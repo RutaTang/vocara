@@ -19,19 +19,6 @@ class LocalStorageService {
     return dir;
   }
 
-  /// Reads every `*.json` document in [collection]. Skips empty/corrupt files.
-  Future<List<Map<String, dynamic>>> readAll(String collection) async {
-    final dir = await _collectionDir(collection);
-    final docs = <Map<String, dynamic>>[];
-    await for (final entity in dir.list()) {
-      if (entity is! File || !entity.path.endsWith('.json')) continue;
-      final content = await entity.readAsString();
-      if (content.trim().isEmpty) continue;
-      docs.add(jsonDecode(content) as Map<String, dynamic>);
-    }
-    return docs;
-  }
-
   Future<Map<String, dynamic>?> read(String collection, String id) async {
     final dir = await _collectionDir(collection);
     final file = File(p.join(dir.path, '$id.json'));
@@ -92,12 +79,6 @@ class LocalStorageService {
       } catch (_) {}
       rethrow;
     }
-  }
-
-  Future<void> delete(String collection, String id) async {
-    final dir = await _collectionDir(collection);
-    final file = File(p.join(dir.path, '$id.json'));
-    if (await file.exists()) await file.delete();
   }
 
   /// Returns (creating if needed) a directory for storing binary assets that
