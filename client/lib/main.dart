@@ -6,6 +6,7 @@ import 'package:window_manager/window_manager.dart';
 
 import 'app.dart';
 import 'config/dependencies.dart';
+import 'config/environment.dart';
 import 'data/db/persistence.dart';
 import 'data/services/recording_finalizer.dart';
 
@@ -26,6 +27,9 @@ Future<void> main() async {
   // is revealed natively after the first frame (below), not here.
   await windowManager.ensureInitialized();
   await windowManager.setTitleBarStyle(TitleBarStyle.hidden);
+  // Suffix the window title in dev/test (blank in prod) so the running
+  // environment is identifiable in ⌘-Tab / Mission Control.
+  await windowManager.setTitle(AppEnvironment.current.windowTitle);
   // Intercept the OS close so an in-flight recording is finalized (saved) before
   // the process is torn down, instead of being lost as a 0-length take.
   await windowManager.setPreventClose(true);

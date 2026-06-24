@@ -5,10 +5,14 @@
 // 'flutter create' template.
 
 // The application's name. By default this is also the title of the Flutter window.
+// Shared across all environments (dev/test/prod) — only the bundle id differs.
 PRODUCT_NAME = vocara
 
-// The application's bundle identifier
-PRODUCT_BUNDLE_IDENTIFIER = com.vocara.vocara
+// Default bundle identifier (production). Per-environment builds override this
+// via the flavor xcconfigs (Dev.xcconfig / Test.xcconfig / Prod.xcconfig), which
+// each #include this file and then redefine PRODUCT_BUNDLE_IDENTIFIER. This value
+// only applies to the scheme-less Debug/Release/Profile base configs.
+PRODUCT_BUNDLE_IDENTIFIER = com.rutatang.vocara
 
 // The copyright displayed in application information
-PRODUCT_COPYRIGHT = Copyright © 2026 com.vocara. All rights reserved.
+PRODUCT_COPYRIGHT = Copyright © 2026 Vocara. All rights reserved.

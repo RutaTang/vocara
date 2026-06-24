@@ -1,0 +1,5 @@
+// Test environment. Used by the e2e / integration suite so automated runs write
+// to an isolated sandbox store that never touches dev or prod data.
+#include "AppInfo.xcconfig"
+
+PRODUCT_BUNDLE_IDENTIFIER = com.rutatang.vocara.test

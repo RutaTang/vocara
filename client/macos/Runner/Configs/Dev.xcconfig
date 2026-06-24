@@ -1,0 +1,6 @@
+// Development environment. Distinct bundle id so the dev build coexists with
+// test/prod on one machine, each with its OWN sandbox container (drift db +
+// asset pool) and HLC device node. See Test.xcconfig / Prod.xcconfig.
+#include "AppInfo.xcconfig"
+
+PRODUCT_BUNDLE_IDENTIFIER = com.rutatang.vocara.dev
