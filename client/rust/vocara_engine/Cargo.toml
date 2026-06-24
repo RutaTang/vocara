@@ -1,0 +1,58 @@
+[package]
+name = "vocara_engine"
+version = "0.1.0"
+edition = "2021"
+description = "Vocara real-time DAG audio engine (graph runtime + DSP nodes + transport)"
+license = "MIT OR Apache-2.0"
+
+[lib]
+# rlib for the offline-render test/bench harness; cdylib/staticlib for the macOS FFI bridge.
+crate-type = ["rlib", "cdylib", "staticlib"]
+
+[features]
+default = []
+# The live OS audio path (cpal output, symphonia decode, VoiceProcessingIO mic+AEC). Gated so
+# the DSP core + graph + transport build and test with zero external crates / no network.
+device = [
+    "dep:cpal",
+    "dep:symphonia",
+    "dep:objc2-audio-toolbox",
+    "dep:objc2-core-audio",
+    "dep:objc2-core-audio-types",
+    "dep:objc2-core-foundation",
+]
+
+[dependencies]
+cpal = { version = "0.18", optional = true }
+# Pinned to the mature 0.5 line (0.6 is a 2026 ground-up API rewrite); decode targets 0.5.
+symphonia = { version = "0.5", optional = true, default-features = false, features = [
+    "mp3", "aac", "isomp4", "flac", "ogg", "vorbis", "wav", "pcm",
+] }
+
+# macOS CoreAudio / AudioUnit FFI for the VoiceProcessingIO mic path (capture + echo
+# cancellation). Same 0.3.2 versions cpal already resolves; we union in the extra modules
+# (AudioComponent Find/New/Dispose, AudioOutputUnit Start/Stop) cpal doesn't enable.
+objc2-audio-toolbox = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "AUComponent",
+    "AudioComponent",
+    "AudioOutputUnit",
+    "AudioUnitProperties",
+    "objc2-core-audio-types",
+] }
+objc2-core-audio = { version = "0.3", optional = true }
+objc2-core-audio-types = { version = "0.3", optional = true }
+objc2-core-foundation = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "CFString",
+    "CFBase",
+] }
+
+[profile.release]
+# Unwinding across the C ABI is UB; abort is deterministic. We validate inputs at the FFI
+# edge and wrap every entry point in catch_unwind so a panic never crosses the boundary.
+panic = "abort"
+lto = "fat"
+codegen-units = 1
+
+# NB: dev/test keep the default unwind so `cargo test` works and catch_unwind is exercised.

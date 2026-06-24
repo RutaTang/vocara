@@ -1,0 +1,118 @@
+//! A bounded, wait-free single-producer / single-consumer ring buffer (Lamport style).
+//!
+//! This is the only cross-thread sharing in the live engine: one ring carries coalesced
+//! parameter commands (control → audio), one ring per source carries decoded PCM
+//! (feeder → audio), and one carries retired graph pointers (audio → reaper). Push/pop are
+//! wait-free and allocate nothing after construction, so they are safe on the audio thread.
+
+use std::cell::UnsafeCell;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+
+struct Inner<T> {
+    buf: Box<[UnsafeCell<T>]>,
+    mask: usize,
+    // Monotonic indices; live count = tail - head. Separate cache lines in practice.
+    head: AtomicUsize,
+    tail: AtomicUsize,
+}
+
+// SAFETY: access is disciplined SPSC — only the producer writes `tail` and the slot at
+// `tail`, only the consumer writes `head` and reads the slot at `head`, with release/acquire
+// fences ordering the data write before the index publish.
+unsafe impl<T: Send> Sync for Inner<T> {}
+
+pub struct Producer<T> {
+    inner: Arc<Inner<T>>,
+}
+pub struct Consumer<T> {
+    inner: Arc<Inner<T>>,
+}
+
+unsafe impl<T: Send> Send for Producer<T> {}
+unsafe impl<T: Send> Send for Consumer<T> {}
+
+/// Create an SPSC ring with capacity rounded up to a power of two (min 2).
+pub fn spsc<T: Copy + Default>(capacity: usize) -> (Producer<T>, Consumer<T>) {
+    let cap = capacity.max(2).next_power_of_two();
+    let buf = (0..cap)
+        .map(|_| UnsafeCell::new(T::default()))
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
+    let inner = Arc::new(Inner {
+        buf,
+        mask: cap - 1,
+        head: AtomicUsize::new(0),
+        tail: AtomicUsize::new(0),
+    });
+    (
+        Producer {
+            inner: inner.clone(),
+        },
+        Consumer { inner },
+    )
+}
+
+impl<T: Copy> Producer<T> {
+    /// Push one element. Returns false if the ring is full (caller applies back-pressure;
+    /// never blocks).
+    #[inline]
+    pub fn push(&mut self, v: T) -> bool {
+        let inner = &*self.inner;
+        let tail = inner.tail.load(Ordering::Relaxed);
+        let head = inner.head.load(Ordering::Acquire);
+        if tail.wrapping_sub(head) >= inner.buf.len() {
+            return false;
+        }
+        // SAFETY: SPSC — we exclusively own this slot until we publish the new tail.
+        unsafe {
+            *inner.buf[tail & inner.mask].get() = v;
+        }
+        inner.tail.store(tail.wrapping_add(1), Ordering::Release);
+        true
+    }
+
+    /// Free slots currently available to push.
+    #[inline]
+    pub fn free(&self) -> usize {
+        let inner = &*self.inner;
+        let tail = inner.tail.load(Ordering::Relaxed);
+        let head = inner.head.load(Ordering::Acquire);
+        inner.buf.len() - tail.wrapping_sub(head)
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.inner.buf.len()
+    }
+}
+
+impl<T: Copy> Consumer<T> {
+    /// Pop one element, or None if empty.
+    #[inline]
+    pub fn pop(&mut self) -> Option<T> {
+        let inner = &*self.inner;
+        let head = inner.head.load(Ordering::Relaxed);
+        let tail = inner.tail.load(Ordering::Acquire);
+        if head == tail {
+            return None;
+        }
+        // SAFETY: SPSC — the producer published this slot via the Release on `tail`.
+        let v = unsafe { *inner.buf[head & inner.mask].get() };
+        inner.head.store(head.wrapping_add(1), Ordering::Release);
+        Some(v)
+    }
+
+    /// Elements currently available to pop.
+    #[inline]
+    pub fn len(&self) -> usize {
+        let inner = &*self.inner;
+        let tail = inner.tail.load(Ordering::Acquire);
+        let head = inner.head.load(Ordering::Relaxed);
+        tail.wrapping_sub(head)
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}

@@ -1,0 +1,253 @@
+//! Freeverb (Schroeder–Moorer) stereo reverb: 8 parallel damped feedback comb filters into
+//! 4 series allpass filters, per channel, with a stereo-spread offset on the right channel.
+//! Width is applied in the reverb's own stereo frame (there is no pan after the return, so
+//! width must live here). Feedback paths are anti-denormal biased.
+
+use crate::dsp::denormals::{sanitize, ANTI_DENORMAL};
+use crate::dsp::smooth::Smoothed;
+use crate::node::{Node, ProcessIo};
+use crate::sample::CHANNELS;
+
+// Jezar's tunings, defined at 44.1 kHz; scaled to the device rate at prepare().
+const COMB_TUNING: [usize; 8] = [1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617];
+const ALLPASS_TUNING: [usize; 4] = [556, 441, 341, 225];
+const STEREO_SPREAD: usize = 23;
+const FIXED_GAIN: f32 = 0.015;
+const ALLPASS_FEEDBACK: f32 = 0.5;
+
+pub mod param {
+    pub const ROOM_SIZE: u16 = 0;
+    pub const DAMPING: u16 = 1;
+    pub const WET: u16 = 2;
+    pub const DRY: u16 = 3;
+    pub const WIDTH: u16 = 4;
+}
+
+struct Comb {
+    buf: Box<[f32]>,
+    idx: usize,
+    store: f32,
+}
+
+impl Comb {
+    fn new(len: usize) -> Self {
+        Comb {
+            buf: vec![0.0; len.max(1)].into_boxed_slice(),
+            idx: 0,
+            store: 0.0,
+        }
+    }
+    #[inline]
+    fn process(&mut self, input: f32, feedback: f32, damp1: f32, damp2: f32) -> f32 {
+        let out = self.buf[self.idx];
+        self.store = sanitize(out * damp2 + self.store * damp1);
+        self.buf[self.idx] = sanitize(input + (self.store + ANTI_DENORMAL) * feedback);
+        self.idx += 1;
+        if self.idx >= self.buf.len() {
+            self.idx = 0;
+        }
+        out
+    }
+    fn clear(&mut self) {
+        for s in self.buf.iter_mut() {
+            *s = 0.0;
+        }
+        self.store = 0.0;
+        self.idx = 0;
+    }
+}
+
+struct Allpass {
+    buf: Box<[f32]>,
+    idx: usize,
+}
+
+impl Allpass {
+    fn new(len: usize) -> Self {
+        Allpass {
+            buf: vec![0.0; len.max(1)].into_boxed_slice(),
+            idx: 0,
+        }
+    }
+    #[inline]
+    fn process(&mut self, input: f32) -> f32 {
+        let bufout = self.buf[self.idx];
+        let out = -input + bufout;
+        self.buf[self.idx] = sanitize(input + bufout * ALLPASS_FEEDBACK);
+        self.idx += 1;
+        if self.idx >= self.buf.len() {
+            self.idx = 0;
+        }
+        out
+    }
+    fn clear(&mut self) {
+        for s in self.buf.iter_mut() {
+            *s = 0.0;
+        }
+        self.idx = 0;
+    }
+}
+
+struct Channel {
+    combs: Vec<Comb>,
+    allpasses: Vec<Allpass>,
+}
+
+impl Channel {
+    fn new(sr: f64, spread: usize) -> Self {
+        let scale = sr / 44_100.0;
+        let len = |base: usize| ((base + spread) as f64 * scale).round() as usize;
+        Channel {
+            combs: COMB_TUNING.iter().map(|&b| Comb::new(len(b))).collect(),
+            allpasses: ALLPASS_TUNING.iter().map(|&b| Allpass::new(len(b))).collect(),
+        }
+    }
+    #[inline]
+    fn process(&mut self, input: f32, feedback: f32, damp1: f32, damp2: f32) -> f32 {
+        let mut out = 0.0;
+        for c in &mut self.combs {
+            out += c.process(input, feedback, damp1, damp2);
+        }
+        for a in &mut self.allpasses {
+            out = a.process(out);
+        }
+        out
+    }
+    fn clear(&mut self) {
+        for c in &mut self.combs {
+            c.clear();
+        }
+        for a in &mut self.allpasses {
+            a.clear();
+        }
+    }
+}
+
+pub struct ReverbNode {
+    left: Channel,
+    right: Channel,
+    room_size: f32,
+    damping: f32,
+    feedback: Smoothed,
+    damp1: Smoothed,
+    wet: Smoothed,
+    dry: Smoothed,
+    width: Smoothed,
+    sr: f64,
+}
+
+impl ReverbNode {
+    pub fn new(room_size: f32, damping: f32, wet: f32, dry: f32, width: f32) -> Self {
+        let sr = 48_000.0;
+        // Clamp here too (not only in set_param): new() is fed raw values from the build
+        // path, which can originate from persisted/synced JSON. A room_size > ~1.07 pushes
+        // the comb feedback target past 1.0 and the filter diverges to garbage.
+        let room_size = room_size.clamp(0.0, 1.0);
+        let damping = damping.clamp(0.0, 1.0);
+        let wet = wet.clamp(0.0, 1.0);
+        let dry = dry.clamp(0.0, 1.0);
+        let width = width.clamp(0.0, 1.0);
+        ReverbNode {
+            left: Channel::new(sr, 0),
+            right: Channel::new(sr, STEREO_SPREAD),
+            room_size,
+            damping,
+            feedback: Smoothed::new(room_size * 0.28 + 0.7),
+            damp1: Smoothed::new(damping * 0.4),
+            wet: Smoothed::new(wet),
+            dry: Smoothed::new(dry),
+            width: Smoothed::new(width),
+            sr,
+        }
+    }
+
+    /// A reverb-send-bus return: medium room, fully wet, no dry (the dry path is separate).
+    pub fn default_bus() -> Self {
+        ReverbNode::new(0.5, 0.5, 1.0, 0.0, 1.0)
+    }
+}
+
+impl Node for ReverbNode {
+    fn prepare(&mut self, sample_rate: f64, _max_block: usize) {
+        self.sr = sample_rate;
+        self.left = Channel::new(sample_rate, 0);
+        self.right = Channel::new(sample_rate, STEREO_SPREAD);
+        let tau = 0.02;
+        self.feedback.set_time(tau, sample_rate);
+        self.damp1.set_time(tau, sample_rate);
+        self.wet.set_time(0.01, sample_rate);
+        self.dry.set_time(0.01, sample_rate);
+        self.width.set_time(0.01, sample_rate);
+    }
+
+    fn process(&mut self, io: &mut ProcessIo) {
+        let frames = io.frames;
+        let n = frames * CHANNELS;
+        let inp = io.inputs.first().copied();
+        let out = &mut *io.outputs[0];
+        // Need the input both as the reverb feed and the optional dry blend; copy it out.
+        // (Outputs and inputs are distinct buffers, so read input first.)
+        let mut feed = [0.0f32; 2];
+        match inp {
+            Some(inp) => {
+                for i in 0..frames {
+                    let il = inp[CHANNELS * i];
+                    let ir = inp[CHANNELS * i + 1];
+                    feed[0] = il;
+                    feed[1] = ir;
+
+                    let fb = self.feedback.next();
+                    let d1 = self.damp1.next();
+                    let d2 = 1.0 - d1;
+                    let wet = self.wet.next();
+                    let dry = self.dry.next();
+                    let width = self.width.next();
+
+                    let wl = self.left.process(feed[0] * FIXED_GAIN, fb, d1, d2);
+                    let wr = self.right.process(feed[1] * FIXED_GAIN, fb, d1, d2);
+
+                    // Width in the reverb's own stereo frame.
+                    let w1 = width * 0.5 + 0.5;
+                    let w2 = (1.0 - width) * 0.5;
+                    let out_l = wl * w1 + wr * w2;
+                    let out_r = wr * w1 + wl * w2;
+
+                    out[CHANNELS * i] = out_l * wet + il * dry;
+                    out[CHANNELS * i + 1] = out_r * wet + ir * dry;
+                }
+            }
+            None => {
+                for s in &mut out[..n] {
+                    *s = 0.0;
+                }
+            }
+        }
+    }
+
+    fn set_param(&mut self, param: u16, value: f32) {
+        // Clamp every reverb parameter to [0,1] like the sibling DSP nodes. ROOM_SIZE is the
+        // critical one: feedback = value*0.28 + 0.7, so value > ~1.07 makes the comb feedback
+        // coefficient exceed 1.0 and the filter diverges (sanitize only catches NaN/Inf, not
+        // unbounded finite growth). Out-of-range values reach here via synced/migrated JSON.
+        let value = value.clamp(0.0, 1.0);
+        match param {
+            param::ROOM_SIZE => {
+                self.room_size = value;
+                self.feedback.set_target(value * 0.28 + 0.7);
+            }
+            param::DAMPING => {
+                self.damping = value;
+                self.damp1.set_target(value * 0.4);
+            }
+            param::WET => self.wet.set_target(value),
+            param::DRY => self.dry.set_target(value),
+            param::WIDTH => self.width.set_target(value),
+            _ => {}
+        }
+    }
+
+    fn reset(&mut self) {
+        self.left.clear();
+        self.right.clear();
+    }
+}

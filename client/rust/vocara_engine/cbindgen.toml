@@ -1,0 +1,16 @@
+# Regenerate the C header with:  cbindgen --config cbindgen.toml --output include/vocara_engine.h
+language = "C"
+include_guard = "VOCARA_ENGINE_H"
+pragma_once = false
+tab_width = 2
+documentation = true
+style = "type"
+
+[parse]
+parse_deps = false
+
+[export]
+prefix = ""
+
+[enum]
+prefix_with_name = true

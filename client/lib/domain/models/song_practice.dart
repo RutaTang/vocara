@@ -1,0 +1,279 @@
+import 'package:flutter/foundation.dart';
+
+import 'audio_fx.dart';
+import 'audio_track.dart';
+import 'fx_bus.dart';
+import 'lyric_line.dart';
+import 'take_version.dart';
+
+/// A single singing-practice project — the unit shown as a card on the home
+/// screen and opened in the multi-track detail view.
+///
+/// It holds one optional [accompaniment] track (the imported backing track,
+/// rendered at the top of the detail view) and any number of [vocalTracks]
+/// the user records or imports to compare their takes.
+@immutable
+class SongPractice {
+  const SongPractice({
+    required this.id,
+    required this.title,
+    required this.createdAt,
+    required this.updatedAt,
+    this.accompaniment,
+    this.reference,
+    this.vocalTracks = const [],
+    this.versions = const [],
+    this.activeVersionId,
+    this.lyrics = const [],
+    this.timelineDurationMs = 0,
+    this.separationSource,
+    this.reverb,
+    this.masterVolume = 1.0,
+    this.fxBuses = const [],
+  });
+
+  final String id;
+
+  /// User-facing name of the practice (e.g. the song title).
+  final String title;
+
+  /// The imported backing track. Null until the user drags one in.
+  final AudioTrack? accompaniment;
+
+  /// The original recording of the song (with the original vocal), to A/B
+  /// against the accompaniment. Null until the user drags one in.
+  final AudioTrack? reference;
+
+  /// Vocal takes across every interpretation, in display order. Each vocal
+  /// take's [AudioTrack.versionId] says which [versions] entry it belongs to;
+  /// the view shows only the active interpretation's takes.
+  final List<AudioTrack> vocalTracks;
+
+  /// The interpretations (emotional/technical readings) of this song. Always at
+  /// least one. Vocal takes are grouped under these.
+  final List<TakeVersion> versions;
+
+  /// The interpretation currently shown/played. Null only for a not-yet-migrated
+  /// legacy practice (resolved on load).
+  final String? activeVersionId;
+
+  /// Lyrics for the song, in order; each line optionally synced to a timeline
+  /// position. Empty until the user pastes/imports lyrics.
+  final List<LyricLine> lyrics;
+
+  /// The total length of the shared timeline, independent of the content (set
+  /// by the user, like a project length in Logic). 0 means "not yet set" — the
+  /// view model defaults it to fit the content. The view maps time→x with this
+  /// so moving clips never rescales the timeline. Never less than [contentEndMs].
+  final int timelineDurationMs;
+
+  final DateTime createdAt;
+  final DateTime updatedAt;
+
+  /// Sandbox path to the kept original full-mix song that the accompaniment +
+  /// reference were separated from. Null when the backing wasn't produced by
+  /// stem separation. Preserved across separations so it can be re-separated.
+  final String? separationSource;
+
+  /// The shared reverb bus settings for this practice's vocal takes. Null = the default
+  /// (a medium room at 25% wet, which is silent until a take's reverb send is raised).
+  final ReverbSettings? reverb;
+
+  /// The master bus output gain (linear, 0..1+, 1.0 = unity) — the overall level
+  /// the whole mix passes through before the master soft-clip.
+  final double masterVolume;
+
+  /// DAW-style FX buses (group/aux tracks) vocal takes can route into. Project-
+  /// scoped and shared across interpretations. Empty until the user adds one.
+  final List<FxBus> fxBuses;
+
+  FxBus? busById(String? id) {
+    if (id == null) return null;
+    for (final b in fxBuses) {
+      if (b.id == id) return b;
+    }
+    return null;
+  }
+
+  bool get hasAccompaniment => accompaniment != null;
+  bool get hasReference => reference != null;
+
+  /// The active interpretation (falls back to the first if the id is stale).
+  TakeVersion? get activeVersion {
+    for (final v in versions) {
+      if (v.id == activeVersionId) return v;
+    }
+    return versions.isEmpty ? null : versions.first;
+  }
+
+  /// Vocal takes belonging to the active interpretation. When no interpretation
+  /// is resolved (legacy), all takes are returned.
+  List<AudioTrack> get activeVocalTracks {
+    final vid = activeVersion?.id;
+    if (vid == null) return vocalTracks;
+    return [
+      for (final t in vocalTracks)
+        if (t.versionId == vid) t,
+    ];
+  }
+
+  /// The end (offset + duration) of the latest-finishing track — the minimum
+  /// length the timeline must span so no audio is clipped off the end.
+  int get contentEndMs {
+    // Use each lane's FULL span (max endMs across ALL its clips), not just the primary
+    // clip's end: a vocal take can have a later clip recorded onto it past the first
+    // clip's end, which must still fit inside the timeline / loop extent. (Single-clip
+    // accompaniment/reference: spanEndMs == endMs.)
+    var max = accompaniment?.spanEndMs ?? 0;
+    if ((reference?.spanEndMs ?? 0) > max) max = reference!.spanEndMs;
+    for (final track in vocalTracks) {
+      if (track.spanEndMs > max) max = track.spanEndMs;
+    }
+    return max;
+  }
+
+  /// Total number of notes across every lane.
+  int get noteCount {
+    var count = accompaniment?.notes.length ?? 0;
+    for (final track in vocalTracks) {
+      count += track.notes.length;
+    }
+    return count;
+  }
+
+  /// Notes across the accompaniment + the active interpretation's takes — what
+  /// the timeline actually shows (so it tracks the visible take count).
+  int get activeNoteCount {
+    var count = accompaniment?.notes.length ?? 0;
+    for (final t in activeVocalTracks) {
+      count += t.notes.length;
+    }
+    return count;
+  }
+
+  SongPractice copyWith({
+    String? title,
+    AudioTrack? accompaniment,
+    bool clearAccompaniment = false,
+    AudioTrack? reference,
+    bool clearReference = false,
+    List<AudioTrack>? vocalTracks,
+    List<TakeVersion>? versions,
+    String? activeVersionId,
+    List<LyricLine>? lyrics,
+    DateTime? updatedAt,
+    int? timelineDurationMs,
+    String? separationSource,
+    bool clearSeparationSource = false,
+    ReverbSettings? reverb,
+    double? masterVolume,
+    List<FxBus>? fxBuses,
+  }) {
+    return SongPractice(
+      id: id,
+      title: title ?? this.title,
+      accompaniment: clearAccompaniment
+          ? null
+          : (accompaniment ?? this.accompaniment),
+      reference: clearReference ? null : (reference ?? this.reference),
+      vocalTracks: vocalTracks ?? this.vocalTracks,
+      versions: versions ?? this.versions,
+      activeVersionId: activeVersionId ?? this.activeVersionId,
+      lyrics: lyrics ?? this.lyrics,
+      createdAt: createdAt,
+      updatedAt: updatedAt ?? this.updatedAt,
+      timelineDurationMs: timelineDurationMs ?? this.timelineDurationMs,
+      separationSource: clearSeparationSource
+          ? null
+          : (separationSource ?? this.separationSource),
+      reverb: reverb ?? this.reverb,
+      masterVolume: masterVolume ?? this.masterVolume,
+      fxBuses: fxBuses ?? this.fxBuses,
+    );
+  }
+
+  factory SongPractice.fromJson(Map<String, dynamic> json) {
+    final id = json['id'] as String;
+    final createdAt = DateTime.parse(json['createdAt'] as String);
+    var vocalTracks = (json['vocalTracks'] as List<dynamic>? ?? const [])
+        .map((e) => AudioTrack.fromJson(e as Map<String, dynamic>))
+        .toList();
+    var versions = (json['versions'] as List<dynamic>? ?? const [])
+        .map((e) => TakeVersion.fromJson(e as Map<String, dynamic>))
+        .toList();
+    var activeVersionId = json['activeVersionId'] as String?;
+
+    // Migration: a legacy practice has no interpretations — wrap all existing
+    // takes in a default "Interpretation 1" and make it active.
+    if (versions.isEmpty) {
+      final def = TakeVersion(
+        id: '${id}__v1',
+        name: 'Interpretation 1',
+        createdAt: createdAt,
+      );
+      versions = [def];
+      activeVersionId = def.id;
+    } else if (activeVersionId == null ||
+        !versions.any((v) => v.id == activeVersionId)) {
+      activeVersionId = versions.first.id;
+    }
+    // Any take whose versionId doesn't resolve to an existing interpretation
+    // (an untagged legacy take, or an id orphaned by partial/hand-edited JSON)
+    // is reattached to the active interpretation so no take is ever hidden.
+    final validVersionIds = {for (final v in versions) v.id};
+    vocalTracks = [
+      for (final t in vocalTracks)
+        validVersionIds.contains(t.versionId)
+            ? t
+            : t.copyWith(versionId: activeVersionId),
+    ];
+
+    return SongPractice(
+      id: id,
+      title: json['title'] as String,
+      accompaniment: json['accompaniment'] == null
+          ? null
+          : AudioTrack.fromJson(json['accompaniment'] as Map<String, dynamic>),
+      reference: json['reference'] == null
+          ? null
+          : AudioTrack.fromJson(json['reference'] as Map<String, dynamic>),
+      vocalTracks: vocalTracks,
+      versions: versions,
+      activeVersionId: activeVersionId,
+      lyrics: (json['lyrics'] as List<dynamic>? ?? const [])
+          .map((e) => LyricLine.fromJson(e as Map<String, dynamic>))
+          .toList(),
+      timelineDurationMs: json['timelineDurationMs'] as int? ?? 0,
+      createdAt: createdAt,
+      updatedAt: DateTime.parse(json['updatedAt'] as String),
+      separationSource: json['separationSource'] as String?,
+      reverb: json['reverb'] != null
+          ? ReverbSettings.fromJson(json['reverb'] as Map<String, dynamic>)
+          : null,
+      masterVolume: (json['masterVolume'] as num?)?.toDouble() ?? 1.0,
+      fxBuses: (json['fxBuses'] as List<dynamic>? ?? const [])
+          .map((e) => FxBus.fromJson(e as Map<String, dynamic>))
+          .toList(),
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'title': title,
+      'accompaniment': accompaniment?.toJson(),
+      'reference': reference?.toJson(),
+      'vocalTracks': vocalTracks.map((e) => e.toJson()).toList(),
+      'versions': versions.map((e) => e.toJson()).toList(),
+      'activeVersionId': activeVersionId,
+      'lyrics': lyrics.map((e) => e.toJson()).toList(),
+      'timelineDurationMs': timelineDurationMs,
+      'createdAt': createdAt.toIso8601String(),
+      'updatedAt': updatedAt.toIso8601String(),
+      'separationSource': separationSource,
+      'reverb': reverb?.toJson(),
+      'masterVolume': masterVolume,
+      'fxBuses': fxBuses.map((e) => e.toJson()).toList(),
+    };
+  }
+}

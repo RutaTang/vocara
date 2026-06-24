@@ -1,0 +1,55 @@
+# Resound — task runner. Run `just` to list recipes.
+# Prereqs: flutter, just, fswatch (brew install just fswatch)
+
+default:
+    @just --list
+
+# Run on macOS with hot-reload on lib/ changes (fswatch pipes "r" to flutter run)
+dev:
+    #!/bin/bash
+    cd client
+    (sleep 5 && fswatch -o lib/ | while read; do echo "r"; done) | flutter run -d macos
+
+# Static analysis
+analyze:
+    cd client && flutter analyze
+
+# Run tests
+test:
+    cd client && flutter test
+
+# Run all UI-driven end-to-end (integration) suites on macOS.
+e2e: e2e-home e2e-library e2e-detail e2e-technique e2e-settings
+
+# Home / settings / library navigation — boots on Home, no deep-link.
+e2e-home:
+    cd client && flutter test integration_test/home_settings_journey_test.dart -d macos
+
+# Technique library list (create / search / tag filter) — deep-links to /techniques.
+e2e-library:
+    cd client && flutter test integration_test/technique_library_journey_test.dart -d macos --dart-define=START=/techniques
+
+# Song-practice detail arrange surface — deep-links into the seeded practice.
+# START must match the seed id the suite inserts (kSeedPracticeId).
+e2e-detail:
+    cd client && flutter test integration_test/detail_arrange_journey_test.dart -d macos --dart-define=START=/song/E2EPRACTICESEED0000000000001
+
+# Technique detail editor — deep-links into the seeded technique (kSeedTechniqueId).
+e2e-technique:
+    cd client && flutter test integration_test/technique_detail_journey_test.dart -d macos --dart-define=START=/techniques/E2ETECHNIQUESEED000000000001
+
+# Settings screen interactions (reverb slider) — deep-links to /settings.
+e2e-settings:
+    cd client && flutter test integration_test/settings_journey_test.dart -d macos --dart-define=START=/settings
+
+# Format code
+fmt:
+    cd client && dart format lib test
+
+# Fetch dependencies
+get:
+    cd client && flutter pub get
+
+# Remove build artifacts
+clean:
+    cd client && flutter clean
