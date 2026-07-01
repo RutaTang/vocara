@@ -160,8 +160,6 @@ class GraphAudioPlaybackService implements PlaybackEngine {
   final Map<String, int> _trackIndex = {};
   // Each FX bus id's index into the committed graph (for live bus FX/volume/meter).
   final Map<String, int> _busIndex = {};
-  // Paths the engine has already decoded + cached (so we skip the isolate decode).
-  final Set<String> _enginePaths = {};
   // The shared reverb settings, re-applied after every graph rebuild (a rebuild resets nodes).
   ReverbSettings? _reverb;
   // The master bus gain, re-applied after every graph rebuild (a rebuild resets nodes).
@@ -524,27 +522,30 @@ class GraphAudioPlaybackService implements PlaybackEngine {
   }
 
   /// Stage one track for the pending commit, routed to [busIdx] (-1 = master).
-  /// Cached files are added instantly; a new file is decoded on an isolate first.
+  /// Tries the engine's decoded-PCM cache first (instant; the native side is the single
+  /// source of truth for what's cached and never decodes on this thread — a miss returns
+  /// -1). On a miss (first stage, or evicted at an earlier commit) the file is decoded on
+  /// an isolate and staged as raw samples, which re-caches it under [t.path].
   Future<int> _stageTrack(TrackPlayback t, int busIdx) async {
     final muted = t.muted ? 1 : 0;
     final vocal = t.isVocal ? 1 : 0;
-    if (_enginePaths.contains(t.path)) {
-      final cpath = t.path.toNativeUtf8();
-      try {
-        final idx = _bindings.ve_tracks_add(
-          _engine,
-          cpath.cast(),
-          t.startMs,
-          t.volume,
-          muted,
-          vocal,
-          busIdx,
-        );
-        if (idx >= 0) _pushChain(idx, t.fx, bus: false);
+    final cachedPath = t.path.toNativeUtf8();
+    try {
+      final idx = _bindings.ve_tracks_add(
+        _engine,
+        cachedPath.cast(),
+        t.startMs,
+        t.volume,
+        muted,
+        vocal,
+        busIdx,
+      );
+      if (idx >= 0) {
+        _pushChain(idx, t.fx, bus: false);
         return idx;
-      } finally {
-        malloc.free(cpath);
       }
+    } finally {
+      malloc.free(cachedPath);
     }
     final (addr, frames) = await _decodeInIsolate(t.path, _sampleRate.round());
     if (addr == 0 || frames == 0) return -1;
@@ -562,10 +563,7 @@ class GraphAudioPlaybackService implements PlaybackEngine {
         vocal,
         busIdx,
       );
-      if (idx >= 0) {
-        _enginePaths.add(t.path);
-        _pushChain(idx, t.fx, bus: false);
-      }
+      if (idx >= 0) _pushChain(idx, t.fx, bus: false);
       return idx;
     } finally {
       malloc.free(cpath);
@@ -953,7 +951,6 @@ class GraphAudioPlaybackService implements PlaybackEngine {
     }
     _trackIndex.clear();
     _busIndex.clear();
-    _enginePaths.clear();
     _committedSig = '';
     await _position.close();
     await _playing.close();

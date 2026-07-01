@@ -508,6 +508,10 @@ class VocaraEngineBindings {
 
   /// Multi-track playback: one source per track, timeline-aligned. Stage with begin/add, then
   /// commit to build + hot-swap the graph; change volume/mute live without a rebuild.
+  /// ve_tracks_add stages from the decoded-PCM cache ONLY and returns -1 on a miss — it never
+  /// decodes on the calling thread; decode off-thread (ve_decode) and stage the samples with
+  /// ve_tracks_add_pcm. A successful commit evicts cached PCM whose path is not in the new
+  /// graph (keeping a bounded recently-staged tail), so the cache can't grow unbounded.
   int ve_tracks_begin(ffi.Pointer<VeEngine> e) {
     return _ve_tracks_begin(e);
   }

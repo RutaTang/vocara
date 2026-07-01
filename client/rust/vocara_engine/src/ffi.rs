@@ -27,8 +27,19 @@ use crate::sample::{Smp, CHANNELS, ENGINE_SR};
 use std::os::raw::c_float;
 use crate::source::{BufferSource, RingSource};
 
+/// A decoded-PCM cache entry: the samples plus the stage-recency stamp used for the
+/// bounded LRU eviction at commit (see [`cache_retain`]).
+struct CachedPcm {
+    pcm: Arc<[Smp]>,
+    /// `VeEngine::cache_seq` at the last time this path was staged (higher = more recent).
+    staged_seq: u64,
+}
+
 /// A track staged for the next [`ve_tracks_commit`].
 struct PendingTrack {
+    /// Cache key (the source file path), so the commit can evict cache entries whose
+    /// paths are not in the newly-committed graph.
+    path: String,
     pcm: Arc<[Smp]>,
     start_frame: i64,
     gain: f32,
@@ -82,9 +93,15 @@ pub struct VeEngine {
     writer: RecordWriter,
     source_id: u32,
     // Decoded PCM cache (path -> device-rate interleaved stereo), so re-committing the graph
-    // never re-decodes a file. Tracks being staged for the next commit, and the gain node id
-    // per committed track (for live volume/mute without a rebuild).
-    cache: std::collections::HashMap<String, Arc<[Smp]>>,
+    // never re-decodes a file. The committed graph pins every live track's samples via its
+    // own Arcs, so the cache's true memory overhead is exactly the non-live entries; each
+    // successful commit evicts those beyond CACHE_KEEP_BYTES (LRU by stage recency), so the
+    // cache cannot grow unbounded across a session (deleted takes used to be retained until
+    // the song closed). Tracks being staged for the next commit, and the gain node id per
+    // committed track (for live volume/mute without a rebuild).
+    cache: std::collections::HashMap<String, CachedPcm>,
+    /// Monotonic stage counter stamping cache entries for the LRU eviction at commit.
+    cache_seq: u64,
     pending: Vec<PendingTrack>,
     pending_buses: Vec<PendingBus>,
     track_gain_nodes: Vec<NodeId>,
@@ -99,6 +116,45 @@ const RING_FRAMES: usize = 1 << 16; // ~1.4 s @ 48k of headroom
 const MIC_RING_FRAMES: usize = 1 << 12; // 4096 frames ≈ 85 ms @ 48k (monitor jitter buffer)
 const CAP_RING_FRAMES: usize = 1 << 13; // analysis capture (Dart polls ve_input_frames)
 const REC_RING_FRAMES: usize = 1 << 14; // recording (drained by the writer thread)
+
+/// Keep-alive budget for decoded PCM whose path is NOT in the committed graph. Live paths
+/// are pinned by the graph's own Arcs regardless, so this bounds the cache's real overhead.
+/// 256 MiB ≈ 11 minutes of 48 kHz stereo f32 (~2-3 typical songs): enough that the
+/// reference ↔ accompaniment backing toggle and a just-separated song's original re-stage
+/// instantly, while a long session (dozens of takes, some deleted) can no longer accumulate
+/// gigabytes of dead PCM.
+const CACHE_KEEP_BYTES: usize = 256 * 1024 * 1024;
+
+/// Evict cached PCM for paths outside `live`, keeping the most recently staged non-live
+/// entries within `keep_bytes` (LRU by stage recency). Live paths are always kept. Dropping
+/// an entry only releases the map's Arc; samples still referenced by a retiring graph free
+/// once the reaper drops that graph.
+fn cache_retain(
+    cache: &mut std::collections::HashMap<String, CachedPcm>,
+    live: &std::collections::HashSet<&str>,
+    keep_bytes: usize,
+) {
+    let mut idle: Vec<(String, u64, usize)> = cache
+        .iter()
+        .filter(|(path, _)| !live.contains(path.as_str()))
+        .map(|(path, c)| {
+            (
+                path.clone(),
+                c.staged_seq,
+                c.pcm.len() * std::mem::size_of::<Smp>(),
+            )
+        })
+        .collect();
+    // Most recently staged first; evict every entry past the point the budget overflows.
+    idle.sort_by(|a, b| b.1.cmp(&a.1));
+    let mut used = 0usize;
+    for (path, _, bytes) in idle {
+        used = used.saturating_add(bytes);
+        if used > keep_bytes {
+            cache.remove(&path);
+        }
+    }
+}
 
 /// Create the engine: build the P0 graph at the fixed `ENGINE_SR`, then spawn the audio-host
 /// thread which opens the default output and starts rendering (resampling `ENGINE_SR` → the
@@ -157,6 +213,7 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
             writer,
             source_id,
             cache: std::collections::HashMap::new(),
+            cache_seq: 0,
             pending: Vec::new(),
             pending_buses: Vec::new(),
             track_gain_nodes: Vec::new(),
@@ -820,8 +877,11 @@ pub extern "C" fn ve_set_bus_send_level(
     })
 }
 
-/// Stage one track: decode `path` (cached so re-commits don't re-decode), place it at
-/// `start_ms` with linear `gain` and `muted`. Returns the track index (>= 0) or -1.
+/// Stage one track from the decoded-PCM cache: place it at `start_ms` with linear `gain`
+/// and `muted`. Returns the track index (>= 0), or -1 when `path` is not cached — the
+/// caller then decodes OFF this thread ([`ve_decode`] on an isolate) and stages the samples
+/// via [`ve_tracks_add_pcm`]. This function never decodes: it runs on the UI thread, and a
+/// cache miss (first stage, or evicted at an earlier commit) must not block it on file I/O.
 #[no_mangle]
 pub extern "C" fn ve_tracks_add(
     e: *mut VeEngine,
@@ -842,27 +902,19 @@ pub extern "C" fn ve_tracks_add(
             Err(_) => return -1,
         };
         let rate = eng.handle.sample_rate();
-        let pcm = match eng.cache.get(path) {
-            Some(c) => c.clone(),
-            None => {
-                let (frames, src_rate) = match device::decode_file(path) {
-                    Ok(v) => v,
-                    Err(_) => return -1,
-                };
-                let resampled = device::resample_linear(&frames, src_rate, rate as u32);
-                let mut flat: Vec<Smp> = Vec::with_capacity(resampled.len() * CHANNELS);
-                for f in resampled {
-                    flat.push(f[0]);
-                    flat.push(f[1]);
-                }
-                let arc: Arc<[Smp]> = flat.into();
-                eng.cache.insert(path.to_string(), arc.clone());
-                arc
+        eng.cache_seq += 1;
+        let seq = eng.cache_seq;
+        let pcm = match eng.cache.get_mut(path) {
+            Some(c) => {
+                c.staged_seq = seq;
+                c.pcm.clone()
             }
+            None => return -1,
         };
         let start_frame = (start_ms as f64 * rate / 1000.0) as i64;
         let idx = eng.pending.len() as c_int;
         eng.pending.push(PendingTrack {
+            path: path.to_string(),
             pcm,
             start_frame,
             gain,
@@ -981,6 +1033,13 @@ pub extern "C" fn ve_tracks_commit(e: *mut VeEngine) -> c_int {
         eng.track_gain_nodes = (0..n).map(|i| build::gain_id((i + 1) as u32)).collect();
         eng.gr_meters = meters;
         eng.bus_gr_meters = bus_meters;
+        // The new graph is live: evict cached PCM for paths no longer in it (with a bounded
+        // keep-alive for quick re-staging), so the cache can't grow unbounded across a
+        // session. Only on success — a rejected topology keeps the OLD graph, whose paths
+        // must stay cached.
+        let live: std::collections::HashSet<&str> =
+            eng.pending.iter().map(|p| p.path.as_str()).collect();
+        cache_retain(&mut eng.cache, &live, CACHE_KEEP_BYTES);
         0
     })
 }
@@ -1114,18 +1173,30 @@ pub extern "C" fn ve_tracks_add_pcm(
             Err(_) => return -1,
         };
         let rate = eng.handle.sample_rate();
-        let arc = match eng.cache.get(path) {
-            Some(c) => c.clone(),
+        eng.cache_seq += 1;
+        let seq = eng.cache_seq;
+        let arc = match eng.cache.get_mut(path) {
+            Some(c) => {
+                c.staged_seq = seq;
+                c.pcm.clone()
+            }
             None => {
                 let slice = unsafe { std::slice::from_raw_parts(pcm, frames * CHANNELS) };
                 let arc: Arc<[Smp]> = Arc::from(slice);
-                eng.cache.insert(path.to_string(), arc.clone());
+                eng.cache.insert(
+                    path.to_string(),
+                    CachedPcm {
+                        pcm: arc.clone(),
+                        staged_seq: seq,
+                    },
+                );
                 arc
             }
         };
         let start_frame = (start_ms as f64 * rate / 1000.0) as i64;
         let idx = eng.pending.len() as c_int;
         eng.pending.push(PendingTrack {
+            path: path.to_string(),
             pcm: arc,
             start_frame,
             gain,
@@ -1785,4 +1856,67 @@ pub extern "C" fn ve_track_gr(e: *mut VeEngine, track: c_int) -> f32 {
         Some(Some(m)) => f32::from_bits(m.load(Ordering::Relaxed)),
         _ => 0.0,
     })
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::{cache_retain, CachedPcm};
+    use crate::sample::Smp;
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Arc;
+
+    /// A cache entry of exactly `bytes` (Smp = f32, 4 bytes each) stamped with `seq`.
+    fn entry(bytes: usize, seq: u64) -> CachedPcm {
+        CachedPcm {
+            pcm: Arc::from(vec![0.0 as Smp; bytes / std::mem::size_of::<Smp>()]),
+            staged_seq: seq,
+        }
+    }
+
+    #[test]
+    fn live_paths_survive_even_with_zero_budget() {
+        let mut cache = HashMap::new();
+        cache.insert("a".to_string(), entry(1024, 1));
+        cache.insert("b".to_string(), entry(1024, 2));
+        let live: HashSet<&str> = ["a"].into_iter().collect();
+        cache_retain(&mut cache, &live, 0);
+        assert!(cache.contains_key("a"), "live entry must never be evicted");
+        assert!(!cache.contains_key("b"), "non-live entry over budget must go");
+    }
+
+    #[test]
+    fn recent_non_live_kept_within_budget_oldest_evicted() {
+        let mut cache = HashMap::new();
+        cache.insert("old".to_string(), entry(1024, 1));
+        cache.insert("mid".to_string(), entry(1024, 2));
+        cache.insert("new".to_string(), entry(1024, 3));
+        let live: HashSet<&str> = HashSet::new();
+        // Budget fits exactly two entries: the two most recently staged survive.
+        cache_retain(&mut cache, &live, 2048);
+        assert!(cache.contains_key("new"));
+        assert!(cache.contains_key("mid"));
+        assert!(!cache.contains_key("old"));
+    }
+
+    #[test]
+    fn exact_budget_boundary_keeps_the_fitting_entry() {
+        let mut cache = HashMap::new();
+        cache.insert("a".to_string(), entry(1024, 1));
+        let live: HashSet<&str> = HashSet::new();
+        // used == keep_bytes is within budget (eviction requires used > keep_bytes).
+        cache_retain(&mut cache, &live, 1024);
+        assert!(cache.contains_key("a"));
+        cache_retain(&mut cache, &live, 1023);
+        assert!(!cache.contains_key("a"));
+    }
+
+    #[test]
+    fn all_live_evicts_nothing() {
+        let mut cache = HashMap::new();
+        cache.insert("a".to_string(), entry(1024, 1));
+        cache.insert("b".to_string(), entry(1024, 2));
+        let live: HashSet<&str> = ["a", "b"].into_iter().collect();
+        cache_retain(&mut cache, &live, 0);
+        assert_eq!(cache.len(), 2);
+    }
 }
