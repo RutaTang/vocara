@@ -124,6 +124,12 @@ class TechniqueDetailViewModel extends ChangeNotifier
   /// Staged caption changes (media id -> new label), applied on save.
   final Map<String, String> _draftLabels = {};
 
+  /// Bumped whenever the media draft is reset/discarded, so an in-flight import
+  /// (addMedia / stopExampleRecording) that resolves after the draft was abandoned
+  /// deletes its just-copied file instead of appending an orphan clip to the
+  /// cleared draft (and mutating selection behind the read view).
+  int _draftGeneration = 0;
+
   /// True when the media draft differs from what's persisted, so Cancel knows to
   /// warn about unsaved example changes.
   bool get hasMediaDraft =>
@@ -160,6 +166,10 @@ class TechniqueDetailViewModel extends ChangeNotifier
   /// Drops the media draft and deletes any files copied for staged additions
   /// (they were never committed). Called when an edit is cancelled.
   Future<void> discardMediaDraft() async {
+    // Invalidate any in-flight import: a clip that finishes copying after this
+    // must be treated as an orphan (deleted), not appended to the now-cleared
+    // draft (which would strand its file and show a phantom clip in the read view).
+    _draftGeneration++;
     // Releasing edit must release the mic: stop and discard any in-flight
     // example recording (otherwise the mic + capture/level timers run on until
     // the route is popped).
@@ -245,6 +255,9 @@ class TechniqueDetailViewModel extends ChangeNotifier
   void _resetToReferenceSubject() {
     _practice = null;
     _practiceFailed = false;
+    // Invalidate any in-flight stopPractice() analysis: its take was recorded
+    // against the reference we're replacing.
+    _practiceGeneration++;
     _subject = TechniqueAnalysisSubject.reference;
     _syncPositionToSubject();
   }
@@ -380,6 +393,10 @@ class TechniqueDetailViewModel extends ChangeNotifier
             'Privacy & Security › Microphone.',
       );
     }
+    // The screen may have been left during the permission await, which disposed
+    // the VM but couldn't tear down this not-yet-started recording (_isRecording
+    // is still false). Bail before touching the engine or arming hardware.
+    if (_disposed) return (path: null, error: null);
     final engine = _engine ??= GraphAudioPlaybackService();
     if (!engine.isAvailable) {
       return (
@@ -396,6 +413,12 @@ class TechniqueDetailViewModel extends ChangeNotifier
     if (inUid != null && inUid.isNotEmpty) engine.setInputDevice(inUid);
     final dir = await Directory.systemTemp.createTemp(prefix);
     final path = '${dir.path}/$prefix.wav';
+    // Same guard after the temp-dir await: a dispose in this window can't stop a
+    // recording that hasn't started. Don't arm hardware/timers; drop the temp dir.
+    if (_disposed) {
+      unawaited(_deleteTempDir(path));
+      return (path: null, error: null);
+    }
     engine.startInputRecording(path);
     _isRecording = true;
     // Live preview: the engine captures the same input it's recording (cpal),
@@ -404,6 +427,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
     _monitor.start();
     _liveMonitor = true;
     _captureTimer = Timer.periodic(const Duration(milliseconds: 30), (_) {
+      if (_disposed) return;
       final frames = engine.pullInputFrames(); // interleaved stereo
       if (frames.isEmpty) return;
       final n = frames.length ~/ 2;
@@ -414,6 +438,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
       _monitor.feedSamples(mono);
     });
     _levelTimer = Timer.periodic(const Duration(milliseconds: 50), (_) {
+      if (_disposed) return;
       // This timer is the only device-event consumer on the technique screen
       // (poll clears on read), so handle input loss here: a mic unplug must stop
       // the recording gracefully — finalizing KEEPS what was captured — instead
@@ -465,6 +490,12 @@ class TechniqueDetailViewModel extends ChangeNotifier
   String? _practiceTempPath;
   TechniqueAnalysis? _practice;
 
+  /// Bumped whenever the reference changes (_resetToReferenceSubject) or the
+  /// practice take is cleared, so a stopPractice() analysis that resolves late
+  /// knows its take is stale — recorded against a now-replaced reference — and
+  /// discards its result instead of pairing mismatched clips.
+  int _practiceGeneration = 0;
+
   /// The analysis of the latest practice recording (ephemeral), or null.
   TechniqueAnalysis? get practiceAnalysis => _practice;
 
@@ -508,6 +539,11 @@ class TechniqueDetailViewModel extends ChangeNotifier
     _practiceLoading = true;
     _practiceFailed = false;
     _subject = TechniqueAnalysisSubject.practice;
+    // Snapshot the reference generation: if it changes during analyze() (the user
+    // selected/added/recorded a different reference, or cleared the take), this
+    // take was recorded against a now-replaced reference. Discarding its result
+    // avoids showing/comparing a take against the wrong reference.
+    final generation = _practiceGeneration;
     notifyListeners();
 
     // analyze() can THROW (native decode / isolate failure). Without try/finally
@@ -515,13 +551,19 @@ class TechniqueDetailViewModel extends ChangeNotifier
     // false, blocking EVERY future practice recording, and the temp dir leaks.
     try {
       final result = await _analysis.analyze(path);
-      _practice = result;
-      _practiceFailed = result == null;
-      if (result == null) _subject = TechniqueAnalysisSubject.reference;
+      if (_practiceGeneration == generation) {
+        _practice = result;
+        _practiceFailed = result == null;
+        if (result == null) _subject = TechniqueAnalysisSubject.reference;
+      }
+      // else: the reference changed mid-analysis; _resetToReferenceSubject already
+      // dropped this take — keep it discarded (the temp file is still deleted below).
     } catch (_) {
-      _practice = null;
-      _practiceFailed = true;
-      _subject = TechniqueAnalysisSubject.reference;
+      if (_practiceGeneration == generation) {
+        _practice = null;
+        _practiceFailed = true;
+        _subject = TechniqueAnalysisSubject.reference;
+      }
     } finally {
       await _deleteTempDir(path);
       _practiceTempPath = null;
@@ -536,6 +578,9 @@ class TechniqueDetailViewModel extends ChangeNotifier
     if (_practice == null && !_practiceFailed) return;
     _practice = null;
     _practiceFailed = false;
+    // Invalidate any in-flight stopPractice() analysis so it doesn't resurrect
+    // the take the user just discarded.
+    _practiceGeneration++;
     if (_subject == TechniqueAnalysisSubject.practice) {
       _subject = TechniqueAnalysisSubject.reference;
     }
@@ -588,6 +633,9 @@ class TechniqueDetailViewModel extends ChangeNotifier
       return;
     }
     _savingExample = true;
+    // Snapshot the draft generation: a Cancel/discard (or dispose) while the clip
+    // is being copied means it must be deleted, not staged into the cleared draft.
+    final generation = _draftGeneration;
     notifyListeners();
 
     TechniqueMedia? added;
@@ -610,13 +658,19 @@ class TechniqueDetailViewModel extends ChangeNotifier
     await _deleteTempDir(path);
     _exampleTempPath = null;
     if (added != null) {
-      _draftAdds.add(added);
-      _selectedExamplePath = added.path;
-      // The just-recorded example becomes the reference; drop a stale practice take that
-      // was compared against the previous reference (matches selectExample).
-      _resetToReferenceSubject();
-      // Expand the just-recorded example so its analysis shows immediately.
-      _analysisCollapsed = false;
+      if (_draftGeneration != generation || _disposed) {
+        // Draft abandoned (Cancel) or VM disposed mid-save; the copied clip is an
+        // orphan — delete it rather than staging it behind the read view.
+        unawaited(_mediaService.deleteMedia(added.path));
+      } else {
+        _draftAdds.add(added);
+        _selectedExamplePath = added.path;
+        // The just-recorded example becomes the reference; drop a stale practice take that
+        // was compared against the previous reference (matches selectExample).
+        _resetToReferenceSubject();
+        // Expand the just-recorded example so its analysis shows immediately.
+        _analysisCollapsed = false;
+      }
     }
     _savingExample = false;
     notifyListeners();
@@ -762,7 +816,10 @@ class TechniqueDetailViewModel extends ChangeNotifier
     RecordingFinalizer.instance.unregister(_quitFinalize);
     _levelTimer?.cancel();
     _captureTimer?.cancel();
-    if (_isRecording) _engine?.stopInputRecording();
+    // Tear down a recording that is running OR still starting (its start awaits
+    // haven't resolved yet). The _beginRecording _disposed guards keep it from
+    // arming after this, so stopping here is belt-and-suspenders against a hot mic.
+    if (_isRecording || _starting) _engine?.stopInputRecording();
     // Clean up any abandoned recording (Stop never pressed before leaving).
     unawaited(_deleteTempDir(_practiceTempPath));
     unawaited(_deleteTempDir(_exampleTempPath));
@@ -833,6 +890,10 @@ class TechniqueDetailViewModel extends ChangeNotifier
     }
 
     _importingMedia = true;
+    // Snapshot the draft generation: if the draft is discarded (Cancel) or the VM
+    // disposed while these copies are in flight, they must be deleted, not folded
+    // into the cleared draft.
+    final generation = _draftGeneration;
     notifyListeners();
 
     final now = DateTime.now();
@@ -857,6 +918,17 @@ class TechniqueDetailViewModel extends ChangeNotifier
         skipped++; // a file that failed to copy; the rest still import
       }
     }
+
+    // The draft was abandoned (Cancel) or the VM disposed while importing: the
+    // copies are orphans — delete them and don't touch the (cleared) draft.
+    if (_draftGeneration != generation || _disposed) {
+      _importingMedia = false;
+      for (final m in added) {
+        unawaited(_mediaService.deleteMedia(m.path));
+      }
+      return;
+    }
+
     if (skipped > 0) {
       _recordingNotice = skipped == 1
           ? "1 file couldn't be imported."

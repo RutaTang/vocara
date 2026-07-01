@@ -255,8 +255,11 @@ class ProcessSourceSeparationService implements SourceSeparationService {
     }
     _active = proc;
     // A cancel that arrived during startup (now preserved, since the reset is at
-    // function entry) still aborts the just-started process.
-    if (_cancelled) proc.kill();
+    // function entry) still aborts the just-started process. Route it through
+    // cancel() — now that _active points at proc — so it gets the same
+    // SIGTERM->SIGKILL escalation a live cancel would, rather than a lone SIGTERM
+    // a torch/ML subprocess could ignore.
+    if (_cancelled) cancel();
 
     // Set once the stems are renamed into the cache; until then the .tmp files are
     // orphans the finally must clean up on ANY early/error exit.
@@ -314,11 +317,13 @@ class ProcessSourceSeparationService implements SourceSeparationService {
       if (code != 0 || !instOk || !vocOk) {
         await _deleteQuietly(instTmp);
         await _deleteQuietly(vocTmp);
-        // Surface the first non-empty stderr line (our sidecar's cause line).
+        // Surface the LAST non-empty stderr line as the cause: the sidecar (and a
+        // Python traceback) print the real reason last, after audio-separator's own
+        // logs — the first line would just echo a library log, not the failure.
         final cause = detail
             .split('\n')
             .map((l) => l.trim())
-            .firstWhere((l) => l.isNotEmpty, orElse: () => '');
+            .lastWhere((l) => l.isNotEmpty, orElse: () => '');
         throw FormatException(
           cause.isNotEmpty
               ? 'Separation failed: $cause'

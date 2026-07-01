@@ -71,7 +71,13 @@ class TechniqueRepositoryDrift implements TechniqueRepository {
       });
       final out = <Technique>[];
       for (final r in rows) {
-        out.add(await _hydrate(r));
+        try {
+          out.add(await _hydrate(r));
+        } catch (_) {
+          // Skip a single corrupt row (e.g. a malformed JSON column) rather than
+          // failing the whole list — the other readable records must still show.
+          continue;
+        }
       }
       return Result.ok(out);
     } catch (e) {
@@ -247,9 +253,12 @@ class TechniqueRepositoryDrift implements TechniqueRepository {
           ),
           insert: (d, s) => db
               .into(db.techniqueMedia)
-              .insert(
+              .insertOnConflictUpdate(
                 TechniqueMediaCompanion.insert(
                   id: d.media.id,
+                  // Revive (clear the tombstone) if this id was previously
+                  // soft-deleted, so a reused ULID upserts instead of a PK crash.
+                  deletedAt: const Value(null),
                   techniqueId: technique.id,
                   assetId: d.assetId,
                   kind: Value(d.media.isVideo ? 'video' : 'audio'),

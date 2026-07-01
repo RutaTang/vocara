@@ -107,19 +107,20 @@ Future<PcmAudio?> decodeMediaToMono(String path, {int rate = 44100}) {
   return Isolate.run(() {
     final bindings = VocaraEngineBindings(_openVocaraLibrary());
     final cpath = path.toNativeUtf8();
+    final pcm = bindings.ve_decode(cpath.cast(), rate);
+    final ptr = pcm.ptr;
+    final frames = pcm.frames;
     try {
-      final pcm = bindings.ve_decode(cpath.cast(), rate);
-      final frames = pcm.frames;
-      if (frames <= 0 || pcm.ptr.address == 0) return null;
-      final inter = pcm.ptr.asTypedList(frames * 2);
+      if (frames <= 0 || ptr.address == 0) return null;
+      final inter = ptr.asTypedList(frames * 2);
       final mono = Float64List(frames);
       for (var i = 0; i < frames; i++) {
         mono[i] = (inter[i * 2] + inter[i * 2 + 1]) * 0.5;
       }
-      bindings.ve_free_decoded(pcm.ptr, frames);
       return PcmAudio(mono, pcm.rate);
     } finally {
       malloc.free(cpath);
+      if (ptr.address != 0) bindings.ve_free_decoded(ptr, frames);
     }
   });
 }

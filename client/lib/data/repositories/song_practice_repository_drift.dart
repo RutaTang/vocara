@@ -61,7 +61,13 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
       });
       final out = <SongPractice>[];
       for (final r in rows) {
-        out.add(await _hydrate(r));
+        try {
+          out.add(await _hydrate(r));
+        } catch (_) {
+          // Skip a single corrupt row (e.g. a malformed JSON column) rather than
+          // failing the whole list — the other readable records must still show.
+          continue;
+        }
       }
       return Result.ok(out);
     } catch (e) {
@@ -349,9 +355,12 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
       hashOf: (d) => SyncWriter.contentHashOf([d.v.name, d.order]),
       insert: (d, s) => db
           .into(db.interpretations)
-          .insert(
+          .insertOnConflictUpdate(
             InterpretationsCompanion.insert(
               id: d.v.id,
+              // Revive (clear the tombstone) if this id was previously
+              // soft-deleted, so a reused ULID upserts instead of a PK crash.
+              deletedAt: const Value(null),
               practiceId: p.id,
               name: Value(d.v.name),
               orderIndex: Value(d.order),
@@ -422,9 +431,12 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
       hashOf: (d) => busHash(d.bus, d.order),
       insert: (d, s) => db
           .into(db.fxBuses)
-          .insert(
+          .insertOnConflictUpdate(
             FxBusesCompanion.insert(
               id: d.bus.id,
+              // Revive (clear the tombstone) if this id was previously
+              // soft-deleted, so a reused ULID upserts instead of a PK crash.
+              deletedAt: const Value(null),
               practiceId: p.id,
               name: Value(d.bus.name),
               colorValue: Value(d.bus.colorValue),
@@ -522,9 +534,12 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
       hashOf: (d) => trackHash(d.track, d.order),
       insert: (d, s) => db
           .into(db.tracks)
-          .insert(
+          .insertOnConflictUpdate(
             TracksCompanion.insert(
               id: d.track.id,
+              // Revive (clear the tombstone) if this id was previously
+              // soft-deleted, so a reused ULID upserts instead of a PK crash.
+              deletedAt: const Value(null),
               practiceId: p.id,
               kind: d.track.kind.name,
               interpretationId: Value(d.track.versionId),
@@ -621,9 +636,12 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
       ]),
       insert: (d, s) => db
           .into(db.clips)
-          .insert(
+          .insertOnConflictUpdate(
             ClipsCompanion.insert(
               id: d.clip.id,
+              // Revive (clear the tombstone) if this id was previously
+              // soft-deleted, so a reused ULID upserts instead of a PK crash.
+              deletedAt: const Value(null),
               trackId: t.id,
               assetId: d.assetId,
               startMs: Value(d.clip.startMs),
@@ -671,9 +689,12 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
           SyncWriter.contentHashOf([n.positionMs, n.endMs, n.content]),
       insert: (n, s) => db
           .into(db.practiceNotes)
-          .insert(
+          .insertOnConflictUpdate(
             PracticeNotesCompanion.insert(
               id: n.id,
+              // Revive (clear the tombstone) if this id was previously
+              // soft-deleted, so a reused ULID upserts instead of a PK crash.
+              deletedAt: const Value(null),
               trackId: t.id,
               positionMs: Value(n.positionMs),
               endMs: Value(n.endMs),
@@ -731,9 +752,12 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
       ]),
       insert: (m, s) => db
           .into(db.techniqueMarkers)
-          .insert(
+          .insertOnConflictUpdate(
             TechniqueMarkersCompanion.insert(
               id: m.id,
+              // Revive (clear the tombstone) if this id was previously
+              // soft-deleted, so a reused ULID upserts instead of a PK crash.
+              deletedAt: const Value(null),
               trackId: t.id,
               positionMs: Value(m.positionMs),
               endMs: Value(m.endMs),

@@ -372,8 +372,10 @@ class AudioTrack {
       colorValue: json['colorValue'] as int?,
       muted: json['muted'] as bool? ?? false,
       soloed: json['soloed'] as bool? ?? false,
-      volume: (json['volume'] as num?)?.toDouble() ?? 1.0,
-      pan: (json['pan'] as num?)?.toDouble() ?? 0.0,
+      // Clamp on load (like ReverbSettings): a synced / migrated / hand-edited
+      // value outside the fader's range must not reach the engine verbatim.
+      volume: ((json['volume'] as num?)?.toDouble() ?? 1.0).clamp(0.0, 1.0),
+      pan: ((json['pan'] as num?)?.toDouble() ?? 0.0).clamp(-1.0, 1.0),
       versionId: json['versionId'] as String?,
       fx: json['fx'] != null
           ? TrackFx.fromJson(json['fx'] as Map<String, dynamic>)

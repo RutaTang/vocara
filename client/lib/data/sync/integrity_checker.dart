@@ -112,6 +112,32 @@ class IntegrityChecker {
       table: 'tracks',
       column: 'interpretation_id',
     ));
+    // A track's routing bus must be a live fx_bus of its OWN practice; otherwise
+    // null it (playback would silently reroute to master on a dangling pointer).
+    out.addAll(await _scalar(
+      repair: repair,
+      invariant: 'track-bus',
+      sql:
+          "SELECT t.id AS id FROM tracks t WHERE t.deleted_at IS NULL AND "
+          "t.bus_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fx_buses b WHERE "
+          "b.id = t.bus_id AND b.deleted_at IS NULL AND b.practice_id = "
+          "t.practice_id)",
+      table: 'tracks',
+      column: 'bus_id',
+    ));
+    // A bus->bus output route must point at a live fx_bus of the same practice;
+    // otherwise null it (falls back to master, same as an absent route).
+    out.addAll(await _scalar(
+      repair: repair,
+      invariant: 'bus-output',
+      sql:
+          "SELECT b.id AS id FROM fx_buses b WHERE b.deleted_at IS NULL AND "
+          "b.output_bus_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fx_buses o "
+          "WHERE o.id = b.output_bus_id AND o.deleted_at IS NULL AND "
+          "o.practice_id = b.practice_id)",
+      table: 'fx_buses',
+      column: 'output_bus_id',
+    ));
 
     // 3. Single-slot LWW: at most one live accompaniment / reference per
     //    practice. Keep the highest HLC, tombstone the losers.

@@ -43,8 +43,18 @@ List<LyricLine> parseLrc(String content) {
       out.add(LyricLine(text: text, timeMs: ms));
     }
   }
-  out.sort((a, b) => (a.timeMs ?? 0).compareTo(b.timeMs ?? 0));
-  return out;
+  // List.sort is not stable, so pair each line with its original index and use
+  // it as a total-order tiebreaker — otherwise distinct lines sharing a
+  // timestamp can be reordered (same hazard handled in
+  // song_practice_repository_drift).
+  final indexed = [
+    for (var i = 0; i < out.length; i++) (index: i, line: out[i]),
+  ];
+  indexed.sort((a, b) {
+    final c = (a.line.timeMs ?? 0).compareTo(b.line.timeMs ?? 0);
+    return c != 0 ? c : a.index.compareTo(b.index);
+  });
+  return [for (final e in indexed) e.line];
 }
 
 /// Serializes [lines] to an `.lrc` document: synced lines get a `[mm:ss.cc]`

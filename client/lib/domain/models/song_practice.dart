@@ -250,7 +250,13 @@ class SongPractice {
       reverb: json['reverb'] != null
           ? ReverbSettings.fromJson(json['reverb'] as Map<String, dynamic>)
           : null,
-      masterVolume: (json['masterVolume'] as num?)?.toDouble() ?? 1.0,
+      // Clamp on load (like ReverbSettings): a synced / migrated / hand-edited
+      // value outside the master fader's range must not reach the engine
+      // verbatim (the master soft-clip runs after this gain).
+      masterVolume: ((json['masterVolume'] as num?)?.toDouble() ?? 1.0).clamp(
+        0.0,
+        1.0,
+      ),
       fxBuses: (json['fxBuses'] as List<dynamic>? ?? const [])
           .map((e) => FxBus.fromJson(e as Map<String, dynamic>))
           .toList(),

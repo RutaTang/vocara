@@ -29,6 +29,59 @@ class _HomeScreenState extends State<HomeScreen> {
   // detail route, bouncing the user straight back to Home.
   bool _opening = false;
 
+  late final HomeViewModel _vm;
+
+  @override
+  void initState() {
+    super.initState();
+    // Surface create/delete failures as a transient toast the moment the command
+    // settles (mirrors the detail screen's SnackBar pattern). Without this, a
+    // failed mutation is silently dropped and the UI diverges from SQLite.
+    _vm = context.read<HomeViewModel>();
+    _vm.createProject.addListener(_onMutationResult);
+    _vm.deleteProject.addListener(_onMutationResult);
+  }
+
+  @override
+  void dispose() {
+    _vm.createProject.removeListener(_onMutationResult);
+    _vm.deleteProject.removeListener(_onMutationResult);
+    super.dispose();
+  }
+
+  void _onMutationResult() {
+    if (!mounted) return;
+    if (_vm.createProject.error) {
+      _showError('Could not create the practice. Please try again.');
+      _vm.createProject.clearResult();
+    }
+    if (_vm.deleteProject.error) {
+      _showError('Could not delete the practice. Please try again.');
+      _vm.deleteProject.clearResult();
+    }
+  }
+
+  void _showError(String message) {
+    ScaffoldMessenger.of(context)
+      ..clearSnackBars()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(
+            message,
+            style: const TextStyle(color: Studio.textPrimary, fontSize: 13),
+          ),
+          backgroundColor: Studio.surfaceRaised,
+          behavior: SnackBarBehavior.floating,
+          margin: const EdgeInsets.all(16),
+          duration: const Duration(milliseconds: 2800),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(8),
+            side: const BorderSide(color: Studio.border),
+          ),
+        ),
+      );
+  }
+
   @override
   Widget build(BuildContext context) {
     final vm = context.read<HomeViewModel>();
@@ -50,6 +103,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 vm: vm,
                 onOpen: (p) => _openDetail(vm, p.id),
                 onDelete: (p) => _deletePractice(vm, p),
+                onRetry: () => vm.load.execute(),
               ),
             ),
           ),
@@ -206,11 +260,13 @@ class _Body extends StatelessWidget {
     required this.vm,
     required this.onOpen,
     required this.onDelete,
+    required this.onRetry,
   });
 
   final HomeViewModel vm;
   final void Function(SongPractice) onOpen;
   final void Function(SongPractice) onDelete;
+  final VoidCallback onRetry;
 
   @override
   Widget build(BuildContext context) {
@@ -220,6 +276,11 @@ class _Body extends StatelessWidget {
           valueColor: AlwaysStoppedAnimation(Studio.textSecondary),
         ),
       );
+    }
+    // A failed list read must read as an error (with Retry), never collapse into
+    // the empty state — otherwise a load failure looks like "No practices yet".
+    if (vm.load.error && vm.projects.isEmpty) {
+      return _ErrorState(onRetry: onRetry);
     }
     if (vm.projects.isEmpty) {
       return const _EmptyState();
@@ -271,6 +332,47 @@ class _EmptyState extends StatelessWidget {
             'Create your first song practice to start recording and taking notes.',
             textAlign: TextAlign.center,
             style: TextStyle(color: Studio.textSecondary, fontSize: 13),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Shown when the practice list fails to load — distinct from the empty state so a
+/// read error is never mistaken for a lost library. Offers a Retry that re-runs load.
+class _ErrorState extends StatelessWidget {
+  const _ErrorState({required this.onRetry});
+
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(FIcons.triangleAlert, size: 48, color: Studio.textFaint),
+          const SizedBox(height: 16),
+          const Text(
+            'Could not load your practices',
+            style: TextStyle(
+              color: Studio.textPrimary,
+              fontSize: 20,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            'Something went wrong reading your library. Your data is safe.',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Studio.textSecondary, fontSize: 13),
+          ),
+          const SizedBox(height: 20),
+          StudioButton(
+            icon: FIcons.refreshCw,
+            label: 'Retry',
+            onTap: onRetry,
           ),
         ],
       ),

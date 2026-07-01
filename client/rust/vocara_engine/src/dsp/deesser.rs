@@ -6,6 +6,7 @@
 //! voice is untouched. No recursive audio path → stable.
 
 use crate::dsp::biquad::{BandKind, BandSpec, Biquad, Coeffs};
+use crate::dsp::smooth::Smoothed;
 use crate::node::{Node, ProcessIo};
 use crate::sample::{db_to_lin, CHANNELS};
 
@@ -32,8 +33,10 @@ pub struct DeEsserNode {
     xmix: f32,
     xinc: f32,
     freq: f32,
-    threshold_db: f32,
-    range_db: f32,
+    // Smoothed so a threshold/range knob drag or automation ramps the high-band reduction
+    // instead of stepping it per block (zipper/click). Mirrors the compressor's threshold.
+    threshold: Smoothed,
+    range: Smoothed,
     env_db: f32,
     attack_coef: f32,
     release_coef: f32,
@@ -52,8 +55,8 @@ impl DeEsserNode {
             xmix: 0.0,
             xinc: 1.0 / XFADE_FRAMES,
             freq: 6500.0,
-            threshold_db: -28.0,
-            range_db: 12.0,
+            threshold: Smoothed::new(-28.0),
+            range: Smoothed::new(12.0),
             env_db: -120.0,
             attack_coef: 1.0,
             release_coef: 1.0,
@@ -125,6 +128,9 @@ impl Node for DeEsserNode {
         self.sr = sample_rate;
         self.retune_now();
         self.recompute_ballistics();
+        let tau = 0.01;
+        self.threshold.set_time(tau, sample_rate);
+        self.range.set_time(tau, sample_rate);
         self.env_db = -120.0;
     }
 
@@ -198,9 +204,11 @@ impl Node for DeEsserNode {
             };
             self.env_db += (x_db - self.env_db) * coef;
 
-            let over = self.env_db - self.threshold_db;
+            let threshold_db = self.threshold.next();
+            let range_db = self.range.next();
+            let over = self.env_db - threshold_db;
             let red_db = if over > 0.0 {
-                (-over).max(-self.range_db)
+                (-over).max(-range_db)
             } else {
                 0.0
             };
@@ -216,8 +224,8 @@ impl Node for DeEsserNode {
                 self.freq = value.clamp(2000.0, 16000.0);
                 self.retune_xfade();
             }
-            param::THRESHOLD_DB => self.threshold_db = value,
-            param::RANGE_DB => self.range_db = value.max(0.0),
+            param::THRESHOLD_DB => self.threshold.set_target(value),
+            param::RANGE_DB => self.range.set_target(value.max(0.0)),
             param::BYPASS => self.bypass = value >= 0.5,
             _ => {}
         }

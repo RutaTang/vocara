@@ -46,6 +46,11 @@ class ApplyResult {
 /// child arrive before its parent within the batch, and each record applies
 /// inside its own SAVEPOINT so one malformed / forward-incompatible record is
 /// quarantined ([ApplyResult.failed]) rather than rolling back every other record.
+/// Because defer_foreign_keys pushes FK enforcement to the OUTER commit (outside
+/// every savepoint), a record whose parent never arrives in the batch would fail
+/// the whole commit — so before committing we sweep foreign_key_check and quarantine
+/// just the still-orphaned rows, and the outer transaction is wrapped so a commit
+/// failure degrades to a failed batch instead of throwing out of apply().
 class SyncApplier {
   SyncApplier(this.db, this.clock);
 
@@ -54,55 +59,89 @@ class SyncApplier {
 
   Future<ApplyResult> apply(List<RemoteRecord> records) async {
     final result = ApplyResult();
-    await db.transaction(() async {
-      await db.customStatement('PRAGMA defer_foreign_keys = ON');
-      for (final rec in records) {
-        try {
-          clock.receive(rec.hlc);
-        } on HlcDriftException {
-          result.quarantined++;
-          continue;
-        }
-        try {
-          // Apply each record inside a nested transaction (SQLite SAVEPOINT) so a
-          // single malformed / forward-incompatible record — a column from a newer
-          // schema_v, a CHECK/NOT NULL violation, an unknown table — rolls back ONLY
-          // itself and is quarantined, instead of throwing out of the batch and
-          // discarding every other (good) record. Counters are updated OUTSIDE the
-          // savepoint so a rollback can't desync them.
-          final applied = await db.transaction(() async {
-            final existing = await db
-                .customSelect(
-                  'SELECT hlc_packed FROM ${rec.table} WHERE id = ?',
-                  variables: [Variable.withString(rec.id)],
-                )
-                .getSingleOrNull();
-            final wins = existing == null ||
-                rec.hlcPacked.compareTo(existing.read<String>('hlc_packed')) > 0;
-            if (!wins) return false;
-            // Clear any single-slot conflict BEFORE writing. The single-slot track
-            // kinds (one live accompaniment/reference per practice) carry a partial
-            // UNIQUE index; inserting a second LIVE row for an occupied slot raises a
-            // UNIQUE violation. Resolving here (and the whole write) is in this
-            // record's savepoint, so a failure rolls back the occupant tombstone too.
-            final columns = await _resolveSlot(rec);
-            if (existing == null) {
-              await _insert(rec.table, columns);
-            } else {
-              await _update(rec.table, columns);
-            }
-            return true;
-          });
-          if (applied) {
-            result.applied++;
-          } else {
-            result.skipped++;
+    try {
+      await db.transaction(() async {
+        await db.customStatement('PRAGMA defer_foreign_keys = ON');
+        for (final rec in records) {
+          try {
+            clock.receive(rec.hlc);
+          } on HlcDriftException {
+            result.quarantined++;
+            continue;
           }
-        } catch (_) {
-          result.failed++;
+          try {
+            // Apply each record inside a nested transaction (SQLite SAVEPOINT) so a
+            // single malformed / forward-incompatible record — a column from a newer
+            // schema_v, a CHECK/NOT NULL violation, an unknown table — rolls back ONLY
+            // itself and is quarantined, instead of throwing out of the batch and
+            // discarding every other (good) record. Counters are updated OUTSIDE the
+            // savepoint so a rollback can't desync them.
+            final applied = await db.transaction(() async {
+              final existing = await db
+                  .customSelect(
+                    'SELECT hlc_packed FROM ${rec.table} WHERE id = ?',
+                    variables: [Variable.withString(rec.id)],
+                  )
+                  .getSingleOrNull();
+              final wins = existing == null ||
+                  rec.hlcPacked.compareTo(existing.read<String>('hlc_packed')) >
+                      0;
+              if (!wins) return false;
+              // Clear any single-slot conflict BEFORE writing. The single-slot track
+              // kinds (one live accompaniment/reference per practice) carry a partial
+              // UNIQUE index; inserting a second LIVE row for an occupied slot raises a
+              // UNIQUE violation. Resolving here (and the whole write) is in this
+              // record's savepoint, so a failure rolls back the occupant tombstone too.
+              final columns = await _resolveSlot(rec);
+              if (existing == null) {
+                await _insert(rec.table, columns);
+              } else {
+                await _update(rec.table, columns);
+              }
+              return true;
+            });
+            if (applied) {
+              result.applied++;
+            } else {
+              result.skipped++;
+            }
+          } catch (_) {
+            result.failed++;
+          }
         }
-      }
-    });
+        // defer_foreign_keys deferred every FK check to THIS outer commit, so a
+        // record whose parent never arrived in the batch (truly orphaned /
+        // forward-incompatible) would fail the whole commit and poison every good
+        // record. Sweep for rows that STILL violate an FK — order-tolerance means a
+        // child inserted before its parent is fine once the parent is present — and
+        // hard-delete just those (they re-arrive on a later page). Loop because
+        // deleting an orphan can strand its own children.
+        while (true) {
+          final violations =
+              await db.customSelect('PRAGMA foreign_key_check').get();
+          if (violations.isEmpty) break;
+          for (final v in violations) {
+            final table = v.read<String>('table');
+            final rowid = v.read<int>('rowid');
+            await db.customStatement(
+              'DELETE FROM $table WHERE rowid = ?',
+              [rowid],
+            );
+            if (result.applied > 0) result.applied--;
+            result.failed++;
+          }
+        }
+      });
+    } catch (_) {
+      // The outer commit failed despite the per-record savepoints and the FK sweep
+      // (e.g. a deferred constraint we can't attribute to a single row). The whole
+      // transaction rolled back, so nothing except the DB-untouched quarantines
+      // stuck. Report the batch as failed rather than throwing out of apply(), which
+      // would lose the ApplyResult and stall sync on an endless retry of this page.
+      result.applied = 0;
+      result.skipped = 0;
+      result.failed = records.length - result.quarantined;
+    }
     return result;
   }
 

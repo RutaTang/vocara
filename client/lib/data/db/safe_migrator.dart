@@ -138,7 +138,13 @@ class SafeMigrator {
           await File(bakPath).rename(dbPath);
         }
         // else: no db, copy, or bak survived — unrecoverable FS corruption.
+        // Durably land the rename (if any) BEFORE dropping the marker, matching
+        // the forward-swap ordering (fsyncDir then terminal marker); otherwise a
+        // double-fault could delete the marker while the rename is still only in
+        // the FS cache, abandoning the db in .bak with no marker to recover from.
+        await fs.fsyncDir(dir);
         await marker.delete();
+        await fs.fsyncDir(dir);
       case 'copying':
       case 'migrating':
       case 'failed':

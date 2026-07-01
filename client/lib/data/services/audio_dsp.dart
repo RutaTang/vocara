@@ -82,7 +82,13 @@ PcmAudio? readWavMono(Uint8List bytes) {
     offset = body + size + (size & 1); // chunks are word-aligned
   }
 
-  if (dataOffset < 0 || format != 1 || bits != 16 || channels < 1) return null;
+  if (dataOffset < 0 ||
+      format != 1 ||
+      bits != 16 ||
+      channels < 1 ||
+      sampleRate <= 0) {
+    return null;
+  }
 
   final total = math.min(dataLen, bytes.length - dataOffset) ~/ 2;
   final frames = total ~/ channels;
@@ -766,6 +772,12 @@ void _medianInto(Float32List src, Float32List dst, int half) {
   final n = src.length;
   final buf = <double>[];
   for (var i = 0; i < n; i++) {
+    // A NaN center means this frame was gated out (unvoiced): keep it NaN so the
+    // smoothing never borrows neighbours' F0/formants onto breath/silence.
+    if (src[i].isNaN) {
+      dst[i] = double.nan;
+      continue;
+    }
     buf.clear();
     final lo = i - half < 0 ? 0 : i - half;
     final hi = i + half >= n ? n - 1 : i + half;

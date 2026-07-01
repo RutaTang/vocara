@@ -53,16 +53,27 @@ class EqBand {
     'enabled': enabled,
   };
 
-  factory EqBand.fromJson(Map<String, dynamic> j) => EqBand(
-    kind: EqBandKind.values.firstWhere(
+  factory EqBand.fromJson(Map<String, dynamic> j) {
+    final kind = EqBandKind.values.firstWhere(
       (k) => k.name == j['kind'],
       orElse: () => EqBandKind.peaking,
-    ),
-    freq: (j['freq'] as num).toDouble(),
-    q: (j['q'] as num?)?.toDouble() ?? 1.0,
-    gainDb: (j['gainDb'] as num?)?.toDouble() ?? 0.0,
-    enabled: j['enabled'] as bool? ?? true,
-  );
+    );
+    // Parse freq defensively like every other numeric field: a malformed /
+    // missing freq must not throw and fail the whole practice load. Fall back to
+    // the canonical default frequency for this band kind (matches _flatBands).
+    final defaultFreq = switch (kind) {
+      EqBandKind.lowShelf => 100.0,
+      EqBandKind.peaking => 1000.0,
+      EqBandKind.highShelf => 12000.0,
+    };
+    return EqBand(
+      kind: kind,
+      freq: (j['freq'] as num?)?.toDouble() ?? defaultFreq,
+      q: (j['q'] as num?)?.toDouble() ?? 1.0,
+      gainDb: (j['gainDb'] as num?)?.toDouble() ?? 0.0,
+      enabled: j['enabled'] as bool? ?? true,
+    );
+  }
 }
 
 /// Feed-forward compressor settings.
@@ -109,13 +120,22 @@ class CompSettings {
     'makeupDb': makeupDb,
   };
 
+  // Clamp on load (like ReverbSettings): a synced / migrated / hand-edited value
+  // outside the editable range must not reach the engine verbatim (ratio < 1 is
+  // invalid; absurd times destabilize the envelope follower).
   factory CompSettings.fromJson(Map<String, dynamic> j) => CompSettings(
-    thresholdDb: (j['thresholdDb'] as num?)?.toDouble() ?? -18.0,
-    ratio: (j['ratio'] as num?)?.toDouble() ?? 3.0,
-    kneeDb: (j['kneeDb'] as num?)?.toDouble() ?? 6.0,
-    attackMs: (j['attackMs'] as num?)?.toDouble() ?? 10.0,
-    releaseMs: (j['releaseMs'] as num?)?.toDouble() ?? 120.0,
-    makeupDb: (j['makeupDb'] as num?)?.toDouble() ?? 0.0,
+    thresholdDb: ((j['thresholdDb'] as num?)?.toDouble() ?? -18.0).clamp(
+      -60.0,
+      0.0,
+    ),
+    ratio: ((j['ratio'] as num?)?.toDouble() ?? 3.0).clamp(1.0, 20.0),
+    kneeDb: ((j['kneeDb'] as num?)?.toDouble() ?? 6.0).clamp(0.0, 24.0),
+    attackMs: ((j['attackMs'] as num?)?.toDouble() ?? 10.0).clamp(0.1, 500.0),
+    releaseMs: ((j['releaseMs'] as num?)?.toDouble() ?? 120.0).clamp(
+      1.0,
+      5000.0,
+    ),
+    makeupDb: ((j['makeupDb'] as num?)?.toDouble() ?? 0.0).clamp(0.0, 24.0),
   );
 }
 
@@ -144,10 +164,15 @@ class DeEsserSettings {
     'thresholdDb': thresholdDb,
     'rangeDb': rangeDb,
   };
+  // Clamp on load (see ReverbSettings): keep a migrated / hand-edited value in
+  // the editable range before it reaches the engine.
   factory DeEsserSettings.fromJson(Map<String, dynamic> j) => DeEsserSettings(
-    freq: (j['freq'] as num?)?.toDouble() ?? 6500,
-    thresholdDb: (j['thresholdDb'] as num?)?.toDouble() ?? -28,
-    rangeDb: (j['rangeDb'] as num?)?.toDouble() ?? 12,
+    freq: ((j['freq'] as num?)?.toDouble() ?? 6500.0).clamp(2000.0, 16000.0),
+    thresholdDb: ((j['thresholdDb'] as num?)?.toDouble() ?? -28.0).clamp(
+      -60.0,
+      0.0,
+    ),
+    rangeDb: ((j['rangeDb'] as num?)?.toDouble() ?? 12.0).clamp(0.0, 24.0),
   );
 }
 
@@ -181,11 +206,19 @@ class GateSettings {
     'attackMs': attackMs,
     'releaseMs': releaseMs,
   };
+  // Clamp on load (see ReverbSettings): keep a migrated / hand-edited value in
+  // the editable range before it reaches the engine.
   factory GateSettings.fromJson(Map<String, dynamic> j) => GateSettings(
-    thresholdDb: (j['thresholdDb'] as num?)?.toDouble() ?? -45,
-    rangeDb: (j['rangeDb'] as num?)?.toDouble() ?? 60,
-    attackMs: (j['attackMs'] as num?)?.toDouble() ?? 2,
-    releaseMs: (j['releaseMs'] as num?)?.toDouble() ?? 120,
+    thresholdDb: ((j['thresholdDb'] as num?)?.toDouble() ?? -45.0).clamp(
+      -80.0,
+      0.0,
+    ),
+    rangeDb: ((j['rangeDb'] as num?)?.toDouble() ?? 60.0).clamp(0.0, 80.0),
+    attackMs: ((j['attackMs'] as num?)?.toDouble() ?? 2.0).clamp(0.1, 50.0),
+    releaseMs: ((j['releaseMs'] as num?)?.toDouble() ?? 120.0).clamp(
+      10.0,
+      500.0,
+    ),
   );
 }
 
@@ -207,10 +240,13 @@ class DelaySettings {
     'feedback': feedback,
     'mix': mix,
   };
+  // Clamp on load (see ReverbSettings): feedback >= 1.0 self-oscillates and
+  // blows the delay line up, so a synced / migrated / hand-edited value must
+  // never reach the engine verbatim.
   factory DelaySettings.fromJson(Map<String, dynamic> j) => DelaySettings(
-    timeMs: (j['timeMs'] as num?)?.toDouble() ?? 300,
-    feedback: (j['feedback'] as num?)?.toDouble() ?? 0.3,
-    mix: (j['mix'] as num?)?.toDouble() ?? 0.0,
+    timeMs: ((j['timeMs'] as num?)?.toDouble() ?? 300.0).clamp(1.0, 1500.0),
+    feedback: ((j['feedback'] as num?)?.toDouble() ?? 0.3).clamp(0.0, 0.95),
+    mix: ((j['mix'] as num?)?.toDouble() ?? 0.0).clamp(0.0, 1.0),
   );
 }
 
@@ -227,9 +263,11 @@ class SaturationSettings {
       );
   Map<String, dynamic> toJson() => {'driveDb': driveDb, 'mix': mix};
   factory SaturationSettings.fromJson(Map<String, dynamic> j) =>
+      // Clamp on load (see ReverbSettings): keep a migrated / hand-edited value
+      // in the editable range before it reaches the engine.
       SaturationSettings(
-        driveDb: (j['driveDb'] as num?)?.toDouble() ?? 6,
-        mix: (j['mix'] as num?)?.toDouble() ?? 0.0,
+        driveDb: ((j['driveDb'] as num?)?.toDouble() ?? 6.0).clamp(0.0, 36.0),
+        mix: ((j['mix'] as num?)?.toDouble() ?? 0.0).clamp(0.0, 1.0),
       );
 }
 
@@ -263,11 +301,13 @@ class DoublerSettings {
     'rateHz': rateHz,
     'mix': mix,
   };
+  // Clamp on load (see ReverbSettings): keep a migrated / hand-edited value in
+  // the editable range before it reaches the engine.
   factory DoublerSettings.fromJson(Map<String, dynamic> j) => DoublerSettings(
-    delayMs: (j['delayMs'] as num?)?.toDouble() ?? 18,
-    depthMs: (j['depthMs'] as num?)?.toDouble() ?? 4,
-    rateHz: (j['rateHz'] as num?)?.toDouble() ?? 0.6,
-    mix: (j['mix'] as num?)?.toDouble() ?? 0.0,
+    delayMs: ((j['delayMs'] as num?)?.toDouble() ?? 18.0).clamp(1.0, 50.0),
+    depthMs: ((j['depthMs'] as num?)?.toDouble() ?? 4.0).clamp(0.0, 20.0),
+    rateHz: ((j['rateHz'] as num?)?.toDouble() ?? 0.6).clamp(0.05, 8.0),
+    mix: ((j['mix'] as num?)?.toDouble() ?? 0.0).clamp(0.0, 1.0),
   );
 }
 
@@ -286,9 +326,11 @@ class LimiterSettings {
     'ceilingDb': ceilingDb,
     'releaseMs': releaseMs,
   };
+  // Clamp on load (see ReverbSettings): keep a migrated / hand-edited value in
+  // the editable range before it reaches the engine.
   factory LimiterSettings.fromJson(Map<String, dynamic> j) => LimiterSettings(
-    ceilingDb: (j['ceilingDb'] as num?)?.toDouble() ?? -0.3,
-    releaseMs: (j['releaseMs'] as num?)?.toDouble() ?? 80,
+    ceilingDb: ((j['ceilingDb'] as num?)?.toDouble() ?? -0.3).clamp(-12.0, 0.0),
+    releaseMs: ((j['releaseMs'] as num?)?.toDouble() ?? 80.0).clamp(1.0, 500.0),
   );
 }
 
@@ -303,7 +345,9 @@ class TrackSend {
       TrackSend(busId: busId ?? this.busId, levelDb: levelDb ?? this.levelDb);
   Map<String, dynamic> toJson() => {'busId': busId, 'levelDb': levelDb};
   factory TrackSend.fromJson(Map<String, dynamic> j) => TrackSend(
-    busId: j['busId'] as String,
+    // Guard against a null/missing busId (partial or hand-edited JSON): an empty
+    // id resolves to no bus (routes to master) instead of throwing on load.
+    busId: j['busId'] as String? ?? '',
     levelDb: (j['levelDb'] as num?)?.toDouble() ?? 0.0,
   );
 }
@@ -568,7 +612,12 @@ class TrackFx {
         const ReverbSettings(),
       ),
       reverbOn: j['reverbOn'] as bool? ?? false,
-      sendDb: (j['sendDb'] as num?)?.toDouble() ?? kSendOffDb,
+      // Clamp on load (see ReverbSettings): the reverb send is a dB level in
+      // [kSendOffDb, 0]; a hand-edited positive value would over-drive the bus.
+      sendDb: ((j['sendDb'] as num?)?.toDouble() ?? kSendOffDb).clamp(
+        kSendOffDb,
+        0.0,
+      ),
       order: order,
     );
   }

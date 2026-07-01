@@ -29,6 +29,7 @@ to see what is available locally.
 
 import argparse
 import os
+import shutil
 import sys
 import tempfile
 
@@ -50,7 +51,9 @@ def reencode_pcm16(src, dst):
     import soundfile as sf
 
     data, sr = sf.read(src, always_2d=True)
-    sf.write(dst, data, sr, subtype="PCM_16")
+    # The Dart side passes atomic-staging paths ending in ".wav.tmp", so soundfile
+    # cannot infer the container from the extension — name the format explicitly.
+    sf.write(dst, data, sr, subtype="PCM_16", format="WAV")
 
 
 def pick(paths, *needles):
@@ -84,54 +87,59 @@ def main():
         return 3
 
     workdir = tempfile.mkdtemp(prefix="vocara_sep_")
-    separator = Separator(output_dir=workdir, output_format="WAV")
-    emit(0.05)
-
+    # The workdir holds full-length raw stem WAVs (tens of MB); always remove it,
+    # on success/failure/crash alike, so it doesn't leak into the temp directory.
     try:
-        separator.load_model(model_filename=args.model)
-    except Exception as exc:  # noqa: BLE001 - surface any load failure verbatim
-        print(
-            f"Failed to load model '{args.model}': {exc}\n"
-            "Run `audio-separator --list_models` and pass a valid --model.",
-            file=sys.stderr,
-        )
-        return 4
-    emit(0.15)
+        separator = Separator(output_dir=workdir, output_format="WAV")
+        emit(0.05)
 
-    # The long step: no fine-grained callback, so progress jumps here.
-    outputs = separator.separate(args.input)
-    emit(0.85)
+        try:
+            separator.load_model(model_filename=args.model)
+        except Exception as exc:  # noqa: BLE001 - surface any load failure verbatim
+            print(
+                f"Failed to load model '{args.model}': {exc}\n"
+                "Run `audio-separator --list_models` and pass a valid --model.",
+                file=sys.stderr,
+            )
+            return 4
+        emit(0.15)
 
-    paths = [o if os.path.isabs(o) else os.path.join(workdir, o) for o in outputs]
-    # audio-separator labels stems in PARENTHESES, e.g. "(Instrumental)" /
-    # "(Vocals)". Match the parenthesized label — NOT a bare "instrument" — because
-    # the model name itself can contain "instrumental" (e.g. an instrumental
-    # specialist like ..._instrumental_becruily), which would otherwise make the
-    # "(Vocals)" file false-match the instrumental needle.
-    inst_src = pick(paths, "(instrumental)", "(no_vocals)", "(no vocals)",
-                    "(other)", "(accompaniment)", "(inst)")
-    vocal_src = pick(paths, "(vocals)", "(vocal)")
-    # With exactly two stems, the non-vocal one is the instrumental (covers any
-    # odd labelling not matched above).
-    if len(paths) == 2:
-        if inst_src is None and vocal_src is not None:
-            inst_src = next(p for p in paths if p != vocal_src)
-        elif vocal_src is None and inst_src is not None:
-            vocal_src = next(p for p in paths if p != inst_src)
+        # The long step: no fine-grained callback, so progress jumps here.
+        outputs = separator.separate(args.input)
+        emit(0.85)
 
-    if inst_src is None or vocal_src is None or inst_src == vocal_src:
-        print(
-            "Could not identify the instrumental + vocal stems in: "
-            f"{[os.path.basename(p) for p in paths]}.",
-            file=sys.stderr,
-        )
-        return 5
+        paths = [o if os.path.isabs(o) else os.path.join(workdir, o) for o in outputs]
+        # audio-separator labels stems in PARENTHESES, e.g. "(Instrumental)" /
+        # "(Vocals)". Match the parenthesized label — NOT a bare "instrument" — because
+        # the model name itself can contain "instrumental" (e.g. an instrumental
+        # specialist like ..._instrumental_becruily), which would otherwise make the
+        # "(Vocals)" file false-match the instrumental needle.
+        inst_src = pick(paths, "(instrumental)", "(no_vocals)", "(no vocals)",
+                        "(other)", "(accompaniment)", "(inst)")
+        vocal_src = pick(paths, "(vocals)", "(vocal)")
+        # With exactly two stems, the non-vocal one is the instrumental (covers any
+        # odd labelling not matched above).
+        if len(paths) == 2:
+            if inst_src is None and vocal_src is not None:
+                inst_src = next(p for p in paths if p != vocal_src)
+            elif vocal_src is None and inst_src is not None:
+                vocal_src = next(p for p in paths if p != inst_src)
 
-    reencode_pcm16(vocal_src, args.vocal)
-    emit(0.92)
-    reencode_pcm16(inst_src, args.instrumental)
-    emit(1.0)
-    return 0
+        if inst_src is None or vocal_src is None or inst_src == vocal_src:
+            print(
+                "Could not identify the instrumental + vocal stems in: "
+                f"{[os.path.basename(p) for p in paths]}.",
+                file=sys.stderr,
+            )
+            return 5
+
+        reencode_pcm16(vocal_src, args.vocal)
+        emit(0.92)
+        reencode_pcm16(inst_src, args.instrumental)
+        emit(1.0)
+        return 0
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 if __name__ == "__main__":

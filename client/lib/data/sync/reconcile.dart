@@ -12,7 +12,9 @@ class ReconcileResult {
 /// Reconciles ONE child collection of a saved aggregate against what is already
 /// persisted, emitting the MINIMAL set of writes through the [SyncWriter]
 /// chokepoint:
-///   - a new id  -> INSERT
+///   - a new id  -> INSERT (an upsert: if the id was previously soft-deleted
+///     and its ULID is reused, this revives the tombstoned row instead of
+///     crashing on a primary-key collision)
 ///   - an existing id whose content hash changed -> UPDATE
 ///   - an existing id that is no longer desired  -> TOMBSTONE (never hard-delete)
 ///   - an unchanged id -> NOTHING (no HLC tick, no oplog)

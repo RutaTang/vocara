@@ -322,7 +322,9 @@ impl Vpio {
 
             // Shrink the IO buffer BEFORE initialize (low latency + keeps the echo in AEC range),
             // and publish the record round-trip latency so recorded takes can be time-aligned.
-            let round_trip = tune_io_and_round_trip() + AEC_BLOCK_FRAMES;
+            // Measure on the device the VPIO unit will actually bind to (`device_uid` below), not
+            // the system defaults — a non-default mic has its own buffer/latency/safety offsets.
+            let round_trip = tune_io_and_round_trip(device_uid) + AEC_BLOCK_FRAMES;
             RECORD_LATENCY_FRAMES.store(round_trip, Ordering::Relaxed);
 
             let on: u32 = 1;
@@ -614,10 +616,21 @@ unsafe extern "C-unwind" fn input_cb(
             }
             return st;
         }
-        ctx.err_streak = 0;
         if got_samples == 0 {
+            // A render that SUCCEEDS (st==0) but delivers zero frames is also a dead mic: the
+            // device is alive yet its capture pipeline hands us nothing (a stalled default-device
+            // change, or a device that never produces data). Accumulate toward EVENT_INPUT_LOST
+            // just like a hard render failure — otherwise these empty successes reset the streak
+            // and the loss is never flagged. RT-safe: a plain counter plus one atomic OR.
+            ctx.err_streak = ctx.err_streak.saturating_add(1);
+            if ctx.err_streak == INPUT_LOST_STREAK {
+                ctx.event
+                    .fetch_or(crate::device::EVENT_INPUT_LOST, Ordering::Release);
+            }
             return 0;
         }
+        // Reset only on a real, non-empty capture (a healthy mic delivers frames every cycle).
+        ctx.err_streak = 0;
 
         // Downmix the RAW mic to mono and pull the matching far-end reference (the backing we sent
         // to the speaker, mono; zero-filled if the ring momentarily lags). `n` = captured frames.
@@ -800,11 +813,18 @@ unsafe fn dev_set_u32(dev: u32, sel: u32, scope: u32, v: u32) -> i32 {
     }
 }
 
-/// Request a small IO buffer on the default input + output devices (cuts monitor/record latency and
+/// Request a small IO buffer on the device(s) the VPIO unit binds (cuts monitor/record latency and
 /// keeps the speaker→mic echo inside the AEC's filter), and return the estimated record round-trip
-/// in frames: ACOUSTIC flight + each device's (buffer + safety offset + hardware latency). The AEC's
+/// in frames: ACOUSTIC flight + each leg's (buffer + safety offset + hardware latency). The AEC's
 /// own block latency is added by the caller. Used to time-align recorded takes on the timeline.
-fn tune_io_and_round_trip() -> u32 {
+///
+/// `device_uid` is the mic the caller is about to bind (via `kAudioOutputUnitProperty_CurrentDevice`
+/// below). When it resolves, VPIO uses that SINGLE device for both the input and output legs (a
+/// communication endpoint), so both scopes are measured on it — a non-default mic has its own
+/// buffer/latency/safety, and measuring the system defaults instead misaligns takes. When it does
+/// NOT resolve, VPIO falls back to the system default INPUT for capture and default OUTPUT for
+/// playback (two distinct devices), so each leg is measured on its own default, as before.
+fn tune_io_and_round_trip(device_uid: Option<&str>) -> u32 {
     use objc2_core_audio::{
         kAudioDevicePropertyBufferFrameSize, kAudioDevicePropertyLatency,
         kAudioDevicePropertySafetyOffset, kAudioHardwarePropertyDefaultInputDevice,
@@ -816,15 +836,35 @@ fn tune_io_and_round_trip() -> u32 {
     const ACOUSTIC_FRAMES: u32 = 64;
     let mut round_trip = ACOUSTIC_FRAMES;
     unsafe {
-        for (dsel, lscope) in [
-            (kAudioHardwarePropertyDefaultInputDevice, kAudioObjectPropertyScopeInput),
-            (kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyScopeOutput),
-        ] {
-            let Some(dev) = dev_get_u32(
-                kAudioObjectSystemObject as u32,
-                dsel,
-                kAudioObjectPropertyScopeGlobal,
-            ) else {
+        // Resolve the device the VPIO unit will actually bind. Some(dev) → one duplex device serves
+        // both legs; None → measure each leg on its respective system default (the unbound case).
+        let bound = device_uid.and_then(device_id_for_uid);
+        let legs: [(Option<u32>, u32); 2] = match bound {
+            Some(dev) => [
+                (Some(dev), kAudioObjectPropertyScopeInput),
+                (Some(dev), kAudioObjectPropertyScopeOutput),
+            ],
+            None => [
+                (
+                    dev_get_u32(
+                        kAudioObjectSystemObject as u32,
+                        kAudioHardwarePropertyDefaultInputDevice,
+                        kAudioObjectPropertyScopeGlobal,
+                    ),
+                    kAudioObjectPropertyScopeInput,
+                ),
+                (
+                    dev_get_u32(
+                        kAudioObjectSystemObject as u32,
+                        kAudioHardwarePropertyDefaultOutputDevice,
+                        kAudioObjectPropertyScopeGlobal,
+                    ),
+                    kAudioObjectPropertyScopeOutput,
+                ),
+            ],
+        };
+        for (dev, lscope) in legs {
+            let Some(dev) = dev else {
                 continue;
             };
             let _ = dev_set_u32(

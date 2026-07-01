@@ -2,6 +2,7 @@
 //! threshold (cleans breaths / room tone between phrases). Stereo-linked peak detector with
 //! attack/release ballistics on the gain-reduction envelope. No recursive audio path.
 
+use crate::dsp::denormals::sanitize;
 use crate::node::{Node, ProcessIo};
 use crate::sample::{db_to_lin, CHANNELS};
 
@@ -108,7 +109,11 @@ impl Node for GateNode {
             } else {
                 self.release_coef
             };
-            self.env_db += (target_db - self.env_db) * coef;
+            // Defensive: target_db is already kept finite by the `.max(-range_db)` clamp
+            // above (f32::max drops NaN, +Inf takes the `>=` branch), so env_db stays finite
+            // for finite range_db. Sanitize anyway to honor the biquad/reverb recursive-state
+            // invariant in denormals.rs and stay robust to future detector changes.
+            self.env_db = sanitize(self.env_db + (target_db - self.env_db) * coef);
 
             let g = db_to_lin(self.env_db);
             out[CHANNELS * i] = l * g;

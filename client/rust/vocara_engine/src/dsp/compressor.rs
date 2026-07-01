@@ -8,6 +8,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
+use crate::dsp::denormals::sanitize;
 use crate::dsp::smooth::Smoothed;
 use crate::node::{Node, ProcessIo};
 use crate::sample::{db_to_lin, CHANNELS};
@@ -167,7 +168,10 @@ impl Node for CompressorNode {
             } else {
                 self.release_coef
             };
-            self.env_db += (gain_db - self.env_db) * coef;
+            // Sanitize the recursive envelope so one non-finite input sample (Inf, or NaN
+            // in both channels) can't poison env_db for the rest of playback — mirrors the
+            // biquad/reverb invariant in denormals.rs.
+            self.env_db = sanitize(self.env_db + (gain_db - self.env_db) * coef);
 
             let g = db_to_lin(self.env_db + mk);
             out[CHANNELS * i] = l * g;

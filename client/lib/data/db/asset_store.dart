@@ -226,26 +226,32 @@ class AssetStore {
       if (referenced.contains(id)) continue;
 
       final s = writer.stamp();
-      await db.customUpdate(
-        'UPDATE assets SET deleted_at = ?, updated_at = ?, hlc_wall = ?, '
-        'hlc_ctr = ?, hlc_node = ?, hlc_packed = ? WHERE id = ?',
-        variables: [
-          Variable.withInt(s.at),
-          Variable.withInt(s.at),
-          Variable.withInt(s.hlc.wallMs),
-          Variable.withInt(s.hlc.counter),
-          Variable.withString(s.hlc.node),
-          Variable.withString(s.hlc.packed),
-          Variable.withString(id),
-        ],
-      );
-      await writer.journal(
-        table: 'assets',
-        id: id,
-        op: 'tombstone',
-        hlc: s.hlc,
-        payloadHash: '',
-      );
+      // The tombstone UPDATE and its oplog entry MUST commit together (a row
+      // mutation and its journal entry in the SAME transaction), exactly as
+      // importFile does; otherwise a crash between them would tombstone a synced
+      // asset with no journal entry and the delete would never propagate.
+      await db.transaction(() async {
+        await db.customUpdate(
+          'UPDATE assets SET deleted_at = ?, updated_at = ?, hlc_wall = ?, '
+          'hlc_ctr = ?, hlc_node = ?, hlc_packed = ? WHERE id = ?',
+          variables: [
+            Variable.withInt(s.at),
+            Variable.withInt(s.at),
+            Variable.withInt(s.hlc.wallMs),
+            Variable.withInt(s.hlc.counter),
+            Variable.withString(s.hlc.node),
+            Variable.withString(s.hlc.packed),
+            Variable.withString(id),
+          ],
+        );
+        await writer.journal(
+          table: 'assets',
+          id: id,
+          op: 'tombstone',
+          hlc: s.hlc,
+          payloadHash: '',
+        );
+      });
       removed++;
 
       // Delete the file only if no surviving asset still maps to this hash.

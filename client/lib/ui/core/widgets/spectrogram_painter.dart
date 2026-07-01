@@ -56,6 +56,20 @@ Future<ui.Image> renderSpectrogramImage(
 }) {
   final w = s.frames;
   final h = s.bins;
+  // An empty spectrogram (frames/bins == 0, e.g. a not-yet-analysed or silent
+  // take) would hand decodeImageFromPixels a zero-size buffer, which never
+  // completes / throws. Emit a 1x1 transparent placeholder instead.
+  if (w == 0 || h == 0) {
+    final blank = Completer<ui.Image>();
+    ui.decodeImageFromPixels(
+      Uint8List(4),
+      1,
+      1,
+      ui.PixelFormat.rgba8888,
+      blank.complete,
+    );
+    return blank.future;
+  }
   final pixels = Uint8List(w * h * 4);
   final ceil = s.maxDb < _minCeilDb ? _minCeilDb : s.maxDb;
   final floor = ceil - dynamicRangeDb;

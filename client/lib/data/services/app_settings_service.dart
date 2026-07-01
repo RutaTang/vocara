@@ -167,9 +167,9 @@ class AppSettingsService extends ChangeNotifier {
     }
   }
 
-  // A change signature over a device set (uid + default flag) to skip no-op rebuilds.
+  // A change signature over a device set (the fields the panel renders) to skip no-op rebuilds.
   static String _deviceSig(List<AudioDevice> ds) =>
-      ds.map((d) => '${d.uid}:${d.isDefault}').join('|');
+      ds.map((d) => '${d.uid}:${d.isDefault}:${d.rate}:${d.name}').join('|');
 
   /// Attach the active engine. Applies the persisted devices immediately so a freshly-created
   /// engine adopts the saved choices; refreshes the device lists from the live host.
@@ -210,7 +210,13 @@ class AppSettingsService extends ChangeNotifier {
   /// engine and persists it for the next one.
   Future<void> setOutputDevice(String? uid) async {
     _outputDeviceUid = uid;
-    if (uid != null && uid.isNotEmpty) _engine?.setOutputDevice(uid);
+    // Drive the engine toward the resolved device even for a null/empty (System Default)
+    // selection: passing '' makes the native side fall back to the default output. Without this
+    // the engine would keep the previously-selected device while monitorAllowed is recomputed from
+    // the OS default — which could un-mute the hear-yourself monitor into a speaker (feedback).
+    // set_output_device blocks for the host reply, so the engine is on the resulting device before
+    // we re-evaluate monitor safety below.
+    _engine?.setOutputDevice(uid ?? '');
     // Re-evaluate monitor safety for the new output (speaker → force the monitor off).
     _applyMonitorGain();
     notifyListeners();
@@ -220,7 +226,10 @@ class AppSettingsService extends ChangeNotifier {
   /// Select an input device by UID (or null = system default).
   Future<void> setInputDevice(String? uid) async {
     _inputDeviceUid = uid;
-    if (uid != null && uid.isNotEmpty) _engine?.setInputDevice(uid);
+    // Also drive the engine on a null/empty selection: '' makes the native side fall back to the
+    // default input, so a System Default pick actually switches the mic instead of leaving the
+    // engine on the previously-selected device until restart.
+    _engine?.setInputDevice(uid ?? '');
     notifyListeners();
     await _persist();
   }

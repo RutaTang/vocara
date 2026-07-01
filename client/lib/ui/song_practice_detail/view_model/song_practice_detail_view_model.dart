@@ -1796,6 +1796,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
           }
           oldAccompaniment = cur.accompaniment;
           oldReference = cur.reference;
+          final prevPlayRef = _playReference;
           _playReference = false; // sing over the instrumental
           _practice = cur.copyWith(
             accompaniment: instrumental,
@@ -1807,6 +1808,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
           saved = await _save();
           if (!saved) {
             _practice = cur; // revert in-memory to the un-persisted state
+            _playReference = prevPlayRef; // restore the pre-separation backing flag
             _toast('Could not save the separated track.');
           }
         } catch (_) {

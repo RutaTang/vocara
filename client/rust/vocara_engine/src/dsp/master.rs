@@ -34,17 +34,24 @@ impl MasterNode {
     }
 }
 
-/// Cubic soft clip: identity for |x| <= 1/3, smoothly saturating toward ±2/3, hard-limited
-/// beyond |x| >= 1 (a classic gentle waveshaper). Leaves normal-level material untouched.
+/// Cubic soft clip with a 0 dBFS ceiling: `K * f(x/K)` where `f(u) = u - u^3/3` is the
+/// classic cubic waveshaper and `K = 1.5` sets the operating point. Small-signal gain is
+/// unity (`f'(0) = 1`), so normal-level material is left ~untouched; peaks are smoothly
+/// saturated and hard-limited to ±1.0 (0 dBFS), since `K * (2/3) = 1.0`. Pre-scaling into
+/// the knee and post-scaling to restore unity keeps the full 0 dBFS headroom (the raw `f`
+/// alone would cap output at 2/3 = -3.5 dBFS and attenuate everything below that).
 #[inline]
 fn soft_clip(x: f32) -> f32 {
-    if x <= -1.0 {
+    const K: f32 = 1.5; // K * (2/3) = 1.0 => ceiling at 0 dBFS
+    let u = x / K;
+    let shaped = if u <= -1.0 {
         -2.0 / 3.0
-    } else if x >= 1.0 {
+    } else if u >= 1.0 {
         2.0 / 3.0
     } else {
-        x - x * x * x / 3.0
-    }
+        u - u * u * u / 3.0
+    };
+    K * shaped
 }
 
 impl Node for MasterNode {

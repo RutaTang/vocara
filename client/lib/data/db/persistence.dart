@@ -43,7 +43,11 @@ class Persistence {
     //  opening, so drift never sees a stale on-disk version.)
     final db = AppDatabase(NativeDatabase.createInBackground(File(dbPath)));
     final node = await _readOrCreateNode(dir);
-    final persistence = _wire(db, dir, node);
+    // Restore the HLC clock's monotonicity across restarts BEFORE wiring the
+    // writer (the startup sweeps below tick it), so a new local edit can never
+    // stamp LOWER than one this install already pushed. See _seedClock.
+    final clock = await _seedClock(db, node);
+    final persistence = _wire(db, dir, node, clock: clock);
     // Reclaim staging leftovers: after a save, a recording/import has been copied
     // into the content-addressed pool and its working file under audio/ or
     // technique_media/ is an orphan (nothing persistent references it — clips
@@ -71,8 +75,13 @@ class Persistence {
     return _wire(AppDatabase(NativeDatabase.memory()), dir, newId());
   }
 
-  static Persistence _wire(AppDatabase db, Directory root, String node) {
-    final writer = SyncWriter(db, HlcClock(node: node));
+  static Persistence _wire(
+    AppDatabase db,
+    Directory root,
+    String node, {
+    HlcClock? clock,
+  }) {
+    final writer = SyncWriter(db, clock ?? HlcClock(node: node));
     final assets = AssetStore(db: db, root: root, writer: writer);
     return Persistence(
       db: db,
@@ -88,6 +97,41 @@ class Persistence {
         writer: writer,
         assets: assets,
       ),
+    );
+  }
+
+  /// Restores the [HlcClock]'s monotonicity across app restarts by seeding it
+  /// with the highest packed HLC ever persisted on this device.
+  ///
+  /// [HlcClock.tick] guarantees a strictly-increasing stamp only relative to its
+  /// IN-MEMORY high-water mark (_last / _maxWallEverSeen). A fresh clock starts
+  /// at wall 0, so after a restart that follows a forward clock excursion (the
+  /// wall had been held ahead of real time only in memory) a new local edit would
+  /// stamp a LOWER hlc than ones this install already pushed to peers — and each
+  /// peer's LWW check silently DROPS that edit. Reseeding from the durable max
+  /// closes the gap: every synced row (and the oplog) carries hlc_packed — the
+  /// fixed-width, lexicographically ordered LWW key — so the global MAX is the
+  /// greatest stamp this install ever produced or adopted from a peer.
+  static Future<HlcClock> _seedClock(AppDatabase db, String node) async {
+    String? maxPacked;
+    // Any table carrying the hlc_packed column (all synced tables + the oplog).
+    for (final table in db.allTables.where(
+      (t) => t.$columns.any((c) => c.name == 'hlc_packed'),
+    )) {
+      final row = await db
+          .customSelect(
+            'SELECT MAX(hlc_packed) AS m FROM ${table.actualTableName}',
+          )
+          .getSingleOrNull();
+      final packed = row?.readNullable<String>('m');
+      if (packed != null &&
+          (maxPacked == null || packed.compareTo(maxPacked) > 0)) {
+        maxPacked = packed;
+      }
+    }
+    return HlcClock(
+      node: node,
+      initial: maxPacked == null ? null : Hlc.parse(maxPacked),
     );
   }
 
