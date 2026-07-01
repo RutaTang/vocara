@@ -258,11 +258,12 @@ class AssetStore {
           )
           .getSingle();
       if (shared.read<int>('n') == 0) {
-        final rel = a.data['local_rel_path'];
-        if (rel is String) {
-          final f = File(p.join(root.path, rel));
-          if (await f.exists()) await f.delete();
-        }
+        // No live asset maps to this hash anymore. Delete EVERY pooled file for it,
+        // not just this row's local_rel_path: identical bytes imported under a
+        // different extension on another device produce `<hash>.wav` AND `<hash>.mp3`
+        // as distinct files, so deleting only the current row's path would leak the
+        // rest. All files for a hash live in one shard dir (assets/<h0:2>/<h2:4>).
+        await _deletePoolFilesForHash(hash);
         await (db.delete(db.waveformCache)
               ..where((w) => w.contentHash.equals(hash)))
             .go();
@@ -271,19 +272,43 @@ class AssetStore {
     return removed;
   }
 
-  /// Reclaims pool files left with NO asset row at all — e.g. a crash between the pool write
-  /// in [_placeFile] and the asset-row transaction in [importFile]. ([sweepUnreferenced] only
-  /// reclaims files for assets it tombstones; a crash orphan has no row to find.) Meant to run
-  /// at startup when nothing is in flight. Best-effort; returns the count removed.
+  /// Deletes every pooled file named `<hash>` or `<hash>.<ext>` from the hash's
+  /// shard directory. Best-effort (a lingering file is a reclaimable orphan).
+  Future<void> _deletePoolFilesForHash(String hash) async {
+    if (hash.length < 4) return;
+    final shard = Directory(
+      p.join(root.path, 'assets', hash.substring(0, 2), hash.substring(2, 4)),
+    );
+    if (!await shard.exists()) return;
+    await for (final e in shard.list()) {
+      if (e is! File) continue;
+      final name = p.basename(e.path);
+      if (name == hash || name.startsWith('$hash.')) {
+        try {
+          await e.delete();
+        } catch (_) {}
+      }
+    }
+  }
+
+  /// Reclaims pool files that no LIVE asset references. Two cases:
+  ///  - a crash between the pool write in [_placeFile] and the asset-row transaction
+  ///    in [importFile] leaves a file with NO row at all; and
+  ///  - a crash between the tombstone commit and the file unlink in [sweepUnreferenced]
+  ///    leaves a file whose only rows are tombstoned (which [sweepUnreferenced] never
+  ///    revisits, since it iterates only live rows).
+  /// Both are covered by treating only LIVE (deleted_at IS NULL) content hashes as owned.
+  /// Meant to run at startup when nothing is in flight. Best-effort; returns the count removed.
   Future<int> sweepOrphanPoolFiles() async {
     final pool = Directory(p.join(root.path, 'assets'));
     if (!await pool.exists()) return 0;
-    // Every content hash the DB knows (live OR tombstoned): a file matching any of these is
-    // legitimately owned (or already handled by sweepUnreferenced); only files matching none
-    // are crash orphans.
+    // Content hashes with a LIVE asset row: a file matching one is legitimately owned.
+    // A file matching only a tombstoned hash (or no hash) is an orphan to reclaim.
     final known = <String>{};
     for (final r in await db
-        .customSelect('SELECT DISTINCT content_hash AS h FROM assets')
+        .customSelect(
+          'SELECT DISTINCT content_hash AS h FROM assets WHERE deleted_at IS NULL',
+        )
         .get()) {
       final h = r.data['h'];
       if (h is String) known.add(h);

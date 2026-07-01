@@ -5,7 +5,7 @@
 //! the threshold, only the high band is attenuated (clamped to `range`), so the body of the
 //! voice is untouched. No recursive audio path → stable.
 
-use crate::dsp::biquad::{BandKind, BandSpec, Biquad};
+use crate::dsp::biquad::{BandKind, BandSpec, Biquad, Coeffs};
 use crate::node::{Node, ProcessIo};
 use crate::sample::{db_to_lin, CHANNELS};
 
@@ -16,9 +16,21 @@ pub mod param {
     pub const BYPASS: u16 = 3;
 }
 
+/// Cross-fade length (frames) when the detector frequency changes, so swapping the
+/// high-pass coefficients in place does not produce a zipper/click. Mirrors the EQ
+/// `Band` cross-fade in `biquad.rs`.
+const XFADE_FRAMES: f32 = 256.0;
+
 pub struct DeEsserNode {
     hp_l: Biquad,
     hp_r: Biquad,
+    // Target high-pass filters, valid while `xfading`: seeded from the current filters
+    // (copies their history) with the new coefficients, then blended in over XFADE_FRAMES.
+    hp_l2: Biquad,
+    hp_r2: Biquad,
+    xfading: bool,
+    xmix: f32,
+    xinc: f32,
     freq: f32,
     threshold_db: f32,
     range_db: f32,
@@ -32,8 +44,13 @@ pub struct DeEsserNode {
 impl DeEsserNode {
     pub fn new() -> Self {
         let mut d = DeEsserNode {
-            hp_l: Biquad::new(crate::dsp::biquad::Coeffs::PASS),
-            hp_r: Biquad::new(crate::dsp::biquad::Coeffs::PASS),
+            hp_l: Biquad::new(Coeffs::PASS),
+            hp_r: Biquad::new(Coeffs::PASS),
+            hp_l2: Biquad::new(Coeffs::PASS),
+            hp_r2: Biquad::new(Coeffs::PASS),
+            xfading: false,
+            xmix: 0.0,
+            xinc: 1.0 / XFADE_FRAMES,
             freq: 6500.0,
             threshold_db: -28.0,
             range_db: 12.0,
@@ -43,22 +60,50 @@ impl DeEsserNode {
             bypass: true,
             sr: 48_000.0,
         };
-        d.retune();
+        d.retune_now();
         d.recompute_ballistics();
         d
     }
 
-    fn retune(&mut self) {
-        let c = BandSpec {
+    fn hp_coeffs(&self) -> Coeffs {
+        BandSpec {
             kind: BandKind::HighPass,
             freq: self.freq,
             q: 0.707,
             gain_db: 0.0,
             enabled: true,
         }
-        .coeffs(self.sr);
+        .coeffs(self.sr)
+    }
+
+    /// Immediate retune (pre-roll: new/prepare) — no cross-fade.
+    fn retune_now(&mut self) {
+        let c = self.hp_coeffs();
         self.hp_l.set_coeffs(c);
         self.hp_r.set_coeffs(c);
+        self.hp_l2.set_coeffs(c);
+        self.hp_r2.set_coeffs(c);
+        self.xfading = false;
+        self.xmix = 0.0;
+    }
+
+    /// Retune with an output cross-fade — used for a runtime FREQ change so the
+    /// coefficient swap on a stateful filter does not click.
+    fn retune_xfade(&mut self) {
+        let c = self.hp_coeffs();
+        // Collapse an in-flight fade into the current filters so the new fade starts
+        // from a defined state.
+        if self.xfading {
+            self.hp_l = self.hp_l2;
+            self.hp_r = self.hp_r2;
+        }
+        // Seed the target filters from the current ones (copies history), then retune.
+        self.hp_l2 = self.hp_l;
+        self.hp_r2 = self.hp_r;
+        self.hp_l2.set_coeffs(c);
+        self.hp_r2.set_coeffs(c);
+        self.xfading = true;
+        self.xmix = 0.0;
     }
 
     fn recompute_ballistics(&mut self) {
@@ -78,7 +123,7 @@ impl Default for DeEsserNode {
 impl Node for DeEsserNode {
     fn prepare(&mut self, sample_rate: f64, _max_block: usize) {
         self.sr = sample_rate;
-        self.retune();
+        self.retune_now();
         self.recompute_ballistics();
         self.env_db = -120.0;
     }
@@ -89,8 +134,18 @@ impl Node for DeEsserNode {
         // carry pre-seek history across the discontinuity (click + wrong gain
         // reduction). Clear filter state (coeffs intact) and the envelope to its
         // idle value — matching Band::reset and the delay/doubler/reverb resets.
+        // Commit a pending coefficient cross-fade into the current filters first,
+        // otherwise reset would revert to the OLD coeffs and desync from `freq`.
+        if self.xfading {
+            self.hp_l = self.hp_l2;
+            self.hp_r = self.hp_r2;
+            self.xfading = false;
+        }
         self.hp_l.reset_state();
         self.hp_r.reset_state();
+        self.hp_l2.reset_state();
+        self.hp_r2.reset_state();
+        self.xmix = 0.0;
         self.env_db = -120.0;
     }
 
@@ -114,8 +169,23 @@ impl Node for DeEsserNode {
         for i in 0..frames {
             let l = out[CHANNELS * i];
             let r = out[CHANNELS * i + 1];
-            let hl = self.hp_l.tick(l);
-            let hr = self.hp_r.tick(r);
+            // Cross-fade the high-pass output on a freq change so a coefficient swap
+            // on the stateful biquads doesn't click.
+            let (hl, hr) = if self.xfading {
+                let m = self.xmix;
+                let hl = self.hp_l.tick(l) * (1.0 - m) + self.hp_l2.tick(l) * m;
+                let hr = self.hp_r.tick(r) * (1.0 - m) + self.hp_r2.tick(r) * m;
+                self.xmix += self.xinc;
+                if self.xmix >= 1.0 {
+                    self.xmix = 1.0;
+                    self.hp_l = self.hp_l2;
+                    self.hp_r = self.hp_r2;
+                    self.xfading = false;
+                }
+                (hl, hr)
+            } else {
+                (self.hp_l.tick(l), self.hp_r.tick(r))
+            };
             let low_l = l - hl;
             let low_r = r - hr;
 
@@ -144,7 +214,7 @@ impl Node for DeEsserNode {
         match param {
             param::FREQ => {
                 self.freq = value.clamp(2000.0, 16000.0);
-                self.retune();
+                self.retune_xfade();
             }
             param::THRESHOLD_DB => self.threshold_db = value,
             param::RANGE_DB => self.range_db = value.max(0.0),

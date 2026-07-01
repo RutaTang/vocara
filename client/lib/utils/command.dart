@@ -33,6 +33,12 @@ abstract class Command<T> extends ChangeNotifier {
 
     try {
       _result = await action();
+    } catch (e) {
+      // The contract is that actions return a Result and never throw. Be defensive
+      // anyway: a thrown action would otherwise leave _result null (neither error
+      // nor completed, so the UI shows nothing) and surface as an unhandled async
+      // error far from its cause. Convert it into an observable error result.
+      _result = Result.error(e is Exception ? e : Exception('$e'));
     } finally {
       _running = false;
       notifyListeners();

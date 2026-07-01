@@ -236,9 +236,16 @@ impl OutResampler {
         let mut done = 0;
         while done < out_frames {
             let chunk = (out_frames - done).min(self.max_block);
-            // Highest FIFO index touched this sub-chunk is floor(pos + (chunk-1)*step) + 1.
-            let need =
+            // Interpolation touches up to index floor(pos + (chunk-1)*step) + 1, so it needs
+            // floor(pos + (chunk-1)*step) + 2 frames present. The drain below advances `pos`
+            // by chunk*step and removes floor(pos + chunk*step) frames, so the FIFO must ALSO
+            // hold at least that many. Sizing `need` to the max keeps the drained count equal
+            // to the `pos` adjustment; without it, on device rates <= 24 kHz (step >= 2) the
+            // drop was clamped below `consumed` and the read position drifted (audible glitch).
+            let need_interp =
                 (self.pos + (chunk.saturating_sub(1)) as f64 * self.step).floor() as usize + 2;
+            let need_consumed = (self.pos + chunk as f64 * self.step).floor() as usize;
+            let need = need_interp.max(need_consumed);
             // The FIFO is sized in `new` so reaching `need` never reallocates (no RT alloc).
             debug_assert!(need + self.max_block <= self.fifo.capacity());
             while self.fifo.len() < need {
@@ -256,9 +263,11 @@ impl OutResampler {
             }
             let consumed = self.pos.floor() as usize;
             if consumed > 0 {
+                // `need >= need_consumed` guarantees `consumed <= fifo.len()`, so `drop`
+                // equals `consumed`; subtract the actually-dropped count to stay consistent.
                 let drop = consumed.min(self.fifo.len());
                 self.fifo.drain(0..drop);
-                self.pos -= consumed as f64;
+                self.pos -= drop as f64;
             }
             done += chunk;
         }
@@ -732,12 +741,18 @@ fn open_mic(
     uid: Option<&str>,
     rt: &Arc<RtCell>,
     input_cell: &Arc<InputCell>,
-    _event: &Arc<AtomicU32>,
+    event: &Arc<AtomicU32>,
 ) -> Result<MicHandle, String> {
     // Safe default; `Vpio::start` re-reconfigures the input cell from VPIO's *negotiated* format
     // (mono/stereo, native rate) after the unit initializes, which is what actually governs feed.
     input_cell.reconfigure(ENGINE_SR, CHANNELS);
-    crate::vpio::Vpio::start(uid, Arc::clone(input_cell), Arc::clone(rt), VPIO_DUPLEX_AEC)
+    crate::vpio::Vpio::start(
+        uid,
+        Arc::clone(input_cell),
+        Arc::clone(rt),
+        VPIO_DUPLEX_AEC,
+        Arc::clone(event),
+    )
 }
 #[cfg(not(target_vendor = "apple"))]
 fn open_mic(

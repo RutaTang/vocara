@@ -150,6 +150,7 @@ class SpectrogramImage extends StatefulWidget {
 
 class _SpectrogramImageState extends State<SpectrogramImage> {
   ui.Image? _image;
+  int _generation = 0;
 
   @override
   void initState() {
@@ -166,8 +167,13 @@ class _SpectrogramImageState extends State<SpectrogramImage> {
   }
 
   Future<void> _render() async {
+    final gen = ++_generation;
     final image = await renderSpectrogramImage(widget.spectrogram);
-    if (!mounted) {
+    // Drop a stale render: the widget was disposed, OR a newer _render started
+    // (rapid take switches, whose decodes don't necessarily complete in order),
+    // so this image is no longer the current one. Without the generation check an
+    // earlier decode completing last would persistently show the wrong take.
+    if (!mounted || gen != _generation) {
       image.dispose();
       return;
     }

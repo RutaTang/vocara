@@ -59,25 +59,49 @@ void main() {
       expect(b.counter, 1);
     });
 
-    test('bounded-drift clamp: a once-future clock resets to wall on tick', () {
+    test('a once-future clock stays strictly monotonic on tick (never smaller)',
+        () {
       var now = 1000;
       final clock = HlcClock(node: 'N', now: () => now, maxDriftMs: 60000);
-      // Force the internal clock far into the future via a remote merge.
+      // Force the internal clock into the future via a remote merge (30s ahead).
       clock.receive(Hlc(wallMs: 1000 + 30000, counter: 0, node: 'M'));
       expect(clock.last.wallMs, 31000);
-      // Wall is still 1000 and the last stamp is 30s ahead (< 60s drift) -> hold.
+      // Wall is still ~1000; tick holds at the last seen wall (monotonic).
       now = 1001;
       expect(clock.tick().wallMs, 31000);
-      // Now the last stamp is > 60s ahead of wall -> distrust it, reset to wall.
-      now = 31000 - 60000 - 1; // makes (last.wall - now) > maxDrift
-      // Guard against negative now in the test setup.
-      now = 1002;
-      final clock2 =
-          HlcClock(node: 'N', now: () => now, maxDriftMs: 60000, initial:
-              Hlc(wallMs: 1002 + 60000 + 5, counter: 9, node: 'N'));
+
+      // Even when the last stamp is far ahead of wall (a clock corrected after a
+      // large forward skew), tick must NOT emit a stamp that compares LESS than its
+      // own previous one — that would silently drop the device's newest edit under
+      // LWW. It holds at the future wall and bumps the counter until real time
+      // catches up, instead of resetting backward.
+      final skewed = Hlc(wallMs: 1002 + 60000 + 5, counter: 9, node: 'N');
+      final clock2 = HlcClock(
+        node: 'N',
+        now: () => 1002,
+        maxDriftMs: 60000,
+        initial: skewed,
+      );
       final t = clock2.tick();
-      expect(t.wallMs, 1002, reason: 'should reset to wall, not the future');
-      expect(t.counter, 0);
+      expect(t > skewed, isTrue, reason: 'strictly monotonic, never backward');
+      expect(t.wallMs, skewed.wallMs);
+      expect(t.counter, 10);
+    });
+
+    test('a slow local clock still accepts correctly-stamped remotes', () {
+      // The device operated with a correct clock before (its persisted last stamp is
+      // near real time), then its clock went 10 min slow. maxWallEverSeen (seeded
+      // from that persisted stamp) keeps the drift gate anchored to real time, so an
+      // honest peer near true-now is accepted instead of quarantined.
+      const trueNow = 10 * 60 * 1000; // 600000
+      final clock = HlcClock(
+        node: 'N',
+        now: () => 1000, // local clock 10 min behind real time
+        initial: Hlc(wallMs: trueNow, counter: 0, node: 'N'),
+      );
+      final merged =
+          clock.receive(Hlc(wallMs: trueNow + 1000, counter: 0, node: 'M'));
+      expect(merged.wallMs, trueNow + 1000);
     });
   });
 

@@ -65,6 +65,14 @@ impl Node for GateNode {
         self.env_db = 0.0;
     }
 
+    fn reset(&mut self) {
+        // Seek clears every node's state. Without this override (inherited no-op)
+        // the held gain-reduction envelope carries across the discontinuity and
+        // recovers only over the attack/release time — an audible momentary wrong
+        // level right after a seek. Matches CompressorNode/DeEsserNode::reset.
+        self.env_db = 0.0;
+    }
+
     fn process(&mut self, io: &mut ProcessIo) {
         let frames = io.frames;
         let n = frames * CHANNELS;

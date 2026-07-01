@@ -326,6 +326,15 @@ pub fn build(spec: ProjectSpec) -> GraphDesc {
         edges.push(Edge::simple(prev, gain));
         edges.push(Edge::simple(gain, pan));
         edges.push(Edge::simple(pan, output_target(b.output))); // bus out → master / bus
+        // Shared reverb send: a post-fader tap of the bus fader into the one reverb bus.
+        // Always created (even at -120 dB "off") so the control plane can address it.
+        let bus_send = bus_send_id(b.id);
+        nodes.push(NodeEntry::new(
+            bus_send,
+            Box::new(MasterNode::new(crate::sample::db_to_lin(b.send_db), false)),
+        ));
+        edges.push(Edge::simple(gain, bus_send));
+        edges.push(Edge::simple(bus_send, REVERB_ID));
         // Post-fader aux sends from this bus into other buses.
         for (i, &(target, level)) in b.sends.iter().enumerate() {
             let s = bus_aux_send_id(b.id, i);
@@ -357,6 +366,15 @@ pub fn build(spec: ProjectSpec) -> GraphDesc {
             }
             edges.push(Edge::simple(prev, gain));
             edges.push(Edge::simple(gain, pan));
+            // Shared reverb send (vocals only): post-fader tap into the one reverb bus.
+            // Always created (even at -120 dB "off") so ve_set_send can address it.
+            let send = send_id(tid);
+            nodes.push(NodeEntry::new(
+                send,
+                Box::new(MasterNode::new(crate::sample::db_to_lin(t.send_db), false)),
+            ));
+            edges.push(Edge::simple(gain, send));
+            edges.push(Edge::simple(send, REVERB_ID));
         } else {
             edges.push(Edge::simple(src, gain));
             edges.push(Edge::simple(gain, pan));

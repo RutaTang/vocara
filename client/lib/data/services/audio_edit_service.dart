@@ -147,6 +147,12 @@ class AudioEditService {
         'WAV files can be split.',
       );
     }
+    // Need at least one frame on each side. A 0-length / sub-2-frame take (e.g. a
+    // recording quit mid-capture) would otherwise give clamp bounds where lower >
+    // upper, and num.clamp throws an opaque ArgumentError instead of this message.
+    if (w.dataLen < 2 * w.blockAlign) {
+      throw const FormatException('This take is too short to split.');
+    }
     final frame = (splitFileMs / 1000 * w.sampleRate).round();
     final cut = (frame * w.blockAlign).clamp(
       w.blockAlign,

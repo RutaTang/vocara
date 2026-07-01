@@ -53,6 +53,14 @@ impl Node for LimiterNode {
         self.gain = 1.0;
     }
 
+    fn reset(&mut self) {
+        // Seek clears every node's state. Without this override (inherited no-op)
+        // the instantaneously-clamped gain carries across the discontinuity and
+        // recovers only over the release time — an audible dropout right after a
+        // seek. Matches CompressorNode/DeEsserNode::reset.
+        self.gain = 1.0;
+    }
+
     fn process(&mut self, io: &mut ProcessIo) {
         let frames = io.frames;
         let n = frames * CHANNELS;

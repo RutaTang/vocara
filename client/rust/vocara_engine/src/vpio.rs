@@ -66,6 +66,9 @@ const REF_RING_CAP: usize = 1 << 15; // 32768
 const AEC_TAIL_MS: f32 = 250.0;
 /// The AEC's own algorithmic latency: one internal block (256 samples), added to the IO round-trip.
 const AEC_BLOCK_FRAMES: u32 = 256;
+/// Consecutive `AudioUnitRender` failures before we flag the input device as lost. At the ~10 ms
+/// VPIO slice that is ~200 ms of dead capture — a real disconnect, not a one-off transient.
+const INPUT_LOST_STREAK: u32 = 20;
 
 /// Estimated record round-trip latency (frames @ ENGINE_SR): output IO (buffer + safety + device
 /// latency) + acoustic flight + input IO + the AEC block. The captured vocal lands this far behind
@@ -245,6 +248,12 @@ struct InCtx {
     /// Post-AEC high-pass + adaptive expander, applied before the makeup gain.
     cleanup: Cleanup,
     layout: Layout,
+    /// Shared device-event flags (polled by the host via `ve_poll_device_event`). We raise
+    /// EVENT_INPUT_LOST on a sustained render-failure streak so a mid-session mic disconnect is
+    /// observable, matching the cpal `err_cb` path (the VPIO unit itself has no error callback).
+    event: Arc<AtomicU32>,
+    /// Consecutive `AudioUnitRender` failures, reset on any success.
+    err_streak: u32,
 }
 
 // SAFETY: built/moved on the AudioHost thread before the unit starts; afterwards only the input
@@ -286,6 +295,7 @@ impl Vpio {
         input: Arc<InputCell>,
         rt: Arc<RtCell>,
         with_output: bool,
+        event: Arc<AtomicU32>,
     ) -> Result<Vpio, String> {
         unsafe {
             let mut desc = AudioComponentDescription {
@@ -372,6 +382,8 @@ impl Vpio {
                 clean_mono: vec![0.0; MAX_FRAMES],
                 cleanup: Cleanup::new(),
                 layout: placeholder,
+                event,
+                err_streak: 0,
             });
             let in_ptr = (&mut *in_ctx as *mut InCtx) as *mut c_void;
 
@@ -590,8 +602,21 @@ unsafe extern "C-unwind" fn input_cb(
         let got_samples = got_bytes / std::mem::size_of::<f32>();
         let act_ch = if frames > 0 { (got_samples / frames).clamp(1, MAX_CH) } else { 1 };
 
-        if st != 0 || got_samples == 0 {
+        if st != 0 {
+            // Sustained AudioUnitRender failure means the input device went away (hot-unplug /
+            // default-device change): the VPIO unit has no error callback, so flag it for the
+            // host's device-event poll (it rebuilds), matching build_input's cpal err_cb.
+            // RT-safe: a plain counter plus one atomic OR fired once at the threshold.
+            ctx.err_streak = ctx.err_streak.saturating_add(1);
+            if ctx.err_streak == INPUT_LOST_STREAK {
+                ctx.event
+                    .fetch_or(crate::device::EVENT_INPUT_LOST, Ordering::Release);
+            }
             return st;
+        }
+        ctx.err_streak = 0;
+        if got_samples == 0 {
+            return 0;
         }
 
         // Downmix the RAW mic to mono and pull the matching far-end reference (the backing we sent

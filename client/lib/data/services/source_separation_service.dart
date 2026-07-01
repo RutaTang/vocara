@@ -337,6 +337,12 @@ class ProcessSourceSeparationService implements SourceSeparationService {
       onProgress?.call(1.0);
       return (instrumentalPath: inst.path, vocalPath: voc.path);
     } finally {
+      // Ensure the subprocess is never left running. On the normal / cancel /
+      // failure paths it has already exited, so kill() is a harmless no-op; on an
+      // unexpected stream / decode / onProgress-callback exception before exitCode
+      // resolved, this tears down the still-running (heavy torch/ML) subprocess
+      // instead of orphaning it uncancellably (we null _active just below).
+      proc.kill(ProcessSignal.sigkill);
       _active = null;
       // Clean up orphan .tmp files on any path that didn't rename them in — an
       // unexpected stream/pipe/decode error (the await-for / exitCode / stderrDone

@@ -24,10 +24,12 @@ class ApplyResult {
   int applied = 0;
   int skipped = 0; // lost the LWW comparison (we already hold something newer)
   int quarantined = 0; // implausibly-future clock; not applied
+  int failed = 0; // threw while applying (malformed / forward-incompatible row)
 
   @override
   String toString() =>
-      'ApplyResult(applied: $applied, skipped: $skipped, quarantined: $quarantined)';
+      'ApplyResult(applied: $applied, skipped: $skipped, '
+      'quarantined: $quarantined, failed: $failed)';
 }
 
 /// The "remote door": applies records pulled from sync into the local store.
@@ -40,8 +42,10 @@ class ApplyResult {
 /// everything we've seen; a record whose clock is implausibly far in the future
 /// is quarantined instead of merged (one bad peer can't poison the fleet).
 ///
-/// Apply is order-tolerant: defer_foreign_keys lets a child arrive before its
-/// parent within the batch; the whole batch commits atomically.
+/// Apply is order-tolerant and per-record resilient: defer_foreign_keys lets a
+/// child arrive before its parent within the batch, and each record applies
+/// inside its own SAVEPOINT so one malformed / forward-incompatible record is
+/// quarantined ([ApplyResult.failed]) rather than rolling back every other record.
 class SyncApplier {
   SyncApplier(this.db, this.clock);
 
@@ -59,30 +63,44 @@ class SyncApplier {
           result.quarantined++;
           continue;
         }
-        final existing = await db
-            .customSelect(
-              'SELECT hlc_packed FROM ${rec.table} WHERE id = ?',
-              variables: [Variable.withString(rec.id)],
-            )
-            .getSingleOrNull();
-        final wins = existing == null ||
-            rec.hlcPacked.compareTo(existing.read<String>('hlc_packed')) > 0;
-        if (!wins) {
-          result.skipped++;
-          continue;
+        try {
+          // Apply each record inside a nested transaction (SQLite SAVEPOINT) so a
+          // single malformed / forward-incompatible record — a column from a newer
+          // schema_v, a CHECK/NOT NULL violation, an unknown table — rolls back ONLY
+          // itself and is quarantined, instead of throwing out of the batch and
+          // discarding every other (good) record. Counters are updated OUTSIDE the
+          // savepoint so a rollback can't desync them.
+          final applied = await db.transaction(() async {
+            final existing = await db
+                .customSelect(
+                  'SELECT hlc_packed FROM ${rec.table} WHERE id = ?',
+                  variables: [Variable.withString(rec.id)],
+                )
+                .getSingleOrNull();
+            final wins = existing == null ||
+                rec.hlcPacked.compareTo(existing.read<String>('hlc_packed')) > 0;
+            if (!wins) return false;
+            // Clear any single-slot conflict BEFORE writing. The single-slot track
+            // kinds (one live accompaniment/reference per practice) carry a partial
+            // UNIQUE index; inserting a second LIVE row for an occupied slot raises a
+            // UNIQUE violation. Resolving here (and the whole write) is in this
+            // record's savepoint, so a failure rolls back the occupant tombstone too.
+            final columns = await _resolveSlot(rec);
+            if (existing == null) {
+              await _insert(rec.table, columns);
+            } else {
+              await _update(rec.table, columns);
+            }
+            return true;
+          });
+          if (applied) {
+            result.applied++;
+          } else {
+            result.skipped++;
+          }
+        } catch (_) {
+          result.failed++;
         }
-        // Clear any single-slot conflict BEFORE writing. The single-slot track kinds
-        // (one live accompaniment/reference per practice) carry a partial UNIQUE index;
-        // inserting a second LIVE row for an already-occupied slot raises a UNIQUE
-        // violation, which is NOT an HlcDriftException and would escape the per-record
-        // guard and roll back the WHOLE batch (losing every other record).
-        final columns = await _resolveSlot(rec);
-        if (existing == null) {
-          await _insert(rec.table, columns);
-        } else {
-          await _update(rec.table, columns);
-        }
-        result.applied++;
       }
     });
     return result;

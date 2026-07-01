@@ -62,7 +62,13 @@ class TechniqueRepositoryDrift implements TechniqueRepository {
       final rows = await (db.select(
         db.techniques,
       )..where((t) => t.deletedAt.isNull())).get();
-      rows.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+      // Deterministic order: updatedAt desc, then id desc as a total-order
+      // tiebreaker so rows sharing a millisecond don't reshuffle between launches
+      // (Dart's List.sort is not stable).
+      rows.sort((a, b) {
+        final c = b.updatedAt.compareTo(a.updatedAt);
+        return c != 0 ? c : b.id.compareTo(a.id);
+      });
       final out = <Technique>[];
       for (final r in rows) {
         out.add(await _hydrate(r));

@@ -84,6 +84,23 @@ void main() {
     expect(await row('FUT'), isNull);
   });
 
+  test('a malformed record is quarantined without discarding the batch',
+      () async {
+    final good = practice('GOOD', 'kept', hlc(900));
+    // A record carrying a column that does not exist locally (e.g. from a newer
+    // schema_v) fails at INSERT — a NON-drift error. It must roll back only itself
+    // (its SAVEPOINT), not the whole batch, so the already-applied good record stays.
+    final bad = RemoteRecord(table: 'practices', columns: {
+      ...practice('BAD', 'dropped', hlc(910)).columns,
+      'column_from_the_future': 1,
+    });
+    final res = await applier.apply([good, bad]);
+    expect(res.applied, 1);
+    expect(res.failed, 1);
+    expect((await row('GOOD'))!['title'], 'kept'); // survived the later failure
+    expect(await row('BAD'), isNull); // rolled back to its savepoint
+  });
+
   test('applying remote changes writes NO oplog (no ping-pong)', () async {
     await applier.apply([
       practice('A', 'a', hlc(900)),

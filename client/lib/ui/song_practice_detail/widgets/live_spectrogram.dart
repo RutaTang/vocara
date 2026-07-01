@@ -21,6 +21,7 @@ class LiveSpectrogram extends StatefulWidget {
 class _LiveSpectrogramState extends State<LiveSpectrogram> {
   ui.Image? _image;
   bool _scheduled = false;
+  int _generation = 0;
 
   @override
   void initState() {
@@ -58,6 +59,9 @@ class _LiveSpectrogramState extends State<LiveSpectrogram> {
     final cols = widget.monitor.columns;
     final bins = widget.monitor.bins;
     if (cols.isEmpty) {
+      // Invalidate any in-flight render so it can't install a stale image after we
+      // clear (the monitor was reset to no columns).
+      ++_generation;
       if (_image != null && mounted) {
         final old = _image;
         setState(() => _image = null);
@@ -69,8 +73,12 @@ class _LiveSpectrogramState extends State<LiveSpectrogram> {
     // voicing mask stays aligned with the columns across the await below.
     final colsCopy = List<Float32List>.of(cols);
     final activeCopy = List<int>.of(widget.monitor.activeColumns);
+    final gen = ++_generation;
     final image = await renderColumnsImage(colsCopy, bins, active: activeCopy);
-    if (!mounted) {
+    // Drop a stale render: unmounted, or a newer _rebuild started while this one
+    // awaited (renders aren't guaranteed to complete in submission order), so an
+    // earlier frame completing last would install a stale image.
+    if (!mounted || gen != _generation) {
       image.dispose();
       return;
     }

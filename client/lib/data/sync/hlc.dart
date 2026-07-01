@@ -128,18 +128,22 @@ class HlcClock {
   /// The highest wall ever observed (kept for forensics / drift diagnostics).
   int get maxWallEverSeen => _maxWallEverSeen;
 
-  /// Stamps a LOCAL write. Standard HLC advance with a bounded-drift clamp: if
-  /// the last stamp is more than [maxDriftMs] ahead of wall time (a clock that
-  /// was skewed forward and has since been corrected), distrust it and reset to
-  /// wall time — otherwise a once-future clock would ratchet forward forever.
+  /// Stamps a LOCAL write. Standard, strictly-monotonic HLC advance: the wall
+  /// never moves backward, so every stamp is greater than the previous one.
+  ///
+  /// We deliberately do NOT reset the wall back to real time on forward drift.
+  /// That reset emitted an `Hlc(now, 0)` that compared SMALLER than the device's
+  /// own earlier (skewed-forward) stamps, so — under entity-level LWW — the newest
+  /// local edit silently lost to an older one, and a just-undeleted row could stay
+  /// tombstoned. Monotonicity is the stronger invariant. If a corrected clock
+  /// leaves us ahead of real time, the wall simply holds (counter keeps
+  /// incrementing) until real time catches up: local edits still win over our own
+  /// prior ones, and any stamp too far ahead of a peer is quarantined by that
+  /// peer's [receive] drift gate — a visible, self-healing degradation rather than
+  /// silent local data loss.
   Hlc tick() {
     final now = _now();
-    final int wall;
-    if (_last.wallMs - now > maxDriftMs) {
-      wall = now;
-    } else {
-      wall = now > _last.wallMs ? now : _last.wallMs;
-    }
+    final wall = now > _last.wallMs ? now : _last.wallMs;
     final counter = (wall == _last.wallMs) ? _last.counter + 1 : 0;
     _last = Hlc(wallMs: wall, counter: counter, node: node);
     _track(wall);
@@ -155,10 +159,18 @@ class HlcClock {
   /// remote in the past is fine (it simply doesn't advance us).
   Hlc receive(Hlc remote) {
     final now = _now();
-    if (remote.wallMs - now > maxDriftMs) {
+    // Judge "implausibly far in the future" against the best estimate of true time
+    // we have: the later of our local clock and the highest wall we have ever seen
+    // from an honest peer. Gating on the local clock alone meant that if OUR clock
+    // ran slow by more than [maxDriftMs], every correctly-stamped remote looked
+    // far-future and ALL inbound sync was quarantined. Using max(now, seen) keeps
+    // the gate working through a slow local clock while still rejecting a genuinely
+    // far-future remote clock.
+    final reference = now > _maxWallEverSeen ? now : _maxWallEverSeen;
+    if (remote.wallMs - reference > maxDriftMs) {
       throw HlcDriftException(
         remote: remote,
-        nowMs: now,
+        nowMs: reference,
         maxDriftMs: maxDriftMs,
       );
     }

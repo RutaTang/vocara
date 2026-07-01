@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:io';
 import 'dart:math' as math;
 
@@ -523,6 +524,11 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// Live, growing waveform peaks of the in-progress recording (one per
   /// [_recordIntervalMs]). Drives the recording lane without rebuilding the
   /// whole detail tree.
+  /// Backing store for [recordingPeaks]: appended in place (amortised O(1) per tick)
+  /// and surfaced as a zero-copy [UnmodifiableListView], so the notifier still fires a
+  /// fresh reference each tick without the per-tick full-list copy that made a long
+  /// take O(n^2).
+  final List<double> _recPeaks = <double>[];
   final ValueNotifier<List<double>> recordingPeaks = ValueNotifier(const []);
   int get recordingDurationMs =>
       recordingPeaks.value.length * _recordIntervalMs;
@@ -1724,6 +1730,10 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     _separationProgress = 0;
     notifyListeners();
     await _runBusy(() async {
+      // The old backing/reference to clean up after a successful swap. Captured from
+      // the LIVE practice at commit time (below), not the pre-await snapshot.
+      AudioTrack? oldAccompaniment;
+      AudioTrack? oldReference;
       try {
         final SeparationResult stems;
         try {
@@ -1775,8 +1785,19 @@ class SongPracticeDetailViewModel extends ChangeNotifier
                   createdAt: original.createdAt,
                 );
 
+          // Re-read the LIVE practice: notes / lyrics / interpretations may have been
+          // edited (and persisted) during the minutes-long separation. Build on the
+          // current state so those edits are not clobbered by the pre-await snapshot
+          // (mirrors addAccompaniment / addReference).
+          final cur = _practice;
+          if (cur == null) {
+            await _audioFiles.deleteAudio(instDest);
+            return;
+          }
+          oldAccompaniment = cur.accompaniment;
+          oldReference = cur.reference;
           _playReference = false; // sing over the instrumental
-          _practice = practice.copyWith(
+          _practice = cur.copyWith(
             accompaniment: instrumental,
             reference: referenceTrack,
             separationSource: originalPath,
@@ -1785,7 +1806,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
           // the JSON pointing at files already gone.
           saved = await _save();
           if (!saved) {
-            _practice = practice; // revert in-memory to the un-persisted state
+            _practice = cur; // revert in-memory to the un-persisted state
             _toast('Could not save the separated track.');
           }
         } catch (_) {
@@ -1802,7 +1823,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         // The instrumental is live + persisted. Delete any prior backing file
         // that's no longer referenced — never the kept original or new
         // instrumental. Errors here must NOT roll back the live track.
-        for (final old in [practice.accompaniment, practice.reference]) {
+        for (final old in [oldAccompaniment, oldReference]) {
           if (old != null &&
               old.audioFilePath != originalPath &&
               old.audioFilePath != instDest) {
@@ -1886,6 +1907,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     }
     _recordingTargetId = targetId;
     _recordingStartMs = position.value.inMilliseconds;
+    _recPeaks.clear();
     recordingPeaks.value = const [];
     _recordingPath = await _audioFiles.newRecordingPath(
       practiceId: _practiceId,
@@ -1904,10 +1926,16 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     // down); every other lane still obeys mute/solo. Play freely (no range wrap)
     // from the cursor as a reference.
     await _resyncPlayback();
+    if (_disposed) return;
     _playback.setLoop(false, 0, 0);
     await _playback.seek(Duration(milliseconds: _recordingStartMs));
+    if (_disposed) return;
     position.value = Duration(milliseconds: _recordingStartMs);
     await _playback.play();
+    // Popped during the resync/seek/play awaits above — dispose() already stopped
+    // recording and disposed the notifiers/playback; don't arm a timer that would
+    // write disposed ValueNotifiers and poll a disposed engine every tick.
+    if (_disposed) return;
 
     // Drive the meter + live waveform off the engine's input peak.
     _recLevelTimer = Timer.periodic(const Duration(milliseconds: _recordIntervalMs), (
@@ -1919,7 +1947,8 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       recordLevel.value = _meterFromPeak(peak);
       // Also drive the mixer's MIC meter while recording (it shares this notifier with monitoring).
       inputLevel.value = _meterFromPeak(peak);
-      recordingPeaks.value = [...recordingPeaks.value, peak];
+      _recPeaks.add(peak);
+      recordingPeaks.value = UnmodifiableListView(_recPeaks);
       position.value = Duration(
         milliseconds: _recordingStartMs + recordingDurationMs,
       );
@@ -1952,6 +1981,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     final targetId = _recordingTargetId;
     _isRecording = false;
     _recordingTargetId = null;
+    _recPeaks.clear();
     recordingPeaks.value = const [];
     notifyListeners();
     if (path == null) return;
@@ -3418,7 +3448,11 @@ class SongPracticeDetailViewModel extends ChangeNotifier
 
     for (final t in _allTracks) {
       if (!t.hasClip || !_audibleTrack(t, solo)) continue;
-      fold(t.waveformPeaks, t.startMs, t.durationMs, t.volume);
+      // Fold every clip of the take (not just the primary), so trailing punched-in
+      // clips of a multi-clip take show in the master envelope — matching busWaveformPeaks.
+      for (final c in t.clips) {
+        fold(c.waveformPeaks, c.startMs, c.durationMs, t.volume);
+      }
     }
     // The take being laid down isn't a track yet — fold its live envelope in.
     if (_isRecording) {
