@@ -96,9 +96,11 @@ def main():
         try:
             separator.load_model(model_filename=args.model)
         except Exception as exc:  # noqa: BLE001 - surface any load failure verbatim
+            # Advice first, verbatim cause LAST: the Dart side surfaces the last
+            # non-empty stderr line to the user, so the actual error must be it.
             print(
-                f"Failed to load model '{args.model}': {exc}\n"
-                "Run `audio-separator --list_models` and pass a valid --model.",
+                "Run `audio-separator --list_models` and pass a valid --model.\n"
+                f"Failed to load model '{args.model}': {exc}",
                 file=sys.stderr,
             )
             return 4

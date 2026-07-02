@@ -92,6 +92,11 @@ class SafeMigrator {
       throw MigrationException('migration failed', e);
     }
     copy.close();
+    // SQLite's own syncs do not flush the drive's write cache (no F_FULLFSYNC
+    // by default): force the migrated copy's BYTES to permanent storage before
+    // it is renamed over the live db, or a power cut right after the swap
+    // could leave a truncated/corrupt file as the only database.
+    await fs.fsyncFile(copyPath);
 
     // 3. Atomic swap (marker first, then sidecar cleanup, then renames).
     await _writeMarker(marker, 'swapping', targetVersion);
@@ -129,6 +134,10 @@ class SafeMigrator {
           // copy->live completed (or live was never moved): live db is current.
         } else if (await File(copyPath).exists()) {
           // live->bak done but copy->live not: promote the migrated copy.
+          // Flush its bytes first — the crash may have hit before migrate()'s
+          // own fsync, and promoting an unflushed copy reopens the window
+          // where power loss leaves a truncated live db.
+          await fs.fsyncFile(copyPath);
           await File(copyPath).rename(dbPath);
         } else if (await File(bakPath).exists()) {
           // Both the live and copy directory entries were lost mid-swap: roll
@@ -182,6 +191,12 @@ class SafeMigrator {
   Future<void> _writeMarker(File marker, String state, int target) async {
     await marker.writeAsString('{"state":"$state","to":$target}');
     await fs.fsyncFile(marker.path);
+    // A newly CREATED marker is only durable once its directory entry is also
+    // flushed (fsyncFile covers the bytes, not the dirent). Without this, a
+    // crash mid-swap could land the renames on disk with NO marker, so
+    // recoverIfNeeded would see "nothing to do" while the only database sits
+    // half-swapped (e.g. stranded in .bak).
+    await fs.fsyncDir(marker.parent.path);
   }
 
   String _markerState(String json) {

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:forui/forui.dart';
 
 import '../../core/themes/studio.dart';
+import '../../core/widgets/confirm_dialog.dart';
 
 /// Callbacks for the track right-click menu. Vocal-only actions are hidden for
 /// the accompaniment; [canMergeDown] hides "Merge" when there is no lane below.
@@ -566,62 +567,24 @@ class _ColorSwatch extends StatelessWidget {
 }
 
 /// Modal text dialog used to name/rename something — dark studio styling.
+/// Delegates to [showStudioPrompt], whose [TextEditingController] is owned by
+/// the dialog's own State and disposed only after the dismiss transition —
+/// disposing a local controller right after `showDialog` returns let the
+/// still-animating TextField touch a dead controller (debug crash).
 Future<String?> showRenameDialog(
   BuildContext context, {
   required String current,
   String title = 'Rename track',
   String hint = 'Track name',
   String confirmLabel = 'Rename',
-}) async {
-  final controller = TextEditingController(text: current);
-  final result = await showDialog<String>(
-    context: context,
-    barrierColor: Colors.black54,
-    builder: (dialogContext) {
-      void submit() {
-        final text = controller.text.trim();
-        Navigator.of(dialogContext).pop(text.isEmpty ? null : text);
-      }
-
-      return _StudioDialog(
-        title: title,
-        body: TextField(
-          controller: controller,
-          autofocus: true,
-          onSubmitted: (_) => submit(),
-          cursorColor: Studio.accent,
-          style: const TextStyle(color: Studio.textPrimary, fontSize: 14),
-          decoration: InputDecoration(
-            hintText: hint,
-            hintStyle: const TextStyle(color: Studio.textFaint),
-            filled: true,
-            fillColor: Studio.inset,
-            contentPadding: const EdgeInsets.symmetric(
-              horizontal: 12,
-              vertical: 12,
-            ),
-            enabledBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(8),
-              borderSide: const BorderSide(color: Studio.border),
-            ),
-            focusedBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(8),
-              borderSide: const BorderSide(color: Studio.accent, width: 1.5),
-            ),
-          ),
-        ),
-        actions: [
-          _DialogButton(
-            label: 'Cancel',
-            onTap: () => Navigator.of(dialogContext).pop(),
-          ),
-          _DialogButton(label: confirmLabel, primary: true, onTap: submit),
-        ],
-      );
-    },
+}) {
+  return showStudioPrompt(
+    context,
+    title: title,
+    hint: hint,
+    initial: current,
+    confirmLabel: confirmLabel,
   );
-  controller.dispose();
-  return result;
 }
 
 /// A dark, rounded studio modal shell: title, body and a right-aligned action

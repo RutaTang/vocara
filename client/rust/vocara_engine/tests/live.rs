@@ -92,6 +92,54 @@ fn params_applied_through_handle() {
 }
 
 #[test]
+fn reap_drains_overflowed_param_storm_without_explicit_flush() {
+    // A parameter storm larger than the command ring: after the single flush that overflows,
+    // the leftovers must still reach the audio thread via the control-plane hot path (reap(),
+    // which the FFI frame-position getter polls during playback) — with NO further
+    // user-driven flush. Before the reap() hook, the tail of the storm sat pending forever
+    // and those nodes silently ran at engine defaults.
+    let (prod, cons) = spsc::<[f32; CHANNELS]>(8192);
+    let desc = GraphDesc {
+        nodes: vec![
+            NodeEntry::new(1, Box::new(RingSource::new(cons))),
+            NodeEntry::new(2, Box::new(MasterNode::unity())),
+        ],
+        edges: vec![Edge::simple(1, 2)],
+        master: 2,
+    };
+    let g = desc.compile(SR, BLOCK).unwrap();
+    let mut producers = HashMap::new();
+    producers.insert(1u32, prod);
+    let (_mic_prod, mic_cons) = spsc::<[f32; CHANNELS]>(256);
+    // Command ring of only 16 slots so the storm below overflows it.
+    let (mut h, mut rt) = spawn(g, producers, mic_cons, 16);
+
+    h.push_pcm(1, &frames_dc(0.8, 65536));
+    h.play();
+
+    // Storm: 32 padding commands (unknown params; RingSource ignores them) followed by the
+    // one that matters — muting the master. One flush fits only the first 16.
+    for p in 0..32u16 {
+        h.set_param(1, 100 + p, 0.0);
+    }
+    h.set_param(2, mparam::GAIN, 0.0);
+    h.flush();
+
+    // Playback loop: render + poll (reap) — exactly what the app does while playing. The
+    // master mute at the very END of the storm must arrive and take effect.
+    let mut out = vec![0.0; BLOCK * CHANNELS];
+    for _ in 0..40 {
+        rt.process(&mut out, BLOCK);
+        h.reap();
+    }
+    assert!(
+        rms(&out) < 1e-3,
+        "tail of an overflowed param storm never delivered: master still audible at {}",
+        rms(&out)
+    );
+}
+
+#[test]
 fn underrun_emits_silence_not_garbage() {
     let (mut h, mut rt, src) = one_source_engine();
     // Feed less than a block; the rest underruns to silence (finite, not garbage).

@@ -113,26 +113,36 @@ class Persistence {
   /// fixed-width, lexicographically ordered LWW key — so the global MAX is the
   /// greatest stamp this install ever produced or adopted from a peer.
   static Future<HlcClock> _seedClock(AppDatabase db, String node) async {
-    String? maxPacked;
-    // Any table carrying the hlc_packed column (all synced tables + the oplog).
-    for (final table in db.allTables.where(
-      (t) => t.$columns.any((c) => c.name == 'hlc_packed'),
-    )) {
-      final row = await db
-          .customSelect(
-            'SELECT MAX(hlc_packed) AS m FROM ${table.actualTableName}',
-          )
-          .getSingleOrNull();
-      final packed = row?.readNullable<String>('m');
-      if (packed != null &&
-          (maxPacked == null || packed.compareTo(maxPacked) > 0)) {
-        maxPacked = packed;
+    Hlc? max;
+    // Seeding is a monotonicity safety net, not a launch precondition: one
+    // malformed hlc_packed (or one unreadable table) must never brick startup
+    // by throwing out of open() before the window ever shows. Parse per table
+    // so a bad value only skips ITS table, and wrap the whole scan so any
+    // other failure degrades to whatever was gathered (possibly an unseeded
+    // clock) — silent by design, like the other best-effort startup sweeps.
+    try {
+      // Any table carrying the hlc_packed column (all synced tables + the oplog).
+      for (final table in db.allTables.where(
+        (t) => t.$columns.any((c) => c.name == 'hlc_packed'),
+      )) {
+        try {
+          final row = await db
+              .customSelect(
+                'SELECT MAX(hlc_packed) AS m FROM ${table.actualTableName}',
+              )
+              .getSingleOrNull();
+          final packed = row?.readNullable<String>('m');
+          if (packed == null) continue;
+          final hlc = Hlc.parse(packed);
+          if (max == null || hlc > max) max = hlc;
+        } catch (_) {
+          // Malformed value or unreadable table: keep scanning the others.
+        }
       }
+    } catch (_) {
+      // Even enumerating the tables failed: fall through with the partial max.
     }
-    return HlcClock(
-      node: node,
-      initial: maxPacked == null ? null : Hlc.parse(maxPacked),
-    );
+    return HlcClock(node: node, initial: max);
   }
 
   /// Reads (or mints + persists once) the stable per-install device node id —

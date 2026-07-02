@@ -81,6 +81,57 @@ fn command_channel_coalesces_and_applies() {
     assert!(all_finite(&out));
 }
 
+/// A post-rebuild parameter storm can exceed the command ring's capacity. flush() must then
+/// deliver the leftovers across later flushes in FIFO order — draining from the back would
+/// starve exactly the OLDEST commands (the first tracks' EQ/comp/sends/pan) and deliver the
+/// rest reversed.
+#[test]
+fn command_overflow_delivers_all_in_order() {
+    use std::sync::{Arc, Mutex};
+    use vocara_engine::{Node, ProcessIo};
+
+    /// Records every (param, value) it receives so delivery order is observable.
+    struct RecorderNode(Arc<Mutex<Vec<(u16, f32)>>>);
+    impl Node for RecorderNode {
+        fn prepare(&mut self, _sample_rate: f64, _max_block: usize) {}
+        fn process(&mut self, _io: &mut ProcessIo) {}
+        fn set_param(&mut self, param: u16, value: f32) {
+            self.0.lock().unwrap().push((param, value));
+        }
+    }
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let desc = GraphDesc {
+        nodes: vec![NodeEntry::new(7, Box::new(RecorderNode(Arc::clone(&seen))))],
+        edges: vec![],
+        master: 7,
+    };
+    let mut g = desc.compile(SR, BLOCK).unwrap();
+
+    // Ring of 16 slots; 200 distinct (node, param) commands — far more than one flush fits.
+    let (mut tx, mut rx) = command_channel(16);
+    let total = 200u16;
+    for p in 0..total {
+        tx.set(7, p, p as f32);
+    }
+    tx.flush();
+    assert!(tx.pending_len() > 0, "storm must overflow the ring for this test to bite");
+
+    // Alternate bounded audio-thread drains (like the render callback) with control-thread
+    // re-flushes until everything is delivered.
+    let mut spins = 0;
+    while tx.pending_len() > 0 || rx.pending() > 0 {
+        rx.apply(&mut g, 8);
+        tx.flush();
+        spins += 1;
+        assert!(spins < 1000, "delivery must terminate");
+    }
+
+    let seen = seen.lock().unwrap();
+    let expect: Vec<(u16, f32)> = (0..total).map(|p| (p, p as f32)).collect();
+    assert_eq!(*seen, expect, "every command arrives exactly once, in submission order");
+}
+
 #[test]
 fn rcu_graph_swap_changes_output() {
     fn dc_graph(value: f32) -> Box<Graph> {

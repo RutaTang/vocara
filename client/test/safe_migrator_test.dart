@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:sqlite3/sqlite3.dart';
 import 'package:vocara/data/db/app_database.dart';
+import 'package:vocara/data/db/durable_fs.dart';
 import 'package:vocara/data/db/safe_migrator.dart';
 
 void main() {
@@ -170,6 +171,94 @@ void main() {
     await SafeMigrator().recoverIfNeeded(dbPath);
     expect(userVersion(), 1);
   });
+
+  test('copy bytes + swapping marker dirent are durable BEFORE the swap '
+      'renames', () async {
+    await seedV1();
+    final fs = _RecordingFs(tmp.path);
+    await SafeMigrator(fs: fs).migrate(
+      dbPath: dbPath,
+      targetVersion: 2,
+      step: (copy) => copy.execute('ALTER TABLE practices ADD COLUMN c TEXT'),
+    );
+
+    // The migrated copy's bytes were flushed while the live db still existed,
+    // i.e. before any destructive rename ran.
+    final copySync = fs.log.indexOf('file:$_copy(liveExists=true)');
+    expect(copySync, greaterThanOrEqualTo(0),
+        reason: 'copy must be fsynced before the swap: ${fs.log}');
+
+    // The 'swapping' marker was written AFTER the copy flush and its directory
+    // entry was fsync'd while no .bak existed yet — i.e. the marker is durable
+    // before the first rename creates the .bak.
+    final swapMarker = fs.log.indexOf('marker:swapping');
+    expect(swapMarker, greaterThan(copySync));
+    // Any dir fsync logged with NO .bak yet necessarily ran before the first
+    // rename (live->bak); one must follow the swapping marker write.
+    final preSwapDirSync = fs.log.indexOf('dir(bakExists=false)', swapMarker);
+    expect(preSwapDirSync, greaterThan(swapMarker),
+        reason: 'the swapping marker dirent must be flushed before the '
+            'renames: ${fs.log}');
+
+    // The post-rename directory fsync (bak now exists) still runs afterwards.
+    expect(fs.log.indexOf('dir(bakExists=true)', preSwapDirSync),
+        greaterThan(preSwapDirSync));
+  });
+
+  test('recovery flushes the copy bytes before promoting it to live',
+      () async {
+    await seedV1();
+    await SafeMigrator().migrate(
+      dbPath: dbPath,
+      targetVersion: 2,
+      step: (copy) => copy.execute('ALTER TABLE practices ADD COLUMN c TEXT'),
+    );
+    // Stage "crashed mid-swap": migrated db at the copy path, live path empty.
+    await File(dbPath).rename(p.join(tmp.path, _copy));
+    await File(p.join(tmp.path, 'migration.json'))
+        .writeAsString('{"state":"swapping","to":2}');
+
+    final fs = _RecordingFs(tmp.path);
+    await SafeMigrator(fs: fs).recoverIfNeeded(dbPath);
+
+    // The copy was fsynced while the live path was still empty, i.e. before
+    // the copy->live promotion rename.
+    expect(fs.log, contains('file:$_copy(liveExists=false)'));
+    expect(userVersion(), 2); // and the promotion itself still happened
+  });
 }
 
 const _copy = 'vocara.migrating.db';
+
+/// Records every durability call, tagged with enough directory state to assert
+/// ORDER relative to the swap renames: whether the live db / the .bak exist at
+/// the moment of the call distinguishes "before the swap" from "after".
+class _RecordingFs extends DurableFs {
+  _RecordingFs(this.dir);
+
+  final String dir;
+  final List<String> log = [];
+
+  @override
+  Future<void> fsyncFile(String path) async {
+    final name = p.basename(path);
+    if (name == 'migration.json') {
+      final state = RegExp(r'"state"\s*:\s*"(\w+)"')
+              .firstMatch(await File(path).readAsString())
+              ?.group(1) ??
+          '?';
+      log.add('marker:$state');
+    } else {
+      final live = File(p.join(dir, 'vocara.db')).existsSync();
+      log.add('file:$name(liveExists=$live)');
+    }
+    await super.fsyncFile(path);
+  }
+
+  @override
+  Future<void> fsyncDir(String path) async {
+    final bak = File(p.join(dir, 'vocara.pre-migrate.bak')).existsSync();
+    log.add('dir(bakExists=$bak)');
+    await super.fsyncDir(path);
+  }
+}

@@ -1919,8 +1919,14 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     // would write disposed ValueNotifiers every tick.
     if (_disposed) return;
     // Record from the engine's selected input device (cpal). macOS prompts for mic access on the
-    // first capture; if denied, the take is silent.
-    engine.startInputRecording(_recordingPath!);
+    // first capture; if denied, the take is silent. A false return means the writer could not
+    // create the WAV (disk full / permissions) and nothing would be recorded: fail loudly here
+    // so startRecording's catch tears down and toasts, instead of "recording" into nowhere.
+    if (!engine.startInputRecording(_recordingPath!)) {
+      throw const FormatException(
+        "Couldn't create the recording file. Check your free disk space.",
+      );
+    }
     _isRecording = true;
     notifyListeners();
 
@@ -1969,7 +1975,9 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       _heldInputLevel = 0;
       inputLevel.value = 0;
     }
-    _graphEngine?.stopInputRecording();
+    // False = the writer hit an IO error (create/write/finalize) during the take, so the
+    // WAV on disk is missing, damaged, or incomplete; handled below once the path is known.
+    final recordingClean = _graphEngine?.stopInputRecording() ?? true;
     await _playback.pause();
     final path = _recordingPath;
     // Record-latency compensation: the first captured sample is the vocal sung in response to the
@@ -1989,7 +1997,34 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     if (path == null) return;
 
     await _runBusy(() async {
-      final analysis = await _waveforms.analyze(path);
+      WaveformResult analysis;
+      if (recordingClean) {
+        analysis = await _waveforms.analyze(path);
+      } else {
+        // The engine reported an IO error during the take (disk full, write or
+        // finalize failure). Be conservative: keep the take only if the partial
+        // WAV is still present and readable; otherwise delete it so no take row
+        // points at unusable audio.
+        WaveformResult? partial;
+        try {
+          if (await File(path).exists()) {
+            partial = await _waveforms.analyze(path);
+          }
+        } catch (_) {
+          partial = null;
+        }
+        if (partial == null) {
+          try {
+            await _audioFiles.deleteAudio(path);
+          } catch (_) {
+            // Best-effort cleanup of the unreadable partial file.
+          }
+          _toast('Recording failed. The take could not be saved.');
+          return;
+        }
+        _toast('Recording hit a disk error. The take may be incomplete.');
+        analysis = partial;
+      }
       final target = targetId == null ? null : _trackById(targetId);
       if (target == null || target.kind != AudioTrackKind.vocal) {
         // No armed take → the recording becomes a new take at the cursor.

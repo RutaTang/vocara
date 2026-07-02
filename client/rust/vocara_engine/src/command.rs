@@ -4,6 +4,8 @@
 //! many events collapses to its latest value) and flushes them into a wait-free ring. The
 //! audio thread drains a bounded number per block and applies them — no allocation, no lock.
 
+use std::collections::VecDeque;
+
 use crate::graph::{Graph, NodeId};
 use crate::ring::{spsc, Consumer, Producer};
 
@@ -18,7 +20,10 @@ pub struct ParamCmd {
 /// Control-thread half: coalesces then flushes into the ring.
 pub struct CommandSender {
     prod: Producer<ParamCmd>,
-    pending: Vec<(u64, f32)>, // key = (node << 16) | param  ->  latest value
+    /// key = (node << 16) | param  ->  latest value. A deque so an overflow flush drains
+    /// FIFO from the front in O(1) per command (a post-rebuild storm can queue far more
+    /// than the ring capacity).
+    pending: VecDeque<(u64, f32)>,
 }
 
 impl CommandSender {
@@ -28,21 +33,23 @@ impl CommandSender {
         if let Some(e) = self.pending.iter_mut().find(|(k, _)| *k == key) {
             e.1 = value;
         } else {
-            self.pending.push((key, value));
+            self.pending.push_back((key, value));
         }
     }
 
-    /// Push pending values into the ring; keeps any that don't fit for the next flush
-    /// (never blocks).
+    /// Push pending values into the ring in FIFO order; keeps any that don't fit for the
+    /// next flush (never blocks). Draining from the FRONT preserves submission order across
+    /// a ring overflow — draining from the back would starve exactly the OLDEST commands
+    /// (the first tracks' settings) until the user happened to touch them again.
     pub fn flush(&mut self) {
-        while let Some(&(key, value)) = self.pending.last() {
+        while let Some(&(key, value)) = self.pending.front() {
             let cmd = ParamCmd {
                 node: (key >> 16) as NodeId,
                 param: (key & 0xffff) as u16,
                 value,
             };
             if self.prod.push(cmd) {
-                self.pending.pop();
+                self.pending.pop_front();
             } else {
                 break; // ring full; retry next flush
             }
@@ -80,7 +87,7 @@ pub fn command_channel(capacity: usize) -> (CommandSender, CommandReceiver) {
     (
         CommandSender {
             prod,
-            pending: Vec::new(),
+            pending: VecDeque::new(),
         },
         CommandReceiver { cons },
     )

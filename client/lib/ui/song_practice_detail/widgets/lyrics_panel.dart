@@ -143,10 +143,38 @@ class _Tab extends StatelessWidget {
   }
 }
 
-class _LyricsTab extends StatelessWidget {
+class _LyricsTab extends StatefulWidget {
   const _LyricsTab({required this.vm});
 
   final SongPracticeDetailViewModel vm;
+
+  @override
+  State<_LyricsTab> createState() => _LyricsTabState();
+}
+
+class _LyricsTabState extends State<_LyricsTab> {
+  /// Bumped when a drop-import lands while the EDITOR is open. It keys the
+  /// editor, so the bump re-creates it and re-seeds its controller from the
+  /// just-imported lyrics. Without this the editor kept its pre-drop snapshot
+  /// and Save silently overwrote the import (timestamps included).
+  int _editorSeed = 0;
+
+  SongPracticeDetailViewModel get vm => widget.vm;
+
+  Future<void> _importDrop(String path) async {
+    final editing = vm.lyricsMode == LyricsMode.edit;
+    final before = editing ? vm.lyricsAsText() : '';
+    // The VM validates type + size, reads, and toasts on every failure
+    // (and guards against the recording/busy lost-update race).
+    await vm.importLyricsFromFile(path);
+    // Route a successful edit-mode drop INTO the open editor: the drop is an
+    // explicit "replace the lyrics" action, so the editor must show (and Save
+    // must apply) the imported text. A failed or no-op import leaves the
+    // in-progress edit untouched.
+    if (editing && mounted && vm.lyricsAsText() != before) {
+      setState(() => _editorSeed++);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -157,9 +185,7 @@ class _LyricsTab extends StatelessWidget {
           child: DropTarget(
             onDragDone: (d) async {
               if (d.files.isEmpty) return;
-              // The VM validates type + size, reads, and toasts on every failure
-              // (and guards against the recording/busy lost-update race).
-              await vm.importLyricsFromFile(d.files.first.path);
+              await _importDrop(d.files.first.path);
             },
             child: _body(),
           ),
@@ -172,7 +198,7 @@ class _LyricsTab extends StatelessWidget {
     switch (vm.lyricsMode) {
       // Edit is always available — it's how the first lyrics get pasted/typed.
       case LyricsMode.edit:
-        return _LyricsEditor(vm: vm);
+        return _LyricsEditor(key: ValueKey(_editorSeed), vm: vm);
       case LyricsMode.read:
         return vm.hasLyrics ? _LyricsReader(vm: vm) : _EmptyState(vm: vm);
       case LyricsMode.sync:
@@ -822,7 +848,9 @@ class _LyricsReaderState extends State<_LyricsReader> {
 }
 
 class _LyricsEditor extends StatefulWidget {
-  const _LyricsEditor({required this.vm});
+  // Keyed by _LyricsTab so a successful drop-import re-creates the editor
+  // (re-seeding the controller from the imported lyrics).
+  const _LyricsEditor({required this.vm, super.key});
 
   final SongPracticeDetailViewModel vm;
 

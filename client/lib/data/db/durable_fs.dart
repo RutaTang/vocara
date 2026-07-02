@@ -1,5 +1,6 @@
 import 'dart:ffi';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:ffi/ffi.dart';
 
@@ -21,9 +22,18 @@ class DurableFs {
 
   /// Flush a file's data all the way to permanent storage (drive cache included
   /// on macOS via `F_FULLFSYNC`). Falls back to a buffered flush off-macOS.
+  ///
+  /// The native flush runs via [Isolate.run]: F_FULLFSYNC blocks until the
+  /// drive's write cache is flushed (whole seconds for a large take on a slow
+  /// disk), which would beachball the UI isolate if called inline. The closure
+  /// is self-contained (path in, bool out) and the FFI globals below are
+  /// lazily re-initialized inside the spawned isolate.
   Future<void> fsyncFile(String path) async {
     // O_WRONLY: F_FULLFSYNC wants a writable fd for a regular file.
-    if (Platform.isMacOS && _tryNativeFsync(path, _oWronly, fullFsync: true)) {
+    if (Platform.isMacOS &&
+        await Isolate.run(
+          () => _tryNativeFsync(path, _oWronly, fullFsync: true),
+        )) {
       return;
     }
     // Fallback: push buffered writes to the OS (NOT a drive-cache flush).
@@ -40,7 +50,11 @@ class DurableFs {
   /// plain `fsync` on that fd. No pure-Dart fallback exists (best-effort no-op).
   Future<void> fsyncDir(String path) async {
     if (Platform.isMacOS) {
-      _tryNativeFsync(path, _oRdonly, fullFsync: false);
+      // Off the UI isolate for the same reason as fsyncFile; awaited so the
+      // caller's durability ordering (entry flushed before the DB commit) holds.
+      await Isolate.run(
+        () => _tryNativeFsync(path, _oRdonly, fullFsync: false),
+      );
     }
   }
 

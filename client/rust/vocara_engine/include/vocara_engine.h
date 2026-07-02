@@ -85,8 +85,12 @@ int ve_stop_capture(VeEngine *e);
 /* Pop up to `max_frames` captured interleaved-stereo frames (48 kHz) into `out`
  * (max_frames*2 floats). Returns frames written. Non-blocking. */
 size_t ve_input_frames(VeEngine *e, float *out, size_t max_frames);
-/* Record the live input to a mono 48 kHz WAV at `path` (writer thread). 0 = ok. */
+/* Record the live input to a mono 48 kHz WAV at `path` (writer thread). Blocks briefly on
+ * the writer creating the file. 0 = ok; -1 = the file could not be created (disk full /
+ * permissions) and nothing will be recorded. */
 int ve_start_input_recording(VeEngine *e, const char *path);
+/* Stop the input recording (finalizes the WAV). 0 = ok; -2 = an IO error occurred during
+ * the recording (the WAV at the recorded path is missing, damaged, or incomplete). */
 int ve_stop_input_recording(VeEngine *e);
 
 int ve_play(VeEngine *e);

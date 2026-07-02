@@ -7,9 +7,14 @@ import 'package:flutter/services.dart' show appFlavor;
 ///   dev  -> com.rutatang.vocara.dev
 ///   test -> com.rutatang.vocara.test
 ///   prod -> com.rutatang.vocara
-/// Because the macOS sandbox container (the drift db + asset pool) and the HLC
-/// device node are keyed by bundle id, this gives each environment its OWN
-/// store, so dev/test/prod coexist on one machine without clobbering each other.
+/// The store location (the drift db + asset pool, and with it the HLC device
+/// node) is keyed by bundle id AND build config. Each bundle id gets its own
+/// macOS sandbox container, so dev/test/prod coexist on one machine without
+/// clobbering each other. But Debug/Profile builds disable the sandbox (see
+/// `macos/Runner/DebugProfile.entitlements`; deliberate dev-only choice so the
+/// prototype Python separation sidecar can be spawned), so the SAME bundle id
+/// resolves to the plain `~/Library/Application Support` path in Debug and to
+/// the sandbox container in Release: two disjoint stores with two HLC node ids.
 ///
 /// Builds are flavor-only; an unflavored build (no `--flavor`) is not a normal
 /// path but falls back to [dev] for safety.

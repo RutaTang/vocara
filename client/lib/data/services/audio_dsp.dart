@@ -216,6 +216,7 @@ VoiceMetrics computeVoiceMetrics(
   final rf0 = Float32List(nFrames);
   final rh1h2 = Float32List(nFrames); // raw H1−H2, median-smoothed into h1h2
   final per = Float32List(nFrames); // YIN periodicity per frame (voicing gate)
+  final voicedMask = Uint8List(nFrames); // gate verdict, re-applied post-median
 
   // Band edges (bins).
   final b2k = binOf(2000), b4k = binOf(4000);
@@ -395,6 +396,7 @@ VoiceMetrics computeVoiceMetrics(
     // dilutes them and mismatched the live readout's voiced-only average.
     if (audible) active[fr] = 1;
     if (voiced) {
+      voicedMask[fr] = 1;
       rSum += ring[fr];
       tSum += tilt[fr];
       cSum += cpp[fr];
@@ -414,6 +416,21 @@ VoiceMetrics computeVoiceMetrics(
   _medianInto(rf2, f2, 2);
   _medianInto(rf3, f3, 2);
   _medianInto(rh1h2, h1h2, 2);
+  // Re-apply the voicing gate AFTER smoothing. The two NaN meanings differ:
+  // the median bridges measurement dropouts (LPC/H1−H2 misses on frames the
+  // gate declared VOICED) from valid neighbours, while this mask keeps every
+  // gate-NaN frame NaN so smoothing never paints F0/formants onto breath or
+  // silence. Mirrors the live path's _smoothGated, which separates "unvoiced"
+  // from "voiced but unmeasured" the same way.
+  for (var fr = 0; fr < nFrames; fr++) {
+    if (voicedMask[fr] == 0) {
+      f0[fr] = double.nan;
+      f1[fr] = double.nan;
+      f2[fr] = double.nan;
+      f3[fr] = double.nan;
+      h1h2[fr] = double.nan;
+    }
+  }
   final inv = n == 0 ? 0.0 : 1.0 / n;
 
   // --- Input quality: peak level, clipping, SNR ----------------------------
@@ -768,16 +785,14 @@ double _harmonicPeak(List<double> mags, double centerBin, int halfWidth) {
 }
 
 /// Writes the running ±[half]-frame median of [src] (ignoring NaN) into [dst].
+/// A NaN center is bridged from its valid neighbours on purpose: the raw
+/// tracks carry NaN on VOICED frames too (LPC / H1−H2 measurement dropouts),
+/// and those one-frame holes should be filled. Keeping unvoiced frames NaN is
+/// the CALLER's job — it re-applies the voicing mask after smoothing.
 void _medianInto(Float32List src, Float32List dst, int half) {
   final n = src.length;
   final buf = <double>[];
   for (var i = 0; i < n; i++) {
-    // A NaN center means this frame was gated out (unvoiced): keep it NaN so the
-    // smoothing never borrows neighbours' F0/formants onto breath/silence.
-    if (src[i].isNaN) {
-      dst[i] = double.nan;
-      continue;
-    }
     buf.clear();
     final lo = i - half < 0 ? 0 : i - half;
     final hi = i + half >= n ? n - 1 : i + half;

@@ -1,3 +1,5 @@
+import 'dart:ui' show AppExitResponse;
+
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:media_kit/media_kit.dart';
@@ -34,6 +36,21 @@ Future<void> main() async {
   // the process is torn down, instead of being lost as a 0-length take.
   await windowManager.setPreventClose(true);
   windowManager.addListener(_QuitGuard());
+  // The red close button is only one quit path: Cmd+Q, the app-menu Quit, a
+  // Dock quit and logout all go through NSApplication.terminate:, which never
+  // reaches the window-close listener above. FlutterAppDelegate implements
+  // macOS's cancellable-termination flow (applicationShouldTerminate defers the
+  // terminate and asks the framework), so this exit request fires on all of
+  // those paths — including windowManager.destroy(), which also calls
+  // terminate. Finalize any in-flight recording, then allow the exit.
+  // Force-quit / kill -9 is not interceptable (known, deferred): the staged
+  // file is swept on next boot.
+  _exitGuard = AppLifecycleListener(
+    onExitRequested: () async {
+      await RecordingFinalizer.instance.finalizeAll();
+      return AppExitResponse.exit;
+    },
+  );
 
   // Open the drift/SQLite store (db file, device node id, asset pool) once.
   final persistence = await Persistence.open();
@@ -51,11 +68,24 @@ Future<void> main() async {
   });
 }
 
+/// Keeps the exit-request guard alive for the app's lifetime (registered in
+/// [main], never disposed: it must outlive every quit path). Write-only by
+/// design — the reference itself is the point.
+// ignore: unused_element
+late final AppLifecycleListener _exitGuard;
+
 /// Finalizes any in-flight recording before the window actually closes. With
 /// [WindowManager.setPreventClose] on, the OS close is deferred to here.
 class _QuitGuard with WindowListener {
+  // Re-entrancy guard: with preventClose on, every close click fires
+  // onWindowClose again, and a second run must not race a second destroy()
+  // (or re-run finalizers) while the first save is still in flight.
+  bool _closing = false;
+
   @override
   void onWindowClose() async {
+    if (_closing) return;
+    _closing = true;
     await RecordingFinalizer.instance.finalizeAll();
     await windowManager.destroy();
   }

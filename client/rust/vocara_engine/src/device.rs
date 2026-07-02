@@ -30,6 +30,22 @@ pub struct DeviceHandle {
     _stream: cpal::Stream,
 }
 
+impl Drop for DeviceHandle {
+    fn drop(&mut self) {
+        // Dropping a cpal `Stream` alone does NOT synchronize with a callback in flight:
+        // cpal's coreaudio monitor threads (disconnect / default-output listeners) hold a
+        // `Weak` to the inner stream state and can transiently upgrade it, in which case our
+        // drop merely decrements a refcount and the old callback keeps rendering — racing the
+        // replacement stream's callback on the shared `RtCell` (two `&mut RtProcessor` = UB).
+        // `pause()` takes the same inner lock those monitor threads use and synchronously
+        // executes `AudioOutputUnitStop`, which joins any in-flight render callback; nothing
+        // ever restarts a paused stream (the monitors only pause), so after this returns no
+        // callback is executing and none will start. The result is ignored: a failed stop
+        // just leaves the pre-existing narrow race, never a new failure mode.
+        let _ = self._stream.pause();
+    }
+}
+
 /// Engine render sub-chunk for the output-boundary resampler (matches the graph's max block).
 const RESAMPLE_BLOCK: usize = 1024;
 
@@ -491,9 +507,12 @@ pub struct RecordWriter {
 }
 
 enum WriterCmd {
-    Start(String),
-    /// Stop + finalize the WAV; the writer acks when the file is fully flushed.
-    Stop(mpsc::Sender<()>),
+    /// Start a new recording; the writer acks `true` once the file is created, `false` when
+    /// creation failed (disk full / permissions) so the caller can fail loudly.
+    Start(String, mpsc::Sender<bool>),
+    /// Stop + finalize the WAV; the writer acks when the file is fully flushed. `true` = the
+    /// take on disk is clean; `false` = a create/write/finalize error damaged (or lost) it.
+    Stop(mpsc::Sender<bool>),
     Shutdown,
 }
 
@@ -507,17 +526,26 @@ impl RecordWriter {
         RecordWriter { tx, join }
     }
 
-    pub fn start(&self, path: &str) {
-        let _ = self.tx.send(WriterCmd::Start(path.to_string()));
+    /// Start recording to `path`, blocking until the writer thread has created the file
+    /// (file creation is not on the RT path). Returns `false` when the file could not be
+    /// created, so the caller reports failure instead of silently losing the take.
+    pub fn start(&self, path: &str) -> bool {
+        let (ack, rx) = mpsc::channel();
+        if self.tx.send(WriterCmd::Start(path.to_string(), ack)).is_err() {
+            return false;
+        }
+        rx.recv().unwrap_or(false)
     }
 
     /// Stop recording and block until the WAV is fully written + finalized (so the caller can
-    /// read the file immediately).
-    pub fn stop(&self) {
+    /// read the file immediately). Returns `false` when any IO error occurred since start —
+    /// the take on disk is missing, damaged, or incomplete.
+    pub fn stop(&self) -> bool {
         let (ack, rx) = mpsc::channel();
-        if self.tx.send(WriterCmd::Stop(ack)).is_ok() {
-            let _ = rx.recv();
+        if self.tx.send(WriterCmd::Stop(ack)).is_err() {
+            return false;
         }
+        rx.recv().unwrap_or(false)
     }
 }
 
@@ -532,27 +560,47 @@ impl Drop for RecordWriter {
 
 fn writer_run(mut rec: Consumer<[Smp; CHANNELS]>, rx: mpsc::Receiver<WriterCmd>) {
     let mut wav: Option<crate::wav::WavStream> = None;
+    // Sticky IO-error flag for the current recording: set on any create/write/finalize
+    // failure and reported through Stop's ack, so the caller learns the take is damaged
+    // instead of the UI silently reporting success (disk full, revoked permission).
+    let mut failed = false;
     loop {
         // Apply any pending commands.
         loop {
             match rx.try_recv() {
-                Ok(WriterCmd::Start(path)) => {
+                Ok(WriterCmd::Start(path, ack)) => {
                     if let Some(w) = wav.take() {
                         let _ = w.finalize();
                     }
-                    wav = crate::wav::WavStream::create(&path, 1, ENGINE_SR as u32).ok();
+                    match crate::wav::WavStream::create(&path, 1, ENGINE_SR as u32) {
+                        Ok(w) => {
+                            wav = Some(w);
+                            failed = false;
+                            let _ = ack.send(true);
+                        }
+                        Err(_) => {
+                            wav = None;
+                            failed = true;
+                            let _ = ack.send(false);
+                        }
+                    }
                 }
                 Ok(WriterCmd::Stop(ack)) => {
                     // Drain any buffered tail into the file before finalizing.
                     if let Some(w) = wav.as_mut() {
                         while let Some(f) = rec.pop() {
-                            let _ = w.write_sample(f[0]);
+                            if w.write_sample(f[0]).is_err() {
+                                failed = true;
+                            }
                         }
                     }
                     if let Some(w) = wav.take() {
-                        let _ = w.finalize();
+                        if w.finalize().is_err() {
+                            failed = true;
+                        }
                     }
-                    let _ = ack.send(());
+                    let _ = ack.send(!failed);
+                    failed = false;
                 }
                 Ok(WriterCmd::Shutdown) => {
                     if let Some(w) = wav.take() {
@@ -564,11 +612,15 @@ fn writer_run(mut rec: Consumer<[Smp; CHANNELS]>, rx: mpsc::Receiver<WriterCmd>)
                 Err(mpsc::TryRecvError::Disconnected) => return,
             }
         }
-        // Drain available frames; write the left channel (mono) when recording.
+        // Drain available frames; write the left channel (mono) when recording. A write
+        // failure sets the sticky flag (reported at Stop) but keeps draining, so the ring
+        // never backs up and any samples that still fit on disk are kept.
         let mut wrote = false;
         while let Some(f) = rec.pop() {
             if let Some(w) = wav.as_mut() {
-                let _ = w.write_sample(f[0]);
+                if w.write_sample(f[0]).is_err() {
+                    failed = true;
+                }
                 wrote = true;
             }
         }
@@ -1015,4 +1067,65 @@ pub fn resample_linear(frames: &[[Smp; CHANNELS]], from: u32, to: u32) -> Vec<[S
         ]);
     }
     out
+}
+
+#[cfg(test)]
+mod record_writer_tests {
+    //! The recording writer's IO-failure reporting: `start` must ack file creation and
+    //! `stop` must report a clean vs. damaged/missing take (no device needed — the writer
+    //! only consumes a ring).
+
+    use super::RecordWriter;
+    use crate::ring::spsc;
+    use crate::sample::{Smp, CHANNELS};
+
+    fn temp_wav(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("vocara_recwriter_{}_{}.wav", std::process::id(), name))
+    }
+
+    #[test]
+    fn start_fails_when_file_cannot_be_created() {
+        let (_prod, cons) = spsc::<[Smp; CHANNELS]>(64);
+        let w = RecordWriter::spawn(cons);
+        // A path under a directory that does not exist cannot be created.
+        assert!(
+            !w.start("/nonexistent-vocara-dir/take.wav"),
+            "start must report a failed file creation"
+        );
+        // The failed start left no take on disk; stop must report the loss, not success.
+        assert!(!w.stop(), "stop after a failed start must not report a clean take");
+    }
+
+    #[test]
+    fn clean_recording_writes_all_frames_and_reports_success() {
+        let (mut prod, cons) = spsc::<[Smp; CHANNELS]>(1024);
+        let w = RecordWriter::spawn(cons);
+        let path = temp_wav("clean");
+        assert!(w.start(path.to_str().unwrap()), "start must ack a successful create");
+        for i in 0..100 {
+            assert!(prod.push([i as f32 / 200.0, 0.0]));
+        }
+        // Stop drains the ring tail before finalizing, so all 100 frames must land on disk.
+        assert!(w.stop(), "a clean recording must report success");
+        let bytes = std::fs::read(&path).expect("recorded WAV must exist");
+        // 44-byte header + 100 mono 16-bit samples, with both size fields patched.
+        assert_eq!(bytes.len(), 44 + 200);
+        assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 36 + 200);
+        assert_eq!(u32::from_le_bytes(bytes[40..44].try_into().unwrap()), 200);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn failure_flag_resets_for_the_next_recording() {
+        let (mut prod, cons) = spsc::<[Smp; CHANNELS]>(64);
+        let w = RecordWriter::spawn(cons);
+        assert!(!w.start("/nonexistent-vocara-dir/take.wav"));
+        assert!(!w.stop());
+        // The sticky error from the lost take must not bleed into a new, healthy one.
+        let path = temp_wav("after_failure");
+        assert!(w.start(path.to_str().unwrap()));
+        assert!(prod.push([0.5, 0.5]));
+        assert!(w.stop(), "a later clean recording must report success again");
+        let _ = std::fs::remove_file(&path);
+    }
 }

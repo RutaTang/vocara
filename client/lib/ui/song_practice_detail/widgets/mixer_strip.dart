@@ -127,31 +127,64 @@ String _busName(List<FxBus> buses, String? id) {
   return 'Master';
 }
 
-/// Wraps a channel-strip [Column] so the strip fills the dock at normal heights
-/// (the fader's Expanded still stretches to fill) but becomes vertically
-/// scrollable when the dock is squeezed too short — instead of collapsing the
-/// fader to zero and clipping the dB readout / routing chip / delete control
-/// with a RenderFlex overflow.
-class _StripBody extends StatelessWidget {
-  const _StripBody({required this.child});
+/// Inner strip height (px) below which a strip switches to its scrolling
+/// fallback. Derived from the tallest strip's fixed rows: title ≈14, M/S row
+/// 20, pan knob 26 + its label ≈14, dB readout ≈13, routing chip ≈19, delete
+/// icon 14 and the SizedBox gaps between them (10+10+10+8+8+10 = 56) ≈ 176 in
+/// total, plus ~56px of minimum usable fader travel.
+const double _kStripMinContentHeight = 232;
 
-  final Widget child;
+/// Fixed fader height used in the squeezed scrolling fallback, where the
+/// column's height is unbounded so Expanded cannot size the fader.
+const double _kSqueezedFaderHeight = 120;
+
+/// Lays out a channel strip's column. At normal dock heights it returns the
+/// plain [Column] — the fader's Expanded stretches to fill, console style.
+/// When the strip is squeezed below [_kStripMinContentHeight] it swaps to a
+/// vertically scrollable column (with the fader at a fixed height) instead of
+/// collapsing the fader to zero and clipping the dB readout / routing chip /
+/// delete control with a RenderFlex overflow.
+///
+/// Deliberately NOT SingleChildScrollView + IntrinsicHeight: the faders are
+/// LayoutBuilder-based, and LayoutBuilder does not support intrinsic
+/// measurement — every layout would throw in asserts-enabled builds.
+class _StripBody extends StatelessWidget {
+  const _StripBody({required this.builder});
+
+  /// Builds the strip column's children. [squeezed] is true in the scrolling
+  /// fallback, where the fader slot must use a fixed height (see
+  /// [_stripFaderSlot]).
+  final List<Widget> Function(bool squeezed) builder;
 
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
-      builder: (context, constraints) => SingleChildScrollView(
-        child: ConstrainedBox(
-          constraints: BoxConstraints(
-            minHeight: constraints.maxHeight.isFinite
-                ? constraints.maxHeight
-                : 0.0,
+      builder: (context, constraints) {
+        if (constraints.maxHeight >= _kStripMinContentHeight) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: builder(false),
+          );
+        }
+        return SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: builder(true),
           ),
-          child: IntrinsicHeight(child: child),
-        ),
-      ),
+        );
+      },
     );
   }
+}
+
+/// The fader slot inside a strip column: fills the leftover height at normal
+/// dock heights, a fixed (still usable) height in the squeezed scrolling
+/// fallback where the column's height is unbounded.
+Widget _stripFaderSlot({required bool squeezed, required Widget child}) {
+  return squeezed
+      ? SizedBox(height: _kSqueezedFaderHeight, child: child)
+      : Expanded(child: child);
 }
 
 /// A routing chip ("→ Master" / "→ Bus name") that opens a destination menu.
@@ -271,104 +304,102 @@ class _BusChannel extends StatelessWidget {
           ),
         ),
         child: _StripBody(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              Text(
-                bus.name,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  color: accent,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w700,
+          builder: (squeezed) => [
+            Text(
+              bus.name,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: accent,
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 10),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                _Toggle(
+                  label: 'M',
+                  active: bus.muted,
+                  activeColor: Studio.record,
+                  onTap: onMute,
+                ),
+                const SizedBox(width: 6),
+                _Toggle(
+                  label: 'S',
+                  active: bus.soloed,
+                  activeColor: Studio.accent,
+                  onTap: onSolo,
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            StudioPanKnob(
+              value: bus.pan,
+              accent: accent,
+              size: 26,
+              onChanged: onPan,
+              onCommit: onPanCommit,
+            ),
+            const SizedBox(height: 10),
+            _stripFaderSlot(
+              squeezed: squeezed,
+              child: Center(
+                child: SizedBox(
+                  width: 46,
+                  child: _VerticalFader(
+                    value: bus.volume,
+                    accent: accent,
+                    onChanged: onVolume,
+                    onChangeEnd: onVolumeCommit,
+                  ),
                 ),
               ),
-              const SizedBox(height: 10),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  _Toggle(
-                    label: 'M',
-                    active: bus.muted,
-                    activeColor: Studio.record,
-                    onTap: onMute,
-                  ),
-                  const SizedBox(width: 6),
-                  _Toggle(
-                    label: 'S',
-                    active: bus.soloed,
-                    activeColor: Studio.accent,
-                    onTap: onSolo,
-                  ),
-                ],
+            ),
+            const SizedBox(height: 8),
+            Text(
+              '${_Channel._formatDb(bus.volume)} dB',
+              style: const TextStyle(
+                color: Studio.textSecondary,
+                fontSize: 10,
+                fontWeight: FontWeight.w600,
+                fontFeatures: [FontFeature.tabularFigures()],
               ),
-              const SizedBox(height: 10),
-              StudioPanKnob(
-                value: bus.pan,
-                accent: accent,
-                size: 26,
-                onChanged: onPan,
-                onCommit: onPanCommit,
-              ),
-              const SizedBox(height: 10),
-              Expanded(
-                child: Center(
-                  child: SizedBox(
-                    width: 46,
-                    child: _VerticalFader(
-                      value: bus.volume,
-                      accent: accent,
-                      onChanged: onVolume,
-                      onChangeEnd: onVolumeCommit,
+            ),
+            const SizedBox(height: 8),
+            _RouteChip(
+              label: outName,
+              accent: accent,
+              options: [
+                (
+                  label: 'Master',
+                  selected: bus.outputBusId == null,
+                  onTap: () => onRoute(null),
+                ),
+                for (final b in buses)
+                  if (b.id != bus.id)
+                    (
+                      label: b.name,
+                      selected: bus.outputBusId == b.id,
+                      onTap: () => onRoute(b.id),
                     ),
-                  ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            MouseRegion(
+              cursor: SystemMouseCursors.click,
+              child: GestureDetector(
+                onTap: onDelete,
+                child: const Icon(
+                  FIcons.trash2,
+                  size: 14,
+                  color: Studio.textFaint,
                 ),
               ),
-              const SizedBox(height: 8),
-              Text(
-                '${_Channel._formatDb(bus.volume)} dB',
-                style: const TextStyle(
-                  color: Studio.textSecondary,
-                  fontSize: 10,
-                  fontWeight: FontWeight.w600,
-                  fontFeatures: [FontFeature.tabularFigures()],
-                ),
-              ),
-              const SizedBox(height: 8),
-              _RouteChip(
-                label: outName,
-                accent: accent,
-                options: [
-                  (
-                    label: 'Master',
-                    selected: bus.outputBusId == null,
-                    onTap: () => onRoute(null),
-                  ),
-                  for (final b in buses)
-                    if (b.id != bus.id)
-                      (
-                        label: b.name,
-                        selected: bus.outputBusId == b.id,
-                        onTap: () => onRoute(b.id),
-                      ),
-                ],
-              ),
-              const SizedBox(height: 10),
-              MouseRegion(
-                cursor: SystemMouseCursors.click,
-                child: GestureDetector(
-                  onTap: onDelete,
-                  child: const Icon(
-                    FIcons.trash2,
-                    size: 14,
-                    color: Studio.textFaint,
-                  ),
-                ),
-              ),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
     );
@@ -442,48 +473,46 @@ class _MasterChannel extends StatelessWidget {
         border: Border.all(color: Studio.accent.withValues(alpha: 0.4)),
       ),
       child: _StripBody(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.center,
-          children: [
-            const Text(
-              'MASTER',
-              style: TextStyle(
-                color: Studio.accent,
-                fontSize: 11,
-                fontWeight: FontWeight.w700,
-                letterSpacing: 0.5,
-              ),
+        builder: (squeezed) => [
+          const Text(
+            'MASTER',
+            style: TextStyle(
+              color: Studio.accent,
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.5,
             ),
-            // Pad where the M/S row + pan knob sit on a track strip, so the
-            // fader lines up with the channel faders.
-            const SizedBox(height: 92),
-            Expanded(
-              child: Center(
-                child: SizedBox(
-                  width: 46,
-                  child: _VerticalFader(
-                    value: value,
-                    accent: Studio.accent,
-                    onChanged: onVolume,
-                    onChangeEnd: onVolumeCommit,
-                  ),
+          ),
+          // Pad where the M/S row + pan knob sit on a track strip, so the
+          // fader lines up with the channel faders.
+          const SizedBox(height: 92),
+          _stripFaderSlot(
+            squeezed: squeezed,
+            child: Center(
+              child: SizedBox(
+                width: 46,
+                child: _VerticalFader(
+                  value: value,
+                  accent: Studio.accent,
+                  onChanged: onVolume,
+                  onChangeEnd: onVolumeCommit,
                 ),
               ),
             ),
-            const SizedBox(height: 8),
-            Text(
-              '${_Channel._formatDb(value)} dB',
-              style: const TextStyle(
-                color: Studio.textSecondary,
-                fontSize: 10,
-                fontWeight: FontWeight.w600,
-                fontFeatures: [FontFeature.tabularFigures()],
-              ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            '${_Channel._formatDb(value)} dB',
+            style: const TextStyle(
+              color: Studio.textSecondary,
+              fontSize: 10,
+              fontWeight: FontWeight.w600,
+              fontFeatures: [FontFeature.tabularFigures()],
             ),
-            // Pad where the delete button sits on a track strip.
-            const SizedBox(height: 24),
-          ],
-        ),
+          ),
+          // Pad where the delete button sits on a track strip.
+          const SizedBox(height: 24),
+        ],
       ),
     );
   }
@@ -517,81 +546,79 @@ class _MicInputChannel extends StatelessWidget {
             border: Border.all(color: Studio.record.withValues(alpha: 0.4)),
           ),
           child: _StripBody(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.center,
-              children: [
-                const Text(
-                  'MIC',
-                  style: TextStyle(
-                    color: Studio.record,
-                    fontSize: 11,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 0.5,
-                  ),
+            builder: (squeezed) => [
+              const Text(
+                'MIC',
+                style: TextStyle(
+                  color: Studio.record,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.5,
                 ),
-                const SizedBox(height: 8),
-                // Shared input level meter (monitor + record are the same mic).
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(3),
-                  child: SizedBox(
-                    height: 6,
-                    width: double.infinity,
-                    child: ColoredBox(
-                      color: Studio.inset,
-                      child: Align(
-                        alignment: Alignment.centerLeft,
-                        child: ValueListenableBuilder<double>(
-                          valueListenable: vm.inputLevel,
-                          builder: (_, v, _) => FractionallySizedBox(
-                            widthFactor: v.clamp(0.0, 1.0),
-                            heightFactor: 1.0,
-                            child: const ColoredBox(color: Studio.record),
-                          ),
+              ),
+              const SizedBox(height: 8),
+              // Shared input level meter (monitor + record are the same mic).
+              ClipRRect(
+                borderRadius: BorderRadius.circular(3),
+                child: SizedBox(
+                  height: 6,
+                  width: double.infinity,
+                  child: ColoredBox(
+                    color: Studio.inset,
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: ValueListenableBuilder<double>(
+                        valueListenable: vm.inputLevel,
+                        builder: (_, v, _) => FractionallySizedBox(
+                          widthFactor: v.clamp(0.0, 1.0),
+                          heightFactor: 1.0,
+                          child: const ColoredBox(color: Studio.record),
                         ),
                       ),
                     ),
                   ),
                 ),
-                const SizedBox(height: 12),
-                Expanded(
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      Expanded(
-                        child: _FaderColumn(
-                          label: 'REC',
-                          value: recPos,
-                          accent: Studio.record,
-                          readout: '${settings.recordGainDb.round()} dB',
-                          onChanged: (p) => settings.setRecordGainDbLive(
-                            minDb + p * (maxDb - minDb),
-                          ),
-                          onEnd: settings.commitAudioGains,
+              ),
+              const SizedBox(height: 12),
+              _stripFaderSlot(
+                squeezed: squeezed,
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Expanded(
+                      child: _FaderColumn(
+                        label: 'REC',
+                        value: recPos,
+                        accent: Studio.record,
+                        readout: '${settings.recordGainDb.round()} dB',
+                        onChanged: (p) => settings.setRecordGainDbLive(
+                          minDb + p * (maxDb - minDb),
                         ),
+                        onEnd: settings.commitAudioGains,
                       ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: _FaderColumn(
-                          label: 'MON',
-                          enabled: settings.monitorAllowed,
-                          value: settings.monitorAllowed
-                              ? settings.monitorGain
-                              : 0.0,
-                          accent: Studio.accent,
-                          readout: !settings.monitorAllowed
-                              ? 'spkr'
-                              : (settings.monitorGain <= 0.001
-                                    ? 'off'
-                                    : '${(settings.monitorGain * 100).round()}%'),
-                          onChanged: settings.setMonitorGainLive,
-                          onEnd: settings.commitAudioGains,
-                        ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: _FaderColumn(
+                        label: 'MON',
+                        enabled: settings.monitorAllowed,
+                        value: settings.monitorAllowed
+                            ? settings.monitorGain
+                            : 0.0,
+                        accent: Studio.accent,
+                        readout: !settings.monitorAllowed
+                            ? 'spkr'
+                            : (settings.monitorGain <= 0.001
+                                  ? 'off'
+                                  : '${(settings.monitorGain * 100).round()}%'),
+                        onChanged: settings.setMonitorGainLive,
+                        onEnd: settings.commitAudioGains,
                       ),
-                    ],
-                  ),
+                    ),
+                  ],
                 ),
-              ],
-            ),
+              ),
+            ],
           ),
         );
       },
@@ -729,106 +756,104 @@ class _Channel extends StatelessWidget {
           ),
         ),
         child: _StripBody(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              Text(
-                track.displayName,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                textAlign: TextAlign.center,
-                style: const TextStyle(
-                  color: Studio.textPrimary,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w700,
+          builder: (squeezed) => [
+            Text(
+              track.displayName,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: Studio.textPrimary,
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 10),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                _Toggle(
+                  label: 'M',
+                  active: track.muted,
+                  activeColor: Studio.record,
+                  onTap: onMute,
                 ),
-              ),
-              const SizedBox(height: 10),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  _Toggle(
-                    label: 'M',
-                    active: track.muted,
-                    activeColor: Studio.record,
-                    onTap: onMute,
-                  ),
-                  const SizedBox(width: 6),
-                  _Toggle(
-                    label: 'S',
-                    active: track.soloed,
-                    activeColor: Studio.accent,
-                    onTap: onSolo,
-                  ),
-                ],
-              ),
-              const SizedBox(height: 10),
-              StudioPanKnob(
-                value: track.pan,
-                accent: accent,
-                size: 26,
-                onChanged: onPan,
-                onCommit: onPanCommit,
-              ),
-              const SizedBox(height: 10),
-              Expanded(
-                child: Center(
-                  child: SizedBox(
-                    width: 46,
-                    child: _VerticalFader(
-                      value: track.volume,
-                      accent: accent,
-                      onChanged: onVolume,
-                      onChangeEnd: onVolumeCommit,
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                '${_formatDb(track.volume)} dB',
-                style: const TextStyle(
-                  color: Studio.textSecondary,
-                  fontSize: 10,
-                  fontWeight: FontWeight.w600,
-                  fontFeatures: [FontFeature.tabularFigures()],
-                ),
-              ),
-              // Output routing chip — vocal takes only, when buses exist.
-              if (!track.isBacking && buses.isNotEmpty) ...[
-                const SizedBox(height: 8),
-                _RouteChip(
-                  label: _busName(buses, routedBusId),
-                  accent: accent,
-                  options: [
-                    (
-                      label: 'Master',
-                      selected: routedBusId == null,
-                      onTap: () => onRoute(null),
-                    ),
-                    for (final b in buses)
-                      (
-                        label: b.name,
-                        selected: routedBusId == b.id,
-                        onTap: () => onRoute(b.id),
-                      ),
-                  ],
+                const SizedBox(width: 6),
+                _Toggle(
+                  label: 'S',
+                  active: track.soloed,
+                  activeColor: Studio.accent,
+                  onTap: onSolo,
                 ),
               ],
-              const SizedBox(height: 10),
-              MouseRegion(
-                cursor: SystemMouseCursors.click,
-                child: GestureDetector(
-                  onTap: onDelete,
-                  child: const Icon(
-                    FIcons.trash2,
-                    size: 14,
-                    color: Studio.textFaint,
+            ),
+            const SizedBox(height: 10),
+            StudioPanKnob(
+              value: track.pan,
+              accent: accent,
+              size: 26,
+              onChanged: onPan,
+              onCommit: onPanCommit,
+            ),
+            const SizedBox(height: 10),
+            _stripFaderSlot(
+              squeezed: squeezed,
+              child: Center(
+                child: SizedBox(
+                  width: 46,
+                  child: _VerticalFader(
+                    value: track.volume,
+                    accent: accent,
+                    onChanged: onVolume,
+                    onChangeEnd: onVolumeCommit,
                   ),
                 ),
               ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              '${_formatDb(track.volume)} dB',
+              style: const TextStyle(
+                color: Studio.textSecondary,
+                fontSize: 10,
+                fontWeight: FontWeight.w600,
+                fontFeatures: [FontFeature.tabularFigures()],
+              ),
+            ),
+            // Output routing chip — vocal takes only, when buses exist.
+            if (!track.isBacking && buses.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              _RouteChip(
+                label: _busName(buses, routedBusId),
+                accent: accent,
+                options: [
+                  (
+                    label: 'Master',
+                    selected: routedBusId == null,
+                    onTap: () => onRoute(null),
+                  ),
+                  for (final b in buses)
+                    (
+                      label: b.name,
+                      selected: routedBusId == b.id,
+                      onTap: () => onRoute(b.id),
+                    ),
+                ],
+              ),
             ],
-          ),
+            const SizedBox(height: 10),
+            MouseRegion(
+              cursor: SystemMouseCursors.click,
+              child: GestureDetector(
+                onTap: onDelete,
+                child: const Icon(
+                  FIcons.trash2,
+                  size: 14,
+                  color: Studio.textFaint,
+                ),
+              ),
+            ),
+          ],
         ),
       ),
     );

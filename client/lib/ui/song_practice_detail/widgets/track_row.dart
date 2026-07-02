@@ -480,7 +480,7 @@ class MsToggle extends StatelessWidget {
 /// Live recording peaks arrive one per this many ms (matches the ViewModel).
 const int _kRecordIntervalMs = 50;
 
-class _Body extends StatelessWidget {
+class _Body extends StatefulWidget {
   const _Body({
     required this.track,
     required this.timelineDurationMs,
@@ -521,9 +521,31 @@ class _Body extends StatelessWidget {
   final ValueChanged<PracticeNote> onEditNote;
 
   @override
+  State<_Body> createState() => _BodyState();
+}
+
+class _BodyState extends State<_Body> {
+  /// The clip whose move-drag is in flight, if any. That clip is exempt from
+  /// the visibility cull in [build]: unmounting it mid-gesture would dispose
+  /// its drag recognizer, so the end-of-drag commit (persistence + engine
+  /// realign) would never fire.
+  String? _draggingClipId;
+
+  void _setDragging(String clipId, bool active) {
+    setState(() {
+      if (active) {
+        _draggingClipId = clipId;
+      } else if (_draggingClipId == clipId) {
+        _draggingClipId = null;
+      }
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final dur = timelineDurationMs; // the visible span
-    final viewStart = viewStartMs;
+    final track = widget.track;
+    final dur = widget.timelineDurationMs; // the visible span
+    final viewStart = widget.viewStartMs;
     return LayoutBuilder(
       builder: (context, constraints) {
         final width = constraints.maxWidth;
@@ -559,6 +581,23 @@ class _Body extends StatelessWidget {
           );
         }
 
+        // The clip's on-lane box. The actively-dragged clip must stay MOUNTED
+        // even when it leaves the zoomed viewport — culling it would tear down
+        // the drag recognizer mid-gesture, so the commit (persistence + engine
+        // realign) would never fire — so it parks as a 1px sliver just outside
+        // the lane's edge, where the Stack clips it invisible.
+        ({double left, double width, List<double> peaks})? clipBox(
+          AudioClip clip,
+        ) {
+          final v = visible(clip.startMs, clip.durationMs, clip.waveformPeaks);
+          if (v != null || clip.id != _draggingClipId) return v;
+          return (
+            left: clip.endMs <= viewStart ? -1.0 : width,
+            width: 1.0,
+            peaks: const <double>[],
+          );
+        }
+
         return Stack(
           children: [
             // Empty-lane background + grid (bottom of the stack).
@@ -580,43 +619,50 @@ class _Body extends StatelessWidget {
             Positioned.fill(
               child: GestureDetector(
                 behavior: HitTestBehavior.opaque,
-                onTap: onSelect,
-                onSecondaryTapDown: (d) => onContextMenu(d.globalPosition),
+                onTap: widget.onSelect,
+                onSecondaryTapDown: (d) =>
+                    widget.onContextMenu(d.globalPosition),
                 child: const SizedBox.expand(),
               ),
             ),
             // Each clip — its own draggable, selectable, right-clickable block.
+            // Keyed by clip id so the cull can never re-match an in-flight
+            // clip element (and its drag state) onto a NEIGHBORING clip when
+            // an entry leaves the list.
             for (final clip in track.clips)
-              if (visible(clip.startMs, clip.durationMs, clip.waveformPeaks)
-                  case final v?)
+              if (clipBox(clip) case final v?)
                 Positioned(
+                  key: ValueKey(clip.id),
                   left: v.left,
                   top: 3,
                   bottom: 3,
                   width: v.width,
                   child: _ClipRegion(
                     peaks: v.peaks,
-                    color: accent,
+                    color: widget.accent,
                     analyzing: !clip.hasWaveform,
                     selected:
-                        laneSelected &&
-                        (selectedClipId == null || selectedClipId == clip.id),
+                        widget.laneSelected &&
+                        (widget.selectedClipId == null ||
+                            widget.selectedClipId == clip.id),
                     laneWidth: width,
                     timelineDurationMs: dur,
                     clipStartMs: clip.startMs,
-                    onTap: () => onSelectClip(clip.id),
-                    onContextMenu: (pos) => onClipContextMenu(clip.id, pos),
-                    onMoveLive: (ms) => onClipMoveLive(clip.id, ms),
-                    onMoveCommit: onMoveCommit,
+                    onTap: () => widget.onSelectClip(clip.id),
+                    onContextMenu: (pos) =>
+                        widget.onClipContextMenu(clip.id, pos),
+                    onMoveLive: (ms) => widget.onClipMoveLive(clip.id, ms),
+                    onMoveCommit: widget.onMoveCommit,
+                    onDragActive: (active) => _setDragging(clip.id, active),
                   ),
                 ),
             // The forming clip while this lane is the armed recording target.
-            if (recordingPeaks != null)
+            if (widget.recordingPeaks != null)
               ValueListenableBuilder<List<double>>(
-                valueListenable: recordingPeaks!,
+                valueListenable: widget.recordingPeaks!,
                 builder: (context, peaks, _) {
                   final v = visible(
-                    recordingStartMs,
+                    widget.recordingStartMs,
                     peaks.length * _kRecordIntervalMs,
                     peaks,
                   );
@@ -646,15 +692,15 @@ class _Body extends StatelessWidget {
                 left: noteX(note) - 8,
                 bottom: 1,
                 child: _NoteMarker(
-                  color: accent,
-                  onTap: () => onEditNote(note),
+                  color: widget.accent,
+                  onTap: () => widget.onEditNote(note),
                 ),
               ),
             Positioned.fill(
               child: IgnorePointer(
                 child: CustomPaint(
                   painter: PlayheadPainter(
-                    position: position,
+                    position: widget.position,
                     timelineDurationMs: dur,
                     startMs: viewStart,
                     color: Studio.playhead,
@@ -684,6 +730,7 @@ class _ClipRegion extends StatefulWidget {
     required this.onContextMenu,
     required this.onMoveLive,
     required this.onMoveCommit,
+    required this.onDragActive,
   });
 
   final List<double> peaks;
@@ -698,6 +745,10 @@ class _ClipRegion extends StatefulWidget {
   final ValueChanged<int> onMoveLive;
   final VoidCallback onMoveCommit;
 
+  /// Reports drag-in-flight transitions so the lane can exempt this clip from
+  /// its visibility cull while the gesture is live.
+  final ValueChanged<bool> onDragActive;
+
   @override
   State<_ClipRegion> createState() => _ClipRegionState();
 }
@@ -705,6 +756,19 @@ class _ClipRegion extends StatefulWidget {
 class _ClipRegionState extends State<_ClipRegion> {
   int _baseStartMs = 0;
   double _dx = 0;
+  bool _dragging = false;
+
+  /// Commits once per started drag, from BOTH teardown paths (end and cancel):
+  /// a cancelled drag has already applied live moves to the model, so skipping
+  /// the commit would leave persistence and the engine silently diverged from
+  /// what's on screen. The [_dragging] guard keeps a plain tap (whose arena
+  /// loss also fires onHorizontalDragCancel) from committing anything.
+  void _finishDrag() {
+    if (!_dragging) return;
+    _dragging = false;
+    widget.onMoveCommit();
+    widget.onDragActive(false);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -717,6 +781,8 @@ class _ClipRegionState extends State<_ClipRegion> {
         onHorizontalDragStart: (_) {
           _baseStartMs = widget.clipStartMs;
           _dx = 0;
+          _dragging = true;
+          widget.onDragActive(true);
         },
         onHorizontalDragUpdate: (d) {
           final dur = widget.timelineDurationMs;
@@ -725,7 +791,8 @@ class _ClipRegionState extends State<_ClipRegion> {
           _dx += d.delta.dx;
           widget.onMoveLive(_baseStartMs + (_dx / w * dur).round());
         },
-        onHorizontalDragEnd: (_) => widget.onMoveCommit(),
+        onHorizontalDragEnd: (_) => _finishDrag(),
+        onHorizontalDragCancel: _finishDrag,
         child: _Region(
           peaks: widget.peaks,
           color: widget.color,

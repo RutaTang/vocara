@@ -63,6 +63,40 @@ Uint8List _extensibleWavPcm16(Int16List samples, int sr) {
   return b.toBytes();
 }
 
+/// Builds a canonical RIFF/WAVE file with an arbitrary 16-byte `fmt ` chunk
+/// (tag/channels/rate/blockAlign/bits) and raw [data] — for exercising the
+/// header validation with compressed or lying formats.
+Uint8List _wavWithFmt({
+  required int formatTag,
+  required int channels,
+  required int sampleRate,
+  required int blockAlign,
+  required int bits,
+  required Uint8List data,
+}) {
+  final b = BytesBuilder();
+  void str(String s) => b.add(s.codeUnits);
+  void u32(int v) =>
+      b.add((ByteData(4)..setUint32(0, v, Endian.little)).buffer.asUint8List());
+  void u16(int v) =>
+      b.add((ByteData(2)..setUint16(0, v, Endian.little)).buffer.asUint8List());
+  str('RIFF');
+  u32(36 + data.length);
+  str('WAVE');
+  str('fmt ');
+  u32(16);
+  u16(formatTag);
+  u16(channels);
+  u32(sampleRate);
+  u32(sampleRate * blockAlign);
+  u16(blockAlign);
+  u16(bits);
+  str('data');
+  u32(data.length);
+  b.add(data);
+  return b.toBytes();
+}
+
 void main() {
   test('splitWav cuts a take into two parts that rejoin to the original',
       () async {
@@ -180,6 +214,129 @@ void main() {
     final out =
         await edit.concatWav(practiceId: 'p', firstPath: pcm, secondPath: ext);
     expect(readWavMono(await File(out).readAsBytes())!.samples.length, 200);
+  });
+
+  test('splitWav/concatWav reject a compressed (ADPCM) WAV instead of '
+      'byte-splicing it with PCM frame math', () async {
+    // A structurally valid RIFF/WAVE whose fmt tag is MS ADPCM (2): its
+    // blockAlign is a codec block, not a PCM frame, so byte-splicing would
+    // produce silent nonsense. It must hit the "compressed audio" path.
+    final dir = await Directory.systemTemp.createTemp('vocara_adpcm');
+    addTearDown(() => dir.delete(recursive: true));
+
+    final adpcm = _wavWithFmt(
+      formatTag: 2, // WAVE_FORMAT_ADPCM
+      channels: 1,
+      sampleRate: 8000,
+      blockAlign: 256, // a typical ADPCM codec-block size
+      bits: 4,
+      data: Uint8List.fromList(List.filled(4096, 0x55)),
+    );
+    final path = '${dir.path}/adpcm.wav';
+    await File(path).writeAsBytes(adpcm);
+
+    final edit = AudioEditService(files: _TempFiles(dir));
+    expect(
+      () => edit.splitWav(practiceId: 'p', sourcePath: path, splitFileMs: 100),
+      throwsA(isA<FormatException>()),
+    );
+    expect(
+      () => edit.concatWav(practiceId: 'p', firstPath: path, secondPath: path),
+      throwsA(isA<FormatException>()),
+    );
+  });
+
+  test('splitWav rejects an EXTENSIBLE WAV whose SubFormat is not PCM/float',
+      () async {
+    // WAVE_FORMAT_EXTENSIBLE wrapping a compressed SubFormat (ADPCM = 2) must
+    // be rejected just like a plainly-tagged compressed WAV.
+    final dir = await Directory.systemTemp.createTemp('vocara_ext_adpcm');
+    addTearDown(() => dir.delete(recursive: true));
+
+    final bytes = _extensibleWavPcm16(
+      Int16List.fromList(List.filled(4000, 1000)),
+      8000,
+    );
+    // Patch the SubFormat's leading format code (fmt body offset 24; fmt body
+    // starts at byte 20 in this fixed-layout file) from PCM (1) to ADPCM (2).
+    bytes[20 + 24] = 2;
+    final path = '${dir.path}/ext_adpcm.wav';
+    await File(path).writeAsBytes(bytes);
+
+    final edit = AudioEditService(files: _TempFiles(dir));
+    expect(
+      () => edit.splitWav(practiceId: 'p', sourcePath: path, splitFileMs: 100),
+      throwsA(isA<FormatException>()),
+    );
+  });
+
+  test('splitWav rejects a header whose blockAlign lies about the frame size',
+      () async {
+    // Tag says PCM, but blockAlign != channels * bytes/sample: splitting on
+    // such a header would shear every frame after the cut.
+    final dir = await Directory.systemTemp.createTemp('vocara_badalign');
+    addTearDown(() => dir.delete(recursive: true));
+
+    final bad = _wavWithFmt(
+      formatTag: 1,
+      channels: 1,
+      sampleRate: 8000,
+      blockAlign: 3, // PCM16 mono must be 2
+      bits: 16,
+      data: Uint8List.fromList(List.filled(4000, 0)),
+    );
+    final path = '${dir.path}/bad.wav';
+    await File(path).writeAsBytes(bad);
+
+    final edit = AudioEditService(files: _TempFiles(dir));
+    expect(
+      () => edit.splitWav(practiceId: 'p', sourcePath: path, splitFileMs: 100),
+      throwsA(isA<FormatException>()),
+    );
+  });
+
+  test('splitWav still accepts an IEEE-float (format 3) WAV', () async {
+    // The compressed-format rejection must not over-tighten: 32-bit float WAVs
+    // are uncompressed and stay byte-spliceable.
+    final dir = await Directory.systemTemp.createTemp('vocara_float');
+    addTearDown(() => dir.delete(recursive: true));
+
+    const sr = 8000;
+    final data = Uint8List(sr * 4);
+    final dv = ByteData.sublistView(data);
+    for (var i = 0; i < sr; i++) {
+      dv.setFloat32(i * 4, (i / sr) * 2 - 1, Endian.little);
+    }
+    final float = _wavWithFmt(
+      formatTag: 3, // WAVE_FORMAT_IEEE_FLOAT
+      channels: 1,
+      sampleRate: sr,
+      blockAlign: 4,
+      bits: 32,
+      data: data,
+    );
+    final path = '${dir.path}/float.wav';
+    await File(path).writeAsBytes(float);
+
+    final edit = AudioEditService(files: _TempFiles(dir));
+    final parts = await edit.splitWav(
+      practiceId: 'p',
+      sourcePath: path,
+      splitFileMs: 250,
+    );
+    // 250 ms at 8 kHz = 2000 frames * 4 bytes. Data chunk = bytes 44..end for
+    // this fixed canonical layout.
+    final first = await File(parts.firstPath).readAsBytes();
+    final second = await File(parts.secondPath).readAsBytes();
+    expect(first.length - 44, 2000 * 4);
+    expect(second.length - 44, (sr - 2000) * 4);
+    // The float samples survive the byte splice untouched.
+    final fd = ByteData.sublistView(first, 44);
+    expect(fd.getFloat32(0, Endian.little), closeTo(-1.0, 1e-6));
+    expect(
+      fd.getFloat32(1999 * 4, Endian.little),
+      closeTo((1999 / sr) * 2 - 1, 1e-6),
+    );
   });
 
   test('splitWav rejects non-WAV audio', () async {

@@ -170,6 +170,11 @@ class TechniqueDetailViewModel extends ChangeNotifier
     // must be treated as an orphan (deleted), not appended to the now-cleared
     // draft (which would strand its file and show a phantom clip in the read view).
     _draftGeneration++;
+    // Also invalidate a PENDING recording start (still awaiting permission or
+    // the temp dir: _isRecording is false, so the teardown below can't see it).
+    // Without this, cancelling during that window would arm a hot mic in the
+    // read view with no stop affordance.
+    _recordingGeneration++;
     // Releasing edit must release the mic: stop and discard any in-flight
     // example recording (otherwise the mic + capture/level timers run on until
     // the route is popped).
@@ -363,6 +368,13 @@ class TechniqueDetailViewModel extends ChangeNotifier
   /// to arm a hot mic in the read view after teardown.
   bool get starting => _starting;
 
+  /// Bumped whenever an in-flight recording START must be abandoned (edit
+  /// cancelled, edit saved, VM disposed). _beginRecording snapshots it before
+  /// its awaits and arms nothing on a mismatch — mirroring _draftGeneration —
+  /// because a start pending behind the permission/temp-dir awaits has
+  /// _isRecording still false, so the teardown paths can't see or stop it.
+  int _recordingGeneration = 0;
+
   // One-shot user notice from an async recording event (e.g. the input device
   // was disconnected mid-record). The view peeks it, surfaces it as a toast,
   // then clears it.
@@ -385,6 +397,11 @@ class TechniqueDetailViewModel extends ChangeNotifier
   /// into the monitor so the analysis views show the voice in real time while
   /// recording. Returns the temp path, or an error message (path null).
   Future<({String? path, String? error})> _beginRecording(String prefix) async {
+    // Snapshot the recording generation: a Cancel/Save/dispose during the
+    // permission or temp-dir awaits below invalidates this start (bumps the
+    // token) — arming the mic then would leave it hot in the read view with no
+    // stop affordance.
+    final generation = _recordingGeneration;
     if (!await MicPermission.request()) {
       return (
         path: null,
@@ -395,8 +412,12 @@ class TechniqueDetailViewModel extends ChangeNotifier
     }
     // The screen may have been left during the permission await, which disposed
     // the VM but couldn't tear down this not-yet-started recording (_isRecording
-    // is still false). Bail before touching the engine or arming hardware.
-    if (_disposed) return (path: null, error: null);
+    // is still false) — or the edit session this start belonged to was cancelled
+    // or saved (generation bumped). Bail before touching the engine or arming
+    // hardware.
+    if (_disposed || _recordingGeneration != generation) {
+      return (path: null, error: null);
+    }
     final engine = _engine ??= GraphAudioPlaybackService();
     if (!engine.isAvailable) {
       return (
@@ -413,9 +434,10 @@ class TechniqueDetailViewModel extends ChangeNotifier
     if (inUid != null && inUid.isNotEmpty) engine.setInputDevice(inUid);
     final dir = await Directory.systemTemp.createTemp(prefix);
     final path = '${dir.path}/$prefix.wav';
-    // Same guard after the temp-dir await: a dispose in this window can't stop a
-    // recording that hasn't started. Don't arm hardware/timers; drop the temp dir.
-    if (_disposed) {
+    // Same guard after the temp-dir await: a dispose (or a cancelled/saved edit
+    // session) in this window can't stop a recording that hasn't started. Don't
+    // arm hardware/timers; drop the temp dir.
+    if (_disposed || _recordingGeneration != generation) {
       unawaited(_deleteTempDir(path));
       return (path: null, error: null);
     }
@@ -516,6 +538,9 @@ class TechniqueDetailViewModel extends ChangeNotifier
     try {
       final r = await _beginRecording('vocara_practice');
       if (r.error != null) return r.error;
+      // Null path with no error: the start was invalidated mid-await (dispose
+      // or a generation bump). Nothing armed; leave state untouched.
+      if (r.path == null) return null;
       _practiceTempPath = r.path;
       _recordingExample = false;
       _practiceFailed = false;
@@ -593,8 +618,12 @@ class TechniqueDetailViewModel extends ChangeNotifier
   String? _exampleTempPath;
   bool _savingExample = false;
 
-  /// True while the just-recorded example clip is being imported into the draft.
-  bool get savingExample => _savingExample;
+  /// True while the just-recorded example clip is being imported into the draft
+  /// OR while a recording start is pending (permission/temp-dir awaits). The
+  /// screen's saveBlocked reads this, so both windows disable Save: saving
+  /// during a pending start would close the edit and let the mic arm in the
+  /// read view with no stop affordance.
+  bool get savingExample => _savingExample || _starting;
 
   /// Whether an example clip can be recorded right now.
   bool get canRecordExample =>
@@ -610,6 +639,9 @@ class TechniqueDetailViewModel extends ChangeNotifier
     try {
       final r = await _beginRecording('vocara_example');
       if (r.error != null) return r.error;
+      // Null path with no error: the start was invalidated mid-await (dispose
+      // or a generation bump). Nothing armed; leave state untouched.
+      if (r.path == null) return null;
       _exampleTempPath = r.path;
       _recordingExample = true;
       notifyListeners();
@@ -813,6 +845,9 @@ class TechniqueDetailViewModel extends ChangeNotifier
   @override
   void dispose() {
     _disposed = true;
+    // Invalidate any pending recording start (the _disposed guards in
+    // _beginRecording already cover this; the bump mirrors discardMediaDraft).
+    _recordingGeneration++;
     RecordingFinalizer.instance.unregister(_quitFinalize);
     _levelTimer?.cancel();
     _captureTimer?.cancel();
@@ -848,6 +883,17 @@ class TechniqueDetailViewModel extends ChangeNotifier
     ];
     final ok = await _commit(edited.copyWith(media: media));
     if (ok) {
+      // A successful save ends the edit session (the screen leaves edit mode):
+      // invalidate a recording start still pending behind its awaits, and stop
+      // an example recording that armed while the commit was in flight — in the
+      // read view a live example mic would have no stop affordance.
+      _recordingGeneration++;
+      if (_isRecording && _recordingExample) {
+        _endRecordingHardware();
+        _recordingExample = false;
+        await _deleteTempDir(_exampleTempPath);
+        _exampleTempPath = null;
+      }
       for (final path in removedPaths) {
         await _mediaService.deleteMedia(path);
       }

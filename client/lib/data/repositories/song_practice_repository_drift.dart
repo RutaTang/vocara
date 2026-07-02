@@ -257,6 +257,16 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
     final existing = await (db.select(
       db.practices,
     )..where((x) => x.id.equals(p.id))).getSingleOrNull();
+    if (existing != null && existing.deletedAt != null) {
+      // The practice was tombstoned before this save landed (e.g. an in-flight
+      // save racing deletePractice). Continuing would NOT revive the practice
+      // (the update below never clears deleted_at) yet would still commit LIVE
+      // child rows under the tombstoned parent — a journaled zombie subtree.
+      // A deleted aggregate must not be implicitly re-saved: abort the whole
+      // save (the transaction rolls back, no children are written) so the
+      // caller surfaces Result.error, like the pre-upsert-revive PK failure.
+      throw StateError('practice ${p.id} is deleted; refusing to save over it');
+    }
     final hash = SyncWriter.contentHashOf([
       p.title,
       p.timelineDurationMs,

@@ -69,7 +69,10 @@ impl BandSpec {
         // Guard the frequency away from DC and Nyquist for stability.
         let f0 = (self.freq as f64).clamp(10.0, sr * 0.45);
         let q = (self.q as f64).max(0.05);
-        let a = 10f64.powf(self.gain_db as f64 / 40.0); // amplitude, sqrt of linear gain
+        // Guard the gain against corrupt persisted state: the UI clamps to ±15 dB, so ±24 dB
+        // never touches legitimate values but keeps 10^(gain/40) sane if a bad gain slips in.
+        let gain_db = (self.gain_db as f64).clamp(-24.0, 24.0);
+        let a = 10f64.powf(gain_db / 40.0); // amplitude, sqrt of linear gain
         let w0 = 2.0 * std::f64::consts::PI * f0 / sr;
         let cosw = w0.cos();
         let sinw = w0.sin();

@@ -45,6 +45,18 @@ class _WavLayout {
   final int dataLen;
 }
 
+/// Little-endian u16 at [off] within a `fmt ` chunk body (-1 if out of range).
+int _fmtU16(Uint8List f, int off) =>
+    off + 1 < f.length ? f[off] | (f[off + 1] << 8) : -1;
+
+/// The effective sample TYPE: for WAVE_FORMAT_EXTENSIBLE (0xFFFE) it's the
+/// SubFormat GUID's leading format code at fmt offset 24; otherwise the format
+/// tag at offset 0 (1 = integer PCM, 3 = IEEE float).
+int _effFmt(Uint8List f) {
+  final tag = _fmtU16(f, 0);
+  return tag == 0xFFFE ? _fmtU16(f, 24) : tag;
+}
+
 /// Scans a WAV's chunks generically (tolerating extra chunks and
 /// WAVE_FORMAT_EXTENSIBLE). Returns null if it isn't an uncompressed WAV.
 _WavLayout? _parseWav(Uint8List bytes) {
@@ -75,6 +87,23 @@ _WavLayout? _parseWav(Uint8List bytes) {
   if (fmt == null || dataStart < 0 || blockAlign <= 0 || sampleRate <= 0) {
     return null;
   }
+  // Only uncompressed samples can be byte-spliced with PCM frame math. A
+  // compressed RIFF payload (ADPCM / mp3-in-WAV / mu-law) parses the same
+  // chunks, but its blockAlign is a codec block, not a PCM frame — splitting
+  // it mid-block would produce silent nonsense. Returning null routes such
+  // files to the callers' "compressed audio" FormatException.
+  final eff = _effFmt(fmt);
+  if (eff != 1 && eff != 3) return null;
+  // Sanity-check the frame layout: an uncompressed blockAlign is exactly
+  // channels * ceil(bits / 8); anything else is a lying header whose frame
+  // math would shear every frame after the first cut.
+  final channels = _fmtU16(fmt, 2);
+  final bits = _fmtU16(fmt, 14);
+  if (channels <= 0 ||
+      bits <= 0 ||
+      blockAlign != channels * ((bits + 7) ~/ 8)) {
+    return null;
+  }
   return _WavLayout(fmt, sampleRate, blockAlign, dataStart, dataLen);
 }
 
@@ -84,23 +113,14 @@ _WavLayout? _parseWav(Uint8List bytes) {
 /// PCM vs WAVE_FORMAT_EXTENSIBLE of the same actual format) since the PCM bytes
 /// are interpreted identically. Channels live at fmt offset 2, bits at 14.
 bool _compatibleForMerge(_WavLayout a, _WavLayout b) {
-  int u16(Uint8List f, int off) =>
-      off + 1 < f.length ? f[off] | (f[off + 1] << 8) : -1;
-  // The effective sample TYPE: for WAVE_FORMAT_EXTENSIBLE (0xFFFE) it's the SubFormat
-  // GUID's leading format code at fmt offset 24; otherwise the format tag at offset 0
-  // (1 = integer PCM, 3 = IEEE float). Comparing this — not just rate/channels/bits —
-  // stops a 32-bit int WAV and a 32-bit float WAV (same rate/channels/depth) from merging
-  // into reinterpreted noise, while still allowing plain PCM vs EXTENSIBLE-PCM of the same
-  // actual format (both resolve to 1).
-  int effFmt(Uint8List f) {
-    final tag = u16(f, 0);
-    return tag == 0xFFFE ? u16(f, 24) : tag;
-  }
-
+  // Comparing the effective format — not just rate/channels/bits — stops a
+  // 32-bit int WAV and a 32-bit float WAV (same rate/channels/depth) from
+  // merging into reinterpreted noise, while still allowing plain PCM vs
+  // EXTENSIBLE-PCM of the same actual format (both resolve to 1).
   return a.sampleRate == b.sampleRate &&
-      u16(a.fmt, 2) == u16(b.fmt, 2) &&
-      u16(a.fmt, 14) == u16(b.fmt, 14) &&
-      effFmt(a.fmt) == effFmt(b.fmt);
+      _fmtU16(a.fmt, 2) == _fmtU16(b.fmt, 2) &&
+      _fmtU16(a.fmt, 14) == _fmtU16(b.fmt, 14) &&
+      _effFmt(a.fmt) == _effFmt(b.fmt);
 }
 
 Uint8List _buildWav(Uint8List fmt, Uint8List data) {

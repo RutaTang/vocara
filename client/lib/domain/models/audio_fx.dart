@@ -69,8 +69,12 @@ class EqBand {
     return EqBand(
       kind: kind,
       freq: (j['freq'] as num?)?.toDouble() ?? defaultFreq,
-      q: (j['q'] as num?)?.toDouble() ?? 1.0,
-      gainDb: (j['gainDb'] as num?)?.toDouble() ?? 0.0,
+      // Clamp on load (see ReverbSettings): q to the EQ graph's scroll-edit
+      // range (0.3..14 in fx_panel.dart) and gainDb to the graph's editable
+      // ±15 dB (_eqMaxDb) — a shelf amplitude of 10^(gainDb/40) with an absurd
+      // stored gain would otherwise blow the engine's filter up.
+      q: ((j['q'] as num?)?.toDouble() ?? 1.0).clamp(0.3, 14.0),
+      gainDb: ((j['gainDb'] as num?)?.toDouble() ?? 0.0).clamp(-15.0, 15.0),
       enabled: j['enabled'] as bool? ?? true,
     );
   }
@@ -122,20 +126,22 @@ class CompSettings {
 
   // Clamp on load (like ReverbSettings): a synced / migrated / hand-edited value
   // outside the editable range must not reach the engine verbatim (ratio < 1 is
-  // invalid; absurd times destabilize the envelope follower).
+  // invalid; absurd times destabilize the envelope follower). Threshold / ratio /
+  // makeup bounds mirror the panel sliders in fx_panel.dart; knee / attack /
+  // release have no editor, so they keep engine-safe bounds.
   factory CompSettings.fromJson(Map<String, dynamic> j) => CompSettings(
     thresholdDb: ((j['thresholdDb'] as num?)?.toDouble() ?? -18.0).clamp(
-      -60.0,
+      -48.0,
       0.0,
     ),
-    ratio: ((j['ratio'] as num?)?.toDouble() ?? 3.0).clamp(1.0, 20.0),
+    ratio: ((j['ratio'] as num?)?.toDouble() ?? 3.0).clamp(1.0, 12.0),
     kneeDb: ((j['kneeDb'] as num?)?.toDouble() ?? 6.0).clamp(0.0, 24.0),
     attackMs: ((j['attackMs'] as num?)?.toDouble() ?? 10.0).clamp(0.1, 500.0),
     releaseMs: ((j['releaseMs'] as num?)?.toDouble() ?? 120.0).clamp(
       1.0,
       5000.0,
     ),
-    makeupDb: ((j['makeupDb'] as num?)?.toDouble() ?? 0.0).clamp(0.0, 24.0),
+    makeupDb: ((j['makeupDb'] as num?)?.toDouble() ?? 0.0).clamp(0.0, 18.0),
   );
 }
 
@@ -348,7 +354,9 @@ class TrackSend {
     // Guard against a null/missing busId (partial or hand-edited JSON): an empty
     // id resolves to no bus (routes to master) instead of throwing on load.
     busId: j['busId'] as String? ?? '',
-    levelDb: (j['levelDb'] as num?)?.toDouble() ?? 0.0,
+    // Clamp on load (see TrackFx.sendDb): a send is a dB level in
+    // [kSendOffDb, 0]; a hand-edited positive value would over-drive the bus.
+    levelDb: ((j['levelDb'] as num?)?.toDouble() ?? 0.0).clamp(kSendOffDb, 0.0),
   );
 }
 
@@ -564,9 +572,13 @@ class TrackFx {
           ])
         : _flatBands;
     final orderJson = j['order'] as List?;
+    // Skip unknown kind names (e.g. a plugin added by a newer schema) instead
+    // of aliasing them to eq: _normalizeOrder must genuinely drop them, and its
+    // append-missing pass restores any absent known kind at its default slot.
+    final kindByName = FxKind.values.asNameMap();
     final order = _normalizeOrder([
       for (final e in orderJson ?? const [])
-        FxKind.values.firstWhere((k) => k.name == e, orElse: () => FxKind.eq),
+        if (kindByName[e] != null) kindByName[e]!,
     ]);
     return TrackFx(
       eq: eq,

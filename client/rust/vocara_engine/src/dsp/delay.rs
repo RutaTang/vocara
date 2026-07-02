@@ -18,6 +18,10 @@ pub struct DelayNode {
     buf_l: Vec<Smp>,
     buf_r: Vec<Smp>,
     pos: usize,
+    /// Ring entries still holding pre-bypass audio, counted down while bypassed as process()
+    /// progressively overwrites them with silence (see the bypass branch). Re-armed to the
+    /// full line length on every active→bypassed transition.
+    stale: usize,
     time_ms: f32,
     feedback: f32,
     mix: f32,
@@ -32,6 +36,7 @@ impl DelayNode {
             buf_l: vec![0.0; len],
             buf_r: vec![0.0; len],
             pos: 0,
+            stale: 0,
             time_ms: 300.0,
             feedback: 0.3,
             mix: 0.0,
@@ -54,6 +59,7 @@ impl Node for DelayNode {
         self.buf_l = vec![0.0; len];
         self.buf_r = vec![0.0; len];
         self.pos = 0;
+        self.stale = 0; // freshly zeroed line
     }
 
     fn process(&mut self, io: &mut ProcessIo) {
@@ -70,6 +76,23 @@ impl Node for DelayNode {
             }
         }
         if self.bypass {
+            // Progressively overwrite the ring with silence while bypassed (bounded per-block
+            // work — set_param runs on the audio thread, so an unbounded clear there would
+            // violate RT safety). After one full line length of bypassed frames the ring is
+            // clean, so re-activating never replays pre-bypass audio as a one-shot ghost
+            // echo; a shorter toggle keeps natural tail continuity (the un-cleared region is
+            // exactly what a never-bypassed line would still be reading).
+            let len = self.buf_l.len();
+            if len == 0 || self.stale == 0 {
+                return;
+            }
+            let clear = frames.min(self.stale);
+            for _ in 0..clear {
+                self.buf_l[self.pos] = 0.0;
+                self.buf_r[self.pos] = 0.0;
+                self.pos = (self.pos + 1) % len;
+            }
+            self.stale -= clear;
             return;
         }
 
@@ -100,7 +123,14 @@ impl Node for DelayNode {
             param::TIME_MS => self.time_ms = value.clamp(1.0, (MAX_SECONDS * 1000.0) as f32),
             param::FEEDBACK => self.feedback = value.clamp(0.0, 0.98),
             param::MIX => self.mix = value.clamp(0.0, 1.0),
-            param::BYPASS => self.bypass = value >= 0.5,
+            param::BYPASS => {
+                let bypass = value >= 0.5;
+                if bypass && !self.bypass {
+                    // Entering bypass: schedule the progressive ring clear (see process).
+                    self.stale = self.buf_l.len();
+                }
+                self.bypass = bypass;
+            }
             _ => {}
         }
     }
@@ -115,5 +145,6 @@ impl Node for DelayNode {
             *s = 0.0;
         }
         self.pos = 0;
+        self.stale = 0;
     }
 }

@@ -522,6 +522,85 @@ void main() {
     },
   );
 
+  test(
+    'voicing gate survives median smoothing: no F0/formants painted onto a '
+    'mid-take silence gap',
+    () {
+      const fft = 2048, hop = 512; // computeVoiceMetrics defaults
+      final vowel = _vowel(700, 1200, 2600, f0: 200, sec: 0.7);
+      final gapLen = (_sr * 0.35).round();
+      final n = vowel.length * 2 + gapLen;
+      final samples = Float64List(n)
+        ..setRange(0, vowel.length, vowel)
+        ..setRange(vowel.length + gapLen, n, vowel);
+      final m = computeVoiceMetrics(samples, _sr);
+
+      // Frames whose analysis window lies FULLY inside the gap are pure
+      // silence: the gate must keep them NaN even though the ±2-frame median
+      // bridges NaN dropouts on voiced frames (the voicing mask is re-applied
+      // after smoothing).
+      final firstFull = (vowel.length / hop).ceil();
+      final lastFull = (vowel.length + gapLen - fft) ~/ hop;
+      expect(
+        lastFull - firstFull,
+        greaterThan(10),
+        reason: 'the gap should span many frames',
+      );
+      for (var fr = firstFull; fr <= lastFull; fr++) {
+        expect(m.f0[fr].isNaN, isTrue, reason: 'f0 painted onto silence @$fr');
+        expect(m.f1[fr].isNaN, isTrue, reason: 'f1 painted onto silence @$fr');
+        expect(
+          m.h1h2[fr].isNaN,
+          isTrue,
+          reason: 'h1h2 painted onto silence @$fr',
+        );
+      }
+      // Sanity: the voiced regions themselves do carry pitch.
+      expect(
+        [for (var fr = 10; fr < 40; fr++) m.f0[fr]].any((v) => !v.isNaN),
+        isTrue,
+      );
+    },
+  );
+
+  test(
+    'median smoothing bridges measurement dropouts on VOICED frames '
+    '(h1h2 holes from 2·F0 crossing Nyquist are filled)',
+    () {
+      // A pure FM sine around 1000 Hz at sr 4000: every frame is loud and
+      // periodic (voiced) and F0 stays in-band, but H1−H2 is only measurable
+      // while 2·F0 < Nyquist (est. F0 < 1000 Hz). The slow FM therefore
+      // punches deterministic few-frame NaN holes into the raw h1h2 track on
+      // VOICED frames — exactly the measurement dropouts the ±2-frame median
+      // must bridge (while the previous test pins that gate-NaN stays NaN).
+      const sr = 4000;
+      final n = sr * 2;
+      final samples = Float64List(n);
+      var phase = 0.0;
+      for (var i = 0; i < n; i++) {
+        final hz = 1000 + 60 * sin(2 * pi * 5 * i / sr);
+        phase += 2 * pi * hz / sr;
+        samples[i] = 0.7 * sin(phase);
+      }
+      final m = computeVoiceMetrics(samples, sr, fftSize: 512, hop: 128);
+
+      // Interior frames only (the zero-padded edge windows may gate unvoiced).
+      var voiced = 0, h1h2Finite = 0;
+      for (var fr = 3; fr < m.frames - 3; fr++) {
+        if (!m.f0[fr].isNaN) voiced++;
+        if (!m.h1h2[fr].isNaN) h1h2Finite++;
+      }
+      expect(
+        voiced,
+        greaterThan(((m.frames - 6) * 0.9).round()),
+        reason: 'the tone should be voiced throughout',
+      );
+      // Without bridging, only the below-1000 Hz half of each FM cycle carries
+      // h1h2 (~50% of voiced frames); with dropout bridging nearly all do.
+      expect(h1h2Finite, greaterThan((voiced * 0.8).round()));
+    },
+  );
+
   test('frame count matches the spectrogram framing (alignment invariant)', () {
     // Any non-empty take: the formant overlay and per-frame playhead read must
     // line up with the spectrogram columns. (len==0 is the one pathological case

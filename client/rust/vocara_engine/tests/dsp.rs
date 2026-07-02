@@ -5,11 +5,42 @@ use common::*;
 
 use vocara_engine::dsp::biquad::{BandKind, BandSpec, EqNode};
 use vocara_engine::dsp::compressor::{param as cparam, CompressorNode};
+use vocara_engine::dsp::delay::{param as dlparam, DelayNode};
+use vocara_engine::dsp::doubler::{param as dbparam, DoublerNode};
 use vocara_engine::dsp::gain_pan::{param as gparam, GainPanNode};
 use vocara_engine::dsp::reverb::ReverbNode;
-use vocara_engine::Node;
+use vocara_engine::{Node, ProcessIo, CHANNELS};
 
 const SR: f64 = 48_000.0;
+
+/// Drive an already-prepared node over one phase of interleaved-stereo input WITHOUT
+/// re-preparing (`run_node` calls `prepare`, which reallocates the delay lines and would wipe
+/// exactly the cross-phase ring state the bypass-ghost tests below must observe).
+fn run_phase(node: &mut dyn Node, input: &[f32], sr: f64, block: usize) -> Vec<f32> {
+    let total_frames = input.len() / CHANNELS;
+    let mut out = vec![0.0; input.len()];
+    let mut f = 0;
+    while f < total_frames {
+        let n = block.min(total_frames - f);
+        let in_slice = &input[f * CHANNELS..(f + n) * CHANNELS];
+        let mut out_buf = vec![0.0; n * CHANNELS];
+        {
+            let inputs: [&[f32]; 1] = [in_slice];
+            let mut outs: [&mut [f32]; 1] = [&mut out_buf[..]];
+            let mut io = ProcessIo {
+                inputs: &inputs,
+                outputs: &mut outs[..],
+                frames: n,
+                tl: f as i64,
+                sr,
+            };
+            node.process(&mut io);
+        }
+        out[f * CHANNELS..(f + n) * CHANNELS].copy_from_slice(&out_buf);
+        f += n;
+    }
+    out
+}
 
 #[test]
 fn eq_flat_is_identity() {
@@ -148,19 +179,94 @@ fn reverb_silence_in_silence_out_no_denormal_blowup() {
 
 #[test]
 fn gain_pan_scales_and_pans() {
-    // Gain 0.5, center. Equal-power (-3 dB) pan law: center => 0.707/channel, so a
-    // mono-duplicated signal measures 0.5 * 0.7071 ≈ 0.3536 per channel.
+    // Gain 0.5, center. Attenuate-only balance law: center is UNITY on both channels, so a
+    // mono-duplicated signal measures exactly the 0.5 gain per channel. (Center unity is
+    // load-bearing for the graph: one pan node per routing hop must not stack -3 dB per hop,
+    // and the un-panned shared reverb return must level-match the panned dry path.)
     let mut g = GainPanNode::new(0.5, 0.0);
     let input = to_stereo(&sine_mono(440.0, SR, 4000, 0.8));
     let out = run_node(&mut g, &input, SR, 256);
     let ratio = rms(&out[out.len() / 2..]) / rms(&input[input.len() / 2..]);
-    assert!((ratio - 0.3536).abs() < 0.02, "gain 0.5 * -3dB center ≈ 0.3536, got {ratio}");
+    assert!((ratio - 0.5).abs() < 0.02, "gain 0.5 at center-unity pan ≈ 0.5, got {ratio}");
 
-    // Hard left: right channel silent. Pan ramps over ~10 ms (click-free), so measure the
-    // settled tail (last 10%) rather than mid-buffer where the smoother is still moving.
+    // Hard left: right channel silent, left stays at unity (attenuate-only: the kept side is
+    // never cut). Pan ramps over ~10 ms (click-free), so measure the settled tail (last 10%)
+    // rather than mid-buffer where the smoother is still moving.
     let mut gl = GainPanNode::new(1.0, 0.0);
     gl.set_param(gparam::PAN, -1.0);
     let out2 = run_node(&mut gl, &input, SR, 256);
-    let r = rms(&right(&out2[out2.len() * 9 / 10..]));
+    let tail = &out2[out2.len() * 9 / 10..];
+    let in_tail = &input[input.len() * 9 / 10..];
+    let r = rms(&right(tail));
     assert!(r < 1e-3, "hard-left pan should silence the right channel, got {r}");
+    let l_ratio = rms(&left(tail)) / rms(&left(in_tail));
+    assert!(
+        (l_ratio - 1.0).abs() < 0.02,
+        "hard-left pan keeps the left channel at unity, got {l_ratio}"
+    );
+}
+
+/// Toggling the delay to bypass and back must not replay pre-bypass ring audio as a one-shot
+/// ghost echo. The bypassed process() progressively zeroes the ring (bounded per-block work —
+/// set_param runs on the audio thread, so it cannot memset the ~2 s line itself); after one
+/// full line length of bypassed frames the ring is clean.
+#[test]
+fn delay_bypass_toggle_does_not_replay_stale_tail() {
+    let block = 256usize;
+    let mut d = DelayNode::new();
+    d.prepare(SR, block);
+    d.set_param(dlparam::BYPASS, 0.0); // active (the node constructs bypassed)
+    d.set_param(dlparam::TIME_MS, 50.0);
+    d.set_param(dlparam::FEEDBACK, 0.0);
+    d.set_param(dlparam::MIX, 1.0); // full wet: any stale ring content is fully audible
+
+    // Phase A (active): fill the ring with a loud tone.
+    let tone = to_stereo(&sine_mono(440.0, SR, 24_000, 0.8));
+    run_phase(&mut d, &tone, SR, block);
+
+    // Phase B (bypassed): dry passthrough must stay bit-exact while the ring is being
+    // cleared. One full line length (2 s at 48 kHz) of bypassed frames cleans it entirely.
+    d.set_param(dlparam::BYPASS, 1.0);
+    let dry = to_stereo(&sine_mono(440.0, SR, 96_000, 0.8));
+    let out_b = run_phase(&mut d, &dry, SR, block);
+    let max_err = dry
+        .iter()
+        .zip(out_b.iter())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    assert!(max_err < 1e-6, "bypassed delay must pass the dry input through, err {max_err}");
+
+    // Phase C (re-activated, silent input): the wet path must be silent. Before the fix the
+    // ring still held phase A's tone and replayed ~TIME_MS of it as a ghost echo.
+    d.set_param(dlparam::BYPASS, 0.0);
+    let out_c = run_phase(&mut d, &vec![0.0f32; 24_000 * CHANNELS], SR, block);
+    let ghost = rms(&out_c);
+    assert!(ghost < 1e-6, "stale pre-bypass audio replayed as a ghost echo, rms={ghost}");
+}
+
+/// Same ghost-echo guard for the doubler's modulated delay lines (its bypass branch mirrors
+/// the delay's progressive clear).
+#[test]
+fn doubler_bypass_toggle_does_not_replay_stale_tail() {
+    let block = 256usize;
+    let mut db = DoublerNode::new();
+    db.prepare(SR, block);
+    db.set_param(dbparam::BYPASS, 0.0); // active (the node constructs bypassed)
+    db.set_param(dbparam::DELAY_MS, 30.0);
+    db.set_param(dbparam::DEPTH_MS, 0.0); // fixed read tap: the ghost window is deterministic
+    db.set_param(dbparam::MIX, 1.0);
+
+    // Phase A (active): fill the lines with a loud tone.
+    let tone = to_stereo(&sine_mono(440.0, SR, 12_000, 0.8));
+    run_phase(&mut db, &tone, SR, block);
+
+    // Phase B (bypassed): one full line length (0.1 s => 4800 frames) clears the lines.
+    db.set_param(dbparam::BYPASS, 1.0);
+    run_phase(&mut db, &vec![0.0f32; 4_800 * CHANNELS], SR, block);
+
+    // Phase C (re-activated, silent input): the wet copy must be silent, not phase A's tone.
+    db.set_param(dbparam::BYPASS, 0.0);
+    let out_c = run_phase(&mut db, &vec![0.0f32; 9_600 * CHANNELS], SR, block);
+    let ghost = rms(&out_c);
+    assert!(ghost < 1e-6, "stale pre-bypass audio replayed as a ghost, rms={ghost}");
 }

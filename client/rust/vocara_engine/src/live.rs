@@ -359,9 +359,17 @@ impl EngineHandle {
         self.reap();
     }
 
-    /// Free any retired graphs whose grace epoch has elapsed. Safe to call anytime on the
-    /// control thread.
+    /// Free any retired graphs whose grace epoch has elapsed, and drain any parameter
+    /// commands a previous [`flush`](Self::flush) left pending against a full ring. Safe to
+    /// call anytime on the control thread.
     pub fn reap(&mut self) {
+        // Re-flush leftovers from an overflowed flush (e.g. a post-rebuild parameter storm
+        // exceeding the ring capacity). This sits on the control-plane hot path — the FFI
+        // frame-position getter calls reap() while the UI polls the playhead — so the tail
+        // of a storm finishes delivering within milliseconds during playback instead of
+        // waiting for the next user edit. Cheap no-op when nothing is pending.
+        self.cmd_tx.flush();
+
         let now = self.shared.blocks.load(Ordering::Acquire);
         let mut i = 0;
         while i < self.retired.len() {

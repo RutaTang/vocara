@@ -20,6 +20,9 @@ pub struct DoublerNode {
     buf_l: Vec<Smp>,
     buf_r: Vec<Smp>,
     pos: usize,
+    /// Ring entries still holding pre-bypass audio, counted down while bypassed as process()
+    /// progressively overwrites them with silence (mirrors DelayNode's ghost-echo guard).
+    stale: usize,
     phase_l: f32,
     phase_r: f32,
     delay_ms: f32,
@@ -37,6 +40,7 @@ impl DoublerNode {
             buf_l: vec![0.0; len],
             buf_r: vec![0.0; len],
             pos: 0,
+            stale: 0,
             phase_l: 0.0,
             phase_r: std::f32::consts::PI, // L/R out of phase for width
             delay_ms: 18.0,
@@ -73,6 +77,7 @@ impl Node for DoublerNode {
         self.buf_l = vec![0.0; len];
         self.buf_r = vec![0.0; len];
         self.pos = 0;
+        self.stale = 0; // freshly zeroed lines
     }
 
     fn process(&mut self, io: &mut ProcessIo) {
@@ -89,6 +94,21 @@ impl Node for DoublerNode {
             }
         }
         if self.bypass {
+            // Progressively overwrite the delay lines with silence while bypassed (bounded
+            // per-block work; set_param runs on the audio thread, so no unbounded clear
+            // there). Re-activating then never replays stale pre-bypass audio as a ghost.
+            // Mirrors DelayNode's bypass branch.
+            let len = self.buf_l.len();
+            if len == 0 || self.stale == 0 {
+                return;
+            }
+            let clear = frames.min(self.stale);
+            for _ in 0..clear {
+                self.buf_l[self.pos] = 0.0;
+                self.buf_r[self.pos] = 0.0;
+                self.pos = (self.pos + 1) % len;
+            }
+            self.stale -= clear;
             return;
         }
         let len = self.buf_l.len();
@@ -130,7 +150,14 @@ impl Node for DoublerNode {
             param::DEPTH_MS => self.depth_ms = value.clamp(0.0, 20.0),
             param::RATE_HZ => self.rate_hz = value.clamp(0.05, 8.0),
             param::MIX => self.mix = value.clamp(0.0, 1.0),
-            param::BYPASS => self.bypass = value >= 0.5,
+            param::BYPASS => {
+                let bypass = value >= 0.5;
+                if bypass && !self.bypass {
+                    // Entering bypass: schedule the progressive line clear (see process).
+                    self.stale = self.buf_l.len();
+                }
+                self.bypass = bypass;
+            }
             _ => {}
         }
     }
@@ -145,6 +172,7 @@ impl Node for DoublerNode {
             *s = 0.0;
         }
         self.pos = 0;
+        self.stale = 0;
         self.phase_l = 0.0;
         self.phase_r = std::f32::consts::PI;
     }

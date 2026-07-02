@@ -813,17 +813,50 @@ unsafe fn dev_set_u32(dev: u32, sel: u32, scope: u32, v: u32) -> i32 {
     }
 }
 
+/// Whether `dev` can actually play audio: probes `kAudioDevicePropertyStreams` on the OUTPUT scope.
+/// A failed query or an empty stream list both mean "not an output device" (e.g. an input-only USB
+/// mic), so the output leg must be attributed to the default output device instead. Not RT — called
+/// only during `start`.
+unsafe fn has_output_streams(dev: u32) -> bool {
+    use objc2_core_audio::{
+        kAudioDevicePropertyStreams, kAudioObjectPropertyElementMain,
+        kAudioObjectPropertyScopeOutput, AudioObjectGetPropertyDataSize,
+        AudioObjectPropertyAddress,
+    };
+    let addr = AudioObjectPropertyAddress {
+        mSelector: kAudioDevicePropertyStreams,
+        mScope: kAudioObjectPropertyScopeOutput,
+        mElement: kAudioObjectPropertyElementMain,
+    };
+    let mut size: u32 = 0;
+    let st = AudioObjectGetPropertyDataSize(
+        dev,
+        NonNull::from(&addr),
+        0,
+        std::ptr::null(),
+        NonNull::from(&mut size),
+    );
+    st == 0 && size > 0
+}
+
 /// Request a small IO buffer on the device(s) the VPIO unit binds (cuts monitor/record latency and
 /// keeps the speaker→mic echo inside the AEC's filter), and return the estimated record round-trip
 /// in frames: ACOUSTIC flight + each leg's (buffer + safety offset + hardware latency). The AEC's
 /// own block latency is added by the caller. Used to time-align recorded takes on the timeline.
 ///
 /// `device_uid` is the mic the caller is about to bind (via `kAudioOutputUnitProperty_CurrentDevice`
-/// below). When it resolves, VPIO uses that SINGLE device for both the input and output legs (a
-/// communication endpoint), so both scopes are measured on it — a non-default mic has its own
-/// buffer/latency/safety, and measuring the system defaults instead misaligns takes. When it does
-/// NOT resolve, VPIO falls back to the system default INPUT for capture and default OUTPUT for
-/// playback (two distinct devices), so each leg is measured on its own default, as before.
+/// below). Decision logic per leg:
+/// - UID resolves to a DUPLEX device (it has output streams, e.g. a USB interface or headset):
+///   VPIO uses that SINGLE device for both legs (a communication endpoint), so both scopes are
+///   measured on it — a non-default mic has its own buffer/latency/safety, and measuring the
+///   system defaults instead misaligns takes.
+/// - UID resolves to an INPUT-ONLY mic (e.g. a USB mic played through the built-in speakers):
+///   VPIO still renders through the system default OUTPUT device, so the output leg is measured
+///   (and its IO buffer tuned) on that default. Measuring the output scope on the input-only mic
+///   instead would silently drop the speaker's real buffer + latency + safety offset — hundreds
+///   of frames on MacBook speakers — because those queries fail and fall back to 0.
+/// - UID does NOT resolve: VPIO falls back to the system default INPUT for capture and default
+///   OUTPUT for playback (two distinct devices), so each leg is measured on its own default.
 fn tune_io_and_round_trip(device_uid: Option<&str>) -> u32 {
     use objc2_core_audio::{
         kAudioDevicePropertyBufferFrameSize, kAudioDevicePropertyLatency,
@@ -836,29 +869,33 @@ fn tune_io_and_round_trip(device_uid: Option<&str>) -> u32 {
     const ACOUSTIC_FRAMES: u32 = 64;
     let mut round_trip = ACOUSTIC_FRAMES;
     unsafe {
-        // Resolve the device the VPIO unit will actually bind. Some(dev) → one duplex device serves
-        // both legs; None → measure each leg on its respective system default (the unbound case).
+        // Resolve the device the VPIO unit will actually bind, then assign each leg per the doc
+        // comment above: a duplex bound device serves BOTH legs; an input-only bound mic serves
+        // only the input leg (VPIO plays through the default OUTPUT device, which must still be
+        // tuned and measured); unbound falls back to the system defaults for both legs.
+        let default_dev = |sel: u32| {
+            dev_get_u32(kAudioObjectSystemObject as u32, sel, kAudioObjectPropertyScopeGlobal)
+        };
         let bound = device_uid.and_then(device_id_for_uid);
         let legs: [(Option<u32>, u32); 2] = match bound {
-            Some(dev) => [
+            Some(dev) if has_output_streams(dev) => [
                 (Some(dev), kAudioObjectPropertyScopeInput),
                 (Some(dev), kAudioObjectPropertyScopeOutput),
             ],
+            Some(dev) => [
+                (Some(dev), kAudioObjectPropertyScopeInput),
+                (
+                    default_dev(kAudioHardwarePropertyDefaultOutputDevice),
+                    kAudioObjectPropertyScopeOutput,
+                ),
+            ],
             None => [
                 (
-                    dev_get_u32(
-                        kAudioObjectSystemObject as u32,
-                        kAudioHardwarePropertyDefaultInputDevice,
-                        kAudioObjectPropertyScopeGlobal,
-                    ),
+                    default_dev(kAudioHardwarePropertyDefaultInputDevice),
                     kAudioObjectPropertyScopeInput,
                 ),
                 (
-                    dev_get_u32(
-                        kAudioObjectSystemObject as u32,
-                        kAudioHardwarePropertyDefaultOutputDevice,
-                        kAudioObjectPropertyScopeGlobal,
-                    ),
+                    default_dev(kAudioHardwarePropertyDefaultOutputDevice),
                     kAudioObjectPropertyScopeOutput,
                 ),
             ],

@@ -293,19 +293,24 @@ class GraphAudioPlaybackService implements PlaybackEngine {
   }
 
   /// Record the live input (selected device) to a mono 48 kHz WAV at [path].
-  void startInputRecording(String path) {
-    if (!_available) return;
+  /// Returns false when the engine could not create the file (disk full /
+  /// permissions), in which case nothing will be recorded.
+  bool startInputRecording(String path) {
+    if (!_available) return false;
     final cp = path.toNativeUtf8();
     try {
-      _bindings.ve_start_input_recording(_engine, cp.cast());
+      return _bindings.ve_start_input_recording(_engine, cp.cast()) == 0;
     } finally {
       malloc.free(cp);
     }
   }
 
-  /// Stop the input recording (finalizes the WAV).
-  void stopInputRecording() {
-    if (_available) _bindings.ve_stop_input_recording(_engine);
+  /// Stop the input recording (finalizes the WAV). Returns false when an IO
+  /// error occurred during the recording, meaning the WAV on disk is missing,
+  /// damaged, or incomplete.
+  bool stopInputRecording() {
+    if (!_available) return false;
+    return _bindings.ve_stop_input_recording(_engine) == 0;
   }
 
   @override

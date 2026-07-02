@@ -22,7 +22,10 @@ class Hlc implements Comparable<Hlc> {
 
   /// A fixed-width, lexicographically comparable encoding whose string order is
   /// exactly the tuple order — stored next to each row as the hot-path LWW key
-  /// so a conflict is a single `packed < packed` comparison.
+  /// so a conflict is a single `packed < packed` comparison. The counter field
+  /// is fixed at 6 digits: [HlcClock] never emits a counter above
+  /// [HlcClock.maxCounter] (it spills into the next millisecond instead), so
+  /// the width — and therefore the lexicographic ordering — can never break.
   String get packed =>
       '${wallMs.toString().padLeft(13, '0')}-'
       '${counter.toString().padLeft(6, '0')}-'
@@ -112,6 +115,12 @@ class HlcClock {
   /// future one.
   static const int defaultMaxDriftMs = 5 * 60 * 1000;
 
+  /// The highest counter the fixed 6-digit [Hlc.packed] field can carry.
+  /// [tick] and [receive] spill into the next millisecond instead of exceeding
+  /// it — a 7-digit counter would sort lexicographically BELOW 6-digit ones,
+  /// making the string MAX pick the wrong winner under LWW.
+  static const int maxCounter = 999999;
+
   /// Stable per-install node id (final LWW tiebreak).
   final String node;
 
@@ -143,8 +152,15 @@ class HlcClock {
   /// silent local data loss.
   Hlc tick() {
     final now = _now();
-    final wall = now > _last.wallMs ? now : _last.wallMs;
-    final counter = (wall == _last.wallMs) ? _last.counter + 1 : 0;
+    var wall = now > _last.wallMs ? now : _last.wallMs;
+    var counter = (wall == _last.wallMs) ? _last.counter + 1 : 0;
+    if (counter > maxCounter) {
+      // The 6-digit packed counter is exhausted within this millisecond: spill
+      // into the next one. Same hold-the-wall degradation as a forward clock
+      // excursion — still strictly monotonic, and real time catches up.
+      wall += 1;
+      counter = 0;
+    }
     _last = Hlc(wallMs: wall, counter: counter, node: node);
     _track(wall);
     return _last;
@@ -174,12 +190,12 @@ class HlcClock {
         maxDriftMs: maxDriftMs,
       );
     }
-    final wall = [
+    var wall = [
       now,
       _last.wallMs,
       remote.wallMs,
     ].reduce((a, b) => a > b ? a : b);
-    final int counter;
+    int counter;
     if (wall == _last.wallMs && wall == remote.wallMs) {
       counter =
           (_last.counter > remote.counter ? _last.counter : remote.counter) + 1;
@@ -188,6 +204,12 @@ class HlcClock {
     } else if (wall == remote.wallMs) {
       counter = remote.counter + 1;
     } else {
+      counter = 0;
+    }
+    if (counter > maxCounter) {
+      // Keep the packed encoding's fixed 6-digit counter: spill to the next
+      // millisecond (still strictly after both _last and remote).
+      wall += 1;
       counter = 0;
     }
     _last = Hlc(wallMs: wall, counter: counter, node: node);

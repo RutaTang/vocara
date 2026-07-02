@@ -313,14 +313,18 @@ const BOOTSTRAP_IGNITE: f32 = 0.30;
 /// Double-talk hangover in blocks (~160 ms): after voice activity, stay frozen this long so a
 /// breath between phrases or a consonant transient doesn't immediately resume fast adaptation.
 const HANG_BLOCKS: u32 = 30;
-/// Consecutive blocks of the "echo-path GAIN INCREASE" signature — the shaped near-end test pins
-/// the gate (nearend_ratio > NEAREND_TRIP) while the mic stays highly coherent with the echo
-/// estimate (coh > COH_GAIN) — before we conclude the path model is stale and re-seed it. That
-/// signature is unreachable by near-end voice (loud enough voice to pin the gate necessarily
-/// DEPRESSES coherence; see the breaker below), so this is really just a debounce against a
-/// transient. Set well above HANG_BLOCKS and DIV_RESET_HOLD so no ordinary hangover or divergence
-/// cycle can reach it; the deadlock it breaks is otherwise PERMANENT, so a ~0.5 s confirmation
-/// costs only a little residual echo (~0.5 s @ 48 kHz / 256-sample blocks).
+/// Accumulated blocks of the "echo-path GAIN INCREASE" signature — the double-talk hangover held
+/// armed (the shaped near-end test keeps re-tripping it, which covers EVERY deadlocked ratio
+/// above ~(NEAREND_TRIP+1)/2, not just ratio > NEAREND_TRIP) while the mic stays highly coherent
+/// with the echo estimate (coh > COH_GAIN) — before we conclude the path model is stale and
+/// re-seed it. That signature is unreachable by near-end voice (voice loud enough to hold the
+/// hangover necessarily DEPRESSES coherence; see the breaker below). The streak DRAINS on a miss
+/// (saturating_sub(2)) instead of resetting to 0, so non-stationary (rhythmic) material — whose
+/// pauses and level dips briefly drop far_active or the ratio — cannot postpone the breaker
+/// forever, while real voice still can't reach it: each phrase contributes at most HANG_BLOCKS of
+/// post-phrase high-coherence tail and the voiced blocks themselves (depressed coherence) drain
+/// the streak twice as fast as the tail builds it. The deadlock it breaks is otherwise PERMANENT,
+/// so a ~0.5 s confirmation costs only a little residual echo (~0.5 s @ 48 kHz / 256 blocks).
 const PATH_CHANGE_HOLD: u32 = 96;
 /// Gate attack smoothing toward a *lower* target (freeze). 1.0 => freeze within one block.
 const GATE_ATTACK: f32 = 1.0;
@@ -527,9 +531,13 @@ pub struct Aec {
     g_adapt: f32, // current smoothed adaptation gate in [0,1]
     hang: u32,    // double-talk hangover countdown
     div_count: u32, // consecutive diverging blocks
-    /// Consecutive blocks matching the echo-path-gain-INCREASE deadlock signature (gate pinned by
-    /// the shaped near-end test while mic/echo-estimate coherence stays high). Breaks the freeze.
+    /// Accumulated evidence (blocks; drained on misses, see PATH_CHANGE_HOLD) of the
+    /// echo-path-gain-INCREASE deadlock signature: the double-talk hangover held armed while the
+    /// mic stays highly coherent with the echo estimate. Reaching the hold breaks the freeze.
     path_change_streak: u32,
+    /// Diagnostic: how many times the path-change deadlock breaker has fired since construction
+    /// or `reset()`. Read by tests/telemetry; never used by the algorithm.
+    path_change_fires: u32,
 
     // ---- optional suppressor state ----
     sup_gain: Box<[f32]>, // length half
@@ -617,6 +625,7 @@ impl Aec {
             hang: 0,
             div_count: 0,
             path_change_streak: 0,
+            path_change_fires: 0,
 
             sup_gain: vec![1.0f32; half].into_boxed_slice(),
         }
@@ -729,6 +738,14 @@ impl Aec {
         self.hang = 0;
         self.div_count = 0;
         self.path_change_streak = 0;
+        self.path_change_fires = 0;
+    }
+
+    /// Diagnostic: how many times the path-change deadlock breaker has fired since construction
+    /// or the last [`reset`](Aec::reset). Exposed for tests/telemetry; not part of the audio API.
+    #[doc(hidden)]
+    pub fn path_change_fires(&self) -> u32 {
+        self.path_change_fires
     }
 
     // -------------------------------------------------------------------------------------
@@ -1003,32 +1020,39 @@ impl Aec {
 
         // ----- Path-change deadlock breaker (sudden echo-path GAIN INCREASE) -----
         // A sudden loudspeaker/room gain INCREASE leaves the tracked path model (gxx) stale and
-        // UNDER-predicting the now-louder echo, so the shaped near-end test reads
-        // nearend_ratio >> NEAREND_TRIP and pins the gate at 0 indefinitely. Every normal recovery
-        // path is blocked: gxx only refreshes inside far_only_evidence (needs rho < RHO_LO), but a
-        // stale under-cancelling filter holds rho well above RHO_LO ((F-1)^2/F^2 ≈ 0.56 for a 4x
-        // gain jump); the divergence guard needs an even higher rho > DIV_RATIO. (A gain DECREASE
-        // self-corrects — the model then OVER-predicts, nearend_ratio < 1, the gate reopens — so
-        // only an INCREASE deadlocks.)
+        // UNDER-predicting the now-louder echo, so the shaped near-end test trips (ANY
+        // nearend_ratio above ~(NEAREND_TRIP+1)/2 does), re-arms the hangover every block, and
+        // pins the gate at 0 indefinitely. Every normal recovery path is blocked: gxx only
+        // refreshes inside far_only_evidence (needs hang == 0, which the pinned hangover never
+        // grants, and rho < RHO_LO); the divergence guard needs rho > DIV_RATIO, far above a
+        // stale under-cancelling filter's residual ((F-1)^2/F^2 < 1 for any gain jump F). (A
+        // gain DECREASE self-corrects — the model then OVER-predicts, nearend_ratio < 1, the
+        // gate reopens — so only an INCREASE deadlocks.)
         //
         // The tell that this is a louder PURE ECHO and not near-end voice: the mic stays highly
-        // COHERENT with the filter's echo estimate (coh ~ 1 — a scaled echo is still a scaled echo),
-        // whereas voice adds energy UNCORRELATED with the estimate and necessarily DEPRESSES coh.
-        // Pinning the gate (nearend_ratio > NEAREND_TRIP) with a CORRECT model requires voice louder
-        // than ~2x the echo, which forces coh below ~1/3, so "gate pinned AND coh > COH_GAIN" can
-        // ONLY be a stale-model path increase, never loud voice. (And gxx is a per-bin power RATIO,
-        // so a merely louder BACKING at the SAME path leaves it unchanged — only a louder PATH trips
-        // this.) We require the signature to persist for many consecutive blocks so no transient can
-        // reach it, then re-seed the stale path model from the current (confirmed pure-echo) block
-        // and drop back to the cold-start bootstrap so adaptation re-ignites and re-converges to the
-        // new path. Voice-safe: the reused bootstrap gate is the SAME coherence-ramp voice protection
-        // used at cold start, and the high-coherence guard above already excludes any real near-end.
-        let path_change_freeze =
-            self.converged && far_active && nearend_ratio > NEAREND_TRIP && coh > COH_GAIN;
+        // COHERENT with the filter's echo estimate (coh ~ 1 — a scaled echo is still a scaled
+        // echo), whereas voice adds energy UNCORRELATED with the estimate and necessarily
+        // DEPRESSES coh (unexplained energy strong enough to hold the hangover pushes coh to
+        // ~1/ratio < 1/2, far under COH_GAIN). So "hangover held AND coh > COH_GAIN" can ONLY be
+        // a stale-model path increase — and, unlike arming on nearend_ratio > NEAREND_TRIP, it
+        // covers the WHOLE deadlocked band, including ratios in ((NEAREND_TRIP+1)/2, NEAREND_TRIP]
+        // that freeze the gate but could never reach a trip-level arming test. (And gxx is a
+        // per-bin power RATIO, so a merely louder BACKING at the SAME path leaves it unchanged —
+        // only a louder PATH trips this.) The signature must ACCUMULATE across many blocks before
+        // firing; a miss DRAINS the streak (saturating_sub(2)) rather than resetting it, so the
+        // pauses/dips of real (rhythmic) far-end material cannot postpone the breaker forever,
+        // while genuine voice — whose depressed coherence makes every voiced block a miss —
+        // drains it faster than the bounded (<= HANG_BLOCKS) post-phrase hangover tail can build
+        // it. On firing we re-seed the stale path model from the current (confirmed pure-echo)
+        // block and drop back to the cold-start bootstrap so adaptation re-ignites and
+        // re-converges to the new path. Voice-safe: the reused bootstrap gate is the SAME
+        // coherence-ramp voice protection used at cold start, and the high-coherence guard above
+        // already excludes any real near-end on the re-seed block itself.
+        let path_change_freeze = self.converged && far_active && self.hang > 0 && coh > COH_GAIN;
         if path_change_freeze {
             self.path_change_streak = self.path_change_streak.saturating_add(1);
         } else {
-            self.path_change_streak = 0;
+            self.path_change_streak = self.path_change_streak.saturating_sub(2);
         }
         if self.path_change_streak >= PATH_CHANGE_HOLD {
             // Re-seed gxx directly from this block's per-bin mic/far power ratio — the SAME direct
@@ -1045,6 +1069,7 @@ impl Aec {
             self.converged = false;
             self.hang = 0;
             self.path_change_streak = 0;
+            self.path_change_fires = self.path_change_fires.saturating_add(1);
         }
 
         // The full DTD (Geigel + coherence + rho) only applies AFTER convergence — before that

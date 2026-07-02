@@ -149,6 +149,47 @@ void main() {
     });
   });
 
+  group('counter cap (fixed 6-digit packed field)', () {
+    test('tick spills into the next millisecond at counter 999999', () {
+      // Hold the wall (now < last.wallMs) so every tick lands in the same
+      // millisecond and drives the counter toward the cap.
+      final clock = HlcClock(
+        node: 'N',
+        now: () => 1000,
+        initial: Hlc(wallMs: 5000, counter: HlcClock.maxCounter - 1, node: 'N'),
+      );
+      final atCap = clock.tick();
+      expect(atCap, Hlc(wallMs: 5000, counter: HlcClock.maxCounter, node: 'N'));
+
+      // The next tick would be counter 1_000_000 — 7 digits, which sorts
+      // lexicographically BELOW '999999'. It must spill to wallMs+1 instead.
+      final spilled = clock.tick();
+      expect(spilled, Hlc(wallMs: 5001, counter: 0, node: 'N'));
+      expect(spilled > atCap, isTrue);
+      expect(spilled.packed.length, atCap.packed.length); // width never grows
+      expect(atCap.packed.compareTo(spilled.packed) < 0, isTrue,
+          reason: 'packed ordering stays monotonic across the spill');
+
+      // And keeps ticking normally after the spill.
+      final next = clock.tick();
+      expect(next, Hlc(wallMs: 5001, counter: 1, node: 'N'));
+      expect(spilled.packed.compareTo(next.packed) < 0, isTrue);
+    });
+
+    test('receive spills instead of overflowing the 6-digit counter', () {
+      final local = Hlc(wallMs: 1000, counter: HlcClock.maxCounter, node: 'N');
+      final clock = HlcClock(node: 'N', now: () => 1000, initial: local);
+      // Equal walls take max(counter)+1, which would overflow the field.
+      final merged = clock.receive(
+        Hlc(wallMs: 1000, counter: HlcClock.maxCounter, node: 'M'),
+      );
+      expect(merged, Hlc(wallMs: 1001, counter: 0, node: 'N'));
+      expect(merged > local, isTrue);
+      expect(local.packed.compareTo(merged.packed) < 0, isTrue,
+          reason: 'packed ordering stays monotonic across the spill');
+    });
+  });
+
   test('two clocks converge to a deterministic total order', () {
     // Cross-merge a few stamps and assert the relation is a strict total order.
     final a = HlcClock(node: 'AAA', now: () => 100);

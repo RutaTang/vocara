@@ -48,9 +48,12 @@ class ApplyResult {
 /// quarantined ([ApplyResult.failed]) rather than rolling back every other record.
 /// Because defer_foreign_keys pushes FK enforcement to the OUTER commit (outside
 /// every savepoint), a record whose parent never arrives in the batch would fail
-/// the whole commit — so before committing we sweep foreign_key_check and quarantine
-/// just the still-orphaned rows, and the outer transaction is wrapped so a commit
-/// failure degrades to a failed batch instead of throwing out of apply().
+/// the whole commit — so before committing we sweep foreign_key_check
+/// ([_sweepFkOrphans]): rows INSERTED by this batch are hard-deleted (they
+/// re-arrive with their parent on a later page) while PRE-EXISTING rows are
+/// never deleted, only their dangling pointer column is nulled. The outer
+/// transaction is wrapped so a commit failure degrades to a failed batch
+/// instead of throwing out of apply().
 class SyncApplier {
   SyncApplier(this.db, this.clock);
 
@@ -59,6 +62,9 @@ class SyncApplier {
 
   Future<ApplyResult> apply(List<RemoteRecord> records) async {
     final result = ApplyResult();
+    // (table, id) pairs INSERTED by this batch — the only rows the FK sweep is
+    // allowed to hard-delete (see _sweepFkOrphans).
+    final insertedThisBatch = <(String, String)>{};
     try {
       await db.transaction(() async {
         await db.customStatement('PRAGMA defer_foreign_keys = ON');
@@ -76,6 +82,7 @@ class SyncApplier {
             // itself and is quarantined, instead of throwing out of the batch and
             // discarding every other (good) record. Counters are updated OUTSIDE the
             // savepoint so a rollback can't desync them.
+            var didInsert = false;
             final applied = await db.transaction(() async {
               final existing = await db
                   .customSelect(
@@ -95,6 +102,7 @@ class SyncApplier {
               final columns = await _resolveSlot(rec);
               if (existing == null) {
                 await _insert(rec.table, columns);
+                didInsert = true;
               } else {
                 await _update(rec.table, columns);
               }
@@ -102,6 +110,7 @@ class SyncApplier {
             });
             if (applied) {
               result.applied++;
+              if (didInsert) insertedThisBatch.add((rec.table, rec.id));
             } else {
               result.skipped++;
             }
@@ -109,28 +118,7 @@ class SyncApplier {
             result.failed++;
           }
         }
-        // defer_foreign_keys deferred every FK check to THIS outer commit, so a
-        // record whose parent never arrived in the batch (truly orphaned /
-        // forward-incompatible) would fail the whole commit and poison every good
-        // record. Sweep for rows that STILL violate an FK — order-tolerance means a
-        // child inserted before its parent is fine once the parent is present — and
-        // hard-delete just those (they re-arrive on a later page). Loop because
-        // deleting an orphan can strand its own children.
-        while (true) {
-          final violations =
-              await db.customSelect('PRAGMA foreign_key_check').get();
-          if (violations.isEmpty) break;
-          for (final v in violations) {
-            final table = v.read<String>('table');
-            final rowid = v.read<int>('rowid');
-            await db.customStatement(
-              'DELETE FROM $table WHERE rowid = ?',
-              [rowid],
-            );
-            if (result.applied > 0) result.applied--;
-            result.failed++;
-          }
-        }
+        await _sweepFkOrphans(result, insertedThisBatch);
       });
     } catch (_) {
       // The outer commit failed despite the per-record savepoints and the FK sweep
@@ -143,6 +131,110 @@ class SyncApplier {
       result.failed = records.length - result.quarantined;
     }
     return result;
+  }
+
+  /// Pre-commit sweep for rows that STILL violate a foreign key once the whole
+  /// batch is in (defer_foreign_keys postponed enforcement to the outer
+  /// commit, so order-tolerance already absorbed child-before-parent within
+  /// the batch).
+  ///
+  /// foreign_key_check scans the WHOLE database, so a flagged row is not
+  /// necessarily one this batch created: a remote UPDATE can plant a dangling
+  /// pointer into a row that existed long before. Healing is by provenance:
+  ///
+  ///  * A row INSERTED by this batch is hard-deleted. Its parent truly never
+  ///    arrived (a later page carries both), and deleting it destroys nothing
+  ///    that existed before this apply.
+  ///  * A PRE-EXISTING row is NEVER deleted (deleting it — and then its whole
+  ///    subtree via the fixpoint loop — would silently destroy local data with
+  ///    no tombstone and no oplog). It satisfied every FK when the batch began
+  ///    (SQLite enforced them at every earlier commit), so it can only be
+  ///    flagged because THIS batch repointed one of its FK columns — either at
+  ///    an id that never arrived, or at a batch-inserted parent this sweep
+  ///    just deleted. Only that column is nulled (the IntegrityChecker-style
+  ///    scalar self-heal), deliberately un-journaled like every remote apply;
+  ///    the pointer is restored when the missing parent and a fresher update
+  ///    arrive. Every FK column a remote update realistically repoints is
+  ///    nullable (separation_asset_id / interpretation_id / bus_id — the
+  ///    NOT NULL parent links practice_id / track_id / technique_id are never
+  ///    rewritten after insert); should a NOT NULL column ever dangle anyway
+  ///    (e.g. clips.asset_id repointed at a not-yet-arrived asset), we abort
+  ///    so the WHOLE batch rolls back — a retried page over silently deleting
+  ///    pre-existing data.
+  ///
+  /// Loops to a fixpoint because deleting an orphan can strand its own
+  /// batch-inserted children. Counters: a deleted batch-insert moves from
+  /// applied to failed exactly once (duplicate violations for a multi-FK row
+  /// are skipped once the row is gone); a nulled pre-existing row changes no
+  /// counter (its update, if this batch carried one, genuinely applied).
+  Future<void> _sweepFkOrphans(
+    ApplyResult result,
+    Set<(String, String)> insertedThisBatch,
+  ) async {
+    while (true) {
+      final violations =
+          await db.customSelect('PRAGMA foreign_key_check').get();
+      if (violations.isEmpty) break;
+      for (final v in violations) {
+        final table = v.read<String>('table');
+        final rowid = v.read<int>('rowid');
+        // A row with several dangling FKs is reported once per violated
+        // constraint; after the DELETE below the id lookup misses, so the
+        // duplicate entries are skipped (no double accounting).
+        final idRow = await db
+            .customSelect(
+              'SELECT id FROM $table WHERE rowid = ?',
+              variables: [Variable.withInt(rowid)],
+            )
+            .getSingleOrNull();
+        if (idRow == null) continue;
+        final id = idRow.read<String>('id');
+        if (insertedThisBatch.contains((table, id))) {
+          await db.customStatement(
+            'DELETE FROM $table WHERE rowid = ?',
+            [rowid],
+          );
+          // The insert was counted as applied above; it did not stick.
+          if (result.applied > 0) result.applied--;
+          result.failed++;
+          continue;
+        }
+        // Pre-existing row: null just the dangling column. Which column comes
+        // from the violation's fkid resolved against foreign_key_list.
+        final fkid = v.readNullable<int>('fkid');
+        final column = fkid == null ? null : await _fkColumn(table, fkid);
+        if (column == null || !await _isNullable(table, column)) {
+          // Un-heal-able (see doc comment): fail the batch, keep the data.
+          throw StateError(
+            'FK sweep: pre-existing $table/$id has a dangling NOT NULL '
+            'foreign key (fkid: $fkid); failing the batch to preserve it',
+          );
+        }
+        await db.customStatement(
+          'UPDATE $table SET $column = NULL WHERE rowid = ?',
+          [rowid],
+        );
+      }
+    }
+  }
+
+  /// The child column of foreign key [fkid] on [table] (our FKs are all
+  /// single-column, so the first component is the whole key).
+  Future<String?> _fkColumn(String table, int fkid) async {
+    final fks =
+        await db.customSelect('PRAGMA foreign_key_list($table)').get();
+    for (final fk in fks) {
+      if (fk.read<int>('id') == fkid) return fk.read<String>('from');
+    }
+    return null;
+  }
+
+  Future<bool> _isNullable(String table, String column) async {
+    final cols = await db.customSelect('PRAGMA table_info($table)').get();
+    for (final c in cols) {
+      if (c.read<String>('name') == column) return c.read<int>('notnull') == 0;
+    }
+    return false;
   }
 
   /// Returns the column map to write for [rec] after resolving any single-slot conflict by

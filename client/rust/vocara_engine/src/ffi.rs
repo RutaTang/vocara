@@ -471,8 +471,10 @@ pub extern "C" fn ve_input_frames(e: *mut VeEngine, out: *mut c_float, max_frame
     })
 }
 
-/// Start recording the live input to a mono 48 kHz WAV at `path` (writer thread). Opens the
-/// input stream. 0 = ok.
+/// Start recording the live input to a mono 48 kHz WAV at `path` (writer thread). Blocks
+/// briefly on the writer creating the file (file creation is not on the RT path). Opens the
+/// input stream. 0 = ok; -1 = the file could not be created (disk full / permissions) —
+/// nothing will be recorded.
 #[no_mangle]
 pub extern "C" fn ve_start_input_recording(e: *mut VeEngine, path: *const c_char) -> c_int {
     with_engine(e, -1, |eng| {
@@ -483,7 +485,9 @@ pub extern "C" fn ve_start_input_recording(e: *mut VeEngine, path: *const c_char
             Ok(p) => p,
             Err(_) => return -1,
         };
-        eng.writer.start(p);
+        if !eng.writer.start(p) {
+            return -1;
+        }
         eng.rec_active.store(true, Ordering::Release);
         sync_input(eng);
         0
@@ -491,14 +495,19 @@ pub extern "C" fn ve_start_input_recording(e: *mut VeEngine, path: *const c_char
 }
 
 /// Stop the input recording (finalizes the WAV); closes the input stream if nothing else needs
-/// it. 0 = ok.
+/// it. 0 = ok; -2 = an IO error occurred during the recording (the WAV at the recorded path
+/// is missing, damaged, or incomplete).
 #[no_mangle]
 pub extern "C" fn ve_stop_input_recording(e: *mut VeEngine) -> c_int {
     with_engine(e, -1, |eng| {
         eng.rec_active.store(false, Ordering::Release);
-        eng.writer.stop();
+        let clean = eng.writer.stop();
         sync_input(eng);
-        0
+        if clean {
+            0
+        } else {
+            -2
+        }
     })
 }
 
@@ -640,7 +649,15 @@ pub extern "C" fn ve_push_pcm(e: *mut VeEngine, pcm: *const f32, frames: usize) 
 /// The current playhead in samples (atomic read).
 #[no_mangle]
 pub extern "C" fn ve_frame_pos(e: *mut VeEngine) -> i64 {
-    with_engine(e, 0, |eng| eng.handle.frame())
+    with_engine(e, 0, |eng| {
+        // Reap retired graphs on Dart's hot playback poll: `publish_graph` can only free the
+        // PREVIOUS generation (its own retiree is still inside the grace epoch), so without
+        // this the last generation's decoded PCM stays resident until the next commit —
+        // defeating the cache byte bound. Cheap (an atomic load; the list is usually empty)
+        // and control-thread-safe (see `EngineHandle::reap`).
+        eng.handle.reap();
+        eng.handle.frame()
+    })
 }
 
 /// The engine/device sample rate.
@@ -701,6 +718,9 @@ pub extern "C" fn ve_load_file(e: *mut VeEngine, path: *const c_char) -> c_int {
 #[no_mangle]
 pub extern "C" fn ve_tracks_begin(e: *mut VeEngine) -> c_int {
     with_engine(e, -1, |eng| {
+        // Collect graphs retired by the previous commit before staging the next set (see
+        // the matching reap in `ve_frame_pos` for why prompt reaping matters).
+        eng.handle.reap();
         eng.pending.clear();
         0
     })

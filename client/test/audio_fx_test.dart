@@ -84,6 +84,76 @@ void main() {
         ..remove('order');
       expect(TrackFx.fromJson(legacy).order, FxKind.values);
     });
+
+    test('unknown insert kinds are dropped, not aliased to eq', () {
+      // A newer-schema take with a plugin this build doesn't know. The unknown
+      // kind must be dropped outright — before the fix it parsed as FxKind.eq,
+      // which both kept a phantom entry and RELOCATED the real EQ insert to the
+      // unknown plugin's chain position (an audible, persistent reorder).
+      final j = Map<String, dynamic>.from(TrackFx.flat().toJson())
+        ..['order'] = ['spaceEcho', 'comp', 'eq', 'deEsser'];
+      final back = TrackFx.fromJson(j);
+
+      // Unknown kind gone; known kinds keep their saved relative order (eq must
+      // NOT jump in front of comp via the unknown slot).
+      expect(back.order.take(3), [FxKind.comp, FxKind.eq, FxKind.deEsser]);
+      // Missing known kinds are appended, so the chain is still complete.
+      expect(back.order.toSet(), FxKind.values.toSet());
+      expect(back.order.length, FxKind.values.length);
+    });
+
+    test('fromJson clamps out-of-range values to the editable ranges', () {
+      // EqBand: gainDb to the EQ graph's ±15 dB (_eqMaxDb), q to the graph's
+      // scroll-edit range 0.3..14. A stored gainDb=200 would otherwise become a
+      // 10^10 shelf amplitude in the engine.
+      final hot = EqBand.fromJson(const {
+        'kind': 'lowShelf',
+        'freq': 100.0,
+        'q': 100.0,
+        'gainDb': 200.0,
+      });
+      expect(hot.gainDb, 15.0);
+      expect(hot.q, 14.0);
+      final cold = EqBand.fromJson(const {
+        'kind': 'peaking',
+        'freq': 1000.0,
+        'q': 0.01,
+        'gainDb': -200.0,
+      });
+      expect(cold.gainDb, -15.0);
+      expect(cold.q, 0.3);
+      // In-range values pass through untouched.
+      final ok = EqBand.fromJson(const {
+        'kind': 'peaking',
+        'freq': 700.0,
+        'q': 2.0,
+        'gainDb': -4.5,
+      });
+      expect(ok.q, 2.0);
+      expect(ok.gainDb, -4.5);
+
+      // CompSettings: bounds mirror the panel sliders (-48..0, 1..12, 0..18).
+      final comp = CompSettings.fromJson(const {
+        'thresholdDb': -60.0,
+        'ratio': 20.0,
+        'makeupDb': 24.0,
+      });
+      expect(comp.thresholdDb, -48.0);
+      expect(comp.ratio, 12.0);
+      expect(comp.makeupDb, 18.0);
+
+      // TrackSend: a dB level in [kSendOffDb, 0]; a positive value would
+      // over-drive the bus.
+      final loud = TrackSend.fromJson(const {'busId': 'b1', 'levelDb': 24.0});
+      expect(loud.levelDb, 0.0);
+      final silent = TrackSend.fromJson(const {
+        'busId': 'b1',
+        'levelDb': -300.0,
+      });
+      expect(silent.levelDb, kSendOffDb);
+      final mid = TrackSend.fromJson(const {'busId': 'b1', 'levelDb': -9.0});
+      expect(mid.levelDb, -9.0);
+    });
   });
 
   test('ReverbSettings round-trips', () {
@@ -160,8 +230,10 @@ void main() {
           expect(b.gainDb, inInclusiveRange(-12, 12), reason: p.name);
         }
         if (fx.compOn) {
-          expect(fx.comp.thresholdDb, inInclusiveRange(-60, 0), reason: p.name);
-          expect(fx.comp.ratio, inInclusiveRange(1, 20), reason: p.name);
+          // Bounds match the panel sliders + CompSettings.fromJson clamps: a
+          // preset must never be silently altered by its own app's clamps.
+          expect(fx.comp.thresholdDb, inInclusiveRange(-48, 0), reason: p.name);
+          expect(fx.comp.ratio, inInclusiveRange(1, 12), reason: p.name);
           expect(fx.comp.makeupDb, inInclusiveRange(0, 18), reason: p.name);
         }
         if (fx.deEsserOn) {
