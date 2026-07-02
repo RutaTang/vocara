@@ -242,13 +242,13 @@ void main() {
 
       // Active backing switched to the freshly produced instrumental.
       expect(
-        vm.playReference,
+        vm.mixer.playReference,
         isFalse,
         reason: 'after separation the audible backing is the instrumental',
       );
-      expect(vm.activeBacking, isNotNull);
+      expect(vm.mixer.activeBacking, isNotNull);
       expect(
-        vm.activeBacking!.primaryClip!.audioFilePath,
+        vm.mixer.activeBacking!.primaryClip!.audioFilePath,
         accompaniment.primaryClip!.audioFilePath,
       );
 

@@ -77,18 +77,18 @@ class DetailTransportBar extends StatelessWidget {
               children: [
                 _ZoomIcon(
                   icon: FIcons.zoomOut,
-                  onTap: () => vm.zoomTimeline(1.25),
+                  onTap: () => vm.playback.zoomTimeline(1.25),
                 ),
                 const SizedBox(width: 8),
                 _ZoomSlider(
-                  value: vm.timelineZoom,
-                  onChanged: vm.setTimelineZoomLive,
-                  onChangeEnd: vm.commitTimelineZoom,
+                  value: vm.playback.timelineZoom,
+                  onChanged: vm.playback.setTimelineZoomLive,
+                  onChangeEnd: vm.playback.commitTimelineZoom,
                 ),
                 const SizedBox(width: 8),
                 _ZoomIcon(
                   icon: FIcons.zoomIn,
-                  onTap: () => vm.zoomTimeline(0.8),
+                  onTap: () => vm.playback.zoomTimeline(0.8),
                 ),
               ],
             ),
@@ -100,31 +100,35 @@ class DetailTransportBar extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               children: [
                 StudioRoundButton(
-                  icon: vm.isPlaying ? FIcons.pause : FIcons.play,
+                  icon: vm.playback.isPlaying ? FIcons.pause : FIcons.play,
                   filled: true,
                   size: 34,
-                  onTap: canPlay ? vm.togglePlay : null,
+                  onTap: canPlay ? vm.playback.togglePlay : null,
                 ),
                 const SizedBox(width: 8),
                 StudioRoundButton(
                   icon: FIcons.square,
                   color: Studio.textSecondary,
                   size: 34,
-                  onTap: hasTracks ? vm.stop : null,
+                  onTap: hasTracks ? vm.playback.stop : null,
                 ),
                 const SizedBox(width: 8),
                 StudioRoundButton(
                   icon: FIcons.repeat,
-                  color: vm.loopEnabled ? Studio.accent : Studio.textSecondary,
+                  color: vm.playback.loopEnabled
+                      ? Studio.accent
+                      : Studio.textSecondary,
                   size: 34,
-                  onTap: vm.hasLoop ? vm.toggleLoop : null,
+                  onTap: vm.playback.hasLoop ? vm.playback.toggleLoop : null,
                 ),
                 const SizedBox(width: 8),
                 StudioRoundButton(
                   icon: FIcons.locateFixed,
-                  color: vm.followCursor ? Studio.accent : Studio.textSecondary,
+                  color: vm.playback.followCursor
+                      ? Studio.accent
+                      : Studio.textSecondary,
                   size: 34,
-                  onTap: vm.toggleFollowCursor,
+                  onTap: vm.playback.toggleFollowCursor,
                 ),
                 const SizedBox(width: 16),
                 _Lcd(
@@ -135,17 +139,18 @@ class DetailTransportBar extends StatelessWidget {
                 // Input monitoring: arm the mic (meter + level live in the mixer's MIC strip).
                 StudioRoundButton(
                   icon: FIcons.headphones,
-                  color: vm.inputMonitorEnabled
+                  color: vm.recording.inputMonitorEnabled
                       ? Studio.accent
                       : Studio.textSecondary,
                   size: 34,
-                  onTap: vm.toggleInputMonitor,
+                  onTap: vm.recording.toggleInputMonitor,
                 ),
                 const SizedBox(width: 12),
                 _RecPill(
                   isRecording: vm.isRecording,
-                  onTap: () =>
-                      vm.isRecording ? vm.stopRecording() : vm.startRecording(),
+                  onTap: () => vm.isRecording
+                      ? vm.stopRecording()
+                      : vm.recording.startRecording(),
                 ),
                 if (vm.busy) ...[
                   const SizedBox(width: 14),

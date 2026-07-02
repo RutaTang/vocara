@@ -28,7 +28,7 @@ class MixerStrip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final buses = vm.fxBuses;
+    final buses = vm.mixer.fxBuses;
     if (tracks.isEmpty && buses.isEmpty) {
       return const Center(
         child: Text(
@@ -43,7 +43,7 @@ class MixerStrip extends StatelessWidget {
       children: [
         // Mic input strip: the live input's meter + record gain + monitor (hear-yourself) gain.
         // Only meaningful on the native engine (device I/O + monitoring).
-        if (vm.supportsEffects) ...[
+        if (vm.mixer.supportsEffects) ...[
           _MicInputChannel(vm: vm),
           Container(
             width: 1,
@@ -58,18 +58,18 @@ class MixerStrip extends StatelessWidget {
             // Backing tracks stay dry → no output routing chip.
             buses: t.isBacking ? const [] : buses,
             routedBusId: t.busId,
-            onRoute: (id) => vm.setTrackBus(t.id, id),
+            onRoute: (id) => vm.mixer.setTrackBus(t.id, id),
             onSelect: () => vm.selectTrack(t.id),
-            onMute: () => vm.toggleMute(t.id),
-            onSolo: () => vm.toggleSolo(t.id),
-            onVolume: (v) => vm.setTrackVolumeLive(t.id, v),
-            onVolumeCommit: vm.commitTrackVolume,
-            onPan: (p) => vm.setTrackPanLive(t.id, p),
-            onPanCommit: vm.commitTrackVolume,
+            onMute: () => vm.mixer.toggleMute(t.id),
+            onSolo: () => vm.mixer.toggleSolo(t.id),
+            onVolume: (v) => vm.mixer.setTrackVolumeLive(t.id, v),
+            onVolumeCommit: vm.mixer.commitTrackVolume,
+            onPan: (p) => vm.mixer.setTrackPanLive(t.id, p),
+            onPanCommit: vm.mixer.commitTrackVolume,
             onDelete: () => onDeleteTrack(t),
           ),
         // FX buses (DAW groups). Only meaningful on the native effects engine.
-        if (vm.supportsEffects) ...[
+        if (vm.mixer.supportsEffects) ...[
           // Separator between the vocal takes and the bus section (incl. + Bus).
           Container(
             width: 1,
@@ -82,12 +82,12 @@ class MixerStrip extends StatelessWidget {
               selected: vm.selectedBusId == b.id,
               buses: buses,
               onSelect: () => vm.selectBus(b.id),
-              onRoute: (out) => vm.setBusOutput(b.id, out),
-              onMute: () => vm.toggleBusMute(b.id),
-              onSolo: () => vm.toggleBusSolo(b.id),
-              onVolume: (v) => vm.setBusVolumeLive(b.id, v),
+              onRoute: (out) => vm.mixer.setBusOutput(b.id, out),
+              onMute: () => vm.mixer.toggleBusMute(b.id),
+              onSolo: () => vm.mixer.toggleBusSolo(b.id),
+              onVolume: (v) => vm.mixer.setBusVolumeLive(b.id, v),
               onVolumeCommit: vm.commitFx,
-              onPan: (p) => vm.setBusPanLive(b.id, p),
+              onPan: (p) => vm.mixer.setBusPanLive(b.id, p),
               onPanCommit: vm.commitFx,
               onRename: () async {
                 final name = await showRenameDialog(
@@ -96,11 +96,11 @@ class MixerStrip extends StatelessWidget {
                   title: 'Rename bus',
                   hint: 'Bus name',
                 );
-                if (name != null) await vm.renameBus(b.id, name);
+                if (name != null) await vm.mixer.renameBus(b.id, name);
               },
-              onDelete: () => vm.deleteBus(b.id),
+              onDelete: () => vm.mixer.deleteBus(b.id),
             ),
-          _AddBusButton(onTap: () => vm.createBus()),
+          _AddBusButton(onTap: () => vm.mixer.createBus()),
         ],
         // The master bus strip — the whole mix sums here. Set apart on the right.
         Container(
@@ -109,9 +109,9 @@ class MixerStrip extends StatelessWidget {
           color: Studio.border,
         ),
         _MasterChannel(
-          value: vm.masterVolume,
-          onVolume: vm.setMasterVolumeLive,
-          onVolumeCommit: vm.commitMasterVolume,
+          value: vm.mixer.masterVolume,
+          onVolume: vm.mixer.setMasterVolumeLive,
+          onVolumeCommit: vm.mixer.commitMasterVolume,
         ),
       ],
     );
@@ -568,7 +568,7 @@ class _MicInputChannel extends StatelessWidget {
                     child: Align(
                       alignment: Alignment.centerLeft,
                       child: ValueListenableBuilder<double>(
-                        valueListenable: vm.inputLevel,
+                        valueListenable: vm.recording.inputLevel,
                         builder: (_, v, _) => FractionallySizedBox(
                           widthFactor: v.clamp(0.0, 1.0),
                           heightFactor: 1.0,

@@ -146,10 +146,16 @@ void main() {
 
       // A vocal take (its own lane) in the active interpretation.
       await vm.addVocalTake(takeWav);
-      await _settle(tester, () => !vm.busy && vm.vocalTakes.isNotEmpty);
-      expect(vm.vocalTakes, hasLength(1));
-      final takeId = vm.vocalTakes.single.id;
-      expect(vm.vocalTakes.single.primaryClip!.waveformPeaks, isNotEmpty);
+      await _settle(
+        tester,
+        () => !vm.busy && vm.versions.vocalTakes.isNotEmpty,
+      );
+      expect(vm.versions.vocalTakes, hasLength(1));
+      final takeId = vm.versions.vocalTakes.single.id;
+      expect(
+        vm.versions.vocalTakes.single.primaryClip!.waveformPeaks,
+        isNotEmpty,
+      );
 
       // Notes at the playhead on both a backing and a vocal lane.
       await vm.seek(const Duration(milliseconds: 250));
@@ -159,7 +165,7 @@ void main() {
       await _settle(tester, () => !vm.busy);
       expect(vm.practice!.accompaniment!.notes, hasLength(1));
       expect(
-        vm.vocalTakes.single.notes,
+        vm.versions.vocalTakes.single.notes,
         hasLength(1),
         reason: 'the take note must be on the take lane',
       );
@@ -168,7 +174,7 @@ void main() {
       await vm.addTechnique(takeId, 'tech-twang', 'Twang', 500, null);
       await vm.addTechnique(takeId, 'tech-cry', 'Cry', 600, 1200);
       await _settle(tester, () => !vm.busy);
-      expect(vm.vocalTakes.single.techniqueMarkers, hasLength(2));
+      expect(vm.versions.vocalTakes.single.techniqueMarkers, hasLength(2));
 
       // Track FX (EQ on, a boosted band) committed. FX is addressed by track id
       // so no selection is needed.
@@ -181,7 +187,7 @@ void main() {
         2,
         editedFx.eq[2].copyWith(gainDb: 4.5),
       );
-      vm.setTrackFxLive(takeId, boostedFx);
+      vm.mixer.setTrackFxLive(takeId, boostedFx);
       await vm.commitFx();
       await _settle(tester, () => !vm.busy);
 
@@ -192,13 +198,13 @@ void main() {
         wet: 0.42,
         width: 0.9,
       );
-      vm.setReverbLive(reverb);
+      vm.mixer.setReverbLive(reverb);
       await vm.commitFx();
       await _settle(tester, () => !vm.busy);
 
       // Master volume.
-      vm.setMasterVolumeLive(0.66);
-      await vm.commitMasterVolume();
+      vm.mixer.setMasterVolumeLive(0.66);
+      await vm.mixer.commitMasterVolume();
       await _settle(tester, () => !vm.busy);
 
       // Lyrics.
@@ -208,15 +214,15 @@ void main() {
 
       // A second interpretation, then switch back to the first so the active
       // version is deterministic for the reload assertions.
-      await vm.createInterpretation('Powerful');
-      await _settle(tester, () => vm.interpretations.length == 2);
-      await vm.setActiveInterpretation(versionId!);
-      await _settle(tester, () => vm.activeInterpretation?.id == versionId);
+      await vm.versions.create('Powerful');
+      await _settle(tester, () => vm.versions.all.length == 2);
+      await vm.versions.setActive(versionId!);
+      await _settle(tester, () => vm.versions.active?.id == versionId);
 
       // Capture expected values before tearing the VM down.
       final expectedAccompPeaks = accomp.primaryClip!.waveformPeaks.length;
       final expectedTakePeaks =
-          vm.vocalTakes.single.primaryClip!.waveformPeaks.length;
+          vm.versions.vocalTakes.single.primaryClip!.waveformPeaks.length;
       final expectedTimeline = vm.practice!.timelineDurationMs;
 
       vm.dispose();
@@ -243,9 +249,9 @@ void main() {
       expect(await File(accompFile).exists(), isTrue);
 
       // Active interpretation + its single take.
-      expect(vm2.activeInterpretation?.id, versionId);
-      expect(vm2.vocalTakes, hasLength(1));
-      final take2 = vm2.vocalTakes.single;
+      expect(vm2.versions.active?.id, versionId);
+      expect(vm2.versions.vocalTakes, hasLength(1));
+      final take2 = vm2.versions.vocalTakes.single;
       expect(take2.id, takeId);
       expect(take2.primaryClip!.waveformPeaks, hasLength(expectedTakePeaks));
 
@@ -276,22 +282,22 @@ void main() {
       expect(fx2.eq[2].gainDb, closeTo(4.5, 1e-6));
 
       // Reverb round-trips.
-      final r2 = vm2.reverbSettings;
+      final r2 = vm2.mixer.reverbSettings;
       expect(r2.roomSize, closeTo(0.8, 1e-6));
       expect(r2.damping, closeTo(0.3, 1e-6));
       expect(r2.wet, closeTo(0.42, 1e-6));
       expect(r2.width, closeTo(0.9, 1e-6));
 
       // Master volume + lyrics + interpretations.
-      expect(vm2.masterVolume, closeTo(0.66, 1e-6));
+      expect(vm2.mixer.masterVolume, closeTo(0.66, 1e-6));
       expect(vm2.lyrics.map((l) => l.text).toList(), [
         'first line',
         'second line',
         'third line',
       ]);
-      expect(vm2.interpretations, hasLength(2));
+      expect(vm2.versions.all, hasLength(2));
       expect(
-        vm2.interpretations.map((v) => v.name),
+        vm2.versions.all.map((v) => v.name),
         containsAll(<String>['Powerful']),
       );
 

@@ -128,9 +128,9 @@ void main() {
     expect(vm.errorMessage, isNull);
 
     // Exercise the media_kit transport: play, then pause.
-    await vm.togglePlay();
+    await vm.playback.togglePlay();
     await tester.pump(const Duration(milliseconds: 400));
-    await vm.togglePlay();
+    await vm.playback.togglePlay();
     await tester.pump(const Duration(milliseconds: 100));
 
     // Pin a note at the playhead on the accompaniment track.

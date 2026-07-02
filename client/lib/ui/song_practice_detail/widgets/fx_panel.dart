@@ -125,21 +125,22 @@ class FxPanel extends StatelessWidget {
 
   void _setFx(TrackFx fx, {bool commit = false}) {
     if (_isBus) {
-      vm.setBusFxLive(bus!.id, fx);
+      vm.mixer.setBusFxLive(bus!.id, fx);
     } else {
-      vm.setTrackFxLive(track!.id, fx);
+      vm.mixer.setTrackFxLive(track!.id, fx);
     }
     if (commit) vm.commitFx();
   }
 
   /// The compressor gain-reduction poll for the GR meter.
-  double _gr() =>
-      _isBus ? vm.busGainReductionDb(bus!.id) : vm.gainReductionDb(track!.id);
+  double _gr() => _isBus
+      ? vm.mixer.busGainReductionDb(bus!.id)
+      : vm.mixer.gainReductionDb(track!.id);
 
   /// The pre-EQ input spectrum column for the analyzer — only a track has one
   /// (a bus is a sum of routed tracks, so it shows the response curve alone).
   ({Float32List col, double binHz})? _eqInput() =>
-      _isBus ? null : vm.eqInputColumn(track!.id);
+      _isBus ? null : vm.analysis.eqInputColumn(track!.id);
 
   /// One insert card in the chain: a header (drag handle + on/off) plus, when
   /// enabled, the plugin's editor. Keyed by kind so reordering animates.
@@ -575,9 +576,9 @@ class FxPanel extends StatelessWidget {
             cardBuilder: (i, kind) => _insertCard(i, kind, fx),
             onReorder: (order) {
               if (_isBus) {
-                vm.reorderBusInserts(bus!.id, order);
+                vm.mixer.reorderBusInserts(bus!.id, order);
               } else {
-                vm.reorderTrackInserts(track!.id, order);
+                vm.mixer.reorderTrackInserts(track!.id, order);
               }
             },
           ),

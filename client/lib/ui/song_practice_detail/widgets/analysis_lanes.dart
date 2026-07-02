@@ -50,12 +50,15 @@ class AnalysisLanes extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final id = track.id;
-    final lanes = vm.lanesFor(id);
-    final viewStart = vm.viewStartMs;
+    final lanes = vm.analysis.lanesFor(id);
+    final viewStart = vm.playback.viewStartMs;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        _LaneToolbar(active: lanes, onToggle: (l) => vm.toggleLane(id, l)),
+        _LaneToolbar(
+          active: lanes,
+          onToggle: (l) => vm.analysis.toggleLane(id, l),
+        ),
         if (lanes.contains(AnalysisLane.pitch))
           PitchLane(
             track: track,
@@ -63,8 +66,8 @@ class AnalysisLanes extends StatelessWidget {
             viewStartMs: viewStart,
             position: vm.position,
             headerWidth: kTrackHeaderW,
-            loading: vm.metricsLoadingFor(id),
-            metrics: vm.metricsFor(id),
+            loading: vm.analysis.metricsLoadingFor(id),
+            metrics: vm.analysis.metricsFor(id),
           ),
         if (lanes.contains(AnalysisLane.loudness))
           LoudnessLane(
@@ -72,8 +75,8 @@ class AnalysisLanes extends StatelessWidget {
             timelineDurationMs: timelineDurationMs,
             viewStartMs: viewStart,
             position: vm.position,
-            loading: vm.metricsLoadingFor(id),
-            metrics: vm.metricsFor(id),
+            loading: vm.analysis.metricsLoadingFor(id),
+            metrics: vm.analysis.metricsFor(id),
           ),
         if (lanes.contains(AnalysisLane.spectrogram))
           SpectrogramLane(
@@ -81,16 +84,16 @@ class AnalysisLanes extends StatelessWidget {
             timelineDurationMs: timelineDurationMs,
             viewStartMs: viewStart,
             position: vm.position,
-            loading: vm.spectrogramLoadingFor(id),
-            spectrogram: vm.spectrogramFor(id),
+            loading: vm.analysis.spectrogramLoadingFor(id),
+            spectrogram: vm.analysis.spectrogramFor(id),
           ),
         if (lanes.contains(AnalysisLane.power))
           PowerLane(
             track: track,
             position: vm.position,
-            loading: vm.spectrogramLoadingFor(id),
-            spectrogram: vm.spectrogramFor(id),
-            metrics: vm.metricsFor(id),
+            loading: vm.analysis.spectrogramLoadingFor(id),
+            spectrogram: vm.analysis.spectrogramFor(id),
+            metrics: vm.analysis.metricsFor(id),
           ),
         if (lanes.contains(AnalysisLane.notes))
           NotesLane(

@@ -43,7 +43,7 @@ class BottomDock extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final open = vm.dockOpen;
+    final open = vm.analysis.dockOpen;
 
     return Container(
       decoration: const BoxDecoration(
@@ -54,7 +54,10 @@ class BottomDock extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           if (open)
-            _ResizeHandle(onDrag: (dy) => vm.setDockHeight(vm.dockHeight - dy)),
+            _ResizeHandle(
+              onDrag: (dy) =>
+                  vm.analysis.setDockHeight(vm.analysis.dockHeight - dy),
+            ),
           SizedBox(
             height: 34,
             child: Row(
@@ -70,8 +73,8 @@ class BottomDock extends StatelessWidget {
                           if (t != DockTab.mixer) ...[
                             _Tab(
                               label: _tabLabel(t),
-                              active: open && vm.dockTab == t,
-                              onTap: () => vm.showDockTab(t),
+                              active: open && vm.analysis.dockTab == t,
+                              onTap: () => vm.analysis.showDockTab(t),
                             ),
                             const SizedBox(width: 6),
                           ],
@@ -79,11 +82,11 @@ class BottomDock extends StatelessWidget {
                     ),
                   ),
                 ),
-                if (open && vm.activeTabSupportsLive) ...[
+                if (open && vm.analysis.activeTabSupportsLive) ...[
                   const SizedBox(width: 8),
                   SourceToggle(
                     live: vm.liveMonitor,
-                    onSelect: (v) => vm.setLiveMonitor(v),
+                    onSelect: (v) => vm.analysis.setLiveMonitor(v),
                   ),
                 ],
                 // Right: Mixer, separated from the analysis tabs.
@@ -92,14 +95,14 @@ class BottomDock extends StatelessWidget {
                 const SizedBox(width: 10),
                 _Tab(
                   label: _tabLabel(DockTab.mixer),
-                  active: open && vm.dockTab == DockTab.mixer,
-                  onTap: () => vm.showDockTab(DockTab.mixer),
+                  active: open && vm.analysis.dockTab == DockTab.mixer,
+                  onTap: () => vm.analysis.showDockTab(DockTab.mixer),
                 ),
                 const SizedBox(width: 6),
                 MouseRegion(
                   cursor: SystemMouseCursors.click,
                   child: GestureDetector(
-                    onTap: vm.toggleDock,
+                    onTap: vm.analysis.toggleDock,
                     child: Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 12),
                       child: Icon(
@@ -118,12 +121,12 @@ class BottomDock extends StatelessWidget {
           ),
           if (open)
             SizedBox(
-              height: vm.dockHeight,
+              height: vm.analysis.dockHeight,
               child: DecoratedBox(
                 decoration: const BoxDecoration(
                   border: Border(top: BorderSide(color: Studio.border)),
                 ),
-                child: switch (vm.dockTab) {
+                child: switch (vm.analysis.dockTab) {
                   DockTab.analysisSummary => VoiceSummaryView(vm: vm),
                   DockTab.spectrogram => SpectrogramTab(vm: vm),
                   DockTab.power => PowerTab(vm: vm),

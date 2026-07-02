@@ -159,7 +159,7 @@ class _WorkspaceState extends State<_Workspace> {
   List<AudioTrack> get _orderedTracks {
     // Only the active backing (per the Accompaniment / Original toggle) is shown
     // — it's the only one that's audible, so the mixer mirrors the timeline.
-    final backing = vm.playReference
+    final backing = vm.mixer.playReference
         ? practice.reference
         : practice.accompaniment;
     return [?backing, ...practice.activeVocalTracks];
@@ -192,7 +192,7 @@ class _WorkspaceState extends State<_Workspace> {
   Future<void> _dropBacking(List<String> paths) =>
       _guardedAudioDrop(paths, (audio) async {
         var index = 0;
-        if (vm.playReference) {
+        if (vm.mixer.playReference) {
           if (practice.reference == null) {
             await vm.addReference(audio.first);
             index = 1;
@@ -601,16 +601,17 @@ class _Center extends StatelessWidget {
       key: ValueKey(track.id),
       track: track,
       label: track.displayName,
-      timelineDurationMs: vm.viewSpanMs,
-      viewStartMs: vm.viewStartMs,
+      timelineDurationMs: vm.playback.viewSpanMs,
+      viewStartMs: vm.playback.viewStartMs,
       position: vm.position,
       selected: vm.selectedTrackId == track.id,
-      armed: !track.isBacking && vm.recordTargetId == track.id,
+      armed: !track.isBacking && vm.recording.recordTargetId == track.id,
       selectedClipId: vm.selectedTrackId == track.id ? vm.selectedClipId : null,
-      recordingPeaks: (vm.isRecording && vm.recordTargetId == track.id)
-          ? vm.recordingPeaks
+      recordingPeaks:
+          (vm.isRecording && vm.recording.recordTargetId == track.id)
+          ? vm.recording.recordingPeaks
           : null,
-      recordingStartMs: vm.recordingStartMs,
+      recordingStartMs: vm.recording.recordingStartMs,
       onSelect: () => vm.selectTrack(track.id),
       reorderable: !track.isBacking,
       onSelectClip: (clipId) => vm.selectClip(track.id, clipId),
@@ -624,19 +625,19 @@ class _Center extends StatelessWidget {
       onAddNote: () => onAddNote(track.id),
       onEditNote: (note) => onEditNote(track.id, note),
       onAddTechnique: () => onAddTechnique(track.id),
-      onToggleMute: () => vm.toggleMute(track.id),
-      onToggleSolo: () => vm.toggleSolo(track.id),
-      onVolume: (v) => vm.setTrackVolumeLive(track.id, v),
-      onVolumeCommit: vm.commitTrackVolume,
+      onToggleMute: () => vm.mixer.toggleMute(track.id),
+      onToggleSolo: () => vm.mixer.toggleSolo(track.id),
+      onVolume: (v) => vm.mixer.setTrackVolumeLive(track.id, v),
+      onVolumeCommit: vm.mixer.commitTrackVolume,
       onDelete: () => onDeleteTrack(track),
       canExpand: !track.isBacking,
-      expanded: vm.isTrackExpanded(track.id),
-      onToggleExpand: () => vm.toggleTrackExpanded(track.id),
-      subLanes: vm.isTrackExpanded(track.id)
+      expanded: vm.analysis.isTrackExpanded(track.id),
+      onToggleExpand: () => vm.analysis.toggleTrackExpanded(track.id),
+      subLanes: vm.analysis.isTrackExpanded(track.id)
           ? AnalysisLanes(
               vm: vm,
               track: track,
-              timelineDurationMs: vm.viewSpanMs,
+              timelineDurationMs: vm.playback.viewSpanMs,
               onAddNote: (s, e) => onAddNoteAt(track.id, s, e),
               onEditNote: (n) => onEditNote(track.id, n),
               onAddTechnique: (s, e) => onAddTechniqueAt(track.id, s, e),
@@ -648,13 +649,13 @@ class _Center extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final backing = vm.activeBacking;
-    final ref = vm.playReference;
+    final backing = vm.mixer.activeBacking;
+    final ref = vm.mixer.playReference;
     // The visible timeline span (zoomable down to a 1-second window) and the
     // absolute time at the left edge; the ruler, grid, lanes, loop band and
     // master all scale to this viewport.
-    final dur = vm.viewSpanMs;
-    final viewStart = vm.viewStartMs;
+    final dur = vm.playback.viewSpanMs;
+    final viewStart = vm.playback.viewStartMs;
     return LayoutBuilder(
       builder: (context, constraints) {
         // The timeline area starts after the fixed track-header column and the
@@ -688,14 +689,16 @@ class _Center extends StatelessWidget {
                             ? signal.scrollDelta.dy
                             : signal.scrollDelta.dx;
                         if (delta != 0) {
-                          vm.panView((delta / timelineW * dur).round());
+                          vm.playback.panView(
+                            (delta / timelineW * dur).round(),
+                          );
                         }
                       },
                       onPointerPanZoomUpdate: (e) {
                         if (timelineW <= 0) return;
                         final dx = e.panDelta.dx;
                         if (dx != 0) {
-                          vm.panView((-dx / timelineW * dur).round());
+                          vm.playback.panView((-dx / timelineW * dur).round());
                         }
                       },
                       child: ListView(
@@ -705,7 +708,7 @@ class _Center extends StatelessWidget {
                         children: [
                           _BackingHeader(
                             playReference: ref,
-                            onSelect: vm.setPlayReference,
+                            onSelect: vm.mixer.setPlayReference,
                           ),
                           // Backing region: its own drop zone, so only it highlights when a
                           // file is dragged over it. Drop fills the empty backing slot; any
@@ -728,7 +731,7 @@ class _Center extends StatelessWidget {
                                   ),
                           ),
                           _TakesHeader(vm: vm),
-                          if (vm.vocalTakes.isEmpty && !vm.isRecording)
+                          if (vm.versions.vocalTakes.isEmpty && !vm.isRecording)
                             _AudioDropZone(
                               onDropPaths: onDropNewTake,
                               builder: (hover) => _LanePad(
@@ -745,7 +748,7 @@ class _Center extends StatelessWidget {
                             // lane adds it as a new clip on THAT take (only that lane
                             // highlights). The live recording draws on the armed lane itself
                             // (Logic / Cubase), so there's no separate REC lane.
-                            for (final t in vm.vocalTakes)
+                            for (final t in vm.versions.vocalTakes)
                               _AudioDropZone(
                                 onDropPaths: (paths) =>
                                     onDropClipToTake(t.id, paths),
@@ -756,9 +759,10 @@ class _Center extends StatelessWidget {
                               ),
                           // FX BUSES — DAW group lanes (Cubase-style), between the
                           // takes and the master. Only on the native FX engine.
-                          if (vm.supportsEffects) ...[
+                          if (vm.mixer.supportsEffects) ...[
                             _BusesHeader(vm: vm),
-                            for (final b in vm.fxBuses) _BusRow(vm: vm, bus: b),
+                            for (final b in vm.mixer.fxBuses)
+                              _BusRow(vm: vm, bus: b),
                           ],
                           const _MasterHeader(),
                           _MasterRow(vm: vm),
@@ -771,7 +775,7 @@ class _Center extends StatelessWidget {
               ],
             ),
             // Loop region band across the timeline area (only while looping).
-            if (vm.loopEnabled && dur > 0 && timelineW > 0)
+            if (vm.playback.loopEnabled && dur > 0 && timelineW > 0)
               Positioned(
                 // Clamp the band to the timeline viewport: a loop that starts
                 // before the visible window must not paint over the track-header
@@ -781,19 +785,13 @@ class _Center extends StatelessWidget {
                 left:
                     kTimelineHMargin +
                     kTrackHeaderW +
-                    ((vm.loopStartMs - viewStart) / dur * timelineW).clamp(
-                      0.0,
-                      timelineW,
-                    ),
+                    ((vm.playback.loopStartMs - viewStart) / dur * timelineW)
+                        .clamp(0.0, timelineW),
                 width:
-                    ((vm.loopEndMs - viewStart) / dur * timelineW).clamp(
-                      0.0,
-                      timelineW,
-                    ) -
-                    ((vm.loopStartMs - viewStart) / dur * timelineW).clamp(
-                      0.0,
-                      timelineW,
-                    ),
+                    ((vm.playback.loopEndMs - viewStart) / dur * timelineW)
+                        .clamp(0.0, timelineW) -
+                    ((vm.playback.loopStartMs - viewStart) / dur * timelineW)
+                        .clamp(0.0, timelineW),
                 top: rulerHeight,
                 bottom: 0,
                 child: IgnorePointer(
@@ -977,7 +975,7 @@ class _TimelineScrollbar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final ext = vm.practice?.timelineDurationMs ?? 0;
-    final span = vm.viewSpanMs;
+    final span = vm.playback.viewSpanMs;
     if (ext <= 0) return const SizedBox(height: 14);
     // Always shown: the thumb fills the groove at fit-all (nothing to scroll)
     // and narrows / becomes draggable once zoomed in. It sits in the timeline
@@ -995,7 +993,7 @@ class _TimelineScrollbar extends StatelessWidget {
                 child: LayoutBuilder(
                   builder: (context, c) {
                     final w = c.maxWidth;
-                    final start = vm.viewStartMs;
+                    final start = vm.playback.viewStartMs;
                     final thumbLeft = (start / ext * w).clamp(0.0, w);
                     final thumbW = (span / ext * w).clamp(28.0, w);
                     return Stack(
@@ -1019,7 +1017,9 @@ class _TimelineScrollbar extends StatelessWidget {
                               behavior: HitTestBehavior.opaque,
                               onHorizontalDragUpdate: (d) {
                                 if (w <= 0) return;
-                                vm.panView((d.delta.dx / w * ext).round());
+                                vm.playback.panView(
+                                  (d.delta.dx / w * ext).round(),
+                                );
                               },
                               child: DecoratedBox(
                                 decoration: BoxDecoration(
@@ -1081,9 +1081,9 @@ class _MasterRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final vol = vm.masterVolume;
-    final tl = vm.viewSpanMs;
-    final viewStart = vm.viewStartMs;
+    final vol = vm.mixer.masterVolume;
+    final tl = vm.playback.viewSpanMs;
+    final viewStart = vm.playback.viewStartMs;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: kTimelineHMargin),
       child: Container(
@@ -1124,8 +1124,8 @@ class _MasterRow extends StatelessWidget {
                                 child: StudioFader(
                                   value: vol,
                                   accent: Studio.accent,
-                                  onChanged: vm.setMasterVolumeLive,
-                                  onChangeEnd: vm.commitMasterVolume,
+                                  onChanged: vm.mixer.setMasterVolumeLive,
+                                  onChangeEnd: vm.mixer.commitMasterVolume,
                                 ),
                               ),
                               const SizedBox(width: 8),
@@ -1176,12 +1176,12 @@ class _MasterRow extends StatelessWidget {
                         child: Padding(
                           padding: const EdgeInsets.symmetric(vertical: 10),
                           child: ValueListenableBuilder<List<double>>(
-                            valueListenable: vm.recordingPeaks,
+                            valueListenable: vm.recording.recordingPeaks,
                             builder: (context, _, _) {
                               // The master envelope spans the whole extent — show
                               // only the visible [viewStart, viewStart+span] slice
                               // so it lines up with the zoomed lanes above.
-                              final all = vm.masterWaveformPeaks;
+                              final all = vm.mixer.masterWaveformPeaks;
                               final ext = vm.practice?.timelineDurationMs ?? 0;
                               List<double> peaks = all;
                               if (ext > 0 && tl < ext && all.isNotEmpty) {
@@ -1255,7 +1255,7 @@ class _BusesHeader extends StatelessWidget {
             cursor: SystemMouseCursors.click,
             child: GestureDetector(
               behavior: HitTestBehavior.opaque,
-              onTap: () => vm.createBus(),
+              onTap: () => vm.mixer.createBus(),
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
                 decoration: BoxDecoration(
@@ -1307,9 +1307,9 @@ class _BusRow extends StatelessWidget {
       position,
       BusMenuActions(
         currentColorValue: bus.colorValue,
-        onPickColor: (value) => vm.setBusColor(bus.id, value),
+        onPickColor: (value) => vm.mixer.setBusColor(bus.id, value),
         onRename: () => _rename(context),
-        onDuplicate: () => vm.duplicateBus(bus.id),
+        onDuplicate: () => vm.mixer.duplicateBus(bus.id),
         onDelete: () => _delete(context),
       ),
     );
@@ -1322,25 +1322,22 @@ class _BusRow extends StatelessWidget {
       title: 'Rename bus',
       hint: 'Bus name',
     );
-    if (name != null) await vm.renameBus(bus.id, name);
+    if (name != null) await vm.mixer.renameBus(bus.id, name);
   }
 
   Future<void> _delete(BuildContext context) async {
-    final ok = await showStudioConfirmDialog(
+    final ok = await showConfirmDialog(
       context,
       title: 'Delete "${bus.name}"?',
-      message:
-          'Removing this FX bus re-routes anything feeding it to the master.',
-      confirmLabel: 'Delete',
-      danger: true,
+      body: 'Removing this FX bus re-routes anything feeding it to the master.',
     );
-    if (ok) await vm.deleteBus(bus.id);
+    if (ok) await vm.mixer.deleteBus(bus.id);
   }
 
   @override
   Widget build(BuildContext context) {
-    final tl = vm.viewSpanMs;
-    final viewStart = vm.viewStartMs;
+    final tl = vm.playback.viewSpanMs;
+    final viewStart = vm.playback.viewStartMs;
     final selected = vm.selectedBusId == bus.id;
     final accent = bus.colorValue != null
         ? Color(bus.colorValue!)
@@ -1404,14 +1401,14 @@ class _BusRow extends StatelessWidget {
                                     label: 'M',
                                     active: bus.muted,
                                     activeColor: Studio.record,
-                                    onTap: () => vm.toggleBusMute(bus.id),
+                                    onTap: () => vm.mixer.toggleBusMute(bus.id),
                                   ),
                                   const SizedBox(width: 4),
                                   MsToggle(
                                     label: 'S',
                                     active: bus.soloed,
                                     activeColor: Studio.accent,
-                                    onTap: () => vm.toggleBusSolo(bus.id),
+                                    onTap: () => vm.mixer.toggleBusSolo(bus.id),
                                   ),
                                   const SizedBox(width: 10),
                                   Expanded(
@@ -1419,7 +1416,7 @@ class _BusRow extends StatelessWidget {
                                       value: bus.volume,
                                       accent: accent,
                                       onChanged: (v) =>
-                                          vm.setBusVolumeLive(bus.id, v),
+                                          vm.mixer.setBusVolumeLive(bus.id, v),
                                       onChangeEnd: vm.commitFx,
                                     ),
                                   ),
@@ -1471,9 +1468,9 @@ class _BusRow extends StatelessWidget {
                         child: Padding(
                           padding: const EdgeInsets.symmetric(vertical: 10),
                           child: ValueListenableBuilder<List<double>>(
-                            valueListenable: vm.recordingPeaks,
+                            valueListenable: vm.recording.recordingPeaks,
                             builder: (context, _, _) {
-                              final all = vm.busWaveformPeaks(bus.id);
+                              final all = vm.mixer.busWaveformPeaks(bus.id);
                               final ext = vm.practice?.timelineDurationMs ?? 0;
                               List<double> peaks = all;
                               if (ext > 0 && tl < ext && all.isNotEmpty) {
@@ -1531,7 +1528,7 @@ class _InterpretationDropdown extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final active = vm.activeInterpretation;
+    final active = vm.versions.active;
     return MouseRegion(
       cursor: SystemMouseCursors.click,
       child: GestureDetector(
@@ -1570,13 +1567,13 @@ class _InterpretationDropdown extends StatelessWidget {
   }
 
   void _open(BuildContext context, Offset globalPosition) {
-    final active = vm.activeInterpretation;
+    final active = vm.versions.active;
     showStudioMenu(context, globalPosition, [
-      for (final v in vm.interpretations)
+      for (final v in vm.versions.all)
         StudioMenuItem(
           label: v.name,
           selected: v.id == active?.id,
-          onTap: () => vm.setActiveInterpretation(v.id),
+          onTap: () => vm.versions.setActive(v.id),
         ),
       StudioMenuItem(
         divider: true,
@@ -1592,7 +1589,7 @@ class _InterpretationDropdown extends StatelessWidget {
           if (a != null) _rename(context, a.id, a.name);
         },
       ),
-      if (vm.interpretations.length > 1)
+      if (vm.versions.all.length > 1)
         StudioMenuItem(
           icon: FIcons.trash2,
           label: 'Delete',
@@ -1608,12 +1605,12 @@ class _InterpretationDropdown extends StatelessWidget {
   Future<void> _create(BuildContext context) async {
     final name = await showRenameDialog(
       context,
-      current: 'Interpretation ${vm.interpretations.length + 1}',
+      current: 'Interpretation ${vm.versions.all.length + 1}',
       title: 'New interpretation',
       hint: 'e.g. Tender, Powerful',
       confirmLabel: 'Create',
     );
-    if (name != null) await vm.createInterpretation(name);
+    if (name != null) await vm.versions.create(name);
   }
 
   Future<void> _rename(BuildContext context, String id, String name) async {
@@ -1623,7 +1620,7 @@ class _InterpretationDropdown extends StatelessWidget {
       title: 'Rename interpretation',
       hint: 'Interpretation name',
     );
-    if (next != null) await vm.renameInterpretation(id, next);
+    if (next != null) await vm.versions.rename(id, next);
   }
 
   Future<void> _delete(BuildContext context, String id, String name) async {
@@ -1632,7 +1629,7 @@ class _InterpretationDropdown extends StatelessWidget {
       title: 'Delete "$name"?',
       body: 'This removes the interpretation and all of its takes.',
     );
-    if (ok) await vm.deleteInterpretation(id);
+    if (ok) await vm.versions.delete(id);
   }
 }
 

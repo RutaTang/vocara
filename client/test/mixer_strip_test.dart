@@ -2,13 +2,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vocara/domain/models/audio_track.dart';
 import 'package:vocara/domain/models/fx_bus.dart';
+import 'package:vocara/ui/song_practice_detail/view_model/mixer_controller.dart';
 import 'package:vocara/ui/song_practice_detail/view_model/song_practice_detail_view_model.dart';
 import 'package:vocara/ui/song_practice_detail/widgets/mixer_strip.dart';
 
-/// Minimal fake: only the members MixerStrip touches while building a track
-/// strip + the master strip. `supportsEffects: false` hides the mic-input and
-/// bus strips, which would drag in audio settings / engine state.
-class _FakeVm extends Fake implements SongPracticeDetailViewModel {
+/// Minimal fake mixer: only the members MixerStrip touches while building a
+/// track strip + the master strip. `supportsEffects: false` hides the
+/// mic-input and bus strips, which would drag in audio settings / engine state.
+class _FakeMixer extends Fake implements MixerController {
   final List<double> trackVolumes = [];
   final List<double> masterVolumes = [];
 
@@ -17,12 +18,6 @@ class _FakeVm extends Fake implements SongPracticeDetailViewModel {
 
   @override
   List<FxBus> get fxBuses => const [];
-
-  @override
-  String? get selectedTrackId => null;
-
-  @override
-  String? get selectedBusId => null;
 
   @override
   double get masterVolume => 0.8;
@@ -39,6 +34,21 @@ class _FakeVm extends Fake implements SongPracticeDetailViewModel {
 
   @override
   Future<void> commitMasterVolume() async {}
+}
+
+/// Minimal fake host: selection (a core VM concern) plus the [mixer] the
+/// strip's level/routing controls talk to directly.
+class _FakeVm extends Fake implements SongPracticeDetailViewModel {
+  final _FakeMixer fakeMixer = _FakeMixer();
+
+  @override
+  MixerController get mixer => fakeMixer;
+
+  @override
+  String? get selectedTrackId => null;
+
+  @override
+  String? get selectedBusId => null;
 }
 
 AudioTrack _track() => AudioTrack(
@@ -102,7 +112,7 @@ void main() {
     await tester.drag(_faders.first, const Offset(0, -40));
     await tester.pump();
     expect(tester.takeException(), isNull);
-    expect(vm.trackVolumes, isNotEmpty);
+    expect(vm.fakeMixer.trackVolumes, isNotEmpty);
   });
 
   testWidgets('squeezed mixer scrolls per strip and the fader still works', (
@@ -122,7 +132,7 @@ void main() {
     await tester.drag(_faders.first, const Offset(0, -30));
     await tester.pump();
     expect(tester.takeException(), isNull);
-    expect(vm.trackVolumes, isNotEmpty);
+    expect(vm.fakeMixer.trackVolumes, isNotEmpty);
   });
 
   testWidgets('severely squeezed mixer still lays out without exceptions', (

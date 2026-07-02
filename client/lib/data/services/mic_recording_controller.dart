@@ -133,10 +133,12 @@ class MicRecordingController {
     this.onInputDeviceLost,
     this.onLevelTick,
     Future<bool> Function() requestPermission = MicPermission.request,
+    RecordingFinalizer? finalizer,
   }) : _acquireEngine = acquireEngine,
        _monitor = monitor,
        _onQuitFinalize = onQuitFinalize,
-       _requestPermission = requestPermission;
+       _requestPermission = requestPermission,
+       _finalizer = finalizer ?? RecordingFinalizer.instance;
 
   /// Live-preview cadence: pull captured frames into the monitor every 30 ms
   /// so the live spectrogram/metrics stay smooth.
@@ -144,7 +146,9 @@ class MicRecordingController {
 
   /// Meter/device-watch cadence (also the elapsed clock the song detail VM
   /// derives its live waveform peaks from — one [onLevelTick] per tick).
-  static const _levelIntervalMs = 50;
+  /// Public so an owner deriving durations from tick counts can alias it
+  /// instead of hard-coding a second 50 that could drift.
+  static const int levelIntervalMs = 50;
 
   /// Borrows the engine to record with; called once per [start], after the
   /// permission gate (so a denied/abandoned start never touches — or lazily
@@ -174,6 +178,11 @@ class MicRecordingController {
 
   /// Injectable for tests; defaults to the real macOS permission round-trip.
   final Future<bool> Function() _requestPermission;
+
+  /// The quit-finalize registry an armed take registers with; injectable so
+  /// an owner (and its tests) can pass a private registry, defaulting to the
+  /// app-wide [RecordingFinalizer.instance].
+  final RecordingFinalizer _finalizer;
 
   /// Live input level (0..1, clamped) while recording, for a meter; reset to
   /// 0 on stop. Disposed with the controller.
@@ -297,7 +306,7 @@ class MicRecordingController {
         );
       }
       _levelTimer = Timer.periodic(
-        const Duration(milliseconds: _levelIntervalMs),
+        const Duration(milliseconds: levelIntervalMs),
         (_) {
           if (_disposed) return;
           // Input loss must stop the take gracefully — finalizing KEEPS what
@@ -314,7 +323,7 @@ class MicRecordingController {
         },
       );
       // Finalize this take if the app quits mid-record; unregistered on stop.
-      RecordingFinalizer.instance.register(_finalizeOnQuit);
+      _finalizer.register(_finalizeOnQuit);
       return MicRecordingStart.started(path);
     } finally {
       // Only this start's own outcome clears the flag: after an invalidate a
@@ -341,7 +350,7 @@ class MicRecordingController {
       _feedingMonitor = false;
     }
     _isRecording = false;
-    RecordingFinalizer.instance.unregister(_finalizeOnQuit);
+    _finalizer.unregister(_finalizeOnQuit);
     final path = _path!;
     _path = null;
     _destination = null;
@@ -382,7 +391,7 @@ class MicRecordingController {
     // a hot mic.
     final active = _isRecording || _starting;
     invalidatePendingStart();
-    RecordingFinalizer.instance.unregister(_finalizeOnQuit);
+    _finalizer.unregister(_finalizeOnQuit);
     _levelTimer?.cancel();
     _levelTimer = null;
     _captureTimer?.cancel();

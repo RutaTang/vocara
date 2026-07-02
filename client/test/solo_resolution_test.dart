@@ -2,7 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:vocara/domain/models/audio_fx.dart';
 import 'package:vocara/domain/models/audio_track.dart';
 import 'package:vocara/domain/models/fx_bus.dart';
-import 'package:vocara/ui/song_practice_detail/view_model/song_practice_detail_view_model.dart';
+import 'package:vocara/ui/song_practice_detail/view_model/mixer_controller.dart';
 
 AudioTrack _track(
   String id, {

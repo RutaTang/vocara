@@ -1,5 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:vocara/ui/song_practice_detail/view_model/song_practice_detail_view_model.dart';
+import 'package:vocara/ui/song_practice_detail/view_model/mixer_controller.dart';
 
 void main() {
   group('computeAudible', () {

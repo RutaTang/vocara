@@ -63,7 +63,7 @@ class RulerBar extends StatelessWidget {
   }
 
   Widget _ticks(BuildContext context, int dur) {
-    final viewStart = vm.viewStartMs;
+    final viewStart = vm.playback.viewStartMs;
     return LayoutBuilder(
       builder: (context, constraints) {
         final w = constraints.maxWidth;
@@ -95,8 +95,8 @@ class RulerBar extends StatelessWidget {
         double xOf(int ms) => (ms - viewStart) / dur * w;
         int msAt(double dx) =>
             (viewStart + (dx / w).clamp(0.0, 1.0) * dur).round();
-        final startX = xOf(vm.loopStartMs);
-        final endX = xOf(vm.loopEndMs);
+        final startX = xOf(vm.playback.loopStartMs);
+        final endX = xOf(vm.playback.loopEndMs);
         // The fill is clamped to the viewport so a loop overflowing the left edge
         // still tints the whole visible region (and never overshoots the right);
         // the edge handles below stay UNCLAMPED so they track the true loop edges.
@@ -104,7 +104,7 @@ class RulerBar extends StatelessWidget {
         final fillLeft = startX.clamp(0.0, w);
         final fillRight = endX.clamp(0.0, w);
         final loopColor = Studio.accent.withValues(
-          alpha: vm.loopEnabled ? 0.20 : 0.07,
+          alpha: vm.playback.loopEnabled ? 0.20 : 0.07,
         );
 
         return Stack(
@@ -136,13 +136,15 @@ class RulerBar extends StatelessWidget {
             // Edge handles (only these resize the region).
             _LoopHandle(
               centerX: startX,
-              onDelta: (dx) =>
-                  vm.setLoopStart(vm.loopStartMs + (dx / w * dur).round()),
+              onDelta: (dx) => vm.playback.setLoopStart(
+                vm.playback.loopStartMs + (dx / w * dur).round(),
+              ),
             ),
             _LoopHandle(
               centerX: endX,
-              onDelta: (dx) =>
-                  vm.setLoopEnd(vm.loopEndMs + (dx / w * dur).round()),
+              onDelta: (dx) => vm.playback.setLoopEnd(
+                vm.playback.loopEndMs + (dx / w * dur).round(),
+              ),
             ),
             Positioned.fill(child: playhead),
           ],

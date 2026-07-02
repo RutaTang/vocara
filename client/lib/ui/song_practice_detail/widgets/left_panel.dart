@@ -68,11 +68,11 @@ class _LeftPanelState extends State<LeftPanel> {
         track != null &&
         !track.isBacking &&
         vm.selectedMetrics == null &&
-        !vm.selectedMetricsUnavailable &&
+        !vm.analysis.selectedMetricsUnavailable &&
         !vm.spectrogramLoading &&
-        !vm.metricsLoadingFor(track.id)) {
+        !vm.analysis.metricsLoadingFor(track.id)) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) vm.ensureSelectedSpectrogram();
+        if (mounted) vm.analysis.ensureSelectedSpectrogram();
       });
     }
 
@@ -237,7 +237,7 @@ class _BusChannelFooter extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final buses = vm.fxBuses;
+    final buses = vm.mixer.fxBuses;
     var dest = 'Stereo Out';
     for (final b in buses) {
       if (b.id == bus.outputBusId) dest = b.name;
@@ -254,14 +254,15 @@ class _BusChannelFooter extends StatelessWidget {
           _SendsSection(
             sends: bus.sends,
             targets: [
-              for (final b in vm.fxBuses)
+              for (final b in vm.mixer.fxBuses)
                 if (b.id != bus.id) b,
             ],
-            onAdd: (busId) => vm.addBusSend(bus.id, busId),
-            onRemove: (slot) => vm.removeBusSend(bus.id, slot),
+            onAdd: (busId) => vm.mixer.addBusSend(bus.id, busId),
+            onRemove: (slot) => vm.mixer.removeBusSend(bus.id, slot),
             onRetarget: (slot, busId) =>
-                vm.setBusSendTarget(bus.id, slot, busId),
-            onLevel: (slot, db) => vm.setBusSendLevelLive(bus.id, slot, db),
+                vm.mixer.setBusSendTarget(bus.id, slot, busId),
+            onLevel: (slot, db) =>
+                vm.mixer.setBusSendLevelLive(bus.id, slot, db),
             onCommit: vm.commitFx,
           ),
           Row(
@@ -276,14 +277,14 @@ class _BusChannelFooter extends StatelessWidget {
                         StudioMenuItem(
                           label: 'Stereo Out',
                           selected: bus.outputBusId == null,
-                          onTap: () => vm.setBusOutput(bus.id, null),
+                          onTap: () => vm.mixer.setBusOutput(bus.id, null),
                         ),
                         for (final b in buses)
                           if (b.id != bus.id)
                             StudioMenuItem(
                               label: b.name,
                               selected: bus.outputBusId == b.id,
-                              onTap: () => vm.setBusOutput(bus.id, b.id),
+                              onTap: () => vm.mixer.setBusOutput(bus.id, b.id),
                             ),
                       ], width: 180),
                   child: Container(
@@ -327,19 +328,19 @@ class _BusChannelFooter extends StatelessWidget {
                 label: 'M',
                 active: bus.muted,
                 color: Studio.record,
-                onTap: () => vm.toggleBusMute(bus.id),
+                onTap: () => vm.mixer.toggleBusMute(bus.id),
               ),
               const SizedBox(width: 8),
               _MsToggle(
                 label: 'S',
                 active: bus.soloed,
                 color: Studio.accent,
-                onTap: () => vm.toggleBusSolo(bus.id),
+                onTap: () => vm.mixer.toggleBusSolo(bus.id),
               ),
               const Spacer(),
               StudioPanKnob(
                 value: bus.pan,
-                onChanged: (p) => vm.setBusPanLive(bus.id, p),
+                onChanged: (p) => vm.mixer.setBusPanLive(bus.id, p),
                 onCommit: vm.commitFx,
               ),
             ],
@@ -352,7 +353,7 @@ class _BusChannelFooter extends StatelessWidget {
                 child: StudioFader(
                   value: bus.volume,
                   accent: Studio.accent,
-                  onChanged: (v) => vm.setBusVolumeLive(bus.id, v),
+                  onChanged: (v) => vm.mixer.setBusVolumeLive(bus.id, v),
                   onChangeEnd: vm.commitFx,
                 ),
               ),
@@ -391,7 +392,7 @@ class _BodyContent extends StatelessWidget {
     // A Logic-style channel strip: the FX inserts (EQ/comp/reverb) scroll above,
     // and the channel-strip footer (output routing, pan, fader, mute/solo) is
     // pinned to the bottom. Analysis moved to the bottom dock's summary tab.
-    final isVocal = !track.isBacking && vm.supportsEffects;
+    final isVocal = !track.isBacking && vm.mixer.supportsEffects;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -449,13 +450,13 @@ class _TrackChannelFooter extends StatelessWidget {
           if (showRouting) ...[
             _SendsSection(
               sends: track.sends,
-              targets: vm.fxBuses,
-              onAdd: (busId) => vm.addTrackSend(track.id, busId),
-              onRemove: (slot) => vm.removeTrackSend(track.id, slot),
+              targets: vm.mixer.fxBuses,
+              onAdd: (busId) => vm.mixer.addTrackSend(track.id, busId),
+              onRemove: (slot) => vm.mixer.removeTrackSend(track.id, slot),
               onRetarget: (slot, busId) =>
-                  vm.setTrackSendTarget(track.id, slot, busId),
+                  vm.mixer.setTrackSendTarget(track.id, slot, busId),
               onLevel: (slot, db) =>
-                  vm.setTrackSendLevelLive(track.id, slot, db),
+                  vm.mixer.setTrackSendLevelLive(track.id, slot, db),
               onCommit: vm.commitFx,
             ),
             Row(
@@ -474,20 +475,20 @@ class _TrackChannelFooter extends StatelessWidget {
                 label: 'M',
                 active: track.muted,
                 color: Studio.record,
-                onTap: () => vm.toggleMute(track.id),
+                onTap: () => vm.mixer.toggleMute(track.id),
               ),
               const SizedBox(width: 8),
               _MsToggle(
                 label: 'S',
                 active: track.soloed,
                 color: Studio.accent,
-                onTap: () => vm.toggleSolo(track.id),
+                onTap: () => vm.mixer.toggleSolo(track.id),
               ),
               const Spacer(),
               StudioPanKnob(
                 value: track.pan,
-                onChanged: (p) => vm.setTrackPanLive(track.id, p),
-                onCommit: vm.commitTrackVolume,
+                onChanged: (p) => vm.mixer.setTrackPanLive(track.id, p),
+                onCommit: vm.mixer.commitTrackVolume,
               ),
             ],
           ),
@@ -499,8 +500,8 @@ class _TrackChannelFooter extends StatelessWidget {
                 child: StudioFader(
                   value: track.volume,
                   accent: Studio.accent,
-                  onChanged: (v) => vm.setTrackVolumeLive(track.id, v),
-                  onChangeEnd: vm.commitTrackVolume,
+                  onChanged: (v) => vm.mixer.setTrackVolumeLive(track.id, v),
+                  onChangeEnd: vm.mixer.commitTrackVolume,
                 ),
               ),
               const SizedBox(width: 8),
@@ -727,7 +728,7 @@ class _OutputChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final buses = vm.fxBuses;
+    final buses = vm.mixer.fxBuses;
     var dest = 'Stereo Out';
     for (final b in buses) {
       if (b.id == track.busId) dest = b.name;
@@ -739,13 +740,13 @@ class _OutputChip extends StatelessWidget {
           StudioMenuItem(
             label: 'Stereo Out',
             selected: track.busId == null,
-            onTap: () => vm.setTrackBus(track.id, null),
+            onTap: () => vm.mixer.setTrackBus(track.id, null),
           ),
           for (final b in buses)
             StudioMenuItem(
               label: b.name,
               selected: track.busId == b.id,
-              onTap: () => vm.setTrackBus(track.id, b.id),
+              onTap: () => vm.mixer.setTrackBus(track.id, b.id),
             ),
         ], width: 180),
         child: Container(
@@ -919,9 +920,9 @@ class _TakeHeader extends StatelessWidget {
   }
 
   String _takeLabel() {
-    final takes = vm.vocalTakes;
+    final takes = vm.versions.vocalTakes;
     final idx = takes.indexWhere((t) => t.id == track.id);
-    final interp = vm.activeInterpretation?.name;
+    final interp = vm.versions.active?.name;
     final num = idx >= 0 ? 'Take ${idx + 1}' : 'Take';
     return interp == null ? num : '$num · $interp';
   }
@@ -996,7 +997,8 @@ class _VoiceSummary extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final track = vm.selectedTrack;
-    final loadingMetrics = track != null && vm.metricsLoadingFor(track.id);
+    final loadingMetrics =
+        track != null && vm.analysis.metricsLoadingFor(track.id);
     if (vm.spectrogramLoading || loadingMetrics) {
       return const _Empty('Analyzing…', inset: false, spinner: true);
     }
@@ -1018,7 +1020,10 @@ class _VoiceSummary extends StatelessWidget {
         if (m.isClipped || m.isLowSnr) _qualityBanner(m),
         _SectionLabel('Voice summary'),
         const SizedBox(height: 10),
-        _RangeRow(profile: profile, onTap: () => vm.showDockTab(DockTab.range)),
+        _RangeRow(
+          profile: profile,
+          onTap: () => vm.analysis.showDockTab(DockTab.range),
+        ),
         const SizedBox(height: 14),
         _grid([
           _Metric(
@@ -1028,7 +1033,7 @@ class _VoiceSummary extends StatelessWidget {
             dot: inTune == null
                 ? null
                 : (inTune >= 85 ? _good : (inTune >= 70 ? _warn : _flag)),
-            onTap: () => vm.showDockTab(DockTab.pitch),
+            onTap: () => vm.analysis.showDockTab(DockTab.pitch),
           ),
           _Metric(
             label: 'Vibrato',
@@ -1041,13 +1046,13 @@ class _VoiceSummary extends StatelessWidget {
             dot: vib == null || !vib.present
                 ? null
                 : ((vib.rateHz >= 5 && vib.rateHz <= 7) ? _good : _warn),
-            onTap: () => vm.showDockTab(DockTab.vibrato),
+            onTap: () => vm.analysis.showDockTab(DockTab.vibrato),
           ),
           _Metric(
             label: 'Clarity',
             value: m.cppAvg.isNaN ? '—' : m.cppAvg.toStringAsFixed(1),
             sub: 'CPP',
-            onTap: () => vm.showDockTab(DockTab.timbre),
+            onTap: () => vm.analysis.showDockTab(DockTab.timbre),
           ),
           _Metric(
             label: 'Ring',
@@ -1055,7 +1060,7 @@ class _VoiceSummary extends StatelessWidget {
                 ? '—'
                 : '${ltas.singersFormantDb.round()} dB',
             sub: "singer's formant",
-            onTap: () => vm.showDockTab(DockTab.ltas),
+            onTap: () => vm.analysis.showDockTab(DockTab.ltas),
           ),
           _Metric(
             label: 'Dynamics',
@@ -1063,7 +1068,7 @@ class _VoiceSummary extends StatelessWidget {
                 ? '${profile.dynamicRangeDb.round()} dB'
                 : '—',
             sub: 'soft → loud',
-            onTap: () => vm.showDockTab(DockTab.dynamics),
+            onTap: () => vm.analysis.showDockTab(DockTab.dynamics),
           ),
           _Metric(
             label: 'Brightness',
@@ -1071,14 +1076,14 @@ class _VoiceSummary extends StatelessWidget {
                 ? '—'
                 : '${ltas.alphaRatio.round()} dB',
             sub: 'α ratio',
-            onTap: () => vm.showDockTab(DockTab.ltas),
+            onTap: () => vm.analysis.showDockTab(DockTab.ltas),
           ),
         ]),
         if (reg != null && reg.hasData) ...[
           const SizedBox(height: 16),
           _RegisterBar(
             reg: reg,
-            onTap: () => vm.showDockTab(DockTab.registers),
+            onTap: () => vm.analysis.showDockTab(DockTab.registers),
           ),
         ],
       ],

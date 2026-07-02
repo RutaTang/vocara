@@ -571,6 +571,11 @@ class _ColorSwatch extends StatelessWidget {
 /// the dialog's own State and disposed only after the dismiss transition —
 /// disposing a local controller right after `showDialog` returns let the
 /// still-animating TextField touch a dead controller (debug crash).
+///
+/// Confirm/cancel prompts use the shared [showConfirmDialog] (this file used
+/// to carry a third confirm-dialog builder; both were plain `showDialog`
+/// modals with reconcilable contracts, so it was merged away — only the
+/// instant-menu [PopupRoute]s above are overlay-anchored and stay here).
 Future<String?> showRenameDialog(
   BuildContext context, {
   required String current,
@@ -585,157 +590,4 @@ Future<String?> showRenameDialog(
     initial: current,
     confirmLabel: confirmLabel,
   );
-}
-
-/// A dark, rounded studio modal shell: title, body and a right-aligned action
-/// row — shared by the rename + confirm dialogs.
-class _StudioDialog extends StatelessWidget {
-  const _StudioDialog({
-    required this.title,
-    required this.body,
-    required this.actions,
-    this.message,
-  });
-
-  final String title;
-  final String? message;
-  final Widget? body;
-  final List<Widget> actions;
-
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 420),
-        child: Material(
-          color: Studio.surfaceRaised,
-          elevation: 16,
-          borderRadius: BorderRadius.circular(14),
-          child: Container(
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: Studio.border),
-            ),
-            padding: const EdgeInsets.fromLTRB(22, 20, 22, 18),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Text(
-                  title,
-                  style: const TextStyle(
-                    color: Studio.textPrimary,
-                    fontSize: 16,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                if (message != null) ...[
-                  const SizedBox(height: 8),
-                  Text(
-                    message!,
-                    style: const TextStyle(
-                      color: Studio.textSecondary,
-                      fontSize: 13,
-                      height: 1.4,
-                    ),
-                  ),
-                ],
-                if (body != null) ...[const SizedBox(height: 16), body!],
-                const SizedBox(height: 20),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.end,
-                  children: [
-                    for (final a in actions) ...[a, const SizedBox(width: 10)],
-                  ]..removeLast(),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _DialogButton extends StatelessWidget {
-  const _DialogButton({
-    required this.label,
-    required this.onTap,
-    this.primary = false,
-    this.danger = false,
-  });
-
-  final String label;
-  final VoidCallback onTap;
-  final bool primary;
-  final bool danger;
-
-  @override
-  Widget build(BuildContext context) {
-    final fill = danger
-        ? Studio.record
-        : primary
-        ? Studio.accent
-        : Colors.transparent;
-    final fg = (primary || danger) ? Colors.white : Studio.textPrimary;
-    return MouseRegion(
-      cursor: SystemMouseCursors.click,
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 9),
-          decoration: BoxDecoration(
-            color: fill,
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(
-              color: (primary || danger) ? Colors.transparent : Studio.border,
-            ),
-          ),
-          child: Text(
-            label,
-            style: TextStyle(
-              color: fg,
-              fontSize: 13.5,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// A dark studio confirm dialog (used for Delete and other yes/no prompts).
-/// Returns true if confirmed.
-Future<bool> showStudioConfirmDialog(
-  BuildContext context, {
-  required String title,
-  required String message,
-  String confirmLabel = 'Confirm',
-  String cancelLabel = 'Cancel',
-  bool danger = false,
-}) async {
-  final ok = await showDialog<bool>(
-    context: context,
-    barrierColor: Colors.black54,
-    builder: (dialogContext) => _StudioDialog(
-      title: title,
-      message: message,
-      body: null,
-      actions: [
-        _DialogButton(
-          label: cancelLabel,
-          onTap: () => Navigator.of(dialogContext).pop(false),
-        ),
-        _DialogButton(
-          label: confirmLabel,
-          primary: !danger,
-          danger: danger,
-          onTap: () => Navigator.of(dialogContext).pop(true),
-        ),
-      ],
-    ),
-  );
-  return ok ?? false;
 }
