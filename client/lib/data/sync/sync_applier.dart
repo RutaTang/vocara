@@ -90,7 +90,8 @@ class SyncApplier {
                     variables: [Variable.withString(rec.id)],
                   )
                   .getSingleOrNull();
-              final wins = existing == null ||
+              final wins =
+                  existing == null ||
                   rec.hlcPacked.compareTo(existing.read<String>('hlc_packed')) >
                       0;
               if (!wins) return false;
@@ -172,8 +173,9 @@ class SyncApplier {
     Set<(String, String)> insertedThisBatch,
   ) async {
     while (true) {
-      final violations =
-          await db.customSelect('PRAGMA foreign_key_check').get();
+      final violations = await db
+          .customSelect('PRAGMA foreign_key_check')
+          .get();
       if (violations.isEmpty) break;
       for (final v in violations) {
         final table = v.read<String>('table');
@@ -190,10 +192,9 @@ class SyncApplier {
         if (idRow == null) continue;
         final id = idRow.read<String>('id');
         if (insertedThisBatch.contains((table, id))) {
-          await db.customStatement(
-            'DELETE FROM $table WHERE rowid = ?',
-            [rowid],
-          );
+          await db.customStatement('DELETE FROM $table WHERE rowid = ?', [
+            rowid,
+          ]);
           // The insert was counted as applied above; it did not stick.
           if (result.applied > 0) result.applied--;
           result.failed++;
@@ -221,8 +222,7 @@ class SyncApplier {
   /// The child column of foreign key [fkid] on [table] (our FKs are all
   /// single-column, so the first component is the whole key).
   Future<String?> _fkColumn(String table, int fkid) async {
-    final fks =
-        await db.customSelect('PRAGMA foreign_key_list($table)').get();
+    final fks = await db.customSelect('PRAGMA foreign_key_list($table)').get();
     for (final fk in fks) {
       if (fk.read<int>('id') == fkid) return fk.read<String>('from');
     }
@@ -288,10 +288,10 @@ class SyncApplier {
   Future<void> _update(String table, Map<String, Object?> columns) {
     final cols = columns.keys.where((c) => c != 'id').toList();
     final setClause = cols.map((c) => '$c = ?').join(', ');
-    return db.customStatement(
-      'UPDATE $table SET $setClause WHERE id = ?',
-      [for (final c in cols) _bind(columns[c]), columns['id']],
-    );
+    return db.customStatement('UPDATE $table SET $setClause WHERE id = ?', [
+      for (final c in cols) _bind(columns[c]),
+      columns['id'],
+    ]);
   }
 
   /// SQLite bind values are int / double / String / null / blob; map bool to its

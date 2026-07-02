@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
@@ -68,8 +69,9 @@ void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
   MediaKit.ensureInitialized();
 
-  testWidgets('import → waveform analysis → multi-track playback pipeline',
-      (tester) async {
+  testWidgets('import → waveform analysis → multi-track playback pipeline', (
+    tester,
+  ) async {
     final tmp = await getTemporaryDirectory();
     final wavPath = await _writeSineWav(
       p.join(tmp.path, 'tone_${DateTime.now().microsecondsSinceEpoch}.wav'),
@@ -83,6 +85,11 @@ void main() {
     expect(created, isA<Ok<SongPractice>>());
     final practiceId = (created as Ok<SongPractice>).value.id;
 
+    // Fire-and-forget load, matching the production wiring in
+    // dependencies.dart (the view model tolerates attach-before-load).
+    final appSettings = AppSettingsService(storage: storage);
+    unawaited(appSettings.load());
+
     final vm = SongPracticeDetailViewModel(
       repository: repo,
       techniqueRepository: persistence.techRepo,
@@ -90,7 +97,7 @@ void main() {
       waveformService: WaveformService(storage: storage),
       spectrogramService: const SpectrogramService(),
       separationService: FakeSourceSeparationService(),
-      appSettings: AppSettingsService(storage: storage)..load(),
+      appSettings: appSettings,
       practiceId: practiceId,
     );
 
@@ -108,10 +115,16 @@ void main() {
 
     final accompaniment = vm.practice!.accompaniment;
     expect(accompaniment, isNotNull, reason: 'accompaniment should be set');
-    expect(accompaniment!.waveformPeaks, isNotEmpty,
-        reason: 'just_waveform should produce peaks');
-    expect(accompaniment.durationMs, greaterThan(500),
-        reason: 'a ~1s tone should report a real duration');
+    expect(
+      accompaniment!.waveformPeaks,
+      isNotEmpty,
+      reason: 'just_waveform should produce peaks',
+    );
+    expect(
+      accompaniment.durationMs,
+      greaterThan(500),
+      reason: 'a ~1s tone should report a real duration',
+    );
     expect(vm.errorMessage, isNull);
 
     // Exercise the media_kit transport: play, then pause.

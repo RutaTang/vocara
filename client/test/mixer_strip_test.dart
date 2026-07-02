@@ -64,7 +64,11 @@ Future<void> _pumpMixer(
           child: SizedBox(
             height: height,
             width: 600,
-            child: MixerStrip(vm: vm, tracks: [_track()], onDeleteTrack: (_) {}),
+            child: MixerStrip(
+              vm: vm,
+              tracks: [_track()],
+              onDeleteTrack: (_) {},
+            ),
           ),
         ),
       ),

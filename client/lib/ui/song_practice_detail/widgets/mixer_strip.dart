@@ -96,7 +96,7 @@ class MixerStrip extends StatelessWidget {
                   title: 'Rename bus',
                   hint: 'Bus name',
                 );
-                if (name != null) vm.renameBus(b.id, name);
+                if (name != null) await vm.renameBus(b.id, name);
               },
               onDelete: () => vm.deleteBus(b.id),
             ),

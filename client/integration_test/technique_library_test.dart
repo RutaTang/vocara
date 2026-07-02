@@ -118,8 +118,11 @@ void main() {
 
       await libVm.createTechnique.execute('Twang');
       await _settle(tester, () => !libVm.createTechnique.running);
-      expect(libVm.createTechnique.completed, isTrue,
-          reason: 'creating a named technique should succeed');
+      expect(
+        libVm.createTechnique.completed,
+        isTrue,
+        reason: 'creating a named technique should succeed',
+      );
 
       final created = (libVm.createTechnique.result as Ok<Technique>).value;
       expect(created.name, 'Twang');
@@ -174,17 +177,26 @@ void main() {
       await detail.addMedia([wavPath]);
       await _settle(tester, () => !detail.importingMedia);
 
-      expect(detail.hasMediaDraft, isTrue,
-          reason: 'a staged add should mark the draft dirty');
-      expect(detail.effectiveMedia, hasLength(1),
-          reason: 'the staged example shows in the draft view');
+      expect(
+        detail.hasMediaDraft,
+        isTrue,
+        reason: 'a staged add should mark the draft dirty',
+      );
+      expect(
+        detail.effectiveMedia,
+        hasLength(1),
+        reason: 'the staged example shows in the draft view',
+      );
       expect(detail.audioExamples, hasLength(1));
       // Still nothing persisted on the underlying technique.
       expect(detail.technique!.media, isEmpty);
 
       final stagedPath = detail.referenceMedia!.path;
-      expect(File(stagedPath).existsSync(), isTrue,
-          reason: 'addMedia copies the file into the sandbox immediately');
+      expect(
+        File(stagedPath).existsSync(),
+        isTrue,
+        reason: 'addMedia copies the file into the sandbox immediately',
+      );
 
       // 4) Run the ground-truth (reference) analysis on the staged example.
       await detail.ensureReferenceAnalysis();
@@ -192,12 +204,18 @@ void main() {
 
       // A real 440 Hz tone decodes; the analysis should be present and sane.
       final refAnalysis = detail.referenceAnalysis;
-      expect(detail.referenceAnalysisFailed, isFalse,
-          reason: 'a clean 440 Hz tone should decode and analyze');
+      expect(
+        detail.referenceAnalysisFailed,
+        isFalse,
+        reason: 'a clean 440 Hz tone should decode and analyze',
+      );
       expect(refAnalysis, isNotNull);
       if (refAnalysis != null) {
-        expect(refAnalysis.durationMs, greaterThan(500),
-            reason: 'a ~1s tone reports a real duration');
+        expect(
+          refAnalysis.durationMs,
+          greaterThan(500),
+          reason: 'a ~1s tone reports a real duration',
+        );
         expect(refAnalysis.metrics.frames, greaterThan(0));
         // The analysis subject getters (AnalysisSource) should be wired.
         expect(detail.selectedMetrics, isNotNull);
@@ -231,11 +249,17 @@ void main() {
       expect(reloaded.tags, ['EVT', 'Quality']);
       expect(reloaded.summary, 'bright, ringing');
       expect(reloaded.cues, 'narrow the AES');
-      expect(reloaded.media, hasLength(1),
-          reason: 'the saved reference example survives reload');
+      expect(
+        reloaded.media,
+        hasLength(1),
+        reason: 'the saved reference example survives reload',
+      );
       final reloadedMedia = reloaded.media.single;
-      expect(reloadedMedia.label, 'Demo take',
-          reason: 'the caption snapshot persists');
+      expect(
+        reloadedMedia.label,
+        'Demo take',
+        reason: 'the caption snapshot persists',
+      );
       expect(reloadedMedia.kind, TechniqueMediaKind.audio);
       // The pooled file is readable after reload.
       expect(File(reloadedMedia.path).existsSync(), isTrue);
@@ -258,57 +282,59 @@ void main() {
     },
   );
 
-  testWidgets(
-    'detail: staged media draft can be DISCARDED without persisting',
-    (tester) async {
-      final libVm = TechniqueLibraryViewModel(
-        repository: persistence.techRepo,
-        mediaService: mediaService,
-      );
-      await _settle(tester, () => !libVm.load.running);
-      await libVm.createTechnique.execute('Curbing');
-      await _settle(tester, () => !libVm.createTechnique.running);
-      final techniqueId =
-          (libVm.createTechnique.result as Ok<Technique>).value.id;
-      libVm.dispose();
+  testWidgets('detail: staged media draft can be DISCARDED without persisting', (
+    tester,
+  ) async {
+    final libVm = TechniqueLibraryViewModel(
+      repository: persistence.techRepo,
+      mediaService: mediaService,
+    );
+    await _settle(tester, () => !libVm.load.running);
+    await libVm.createTechnique.execute('Curbing');
+    await _settle(tester, () => !libVm.createTechnique.running);
+    final techniqueId =
+        (libVm.createTechnique.result as Ok<Technique>).value.id;
+    libVm.dispose();
 
-      final tmp = await getTemporaryDirectory();
-      final wavPath = await _writeSineWav(
-        p.join(tmp.path, 'drop_${DateTime.now().microsecondsSinceEpoch}.wav'),
-      );
+    final tmp = await getTemporaryDirectory();
+    final wavPath = await _writeSineWav(
+      p.join(tmp.path, 'drop_${DateTime.now().microsecondsSinceEpoch}.wav'),
+    );
 
-      final detail = TechniqueDetailViewModel(
-        repository: persistence.techRepo,
-        mediaService: mediaService,
-        techniqueId: techniqueId,
-      );
-      await _settle(tester, () => detail.technique != null);
+    final detail = TechniqueDetailViewModel(
+      repository: persistence.techRepo,
+      mediaService: mediaService,
+      techniqueId: techniqueId,
+    );
+    await _settle(tester, () => detail.technique != null);
 
-      detail.beginMediaDraft();
-      await detail.addMedia([wavPath]);
-      await _settle(tester, () => !detail.importingMedia);
-      expect(detail.effectiveMedia, hasLength(1));
-      final stagedPath = detail.effectiveMedia.single.path;
-      expect(File(stagedPath).existsSync(), isTrue);
+    detail.beginMediaDraft();
+    await detail.addMedia([wavPath]);
+    await _settle(tester, () => !detail.importingMedia);
+    expect(detail.effectiveMedia, hasLength(1));
+    final stagedPath = detail.effectiveMedia.single.path;
+    expect(File(stagedPath).existsSync(), isTrue);
 
-      // Discard the draft: the staged example and its copied file are dropped.
-      await detail.discardMediaDraft();
-      expect(detail.hasMediaDraft, isFalse);
-      expect(detail.effectiveMedia, isEmpty);
-      // The orphaned sandbox copy is deleted (best-effort cleanup may be async).
-      await _settle(tester, () => !File(stagedPath).existsSync());
-      expect(File(stagedPath).existsSync(), isFalse,
-          reason: 'a discarded staged file should be removed from the sandbox');
+    // Discard the draft: the staged example and its copied file are dropped.
+    await detail.discardMediaDraft();
+    expect(detail.hasMediaDraft, isFalse);
+    expect(detail.effectiveMedia, isEmpty);
+    // The orphaned sandbox copy is deleted (best-effort cleanup may be async).
+    await _settle(tester, () => !File(stagedPath).existsSync());
+    expect(
+      File(stagedPath).existsSync(),
+      isFalse,
+      reason: 'a discarded staged file should be removed from the sandbox',
+    );
 
-      detail.dispose();
+    detail.dispose();
 
-      // Nothing persisted.
-      final reloaded = (await persistence.techRepo.getTechnique(techniqueId)
-              as Ok<Technique>)
-          .value;
-      expect(reloaded.media, isEmpty);
-    },
-  );
+    // Nothing persisted.
+    final reloaded =
+        (await persistence.techRepo.getTechnique(techniqueId) as Ok<Technique>)
+            .value;
+    expect(reloaded.media, isEmpty);
+  });
 
   testWidgets(
     'analysis service: a clean tone analyzes; an undecodable file returns null',
@@ -338,8 +364,11 @@ void main() {
       );
       await bogus.writeAsBytes(List<int>.filled(64, 7));
       final bad = await analysis.analyze(bogus.path);
-      expect(bad, isNull,
-          reason: 'an undecodable file returns null rather than throwing');
+      expect(
+        bad,
+        isNull,
+        reason: 'an undecodable file returns null rather than throwing',
+      );
     },
   );
 
@@ -355,16 +384,16 @@ void main() {
       await _settle(tester, () => !libVm.load.running);
       await libVm.createTechnique.execute('Vibrato');
       await _settle(tester, () => !libVm.createTechnique.running);
-      final technique =
-          (libVm.createTechnique.result as Ok<Technique>).value;
+      final technique = (libVm.createTechnique.result as Ok<Technique>).value;
       libVm.dispose();
 
       // 2) Create a song practice and pin a technique marker on a vocal take
       //    that references the library technique (with a name snapshot). An
       //    empty-clip vocal lane needs no audio asset but still carries markers.
-      final practice = (await persistence.songRepo.createPractice('Marker song')
-              as Ok<SongPractice>)
-          .value;
+      final practice =
+          (await persistence.songRepo.createPractice('Marker song')
+                  as Ok<SongPractice>)
+              .value;
 
       final marker = TechniqueMarker(
         id: newId(),
@@ -383,12 +412,15 @@ void main() {
         techniqueMarkers: [marker],
       );
       final withMarker = practice.copyWith(vocalTracks: [take]);
-      final savedPractice = (await persistence.songRepo
-          .savePractice(withMarker) as Ok<SongPractice>).value;
+      final savedPractice =
+          (await persistence.songRepo.savePractice(withMarker)
+                  as Ok<SongPractice>)
+              .value;
 
       // The marker round-trips on the saved practice.
-      final savedTake = savedPractice.vocalTracks
-          .firstWhere((t) => t.id == take.id);
+      final savedTake = savedPractice.vocalTracks.firstWhere(
+        (t) => t.id == take.id,
+      );
       expect(savedTake.techniqueMarkers, hasLength(1));
       expect(savedTake.techniqueMarkers.single.techniqueId, technique.id);
       expect(savedTake.techniqueMarkers.single.techniqueName, 'Vibrato');
@@ -396,23 +428,36 @@ void main() {
       // 3) DELETE the library technique. The marker's ref now dangles by design.
       final del = await persistence.techRepo.deleteTechnique(technique.id);
       expect(del, isA<Ok<void>>());
-      expect(await persistence.techRepo.getTechnique(technique.id),
-          isA<Error<Technique>>());
+      expect(
+        await persistence.techRepo.getTechnique(technique.id),
+        isA<Error<Technique>>(),
+      );
 
       // 4) Reload the practice from the SAME store: the marker survives with its
       //    name snapshot intact even though the library entry is gone (no FK).
-      final reloaded = (await persistence.songRepo.getPractice(practice.id)
-              as Ok<SongPractice>)
-          .value;
-      final reloadedTake =
-          reloaded.vocalTracks.firstWhere((t) => t.id == take.id);
-      expect(reloadedTake.techniqueMarkers, hasLength(1),
-          reason: 'the marker is not cascade-deleted with the technique');
+      final reloaded =
+          (await persistence.songRepo.getPractice(practice.id)
+                  as Ok<SongPractice>)
+              .value;
+      final reloadedTake = reloaded.vocalTracks.firstWhere(
+        (t) => t.id == take.id,
+      );
+      expect(
+        reloadedTake.techniqueMarkers,
+        hasLength(1),
+        reason: 'the marker is not cascade-deleted with the technique',
+      );
       final reloadedMarker = reloadedTake.techniqueMarkers.single;
-      expect(reloadedMarker.techniqueId, technique.id,
-          reason: 'the logical ref is preserved (it may now dangle)');
-      expect(reloadedMarker.techniqueName, 'Vibrato',
-          reason: 'the name snapshot keeps the marker readable');
+      expect(
+        reloadedMarker.techniqueId,
+        technique.id,
+        reason: 'the logical ref is preserved (it may now dangle)',
+      );
+      expect(
+        reloadedMarker.techniqueName,
+        'Vibrato',
+        reason: 'the name snapshot keeps the marker readable',
+      );
       expect(reloadedMarker.positionMs, 1500);
     },
   );

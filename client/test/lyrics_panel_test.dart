@@ -104,8 +104,10 @@ void main() {
 
     // The user has unsaved edits in the open editor.
     await tester.enterText(find.byType(TextField), 'user typed draft');
-    expect(tester.widget<TextField>(find.byType(TextField)).controller!.text,
-        'user typed draft');
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      'user typed draft',
+    );
 
     await _drop(tester, '/tmp/song.lrc');
 
@@ -113,7 +115,8 @@ void main() {
     expect(
       tester.widget<TextField>(find.byType(TextField)).controller!.text,
       'dropped line one\ndropped line two',
-      reason: 'the open editor must show the imported lyrics, not a stale '
+      reason:
+          'the open editor must show the imported lyrics, not a stale '
           'snapshot that Save would write back over the import',
     );
 

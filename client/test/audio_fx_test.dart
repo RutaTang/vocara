@@ -16,12 +16,22 @@ void main() {
     });
 
     test('round-trips through JSON', () {
-      final fx = TrackFx.flat().copyWith(
-        eqOn: true,
-        compOn: true,
-        comp: const CompSettings(thresholdDb: -22, ratio: 4, makeupDb: 3),
-        sendDb: -9,
-      ).withBand(0, const EqBand(kind: EqBandKind.lowShelf, freq: 100, q: 0.7, gainDb: 3));
+      final fx = TrackFx.flat()
+          .copyWith(
+            eqOn: true,
+            compOn: true,
+            comp: const CompSettings(thresholdDb: -22, ratio: 4, makeupDb: 3),
+            sendDb: -9,
+          )
+          .withBand(
+            0,
+            const EqBand(
+              kind: EqBandKind.lowShelf,
+              freq: 100,
+              q: 0.7,
+              gainDb: 3,
+            ),
+          );
 
       final back = TrackFx.fromJson(fx.toJson());
       expect(back.eqOn, isTrue);
@@ -36,26 +46,25 @@ void main() {
     test('legacy 4-band EQ migrates onto the 6 fixed slots by role', () {
       // A pre-migration take saved with the old [lowShelf, peak, peak, highShelf]
       // layout. The high shelf must NOT end up on a peaking engine slot.
-      const legacy = TrackFx(eq: [
-        EqBand(kind: EqBandKind.lowShelf, freq: 120, q: 0.7, gainDb: 4),
-        EqBand(kind: EqBandKind.peaking, freq: 500, q: 1.0, gainDb: -2),
-        EqBand(kind: EqBandKind.peaking, freq: 3000, q: 1.0, gainDb: 1),
-        EqBand(kind: EqBandKind.highShelf, freq: 8000, q: 0.7, gainDb: 3),
-      ]);
+      const legacy = TrackFx(
+        eq: [
+          EqBand(kind: EqBandKind.lowShelf, freq: 120, q: 0.7, gainDb: 4),
+          EqBand(kind: EqBandKind.peaking, freq: 500, q: 1.0, gainDb: -2),
+          EqBand(kind: EqBandKind.peaking, freq: 3000, q: 1.0, gainDb: 1),
+          EqBand(kind: EqBandKind.highShelf, freq: 8000, q: 0.7, gainDb: 3),
+        ],
+      );
       final back = TrackFx.fromJson(legacy.toJson());
 
       expect(back.eq.length, 6);
-      expect(
-        back.eq.map((b) => b.kind),
-        const [
-          EqBandKind.lowShelf,
-          EqBandKind.peaking,
-          EqBandKind.peaking,
-          EqBandKind.peaking,
-          EqBandKind.peaking,
-          EqBandKind.highShelf,
-        ],
-      );
+      expect(back.eq.map((b) => b.kind), const [
+        EqBandKind.lowShelf,
+        EqBandKind.peaking,
+        EqBandKind.peaking,
+        EqBandKind.peaking,
+        EqBandKind.peaking,
+        EqBandKind.highShelf,
+      ]);
       // Shelves preserved at the shelf slots (0 and 5), not lost to a peak slot.
       expect(back.eq.first.freq, 120);
       expect(back.eq.first.gainDb, 4);
@@ -66,24 +75,28 @@ void main() {
       expect(back.eq[2].freq, 3000);
     });
 
-    test('insert-chain order round-trips; legacy JSON normalizes to all kinds',
-        () {
-      // Default chain = every plugin kind, in canonical order.
-      expect(TrackFx.flat().order, FxKind.values);
+    test(
+      'insert-chain order round-trips; legacy JSON normalizes to all kinds',
+      () {
+        // Default chain = every plugin kind, in canonical order.
+        expect(TrackFx.flat().order, FxKind.values);
 
-      // A saved custom order keeps its leading arrangement; missing kinds are
-      // appended (so newly-added plugin types always show up).
-      final fx = TrackFx.flat().copyWith(order: const [FxKind.comp, FxKind.eq]);
-      final back = TrackFx.fromJson(fx.toJson());
-      expect(back.order.take(2), [FxKind.comp, FxKind.eq]);
-      expect(back.order.toSet(), FxKind.values.toSet());
-      expect(back.order.length, FxKind.values.length);
+        // A saved custom order keeps its leading arrangement; missing kinds are
+        // appended (so newly-added plugin types always show up).
+        final fx = TrackFx.flat().copyWith(
+          order: const [FxKind.comp, FxKind.eq],
+        );
+        final back = TrackFx.fromJson(fx.toJson());
+        expect(back.order.take(2), [FxKind.comp, FxKind.eq]);
+        expect(back.order.toSet(), FxKind.values.toSet());
+        expect(back.order.length, FxKind.values.length);
 
-      // Legacy take without an `order` key → all kinds, canonical order.
-      final legacy = Map<String, dynamic>.from(TrackFx.flat().toJson())
-        ..remove('order');
-      expect(TrackFx.fromJson(legacy).order, FxKind.values);
-    });
+        // Legacy take without an `order` key → all kinds, canonical order.
+        final legacy = Map<String, dynamic>.from(TrackFx.flat().toJson())
+          ..remove('order');
+        expect(TrackFx.fromJson(legacy).order, FxKind.values);
+      },
+    );
 
     test('unknown insert kinds are dropped, not aliased to eq', () {
       // A newer-schema take with a plugin this build doesn't know. The unknown
@@ -186,29 +199,34 @@ void main() {
       expect(AudioTrack.fromJson(legacy).fx, isNull);
     });
 
-    test('SongPractice with reverb round-trips; legacy JSON has null reverb', () {
-      final p = SongPractice(
-        id: 'p1',
-        title: 'Song',
-        createdAt: DateTime(2026, 6, 18),
-        updatedAt: DateTime(2026, 6, 18),
-        reverb: const ReverbSettings(wet: 0.3),
-      );
-      final back = SongPractice.fromJson(p.toJson());
-      expect(back.reverb, isNotNull);
-      expect(back.reverb!.wet, 0.3);
+    test(
+      'SongPractice with reverb round-trips; legacy JSON has null reverb',
+      () {
+        final p = SongPractice(
+          id: 'p1',
+          title: 'Song',
+          createdAt: DateTime(2026, 6, 18),
+          updatedAt: DateTime(2026, 6, 18),
+          reverb: const ReverbSettings(wet: 0.3),
+        );
+        final back = SongPractice.fromJson(p.toJson());
+        expect(back.reverb, isNotNull);
+        expect(back.reverb!.wet, 0.3);
 
-      final legacy = Map<String, dynamic>.from(p.toJson())..remove('reverb');
-      expect(SongPractice.fromJson(legacy).reverb, isNull);
-    });
+        final legacy = Map<String, dynamic>.from(p.toJson())..remove('reverb');
+        expect(SongPractice.fromJson(legacy).reverb, isNull);
+      },
+    );
   });
 
   group('presets', () {
     test('vocal presets are well-formed', () {
       final presets = FxPresets.vocal;
       expect(presets.length, greaterThanOrEqualTo(12));
-      expect(presets.map((p) => p.name),
-          containsAll(['Flat', 'Warm Lead', 'Bright Lead', 'Pop Throw']));
+      expect(
+        presets.map((p) => p.name),
+        containsAll(['Flat', 'Warm Lead', 'Bright Lead', 'Pop Throw']),
+      );
       // First slot is the dry reference with everything bypassed.
       final flat = presets.first;
       expect(flat.name, 'Flat');
@@ -237,7 +255,11 @@ void main() {
           expect(fx.comp.makeupDb, inInclusiveRange(0, 18), reason: p.name);
         }
         if (fx.deEsserOn) {
-          expect(fx.deEsser.freq, inInclusiveRange(2000, 16000), reason: p.name);
+          expect(
+            fx.deEsser.freq,
+            inInclusiveRange(2000, 16000),
+            reason: p.name,
+          );
           expect(fx.deEsser.rangeDb, inInclusiveRange(0, 24), reason: p.name);
         }
         if (fx.gateOn) {
@@ -251,7 +273,11 @@ void main() {
           expect(fx.delay.mix, greaterThan(0), reason: p.name);
         }
         if (fx.saturationOn) {
-          expect(fx.saturation.driveDb, inInclusiveRange(0, 36), reason: p.name);
+          expect(
+            fx.saturation.driveDb,
+            inInclusiveRange(0, 36),
+            reason: p.name,
+          );
           expect(fx.saturation.mix, greaterThan(0), reason: p.name);
         }
         if (fx.doublerOn) {
@@ -259,7 +285,11 @@ void main() {
           expect(fx.doubler.mix, greaterThan(0), reason: p.name);
         }
         if (fx.limiterOn) {
-          expect(fx.limiter.ceilingDb, inInclusiveRange(-12, 0), reason: p.name);
+          expect(
+            fx.limiter.ceilingDb,
+            inInclusiveRange(-12, 0),
+            reason: p.name,
+          );
         }
         if (fx.reverbOn) {
           expect(fx.reverb.wet, greaterThan(0), reason: p.name);

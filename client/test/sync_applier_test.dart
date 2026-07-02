@@ -21,63 +21,75 @@ void main() {
   Hlc hlc(int wall, [int ctr = 0]) =>
       Hlc(wallMs: wall, counter: ctr, node: remoteNode);
 
-  RemoteRecord practice(String id, String title, Hlc h,
-          {int? deletedAt, String? separationAssetId}) =>
-      RemoteRecord(table: 'practices', columns: {
-        'id': _id(id),
-        'title': title,
-        'timeline_duration_ms': 0,
-        'master_volume': 1.0,
-        if (separationAssetId != null)
-          'separation_asset_id': _id(separationAssetId),
-        'created_at': h.wallMs,
-        'updated_at': h.wallMs,
-        'deleted_at': deletedAt,
-        'hlc_wall': h.wallMs,
-        'hlc_ctr': h.counter,
-        'hlc_node': h.node,
-        'hlc_packed': h.packed,
-        'schema_v': 1,
-      });
+  RemoteRecord practice(
+    String id,
+    String title,
+    Hlc h, {
+    int? deletedAt,
+    String? separationAssetId,
+  }) => RemoteRecord(
+    table: 'practices',
+    columns: {
+      'id': _id(id),
+      'title': title,
+      'timeline_duration_ms': 0,
+      'master_volume': 1.0,
+      if (separationAssetId != null)
+        'separation_asset_id': _id(separationAssetId),
+      'created_at': h.wallMs,
+      'updated_at': h.wallMs,
+      'deleted_at': deletedAt,
+      'hlc_wall': h.wallMs,
+      'hlc_ctr': h.counter,
+      'hlc_node': h.node,
+      'hlc_packed': h.packed,
+      'schema_v': 1,
+    },
+  );
 
-  RemoteRecord track(String id, String practiceId, Hlc h) =>
-      RemoteRecord(table: 'tracks', columns: {
-        'id': _id(id),
-        'practice_id': _id(practiceId),
-        'kind': 'vocal',
-        'display_name': '',
-        'muted': 0,
-        'soloed': 0,
-        'volume': 1.0,
-        'pan': 0.0,
-        'order_index': 0,
-        'created_at': h.wallMs,
-        'updated_at': h.wallMs,
-        'deleted_at': null,
-        'hlc_wall': h.wallMs,
-        'hlc_ctr': h.counter,
-        'hlc_node': h.node,
-        'hlc_packed': h.packed,
-        'schema_v': 1,
-      });
+  RemoteRecord track(String id, String practiceId, Hlc h) => RemoteRecord(
+    table: 'tracks',
+    columns: {
+      'id': _id(id),
+      'practice_id': _id(practiceId),
+      'kind': 'vocal',
+      'display_name': '',
+      'muted': 0,
+      'soloed': 0,
+      'volume': 1.0,
+      'pan': 0.0,
+      'order_index': 0,
+      'created_at': h.wallMs,
+      'updated_at': h.wallMs,
+      'deleted_at': null,
+      'hlc_wall': h.wallMs,
+      'hlc_ctr': h.counter,
+      'hlc_node': h.node,
+      'hlc_packed': h.packed,
+      'schema_v': 1,
+    },
+  );
 
   RemoteRecord clip(String id, String trackId, String assetId, Hlc h) =>
-      RemoteRecord(table: 'clips', columns: {
-        'id': _id(id),
-        'track_id': _id(trackId),
-        'asset_id': _id(assetId),
-        'start_ms': 0,
-        'duration_ms': 0,
-        'order_index': 0,
-        'created_at': h.wallMs,
-        'updated_at': h.wallMs,
-        'deleted_at': null,
-        'hlc_wall': h.wallMs,
-        'hlc_ctr': h.counter,
-        'hlc_node': h.node,
-        'hlc_packed': h.packed,
-        'schema_v': 1,
-      });
+      RemoteRecord(
+        table: 'clips',
+        columns: {
+          'id': _id(id),
+          'track_id': _id(trackId),
+          'asset_id': _id(assetId),
+          'start_ms': 0,
+          'duration_ms': 0,
+          'order_index': 0,
+          'created_at': h.wallMs,
+          'updated_at': h.wallMs,
+          'deleted_at': null,
+          'hlc_wall': h.wallMs,
+          'hlc_ctr': h.counter,
+          'hlc_node': h.node,
+          'hlc_packed': h.packed,
+          'schema_v': 1,
+        },
+      );
 
   Future<Map<String, Object?>?> row(String id) async {
     final r = await db
@@ -121,8 +133,9 @@ void main() {
 
   test('a tombstone arrives as a higher-HLC update', () async {
     await applier.apply([practice('P', 'v1', hlc(900))]);
-    final res =
-        await applier.apply([practice('P', 'v1', hlc(970), deletedAt: 970)]);
+    final res = await applier.apply([
+      practice('P', 'v1', hlc(970), deletedAt: 970),
+    ]);
     expect(res.applied, 1);
     expect((await row('P'))!['deleted_at'], isNotNull);
   });
@@ -137,16 +150,18 @@ void main() {
     expect(await row('FUT'), isNull);
   });
 
-  test('a malformed record is quarantined without discarding the batch',
-      () async {
+  test('a malformed record is quarantined without discarding the batch', () async {
     final good = practice('GOOD', 'kept', hlc(900));
     // A record carrying a column that does not exist locally (e.g. from a newer
     // schema_v) fails at INSERT — a NON-drift error. It must roll back only itself
     // (its SAVEPOINT), not the whole batch, so the already-applied good record stays.
-    final bad = RemoteRecord(table: 'practices', columns: {
-      ...practice('BAD', 'dropped', hlc(910)).columns,
-      'column_from_the_future': 1,
-    });
+    final bad = RemoteRecord(
+      table: 'practices',
+      columns: {
+        ...practice('BAD', 'dropped', hlc(910)).columns,
+        'column_from_the_future': 1,
+      },
+    );
     final res = await applier.apply([good, bad]);
     expect(res.applied, 1);
     expect(res.failed, 1);
@@ -171,45 +186,50 @@ void main() {
   });
 
   group('FK sweep', () {
-    test('a child arriving BEFORE its parent within a batch applies fine',
-        () async {
-      final res = await applier.apply([
-        track('T', 'P', hlc(900)), // child first
-        practice('P', 'parent', hlc(901)), // parent later in the same batch
-      ]);
-      expect(res.applied, 2);
-      expect(res.failed, 0);
-      expect((await row('P'))!['title'], 'parent');
-      expect(await trackRow('T'), isNotNull);
-    });
-
-    test('a true orphan whose parent never arrives is quarantined ALONE',
-        () async {
-      final res = await applier.apply([
-        practice('P', 'kept', hlc(900)),
-        track('T', 'NEVER', hlc(910)), // parent not in this batch, not local
-      ]);
-      expect(res.applied, 1); // the good record stuck
-      expect(res.failed, 1); // the orphan did not
-      expect((await row('P'))!['title'], 'kept');
-      expect(await trackRow('T'), isNull); // hard-deleted; re-arrives later
-    });
-
-    test('an orphan violating TWO foreign keys is deleted + counted once',
-        () async {
-      final res = await applier.apply([
-        practice('P', 'kept', hlc(900)),
-        // Both track_id and asset_id dangle -> two foreign_key_check entries
-        // for one row. It must decrement applied / increment failed only once.
-        clip('C', 'NOTRACK', 'NOASSET', hlc(910)),
-      ]);
-      expect(res.applied, 1);
-      expect(res.failed, 1);
-      expect((await row('P'))!['title'], 'kept');
-    });
+    test(
+      'a child arriving BEFORE its parent within a batch applies fine',
+      () async {
+        final res = await applier.apply([
+          track('T', 'P', hlc(900)), // child first
+          practice('P', 'parent', hlc(901)), // parent later in the same batch
+        ]);
+        expect(res.applied, 2);
+        expect(res.failed, 0);
+        expect((await row('P'))!['title'], 'parent');
+        expect(await trackRow('T'), isNotNull);
+      },
+    );
 
     test(
-        'a remote update pointing a PRE-EXISTING row at a not-yet-arrived '
+      'a true orphan whose parent never arrives is quarantined ALONE',
+      () async {
+        final res = await applier.apply([
+          practice('P', 'kept', hlc(900)),
+          track('T', 'NEVER', hlc(910)), // parent not in this batch, not local
+        ]);
+        expect(res.applied, 1); // the good record stuck
+        expect(res.failed, 1); // the orphan did not
+        expect((await row('P'))!['title'], 'kept');
+        expect(await trackRow('T'), isNull); // hard-deleted; re-arrives later
+      },
+    );
+
+    test(
+      'an orphan violating TWO foreign keys is deleted + counted once',
+      () async {
+        final res = await applier.apply([
+          practice('P', 'kept', hlc(900)),
+          // Both track_id and asset_id dangle -> two foreign_key_check entries
+          // for one row. It must decrement applied / increment failed only once.
+          clip('C', 'NOTRACK', 'NOASSET', hlc(910)),
+        ]);
+        expect(res.applied, 1);
+        expect(res.failed, 1);
+        expect((await row('P'))!['title'], 'kept');
+      },
+    );
+
+    test('a remote update pointing a PRE-EXISTING row at a not-yet-arrived '
         'asset nulls the pointer; the row and its subtree survive', () async {
       // Seed an earlier page: a practice with a child track (all FKs intact).
       await applier.apply([

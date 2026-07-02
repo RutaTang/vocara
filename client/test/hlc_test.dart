@@ -37,16 +37,18 @@ void main() {
   });
 
   group('HlcClock.tick (local writes)', () {
-    test('counter increments within a millisecond, resets when wall advances',
-        () {
-      var now = 1000;
-      final clock = HlcClock(node: 'N', now: () => now);
-      expect(clock.tick(), Hlc(wallMs: 1000, counter: 0, node: 'N'));
-      expect(clock.tick(), Hlc(wallMs: 1000, counter: 1, node: 'N'));
-      expect(clock.tick(), Hlc(wallMs: 1000, counter: 2, node: 'N'));
-      now = 1001;
-      expect(clock.tick(), Hlc(wallMs: 1001, counter: 0, node: 'N'));
-    });
+    test(
+      'counter increments within a millisecond, resets when wall advances',
+      () {
+        var now = 1000;
+        final clock = HlcClock(node: 'N', now: () => now);
+        expect(clock.tick(), Hlc(wallMs: 1000, counter: 0, node: 'N'));
+        expect(clock.tick(), Hlc(wallMs: 1000, counter: 1, node: 'N'));
+        expect(clock.tick(), Hlc(wallMs: 1000, counter: 2, node: 'N'));
+        now = 1001;
+        expect(clock.tick(), Hlc(wallMs: 1001, counter: 0, node: 'N'));
+      },
+    );
 
     test('stays monotonic when the wall clock goes backwards', () {
       var now = 5000;
@@ -59,8 +61,7 @@ void main() {
       expect(b.counter, 1);
     });
 
-    test('a once-future clock stays strictly monotonic on tick (never smaller)',
-        () {
+    test('a once-future clock stays strictly monotonic on tick (never smaller)', () {
       var now = 1000;
       final clock = HlcClock(node: 'N', now: () => now, maxDriftMs: 60000);
       // Force the internal clock into the future via a remote merge (30s ahead).
@@ -99,8 +100,9 @@ void main() {
         now: () => 1000, // local clock 10 min behind real time
         initial: Hlc(wallMs: trueNow, counter: 0, node: 'N'),
       );
-      final merged =
-          clock.receive(Hlc(wallMs: trueNow + 1000, counter: 0, node: 'M'));
+      final merged = clock.receive(
+        Hlc(wallMs: trueNow + 1000, counter: 0, node: 'M'),
+      );
       expect(merged.wallMs, trueNow + 1000);
     });
   });
@@ -167,8 +169,11 @@ void main() {
       expect(spilled, Hlc(wallMs: 5001, counter: 0, node: 'N'));
       expect(spilled > atCap, isTrue);
       expect(spilled.packed.length, atCap.packed.length); // width never grows
-      expect(atCap.packed.compareTo(spilled.packed) < 0, isTrue,
-          reason: 'packed ordering stays monotonic across the spill');
+      expect(
+        atCap.packed.compareTo(spilled.packed) < 0,
+        isTrue,
+        reason: 'packed ordering stays monotonic across the spill',
+      );
 
       // And keeps ticking normally after the spill.
       final next = clock.tick();
@@ -185,8 +190,11 @@ void main() {
       );
       expect(merged, Hlc(wallMs: 1001, counter: 0, node: 'N'));
       expect(merged > local, isTrue);
-      expect(local.packed.compareTo(merged.packed) < 0, isTrue,
-          reason: 'packed ordering stays monotonic across the spill');
+      expect(
+        local.packed.compareTo(merged.packed) < 0,
+        isTrue,
+        reason: 'packed ordering stays monotonic across the spill',
+      );
     });
   });
 

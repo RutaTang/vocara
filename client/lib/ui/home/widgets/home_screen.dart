@@ -123,7 +123,9 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _openDetail(HomeViewModel vm, String id) async {
-    if (_opening) return; // ignore a rapid second tap while one open is in flight
+    if (_opening) {
+      return; // ignore a rapid second tap while one open is in flight
+    }
     _opening = true;
     try {
       // Show a small "loading practice" dialog over the library for a beat (so it
@@ -369,11 +371,7 @@ class _ErrorState extends StatelessWidget {
             style: TextStyle(color: Studio.textSecondary, fontSize: 13),
           ),
           const SizedBox(height: 20),
-          StudioButton(
-            icon: FIcons.refreshCw,
-            label: 'Retry',
-            onTap: onRetry,
-          ),
+          StudioButton(icon: FIcons.refreshCw, label: 'Retry', onTap: onRetry),
         ],
       ),
     );

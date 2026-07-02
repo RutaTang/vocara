@@ -99,8 +99,10 @@ void main() {
     await persistence.songRepo.createPractice('Hai Kuo Tian Kong');
 
     await boot(tester);
-    expect(await pumpUntil(tester, () => present(find.byType(HomeScreen))),
-        isTrue);
+    expect(
+      await pumpUntil(tester, () => present(find.byType(HomeScreen))),
+      isTrue,
+    );
 
     // Both practices land on the grid.
     expect(
@@ -158,8 +160,10 @@ void main() {
     tester,
   ) async {
     await boot(tester);
-    expect(await pumpUntil(tester, () => present(find.byType(HomeScreen))),
-        isTrue);
+    expect(
+      await pumpUntil(tester, () => present(find.byType(HomeScreen))),
+      isTrue,
+    );
 
     await tester.tap(
       find.descendant(
@@ -209,48 +213,54 @@ void main() {
     );
   });
 
-  testWidgets('Home → Technique library → back round-trips through the library',
-      (tester) async {
-    await boot(tester);
-    expect(await pumpUntil(tester, () => present(find.byType(HomeScreen))),
-        isTrue);
+  testWidgets(
+    'Home → Technique library → back round-trips through the library',
+    (tester) async {
+      await boot(tester);
+      expect(
+        await pumpUntil(tester, () => present(find.byType(HomeScreen))),
+        isTrue,
+      );
 
-    await tester.tap(find.widgetWithText(StudioButton, 'Techniques'));
-    expect(
-      await pumpUntil(
-        tester,
-        () => present(find.byType(TechniqueLibraryScreen)),
-      ),
-      isTrue,
-      reason: 'the Techniques header button pushes the library route',
-    );
-    expect(find.text('Technique library'), findsOneWidget);
+      await tester.tap(find.widgetWithText(StudioButton, 'Techniques'));
+      expect(
+        await pumpUntil(
+          tester,
+          () => present(find.byType(TechniqueLibraryScreen)),
+        ),
+        isTrue,
+        reason: 'the Techniques header button pushes the library route',
+      );
+      expect(find.text('Technique library'), findsOneWidget);
 
-    await tester.tap(
-      find.descendant(
-        of: find.byType(TechniqueLibraryScreen),
-        matching: find.byIcon(FIcons.chevronLeft),
-      ),
-    );
-    expect(
-      await pumpUntil(
-        tester,
-        () =>
-            present(find.byType(HomeScreen)) &&
-            !present(find.byType(TechniqueLibraryScreen)),
-      ),
-      isTrue,
-      reason: 'the library back chevron pops to Home',
-    );
-  });
+      await tester.tap(
+        find.descendant(
+          of: find.byType(TechniqueLibraryScreen),
+          matching: find.byIcon(FIcons.chevronLeft),
+        ),
+      );
+      expect(
+        await pumpUntil(
+          tester,
+          () =>
+              present(find.byType(HomeScreen)) &&
+              !present(find.byType(TechniqueLibraryScreen)),
+        ),
+        isTrue,
+        reason: 'the library back chevron pops to Home',
+      );
+    },
+  );
 
   testWidgets('hovering a card reveals its delete affordance; confirming '
       'removes it and the empty state returns', (tester) async {
     await persistence.songRepo.createPractice('Doomed practice');
 
     await boot(tester);
-    expect(await pumpUntil(tester, () => present(find.byType(HomeScreen))),
-        isTrue);
+    expect(
+      await pumpUntil(tester, () => present(find.byType(HomeScreen))),
+      isTrue,
+    );
     expect(
       await pumpUntil(tester, () => present(find.byType(PracticeProjectCard))),
       isTrue,

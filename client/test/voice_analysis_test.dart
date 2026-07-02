@@ -69,9 +69,13 @@ void main() {
       final peak300 = (300 / _binHz).round();
       final m = _vm(frames: 10);
       final bright = computeLtas(
-          _spec(10, bins, (b) => b == peak3k ? 0.0 : -60.0), m);
+        _spec(10, bins, (b) => b == peak3k ? 0.0 : -60.0),
+        m,
+      );
       final dark = computeLtas(
-          _spec(10, bins, (b) => b == peak300 ? 0.0 : -60.0), m);
+        _spec(10, bins, (b) => b == peak300 ? 0.0 : -60.0),
+        m,
+      );
 
       expect(_argmax(bright.db), peak3k);
       expect(bright.alphaRatio, greaterThan(0)); // energy mostly >1 kHz
@@ -91,15 +95,16 @@ void main() {
         db[f * bins + peak] = f < 5 ? 0.0 : -60.0;
       }
       final s = Spectrogram(
-          frames: 10,
-          bins: bins,
-          maxHz: 5000,
-          sampleRate: _sr,
-          fftSize: _fft,
-          hop: _hop,
-          db: db,
-          minDb: -90,
-          maxDb: 0);
+        frames: 10,
+        bins: bins,
+        maxHz: 5000,
+        sampleRate: _sr,
+        fftSize: _fft,
+        hop: _hop,
+        db: db,
+        minDb: -90,
+        maxDb: 0,
+      );
       final ltas = computeLtas(s, _vm(frames: 10));
       // mean power = (5·1 + 5·1e-6)/10 ≈ 0.5 → 10·log10(0.5) ≈ −3 dB ≫ −30.
       expect(ltas.db[peak], greaterThan(-6));
@@ -151,19 +156,22 @@ void main() {
       expect(analyzeVibrato(_vm(f0: f0), 0, n - 1).present, isFalse);
     });
 
-    test('vibrato riding on a drift reports the true extent (drift removed)',
-        () {
-      final n = (frameRate * 1.6).round();
-      final f0 = Float32List(n);
-      for (var i = 0; i < n; i++) {
-        final cents = 40 * sin(2 * pi * 6 * (i / frameRate)) + 150 * (i / (n - 1));
-        f0[i] = 220 * pow(2, cents / 1200).toDouble();
-      }
-      final v = analyzeVibrato(_vm(f0: f0), 0, n - 1);
-      expect(v.present, isTrue);
-      expect(v.extentCents, inInclusiveRange(30, 55)); // ~40, not inflated
-      expect(v.rateHz, inInclusiveRange(5, 7));
-    });
+    test(
+      'vibrato riding on a drift reports the true extent (drift removed)',
+      () {
+        final n = (frameRate * 1.6).round();
+        final f0 = Float32List(n);
+        for (var i = 0; i < n; i++) {
+          final cents =
+              40 * sin(2 * pi * 6 * (i / frameRate)) + 150 * (i / (n - 1));
+          f0[i] = 220 * pow(2, cents / 1200).toDouble();
+        }
+        final v = analyzeVibrato(_vm(f0: f0), 0, n - 1);
+        expect(v.present, isTrue);
+        expect(v.extentCents, inInclusiveRange(30, 55)); // ~40, not inflated
+        expect(v.rateHz, inInclusiveRange(5, 7));
+      },
+    );
 
     test('the live analyzer measures the trailing window', () {
       // 3 s of straight tone then a 6 Hz ±50¢ vibrato: the trailing-window live

@@ -26,7 +26,9 @@ void main() {
     writer = SyncWriter(db, HlcClock(node: _id('NODE')));
     // A parent practice the interpretations hang off (FK).
     final s = writer.stamp();
-    await db.into(db.practices).insert(
+    await db
+        .into(db.practices)
+        .insert(
           PracticesCompanion.insert(
             id: practiceId,
             createdAt: s.at,
@@ -43,10 +45,13 @@ void main() {
   String hashOf(_Interp i) => SyncWriter.contentHashOf([i.name, i.order]);
 
   Future<Map<String, String>> currentHashes() async {
-    final rows = await (db.select(db.interpretations)
-          ..where((t) => t.deletedAt.isNull()))
-        .get();
-    return {for (final r in rows) r.id: SyncWriter.contentHashOf([r.name, r.orderIndex])};
+    final rows = await (db.select(
+      db.interpretations,
+    )..where((t) => t.deletedAt.isNull())).get();
+    return {
+      for (final r in rows)
+        r.id: SyncWriter.contentHashOf([r.name, r.orderIndex]),
+    };
   }
 
   Future<ReconcileResult> sync(List<_Interp> desired) async {
@@ -59,7 +64,9 @@ void main() {
         desired: desired,
         idOf: (i) => i.id,
         hashOf: hashOf,
-        insert: (i, s) => db.into(db.interpretations).insert(
+        insert: (i, s) => db
+            .into(db.interpretations)
+            .insert(
               InterpretationsCompanion.insert(
                 id: i.id,
                 practiceId: practiceId,
@@ -74,26 +81,32 @@ void main() {
               ),
             ),
         update: (i, s) =>
-            (db.update(db.interpretations)..where((t) => t.id.equals(i.id)))
-                .write(InterpretationsCompanion(
-              name: Value(i.name),
-              orderIndex: Value(i.order),
-              updatedAt: Value(s.at),
-              hlcWall: Value(s.hlc.wallMs),
-              hlcCtr: Value(s.hlc.counter),
-              hlcNode: Value(s.hlc.node),
-              hlcPacked: Value(s.hlc.packed),
-            )),
+            (db.update(
+              db.interpretations,
+            )..where((t) => t.id.equals(i.id))).write(
+              InterpretationsCompanion(
+                name: Value(i.name),
+                orderIndex: Value(i.order),
+                updatedAt: Value(s.at),
+                hlcWall: Value(s.hlc.wallMs),
+                hlcCtr: Value(s.hlc.counter),
+                hlcNode: Value(s.hlc.node),
+                hlcPacked: Value(s.hlc.packed),
+              ),
+            ),
         tombstone: (id, s) =>
-            (db.update(db.interpretations)..where((t) => t.id.equals(id)))
-                .write(InterpretationsCompanion(
-              deletedAt: Value(s.at),
-              updatedAt: Value(s.at),
-              hlcWall: Value(s.hlc.wallMs),
-              hlcCtr: Value(s.hlc.counter),
-              hlcNode: Value(s.hlc.node),
-              hlcPacked: Value(s.hlc.packed),
-            )),
+            (db.update(
+              db.interpretations,
+            )..where((t) => t.id.equals(id))).write(
+              InterpretationsCompanion(
+                deletedAt: Value(s.at),
+                updatedAt: Value(s.at),
+                hlcWall: Value(s.hlc.wallMs),
+                hlcCtr: Value(s.hlc.counter),
+                hlcNode: Value(s.hlc.node),
+                hlcPacked: Value(s.hlc.packed),
+              ),
+            ),
       );
     });
   }
@@ -101,7 +114,10 @@ void main() {
   Future<int> oplogCount() async => (await db.select(db.oplog).get()).length;
 
   test('first save inserts everything', () async {
-    final r = await sync([_Interp(_id('A'), 'Tender', 0), _Interp(_id('B'), 'Powerful', 1)]);
+    final r = await sync([
+      _Interp(_id('A'), 'Tender', 0),
+      _Interp(_id('B'), 'Powerful', 1),
+    ]);
     expect(r.inserts, 2);
     expect(r.updates, 0);
     expect(r.tombstones, 0);
@@ -109,7 +125,10 @@ void main() {
   });
 
   test('a no-op save changes nothing (zero new oplog rows)', () async {
-    final items = [_Interp(_id('A'), 'Tender', 0), _Interp(_id('B'), 'Powerful', 1)];
+    final items = [
+      _Interp(_id('A'), 'Tender', 0),
+      _Interp(_id('B'), 'Powerful', 1),
+    ];
     await sync(items);
     final before = await oplogCount();
     final r = await sync(items); // identical
@@ -122,20 +141,30 @@ void main() {
     final b = _Interp(_id('B'), 'Powerful', 1);
     await sync([a, b]);
     final before = await oplogCount();
-    final r = await sync([_Interp(_id('A'), 'Tender', 0), _Interp(_id('B'), 'Belted', 1)]);
+    final r = await sync([
+      _Interp(_id('A'), 'Tender', 0),
+      _Interp(_id('B'), 'Belted', 1),
+    ]);
     expect(r.updates, 1);
     expect(r.inserts, 0);
     expect(r.tombstones, 0);
     expect(await oplogCount(), before + 1);
-    final rowB = await (db.select(db.interpretations)..where((t) => t.id.equals(_id('B')))).getSingle();
+    final rowB = await (db.select(
+      db.interpretations,
+    )..where((t) => t.id.equals(_id('B')))).getSingle();
     expect(rowB.name, 'Belted');
   });
 
   test('a removed item is tombstoned, not hard-deleted', () async {
-    await sync([_Interp(_id('A'), 'Tender', 0), _Interp(_id('B'), 'Powerful', 1)]);
+    await sync([
+      _Interp(_id('A'), 'Tender', 0),
+      _Interp(_id('B'), 'Powerful', 1),
+    ]);
     final r = await sync([_Interp(_id('A'), 'Tender', 0)]); // B dropped
     expect(r.tombstones, 1);
-    final rowB = await (db.select(db.interpretations)..where((t) => t.id.equals(_id('B')))).getSingle();
+    final rowB = await (db.select(
+      db.interpretations,
+    )..where((t) => t.id.equals(_id('B')))).getSingle();
     expect(rowB.deletedAt, isNotNull); // still there, just tombstoned
     // It no longer appears as live, so a re-add reuses a fresh insert path.
     final live = await currentHashes();
@@ -143,7 +172,10 @@ void main() {
   });
 
   test('insert + update + tombstone in one reconcile', () async {
-    await sync([_Interp(_id('A'), 'Tender', 0), _Interp(_id('B'), 'Powerful', 1)]);
+    await sync([
+      _Interp(_id('A'), 'Tender', 0),
+      _Interp(_id('B'), 'Powerful', 1),
+    ]);
     final r = await sync([
       _Interp(_id('A'), 'Soft', 0), // changed
       _Interp(_id('C'), 'Raspy', 2), // new

@@ -67,11 +67,13 @@ void main() {
   });
 
   test('no passaggio on a flat pitch (range span too small)', () {
-    final p = analyzeVoiceProfile(_metrics(
-      f0: List.filled(120, _midiToHz(60)),
-      h1h2: List.filled(120, 0.0),
-      loud: List.filled(120, -20.0),
-    ));
+    final p = analyzeVoiceProfile(
+      _metrics(
+        f0: List.filled(120, _midiToHz(60)),
+        h1h2: List.filled(120, 0.0),
+        loud: List.filled(120, -20.0),
+      ),
+    );
     expect(p.hasRange, isTrue);
     expect(p.lowMidi, 60);
     expect(p.highMidi, 60);
@@ -84,53 +86,61 @@ void main() {
     for (var i = 0; i < n; i++) {
       f0.add(_midiToHz(55 + 12 * (i / (n - 1)))); // G3 → G4, no timbre step
     }
-    final p = analyzeVoiceProfile(_metrics(
-      f0: f0,
-      h1h2: List.filled(n, 1.0), // flat H1−H2 everywhere
-      loud: List.filled(n, -18.0),
-    ));
+    final p = analyzeVoiceProfile(
+      _metrics(
+        f0: f0,
+        h1h2: List.filled(n, 1.0), // flat H1−H2 everywhere
+        loud: List.filled(n, -18.0),
+      ),
+    );
     expect(p.hasRange, isTrue);
     expect(p.hasPassaggio, isFalse);
   });
 
-  test('passaggio never lands outside the reported range (outlier ignored)', () {
-    // 200 frames at C4 (chest) + a brief 5+5-frame excursion well above. The
-    // outlier bins used to be picked as a passaggio above the whole range.
-    final f0 = <double>[], h = <double>[], loud = <double>[];
-    for (var i = 0; i < 200; i++) {
-      f0.add(_midiToHz(60));
-      h.add(-2);
-      loud.add(-20);
-    }
-    for (var i = 0; i < 5; i++) {
-      f0.add(_midiToHz(66));
-      h.add(-2);
-      loud.add(-20);
-    }
-    for (var i = 0; i < 5; i++) {
-      f0.add(_midiToHz(67));
-      h.add(6);
-      loud.add(-20);
-    }
-    final p = analyzeVoiceProfile(_metrics(f0: f0, h1h2: h, loud: loud));
-    expect(p.lowMidi, 60);
-    expect(p.highMidi, 60); // 66/67 are <5% of frames → trimmed off the range
-    expect(p.hasPassaggio, isFalse); // no break above the range anymore
-  });
+  test(
+    'passaggio never lands outside the reported range (outlier ignored)',
+    () {
+      // 200 frames at C4 (chest) + a brief 5+5-frame excursion well above. The
+      // outlier bins used to be picked as a passaggio above the whole range.
+      final f0 = <double>[], h = <double>[], loud = <double>[];
+      for (var i = 0; i < 200; i++) {
+        f0.add(_midiToHz(60));
+        h.add(-2);
+        loud.add(-20);
+      }
+      for (var i = 0; i < 5; i++) {
+        f0.add(_midiToHz(66));
+        h.add(-2);
+        loud.add(-20);
+      }
+      for (var i = 0; i < 5; i++) {
+        f0.add(_midiToHz(67));
+        h.add(6);
+        loud.add(-20);
+      }
+      final p = analyzeVoiceProfile(_metrics(f0: f0, h1h2: h, loud: loud));
+      expect(p.lowMidi, 60);
+      expect(p.highMidi, 60); // 66/67 are <5% of frames → trimmed off the range
+      expect(p.hasPassaggio, isFalse); // no break above the range anymore
+    },
+  );
 
   test('a single frame is not a profile (no range / dynamics)', () {
     final p = analyzeVoiceProfile(
-        _metrics(f0: [_midiToHz(60)], h1h2: [0.0], loud: [-20.0]));
+      _metrics(f0: [_midiToHz(60)], h1h2: [0.0], loud: [-20.0]),
+    );
     expect(p.hasRange, isFalse);
     expect(p.hasDynamics, isFalse);
   });
 
   test('empty / unvoiced input yields no range, passaggio or dynamics', () {
-    final p = analyzeVoiceProfile(_metrics(
-      f0: List.filled(50, double.nan),
-      h1h2: List.filled(50, double.nan),
-      loud: List.filled(50, double.nan),
-    ));
+    final p = analyzeVoiceProfile(
+      _metrics(
+        f0: List.filled(50, double.nan),
+        h1h2: List.filled(50, double.nan),
+        loud: List.filled(50, double.nan),
+      ),
+    );
     expect(p.hasRange, isFalse);
     expect(p.hasPassaggio, isFalse);
     expect(p.hasDynamics, isFalse);

@@ -77,10 +77,7 @@ class WaveformService {
 
     for (var b = 0; b < buckets; b++) {
       final start = (b * pixels / buckets).floor();
-      final end = (((b + 1) * pixels / buckets).floor()).clamp(
-        start + 1,
-        pixels,
-      );
+      final end = ((b + 1) * pixels / buckets).floor().clamp(start + 1, pixels);
       var peak = 0.0;
       for (var i = start; i < end; i++) {
         final min = waveform.getPixelMin(i).abs();

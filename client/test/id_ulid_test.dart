@@ -25,8 +25,11 @@ void main() {
       var prev = newId();
       for (var i = 0; i < 5000; i++) {
         final next = newId();
-        expect(next.compareTo(prev), greaterThan(0),
-            reason: 'not increasing: $prev -> $next');
+        expect(
+          next.compareTo(prev),
+          greaterThan(0),
+          reason: 'not increasing: $prev -> $next',
+        );
         prev = next;
       }
     });
@@ -37,8 +40,10 @@ void main() {
       final b = newId();
       expect(b.compareTo(a), greaterThan(0));
       // The 10-char timestamp prefix is non-decreasing with wall time.
-      expect(b.substring(0, 10).compareTo(a.substring(0, 10)),
-          greaterThanOrEqualTo(0));
+      expect(
+        b.substring(0, 10).compareTo(a.substring(0, 10)),
+        greaterThanOrEqualTo(0),
+      );
     });
   });
 }

@@ -670,19 +670,14 @@ class _BodyState extends State<_Body> {
                   // Fixed pixels-per-sample for the whole take (timeline px/ms ×
                   // record interval) — the live painter anchors columns to it so
                   // the waveform grows without the drawn part shifting.
-                  final pps = dur <= 0
-                      ? 1.0
-                      : _kRecordIntervalMs * width / dur;
+                  final pps = dur <= 0 ? 1.0 : _kRecordIntervalMs * width / dur;
                   return Positioned(
                     left: v.left,
                     top: 3,
                     bottom: 3,
                     width: v.width,
                     child: IgnorePointer(
-                      child: _FormingClip(
-                        peaks: v.peaks,
-                        pixelsPerSample: pps,
-                      ),
+                      child: _FormingClip(peaks: v.peaks, pixelsPerSample: pps),
                     ),
                   );
                 },

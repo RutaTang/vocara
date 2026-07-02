@@ -33,7 +33,8 @@ Float64List _tone(double hz, {double sec = 1.5}) {
   final out = Float64List(n);
   for (var i = 0; i < n; i++) {
     final t = i / _sr;
-    out[i] = 0.6 * sin(2 * pi * hz * t) +
+    out[i] =
+        0.6 * sin(2 * pi * hz * t) +
         0.3 * sin(2 * pi * 2 * hz * t) +
         0.15 * sin(2 * pi * 3 * hz * t);
   }
@@ -82,9 +83,9 @@ double _median(Float32List xs) {
 }
 
 List<double> _voiced(Float32List xs) => [
-      for (final x in xs)
-        if (!x.isNaN && x > 0) x,
-    ];
+  for (final x in xs)
+    if (!x.isNaN && x > 0) x,
+];
 
 bool _allFinite(Float32List xs) {
   for (final x in xs) {
@@ -103,9 +104,9 @@ void main() {
   });
 
   String wavPath(String name) => p.join(
-        tmp.path,
-        'analysis_${name}_${DateTime.now().microsecondsSinceEpoch}.wav',
-      );
+    tmp.path,
+    'analysis_${name}_${DateTime.now().microsecondsSinceEpoch}.wav',
+  );
 
   group('direct DSP pipeline (computeVoiceMetrics + computeSpectrogram)', () {
     test('a steady 440 Hz tone yields a voiced f0 within a few Hz of 440', () {
@@ -162,8 +163,11 @@ void main() {
       lastThird.sort();
       final loMed = firstThird[firstThird.length ~/ 2];
       final hiMed = lastThird[lastThird.length ~/ 2];
-      expect(hiMed, greaterThan(loMed + 50),
-          reason: 'glide front=$loMed Hz back=$hiMed Hz should rise');
+      expect(
+        hiMed,
+        greaterThan(loMed + 50),
+        reason: 'glide front=$loMed Hz back=$hiMed Hz should rise',
+      );
       // Sanity: the endpoints should bracket the 220→440 sweep loosely.
       expect(loMed, closeTo(220, 40));
       expect(hiMed, closeTo(440, 40));
@@ -182,8 +186,13 @@ void main() {
 
     test('the spectrogram has the expected frame/bin shape and aligns', () {
       final samples = _tone(440);
-      final spec = computeSpectrogram(samples, _sr, fftSize: 2048, hop: 512,
-          maxHz: 5000);
+      final spec = computeSpectrogram(
+        samples,
+        _sr,
+        fftSize: 2048,
+        hop: 512,
+        maxHz: 5000,
+      );
       final m = computeVoiceMetrics(samples, _sr, fftSize: 2048, hop: 512);
 
       // bins == min(fftSize/2+1, ceil(maxHz*fftSize/sr)+1) == ceil(5000*2048/44100)+1.
@@ -208,8 +217,11 @@ void main() {
       }
       final peakHz = argmax * spec.binHz;
       // One STFT bin is ~21.5 Hz wide — accept the fundamental's bin.
-      expect(peakHz, closeTo(440, spec.binHz * 1.5),
-          reason: 'dominant bin at $peakHz Hz');
+      expect(
+        peakHz,
+        closeTo(440, spec.binHz * 1.5),
+        reason: 'dominant bin at $peakHz Hz',
+      );
     });
 
     test('voice profile + register are finite/sane on the glide', () {
@@ -219,16 +231,21 @@ void main() {
       expect(profile.hasRange, isTrue);
       expect(profile.lowMidi, isNotNull);
       expect(profile.highMidi, isNotNull);
-      expect(profile.highMidi! - profile.lowMidi!, greaterThanOrEqualTo(6),
-          reason: 'an octave glide spans well over 6 semitones');
+      expect(
+        profile.highMidi! - profile.lowMidi!,
+        greaterThanOrEqualTo(6),
+        reason: 'an octave glide spans well over 6 semitones',
+      );
       // Dynamics aggregates are finite or cleanly absent.
       expect(profile.softDb.isNaN || profile.softDb.isFinite, isTrue);
       expect(profile.loudDb.isNaN || profile.loudDb.isFinite, isTrue);
 
       final reg = analyzeRegister(m);
-      expect(reg.chestPct + reg.mixPct + reg.headPct,
-          anyOf(closeTo(0, 1e-6), closeTo(100, 1e-3)),
-          reason: 'register fractions sum to 0 (no data) or 100');
+      expect(
+        reg.chestPct + reg.mixPct + reg.headPct,
+        anyOf(closeTo(0, 1e-6), closeTo(100, 1e-3)),
+        reason: 'register fractions sum to 0 (no data) or 100',
+      );
     });
   });
 
@@ -269,42 +286,57 @@ void main() {
       expect(_allFinite(ltas.db), isTrue);
 
       final reg = analyzeRegister(m);
-      expect(reg.hasData, isFalse, reason: 'no voiced H1−H2 → no register data');
+      expect(
+        reg.hasData,
+        isFalse,
+        reason: 'no voiced H1−H2 → no register data',
+      );
 
       final vib = analyzeVibrato(m, 0, m.frames - 1);
       expect(vib.present, isFalse, reason: 'silence has no vibrato');
     });
 
-    test('a buffer shorter than the FFT window returns one padded frame, no crash',
-        () {
-      final shortBuf = Float64List(1000); // < fftSize (2048)
-      // Put a faint 440 Hz tone in it so it is not pure zeros.
-      for (var i = 0; i < shortBuf.length; i++) {
-        shortBuf[i] = 0.4 * sin(2 * pi * 440 * i / _sr);
-      }
-      final m = computeVoiceMetrics(shortBuf, _sr);
-      expect(m.frames, greaterThanOrEqualTo(1),
-          reason: 'sub-window input still yields a zero-padded frame');
-      // Every curve length matches the frame count (alignment invariant).
-      expect(m.f0.length, m.frames);
-      expect(m.f1.length, m.frames);
-      expect(m.ring.length, m.frames);
+    test(
+      'a buffer shorter than the FFT window returns one padded frame, no crash',
+      () {
+        final shortBuf = Float64List(1000); // < fftSize (2048)
+        // Put a faint 440 Hz tone in it so it is not pure zeros.
+        for (var i = 0; i < shortBuf.length; i++) {
+          shortBuf[i] = 0.4 * sin(2 * pi * 440 * i / _sr);
+        }
+        final m = computeVoiceMetrics(shortBuf, _sr);
+        expect(
+          m.frames,
+          greaterThanOrEqualTo(1),
+          reason: 'sub-window input still yields a zero-padded frame',
+        );
+        // Every curve length matches the frame count (alignment invariant).
+        expect(m.f0.length, m.frames);
+        expect(m.f1.length, m.frames);
+        expect(m.ring.length, m.frames);
 
-      final spec = computeSpectrogram(shortBuf, _sr);
-      expect(spec.frames, m.frames,
-          reason: 'short-buffer metrics/spectrogram framing must match');
+        final spec = computeSpectrogram(shortBuf, _sr);
+        expect(
+          spec.frames,
+          m.frames,
+          reason: 'short-buffer metrics/spectrogram framing must match',
+        );
 
-      // Aggregates are finite even when too short to be meaningful.
-      expect(m.ringAvg.isFinite, isTrue);
-      expect(m.cppAvg.isFinite, isTrue);
+        // Aggregates are finite even when too short to be meaningful.
+        expect(m.ringAvg.isFinite, isTrue);
+        expect(m.cppAvg.isFinite, isTrue);
 
-      // Profile/register/vibrato on a 1-frame-ish take: sane empties, no throw.
-      final profile = analyzeVoiceProfile(m);
-      expect(profile.hasRange, isFalse,
-          reason: 'too few frames to be a range');
-      expect(analyzeRegister(m).hasData, anyOf(isTrue, isFalse));
-      expect(analyzeVibrato(m, 0, m.frames - 1).present, isFalse);
-    });
+        // Profile/register/vibrato on a 1-frame-ish take: sane empties, no throw.
+        final profile = analyzeVoiceProfile(m);
+        expect(
+          profile.hasRange,
+          isFalse,
+          reason: 'too few frames to be a range',
+        );
+        expect(analyzeRegister(m).hasData, anyOf(isTrue, isFalse));
+        expect(analyzeVibrato(m, 0, m.frames - 1).present, isFalse);
+      },
+    );
 
     test('truly empty input yields zero frames', () {
       final m = computeVoiceMetrics(Float64List(0), _sr);
@@ -317,8 +349,9 @@ void main() {
   });
 
   group('file-path services (SpectrogramService reads WAV PCM16)', () {
-    testWidgets('computeMetricsFromFile + computeFromFile on a 440 Hz WAV',
-        (tester) async {
+    testWidgets('computeMetricsFromFile + computeFromFile on a 440 Hz WAV', (
+      tester,
+    ) async {
       final wav = await _writeWav(wavPath('tone440'), _tone(440));
 
       final svc = const SpectrogramService();
@@ -328,38 +361,55 @@ void main() {
       metrics = await svc.computeMetricsFromFile(wav);
       spec = await svc.computeFromFile(wav);
 
-      expect(metrics, isNotNull, reason: 'WAV PCM16 must decode via readWavMono');
+      expect(
+        metrics,
+        isNotNull,
+        reason: 'WAV PCM16 must decode via readWavMono',
+      );
       expect(spec, isNotNull);
       final med = _median(metrics!.f0);
       expect(med, closeTo(440, 6), reason: 'file-path median f0=$med Hz');
       expect(_voiced(metrics.f0), isNotEmpty);
-      expect(spec!.frames, metrics.frames,
-          reason: 'service framing aligns metrics ↔ spectrogram');
+      expect(
+        spec!.frames,
+        metrics.frames,
+        reason: 'service framing aligns metrics ↔ spectrogram',
+      );
       expect(_allFinite(spec.db), isTrue);
     });
 
     testWidgets('a missing file returns null (no throw)', (tester) async {
       final svc = const SpectrogramService();
-      final missing = p.join(tmp.path, 'does_not_exist_${DateTime.now()
-          .microsecondsSinceEpoch}.wav');
+      final missing = p.join(
+        tmp.path,
+        'does_not_exist_${DateTime.now().microsecondsSinceEpoch}.wav',
+      );
       expect(await svc.computeFromFile(missing), isNull);
       expect(await svc.computeMetricsFromFile(missing), isNull);
     });
   });
 
   group('MediaAnalysisService end-to-end (native engine decode)', () {
-    testWidgets('analyze a 440 Hz WAV → full bundle with sane f0/spectrogram',
-        (tester) async {
+    testWidgets('analyze a 440 Hz WAV → full bundle with sane f0/spectrogram', (
+      tester,
+    ) async {
       final wav = await _writeWav(wavPath('media440'), _tone(440));
-      final TechniqueAnalysis? a = await const MediaAnalysisService()
-          .analyze(wav);
+      final TechniqueAnalysis? a = await const MediaAnalysisService().analyze(
+        wav,
+      );
 
       expect(a, isNotNull, reason: 'the native engine should decode WAV');
-      expect(a!.durationMs, greaterThan(1000),
-          reason: 'a ~1.5 s tone reports a real duration');
+      expect(
+        a!.durationMs,
+        greaterThan(1000),
+        reason: 'a ~1.5 s tone reports a real duration',
+      );
       expect(a.spectrogram.frames, greaterThan(10));
-      expect(a.spectrogram.frames, a.metrics.frames,
-          reason: 'bundle framing aligns');
+      expect(
+        a.spectrogram.frames,
+        a.metrics.frames,
+        reason: 'bundle framing aligns',
+      );
 
       final med = _median(a.metrics.f0);
       expect(med, isNotNaN);
@@ -374,8 +424,10 @@ void main() {
       expect(a.ltas.alphaRatio.isFinite, isTrue);
       expect(a.ltas.singersFormantDb.isFinite, isTrue);
       expect(_allFinite(a.ltas.db), isTrue);
-      expect(a.register.chestPct + a.register.mixPct + a.register.headPct,
-          anyOf(closeTo(0, 1e-6), closeTo(100, 1e-3)));
+      expect(
+        a.register.chestPct + a.register.mixPct + a.register.headPct,
+        anyOf(closeTo(0, 1e-6), closeTo(100, 1e-3)),
+      );
     });
 
     testWidgets('analyze a glide → f0 rises front-to-back', (tester) async {
@@ -397,9 +449,11 @@ void main() {
       expect(back, isNotEmpty);
       front.sort();
       back.sort();
-      expect(back[back.length ~/ 2],
-          greaterThan(front[front.length ~/ 2] + 50),
-          reason: 'decoded glide f0 must rise');
+      expect(
+        back[back.length ~/ 2],
+        greaterThan(front[front.length ~/ 2] + 50),
+        reason: 'decoded glide f0 must rise',
+      );
     });
   });
 }

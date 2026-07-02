@@ -162,8 +162,7 @@ class AssetStore {
     String ext,
   ) async {
     final rel = existing.localRelPath;
-    final present =
-        rel != null && await File(p.join(root.path, rel)).exists();
+    final present = rel != null && await File(p.join(root.path, rel)).exists();
     if (present) return;
     final newRel = await _placeFile(src, hash, ext);
     await (db.update(db.assets)..where((a) => a.id.equals(existing.id))).write(
@@ -270,9 +269,9 @@ class AssetStore {
         // as distinct files, so deleting only the current row's path would leak the
         // rest. All files for a hash live in one shard dir (assets/<h0:2>/<h2:4>).
         await _deletePoolFilesForHash(hash);
-        await (db.delete(db.waveformCache)
-              ..where((w) => w.contentHash.equals(hash)))
-            .go();
+        await (db.delete(
+          db.waveformCache,
+        )..where((w) => w.contentHash.equals(hash))).go();
       }
     }
     return removed;
@@ -311,11 +310,12 @@ class AssetStore {
     // Content hashes with a LIVE asset row: a file matching one is legitimately owned.
     // A file matching only a tombstoned hash (or no hash) is an orphan to reclaim.
     final known = <String>{};
-    for (final r in await db
-        .customSelect(
-          'SELECT DISTINCT content_hash AS h FROM assets WHERE deleted_at IS NULL',
-        )
-        .get()) {
+    for (final r
+        in await db
+            .customSelect(
+              'SELECT DISTINCT content_hash AS h FROM assets WHERE deleted_at IS NULL',
+            )
+            .get()) {
       final h = r.data['h'];
       if (h is String) known.add(h);
     }

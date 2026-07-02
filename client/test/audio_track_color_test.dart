@@ -2,14 +2,14 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:vocara/domain/models/audio_track.dart';
 
 AudioTrack _track({int? colorValue}) => AudioTrack(
-      id: 't1',
-      kind: AudioTrackKind.vocal,
-      displayName: 'Take 1',
-      audioFilePath: '/tmp/t1.wav',
-      durationMs: 1000,
-      createdAt: DateTime(2026, 1, 1),
-      colorValue: colorValue,
-    );
+  id: 't1',
+  kind: AudioTrackKind.vocal,
+  displayName: 'Take 1',
+  audioFilePath: '/tmp/t1.wav',
+  durationMs: 1000,
+  createdAt: DateTime(2026, 1, 1),
+  colorValue: colorValue,
+);
 
 void main() {
   group('AudioTrack color', () {

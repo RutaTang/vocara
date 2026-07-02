@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
@@ -105,22 +106,25 @@ void main() {
       // exercise the REAL persistence/asset round-trip, not a JSON stub.
       final persistence = Persistence.memory();
       final storage = LocalStorageService();
-      final appSettings = AppSettingsService(storage: storage)..load();
+      // Fire-and-forget load, matching the production wiring in
+      // dependencies.dart (the view model tolerates attach-before-load).
+      final appSettings = AppSettingsService(storage: storage);
+      unawaited(appSettings.load());
 
       final created = await persistence.songRepo.createPractice('Sep test');
       expect(created, isA<Ok<SongPractice>>());
       final practiceId = (created as Ok<SongPractice>).value.id;
 
       SongPracticeDetailViewModel buildVm() => SongPracticeDetailViewModel(
-            repository: persistence.songRepo,
-            techniqueRepository: persistence.techRepo,
-            audioFileService: AudioFileService(storage: storage),
-            waveformService: WaveformService(storage: storage),
-            spectrogramService: const SpectrogramService(),
-            separationService: FakeSourceSeparationService(),
-            appSettings: appSettings,
-            practiceId: practiceId,
-          );
+        repository: persistence.songRepo,
+        techniqueRepository: persistence.techRepo,
+        audioFileService: AudioFileService(storage: storage),
+        waveformService: WaveformService(storage: storage),
+        spectrogramService: const SpectrogramService(),
+        separationService: FakeSourceSeparationService(),
+        appSettings: appSettings,
+        practiceId: practiceId,
+      );
 
       final vm = buildVm();
       addTearDown(() async {
@@ -135,8 +139,11 @@ void main() {
         () => vm.practice != null && vm.separationAvailable,
       );
       expect(vm.practice, isNotNull);
-      expect(vm.separationAvailable, isTrue,
-          reason: 'the fake engine reports available');
+      expect(
+        vm.separationAvailable,
+        isTrue,
+        reason: 'the fake engine reports available',
+      );
 
       // Import the original song into the Reference slot — separateBacking
       // prefers the reference as the source to keep.
@@ -146,8 +153,11 @@ void main() {
       final reference = vm.practice!.reference;
       expect(reference, isNotNull, reason: 'reference should be set');
       expect(reference!.kind, AudioTrackKind.reference);
-      expect(vm.practice!.accompaniment, isNull,
-          reason: 'no accompaniment until separation runs');
+      expect(
+        vm.practice!.accompaniment,
+        isNull,
+        reason: 'no accompaniment until separation runs',
+      );
 
       // Observe the separation progress crossing through to completion via the
       // VM's separationProgress notifier (it nulls out when idle/done).
@@ -165,44 +175,77 @@ void main() {
       await _pumpUntil(tester, () => !vm.isSeparating && !vm.busy);
       vm.removeListener(recordProgress);
 
-      expect(vm.errorMessage, isNull,
-          reason: 'a deterministic fake separation must not error');
+      expect(
+        vm.errorMessage,
+        isNull,
+        reason: 'a deterministic fake separation must not error',
+      );
       expect(vm.isSeparating, isFalse);
-      expect(vm.separationProgress, isNull,
-          reason: 'progress resets to null when separation finishes');
+      expect(
+        vm.separationProgress,
+        isNull,
+        reason: 'progress resets to null when separation finishes',
+      );
       // The fake reports 0.2 then 1.0; the VM forwards them, so we should have
       // observed monotonic, finite progress values during the run.
-      expect(progressSeen, isNotEmpty,
-          reason: 'progress callbacks should have been forwarded');
+      expect(
+        progressSeen,
+        isNotEmpty,
+        reason: 'progress callbacks should have been forwarded',
+      );
       expect(progressSeen.every((v) => v.isFinite && v >= 0 && v <= 1), isTrue);
 
       // The instrumental stem is now the accompaniment, wired into the practice.
       final accompaniment = vm.practice!.accompaniment;
-      expect(accompaniment, isNotNull,
-          reason: 'the instrumental stem becomes the accompaniment');
+      expect(
+        accompaniment,
+        isNotNull,
+        reason: 'the instrumental stem becomes the accompaniment',
+      );
       expect(accompaniment!.kind, AudioTrackKind.accompaniment);
-      expect(accompaniment.displayName, contains('(Instrumental)'),
-          reason: 'separation labels the produced backing as Instrumental');
-      expect(accompaniment.waveformPeaks, isNotEmpty,
-          reason: 'the produced stem is analyzed for a waveform');
-      expect(accompaniment.durationMs, greaterThan(500),
-          reason: 'a ~1s stem should report a real duration');
+      expect(
+        accompaniment.displayName,
+        contains('(Instrumental)'),
+        reason: 'separation labels the produced backing as Instrumental',
+      );
+      expect(
+        accompaniment.waveformPeaks,
+        isNotEmpty,
+        reason: 'the produced stem is analyzed for a waveform',
+      );
+      expect(
+        accompaniment.durationMs,
+        greaterThan(500),
+        reason: 'a ~1s stem should report a real duration',
+      );
       expect(accompaniment.audioFilePath, isNotEmpty);
 
       // The original is KEPT in the reference slot (A/B against the stem).
-      expect(vm.practice!.reference, isNotNull,
-          reason: 'the original is kept as the reference');
+      expect(
+        vm.practice!.reference,
+        isNotNull,
+        reason: 'the original is kept as the reference',
+      );
       expect(vm.practice!.reference!.kind, AudioTrackKind.reference);
 
       // The kept-original source is recorded so a later re-separate has a target.
-      expect(vm.practice!.separationSource, isNotNull,
-          reason: 'separationSource tracks the kept original full mix');
-      expect(vm.canReseparate, isTrue,
-          reason: 'a separated backing + a kept source means re-separate is on');
+      expect(
+        vm.practice!.separationSource,
+        isNotNull,
+        reason: 'separationSource tracks the kept original full mix',
+      );
+      expect(
+        vm.canReseparate,
+        isTrue,
+        reason: 'a separated backing + a kept source means re-separate is on',
+      );
 
       // Active backing switched to the freshly produced instrumental.
-      expect(vm.playReference, isFalse,
-          reason: 'after separation the audible backing is the instrumental');
+      expect(
+        vm.playReference,
+        isFalse,
+        reason: 'after separation the audible backing is the instrumental',
+      );
       expect(vm.activeBacking, isNotNull);
       expect(vm.activeBacking!.audioFilePath, accompaniment.audioFilePath);
 
@@ -222,17 +265,26 @@ void main() {
       expect(reloaded.practice, isNotNull);
 
       final reAccomp = reloaded.practice!.accompaniment;
-      expect(reAccomp, isNotNull,
-          reason: 'the instrumental survived the reload');
+      expect(
+        reAccomp,
+        isNotNull,
+        reason: 'the instrumental survived the reload',
+      );
       expect(reAccomp!.kind, AudioTrackKind.accompaniment);
       expect(reAccomp.displayName, contains('(Instrumental)'));
       // The pooled stem resolves to a readable, non-trivial file on disk.
       expect(reAccomp.audioFilePath, isNotEmpty);
       final reAccompFile = File(reAccomp.audioFilePath);
-      expect(await reAccompFile.exists(), isTrue,
-          reason: 'the pooled instrumental asset resolves to a real file');
-      expect(await reAccompFile.length(), greaterThan(44),
-          reason: 'the stem is a real WAV (more than a bare header)');
+      expect(
+        await reAccompFile.exists(),
+        isTrue,
+        reason: 'the pooled instrumental asset resolves to a real file',
+      );
+      expect(
+        await reAccompFile.length(),
+        greaterThan(44),
+        reason: 'the stem is a real WAV (more than a bare header)',
+      );
       // Peaks are cached by content hash, so they survive the round-trip.
       expect(reAccomp.waveformPeaks, isNotEmpty);
 
@@ -240,8 +292,11 @@ void main() {
       final reRef = reloaded.practice!.reference;
       expect(reRef, isNotNull, reason: 'the kept original survived the reload');
       expect(reRef!.kind, AudioTrackKind.reference);
-      expect(await File(reRef.audioFilePath).exists(), isTrue,
-          reason: 'the pooled reference asset resolves to a real file');
+      expect(
+        await File(reRef.audioFilePath).exists(),
+        isTrue,
+        reason: 'the pooled reference asset resolves to a real file',
+      );
 
       // separationSource resolves on reload (kept for re-separation).
       expect(reloaded.practice!.separationSource, isNotNull);
@@ -307,10 +362,16 @@ void main() {
       }
 
       expect(result, isNotNull);
-      expect(await File(result!.instrumentalPath).exists(), isTrue,
-          reason: 'the real engine writes an instrumental stem');
-      expect(await File(result.vocalPath).exists(), isTrue,
-          reason: 'the real engine writes a vocal stem');
+      expect(
+        await File(result!.instrumentalPath).exists(),
+        isTrue,
+        reason: 'the real engine writes an instrumental stem',
+      );
+      expect(
+        await File(result.vocalPath).exists(),
+        isTrue,
+        reason: 'the real engine writes a vocal stem',
+      );
       expect(result.instrumentalPath, isNot(result.vocalPath));
       // Real stems must carry actual audio frames, not a bare 44-byte header.
       expect(await File(result.instrumentalPath).length(), greaterThan(44));

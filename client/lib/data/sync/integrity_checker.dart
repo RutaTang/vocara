@@ -65,104 +65,124 @@ class IntegrityChecker {
 
     // 1. Dangling children: a live row whose parent is missing or tombstoned.
     for (final (child, fk, parent, inv) in _childEdges) {
-      final rows = await db.customSelect(
-        'SELECT c.id AS id FROM $child c WHERE c.deleted_at IS NULL AND NOT EXISTS '
-        '(SELECT 1 FROM $parent p WHERE p.id = c.$fk AND p.deleted_at IS NULL)',
-      ).get();
+      final rows = await db
+          .customSelect(
+            'SELECT c.id AS id FROM $child c WHERE c.deleted_at IS NULL AND NOT EXISTS '
+            '(SELECT 1 FROM $parent p WHERE p.id = c.$fk AND p.deleted_at IS NULL)',
+          )
+          .get();
       for (final r in rows) {
         final id = r.read<String>('id');
-        out.add(IntegrityViolation(inv, child, id, '$parent missing/tombstoned'));
+        out.add(
+          IntegrityViolation(inv, child, id, '$parent missing/tombstoned'),
+        );
         if (repair) await _tombstone(child, id);
       }
     }
 
     // 2. Scalar self-heal: a pointer resolving to a missing/tombstoned target
     //    is nulled (foreign_key_check passes it, so we must catch it here).
-    out.addAll(await _scalar(
-      repair: repair,
-      invariant: 'active-interp',
-      sql:
-          "SELECT p.id AS id FROM practices p WHERE p.deleted_at IS NULL AND "
-          "p.active_interpretation_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "
-          "interpretations i WHERE i.id = p.active_interpretation_id AND "
-          "i.deleted_at IS NULL AND i.practice_id = p.id)",
-      table: 'practices',
-      column: 'active_interpretation_id',
-    ));
-    out.addAll(await _scalar(
-      repair: repair,
-      invariant: 'separation-asset',
-      sql:
-          "SELECT p.id AS id FROM practices p WHERE p.deleted_at IS NULL AND "
-          "p.separation_asset_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM assets "
-          "a WHERE a.id = p.separation_asset_id AND a.deleted_at IS NULL)",
-      table: 'practices',
-      column: 'separation_asset_id',
-    ));
+    out.addAll(
+      await _scalar(
+        repair: repair,
+        invariant: 'active-interp',
+        sql:
+            'SELECT p.id AS id FROM practices p WHERE p.deleted_at IS NULL AND '
+            'p.active_interpretation_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM '
+            'interpretations i WHERE i.id = p.active_interpretation_id AND '
+            'i.deleted_at IS NULL AND i.practice_id = p.id)',
+        table: 'practices',
+        column: 'active_interpretation_id',
+      ),
+    );
+    out.addAll(
+      await _scalar(
+        repair: repair,
+        invariant: 'separation-asset',
+        sql:
+            'SELECT p.id AS id FROM practices p WHERE p.deleted_at IS NULL AND '
+            'p.separation_asset_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM assets '
+            'a WHERE a.id = p.separation_asset_id AND a.deleted_at IS NULL)',
+        table: 'practices',
+        column: 'separation_asset_id',
+      ),
+    );
     // A vocal take's interpretation must be a live interpretation of its OWN
     // practice; otherwise unassign it.
-    out.addAll(await _scalar(
-      repair: repair,
-      invariant: 'vocal-interp',
-      sql:
-          "SELECT t.id AS id FROM tracks t WHERE t.deleted_at IS NULL AND "
-          "t.kind = 'vocal' AND t.interpretation_id IS NOT NULL AND NOT EXISTS "
-          "(SELECT 1 FROM interpretations i WHERE i.id = t.interpretation_id AND "
-          "i.deleted_at IS NULL AND i.practice_id = t.practice_id)",
-      table: 'tracks',
-      column: 'interpretation_id',
-    ));
+    out.addAll(
+      await _scalar(
+        repair: repair,
+        invariant: 'vocal-interp',
+        sql:
+            'SELECT t.id AS id FROM tracks t WHERE t.deleted_at IS NULL AND '
+            "t.kind = 'vocal' AND t.interpretation_id IS NOT NULL AND NOT EXISTS "
+            '(SELECT 1 FROM interpretations i WHERE i.id = t.interpretation_id AND '
+            'i.deleted_at IS NULL AND i.practice_id = t.practice_id)',
+        table: 'tracks',
+        column: 'interpretation_id',
+      ),
+    );
     // A track's routing bus must be a live fx_bus of its OWN practice; otherwise
     // null it (playback would silently reroute to master on a dangling pointer).
-    out.addAll(await _scalar(
-      repair: repair,
-      invariant: 'track-bus',
-      sql:
-          "SELECT t.id AS id FROM tracks t WHERE t.deleted_at IS NULL AND "
-          "t.bus_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fx_buses b WHERE "
-          "b.id = t.bus_id AND b.deleted_at IS NULL AND b.practice_id = "
-          "t.practice_id)",
-      table: 'tracks',
-      column: 'bus_id',
-    ));
+    out.addAll(
+      await _scalar(
+        repair: repair,
+        invariant: 'track-bus',
+        sql:
+            'SELECT t.id AS id FROM tracks t WHERE t.deleted_at IS NULL AND '
+            't.bus_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fx_buses b WHERE '
+            'b.id = t.bus_id AND b.deleted_at IS NULL AND b.practice_id = '
+            't.practice_id)',
+        table: 'tracks',
+        column: 'bus_id',
+      ),
+    );
     // A bus->bus output route must point at a live fx_bus of the same practice;
     // otherwise null it (falls back to master, same as an absent route).
-    out.addAll(await _scalar(
-      repair: repair,
-      invariant: 'bus-output',
-      sql:
-          "SELECT b.id AS id FROM fx_buses b WHERE b.deleted_at IS NULL AND "
-          "b.output_bus_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fx_buses o "
-          "WHERE o.id = b.output_bus_id AND o.deleted_at IS NULL AND "
-          "o.practice_id = b.practice_id)",
-      table: 'fx_buses',
-      column: 'output_bus_id',
-    ));
+    out.addAll(
+      await _scalar(
+        repair: repair,
+        invariant: 'bus-output',
+        sql:
+            'SELECT b.id AS id FROM fx_buses b WHERE b.deleted_at IS NULL AND '
+            'b.output_bus_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fx_buses o '
+            'WHERE o.id = b.output_bus_id AND o.deleted_at IS NULL AND '
+            'o.practice_id = b.practice_id)',
+        table: 'fx_buses',
+        column: 'output_bus_id',
+      ),
+    );
 
     // 3. Single-slot LWW: at most one live accompaniment / reference per
     //    practice. Keep the highest HLC, tombstone the losers.
-    final dupes = await db.customSelect(
-      "SELECT practice_id, kind FROM tracks WHERE deleted_at IS NULL AND "
-      "kind IN ('accompaniment', 'reference') GROUP BY practice_id, kind "
-      "HAVING COUNT(*) > 1",
-    ).get();
+    final dupes = await db
+        .customSelect(
+          'SELECT practice_id, kind FROM tracks WHERE deleted_at IS NULL AND '
+          "kind IN ('accompaniment', 'reference') GROUP BY practice_id, kind "
+          'HAVING COUNT(*) > 1',
+        )
+        .get();
     for (final d in dupes) {
-      final rows = await db.customSelect(
-        "SELECT id FROM tracks WHERE deleted_at IS NULL AND practice_id = ? AND "
-        "kind = ? ORDER BY hlc_packed DESC",
-        variables: [
-          Variable.withString(d.read<String>('practice_id')),
-          Variable.withString(d.read<String>('kind')),
-        ],
-      ).get();
+      final rows = await db
+          .customSelect(
+            'SELECT id FROM tracks WHERE deleted_at IS NULL AND practice_id = ? AND '
+            'kind = ? ORDER BY hlc_packed DESC',
+            variables: [
+              Variable.withString(d.read<String>('practice_id')),
+              Variable.withString(d.read<String>('kind')),
+            ],
+          )
+          .get();
       for (var i = 1; i < rows.length; i++) {
         final id = rows[i].read<String>('id');
-        out.add(IntegrityViolation(
-          'slot-dup',
-          'tracks',
-          id,
-          'duplicate live ${d.read<String>('kind')} slot',
-        ));
+        out.add(
+          IntegrityViolation(
+            'slot-dup',
+            'tracks',
+            id,
+            'duplicate live ${d.read<String>('kind')} slot',
+          ),
+        );
         if (repair) await _tombstone('tracks', id);
       }
     }

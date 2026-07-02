@@ -65,22 +65,21 @@ void main() {
     // It only invokes the channel from gesture callbacks (drag/double-tap),
     // which this journey never triggers, but mock it defensively with safe
     // defaults so any incidental call resolves rather than throwing.
-    messenger.setMockMethodCallHandler(
-      const MethodChannel('window_manager'),
-      (call) async {
-        switch (call.method) {
-          case 'isMaximized':
-          case 'isMinimized':
-          case 'isFullScreen':
-          case 'isPreventClose':
-          case 'isVisible':
-          case 'isFocused':
-            return false;
-          default:
-            return null;
-        }
-      },
-    );
+    messenger.setMockMethodCallHandler(const MethodChannel('window_manager'), (
+      call,
+    ) async {
+      switch (call.method) {
+        case 'isMaximized':
+        case 'isMinimized':
+        case 'isFullScreen':
+        case 'isPreventClose':
+        case 'isVisible':
+        case 'isFocused':
+          return false;
+        default:
+          return null;
+      }
+    });
 
     // The native window reveal channel main.dart pings after the first frame.
     messenger.setMockMethodCallHandler(

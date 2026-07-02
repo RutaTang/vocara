@@ -15,6 +15,7 @@ import '../../utils/id.dart';
 import '../../utils/result.dart';
 import '../db/app_database.dart';
 import '../db/asset_store.dart';
+import '../db/tables.dart';
 import '../sync/reconcile.dart';
 import '../sync/sync_writer.dart';
 import 'song_practice_repository.dart';
@@ -840,7 +841,7 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
   // --- generic helpers ------------------------------------------------------
 
   /// Live (non-tombstoned) rows of [table] matching [filter].
-  Future<List<D>> _live<T extends Table, D>(
+  Future<List<D>> _live<T extends SyncCols, D>(
     TableInfo<T, D> table,
     Expression<bool> Function(T) filter,
   ) {
@@ -848,7 +849,7 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
     return q.get();
   }
 
-  Expression<bool> _notDeleted(dynamic t) =>
+  Expression<bool> _notDeleted(SyncCols t) =>
       (t.deletedAt as GeneratedColumn<int>).isNull();
 
   /// Soft-deletes a row using a stamp MINTED BY THE CALLER and does NOT journal
@@ -856,7 +857,7 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
   /// entry. Taking the caller's stamp keeps the row's HLC equal to that entry's
   /// (self-journaling here would add a second, HLC-mismatched tombstone op).
   Future<void> _tombstoneRow(
-    TableInfo table,
+    TableInfo<Table, dynamic> table,
     String id,
     int now,
     SyncStamp s,
@@ -880,7 +881,7 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
   /// Soft-deletes a row + journals it. Works for any synced table via raw SQL
   /// so one helper covers them all.
   Future<void> _tombstone(
-    TableInfo table,
+    TableInfo<Table, dynamic> table,
     String name,
     String id,
     int now,

@@ -4,8 +4,8 @@ import 'package:forui/forui.dart';
 
 import '../../../domain/models/audio_track.dart';
 import '../../../domain/models/practice_note.dart';
-import '../../../domain/models/technique_marker.dart';
 import '../../../domain/models/spectrogram.dart';
+import '../../../domain/models/technique_marker.dart';
 import '../../../domain/models/voice_metrics.dart';
 import '../../core/themes/studio.dart';
 import '../../core/widgets/spectrogram_painter.dart';

@@ -53,7 +53,9 @@ class _TechniqueLibraryScreenState extends State<TechniqueLibraryScreen> {
   }
 
   Future<void> _openDetail(TechniqueLibraryViewModel vm, String id) async {
-    if (_opening) return; // ignore a rapid second tap while one open is in flight
+    if (_opening) {
+      return; // ignore a rapid second tap while one open is in flight
+    }
     _opening = true;
     try {
       await context.push(Routes.techniqueDetail(id));

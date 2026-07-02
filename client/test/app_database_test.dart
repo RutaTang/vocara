@@ -60,53 +60,61 @@ void main() {
 
   test('foreign key is enforced (clip needs a real track + asset)', () async {
     expect(
-      () => db.into(db.clips).insert(
-        ClipsCompanion.insert(
-          id: _id('C1'),
-          trackId: _id('NOPE'),
-          assetId: _id('NOPE'),
-          createdAt: 1000,
-          updatedAt: 1000,
-          hlcWall: 1000,
-          hlcCtr: 0,
-          hlcNode: _id('NODE'),
-          hlcPacked: 'x',
-        ),
-      ),
+      () => db
+          .into(db.clips)
+          .insert(
+            ClipsCompanion.insert(
+              id: _id('C1'),
+              trackId: _id('NOPE'),
+              assetId: _id('NOPE'),
+              createdAt: 1000,
+              updatedAt: 1000,
+              hlcWall: 1000,
+              hlcCtr: 0,
+              hlcNode: _id('NODE'),
+              hlcPacked: 'x',
+            ),
+          ),
       throwsA(isA<SqliteException>()),
     );
   });
 
-  test('partial unique index allows ONE live accompaniment per practice',
-      () async {
-    await db.into(db.practices).insert(_practice('P1'));
-    await db.into(db.tracks).insert(_track('T1', 'P1', 'accompaniment'));
-    // A second LIVE accompaniment for the same practice is rejected.
-    expect(
-      () => db.into(db.tracks).insert(_track('T2', 'P1', 'accompaniment')),
-      throwsA(isA<SqliteException>()),
-    );
-    // Tombstoning the live one frees the slot (a tombstoned row is excluded
-    // from the partial index), so a fresh live accompaniment is then allowed.
-    await (db.update(db.tracks)..where((t) => t.id.equals(_id('T1'))))
-        .write(const TracksCompanion(deletedAt: Value(2000)));
-    await db.into(db.tracks).insert(_track('T4', 'P1', 'accompaniment'));
-    final live = await (db.select(db.tracks)
-          ..where((t) =>
-              t.kind.equals('accompaniment') & t.deletedAt.isNull()))
-        .get();
-    expect(live, hasLength(1));
-    expect(live.single.id, _id('T4'));
-  });
+  test(
+    'partial unique index allows ONE live accompaniment per practice',
+    () async {
+      await db.into(db.practices).insert(_practice('P1'));
+      await db.into(db.tracks).insert(_track('T1', 'P1', 'accompaniment'));
+      // A second LIVE accompaniment for the same practice is rejected.
+      expect(
+        () => db.into(db.tracks).insert(_track('T2', 'P1', 'accompaniment')),
+        throwsA(isA<SqliteException>()),
+      );
+      // Tombstoning the live one frees the slot (a tombstoned row is excluded
+      // from the partial index), so a fresh live accompaniment is then allowed.
+      await (db.update(db.tracks)..where((t) => t.id.equals(_id('T1')))).write(
+        const TracksCompanion(deletedAt: Value(2000)),
+      );
+      await db.into(db.tracks).insert(_track('T4', 'P1', 'accompaniment'));
+      final live =
+          await (db.select(db.tracks)..where(
+                (t) => t.kind.equals('accompaniment') & t.deletedAt.isNull(),
+              ))
+              .get();
+      expect(live, hasLength(1));
+      expect(live.single.id, _id('T4'));
+    },
+  );
 
-  test('multiple vocal tracks per practice are allowed (slot rule is scoped)',
-      () async {
-    await db.into(db.practices).insert(_practice('P1'));
-    await db.into(db.tracks).insert(_track('V1', 'P1', 'vocal'));
-    await db.into(db.tracks).insert(_track('V2', 'P1', 'vocal'));
-    final vocals = await (db.select(db.tracks)
-          ..where((t) => t.kind.equals('vocal')))
-        .get();
-    expect(vocals, hasLength(2));
-  });
+  test(
+    'multiple vocal tracks per practice are allowed (slot rule is scoped)',
+    () async {
+      await db.into(db.practices).insert(_practice('P1'));
+      await db.into(db.tracks).insert(_track('V1', 'P1', 'vocal'));
+      await db.into(db.tracks).insert(_track('V2', 'P1', 'vocal'));
+      final vocals = await (db.select(
+        db.tracks,
+      )..where((t) => t.kind.equals('vocal'))).get();
+      expect(vocals, hasLength(2));
+    },
+  );
 }

@@ -78,14 +78,17 @@ final DynamicLibrary _libc = DynamicLibrary.process();
 // open/fcntl are variadic; we bind fixed-arity forms that pass NO variadic arg
 // (open without a mode, fcntl(F_FULLFSYNC) which ignores its third arg), which is
 // ABI-safe on x86_64 and arm64 alike.
-final int Function(Pointer<Utf8>, int) _open =
-    _libc.lookupFunction<Int Function(Pointer<Utf8>, Int), int Function(Pointer<Utf8>, int)>('open');
-final int Function(int, int) _fcntl =
-    _libc.lookupFunction<Int Function(Int, Int), int Function(int, int)>('fcntl');
-final int Function(int) _fsync =
-    _libc.lookupFunction<Int Function(Int), int Function(int)>('fsync');
-final int Function(int) _close =
-    _libc.lookupFunction<Int Function(Int), int Function(int)>('close');
+final int Function(Pointer<Utf8>, int) _open = _libc
+    .lookupFunction<
+      Int Function(Pointer<Utf8>, Int),
+      int Function(Pointer<Utf8>, int)
+    >('open');
+final int Function(int, int) _fcntl = _libc
+    .lookupFunction<Int Function(Int, Int), int Function(int, int)>('fcntl');
+final int Function(int) _fsync = _libc
+    .lookupFunction<Int Function(Int), int Function(int)>('fsync');
+final int Function(int) _close = _libc
+    .lookupFunction<Int Function(Int), int Function(int)>('close');
 
 /// Opens [path] with [oflag], flushes it (F_FULLFSYNC when [fullFsync], else a
 /// plain fsync), and closes it. Returns true only if the flush succeeded. Any

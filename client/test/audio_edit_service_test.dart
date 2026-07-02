@@ -19,8 +19,7 @@ class _TempFiles extends AudioFileService {
   Future<String> newRecordingPath({
     required String practiceId,
     String extension = 'wav',
-  }) async =>
-      '${dir.path}/clip_${_n++}.$extension';
+  }) async => '${dir.path}/clip_${_n++}.$extension';
 }
 
 /// Builds a mono 16-bit WAV tagged WAVE_FORMAT_EXTENSIBLE (0xFFFE), the way
@@ -98,48 +97,50 @@ Uint8List _wavWithFmt({
 }
 
 void main() {
-  test('splitWav cuts a take into two parts that rejoin to the original',
-      () async {
-    final dir = await Directory.systemTemp.createTemp('vocara_edit');
-    addTearDown(() => dir.delete(recursive: true));
+  test(
+    'splitWav cuts a take into two parts that rejoin to the original',
+    () async {
+      final dir = await Directory.systemTemp.createTemp('vocara_edit');
+      addTearDown(() => dir.delete(recursive: true));
 
-    const sr = 8000;
-    // A 1s ramp from -1..1 so the two halves are clearly distinguishable and a
-    // continuous cut is easy to assert.
-    final samples = Float64List.fromList([
-      for (var i = 0; i < sr; i++) (i / sr) * 2 - 1,
-    ]);
-    final srcPath = '${dir.path}/src.wav';
-    await File(srcPath).writeAsBytes(writeWavMono(samples, sr));
+      const sr = 8000;
+      // A 1s ramp from -1..1 so the two halves are clearly distinguishable and a
+      // continuous cut is easy to assert.
+      final samples = Float64List.fromList([
+        for (var i = 0; i < sr; i++) (i / sr) * 2 - 1,
+      ]);
+      final srcPath = '${dir.path}/src.wav';
+      await File(srcPath).writeAsBytes(writeWavMono(samples, sr));
 
-    final edit = AudioEditService(files: _TempFiles(dir));
-    final parts = await edit.splitWav(
-      practiceId: 'p',
-      sourcePath: srcPath,
-      splitFileMs: 400,
-    );
+      final edit = AudioEditService(files: _TempFiles(dir));
+      final parts = await edit.splitWav(
+        practiceId: 'p',
+        sourcePath: srcPath,
+        splitFileMs: 400,
+      );
 
-    final first = readWavMono(await File(parts.firstPath).readAsBytes())!;
-    final second = readWavMono(await File(parts.secondPath).readAsBytes())!;
-    expect(first.sampleRate, sr);
-    // 400 ms at 8 kHz = 3200 samples in the first part.
-    expect(first.samples.length, 3200);
-    expect(second.samples.length, sr - 3200);
-    // The cut is seamless: the two slices bracket the original ramp.
-    expect(first.samples.last, closeTo(samples[3199], 2e-4));
-    expect(second.samples.first, closeTo(samples[3200], 2e-4));
+      final first = readWavMono(await File(parts.firstPath).readAsBytes())!;
+      final second = readWavMono(await File(parts.secondPath).readAsBytes())!;
+      expect(first.sampleRate, sr);
+      // 400 ms at 8 kHz = 3200 samples in the first part.
+      expect(first.samples.length, 3200);
+      expect(second.samples.length, sr - 3200);
+      // The cut is seamless: the two slices bracket the original ramp.
+      expect(first.samples.last, closeTo(samples[3199], 2e-4));
+      expect(second.samples.first, closeTo(samples[3200], 2e-4));
 
-    final mergedPath = await edit.concatWav(
-      practiceId: 'p',
-      firstPath: parts.firstPath,
-      secondPath: parts.secondPath,
-    );
-    final round = readWavMono(await File(mergedPath).readAsBytes())!;
-    expect(round.samples.length, sr);
-    for (var i = 0; i < sr; i += 137) {
-      expect(round.samples[i], closeTo(samples[i], 2e-4));
-    }
-  });
+      final mergedPath = await edit.concatWav(
+        practiceId: 'p',
+        firstPath: parts.firstPath,
+        secondPath: parts.secondPath,
+      );
+      final round = readWavMono(await File(mergedPath).readAsBytes())!;
+      expect(round.samples.length, sr);
+      for (var i = 0; i < sr; i += 137) {
+        expect(round.samples[i], closeTo(samples[i], 2e-4));
+      }
+    },
+  );
 
   test('reads and splits a WAVE_FORMAT_EXTENSIBLE recording', () async {
     // AVFoundation (the `record` plugin's macOS backend) can write WAVs tagged
@@ -149,8 +150,9 @@ void main() {
     addTearDown(() => dir.delete(recursive: true));
 
     const sr = 8000;
-    final samples =
-        Int16List.fromList([for (var i = 0; i < sr; i++) (i % 200) * 100 - 10000]);
+    final samples = Int16List.fromList([
+      for (var i = 0; i < sr; i++) (i % 200) * 100 - 10000,
+    ]);
     final srcPath = '${dir.path}/rec.wav';
     await File(srcPath).writeAsBytes(_extensibleWavPcm16(samples, sr));
 
@@ -175,8 +177,9 @@ void main() {
     final dir = await Directory.systemTemp.createTemp('vocara_concat');
     addTearDown(() => dir.delete(recursive: true));
 
-    final tone =
-        Float64List.fromList([for (var i = 0; i < 400; i++) (i % 50) / 50 - 0.5]);
+    final tone = Float64List.fromList([
+      for (var i = 0; i < 400; i++) (i % 50) / 50 - 0.5,
+    ]);
     final a = '${dir.path}/a.wav';
     final b = '${dir.path}/b.wav';
     // Identical content, different sample rate -> different fmt header. Joining
@@ -193,8 +196,11 @@ void main() {
     // Same format still joins fine.
     final c = '${dir.path}/c.wav';
     await File(c).writeAsBytes(writeWavMono(tone, 44100));
-    final out =
-        await edit.concatWav(practiceId: 'p', firstPath: a, secondPath: c);
+    final out = await edit.concatWav(
+      practiceId: 'p',
+      firstPath: a,
+      secondPath: c,
+    );
     expect(readWavMono(await File(out).readAsBytes())!.samples.length, 800);
   });
 
@@ -206,13 +212,24 @@ void main() {
     final pcm = '${dir.path}/pcm.wav'; // 16-byte PCM fmt
     final ext = '${dir.path}/ext.wav'; // 40-byte EXTENSIBLE fmt
     await File(pcm).writeAsBytes(
-        writeWavMono(Float64List.fromList([for (var i = 0; i < 100; i++) 0.1]), sr));
-    await File(ext).writeAsBytes(_extensibleWavPcm16(
-        Int16List.fromList([for (var i = 0; i < 100; i++) 1000]), sr));
+      writeWavMono(
+        Float64List.fromList([for (var i = 0; i < 100; i++) 0.1]),
+        sr,
+      ),
+    );
+    await File(ext).writeAsBytes(
+      _extensibleWavPcm16(
+        Int16List.fromList([for (var i = 0; i < 100; i++) 1000]),
+        sr,
+      ),
+    );
 
     final edit = AudioEditService(files: _TempFiles(dir));
-    final out =
-        await edit.concatWav(practiceId: 'p', firstPath: pcm, secondPath: ext);
+    final out = await edit.concatWav(
+      practiceId: 'p',
+      firstPath: pcm,
+      secondPath: ext,
+    );
     expect(readWavMono(await File(out).readAsBytes())!.samples.length, 200);
   });
 
@@ -246,54 +263,60 @@ void main() {
     );
   });
 
-  test('splitWav rejects an EXTENSIBLE WAV whose SubFormat is not PCM/float',
-      () async {
-    // WAVE_FORMAT_EXTENSIBLE wrapping a compressed SubFormat (ADPCM = 2) must
-    // be rejected just like a plainly-tagged compressed WAV.
-    final dir = await Directory.systemTemp.createTemp('vocara_ext_adpcm');
-    addTearDown(() => dir.delete(recursive: true));
+  test(
+    'splitWav rejects an EXTENSIBLE WAV whose SubFormat is not PCM/float',
+    () async {
+      // WAVE_FORMAT_EXTENSIBLE wrapping a compressed SubFormat (ADPCM = 2) must
+      // be rejected just like a plainly-tagged compressed WAV.
+      final dir = await Directory.systemTemp.createTemp('vocara_ext_adpcm');
+      addTearDown(() => dir.delete(recursive: true));
 
-    final bytes = _extensibleWavPcm16(
-      Int16List.fromList(List.filled(4000, 1000)),
-      8000,
-    );
-    // Patch the SubFormat's leading format code (fmt body offset 24; fmt body
-    // starts at byte 20 in this fixed-layout file) from PCM (1) to ADPCM (2).
-    bytes[20 + 24] = 2;
-    final path = '${dir.path}/ext_adpcm.wav';
-    await File(path).writeAsBytes(bytes);
+      final bytes = _extensibleWavPcm16(
+        Int16List.fromList(List.filled(4000, 1000)),
+        8000,
+      );
+      // Patch the SubFormat's leading format code (fmt body offset 24; fmt body
+      // starts at byte 20 in this fixed-layout file) from PCM (1) to ADPCM (2).
+      bytes[20 + 24] = 2;
+      final path = '${dir.path}/ext_adpcm.wav';
+      await File(path).writeAsBytes(bytes);
 
-    final edit = AudioEditService(files: _TempFiles(dir));
-    expect(
-      () => edit.splitWav(practiceId: 'p', sourcePath: path, splitFileMs: 100),
-      throwsA(isA<FormatException>()),
-    );
-  });
+      final edit = AudioEditService(files: _TempFiles(dir));
+      expect(
+        () =>
+            edit.splitWav(practiceId: 'p', sourcePath: path, splitFileMs: 100),
+        throwsA(isA<FormatException>()),
+      );
+    },
+  );
 
-  test('splitWav rejects a header whose blockAlign lies about the frame size',
-      () async {
-    // Tag says PCM, but blockAlign != channels * bytes/sample: splitting on
-    // such a header would shear every frame after the cut.
-    final dir = await Directory.systemTemp.createTemp('vocara_badalign');
-    addTearDown(() => dir.delete(recursive: true));
+  test(
+    'splitWav rejects a header whose blockAlign lies about the frame size',
+    () async {
+      // Tag says PCM, but blockAlign != channels * bytes/sample: splitting on
+      // such a header would shear every frame after the cut.
+      final dir = await Directory.systemTemp.createTemp('vocara_badalign');
+      addTearDown(() => dir.delete(recursive: true));
 
-    final bad = _wavWithFmt(
-      formatTag: 1,
-      channels: 1,
-      sampleRate: 8000,
-      blockAlign: 3, // PCM16 mono must be 2
-      bits: 16,
-      data: Uint8List.fromList(List.filled(4000, 0)),
-    );
-    final path = '${dir.path}/bad.wav';
-    await File(path).writeAsBytes(bad);
+      final bad = _wavWithFmt(
+        formatTag: 1,
+        channels: 1,
+        sampleRate: 8000,
+        blockAlign: 3, // PCM16 mono must be 2
+        bits: 16,
+        data: Uint8List.fromList(List.filled(4000, 0)),
+      );
+      final path = '${dir.path}/bad.wav';
+      await File(path).writeAsBytes(bad);
 
-    final edit = AudioEditService(files: _TempFiles(dir));
-    expect(
-      () => edit.splitWav(practiceId: 'p', sourcePath: path, splitFileMs: 100),
-      throwsA(isA<FormatException>()),
-    );
-  });
+      final edit = AudioEditService(files: _TempFiles(dir));
+      expect(
+        () =>
+            edit.splitWav(practiceId: 'p', sourcePath: path, splitFileMs: 100),
+        throwsA(isA<FormatException>()),
+      );
+    },
+  );
 
   test('splitWav still accepts an IEEE-float (format 3) WAV', () async {
     // The compressed-format rejection must not over-tighten: 32-bit float WAVs

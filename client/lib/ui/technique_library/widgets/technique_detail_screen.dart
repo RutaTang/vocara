@@ -9,8 +9,8 @@ import '../../core/widgets/confirm_dialog.dart';
 import '../../core/widgets/studio_button.dart';
 import '../view_model/technique_detail_view_model.dart';
 import 'media/technique_media_section.dart';
-import 'technique_analysis_section.dart';
 import 'studio_field.dart';
+import 'technique_analysis_section.dart';
 
 /// A single technique's detail page: view or edit its fields and manage its
 /// audio/video example clips.

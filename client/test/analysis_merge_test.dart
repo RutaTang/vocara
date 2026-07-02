@@ -94,9 +94,17 @@ void main() {
 
     test('aggregates the quality gate so a clipped/noisy clip still warns', () {
       final clean = _metrics(
-          ring: [1, 1], active: [1, 1], clippedFraction: 0, snrDb: 30);
+        ring: [1, 1],
+        active: [1, 1],
+        clippedFraction: 0,
+        snrDb: 30,
+      );
       final bad = _metrics(
-          ring: [1, 1], active: [1, 1], clippedFraction: 0.05, snrDb: 5);
+        ring: [1, 1],
+        active: [1, 1],
+        clippedFraction: 0.05,
+        snrDb: 5,
+      );
       final m = mergeVoiceMetrics([clean, bad])!;
       expect(m.isClipped, isTrue); // worst clip drives it
       expect(m.isLowSnr, isTrue); // worst (lowest) snr drives it
@@ -105,10 +113,18 @@ void main() {
     });
 
     test('clean clips merge with no false quality warning', () {
-      final a =
-          _metrics(ring: [1, 1], active: [1, 1], clippedFraction: 0, snrDb: 30);
-      final b =
-          _metrics(ring: [1, 1], active: [1, 1], clippedFraction: 0, snrDb: 28);
+      final a = _metrics(
+        ring: [1, 1],
+        active: [1, 1],
+        clippedFraction: 0,
+        snrDb: 30,
+      );
+      final b = _metrics(
+        ring: [1, 1],
+        active: [1, 1],
+        clippedFraction: 0,
+        snrDb: 28,
+      );
       final m = mergeVoiceMetrics([a, b])!;
       expect(m.isClipped, isFalse);
       expect(m.isLowSnr, isFalse);

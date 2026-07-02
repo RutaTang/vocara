@@ -58,7 +58,11 @@ void main() {
   /// loaded detail screen with its takes rendered.
   Future<void> bootDetail(WidgetTester tester) async {
     await seedPracticeWithTakes(persistence.songRepo, tmpDir, takeCount: 2);
-    await pumpApp(tester, persistence, separation: FakeSourceSeparationService());
+    await pumpApp(
+      tester,
+      persistence,
+      separation: FakeSourceSeparationService(),
+    );
 
     expect(
       await pumpUntil(
@@ -73,7 +77,8 @@ void main() {
     expect(
       await pumpUntil(tester, () => present(find.text('E2E Practice'))),
       isTrue,
-      reason: 'the seeded practice loads (its title shows in the transport bar)',
+      reason:
+          'the seeded practice loads (its title shows in the transport bar)',
     );
     expect(
       await pumpUntil(tester, () => present(find.byType(TrackRow))),
@@ -156,32 +161,38 @@ void main() {
     );
   });
 
-  testWidgets('expanding a take flips its disclosure chevron and reveals lanes',
-      (tester) async {
-    await bootDetail(tester);
+  testWidgets(
+    'expanding a take flips its disclosure chevron and reveals lanes',
+    (tester) async {
+      await bootDetail(tester);
 
-    final firstTrack = find.byType(TrackRow).first;
-    final expand = find.descendant(
-      of: firstTrack,
-      matching: find.byIcon(FIcons.chevronRight),
-    );
-    expect(expand, findsOneWidget, reason: 'a collapsed take shows an expand chevron');
+      final firstTrack = find.byType(TrackRow).first;
+      final expand = find.descendant(
+        of: firstTrack,
+        matching: find.byIcon(FIcons.chevronRight),
+      );
+      expect(
+        expand,
+        findsOneWidget,
+        reason: 'a collapsed take shows an expand chevron',
+      );
 
-    await tester.tap(expand);
-    expect(
-      await pumpUntil(
-        tester,
-        () => present(
-          find.descendant(
-            of: find.byType(TrackRow).first,
-            matching: find.byIcon(FIcons.chevronDown),
+      await tester.tap(expand);
+      expect(
+        await pumpUntil(
+          tester,
+          () => present(
+            find.descendant(
+              of: find.byType(TrackRow).first,
+              matching: find.byIcon(FIcons.chevronDown),
+            ),
           ),
         ),
-      ),
-      isTrue,
-      reason: 'expanding flips the chevron and renders the sub-lanes inline',
-    );
-  });
+        isTrue,
+        reason: 'expanding flips the chevron and renders the sub-lanes inline',
+      );
+    },
+  );
 
   testWidgets('the bottom analysis dock opens', (tester) async {
     await bootDetail(tester);
@@ -213,12 +224,13 @@ void main() {
       reason: 'with no accompaniment seeded, the backing drop zone shows',
     );
 
-    final wav = await writeSineWav('${tmpDir.path}/backing_drop.wav', freq: 110);
-    await simulateFileDrop(
-      tester,
-      [wav],
-      at: tester.getCenter(find.text(zoneText)),
+    final wav = await writeSineWav(
+      '${tmpDir.path}/backing_drop.wav',
+      freq: 110,
     );
+    await simulateFileDrop(tester, [
+      wav,
+    ], at: tester.getCenter(find.text(zoneText)));
 
     expect(
       await pumpUntil(tester, () => !present(find.text(zoneText))),

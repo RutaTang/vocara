@@ -4,8 +4,9 @@ import 'package:vocara/domain/models/audio_track.dart';
 import 'package:vocara/ui/song_practice_detail/widgets/track_row.dart';
 
 void main() {
-  testWidgets('M/S toggles fire on a reorderable lane (wrapped in Draggable)',
-      (tester) async {
+  testWidgets('M/S toggles fire on a reorderable lane (wrapped in Draggable)', (
+    tester,
+  ) async {
     var mute = 0, solo = 0, select = 0;
     final track = AudioTrack(
       id: 't1',
@@ -145,76 +146,83 @@ void main() {
       );
     }
 
-    testWidgets('dragging a clip beyond the viewport still commits on release',
-        (tester) async {
-      final starts = {'a': 4000};
-      final liveIds = <String>[];
-      var commits = 0;
-      await pumpClipLane(
-        tester,
-        starts: starts,
-        liveIds: liveIds,
-        onCommit: () => commits++,
-      );
+    testWidgets(
+      'dragging a clip beyond the viewport still commits on release',
+      (tester) async {
+        final starts = {'a': 4000};
+        final liveIds = <String>[];
+        var commits = 0;
+        await pumpClipLane(
+          tester,
+          starts: starts,
+          liveIds: liveIds,
+          onCommit: () => commits++,
+        );
 
-      final gesture = await tester.startGesture(clipCenter(4000));
-      await gesture.moveBy(const Offset(30, 0)); // cross slop → drag accepted
-      await tester.pump();
-      await gesture.moveBy(const Offset(420, 0)); // push past the right edge
-      await tester.pump();
-      expect(
-        starts['a']!,
-        greaterThan(viewportMs),
-        reason: 'the clip should now be fully outside the zoomed viewport',
-      );
-      await gesture.moveBy(const Offset(12, 0)); // drag must still be alive
-      await tester.pump();
-      await gesture.up();
-      await tester.pump();
+        final gesture = await tester.startGesture(clipCenter(4000));
+        await gesture.moveBy(const Offset(30, 0)); // cross slop → drag accepted
+        await tester.pump();
+        await gesture.moveBy(const Offset(420, 0)); // push past the right edge
+        await tester.pump();
+        expect(
+          starts['a']!,
+          greaterThan(viewportMs),
+          reason: 'the clip should now be fully outside the zoomed viewport',
+        );
+        await gesture.moveBy(const Offset(12, 0)); // drag must still be alive
+        await tester.pump();
+        await gesture.up();
+        await tester.pump();
 
-      expect(tester.takeException(), isNull);
-      expect(liveIds, isNotEmpty);
-      expect(
-        commits,
-        1,
-        reason: 'releasing an off-viewport drag must still commit the move',
-      );
-    });
+        expect(tester.takeException(), isNull);
+        expect(liveIds, isNotEmpty);
+        expect(
+          commits,
+          1,
+          reason: 'releasing an off-viewport drag must still commit the move',
+        );
+      },
+    );
 
-    testWidgets('a mid-drag cull cannot transplant the drag onto the next clip',
-        (tester) async {
-      final starts = {'a': 4000, 'b': 8000};
-      final liveIds = <String>[];
-      var commits = 0;
-      await pumpClipLane(
-        tester,
-        starts: starts,
-        liveIds: liveIds,
-        onCommit: () => commits++,
-      );
+    testWidgets(
+      'a mid-drag cull cannot transplant the drag onto the next clip',
+      (tester) async {
+        final starts = {'a': 4000, 'b': 8000};
+        final liveIds = <String>[];
+        var commits = 0;
+        await pumpClipLane(
+          tester,
+          starts: starts,
+          liveIds: liveIds,
+          onCommit: () => commits++,
+        );
 
-      final gesture = await tester.startGesture(clipCenter(4000));
-      await gesture.moveBy(const Offset(30, 0));
-      await tester.pump();
-      await gesture.moveBy(const Offset(420, 0)); // clip a leaves the viewport
-      await tester.pump();
-      await gesture.moveBy(const Offset(12, 0));
-      await tester.pump();
-      await gesture.up();
-      await tester.pump();
+        final gesture = await tester.startGesture(clipCenter(4000));
+        await gesture.moveBy(const Offset(30, 0));
+        await tester.pump();
+        await gesture.moveBy(
+          const Offset(420, 0),
+        ); // clip a leaves the viewport
+        await tester.pump();
+        await gesture.moveBy(const Offset(12, 0));
+        await tester.pump();
+        await gesture.up();
+        await tester.pump();
 
-      expect(tester.takeException(), isNull);
-      expect(
-        liveIds.toSet(),
-        {'a'},
-        reason: 'every live tick must keep targeting the dragged clip',
-      );
-      expect(starts['b'], 8000, reason: 'the neighbor clip must not move');
-      expect(commits, 1);
-    });
+        expect(tester.takeException(), isNull);
+        expect(
+          liveIds.toSet(),
+          {'a'},
+          reason: 'every live tick must keep targeting the dragged clip',
+        );
+        expect(starts['b'], 8000, reason: 'the neighbor clip must not move');
+        expect(commits, 1);
+      },
+    );
 
-    testWidgets('pointer cancel mid-drag still commits the live moves',
-        (tester) async {
+    testWidgets('pointer cancel mid-drag still commits the live moves', (
+      tester,
+    ) async {
       final starts = {'a': 4000};
       final liveIds = <String>[];
       var commits = 0;
@@ -242,8 +250,9 @@ void main() {
       );
     });
 
-    testWidgets('a plain tap selects the clip and never commits a move',
-        (tester) async {
+    testWidgets('a plain tap selects the clip and never commits a move', (
+      tester,
+    ) async {
       final starts = {'a': 4000};
       var commits = 0;
       String? selected;

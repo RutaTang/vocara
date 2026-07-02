@@ -54,7 +54,11 @@ void main() {
       42,
     ]);
     expect(h1, h2);
-    final h3 = SyncWriter.contentHashOf(['title', {'a': 1, 'b': 3}, 42]);
+    final h3 = SyncWriter.contentHashOf([
+      'title',
+      {'a': 1, 'b': 3},
+      42,
+    ]);
     expect(h3, isNot(h1));
   });
 }

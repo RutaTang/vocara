@@ -45,7 +45,11 @@ void main() {
   });
 
   Future<void> boot(WidgetTester tester) async {
-    await pumpApp(tester, persistence, separation: FakeSourceSeparationService());
+    await pumpApp(
+      tester,
+      persistence,
+      separation: FakeSourceSeparationService(),
+    );
     expect(
       await pumpUntil(tester, () => present(find.byType(SettingsScreen))),
       isTrue,
@@ -69,7 +73,10 @@ void main() {
   ) async {
     await boot(tester);
 
-    expect(await pumpUntil(tester, () => present(find.text('Settings'))), isTrue);
+    expect(
+      await pumpUntil(tester, () => present(find.text('Settings'))),
+      isTrue,
+    );
     expect(find.text('AUDIO OUTPUT'), findsOneWidget);
     expect(find.text('AUDIO INPUT'), findsOneWidget);
     expect(find.text('MONITORING'), findsOneWidget);

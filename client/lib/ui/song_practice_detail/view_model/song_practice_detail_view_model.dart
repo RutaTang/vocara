@@ -11,31 +11,31 @@ import '../../../data/repositories/technique_repository.dart';
 import '../../../data/services/app_settings_service.dart';
 import '../../../data/services/audio_edit_service.dart';
 import '../../../data/services/audio_file_service.dart';
-import '../../../data/services/recording_finalizer.dart';
 import '../../../data/services/graph_audio_playback_service.dart';
 import '../../../data/services/mic_permission.dart';
+import '../../../data/services/monitor_service.dart';
 import '../../../data/services/playback_engine.dart';
 import '../../../data/services/playback_engine_factory.dart';
-import '../../../domain/models/audio_fx.dart';
-import '../../../data/services/monitor_service.dart';
+import '../../../data/services/recording_finalizer.dart';
 import '../../../data/services/source_separation_service.dart';
 import '../../../data/services/spectrogram_service.dart';
 import '../../../data/services/waveform_service.dart';
+import '../../../domain/models/audio_fx.dart';
 import '../../../domain/models/audio_track.dart';
 import '../../../domain/models/fx_bus.dart';
 import '../../../domain/models/lyric_line.dart';
 import '../../../domain/models/practice_note.dart';
 import '../../../domain/models/song_practice.dart';
+import '../../../domain/models/spectrogram.dart';
 import '../../../domain/models/take_version.dart';
 import '../../../domain/models/technique.dart';
 import '../../../domain/models/technique_marker.dart';
-import '../../../domain/models/spectrogram.dart';
 import '../../../domain/models/voice_metrics.dart';
 import '../../../utils/command.dart';
 import '../../../utils/id.dart';
-import 'analysis_source.dart';
 import '../../../utils/lyrics_format.dart';
 import '../../../utils/result.dart';
+import 'analysis_source.dart';
 
 /// The tabs of the collapsible bottom dock — one analysis feature each, plus
 /// the mixer. The spectral ones can also show the live mic.
@@ -1808,7 +1808,8 @@ class SongPracticeDetailViewModel extends ChangeNotifier
           saved = await _save();
           if (!saved) {
             _practice = cur; // revert in-memory to the un-persisted state
-            _playReference = prevPlayRef; // restore the pre-separation backing flag
+            _playReference =
+                prevPlayRef; // restore the pre-separation backing flag
             _toast('Could not save the separated track.');
           }
         } catch (_) {

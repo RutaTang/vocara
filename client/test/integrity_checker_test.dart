@@ -45,26 +45,27 @@ void main() {
       displayName: 'Take',
       createdAt: DateTime(2026),
       versionId: base.versions.single.id,
-      clips: [
-        AudioClip(id: newId(), audioFilePath: f.path, durationMs: 1000),
-      ],
+      clips: [AudioClip(id: newId(), audioFilePath: f.path, durationMs: 1000)],
     );
-    return (await repo.savePractice(SongPractice(
-      id: base.id,
-      title: base.title,
-      createdAt: base.createdAt,
-      updatedAt: base.updatedAt,
-      vocalTracks: [vocal],
-      versions: base.versions,
-      activeVersionId: base.versions.single.id,
-    )) as Ok<SongPractice>)
+    return (await repo.savePractice(
+              SongPractice(
+                id: base.id,
+                title: base.title,
+                createdAt: base.createdAt,
+                updatedAt: base.updatedAt,
+                vocalTracks: [vocal],
+                versions: base.versions,
+                activeVersionId: base.versions.single.id,
+              ),
+            )
+            as Ok<SongPractice>)
         .value;
   }
 
   Future<void> rawTombstone(String table, String id) => db.customUpdate(
-        'UPDATE $table SET deleted_at = 999 WHERE id = ?',
-        variables: [Variable.withString(id)],
-      );
+    'UPDATE $table SET deleted_at = 999 WHERE id = ?',
+    variables: [Variable.withString(id)],
+  );
 
   Future<String> firstId(String table) async {
     final r = await db
@@ -78,21 +79,25 @@ void main() {
     expect(await checker.check(), isEmpty);
   });
 
-  test('a live clip under a tombstoned track is detected + cascade-repaired',
-      () async {
-    await seed();
-    await rawTombstone('tracks', await firstId('tracks'));
+  test(
+    'a live clip under a tombstoned track is detected + cascade-repaired',
+    () async {
+      await seed();
+      await rawTombstone('tracks', await firstId('tracks'));
 
-    final found = await checker.check();
-    expect(found.map((v) => v.invariant), contains('clip-track'));
+      final found = await checker.check();
+      expect(found.map((v) => v.invariant), contains('clip-track'));
 
-    expect(await checker.repair(), isEmpty);
-    // The orphaned clip is now tombstoned too.
-    final liveClips = await db
-        .customSelect('SELECT COUNT(*) AS n FROM clips WHERE deleted_at IS NULL')
-        .getSingle();
-    expect(liveClips.read<int>('n'), 0);
-  });
+      expect(await checker.repair(), isEmpty);
+      // The orphaned clip is now tombstoned too.
+      final liveClips = await db
+          .customSelect(
+            'SELECT COUNT(*) AS n FROM clips WHERE deleted_at IS NULL',
+          )
+          .getSingle();
+      expect(liveClips.read<int>('n'), 0);
+    },
+  );
 
   test('a dangling active_interpretation_id is nulled', () async {
     final pr = await seed();

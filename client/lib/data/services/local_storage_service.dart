@@ -40,11 +40,7 @@ class LocalStorageService {
   final Map<String, Future<void>> _writeChains = {};
   int _writeSeq = 0;
 
-  Future<void> write(
-    String collection,
-    String id,
-    Map<String, dynamic> json,
-  ) {
+  Future<void> write(String collection, String id, Map<String, dynamic> json) {
     final key = '$collection/$id';
     final prior = _writeChains[key];
     // Chain after any in-flight write to the same file, ignoring its outcome so one

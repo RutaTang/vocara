@@ -60,7 +60,11 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
 
-    await pumpApp(tester, persistence, separation: FakeSourceSeparationService());
+    await pumpApp(
+      tester,
+      persistence,
+      separation: FakeSourceSeparationService(),
+    );
     expect(
       await pumpUntil(
         tester,
@@ -167,8 +171,7 @@ void main() {
 
     // And it persisted through the repo the test owns.
     final all =
-        (await persistence.techRepo.listTechniques()
-                as Ok<List<Technique>>)
+        (await persistence.techRepo.listTechniques() as Ok<List<Technique>>)
             .value;
     expect(all.map((t) => t.name), contains('Twang'));
   });

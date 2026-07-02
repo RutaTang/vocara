@@ -8,8 +8,8 @@ import 'package:vocara/data/services/local_storage_service.dart';
 import 'package:vocara/data/services/technique_media_service.dart';
 import 'package:vocara/domain/models/technique.dart';
 import 'package:vocara/ui/core/widgets/studio_button.dart';
-import 'package:vocara/ui/technique_library/view_model/technique_library_view_model.dart';
 import 'package:vocara/ui/technique_library/technique_library_screen.dart';
+import 'package:vocara/ui/technique_library/view_model/technique_library_view_model.dart';
 import 'package:vocara/utils/result.dart';
 
 class _FakeRepo implements TechniqueRepository {

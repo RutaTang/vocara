@@ -135,7 +135,10 @@ void main() {
 
       // Accompaniment import (real waveform analysis on a real WAV).
       await vm.addAccompaniment(backingWav);
-      await _settle(tester, () => !vm.busy && vm.practice?.accompaniment != null);
+      await _settle(
+        tester,
+        () => !vm.busy && vm.practice?.accompaniment != null,
+      );
       final accomp = vm.practice!.accompaniment;
       expect(accomp, isNotNull);
       expect(accomp!.waveformPeaks, isNotEmpty);
@@ -219,10 +222,7 @@ void main() {
 
       // --- Fresh VM on the SAME store + practiceId: everything must reload. ---
       final vm2 = buildVm(persistence, practiceId);
-      await _settle(
-        tester,
-        () => vm2.load.completed && vm2.practice != null,
-      );
+      await _settle(tester, () => vm2.load.completed && vm2.practice != null);
       expect(vm2.practice, isNotNull, reason: 'reload must succeed');
 
       expect(vm2.practice!.title, 'Round-trip song');
@@ -365,8 +365,7 @@ void main() {
       expect(saved, isA<Ok<SongPractice>>());
 
       final loaded =
-          (await persistence.songRepo.getPractice(base.id)
-                  as Ok<SongPractice>)
+          (await persistence.songRepo.getPractice(base.id) as Ok<SongPractice>)
               .value;
       final lane = loaded.vocalTracks.single;
       expect(lane.clips, hasLength(2), reason: 'both clips persist');
@@ -376,108 +375,106 @@ void main() {
       expect(lane.clips[1].startMs, 6000);
       // Bytes resolve back from the content-addressed pool.
       expect(await File(lane.clips[0].audioFilePath).readAsBytes(), [1, 2, 3]);
-      expect(
-        await File(lane.clips[1].audioFilePath).readAsBytes(),
-        [4, 5, 6, 7],
-      );
+      expect(await File(lane.clips[1].audioFilePath).readAsBytes(), [
+        4,
+        5,
+        6,
+        7,
+      ]);
       // Per-clip waveform peaks survive (cached by content hash).
       expect(lane.clips[0].waveformPeaks, const [0.5, 0.25]);
       expect(lane.clips[1].waveformPeaks, const [0.75, 0.5, 0.125]);
     },
   );
 
-  test(
-    'content-addressed assets dedup identical bytes and sweep frees only '
-    'unreferenced bytes',
-    () async {
-      final tmp = await Directory.systemTemp.createTemp('vocara_assets');
-      addTearDown(() async {
-        if (await tmp.exists()) await tmp.delete(recursive: true);
-      });
-      final persistence = Persistence.memory();
-      addTearDown(persistence.db.close);
-      final assets = persistence.assets;
+  test('content-addressed assets dedup identical bytes and sweep frees only '
+      'unreferenced bytes', () async {
+    final tmp = await Directory.systemTemp.createTemp('vocara_assets');
+    addTearDown(() async {
+      if (await tmp.exists()) await tmp.delete(recursive: true);
+    });
+    final persistence = Persistence.memory();
+    addTearDown(persistence.db.close);
+    final assets = persistence.assets;
 
-      // Importing identical bytes twice yields ONE live asset (deduped by hash).
-      final srcA = File(p.join(tmp.path, 'a.wav'));
-      final srcADup = File(p.join(tmp.path, 'a-copy.wav'));
-      await srcA.writeAsBytes([10, 20, 30, 40]);
-      await srcADup.writeAsBytes([10, 20, 30, 40]); // same content
-      final idA = await assets.importFile(srcA.path);
-      final idADup = await assets.importFile(srcADup.path);
-      expect(idADup, idA, reason: 'identical bytes reuse the same asset id');
+    // Importing identical bytes twice yields ONE live asset (deduped by hash).
+    final srcA = File(p.join(tmp.path, 'a.wav'));
+    final srcADup = File(p.join(tmp.path, 'a-copy.wav'));
+    await srcA.writeAsBytes([10, 20, 30, 40]);
+    await srcADup.writeAsBytes([10, 20, 30, 40]); // same content
+    final idA = await assets.importFile(srcA.path);
+    final idADup = await assets.importFile(srcADup.path);
+    expect(idADup, idA, reason: 'identical bytes reuse the same asset id');
 
-      final liveAfterDedup = await (persistence.db.select(persistence.db.assets)
-            ..where((a) => a.deletedAt.isNull()))
-          .get();
-      expect(
-        liveAfterDedup,
-        hasLength(1),
-        reason: 'one asset row for one content hash',
-      );
+    final liveAfterDedup = await (persistence.db.select(
+      persistence.db.assets,
+    )..where((a) => a.deletedAt.isNull())).get();
+    expect(
+      liveAfterDedup,
+      hasLength(1),
+      reason: 'one asset row for one content hash',
+    );
 
-      // Wire that asset into a saved take, plus a standalone orphan asset.
-      final base =
-          (await persistence.songRepo.createPractice('GC')
-                  as Ok<SongPractice>)
-              .value;
-      final keptPath = (await assets.resolve(idA))!;
-      final vocal = AudioTrack(
-        id: newId(),
-        kind: AudioTrackKind.vocal,
-        displayName: 'Keep me',
-        createdAt: DateTime(2026),
-        versionId: base.versions.single.id,
-        clips: [
-          AudioClip(id: newId(), audioFilePath: keptPath, durationMs: 1000),
-        ],
-      );
-      await persistence.songRepo.savePractice(
-        SongPractice(
-          id: base.id,
-          title: base.title,
-          createdAt: base.createdAt,
-          updatedAt: base.updatedAt,
-          vocalTracks: [vocal],
-          versions: base.versions,
-          activeVersionId: base.versions.single.id,
-        ),
-      );
+    // Wire that asset into a saved take, plus a standalone orphan asset.
+    final base =
+        (await persistence.songRepo.createPractice('GC') as Ok<SongPractice>)
+            .value;
+    final keptPath = (await assets.resolve(idA))!;
+    final vocal = AudioTrack(
+      id: newId(),
+      kind: AudioTrackKind.vocal,
+      displayName: 'Keep me',
+      createdAt: DateTime(2026),
+      versionId: base.versions.single.id,
+      clips: [
+        AudioClip(id: newId(), audioFilePath: keptPath, durationMs: 1000),
+      ],
+    );
+    await persistence.songRepo.savePractice(
+      SongPractice(
+        id: base.id,
+        title: base.title,
+        createdAt: base.createdAt,
+        updatedAt: base.updatedAt,
+        vocalTracks: [vocal],
+        versions: base.versions,
+        activeVersionId: base.versions.single.id,
+      ),
+    );
 
-      final orphan = File(p.join(tmp.path, 'orphan.wav'));
-      await orphan.writeAsBytes([99, 98, 97]);
-      final orphanId = await assets.importFile(orphan.path);
-      final orphanPath = (await assets.resolve(orphanId))!;
-      expect(await File(orphanPath).exists(), isTrue);
+    final orphan = File(p.join(tmp.path, 'orphan.wav'));
+    await orphan.writeAsBytes([99, 98, 97]);
+    final orphanId = await assets.importFile(orphan.path);
+    final orphanPath = (await assets.resolve(orphanId))!;
+    expect(await File(orphanPath).exists(), isTrue);
 
-      // Sweep reclaims the orphan only; the referenced asset survives.
-      expect(await assets.sweepUnreferenced(), 1);
-      expect(await assets.resolve(orphanId), isNull);
-      expect(await File(orphanPath).exists(), isFalse);
-      expect(
-        await assets.resolve(idA),
-        isNotNull,
-        reason: 'still-referenced asset survives',
-      );
-      expect(await File(keptPath).exists(), isTrue);
+    // Sweep reclaims the orphan only; the referenced asset survives.
+    expect(await assets.sweepUnreferenced(), 1);
+    expect(await assets.resolve(orphanId), isNull);
+    expect(await File(orphanPath).exists(), isFalse);
+    expect(
+      await assets.resolve(idA),
+      isNotNull,
+      reason: 'still-referenced asset survives',
+    );
+    expect(await File(keptPath).exists(), isTrue);
 
-      // Drop the take (save without it) -> its asset is now unreferenced ->
-      // a later sweep frees its bytes too.
-      await persistence.songRepo.savePractice(
-        SongPractice(
-          id: base.id,
-          title: base.title,
-          createdAt: base.createdAt,
-          updatedAt: base.updatedAt,
-          versions: base.versions,
-          activeVersionId: base.versions.single.id,
-        ),
-      );
-      expect(await assets.sweepUnreferenced(), 1);
-      expect(await assets.resolve(idA), isNull);
-      expect(await File(keptPath).exists(), isFalse);
-    },
-  );
+    // Drop the take (save without it) -> its asset is now unreferenced ->
+    // a later sweep frees its bytes too.
+    await persistence.songRepo.savePractice(
+      SongPractice(
+        id: base.id,
+        title: base.title,
+        createdAt: base.createdAt,
+        updatedAt: base.updatedAt,
+        versions: base.versions,
+        activeVersionId: base.versions.single.id,
+      ),
+    );
+    expect(await assets.sweepUnreferenced(), 1);
+    expect(await assets.resolve(idA), isNull);
+    expect(await File(keptPath).exists(), isFalse);
+  });
 
   test(
     'interpretation switching keeps per-version takes separate across reload',
@@ -511,7 +508,9 @@ void main() {
         displayName: 'V1 take',
         createdAt: DateTime(2026),
         versionId: v1.id,
-        clips: [await clip('v1.wav', [1, 1, 1])],
+        clips: [
+          await clip('v1.wav', [1, 1, 1]),
+        ],
         notes: [
           PracticeNote(
             id: newId(),
@@ -528,7 +527,9 @@ void main() {
         displayName: 'V2 take A',
         createdAt: DateTime(2026),
         versionId: v2.id,
-        clips: [await clip('v2a.wav', [2, 2, 2])],
+        clips: [
+          await clip('v2a.wav', [2, 2, 2]),
+        ],
       );
       final takeV2b = AudioTrack(
         id: newId(),
@@ -536,7 +537,9 @@ void main() {
         displayName: 'V2 take B',
         createdAt: DateTime(2026),
         versionId: v2.id,
-        clips: [await clip('v2b.wav', [3, 3, 3])],
+        clips: [
+          await clip('v2b.wav', [3, 3, 3]),
+        ],
       );
 
       await repo.savePractice(

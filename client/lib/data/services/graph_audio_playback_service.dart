@@ -282,7 +282,7 @@ class GraphAudioPlaybackService implements PlaybackEngine {
   /// Pull the latest captured frames (interleaved stereo at 48 kHz) — `count*2` floats.
   Float32List pullInputFrames() {
     if (!_available) return Float32List(0);
-    final buf = (_inputPullBuf ??= malloc<ffi.Float>(_kInputPullFrames * 2));
+    final buf = _inputPullBuf ??= malloc<ffi.Float>(_kInputPullFrames * 2);
     final n = _bindings.ve_input_frames(_engine, buf, _kInputPullFrames);
     return Float32List.fromList(buf.asTypedList(n * 2));
   }

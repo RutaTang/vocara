@@ -26,7 +26,9 @@ void main() {
   /// Creates a v1 database file with one practice row, then closes it.
   Future<void> seedV1() async {
     final db = AppDatabase(NativeDatabase(File(dbPath)));
-    await db.into(db.practices).insert(
+    await db
+        .into(db.practices)
+        .insert(
           PracticesCompanion.insert(
             id: pid,
             title: const Value('keepme'),
@@ -66,14 +68,17 @@ void main() {
         .map((r) => r['name'])
         .toList();
     expect(cols, contains('test_col'));
-    final row =
-        raw.select('SELECT title FROM practices WHERE id = ?', [pid]).first;
+    final row = raw.select('SELECT title FROM practices WHERE id = ?', [
+      pid,
+    ]).first;
     expect(row['title'], 'keepme');
     raw.close();
 
     // The pre-migration db is retained as a rollback copy.
-    expect(await File(p.join(tmp.path, 'vocara.pre-migrate.bak')).exists(),
-        isTrue);
+    expect(
+      await File(p.join(tmp.path, 'vocara.pre-migrate.bak')).exists(),
+      isTrue,
+    );
   });
 
   test('a throwing migration leaves the original untouched', () async {
@@ -92,8 +97,10 @@ void main() {
     expect(raw.select('SELECT COUNT(*) AS c FROM practices').first['c'], 1);
     raw.close();
     // The disposable copy is gone.
-    expect(await File(p.join(tmp.path, 'vocara.migrating.db')).exists(),
-        isFalse);
+    expect(
+      await File(p.join(tmp.path, 'vocara.migrating.db')).exists(),
+      isFalse,
+    );
   });
 
   test('app validation can reject a structurally-valid migration', () async {
@@ -102,8 +109,7 @@ void main() {
       SafeMigrator().migrate(
         dbPath: dbPath,
         targetVersion: 2,
-        step: (copy) =>
-            copy.execute('ALTER TABLE practices ADD COLUMN x TEXT'),
+        step: (copy) => copy.execute('ALTER TABLE practices ADD COLUMN x TEXT'),
         validate: (_) => 'app says no',
       ),
       throwsA(isA<MigrationException>()),
@@ -121,8 +127,9 @@ void main() {
     // Re-stage "crashed mid-swap": the migrated db sits at the copy path and
     // the live path is empty (live was renamed to .bak, copy->live never ran).
     await File(dbPath).rename(p.join(tmp.path, _copy));
-    await File(p.join(tmp.path, 'migration.json'))
-        .writeAsString('{"state":"swapping","to":2}');
+    await File(
+      p.join(tmp.path, 'migration.json'),
+    ).writeAsString('{"state":"swapping","to":2}');
 
     await SafeMigrator().recoverIfNeeded(dbPath);
 
@@ -134,8 +141,9 @@ void main() {
   test('recovery drops a stale copy from a crash before the swap', () async {
     await seedV1(); // live db at v1, untouched
     await File(p.join(tmp.path, _copy)).writeAsString('junk');
-    await File(p.join(tmp.path, 'migration.json'))
-        .writeAsString('{"state":"migrating","to":2}');
+    await File(
+      p.join(tmp.path, 'migration.json'),
+    ).writeAsString('{"state":"migrating","to":2}');
 
     await SafeMigrator().recoverIfNeeded(dbPath);
 
@@ -151,8 +159,9 @@ void main() {
     // and migrating-copy directory entries were both lost (an FS reordering
     // window with no durable directory fsync).
     await File(dbPath).rename(p.join(tmp.path, 'vocara.pre-migrate.bak'));
-    await File(p.join(tmp.path, 'migration.json'))
-        .writeAsString('{"state":"swapping","to":2}');
+    await File(
+      p.join(tmp.path, 'migration.json'),
+    ).writeAsString('{"state":"swapping","to":2}');
 
     await SafeMigrator().recoverIfNeeded(dbPath);
 
@@ -185,8 +194,11 @@ void main() {
     // The migrated copy's bytes were flushed while the live db still existed,
     // i.e. before any destructive rename ran.
     final copySync = fs.log.indexOf('file:$_copy(liveExists=true)');
-    expect(copySync, greaterThanOrEqualTo(0),
-        reason: 'copy must be fsynced before the swap: ${fs.log}');
+    expect(
+      copySync,
+      greaterThanOrEqualTo(0),
+      reason: 'copy must be fsynced before the swap: ${fs.log}',
+    );
 
     // The 'swapping' marker was written AFTER the copy flush and its directory
     // entry was fsync'd while no .bak existed yet — i.e. the marker is durable
@@ -196,17 +208,22 @@ void main() {
     // Any dir fsync logged with NO .bak yet necessarily ran before the first
     // rename (live->bak); one must follow the swapping marker write.
     final preSwapDirSync = fs.log.indexOf('dir(bakExists=false)', swapMarker);
-    expect(preSwapDirSync, greaterThan(swapMarker),
-        reason: 'the swapping marker dirent must be flushed before the '
-            'renames: ${fs.log}');
+    expect(
+      preSwapDirSync,
+      greaterThan(swapMarker),
+      reason:
+          'the swapping marker dirent must be flushed before the '
+          'renames: ${fs.log}',
+    );
 
     // The post-rename directory fsync (bak now exists) still runs afterwards.
-    expect(fs.log.indexOf('dir(bakExists=true)', preSwapDirSync),
-        greaterThan(preSwapDirSync));
+    expect(
+      fs.log.indexOf('dir(bakExists=true)', preSwapDirSync),
+      greaterThan(preSwapDirSync),
+    );
   });
 
-  test('recovery flushes the copy bytes before promoting it to live',
-      () async {
+  test('recovery flushes the copy bytes before promoting it to live', () async {
     await seedV1();
     await SafeMigrator().migrate(
       dbPath: dbPath,
@@ -215,8 +232,9 @@ void main() {
     );
     // Stage "crashed mid-swap": migrated db at the copy path, live path empty.
     await File(dbPath).rename(p.join(tmp.path, _copy));
-    await File(p.join(tmp.path, 'migration.json'))
-        .writeAsString('{"state":"swapping","to":2}');
+    await File(
+      p.join(tmp.path, 'migration.json'),
+    ).writeAsString('{"state":"swapping","to":2}');
 
     final fs = _RecordingFs(tmp.path);
     await SafeMigrator(fs: fs).recoverIfNeeded(dbPath);
@@ -243,9 +261,10 @@ class _RecordingFs extends DurableFs {
   Future<void> fsyncFile(String path) async {
     final name = p.basename(path);
     if (name == 'migration.json') {
-      final state = RegExp(r'"state"\s*:\s*"(\w+)"')
-              .firstMatch(await File(path).readAsString())
-              ?.group(1) ??
+      final state =
+          RegExp(
+            r'"state"\s*:\s*"(\w+)"',
+          ).firstMatch(await File(path).readAsString())?.group(1) ??
           '?';
       log.add('marker:$state');
     } else {

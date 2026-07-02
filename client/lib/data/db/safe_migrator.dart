@@ -175,12 +175,16 @@ class SafeMigrator {
   void _validateCore(Database copy, int target) {
     final integ = copy.select('PRAGMA integrity_check');
     if (integ.isEmpty || integ.first.values.first != 'ok') {
-      throw MigrationException('integrity_check: ${integ.map((r) => r.values).toList()}');
+      throw MigrationException(
+        'integrity_check: ${integ.map((r) => r.values).toList()}',
+      );
     }
     // foreign_key_check is a standalone checker, independent of the FK pragma.
     final fk = copy.select('PRAGMA foreign_key_check');
     if (fk.isNotEmpty) {
-      throw MigrationException('foreign_key_check found ${fk.length} violations');
+      throw MigrationException(
+        'foreign_key_check found ${fk.length} violations',
+      );
     }
     final uv = copy.select('PRAGMA user_version').first.values.first as int;
     if (uv != target) {

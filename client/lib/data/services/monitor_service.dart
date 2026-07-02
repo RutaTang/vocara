@@ -195,7 +195,7 @@ class MonitorService extends ChangeNotifier {
         _activeN++;
         // Accumulate the LTAS power sum over voiced columns.
         final col = f.column;
-        final pow = (_ltasPow ??= Float64List(col.length));
+        final pow = _ltasPow ??= Float64List(col.length);
         if (pow.length == col.length) {
           for (var b = 0; b < col.length; b++) {
             pow[b] += math.pow(10.0, col[b] / 10.0).toDouble();

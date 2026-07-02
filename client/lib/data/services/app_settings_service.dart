@@ -127,7 +127,8 @@ class AppSettingsService extends ChangeNotifier {
     try {
       doc = await _storage.read(_collection, _docId);
     } catch (_) {
-      doc = null; // never let a read failure abort startup; fall back to defaults
+      doc =
+          null; // never let a read failure abort startup; fall back to defaults
     }
     _outputDeviceUid = doc?[_kOutputUid] as String?;
     _inputDeviceUid = doc?[_kInputUid] as String?;
@@ -135,12 +136,18 @@ class AppSettingsService extends ChangeNotifier {
     // tampered / out-of-range stored value must not reach the engine verbatim
     // (e.g. a huge recordGainDb → enormous input gain, monitorGain > 1 → howling
     // feedback) and must keep the mixer fader math valid.
-    _monitorReverbWet =
-        ((doc?[_kReverbWet] as num?)?.toDouble() ?? 0.2).clamp(0.0, 1.0);
-    _recordGainDb = ((doc?[_kRecordGainDb] as num?)?.toDouble() ?? 24.0)
-        .clamp(recordGainMinDb, recordGainMaxDb);
-    _monitorGain =
-        ((doc?[_kMonitorGain] as num?)?.toDouble() ?? 0.0).clamp(0.0, 1.0);
+    _monitorReverbWet = ((doc?[_kReverbWet] as num?)?.toDouble() ?? 0.2).clamp(
+      0.0,
+      1.0,
+    );
+    _recordGainDb = ((doc?[_kRecordGainDb] as num?)?.toDouble() ?? 24.0).clamp(
+      recordGainMinDb,
+      recordGainMaxDb,
+    );
+    _monitorGain = ((doc?[_kMonitorGain] as num?)?.toDouble() ?? 0.0).clamp(
+      0.0,
+      1.0,
+    );
     // If a screen attached the engine before this load() resolved, it adopted
     // constructor defaults — re-push the now-loaded values to it.
     _applyAllToEngine();

@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:drift/drift.dart' show Table, TableInfo;
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
@@ -38,8 +39,11 @@ void main() {
     if (await tmp.exists()) await tmp.delete(recursive: true);
   });
 
-  Future<AudioClip> clip(String name, List<int> bytes,
-      {List<double> peaks = const []}) async {
+  Future<AudioClip> clip(
+    String name,
+    List<int> bytes, {
+    List<double> peaks = const [],
+  }) async {
     final f = File(p.join(tmp.path, name));
     await f.writeAsBytes(bytes);
     return AudioClip(
@@ -69,7 +73,9 @@ void main() {
       kind: AudioTrackKind.accompaniment,
       displayName: 'Backing',
       createdAt: DateTime(2026),
-      clips: [await clip('backing.wav', [1, 2, 3])],
+      clips: [
+        await clip('backing.wav', [1, 2, 3]),
+      ],
     );
     final vocal = AudioTrack(
       id: newId(),
@@ -129,8 +135,12 @@ void main() {
 
     // Accompaniment + its clip resolve to a readable pooled file.
     expect(loaded.accompaniment, isNotNull);
-    expect(await File(loaded.accompaniment!.clips.single.audioFilePath)
-        .readAsBytes(), [1, 2, 3]);
+    expect(
+      await File(
+        loaded.accompaniment!.clips.single.audioFilePath,
+      ).readAsBytes(),
+      [1, 2, 3],
+    );
 
     // Vocal track + children.
     expect(loaded.vocalTracks, hasLength(1));
@@ -144,84 +154,106 @@ void main() {
     expect(v.clips.single.waveformPeaks, [0.5, 0.25, 0.75]);
   });
 
-  test('editing the title bumps updatedAt; an unchanged save is a no-op',
-      () async {
-    final v1 = ok(await repo.createPractice('A'));
-    final beforeOps = (await db.select(db.oplog).get()).length;
+  test(
+    'editing the title bumps updatedAt; an unchanged save is a no-op',
+    () async {
+      final v1 = ok(await repo.createPractice('A'));
+      final beforeOps = (await db.select(db.oplog).get()).length;
 
-    final v1b = ok(await repo.savePractice(v1)); // identical
-    expect(v1b.updatedAt, v1.updatedAt);
-    expect((await db.select(db.oplog).get()).length, beforeOps);
+      final v1b = ok(await repo.savePractice(v1)); // identical
+      expect(v1b.updatedAt, v1.updatedAt);
+      expect((await db.select(db.oplog).get()).length, beforeOps);
 
-    final v2 = ok(await repo.savePractice(SongPractice(
-      id: v1.id,
-      title: 'A renamed',
-      createdAt: v1.createdAt,
-      updatedAt: v1.updatedAt,
-      versions: v1.versions,
-      activeVersionId: v1.activeVersionId,
-    )));
-    expect(v2.title, 'A renamed');
-    expect(v2.updatedAt.isAfter(v1.updatedAt), isTrue);
-  });
-
-  test('removing a vocal track cascade-tombstones its clips/notes/markers',
-      () async {
-    final base = ok(await repo.createPractice('S'));
-    final vocal = AudioTrack(
-      id: newId(),
-      kind: AudioTrackKind.vocal,
-      displayName: 'Take',
-      createdAt: DateTime(2026),
-      versionId: base.versions.single.id,
-      clips: [await clip('t.wav', [1])],
-      notes: [
-        PracticeNote(
-          id: newId(),
-          positionMs: 0,
-          content: 'x',
-          createdAt: DateTime(2026),
-          updatedAt: DateTime(2026),
+      final v2 = ok(
+        await repo.savePractice(
+          SongPractice(
+            id: v1.id,
+            title: 'A renamed',
+            createdAt: v1.createdAt,
+            updatedAt: v1.updatedAt,
+            versions: v1.versions,
+            activeVersionId: v1.activeVersionId,
+          ),
         ),
-      ],
-    );
-    ok(await repo.savePractice(SongPractice(
-      id: base.id,
-      title: base.title,
-      createdAt: base.createdAt,
-      updatedAt: base.updatedAt,
-      vocalTracks: [vocal],
-      versions: base.versions,
-      activeVersionId: base.activeVersionId,
-    )));
-    expect(await _liveCount(db, db.clips), 1);
-    expect(await _liveCount(db, db.practiceNotes), 1);
+      );
+      expect(v2.title, 'A renamed');
+      expect(v2.updatedAt.isAfter(v1.updatedAt), isTrue);
+    },
+  );
 
-    // Save without the vocal track.
-    ok(await repo.savePractice(SongPractice(
-      id: base.id,
-      title: base.title,
-      createdAt: base.createdAt,
-      updatedAt: base.updatedAt,
-      versions: base.versions,
-      activeVersionId: base.activeVersionId,
-    )));
-    final loaded = ok(await repo.getPractice(base.id));
-    expect(loaded.vocalTracks, isEmpty);
-    expect(await _liveCount(db, db.tracks), 0);
-    expect(await _liveCount(db, db.clips), 0); // cascaded
-    expect(await _liveCount(db, db.practiceNotes), 0);
-  });
+  test(
+    'removing a vocal track cascade-tombstones its clips/notes/markers',
+    () async {
+      final base = ok(await repo.createPractice('S'));
+      final vocal = AudioTrack(
+        id: newId(),
+        kind: AudioTrackKind.vocal,
+        displayName: 'Take',
+        createdAt: DateTime(2026),
+        versionId: base.versions.single.id,
+        clips: [
+          await clip('t.wav', [1]),
+        ],
+        notes: [
+          PracticeNote(
+            id: newId(),
+            positionMs: 0,
+            content: 'x',
+            createdAt: DateTime(2026),
+            updatedAt: DateTime(2026),
+          ),
+        ],
+      );
+      ok(
+        await repo.savePractice(
+          SongPractice(
+            id: base.id,
+            title: base.title,
+            createdAt: base.createdAt,
+            updatedAt: base.updatedAt,
+            vocalTracks: [vocal],
+            versions: base.versions,
+            activeVersionId: base.activeVersionId,
+          ),
+        ),
+      );
+      expect(await _liveCount(db, db.clips), 1);
+      expect(await _liveCount(db, db.practiceNotes), 1);
+
+      // Save without the vocal track.
+      ok(
+        await repo.savePractice(
+          SongPractice(
+            id: base.id,
+            title: base.title,
+            createdAt: base.createdAt,
+            updatedAt: base.updatedAt,
+            versions: base.versions,
+            activeVersionId: base.activeVersionId,
+          ),
+        ),
+      );
+      final loaded = ok(await repo.getPractice(base.id));
+      expect(loaded.vocalTracks, isEmpty);
+      expect(await _liveCount(db, db.tracks), 0);
+      expect(await _liveCount(db, db.clips), 0); // cascaded
+      expect(await _liveCount(db, db.practiceNotes), 0);
+    },
+  );
 
   test('delete tombstones the practice; list excludes it', () async {
     final a = ok(await repo.createPractice('A'));
     await repo.createPractice('B');
-    expect((await repo.listPractices() as Ok<List<SongPractice>>).value,
-        hasLength(2));
+    expect(
+      (await repo.listPractices() as Ok<List<SongPractice>>).value,
+      hasLength(2),
+    );
 
     await repo.deletePractice(a.id);
-    expect((await repo.listPractices() as Ok<List<SongPractice>>).value,
-        hasLength(1));
+    expect(
+      (await repo.listPractices() as Ok<List<SongPractice>>).value,
+      hasLength(1),
+    );
     expect(await repo.getPractice(a.id), isA<Error<SongPractice>>());
   });
 
@@ -236,30 +268,39 @@ void main() {
       displayName: 'Take',
       createdAt: DateTime(2026),
       versionId: base.versions.single.id,
-      clips: [await clip('take.wav', [1, 2, 3])],
+      clips: [
+        await clip('take.wav', [1, 2, 3]),
+      ],
     );
-    ok(await repo.savePractice(SongPractice(
-      id: base.id,
-      title: base.title,
-      createdAt: base.createdAt,
-      updatedAt: base.updatedAt,
-      vocalTracks: [vocal],
-      versions: base.versions,
-      activeVersionId: base.versions.single.id,
-    )));
+    ok(
+      await repo.savePractice(
+        SongPractice(
+          id: base.id,
+          title: base.title,
+          createdAt: base.createdAt,
+          updatedAt: base.updatedAt,
+          vocalTracks: [vocal],
+          versions: base.versions,
+          activeVersionId: base.versions.single.id,
+        ),
+      ),
+    );
 
     // Simulate the bytes going missing locally.
-    final rel = (await db
-            .customSelect('SELECT local_rel_path AS r FROM assets LIMIT 1')
-            .getSingle())
-        .read<String>('r');
+    final rel =
+        (await db
+                .customSelect('SELECT local_rel_path AS r FROM assets LIMIT 1')
+                .getSingle())
+            .read<String>('r');
     await File(p.join(tmp.path, rel)).delete();
 
     // Reload keeps the clip (as an asset:// ref) — it must NOT be dropped.
     final reloaded = ok(await repo.getPractice(base.id));
     expect(reloaded.vocalTracks.single.clips, hasLength(1));
-    expect(reloaded.vocalTracks.single.clips.single.audioFilePath,
-        startsWith('asset://'));
+    expect(
+      reloaded.vocalTracks.single.clips.single.audioFilePath,
+      startsWith('asset://'),
+    );
 
     // Re-saving the reloaded model must NOT tombstone the still-valid clip row.
     ok(await repo.savePractice(reloaded));
@@ -269,46 +310,62 @@ void main() {
   test('replacing the accompaniment does not roll back (tombstone before insert '
       'frees the unique slot)', () async {
     final base = ok(await repo.createPractice('S'));
-    ok(await repo.savePractice(SongPractice(
-      id: base.id,
-      title: base.title,
-      createdAt: base.createdAt,
-      updatedAt: base.updatedAt,
-      accompaniment: AudioTrack(
-        id: newId(),
-        kind: AudioTrackKind.accompaniment,
-        displayName: 'B1',
-        createdAt: DateTime(2026),
-        clips: [await clip('b1.wav', [1])],
+    ok(
+      await repo.savePractice(
+        SongPractice(
+          id: base.id,
+          title: base.title,
+          createdAt: base.createdAt,
+          updatedAt: base.updatedAt,
+          accompaniment: AudioTrack(
+            id: newId(),
+            kind: AudioTrackKind.accompaniment,
+            displayName: 'B1',
+            createdAt: DateTime(2026),
+            clips: [
+              await clip('b1.wav', [1]),
+            ],
+          ),
+          versions: base.versions,
+          activeVersionId: base.versions.single.id,
+        ),
       ),
-      versions: base.versions,
-      activeVersionId: base.versions.single.id,
-    )));
+    );
 
     // Replace with a NEW accompaniment track (different id, same single slot).
-    final result = await repo.savePractice(SongPractice(
-      id: base.id,
-      title: base.title,
-      createdAt: base.createdAt,
-      updatedAt: base.updatedAt,
-      accompaniment: AudioTrack(
-        id: newId(),
-        kind: AudioTrackKind.accompaniment,
-        displayName: 'B2',
-        createdAt: DateTime(2026),
-        clips: [await clip('b2.wav', [2])],
+    final result = await repo.savePractice(
+      SongPractice(
+        id: base.id,
+        title: base.title,
+        createdAt: base.createdAt,
+        updatedAt: base.updatedAt,
+        accompaniment: AudioTrack(
+          id: newId(),
+          kind: AudioTrackKind.accompaniment,
+          displayName: 'B2',
+          createdAt: DateTime(2026),
+          clips: [
+            await clip('b2.wav', [2]),
+          ],
+        ),
+        versions: base.versions,
+        activeVersionId: base.versions.single.id,
       ),
-      versions: base.versions,
-      activeVersionId: base.versions.single.id,
-    ));
+    );
 
-    expect(result, isA<Ok<SongPractice>>()); // did NOT roll back on ux_track_slot
+    expect(
+      result,
+      isA<Ok<SongPractice>>(),
+    ); // did NOT roll back on ux_track_slot
     expect(ok(result).accompaniment!.displayName, 'B2');
-    final n = (await db
-            .customSelect("SELECT COUNT(*) AS n FROM tracks WHERE "
-                "kind = 'accompaniment' AND deleted_at IS NULL")
-            .getSingle())
-        .read<int>('n');
+    final n =
+        (await db
+                .customSelect(
+                  'SELECT COUNT(*) AS n FROM tracks WHERE '
+                  "kind = 'accompaniment' AND deleted_at IS NULL",
+                )
+                .getSingle())
+            .read<int>('n');
     expect(n, 1);
   });
 
@@ -321,56 +378,75 @@ void main() {
       displayName: 'Take',
       createdAt: DateTime(2026),
       versionId: base.versions.single.id,
-      clips: [await clip('t.wav', [1, 2])],
+      clips: [
+        await clip('t.wav', [1, 2]),
+      ],
     );
-    ok(await repo.savePractice(SongPractice(
-      id: base.id,
-      title: base.title,
-      createdAt: base.createdAt,
-      updatedAt: base.updatedAt,
-      vocalTracks: [track],
-      versions: base.versions,
-      activeVersionId: base.versions.single.id,
-    )));
+    ok(
+      await repo.savePractice(
+        SongPractice(
+          id: base.id,
+          title: base.title,
+          createdAt: base.createdAt,
+          updatedAt: base.updatedAt,
+          vocalTracks: [track],
+          versions: base.versions,
+          activeVersionId: base.versions.single.id,
+        ),
+      ),
+    );
 
     // Save without the track -> reconcile-driven cascade tombstone.
-    ok(await repo.savePractice(SongPractice(
-      id: base.id,
-      title: base.title,
-      createdAt: base.createdAt,
-      updatedAt: base.updatedAt,
-      versions: base.versions,
-      activeVersionId: base.versions.single.id,
-    )));
+    ok(
+      await repo.savePractice(
+        SongPractice(
+          id: base.id,
+          title: base.title,
+          createdAt: base.createdAt,
+          updatedAt: base.updatedAt,
+          versions: base.versions,
+          activeVersionId: base.versions.single.id,
+        ),
+      ),
+    );
 
     // Exactly ONE tracks tombstone op for this id, and its HLC equals the row's
     // (the old bug emitted a second, HLC-mismatched entry).
     final trackOps = await db
-        .customSelect("SELECT hlc_packed FROM oplog WHERE "
-            "entity_table = 'tracks' AND entity_id = '${track.id}' "
-            "AND op = 'tombstone'")
+        .customSelect(
+          'SELECT hlc_packed FROM oplog WHERE '
+          "entity_table = 'tracks' AND entity_id = '${track.id}' "
+          "AND op = 'tombstone'",
+        )
         .get();
     expect(trackOps, hasLength(1));
-    final rowHlc = (await db
-            .customSelect(
-                "SELECT hlc_packed FROM tracks WHERE id = '${track.id}'")
-            .getSingle())
-        .read<String>('hlc_packed');
+    final rowHlc =
+        (await db
+                .customSelect(
+                  "SELECT hlc_packed FROM tracks WHERE id = '${track.id}'",
+                )
+                .getSingle())
+            .read<String>('hlc_packed');
     expect(trackOps.single.read<String>('hlc_packed'), rowHlc);
 
     // The cascaded clip is tombstoned exactly once too.
-    final clipOps = (await db
-            .customSelect("SELECT COUNT(*) AS n FROM oplog WHERE "
-                "entity_table = 'clips' AND op = 'tombstone'")
-            .getSingle())
-        .read<int>('n');
+    final clipOps =
+        (await db
+                .customSelect(
+                  'SELECT COUNT(*) AS n FROM oplog WHERE '
+                  "entity_table = 'clips' AND op = 'tombstone'",
+                )
+                .getSingle())
+            .read<int>('n');
     expect(clipOps, 1);
   });
 }
 
-Future<int> _liveCount(AppDatabase db, dynamic table) async {
-  final rows = await db.customSelect(
-    'SELECT COUNT(*) AS n FROM ${table.actualTableName} WHERE deleted_at IS NULL',
-  ).getSingle();
+Future<int> _liveCount(AppDatabase db, TableInfo<Table, dynamic> table) async {
+  final rows = await db
+      .customSelect(
+        'SELECT COUNT(*) AS n FROM ${table.actualTableName} WHERE deleted_at IS NULL',
+      )
+      .getSingle();
   return rows.data['n'] as int;
 }

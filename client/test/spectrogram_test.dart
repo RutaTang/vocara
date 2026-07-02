@@ -5,49 +5,63 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:vocara/data/services/audio_dsp.dart';
 
 void main() {
-  test('computeSpectrogram concentrates energy at the input tone frequencies', () {
-    const sr = 44100;
-    final n = sr; // 1 second
-    final samples = Float64List(n);
-    const tones = [500.0, 1500.0, 3000.0];
-    for (var i = 0; i < n; i++) {
-      var v = 0.0;
-      for (final f in tones) {
-        v += sin(2 * pi * f * i / sr);
+  test(
+    'computeSpectrogram concentrates energy at the input tone frequencies',
+    () {
+      const sr = 44100;
+      final n = sr; // 1 second
+      final samples = Float64List(n);
+      const tones = [500.0, 1500.0, 3000.0];
+      for (var i = 0; i < n; i++) {
+        var v = 0.0;
+        for (final f in tones) {
+          v += sin(2 * pi * f * i / sr);
+        }
+        samples[i] = v / tones.length * 0.8;
       }
-      samples[i] = v / tones.length * 0.8;
-    }
 
-    final spec = computeSpectrogram(samples, sr, fftSize: 2048, hop: 512, maxHz: 5000);
-    expect(spec.frames, greaterThan(10));
-    expect(spec.bins, greaterThan(200));
-
-    // Average dB per bin across all frames.
-    final avg = Float64List(spec.bins);
-    for (var f = 0; f < spec.frames; f++) {
-      final base = f * spec.bins;
-      for (var b = 0; b < spec.bins; b++) {
-        avg[b] += spec.db[base + b];
-      }
-    }
-    for (var b = 0; b < spec.bins; b++) {
-      avg[b] /= spec.frames;
-    }
-
-    int binOf(double hz) => (hz / spec.binHz).round();
-    final control = avg[binOf(4500)]; // a quiet region with no tone
-    for (final f in tones) {
-      expect(
-        avg[binOf(f)],
-        greaterThan(control + 20),
-        reason: 'tone $f Hz should dominate the ~4500 Hz control bin',
+      final spec = computeSpectrogram(
+        samples,
+        sr,
+        fftSize: 2048,
+        hop: 512,
+        maxHz: 5000,
       );
-    }
-  });
+      expect(spec.frames, greaterThan(10));
+      expect(spec.bins, greaterThan(200));
+
+      // Average dB per bin across all frames.
+      final avg = Float64List(spec.bins);
+      for (var f = 0; f < spec.frames; f++) {
+        final base = f * spec.bins;
+        for (var b = 0; b < spec.bins; b++) {
+          avg[b] += spec.db[base + b];
+        }
+      }
+      for (var b = 0; b < spec.bins; b++) {
+        avg[b] /= spec.frames;
+      }
+
+      int binOf(double hz) => (hz / spec.binHz).round();
+      final control = avg[binOf(4500)]; // a quiet region with no tone
+      for (final f in tones) {
+        expect(
+          avg[binOf(f)],
+          greaterThan(control + 20),
+          reason: 'tone $f Hz should dominate the ~4500 Hz control bin',
+        );
+      }
+    },
+  );
 
   test('StreamingStft emits columns with energy at the tone frequency', () {
     const sr = 44100;
-    final stft = StreamingStft(fftSize: 2048, hop: 512, sampleRate: sr, maxHz: 5000);
+    final stft = StreamingStft(
+      fftSize: 2048,
+      hop: 512,
+      sampleRate: sr,
+      maxHz: 5000,
+    );
     final cols = <Float32List>[];
     const tone = 2000.0;
     var phase = 0.0;

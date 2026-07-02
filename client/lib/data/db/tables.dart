@@ -35,7 +35,8 @@ mixin SyncCols on Table {
 @DataClassName('PracticeRow')
 class Practices extends Table with SyncCols {
   TextColumn get title => text().withDefault(const Constant(''))();
-  IntColumn get timelineDurationMs => integer().withDefault(const Constant(0))();
+  IntColumn get timelineDurationMs =>
+      integer().withDefault(const Constant(0))();
   RealColumn get masterVolume => real().withDefault(const Constant(1.0))();
 
   /// Which interpretation is active. Logical nullable pointer (self-healed by

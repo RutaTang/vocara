@@ -66,7 +66,10 @@ void installE2eChannelMocks(Directory tmpDir) {
     'plugins.flutter.io/path_provider',
     'plugins.flutter.io/path_provider_macos',
   ]) {
-    mock(ch, (call) async => call.method.startsWith('get') ? tmpDir.path : null);
+    mock(
+      ch,
+      (call) async => call.method.startsWith('get') ? tmpDir.path : null,
+    );
   }
   mock('window_manager', (call) async {
     switch (call.method) {
@@ -226,7 +229,11 @@ Future<void> seedEmptyPractice(
       id: id,
       title: title,
       versions: [
-        TakeVersion(id: kSeedVersionId, name: 'Interpretation 1', createdAt: now),
+        TakeVersion(
+          id: kSeedVersionId,
+          name: 'Interpretation 1',
+          createdAt: now,
+        ),
       ],
       activeVersionId: kSeedVersionId,
       createdAt: now,
@@ -286,11 +293,6 @@ Future<void> seedTechnique(
 }) async {
   final now = DateTime.now();
   await repo.saveTechnique(
-    Technique(
-      id: id,
-      name: name,
-      createdAt: now,
-      updatedAt: now,
-    ),
+    Technique(id: id, name: name, createdAt: now, updatedAt: now),
   );
 }

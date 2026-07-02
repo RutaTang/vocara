@@ -53,7 +53,11 @@ void main() {
 
   Future<void> bootTechnique(WidgetTester tester) async {
     await seedTechnique(persistence.techRepo, name: 'E2E Technique');
-    await pumpApp(tester, persistence, separation: FakeSourceSeparationService());
+    await pumpApp(
+      tester,
+      persistence,
+      separation: FakeSourceSeparationService(),
+    );
 
     expect(
       await pumpUntil(
@@ -75,12 +79,13 @@ void main() {
   /// The borderless [TextField] inside the edit-form [StudioField] labelled
   /// [label] (e.g. 'Name', 'Summary').
   Finder editField(String label) => find.descendant(
-        of: find.byWidgetPredicate((w) => w is StudioField && w.label == label),
-        matching: find.byType(TextField),
-      );
+    of: find.byWidgetPredicate((w) => w is StudioField && w.label == label),
+    matching: find.byType(TextField),
+  );
 
   Future<Technique> reload() async =>
-      (await persistence.techRepo.getTechnique(kSeedTechniqueId) as Ok<Technique>)
+      (await persistence.techRepo.getTechnique(kSeedTechniqueId)
+              as Ok<Technique>)
           .value;
 
   testWidgets('Edit → change fields → Save persists through the repo', (
@@ -136,11 +141,9 @@ void main() {
     );
 
     final wav = await writeSineWav('${tmpDir.path}/example.wav', freq: 330);
-    await simulateFileDrop(
-      tester,
-      [wav],
-      at: tester.getCenter(find.text(addZone)),
-    );
+    await simulateFileDrop(tester, [
+      wav,
+    ], at: tester.getCenter(find.text(addZone)));
 
     // Once imported, the add zone goes dense ('Add another example') because
     // effectiveMedia is non-empty — a UI proxy that the import finished.
@@ -166,50 +169,55 @@ void main() {
       hasLength(1),
       reason: 'the staged example persisted on save',
     );
-    expect(File(reloaded.media.single.path).existsSync(), isTrue,
-        reason: 'the pooled example file resolves on disk');
+    expect(
+      File(reloaded.media.single.path).existsSync(),
+      isTrue,
+      reason: 'the pooled example file resolves on disk',
+    );
   });
 
-  testWidgets('Edit → change a field → Cancel discards via the confirm dialog',
-      (tester) async {
-    await bootTechnique(tester);
+  testWidgets(
+    'Edit → change a field → Cancel discards via the confirm dialog',
+    (tester) async {
+      await bootTechnique(tester);
 
-    await tester.tap(find.widgetWithText(StudioButton, 'Edit'));
-    expect(
-      await pumpUntil(tester, () => present(find.text('Edit technique'))),
-      isTrue,
-    );
+      await tester.tap(find.widgetWithText(StudioButton, 'Edit'));
+      expect(
+        await pumpUntil(tester, () => present(find.text('Edit technique'))),
+        isTrue,
+      );
 
-    await tester.enterText(editField('Name'), 'Should Not Persist');
-    await tester.pump();
+      await tester.enterText(editField('Name'), 'Should Not Persist');
+      await tester.pump();
 
-    await tester.tap(find.widgetWithText(StudioButton, 'Cancel'));
-    expect(
-      await pumpUntil(
-        tester,
-        () => present(find.text('Discard unsaved changes?')),
-      ),
-      isTrue,
-      reason: 'cancelling a dirty editor asks to confirm first',
-    );
+      await tester.tap(find.widgetWithText(StudioButton, 'Cancel'));
+      expect(
+        await pumpUntil(
+          tester,
+          () => present(find.text('Discard unsaved changes?')),
+        ),
+        isTrue,
+        reason: 'cancelling a dirty editor asks to confirm first',
+      );
 
-    await tester.tap(find.widgetWithText(StudioButton, 'Discard'));
-    expect(
-      await pumpUntil(
-        tester,
-        () =>
-            present(find.widgetWithText(StudioButton, 'Edit')) &&
-            !present(find.text('Discard unsaved changes?')),
-      ),
-      isTrue,
-      reason: 'discarding returns to view mode',
-    );
+      await tester.tap(find.widgetWithText(StudioButton, 'Discard'));
+      expect(
+        await pumpUntil(
+          tester,
+          () =>
+              present(find.widgetWithText(StudioButton, 'Edit')) &&
+              !present(find.text('Discard unsaved changes?')),
+        ),
+        isTrue,
+        reason: 'discarding returns to view mode',
+      );
 
-    final reloaded = await reload();
-    expect(
-      reloaded.name,
-      'E2E Technique',
-      reason: 'a discarded edit never reaches the store',
-    );
-  });
+      final reloaded = await reload();
+      expect(
+        reloaded.name,
+        'E2E Technique',
+        reason: 'a discarded edit never reaches the store',
+      );
+    },
+  );
 }
