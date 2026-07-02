@@ -9,6 +9,7 @@ import '../../../domain/models/spectrogram.dart';
 import '../../../domain/models/voice_metrics.dart';
 import '../../core/themes/studio.dart';
 import '../../core/widgets/spectrogram_painter.dart';
+import '../../core/widgets/studio_hint.dart';
 import '../../core/widgets/waveform_painter.dart';
 import '../view_model/song_practice_detail_view_model.dart';
 import 'pitch_lane.dart';
@@ -228,11 +229,9 @@ class SpectrogramLane extends StatelessWidget {
     final spec = spectrogram;
     Widget body;
     if (loading) {
-      body = const _LaneHint('Analyzing…');
+      body = const LaneHint('Analyzing…');
     } else if (spec == null) {
-      body = const _LaneHint(
-        'Spectrogram is available for recorded WAV takes.',
-      );
+      body = const LaneHint('Spectrogram is available for recorded WAV takes.');
     } else {
       body = LayoutBuilder(
         builder: (context, c) {
@@ -311,9 +310,9 @@ class PowerLane extends StatelessWidget {
     final spec = spectrogram;
     Widget body;
     if (loading) {
-      body = const _LaneHint('Analyzing…');
+      body = const LaneHint('Analyzing…');
     } else if (spec == null) {
-      body = const _LaneHint(
+      body = const LaneHint(
         'Power spectrum is available for recorded WAV takes.',
       );
     } else {
@@ -374,9 +373,9 @@ class LoudnessLane extends StatelessWidget {
     final m = metrics;
     Widget body;
     if (loading) {
-      body = const _LaneHint('Analyzing…');
+      body = const LaneHint('Analyzing…');
     } else if (m == null || m.frames == 0) {
-      body = const _LaneHint('Loudness is available for recorded WAV takes.');
+      body = const LaneHint('Loudness is available for recorded WAV takes.');
     } else {
       body = Stack(
         children: [
@@ -884,23 +883,4 @@ Widget _laneShell(String label, double height, Widget body) {
       ],
     ),
   );
-}
-
-class _LaneHint extends StatelessWidget {
-  const _LaneHint(this.text);
-
-  final String text;
-
-  @override
-  Widget build(BuildContext context) {
-    return ColoredBox(
-      color: Studio.inset,
-      child: Center(
-        child: Text(
-          text,
-          style: const TextStyle(color: Studio.textFaint, fontSize: 12),
-        ),
-      ),
-    );
-  }
 }

@@ -327,7 +327,9 @@ class VocaraEngineBindings {
         int Function(ffi.Pointer<VeEngine>, ffi.Pointer<ffi.Float>, int)
       >();
 
-  /// Record the live input to a mono 48 kHz WAV at `path` (writer thread). 0 = ok.
+  /// Record the live input to a mono 48 kHz WAV at `path` (writer thread). Blocks briefly on
+  /// the writer creating the file. 0 = ok; -1 = the file could not be created (disk full /
+  /// permissions) and nothing will be recorded.
   int ve_start_input_recording(
     ffi.Pointer<VeEngine> e,
     ffi.Pointer<ffi.Char> path,
@@ -344,6 +346,8 @@ class VocaraEngineBindings {
   late final _ve_start_input_recording = _ve_start_input_recordingPtr
       .asFunction<int Function(ffi.Pointer<VeEngine>, ffi.Pointer<ffi.Char>)>();
 
+  /// Stop the input recording (finalizes the WAV). 0 = ok; -2 = an IO error occurred during
+  /// the recording (the WAV at the recorded path is missing, damaged, or incomplete).
   int ve_stop_input_recording(ffi.Pointer<VeEngine> e) {
     return _ve_stop_input_recording(e);
   }
@@ -431,31 +435,6 @@ class VocaraEngineBindings {
   late final _ve_flush = _ve_flushPtr
       .asFunction<int Function(ffi.Pointer<VeEngine>)>();
 
-  /// Feed `frames` interleaved-stereo f32 frames (pcm points at frames*2 floats). Returns
-  /// frames accepted (back-pressure; never blocks).
-  int ve_push_pcm(
-    ffi.Pointer<VeEngine> e,
-    ffi.Pointer<ffi.Float> pcm,
-    int frames,
-  ) {
-    return _ve_push_pcm(e, pcm, frames);
-  }
-
-  late final _ve_push_pcmPtr =
-      _lookup<
-        ffi.NativeFunction<
-          ffi.Size Function(
-            ffi.Pointer<VeEngine>,
-            ffi.Pointer<ffi.Float>,
-            ffi.Size,
-          )
-        >
-      >('ve_push_pcm');
-  late final _ve_push_pcm = _ve_push_pcmPtr
-      .asFunction<
-        int Function(ffi.Pointer<VeEngine>, ffi.Pointer<ffi.Float>, int)
-      >();
-
   /// Current playhead in samples (atomic read).
   int ve_frame_pos(ffi.Pointer<VeEngine> e) {
     return _ve_frame_pos(e);
@@ -478,33 +457,6 @@ class VocaraEngineBindings {
       );
   late final _ve_sample_rate = _ve_sample_ratePtr
       .asFunction<double Function(ffi.Pointer<VeEngine>)>();
-
-  /// The node id to feed PCM to (the default track's source).
-  int ve_source_id(ffi.Pointer<VeEngine> e) {
-    return _ve_source_id(e);
-  }
-
-  late final _ve_source_idPtr =
-      _lookup<ffi.NativeFunction<ffi.Uint32 Function(ffi.Pointer<VeEngine>)>>(
-        've_source_id',
-      );
-  late final _ve_source_id = _ve_source_idPtr
-      .asFunction<int Function(ffi.Pointer<VeEngine>)>();
-
-  /// Decode a file into a timeline-addressable in-memory source (seek/loop work), hot-swap it
-  /// into the graph, seek to 0, and play. 0 on success, negative on failure.
-  int ve_load_file(ffi.Pointer<VeEngine> e, ffi.Pointer<ffi.Char> path) {
-    return _ve_load_file(e, path);
-  }
-
-  late final _ve_load_filePtr =
-      _lookup<
-        ffi.NativeFunction<
-          ffi.Int Function(ffi.Pointer<VeEngine>, ffi.Pointer<ffi.Char>)
-        >
-      >('ve_load_file');
-  late final _ve_load_file = _ve_load_filePtr
-      .asFunction<int Function(ffi.Pointer<VeEngine>, ffi.Pointer<ffi.Char>)>();
 
   /// Multi-track playback: one source per track, timeline-aligned. Stage with begin/add, then
   /// commit to build + hot-swap the graph; change volume/mute live without a rebuild.

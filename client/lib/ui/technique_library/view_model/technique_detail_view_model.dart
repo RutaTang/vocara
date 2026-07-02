@@ -441,7 +441,17 @@ class TechniqueDetailViewModel extends ChangeNotifier
       unawaited(_deleteTempDir(path));
       return (path: null, error: null);
     }
-    engine.startInputRecording(path);
+    // A false return means the writer could not create the WAV (disk full /
+    // permissions) and nothing would be recorded: fail loudly here instead of
+    // "recording" into nowhere, and arm no timers or state.
+    if (!engine.startInputRecording(path)) {
+      unawaited(_deleteTempDir(path));
+      return (
+        path: null,
+        error:
+            "Couldn't create the recording file. Check your free disk space.",
+      );
+    }
     _isRecording = true;
     // Live preview: the engine captures the same input it's recording (cpal),
     // so we can drive the live spectrogram / tuner / metrics off it.
@@ -481,21 +491,24 @@ class TechniqueDetailViewModel extends ChangeNotifier
   }
 
   /// Stops the mic hardware, live capture and meter (without persisting or
-  /// analyzing).
-  void _endRecordingHardware() {
+  /// analyzing). Returns false when the writer reported an IO error
+  /// (create/write/finalize) during the take, meaning the WAV on disk is
+  /// missing, damaged, or incomplete.
+  bool _endRecordingHardware() {
     _levelTimer?.cancel();
     _levelTimer = null;
     _captureTimer?.cancel();
     _captureTimer = null;
     recordLevel.value = 0;
     final engine = _engine;
-    engine?.stopInputRecording();
+    final recordingClean = engine?.stopInputRecording() ?? true;
     if (_liveMonitor) {
       engine?.stopCapture();
       _monitor.stop();
       _liveMonitor = false;
     }
     _isRecording = false;
+    return recordingClean;
   }
 
   /// Best-effort delete of a temp recording dir at [path].
@@ -555,7 +568,9 @@ class TechniqueDetailViewModel extends ChangeNotifier
   /// recording file is deleted afterwards (never persisted).
   Future<void> stopPractice() async {
     if (!isRecordingPractice) return;
-    _endRecordingHardware();
+    // False = the writer hit an IO error during the take, so the WAV on disk
+    // is missing, damaged, or incomplete; handled conservatively below.
+    final recordingClean = _endRecordingHardware();
     final path = _practiceTempPath;
     if (path == null) {
       notifyListeners();
@@ -575,7 +590,19 @@ class TechniqueDetailViewModel extends ChangeNotifier
     // _practiceLoading would stay true forever — canRecordPractice is then stuck
     // false, blocking EVERY future practice recording, and the temp dir leaks.
     try {
-      final result = await _analysis.analyze(path);
+      TechniqueAnalysis? result;
+      if (recordingClean) {
+        result = await _analysis.analyze(path);
+      } else if (await File(path).exists()) {
+        // Dirty stop: analyze the partial WAV only if it's still on disk; a
+        // missing or undecodable file falls out as a failed take below.
+        result = await _analysis.analyze(path);
+      }
+      if (!recordingClean) {
+        _recordingNotice = result == null
+            ? 'Recording failed. The take could not be saved.'
+            : 'Recording hit a disk error. The take may be incomplete.';
+      }
       if (_practiceGeneration == generation) {
         _practice = result;
         _practiceFailed = result == null;
@@ -584,6 +611,9 @@ class TechniqueDetailViewModel extends ChangeNotifier
       // else: the reference changed mid-analysis; _resetToReferenceSubject already
       // dropped this take — keep it discarded (the temp file is still deleted below).
     } catch (_) {
+      if (!recordingClean) {
+        _recordingNotice = 'Recording failed. The take could not be saved.';
+      }
       if (_practiceGeneration == generation) {
         _practice = null;
         _practiceFailed = true;
@@ -657,7 +687,9 @@ class TechniqueDetailViewModel extends ChangeNotifier
   /// analysis shows immediately.
   Future<void> stopExampleRecording() async {
     if (!isRecordingExample) return;
-    _endRecordingHardware();
+    // False = the writer hit an IO error during the take, so the WAV on disk
+    // is missing, damaged, or incomplete; handled conservatively below.
+    final recordingClean = _endRecordingHardware();
     _recordingExample = false;
     final path = _exampleTempPath;
     if (path == null) {
@@ -669,6 +701,30 @@ class TechniqueDetailViewModel extends ChangeNotifier
     // is being copied means it must be deleted, not staged into the cleared draft.
     final generation = _draftGeneration;
     notifyListeners();
+
+    // Dirty stop: stage the clip only if the partial WAV is still present and
+    // decodable, so no example points at unusable audio. The partial analysis
+    // seeds the reference cache after the import below.
+    TechniqueAnalysis? partial;
+    if (!recordingClean) {
+      try {
+        if (await File(path).exists()) {
+          partial = await _analysis.analyze(path);
+        }
+      } catch (_) {
+        partial = null;
+      }
+      if (partial == null) {
+        await _deleteTempDir(path);
+        _exampleTempPath = null;
+        _recordingNotice = 'Recording failed. The example could not be saved.';
+        _savingExample = false;
+        notifyListeners();
+        return;
+      }
+      _recordingNotice =
+          'Recording hit a disk error. The example may be incomplete.';
+    }
 
     TechniqueMedia? added;
     try {
@@ -695,6 +751,9 @@ class TechniqueDetailViewModel extends ChangeNotifier
         // orphan — delete it rather than staging it behind the read view.
         unawaited(_mediaService.deleteMedia(added.path));
       } else {
+        // A dirty stop already validated the partial take: reuse its analysis
+        // so the reference view doesn't decode the clip a second time.
+        if (partial != null) _refCache[added.path] = partial;
         _draftAdds.add(added);
         _selectedExamplePath = added.path;
         // The just-recorded example becomes the reference; drop a stale practice take that

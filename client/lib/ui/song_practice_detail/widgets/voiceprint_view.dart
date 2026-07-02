@@ -9,6 +9,7 @@ import '../../../domain/models/spectrogram.dart';
 import '../../../domain/models/voice_metrics.dart';
 import '../../core/themes/studio.dart';
 import '../../core/widgets/spectrogram_painter.dart';
+import '../../core/widgets/studio_hint.dart';
 import '../../core/widgets/waveform_painter.dart';
 import '../view_model/analysis_source.dart';
 import 'live_spectrogram.dart';
@@ -30,12 +31,14 @@ Widget _withSpectrogram(
 ) {
   final track = vm.selectedTrack;
   if (track == null || track.isBacking) {
-    return const _Hint('Select a recorded take to analyze.');
+    return const StudioHint('Select a recorded take to analyze.');
   }
-  if (vm.spectrogramLoading) return const _Hint('Analyzing…', spinner: true);
+  if (vm.spectrogramLoading) {
+    return const StudioHint('Analyzing…', spinner: true);
+  }
   final spec = vm.selectedSpectrogram;
   if (spec == null) {
-    return const _Hint(
+    return const StudioHint(
       'Analysis is available for recorded takes (WAV).\n'
       'Switch to Live to watch your voice as you sing.',
     );
@@ -50,12 +53,14 @@ Widget _withMetrics(
 ) {
   final track = vm.selectedTrack;
   if (track == null || track.isBacking) {
-    return const _Hint('Select a recorded take to analyze.');
+    return const StudioHint('Select a recorded take to analyze.');
   }
-  if (vm.spectrogramLoading) return const _Hint('Analyzing…', spinner: true);
+  if (vm.spectrogramLoading) {
+    return const StudioHint('Analyzing…', spinner: true);
+  }
   final m = vm.selectedMetrics;
   if (m == null || m.frames == 0) {
-    return const _Hint('Analysis is available for recorded takes (WAV).');
+    return const StudioHint('Analysis is available for recorded takes (WAV).');
   }
   return build(m, track);
 }
@@ -448,12 +453,7 @@ class PitchTab extends StatelessWidget {
       (m, track) => LayoutBuilder(
         builder: (context, c) => PitchLane(
           track: track,
-          timelineDurationMs: _takeSpanMs(
-            m.frames,
-            m.hop,
-            m.sampleRate,
-            track,
-          ),
+          timelineDurationMs: _takeSpanMs(m.frames, m.hop, m.sampleRate, track),
           position: vm.position,
           headerWidth: 132,
           loading: false,
@@ -698,7 +698,7 @@ class LtasTab extends StatelessWidget {
         builder: (context, _) {
           final ltas = monitor.liveLtas;
           if (ltas == null || !ltas.hasData) {
-            return const _Hint(
+            return const StudioHint(
               'Sing into the mic to build your live average spectrum.',
             );
           }
@@ -709,7 +709,7 @@ class LtasTab extends StatelessWidget {
     return _withSpectrogram(vm, (spec, metrics, track) {
       final ltas = vm.selectedLtas;
       if (ltas == null || !ltas.hasData) {
-        return const _Hint('Sing a passage to see your average spectrum.');
+        return const StudioHint('Sing a passage to see your average spectrum.');
       }
       return _ltasBody(ltas, live: false);
     });
@@ -934,8 +934,8 @@ class _VibratoPainter extends CustomPainter {
   bool shouldRepaint(_VibratoPainter old) => old.v != v;
 }
 
-const Color _chestColor = Color(0xFFE0825A); // warm = chest
-const Color _headColor = Color(0xFF5B8DEF); // cool = head
+const Color _chestColor = Studio.registerChest; // warm = chest
+const Color _headColor = Studio.registerHead; // cool = head
 
 /// Bottom-dock tab: the pitch contour colored by register (chest↔head). An
 /// indicator from H1−H2, not a verdict. Take-only.
@@ -956,7 +956,7 @@ class RegisterTab extends StatelessWidget {
     return _withMetrics(vm, (m, track) {
       final reg = vm.selectedRegister;
       if (reg == null || !reg.hasData) {
-        return const _Hint('Sing a passage to map your registers.');
+        return const StudioHint('Sing a passage to map your registers.');
       }
       final range = pitchSemitoneRange(m);
       final spanMs = _takeSpanMs(m.frames, m.hop, m.sampleRate, track);
@@ -1061,7 +1061,7 @@ class _LiveRegisterPanel extends StatelessWidget {
         ? 'MIX'
         : 'HEAD';
     if (total == 0 && !hasNow) {
-      return const _Hint('Sing into the mic to map your registers live.');
+      return const StudioHint('Sing into the mic to map your registers live.');
     }
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 12, 20, 16),
@@ -1324,7 +1324,7 @@ class _LiveMetricsBar extends StatelessWidget {
 }
 
 /// In-tune color for the live tuner (green); off-pitch ramps toward red.
-const Color _tunerGreen = Color(0xFF52B788);
+const Color _tunerGreen = Studio.inTune;
 
 /// A prominent real-time tuner (A2): the nearest note + a needle that swings
 /// left/right with how flat/sharp the live pitch is, centering green when in
@@ -1935,42 +1935,4 @@ class _FreqAxisPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_FreqAxisPainter old) => old.maxHz != maxHz;
-}
-
-class _Hint extends StatelessWidget {
-  const _Hint(this.text, {this.spinner = false});
-
-  final String text;
-  final bool spinner;
-
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (spinner) ...[
-            const SizedBox(
-              width: 18,
-              height: 18,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                valueColor: AlwaysStoppedAnimation(Studio.accent),
-              ),
-            ),
-            const SizedBox(height: 14),
-          ],
-          Text(
-            text,
-            textAlign: TextAlign.center,
-            style: const TextStyle(
-              color: Studio.textFaint,
-              fontSize: 13,
-              height: 1.4,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
 }

@@ -4,6 +4,7 @@ import '../../../data/services/monitor_service.dart';
 import '../../../domain/models/audio_track.dart';
 import '../../../domain/models/voice_metrics.dart';
 import '../../core/themes/studio.dart';
+import '../../core/widgets/studio_hint.dart';
 import '../../core/widgets/waveform_painter.dart';
 import '../view_model/analysis_source.dart';
 import 'analysis_lanes.dart';
@@ -15,17 +16,17 @@ Widget _profileGuard(
   String emptyHint,
   Widget Function(VoiceProfile p, VoiceMetrics m, AudioTrack track) build,
 ) {
-  if (vm.liveMonitor) return _ProfileHint(liveHint);
+  if (vm.liveMonitor) return StudioHint(liveHint);
   final track = vm.selectedTrack;
   if (track == null || track.isBacking) {
-    return const _ProfileHint('Select a recorded take to analyze.');
+    return const StudioHint('Select a recorded take to analyze.');
   }
   if (vm.spectrogramLoading) {
-    return const _ProfileHint('Analyzing…', spinner: true);
+    return const StudioHint('Analyzing…', spinner: true);
   }
   final p = vm.selectedProfile;
   final m = vm.selectedMetrics;
-  if (p == null || m == null) return _ProfileHint(emptyHint);
+  if (p == null || m == null) return StudioHint(emptyHint);
   return build(p, m, track);
 }
 
@@ -46,7 +47,7 @@ class RangeView extends StatelessWidget {
         'Sing a passage to map your range.',
         (p, m, track) {
           if (!p.hasRange) {
-            return const _ProfileHint('Sing a passage to map your range.');
+            return const StudioHint('Sing a passage to map your range.');
           }
           return Padding(
             padding: const EdgeInsets.fromLTRB(20, 28, 20, 18),
@@ -122,7 +123,7 @@ class DynamicsView extends StatelessWidget {
           'Sing a passage to see your dynamics.',
           (p, m, track) {
             if (m.frames == 0 || !p.hasDynamics) {
-              return const _ProfileHint('Sing a passage to see your dynamics.');
+              return const StudioHint('Sing a passage to see your dynamics.');
             }
             return Padding(
               padding: const EdgeInsets.fromLTRB(20, 16, 20, 18),
@@ -273,42 +274,6 @@ class _CapLabel extends StatelessWidget {
   );
 }
 
-class _ProfileHint extends StatelessWidget {
-  const _ProfileHint(this.text, {this.spinner = false});
-  final String text;
-  final bool spinner;
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (spinner) ...[
-            const SizedBox(
-              width: 18,
-              height: 18,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                valueColor: AlwaysStoppedAnimation(Studio.accent),
-              ),
-            ),
-            const SizedBox(height: 14),
-          ],
-          Text(
-            text,
-            textAlign: TextAlign.center,
-            style: const TextStyle(
-              color: Studio.textFaint,
-              fontSize: 13,
-              height: 1.4,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 /// The live (mic) dynamics panel: rolling loudness curve + soft/loud/range over
 /// the recent voiced window. Mirrors the take's [DynamicsView] for Live mode.
 class _LiveDynamicsPanel extends StatelessWidget {
@@ -323,7 +288,7 @@ class _LiveDynamicsPanel extends StatelessWidget {
       builder: (context, _) {
         final d = monitor.liveDynamics;
         if (d.rangeDb.isNaN) {
-          return const _ProfileHint(
+          return const StudioHint(
             'Sing into the mic to measure your live dynamics.',
           );
         }

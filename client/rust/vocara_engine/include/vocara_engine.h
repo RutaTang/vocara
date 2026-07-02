@@ -102,19 +102,9 @@ int ve_set_loop(VeEngine *e, int enabled, int64_t start, int64_t end);
 int ve_set_param(VeEngine *e, uint32_t node, uint16_t param, float value);
 int ve_flush(VeEngine *e);
 
-/* Feed `frames` interleaved-stereo f32 frames (pcm points at frames*2 floats). Returns
- * frames accepted (back-pressure; never blocks). */
-size_t ve_push_pcm(VeEngine *e, const float *pcm, size_t frames);
-
 /* Current playhead in samples (atomic read). */
 int64_t ve_frame_pos(VeEngine *e);
 double ve_sample_rate(VeEngine *e);
-/* The node id to feed PCM to (the default track's source). */
-uint32_t ve_source_id(VeEngine *e);
-
-/* Decode a file into a timeline-addressable in-memory source (seek/loop work), hot-swap it
- * into the graph, seek to 0, and play. 0 on success, negative on failure. */
-int ve_load_file(VeEngine *e, const char *path);
 
 /* Multi-track playback: one source per track, timeline-aligned. Stage with begin/add, then
  * commit to build + hot-swap the graph; change volume/mute live without a rebuild.

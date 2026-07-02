@@ -307,9 +307,10 @@ class _WorkspaceState extends State<_Workspace> {
 
   Future<void> _separateBacking(AudioTrack track) async {
     final reseparate = vm.canReseparate;
-    final confirmed = await showStudioConfirm(
+    final confirmed = await showConfirmDialog(
       context,
       icon: FIcons.wandSparkles,
+      destructive: false,
       title: reseparate ? 'Re-extract the backing?' : 'Extract the backing?',
       body: reseparate
           ? 'Runs separation on the original again. The instrumental in the '

@@ -12,6 +12,7 @@ import '../../../domain/models/audio_track.dart';
 import '../../../domain/models/fx_bus.dart';
 import '../../../domain/models/fx_presets.dart';
 import '../../core/themes/studio.dart';
+import '../../core/widgets/cap_label.dart';
 import '../view_model/song_practice_detail_view_model.dart';
 import 'track_context_menu.dart';
 
@@ -452,7 +453,7 @@ class FxPanel extends StatelessWidget {
               padding: const EdgeInsets.symmetric(vertical: 4),
               child: Row(
                 children: [
-                  _CapLabel('Space'),
+                  CapLabel('Space'),
                   const Spacer(),
                   _Dropdown(
                     hint: 'Space…',
@@ -589,7 +590,7 @@ class FxPanel extends StatelessWidget {
   Widget _presetRow(TrackFx fx) {
     return Row(
       children: [
-        _CapLabel('Preset'),
+        CapLabel('Preset'),
         const Spacer(),
         _Dropdown(
           hint: 'Choose…',
@@ -1336,21 +1337,6 @@ class _EqPainter extends CustomPainter {
   @override
   bool shouldRepaint(_EqPainter old) =>
       old.on != on || !identical(old.bands, bands);
-}
-
-class _CapLabel extends StatelessWidget {
-  const _CapLabel(this.text);
-  final String text;
-  @override
-  Widget build(BuildContext context) => Text(
-    text.toUpperCase(),
-    style: const TextStyle(
-      color: Studio.textFaint,
-      fontSize: 9,
-      fontWeight: FontWeight.w700,
-      letterSpacing: 0.5,
-    ),
-  );
 }
 
 class _Dropdown extends StatelessWidget {

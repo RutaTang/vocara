@@ -35,4 +35,11 @@ abstract final class Studio {
   // Waveform when the track is not selected.
   static const waveform = Color(0xFF6A6A77);
   static const toggleOff = Color(0xFF3A3A45);
+
+  // Semantic analysis colors shared by the dock views. Chest is warm, head is
+  // cool; mix is derived by lerping the two at the usage site.
+  static const registerChest = Color(0xFFE0825A);
+  static const registerHead = Color(0xFF5B8DEF);
+  static const inTune = Color(0xFF52B788); // pitch within tolerance / healthy
+  static const good = Color(0xFF63C089); // metric in the good range
 }

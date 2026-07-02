@@ -32,16 +32,6 @@ pub fn lin_to_db(lin: f32) -> f32 {
     20.0 * (lin.abs() + DB_FLOOR).log10()
 }
 
-/// Equal-power pan law. `pan` in [-1, 1]; returns (left_gain, right_gain). Center keeps
-/// each channel at -3 dB so a centered mono image sums to unity power.
-#[inline]
-pub fn equal_power_pan(pan: f32) -> (f32, f32) {
-    // Map [-1,1] -> [0, pi/2]; left = cos, right = sin.
-    let p = pan.clamp(-1.0, 1.0);
-    let angle = (p + 1.0) * (core::f32::consts::FRAC_PI_4); // 0..pi/2
-    (angle.cos(), angle.sin())
-}
-
 /// Zero an interleaved stereo buffer (only the live `frames` region).
 #[inline]
 pub fn clear(buf: &mut [Smp], frames: usize) {

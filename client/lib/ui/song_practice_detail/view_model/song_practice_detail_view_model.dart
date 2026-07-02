@@ -2448,21 +2448,6 @@ class SongPracticeDetailViewModel extends ChangeNotifier
 
   // --- Clip editing (drag-move, reorder, split, merge, …) -----------------
 
-  /// Moves a clip along the timeline live (model only) while dragging — call on
-  /// every drag tick with the new absolute [startMs]. Persist once on release
-  /// with [commitTrackMove].
-  void moveTrackStartLive(String trackId, int startMs) {
-    final track = _trackById(trackId);
-    if (track == null) return;
-    // Keep the clip within the (fixed) timeline so dragging never resizes it.
-    final timeline = _practice?.timelineDurationMs ?? 0;
-    final maxStart = (timeline - track.durationMs).clamp(0, timeline);
-    final clamped = startMs.clamp(0, maxStart);
-    if (track.startMs == clamped) return;
-    _updateTrack(trackId, (t) => t.copyWith(startMs: clamped));
-    notifyListeners();
-  }
-
   /// Persists a finished drag-move and re-aligns offset-aware playback.
   Future<void> commitTrackMove() => _save();
 

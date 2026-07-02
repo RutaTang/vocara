@@ -1,7 +1,6 @@
 import 'package:provider/provider.dart';
 import 'package:provider/single_child_widget.dart';
 
-import '../data/db/app_database.dart';
 import '../data/db/persistence.dart';
 import '../data/repositories/song_practice_repository.dart';
 import '../data/repositories/technique_repository.dart';
@@ -18,8 +17,8 @@ import '../data/services/waveform_service.dart';
 /// created in the router and read these via `context.read`. Stateful, per-view
 /// services (playback, recording) are owned by the detail ViewModel itself.
 ///
-/// The two repositories + the drift database come from a [Persistence] layer
-/// opened once at startup (see main); everything else is created here.
+/// The two repositories come from a [Persistence] layer opened once at
+/// startup (see main); everything else is created here.
 ///
 /// [separationOverride] lets a test swap in a fake separation engine (the real
 /// one shells out to a Python sidecar); production passes nothing.
@@ -33,7 +32,6 @@ List<SingleChildWidget> buildProviders(
         AppSettingsService(storage: context.read<LocalStorageService>())
           ..load(),
   ),
-  Provider<AppDatabase>.value(value: persistence.db),
   Provider<SongPracticeRepository>.value(value: persistence.songRepo),
   Provider<TechniqueRepository>.value(value: persistence.techRepo),
   Provider<TechniqueMediaService>(

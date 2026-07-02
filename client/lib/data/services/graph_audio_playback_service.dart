@@ -139,7 +139,6 @@ class GraphAudioPlaybackService implements PlaybackEngine {
     _available = _engine != ffi.nullptr;
     if (_available) {
       _sampleRate = _bindings.ve_sample_rate(_engine);
-      _sourceId = _bindings.ve_source_id(_engine);
     }
   }
 
@@ -147,7 +146,6 @@ class GraphAudioPlaybackService implements PlaybackEngine {
   ffi.Pointer<VeEngine> _engine = ffi.nullptr;
   bool _available = false;
   double _sampleRate = 48000.0;
-  int _sourceId = 0;
 
   final _position = StreamController<Duration>.broadcast();
   final _playing = StreamController<bool>.broadcast();
@@ -170,9 +168,6 @@ class GraphAudioPlaybackService implements PlaybackEngine {
   /// Whether the native engine started (a device was opened). If false, every call no-ops.
   bool get isAvailable => _available;
   double get sampleRate => _sampleRate;
-
-  /// The single-track probe source node id (unused by the multi-track app path).
-  int get sourceId => _sourceId;
 
   /// Switch the active output device by UID. Returns true on success (the engine falls back to
   /// the default output if the requested device can't be opened). No-op if the engine is down.
@@ -634,23 +629,6 @@ class GraphAudioPlaybackService implements PlaybackEngine {
       _msToFrames(startMs),
       _msToFrames(endMs),
     );
-  }
-
-  /// Decode + play a single file immediately (used by the standalone probe).
-  bool loadAndPlayFile(String path) {
-    if (!_available) return false;
-    final cpath = path.toNativeUtf8();
-    try {
-      if (_bindings.ve_load_file(_engine, cpath.cast()) != 0) return false;
-    } finally {
-      malloc.free(cpath);
-    }
-    _bindings.ve_seek(_engine, 0);
-    _bindings.ve_play(_engine);
-    _isPlaying = true;
-    _playing.add(true);
-    _startPoll();
-    return true;
   }
 
   @override

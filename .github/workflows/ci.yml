@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  dart:
+    name: Flutter format, analyze, test
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          # Pinned to the stable release matching client/.metadata
+          # (revision f6ff1529fd).
+          flutter-version: 3.38.5
+          cache: true
+      - run: flutter pub get
+      - run: dart format --set-exit-if-changed lib test
+      - run: flutter analyze
+      - run: flutter test
+
+  rust:
+    name: Rust engine tests
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: client/rust/vocara_engine
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: client/rust/vocara_engine
+      - run: cargo test --features device
+
+  # The UI-driven e2e suites boot the full macOS app (TEST flavor, seeded
+  # sandbox store) and take several minutes each, so they are manual-only:
+  # Actions tab -> CI -> Run workflow. Mirrors `just e2e`.
+  e2e:
+    name: E2E journeys (manual)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.38.5
+          cache: true
+      - run: flutter pub get
+      - run: flutter test integration_test/home_settings_journey_test.dart -d macos --flavor test
+      - run: flutter test integration_test/technique_library_journey_test.dart -d macos --flavor test --dart-define=START=/techniques
+      - run: flutter test integration_test/detail_arrange_journey_test.dart -d macos --flavor test --dart-define=START=/song/E2EPRACTICESEED0000000000001
+      - run: flutter test integration_test/technique_detail_journey_test.dart -d macos --flavor test --dart-define=START=/techniques/E2ETECHNIQUESEED000000000001
+      - run: flutter test integration_test/settings_journey_test.dart -d macos --flavor test --dart-define=START=/settings

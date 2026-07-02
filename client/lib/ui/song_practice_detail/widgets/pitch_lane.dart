@@ -6,13 +6,14 @@ import 'package:flutter/material.dart';
 import '../../../domain/models/audio_track.dart';
 import '../../../domain/models/voice_metrics.dart';
 import '../../core/themes/studio.dart';
+import '../../core/widgets/studio_hint.dart';
 import '../../core/widgets/waveform_painter.dart';
 
 /// Height of the inline pitch sub-lane that folds out under a vocal take.
 const double kPitchLaneHeight = 96;
 
 /// In-tune color (green); off-pitch ramps toward [Studio.record].
-const Color _inTune = Color(0xFF52B788);
+const Color _inTune = Studio.inTune;
 
 /// A sung note within ±this many cents of its semitone counts as "in tune".
 const double _inTuneCents = 25;
@@ -316,9 +317,9 @@ class PitchLane extends StatelessWidget {
     Set<int> worst,
     ({int lo, int hi}) range,
   ) {
-    if (loading) return const _LaneHint('Analyzing pitch…');
+    if (loading) return const LaneHint('Analyzing pitch…');
     if (m == null) {
-      return const _LaneHint('Pitch is available for recorded WAV takes.');
+      return const LaneHint('Pitch is available for recorded WAV takes.');
     }
     return ColoredBox(
       color: Studio.inset,
@@ -363,25 +364,6 @@ PitchNote? _noteAtFrame(List<PitchNote> notes, int fr) {
     if (fr >= n.startFrame && fr <= n.endFrame) return n;
   }
   return null;
-}
-
-class _LaneHint extends StatelessWidget {
-  const _LaneHint(this.text);
-
-  final String text;
-
-  @override
-  Widget build(BuildContext context) {
-    return ColoredBox(
-      color: Studio.inset,
-      child: Center(
-        child: Text(
-          text,
-          style: const TextStyle(color: Studio.textFaint, fontSize: 12),
-        ),
-      ),
-    );
-  }
 }
 
 /// Draws the semitone grid, the detected note blocks (tinted by how in-tune,

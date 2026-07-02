@@ -3,112 +3,6 @@ import 'package:flutter/material.dart';
 import '../themes/studio.dart';
 import 'studio_button.dart';
 
-/// A studio-themed confirm dialog (dark card, coral accent button) — used where
-/// the forui adaptive dialog's light primary button looks out of place. The
-/// title ellipsizes so a long song name can't blow up the dialog.
-Future<bool> showStudioConfirm(
-  BuildContext context, {
-  required String title,
-  String? body,
-  String confirmLabel = 'Confirm',
-  String cancelLabel = 'Cancel',
-  IconData? icon,
-}) async {
-  final result = await showDialog<bool>(
-    context: context,
-    barrierColor: const Color(0xB0000000),
-    builder: (ctx) => Center(
-      child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Material(
-          color: Colors.transparent,
-          child: Container(
-            width: 400,
-            padding: const EdgeInsets.all(22),
-            decoration: BoxDecoration(
-              color: Studio.surfaceRaised,
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: Studio.border),
-              boxShadow: const [
-                BoxShadow(
-                  color: Color(0x80000000),
-                  blurRadius: 40,
-                  offset: Offset(0, 16),
-                ),
-              ],
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    if (icon != null) ...[
-                      Container(
-                        width: 30,
-                        height: 30,
-                        alignment: Alignment.center,
-                        decoration: BoxDecoration(
-                          color: Studio.accent.withValues(alpha: 0.14),
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Icon(icon, size: 15, color: Studio.accent),
-                      ),
-                      const SizedBox(width: 12),
-                    ],
-                    Expanded(
-                      child: Text(
-                        title,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: Studio.textPrimary,
-                          fontSize: 15,
-                          fontWeight: FontWeight.w700,
-                          height: 1.3,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                if (body != null) ...[
-                  const SizedBox(height: 12),
-                  Text(
-                    body,
-                    style: const TextStyle(
-                      color: Studio.textSecondary,
-                      fontSize: 13,
-                      height: 1.5,
-                    ),
-                  ),
-                ],
-                const SizedBox(height: 22),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.end,
-                  children: [
-                    StudioButton(
-                      label: cancelLabel,
-                      onTap: () => Navigator.of(ctx).pop(false),
-                    ),
-                    const SizedBox(width: 10),
-                    StudioButton(
-                      label: confirmLabel,
-                      variant: StudioButtonVariant.accent,
-                      onTap: () => Navigator.of(ctx).pop(true),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    ),
-  );
-  return result ?? false;
-}
-
 /// A studio-themed single-line text prompt (dark card, coral primary button) —
 /// the dark-theme replacement for the forui adaptive dialog. Returns the trimmed
 /// text, or null on cancel / empty.
@@ -161,8 +55,9 @@ class _StudioPrompt extends StatefulWidget {
 }
 
 class _StudioPromptState extends State<_StudioPrompt> {
-  late final TextEditingController _controller =
-      TextEditingController(text: widget.initial ?? '');
+  late final TextEditingController _controller = TextEditingController(
+    text: widget.initial ?? '',
+  );
 
   @override
   void dispose() {
@@ -277,14 +172,18 @@ class _StudioPromptState extends State<_StudioPrompt> {
   }
 }
 
-/// A reusable confirm/cancel modal in the dark studio style. Returns true if the
-/// user confirmed.
+/// A reusable confirm/cancel modal in the dark studio style (dark card, coral
+/// accent) — used where the forui adaptive dialog's light primary button looks
+/// out of place. The title ellipsizes so a long song name can't blow up the
+/// dialog; an optional [icon] renders in an accent-tinted badge before it.
+/// Returns true if the user confirmed.
 Future<bool> showConfirmDialog(
   BuildContext context, {
   required String title,
   String? body,
   String confirmLabel = 'Delete',
   String cancelLabel = 'Cancel',
+  IconData? icon,
   bool destructive = true,
 }) async {
   final result = await showDialog<bool>(
@@ -314,16 +213,36 @@ Future<bool> showConfirmDialog(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  title,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Studio.textPrimary,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w700,
-                    height: 1.3,
-                  ),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (icon != null) ...[
+                      Container(
+                        width: 30,
+                        height: 30,
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                          color: Studio.accent.withValues(alpha: 0.14),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Icon(icon, size: 15, color: Studio.accent),
+                      ),
+                      const SizedBox(width: 12),
+                    ],
+                    Expanded(
+                      child: Text(
+                        title,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Studio.textPrimary,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w700,
+                          height: 1.3,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
                 if (body != null) ...[
                   const SizedBox(height: 12),

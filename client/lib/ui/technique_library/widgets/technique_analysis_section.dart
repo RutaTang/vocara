@@ -4,6 +4,7 @@ import 'package:forui/forui.dart' show FIcons;
 import '../../../domain/models/technique_analysis.dart';
 import '../../../domain/models/voice_metrics.dart';
 import '../../core/themes/studio.dart';
+import '../../core/widgets/studio_hint.dart';
 import '../../song_practice_detail/widgets/voice_profile_view.dart';
 import '../../song_practice_detail/widgets/voiceprint_view.dart';
 import '../view_model/technique_detail_view_model.dart';
@@ -396,17 +397,21 @@ class _AnalysisBox extends StatelessWidget {
       // While recording, the reused dock views render the live mic feed.
       body = child;
     } else if (loading) {
-      body = _Hint(
+      body = StudioHint(
         practice ? 'Analyzing your take…' : 'Analyzing the example…',
         spinner: true,
+        fontSize: 12.5,
+        padding: const EdgeInsets.all(20),
       );
     } else if (analysis == null) {
-      body = _Hint(
+      body = StudioHint(
         failed
             ? (practice
                   ? "Couldn't analyze your recording. Try again."
                   : "Couldn't analyze this example clip.")
             : 'Record yourself to compare against the reference.',
+        fontSize: 12.5,
+        padding: const EdgeInsets.all(20),
       );
     } else {
       body = child;
@@ -587,7 +592,7 @@ class _GapRow extends StatelessWidget {
               style: TextStyle(
                 color: !has
                     ? Studio.textFaint
-                    : (close ? const Color(0xFF63C089) : Studio.accentBright),
+                    : (close ? Studio.good : Studio.accentBright),
                 fontSize: 12,
                 fontWeight: FontWeight.w700,
               ),
@@ -640,47 +645,6 @@ class _QualityWarning extends StatelessWidget {
             ),
           ),
         ],
-      ),
-    );
-  }
-}
-
-class _Hint extends StatelessWidget {
-  const _Hint(this.text, {this.spinner = false});
-
-  final String text;
-  final bool spinner;
-
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (spinner) ...[
-              const SizedBox(
-                width: 18,
-                height: 18,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2,
-                  valueColor: AlwaysStoppedAnimation(Studio.accent),
-                ),
-              ),
-              const SizedBox(height: 14),
-            ],
-            Text(
-              text,
-              textAlign: TextAlign.center,
-              style: const TextStyle(
-                color: Studio.textFaint,
-                fontSize: 12.5,
-                height: 1.4,
-              ),
-            ),
-          ],
-        ),
       ),
     );
   }

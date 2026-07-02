@@ -79,8 +79,9 @@ class SongPractice {
   /// (a medium room at 25% wet, which is silent until a take's reverb send is raised).
   final ReverbSettings? reverb;
 
-  /// The master bus output gain (linear, 0..1+, 1.0 = unity) — the overall level
-  /// the whole mix passes through before the master soft-clip.
+  /// The master bus output gain (linear, 0..1, 1.0 = unity; clamped to 1.0 on
+  /// load to match the master fader's range) — the overall level the whole mix
+  /// passes through before the master soft-clip.
   final double masterVolume;
 
   /// DAW-style FX buses (group/aux tracks) vocal takes can route into. Project-

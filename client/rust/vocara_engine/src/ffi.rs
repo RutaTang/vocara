@@ -4,8 +4,8 @@
 //! the audio data plane is the cpal callback Dart never sees.
 //!
 //! The default P0 graph is one vocal track (full EQ → Comp → Gain → Pan chain + a shared
-//! reverb send) fed by a ring; Dart decodes/feeds PCM via [`ve_push_pcm`] (or calls
-//! [`ve_decode_file`] to get device-rate PCM ready to push).
+//! reverb send) fed by a silent ring; the first [`ve_tracks_commit`] replaces it with the
+//! real project graph.
 
 // FFI entry points deliberately take raw pointers from C and validate them in-body.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
@@ -91,7 +91,6 @@ pub struct VeEngine {
     cap_cons: Consumer<[Smp; CHANNELS]>,
     /// Background WAV writer (owns the recording-ring consumer; writes only while recording).
     writer: RecordWriter,
-    source_id: u32,
     // Decoded PCM cache (path -> device-rate interleaved stereo), so re-committing the graph
     // never re-decodes a file. The committed graph pins every live track's samples via its
     // own Arcs, so the cache's true memory overhead is exactly the non-live entries; each
@@ -162,22 +161,21 @@ fn cache_retain(
 #[no_mangle]
 pub extern "C" fn ve_create() -> *mut VeEngine {
     let built = catch_unwind(|| -> Result<*mut VeEngine, String> {
-        let (prod, cons) = spsc::<[Smp; CHANNELS]>(RING_FRAMES);
+        // Baseline placeholder track: a silent ring (nothing feeds it), immediately replaced
+        // by the first ve_tracks_commit.
+        let (_prod, cons) = spsc::<[Smp; CHANNELS]>(RING_FRAMES);
         let track = TrackSpec::vocal(1, Box::new(RingSource::new(cons)));
         let desc = build(ProjectSpec::new(vec![track]));
         // The graph is device-independent: always compiled at ENGINE_SR.
         let graph = desc
             .compile(ENGINE_SR, MAX_BLOCK)
             .map_err(|e| format!("compile: {e:?}"))?;
-        let source_id = build::source_id(1);
-        let mut producers = HashMap::new();
-        producers.insert(source_id, prod);
         // Input rings: the input callback (host thread) fans resampled mic frames out to the
         // monitor (RtProcessor), the analysis capture (Dart), and the recording writer.
         let (mic_prod, mic_cons) = spsc::<[Smp; CHANNELS]>(MIC_RING_FRAMES);
         let (cap_prod, cap_cons) = spsc::<[Smp; CHANNELS]>(CAP_RING_FRAMES);
         let (rec_prod, rec_cons) = spsc::<[Smp; CHANNELS]>(REC_RING_FRAMES);
-        let (handle, rt) = spawn(graph, producers, mic_cons, 1024);
+        let (handle, rt) = spawn(graph, HashMap::new(), mic_cons, 1024);
         // The audio-host thread owns the !Send streams and the shared RtCell for the engine's
         // whole life; FFI threads only message it.
         let rt_cell = RtCell::new(rt);
@@ -211,7 +209,6 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
             rec_active,
             cap_cons,
             writer,
-            source_id,
             cache: std::collections::HashMap::new(),
             cache_seq: 0,
             pending: Vec::new(),
@@ -629,23 +626,6 @@ pub extern "C" fn ve_flush(e: *mut VeEngine) -> c_int {
     })
 }
 
-/// Feed `frames` interleaved-stereo f32 frames (`pcm` points at `frames * 2` floats) to the
-/// source ring. Returns frames accepted (back-pressure: a short return means slow down).
-#[no_mangle]
-pub extern "C" fn ve_push_pcm(e: *mut VeEngine, pcm: *const f32, frames: usize) -> usize {
-    if e.is_null() || pcm.is_null() {
-        return 0;
-    }
-    catch_unwind(AssertUnwindSafe(|| {
-        let eng = unsafe { &mut *e };
-        // SAFETY: [f32; 2] is two contiguous f32; caller guarantees `frames * 2` floats.
-        let slice = unsafe { std::slice::from_raw_parts(pcm as *const [Smp; CHANNELS], frames) };
-        let src = eng.source_id;
-        eng.handle.push_pcm(src, slice)
-    }))
-    .unwrap_or(0)
-}
-
 /// The current playhead in samples (atomic read).
 #[no_mangle]
 pub extern "C" fn ve_frame_pos(e: *mut VeEngine) -> i64 {
@@ -664,52 +644,6 @@ pub extern "C" fn ve_frame_pos(e: *mut VeEngine) -> i64 {
 #[no_mangle]
 pub extern "C" fn ve_sample_rate(e: *mut VeEngine) -> f64 {
     with_engine(e, 0.0, |eng| eng.handle.sample_rate())
-}
-
-/// The node id Dart should feed PCM to (the default track's source).
-#[no_mangle]
-pub extern "C" fn ve_source_id(e: *mut VeEngine) -> u32 {
-    with_engine(e, 0, |eng| eng.source_id)
-}
-
-/// Decode `path` natively, build a **timeline-addressable** in-memory source (so seek and
-/// loop work), hot-swap it into the graph, seek to 0, and play. Returns 0 on success, a
-/// negative code on failure. This is the right path for files (backing tracks / takes);
-/// `ve_push_pcm` streaming is for live input.
-#[no_mangle]
-pub extern "C" fn ve_load_file(e: *mut VeEngine, path: *const c_char) -> c_int {
-    if e.is_null() || path.is_null() {
-        return -1;
-    }
-    catch_unwind(AssertUnwindSafe(|| {
-        let eng = unsafe { &mut *e };
-        let path = match unsafe { CStr::from_ptr(path) }.to_str() {
-            Ok(p) => p,
-            Err(_) => return -1,
-        };
-        let rate = eng.handle.sample_rate();
-        let (frames, src_rate) = match device::decode_file(path) {
-            Ok(v) => v,
-            Err(_) => return -2,
-        };
-        let resampled = device::resample_linear(&frames, src_rate, rate as u32);
-        let mut flat: Vec<Smp> = Vec::with_capacity(resampled.len() * CHANNELS);
-        for f in resampled {
-            flat.push(f[0]);
-            flat.push(f[1]);
-        }
-        let src = BufferSource::new(flat, 0);
-        let desc = build(ProjectSpec::new(vec![TrackSpec::vocal(1, Box::new(src))]));
-        let graph = match desc.compile(rate, MAX_BLOCK) {
-            Ok(g) => g,
-            Err(_) => return -3,
-        };
-        // Load only: hot-swap the graph but preserve transport state (frame/playing), so
-        // sync() can reload a track without restarting playback. The caller seeks/plays.
-        eng.handle.publish_graph(graph);
-        0
-    }))
-    .unwrap_or(-1)
 }
 
 // ---- Multi-track playback (one source per track, timeline-aligned) ----------------------
@@ -1296,8 +1230,8 @@ impl VePcm {
     }
 }
 
-/// Decode `path` to interleaved-stereo f32 resampled to the engine's device rate. Dart then
-/// feeds it via [`ve_push_pcm`] (e.g. from a feeder isolate) and frees it with [`ve_free_pcm`].
+/// Decode `path` to interleaved-stereo f32 resampled to the engine's device rate. The caller
+/// frees the returned buffer with [`ve_free_pcm`].
 #[no_mangle]
 pub extern "C" fn ve_decode_file(e: *mut VeEngine, path: *const c_char) -> VePcm {
     if e.is_null() || path.is_null() {

@@ -9,6 +9,7 @@ import '../../../domain/models/fx_bus.dart';
 import '../../../domain/models/voice_metrics.dart';
 import '../../../utils/format.dart';
 import '../../core/themes/studio.dart';
+import '../../core/widgets/cap_label.dart';
 import '../../core/widgets/studio_controls.dart';
 import '../view_model/song_practice_detail_view_model.dart';
 import 'fx_panel.dart';
@@ -18,13 +19,13 @@ import 'track_context_menu.dart';
 const double _panelWidth = 272;
 
 // Pass / warn / flag indicator colors for the scorecard dots.
-const _good = Color(0xFF63C089);
+const _good = Studio.good;
 const _warn = Color(0xFFE0A04C);
 const _flag = Studio.record;
 
 // Register split colors (warm chest → cool head).
-const _chest = Color(0xFFE0825A);
-const _head = Color(0xFF5B8DEF);
+const _chest = Studio.registerChest;
+const _head = Studio.registerHead;
 
 const _months = [
   'Jan',
@@ -1158,7 +1159,7 @@ class _RangeRow extends StatelessWidget {
                 style: const TextStyle(color: Studio.textFaint, fontSize: 11),
               ),
               const Spacer(),
-              _CapLabel('Range'),
+              CapLabel('Range'),
             ],
           ),
           const SizedBox(height: 7),
@@ -1235,7 +1236,7 @@ class _RegisterBar extends StatelessWidget {
         children: [
           Row(
             children: [
-              _CapLabel('Register'),
+              CapLabel('Register'),
               const Spacer(),
               Text(
                 'chest ${pct(reg.chestPct)} · mix ${pct(reg.mixPct)} · head ${pct(reg.headPct)}',
@@ -1305,7 +1306,7 @@ class _Metric extends StatelessWidget {
           children: [
             Row(
               children: [
-                _CapLabel(label),
+                CapLabel(label),
                 const Spacer(),
                 if (dot != null)
                   Container(
@@ -1353,21 +1354,6 @@ class _SectionLabel extends StatelessWidget {
       fontSize: 10,
       fontWeight: FontWeight.w700,
       letterSpacing: 0.8,
-    ),
-  );
-}
-
-class _CapLabel extends StatelessWidget {
-  const _CapLabel(this.text);
-  final String text;
-  @override
-  Widget build(BuildContext context) => Text(
-    text.toUpperCase(),
-    style: const TextStyle(
-      color: Studio.textFaint,
-      fontSize: 9,
-      fontWeight: FontWeight.w700,
-      letterSpacing: 0.5,
     ),
   );
 }
