@@ -209,7 +209,7 @@ void main() {
         reason: 'separation labels the produced backing as Instrumental',
       );
       expect(
-        accompaniment.waveformPeaks,
+        accompaniment.primaryClip!.waveformPeaks,
         isNotEmpty,
         reason: 'the produced stem is analyzed for a waveform',
       );
@@ -218,7 +218,7 @@ void main() {
         greaterThan(500),
         reason: 'a ~1s stem should report a real duration',
       );
-      expect(accompaniment.audioFilePath, isNotEmpty);
+      expect(accompaniment.primaryClip!.audioFilePath, isNotEmpty);
 
       // The original is KEPT in the reference slot (A/B against the stem).
       expect(
@@ -247,9 +247,12 @@ void main() {
         reason: 'after separation the audible backing is the instrumental',
       );
       expect(vm.activeBacking, isNotNull);
-      expect(vm.activeBacking!.audioFilePath, accompaniment.audioFilePath);
+      expect(
+        vm.activeBacking!.primaryClip!.audioFilePath,
+        accompaniment.primaryClip!.audioFilePath,
+      );
 
-      final accompPathBeforeReload = accompaniment.audioFilePath;
+      final accompPathBeforeReload = accompaniment.primaryClip!.audioFilePath;
 
       vm.dispose();
 
@@ -273,8 +276,8 @@ void main() {
       expect(reAccomp!.kind, AudioTrackKind.accompaniment);
       expect(reAccomp.displayName, contains('(Instrumental)'));
       // The pooled stem resolves to a readable, non-trivial file on disk.
-      expect(reAccomp.audioFilePath, isNotEmpty);
-      final reAccompFile = File(reAccomp.audioFilePath);
+      expect(reAccomp.primaryClip!.audioFilePath, isNotEmpty);
+      final reAccompFile = File(reAccomp.primaryClip!.audioFilePath);
       expect(
         await reAccompFile.exists(),
         isTrue,
@@ -286,14 +289,14 @@ void main() {
         reason: 'the stem is a real WAV (more than a bare header)',
       );
       // Peaks are cached by content hash, so they survive the round-trip.
-      expect(reAccomp.waveformPeaks, isNotEmpty);
+      expect(reAccomp.primaryClip!.waveformPeaks, isNotEmpty);
 
       // The reference (original) round-trips too.
       final reRef = reloaded.practice!.reference;
       expect(reRef, isNotNull, reason: 'the kept original survived the reload');
       expect(reRef!.kind, AudioTrackKind.reference);
       expect(
-        await File(reRef.audioFilePath).exists(),
+        await File(reRef.primaryClip!.audioFilePath).exists(),
         isTrue,
         reason: 'the pooled reference asset resolves to a real file',
       );

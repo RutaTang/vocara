@@ -141,7 +141,7 @@ void main() {
       );
       final accomp = vm.practice!.accompaniment;
       expect(accomp, isNotNull);
-      expect(accomp!.waveformPeaks, isNotEmpty);
+      expect(accomp!.primaryClip!.waveformPeaks, isNotEmpty);
       expect(accomp.durationMs, greaterThan(500));
 
       // A vocal take (its own lane) in the active interpretation.
@@ -149,7 +149,7 @@ void main() {
       await _settle(tester, () => !vm.busy && vm.vocalTakes.isNotEmpty);
       expect(vm.vocalTakes, hasLength(1));
       final takeId = vm.vocalTakes.single.id;
-      expect(vm.vocalTakes.single.waveformPeaks, isNotEmpty);
+      expect(vm.vocalTakes.single.primaryClip!.waveformPeaks, isNotEmpty);
 
       // Notes at the playhead on both a backing and a vocal lane.
       await vm.seek(const Duration(milliseconds: 250));
@@ -214,8 +214,9 @@ void main() {
       await _settle(tester, () => vm.activeInterpretation?.id == versionId);
 
       // Capture expected values before tearing the VM down.
-      final expectedAccompPeaks = accomp.waveformPeaks.length;
-      final expectedTakePeaks = vm.vocalTakes.single.waveformPeaks.length;
+      final expectedAccompPeaks = accomp.primaryClip!.waveformPeaks.length;
+      final expectedTakePeaks =
+          vm.vocalTakes.single.primaryClip!.waveformPeaks.length;
       final expectedTimeline = vm.practice!.timelineDurationMs;
 
       vm.dispose();
@@ -233,7 +234,7 @@ void main() {
       expect(a2, isNotNull);
       expect(a2!.displayName, accomp.displayName);
       expect(a2.clips, hasLength(1));
-      expect(a2.waveformPeaks, hasLength(expectedAccompPeaks));
+      expect(a2.primaryClip!.waveformPeaks, hasLength(expectedAccompPeaks));
       expect(a2.notes, hasLength(1));
       expect(a2.notes.single.content, 'count-in here');
       // The accompaniment clip resolves to a readable pooled file.
@@ -246,7 +247,7 @@ void main() {
       expect(vm2.vocalTakes, hasLength(1));
       final take2 = vm2.vocalTakes.single;
       expect(take2.id, takeId);
-      expect(take2.waveformPeaks, hasLength(expectedTakePeaks));
+      expect(take2.primaryClip!.waveformPeaks, hasLength(expectedTakePeaks));
 
       // Notes round-trip on the take.
       expect(take2.notes, hasLength(1));

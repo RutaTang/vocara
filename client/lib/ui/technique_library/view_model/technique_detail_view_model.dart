@@ -7,9 +7,8 @@ import '../../../data/repositories/technique_repository.dart';
 import '../../../data/services/app_settings_service.dart';
 import '../../../data/services/graph_audio_playback_service.dart';
 import '../../../data/services/media_analysis_service.dart';
-import '../../../data/services/mic_permission.dart';
+import '../../../data/services/mic_recording_controller.dart';
 import '../../../data/services/monitor_service.dart';
-import '../../../data/services/recording_finalizer.dart';
 import '../../../data/services/technique_media_service.dart';
 import '../../../domain/models/audio_track.dart';
 import '../../../domain/models/spectrogram.dart';
@@ -69,14 +68,10 @@ class TechniqueDetailViewModel extends ChangeNotifier
        _appSettings = appSettings,
        _analysis = analysisService {
     load = Command0(_load)..execute();
-    // Finalize an in-flight example/practice recording if the app is quit
-    // mid-record (no-op otherwise); unregistered in dispose.
-    RecordingFinalizer.instance.register(_quitFinalize);
   }
 
-  // Registered with RecordingFinalizer (saves the captured example/practice take
-  // on app quit). No-op unless a recording is in flight. (A method tear-off is a
-  // stable reference, so register/unregister match.)
+  // Registered with RecordingFinalizer by the recording controller while a
+  // take is in flight (saves the captured example/practice take on app quit).
   Future<void> _quitFinalize() async {
     if (isRecordingExample) {
       await stopExampleRecording();
@@ -171,18 +166,16 @@ class TechniqueDetailViewModel extends ChangeNotifier
     // draft (which would strand its file and show a phantom clip in the read view).
     _draftGeneration++;
     // Also invalidate a PENDING recording start (still awaiting permission or
-    // the temp dir: _isRecording is false, so the teardown below can't see it).
+    // the temp dir: isRecording is false, so the teardown below can't see it).
     // Without this, cancelling during that window would arm a hot mic in the
     // read view with no stop affordance.
-    _recordingGeneration++;
+    _recorder.invalidatePendingStart();
     // Releasing edit must release the mic: stop and discard any in-flight
     // example recording (otherwise the mic + capture/level timers run on until
     // the route is popped).
-    if (_isRecording) {
-      _endRecordingHardware();
+    if (_recorder.isRecording) {
+      await _recorder.abort();
       _recordingExample = false;
-      _starting = false;
-      await _deleteTempDir(_exampleTempPath);
       _exampleTempPath = null;
     }
     final orphans = List<TechniqueMedia>.from(_draftAdds);
@@ -350,30 +343,36 @@ class TechniqueDetailViewModel extends ChangeNotifier
       ? _practice
       : _selectedReference;
 
-  // --- Mic recording (shared core) -----------------------------------------
+  // --- Mic recording (shared controller) -----------------------------------
 
   GraphAudioPlaybackService? _engine;
-  Timer? _levelTimer;
-  Timer? _captureTimer;
-  bool _isRecording = false;
   bool _recordingExample = false;
-  // Synchronous in-flight guard: set true the instant a start is requested (the
-  // engine/permission setup awaits, so _isRecording isn't true yet — without
-  // this a fast double-tap would start two recordings and leak the first).
-  bool _starting = false;
+
+  /// The shared mic-recording core (permission → temp WAV → engine → capture/
+  /// level pumps → quit finalizer). The engine stays owned by this VM: created
+  /// lazily on the first take, disposed in [dispose]; the controller borrows
+  /// it per take.
+  late final MicRecordingController _recorder = MicRecordingController(
+    acquireEngine: () {
+      final engine = _engine ??= GraphAudioPlaybackService();
+      // Record from the input device the user chose in Settings (this VM owns
+      // its own engine, so without this it would capture from the OS default
+      // and silently contradict the global selection). No-op when the engine
+      // is unavailable.
+      final inUid = _appSettings?.inputDeviceUid;
+      if (inUid != null && inUid.isNotEmpty) engine.setInputDevice(inUid);
+      return engine;
+    },
+    monitor: _monitor,
+    onQuitFinalize: _quitFinalize,
+    onInputDeviceLost: _onInputDeviceLost,
+  );
 
   /// True during the example/practice record START window — after the user tapped
-  /// Record but before the permission + temp-dir awaits resolve and _isRecording
+  /// Record but before the permission + temp-dir awaits resolve and isRecording
   /// flips true. Cancel must treat this as dirty so the pending start isn't left
   /// to arm a hot mic in the read view after teardown.
-  bool get starting => _starting;
-
-  /// Bumped whenever an in-flight recording START must be abandoned (edit
-  /// cancelled, edit saved, VM disposed). _beginRecording snapshots it before
-  /// its awaits and arms nothing on a mismatch — mirroring _draftGeneration —
-  /// because a start pending behind the permission/temp-dir awaits has
-  /// _isRecording still false, so the teardown paths can't see or stop it.
-  int _recordingGeneration = 0;
+  bool get starting => _recorder.isStarting;
 
   // One-shot user notice from an async recording event (e.g. the input device
   // was disconnected mid-record). The view peeks it, surfaces it as a toast,
@@ -383,142 +382,39 @@ class TechniqueDetailViewModel extends ChangeNotifier
   void clearRecordingNotice() => _recordingNotice = null;
 
   /// True while recording the ephemeral practice take.
-  bool get isRecordingPractice => _isRecording && !_recordingExample;
+  bool get isRecordingPractice => _recorder.isRecording && !_recordingExample;
 
   /// True while recording a clip to save as a persisted example.
-  bool get isRecordingExample => _isRecording && _recordingExample;
+  bool get isRecordingExample => _recorder.isRecording && _recordingExample;
 
   /// Live input level (0..1) while recording, for the meter (shared by both
   /// the practice and the example recorder).
-  final ValueNotifier<double> recordLevel = ValueNotifier(0);
+  ValueListenable<double> get recordLevel => _recorder.level;
 
-  /// Requests mic permission, ensures the engine, opens a temp WAV under a
-  /// [prefix] temp dir, starts the level-meter timer, and feeds the live input
-  /// into the monitor so the analysis views show the voice in real time while
-  /// recording. Returns the temp path, or an error message (path null).
-  Future<({String? path, String? error})> _beginRecording(String prefix) async {
-    // Snapshot the recording generation: a Cancel/Save/dispose during the
-    // permission or temp-dir awaits below invalidates this start (bumps the
-    // token) — arming the mic then would leave it hot in the read view with no
-    // stop affordance.
-    final generation = _recordingGeneration;
-    if (!await MicPermission.request()) {
-      return (
-        path: null,
-        error:
-            'Microphone access is off. Enable it in System Settings › '
-            'Privacy & Security › Microphone.',
-      );
+  /// The mic vanished mid-record (unplugged, Bluetooth profile flip): stop the
+  /// recording gracefully — finalizing KEEPS what was captured — instead of
+  /// letting capture die silently. This VM is the only device-event consumer
+  /// on the technique screen, so the controller polls while recording.
+  void _onInputDeviceLost() {
+    _recordingNotice = 'Recording stopped: the input device was disconnected.';
+    if (_recordingExample) {
+      unawaited(stopExampleRecording());
+    } else {
+      unawaited(stopPractice());
     }
-    // The screen may have been left during the permission await, which disposed
-    // the VM but couldn't tear down this not-yet-started recording (_isRecording
-    // is still false) — or the edit session this start belonged to was cancelled
-    // or saved (generation bumped). Bail before touching the engine or arming
-    // hardware.
-    if (_disposed || _recordingGeneration != generation) {
-      return (path: null, error: null);
-    }
-    final engine = _engine ??= GraphAudioPlaybackService();
-    if (!engine.isAvailable) {
-      return (
-        path: null,
-        error:
-            'The audio engine is unavailable. Reconnect an audio device and '
-            'try again.',
-      );
-    }
-    // Record from the input device the user chose in Settings (this VM owns its
-    // own engine, so without this it would capture from the OS default and
-    // silently contradict the global selection).
-    final inUid = _appSettings?.inputDeviceUid;
-    if (inUid != null && inUid.isNotEmpty) engine.setInputDevice(inUid);
-    final dir = await Directory.systemTemp.createTemp(prefix);
-    final path = '${dir.path}/$prefix.wav';
-    // Same guard after the temp-dir await: a dispose (or a cancelled/saved edit
-    // session) in this window can't stop a recording that hasn't started. Don't
-    // arm hardware/timers; drop the temp dir.
-    if (_disposed || _recordingGeneration != generation) {
-      unawaited(_deleteTempDir(path));
-      return (path: null, error: null);
-    }
-    // A false return means the writer could not create the WAV (disk full /
-    // permissions) and nothing would be recorded: fail loudly here instead of
-    // "recording" into nowhere, and arm no timers or state.
-    if (!engine.startInputRecording(path)) {
-      unawaited(_deleteTempDir(path));
-      return (
-        path: null,
-        error:
-            "Couldn't create the recording file. Check your free disk space.",
-      );
-    }
-    _isRecording = true;
-    // Live preview: the engine captures the same input it's recording (cpal),
-    // so we can drive the live spectrogram / tuner / metrics off it.
-    engine.startCapture();
-    _monitor.start();
-    _liveMonitor = true;
-    _captureTimer = Timer.periodic(const Duration(milliseconds: 30), (_) {
-      if (_disposed) return;
-      final frames = engine.pullInputFrames(); // interleaved stereo
-      if (frames.isEmpty) return;
-      final n = frames.length ~/ 2;
-      final mono = Float64List(n);
-      for (var i = 0; i < n; i++) {
-        mono[i] = (frames[2 * i] + frames[2 * i + 1]) * 0.5;
-      }
-      _monitor.feedSamples(mono);
-    });
-    _levelTimer = Timer.periodic(const Duration(milliseconds: 50), (_) {
-      if (_disposed) return;
-      // This timer is the only device-event consumer on the technique screen
-      // (poll clears on read), so handle input loss here: a mic unplug must stop
-      // the recording gracefully — finalizing KEEPS what was captured — instead
-      // of letting capture die silently.
-      if (engine.pollDeviceEvents() & 2 != 0) {
-        _recordingNotice =
-            'Recording stopped: the input device was disconnected.';
-        if (_recordingExample) {
-          unawaited(stopExampleRecording());
-        } else {
-          unawaited(stopPractice());
-        }
-        return;
-      }
-      recordLevel.value = engine.inputLevel().clamp(0.0, 1.0);
-    });
-    return (path: path, error: null);
   }
 
-  /// Stops the mic hardware, live capture and meter (without persisting or
-  /// analyzing). Returns false when the writer reported an IO error
-  /// (create/write/finalize) during the take, meaning the WAV on disk is
-  /// missing, damaged, or incomplete.
-  bool _endRecordingHardware() {
-    _levelTimer?.cancel();
-    _levelTimer = null;
-    _captureTimer?.cancel();
-    _captureTimer = null;
-    recordLevel.value = 0;
-    final engine = _engine;
-    final recordingClean = engine?.stopInputRecording() ?? true;
-    if (_liveMonitor) {
-      engine?.stopCapture();
-      _monitor.stop();
-      _liveMonitor = false;
-    }
-    _isRecording = false;
-    return recordingClean;
-  }
-
-  /// Best-effort delete of a temp recording dir at [path].
-  Future<void> _deleteTempDir(String? path) async {
-    if (path == null) return;
-    try {
-      final dir = File(path).parent;
-      if (await dir.exists()) await dir.delete(recursive: true);
-    } catch (_) {}
-  }
+  /// The message the screen toasts for a failed recording start.
+  String _startFailureMessage(MicRecordingFailure failure) => switch (failure) {
+    MicRecordingFailure.permissionDenied =>
+      'Microphone access is off. Enable it in System Settings › '
+          'Privacy & Security › Microphone.',
+    MicRecordingFailure.engineUnavailable =>
+      'The audio engine is unavailable. Reconnect an audio device and '
+          'try again.',
+    MicRecordingFailure.fileCreateFailed =>
+      "Couldn't create the recording file. Check your free disk space.",
+  };
 
   // --- Ephemeral practice recording ----------------------------------------
 
@@ -542,26 +438,27 @@ class TechniqueDetailViewModel extends ChangeNotifier
 
   /// Whether a practice take can be recorded right now.
   bool get canRecordPractice =>
-      !_isRecording && !_practiceLoading && !_savingExample && !_starting;
+      !_recorder.isRecording &&
+      !_practiceLoading &&
+      !_savingExample &&
+      !_recorder.isStarting;
 
   /// Starts an ephemeral practice recording. Returns an error to show, or null.
   Future<String?> startPractice() async {
     if (!canRecordPractice) return null;
-    _starting = true;
-    try {
-      final r = await _beginRecording('vocara_practice');
-      if (r.error != null) return r.error;
-      // Null path with no error: the start was invalidated mid-await (dispose
-      // or a generation bump). Nothing armed; leave state untouched.
-      if (r.path == null) return null;
-      _practiceTempPath = r.path;
-      _recordingExample = false;
-      _practiceFailed = false;
-      notifyListeners();
-      return null;
-    } finally {
-      _starting = false;
-    }
+    final r = await _recorder.start(
+      RecordingPathStrategy.tempDir('vocara_practice'),
+    );
+    final failure = r.failure;
+    if (failure != null) return _startFailureMessage(failure);
+    // Not started with no failure: the start was invalidated mid-await
+    // (dispose or a generation bump). Nothing armed; leave state untouched.
+    if (!r.started) return null;
+    _practiceTempPath = r.path;
+    _recordingExample = false;
+    _practiceFailed = false;
+    notifyListeners();
+    return null;
   }
 
   /// Stops the practice recording, analyzes it, and shows it on the card. The
@@ -570,7 +467,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
     if (!isRecordingPractice) return;
     // False = the writer hit an IO error during the take, so the WAV on disk
     // is missing, damaged, or incomplete; handled conservatively below.
-    final recordingClean = _endRecordingHardware();
+    final recordingClean = _recorder.stop()?.clean ?? true;
     final path = _practiceTempPath;
     if (path == null) {
       notifyListeners();
@@ -620,7 +517,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
         _subject = TechniqueAnalysisSubject.reference;
       }
     } finally {
-      await _deleteTempDir(path);
+      await deleteTempRecordingDir(path);
       _practiceTempPath = null;
       _practiceLoading = false;
       _syncPositionToSubject();
@@ -653,11 +550,14 @@ class TechniqueDetailViewModel extends ChangeNotifier
   /// screen's saveBlocked reads this, so both windows disable Save: saving
   /// during a pending start would close the edit and let the mic arm in the
   /// read view with no stop affordance.
-  bool get savingExample => _savingExample || _starting;
+  bool get savingExample => _savingExample || _recorder.isStarting;
 
   /// Whether an example clip can be recorded right now.
   bool get canRecordExample =>
-      !_isRecording && !_savingExample && !_importingMedia && !_starting;
+      !_recorder.isRecording &&
+      !_savingExample &&
+      !_importingMedia &&
+      !_recorder.isStarting;
 
   /// Records a clip to add as an audio example (staged in the draft) — so a
   /// singer can demo the technique themselves and re-record until happy, seeing
@@ -665,20 +565,18 @@ class TechniqueDetailViewModel extends ChangeNotifier
   /// Returns an error to surface, or null.
   Future<String?> startExampleRecording() async {
     if (!canRecordExample) return null;
-    _starting = true;
-    try {
-      final r = await _beginRecording('vocara_example');
-      if (r.error != null) return r.error;
-      // Null path with no error: the start was invalidated mid-await (dispose
-      // or a generation bump). Nothing armed; leave state untouched.
-      if (r.path == null) return null;
-      _exampleTempPath = r.path;
-      _recordingExample = true;
-      notifyListeners();
-      return null;
-    } finally {
-      _starting = false;
-    }
+    final r = await _recorder.start(
+      RecordingPathStrategy.tempDir('vocara_example'),
+    );
+    final failure = r.failure;
+    if (failure != null) return _startFailureMessage(failure);
+    // Not started with no failure: the start was invalidated mid-await
+    // (dispose or a generation bump). Nothing armed; leave state untouched.
+    if (!r.started) return null;
+    _exampleTempPath = r.path;
+    _recordingExample = true;
+    notifyListeners();
+    return null;
   }
 
   /// Stops the example recording and imports it into the sandbox as a STAGED
@@ -689,7 +587,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
     if (!isRecordingExample) return;
     // False = the writer hit an IO error during the take, so the WAV on disk
     // is missing, damaged, or incomplete; handled conservatively below.
-    final recordingClean = _endRecordingHardware();
+    final recordingClean = _recorder.stop()?.clean ?? true;
     _recordingExample = false;
     final path = _exampleTempPath;
     if (path == null) {
@@ -715,7 +613,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
         partial = null;
       }
       if (partial == null) {
-        await _deleteTempDir(path);
+        await deleteTempRecordingDir(path);
         _exampleTempPath = null;
         _recordingNotice = 'Recording failed. The example could not be saved.';
         _savingExample = false;
@@ -743,7 +641,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
     }
     // Keep _exampleTempPath set until the file is actually gone, so a dispose
     // mid-save still cleans it up.
-    await _deleteTempDir(path);
+    await deleteTempRecordingDir(path);
     _exampleTempPath = null;
     if (added != null) {
       if (_draftGeneration != generation || _disposed) {
@@ -771,10 +669,6 @@ class TechniqueDetailViewModel extends ChangeNotifier
 
   final MonitorService _monitor = MonitorService();
 
-  /// True while a recording is in progress, switching the analysis views to the
-  /// live mic feed.
-  bool _liveMonitor = false;
-
   @override
   final ValueNotifier<Duration> position = ValueNotifier(Duration.zero);
 
@@ -794,8 +688,10 @@ class TechniqueDetailViewModel extends ChangeNotifier
     notifyListeners();
   }
 
+  /// True while a recording is in progress (the controller feeds the monitor
+  /// then), switching the analysis views to the live mic feed.
   @override
-  bool get liveMonitor => _liveMonitor;
+  bool get liveMonitor => _recorder.feedingMonitor;
 
   @override
   MonitorService get monitor => _monitor;
@@ -816,7 +712,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
   /// it plays — only when the reference is shown (the inline player plays the
   /// reference clip), and not while recording (the live feed owns the views).
   void setPlayheadFromPlayback(Duration to) {
-    if (_isRecording) return;
+    if (_recorder.isRecording) return;
     if (_subject != TechniqueAnalysisSubject.reference) return;
     final maxMs = _selectedReference?.durationMs ?? 0;
     if (maxMs <= 0) return;
@@ -904,25 +800,18 @@ class TechniqueDetailViewModel extends ChangeNotifier
   @override
   void dispose() {
     _disposed = true;
-    // Invalidate any pending recording start (the _disposed guards in
-    // _beginRecording already cover this; the bump mirrors discardMediaDraft).
-    _recordingGeneration++;
-    RecordingFinalizer.instance.unregister(_quitFinalize);
-    _levelTimer?.cancel();
-    _captureTimer?.cancel();
-    // Tear down a recording that is running OR still starting (its start awaits
-    // haven't resolved yet). The _beginRecording _disposed guards keep it from
-    // arming after this, so stopping here is belt-and-suspenders against a hot mic.
-    if (_isRecording || _starting) _engine?.stopInputRecording();
+    // Tears down a recording that is running OR still starting (a pending
+    // start is invalidated and arms nothing), unregisters the quit finalizer,
+    // and disposes the level notifier.
+    _recorder.dispose();
     // Clean up any abandoned recording (Stop never pressed before leaving).
-    unawaited(_deleteTempDir(_practiceTempPath));
-    unawaited(_deleteTempDir(_exampleTempPath));
+    unawaited(deleteTempRecordingDir(_practiceTempPath));
+    unawaited(deleteTempRecordingDir(_exampleTempPath));
     // Delete files copied for staged additions that were never committed.
     for (final m in _draftAdds) {
       unawaited(_mediaService.deleteMedia(m.path));
     }
     unawaited(_engine?.dispose());
-    recordLevel.dispose();
     position.dispose();
     _scrub.dispose();
     _monitor.dispose();
@@ -946,11 +835,10 @@ class TechniqueDetailViewModel extends ChangeNotifier
       // invalidate a recording start still pending behind its awaits, and stop
       // an example recording that armed while the commit was in flight — in the
       // read view a live example mic would have no stop affordance.
-      _recordingGeneration++;
-      if (_isRecording && _recordingExample) {
-        _endRecordingHardware();
+      _recorder.invalidatePendingStart();
+      if (_recorder.isRecording && _recordingExample) {
+        await _recorder.abort();
         _recordingExample = false;
-        await _deleteTempDir(_exampleTempPath);
         _exampleTempPath = null;
       }
       for (final path in removedPaths) {

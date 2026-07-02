@@ -84,23 +84,11 @@ void _seekTo(
 
 /// The absolute playhead [pos] as take-local seconds, clamped to the take's
 /// [durationMs] span (which begins at [startMs] on the shared timeline).
+/// [AudioTrack.startMs]/[AudioTrack.durationMs] are the LANE span, and a
+/// multi-clip take's aggregate analysis places each clip's frames at its
+/// lane-relative offset — so the take-local axis lines up for any clip count.
 double _localSeconds(Duration pos, int durationMs, int startMs) =>
     (pos.inMilliseconds - startMs).clamp(0, durationMs) / 1000.0;
-
-/// The take-local time-axis span (ms) for an analysis with this framing. A
-/// single-clip take spans ~its own [AudioTrack.durationMs]; a multi-clip
-/// aggregate concatenates every clip, so the merged analysis' own frame span
-/// (frames·hop/sampleRate) runs past the primary clip's durationMs and must set
-/// the axis width — otherwise frames beyond the first clip land off the right
-/// edge and the playhead/seek only traverse the first clip's fraction. The take
-/// origin ([AudioTrack.startMs]) is unchanged in both cases.
-int _takeSpanMs(int frames, int hop, int sampleRate, AudioTrack track) {
-  if (track.clips.length > 1 && sampleRate > 0) {
-    final analysisMs = (frames * hop * 1000 / sampleRate).round();
-    if (analysisMs > track.durationMs) return analysisMs;
-  }
-  return track.durationMs;
-}
 
 /// The take spectrogram stack: image + grid + formant overlay + seek + playhead.
 Widget _takeSpectroStack(
@@ -109,7 +97,7 @@ Widget _takeSpectroStack(
   VoiceMetrics? metrics,
   AudioTrack track,
 ) {
-  final spanMs = _takeSpanMs(spec.frames, spec.hop, spec.sampleRate, track);
+  final spanMs = track.durationMs;
   return LayoutBuilder(
     builder: (context, c) => Stack(
       children: [
@@ -334,7 +322,7 @@ class PowerTab extends StatelessWidget {
       );
     }
     return _withSpectrogram(vm, (spec, metrics, track) {
-      final spanMs = _takeSpanMs(spec.frames, spec.hop, spec.sampleRate, track);
+      final spanMs = track.durationMs;
       return Padding(
         padding: const EdgeInsets.fromLTRB(16, 12, 20, 16),
         child: ValueListenableBuilder<Duration>(
@@ -377,11 +365,12 @@ class VowelTab extends StatelessWidget {
       );
     }
     return _withMetrics(vm, (m, track) {
-      final spanMs = _takeSpanMs(m.frames, m.hop, m.sampleRate, track);
       return ValueListenableBuilder<Duration>(
         valueListenable: vm.position,
         builder: (context, pos, _) {
-          final fr = m.frameAtTime(_localSeconds(pos, spanMs, track.startMs));
+          final fr = m.frameAtTime(
+            _localSeconds(pos, track.durationMs, track.startMs),
+          );
           return _vowelPanel(m.f1[fr], m.f2[fr]);
         },
       );
@@ -453,7 +442,7 @@ class PitchTab extends StatelessWidget {
       (m, track) => LayoutBuilder(
         builder: (context, c) => PitchLane(
           track: track,
-          timelineDurationMs: _takeSpanMs(m.frames, m.hop, m.sampleRate, track),
+          timelineDurationMs: track.durationMs,
           position: vm.position,
           headerWidth: 132,
           loading: false,
@@ -492,7 +481,7 @@ class TimbreTab extends StatelessWidget {
       );
     }
     return _withMetrics(vm, (m, track) {
-      final spanMs = _takeSpanMs(m.frames, m.hop, m.sampleRate, track);
+      final spanMs = track.durationMs;
       return Padding(
         padding: const EdgeInsets.fromLTRB(16, 12, 20, 16),
         child: Column(
@@ -778,7 +767,7 @@ class VibratoTab extends StatelessWidget {
       );
     }
     return _withMetrics(vm, (m, track) {
-      final spanMs = _takeSpanMs(m.frames, m.hop, m.sampleRate, track);
+      final spanMs = track.durationMs;
       final notes = segmentPitchNotes(m);
       // Memoize per note once per build — the take's vibrato doesn't change as
       // the playhead moves, so we must not recompute it on every position tick.
@@ -959,7 +948,7 @@ class RegisterTab extends StatelessWidget {
         return const StudioHint('Sing a passage to map your registers.');
       }
       final range = pitchSemitoneRange(m);
-      final spanMs = _takeSpanMs(m.frames, m.hop, m.sampleRate, track);
+      final spanMs = track.durationMs;
       return Padding(
         padding: const EdgeInsets.fromLTRB(16, 12, 20, 16),
         child: Column(

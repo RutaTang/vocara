@@ -69,6 +69,19 @@ class TechniqueMedia {
     };
   }
 
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TechniqueMedia &&
+          other.id == id &&
+          other.path == path &&
+          other.kind == kind &&
+          other.label == label &&
+          other.addedAt == addedAt;
+
+  @override
+  int get hashCode => Object.hash(id, path, kind, label, addedAt);
+
   /// File extensions recognized as video; everything else importable is treated
   /// as audio.
   static const _videoExtensions = {

@@ -78,6 +78,19 @@ class EqBand {
       enabled: j['enabled'] as bool? ?? true,
     );
   }
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is EqBand &&
+          other.kind == kind &&
+          other.freq == freq &&
+          other.q == q &&
+          other.gainDb == gainDb &&
+          other.enabled == enabled;
+
+  @override
+  int get hashCode => Object.hash(kind, freq, q, gainDb, enabled);
 }
 
 /// Feed-forward compressor settings.
@@ -143,6 +156,21 @@ class CompSettings {
     ),
     makeupDb: ((j['makeupDb'] as num?)?.toDouble() ?? 0.0).clamp(0.0, 18.0),
   );
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is CompSettings &&
+          other.thresholdDb == thresholdDb &&
+          other.ratio == ratio &&
+          other.kneeDb == kneeDb &&
+          other.attackMs == attackMs &&
+          other.releaseMs == releaseMs &&
+          other.makeupDb == makeupDb;
+
+  @override
+  int get hashCode =>
+      Object.hash(thresholdDb, ratio, kneeDb, attackMs, releaseMs, makeupDb);
 }
 
 /// De-esser: split-band sibilance reducer.
@@ -180,6 +208,17 @@ class DeEsserSettings {
     ),
     rangeDb: ((j['rangeDb'] as num?)?.toDouble() ?? 12.0).clamp(0.0, 24.0),
   );
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DeEsserSettings &&
+          other.freq == freq &&
+          other.thresholdDb == thresholdDb &&
+          other.rangeDb == rangeDb;
+
+  @override
+  int get hashCode => Object.hash(freq, thresholdDb, rangeDb);
 }
 
 /// Noise gate / downward expander.
@@ -226,6 +265,18 @@ class GateSettings {
       500.0,
     ),
   );
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is GateSettings &&
+          other.thresholdDb == thresholdDb &&
+          other.rangeDb == rangeDb &&
+          other.attackMs == attackMs &&
+          other.releaseMs == releaseMs;
+
+  @override
+  int get hashCode => Object.hash(thresholdDb, rangeDb, attackMs, releaseMs);
 }
 
 /// Feedback delay (echo / throw).
@@ -254,6 +305,17 @@ class DelaySettings {
     feedback: ((j['feedback'] as num?)?.toDouble() ?? 0.3).clamp(0.0, 0.95),
     mix: ((j['mix'] as num?)?.toDouble() ?? 0.0).clamp(0.0, 1.0),
   );
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DelaySettings &&
+          other.timeMs == timeMs &&
+          other.feedback == feedback &&
+          other.mix == mix;
+
+  @override
+  int get hashCode => Object.hash(timeMs, feedback, mix);
 }
 
 /// Soft saturation / harmonic exciter.
@@ -275,6 +337,16 @@ class SaturationSettings {
         driveDb: ((j['driveDb'] as num?)?.toDouble() ?? 6.0).clamp(0.0, 36.0),
         mix: ((j['mix'] as num?)?.toDouble() ?? 0.0).clamp(0.0, 1.0),
       );
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is SaturationSettings &&
+          other.driveDb == driveDb &&
+          other.mix == mix;
+
+  @override
+  int get hashCode => Object.hash(driveDb, mix);
 }
 
 /// Vocal doubler / chorus.
@@ -315,6 +387,18 @@ class DoublerSettings {
     rateHz: ((j['rateHz'] as num?)?.toDouble() ?? 0.6).clamp(0.05, 8.0),
     mix: ((j['mix'] as num?)?.toDouble() ?? 0.0).clamp(0.0, 1.0),
   );
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DoublerSettings &&
+          other.delayMs == delayMs &&
+          other.depthMs == depthMs &&
+          other.rateHz == rateHz &&
+          other.mix == mix;
+
+  @override
+  int get hashCode => Object.hash(delayMs, depthMs, rateHz, mix);
 }
 
 /// Brick-wall peak limiter.
@@ -338,6 +422,16 @@ class LimiterSettings {
     ceilingDb: ((j['ceilingDb'] as num?)?.toDouble() ?? -0.3).clamp(-12.0, 0.0),
     releaseMs: ((j['releaseMs'] as num?)?.toDouble() ?? 80.0).clamp(1.0, 500.0),
   );
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is LimiterSettings &&
+          other.ceilingDb == ceilingDb &&
+          other.releaseMs == releaseMs;
+
+  @override
+  int get hashCode => Object.hash(ceilingDb, releaseMs);
 }
 
 /// A post-fader aux send: a copy of the channel, scaled by [levelDb], routed to
@@ -358,6 +452,14 @@ class TrackSend {
     // [kSendOffDb, 0]; a hand-edited positive value would over-drive the bus.
     levelDb: ((j['levelDb'] as num?)?.toDouble() ?? 0.0).clamp(kSendOffDb, 0.0),
   );
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TrackSend && other.busId == busId && other.levelDb == levelDb;
+
+  @override
+  int get hashCode => Object.hash(busId, levelDb);
 }
 
 /// Max post-fader aux sends per channel (matches the engine's `MAX_SENDS`).
@@ -418,6 +520,11 @@ class TrackFx {
 
   /// The default flat 6-band strip (low shelf, four peaks, high shelf),
   /// everything off. Frequencies match the engine's `EqNode::default_strip`.
+  ///
+  /// Returns the one canonical const instance: its [eq] list is a deeply
+  /// immutable const list, so flat instances can never share MUTABLE band
+  /// state across tracks (in-place mutation throws; edits must go through
+  /// [withBand]/[copyWith], which build fresh lists).
   static TrackFx flat() => const TrackFx(eq: _flatBands);
 
   static const List<EqBand> _flatBands = [
@@ -487,7 +594,9 @@ class TrackFx {
     double? sendDb,
     List<FxKind>? order,
   }) => TrackFx(
-    eq: eq ?? this.eq,
+    // Defensive copies: never retain a caller's list, so mutating it after
+    // the call can't reach into this (otherwise immutable) value.
+    eq: eq != null ? List.of(eq) : this.eq,
     eqOn: eqOn ?? this.eqOn,
     comp: comp ?? this.comp,
     compOn: compOn ?? this.compOn,
@@ -506,7 +615,7 @@ class TrackFx {
     reverb: reverb ?? this.reverb,
     reverbOn: reverbOn ?? this.reverbOn,
     sendDb: sendDb ?? this.sendDb,
-    order: order ?? this.order,
+    order: order != null ? List.of(order) : this.order,
   );
 
   /// Normalizes a chain order: de-dupes, drops unknown kinds, and appends any
@@ -633,6 +742,55 @@ class TrackFx {
       order: order,
     );
   }
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TrackFx &&
+          listEquals(other.eq, eq) &&
+          other.eqOn == eqOn &&
+          other.comp == comp &&
+          other.compOn == compOn &&
+          other.deEsser == deEsser &&
+          other.deEsserOn == deEsserOn &&
+          other.gate == gate &&
+          other.gateOn == gateOn &&
+          other.delay == delay &&
+          other.delayOn == delayOn &&
+          other.saturation == saturation &&
+          other.saturationOn == saturationOn &&
+          other.doubler == doubler &&
+          other.doublerOn == doublerOn &&
+          other.limiter == limiter &&
+          other.limiterOn == limiterOn &&
+          other.reverb == reverb &&
+          other.reverbOn == reverbOn &&
+          other.sendDb == sendDb &&
+          listEquals(other.order, order);
+
+  @override
+  int get hashCode => Object.hash(
+    Object.hashAll(eq),
+    eqOn,
+    comp,
+    compOn,
+    deEsser,
+    deEsserOn,
+    gate,
+    gateOn,
+    delay,
+    delayOn,
+    saturation,
+    saturationOn,
+    doubler,
+    doublerOn,
+    limiter,
+    limiterOn,
+    reverb,
+    reverbOn,
+    sendDb,
+    Object.hashAll(order),
+  );
 }
 
 /// The one shared reverb bus (Freeverb). `wet`/`width` 0..1; tracks feed it via their send.
@@ -678,4 +836,16 @@ class ReverbSettings {
     wet: ((j['wet'] as num?)?.toDouble() ?? 0.25).clamp(0.0, 1.0),
     width: ((j['width'] as num?)?.toDouble() ?? 1.0).clamp(0.0, 1.0),
   );
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ReverbSettings &&
+          other.roomSize == roomSize &&
+          other.damping == damping &&
+          other.wet == wet &&
+          other.width == width;
+
+  @override
+  int get hashCode => Object.hash(roomSize, damping, wet, width);
 }

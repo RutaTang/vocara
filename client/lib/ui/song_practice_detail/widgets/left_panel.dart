@@ -911,7 +911,7 @@ class _TakeHeader extends StatelessWidget {
         ),
         const SizedBox(height: 8),
         Text(
-          '$sub  ·  ${formatClockMs(track.spanEndMs - track.spanStartMs)}  ·  ${_fmtDate(track.createdAt)}',
+          '$sub  ·  ${formatClockMs(track.durationMs)}  ·  ${_fmtDate(track.createdAt)}',
           style: const TextStyle(color: Studio.textFaint, fontSize: 11),
         ),
       ],

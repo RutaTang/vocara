@@ -1091,10 +1091,12 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   }
 
   /// Cache key for a take's whole-lane aggregate analysis. Embeds the ordered
-  /// clip ids (with an `agg:` prefix that no file path uses) so the key
-  /// self-invalidates whenever the clip set changes.
+  /// clip ids AND their timeline starts (with an `agg:` prefix that no file
+  /// path uses) so the key self-invalidates whenever the clip set changes or a
+  /// clip moves — the merged analysis bakes each clip's lane-relative offset
+  /// into its frame placement.
   String aggregateKeyFor(AudioTrack track) =>
-      'agg:${track.id}#${track.clips.map((c) => c.id).join(',')}';
+      'agg:${track.id}#${track.clips.map((c) => '${c.id}@${c.startMs}').join(',')}';
 
   /// The subject the inspector analyzes for the current selection: a single
   /// selected clip (analyze that one file), or — when the lane is selected via
@@ -1181,26 +1183,41 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     return cache[s.key] ??= analyzeRegister(m);
   }
 
-  /// Voice metrics for an arbitrary track (its inline lanes read this).
+  /// Voice metrics for an arbitrary lane (its inline sub-lanes read this): the
+  /// clip's own analysis for a single-clip lane, or the whole-lane aggregate —
+  /// aligned to the lane span, gaps as NaN frames — for a multi-clip lane.
   VoiceMetrics? metricsFor(String trackId) {
     final t = _trackById(trackId);
-    return t == null ? null : _metricsCache[t.audioFilePath];
+    if (t == null) return null;
+    if (t.clips.length > 1) return _aggMetricsCache[aggregateKeyFor(t)];
+    final clip = t.primaryClip;
+    return clip == null ? null : _metricsCache[clip.audioFilePath];
   }
 
   bool metricsLoadingFor(String trackId) {
     final t = _trackById(trackId);
-    return t != null && _metricsLoading.contains(t.audioFilePath);
+    if (t == null) return false;
+    if (t.clips.length > 1) return _aggLoading.contains(aggregateKeyFor(t));
+    final clip = t.primaryClip;
+    return clip != null && _metricsLoading.contains(clip.audioFilePath);
   }
 
-  /// Computed spectrogram for an arbitrary track (its inline lanes read this).
+  /// Computed spectrogram for an arbitrary lane (its inline sub-lanes read
+  /// this); single vs multi-clip resolution mirrors [metricsFor].
   Spectrogram? spectrogramFor(String trackId) {
     final t = _trackById(trackId);
-    return t == null ? null : _spectrogramCache[t.audioFilePath];
+    if (t == null) return null;
+    if (t.clips.length > 1) return _aggSpectrogramCache[aggregateKeyFor(t)];
+    final clip = t.primaryClip;
+    return clip == null ? null : _spectrogramCache[clip.audioFilePath];
   }
 
   bool spectrogramLoadingFor(String trackId) {
     final t = _trackById(trackId);
-    return t != null && _spectrogramLoading.contains(t.audioFilePath);
+    if (t == null) return false;
+    if (t.clips.length > 1) return _aggLoading.contains(aggregateKeyFor(t));
+    final clip = t.primaryClip;
+    return clip != null && _spectrogramLoading.contains(clip.audioFilePath);
   }
 
   // --- Inline analysis sub-lanes (Logic-style fold-out) -------------------
@@ -1246,12 +1263,16 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     }
   }
 
-  /// Computes + caches voice metrics for any track's audio (lazy, in an isolate;
-  /// WAV-only). Shares [_metricsCache] with the Voiceprint dock.
+  /// Computes + caches voice metrics for a lane (lazy, in an isolate;
+  /// WAV-only): the clip's file for a single-clip lane, or the whole-lane
+  /// aggregate for a multi-clip lane. Shares the caches with the Voiceprint
+  /// dock.
   Future<void> ensureMetricsFor(String trackId) async {
     final track = _trackById(trackId);
     if (track == null) return;
-    await _ensureMetricsForPath(track.audioFilePath);
+    if (track.clips.length > 1) return _ensureAggregateAnalysis(track);
+    final clip = track.primaryClip;
+    if (clip != null) await _ensureMetricsForPath(clip.audioFilePath);
   }
 
   /// Computes + caches voice metrics for one audio file (lazy, in an isolate;
@@ -1282,11 +1303,14 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     }
   }
 
-  /// Computes + caches the spectrogram for any track's audio (lazy).
+  /// Computes + caches the spectrogram for a lane (lazy); single vs multi-clip
+  /// resolution mirrors [ensureMetricsFor].
   Future<void> ensureSpectrogramFor(String trackId) async {
     final track = _trackById(trackId);
     if (track == null) return;
-    await _ensureSpectrogramForPath(track.audioFilePath);
+    if (track.clips.length > 1) return _ensureAggregateAnalysis(track);
+    final clip = track.primaryClip;
+    if (clip != null) await _ensureSpectrogramForPath(clip.audioFilePath);
   }
 
   /// Computes + caches the spectrogram for one audio file (lazy). Keyed by
@@ -1378,9 +1402,10 @@ class SongPracticeDetailViewModel extends ChangeNotifier
 
   /// Computes the whole-lane aggregate for a multi-clip [track]: analyzes each
   /// clip's file (reusing the per-path caches, so selecting a clip later is
-  /// already warm), then merges the per-clip results in timeline order. Clips
-  /// that fail or aren't WAV are simply skipped; the aggregate is built from
-  /// whatever analyzed.
+  /// already warm), then merges the per-clip results at their lane-relative
+  /// offsets — so the aggregate spans exactly [AudioTrack.startMs]..[endMs],
+  /// with gaps between clips as silence. Clips that fail or aren't WAV are
+  /// simply skipped; the aggregate is built from whatever analyzed.
   Future<void> _ensureAggregateAnalysis(AudioTrack track) async {
     final key = aggregateKeyFor(track);
     if (_aggMetricsCache.containsKey(key) ||
@@ -1391,14 +1416,16 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     _aggLoading.add(key);
     notifyListeners();
     try {
-      final clips = [...track.clips]
-        ..sort((a, b) => a.startMs.compareTo(b.startMs));
       await Future.wait([
-        for (final c in clips) _ensureClipAnalysis(c.audioFilePath),
+        for (final c in track.clips) _ensureClipAnalysis(c.audioFilePath),
       ]);
-      final metrics = <VoiceMetrics>[];
-      final specs = <Spectrogram>[];
-      for (final c in clips) {
+      // Offsets are relative to the lane's span start (min over ALL clips, even
+      // ones whose analysis failed), so the merged frames line up with the lane
+      // axis (track.startMs/durationMs) every consumer maps against.
+      final laneStartMs = track.startMs;
+      final metrics = <({int offsetMs, VoiceMetrics metrics})>[];
+      final specs = <({int offsetMs, Spectrogram spectrogram})>[];
+      for (final c in track.clips) {
         final m = _metricsCache[c.audioFilePath];
         final spec = _spectrogramCache[c.audioFilePath];
         // Fold a clip in only when BOTH analyses are present and non-empty, kept
@@ -1406,8 +1433,9 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         // metrics.frames=0, which would desync the two merged framings (the
         // formant overlay then normalizes against the wrong frame count).
         if (m != null && spec != null && m.frames > 0 && spec.frames > 0) {
-          metrics.add(m);
-          specs.add(spec);
+          final offsetMs = c.startMs - laneStartMs;
+          metrics.add((offsetMs: offsetMs, metrics: m));
+          specs.add((offsetMs: offsetMs, spectrogram: spec));
         }
       }
       final mergedMetrics = mergeVoiceMetrics(metrics);
@@ -1601,7 +1629,11 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         accompaniment: track,
         clearSeparationSource: true,
       );
-      if (old != null) await _audioFiles.deleteAudio(old.audioFilePath);
+      if (old != null) {
+        for (final c in old.clips) {
+          await _audioFiles.deleteAudio(c.audioFilePath);
+        }
+      }
       if (staleSource != null) {
         await _audioFiles.deleteAudio(staleSource);
       }
@@ -1636,7 +1668,11 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       final old = cur.reference;
       final staleSource = cur.separationSource;
       _practice = cur.copyWith(reference: track, clearSeparationSource: true);
-      if (old != null) await _audioFiles.deleteAudio(old.audioFilePath);
+      if (old != null) {
+        for (final c in old.clips) {
+          await _audioFiles.deleteAudio(c.audioFilePath);
+        }
+      }
       if (staleSource != null) {
         await _audioFiles.deleteAudio(staleSource);
       }
@@ -1719,9 +1755,10 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       return;
     }
     // The original to separate + keep: prefer the Reference slot (where the
-    // original lives), else the right-clicked track.
+    // original lives), else the right-clicked track. Backings are single-clip
+    // lanes, so the primary clip's file IS the original recording.
     final original = practice.reference ?? source;
-    final originalPath = original.audioFilePath;
+    final originalPath = original.primaryClip?.audioFilePath ?? '';
     final baseName = original.displayName.replaceAll(
       RegExp(r'\s*\(Instrumental\)$'),
       '',
@@ -1774,10 +1811,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
                   id: original.id,
                   kind: AudioTrackKind.reference,
                   displayName: original.displayName,
-                  audioFilePath: original.audioFilePath,
-                  durationMs: original.durationMs,
-                  startMs: original.startMs,
-                  waveformPeaks: original.waveformPeaks,
+                  clips: original.clips,
                   notes: original.notes,
                   techniqueMarkers: original.techniqueMarkers,
                   colorValue: original.colorValue,
@@ -1823,16 +1857,19 @@ class SongPracticeDetailViewModel extends ChangeNotifier
           return;
         }
 
-        // The instrumental is live + persisted. Delete any prior backing file
-        // that's no longer referenced — never the kept original or new
+        // The instrumental is live + persisted. Delete any prior backing files
+        // that are no longer referenced — never the kept original or new
         // instrumental. Errors here must NOT roll back the live track.
         for (final old in [oldAccompaniment, oldReference]) {
-          if (old != null &&
-              old.audioFilePath != originalPath &&
-              old.audioFilePath != instDest) {
-            _evictAnalysis(old.audioFilePath);
+          if (old == null) continue;
+          for (final c in old.clips) {
+            if (c.audioFilePath == originalPath ||
+                c.audioFilePath == instDest) {
+              continue;
+            }
+            _evictAnalysis(c.audioFilePath);
             try {
-              await _audioFiles.deleteAudio(old.audioFilePath);
+              await _audioFiles.deleteAudio(c.audioFilePath);
             } catch (_) {
               /* best-effort: a lingering old file is harmless */
             }
@@ -2449,8 +2486,20 @@ class SongPracticeDetailViewModel extends ChangeNotifier
 
   // --- Clip editing (drag-move, reorder, split, merge, …) -----------------
 
-  /// Persists a finished drag-move and re-aligns offset-aware playback.
-  Future<void> commitTrackMove() => _save();
+  /// Persists a finished drag-move and re-aligns offset-aware playback. A move
+  /// changes the lane-relative offsets baked into a multi-clip take's aggregate
+  /// analysis (its cache key embeds clip positions, so the old entry is simply
+  /// stale) — recompute whatever analysis is on screen for the new layout. The
+  /// ensure calls are cheap no-ops for single-clip takes and cached subjects.
+  Future<void> commitTrackMove() async {
+    await _save();
+    if ((_dockOpen && _dockShowsTake) || _inspectorOpen) {
+      unawaited(ensureSelectedSpectrogram());
+    }
+    for (final id in _expandedTracks) {
+      _ensureLaneData(id);
+    }
+  }
 
   /// Moves a single clip along the timeline live (model only) while dragging.
   /// Persist once on release with [commitTrackMove].
@@ -2566,8 +2615,10 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     final src = _trackById(trackId);
     if (practice == null || src == null || src.isBacking) return;
     if (_busy || isSeparating) return; // no concurrent structural edit
-    // Byte-splitting one file can't represent a multi-clip lane — refuse rather
-    // than silently drop the trailing clips (delete/move a clip from its menu).
+    // Byte-splitting is a ONE-FILE operation: a multi-clip lane has several
+    // independent files, and its lane span (startMs/durationMs) covers gaps no
+    // file byte maps to — refuse rather than silently drop the other clips
+    // (delete/move a clip from its menu instead).
     if (src.clips.length > 1) {
       _toast(
         'This take has multiple clips. Delete or move a clip from its menu '
@@ -2575,8 +2626,13 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       );
       return;
     }
+    // Single-clip lane: the clip IS the lane (same span), so the cut position
+    // maps 1:1 into the clip's file.
+    final clip = src.primaryClip;
     final atMs = position.value.inMilliseconds;
-    if (atMs <= src.startMs + _minLoopMs || atMs >= src.endMs - _minLoopMs) {
+    if (clip == null ||
+        atMs <= clip.startMs + _minLoopMs ||
+        atMs >= clip.endMs - _minLoopMs) {
       _toast(
         'Move the playhead onto this take to split it. The take spans '
         'only its highlighted region.',
@@ -2586,15 +2642,20 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     await _runBusy(() async {
       final parts = await _edits.splitWav(
         practiceId: _practiceId,
-        sourcePath: src.audioFilePath,
-        splitFileMs: atMs - src.startMs,
+        sourcePath: clip.audioFilePath,
+        splitFileMs: atMs - clip.startMs,
       );
       final firstAnalysis = await _waveforms.analyze(parts.firstPath);
       final secondAnalysis = await _waveforms.analyze(parts.secondPath);
       final first = src.copyWith(
-        audioFilePath: parts.firstPath,
-        durationMs: firstAnalysis.durationMs,
-        waveformPeaks: firstAnalysis.peaks,
+        // The surviving take keeps its clip id (same row, new file + length).
+        clips: [
+          clip.copyWith(
+            audioFilePath: parts.firstPath,
+            durationMs: firstAnalysis.durationMs,
+            waveformPeaks: firstAnalysis.peaks,
+          ),
+        ],
         // Markers stay with the half their start falls in; a range straddling
         // the cut is clamped so it doesn't dangle past the shortened take.
         notes: src.notes
@@ -2608,11 +2669,10 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       );
       final second = src.copyWith(
         id: newId(),
-        // A FRESH clip id (not the legacy single-clip copyWith path, which keeps the
-        // source clip's id) — otherwise the new take and the surviving `first` take would
-        // share one clip primary key and the save transaction would roll back on the
-        // duplicate INSERT, silently losing the split (and the original file is already
-        // deleted by then).
+        // A FRESH clip id — otherwise the new take and the surviving `first`
+        // take would share one clip primary key and the save transaction would
+        // roll back on the duplicate INSERT, silently losing the split (and the
+        // original file is already deleted by then).
         clips: [
           AudioClip(
             id: newId(),
@@ -2646,8 +2706,8 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       list[idx] = first;
       list.insert(idx + 1, second);
       _practice = cur.copyWith(vocalTracks: list);
-      _evictAnalysis(src.audioFilePath);
-      await _audioFiles.deleteAudio(src.audioFilePath);
+      _evictAnalysis(clip.audioFilePath);
+      await _audioFiles.deleteAudio(clip.audioFilePath);
       await _save();
       _toast('Take split.');
     });
@@ -2673,24 +2733,32 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     }
     final top = visible[vIdx];
     final bottom = visible[vIdx + 1];
-    // Byte-concatenating two primary files can't represent multi-clip lanes —
-    // refuse rather than orphan the trailing clips' audio.
+    // Byte-concatenation joins exactly TWO files into one clip: a multi-clip
+    // lane has several independent files (and its lane span covers gaps no file
+    // byte maps to) — refuse rather than orphan the other clips' audio.
     if (top.clips.length > 1 || bottom.clips.length > 1) {
       _toast(
         'These takes have multiple clips and can\'t be merged into one lane.',
       );
       return;
     }
+    // Single-clip lanes: each lane's clip IS the lane (same span).
+    final topClip = top.primaryClip;
+    final bottomClip = bottom.primaryClip;
+    if (topClip == null || bottomClip == null) {
+      _toast('An empty take has no audio to merge.');
+      return;
+    }
     await _runBusy(() async {
       final mergedPath = await _edits.concatWav(
         practiceId: _practiceId,
-        firstPath: top.audioFilePath,
-        secondPath: bottom.audioFilePath,
+        firstPath: topClip.audioFilePath,
+        secondPath: bottomClip.audioFilePath,
       );
       final analysis = await _waveforms.analyze(mergedPath);
       // Shift the bottom take's markers onto the merged timeline; range markers
       // shift their end by the same delta so the span is preserved.
-      final delta = top.startMs + top.durationMs - bottom.startMs;
+      final delta = topClip.endMs - bottomClip.startMs;
       // Fresh ids for the bottom take's notes/markers: the bottom track is tombstoned but
       // its child rows keep these ids, so reusing them on the merged (top) track would
       // collide on insert and roll the save back.
@@ -2713,9 +2781,14 @@ class SongPracticeDetailViewModel extends ChangeNotifier
           ),
       ]..sort((a, b) => a.positionMs.compareTo(b.positionMs));
       final merged = top.copyWith(
-        audioFilePath: mergedPath,
-        durationMs: analysis.durationMs,
-        waveformPeaks: analysis.peaks,
+        // The merged take keeps the top clip's id (same row, new file+length).
+        clips: [
+          topClip.copyWith(
+            audioFilePath: mergedPath,
+            durationMs: analysis.durationMs,
+            waveformPeaks: analysis.peaks,
+          ),
+        ],
         notes: notes,
         techniqueMarkers: markers,
       );
@@ -2733,10 +2806,10 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       _practice = cur.copyWith(vocalTracks: newList);
       _expandedTracks.remove(bottom.id); // the absorbed take is gone
       _trackLanes.remove(bottom.id);
-      _evictAnalysis(top.audioFilePath);
-      _evictAnalysis(bottom.audioFilePath);
-      await _audioFiles.deleteAudio(top.audioFilePath);
-      await _audioFiles.deleteAudio(bottom.audioFilePath);
+      _evictAnalysis(topClip.audioFilePath);
+      _evictAnalysis(bottomClip.audioFilePath);
+      await _audioFiles.deleteAudio(topClip.audioFilePath);
+      await _audioFiles.deleteAudio(bottomClip.audioFilePath);
       await _save();
       _toast('Takes merged.');
     });
@@ -2744,21 +2817,30 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     _onTrackAudioChanged(trackId);
   }
 
-  /// Recomputes the waveform (and invalidates the cached spectrogram) for a
-  /// track — useful after its audio file changed underneath.
+  /// Recomputes the waveform (and invalidates the cached spectrogram) for
+  /// every clip on a lane — useful after its audio files changed underneath.
   Future<void> reanalyzeTrack(String trackId) async {
     final track = _trackById(trackId);
     if (track == null) return;
     await _runBusy(() async {
-      final analysis = await _waveforms.analyze(track.audioFilePath);
+      // Analyze EVERY clip's file (a lane can hold several independent files),
+      // then fold the results back in BY CLIP ID against the live model — a
+      // clip added/removed during the analyze awaits must survive untouched.
+      final updatedById = <String, AudioClip>{};
+      for (final c in track.clips) {
+        final analysis = await _waveforms.analyze(c.audioFilePath);
+        updatedById[c.id] = c.copyWith(
+          durationMs: analysis.durationMs,
+          waveformPeaks: analysis.peaks,
+        );
+        _evictAnalysis(c.audioFilePath);
+      }
       _updateTrack(
         trackId,
         (t) => t.copyWith(
-          durationMs: analysis.durationMs,
-          waveformPeaks: analysis.peaks,
+          clips: [for (final c in t.clips) updatedById[c.id] ?? c],
         ),
       );
-      _evictAnalysis(track.audioFilePath);
       await _save();
     });
     _onTrackAudioChanged(trackId);
@@ -3493,9 +3575,18 @@ class SongPracticeDetailViewModel extends ChangeNotifier
 
   /// The vocal compressor's current gain reduction (dB) for a track — for a live meter.
   double gainReductionDb(String trackId) {
-    // The FX meter reads the lane's primary clip source.
-    final clip = _trackById(trackId)?.primaryClip;
-    return clip == null ? 0 : _playback.trackGainReductionDb(clip.id);
+    // Engine sources are per-clip, so the FX meter reads the take's clip under
+    // the playhead (the one sounding); in the gaps between clips nothing of the
+    // take plays, so there is no gain reduction to show.
+    final track = _trackById(trackId);
+    if (track == null) return 0;
+    final posMs = position.value.inMilliseconds;
+    for (final c in track.clips) {
+      if (posMs >= c.startMs && posMs < c.endMs) {
+        return _playback.trackGainReductionDb(c.id);
+      }
+    }
+    return 0;
   }
 
   AudioTrack? _trackById(String trackId) {

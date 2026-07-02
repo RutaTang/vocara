@@ -71,7 +71,9 @@ class FxBus {
     soloed: soloed ?? this.soloed,
     pan: pan ?? this.pan,
     outputBusId: clearOutput ? null : (outputBusId ?? this.outputBusId),
-    sends: sends ?? this.sends,
+    // Defensive copy: never retain a caller's list, so mutating it after the
+    // call can't reach into this (otherwise immutable) value.
+    sends: sends != null ? List.of(sends) : this.sends,
   );
 
   Map<String, dynamic> toJson() => {
@@ -102,5 +104,34 @@ class FxBus {
     sends: (j['sends'] as List<dynamic>? ?? const [])
         .map((e) => TrackSend.fromJson(e as Map<String, dynamic>))
         .toList(),
+  );
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is FxBus &&
+          other.id == id &&
+          other.name == name &&
+          other.fx == fx &&
+          other.colorValue == colorValue &&
+          other.volume == volume &&
+          other.muted == muted &&
+          other.soloed == soloed &&
+          other.pan == pan &&
+          other.outputBusId == outputBusId &&
+          listEquals(other.sends, sends);
+
+  @override
+  int get hashCode => Object.hash(
+    id,
+    name,
+    fx,
+    colorValue,
+    volume,
+    muted,
+    soloed,
+    pan,
+    outputBusId,
+    Object.hashAll(sends),
   );
 }

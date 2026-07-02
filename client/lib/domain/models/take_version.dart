@@ -35,4 +35,15 @@ class TakeVersion {
   Map<String, dynamic> toJson() {
     return {'id': id, 'name': name, 'createdAt': createdAt.toIso8601String()};
   }
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TakeVersion &&
+          other.id == id &&
+          other.name == name &&
+          other.createdAt == createdAt;
+
+  @override
+  int get hashCode => Object.hash(id, name, createdAt);
 }

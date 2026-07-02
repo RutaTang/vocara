@@ -91,14 +91,16 @@ class Technique {
     return Technique(
       id: id,
       name: name ?? this.name,
-      aliases: aliases ?? this.aliases,
-      tags: tags ?? this.tags,
+      // Defensive copies: never retain a caller's list, so mutating it after
+      // the call can't reach into this (otherwise immutable) value.
+      aliases: aliases != null ? List.of(aliases) : this.aliases,
+      tags: tags != null ? List.of(tags) : this.tags,
       summary: summary ?? this.summary,
       description: description ?? this.description,
       cues: cues ?? this.cues,
       exercises: exercises ?? this.exercises,
       acousticSignature: acousticSignature ?? this.acousticSignature,
-      media: media ?? this.media,
+      media: media != null ? List.of(media) : this.media,
       createdAt: createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
     );
@@ -143,4 +145,37 @@ class Technique {
       'updatedAt': updatedAt.toIso8601String(),
     };
   }
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is Technique &&
+          other.id == id &&
+          other.name == name &&
+          listEquals(other.aliases, aliases) &&
+          listEquals(other.tags, tags) &&
+          other.summary == summary &&
+          other.description == description &&
+          other.cues == cues &&
+          other.exercises == exercises &&
+          other.acousticSignature == acousticSignature &&
+          listEquals(other.media, media) &&
+          other.createdAt == createdAt &&
+          other.updatedAt == updatedAt;
+
+  @override
+  int get hashCode => Object.hash(
+    id,
+    name,
+    Object.hashAll(aliases),
+    Object.hashAll(tags),
+    summary,
+    description,
+    cues,
+    exercises,
+    acousticSignature,
+    Object.hashAll(media),
+    createdAt,
+    updatedAt,
+  );
 }

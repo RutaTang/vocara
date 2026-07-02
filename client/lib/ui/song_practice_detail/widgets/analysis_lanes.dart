@@ -445,28 +445,44 @@ class LoudnessLanePainter extends CustomPainter {
     double yOf(double db) =>
         (1 - ((db - floor) / _rangeDb).clamp(0.0, 1.0)) * size.height;
 
+    // Segmented paths: a multi-clip take's aggregate metrics carry NaN frames
+    // in the gaps between clips, which must break the envelope instead of
+    // feeding NaN points into the path. Single-clip loudness is always finite.
     final area = Path();
     final line = Path();
     var started = false;
+    var any = false;
     var lastX = 0.0;
+    void closeSegment() {
+      if (!started) return;
+      area
+        ..lineTo(lastX, size.height)
+        ..close();
+      started = false;
+    }
+
     for (var fr = 0; fr < frames; fr++) {
+      final db = metrics.loudness[fr];
+      if (!db.isFinite) {
+        closeSegment();
+        continue;
+      }
       final x = xOf(startMs + metrics.timeOfFrame(fr) * 1000);
-      final y = yOf(metrics.loudness[fr]);
+      final y = yOf(db);
       if (!started) {
         area.moveTo(x, size.height);
         area.lineTo(x, y);
         line.moveTo(x, y);
         started = true;
+        any = true;
       } else {
         area.lineTo(x, y);
         line.lineTo(x, y);
       }
       lastX = x;
     }
-    if (!started) return;
-    area
-      ..lineTo(lastX, size.height)
-      ..close();
+    if (!any) return;
+    closeSegment();
     canvas.drawPath(
       area,
       Paint()..color = Studio.accent.withValues(alpha: 0.18),

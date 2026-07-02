@@ -47,38 +47,75 @@ class Spectrogram {
   }
 }
 
-/// Concatenates several takes' [Spectrogram]s (passed in timeline order) into
-/// one, for whole-lane analysis across a multi-clip take. Parts must share
-/// [bins], [fftSize], [sampleRate] and [hop]; any part whose framing differs
-/// from the first is skipped. Returns null for an empty list and the single part
-/// unchanged for one. Pure.
-Spectrogram? mergeSpectrograms(List<Spectrogram> parts) {
+/// Merges several clips' [Spectrogram]s into one lane-spanning analysis for a
+/// multi-clip take. Each part carries [offsetMs] — the clip's start relative to
+/// the LANE's span start (clip.startMs − track.startMs, so ≥ 0) — and its
+/// frames are placed at that offset, so frame f of the result always sits
+/// f·hop/sampleRate seconds after the lane start. Gaps between clips become
+/// floor (merged minDb) columns, which the heat renderer draws as silence;
+/// where clips overlap, the later-starting clip wins.
+///
+/// Parts must share [bins], [fftSize], [sampleRate] and [hop]; any part whose
+/// framing differs from the first is skipped, as are frameless parts. Returns
+/// null when nothing survives, and a lone survivor starting at the lane origin
+/// unchanged. Pure.
+Spectrogram? mergeSpectrograms(
+  List<({int offsetMs, Spectrogram spectrogram})> parts,
+) {
+  assert(
+    parts.every((p) => p.offsetMs >= 0),
+    'offsets are lane-relative and must be >= 0',
+  );
   if (parts.isEmpty) return null;
-  if (parts.length == 1) return parts.first;
-  final first = parts.first;
+  final first = parts.first.spectrogram;
+  // Skip frameless parts too: they carry nothing to place, and must not
+  // stretch the output span with pure gap.
   final kept = parts
       .where(
         (p) =>
-            p.bins == first.bins &&
-            p.fftSize == first.fftSize &&
-            p.sampleRate == first.sampleRate &&
-            p.hop == first.hop,
+            p.spectrogram.frames > 0 &&
+            p.spectrogram.bins == first.bins &&
+            p.spectrogram.fftSize == first.fftSize &&
+            p.spectrogram.sampleRate == first.sampleRate &&
+            p.spectrogram.hop == first.hop,
       )
       .toList();
   if (kept.isEmpty) return null;
-  if (kept.length == 1) return kept.first;
+  int frameOf(int offsetMs) =>
+      (offsetMs / 1000 * first.sampleRate / first.hop).round();
+  // A lone part at the lane origin IS the whole lane's analysis — unchanged.
+  if (kept.length == 1 && frameOf(kept.single.offsetMs) == 0) {
+    return kept.single.spectrogram;
+  }
+
+  // Place parts in ascending start order (stable on ties), so a later-starting
+  // clip's frames overwrite an earlier clip's where they overlap.
+  final order = [for (var i = 0; i < kept.length; i++) i]
+    ..sort((a, b) {
+      final byStart = kept[a].offsetMs.compareTo(kept[b].offsetMs);
+      return byStart != 0 ? byStart : a.compareTo(b);
+    });
 
   final bins = first.bins;
-  final total = kept.fold(0, (n, p) => n + p.frames);
-  final db = Float32List(total * bins);
+  var total = 0;
   var minDb = double.infinity;
   var maxDb = -double.infinity;
-  var off = 0;
   for (final p in kept) {
-    db.setRange(off, off + p.frames * bins, p.db);
-    if (p.minDb < minDb) minDb = p.minDb;
-    if (p.maxDb > maxDb) maxDb = p.maxDb;
-    off += p.frames * bins;
+    final end = frameOf(p.offsetMs) + p.spectrogram.frames;
+    if (end > total) total = end;
+    if (p.spectrogram.minDb < minDb) minDb = p.spectrogram.minDb;
+    if (p.spectrogram.maxDb > maxDb) maxDb = p.spectrogram.maxDb;
+  }
+  final floorDb = minDb.isFinite ? minDb : 0.0;
+
+  // Pre-fill with the merged floor so gap columns read as silence (the darkest
+  // level any clip carries) instead of the Float32List default of 0 dB, which
+  // the auto-scaled heat map would render as bright noise.
+  final db = Float32List(total * bins)..fillRange(0, total * bins, floorDb);
+  for (final i in order) {
+    final p = kept[i];
+    final at = frameOf(p.offsetMs) * bins;
+    db.setRange(at, at + p.spectrogram.frames * bins, p.spectrogram.db);
   }
   return Spectrogram(
     frames: total,
@@ -88,7 +125,7 @@ Spectrogram? mergeSpectrograms(List<Spectrogram> parts) {
     fftSize: first.fftSize,
     hop: first.hop,
     db: db,
-    minDb: minDb.isFinite ? minDb : 0,
+    minDb: floorDb,
     maxDb: maxDb.isFinite ? maxDb : 0,
   );
 }

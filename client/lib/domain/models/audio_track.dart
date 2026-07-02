@@ -65,7 +65,11 @@ class AudioClip {
       audioFilePath: audioFilePath ?? this.audioFilePath,
       durationMs: durationMs ?? this.durationMs,
       startMs: startMs ?? this.startMs,
-      waveformPeaks: waveformPeaks ?? this.waveformPeaks,
+      // Defensive copy: never retain a caller's list, so mutating it after
+      // the call can't reach into this (otherwise immutable) value.
+      waveformPeaks: waveformPeaks != null
+          ? List.of(waveformPeaks)
+          : this.waveformPeaks,
     );
   }
 
@@ -88,6 +92,25 @@ class AudioClip {
     'startMs': startMs,
     'waveformPeaks': waveformPeaks,
   };
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is AudioClip &&
+          other.id == id &&
+          other.audioFilePath == audioFilePath &&
+          other.durationMs == durationMs &&
+          other.startMs == startMs &&
+          listEquals(other.waveformPeaks, waveformPeaks);
+
+  @override
+  int get hashCode => Object.hash(
+    id,
+    audioFilePath,
+    durationMs,
+    startMs,
+    Object.hashAll(waveformPeaks),
+  );
 }
 
 /// A single lane in the multi-track editor: a list of audio [clips] plus its own
@@ -113,9 +136,9 @@ class AudioTrack {
     this.sends = const [],
   });
 
-  /// Builds a lane. Pass [clips] directly, or the legacy single-clip fields
-  /// (audioFilePath / startMs / durationMs / waveformPeaks) which become one
-  /// clip — so every existing call site keeps working unchanged.
+  /// Builds a lane. Pass [clips] directly, or the single-clip convenience
+  /// fields (audioFilePath / startMs / durationMs / waveformPeaks) which become
+  /// the lane's one clip — the common way imports and recordings create takes.
   factory AudioTrack({
     required String id,
     required AudioTrackKind kind,
@@ -192,7 +215,9 @@ class AudioTrack {
   /// Human-readable label shown on the lane header.
   final String displayName;
 
-  /// The clips on this lane, in timeline order. Empty = an empty take.
+  /// The clips on this lane, in creation order — NOT necessarily timeline
+  /// order (a punch-in can land before an existing clip). Empty = an empty
+  /// take. The lane-span getters below are order-independent.
   final List<AudioClip> clips;
 
   /// Notes pinned to this lane's timeline — the lane's "note track".
@@ -225,8 +250,10 @@ class AudioTrack {
   bool get isBacking =>
       kind == AudioTrackKind.accompaniment || kind == AudioTrackKind.reference;
 
-  /// The lane's primary clip (the first one) — the one analysis runs on. Null
-  /// when the lane is empty.
+  /// The lane's first clip — for file-centric operations that require a
+  /// single-clip lane (byte-level split/merge) or one representative clip.
+  /// Null when the lane is empty. Time/analysis consumers should use the
+  /// lane-span fields ([startMs]/[endMs]/[durationMs]) or iterate [clips].
   AudioClip? get primaryClip => clips.isEmpty ? null : clips.first;
 
   AudioClip? clipById(String clipId) {
@@ -236,25 +263,25 @@ class AudioTrack {
     return null;
   }
 
-  // --- Compatibility accessors (delegate to the primary clip) so the analysis
-  // pipeline and other single-clip readers keep working unchanged. ---
-  String get audioFilePath => primaryClip?.audioFilePath ?? '';
-  int get durationMs => primaryClip?.durationMs ?? 0;
-  int get startMs => primaryClip?.startMs ?? 0;
-  List<double> get waveformPeaks => primaryClip?.waveformPeaks ?? const [];
+  // --- Lane-span time model: the lane's time fields cover ALL of its clips,
+  // so multi-clip takes (punch-in recordings, dropped clips) read correctly
+  // everywhere. For a single-clip lane they equal the clip's own fields. ---
 
-  /// End of the primary clip on the shared timeline.
-  int get endMs => primaryClip?.endMs ?? 0;
-  bool get hasWaveform => primaryClip?.hasWaveform ?? false;
-
-  /// The full timeline span across all clips on the lane.
-  int get spanStartMs => clips.isEmpty
+  /// Start of the lane's content on the shared timeline: the earliest clip
+  /// start (0 for an empty lane).
+  int get startMs => clips.isEmpty
       ? 0
       : clips.fold(
           clips.first.startMs,
           (m, c) => c.startMs < m ? c.startMs : m,
         );
-  int get spanEndMs => clips.fold(0, (m, c) => c.endMs > m ? c.endMs : m);
+
+  /// End of the lane's content on the shared timeline: the latest clip end
+  /// (0 for an empty lane).
+  int get endMs => clips.fold(0, (m, c) => c.endMs > m ? c.endMs : m);
+
+  /// The lane's content span in ms ([startMs]..[endMs]), gaps included.
+  int get durationMs => endMs - startMs;
 
   bool get hasClip => clips.isNotEmpty;
   bool get isEmptyTake => kind == AudioTrackKind.vocal && clips.isEmpty;
@@ -263,11 +290,6 @@ class AudioTrack {
     String? id,
     String? displayName,
     List<AudioClip>? clips,
-    // Legacy single-clip updates → applied to the primary clip.
-    String? audioFilePath,
-    int? durationMs,
-    int? startMs,
-    List<double>? waveformPeaks,
     List<PracticeNote>? notes,
     List<TechniqueMarker>? techniqueMarkers,
     int? colorValue,
@@ -284,40 +306,18 @@ class AudioTrack {
     bool clearBus = false,
     List<TrackSend>? sends,
   }) {
-    List<AudioClip> nextClips;
-    if (clips != null) {
-      nextClips = clips;
-    } else if (audioFilePath != null ||
-        durationMs != null ||
-        startMs != null ||
-        waveformPeaks != null) {
-      final base =
-          primaryClip ??
-          AudioClip(
-            id: '${id ?? this.id}-c0',
-            audioFilePath: '',
-            durationMs: 0,
-          );
-      final updated = base.copyWith(
-        audioFilePath: audioFilePath,
-        durationMs: durationMs,
-        startMs: startMs,
-        waveformPeaks: waveformPeaks,
-      );
-      nextClips = this.clips.isEmpty
-          ? [updated]
-          : [updated, ...this.clips.skip(1)];
-    } else {
-      nextClips = this.clips;
-    }
     return AudioTrack._(
       id: id ?? this.id,
       kind: kind,
       displayName: displayName ?? this.displayName,
       createdAt: createdAt ?? this.createdAt,
-      clips: nextClips,
-      notes: notes ?? this.notes,
-      techniqueMarkers: techniqueMarkers ?? this.techniqueMarkers,
+      // Defensive copies: never retain a caller's list, so mutating it after
+      // the call can't reach into this (otherwise immutable) value.
+      clips: clips != null ? List.of(clips) : this.clips,
+      notes: notes != null ? List.of(notes) : this.notes,
+      techniqueMarkers: techniqueMarkers != null
+          ? List.of(techniqueMarkers)
+          : this.techniqueMarkers,
       // colorValue == null normally means "unchanged"; clearColor resets it to
       // the default (no custom tint).
       colorValue: clearColor ? null : (colorValue ?? this.colorValue),
@@ -328,7 +328,7 @@ class AudioTrack {
       versionId: versionId ?? this.versionId,
       fx: clearFx ? null : (fx ?? this.fx),
       busId: clearBus ? null : (busId ?? this.busId),
-      sends: sends ?? this.sends,
+      sends: sends != null ? List.of(sends) : this.sends,
     );
   }
 
@@ -407,4 +407,47 @@ class AudioTrack {
       'sends': sends.map((s) => s.toJson()).toList(),
     };
   }
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is AudioTrack &&
+          other.id == id &&
+          other.kind == kind &&
+          other.displayName == displayName &&
+          // Order matters: clips are kept in creation order (see [clips]), so
+          // two lanes with the same clips in a different order are NOT equal.
+          listEquals(other.clips, clips) &&
+          listEquals(other.notes, notes) &&
+          listEquals(other.techniqueMarkers, techniqueMarkers) &&
+          other.colorValue == colorValue &&
+          other.muted == muted &&
+          other.soloed == soloed &&
+          other.volume == volume &&
+          other.pan == pan &&
+          other.createdAt == createdAt &&
+          other.versionId == versionId &&
+          other.fx == fx &&
+          other.busId == busId &&
+          listEquals(other.sends, sends);
+
+  @override
+  int get hashCode => Object.hash(
+    id,
+    kind,
+    displayName,
+    Object.hashAll(clips),
+    Object.hashAll(notes),
+    Object.hashAll(techniqueMarkers),
+    colorValue,
+    muted,
+    soloed,
+    volume,
+    pan,
+    createdAt,
+    versionId,
+    fx,
+    busId,
+    Object.hashAll(sends),
+  );
 }

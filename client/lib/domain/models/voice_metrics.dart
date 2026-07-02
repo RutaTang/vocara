@@ -107,37 +107,79 @@ class VoiceMetrics {
       frames == 0 ? double.nan : curve[frameAtTime(seconds)];
 }
 
-/// Concatenates several takes' [VoiceMetrics] (passed in timeline order) into
-/// one, for whole-lane analysis across a multi-clip take. Parts must share
-/// [hop] and [sampleRate] — they do when computed by the same SpectrogramService
-/// defaults — and any part whose framing differs from the first is skipped.
-/// Returns null for an empty list and the single part unchanged for one. The
-/// per-frame curves are concatenated and [ringAvg]/[tiltAvg]/[cppAvg] are
-/// recomputed over the combined active frames. Pure.
-VoiceMetrics? mergeVoiceMetrics(List<VoiceMetrics> parts) {
+/// Merges several clips' [VoiceMetrics] into one lane-spanning analysis for a
+/// multi-clip take. Each part carries [offsetMs] — the clip's start relative to
+/// the LANE's span start (clip.startMs − track.startMs, so ≥ 0) — and its
+/// frames are placed at that offset, so frame f of the result always sits
+/// f·hop/sampleRate seconds after the lane start. Gaps between clips become NaN
+/// frames (inactive), which every curve consumer already treats as "no voice";
+/// where clips overlap, the later-starting clip wins.
+///
+/// Parts must share [hop] and [sampleRate] — they do when computed by the same
+/// SpectrogramService defaults — and any part whose framing differs from the
+/// first is skipped, as are frameless parts. Returns null when nothing
+/// survives, and a lone survivor starting at the lane origin unchanged.
+/// [ringAvg]/[tiltAvg]/[cppAvg] are recomputed over the placed voiced frames
+/// and the input-quality gate keeps the worst clip's values. Pure.
+VoiceMetrics? mergeVoiceMetrics(
+  List<({int offsetMs, VoiceMetrics metrics})> parts,
+) {
+  assert(
+    parts.every((p) => p.offsetMs >= 0),
+    'offsets are lane-relative and must be >= 0',
+  );
   if (parts.isEmpty) return null;
-  if (parts.length == 1) return parts.first;
-  final first = parts.first;
+  final first = parts.first.metrics;
+  // Skip frameless parts too: they carry nothing to place, and must not
+  // stretch the output span with pure gap.
   final kept = parts
-      .where((p) => p.hop == first.hop && p.sampleRate == first.sampleRate)
+      .where(
+        (p) =>
+            p.metrics.frames > 0 &&
+            p.metrics.hop == first.hop &&
+            p.metrics.sampleRate == first.sampleRate,
+      )
       .toList();
   if (kept.isEmpty) return null;
-  if (kept.length == 1) return kept.first;
+  int frameOf(int offsetMs) =>
+      (offsetMs / 1000 * first.sampleRate / first.hop).round();
+  // A lone part at the lane origin IS the whole lane's analysis — unchanged.
+  if (kept.length == 1 && frameOf(kept.single.offsetMs) == 0) {
+    return kept.single.metrics;
+  }
 
-  final total = kept.fold(0, (n, p) => n + p.frames);
-  final ring = Float32List(total);
-  final tilt = Float32List(total);
-  final cpp = Float32List(total);
-  final loudness = Float32List(total);
-  final f0 = Float32List(total);
-  final f1 = Float32List(total);
-  final f2 = Float32List(total);
-  final f3 = Float32List(total);
-  final h1h2 = Float32List(total);
+  // Place parts in ascending start order (stable on ties), so a later-starting
+  // clip's frames overwrite an earlier clip's where they overlap.
+  final order = [for (var i = 0; i < kept.length; i++) i]
+    ..sort((a, b) {
+      final byStart = kept[a].offsetMs.compareTo(kept[b].offsetMs);
+      return byStart != 0 ? byStart : a.compareTo(b);
+    });
+
+  var total = 0;
+  for (final p in kept) {
+    final end = frameOf(p.offsetMs) + p.metrics.frames;
+    if (end > total) total = end;
+  }
+
+  // Pre-fill the curves with NaN (and leave `active` 0) so the frames no clip
+  // covers read as gaps, exactly like unvoiced silence within a clip.
+  Float32List gapFilled() =>
+      Float32List(total)..fillRange(0, total, double.nan);
+  final ring = gapFilled();
+  final tilt = gapFilled();
+  final cpp = gapFilled();
+  final loudness = gapFilled();
+  final f0 = gapFilled();
+  final f1 = gapFilled();
+  final f2 = gapFilled();
+  final f3 = gapFilled();
+  final h1h2 = gapFilled();
   final active = Uint8List(total);
 
-  var off = 0;
-  for (final p in kept) {
+  for (final i in order) {
+    final p = kept[i].metrics;
+    final off = frameOf(kept[i].offsetMs);
     final end = off + p.frames;
     ring.setRange(off, end, p.ring);
     tilt.setRange(off, end, p.tilt);
@@ -149,15 +191,15 @@ VoiceMetrics? mergeVoiceMetrics(List<VoiceMetrics> parts) {
     f3.setRange(off, end, p.f3);
     h1h2.setRange(off, end, p.h1h2);
     active.setRange(off, end, p.active);
-    off = end;
   }
 
-  // Recompute the timbre averages over the concatenation, gated on VOICED frames
-  // (valid F0), to match computeVoiceMetrics's single-clip averages. `active`
-  // alone is the looser AUDIBLE set; averaging ring/tilt/cpp over it would dilute
-  // them with breath/consonant/onset noise, so the same audio would read
-  // differently as a multi-clip aggregate than as one clip. f0 is NaN on unvoiced
-  // frames, so `f0 finite && > 0` closely tracks the voiced gate.
+  // Recompute the timbre averages over the placed frames, gated on VOICED
+  // frames (valid F0), to match computeVoiceMetrics's single-clip averages.
+  // `active` alone is the looser AUDIBLE set; averaging ring/tilt/cpp over it
+  // would dilute them with breath/consonant/onset noise, so the same audio
+  // would read differently as a multi-clip aggregate than as one clip. f0 is
+  // NaN on unvoiced frames AND in the gaps, so `f0 finite && > 0` closely
+  // tracks the voiced gate and gap frames never count.
   double avgVoiced(Float32List c) {
     var sum = 0.0;
     var n = 0;
@@ -177,7 +219,8 @@ VoiceMetrics? mergeVoiceMetrics(List<VoiceMetrics> parts) {
   var peak = double.negativeInfinity;
   var worstClip = 0.0;
   var worstSnr = double.infinity;
-  for (final p in kept) {
+  for (final part in kept) {
+    final p = part.metrics;
     if (p.peakDbfs.isFinite && p.peakDbfs > peak) peak = p.peakDbfs;
     if (p.clippedFraction > worstClip) worstClip = p.clippedFraction;
     if (p.snrDb.isFinite && p.snrDb < worstSnr) worstSnr = p.snrDb;

@@ -27,8 +27,16 @@ class AudioDevice {
 
   @override
   bool operator ==(Object other) =>
-      other is AudioDevice && other.uid == uid && other.isInput == isInput;
+      identical(this, other) ||
+      other is AudioDevice &&
+          other.uid == uid &&
+          other.name == name &&
+          other.rate == rate &&
+          other.isDefault == isDefault &&
+          other.isInput == isInput &&
+          other.isBluetooth == isBluetooth;
 
   @override
-  int get hashCode => Object.hash(uid, isInput);
+  int get hashCode =>
+      Object.hash(uid, name, rate, isDefault, isInput, isBluetooth);
 }

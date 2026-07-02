@@ -118,17 +118,13 @@ class SongPractice {
     ];
   }
 
-  /// The end (offset + duration) of the latest-finishing track — the minimum
+  /// The end of the latest-finishing lane (its last clip's end) — the minimum
   /// length the timeline must span so no audio is clipped off the end.
   int get contentEndMs {
-    // Use each lane's FULL span (max endMs across ALL its clips), not just the primary
-    // clip's end: a vocal take can have a later clip recorded onto it past the first
-    // clip's end, which must still fit inside the timeline / loop extent. (Single-clip
-    // accompaniment/reference: spanEndMs == endMs.)
-    var max = accompaniment?.spanEndMs ?? 0;
-    if ((reference?.spanEndMs ?? 0) > max) max = reference!.spanEndMs;
+    var max = accompaniment?.endMs ?? 0;
+    if ((reference?.endMs ?? 0) > max) max = reference!.endMs;
     for (final track in vocalTracks) {
-      if (track.spanEndMs > max) max = track.spanEndMs;
+      if (track.endMs > max) max = track.endMs;
     }
     return max;
   }
@@ -177,10 +173,14 @@ class SongPractice {
           ? null
           : (accompaniment ?? this.accompaniment),
       reference: clearReference ? null : (reference ?? this.reference),
-      vocalTracks: vocalTracks ?? this.vocalTracks,
-      versions: versions ?? this.versions,
+      // Defensive copies: never retain a caller's list, so mutating it after
+      // the call can't reach into this (otherwise immutable) value.
+      vocalTracks: vocalTracks != null
+          ? List.of(vocalTracks)
+          : this.vocalTracks,
+      versions: versions != null ? List.of(versions) : this.versions,
       activeVersionId: activeVersionId ?? this.activeVersionId,
-      lyrics: lyrics ?? this.lyrics,
+      lyrics: lyrics != null ? List.of(lyrics) : this.lyrics,
       createdAt: createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
       timelineDurationMs: timelineDurationMs ?? this.timelineDurationMs,
@@ -189,7 +189,7 @@ class SongPractice {
           : (separationSource ?? this.separationSource),
       reverb: reverb ?? this.reverb,
       masterVolume: masterVolume ?? this.masterVolume,
-      fxBuses: fxBuses ?? this.fxBuses,
+      fxBuses: fxBuses != null ? List.of(fxBuses) : this.fxBuses,
     );
   }
 
@@ -283,4 +283,43 @@ class SongPractice {
       'fxBuses': fxBuses.map((e) => e.toJson()).toList(),
     };
   }
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is SongPractice &&
+          other.id == id &&
+          other.title == title &&
+          other.accompaniment == accompaniment &&
+          other.reference == reference &&
+          listEquals(other.vocalTracks, vocalTracks) &&
+          listEquals(other.versions, versions) &&
+          other.activeVersionId == activeVersionId &&
+          listEquals(other.lyrics, lyrics) &&
+          other.timelineDurationMs == timelineDurationMs &&
+          other.createdAt == createdAt &&
+          other.updatedAt == updatedAt &&
+          other.separationSource == separationSource &&
+          other.reverb == reverb &&
+          other.masterVolume == masterVolume &&
+          listEquals(other.fxBuses, fxBuses);
+
+  @override
+  int get hashCode => Object.hash(
+    id,
+    title,
+    accompaniment,
+    reference,
+    Object.hashAll(vocalTracks),
+    Object.hashAll(versions),
+    activeVersionId,
+    Object.hashAll(lyrics),
+    timelineDurationMs,
+    createdAt,
+    updatedAt,
+    separationSource,
+    reverb,
+    masterVolume,
+    Object.hashAll(fxBuses),
+  );
 }

@@ -116,7 +116,7 @@ void main() {
     final accompaniment = vm.practice!.accompaniment;
     expect(accompaniment, isNotNull, reason: 'accompaniment should be set');
     expect(
-      accompaniment!.waveformPeaks,
+      accompaniment!.primaryClip!.waveformPeaks,
       isNotEmpty,
       reason: 'just_waveform should produce peaks',
     );
