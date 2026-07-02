@@ -13,8 +13,11 @@ import 'dart:async';
 ///    `NSApplication.terminate:`, which FlutterAppDelegate turns into a
 ///    cancellable exit request; the `AppLifecycleListener.onExitRequested`
 ///    guard runs [finalizeAll] before allowing the exit.
-/// NOT covered (known, deferred): force-quit / `kill -9`, where the process
-/// dies without notice; the staged file is swept on next boot.
+/// NOT interceptable: force-quit / `kill -9`, where the process dies without
+/// notice. That path is covered differently: the engine keeps the streaming
+/// WAV's header valid (periodic in-place patch), and the next boot recovers
+/// the staged file as a new take (`Persistence.recoverStagedRecordings`)
+/// before the staging sweep.
 ///
 /// A recording view model registers a callback when it starts and removes it
 /// when it stops or is disposed.

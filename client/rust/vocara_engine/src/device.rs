@@ -624,7 +624,21 @@ fn writer_run(mut rec: Consumer<[Smp; CHANNELS]>, rx: mpsc::Receiver<WriterCmd>)
                 wrote = true;
             }
         }
-        if !wrote {
+        if wrote {
+            // Periodic in-place header patch (~1 s of audio cadence, writer thread only): a
+            // TRUE hard kill (force quit / crash / kill -9) never reaches Stop/Shutdown, so
+            // without this the WAV on disk would keep its zero-size placeholder header and
+            // the take would be unreadable. With it the file parses at (nearly) every
+            // instant — covering all samples up to the last patch — so the boot-time
+            // staging sweep can RECOVER the take. Graceful paths still get the exact final
+            // sizes from finalize. An IO error here is the same sticky failure as a failed
+            // sample write (disk full), reported through Stop's ack.
+            if let Some(w) = wav.as_mut() {
+                if w.sync_header_if_due().is_err() {
+                    failed = true;
+                }
+            }
+        } else {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
     }

@@ -766,6 +766,16 @@ class TechniqueDetailViewModel extends ChangeNotifier
     );
   }
 
+  /// The subject axis (see [AnalysisSource.analysisStartMs]): the synthetic
+  /// [selectedTrack] wraps exactly one clip placed at 0, so the subject span
+  /// is trivially the track span — the clip's own 0..durationMs.
+  @override
+  int get analysisStartMs => 0;
+
+  /// The length of the subject span; see [analysisStartMs].
+  @override
+  int get analysisDurationMs => _activeAnalysis?.durationMs ?? 0;
+
   @override
   VoiceMetrics? get selectedMetrics => _activeAnalysis?.metrics;
 

@@ -281,20 +281,54 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   /// its header — the whole take, which is just the one clip for a single-clip
   /// take and the aggregate across all clips for a multi-clip take. Null for no
   /// selection, a backing track, or an empty take. [aggregate] picks which cache
-  /// family [key] lives in.
-  ({String key, bool aggregate})? get _analysisSubject {
+  /// family [key] lives in; [startMs]/[durationMs] are the absolute-timeline
+  /// span the subject's analysis covers (the clip span for a clip subject, the
+  /// lane span for the aggregate — equal for a single-clip lane, whose one
+  /// clip IS the lane span). Carried here so the subject axis can never
+  /// disagree with which cache [selectedMetrics]/[selectedSpectrogram] serve.
+  ({String key, bool aggregate, int startMs, int durationMs})?
+  get _analysisSubject {
     final track = selectedTrack;
     if (track == null || track.isBacking || track.clips.isEmpty) return null;
     final clipId = _selectedClipId();
     if (clipId != null) {
       final clip = track.clipById(clipId);
-      if (clip != null) return (key: clip.audioFilePath, aggregate: false);
+      if (clip != null) {
+        return (
+          key: clip.audioFilePath,
+          aggregate: false,
+          startMs: clip.startMs,
+          durationMs: clip.durationMs,
+        );
+      }
     }
     if (track.clips.length == 1) {
-      return (key: track.clips.first.audioFilePath, aggregate: false);
+      final clip = track.clips.first;
+      return (
+        key: clip.audioFilePath,
+        aggregate: false,
+        startMs: clip.startMs,
+        durationMs: clip.durationMs,
+      );
     }
-    return (key: aggregateKeyFor(track), aggregate: true);
+    return (
+      key: aggregateKeyFor(track),
+      aggregate: true,
+      startMs: track.startMs,
+      durationMs: track.durationMs,
+    );
   }
+
+  /// The absolute-timeline span of the current analysis subject (see
+  /// [AnalysisSource.analysisStartMs]): whatever [selectedMetrics] /
+  /// [selectedSpectrogram] return maps over exactly this span. 0 while there
+  /// is no subject; unread in live mode (the live views never map a take).
+  @override
+  int get analysisStartMs => _analysisSubject?.startMs ?? 0;
+
+  /// The length (ms) of the analysis-subject span; see [analysisStartMs].
+  @override
+  int get analysisDurationMs => _analysisSubject?.durationMs ?? 0;
 
   /// The computed spectrogram for the analysis subject, if ready.
   @override

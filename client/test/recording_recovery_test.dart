@@ -1,0 +1,241 @@
+// Boot-time recovery of hard-kill orphaned recordings.
+//
+// A force quit / crash / kill -9 mid-record leaves the streamed take WAV in the
+// audio staging tree (audio/<practiceId>/<id>.wav) with no rows referencing it;
+// the engine keeps that file's header valid by patching it in place ~1x/s.
+// Persistence.recoverStagedRecordings must re-attach such a file to its
+// practice as a new vocal take (analysis, clip, save — the normal finalize
+// shape), be idempotent across re-runs (a crash during recovery must not
+// duplicate the take), and leave everything else to the staging sweep.
+
+import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
+import 'package:vocara/data/db/persistence.dart';
+import 'package:vocara/data/services/audio_dsp.dart';
+import 'package:vocara/data/services/waveform_service.dart';
+import 'package:vocara/domain/models/audio_track.dart';
+import 'package:vocara/domain/models/song_practice.dart';
+import 'package:vocara/utils/id.dart';
+import 'package:vocara/utils/result.dart';
+
+void main() {
+  late Persistence persistence;
+  late Directory root;
+
+  setUp(() {
+    persistence = Persistence.memory();
+    root = persistence.assets.root;
+  });
+
+  tearDown(() async {
+    await persistence.db.close();
+    if (await root.exists()) await root.delete(recursive: true);
+  });
+
+  /// The analyzer a real recovery would run through WaveformService; tests
+  /// stand in a fixed result (the platform decoder isn't available here).
+  Future<WaveformResult> fakeAnalyze(String path) async =>
+      (peaks: <double>[0.1, 0.2], durationMs: 500);
+
+  /// Mono 16-bit PCM WAV bytes with [samples] ramp samples — the exact shape
+  /// the recording engine writes.
+  Uint8List monoWav(int samples, {double gain = 0.5}) => writeWavMono(
+    Float64List.fromList([
+      for (var i = 0; i < samples; i++) gain * (i % 100) / 100,
+    ]),
+    48000,
+  );
+
+  /// Simulates the hard-kill file shape: real PCM bytes exist PAST what the
+  /// last in-place header patch covers (the header sizes are left as-is).
+  Uint8List withUnpatchedTail(Uint8List wav, int extraBytes) =>
+      Uint8List.fromList([...wav, ...List.filled(extraBytes, 7)]);
+
+  /// Writes an orphaned recording into the staging tree exactly where
+  /// AudioFileService.newRecordingPath would have placed it.
+  Future<File> stageOrphan(String practiceId, List<int> bytes) async {
+    final f = File(p.join(root.path, 'audio', practiceId, '${newId()}.wav'));
+    await f.parent.create(recursive: true);
+    await f.writeAsBytes(bytes, flush: true);
+    return f;
+  }
+
+  Future<SongPractice> createPractice() async {
+    final res = await persistence.songRepo.createPractice('Song');
+    return (res as Ok<SongPractice>).value;
+  }
+
+  Future<SongPractice> reload(String id) async {
+    final res = await persistence.songRepo.getPractice(id);
+    return (res as Ok<SongPractice>).value;
+  }
+
+  test('orphaned recording is recovered as a new vocal take', () async {
+    final practice = await createPractice();
+    final orphan = await stageOrphan(
+      practice.id,
+      withUnpatchedTail(monoWav(4800), 120),
+    );
+
+    expect(await persistence.recoverStagedRecordings(analyze: fakeAnalyze), 1);
+
+    final after = await reload(practice.id);
+    expect(after.vocalTracks, hasLength(1));
+    final take = after.vocalTracks.single;
+    expect(take.kind, AudioTrackKind.vocal);
+    expect(take.displayName, 'Take 1 (recovered)');
+    expect(take.versionId, after.activeVersionId);
+    final clip = take.primaryClip!;
+    expect(clip.durationMs, 500); // from the (injected) waveform analysis
+    expect(clip.startMs, 0); // the killed session's playhead is unknowable
+    expect(clip.waveformPeaks, hasLength(2));
+    expect(clip.waveformPeaks[0], closeTo(0.1, 1e-6));
+    expect(clip.waveformPeaks[1], closeTo(0.2, 1e-6));
+    // The audio was imported into the content-addressed pool; the clip
+    // resolves to a live pool file, not the staging path.
+    expect(p.isWithin(p.join(root.path, 'assets'), clip.audioFilePath), isTrue);
+    expect(await File(clip.audioFilePath).exists(), isTrue);
+    // The staging copy was deleted after the rows committed.
+    expect(await orphan.exists(), isFalse);
+  });
+
+  test('second run is a no-op', () async {
+    final practice = await createPractice();
+    await stageOrphan(practice.id, monoWav(4800));
+    expect(await persistence.recoverStagedRecordings(analyze: fakeAnalyze), 1);
+
+    expect(await persistence.recoverStagedRecordings(analyze: fakeAnalyze), 0);
+    expect((await reload(practice.id)).vocalTracks, hasLength(1));
+  });
+
+  test('a crash between the row commit and the file delete cannot duplicate '
+      'the take on the next boot', () async {
+    final practice = await createPractice();
+    final bytes = monoWav(4800);
+    final orphan = await stageOrphan(practice.id, bytes);
+    expect(await persistence.recoverStagedRecordings(analyze: fakeAnalyze), 1);
+
+    // Simulate the crash window: the take's rows are committed but the
+    // staging file survived (recreate the identical bytes at the same path).
+    await orphan.writeAsBytes(bytes, flush: true);
+    expect(await persistence.recoverStagedRecordings(analyze: fakeAnalyze), 0);
+    expect((await reload(practice.id)).vocalTracks, hasLength(1));
+    // The skipped leftover is then deleted by the sweep, as before.
+    await persistence.assets.sweepStaging();
+    expect(await orphan.exists(), isFalse);
+  });
+
+  test('a crash between the pool import and the row commit still recovers on '
+      'the retry, reusing the half-imported asset', () async {
+    final practice = await createPractice();
+    final orphan = await stageOrphan(practice.id, monoWav(4800));
+    // Simulate the crash window: the asset row + pooled bytes exist but no
+    // clip row ever committed (savePractice imports first, then writes rows).
+    await persistence.assets.importFile(orphan.path);
+
+    expect(await persistence.recoverStagedRecordings(analyze: fakeAnalyze), 1);
+    final after = await reload(practice.id);
+    expect(after.vocalTracks, hasLength(1));
+    // Deduped: the retry reused the existing asset instead of minting a
+    // second one for the same bytes.
+    final count = await persistence.db
+        .customSelect(
+          'SELECT COUNT(*) AS n FROM assets WHERE deleted_at IS NULL',
+        )
+        .getSingle();
+    expect(count.data['n'], 1);
+    expect(await orphan.exists(), isFalse);
+  });
+
+  test(
+    'numbering continues after existing takes in the interpretation',
+    () async {
+      var practice = await createPractice();
+      // An already-saved ordinary take named by the normal scheme.
+      final existing = File(p.join(root.path, 'existing.wav'));
+      await existing.writeAsBytes(monoWav(1200, gain: 0.3), flush: true);
+      final saved = await persistence.songRepo.savePractice(
+        practice.copyWith(
+          vocalTracks: [
+            AudioTrack(
+              id: newId(),
+              kind: AudioTrackKind.vocal,
+              displayName: 'Take 3',
+              audioFilePath: existing.path,
+              durationMs: 100,
+              createdAt: DateTime.now(),
+              versionId: practice.activeVersionId,
+            ),
+          ],
+        ),
+      );
+      practice = (saved as Ok<SongPractice>).value;
+
+      await stageOrphan(practice.id, monoWav(4800));
+      expect(
+        await persistence.recoverStagedRecordings(analyze: fakeAnalyze),
+        1,
+      );
+      final after = await reload(practice.id);
+      expect(
+        after.vocalTracks.map((t) => t.displayName),
+        containsAll(['Take 3', 'Take 4 (recovered)']),
+      );
+    },
+  );
+
+  test(
+    'an orphan of a deleted or unknown practice is left for the sweep',
+    () async {
+      final practice = await createPractice();
+      await persistence.songRepo.deletePractice(practice.id);
+      final tombstoned = await stageOrphan(practice.id, monoWav(4800));
+      final unknown = await stageOrphan('no-such-practice', monoWav(4800));
+
+      expect(
+        await persistence.recoverStagedRecordings(analyze: fakeAnalyze),
+        0,
+      );
+      expect(await tombstoned.exists(), isTrue); // untouched, then swept
+      expect(await unknown.exists(), isTrue);
+      await persistence.assets.sweepStaging();
+      expect(await tombstoned.exists(), isFalse);
+      expect(await unknown.exists(), isFalse);
+    },
+  );
+
+  test(
+    'empty, unparseable and non-recording files are never recovered',
+    () async {
+      final practice = await createPractice();
+      // Killed before the first header patch: valid WAV, zero data bytes.
+      final empty = await stageOrphan(practice.id, monoWav(0));
+      // Not a WAV at all.
+      final garbage = await stageOrphan(
+        practice.id,
+        List<int>.generate(128, (i) => i),
+      );
+      // A stereo file (an import, not something the recorder writes): flip the
+      // channel-count field of an otherwise valid header.
+      final stereoBytes = monoWav(4800);
+      stereoBytes.buffer.asByteData().setUint16(22, 2, Endian.little);
+      final stereo = await stageOrphan(practice.id, stereoBytes);
+
+      expect(
+        await persistence.recoverStagedRecordings(analyze: fakeAnalyze),
+        0,
+      );
+      expect((await reload(practice.id)).vocalTracks, isEmpty);
+      for (final f in [empty, garbage, stereo]) {
+        expect(await f.exists(), isTrue); // untouched, then swept
+      }
+      await persistence.assets.sweepStaging();
+      for (final f in [empty, garbage, stereo]) {
+        expect(await f.exists(), isFalse);
+      }
+    },
+  );
+}

@@ -1,9 +1,22 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:path/path.dart' as p;
 
 import '../../utils/id.dart';
 import 'local_storage_service.dart';
+
+/// Header facts of a canonical PCM WAV file — see [AudioFileService.probeWav].
+/// [dataBytes] is the payload the header AND the file both cover: the header's
+/// data-chunk size clamped to the bytes actually present after the header (a
+/// hard-killed recording legitimately holds a written-but-not-yet-patched tail
+/// beyond the last header patch; that tail is not counted).
+typedef WavProbe = ({
+  int channels,
+  int sampleRate,
+  int bitsPerSample,
+  int dataBytes,
+});
 
 /// Owns audio files on disk. Imported files are copied into the app sandbox
 /// (under `audio/<practiceId>/`) so a practice owns its media and never loses
@@ -58,5 +71,60 @@ class AudioFileService {
     if (await file.exists()) {
       await file.delete();
     }
+  }
+
+  /// Parses the header of [file] as a canonical uncompressed-PCM WAV (`RIFF` /
+  /// `WAVE` / 16-byte `fmt ` / `data`, the exact layout the recording engine
+  /// writes). Returns null when the file is too short, not that layout, or not
+  /// plain PCM — the boot-time orphan recovery uses null as "not a recording,
+  /// leave it for the sweep". Reads only the header, never the payload, so it
+  /// is cheap even on an hours-long take.
+  static Future<WavProbe?> probeWav(File file) async {
+    const headerLen = 44;
+    final int length;
+    try {
+      length = await file.length();
+    } catch (_) {
+      return null;
+    }
+    if (length < headerLen) return null;
+
+    final Uint8List head;
+    final raf = await file.open();
+    try {
+      head = await raf.read(headerLen);
+    } catch (_) {
+      return null;
+    } finally {
+      await raf.close();
+    }
+    if (head.length < headerLen) return null;
+
+    final bd = ByteData.sublistView(head);
+    String tag(int o) => String.fromCharCodes(head, o, o + 4);
+    if (tag(0) != 'RIFF' || tag(8) != 'WAVE' || tag(12) != 'fmt ') return null;
+    // Canonical layout only: a 16-byte PCM fmt chunk immediately followed by
+    // the data chunk (what WavStream writes). Foreign files with extensible
+    // fmt / extra chunks are simply "not a recording" here.
+    if (bd.getUint32(16, Endian.little) != 16) return null;
+    if (bd.getUint16(20, Endian.little) != 1) return null; // PCM
+    final channels = bd.getUint16(22, Endian.little);
+    final sampleRate = bd.getUint32(24, Endian.little);
+    final bits = bd.getUint16(34, Endian.little);
+    if (tag(36) != 'data') return null;
+    if (channels < 1 || sampleRate <= 0 || bits == 0) return null;
+    final headerDataBytes = bd.getUint32(40, Endian.little);
+    // The payload both the header and the file cover. min() tolerates the
+    // hard-kill shape (real bytes past the last header patch) and rejects a
+    // header that claims more than the file holds.
+    final dataBytes = headerDataBytes < (length - headerLen)
+        ? headerDataBytes
+        : length - headerLen;
+    return (
+      channels: channels,
+      sampleRate: sampleRate,
+      bitsPerSample: bits,
+      dataBytes: dataBytes,
+    );
   }
 }

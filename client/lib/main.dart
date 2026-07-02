@@ -43,8 +43,10 @@ Future<void> main() async {
   // terminate and asks the framework), so this exit request fires on all of
   // those paths — including windowManager.destroy(), which also calls
   // terminate. Finalize any in-flight recording, then allow the exit.
-  // Force-quit / kill -9 is not interceptable (known, deferred): the staged
-  // file is swept on next boot.
+  // Force-quit / kill -9 is not interceptable, but the recording WAV's header
+  // is patched in place every ~1 s while recording, and the next boot recovers
+  // the orphaned take (Persistence.recoverStagedRecordings) instead of
+  // sweeping it.
   _exitGuard = AppLifecycleListener(
     onExitRequested: () async {
       await RecordingFinalizer.instance.finalizeAll();

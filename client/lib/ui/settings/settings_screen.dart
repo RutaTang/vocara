@@ -58,6 +58,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 _DeviceCard(
                   devices: settings.outputDevices,
                   selectedUid: settings.outputDeviceUid,
+                  lastKnownName: settings.outputDeviceName,
                   defaultSubtitle: 'Follow the macOS output device',
                   onSelect: settings.setOutputDevice,
                   onRefresh: settings.refreshDevices,
@@ -68,6 +69,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 _DeviceCard(
                   devices: settings.inputDevices,
                   selectedUid: settings.inputDeviceUid,
+                  lastKnownName: settings.inputDeviceName,
                   defaultSubtitle: 'Follow the macOS input device',
                   onSelect: settings.setInputDevice,
                   onRefresh: settings.refreshDevices,
@@ -160,6 +162,7 @@ class _DeviceCard extends StatelessWidget {
   const _DeviceCard({
     required this.devices,
     required this.selectedUid,
+    required this.lastKnownName,
     required this.defaultSubtitle,
     required this.onSelect,
     required this.onRefresh,
@@ -167,6 +170,10 @@ class _DeviceCard extends StatelessWidget {
 
   final List<AudioDevice> devices;
   final String? selectedUid;
+
+  /// Last-known display name of the persisted device — labels the offline
+  /// pseudo-row when the device is unplugged (fallback: the raw UID).
+  final String? lastKnownName;
   final String defaultSubtitle;
   final ValueChanged<String?> onSelect;
   final VoidCallback onRefresh;
@@ -174,6 +181,9 @@ class _DeviceCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hasExplicit = selectedUid != null && selectedUid!.isNotEmpty;
+    // The persisted device is unplugged: the engine runs on the system default,
+    // but the choice is kept (and restored when the device returns).
+    final missing = hasExplicit && !devices.any((d) => d.uid == selectedUid);
 
     return Container(
       decoration: BoxDecoration(
@@ -184,10 +194,13 @@ class _DeviceCard extends StatelessWidget {
       clipBehavior: Clip.antiAlias,
       child: Column(
         children: [
-          // "System Default" follows whatever the OS picks.
+          // "System Default" follows whatever the OS picks. While the selected
+          // device is unplugged it is the effective route, so say so.
           _DeviceRow(
             title: 'System Default',
-            subtitle: defaultSubtitle,
+            subtitle: missing
+                ? '$defaultSubtitle · currently active'
+                : defaultSubtitle,
             selected: !hasExplicit,
             onTap: () => onSelect(null),
           ),
@@ -198,6 +211,19 @@ class _DeviceCard extends StatelessWidget {
               subtitle: _subtitle(d),
               selected: hasExplicit && d.uid == selectedUid,
               onTap: () => onSelect(d.uid),
+            ),
+          ],
+          if (missing) ...[
+            // The unplugged persisted selection: still the checked choice, but
+            // disabled (not tappable) and marked as unavailable.
+            const Divider(height: 1, color: Studio.border),
+            _DeviceRow(
+              title: (lastKnownName?.isNotEmpty ?? false)
+                  ? lastKnownName!
+                  : selectedUid!,
+              subtitle: 'Unavailable · using system default',
+              selected: true,
+              enabled: false,
             ),
           ],
           const Divider(height: 1, color: Studio.border),
@@ -220,18 +246,25 @@ class _DeviceRow extends StatelessWidget {
     required this.title,
     required this.subtitle,
     required this.selected,
-    required this.onTap,
+    this.onTap,
+    this.enabled = true,
   });
 
   final String title;
   final String subtitle;
   final bool selected;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
+
+  /// False renders the row dimmed and non-tappable (the unplugged persisted
+  /// selection: still checked, but not a live route to pick).
+  final bool enabled;
 
   @override
   Widget build(BuildContext context) {
+    // Dim everything on a disabled row, including the selection accents.
+    final accent = enabled ? Studio.accent : Studio.textFaint;
     return InkWell(
-      onTap: onTap,
+      onTap: enabled ? onTap : null,
       hoverColor: Studio.hover,
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
@@ -240,7 +273,7 @@ class _DeviceRow extends StatelessWidget {
             Icon(
               FIcons.speaker,
               size: 16,
-              color: selected ? Studio.accent : Studio.textFaint,
+              color: selected ? accent : Studio.textFaint,
             ),
             const SizedBox(width: 12),
             Expanded(
@@ -252,7 +285,9 @@ class _DeviceRow extends StatelessWidget {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                      color: selected
+                      color: !enabled
+                          ? Studio.textFaint
+                          : selected
                           ? Studio.textPrimary
                           : Studio.textSecondary,
                       fontSize: 13.5,
@@ -272,8 +307,7 @@ class _DeviceRow extends StatelessWidget {
                 ],
               ),
             ),
-            if (selected)
-              const Icon(FIcons.check, size: 16, color: Studio.accent),
+            if (selected) Icon(FIcons.check, size: 16, color: accent),
           ],
         ),
       ),

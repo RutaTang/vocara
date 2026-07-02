@@ -1713,6 +1713,10 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   @override
   Future<void> seek(Duration to) => playback.seek(to);
   @override
+  int get analysisStartMs => analysis.analysisStartMs;
+  @override
+  int get analysisDurationMs => analysis.analysisDurationMs;
+  @override
   VoiceMetrics? get selectedMetrics => analysis.selectedMetrics;
   @override
   Spectrogram? get selectedSpectrogram => analysis.selectedSpectrogram;

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
@@ -11,16 +12,27 @@ import 'local_storage_service.dart';
 /// currently-active engine: enumeration is static (works with no song open), while applying a
 /// choice is forwarded to the attached engine and persisted for the next engine.
 class AppSettingsService extends ChangeNotifier {
-  AppSettingsService({required LocalStorageService storage})
-    : _storage = storage;
+  /// [enumerateOutputs] / [enumerateInputs] are injectable for tests; they
+  /// default to the live CoreAudio enumeration.
+  AppSettingsService({
+    required LocalStorageService storage,
+    List<AudioDevice> Function()? enumerateOutputs,
+    List<AudioDevice> Function()? enumerateInputs,
+  }) : _storage = storage,
+       _enumerateOutputs = enumerateOutputs ?? enumerateOutputDevices,
+       _enumerateInputs = enumerateInputs ?? enumerateInputDevices;
 
   final LocalStorageService _storage;
+  final List<AudioDevice> Function() _enumerateOutputs;
+  final List<AudioDevice> Function() _enumerateInputs;
 
   // One JSON document under the app-support `settings` collection.
   static const _collection = 'settings';
   static const _docId = 'audio';
   static const _kOutputUid = 'outputDeviceUid';
   static const _kInputUid = 'inputDeviceUid';
+  static const _kOutputName = 'outputDeviceName';
+  static const _kInputName = 'inputDeviceName';
   static const _kReverbWet = 'monitorReverbWet';
   static const _kRecordGainDb = 'recordGainDb';
   static const _kMonitorGain = 'monitorGain';
@@ -35,6 +47,10 @@ class AppSettingsService extends ChangeNotifier {
 
   String? _outputDeviceUid;
   String? _inputDeviceUid;
+  // Last-known display names of the persisted devices, persisted alongside the
+  // UIDs so the settings panel can label an unplugged choice by name.
+  String? _outputDeviceName;
+  String? _inputDeviceName;
   double _monitorReverbWet = 0.2;
   double _recordGainDb = 24.0; // mic-input makeup (≈ the engine's default)
   double _monitorGain =
@@ -49,6 +65,23 @@ class AppSettingsService extends ChangeNotifier {
   /// The persisted input device UID, or null = system default.
   String? get inputDeviceUid => _inputDeviceUid;
 
+  /// Last-known display name of the persisted output device, or null when
+  /// following the system default. Kept current while the device is connected
+  /// so the panel can still label the choice after it's unplugged.
+  String? get outputDeviceName => _outputDeviceName;
+
+  /// Last-known display name of the persisted input device (see [outputDeviceName]).
+  String? get inputDeviceName => _inputDeviceName;
+
+  /// True when an output device is persisted but absent from the live list
+  /// (unplugged). The engine falls back to the system default; the UID stays
+  /// persisted so the choice is restored when the device returns.
+  bool get outputDeviceMissing => _isMissing(_outputDevices, _outputDeviceUid);
+
+  /// True when an input device is persisted but absent from the live list
+  /// (see [outputDeviceMissing]).
+  bool get inputDeviceMissing => _isMissing(_inputDevices, _inputDeviceUid);
+
   /// The currently-enumerated output devices.
   List<AudioDevice> get outputDevices => _outputDevices;
 
@@ -60,10 +93,8 @@ class AppSettingsService extends ChangeNotifier {
   AudioDevice? get selectedInputDevice {
     final uid = _inputDeviceUid;
     if (uid == null || uid.isEmpty) return null;
-    for (final d in _inputDevices) {
-      if (d.uid == uid) return d;
-    }
-    return AudioDevice(uid: uid, name: '');
+    return _byUid(_inputDevices, uid) ??
+        AudioDevice(uid: uid, name: _inputDeviceName ?? '');
   }
 
   /// Monitor reverb amount (0..1) — how much space the singer hears on their own voice.
@@ -80,14 +111,22 @@ class AppSettingsService extends ChangeNotifier {
   /// The engine's fixed processing rate (Hz) — shown in the panel.
   double get engineSampleRate => _engine?.sampleRate ?? 48000.0;
 
+  // The device with [uid] from a list, or null (also for a null/empty uid).
+  static AudioDevice? _byUid(List<AudioDevice> list, String? uid) {
+    if (uid == null || uid.isEmpty) return null;
+    for (final d in list) {
+      if (d.uid == uid) return d;
+    }
+    return null;
+  }
+
+  // An explicit pick that isn't in the live list (i.e. unplugged).
+  static bool _isMissing(List<AudioDevice> list, String? uid) =>
+      uid != null && uid.isNotEmpty && _byUid(list, uid) == null;
+
   // The effective device (an explicit pick, else the system default) from a list.
   AudioDevice? _effective(List<AudioDevice> list, String? uid) {
-    if (uid != null && uid.isNotEmpty) {
-      for (final d in list) {
-        if (d.uid == uid) return d;
-      }
-      return null;
-    }
+    if (uid != null && uid.isNotEmpty) return _byUid(list, uid);
     for (final d in list) {
       if (d.isDefault) return d;
     }
@@ -132,6 +171,8 @@ class AppSettingsService extends ChangeNotifier {
     }
     _outputDeviceUid = doc?[_kOutputUid] as String?;
     _inputDeviceUid = doc?[_kInputUid] as String?;
+    _outputDeviceName = doc?[_kOutputName] as String?;
+    _inputDeviceName = doc?[_kInputName] as String?;
     // Clamp every loaded value to the same range the live setters enforce — a
     // tampered / out-of-range stored value must not reach the engine verbatim
     // (e.g. a huge recordGainDb → enormous input gain, monitorGain > 1 → howling
@@ -157,14 +198,21 @@ class AppSettingsService extends ChangeNotifier {
   /// Re-query the available output + input devices (static; no engine required). Only notifies
   /// when a set actually changed, so it's safe to poll on a timer for hot-plug detection.
   void refreshDevices() {
-    final outs = enumerateOutputDevices();
-    final ins = enumerateInputDevices();
+    final outs = _enumerateOutputs();
+    final ins = _enumerateInputs();
     final changed =
         _deviceSig(outs) != _deviceSig(_outputDevices) ||
         _deviceSig(ins) != _deviceSig(_inputDevices);
     if (changed) {
+      // A persisted device coming back after an unplug: the engine fell back to
+      // the system default meanwhile, so switch it back to the user's choice live.
+      final outReturned = _returned(_outputDevices, outs, _outputDeviceUid);
+      final inReturned = _returned(_inputDevices, ins, _inputDeviceUid);
       _outputDevices = outs;
       _inputDevices = ins;
+      if (outReturned) _engine?.setOutputDevice(_outputDeviceUid!);
+      if (inReturned) _engine?.setInputDevice(_inputDeviceUid!);
+      _syncLastKnownNames();
       // monitorAllowed is derived from the output set, so reconcile the engine's
       // monitor gain whenever it changes — the initial attach can run before the
       // (microtask-deferred) device list is populated and force the gain to 0;
@@ -177,6 +225,33 @@ class AppSettingsService extends ChangeNotifier {
   // A change signature over a device set (the fields the panel renders) to skip no-op rebuilds.
   static String _deviceSig(List<AudioDevice> ds) =>
       ds.map((d) => '${d.uid}:${d.isDefault}:${d.rate}:${d.name}').join('|');
+
+  // The persisted device reappeared: absent from the previous list, present in the
+  // fresh one. The previous list must be non-empty so the very first enumeration
+  // (load/attach, where _applyAllToEngine already pushed the choice) doesn't count.
+  static bool _returned(
+    List<AudioDevice> before,
+    List<AudioDevice> after,
+    String? uid,
+  ) => before.isNotEmpty && _isMissing(before, uid) && !_isMissing(after, uid);
+
+  // Track device renames: while a persisted device is connected, keep its stored
+  // display name current (the name labels the offline pseudo-row in the panel).
+  void _syncLastKnownNames() {
+    var dirty = false;
+    final out = _byUid(_outputDevices, _outputDeviceUid);
+    if (out != null && out.name != _outputDeviceName) {
+      _outputDeviceName = out.name;
+      dirty = true;
+    }
+    final inp = _byUid(_inputDevices, _inputDeviceUid);
+    if (inp != null && inp.name != _inputDeviceName) {
+      _inputDeviceName = inp.name;
+      dirty = true;
+    }
+    // Fire-and-forget: a failed name persist only degrades the offline label.
+    if (dirty) unawaited(_persist());
+  }
 
   /// Attach the active engine. Applies the persisted devices immediately so a freshly-created
   /// engine adopts the saved choices; refreshes the device lists from the live host.
@@ -217,6 +292,7 @@ class AppSettingsService extends ChangeNotifier {
   /// engine and persists it for the next one.
   Future<void> setOutputDevice(String? uid) async {
     _outputDeviceUid = uid;
+    _outputDeviceName = _byUid(_outputDevices, uid)?.name;
     // Drive the engine toward the resolved device even for a null/empty (System Default)
     // selection: passing '' makes the native side fall back to the default output. Without this
     // the engine would keep the previously-selected device while monitorAllowed is recomputed from
@@ -233,6 +309,7 @@ class AppSettingsService extends ChangeNotifier {
   /// Select an input device by UID (or null = system default).
   Future<void> setInputDevice(String? uid) async {
     _inputDeviceUid = uid;
+    _inputDeviceName = _byUid(_inputDevices, uid)?.name;
     // Also drive the engine on a null/empty selection: '' makes the native side fall back to the
     // default input, so a System Default pick actually switches the mic instead of leaving the
     // engine on the previously-selected device until restart.
@@ -275,6 +352,8 @@ class AppSettingsService extends ChangeNotifier {
   Future<void> _persist() => _storage.write(_collection, _docId, {
     _kOutputUid: _outputDeviceUid,
     _kInputUid: _inputDeviceUid,
+    _kOutputName: _outputDeviceName,
+    _kInputName: _inputDeviceName,
     _kReverbWet: _monitorReverbWet,
     _kRecordGainDb: _recordGainDb,
     _kMonitorGain: _monitorGain,

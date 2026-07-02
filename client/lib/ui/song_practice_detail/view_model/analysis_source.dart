@@ -18,10 +18,24 @@ import '../../../domain/models/voice_metrics.dart';
 /// It is a [Listenable] so the analysis views can rebuild when it changes (both
 /// implementers are [ChangeNotifier]s).
 abstract class AnalysisSource implements Listenable {
-  /// The take/clip whose analysis is shown — its `durationMs`/`startMs` set the
-  /// time axis. Null when nothing is selected; for the technique screen this is
-  /// a synthetic track wrapping the reference or practice clip.
+  /// The take/clip whose analysis is shown. Null when nothing is selected; for
+  /// the technique screen this is a synthetic track wrapping the reference or
+  /// practice clip. The time axis of the analysis views is NOT this track's
+  /// lane span but the subject axis below, which can be narrower.
   AudioTrack? get selectedTrack;
+
+  /// The absolute-timeline start (ms, on [position]'s clock) of the span the
+  /// current analysis subject occupies — the span [selectedMetrics] /
+  /// [selectedSpectrogram] actually cover. For a whole-lane subject (no clip
+  /// selected, or a single-clip lane) this is the lane span's start; when a
+  /// specific clip of a multi-clip lane is analyzed it is that clip's
+  /// `startMs`. 0 when there is no subject. Unused while [liveMonitor] is on:
+  /// the live views render the mic feed and never map the playhead onto a take.
+  int get analysisStartMs;
+
+  /// The length (ms) of the analysis-subject span; see [analysisStartMs].
+  /// 0 when there is no subject.
+  int get analysisDurationMs;
 
   VoiceMetrics? get selectedMetrics;
   Spectrogram? get selectedSpectrogram;

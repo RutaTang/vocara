@@ -72,8 +72,8 @@ void _seekTo(
   int durationMs,
   int startMs,
 ) {
-  // The panel shows the take in take-local time [0, dur]; map the click back to
-  // the absolute timeline (startMs + local) so seeking lands on the take.
+  // The panel shows the subject in subject-local time [0, dur]; map the click
+  // back to the absolute timeline (startMs + local) so seeking lands on it.
   vm.seek(
     Duration(
       milliseconds: (startMs + (dx / width).clamp(0.0, 1.0) * durationMs)
@@ -82,11 +82,14 @@ void _seekTo(
   );
 }
 
-/// The absolute playhead [pos] as take-local seconds, clamped to the take's
-/// [durationMs] span (which begins at [startMs] on the shared timeline).
-/// [AudioTrack.startMs]/[AudioTrack.durationMs] are the LANE span, and a
-/// multi-clip take's aggregate analysis places each clip's frames at its
-/// lane-relative offset — so the take-local axis lines up for any clip count.
+/// The absolute playhead [pos] as subject-local seconds, clamped to the
+/// analysis subject's [durationMs] span (which begins at [startMs] on the
+/// shared timeline). Callers pass [AnalysisSource.analysisStartMs] /
+/// [AnalysisSource.analysisDurationMs] — the span the shown metrics /
+/// spectrogram actually cover: the lane span for a whole-lane subject (a
+/// multi-clip aggregate places each clip's frames at its lane-relative
+/// offset), or the clip's own span when one clip of a multi-clip lane is
+/// selected (its analysis is clip-local).
 double _localSeconds(Duration pos, int durationMs, int startMs) =>
     (pos.inMilliseconds - startMs).clamp(0, durationMs) / 1000.0;
 
@@ -95,9 +98,9 @@ Widget _takeSpectroStack(
   AnalysisSource vm,
   Spectrogram spec,
   VoiceMetrics? metrics,
-  AudioTrack track,
 ) {
-  final spanMs = track.durationMs;
+  final spanMs = vm.analysisDurationMs;
+  final startMs = vm.analysisStartMs;
   return LayoutBuilder(
     builder: (context, c) => Stack(
       children: [
@@ -124,20 +127,10 @@ Widget _takeSpectroStack(
         Positioned.fill(
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
-            onTapDown: (d) => _seekTo(
-              vm,
-              d.localPosition.dx,
-              c.maxWidth,
-              spanMs,
-              track.startMs,
-            ),
-            onHorizontalDragUpdate: (d) => _seekTo(
-              vm,
-              d.localPosition.dx,
-              c.maxWidth,
-              spanMs,
-              track.startMs,
-            ),
+            onTapDown: (d) =>
+                _seekTo(vm, d.localPosition.dx, c.maxWidth, spanMs, startMs),
+            onHorizontalDragUpdate: (d) =>
+                _seekTo(vm, d.localPosition.dx, c.maxWidth, spanMs, startMs),
           ),
         ),
         Positioned.fill(
@@ -148,7 +141,7 @@ Widget _takeSpectroStack(
                 timelineDurationMs: spanMs,
                 color: Studio.playhead,
                 showHead: true,
-                startMs: track.startMs,
+                startMs: startMs,
               ),
             ),
           ),
@@ -210,7 +203,7 @@ class SpectrogramTab extends StatelessWidget {
             Expanded(
               child: _AxisRow(
                 maxHz: spec.maxHz,
-                child: _takeSpectroStack(vm, spec, metrics, track),
+                child: _takeSpectroStack(vm, spec, metrics),
               ),
             ),
           ],
@@ -322,13 +315,14 @@ class PowerTab extends StatelessWidget {
       );
     }
     return _withSpectrogram(vm, (spec, metrics, track) {
-      final spanMs = track.durationMs;
+      final spanMs = vm.analysisDurationMs;
+      final startMs = vm.analysisStartMs;
       return Padding(
         padding: const EdgeInsets.fromLTRB(16, 12, 20, 16),
         child: ValueListenableBuilder<Duration>(
           valueListenable: vm.position,
           builder: (context, pos, _) {
-            final seconds = _localSeconds(pos, spanMs, track.startMs);
+            final seconds = _localSeconds(pos, spanMs, startMs);
             // Guard frames>0: an empty take's f1/f2/f3 are empty lists.
             final hasFrames = metrics != null && metrics.frames > 0;
             final fr = hasFrames ? metrics.frameAtTime(seconds) : null;
@@ -365,12 +359,12 @@ class VowelTab extends StatelessWidget {
       );
     }
     return _withMetrics(vm, (m, track) {
+      final spanMs = vm.analysisDurationMs;
+      final startMs = vm.analysisStartMs;
       return ValueListenableBuilder<Duration>(
         valueListenable: vm.position,
         builder: (context, pos, _) {
-          final fr = m.frameAtTime(
-            _localSeconds(pos, track.durationMs, track.startMs),
-          );
+          final fr = m.frameAtTime(_localSeconds(pos, spanMs, startMs));
           return _vowelPanel(m.f1[fr], m.f2[fr]);
         },
       );
@@ -437,12 +431,31 @@ class PitchTab extends StatelessWidget {
         ),
       );
     }
-    return _withMetrics(
-      vm,
-      (m, track) => LayoutBuilder(
+    return _withMetrics(vm, (m, track) {
+      // PitchLane derives the metrics' absolute origin from track.startMs (its
+      // take-local playhead mapping and note readout both subtract it). When
+      // the analysis subject is one clip of a multi-clip lane, [m] is
+      // clip-local, so hand it a single-clip view spanning the subject axis
+      // instead of the whole lane. A whole-lane subject's axis equals the lane
+      // span, so the original track passes through untouched there.
+      final startMs = vm.analysisStartMs;
+      final spanMs = vm.analysisDurationMs;
+      final subject = (startMs == track.startMs && spanMs == track.durationMs)
+          ? track
+          : track.copyWith(
+              clips: [
+                AudioClip(
+                  id: '${track.id}-analysis-subject',
+                  audioFilePath: track.primaryClip?.audioFilePath ?? '',
+                  durationMs: spanMs,
+                  startMs: startMs,
+                ),
+              ],
+            );
+      return LayoutBuilder(
         builder: (context, c) => PitchLane(
-          track: track,
-          timelineDurationMs: track.durationMs,
+          track: subject,
+          timelineDurationMs: spanMs,
           position: vm.position,
           headerWidth: 132,
           loading: false,
@@ -450,8 +463,8 @@ class PitchTab extends StatelessWidget {
           height: c.maxHeight,
           takeLocal: true,
         ),
-      ),
-    );
+      );
+    });
   }
 }
 
@@ -481,7 +494,8 @@ class TimbreTab extends StatelessWidget {
       );
     }
     return _withMetrics(vm, (m, track) {
-      final spanMs = track.durationMs;
+      final spanMs = vm.analysisDurationMs;
+      final startMs = vm.analysisStartMs;
       return Padding(
         padding: const EdgeInsets.fromLTRB(16, 12, 20, 16),
         child: Column(
@@ -491,7 +505,7 @@ class TimbreTab extends StatelessWidget {
               vm: vm,
               metrics: m,
               durationMs: spanMs,
-              startMs: track.startMs,
+              startMs: startMs,
             ),
             const SizedBox(height: 12),
             const _TimbreLegend(),
@@ -519,7 +533,7 @@ class TimbreTab extends StatelessWidget {
                             position: vm.position,
                             timelineDurationMs: spanMs,
                             color: Studio.playhead,
-                            startMs: track.startMs,
+                            startMs: startMs,
                           ),
                         ),
                       ),
@@ -767,7 +781,8 @@ class VibratoTab extends StatelessWidget {
       );
     }
     return _withMetrics(vm, (m, track) {
-      final spanMs = track.durationMs;
+      final spanMs = vm.analysisDurationMs;
+      final startMs = vm.analysisStartMs;
       final notes = segmentPitchNotes(m);
       // Memoize per note once per build — the take's vibrato doesn't change as
       // the playhead moves, so we must not recompute it on every position tick.
@@ -777,7 +792,7 @@ class VibratoTab extends StatelessWidget {
       return ValueListenableBuilder<Duration>(
         valueListenable: vm.position,
         builder: (context, pos, _) {
-          final fr = m.frameAtTime(_localSeconds(pos, spanMs, track.startMs));
+          final fr = m.frameAtTime(_localSeconds(pos, spanMs, startMs));
           Vibrato? v;
           for (final n in notes) {
             if (fr >= n.startFrame && fr <= n.endFrame) {
@@ -948,7 +963,8 @@ class RegisterTab extends StatelessWidget {
         return const StudioHint('Sing a passage to map your registers.');
       }
       final range = pitchSemitoneRange(m);
-      final spanMs = track.durationMs;
+      final spanMs = vm.analysisDurationMs;
+      final startMs = vm.analysisStartMs;
       return Padding(
         padding: const EdgeInsets.fromLTRB(16, 12, 20, 16),
         child: Column(
@@ -996,7 +1012,7 @@ class RegisterTab extends StatelessWidget {
                             position: vm.position,
                             timelineDurationMs: spanMs,
                             color: Studio.playhead,
-                            startMs: track.startMs,
+                            startMs: startMs,
                           ),
                         ),
                       ),
