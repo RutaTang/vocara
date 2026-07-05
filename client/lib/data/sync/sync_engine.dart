@@ -1,0 +1,540 @@
+import 'dart:async';
+
+import 'package:drift/drift.dart';
+
+import '../db/app_database.dart';
+import 'integrity_checker.dart';
+import 'oplog_drain.dart';
+import 'sync_applier.dart';
+import 'sync_row.dart';
+import 'sync_state_store.dart';
+import 'sync_transport.dart';
+
+/// One "remote changes landed" notification, fired AFTER the page's
+/// transaction committed (never from inside an open transaction) and after the
+/// post-page integrity repair ran.
+///
+/// This event exists for FRESHNESS only, never for safety: three-way
+/// reconcile (base hashes) already guarantees that an editor which misses (or
+/// skips) a reload cannot revert or tombstone the synced-in rows on its next
+/// save. View models therefore listen with tiny, heavily-guarded handlers and
+/// simply skip the reload whenever the user is mid-anything.
+class RemoteApplied {
+  RemoteApplied({
+    required List<(String, String)> rows,
+    required Set<String> practiceIds,
+    required Set<String> techniqueIds,
+  }) : rows = List.unmodifiable(rows),
+       practiceIds = Set.unmodifiable(practiceIds),
+       techniqueIds = Set.unmodifiable(techniqueIds);
+
+  /// The (table, id) pairs the applied page carried, deduped, arrival order.
+  final List<(String, String)> rows;
+
+  /// Ids of every practice the page touched — directly (a practices row) or
+  /// through a child row (tracks/interpretations/fx_buses carry practice_id
+  /// on the wire; clips/notes/markers are resolved via their track_id with
+  /// one local read AFTER the commit). A child whose track is unknown locally
+  /// (quarantined / swept) resolves to nothing and is simply omitted.
+  final Set<String> practiceIds;
+
+  /// Ids of every technique the page touched (techniques rows and
+  /// technique_media child rows).
+  final Set<String> techniqueIds;
+
+  bool touchesTable(String table) => rows.any((r) => r.$1 == table);
+}
+
+/// How a timer is minted — injectable so tests never arm a real [Timer].
+typedef SyncTimerFactory = Timer Function(Duration delay, void Function() run);
+
+/// Diagnostics of one [SyncEngine.pumpPush] run.
+class PushRun {
+  const PushRun({
+    this.pushed = 0,
+    this.heldBack = 0,
+    this.ackedThrough = 0,
+    this.failure,
+  });
+
+  /// Rows sent to (and accepted by) the transport across the whole run.
+  final int pushed;
+
+  /// Asset-gated entries left in the oplog for a later run (see the class
+  /// docs on the asset gate).
+  final int heldBack;
+
+  /// The highest oplog sequence acknowledged (0 = nothing was acked).
+  final int ackedThrough;
+
+  /// Non-null when the run aborted (transport failure, unresolved conflict):
+  /// every unacked oplog entry is still in the ledger and re-pushes later.
+  final Object? failure;
+
+  bool get failed => failure != null;
+
+  @override
+  String toString() =>
+      'PushRun(pushed: $pushed, heldBack: $heldBack, '
+      'ackedThrough: $ackedThrough, failure: $failure)';
+}
+
+/// Diagnostics of one [SyncEngine.pumpPull] run.
+class PullRun {
+  const PullRun({
+    this.pages = 0,
+    this.applied = 0,
+    this.skipped = 0,
+    this.quarantined = 0,
+    this.failedRecords = 0,
+    this.failure,
+  });
+
+  /// Pages whose transaction (records + change token) committed.
+  final int pages;
+
+  final int applied;
+  final int skipped;
+  final int quarantined;
+
+  /// Per-record failures inside committed pages (quarantined to the store).
+  final int failedRecords;
+
+  /// Non-null when the run aborted before catching up (transport failure or a
+  /// rolled-back page). The change token was NOT advanced past anything that
+  /// failed to commit; the next run resumes exactly there.
+  final Object? failure;
+
+  bool get failed => failure != null;
+
+  @override
+  String toString() =>
+      'PullRun(pages: $pages, applied: $applied, skipped: $skipped, '
+      'quarantined: $quarantined, failedRecords: $failedRecords, '
+      'failure: $failure)';
+}
+
+/// The sync orchestrator: drains the local oplog into [SyncTransport.pushRows]
+/// and pulls [SyncTransport.fetchChanges] pages through the [SyncApplier].
+///
+/// HARD INVARIANTS (each has a test):
+///  * The change token advances IFF the page it covers committed — the token
+///    write runs inside the applier's outer transaction via `beforeCommit`.
+///  * Applying remote changes journals nothing (the applier's contract), so
+///    pull can never echo rows back into push.
+///  * At-least-once tolerant: re-delivered rows/pages are LWW no-ops.
+///  * Listeners are only notified AFTER transactions close ([onRemoteApplied]
+///    fires post-commit; the oplog poke rides drift's table-update stream,
+///    which is dispatched only once its transaction has completed — a
+///    rollback's spurious poke drains to a no-op, see [start]).
+///  * Data safety over progress: any failure leaves the oplog entries unacked
+///    and the token unmoved; the next pump simply retries.
+///
+/// ASSET GATE: an oplog entry carrying [PendingOplogEntry.dependsOnAssetId]
+/// whose asset bytes have no `asset_sync` upload marker is HELD BACK — the row
+/// must never reach a peer before the bytes it references are fetchable. Held
+/// entries stay in the oplog (the ack watermark stops just short of the first
+/// held sequence), so rows after them may be re-pushed on the next run —
+/// harmless under LWW. P2's byte uploader writes the marker and thereby
+/// releases the gate; until then nothing in production journals a dependency,
+/// so the gate is exercised only by tests.
+///
+/// SCHEDULING: tests drive [pumpPush]/[pumpPull] directly — no timers exist
+/// unless [start] is called. [start] subscribes to oplog inserts (drift emits
+/// them only after the owning transaction commits) and debounces into a push:
+/// [quietWindow] of no further writes, capped at [maxWait] from the first
+/// unflushed write. The timer factory is injectable so even the debounce is
+/// testable without real time.
+class SyncEngine {
+  SyncEngine({
+    required AppDatabase db,
+    required SyncApplier applier,
+    required OplogDrain drain,
+    required SyncRowBuilder builder,
+    required SyncStateStore state,
+    required IntegrityChecker integrity,
+    required SyncTransport transport,
+    this.onRemoteApplied,
+    this.quietWindow = const Duration(seconds: 2),
+    this.maxWait = const Duration(seconds: 30),
+    this.pushBatchLimit = 400,
+    this.drainLimit = 500,
+    SyncTimerFactory? timers,
+    Future<void> Function(FetchPage page)? debugBeforePageCommit,
+  }) : _db = db,
+       _applier = applier,
+       _drain = drain,
+       _builder = builder,
+       _state = state,
+       _integrity = integrity,
+       _transport = transport,
+       _timers = timers ?? _realTimer,
+       _debugBeforePageCommit = debugBeforePageCommit;
+
+  static Timer _realTimer(Duration delay, void Function() run) =>
+      Timer(delay, run);
+
+  final AppDatabase _db;
+  final SyncApplier _applier;
+  final OplogDrain _drain;
+  final SyncRowBuilder _builder;
+  final SyncStateStore _state;
+  final IntegrityChecker _integrity;
+  final SyncTransport _transport;
+  final SyncTimerFactory _timers;
+
+  /// Test-only seam: runs INSIDE each page's transaction, after the token
+  /// write. A throwing hook kills the transaction, proving atomicity.
+  final Future<void> Function(FetchPage page)? _debugBeforePageCommit;
+
+  /// Fired after each committed page that actually changed rows (post-commit,
+  /// post-repair). Wired by Persistence to its broadcast stream.
+  final void Function(RemoteApplied event)? onRemoteApplied;
+
+  /// Debounce: a push fires after this long with no further local writes...
+  final Duration quietWindow;
+
+  /// ...but never later than this after the first unflushed write.
+  final Duration maxWait;
+
+  /// Transport batch cap (CloudKit modify limit is 400 records per op).
+  final int pushBatchLimit;
+
+  /// Raw oplog rows read per drain (see [OplogDrain.readPending]).
+  final int drainLimit;
+
+  /// Bounded conflict resolution: how many times one [pumpPush] run re-pushes
+  /// rows whose local HLC beat the server row before giving up (leaving the
+  /// oplog unacked for the next run).
+  static const int maxConflictRetries = 3;
+
+  StreamSubscription<Object?>? _oplogSub;
+  Timer? _quietTimer;
+  Timer? _maxTimer;
+  bool _disposed = false;
+
+  /// Serializes push and pull: the two must never interleave their awaits
+  /// (a pull's integrity repair journals, which pokes a push — that push must
+  /// queue behind the pull, not race it).
+  Future<void> _serial = Future.value();
+
+  Future<T> _exclusive<T>(Future<T> Function() op) {
+    final run = _serial.then((_) => op());
+    // The chain must survive a failed run; callers see the error via [run].
+    _serial = run.then((_) {}, onError: (_) {});
+    return run;
+  }
+
+  // --- Automatic mode (production wiring; optional) -------------------------
+
+  /// Subscribes the debounced push to oplog inserts. Drift defers table-update
+  /// notifications until the transaction that made them COMPLETES (commit or
+  /// rollback), so a poke can never observe an open transaction. A rolled-back
+  /// save still dispatches its notification, but that poke is harmless by
+  /// construction: the journal entry rolled back with the data, so the pump
+  /// drains nothing (tested). The ack's deletes are filtered out by the
+  /// insert-only query.
+  void start() {
+    if (_disposed || _oplogSub != null) return;
+    _oplogSub = _db
+        .tableUpdates(
+          TableUpdateQuery.onTable(
+            _db.oplog,
+            limitUpdateKind: UpdateKind.insert,
+          ),
+        )
+        .listen((_) => poke());
+  }
+
+  /// Nudges the engine: schedules a debounced [pumpPush]. Called by the oplog
+  /// subscription after every committed local write; safe to call manually.
+  void poke() {
+    if (_disposed) return;
+    _quietTimer?.cancel();
+    _quietTimer = _timers(quietWindow, _flush);
+    _maxTimer ??= _timers(maxWait, _flush);
+  }
+
+  void _flush() {
+    _quietTimer?.cancel();
+    _quietTimer = null;
+    _maxTimer?.cancel();
+    _maxTimer = null;
+    if (_disposed) return;
+    unawaited(pumpPush());
+  }
+
+  /// Cancels the subscription and any pending timers. Idempotent. In-flight
+  /// pumps finish on their own (they are already crash-tolerant, so there is
+  /// nothing to interrupt safely — we just stop scheduling new ones).
+  void dispose() {
+    _disposed = true;
+    _quietTimer?.cancel();
+    _quietTimer = null;
+    _maxTimer?.cancel();
+    _maxTimer = null;
+    unawaited(_oplogSub?.cancel());
+    _oplogSub = null;
+  }
+
+  // --- Push ------------------------------------------------------------------
+
+  /// Drains pending oplog entries, pushes the CURRENT state of their rows,
+  /// and acks exactly what was handled. Loops while it makes full progress,
+  /// so a large backlog drains in one call. Any failure aborts with the
+  /// ledger intact (minus already-acked prefixes, which the server durably
+  /// accepted).
+  Future<PushRun> pumpPush() => _exclusive(_pushLocked);
+
+  Future<PushRun> _pushLocked() async {
+    var pushed = 0;
+    var heldBack = 0;
+    var ackedThrough = 0;
+    try {
+      var lastMaxSeq = 0;
+      while (true) {
+        final batch = await _drain.readPending(limit: drainLimit);
+        if (batch.isEmpty) break;
+        // No forward progress is possible when the same window comes back
+        // (its head is asset-gated); stop rather than spin.
+        if (batch.maxSeq == lastMaxSeq) break;
+        lastMaxSeq = batch.maxSeq;
+
+        // Partition on the asset gate (entries are seq-ascending).
+        final ready = <PendingOplogEntry>[];
+        int? firstHeldSeq;
+        var held = 0;
+        for (final e in batch.entries) {
+          final gated =
+              e.dependsOnAssetId != null &&
+              !await _assetBytesUploaded(e.dependsOnAssetId!);
+          if (gated) {
+            held++;
+            firstHeldSeq ??= e.seq;
+          } else {
+            ready.add(e);
+          }
+        }
+        heldBack += held;
+
+        // Push CURRENT row state (the drain already collapsed to latest per
+        // row; the builder re-reads, so a save that landed after the drain
+        // simply makes the pushed state even fresher — and its own oplog
+        // entry, with a higher seq, survives the ack below).
+        final rows = <SyncRow>[];
+        for (final e in ready) {
+          final row = await _builder.build(e.table, e.id);
+          // A vanished row (hard-deleted before it ever synced, e.g. an
+          // FK-swept draft) has nothing to push; its entry is still acked.
+          if (row != null) rows.add(row);
+        }
+        for (var i = 0; i < rows.length; i += pushBatchLimit) {
+          final chunk = rows.sublist(
+            i,
+            i + pushBatchLimit > rows.length ? rows.length : i + pushBatchLimit,
+          );
+          pushed += await _pushChunkResolvingConflicts(chunk);
+        }
+
+        // Ack exactly what this read covered — held back at the first gated
+        // entry so it is never deleted un-pushed. Everything acked was either
+        // accepted by the server or deliberately dropped (server newer).
+        final ackTo = firstHeldSeq == null ? batch.maxSeq : firstHeldSeq - 1;
+        if (ackTo > 0) {
+          await _drain.ack(ackTo);
+          ackedThrough = ackTo;
+        }
+        if (ackTo < batch.maxSeq) break; // gated head: later entries wait
+      }
+      return PushRun(
+        pushed: pushed,
+        heldBack: heldBack,
+        ackedThrough: ackedThrough,
+      );
+    } catch (e) {
+      // Transport failure / exhausted conflict retries: nothing past the last
+      // durable ack is lost — it is all still journaled and re-pushes later.
+      return PushRun(
+        pushed: pushed,
+        heldBack: heldBack,
+        ackedThrough: ackedThrough,
+        failure: e,
+      );
+    }
+  }
+
+  /// Pushes one chunk, resolving conflicted rows per the transport contract:
+  /// local HLC strictly greater than the server row's → re-push (bounded by
+  /// [maxConflictRetries]); otherwise drop ours — the newer server state
+  /// arrives via pull, and LWW makes dropping safe. Returns rows accepted.
+  Future<int> _pushChunkResolvingConflicts(List<SyncRow> chunk) async {
+    var accepted = 0;
+    var attempt = chunk;
+    for (var tries = 0; attempt.isNotEmpty; tries++) {
+      final ack = await _transport.pushRows(attempt);
+      final retry = <SyncRow>[];
+      for (final r in ack.results) {
+        if (r.accepted) {
+          accepted++;
+        } else if (r.row.hlcPacked.compareTo(r.serverRow!.hlcPacked) > 0) {
+          retry.add(r.row);
+        }
+        // else: server holds something newer (or equal) — drop ours.
+      }
+      if (retry.isEmpty) break;
+      if (tries + 1 >= maxConflictRetries) {
+        // Give up this run WITHOUT acking: the rows stay journaled and the
+        // next run retries from scratch (data safety over progress).
+        throw SyncTransportException(
+          'push conflicts unresolved after $maxConflictRetries attempts '
+          '(${retry.length} rows)',
+        );
+      }
+      attempt = retry;
+    }
+    return accepted;
+  }
+
+  /// Whether [assetId]'s BYTES are durably uploaded: its content hash has an
+  /// asset_sync marker. A missing asset row counts as not uploaded (held back
+  /// — the safe side).
+  Future<bool> _assetBytesUploaded(String assetId) async {
+    final row = await _db
+        .customSelect(
+          'SELECT 1 AS ok FROM asset_sync s '
+          'JOIN assets a ON a.content_hash = s.hash WHERE a.id = ?',
+          variables: [Variable.withString(assetId)],
+        )
+        .getSingleOrNull();
+    return row != null;
+  }
+
+  // --- Pull ------------------------------------------------------------------
+
+  /// Fetches remote pages and applies each one atomically WITH its change
+  /// token (one transaction per page, via the applier's `beforeCommit` hook).
+  /// After each committed page: integrity repair in its own transaction, then
+  /// [onRemoteApplied]. Stops at the first failure with the token exactly at
+  /// the last committed page.
+  Future<PullRun> pumpPull() => _exclusive(_pullLocked);
+
+  Future<PullRun> _pullLocked() async {
+    var pages = 0;
+    var applied = 0;
+    var skipped = 0;
+    var quarantined = 0;
+    var failedRecords = 0;
+    try {
+      var token = await _state.changeToken();
+      while (true) {
+        final page = await _transport.fetchChanges(token);
+        if (page.rows.isEmpty) {
+          // Caught up. Persist a moved empty-page token (CloudKit can advance
+          // the token without changes); there is no batch to be atomic with.
+          if (page.nextToken != token) {
+            await _state.setChangeToken(page.nextToken);
+          }
+          if (!page.hasMore) break;
+          if (page.nextToken == token) break; // defensive: refuse to spin
+          token = page.nextToken;
+          continue;
+        }
+        final result = await _applier.apply(
+          page.rows,
+          beforeCommit: () async {
+            await _state.setChangeToken(page.nextToken);
+            final hook = _debugBeforePageCommit;
+            if (hook != null) await hook(page);
+          },
+        );
+        if (!result.committed) {
+          // The page (and its token) rolled back in full: stop, retry later.
+          throw StateError('pull page failed to commit; token unmoved');
+        }
+        pages++;
+        applied += result.applied;
+        skipped += result.skipped;
+        quarantined += result.quarantined;
+        failedRecords += result.failed;
+        token = page.nextToken;
+        if (result.applied > 0) {
+          // Repair the affected invariants closure BEFORE announcing, so
+          // listeners reload an already-consistent view. Wrapped in ONE
+          // transaction so each repair write commits with its journal entry.
+          await _db.transaction(() => _integrity.repair());
+          _fireRemoteApplied(await _describePage(page));
+        }
+        if (!page.hasMore) break;
+      }
+      return PullRun(
+        pages: pages,
+        applied: applied,
+        skipped: skipped,
+        quarantined: quarantined,
+        failedRecords: failedRecords,
+      );
+    } catch (e) {
+      return PullRun(
+        pages: pages,
+        applied: applied,
+        skipped: skipped,
+        quarantined: quarantined,
+        failedRecords: failedRecords,
+        failure: e,
+      );
+    }
+  }
+
+  void _fireRemoteApplied(RemoteApplied event) {
+    final sink = onRemoteApplied;
+    if (sink == null || _disposed) return;
+    sink(event);
+  }
+
+  /// Builds the [RemoteApplied] event for a committed page: the (table, id)
+  /// pairs plus the practice/technique ids they roll up to. Runs AFTER the
+  /// commit; the one extra read (track_id -> practice_id) is over ids only.
+  Future<RemoteApplied> _describePage(FetchPage page) async {
+    final pairs = <(String, String)>[];
+    final seen = <(String, String)>{};
+    final practiceIds = <String>{};
+    final techniqueIds = <String>{};
+    final trackIds = <String>{};
+    for (final row in page.rows) {
+      final pair = (row.table, row.id);
+      if (seen.add(pair)) pairs.add(pair);
+      switch (row.table) {
+        case 'practices':
+          practiceIds.add(row.id);
+        case 'tracks' || 'interpretations' || 'fx_buses':
+          final pid = row.fields['practice_id'];
+          if (pid is String) practiceIds.add(pid);
+        case 'clips' || 'practice_notes' || 'technique_markers':
+          final tid = row.fields['track_id'];
+          if (tid is String) trackIds.add(tid);
+        case 'techniques':
+          techniqueIds.add(row.id);
+        case 'technique_media':
+          final tid = row.fields['technique_id'];
+          if (tid is String) techniqueIds.add(tid);
+      }
+    }
+    if (trackIds.isNotEmpty) {
+      final placeholders = List.filled(trackIds.length, '?').join(', ');
+      final rows = await _db
+          .customSelect(
+            'SELECT practice_id FROM tracks WHERE id IN ($placeholders)',
+            variables: [for (final id in trackIds) Variable.withString(id)],
+          )
+          .get();
+      for (final r in rows) {
+        practiceIds.add(r.read<String>('practice_id'));
+      }
+    }
+    return RemoteApplied(
+      rows: pairs,
+      practiceIds: practiceIds,
+      techniqueIds: techniqueIds,
+    );
+  }
+}

@@ -18,6 +18,7 @@ import '../../../data/services/recording_finalizer.dart';
 import '../../../data/services/source_separation_service.dart';
 import '../../../data/services/spectrogram_service.dart';
 import '../../../data/services/waveform_service.dart';
+import '../../../data/sync/sync_engine.dart';
 import '../../../data/sync/sync_hashes.dart';
 import '../../../domain/models/audio_track.dart';
 import '../../../domain/models/fx_bus.dart';
@@ -115,6 +116,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     required SourceSeparationService separationService,
     required AppSettingsService appSettings,
     required String practiceId,
+    Stream<RemoteApplied>? remoteApplied,
     PlaybackEngine? playbackEngine,
     MonitorService? monitor,
     AudioEditService? editService,
@@ -243,6 +245,8 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     }
 
     load = Command0(_load)..execute();
+    // Freshness reloads when sync applies remote changes to THIS practice.
+    _remoteSub = remoteApplied?.listen(_onRemoteApplied);
     // Probe the separation engine once so the UI can hide "Separate" when no
     // engine is present (e.g. the dev sidecar isn't installed).
     _separation.isAvailable().then((available) {
@@ -319,6 +323,48 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// returns, so a stale in-memory aggregate can never revert or tombstone
   /// rows that changed underneath it (e.g. applied by sync).
   Map<String, String> _baseHashes = const {};
+
+  // --- Sync freshness ---------------------------------------------------------
+
+  StreamSubscription<RemoteApplied>? _remoteSub;
+
+  /// True while a save is writing/re-reading; a remote-applied reload must not
+  /// interleave its own load with it (the save already returns the fresh
+  /// aggregate + base).
+  bool _saving = false;
+
+  /// Bumped whenever a save or a newer remote reload starts, so an older
+  /// in-flight reload's result is discarded instead of clobbering fresher
+  /// state (the classic stale-read-completes-last race).
+  int _reloadEpoch = 0;
+
+  /// Freshness-only reload when sync applied remote rows belonging to THIS
+  /// practice. Heavily guarded: skipped while anything is in flight (busy
+  /// gate, recording, separating, saving) — skipping is always SAFE because
+  /// every save three-way merges against [_baseHashes]; this reload only
+  /// makes the remote edit visible sooner and refreshes the base so the next
+  /// save resolves against it.
+  Future<void> _onRemoteApplied(RemoteApplied event) async {
+    if (_disposed || _practice == null || load.running) return;
+    if (!event.practiceIds.contains(_practiceId)) return;
+    if (busy || isRecording || isSeparating || _saving) return;
+    final epoch = ++_reloadEpoch;
+    final loaded = await _repository.loadPractice(_practiceId);
+    if (_disposed || epoch != _reloadEpoch) return;
+    if (busy || isRecording || isSeparating || _saving) return;
+    if (loaded is! Ok<Loaded<SongPractice>>) {
+      // Deleted remotely (or unreadable): keep showing the current state. A
+      // later save aborts safely on the tombstoned parent; navigation-on-
+      // remote-delete is deliberately out of scope here.
+      return;
+    }
+    _practice = loaded.value.aggregate;
+    _baseHashes = loaded.value.baseHashes;
+    _ensureSelection();
+    playback.ensureLoopRange();
+    await mixer.resyncPlayback();
+    notifyListeners();
+  }
 
   /// The one busy/error latch (spinner + structural-edit mutex).
   bool get busy => _busyGate.busy;
@@ -664,13 +710,21 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     final practice = _practice;
     if (practice == null) return;
     _practice = practice.copyWith(lyrics: lines);
-    final result = await _repository.savePracticeWithBase(
-      _practice!,
-      baseHashes: _baseHashes,
-    );
-    if (result is Ok<Loaded<SongPractice>>) {
-      _practice = result.value.aggregate;
-      _baseHashes = result.value.baseHashes;
+    // Same save bracket as [_save]: supersede in-flight remote reloads and
+    // block new ones until the fresh base is captured.
+    _reloadEpoch++;
+    _saving = true;
+    try {
+      final result = await _repository.savePracticeWithBase(
+        _practice!,
+        baseHashes: _baseHashes,
+      );
+      if (result is Ok<Loaded<SongPractice>>) {
+        _practice = result.value.aggregate;
+        _baseHashes = result.value.baseHashes;
+      }
+    } finally {
+      _saving = false;
     }
     notifyListeners();
   }
@@ -1697,37 +1751,45 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   Future<bool> _save() async {
     if (_practice == null) return false;
     _ensureTimeline();
-    // Three-way save against the base captured at load / the previous save,
-    // so a stale aggregate can't revert or tombstone concurrent (synced-in)
-    // changes; the returned fresh base replaces ours for the next save.
-    final result = await _repository.savePracticeWithBase(
-      _practice!,
-      baseHashes: _baseHashes,
-    );
-    final ok = result is Ok<Loaded<SongPractice>>;
-    // If the route was popped mid-save (e.g. a second back while finalizing a
-    // recording), the write above still committed — the take is safe — but the
-    // playback/selection resync below must not touch now-disposed notifiers.
-    if (_disposed) return ok;
-    if (ok) {
-      _practice = result.value.aggregate;
-      _baseHashes = result.value.baseHashes;
-    } else {
-      // Revert the optimistic in-memory model to what's actually on disk, so the
-      // UI never keeps showing edits a failed write didn't persist. The base
-      // hashes are refreshed with it (they must always describe _practice).
-      final reloaded = await _repository.loadPractice(_practice!.id);
-      if (reloaded is Ok<Loaded<SongPractice>>) {
-        _practice = reloaded.value.aggregate;
-        _baseHashes = reloaded.value.baseHashes;
+    // A starting save supersedes any in-flight remote-applied reload (its read
+    // predates this write) and blocks new ones until the fresh base is in.
+    _reloadEpoch++;
+    _saving = true;
+    try {
+      // Three-way save against the base captured at load / the previous save,
+      // so a stale aggregate can't revert or tombstone concurrent (synced-in)
+      // changes; the returned fresh base replaces ours for the next save.
+      final result = await _repository.savePracticeWithBase(
+        _practice!,
+        baseHashes: _baseHashes,
+      );
+      final ok = result is Ok<Loaded<SongPractice>>;
+      // If the route was popped mid-save (e.g. a second back while finalizing a
+      // recording), the write above still committed — the take is safe — but the
+      // playback/selection resync below must not touch now-disposed notifiers.
+      if (_disposed) return ok;
+      if (ok) {
+        _practice = result.value.aggregate;
+        _baseHashes = result.value.baseHashes;
+      } else {
+        // Revert the optimistic in-memory model to what's actually on disk, so the
+        // UI never keeps showing edits a failed write didn't persist. The base
+        // hashes are refreshed with it (they must always describe _practice).
+        final reloaded = await _repository.loadPractice(_practice!.id);
+        if (reloaded is Ok<Loaded<SongPractice>>) {
+          _practice = reloaded.value.aggregate;
+          _baseHashes = reloaded.value.baseHashes;
+        }
+        _toast("Couldn't save your changes.");
       }
-      _toast("Couldn't save your changes.");
+      _ensureSelection();
+      playback.ensureLoopRange();
+      await mixer.resyncPlayback();
+      notifyListeners();
+      return ok;
+    } finally {
+      _saving = false;
     }
-    _ensureSelection();
-    playback.ensureLoopRange();
-    await mixer.resyncPlayback();
-    notifyListeners();
-    return ok;
   }
 
   // --- Retained cross-cutting delegates -------------------------------------
@@ -1778,6 +1840,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   @override
   void dispose() {
     _disposed = true;
+    unawaited(_remoteSub?.cancel());
     // ORDER MATTERS. Recording first: it closes an in-flight take's WAV
     // handle, unregisters the quit finalizer and kills the device-watch/meter
     // timers that poll the engine over FFI — all before the engine goes away.

@@ -10,6 +10,7 @@ import '../../../data/services/media_analysis_service.dart';
 import '../../../data/services/mic_recording_controller.dart';
 import '../../../data/services/monitor_service.dart';
 import '../../../data/services/technique_media_service.dart';
+import '../../../data/sync/sync_engine.dart';
 import '../../../data/sync/sync_hashes.dart';
 import '../../../domain/models/audio_track.dart';
 import '../../../domain/models/spectrogram.dart';
@@ -62,6 +63,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
     required TechniqueRepository repository,
     required TechniqueMediaService mediaService,
     required this.techniqueId,
+    Stream<RemoteApplied>? remoteApplied,
     AppSettingsService? appSettings,
     MediaAnalysisService analysisService = const MediaAnalysisService(),
   }) : _repository = repository,
@@ -69,6 +71,8 @@ class TechniqueDetailViewModel extends ChangeNotifier
        _appSettings = appSettings,
        _analysis = analysisService {
     load = Command0(_load)..execute();
+    // Freshness reloads when sync applies remote changes to THIS technique.
+    _remoteSub = remoteApplied?.listen(_onRemoteApplied);
   }
 
   // Registered with RecordingFinalizer by the recording controller while a
@@ -100,6 +104,50 @@ class TechniqueDetailViewModel extends ChangeNotifier
   /// technique can never revert or tombstone rows that changed underneath it
   /// (e.g. applied by sync).
   Map<String, String> _baseHashes = const {};
+
+  // --- Sync freshness ---------------------------------------------------------
+
+  StreamSubscription<RemoteApplied>? _remoteSub;
+
+  /// True while [_commit] is writing; a remote-applied reload must not
+  /// interleave with it (the save returns the fresh aggregate + base itself).
+  bool _saving = false;
+
+  /// Bumped when a save or a newer remote reload starts so an older in-flight
+  /// reload's result is discarded (stale-read-completes-last race).
+  int _reloadEpoch = 0;
+
+  /// Freshness-only reload when sync applied remote rows of THIS technique.
+  /// Skipped whenever an edit session holds state this reload would talk over
+  /// (a media draft, an import, a recording, a save in flight) — skipping is
+  /// always SAFE: the next save three-way merges against [_baseHashes], so a
+  /// missed reload can never revert the synced-in change.
+  Future<void> _onRemoteApplied(RemoteApplied event) async {
+    if (_disposed || _technique == null || load.running) return;
+    if (!event.techniqueIds.contains(techniqueId)) return;
+    if (_saving ||
+        importingMedia ||
+        savingExample ||
+        hasMediaDraft ||
+        _recorder.isRecording) {
+      return;
+    }
+    final epoch = ++_reloadEpoch;
+    final result = await _repository.loadTechnique(techniqueId);
+    if (_disposed || epoch != _reloadEpoch) return;
+    if (_saving ||
+        importingMedia ||
+        savingExample ||
+        hasMediaDraft ||
+        _recorder.isRecording) {
+      return;
+    }
+    if (result is! Ok<Loaded<Technique>>) return; // e.g. deleted remotely
+    _technique = result.value.aggregate;
+    _baseHashes = result.value.baseHashes;
+    _fixSelectionAfterMediaChange();
+    notifyListeners();
+  }
 
   /// True while example files are being copied into the sandbox.
   bool _importingMedia = false;
@@ -823,6 +871,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
   @override
   void dispose() {
     _disposed = true;
+    unawaited(_remoteSub?.cancel());
     // Tears down a recording that is running OR still starting (a pending
     // start is invalidated and arms nothing), unregisters the quit finalizer,
     // and disposes the level notifier.
@@ -1018,24 +1067,33 @@ class TechniqueDetailViewModel extends ChangeNotifier
     _technique = next;
     notifyListeners();
 
-    // Three-way save against the base captured at load / the previous save,
-    // so a stale technique can't revert or tombstone concurrent (synced-in)
-    // changes; the returned fresh base replaces ours for the next save.
-    final result = await _repository.saveTechniqueWithBase(
-      next,
-      baseHashes: _baseHashes,
-    );
-    final ok = result is Ok<Loaded<Technique>>;
-    if (ok) {
-      _technique = result.value.aggregate;
-      _baseHashes = result.value.baseHashes;
-    } else {
-      // Revert to the previous aggregate; _baseHashes stays as-is — it still
-      // describes the last state this session loaded or saved, which is what
-      // the reverted model matches.
-      _technique = previous;
+    // A starting save supersedes any in-flight remote-applied reload (its
+    // read predates this write) and blocks new ones until the fresh base is
+    // captured below.
+    _reloadEpoch++;
+    _saving = true;
+    try {
+      // Three-way save against the base captured at load / the previous save,
+      // so a stale technique can't revert or tombstone concurrent (synced-in)
+      // changes; the returned fresh base replaces ours for the next save.
+      final result = await _repository.saveTechniqueWithBase(
+        next,
+        baseHashes: _baseHashes,
+      );
+      final ok = result is Ok<Loaded<Technique>>;
+      if (ok) {
+        _technique = result.value.aggregate;
+        _baseHashes = result.value.baseHashes;
+      } else {
+        // Revert to the previous aggregate; _baseHashes stays as-is — it still
+        // describes the last state this session loaded or saved, which is what
+        // the reverted model matches.
+        _technique = previous;
+      }
+      notifyListeners();
+      return ok;
+    } finally {
+      _saving = false;
     }
-    notifyListeners();
-    return ok;
   }
 }

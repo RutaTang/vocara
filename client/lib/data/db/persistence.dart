@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
@@ -15,6 +16,14 @@ import '../services/audio_file_service.dart';
 import '../services/local_storage_service.dart';
 import '../services/waveform_service.dart';
 import '../sync/hlc.dart';
+import '../sync/integrity_checker.dart';
+import '../sync/oplog_drain.dart';
+import '../sync/quarantine_store.dart';
+import '../sync/sync_applier.dart';
+import '../sync/sync_engine.dart';
+import '../sync/sync_row.dart';
+import '../sync/sync_state_store.dart';
+import '../sync/sync_transport.dart';
 import '../sync/sync_writer.dart';
 import 'app_database.dart';
 import 'asset_store.dart';
@@ -43,6 +52,51 @@ class Persistence {
   final AssetStore assets;
   final SongPracticeRepositoryDrift songRepo;
   final TechniqueRepositoryDrift techRepo;
+
+  /// "Remote changes were applied by sync" notifications for the UI layer:
+  /// one event per committed pull page that changed rows, fired strictly
+  /// AFTER that page's transaction (and the follow-up integrity repair)
+  /// committed — never from inside an open transaction. View models listen to
+  /// refresh what they display; skipping a reload is always safe because
+  /// three-way saves merge against base hashes (freshness, not safety).
+  Stream<RemoteApplied> get remoteApplied => _remoteApplied.stream;
+  final StreamController<RemoteApplied> _remoteApplied =
+      StreamController<RemoteApplied>.broadcast();
+
+  /// The sync engine, once [attachSync] wired one (null until then — P0 has
+  /// no production transport; tests and the future CloudKit bridge attach).
+  SyncEngine? get sync => _sync;
+  SyncEngine? _sync;
+
+  /// Builds and wires the [SyncEngine] over this store: the applier (with a
+  /// persistent quarantine), the oplog drain, the row builder, the sync-state
+  /// and integrity collaborators, and the [remoteApplied] broadcast. The
+  /// engine starts PASSIVE — callers pump it explicitly; production calls
+  /// [SyncEngine.start] to also subscribe the debounced push to committed
+  /// oplog writes. Attach at most once per Persistence.
+  SyncEngine attachSync(
+    SyncTransport transport, {
+    SyncTimerFactory? timers,
+    Future<void> Function(FetchPage page)? debugBeforePageCommit,
+  }) {
+    if (_sync != null) {
+      throw StateError('a SyncEngine is already attached to this store');
+    }
+    final engine = SyncEngine(
+      db: db,
+      applier: SyncApplier(db, writer.clock, quarantine: QuarantineStore(db)),
+      drain: OplogDrain(db),
+      builder: SyncRowBuilder(db),
+      state: SyncStateStore(db),
+      integrity: IntegrityChecker(db, writer),
+      transport: transport,
+      onRemoteApplied: _remoteApplied.add,
+      timers: timers,
+      debugBeforePageCommit: debugBeforePageCommit,
+    );
+    _sync = engine;
+    return engine;
+  }
 
   /// Opens the real on-disk store under the app support directory. First
   /// recovers any half-finished schema migration (a crash mid-swap) so the live

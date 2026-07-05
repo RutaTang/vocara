@@ -25,10 +25,16 @@ class ApplyResult {
   int quarantined = 0; // implausibly-future clock; not applied
   int failed = 0; // threw while applying (malformed / forward-incompatible row)
 
+  /// Whether the batch's OUTER transaction committed. False means the whole
+  /// batch rolled back (nothing was applied, quarantined-to-store, or written
+  /// by the `beforeCommit` hook) and the caller must retry the page — this is
+  /// how the sync engine knows its change token did NOT advance.
+  bool committed = true;
+
   @override
   String toString() =>
       'ApplyResult(applied: $applied, skipped: $skipped, '
-      'quarantined: $quarantined, failed: $failed)';
+      'quarantined: $quarantined, failed: $failed, committed: $committed)';
 }
 
 /// The "remote door": applies records pulled from sync into the local store.
@@ -66,7 +72,19 @@ class SyncApplier {
   /// behavior unchanged.
   final QuarantineStore? quarantine;
 
-  Future<ApplyResult> apply(List<SyncRow> records) async {
+  /// Applies one batch of remote records in ONE outer transaction.
+  ///
+  /// [beforeCommit], when given, runs INSIDE that outer transaction as its
+  /// very last step (after every record and the FK sweep), so whatever it
+  /// writes commits atomically with the batch. This is the sync engine's
+  /// change-token hook: the token it covers advances IFF the batch committed.
+  /// A throwing hook rolls the WHOLE batch back ([ApplyResult.committed]
+  /// false) — deliberately, since applying records whose token write failed
+  /// would re-apply the page forever.
+  Future<ApplyResult> apply(
+    List<SyncRow> records, {
+    Future<void> Function()? beforeCommit,
+  }) async {
     final result = ApplyResult();
     // (table, id) pairs INSERTED by this batch — the only rows the FK sweep is
     // allowed to hard-delete (see _sweepFkOrphans).
@@ -129,18 +147,20 @@ class SyncApplier {
           }
         }
         await _sweepFkOrphans(result, insertedThisBatch);
+        if (beforeCommit != null) await beforeCommit();
       });
     } catch (_) {
       // The outer commit failed despite the per-record savepoints and the FK sweep
-      // (e.g. a deferred constraint we can't attribute to a single row). The whole
-      // transaction rolled back — including any persisted quarantine rows, which is
-      // correct: the retry of this page re-quarantines them atomically with whatever
-      // does commit. Report the batch as failed rather than throwing out of apply(),
-      // which would lose the ApplyResult and stall sync on an endless retry of this
-      // page.
+      // (e.g. a deferred constraint we can't attribute to a single row, or a
+      // throwing beforeCommit hook). The whole transaction rolled back — including
+      // any persisted quarantine rows, which is correct: the retry of this page
+      // re-quarantines them atomically with whatever does commit. Report the batch
+      // as failed rather than throwing out of apply(), which would lose the
+      // ApplyResult and stall sync on an endless retry of this page.
       result.applied = 0;
       result.skipped = 0;
       result.failed = records.length - result.quarantined;
+      result.committed = false;
     }
     return result;
   }
