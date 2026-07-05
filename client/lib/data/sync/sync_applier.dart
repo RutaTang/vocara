@@ -2,22 +2,21 @@ import 'package:drift/drift.dart';
 
 import '../db/app_database.dart';
 import 'hlc.dart';
+import 'quarantine_store.dart';
+import 'sync_row.dart';
 
 /// A row pulled from the cloud, ready to apply: the table name plus every synced
 /// column (including the HLC quad, deleted_at and schema_v) as a value map.
-class RemoteRecord {
-  RemoteRecord({required this.table, required this.columns});
+///
+/// Unified with the wire format: this is now a thin [SyncRow] whose field map
+/// keeps its original [columns] name, so existing construction sites (and the
+/// applier tests) are untouched while the applier itself accepts any [SyncRow]
+/// straight off the transport.
+class RemoteRecord extends SyncRow {
+  RemoteRecord({required super.table, required Map<String, Object?> columns})
+    : super(fields: columns);
 
-  final String table;
-  final Map<String, Object?> columns;
-
-  String get id => columns['id'] as String;
-  String get hlcPacked => columns['hlc_packed'] as String;
-  Hlc get hlc => Hlc(
-    wallMs: columns['hlc_wall'] as int,
-    counter: columns['hlc_ctr'] as int,
-    node: columns['hlc_node'] as String,
-  );
+  Map<String, Object?> get columns => fields;
 }
 
 class ApplyResult {
@@ -55,12 +54,19 @@ class ApplyResult {
 /// transaction is wrapped so a commit failure degrades to a failed batch
 /// instead of throwing out of apply().
 class SyncApplier {
-  SyncApplier(this.db, this.clock);
+  SyncApplier(this.db, this.clock, {this.quarantine});
 
   final AppDatabase db;
   final HlcClock clock;
 
-  Future<ApplyResult> apply(List<RemoteRecord> records) async {
+  /// Optional collaborator: when present, a rejected record (HLC drift or a
+  /// per-record apply failure) is PERSISTED to the quarantine parking lot
+  /// inside the same outer transaction, so nothing is silently dropped. Kept
+  /// optional so wiring (and tests) without persistence keep the counter-only
+  /// behavior unchanged.
+  final QuarantineStore? quarantine;
+
+  Future<ApplyResult> apply(List<SyncRow> records) async {
     final result = ApplyResult();
     // (table, id) pairs INSERTED by this batch — the only rows the FK sweep is
     // allowed to hard-delete (see _sweepFkOrphans).
@@ -71,8 +77,9 @@ class SyncApplier {
         for (final rec in records) {
           try {
             clock.receive(rec.hlc);
-          } on HlcDriftException {
+          } on HlcDriftException catch (e) {
             result.quarantined++;
+            await _quarantine(rec, 'hlc-drift: $e');
             continue;
           }
           try {
@@ -115,8 +122,10 @@ class SyncApplier {
             } else {
               result.skipped++;
             }
-          } catch (_) {
+          } catch (e) {
+            // Forward-incompat / malformed record: its savepoint rolled back.
             result.failed++;
+            await _quarantine(rec, 'apply-failed: $e');
           }
         }
         await _sweepFkOrphans(result, insertedThisBatch);
@@ -124,14 +133,43 @@ class SyncApplier {
     } catch (_) {
       // The outer commit failed despite the per-record savepoints and the FK sweep
       // (e.g. a deferred constraint we can't attribute to a single row). The whole
-      // transaction rolled back, so nothing except the DB-untouched quarantines
-      // stuck. Report the batch as failed rather than throwing out of apply(), which
-      // would lose the ApplyResult and stall sync on an endless retry of this page.
+      // transaction rolled back — including any persisted quarantine rows, which is
+      // correct: the retry of this page re-quarantines them atomically with whatever
+      // does commit. Report the batch as failed rather than throwing out of apply(),
+      // which would lose the ApplyResult and stall sync on an endless retry of this
+      // page.
       result.applied = 0;
       result.skipped = 0;
       result.failed = records.length - result.quarantined;
     }
     return result;
+  }
+
+  /// Persists a rejected record to the quarantine parking lot (latest state
+  /// per row) INSIDE the current outer apply transaction. Strictly best-effort
+  /// bookkeeping: a record too malformed to describe (bad id/hlc types) or a
+  /// storage error here must never turn a per-record rejection into a batch
+  /// failure — the counters remain the source of truth for the caller.
+  Future<void> _quarantine(SyncRow rec, String reason) async {
+    final store = quarantine;
+    if (store == null) return;
+    try {
+      final id = rec.fields['id'];
+      if (id is! String || id.isEmpty) return; // nothing addressable to park
+      final hlcPacked = rec.fields['hlc_packed'];
+      final schemaV = rec.fields['schema_v'];
+      await store.put(
+        table: rec.table,
+        id: id,
+        hlcPacked: hlcPacked is String ? hlcPacked : '',
+        schemaV: schemaV is int ? schemaV : 0,
+        payload: rec.encode(),
+        reason: reason,
+        quarantinedAt: DateTime.now().millisecondsSinceEpoch,
+      );
+    } catch (_) {
+      // Swallowed by design (see doc comment).
+    }
   }
 
   /// Pre-commit sweep for rows that STILL violate a foreign key once the whole
@@ -242,14 +280,14 @@ class SyncApplier {
   /// slot is held by a DIFFERENT live row, the higher hlc_packed keeps the slot live and
   /// the loser is tombstoned. When [rec] is the loser, the returned map is tombstoned so
   /// the row is still stored (a later sync can update it) without occupying the live slot.
-  Future<Map<String, Object?>> _resolveSlot(RemoteRecord rec) async {
-    if (rec.table != 'tracks' || rec.columns['deleted_at'] != null) {
-      return rec.columns;
+  Future<Map<String, Object?>> _resolveSlot(SyncRow rec) async {
+    if (rec.table != 'tracks' || rec.fields['deleted_at'] != null) {
+      return rec.fields;
     }
-    final kind = rec.columns['kind'];
-    if (kind != 'accompaniment' && kind != 'reference') return rec.columns;
-    final practiceId = rec.columns['practice_id'];
-    if (practiceId is! String) return rec.columns;
+    final kind = rec.fields['kind'];
+    if (kind != 'accompaniment' && kind != 'reference') return rec.fields;
+    final practiceId = rec.fields['practice_id'];
+    if (practiceId is! String) return rec.fields;
     final occupant = await db
         .customSelect(
           'SELECT id, hlc_packed FROM tracks WHERE practice_id = ? AND kind = ? '
@@ -261,19 +299,19 @@ class SyncApplier {
           ],
         )
         .getSingleOrNull();
-    if (occupant == null) return rec.columns;
+    if (occupant == null) return rec.fields;
     // A plausible tombstone time: the incoming record's wall clock.
-    final tombstoneAt = rec.columns['hlc_wall'];
+    final tombstoneAt = rec.fields['hlc_wall'];
     if (rec.hlcPacked.compareTo(occupant.read<String>('hlc_packed')) > 0) {
       // Incoming wins → free the slot by tombstoning the current occupant.
       await db.customStatement(
         'UPDATE tracks SET deleted_at = ? WHERE id = ?',
         [_bind(tombstoneAt), occupant.read<String>('id')],
       );
-      return rec.columns;
+      return rec.fields;
     }
     // Incoming loses → store it tombstoned so it never occupies the live slot.
-    return {...rec.columns, 'deleted_at': tombstoneAt};
+    return {...rec.fields, 'deleted_at': tombstoneAt};
   }
 
   Future<void> _insert(String table, Map<String, Object?> columns) {

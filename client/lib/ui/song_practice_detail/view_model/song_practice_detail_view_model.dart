@@ -18,6 +18,7 @@ import '../../../data/services/recording_finalizer.dart';
 import '../../../data/services/source_separation_service.dart';
 import '../../../data/services/spectrogram_service.dart';
 import '../../../data/services/waveform_service.dart';
+import '../../../data/sync/sync_hashes.dart';
 import '../../../domain/models/audio_track.dart';
 import '../../../domain/models/fx_bus.dart';
 import '../../../domain/models/lyric_line.dart';
@@ -310,6 +311,14 @@ class SongPracticeDetailViewModel extends ChangeNotifier
 
   SongPractice? _practice;
   SongPractice? get practice => _practice;
+
+  /// Per-row content hashes of the persisted practice as THIS view model last
+  /// loaded or saved it — the BASE side of the repository's three-way save
+  /// (see [Loaded]). Captured by [_load], handed to every save, and replaced
+  /// by the fresh map each successful save (and the failed-save reload)
+  /// returns, so a stale in-memory aggregate can never revert or tombstone
+  /// rows that changed underneath it (e.g. applied by sync).
+  Map<String, String> _baseHashes = const {};
 
   /// The one busy/error latch (spinner + structural-edit mutex).
   bool get busy => _busyGate.busy;
@@ -655,32 +664,43 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     final practice = _practice;
     if (practice == null) return;
     _practice = practice.copyWith(lyrics: lines);
-    final result = await _repository.savePractice(_practice!);
-    if (result is Ok<SongPractice>) _practice = result.value;
+    final result = await _repository.savePracticeWithBase(
+      _practice!,
+      baseHashes: _baseHashes,
+    );
+    if (result is Ok<Loaded<SongPractice>>) {
+      _practice = result.value.aggregate;
+      _baseHashes = result.value.baseHashes;
+    }
     notifyListeners();
   }
 
   // --- Loading -------------------------------------------------------------
 
   Future<Result<SongPractice>> _load() async {
-    final result = await _repository.getPractice(_practiceId);
-    if (result is Ok<SongPractice>) {
-      _practice = result.value;
-      _ensureSelection();
-      _ensureTimeline();
-      playback.ensureLoopRange();
-      // Render the workspace as soon as the project DATA is ready (tracks + cached waveforms), so
-      // there is no blank loading screen; the audio engine sync below continues in the background.
-      notifyListeners();
-      if (analysis.dockOpen && analysis.dockShowsTake) {
-        unawaited(analysis.ensureSelectedSpectrogram());
-      }
-      // Compile-time demo/screenshot hooks (see AppConfig).
-      analysis.applyDemoHooks(result.value.vocalTracks);
-      await mixer.resyncPlayback();
-      notifyListeners();
+    // Load through the base-hash path: the hashes captured here are what every
+    // later save three-way merges against (see [_baseHashes]).
+    final loaded = await _repository.loadPractice(_practiceId);
+    if (loaded is! Ok<Loaded<SongPractice>>) {
+      return Result.error((loaded as Error<Loaded<SongPractice>>).error);
     }
-    return result;
+    final practice = loaded.value.aggregate;
+    _practice = practice;
+    _baseHashes = loaded.value.baseHashes;
+    _ensureSelection();
+    _ensureTimeline();
+    playback.ensureLoopRange();
+    // Render the workspace as soon as the project DATA is ready (tracks + cached waveforms), so
+    // there is no blank loading screen; the audio engine sync below continues in the background.
+    notifyListeners();
+    if (analysis.dockOpen && analysis.dockShowsTake) {
+      unawaited(analysis.ensureSelectedSpectrogram());
+    }
+    // Compile-time demo/screenshot hooks (see AppConfig).
+    analysis.applyDemoHooks(practice.vocalTracks);
+    await mixer.resyncPlayback();
+    notifyListeners();
+    return Result.ok(practice);
   }
 
   // --- Importing audio -----------------------------------------------------
@@ -1677,19 +1697,30 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   Future<bool> _save() async {
     if (_practice == null) return false;
     _ensureTimeline();
-    final result = await _repository.savePractice(_practice!);
-    final ok = result is Ok<SongPractice>;
+    // Three-way save against the base captured at load / the previous save,
+    // so a stale aggregate can't revert or tombstone concurrent (synced-in)
+    // changes; the returned fresh base replaces ours for the next save.
+    final result = await _repository.savePracticeWithBase(
+      _practice!,
+      baseHashes: _baseHashes,
+    );
+    final ok = result is Ok<Loaded<SongPractice>>;
     // If the route was popped mid-save (e.g. a second back while finalizing a
     // recording), the write above still committed — the take is safe — but the
     // playback/selection resync below must not touch now-disposed notifiers.
     if (_disposed) return ok;
     if (ok) {
-      _practice = result.value;
+      _practice = result.value.aggregate;
+      _baseHashes = result.value.baseHashes;
     } else {
       // Revert the optimistic in-memory model to what's actually on disk, so the
-      // UI never keeps showing edits a failed write didn't persist.
-      final reloaded = await _repository.getPractice(_practice!.id);
-      if (reloaded is Ok<SongPractice>) _practice = reloaded.value;
+      // UI never keeps showing edits a failed write didn't persist. The base
+      // hashes are refreshed with it (they must always describe _practice).
+      final reloaded = await _repository.loadPractice(_practice!.id);
+      if (reloaded is Ok<Loaded<SongPractice>>) {
+        _practice = reloaded.value.aggregate;
+        _baseHashes = reloaded.value.baseHashes;
+      }
       _toast("Couldn't save your changes.");
     }
     _ensureSelection();

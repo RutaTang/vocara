@@ -4,7 +4,11 @@ import 'tables.dart';
 
 part 'app_database.g.dart';
 
-/// The drift/SQLite working store. Greenfield at [schemaVersion] 1.
+/// The drift/SQLite working store.
+///
+/// Schema history: v1 greenfield; v2 adds the LOCAL-ONLY sync bookkeeping
+/// tables (sync_state, sync_quarantine, asset_sync) — additive only, upgraded
+/// on disk by the registered SafeMigrator step (see safe_migrator.dart).
 ///
 /// In-place upgrades are DELIBERATELY refused (see [migration]): the safe
 /// schema-migration protocol upgrades a COPY of the database, validates it, and
@@ -26,13 +30,20 @@ part 'app_database.g.dart';
     Oplog,
     RecordingsInflight,
     WaveformCache,
+    SyncState,
+    SyncQuarantine,
+    AssetSync,
   ],
 )
 class AppDatabase extends _$AppDatabase {
   AppDatabase(super.e);
 
+  /// The current code schema version; the SafeMigrator upgrade driver targets
+  /// this so persistence wiring can never drift out of step with [schemaVersion].
+  static const int currentSchemaVersion = 2;
+
   @override
-  int get schemaVersion => 1;
+  int get schemaVersion => currentSchemaVersion;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(

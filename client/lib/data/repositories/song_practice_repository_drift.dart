@@ -17,6 +17,7 @@ import '../db/app_database.dart';
 import '../db/asset_store.dart';
 import '../db/tables.dart';
 import '../sync/reconcile.dart';
+import '../sync/sync_hashes.dart';
 import '../sync/sync_writer.dart';
 import 'song_practice_repository.dart';
 
@@ -81,6 +82,15 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
 
   @override
   Future<Result<SongPractice>> getPractice(String id) async {
+    final r = await loadPractice(id);
+    return switch (r) {
+      Ok<Loaded<SongPractice>>(:final value) => Result.ok(value.aggregate),
+      Error<Loaded<SongPractice>>(:final error) => Result.error(error),
+    };
+  }
+
+  @override
+  Future<Result<Loaded<SongPractice>>> loadPractice(String id) async {
     try {
       final row =
           await (db.select(db.practices)
@@ -89,7 +99,13 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
       if (row == null) {
         return Result.error(Exception('Practice "$id" not found'));
       }
-      return Result.ok(await _hydrate(row));
+      // Collect the base hash of every row this read returns, so a later save
+      // can three-way merge against exactly what the editor was shown.
+      final hashes = <String, String>{};
+      final practice = await _hydrate(row, baseHashes: hashes);
+      return Result.ok(
+        Loaded(practice, Map<String, String>.unmodifiable(hashes)),
+      );
     } catch (e) {
       // The data boundary must always return a Result, never throw — a
       // data-layer Error (e.g. a StateError) must still surface as Result.error
@@ -159,6 +175,30 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
 
   @override
   Future<Result<SongPractice>> savePractice(SongPractice practice) async {
+    // Base-less save: _save adopts the CURRENT persisted rows as the base,
+    // which reproduces the old two-way diff exactly. Safe only for callers
+    // that just created or just re-read the aggregate (createPractice, boot
+    // recovery); editors must use savePracticeWithBase — see the interface.
+    final r = await _save(practice, base: null);
+    return switch (r) {
+      Ok<Loaded<SongPractice>>(:final value) => Result.ok(value.aggregate),
+      Error<Loaded<SongPractice>>(:final error) => Result.error(error),
+    };
+  }
+
+  @override
+  Future<Result<Loaded<SongPractice>>> savePracticeWithBase(
+    SongPractice practice, {
+    required Map<String, String> baseHashes,
+  }) => _save(practice, base: baseHashes);
+
+  /// The one save core. [base] is the per-row content-hash map captured when
+  /// the caller loaded the aggregate (three-way merge); null means "adopt the
+  /// current persisted state as base" (the legacy two-way diff).
+  Future<Result<Loaded<SongPractice>>> _save(
+    SongPractice practice, {
+    required Map<String, String>? base,
+  }) async {
     try {
       // All tracks flattened (accompaniment + reference + vocals).
       final allTracks = <AudioTrack>[
@@ -205,13 +245,14 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
           reverbJson: reverbJson,
           lyricsJson: lyricsJson,
           now: now,
+          base: base,
         );
 
         // --- interpretations ---
-        var childChanges = await _reconcileInterpretations(practice, now);
+        var childChanges = await _reconcileInterpretations(practice, now, base);
 
         // --- fx buses (before tracks so a track's bus_id resolves) ---
-        childChanges += await _reconcileFxBuses(practice, now);
+        childChanges += await _reconcileFxBuses(practice, now, base);
 
         // --- tracks (+ cascade their clips / notes / markers) ---
         childChanges += await _reconcileTracks(
@@ -219,6 +260,7 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
           allTracks,
           clipAsset,
           now,
+          base,
         );
 
         // A child-only edit (clip move, note/marker, fader, add/remove an
@@ -234,7 +276,10 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
         }
       });
 
-      return getPractice(practice.id);
+      // Re-read the saved aggregate WITH fresh base hashes, so the caller's
+      // next save merges against what this save actually left in the store
+      // (including any concurrent rows the three-way rules kept).
+      return loadPractice(practice.id);
     } catch (e) {
       // The data boundary must always return a Result, never throw — a
       // data-layer Error (e.g. a StateError) must still surface as Result.error
@@ -246,37 +291,41 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
   // --- write helpers --------------------------------------------------------
 
   /// Writes the practice-level row. Returns whether the row was actually written
-  /// (insert or content change) — false on the no-change early return, so the
-  /// caller knows whether updatedAt was already bumped here.
+  /// (insert or content change) — false on the no-change early return AND on
+  /// the three-way "keep theirs" skip, so the caller knows whether updatedAt
+  /// was already bumped here.
   Future<bool> _upsertPractice(
     SongPractice p, {
     required String? separationAssetId,
     required String? reverbJson,
     required String lyricsJson,
     required int now,
+    required Map<String, String>? base,
   }) async {
     final existing = await (db.select(
       db.practices,
     )..where((x) => x.id.equals(p.id))).getSingleOrNull();
     if (existing != null && existing.deletedAt != null) {
       // The practice was tombstoned before this save landed (e.g. an in-flight
-      // save racing deletePractice). Continuing would NOT revive the practice
-      // (the update below never clears deleted_at) yet would still commit LIVE
-      // child rows under the tombstoned parent — a journaled zombie subtree.
-      // A deleted aggregate must not be implicitly re-saved: abort the whole
-      // save (the transaction rolls back, no children are written) so the
-      // caller surfaces Result.error, like the pre-upsert-revive PK failure.
+      // save racing deletePractice, or a synced-in delete). Continuing would
+      // NOT revive the practice (the update below never clears deleted_at) yet
+      // would still commit LIVE child rows under the tombstoned parent — a
+      // journaled zombie subtree. A deleted aggregate must not be implicitly
+      // re-saved — for the AGGREGATE ROOT this abort deliberately outranks the
+      // per-row edit-vs-delete "active editor wins" rule: abort the whole save
+      // (the transaction rolls back, no children are written) so the caller
+      // surfaces Result.error, like the pre-upsert-revive PK failure.
       throw StateError('practice ${p.id} is deleted; refusing to save over it');
     }
-    final hash = SyncWriter.contentHashOf([
-      p.title,
-      p.timelineDurationMs,
-      p.masterVolume,
-      p.activeVersionId,
-      separationAssetId,
-      reverbJson,
-      lyricsJson,
-    ]);
+    final hash = practiceContentHash(
+      title: p.title,
+      timelineDurationMs: p.timelineDurationMs,
+      masterVolume: p.masterVolume,
+      activeInterpretationId: p.activeVersionId,
+      separationAssetId: separationAssetId,
+      reverbJson: reverbJson,
+      lyricsJson: lyricsJson,
+    );
     if (existing == null) {
       final s = writer.stamp();
       await db
@@ -307,16 +356,25 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
         payloadHash: hash,
       );
     } else {
-      final existingHash = SyncWriter.contentHashOf([
-        existing.title,
-        existing.timelineDurationMs,
-        existing.masterVolume,
-        existing.activeInterpretationId,
-        existing.separationAssetId,
-        existing.reverbJson,
-        existing.lyricsJson,
-      ]);
+      final existingHash = practiceRowHash(existing);
       if (existingHash == hash) return false;
+      // Three-way merge on the parent row itself (same rules as
+      // reconcileCollection). A null [base] adopts the current row as base
+      // (legacy two-way — the skip below then never fires); a with-base map
+      // missing this id means the editor never held the row, which degrades
+      // to conflict-local-wins below.
+      final baseHash = base == null ? existingHash : base[p.id];
+      if (baseHash != null && existingHash != baseHash && hash == baseHash) {
+        // The persisted row moved on since this editor loaded it (a remote/
+        // newer write) and the editor never touched the practice-level fields:
+        // keep the DB state. Writing "mine" would revert the newer row to
+        // stale values under a fresh HLC. Not "written" — a child-only change
+        // may still bump updatedAt locally in the caller.
+        return false;
+      }
+      // Plain local edit (existingHash == baseHash) or a true conflict (both
+      // sides changed): the ACTIVE EDITOR wins by policy and mine is written
+      // with a fresh HLC, so it also wins entity-level LWW downstream.
       final s = writer.stamp();
       await (db.update(db.practices)..where((x) => x.id.equals(p.id))).write(
         PracticesCompanion(
@@ -345,25 +403,30 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
     return true;
   }
 
-  Future<int> _reconcileInterpretations(SongPractice p, int now) async {
+  Future<int> _reconcileInterpretations(
+    SongPractice p,
+    int now,
+    Map<String, String>? base,
+  ) async {
     final live = await _live(
       db.interpretations,
       (x) => x.practiceId.equals(p.id),
     );
-    final current = {
-      for (final r in live)
-        r.id: SyncWriter.contentHashOf([r.name, r.orderIndex]),
-    };
+    final current = {for (final r in live) r.id: interpretationRowHash(r)};
     final desired = [
       for (var i = 0; i < p.versions.length; i++) (v: p.versions[i], order: i),
     ];
     return (await reconcileCollection(
       writer: writer,
       table: 'interpretations',
+      // A null base (legacy no-base save) adopts the current persisted rows,
+      // reproducing the old two-way diff; see savePractice.
+      baseHashes: base ?? current,
       currentHashes: current,
       desired: desired,
       idOf: (d) => d.v.id,
-      hashOf: (d) => SyncWriter.contentHashOf([d.v.name, d.order]),
+      hashOf: (d) =>
+          interpretationContentHash(name: d.v.name, orderIndex: d.order),
       insert: (d, s) => db
           .into(db.interpretations)
           .insertOnConflictUpdate(
@@ -401,41 +464,33 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
     )).total;
   }
 
-  Future<int> _reconcileFxBuses(SongPractice p, int now) async {
+  Future<int> _reconcileFxBuses(
+    SongPractice p,
+    int now,
+    Map<String, String>? base,
+  ) async {
     final live = await _live(db.fxBuses, (x) => x.practiceId.equals(p.id));
-    String busHash(FxBus b, int order) => SyncWriter.contentHashOf([
-      b.name,
-      b.colorValue,
-      b.volume,
-      b.pan,
-      b.muted,
-      b.soloed,
-      b.outputBusId,
-      jsonEncode(b.fx.toJson()),
-      jsonEncode(b.sends.map((s) => s.toJson()).toList()),
-      order,
-    ]);
-    final current = {
-      for (final r in live)
-        r.id: SyncWriter.contentHashOf([
-          r.name,
-          r.colorValue,
-          r.volume,
-          r.pan,
-          r.muted,
-          r.soloed,
-          r.outputBusId,
-          r.fxJson ?? '',
-          r.sendsJson ?? '[]',
-          r.orderIndex,
-        ]),
-    };
+    String busHash(FxBus b, int order) => fxBusContentHash(
+      name: b.name,
+      colorValue: b.colorValue,
+      volume: b.volume,
+      pan: b.pan,
+      muted: b.muted,
+      soloed: b.soloed,
+      outputBusId: b.outputBusId,
+      fxJson: jsonEncode(b.fx.toJson()),
+      sendsJson: jsonEncode(b.sends.map((s) => s.toJson()).toList()),
+      orderIndex: order,
+    );
+    final current = {for (final r in live) r.id: fxBusRowHash(r)};
     final desired = [
       for (var i = 0; i < p.fxBuses.length; i++) (bus: p.fxBuses[i], order: i),
     ];
     return (await reconcileCollection(
       writer: writer,
       table: 'fx_buses',
+      // Null base adopts the current rows (legacy two-way); see savePractice.
+      baseHashes: base ?? current,
       currentHashes: current,
       desired: desired,
       idOf: (d) => d.bus.id,
@@ -500,45 +555,32 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
     List<AudioTrack> tracks,
     Map<String, String> clipAsset,
     int now,
+    Map<String, String>? base,
   ) async {
     final live = await _live(db.tracks, (x) => x.practiceId.equals(p.id));
-    String trackHash(AudioTrack t, int order) => SyncWriter.contentHashOf([
-      t.kind.name,
-      t.versionId,
-      t.displayName,
-      t.colorValue,
-      t.muted,
-      t.soloed,
-      t.volume,
-      t.pan,
-      t.busId,
-      t.fx == null ? null : jsonEncode(t.fx!.toJson()),
-      jsonEncode(t.sends.map((s) => s.toJson()).toList()),
-      order,
-    ]);
-    final current = {
-      for (final r in live)
-        r.id: SyncWriter.contentHashOf([
-          r.kind,
-          r.interpretationId,
-          r.displayName,
-          r.colorValue,
-          r.muted,
-          r.soloed,
-          r.volume,
-          r.pan,
-          r.busId,
-          r.fxJson,
-          r.sendsJson ?? '[]',
-          r.orderIndex,
-        ]),
-    };
+    String trackHash(AudioTrack t, int order) => trackContentHash(
+      kind: t.kind.name,
+      interpretationId: t.versionId,
+      displayName: t.displayName,
+      colorValue: t.colorValue,
+      muted: t.muted,
+      soloed: t.soloed,
+      volume: t.volume,
+      pan: t.pan,
+      busId: t.busId,
+      fxJson: t.fx == null ? null : jsonEncode(t.fx!.toJson()),
+      sendsJson: jsonEncode(t.sends.map((s) => s.toJson()).toList()),
+      orderIndex: order,
+    );
+    final current = {for (final r in live) r.id: trackRowHash(r)};
     final desired = [
       for (var i = 0; i < tracks.length; i++) (track: tracks[i], order: i),
     ];
     var changed = (await reconcileCollection(
       writer: writer,
       table: 'tracks',
+      // Null base adopts the current rows (legacy two-way); see savePractice.
+      baseHashes: base ?? current,
       currentHashes: current,
       desired: desired,
       idOf: (d) => d.track.id,
@@ -605,11 +647,15 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
       tombstone: (id, s) => _cascadeTombstoneTrack(id, now, rowStamp: s),
     )).total;
 
-    // Children of every surviving track.
+    // Children of every surviving track. Note the composition with the
+    // per-row three-way rules: if a track was deleted remotely (cascade-
+    // tombstoning its children) and the local editor's track-level edit
+    // revives the track row, only children the editor ALSO edited are revived
+    // here — untouched children accept the remote delete (rule 5), row by row.
     for (final t in tracks) {
-      changed += await _reconcileClips(t, clipAsset, now);
-      changed += await _reconcileNotes(t, now);
-      changed += await _reconcileMarkers(t, now);
+      changed += await _reconcileClips(t, clipAsset, now, base);
+      changed += await _reconcileNotes(t, now, base);
+      changed += await _reconcileMarkers(t, now, base);
     }
     return changed;
   }
@@ -618,17 +664,10 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
     AudioTrack t,
     Map<String, String> clipAsset,
     int now,
+    Map<String, String>? base,
   ) async {
     final live = await _live(db.clips, (x) => x.trackId.equals(t.id));
-    final current = {
-      for (final r in live)
-        r.id: SyncWriter.contentHashOf([
-          r.assetId,
-          r.startMs,
-          r.durationMs,
-          r.orderIndex,
-        ]),
-    };
+    final current = {for (final r in live) r.id: clipRowHash(r)};
     final desired = [
       for (var i = 0; i < t.clips.length; i++)
         (clip: t.clips[i], assetId: clipAsset[t.clips[i].id]!, order: i),
@@ -636,15 +675,17 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
     return (await reconcileCollection(
       writer: writer,
       table: 'clips',
+      // Null base adopts the current rows (legacy two-way); see savePractice.
+      baseHashes: base ?? current,
       currentHashes: current,
       desired: desired,
       idOf: (d) => d.clip.id,
-      hashOf: (d) => SyncWriter.contentHashOf([
-        d.assetId,
-        d.clip.startMs,
-        d.clip.durationMs,
-        d.order,
-      ]),
+      hashOf: (d) => clipContentHash(
+        assetId: d.assetId,
+        startMs: d.clip.startMs,
+        durationMs: d.clip.durationMs,
+        orderIndex: d.order,
+      ),
       insert: (d, s) => db
           .into(db.clips)
           .insertOnConflictUpdate(
@@ -684,20 +725,26 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
     )).total;
   }
 
-  Future<int> _reconcileNotes(AudioTrack t, int now) async {
+  Future<int> _reconcileNotes(
+    AudioTrack t,
+    int now,
+    Map<String, String>? base,
+  ) async {
     final live = await _live(db.practiceNotes, (x) => x.trackId.equals(t.id));
-    final current = {
-      for (final r in live)
-        r.id: SyncWriter.contentHashOf([r.positionMs, r.endMs, r.content]),
-    };
+    final current = {for (final r in live) r.id: practiceNoteRowHash(r)};
     return (await reconcileCollection(
       writer: writer,
       table: 'practice_notes',
+      // Null base adopts the current rows (legacy two-way); see savePractice.
+      baseHashes: base ?? current,
       currentHashes: current,
       desired: t.notes,
       idOf: (n) => n.id,
-      hashOf: (n) =>
-          SyncWriter.contentHashOf([n.positionMs, n.endMs, n.content]),
+      hashOf: (n) => practiceNoteContentHash(
+        positionMs: n.positionMs,
+        endMs: n.endMs,
+        content: n.content,
+      ),
       insert: (n, s) => db
           .into(db.practiceNotes)
           .insertOnConflictUpdate(
@@ -735,32 +782,30 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
     )).total;
   }
 
-  Future<int> _reconcileMarkers(AudioTrack t, int now) async {
+  Future<int> _reconcileMarkers(
+    AudioTrack t,
+    int now,
+    Map<String, String>? base,
+  ) async {
     final live = await _live(
       db.techniqueMarkers,
       (x) => x.trackId.equals(t.id),
     );
-    final current = {
-      for (final r in live)
-        r.id: SyncWriter.contentHashOf([
-          r.positionMs,
-          r.endMs,
-          r.techniqueId,
-          r.techniqueNameSnapshot,
-        ]),
-    };
+    final current = {for (final r in live) r.id: techniqueMarkerRowHash(r)};
     return (await reconcileCollection(
       writer: writer,
       table: 'technique_markers',
+      // Null base adopts the current rows (legacy two-way); see savePractice.
+      baseHashes: base ?? current,
       currentHashes: current,
       desired: t.techniqueMarkers,
       idOf: (m) => m.id,
-      hashOf: (m) => SyncWriter.contentHashOf([
-        m.positionMs,
-        m.endMs,
-        m.techniqueId,
-        m.techniqueName,
-      ]),
+      hashOf: (m) => techniqueMarkerContentHash(
+        positionMs: m.positionMs,
+        endMs: m.endMs,
+        techniqueId: m.techniqueId,
+        techniqueName: m.techniqueName,
+      ),
       insert: (m, s) => db
           .into(db.techniqueMarkers)
           .insertOnConflictUpdate(
@@ -929,7 +974,16 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
 
   // --- hydration ------------------------------------------------------------
 
-  Future<SongPractice> _hydrate(PracticeRow row) async {
+  /// Builds the domain aggregate from [row]. When [baseHashes] is given, the
+  /// content hash of EVERY row this read returns (the practice row and each
+  /// live child row, whether or not it survives domain-level dedup) is
+  /// recorded — the base side of a later three-way save. The projections come
+  /// from sync_hashes.dart, the SAME functions the save path hashes with.
+  Future<SongPractice> _hydrate(
+    PracticeRow row, {
+    Map<String, String>? baseHashes,
+  }) async {
+    baseHashes?[row.id] = practiceRowHash(row);
     final interpRows =
         await (db.select(db.interpretations)
               ..where((i) => i.practiceId.equals(row.id) & i.deletedAt.isNull())
@@ -939,6 +993,11 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
       for (final i in interpRows)
         TakeVersion(id: i.id, name: i.name, createdAt: _dt(i.createdAt)),
     ];
+    if (baseHashes != null) {
+      for (final i in interpRows) {
+        baseHashes[i.id] = interpretationRowHash(i);
+      }
+    }
 
     final trackRows =
         await (db.select(db.tracks)
@@ -949,7 +1008,8 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
     AudioTrack? reference;
     final vocals = <AudioTrack>[];
     for (final tr in trackRows) {
-      final track = await _hydrateTrack(tr);
+      baseHashes?[tr.id] = trackRowHash(tr);
+      final track = await _hydrateTrack(tr, baseHashes: baseHashes);
       switch (tr.kind) {
         case 'accompaniment':
           accompaniment ??= track;
@@ -965,6 +1025,11 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
               ..where((b) => b.practiceId.equals(row.id) & b.deletedAt.isNull())
               ..orderBy([(b) => OrderingTerm(expression: b.orderIndex)]))
             .get();
+    if (baseHashes != null) {
+      for (final b in busRows) {
+        baseHashes[b.id] = fxBusRowHash(b);
+      }
+    }
     final buses = [
       for (final b in busRows)
         FxBus(
@@ -1009,7 +1074,10 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
     );
   }
 
-  Future<AudioTrack> _hydrateTrack(TrackRow tr) async {
+  Future<AudioTrack> _hydrateTrack(
+    TrackRow tr, {
+    Map<String, String>? baseHashes,
+  }) async {
     final clipRows =
         await (db.select(db.clips)
               ..where((c) => c.trackId.equals(tr.id) & c.deletedAt.isNull())
@@ -1017,6 +1085,7 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
             .get();
     final clips = <AudioClip>[];
     for (final c in clipRows) {
+      baseHashes?[c.id] = clipRowHash(c);
       // Keep the clip even when its bytes are missing locally (carry an
       // `asset://` ref) so a reload never drops it — dropping it would make the
       // next save tombstone the row, losing the take permanently.
@@ -1047,10 +1116,20 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
           updatedAt: _dt(n.updatedAt),
         ),
     ];
+    if (baseHashes != null) {
+      for (final n in noteRows) {
+        baseHashes[n.id] = practiceNoteRowHash(n);
+      }
+    }
 
     final markerRows = await (db.select(
       db.techniqueMarkers,
     )..where((m) => m.trackId.equals(tr.id) & m.deletedAt.isNull())).get();
+    if (baseHashes != null) {
+      for (final m in markerRows) {
+        baseHashes[m.id] = techniqueMarkerRowHash(m);
+      }
+    }
     final markers = [
       for (final m in markerRows)
         TechniqueMarker(

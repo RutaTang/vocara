@@ -268,3 +268,69 @@ class WaveformCache extends Table {
   @override
   Set<Column> get primaryKey => {contentHash, algoVersion};
 }
+
+/// Local-only key-value state for the sync engine: the server change token,
+/// pagination cursors and misc bookkeeping. Values are strings (callers encode
+/// anything richer as JSON). Writes are plain drift ops so they compose into a
+/// caller-provided transaction — the change token MUST be able to commit
+/// atomically with the batch it acknowledges (see SyncStateStore).
+@DataClassName('SyncStateRow')
+class SyncState extends Table {
+  TextColumn get key => text()();
+  TextColumn get value => text()();
+
+  @override
+  Set<Column> get primaryKey => {key};
+}
+
+/// Local-only quarantine parking lot: the LATEST rejected remote state per
+/// (table, id) — a record whose HLC was implausibly far in the future, or one
+/// the local schema could not apply (forward-incompatible). Kept so nothing is
+/// silently dropped and a later app upgrade / manual review can re-apply it.
+///
+/// SAFETY: the remote stamp column is deliberately named remote_hlc_packed,
+/// NOT hlc_packed. Persistence._seedClock seeds the boot HLC from MAX of every
+/// table carrying an `hlc_packed` column, and the synced-table registry keys
+/// off the same SyncCols column names — quarantined stamps are by definition
+/// suspect (often far-future), so reusing the `hlc_packed` name would poison
+/// the local clock at boot, which is exactly what quarantine exists to prevent.
+@DataClassName('SyncQuarantineRow')
+class SyncQuarantine extends Table {
+  /// The synced table the rejected record targets ("tbl": not a SyncCols name
+  /// on purpose, this row is ABOUT a remote record, not a synced row itself).
+  TextColumn get tbl => text()();
+
+  /// The rejected record's row id within [tbl].
+  TextColumn get id => text()();
+
+  /// The remote record's packed HLC as received (see class doc for the name).
+  TextColumn get remoteHlcPacked => text()();
+
+  /// The schema_v the remote record claims (forward-incompat diagnostics).
+  IntColumn get schemaV => integer()();
+
+  /// The full record in the SyncRow wire format (JSON), replayable later.
+  TextColumn get payload => text()();
+
+  /// Why it was quarantined (human-readable, stable prefix for tests).
+  TextColumn get reason => text()();
+
+  /// Wall time (epoch ms) the record was quarantined at.
+  IntColumn get quarantinedAt => integer()();
+
+  @override
+  Set<Column> get primaryKey => {tbl, id};
+}
+
+/// Local-only asset upload markers for Phase 2 of sync: which content hashes
+/// this device has durably uploaded (bytes sync out-of-band from records).
+/// Created in schema v2 alongside the other sync tables to avoid another
+/// migration later; unused until the pusher lands.
+@DataClassName('AssetSyncRow')
+class AssetSync extends Table {
+  TextColumn get hash => text()();
+  IntColumn get uploadedAt => integer()();
+
+  @override
+  Set<Column> get primaryKey => {hash};
+}

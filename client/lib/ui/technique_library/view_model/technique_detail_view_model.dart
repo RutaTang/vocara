@@ -10,6 +10,7 @@ import '../../../data/services/media_analysis_service.dart';
 import '../../../data/services/mic_recording_controller.dart';
 import '../../../data/services/monitor_service.dart';
 import '../../../data/services/technique_media_service.dart';
+import '../../../data/sync/sync_hashes.dart';
 import '../../../domain/models/audio_track.dart';
 import '../../../domain/models/spectrogram.dart';
 import '../../../domain/models/technique.dart';
@@ -92,17 +93,29 @@ class TechniqueDetailViewModel extends ChangeNotifier
   Technique? _technique;
   Technique? get technique => _technique;
 
+  /// Per-row content hashes of the persisted technique as THIS view model last
+  /// loaded or saved it — the BASE side of the repository's three-way save
+  /// (see [Loaded]). Captured by [_load], handed to every save, and replaced
+  /// by the fresh map each successful save returns, so a stale in-memory
+  /// technique can never revert or tombstone rows that changed underneath it
+  /// (e.g. applied by sync).
+  Map<String, String> _baseHashes = const {};
+
   /// True while example files are being copied into the sandbox.
   bool _importingMedia = false;
   bool get importingMedia => _importingMedia;
 
   Future<Result<Technique>> _load() async {
-    final result = await _repository.getTechnique(techniqueId);
-    if (result is Ok<Technique>) {
-      _technique = result.value;
+    // Load through the base-hash path: the hashes captured here are what every
+    // later save three-way merges against (see [_baseHashes]).
+    final result = await _repository.loadTechnique(techniqueId);
+    if (result is Ok<Loaded<Technique>>) {
+      _technique = result.value.aggregate;
+      _baseHashes = result.value.baseHashes;
       notifyListeners();
+      return Result.ok(result.value.aggregate);
     }
-    return result;
+    return Result.error((result as Error<Loaded<Technique>>).error);
   }
 
   // --- Staged media draft (committed on save) ------------------------------
@@ -1005,11 +1018,21 @@ class TechniqueDetailViewModel extends ChangeNotifier
     _technique = next;
     notifyListeners();
 
-    final result = await _repository.saveTechnique(next);
-    final ok = result is Ok<Technique>;
+    // Three-way save against the base captured at load / the previous save,
+    // so a stale technique can't revert or tombstone concurrent (synced-in)
+    // changes; the returned fresh base replaces ours for the next save.
+    final result = await _repository.saveTechniqueWithBase(
+      next,
+      baseHashes: _baseHashes,
+    );
+    final ok = result is Ok<Loaded<Technique>>;
     if (ok) {
-      _technique = result.value;
+      _technique = result.value.aggregate;
+      _baseHashes = result.value.baseHashes;
     } else {
+      // Revert to the previous aggregate; _baseHashes stays as-is — it still
+      // describes the last state this session loaded or saved, which is what
+      // the reverted model matches.
       _technique = previous;
     }
     notifyListeners();

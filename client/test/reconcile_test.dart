@@ -60,6 +60,11 @@ void main() {
       return reconcileCollection<_Interp>(
         writer: writer,
         table: 'interpretations',
+        // These tests model an editor holding the LATEST persisted state, so
+        // base == current — which degenerates the three-way merge to the
+        // original two-way diff these cases were written for. The stale-base
+        // rules have their own suite in reconcile_three_way_test.dart.
+        baseHashes: current,
         currentHashes: current,
         desired: desired,
         idOf: (i) => i.id,

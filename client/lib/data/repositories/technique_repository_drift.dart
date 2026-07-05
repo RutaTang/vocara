@@ -8,6 +8,7 @@ import '../../utils/result.dart';
 import '../db/app_database.dart';
 import '../db/asset_store.dart';
 import '../sync/reconcile.dart';
+import '../sync/sync_hashes.dart';
 import '../sync/sync_writer.dart';
 import 'technique_repository.dart';
 
@@ -32,29 +33,6 @@ class TechniqueRepositoryDrift implements TechniqueRepository {
 
   static int _ms(DateTime d) => d.millisecondsSinceEpoch;
   static DateTime _dt(int ms) => DateTime.fromMillisecondsSinceEpoch(ms);
-
-  String _techniqueHash(
-    String name,
-    String aliasesJson,
-    String tagsJson,
-    String summary,
-    String description,
-    String cues,
-    String exercises,
-    String acoustic,
-  ) => SyncWriter.contentHashOf([
-    name,
-    aliasesJson,
-    tagsJson,
-    summary,
-    description,
-    cues,
-    exercises,
-    acoustic,
-  ]);
-
-  String _mediaHash(String assetId, String kind, String label, int order) =>
-      SyncWriter.contentHashOf([assetId, kind, label, order]);
 
   @override
   Future<Result<List<Technique>>> listTechniques() async {
@@ -90,6 +68,15 @@ class TechniqueRepositoryDrift implements TechniqueRepository {
 
   @override
   Future<Result<Technique>> getTechnique(String id) async {
+    final r = await loadTechnique(id);
+    return switch (r) {
+      Ok<Loaded<Technique>>(:final value) => Result.ok(value.aggregate),
+      Error<Loaded<Technique>>(:final error) => Result.error(error),
+    };
+  }
+
+  @override
+  Future<Result<Loaded<Technique>>> loadTechnique(String id) async {
     try {
       final row =
           await (db.select(db.techniques)
@@ -98,7 +85,13 @@ class TechniqueRepositoryDrift implements TechniqueRepository {
       if (row == null) {
         return Result.error(Exception('Technique "$id" not found'));
       }
-      return Result.ok(await _hydrate(row));
+      // Collect the base hash of every row this read returns, so a later save
+      // can three-way merge against exactly what the editor was shown.
+      final hashes = <String, String>{};
+      final technique = await _hydrate(row, baseHashes: hashes);
+      return Result.ok(
+        Loaded(technique, Map<String, String>.unmodifiable(hashes)),
+      );
     } catch (e) {
       // The data boundary must always return a Result, never throw — a
       // data-layer Error (e.g. a StateError) must still surface as Result.error
@@ -109,6 +102,30 @@ class TechniqueRepositoryDrift implements TechniqueRepository {
 
   @override
   Future<Result<Technique>> saveTechnique(Technique technique) async {
+    // Base-less save: _save adopts the CURRENT persisted rows as the base,
+    // which reproduces the old two-way diff exactly. Safe only for callers
+    // that just created or just re-read the technique (the library's create
+    // flow); editors must use saveTechniqueWithBase — see the interface.
+    final r = await _save(technique, base: null);
+    return switch (r) {
+      Ok<Loaded<Technique>>(:final value) => Result.ok(value.aggregate),
+      Error<Loaded<Technique>>(:final error) => Result.error(error),
+    };
+  }
+
+  @override
+  Future<Result<Loaded<Technique>>> saveTechniqueWithBase(
+    Technique technique, {
+    required Map<String, String> baseHashes,
+  }) => _save(technique, base: baseHashes);
+
+  /// The one save core. [base] is the per-row content-hash map captured when
+  /// the caller loaded the technique (three-way merge); null means "adopt the
+  /// current persisted state as base" (the legacy two-way diff).
+  Future<Result<Loaded<Technique>>> _save(
+    Technique technique, {
+    required Map<String, String>? base,
+  }) async {
     try {
       // Assets first (outside the row transaction, idempotent + deduped): a
       // dependent media row never exists without its asset.
@@ -125,22 +142,33 @@ class TechniqueRepositoryDrift implements TechniqueRepository {
       final aliasesJson = jsonEncode(technique.aliases);
       final tagsJson = jsonEncode(technique.tags);
       final now = _ms(DateTime.now());
-      var savedUpdatedAt = _ms(technique.updatedAt);
 
       await db.transaction(() async {
         // --- the technique row (single-entity reconcile) ---
         final existing = await (db.select(
           db.techniques,
         )..where((t) => t.id.equals(technique.id))).getSingleOrNull();
-        final desiredHash = _techniqueHash(
-          technique.name,
-          aliasesJson,
-          tagsJson,
-          technique.summary,
-          technique.description,
-          technique.cues,
-          technique.exercises,
-          technique.acousticSignature,
+        if (existing != null && existing.deletedAt != null) {
+          // The technique was tombstoned before this save landed (a save
+          // racing deleteTechnique, or a synced-in delete). Continuing would
+          // NOT revive the row (the update below never clears deleted_at) yet
+          // would still commit LIVE media rows under the tombstoned parent — a
+          // journaled zombie subtree. Same policy as savePractice: a deleted
+          // aggregate must never be implicitly re-saved; abort so the whole
+          // transaction rolls back and the caller surfaces Result.error.
+          throw StateError(
+            'technique ${technique.id} is deleted; refusing to save over it',
+          );
+        }
+        final desiredHash = techniqueContentHash(
+          name: technique.name,
+          aliasesJson: aliasesJson,
+          tagsJson: tagsJson,
+          summary: technique.summary,
+          description: technique.description,
+          cues: technique.cues,
+          exercises: technique.exercises,
+          acousticSignature: technique.acousticSignature,
         );
         // Tracks whether the technique ROW itself was written, so a media-only
         // edit (row hash unchanged) can still bump updatedAt for list ordering.
@@ -149,7 +177,6 @@ class TechniqueRepositoryDrift implements TechniqueRepository {
         if (existing == null) {
           final s = writer.stamp();
           techniqueWritten = true;
-          savedUpdatedAt = _ms(technique.updatedAt);
           await db
               .into(db.techniques)
               .insert(
@@ -164,7 +191,7 @@ class TechniqueRepositoryDrift implements TechniqueRepository {
                   exercises: Value(technique.exercises),
                   acousticSignature: Value(technique.acousticSignature),
                   createdAt: _ms(technique.createdAt),
-                  updatedAt: savedUpdatedAt,
+                  updatedAt: _ms(technique.updatedAt),
                   hlcWall: s.hlc.wallMs,
                   hlcCtr: s.hlc.counter,
                   hlcNode: s.hlc.node,
@@ -179,20 +206,27 @@ class TechniqueRepositoryDrift implements TechniqueRepository {
             payloadHash: desiredHash,
           );
         } else {
-          final existingHash = _techniqueHash(
-            existing.name,
-            existing.aliasesJson ?? '[]',
-            existing.tagsJson ?? '[]',
-            existing.summary,
-            existing.description,
-            existing.cues,
-            existing.exercises,
-            existing.acousticSignature,
-          );
-          if (existingHash != desiredHash) {
+          final existingHash = techniqueRowHash(existing);
+          // Three-way merge on the technique row (same rules as
+          // reconcileCollection). A null [base] adopts the current row as base
+          // (legacy two-way — the skip below then never fires); a with-base
+          // map missing this id degrades to conflict-local-wins.
+          final baseHash = base == null ? existingHash : base[technique.id];
+          final keepTheirs =
+              existingHash != desiredHash &&
+              baseHash != null &&
+              existingHash != baseHash &&
+              desiredHash == baseHash;
+          // keepTheirs: the persisted row moved on since this editor loaded it
+          // (a remote/newer write) and the editor never touched the technique
+          // fields — keep the DB state; writing "mine" would revert the newer
+          // row to stale values under a fresh HLC.
+          if (existingHash != desiredHash && !keepTheirs) {
+            // Plain local edit, or a true conflict (both sides changed): the
+            // ACTIVE EDITOR wins by policy and mine is written with a fresh
+            // HLC, so it also wins entity-level LWW downstream.
             final s = writer.stamp();
             techniqueWritten = true;
-            savedUpdatedAt = now;
             await (db.update(
               db.techniques,
             )..where((t) => t.id.equals(technique.id))).write(
@@ -219,8 +253,6 @@ class TechniqueRepositoryDrift implements TechniqueRepository {
               hlc: s.hlc,
               payloadHash: desiredHash,
             );
-          } else {
-            savedUpdatedAt = existing.updatedAt;
           }
         }
 
@@ -232,8 +264,7 @@ class TechniqueRepositoryDrift implements TechniqueRepository {
                 ))
                 .get();
         final currentHashes = {
-          for (final m in liveMedia)
-            m.id: _mediaHash(m.assetId, m.kind, m.label, m.orderIndex),
+          for (final m in liveMedia) m.id: techniqueMediaRowHash(m),
         };
         final desired = [
           for (var i = 0; i < technique.media.length; i++)
@@ -242,14 +273,17 @@ class TechniqueRepositoryDrift implements TechniqueRepository {
         final mediaChanges = (await reconcileCollection(
           writer: writer,
           table: 'technique_media',
+          // Null base adopts the current rows (legacy two-way); see
+          // saveTechnique.
+          baseHashes: base ?? currentHashes,
           currentHashes: currentHashes,
           desired: desired,
           idOf: (d) => d.media.id,
-          hashOf: (d) => _mediaHash(
-            d.assetId,
-            d.media.isVideo ? 'video' : 'audio',
-            d.media.label,
-            d.order,
+          hashOf: (d) => techniqueMediaContentHash(
+            assetId: d.assetId,
+            kind: d.media.isVideo ? 'video' : 'audio',
+            label: d.media.label,
+            orderIndex: d.order,
           ),
           insert: (d, s) => db
               .into(db.techniqueMedia)
@@ -315,8 +349,10 @@ class TechniqueRepositoryDrift implements TechniqueRepository {
         }
       });
 
-      // Return the saved copy with resolved (pooled) media paths.
-      return getTechnique(technique.id);
+      // Return the saved copy with resolved (pooled) media paths, plus fresh
+      // base hashes so the caller's next save merges against what this save
+      // actually left in the store.
+      return loadTechnique(technique.id);
     } catch (e) {
       // The data boundary must always return a Result, never throw — a
       // data-layer Error (e.g. a StateError) must still surface as Result.error
@@ -384,7 +420,14 @@ class TechniqueRepositoryDrift implements TechniqueRepository {
   }
 
   /// Builds a domain [Technique] from a row + its live media (paths resolved).
-  Future<Technique> _hydrate(TechniqueRow row) async {
+  /// When [baseHashes] is given, the content hash of every row this read
+  /// returns is recorded — the base side of a later three-way save, hashed
+  /// with the SAME sync_hashes.dart projections the save path uses.
+  Future<Technique> _hydrate(
+    TechniqueRow row, {
+    Map<String, String>? baseHashes,
+  }) async {
+    baseHashes?[row.id] = techniqueRowHash(row);
     final mediaRows =
         await (db.select(db.techniqueMedia)
               ..where(
@@ -394,6 +437,7 @@ class TechniqueRepositoryDrift implements TechniqueRepository {
             .get();
     final media = <TechniqueMedia>[];
     for (final m in mediaRows) {
+      baseHashes?[m.id] = techniqueMediaRowHash(m);
       // Keep the media even if its bytes are missing locally (carry an
       // `asset://` ref) so a reload + save never drops the example.
       final path =

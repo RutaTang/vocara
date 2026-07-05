@@ -3,7 +3,9 @@ import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vocara/data/db/app_database.dart';
 import 'package:vocara/data/sync/hlc.dart';
+import 'package:vocara/data/sync/quarantine_store.dart';
 import 'package:vocara/data/sync/sync_applier.dart';
+import 'package:vocara/data/sync/sync_row.dart';
 
 String _id(String s) => s.padRight(26, '0').substring(0, 26);
 
@@ -251,6 +253,91 @@ void main() {
       expect(p!['title'], 'v2'); // the update itself stuck
       expect(p['separation_asset_id'], isNull); // the dangler was healed
       expect(await trackRow('T'), isNotNull); // subtree intact
+    });
+  });
+
+  group('quarantine persistence', () {
+    late QuarantineStore store;
+
+    setUp(() {
+      store = QuarantineStore(db);
+      // Same applier wiring plus the optional collaborator under test.
+      applier = SyncApplier(
+        db,
+        HlcClock(node: _id('LOCAL'), now: () => 1000),
+        quarantine: store,
+      );
+    });
+
+    test('an HLC-drift record is parked with its full wire payload', () async {
+      final future = hlc(1000 + 5 * 60 * 1000 + 1);
+      final rec = practice('FUT', 'from the future', future);
+      final res = await applier.apply([rec]);
+      expect(res.quarantined, 1);
+      expect(await row('FUT'), isNull); // still NOT applied
+
+      final parked = await store.list();
+      expect(parked, hasLength(1));
+      expect(parked.single.tbl, 'practices');
+      expect(parked.single.id, _id('FUT'));
+      expect(parked.single.remoteHlcPacked, future.packed);
+      expect(parked.single.schemaV, 1);
+      expect(parked.single.reason, startsWith('hlc-drift'));
+      // The payload is the SyncRow wire format: replayable later, verbatim.
+      final replay = SyncRow.decode(parked.single.payload);
+      expect(replay.table, 'practices');
+      expect(replay.fields, equals(rec.columns));
+    });
+
+    test('a forward-incompatible record is parked with reason apply-failed '
+        'and the good record still applies', () async {
+      final good = practice('GOOD', 'kept', hlc(900));
+      final bad = RemoteRecord(
+        table: 'practices',
+        columns: {
+          ...practice('BAD', 'dropped', hlc(910)).columns,
+          'column_from_the_future': 1,
+        },
+      );
+      final res = await applier.apply([good, bad]);
+      expect(res.applied, 1);
+      expect(res.failed, 1);
+      expect((await row('GOOD'))!['title'], 'kept');
+      expect(await row('BAD'), isNull);
+
+      final parked = await store.list();
+      expect(parked, hasLength(1));
+      expect(parked.single.id, _id('BAD'));
+      expect(parked.single.reason, startsWith('apply-failed'));
+      // The unknown column rides along in the parked payload for a future
+      // (schema-upgraded) re-apply.
+      final replay = SyncRow.decode(parked.single.payload);
+      expect(replay.fields['column_from_the_future'], 1);
+    });
+
+    test('re-quarantining the same row keeps only the latest state', () async {
+      final drift1 = hlc(1000 + 6 * 60 * 1000);
+      final drift2 = hlc(1000 + 7 * 60 * 1000);
+      await applier.apply([practice('FUT', 'v1', drift1)]);
+      await applier.apply([practice('FUT', 'v2', drift2)]);
+
+      final parked = await store.list();
+      expect(parked, hasLength(1)); // latest per (tbl, id), not a pile-up
+      expect(parked.single.remoteHlcPacked, drift2.packed);
+      expect(SyncRow.decode(parked.single.payload).fields['title'], 'v2');
+    });
+
+    test('quarantine rows commit atomically with the batch (same outer '
+        'transaction, no oplog echo)', () async {
+      await applier.apply([
+        practice('OK', 'applied', hlc(900)),
+        practice('FUT', 'parked', hlc(1000 + 6 * 60 * 1000)),
+      ]);
+      // Both the applied row and the parked row landed...
+      expect((await row('OK'))!['title'], 'applied');
+      expect(await store.list(), hasLength(1));
+      // ...and neither the apply nor the quarantine journaled anything.
+      expect(await db.select(db.oplog).get(), isEmpty);
     });
   });
 }

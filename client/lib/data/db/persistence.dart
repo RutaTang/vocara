@@ -51,8 +51,14 @@ class Persistence {
     final dir = await getApplicationSupportDirectory();
     final dbPath = p.join(dir.path, 'vocara.db');
     await SafeMigrator().recoverIfNeeded(dbPath);
-    // (When schemaVersion grows, run SafeMigrator().migrate(...) here, BEFORE
-    //  opening, so drift never sees a stale on-disk version.)
+    // Upgrade a stale on-disk schema BEFORE drift opens the file: drift's own
+    // onUpgrade deliberately throws (the copy/validate/swap protocol owns
+    // upgrades). A fresh install (no file) is a no-op here — drift's onCreate
+    // builds the current schema directly.
+    await SafeMigrator().upgradeIfNeeded(
+      dbPath: dbPath,
+      targetVersion: AppDatabase.currentSchemaVersion,
+    );
     final db = AppDatabase(NativeDatabase.createInBackground(File(dbPath)));
     final node = await _readOrCreateNode(dir);
     // Restore the HLC clock's monotonicity across restarts BEFORE wiring the

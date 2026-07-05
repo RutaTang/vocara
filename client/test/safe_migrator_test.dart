@@ -23,7 +23,12 @@ void main() {
     if (await tmp.exists()) await tmp.delete(recursive: true);
   });
 
-  /// Creates a v1 database file with one practice row, then closes it.
+  /// Creates a GENUINE v1 database file with one practice row, then closes it.
+  ///
+  /// AppDatabase now creates schema v2 directly, so the v2 additions (the
+  /// local-only sync tables) are stripped and user_version is reset to 1 —
+  /// reconstructing exactly the on-disk layout the registered v1->v2 step
+  /// upgrades from (v2 is purely additive over v1).
   Future<void> seedV1() async {
     final db = AppDatabase(NativeDatabase(File(dbPath)));
     await db
@@ -41,6 +46,15 @@ void main() {
           ),
         );
     await db.close();
+    final raw = sqlite3.open(dbPath);
+    try {
+      raw.execute('DROP TABLE sync_state');
+      raw.execute('DROP TABLE sync_quarantine');
+      raw.execute('DROP TABLE asset_sync');
+      raw.execute('PRAGMA user_version = 1');
+    } finally {
+      raw.close();
+    }
   }
 
   int userVersion() {
@@ -221,6 +235,119 @@ void main() {
       fs.log.indexOf('dir(bakExists=true)', preSwapDirSync),
       greaterThan(preSwapDirSync),
     );
+  });
+
+  group('registered v1 -> v2 step', () {
+    /// PRAGMA table_info projected to the schema-relevant tuple per column.
+    List<Map<String, Object?>> tableInfo(String path, String table) {
+      final raw = sqlite3.open(path);
+      try {
+        return raw
+            .select('PRAGMA table_info("$table")')
+            .map(
+              (r) => <String, Object?>{
+                'name': r['name'],
+                'type': r['type'],
+                'notnull': r['notnull'],
+                'dflt_value': r['dflt_value'],
+                'pk': r['pk'],
+              },
+            )
+            .toList();
+      } finally {
+        raw.close();
+      }
+    }
+
+    test('upgradeIfNeeded brings a v1 db to v2: data preserved, sync tables '
+        'match the drift-created schema, drift opens the result', () async {
+      await seedV1();
+      await SafeMigrator().upgradeIfNeeded(
+        dbPath: dbPath,
+        targetVersion: AppDatabase.currentSchemaVersion,
+      );
+      expect(userVersion(), AppDatabase.currentSchemaVersion);
+
+      // Existing data passed through untouched (additive-only migration).
+      final raw = sqlite3.open(dbPath);
+      final row = raw.select('SELECT title FROM practices WHERE id = ?', [
+        pid,
+      ]).first;
+      expect(row['title'], 'keepme');
+      raw.close();
+
+      // The migrated sync tables are column-for-column identical to what a
+      // FRESH drift-created v2 database gets — the step's raw SQL can never
+      // drift (pun intended) from the schema in tables.dart unnoticed.
+      final freshPath = p.join(tmp.path, 'fresh.db');
+      final fresh = AppDatabase(NativeDatabase(File(freshPath)));
+      await fresh.customSelect('SELECT 1').get(); // force open/create
+      await fresh.close();
+      for (final table in ['sync_state', 'sync_quarantine', 'asset_sync']) {
+        expect(
+          tableInfo(dbPath, table),
+          tableInfo(freshPath, table),
+          reason: '$table schema must match the drift-created one',
+        );
+      }
+
+      // Drift opens the migrated file at the current version (its onUpgrade —
+      // which throws by design — must NOT fire) and the new tables work.
+      final db = AppDatabase(NativeDatabase(File(dbPath)));
+      final kept = await db.select(db.practices).get();
+      expect(kept.single.title, 'keepme');
+      await db
+          .into(db.syncState)
+          .insert(SyncStateCompanion.insert(key: 'k', value: 'v'));
+      expect((await db.select(db.syncState).get()).single.value, 'v');
+      await db.close();
+    });
+
+    test('upgradeIfNeeded is a no-op on an already-current database', () async {
+      await seedV1();
+      await SafeMigrator().upgradeIfNeeded(
+        dbPath: dbPath,
+        targetVersion: AppDatabase.currentSchemaVersion,
+      );
+      // Remove the rollback .bak so a second run would recreate it IF it
+      // (wrongly) migrated again.
+      await File(p.join(tmp.path, 'vocara.pre-migrate.bak')).delete();
+
+      await SafeMigrator().upgradeIfNeeded(
+        dbPath: dbPath,
+        targetVersion: AppDatabase.currentSchemaVersion,
+      );
+
+      expect(userVersion(), AppDatabase.currentSchemaVersion);
+      expect(
+        await File(p.join(tmp.path, 'vocara.pre-migrate.bak')).exists(),
+        isFalse, // no second migration ran
+      );
+    });
+
+    test('upgradeIfNeeded is a no-op when no database file exists yet '
+        '(fresh install: drift creates the current schema itself)', () async {
+      await SafeMigrator().upgradeIfNeeded(
+        dbPath: dbPath,
+        targetVersion: AppDatabase.currentSchemaVersion,
+      );
+      expect(await File(dbPath).exists(), isFalse); // probing created nothing
+    });
+
+    test('upgradeIfNeeded refuses a version gap with no registered step '
+        '(never bumps user_version without the schema change)', () async {
+      await seedV1();
+      await expectLater(
+        SafeMigrator().upgradeIfNeeded(
+          dbPath: dbPath,
+          // One past the current version: step 1 exists, step 2 does not.
+          targetVersion: AppDatabase.currentSchemaVersion + 1,
+        ),
+        throwsA(isA<MigrationException>()),
+      );
+      // The v1->v2 step it DID have ran safely; the missing step ran nothing.
+      expect(userVersion(), AppDatabase.currentSchemaVersion);
+    });
   });
 
   test('recovery flushes the copy bytes before promoting it to live', () async {

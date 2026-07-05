@@ -10332,6 +10332,913 @@ class WaveformCacheCompanion extends UpdateCompanion<WaveformCacheRow> {
   }
 }
 
+class $SyncStateTable extends SyncState
+    with TableInfo<$SyncStateTable, SyncStateRow> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $SyncStateTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _keyMeta = const VerificationMeta('key');
+  @override
+  late final GeneratedColumn<String> key = GeneratedColumn<String>(
+    'key',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _valueMeta = const VerificationMeta('value');
+  @override
+  late final GeneratedColumn<String> value = GeneratedColumn<String>(
+    'value',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [key, value];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'sync_state';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<SyncStateRow> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('key')) {
+      context.handle(
+        _keyMeta,
+        key.isAcceptableOrUnknown(data['key']!, _keyMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_keyMeta);
+    }
+    if (data.containsKey('value')) {
+      context.handle(
+        _valueMeta,
+        value.isAcceptableOrUnknown(data['value']!, _valueMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_valueMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {key};
+  @override
+  SyncStateRow map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return SyncStateRow(
+      key: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}key'],
+      )!,
+      value: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}value'],
+      )!,
+    );
+  }
+
+  @override
+  $SyncStateTable createAlias(String alias) {
+    return $SyncStateTable(attachedDatabase, alias);
+  }
+}
+
+class SyncStateRow extends DataClass implements Insertable<SyncStateRow> {
+  final String key;
+  final String value;
+  const SyncStateRow({required this.key, required this.value});
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['key'] = Variable<String>(key);
+    map['value'] = Variable<String>(value);
+    return map;
+  }
+
+  SyncStateCompanion toCompanion(bool nullToAbsent) {
+    return SyncStateCompanion(key: Value(key), value: Value(value));
+  }
+
+  factory SyncStateRow.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return SyncStateRow(
+      key: serializer.fromJson<String>(json['key']),
+      value: serializer.fromJson<String>(json['value']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'key': serializer.toJson<String>(key),
+      'value': serializer.toJson<String>(value),
+    };
+  }
+
+  SyncStateRow copyWith({String? key, String? value}) =>
+      SyncStateRow(key: key ?? this.key, value: value ?? this.value);
+  SyncStateRow copyWithCompanion(SyncStateCompanion data) {
+    return SyncStateRow(
+      key: data.key.present ? data.key.value : this.key,
+      value: data.value.present ? data.value.value : this.value,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('SyncStateRow(')
+          ..write('key: $key, ')
+          ..write('value: $value')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(key, value);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is SyncStateRow &&
+          other.key == this.key &&
+          other.value == this.value);
+}
+
+class SyncStateCompanion extends UpdateCompanion<SyncStateRow> {
+  final Value<String> key;
+  final Value<String> value;
+  final Value<int> rowid;
+  const SyncStateCompanion({
+    this.key = const Value.absent(),
+    this.value = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  SyncStateCompanion.insert({
+    required String key,
+    required String value,
+    this.rowid = const Value.absent(),
+  }) : key = Value(key),
+       value = Value(value);
+  static Insertable<SyncStateRow> custom({
+    Expression<String>? key,
+    Expression<String>? value,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (key != null) 'key': key,
+      if (value != null) 'value': value,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  SyncStateCompanion copyWith({
+    Value<String>? key,
+    Value<String>? value,
+    Value<int>? rowid,
+  }) {
+    return SyncStateCompanion(
+      key: key ?? this.key,
+      value: value ?? this.value,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (key.present) {
+      map['key'] = Variable<String>(key.value);
+    }
+    if (value.present) {
+      map['value'] = Variable<String>(value.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('SyncStateCompanion(')
+          ..write('key: $key, ')
+          ..write('value: $value, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
+class $SyncQuarantineTable extends SyncQuarantine
+    with TableInfo<$SyncQuarantineTable, SyncQuarantineRow> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $SyncQuarantineTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _tblMeta = const VerificationMeta('tbl');
+  @override
+  late final GeneratedColumn<String> tbl = GeneratedColumn<String>(
+    'tbl',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  @override
+  late final GeneratedColumn<String> id = GeneratedColumn<String>(
+    'id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _remoteHlcPackedMeta = const VerificationMeta(
+    'remoteHlcPacked',
+  );
+  @override
+  late final GeneratedColumn<String> remoteHlcPacked = GeneratedColumn<String>(
+    'remote_hlc_packed',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _schemaVMeta = const VerificationMeta(
+    'schemaV',
+  );
+  @override
+  late final GeneratedColumn<int> schemaV = GeneratedColumn<int>(
+    'schema_v',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _payloadMeta = const VerificationMeta(
+    'payload',
+  );
+  @override
+  late final GeneratedColumn<String> payload = GeneratedColumn<String>(
+    'payload',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _reasonMeta = const VerificationMeta('reason');
+  @override
+  late final GeneratedColumn<String> reason = GeneratedColumn<String>(
+    'reason',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _quarantinedAtMeta = const VerificationMeta(
+    'quarantinedAt',
+  );
+  @override
+  late final GeneratedColumn<int> quarantinedAt = GeneratedColumn<int>(
+    'quarantined_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    tbl,
+    id,
+    remoteHlcPacked,
+    schemaV,
+    payload,
+    reason,
+    quarantinedAt,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'sync_quarantine';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<SyncQuarantineRow> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('tbl')) {
+      context.handle(
+        _tblMeta,
+        tbl.isAcceptableOrUnknown(data['tbl']!, _tblMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_tblMeta);
+    }
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    } else if (isInserting) {
+      context.missing(_idMeta);
+    }
+    if (data.containsKey('remote_hlc_packed')) {
+      context.handle(
+        _remoteHlcPackedMeta,
+        remoteHlcPacked.isAcceptableOrUnknown(
+          data['remote_hlc_packed']!,
+          _remoteHlcPackedMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_remoteHlcPackedMeta);
+    }
+    if (data.containsKey('schema_v')) {
+      context.handle(
+        _schemaVMeta,
+        schemaV.isAcceptableOrUnknown(data['schema_v']!, _schemaVMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_schemaVMeta);
+    }
+    if (data.containsKey('payload')) {
+      context.handle(
+        _payloadMeta,
+        payload.isAcceptableOrUnknown(data['payload']!, _payloadMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_payloadMeta);
+    }
+    if (data.containsKey('reason')) {
+      context.handle(
+        _reasonMeta,
+        reason.isAcceptableOrUnknown(data['reason']!, _reasonMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_reasonMeta);
+    }
+    if (data.containsKey('quarantined_at')) {
+      context.handle(
+        _quarantinedAtMeta,
+        quarantinedAt.isAcceptableOrUnknown(
+          data['quarantined_at']!,
+          _quarantinedAtMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_quarantinedAtMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {tbl, id};
+  @override
+  SyncQuarantineRow map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return SyncQuarantineRow(
+      tbl: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}tbl'],
+      )!,
+      id: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}id'],
+      )!,
+      remoteHlcPacked: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}remote_hlc_packed'],
+      )!,
+      schemaV: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}schema_v'],
+      )!,
+      payload: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}payload'],
+      )!,
+      reason: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}reason'],
+      )!,
+      quarantinedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}quarantined_at'],
+      )!,
+    );
+  }
+
+  @override
+  $SyncQuarantineTable createAlias(String alias) {
+    return $SyncQuarantineTable(attachedDatabase, alias);
+  }
+}
+
+class SyncQuarantineRow extends DataClass
+    implements Insertable<SyncQuarantineRow> {
+  /// The synced table the rejected record targets ("tbl": not a SyncCols name
+  /// on purpose, this row is ABOUT a remote record, not a synced row itself).
+  final String tbl;
+
+  /// The rejected record's row id within [tbl].
+  final String id;
+
+  /// The remote record's packed HLC as received (see class doc for the name).
+  final String remoteHlcPacked;
+
+  /// The schema_v the remote record claims (forward-incompat diagnostics).
+  final int schemaV;
+
+  /// The full record in the SyncRow wire format (JSON), replayable later.
+  final String payload;
+
+  /// Why it was quarantined (human-readable, stable prefix for tests).
+  final String reason;
+
+  /// Wall time (epoch ms) the record was quarantined at.
+  final int quarantinedAt;
+  const SyncQuarantineRow({
+    required this.tbl,
+    required this.id,
+    required this.remoteHlcPacked,
+    required this.schemaV,
+    required this.payload,
+    required this.reason,
+    required this.quarantinedAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['tbl'] = Variable<String>(tbl);
+    map['id'] = Variable<String>(id);
+    map['remote_hlc_packed'] = Variable<String>(remoteHlcPacked);
+    map['schema_v'] = Variable<int>(schemaV);
+    map['payload'] = Variable<String>(payload);
+    map['reason'] = Variable<String>(reason);
+    map['quarantined_at'] = Variable<int>(quarantinedAt);
+    return map;
+  }
+
+  SyncQuarantineCompanion toCompanion(bool nullToAbsent) {
+    return SyncQuarantineCompanion(
+      tbl: Value(tbl),
+      id: Value(id),
+      remoteHlcPacked: Value(remoteHlcPacked),
+      schemaV: Value(schemaV),
+      payload: Value(payload),
+      reason: Value(reason),
+      quarantinedAt: Value(quarantinedAt),
+    );
+  }
+
+  factory SyncQuarantineRow.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return SyncQuarantineRow(
+      tbl: serializer.fromJson<String>(json['tbl']),
+      id: serializer.fromJson<String>(json['id']),
+      remoteHlcPacked: serializer.fromJson<String>(json['remoteHlcPacked']),
+      schemaV: serializer.fromJson<int>(json['schemaV']),
+      payload: serializer.fromJson<String>(json['payload']),
+      reason: serializer.fromJson<String>(json['reason']),
+      quarantinedAt: serializer.fromJson<int>(json['quarantinedAt']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'tbl': serializer.toJson<String>(tbl),
+      'id': serializer.toJson<String>(id),
+      'remoteHlcPacked': serializer.toJson<String>(remoteHlcPacked),
+      'schemaV': serializer.toJson<int>(schemaV),
+      'payload': serializer.toJson<String>(payload),
+      'reason': serializer.toJson<String>(reason),
+      'quarantinedAt': serializer.toJson<int>(quarantinedAt),
+    };
+  }
+
+  SyncQuarantineRow copyWith({
+    String? tbl,
+    String? id,
+    String? remoteHlcPacked,
+    int? schemaV,
+    String? payload,
+    String? reason,
+    int? quarantinedAt,
+  }) => SyncQuarantineRow(
+    tbl: tbl ?? this.tbl,
+    id: id ?? this.id,
+    remoteHlcPacked: remoteHlcPacked ?? this.remoteHlcPacked,
+    schemaV: schemaV ?? this.schemaV,
+    payload: payload ?? this.payload,
+    reason: reason ?? this.reason,
+    quarantinedAt: quarantinedAt ?? this.quarantinedAt,
+  );
+  SyncQuarantineRow copyWithCompanion(SyncQuarantineCompanion data) {
+    return SyncQuarantineRow(
+      tbl: data.tbl.present ? data.tbl.value : this.tbl,
+      id: data.id.present ? data.id.value : this.id,
+      remoteHlcPacked: data.remoteHlcPacked.present
+          ? data.remoteHlcPacked.value
+          : this.remoteHlcPacked,
+      schemaV: data.schemaV.present ? data.schemaV.value : this.schemaV,
+      payload: data.payload.present ? data.payload.value : this.payload,
+      reason: data.reason.present ? data.reason.value : this.reason,
+      quarantinedAt: data.quarantinedAt.present
+          ? data.quarantinedAt.value
+          : this.quarantinedAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('SyncQuarantineRow(')
+          ..write('tbl: $tbl, ')
+          ..write('id: $id, ')
+          ..write('remoteHlcPacked: $remoteHlcPacked, ')
+          ..write('schemaV: $schemaV, ')
+          ..write('payload: $payload, ')
+          ..write('reason: $reason, ')
+          ..write('quarantinedAt: $quarantinedAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    tbl,
+    id,
+    remoteHlcPacked,
+    schemaV,
+    payload,
+    reason,
+    quarantinedAt,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is SyncQuarantineRow &&
+          other.tbl == this.tbl &&
+          other.id == this.id &&
+          other.remoteHlcPacked == this.remoteHlcPacked &&
+          other.schemaV == this.schemaV &&
+          other.payload == this.payload &&
+          other.reason == this.reason &&
+          other.quarantinedAt == this.quarantinedAt);
+}
+
+class SyncQuarantineCompanion extends UpdateCompanion<SyncQuarantineRow> {
+  final Value<String> tbl;
+  final Value<String> id;
+  final Value<String> remoteHlcPacked;
+  final Value<int> schemaV;
+  final Value<String> payload;
+  final Value<String> reason;
+  final Value<int> quarantinedAt;
+  final Value<int> rowid;
+  const SyncQuarantineCompanion({
+    this.tbl = const Value.absent(),
+    this.id = const Value.absent(),
+    this.remoteHlcPacked = const Value.absent(),
+    this.schemaV = const Value.absent(),
+    this.payload = const Value.absent(),
+    this.reason = const Value.absent(),
+    this.quarantinedAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  SyncQuarantineCompanion.insert({
+    required String tbl,
+    required String id,
+    required String remoteHlcPacked,
+    required int schemaV,
+    required String payload,
+    required String reason,
+    required int quarantinedAt,
+    this.rowid = const Value.absent(),
+  }) : tbl = Value(tbl),
+       id = Value(id),
+       remoteHlcPacked = Value(remoteHlcPacked),
+       schemaV = Value(schemaV),
+       payload = Value(payload),
+       reason = Value(reason),
+       quarantinedAt = Value(quarantinedAt);
+  static Insertable<SyncQuarantineRow> custom({
+    Expression<String>? tbl,
+    Expression<String>? id,
+    Expression<String>? remoteHlcPacked,
+    Expression<int>? schemaV,
+    Expression<String>? payload,
+    Expression<String>? reason,
+    Expression<int>? quarantinedAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (tbl != null) 'tbl': tbl,
+      if (id != null) 'id': id,
+      if (remoteHlcPacked != null) 'remote_hlc_packed': remoteHlcPacked,
+      if (schemaV != null) 'schema_v': schemaV,
+      if (payload != null) 'payload': payload,
+      if (reason != null) 'reason': reason,
+      if (quarantinedAt != null) 'quarantined_at': quarantinedAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  SyncQuarantineCompanion copyWith({
+    Value<String>? tbl,
+    Value<String>? id,
+    Value<String>? remoteHlcPacked,
+    Value<int>? schemaV,
+    Value<String>? payload,
+    Value<String>? reason,
+    Value<int>? quarantinedAt,
+    Value<int>? rowid,
+  }) {
+    return SyncQuarantineCompanion(
+      tbl: tbl ?? this.tbl,
+      id: id ?? this.id,
+      remoteHlcPacked: remoteHlcPacked ?? this.remoteHlcPacked,
+      schemaV: schemaV ?? this.schemaV,
+      payload: payload ?? this.payload,
+      reason: reason ?? this.reason,
+      quarantinedAt: quarantinedAt ?? this.quarantinedAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (tbl.present) {
+      map['tbl'] = Variable<String>(tbl.value);
+    }
+    if (id.present) {
+      map['id'] = Variable<String>(id.value);
+    }
+    if (remoteHlcPacked.present) {
+      map['remote_hlc_packed'] = Variable<String>(remoteHlcPacked.value);
+    }
+    if (schemaV.present) {
+      map['schema_v'] = Variable<int>(schemaV.value);
+    }
+    if (payload.present) {
+      map['payload'] = Variable<String>(payload.value);
+    }
+    if (reason.present) {
+      map['reason'] = Variable<String>(reason.value);
+    }
+    if (quarantinedAt.present) {
+      map['quarantined_at'] = Variable<int>(quarantinedAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('SyncQuarantineCompanion(')
+          ..write('tbl: $tbl, ')
+          ..write('id: $id, ')
+          ..write('remoteHlcPacked: $remoteHlcPacked, ')
+          ..write('schemaV: $schemaV, ')
+          ..write('payload: $payload, ')
+          ..write('reason: $reason, ')
+          ..write('quarantinedAt: $quarantinedAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
+class $AssetSyncTable extends AssetSync
+    with TableInfo<$AssetSyncTable, AssetSyncRow> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $AssetSyncTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _hashMeta = const VerificationMeta('hash');
+  @override
+  late final GeneratedColumn<String> hash = GeneratedColumn<String>(
+    'hash',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _uploadedAtMeta = const VerificationMeta(
+    'uploadedAt',
+  );
+  @override
+  late final GeneratedColumn<int> uploadedAt = GeneratedColumn<int>(
+    'uploaded_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [hash, uploadedAt];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'asset_sync';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<AssetSyncRow> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('hash')) {
+      context.handle(
+        _hashMeta,
+        hash.isAcceptableOrUnknown(data['hash']!, _hashMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_hashMeta);
+    }
+    if (data.containsKey('uploaded_at')) {
+      context.handle(
+        _uploadedAtMeta,
+        uploadedAt.isAcceptableOrUnknown(data['uploaded_at']!, _uploadedAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_uploadedAtMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {hash};
+  @override
+  AssetSyncRow map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return AssetSyncRow(
+      hash: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}hash'],
+      )!,
+      uploadedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}uploaded_at'],
+      )!,
+    );
+  }
+
+  @override
+  $AssetSyncTable createAlias(String alias) {
+    return $AssetSyncTable(attachedDatabase, alias);
+  }
+}
+
+class AssetSyncRow extends DataClass implements Insertable<AssetSyncRow> {
+  final String hash;
+  final int uploadedAt;
+  const AssetSyncRow({required this.hash, required this.uploadedAt});
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['hash'] = Variable<String>(hash);
+    map['uploaded_at'] = Variable<int>(uploadedAt);
+    return map;
+  }
+
+  AssetSyncCompanion toCompanion(bool nullToAbsent) {
+    return AssetSyncCompanion(hash: Value(hash), uploadedAt: Value(uploadedAt));
+  }
+
+  factory AssetSyncRow.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return AssetSyncRow(
+      hash: serializer.fromJson<String>(json['hash']),
+      uploadedAt: serializer.fromJson<int>(json['uploadedAt']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'hash': serializer.toJson<String>(hash),
+      'uploadedAt': serializer.toJson<int>(uploadedAt),
+    };
+  }
+
+  AssetSyncRow copyWith({String? hash, int? uploadedAt}) => AssetSyncRow(
+    hash: hash ?? this.hash,
+    uploadedAt: uploadedAt ?? this.uploadedAt,
+  );
+  AssetSyncRow copyWithCompanion(AssetSyncCompanion data) {
+    return AssetSyncRow(
+      hash: data.hash.present ? data.hash.value : this.hash,
+      uploadedAt: data.uploadedAt.present
+          ? data.uploadedAt.value
+          : this.uploadedAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('AssetSyncRow(')
+          ..write('hash: $hash, ')
+          ..write('uploadedAt: $uploadedAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(hash, uploadedAt);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is AssetSyncRow &&
+          other.hash == this.hash &&
+          other.uploadedAt == this.uploadedAt);
+}
+
+class AssetSyncCompanion extends UpdateCompanion<AssetSyncRow> {
+  final Value<String> hash;
+  final Value<int> uploadedAt;
+  final Value<int> rowid;
+  const AssetSyncCompanion({
+    this.hash = const Value.absent(),
+    this.uploadedAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  AssetSyncCompanion.insert({
+    required String hash,
+    required int uploadedAt,
+    this.rowid = const Value.absent(),
+  }) : hash = Value(hash),
+       uploadedAt = Value(uploadedAt);
+  static Insertable<AssetSyncRow> custom({
+    Expression<String>? hash,
+    Expression<int>? uploadedAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (hash != null) 'hash': hash,
+      if (uploadedAt != null) 'uploaded_at': uploadedAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  AssetSyncCompanion copyWith({
+    Value<String>? hash,
+    Value<int>? uploadedAt,
+    Value<int>? rowid,
+  }) {
+    return AssetSyncCompanion(
+      hash: hash ?? this.hash,
+      uploadedAt: uploadedAt ?? this.uploadedAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (hash.present) {
+      map['hash'] = Variable<String>(hash.value);
+    }
+    if (uploadedAt.present) {
+      map['uploaded_at'] = Variable<int>(uploadedAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('AssetSyncCompanion(')
+          ..write('hash: $hash, ')
+          ..write('uploadedAt: $uploadedAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$AppDatabase extends GeneratedDatabase {
   _$AppDatabase(QueryExecutor e) : super(e);
   $AppDatabaseManager get managers => $AppDatabaseManager(this);
@@ -10353,6 +11260,9 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   late final $RecordingsInflightTable recordingsInflight =
       $RecordingsInflightTable(this);
   late final $WaveformCacheTable waveformCache = $WaveformCacheTable(this);
+  late final $SyncStateTable syncState = $SyncStateTable(this);
+  late final $SyncQuarantineTable syncQuarantine = $SyncQuarantineTable(this);
+  late final $AssetSyncTable assetSync = $AssetSyncTable(this);
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -10371,6 +11281,9 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     oplog,
     recordingsInflight,
     waveformCache,
+    syncState,
+    syncQuarantine,
+    assetSync,
   ];
 }
 
@@ -17626,6 +18539,538 @@ typedef $$WaveformCacheTableProcessedTableManager =
       WaveformCacheRow,
       PrefetchHooks Function()
     >;
+typedef $$SyncStateTableCreateCompanionBuilder =
+    SyncStateCompanion Function({
+      required String key,
+      required String value,
+      Value<int> rowid,
+    });
+typedef $$SyncStateTableUpdateCompanionBuilder =
+    SyncStateCompanion Function({
+      Value<String> key,
+      Value<String> value,
+      Value<int> rowid,
+    });
+
+class $$SyncStateTableFilterComposer
+    extends Composer<_$AppDatabase, $SyncStateTable> {
+  $$SyncStateTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get key => $composableBuilder(
+    column: $table.key,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get value => $composableBuilder(
+    column: $table.value,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$SyncStateTableOrderingComposer
+    extends Composer<_$AppDatabase, $SyncStateTable> {
+  $$SyncStateTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get key => $composableBuilder(
+    column: $table.key,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get value => $composableBuilder(
+    column: $table.value,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$SyncStateTableAnnotationComposer
+    extends Composer<_$AppDatabase, $SyncStateTable> {
+  $$SyncStateTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get key =>
+      $composableBuilder(column: $table.key, builder: (column) => column);
+
+  GeneratedColumn<String> get value =>
+      $composableBuilder(column: $table.value, builder: (column) => column);
+}
+
+class $$SyncStateTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $SyncStateTable,
+          SyncStateRow,
+          $$SyncStateTableFilterComposer,
+          $$SyncStateTableOrderingComposer,
+          $$SyncStateTableAnnotationComposer,
+          $$SyncStateTableCreateCompanionBuilder,
+          $$SyncStateTableUpdateCompanionBuilder,
+          (
+            SyncStateRow,
+            BaseReferences<_$AppDatabase, $SyncStateTable, SyncStateRow>,
+          ),
+          SyncStateRow,
+          PrefetchHooks Function()
+        > {
+  $$SyncStateTableTableManager(_$AppDatabase db, $SyncStateTable table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$SyncStateTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$SyncStateTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$SyncStateTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> key = const Value.absent(),
+                Value<String> value = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => SyncStateCompanion(key: key, value: value, rowid: rowid),
+          createCompanionCallback:
+              ({
+                required String key,
+                required String value,
+                Value<int> rowid = const Value.absent(),
+              }) => SyncStateCompanion.insert(
+                key: key,
+                value: value,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$SyncStateTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $SyncStateTable,
+      SyncStateRow,
+      $$SyncStateTableFilterComposer,
+      $$SyncStateTableOrderingComposer,
+      $$SyncStateTableAnnotationComposer,
+      $$SyncStateTableCreateCompanionBuilder,
+      $$SyncStateTableUpdateCompanionBuilder,
+      (
+        SyncStateRow,
+        BaseReferences<_$AppDatabase, $SyncStateTable, SyncStateRow>,
+      ),
+      SyncStateRow,
+      PrefetchHooks Function()
+    >;
+typedef $$SyncQuarantineTableCreateCompanionBuilder =
+    SyncQuarantineCompanion Function({
+      required String tbl,
+      required String id,
+      required String remoteHlcPacked,
+      required int schemaV,
+      required String payload,
+      required String reason,
+      required int quarantinedAt,
+      Value<int> rowid,
+    });
+typedef $$SyncQuarantineTableUpdateCompanionBuilder =
+    SyncQuarantineCompanion Function({
+      Value<String> tbl,
+      Value<String> id,
+      Value<String> remoteHlcPacked,
+      Value<int> schemaV,
+      Value<String> payload,
+      Value<String> reason,
+      Value<int> quarantinedAt,
+      Value<int> rowid,
+    });
+
+class $$SyncQuarantineTableFilterComposer
+    extends Composer<_$AppDatabase, $SyncQuarantineTable> {
+  $$SyncQuarantineTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get tbl => $composableBuilder(
+    column: $table.tbl,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get remoteHlcPacked => $composableBuilder(
+    column: $table.remoteHlcPacked,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get schemaV => $composableBuilder(
+    column: $table.schemaV,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get payload => $composableBuilder(
+    column: $table.payload,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get reason => $composableBuilder(
+    column: $table.reason,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get quarantinedAt => $composableBuilder(
+    column: $table.quarantinedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$SyncQuarantineTableOrderingComposer
+    extends Composer<_$AppDatabase, $SyncQuarantineTable> {
+  $$SyncQuarantineTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get tbl => $composableBuilder(
+    column: $table.tbl,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get remoteHlcPacked => $composableBuilder(
+    column: $table.remoteHlcPacked,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get schemaV => $composableBuilder(
+    column: $table.schemaV,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get payload => $composableBuilder(
+    column: $table.payload,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get reason => $composableBuilder(
+    column: $table.reason,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get quarantinedAt => $composableBuilder(
+    column: $table.quarantinedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$SyncQuarantineTableAnnotationComposer
+    extends Composer<_$AppDatabase, $SyncQuarantineTable> {
+  $$SyncQuarantineTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get tbl =>
+      $composableBuilder(column: $table.tbl, builder: (column) => column);
+
+  GeneratedColumn<String> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<String> get remoteHlcPacked => $composableBuilder(
+    column: $table.remoteHlcPacked,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get schemaV =>
+      $composableBuilder(column: $table.schemaV, builder: (column) => column);
+
+  GeneratedColumn<String> get payload =>
+      $composableBuilder(column: $table.payload, builder: (column) => column);
+
+  GeneratedColumn<String> get reason =>
+      $composableBuilder(column: $table.reason, builder: (column) => column);
+
+  GeneratedColumn<int> get quarantinedAt => $composableBuilder(
+    column: $table.quarantinedAt,
+    builder: (column) => column,
+  );
+}
+
+class $$SyncQuarantineTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $SyncQuarantineTable,
+          SyncQuarantineRow,
+          $$SyncQuarantineTableFilterComposer,
+          $$SyncQuarantineTableOrderingComposer,
+          $$SyncQuarantineTableAnnotationComposer,
+          $$SyncQuarantineTableCreateCompanionBuilder,
+          $$SyncQuarantineTableUpdateCompanionBuilder,
+          (
+            SyncQuarantineRow,
+            BaseReferences<
+              _$AppDatabase,
+              $SyncQuarantineTable,
+              SyncQuarantineRow
+            >,
+          ),
+          SyncQuarantineRow,
+          PrefetchHooks Function()
+        > {
+  $$SyncQuarantineTableTableManager(
+    _$AppDatabase db,
+    $SyncQuarantineTable table,
+  ) : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$SyncQuarantineTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$SyncQuarantineTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$SyncQuarantineTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> tbl = const Value.absent(),
+                Value<String> id = const Value.absent(),
+                Value<String> remoteHlcPacked = const Value.absent(),
+                Value<int> schemaV = const Value.absent(),
+                Value<String> payload = const Value.absent(),
+                Value<String> reason = const Value.absent(),
+                Value<int> quarantinedAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => SyncQuarantineCompanion(
+                tbl: tbl,
+                id: id,
+                remoteHlcPacked: remoteHlcPacked,
+                schemaV: schemaV,
+                payload: payload,
+                reason: reason,
+                quarantinedAt: quarantinedAt,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String tbl,
+                required String id,
+                required String remoteHlcPacked,
+                required int schemaV,
+                required String payload,
+                required String reason,
+                required int quarantinedAt,
+                Value<int> rowid = const Value.absent(),
+              }) => SyncQuarantineCompanion.insert(
+                tbl: tbl,
+                id: id,
+                remoteHlcPacked: remoteHlcPacked,
+                schemaV: schemaV,
+                payload: payload,
+                reason: reason,
+                quarantinedAt: quarantinedAt,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$SyncQuarantineTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $SyncQuarantineTable,
+      SyncQuarantineRow,
+      $$SyncQuarantineTableFilterComposer,
+      $$SyncQuarantineTableOrderingComposer,
+      $$SyncQuarantineTableAnnotationComposer,
+      $$SyncQuarantineTableCreateCompanionBuilder,
+      $$SyncQuarantineTableUpdateCompanionBuilder,
+      (
+        SyncQuarantineRow,
+        BaseReferences<_$AppDatabase, $SyncQuarantineTable, SyncQuarantineRow>,
+      ),
+      SyncQuarantineRow,
+      PrefetchHooks Function()
+    >;
+typedef $$AssetSyncTableCreateCompanionBuilder =
+    AssetSyncCompanion Function({
+      required String hash,
+      required int uploadedAt,
+      Value<int> rowid,
+    });
+typedef $$AssetSyncTableUpdateCompanionBuilder =
+    AssetSyncCompanion Function({
+      Value<String> hash,
+      Value<int> uploadedAt,
+      Value<int> rowid,
+    });
+
+class $$AssetSyncTableFilterComposer
+    extends Composer<_$AppDatabase, $AssetSyncTable> {
+  $$AssetSyncTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get hash => $composableBuilder(
+    column: $table.hash,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get uploadedAt => $composableBuilder(
+    column: $table.uploadedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$AssetSyncTableOrderingComposer
+    extends Composer<_$AppDatabase, $AssetSyncTable> {
+  $$AssetSyncTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get hash => $composableBuilder(
+    column: $table.hash,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get uploadedAt => $composableBuilder(
+    column: $table.uploadedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$AssetSyncTableAnnotationComposer
+    extends Composer<_$AppDatabase, $AssetSyncTable> {
+  $$AssetSyncTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get hash =>
+      $composableBuilder(column: $table.hash, builder: (column) => column);
+
+  GeneratedColumn<int> get uploadedAt => $composableBuilder(
+    column: $table.uploadedAt,
+    builder: (column) => column,
+  );
+}
+
+class $$AssetSyncTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $AssetSyncTable,
+          AssetSyncRow,
+          $$AssetSyncTableFilterComposer,
+          $$AssetSyncTableOrderingComposer,
+          $$AssetSyncTableAnnotationComposer,
+          $$AssetSyncTableCreateCompanionBuilder,
+          $$AssetSyncTableUpdateCompanionBuilder,
+          (
+            AssetSyncRow,
+            BaseReferences<_$AppDatabase, $AssetSyncTable, AssetSyncRow>,
+          ),
+          AssetSyncRow,
+          PrefetchHooks Function()
+        > {
+  $$AssetSyncTableTableManager(_$AppDatabase db, $AssetSyncTable table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$AssetSyncTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$AssetSyncTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$AssetSyncTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> hash = const Value.absent(),
+                Value<int> uploadedAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => AssetSyncCompanion(
+                hash: hash,
+                uploadedAt: uploadedAt,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String hash,
+                required int uploadedAt,
+                Value<int> rowid = const Value.absent(),
+              }) => AssetSyncCompanion.insert(
+                hash: hash,
+                uploadedAt: uploadedAt,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$AssetSyncTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $AssetSyncTable,
+      AssetSyncRow,
+      $$AssetSyncTableFilterComposer,
+      $$AssetSyncTableOrderingComposer,
+      $$AssetSyncTableAnnotationComposer,
+      $$AssetSyncTableCreateCompanionBuilder,
+      $$AssetSyncTableUpdateCompanionBuilder,
+      (
+        AssetSyncRow,
+        BaseReferences<_$AppDatabase, $AssetSyncTable, AssetSyncRow>,
+      ),
+      AssetSyncRow,
+      PrefetchHooks Function()
+    >;
 
 class $AppDatabaseManager {
   final _$AppDatabase _db;
@@ -17656,4 +19101,10 @@ class $AppDatabaseManager {
       $$RecordingsInflightTableTableManager(_db, _db.recordingsInflight);
   $$WaveformCacheTableTableManager get waveformCache =>
       $$WaveformCacheTableTableManager(_db, _db.waveformCache);
+  $$SyncStateTableTableManager get syncState =>
+      $$SyncStateTableTableManager(_db, _db.syncState);
+  $$SyncQuarantineTableTableManager get syncQuarantine =>
+      $$SyncQuarantineTableTableManager(_db, _db.syncQuarantine);
+  $$AssetSyncTableTableManager get assetSync =>
+      $$AssetSyncTableTableManager(_db, _db.assetSync);
 }

@@ -6,6 +6,7 @@ import 'package:provider/provider.dart';
 import 'package:vocara/data/repositories/technique_repository.dart';
 import 'package:vocara/data/services/local_storage_service.dart';
 import 'package:vocara/data/services/technique_media_service.dart';
+import 'package:vocara/data/sync/sync_hashes.dart';
 import 'package:vocara/domain/models/technique.dart';
 import 'package:vocara/ui/core/widgets/studio_button.dart';
 import 'package:vocara/ui/technique_library/technique_library_screen.dart';
@@ -25,7 +26,17 @@ class _FakeRepo implements TechniqueRepository {
       Result.ok(techniques.firstWhere((t) => t.id == id));
 
   @override
+  Future<Result<Loaded<Technique>>> loadTechnique(String id) async =>
+      Result.ok(Loaded(techniques.firstWhere((t) => t.id == id), const {}));
+
+  @override
   Future<Result<Technique>> saveTechnique(Technique t) async => Result.ok(t);
+
+  @override
+  Future<Result<Loaded<Technique>>> saveTechniqueWithBase(
+    Technique t, {
+    required Map<String, String> baseHashes,
+  }) async => Result.ok(Loaded(t, const {}));
 
   @override
   Future<Result<void>> deleteTechnique(String id) async =>
