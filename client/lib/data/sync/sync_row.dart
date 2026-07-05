@@ -168,9 +168,67 @@ class SyncRowBuilder {
 
   final AppDatabase _db;
   final Map<String, TableInfo<Table, dynamic>> _tables;
+  Map<String, int>? _ranks;
 
   /// The synced tables this builder (and the wire format) recognizes.
   Set<String> get tableNames => _tables.keys.toSet();
+
+  /// Parent-before-child upload rank per synced table, derived from the live
+  /// SQLite foreign-key graph: a table ranks strictly above every synced
+  /// table it references, so sorting a batch by rank puts every parent row
+  /// before its children.
+  ///
+  /// This exists for the pusher: the oplog's collapsed order is LATEST-op
+  /// order, and a cascade delete journals children before their parent, so a
+  /// deleted aggregate would otherwise be uploaded child-first. A receiver
+  /// that has never seen those rows applies them as fresh inserts, and a page
+  /// boundary inside the cascade would leave a child whose parent never
+  /// arrived — the applier's FK sweep then drops it with the change token
+  /// already advanced, losing the row permanently (found by the convergence
+  /// simulation, seed 0x5eed0001). Sorting by this rank restores the
+  /// [FetchPage] ordering contract for every push.
+  ///
+  /// Derived (not hand-kept) so a new synced table can never be missed;
+  /// memoized because the schema is fixed for the life of the process.
+  Future<Map<String, int>> tableRanks() async {
+    final cached = _ranks;
+    if (cached != null) return cached;
+    final deps = <String, Set<String>>{};
+    for (final table in _tables.keys) {
+      final fks = await _db
+          .customSelect('PRAGMA foreign_key_list("$table")')
+          .get();
+      deps[table] = {
+        for (final fk in fks)
+          if (_tables.containsKey(fk.read<String>('table')) &&
+              fk.read<String>('table') != table)
+            fk.read<String>('table'),
+      };
+    }
+    final ranks = <String, int>{};
+    int rankOf(String table, Set<String> visiting) {
+      final known = ranks[table];
+      if (known != null) return known;
+      if (!visiting.add(table)) {
+        // An FK cycle would make parent-first ordering undefined. No synced
+        // table participates in one today; fail loudly if that ever changes.
+        throw StateError('SyncRowBuilder: FK cycle involving "$table"');
+      }
+      var rank = 0;
+      for (final parent in deps[table]!) {
+        final r = rankOf(parent, visiting) + 1;
+        if (r > rank) rank = r;
+      }
+      visiting.remove(table);
+      ranks[table] = rank;
+      return rank;
+    }
+
+    for (final table in _tables.keys) {
+      rankOf(table, <String>{});
+    }
+    return _ranks = Map.unmodifiable(ranks);
+  }
 
   /// Builds the SyncRow for the CURRENT state of ([table], [id]), or null if
   /// no such row exists (e.g. it was hard-deleted as a never-synced draft

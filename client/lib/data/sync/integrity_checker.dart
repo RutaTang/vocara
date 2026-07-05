@@ -1,6 +1,7 @@
 import 'package:drift/drift.dart';
 
 import '../db/app_database.dart';
+import 'hlc.dart';
 import 'sync_writer.dart';
 
 /// One detected integrity violation.
@@ -25,12 +26,42 @@ class IntegrityViolation {
 ///
 /// Invoked at three points: post-write (debug + periodic), migration-validate
 /// (full DB on the migrated copy), and sync-apply (the affected closure).
-/// Repairs go through the [SyncWriter] chokepoint so they journal like any edit.
+/// Repairs journal through the [SyncWriter] like any edit, but are stamped
+/// with a DERIVED HLC, never a fresh clock tick — see [_repairStamp].
 class IntegrityChecker {
   IntegrityChecker(this.db, this.writer);
 
   final AppDatabase db;
   final SyncWriter writer;
+
+  /// The stamp for one repair write, DERIVED from the repaired row's own HLC:
+  /// one counter above it, under this device's node.
+  ///
+  /// A repair is derived state, not user intent. It must be strictly ABOVE
+  /// the row's current stamp (so the repair wins LWW on every peer and the
+  /// fleet converges) but strictly BELOW any later real edit (every device
+  /// that holds a row has already advanced its clock past that row's HLC, so
+  /// its next real tick out-ranks this bump). A fresh `writer.stamp()` tick
+  /// here — the old behavior — minted user-grade intent for bookkeeping: a
+  /// scalar heal on a practice could out-rank a genuinely later delete and
+  /// resurrect the deleted practice fleet-wide (convergence simulation, seed
+  /// 0xab1a57). Two devices repairing the same row independently derive the
+  /// same (wall, counter) with their node as the only difference, so their
+  /// identical-content repairs converge by the node tiebreak.
+  SyncStamp _repairStamp(String rowHlcPacked) {
+    final base = Hlc.parse(rowHlcPacked);
+    var wall = base.wallMs;
+    var counter = base.counter + 1;
+    if (counter > HlcClock.maxCounter) {
+      // Keep the packed encoding's fixed-width counter: spill to the next
+      // millisecond, exactly like HlcClock does.
+      wall += 1;
+      counter = 0;
+    }
+    return SyncStamp(
+      Hlc(wallMs: wall, counter: counter, node: writer.clock.node),
+    );
+  }
 
   /// (childTable, fkColumn, parentTable, invariantId). Ordered PARENT-FIRST so a
   /// repair pass tombstones a dangling parent before its children are examined.
@@ -67,7 +98,8 @@ class IntegrityChecker {
     for (final (child, fk, parent, inv) in _childEdges) {
       final rows = await db
           .customSelect(
-            'SELECT c.id AS id FROM $child c WHERE c.deleted_at IS NULL AND NOT EXISTS '
+            'SELECT c.id AS id, c.hlc_packed AS h FROM $child c WHERE '
+            'c.deleted_at IS NULL AND NOT EXISTS '
             '(SELECT 1 FROM $parent p WHERE p.id = c.$fk AND p.deleted_at IS NULL)',
           )
           .get();
@@ -76,7 +108,7 @@ class IntegrityChecker {
         out.add(
           IntegrityViolation(inv, child, id, '$parent missing/tombstoned'),
         );
-        if (repair) await _tombstone(child, id);
+        if (repair) await _tombstone(child, id, r.read<String>('h'));
       }
     }
 
@@ -87,8 +119,8 @@ class IntegrityChecker {
         repair: repair,
         invariant: 'active-interp',
         sql:
-            'SELECT p.id AS id FROM practices p WHERE p.deleted_at IS NULL AND '
-            'p.active_interpretation_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM '
+            'SELECT p.id AS id, p.hlc_packed AS h FROM practices p WHERE '
+            'p.deleted_at IS NULL AND p.active_interpretation_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM '
             'interpretations i WHERE i.id = p.active_interpretation_id AND '
             'i.deleted_at IS NULL AND i.practice_id = p.id)',
         table: 'practices',
@@ -100,8 +132,8 @@ class IntegrityChecker {
         repair: repair,
         invariant: 'separation-asset',
         sql:
-            'SELECT p.id AS id FROM practices p WHERE p.deleted_at IS NULL AND '
-            'p.separation_asset_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM assets '
+            'SELECT p.id AS id, p.hlc_packed AS h FROM practices p WHERE '
+            'p.deleted_at IS NULL AND p.separation_asset_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM assets '
             'a WHERE a.id = p.separation_asset_id AND a.deleted_at IS NULL)',
         table: 'practices',
         column: 'separation_asset_id',
@@ -114,8 +146,8 @@ class IntegrityChecker {
         repair: repair,
         invariant: 'vocal-interp',
         sql:
-            'SELECT t.id AS id FROM tracks t WHERE t.deleted_at IS NULL AND '
-            "t.kind = 'vocal' AND t.interpretation_id IS NOT NULL AND NOT EXISTS "
+            'SELECT t.id AS id, t.hlc_packed AS h FROM tracks t WHERE '
+            "t.deleted_at IS NULL AND t.kind = 'vocal' AND t.interpretation_id IS NOT NULL AND NOT EXISTS "
             '(SELECT 1 FROM interpretations i WHERE i.id = t.interpretation_id AND '
             'i.deleted_at IS NULL AND i.practice_id = t.practice_id)',
         table: 'tracks',
@@ -129,8 +161,8 @@ class IntegrityChecker {
         repair: repair,
         invariant: 'track-bus',
         sql:
-            'SELECT t.id AS id FROM tracks t WHERE t.deleted_at IS NULL AND '
-            't.bus_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fx_buses b WHERE '
+            'SELECT t.id AS id, t.hlc_packed AS h FROM tracks t WHERE '
+            't.deleted_at IS NULL AND t.bus_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fx_buses b WHERE '
             'b.id = t.bus_id AND b.deleted_at IS NULL AND b.practice_id = '
             't.practice_id)',
         table: 'tracks',
@@ -144,8 +176,8 @@ class IntegrityChecker {
         repair: repair,
         invariant: 'bus-output',
         sql:
-            'SELECT b.id AS id FROM fx_buses b WHERE b.deleted_at IS NULL AND '
-            'b.output_bus_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fx_buses o '
+            'SELECT b.id AS id, b.hlc_packed AS h FROM fx_buses b WHERE '
+            'b.deleted_at IS NULL AND b.output_bus_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fx_buses o '
             'WHERE o.id = b.output_bus_id AND o.deleted_at IS NULL AND '
             'o.practice_id = b.practice_id)',
         table: 'fx_buses',
@@ -165,8 +197,8 @@ class IntegrityChecker {
     for (final d in dupes) {
       final rows = await db
           .customSelect(
-            'SELECT id FROM tracks WHERE deleted_at IS NULL AND practice_id = ? AND '
-            'kind = ? ORDER BY hlc_packed DESC',
+            'SELECT id, hlc_packed FROM tracks WHERE deleted_at IS NULL AND '
+            'practice_id = ? AND kind = ? ORDER BY hlc_packed DESC',
             variables: [
               Variable.withString(d.read<String>('practice_id')),
               Variable.withString(d.read<String>('kind')),
@@ -183,7 +215,9 @@ class IntegrityChecker {
             'duplicate live ${d.read<String>('kind')} slot',
           ),
         );
-        if (repair) await _tombstone('tracks', id);
+        if (repair) {
+          await _tombstone('tracks', id, rows[i].read<String>('hlc_packed'));
+        }
       }
     }
 
@@ -203,7 +237,7 @@ class IntegrityChecker {
       final id = r.read<String>('id');
       out.add(IntegrityViolation(invariant, table, id, '$column dangling'));
       if (repair) {
-        final s = writer.stamp();
+        final s = _repairStamp(r.read<String>('h'));
         await db.customUpdate(
           'UPDATE $table SET $column = NULL, updated_at = ?, hlc_wall = ?, '
           'hlc_ctr = ?, hlc_node = ?, hlc_packed = ? WHERE id = ?',
@@ -228,8 +262,8 @@ class IntegrityChecker {
     return out;
   }
 
-  Future<void> _tombstone(String table, String id) async {
-    final s = writer.stamp();
+  Future<void> _tombstone(String table, String id, String rowHlcPacked) async {
+    final s = _repairStamp(rowHlcPacked);
     await db.customUpdate(
       'UPDATE $table SET deleted_at = ?, updated_at = ?, hlc_wall = ?, '
       'hlc_ctr = ?, hlc_node = ?, hlc_packed = ? WHERE id = ?',

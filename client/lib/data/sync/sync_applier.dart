@@ -42,10 +42,14 @@ class ApplyResult {
 /// Distinct from local writes (which go through SyncWriter): a remote change
 /// ADOPTS the remote HLC (it does not tick), wins only by entity-level
 /// Last-Writer-Wins on the HLC, and is NEVER journaled — so an applied remote
-/// change can't be re-pushed into an infinite ping-pong. The clock is advanced
-/// via [HlcClock.receive] so subsequent LOCAL writes stay causally after
-/// everything we've seen; a record whose clock is implausibly far in the future
-/// is quarantined instead of merged (one bad peer can't poison the fleet).
+/// change can't be re-pushed into an infinite ping-pong. (The single carve-out
+/// is the single-slot RESOLUTION tombstone, which is a new derived local
+/// decision — not an echo of the applied record — and must replicate to
+/// converge; it is bounded to one write per losing row, see [_resolveSlot].)
+/// The clock is advanced via [HlcClock.receive] so subsequent LOCAL writes
+/// stay causally after everything we've seen; a record whose clock is
+/// implausibly far in the future is quarantined instead of merged (one bad
+/// peer can't poison the fleet).
 ///
 /// Apply is order-tolerant and per-record resilient: defer_foreign_keys lets a
 /// child arrive before its parent within the batch, and each record applies
@@ -300,6 +304,22 @@ class SyncApplier {
   /// slot is held by a DIFFERENT live row, the higher hlc_packed keeps the slot live and
   /// the loser is tombstoned. When [rec] is the loser, the returned map is tombstoned so
   /// the row is still stored (a later sync can update it) without occupying the live slot.
+  ///
+  /// The resolution REPLICATES: the loser's tombstone is stamped one HLC
+  /// counter above the loser's own stamp (under OUR node — see
+  /// [_derivedHlc]) and journaled, because whether a device even observes
+  /// the conflict depends on its local apply order (the loser's creator
+  /// meets the winner arriving; a device that received the winner's later
+  /// tombstone first never sees two live rows at once). An un-journaled,
+  /// un-bumped local tombstone therefore diverged permanently: same
+  /// hlc_packed, live on one device and dead on another (convergence
+  /// simulation, seeds 0x5eed0009 / 0xabd782). With the bump + journal the
+  /// resolution wins LWW on every peer, and two devices resolving the same
+  /// pair independently produce identical rows up to the node tiebreak.
+  /// The tombstone TIME is the winner's wall clock (the moment the slot was
+  /// claimed) — the same value on every resolver. This is the ONE local
+  /// write the applier journals; it is a new derived decision, never an echo
+  /// of the applied record, so it cannot ping-pong (see the class docs).
   Future<Map<String, Object?>> _resolveSlot(SyncRow rec) async {
     if (rec.table != 'tracks' || rec.fields['deleted_at'] != null) {
       return rec.fields;
@@ -310,8 +330,8 @@ class SyncApplier {
     if (practiceId is! String) return rec.fields;
     final occupant = await db
         .customSelect(
-          'SELECT id, hlc_packed FROM tracks WHERE practice_id = ? AND kind = ? '
-          'AND deleted_at IS NULL AND id <> ?',
+          'SELECT id, hlc_packed, hlc_wall FROM tracks WHERE practice_id = ? '
+          'AND kind = ? AND deleted_at IS NULL AND id <> ?',
           variables: [
             Variable.withString(practiceId),
             Variable.withString(kind as String),
@@ -320,18 +340,78 @@ class SyncApplier {
         )
         .getSingleOrNull();
     if (occupant == null) return rec.fields;
-    // A plausible tombstone time: the incoming record's wall clock.
-    final tombstoneAt = rec.fields['hlc_wall'];
     if (rec.hlcPacked.compareTo(occupant.read<String>('hlc_packed')) > 0) {
-      // Incoming wins → free the slot by tombstoning the current occupant.
+      // Incoming wins → free the slot by tombstoning the current occupant
+      // (the loser), stamped one counter above the occupant's own HLC.
+      final loserId = occupant.read<String>('id');
+      final stamp = _derivedHlc(Hlc.parse(occupant.read<String>('hlc_packed')));
+      final tombstoneAt = rec.fields['hlc_wall'];
       await db.customStatement(
-        'UPDATE tracks SET deleted_at = ? WHERE id = ?',
-        [_bind(tombstoneAt), occupant.read<String>('id')],
+        'UPDATE tracks SET deleted_at = ?, updated_at = ?, hlc_wall = ?, '
+        'hlc_ctr = ?, hlc_node = ?, hlc_packed = ? WHERE id = ?',
+        [
+          _bind(tombstoneAt),
+          _bind(tombstoneAt),
+          stamp.wallMs,
+          stamp.counter,
+          stamp.node,
+          stamp.packed,
+          loserId,
+        ],
       );
+      await _journalSlotTombstone(loserId, stamp);
       return rec.fields;
     }
-    // Incoming loses → store it tombstoned so it never occupies the live slot.
-    return {...rec.fields, 'deleted_at': tombstoneAt};
+    // Incoming loses → store it tombstoned (stamped one counter above its own
+    // HLC, dated to the occupant/winner's wall) so it never occupies the live
+    // slot and the resolution replicates to peers still holding it live.
+    final stamp = _derivedHlc(rec.hlc);
+    await _journalSlotTombstone(rec.id, stamp);
+    return {
+      ...rec.fields,
+      'deleted_at': occupant.read<int>('hlc_wall'),
+      'updated_at': occupant.read<int>('hlc_wall'),
+      'hlc_wall': stamp.wallMs,
+      'hlc_ctr': stamp.counter,
+      'hlc_node': stamp.node,
+      'hlc_packed': stamp.packed,
+    };
+  }
+
+  /// A DERIVED stamp for a local resolution write: one counter above [base],
+  /// under this device's node. Strictly above the row's current stamp (so
+  /// the write replicates via LWW) yet strictly below any later real edit
+  /// (every device holding the row has advanced its clock past [base], so
+  /// its next tick out-ranks the bump) — derived state must never out-rank
+  /// user intent. Same derivation as IntegrityChecker's repair stamps.
+  Hlc _derivedHlc(Hlc base) {
+    var wall = base.wallMs;
+    var counter = base.counter + 1;
+    if (counter > HlcClock.maxCounter) {
+      // Keep the packed encoding's fixed-width counter: spill to the next
+      // millisecond, exactly like HlcClock does.
+      wall += 1;
+      counter = 0;
+    }
+    return Hlc(wallMs: wall, counter: counter, node: clock.node);
+  }
+
+  /// Journals the slot-resolution tombstone so the resolution replicates.
+  /// Runs inside the record's savepoint: the row write and its ledger entry
+  /// commit (or roll back) together, like every local write.
+  Future<void> _journalSlotTombstone(String id, Hlc hlc) {
+    return db
+        .into(db.oplog)
+        .insert(
+          OplogCompanion.insert(
+            entityTable: 'tracks',
+            entityId: id,
+            op: 'tombstone',
+            hlcPacked: hlc.packed,
+            payloadHash: '',
+            createdAt: hlc.wallMs,
+          ),
+        );
   }
 
   Future<void> _insert(String table, Map<String, Object?> columns) {

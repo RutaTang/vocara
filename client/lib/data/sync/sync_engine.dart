@@ -11,14 +11,18 @@ import 'sync_state_store.dart';
 import 'sync_transport.dart';
 
 /// One "remote changes landed" notification, fired AFTER the page's
-/// transaction committed (never from inside an open transaction) and after the
-/// post-page integrity repair ran.
+/// transaction committed (never from inside an open transaction) and after
+/// the pull run's end-of-run integrity repair ran, so listeners always reload
+/// an already-consistent view.
 ///
 /// This event exists for FRESHNESS only, never for safety: three-way
 /// reconcile (base hashes) already guarantees that an editor which misses (or
 /// skips) a reload cannot revert or tombstone the synced-in rows on its next
 /// save. View models therefore listen with tiny, heavily-guarded handlers and
-/// simply skip the reload whenever the user is mid-anything.
+/// simply skip the reload whenever the user is mid-anything. (That is also
+/// why a run that aborts mid-backlog may drop the events of its committed
+/// pages: the next successful run announces its own pages and repairs
+/// everything; nothing is lost but a reload nudge.)
 class RemoteApplied {
   RemoteApplied({
     required List<(String, String)> rows,
@@ -121,7 +125,9 @@ class PullRun {
 ///  * The change token advances IFF the page it covers committed — the token
 ///    write runs inside the applier's outer transaction via `beforeCommit`.
 ///  * Applying remote changes journals nothing (the applier's contract), so
-///    pull can never echo rows back into push.
+///    pull can never echo rows back into push. (The applier's one carve-out —
+///    the single-slot resolution tombstone — is a new derived local decision,
+///    bounded to one write per losing row, never an echo.)
 ///  * At-least-once tolerant: re-delivered rows/pages are LWW no-ops.
 ///  * Listeners are only notified AFTER transactions close ([onRemoteApplied]
 ///    fires post-commit; the oplog poke rides drift's table-update stream,
@@ -321,13 +327,35 @@ class SyncEngine {
         // row; the builder re-reads, so a save that landed after the drain
         // simply makes the pushed state even fresher — and its own oplog
         // entry, with a higher seq, survives the ack below).
-        final rows = <SyncRow>[];
+        final built = <SyncRow>[];
         for (final e in ready) {
           final row = await _builder.build(e.table, e.id);
           // A vanished row (hard-deleted before it ever synced, e.g. an
           // FK-swept draft) has nothing to push; its entry is still acked.
-          if (row != null) rows.add(row);
+          if (row != null) built.add(row);
         }
+        // Upload parents before children — the [FetchPage] ordering contract.
+        // The drain's latest-op order is CHILD-first for a cascade delete
+        // (children are journaled before their parent), and a receiver that
+        // has never seen the aggregate applies those rows as fresh inserts:
+        // child-first across a page boundary would strand a child whose
+        // parent hasn't arrived yet, and the applier's FK sweep would drop it
+        // with the change token already advanced — a permanently lost row
+        // (convergence simulation, seed 0x5eed0001). A stable
+        // (rank, journal-order) sort fixes the order; the ack cover below is
+        // seq-based and unaffected. Rows are full LWW states, so reordering
+        // within one push never changes any outcome, only arrival order.
+        final ranks = built.length > 1
+            ? await _builder.tableRanks()
+            : const <String, int>{};
+        final indexed = built.indexed.toList()
+          ..sort((a, b) {
+            final byRank = (ranks[a.$2.table] ?? 0).compareTo(
+              ranks[b.$2.table] ?? 0,
+            );
+            return byRank != 0 ? byRank : a.$1.compareTo(b.$1);
+          });
+        final rows = [for (final (_, row) in indexed) row];
         for (var i = 0; i < rows.length; i += pushBatchLimit) {
           final chunk = rows.sublist(
             i,
@@ -413,10 +441,30 @@ class SyncEngine {
 
   /// Fetches remote pages and applies each one atomically WITH its change
   /// token (one transaction per page, via the applier's `beforeCommit` hook).
-  /// After each committed page: integrity repair in its own transaction, then
-  /// [onRemoteApplied]. Stops at the first failure with the token exactly at
-  /// the last committed page.
+  /// After the run has caught up: ONE integrity repair in its own
+  /// transaction, then the buffered [onRemoteApplied] events. Stops at the
+  /// first failure with the token exactly at the last committed page.
+  ///
+  /// The repair deliberately runs at the END of the run, never between
+  /// pages: mid-run the local store may hold a HALF-DELIVERED aggregate (a
+  /// practice row whose interpretation is on the next page), and repairing
+  /// that transient state manufactures intent — e.g. the active-interp
+  /// scalar heal nulls the pointer with an HLC above the row's that can
+  /// later beat a legitimate tombstone and resurrect a deleted practice
+  /// fleet-wide (found by the convergence simulation, seeds 0xc1c2b7 and
+  /// 0x5eed0009). Once the run is caught up, the delivered prefix is
+  /// causally complete (the pusher uploads parents before children and whole
+  /// transactions in order), so the checker sees only genuinely broken
+  /// states. Residual exposure: a pusher whose SINGLE transaction exceeds one
+  /// push chunk (400 rows) can still be observed half-uploaded by a caught-up
+  /// puller; P0 aggregates are far smaller, and the derived repair stamps cap
+  /// the blast radius to bookkeeping that any later real write out-ranks.
   Future<PullRun> pumpPull() => _exclusive(_pullLocked);
+
+  /// Set when a run that had already committed applied pages aborted before
+  /// its end-of-run repair: the next successful run repairs even if it
+  /// applies nothing itself.
+  bool _repairDebt = false;
 
   Future<PullRun> _pullLocked() async {
     var pages = 0;
@@ -424,6 +472,9 @@ class SyncEngine {
     var skipped = 0;
     var quarantined = 0;
     var failedRecords = 0;
+    // Events buffered until the end-of-run repair has run (listeners must
+    // always reload an already-consistent view).
+    final announcements = <RemoteApplied>[];
     try {
       var token = await _state.changeToken();
       while (true) {
@@ -458,13 +509,18 @@ class SyncEngine {
         failedRecords += result.failed;
         token = page.nextToken;
         if (result.applied > 0) {
-          // Repair the affected invariants closure BEFORE announcing, so
-          // listeners reload an already-consistent view. Wrapped in ONE
-          // transaction so each repair write commits with its journal entry.
-          await _db.transaction(() => _integrity.repair());
-          _fireRemoteApplied(await _describePage(page));
+          announcements.add(await _describePage(page));
         }
         if (!page.hasMore) break;
+      }
+      if (applied > 0 || _repairDebt) {
+        // Caught up: repair the invariants closure ONCE, in one transaction
+        // so each repair write commits with its journal entry, then announce.
+        await _db.transaction(() => _integrity.repair());
+        _repairDebt = false;
+      }
+      for (final event in announcements) {
+        _fireRemoteApplied(event);
       }
       return PullRun(
         pages: pages,
@@ -474,6 +530,10 @@ class SyncEngine {
         failedRecords: failedRecords,
       );
     } catch (e) {
+      // Aborted mid-backlog: committed pages exist without their repair (and
+      // without their announcements — freshness only, see [RemoteApplied]).
+      // Carry the repair forward so the next successful run settles it.
+      if (applied > 0) _repairDebt = true;
       return PullRun(
         pages: pages,
         applied: applied,
