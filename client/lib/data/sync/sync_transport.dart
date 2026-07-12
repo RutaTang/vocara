@@ -1,6 +1,6 @@
 import 'sync_row.dart';
 
-/// A transient transport failure (offline, iCloud unreachable, request timed
+/// A transient transport failure (offline, server unreachable, request timed
 /// out). The [SyncEngine] treats any exception from a transport call as "try
 /// again later": the oplog and the change token are left exactly as they were,
 /// so no data is ever lost to a flaky network.
@@ -19,7 +19,7 @@ class SyncTransportException implements Exception {
 ///
 /// [accepted] means the server durably stored [row]. Otherwise the push was
 /// rejected because the server already holds a DIFFERENT version of the record
-/// (CloudKit's `serverRecordChanged`), and [serverRow] carries that current
+/// (a compare-and-set rejection), and [serverRow] carries that current
 /// server state so the caller can resolve. Resolution is the ENGINE's job, not
 /// the transport's — see [SyncTransport.pushRows].
 class PushRowResult {
@@ -69,9 +69,10 @@ class FetchPage {
   final bool hasMore;
 }
 
-/// The device-to-cloud seam of the sync engine — the interface the Swift /
-/// CloudKit bridge implements in Phase 1 (P0 ships only the in-memory fake
-/// used by tests).
+/// The device-to-server seam of the sync engine — the interface a real
+/// backend client implements in Phase 1 (an HTTP client against the Vocara
+/// sync server; the wire contract lives in docs/sync-protocol.md). P0 ships
+/// only the in-memory fake used by tests.
 ///
 /// DELIVERY CONTRACT: everything here is AT-LEAST-ONCE, never exactly-once.
 /// A crash between a successful push and the oplog ack re-pushes the same
@@ -86,15 +87,16 @@ class FetchPage {
 /// The engine persists them verbatim and never inspects them. A transport
 /// must advance the token whenever it returns rows; returning an unchanged
 /// token WITH an empty row list is the "caught up" signal. A transport that
-/// can no longer honor a token (CloudKit's expired change token) should throw
+/// can no longer honor a token (e.g. the server compacted its change log past
+/// it) should throw
 /// — clearing the token and re-pulling from scratch is a policy decision that
 /// lives above the transport.
 abstract class SyncTransport {
   /// Uploads full row states. Returns one result per row, in input order.
   ///
   /// A row the server already holds in a DIFFERENT version comes back as
-  /// [PushRowResult.conflicted] with the server's current record — CloudKit's
-  /// `serverRecordChanged` shape. The ENGINE resolves: if the local row's
+  /// [PushRowResult.conflicted] with the server's current record. The ENGINE
+  /// resolves: if the local row's
   /// hlcPacked is strictly greater than the server row's, it retries the push
   /// (which the server then accepts); otherwise it drops the local push and
   /// lets the newer server state arrive via [fetchChanges].

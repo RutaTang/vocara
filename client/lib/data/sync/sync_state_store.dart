@@ -14,7 +14,7 @@ class SyncStateStore {
 
   final AppDatabase _db;
 
-  /// The CloudKit server change token (opaque, transport-encoded string).
+  /// The server change token (opaque, transport-encoded string).
   static const String changeTokenKey = 'change_token';
 
   /// Generic get: null when the key was never set.

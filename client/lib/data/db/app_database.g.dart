@@ -444,7 +444,7 @@ class $AssetsTable extends Assets with TableInfo<$AssetsTable, AssetRow> {
 }
 
 class AssetRow extends DataClass implements Insertable<AssetRow> {
-  /// Stable ULID primary key; doubles as the CloudKit record name.
+  /// Stable ULID primary key; doubles as the wire record key.
   final String id;
 
   /// Creation / last-modification wall time (epoch ms).
@@ -1388,7 +1388,7 @@ class $PracticesTable extends Practices
 }
 
 class PracticeRow extends DataClass implements Insertable<PracticeRow> {
-  /// Stable ULID primary key; doubles as the CloudKit record name.
+  /// Stable ULID primary key; doubles as the wire record key.
   final String id;
 
   /// Creation / last-modification wall time (epoch ms).
@@ -2243,7 +2243,7 @@ class $InterpretationsTable extends Interpretations
 
 class InterpretationRow extends DataClass
     implements Insertable<InterpretationRow> {
-  /// Stable ULID primary key; doubles as the CloudKit record name.
+  /// Stable ULID primary key; doubles as the wire record key.
   final String id;
 
   /// Creation / last-modification wall time (epoch ms).
@@ -3138,7 +3138,7 @@ class $FxBusesTable extends FxBuses with TableInfo<$FxBusesTable, FxBusRow> {
 }
 
 class FxBusRow extends DataClass implements Insertable<FxBusRow> {
-  /// Stable ULID primary key; doubles as the CloudKit record name.
+  /// Stable ULID primary key; doubles as the wire record key.
   final String id;
 
   /// Creation / last-modification wall time (epoch ms).
@@ -4290,7 +4290,7 @@ class $TracksTable extends Tracks with TableInfo<$TracksTable, TrackRow> {
 }
 
 class TrackRow extends DataClass implements Insertable<TrackRow> {
-  /// Stable ULID primary key; doubles as the CloudKit record name.
+  /// Stable ULID primary key; doubles as the wire record key.
   final String id;
 
   /// Creation / last-modification wall time (epoch ms).
@@ -5317,7 +5317,7 @@ class $ClipsTable extends Clips with TableInfo<$ClipsTable, ClipRow> {
 }
 
 class ClipRow extends DataClass implements Insertable<ClipRow> {
-  /// Stable ULID primary key; doubles as the CloudKit record name.
+  /// Stable ULID primary key; doubles as the wire record key.
   final String id;
 
   /// Creation / last-modification wall time (epoch ms).
@@ -6103,7 +6103,7 @@ class $PracticeNotesTable extends PracticeNotes
 }
 
 class PracticeNoteRow extends DataClass implements Insertable<PracticeNoteRow> {
-  /// Stable ULID primary key; doubles as the CloudKit record name.
+  /// Stable ULID primary key; doubles as the wire record key.
   final String id;
 
   /// Creation / last-modification wall time (epoch ms).
@@ -6899,7 +6899,7 @@ class $TechniqueMarkersTable extends TechniqueMarkers
 
 class TechniqueMarkerRow extends DataClass
     implements Insertable<TechniqueMarkerRow> {
-  /// Stable ULID primary key; doubles as the CloudKit record name.
+  /// Stable ULID primary key; doubles as the wire record key.
   final String id;
 
   /// Creation / last-modification wall time (epoch ms).
@@ -7816,7 +7816,7 @@ class $TechniquesTable extends Techniques
 }
 
 class TechniqueRow extends DataClass implements Insertable<TechniqueRow> {
-  /// Stable ULID primary key; doubles as the CloudKit record name.
+  /// Stable ULID primary key; doubles as the wire record key.
   final String id;
 
   /// Creation / last-modification wall time (epoch ms).
@@ -8734,7 +8734,7 @@ class $TechniqueMediaTable extends TechniqueMedia
 
 class TechniqueMediaRow extends DataClass
     implements Insertable<TechniqueMediaRow> {
-  /// Stable ULID primary key; doubles as the CloudKit record name.
+  /// Stable ULID primary key; doubles as the wire record key.
   final String id;
 
   /// Creation / last-modification wall time (epoch ms).

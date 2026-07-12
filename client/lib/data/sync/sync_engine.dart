@@ -203,7 +203,8 @@ class SyncEngine {
   /// ...but never later than this after the first unflushed write.
   final Duration maxWait;
 
-  /// Transport batch cap (CloudKit modify limit is 400 records per op).
+  /// Transport batch cap (a conservative per-request row limit any backend
+  /// can honor).
   final int pushBatchLimit;
 
   /// Raw oplog rows read per drain (see [OplogDrain.readPending]).
@@ -480,7 +481,7 @@ class SyncEngine {
       while (true) {
         final page = await _transport.fetchChanges(token);
         if (page.rows.isEmpty) {
-          // Caught up. Persist a moved empty-page token (CloudKit can advance
+          // Caught up. Persist a moved empty-page token (a server may advance
           // the token without changes); there is no batch to be atomic with.
           if (page.nextToken != token) {
             await _state.setChangeToken(page.nextToken);

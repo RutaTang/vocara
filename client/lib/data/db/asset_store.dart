@@ -16,7 +16,7 @@ import 'durable_fs.dart';
 /// contents and identical bytes are stored once. The DB never holds a path —
 /// rows reference an [assetId]; [resolve] maps that to a live absolute path on
 /// this device. The physical location is a per-device detail, so the same row
-/// resolves correctly after a reinstall, machine move, or iCloud restore.
+/// resolves correctly after a reinstall, machine move, or cloud restore.
 class AssetStore {
   AssetStore({
     required this.db,

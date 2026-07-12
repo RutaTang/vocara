@@ -24,7 +24,7 @@ class FakeCloud {
   final List<FakeCloudEntry> log = [];
 
   /// The server's current record per (table, id): the LAST ACCEPTED push,
-  /// CloudKit-style — the server knows change tags, not HLCs, so it never
+  /// like a real sync server — it knows change tags, not HLCs, so it never
   /// resolves conflicts itself.
   final Map<(String, String), SyncRow> latest = {};
 
@@ -62,7 +62,7 @@ class _HeldPush {
 ///    delivery delay; lets a test interleave work "during" a push).
 ///  * [pageSize] — fetchChanges page size (hasMore paging).
 ///  * [injectConflictOnce] — the next push of that (table, id) is rejected
-///    with the server's CURRENT row (CloudKit `serverRecordChanged`); the
+///    with the server's CURRENT row (a compare-and-set rejection); the
 ///    retry is then accepted. Ignored if the server holds no row for the key
 ///    (a real server only conflicts against an existing record).
 ///  * [redeliverNextFetches] — the next N fetchChanges calls re-serve the

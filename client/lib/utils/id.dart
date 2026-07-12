@@ -21,7 +21,7 @@ final BigInt _randomCeiling = BigInt.one << 80;
 /// millisecond timestamp followed by 80 bits of randomness. It is globally
 /// unique, lexicographically sortable by creation time, and monotonic within a
 /// millisecond — so it doubles as the stable cross-device primary key and the
-/// CloudKit record name (an id never needs re-minting on import or restore).
+/// wire record key (an id never needs re-minting on import or restore).
 ///
 /// The signature is unchanged from the previous local-only id, so every call
 /// site keeps working.

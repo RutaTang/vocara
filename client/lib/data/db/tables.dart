@@ -8,7 +8,7 @@ import 'package:drift/drift.dart';
 /// equality — the reconcile-diff compares only a table's domain columns, so a
 /// fader nudge that rewrites a sibling's HLC can't make it look "changed".
 mixin SyncCols on Table {
-  /// Stable ULID primary key; doubles as the CloudKit record name.
+  /// Stable ULID primary key; doubles as the wire record key.
   TextColumn get id => text().withLength(min: 26, max: 36)();
 
   /// Creation / last-modification wall time (epoch ms).
@@ -198,8 +198,9 @@ class TechniqueMedia extends Table with SyncCols {
 }
 
 /// The asset indirection. The RECORD syncs; the BYTES sync out-of-band as a
-/// CKAsset keyed by [contentHash]. The physical [localRelPath] and the sync
-/// state columns are PER-DEVICE (stripped from the CKRecord projection).
+/// content-addressed blob keyed by [contentHash]. The physical [localRelPath]
+/// and the sync state columns are PER-DEVICE (stripped from the wire
+/// projection).
 @DataClassName('AssetRow')
 class Assets extends Table with SyncCols {
   TextColumn get contentHash => text()(); // sha256, dedup + integrity

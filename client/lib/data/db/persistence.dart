@@ -64,7 +64,7 @@ class Persistence {
       StreamController<RemoteApplied>.broadcast();
 
   /// The sync engine, once [attachSync] wired one (null until then — P0 has
-  /// no production transport; tests and the future CloudKit bridge attach).
+  /// no production transport; tests and the future server transport attach).
   SyncEngine? get sync => _sync;
   SyncEngine? _sync;
 
