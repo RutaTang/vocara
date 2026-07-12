@@ -13,6 +13,7 @@ import '../../utils/result.dart';
 import '../repositories/song_practice_repository_drift.dart';
 import '../repositories/technique_repository_drift.dart';
 import '../services/audio_file_service.dart';
+import '../services/diagnostics_log.dart';
 import '../services/local_storage_service.dart';
 import '../services/waveform_service.dart';
 import '../sync/hlc.dart';
@@ -33,6 +34,54 @@ import 'safe_migrator.dart';
 /// peaks + duration — [WaveformService.analyze] in production, injectable so
 /// tests don't need the platform decoder. Must throw on undecodable audio.
 typedef WavAnalyzer = Future<WaveformResult> Function(String path);
+
+/// Thrown by [Persistence.open] when the on-disk library's schema
+/// `user_version` is HIGHER than this build's [AppDatabase.currentSchemaVersion]:
+/// the library was written by a newer Vocara. Opening it anyway would run this
+/// build against tables and columns it doesn't understand, and drift's own
+/// version check only fires lazily on the first query — long after the app
+/// started against a half-dead store. Typed so main() can show a dedicated
+/// "please update Vocara" window instead of a generic failure.
+class NewerLibraryException implements Exception {
+  NewerLibraryException({
+    required this.libraryVersion,
+    required this.appVersion,
+  });
+
+  /// The schema `user_version` found in the on-disk database.
+  final int libraryVersion;
+
+  /// The schema version this build understands.
+  final int appVersion;
+
+  @override
+  String toString() =>
+      'NewerLibraryException: the library schema is v$libraryVersion but this '
+      'build understands up to v$appVersion';
+}
+
+/// What one [Persistence.repairLibrary] pass found and did.
+class RepairReport {
+  const RepairReport({
+    required this.violationsFound,
+    required this.violationsRepaired,
+    required this.assetsSwept,
+  });
+
+  /// Cross-row integrity violations detected before repairing.
+  final int violationsFound;
+
+  /// How many of those the repair pass resolved.
+  final int violationsRepaired;
+
+  /// Unreferenced assets tombstoned plus orphaned pool files reclaimed.
+  final int assetsSwept;
+
+  @override
+  String toString() =>
+      'RepairReport(found: $violationsFound, repaired: $violationsRepaired, '
+      'assetsSwept: $assetsSwept)';
+}
 
 /// The wired-up persistence layer: one drift database, the write chokepoint, the
 /// asset pool, and the two repositories built on them. Constructed ONCE at app
@@ -101,10 +150,33 @@ class Persistence {
   /// Opens the real on-disk store under the app support directory. First
   /// recovers any half-finished schema migration (a crash mid-swap) so the live
   /// file is always consistent before drift opens it.
-  static Future<Persistence> open() async {
-    final dir = await getApplicationSupportDirectory();
+  ///
+  /// [dir] and [analyze] are test seams (the store's on-disk root and the
+  /// recovery waveform analyzer); production passes neither.
+  ///
+  /// Throws [NewerLibraryException] when the library was written by a newer
+  /// Vocara; any other throw is a fatal open, surfaced by main() in a
+  /// dedicated error window.
+  static Future<Persistence> open({
+    Directory? dir,
+    WavAnalyzer? analyze,
+  }) async {
+    dir ??= await getApplicationSupportDirectory();
     final dbPath = p.join(dir.path, 'vocara.db');
     await SafeMigrator().recoverIfNeeded(dbPath);
+    // Refuse a library from a NEWER Vocara BEFORE building the store: this
+    // build cannot understand (let alone migrate) a higher schema, so nothing
+    // may touch it — not drift, not the sweeps. A downgrade path does not
+    // exist by design; the on-disk file is left byte-for-byte untouched.
+    if (await File(dbPath).exists()) {
+      final onDiskVersion = SafeMigrator().readUserVersion(dbPath);
+      if (onDiskVersion > AppDatabase.currentSchemaVersion) {
+        throw NewerLibraryException(
+          libraryVersion: onDiskVersion,
+          appVersion: AppDatabase.currentSchemaVersion,
+        );
+      }
+    }
     // Upgrade a stale on-disk schema BEFORE drift opens the file: drift's own
     // onUpgrade deliberately throws (the copy/validate/swap protocol owns
     // upgrades). A fresh install (no file) is a no-op here — drift's onCreate
@@ -125,35 +197,117 @@ class Persistence {
     // graceful stop + save, leaving the streamed WAV in staging as the ONLY
     // copy of the take (the engine keeps its header valid by patching it in
     // place ~1x/s while recording). Best-effort; never blocks launch.
+    //
+    // GATE for every destructive sweep below: the sweeps derive their
+    // keep-sets from the database, and sweepStaging clears the staging tree
+    // outright — so they may only run once the database has answered real
+    // reads AND recovery completed. If the probe or recovery threw (an
+    // unreadable table, a failed staging scan), a staged WAV may still be the
+    // ONLY copy of a take, and sweeping it would be unrecoverable data loss.
+    // Skipping every sweep on a sick boot merely leaks disk until a healthy
+    // boot; the sweeps themselves remain best-effort and never block launch.
+    var sweepGateOpen = false;
     try {
-      final waveforms = WaveformService(storage: LocalStorageService());
-      await persistence.recoverStagedRecordings(analyze: waveforms.analyze);
-    } catch (_) {}
-    // Reclaim staging leftovers: after a save, a recording/import has been copied
-    // into the content-addressed pool and its working file under audio/ or
-    // technique_media/ is an orphan (nothing persistent references it — clips
-    // and media reference pool assets). At startup nothing is in flight, so the
-    // staging tree is safe to clear. Best-effort; never blocks launch.
-    await persistence.assets.sweepStaging();
-    // Reclaim pooled bytes for assets no live clip/media/practice references any
-    // more (removed takes, replaced accompaniment, deleted examples). Derives the
-    // refcount from a query, so it's safe to run at startup when nothing is in
-    // flight. Best-effort — a GC failure must never block launch.
-    try {
-      await persistence.assets.sweepUnreferenced();
-    } catch (_) {}
-    // Reclaim pool files left with no asset row at all (a crash between the pool write and the
-    // asset-row commit). Best-effort — a GC failure must never block launch.
-    try {
-      await persistence.assets.sweepOrphanPoolFiles();
-    } catch (_) {}
+      await _probeDbReadable(db);
+      final wavAnalyzer =
+          analyze ?? WaveformService(storage: LocalStorageService()).analyze;
+      await persistence.recoverStagedRecordings(analyze: wavAnalyzer);
+      sweepGateOpen = true;
+    } catch (e) {
+      DiagnosticsLog.instance.log(
+        'persistence',
+        'boot health probe / staged-recording recovery failed '
+            '(${e.runtimeType}); skipping all destructive sweeps this boot',
+      );
+    }
+    if (sweepGateOpen) {
+      // Reclaim staging leftovers: after a save, a recording/import has been copied
+      // into the content-addressed pool and its working file under audio/ or
+      // technique_media/ is an orphan (nothing persistent references it — clips
+      // and media reference pool assets). At startup nothing is in flight, so the
+      // staging tree is safe to clear. Best-effort; never blocks launch.
+      await persistence.assets.sweepStaging();
+      // Reclaim pooled bytes for assets no live clip/media/practice references any
+      // more (removed takes, replaced accompaniment, deleted examples). Derives the
+      // refcount from a query, so it's safe to run at startup when nothing is in
+      // flight. Best-effort — a GC failure must never block launch.
+      try {
+        await persistence.assets.sweepUnreferenced();
+      } catch (e) {
+        DiagnosticsLog.instance.log(
+          'persistence',
+          'sweepUnreferenced failed (${e.runtimeType})',
+        );
+      }
+      // Reclaim pool files left with no asset row at all (a crash between the pool write and the
+      // asset-row commit). Best-effort — a GC failure must never block launch.
+      try {
+        await persistence.assets.sweepOrphanPoolFiles();
+      } catch (e) {
+        DiagnosticsLog.instance.log(
+          'persistence',
+          'sweepOrphanPoolFiles failed (${e.runtimeType})',
+        );
+      }
+      // The sweeps above park reclaimed files in the asset trash rather than
+      // unlinking them; age trash out ONLY after a fully healthy boot, so a
+      // sick boot can never shorten the recovery window.
+      try {
+        await persistence.assets.pruneTrash();
+      } catch (e) {
+        DiagnosticsLog.instance.log(
+          'persistence',
+          'pruneTrash failed (${e.runtimeType})',
+        );
+      }
+    }
     return persistence;
+  }
+
+  /// One real read against every table the boot sweeps derive their keep-sets
+  /// from. A miss (missing or corrupt table) throws, which closes the sweep
+  /// gate in [open]: when reference derivation can't be trusted, no
+  /// destructive sweep may run.
+  static Future<void> _probeDbReadable(AppDatabase db) async {
+    for (final table in const [
+      'practices',
+      'tracks',
+      'clips',
+      'technique_media',
+      'assets',
+    ]) {
+      await db.customSelect('SELECT COUNT(*) AS n FROM $table').getSingle();
+    }
   }
 
   /// A synchronous in-memory instance (host sqlite3) for tests / widget boot.
   factory Persistence.memory() {
     final dir = Directory.systemTemp.createTempSync('vocara_mem');
     return _wire(AppDatabase(NativeDatabase.memory()), dir, newId());
+  }
+
+  /// One user-invoked "repair library" pass: runs the cross-row integrity
+  /// repair to a fixpoint, then reclaims unreferenced assets and orphaned
+  /// pool files. Repairs journal through the normal write chokepoint like any
+  /// edit, so this is safe on a live store between user actions. Meant for a
+  /// diagnostics/settings action, never the boot path (boot has its own
+  /// gated sweeps in [open]).
+  Future<RepairReport> repairLibrary() async {
+    final checker = IntegrityChecker(db, writer);
+    final found = await checker.check();
+    final unrepaired = await checker.repair();
+    // A cascade can repair MORE than the initial scan saw; the report never
+    // claims a negative remainder.
+    final repaired = (found.length - unrepaired.length).clamp(0, found.length);
+    final tombstoned = await assets.sweepUnreferenced();
+    final orphaned = await assets.sweepOrphanPoolFiles();
+    final report = RepairReport(
+      violationsFound: found.length,
+      violationsRepaired: repaired,
+      assetsSwept: tombstoned + orphaned,
+    );
+    DiagnosticsLog.instance.log('persistence', 'repairLibrary: $report');
+    return report;
   }
 
   /// Boot-time recovery of hard-kill orphaned take recordings. Returns the
@@ -212,10 +366,15 @@ class Persistence {
           if (await _recoverOrphanTake(f, practiceId, referenced, analyze)) {
             recovered++;
           }
-        } catch (_) {
+        } catch (e) {
           // Best-effort per file: a failed recovery (decode error, disk
           // error) leaves the file to the sweep and never blocks the other
           // orphans or the launch.
+          DiagnosticsLog.instance.log(
+            'persistence',
+            'one staged recording failed to recover (${e.runtimeType}); '
+                'left for the sweep',
+          );
         }
       }
     }
@@ -282,7 +441,13 @@ class Persistence {
     // (this boot) or the referenced-hash skip (next boot) covers it.
     try {
       await file.delete();
-    } catch (_) {}
+    } catch (e) {
+      DiagnosticsLog.instance.log(
+        'persistence',
+        'recovered take staging copy not deleted (${e.runtimeType}); '
+            'the sweep covers it',
+      );
+    }
     return true;
   }
 
@@ -303,17 +468,23 @@ class Persistence {
     return max + 1;
   }
 
-  /// Content hashes of every asset a live clip / technique media / practice
-  /// separation source references — bytes a completed save already owns.
+  /// Content hashes of every asset a live row references — bytes a completed
+  /// save already owns. Derived from [AssetStore.assetRefColumns], the single
+  /// source of truth for asset-referencing columns (guarded by a
+  /// schema-derived test), so a future referencing column cannot be silently
+  /// missed here while the GC honors it.
   Future<Set<String>> _referencedContentHashes() async {
+    final union = AssetStore.assetRefColumns
+        .map(
+          (r) =>
+              'SELECT ${r.column} FROM ${r.table} '
+              'WHERE deleted_at IS NULL AND ${r.column} IS NOT NULL',
+        )
+        .join(' UNION ');
     final rows = await db
         .customSelect(
           'SELECT DISTINCT content_hash AS h FROM assets '
-          'WHERE deleted_at IS NULL AND id IN ('
-          'SELECT asset_id FROM clips WHERE deleted_at IS NULL '
-          'UNION SELECT asset_id FROM technique_media WHERE deleted_at IS NULL '
-          'UNION SELECT separation_asset_id FROM practices '
-          'WHERE deleted_at IS NULL AND separation_asset_id IS NOT NULL)',
+          'WHERE deleted_at IS NULL AND id IN ($union)',
         )
         .get();
     return {
@@ -382,12 +553,21 @@ class Persistence {
           if (packed == null) continue;
           final hlc = Hlc.parse(packed);
           if (max == null || hlc > max) max = hlc;
-        } catch (_) {
+        } catch (e) {
           // Malformed value or unreadable table: keep scanning the others.
+          DiagnosticsLog.instance.log(
+            'persistence',
+            'seedClock skipped ${table.actualTableName} (${e.runtimeType})',
+          );
         }
       }
-    } catch (_) {
+    } catch (e) {
       // Even enumerating the tables failed: fall through with the partial max.
+      DiagnosticsLog.instance.log(
+        'persistence',
+        'seedClock table enumeration failed (${e.runtimeType}); '
+            'clock seeded from a partial max',
+      );
     }
     return HlcClock(node: node, initial: max);
   }

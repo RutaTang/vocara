@@ -685,7 +685,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
           'Recording hit a disk error. The example may be incomplete.';
     }
 
-    TechniqueMedia? added;
+    final TechniqueMedia added;
     try {
       final dest = await _mediaService.importMedia(
         techniqueId: techniqueId,
@@ -698,29 +698,38 @@ class TechniqueDetailViewModel extends ChangeNotifier
         addedAt: DateTime.now(),
       );
     } on Exception {
-      // Import failed; nothing staged.
+      // Import failed (copy error, disk full): the temp WAV is the ONLY copy
+      // of the take, so it must NOT be deleted — keep it on disk for recovery
+      // and surface the failure. Clearing _exampleTempPath keeps dispose()'s
+      // abandoned-recording cleanup away from the kept file.
+      _exampleTempPath = null;
+      _recordingNotice =
+          "Couldn't save the example recording. The take was kept in a "
+          'temporary folder.';
+      _savingExample = false;
+      notifyListeners();
+      return;
     }
-    // Keep _exampleTempPath set until the file is actually gone, so a dispose
-    // mid-save still cleans it up.
+    // Import succeeded: the clip lives in the sandbox now, the temp is a
+    // duplicate. Keep _exampleTempPath set until the file is actually gone, so
+    // a dispose mid-save still cleans it up.
     await deleteTempRecordingDir(path);
     _exampleTempPath = null;
-    if (added != null) {
-      if (_draftGeneration != generation || _disposed) {
-        // Draft abandoned (Cancel) or VM disposed mid-save; the copied clip is an
-        // orphan — delete it rather than staging it behind the read view.
-        unawaited(_mediaService.deleteMedia(added.path));
-      } else {
-        // A dirty stop already validated the partial take: reuse its analysis
-        // so the reference view doesn't decode the clip a second time.
-        if (partial != null) _refCache[added.path] = partial;
-        _draftAdds.add(added);
-        _selectedExamplePath = added.path;
-        // The just-recorded example becomes the reference; drop a stale practice take that
-        // was compared against the previous reference (matches selectExample).
-        _resetToReferenceSubject();
-        // Expand the just-recorded example so its analysis shows immediately.
-        _analysisCollapsed = false;
-      }
+    if (_draftGeneration != generation || _disposed) {
+      // Draft abandoned (Cancel) or VM disposed mid-save; the copied clip is an
+      // orphan — delete it rather than staging it behind the read view.
+      unawaited(_mediaService.deleteMedia(added.path));
+    } else {
+      // A dirty stop already validated the partial take: reuse its analysis
+      // so the reference view doesn't decode the clip a second time.
+      if (partial != null) _refCache[added.path] = partial;
+      _draftAdds.add(added);
+      _selectedExamplePath = added.path;
+      // The just-recorded example becomes the reference; drop a stale practice take that
+      // was compared against the previous reference (matches selectExample).
+      _resetToReferenceSubject();
+      // Expand the just-recorded example so its analysis shows immediately.
+      _analysisCollapsed = false;
     }
     _savingExample = false;
     notifyListeners();

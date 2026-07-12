@@ -11,11 +11,13 @@ class TrackMenuActions {
     required this.isVocal,
     required this.canMergeDown,
     required this.canSeparate,
+    required this.canExport,
     required this.reseparate,
     required this.currentColorValue,
     required this.onPickColor,
     required this.onRename,
     required this.onSeparate,
+    required this.onExport,
     required this.onAddNote,
     required this.onAddTechnique,
     required this.onDuplicate,
@@ -36,6 +38,9 @@ class TrackMenuActions {
   /// the kept original (different label).
   final bool reseparate;
 
+  /// Whether to offer "Export take… / Export audio…" (the lane has audio).
+  final bool canExport;
+
   /// The track's current custom tint (ARGB), or null when it uses the default.
   final int? currentColorValue;
 
@@ -44,6 +49,9 @@ class TrackMenuActions {
 
   final VoidCallback onRename;
   final VoidCallback onSeparate;
+
+  /// Copies the lane's audio out to a user-chosen location.
+  final VoidCallback onExport;
   final VoidCallback onAddNote;
   final VoidCallback onAddTechnique;
   final VoidCallback onDuplicate;
@@ -154,6 +162,17 @@ Future<void> showTrackContextMenu(
           close();
           actions.onMergeDown();
         }),
+      // Exporting is the guarantee that audio is never trapped in the app's
+      // private container — offered for any lane that has audio.
+      if (actions.canExport)
+        _MenuRow(
+          FIcons.download,
+          actions.isVocal ? 'Export take…' : 'Export audio…',
+          () {
+            close();
+            actions.onExport();
+          },
+        ),
       _MenuRow(FIcons.rotateCw, 'Re-analyze waveform', () {
         close();
         actions.onReanalyze();
@@ -222,16 +241,23 @@ Future<void> showBusContextMenu(
   );
 }
 
-/// A minimal context menu for a single clip — right now just "Delete clip".
+/// A minimal context menu for a single clip: export (the per-clip escape
+/// hatch for multi-clip lanes) and delete.
 Future<void> showClipContextMenu(
   BuildContext context,
   Offset globalPosition, {
   required VoidCallback onDelete,
+  VoidCallback? onExport,
 }) {
   return _showStudioMenu(
     context,
     globalPosition,
     (close) => [
+      if (onExport != null)
+        _MenuRow(FIcons.download, 'Export clip…', () {
+          close();
+          onExport();
+        }),
       _MenuRow(FIcons.trash2, 'Delete clip', () {
         close();
         onDelete();

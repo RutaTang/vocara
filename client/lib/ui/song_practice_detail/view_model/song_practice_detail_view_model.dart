@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:file_selector/file_selector.dart' show getSaveLocation;
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 
@@ -121,6 +122,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     MonitorService? monitor,
     AudioEditService? editService,
     RecordingFinalizer? finalizer,
+    Future<String?> Function(String suggestedName)? saveLocationPicker,
   }) : _repository = repository,
        _techniqueRepository = techniqueRepository,
        _audioFiles = audioFileService,
@@ -130,6 +132,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
        _appSettings = appSettings,
        _practiceId = practiceId,
        _playback = playbackEngine ?? createPlaybackEngine(),
+       _pickSaveLocation = saveLocationPicker ?? _systemSaveLocation,
        _monitor = monitor ?? MonitorService(),
        _edits = editService ?? AudioEditService(files: audioFileService),
        _finalizer = finalizer ?? RecordingFinalizer.instance {
@@ -262,6 +265,17 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   final SpectrogramService _spectrograms;
   final SourceSeparationService _separation;
   final AppSettingsService _appSettings;
+
+  /// Resolves where an export is written (the platform save panel by default);
+  /// injected so tests can drive [exportTrackAudio] without the plugin.
+  final Future<String?> Function(String suggestedName) _pickSaveLocation;
+
+  /// The production picker: the macOS save panel via file_selector. Returns
+  /// null when the user cancels.
+  static Future<String?> _systemSaveLocation(String suggestedName) async {
+    final location = await getSaveLocation(suggestedName: suggestedName);
+    return location?.path;
+  }
 
   /// The global audio settings (devices, record/monitor gains) — used by the mixer's mic strip.
   AppSettingsService get appSettings => _appSettings;
@@ -909,11 +923,11 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     final source = _trackById(trackId);
     if (practice == null || source == null || !source.isBacking) return;
     if (isSeparating || busy) return; // no concurrent / re-entrant runs
+    // Residual race only: the menu item is hidden while unavailable (the
+    // availability probe resolves before any menu can be shown), so this
+    // guard fires only if a click slipped in before the probe landed.
     if (!_separationAvailable) {
-      _toast(
-        'Separation engine unavailable. Install audio-separator and run a '
-        'non-sandboxed debug build (see assets/separation/README.md).',
-      );
+      _toast('Source separation is not available in this version.');
       return;
     }
     if (isRecording) {
@@ -1051,6 +1065,99 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// Aborts an in-flight separation (best-effort).
   void cancelSeparation() {
     if (isSeparating) _separation.cancel();
+  }
+
+  // --- Exporting audio -------------------------------------------------------
+  // The escape hatch that guarantees audio is never trapped in the app's
+  // private container: any track's audio can be copied out to a user-chosen
+  // location, byte-for-byte.
+
+  /// Exports a track's audio to a user-chosen location. Single-clip lanes
+  /// only (the file IS the lane); a multi-clip lane is refused with a pointer
+  /// to the per-clip export ([exportClipAudio]) — v1 does not render a lane's
+  /// clips + gaps into one file.
+  Future<void> exportTrackAudio(String trackId) async {
+    final practice = _practice;
+    final track = _trackById(trackId);
+    if (practice == null || track == null) return;
+    if (track.clips.isEmpty) {
+      _toast('This take has no audio to export yet.');
+      return;
+    }
+    if (track.clips.length > 1) {
+      _toast(
+        'This take has multiple clips. Export each clip from its own '
+        'right-click menu.',
+      );
+      return;
+    }
+    final clip = track.primaryClip!;
+    await _exportFile(
+      clip.audioFilePath,
+      suggestedName: _exportName(
+        practice.title,
+        track.displayName,
+        clip.audioFilePath,
+      ),
+    );
+  }
+
+  /// Exports one clip's audio file — the per-clip path for multi-clip lanes.
+  Future<void> exportClipAudio(String trackId, String clipId) async {
+    final practice = _practice;
+    final track = _trackById(trackId);
+    final clip = track?.clipById(clipId);
+    if (practice == null || track == null || clip == null) return;
+    // Number the clip when the lane holds several, so exporting two clips of
+    // the same take doesn't suggest the same file name twice.
+    final index = track.clips.indexWhere((c) => c.id == clipId);
+    final suffix = track.clips.length > 1 ? ' (clip ${index + 1})' : '';
+    await _exportFile(
+      clip.audioFilePath,
+      suggestedName: _exportName(
+        practice.title,
+        '${track.displayName}$suffix',
+        clip.audioFilePath,
+      ),
+    );
+  }
+
+  /// `"{practice title} - {track name}{source extension}"`, with path-hostile
+  /// characters flattened so the suggestion is a valid file name. The source
+  /// extension is kept (an imported mp3 exports as .mp3; recordings are .wav).
+  static String _exportName(String title, String trackName, String sourcePath) {
+    final ext = p.extension(sourcePath);
+    final base = '$title - $trackName'.replaceAll(RegExp(r'[/\\:]'), '-');
+    return '$base${ext.isEmpty ? '.wav' : ext}';
+  }
+
+  /// Copies [sourcePath] to a location picked via [_pickSaveLocation]. A null
+  /// pick (user cancelled) exits silently; everything else toasts an outcome.
+  Future<void> _exportFile(
+    String sourcePath, {
+    required String suggestedName,
+  }) async {
+    final source = File(sourcePath);
+    if (sourcePath.isEmpty || !await source.exists()) {
+      _toast('The audio file for this track is missing.');
+      return;
+    }
+    final String? destPath;
+    try {
+      destPath = await _pickSaveLocation(suggestedName);
+    } catch (_) {
+      _toast('Could not open the save dialog.');
+      return;
+    }
+    if (destPath == null) return; // user cancelled
+    try {
+      // Overwrite is intentional: the save panel already confirmed replacing.
+      await source.copy(destPath);
+    } catch (_) {
+      _toast('Could not export the audio to that location.');
+      return;
+    }
+    _toast('Exported to $destPath');
   }
 
   // --- Takes -----------------------------------------------------------------

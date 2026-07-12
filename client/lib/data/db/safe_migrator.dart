@@ -174,7 +174,7 @@ class SafeMigrator {
   }) async {
     if (!await File(dbPath).exists()) return;
     final registry = steps ?? registeredMigrationSteps;
-    var current = _readUserVersion(dbPath);
+    var current = readUserVersion(dbPath);
     if (current == 0) return;
     while (current < targetVersion) {
       final step = registry[current];
@@ -184,7 +184,7 @@ class SafeMigrator {
         );
       }
       await migrate(dbPath: dbPath, targetVersion: current + 1, step: step);
-      final next = _readUserVersion(dbPath);
+      final next = readUserVersion(dbPath);
       if (next <= current) {
         // Defensive: a step that fails to advance must not spin forever.
         throw MigrationException(
@@ -195,8 +195,14 @@ class SafeMigrator {
     }
   }
 
-  int _readUserVersion(String dbPath) {
-    // Read-only open: probing the version must never create or modify a file.
+  /// Reads the schema `user_version` of the SQLite file at [dbPath] without
+  /// ever creating or modifying it (read-only open). Throws if the file is
+  /// not a readable SQLite database.
+  ///
+  /// Public because Persistence.open uses it to REFUSE a library written by a
+  /// newer app (user_version above the code's schema) before building the
+  /// store, and the diagnostics exporter includes it in bug-report bundles.
+  int readUserVersion(String dbPath) {
     final raw = sqlite3.open(dbPath, mode: OpenMode.readOnly);
     try {
       return raw.select('PRAGMA user_version').first.values.first as int;

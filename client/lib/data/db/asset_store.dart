@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:crypto/crypto.dart';
 import 'package:drift/drift.dart';
+import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 
 import '../../utils/id.dart';
@@ -179,33 +180,50 @@ class AssetStore {
   /// recordings and imports are written before being copied into the pool. After
   /// the drift rebuild nothing persistent references those files (clips/media
   /// reference pool assets), so a leftover there is always a reclaimable orphan.
-  /// Meant to run once at startup, when nothing is in flight. Never touches the
-  /// content-addressed pool (`assets/`). Best-effort.
+  /// Each tree is MOVED into [trashDir] (recoverable until [pruneTrash] ages it
+  /// out), never deleted in place. Meant to run once at startup, when nothing
+  /// is in flight. Never touches the content-addressed pool (`assets/`).
+  /// Best-effort.
   Future<void> sweepStaging() async {
     for (final name in const ['audio', 'technique_media']) {
       try {
         final d = Directory(p.join(root.path, name));
-        if (await d.exists()) await d.delete(recursive: true);
+        if (await d.exists()) await _moveToTrash(d);
       } catch (_) {}
     }
   }
 
-  /// Reclaims local disk: tombstones any live asset row no live clip /
-  /// technique-media / practice references, and deletes its pooled file once no
-  /// surviving asset shares that content hash (and drops its waveform cache).
-  /// Returns the number of assets tombstoned.
+  /// Every (table, column) that can reference an asset id — THE single source
+  /// of truth the GC derives reachability from. It MUST cover every
+  /// `.references(Assets)` column in the schema: a column missing here makes
+  /// [sweepUnreferenced] tombstone assets that are still in use and reclaim
+  /// their bytes. Guarded by a test (asset_gc_test.dart) that derives this set
+  /// structurally from the live schema and fails on any drift.
   ///
-  /// Refcount is DERIVED here (a query), never a stored counter that a crash
-  /// could desync. NOTE: this only reclaims LOCAL disk; cloud-byte deletion is a
-  /// separate, knowledge-gated step that never runs on a time horizon.
+  /// NOTE: Persistence._referencedContentHashes hand-copies the same
+  /// enumeration for the staged-recording recovery; keep the two in step until
+  /// it can share this constant.
+  static const List<({String table, String column})> assetRefColumns = [
+    (table: 'clips', column: 'asset_id'),
+    (table: 'technique_media', column: 'asset_id'),
+    (table: 'practices', column: 'separation_asset_id'),
+  ];
+
+  /// Reclaims local disk: tombstones any live asset row no live clip /
+  /// technique-media / practice references, and moves its pooled file into the
+  /// trash once no surviving asset shares that content hash (and drops its
+  /// waveform cache). Returns the number of assets tombstoned.
+  ///
+  /// Refcount is DERIVED here (a query over [assetRefColumns]), never a stored
+  /// counter that a crash could desync. NOTE: this only reclaims LOCAL disk;
+  /// cloud-byte deletion is a separate, knowledge-gated step that never runs on
+  /// a time horizon.
   Future<int> sweepUnreferenced() async {
     final referenced = <String>{};
-    for (final sql in const [
-      'SELECT DISTINCT asset_id AS a FROM clips WHERE deleted_at IS NULL',
-      'SELECT DISTINCT asset_id AS a FROM technique_media WHERE deleted_at IS NULL',
-      'SELECT DISTINCT separation_asset_id AS a FROM practices '
-          'WHERE deleted_at IS NULL AND separation_asset_id IS NOT NULL',
-    ]) {
+    for (final ref in assetRefColumns) {
+      final sql =
+          'SELECT DISTINCT ${ref.column} AS a FROM ${ref.table} '
+          'WHERE deleted_at IS NULL AND ${ref.column} IS NOT NULL';
       for (final r in await db.customSelect(sql).get()) {
         final a = r.data['a'];
         if (a is String) referenced.add(a);
@@ -253,7 +271,7 @@ class AssetStore {
       });
       removed++;
 
-      // Delete the file only if no surviving asset still maps to this hash.
+      // Reclaim the file only if no surviving asset still maps to this hash.
       final hash = a.read<String>('content_hash');
       final shared = await db
           .customSelect(
@@ -263,12 +281,12 @@ class AssetStore {
           )
           .getSingle();
       if (shared.read<int>('n') == 0) {
-        // No live asset maps to this hash anymore. Delete EVERY pooled file for it,
+        // No live asset maps to this hash anymore. Trash EVERY pooled file for it,
         // not just this row's local_rel_path: identical bytes imported under a
         // different extension on another device produce `<hash>.wav` AND `<hash>.mp3`
-        // as distinct files, so deleting only the current row's path would leak the
+        // as distinct files, so reclaiming only the current row's path would leak the
         // rest. All files for a hash live in one shard dir (assets/<h0:2>/<h2:4>).
-        await _deletePoolFilesForHash(hash);
+        await _trashPoolFilesForHash(hash);
         await (db.delete(
           db.waveformCache,
         )..where((w) => w.contentHash.equals(hash))).go();
@@ -277,9 +295,10 @@ class AssetStore {
     return removed;
   }
 
-  /// Deletes every pooled file named `<hash>` or `<hash>.<ext>` from the hash's
-  /// shard directory. Best-effort (a lingering file is a reclaimable orphan).
-  Future<void> _deletePoolFilesForHash(String hash) async {
+  /// Moves every pooled file named `<hash>` or `<hash>.<ext>` from the hash's
+  /// shard directory into the trash — never a hard delete, so a GC mistake
+  /// stays recoverable. Best-effort (a lingering file is a reclaimable orphan).
+  Future<void> _trashPoolFilesForHash(String hash) async {
     if (hash.length < 4) return;
     final shard = Directory(
       p.join(root.path, 'assets', hash.substring(0, 2), hash.substring(2, 4)),
@@ -289,20 +308,26 @@ class AssetStore {
       if (e is! File) continue;
       final name = p.basename(e.path);
       if (name == hash || name.startsWith('$hash.')) {
-        try {
-          await e.delete();
-        } catch (_) {}
+        await _moveToTrash(e);
       }
     }
   }
 
-  /// Reclaims pool files that no LIVE asset references. Two cases:
+  /// Reclaims pool files that no LIVE asset references — by moving them into
+  /// [trashDir] (recoverable until [pruneTrash] ages them out). Two cases:
   ///  - a crash between the pool write in [_placeFile] and the asset-row transaction
   ///    in [importFile] leaves a file with NO row at all; and
-  ///  - a crash between the tombstone commit and the file unlink in [sweepUnreferenced]
+  ///  - a crash between the tombstone commit and the file reclaim in [sweepUnreferenced]
   ///    leaves a file whose only rows are tombstoned (which [sweepUnreferenced] never
   ///    revisits, since it iterates only live rows).
   /// Both are covered by treating only LIVE (deleted_at IS NULL) content hashes as owned.
+  ///
+  /// FUSE: when the assets table holds ZERO live rows while the pool holds
+  /// files, the sweep SKIPS entirely. No normal state looks like that — a
+  /// fresh install has no pool yet — so it means this database was lost or
+  /// replaced while the bytes survived (wiped/restored DB file), and sweeping
+  /// would reclaim every byte the user could still recover.
+  ///
   /// Meant to run at startup when nothing is in flight. Best-effort; returns the count removed.
   Future<int> sweepOrphanPoolFiles() async {
     final pool = Directory(p.join(root.path, 'assets'));
@@ -319,27 +344,98 @@ class AssetStore {
       final h = r.data['h'];
       if (h is String) known.add(h);
     }
+    if (known.isEmpty) {
+      // The fuse (see doc): with no live assets at all, a non-empty pool means
+      // "database lost, bytes survived" — protect the bytes and touch nothing.
+      await for (final e in pool.list(recursive: true)) {
+        if (e is File) {
+          debugPrint(
+            'AssetStore.sweepOrphanPoolFiles: skipped — the assets table has '
+            'zero live rows but the pool holds files; protecting the bytes.',
+          );
+          return 0;
+        }
+      }
+      return 0; // no live assets AND no pool files: nothing to sweep anyway
+    }
     var removed = 0;
     await for (final e in pool.list(recursive: true)) {
       if (e is! File) continue;
       final name = p.basename(e.path);
       if (name.endsWith('.part')) {
-        // Transient copy artifact from a crashed import — never a valid pool file.
-        try {
-          await e.delete();
-          removed++;
-        } catch (_) {}
+        // Transient copy artifact from a crashed import — never a valid pool
+        // file, but trash it anyway (uniform no-hard-delete policy).
+        if (await _moveToTrash(e)) removed++;
         continue;
       }
       // Pool files are named `<sha256>` or `<sha256>.<ext>`.
       final dot = name.indexOf('.');
       final hash = dot < 0 ? name : name.substring(0, dot);
       if (hash.length == 64 && !known.contains(hash)) {
-        try {
-          await e.delete();
-          removed++;
-        } catch (_) {}
+        if (await _moveToTrash(e)) removed++;
       }
+    }
+    return removed;
+  }
+
+  // --- Trash (GC recoverability) --------------------------------------------
+
+  /// The container-local trash under [root]. Every pool/staging reclaim in this
+  /// class MOVES bytes here instead of unlinking them, so no single GC pass (or
+  /// GC bug) can ever destroy the only copy of a take. Entries are named
+  /// `<epochMs>-<originalName>`; [pruneTrash] ages them out.
+  Directory get trashDir => Directory(p.join(root.path, 'trash'));
+
+  /// Moves [entity] (a pool/staging file, or a whole staging tree) into
+  /// [trashDir] as `<epochMs>-<originalName>`. Best-effort: returns whether it
+  /// moved; on failure the entity is left in place (a lingering orphan is
+  /// always safer than an unlink).
+  Future<bool> _moveToTrash(FileSystemEntity entity) async {
+    try {
+      final dir = trashDir;
+      await dir.create(recursive: true);
+      final base = p.basename(entity.path);
+      final stampMs = DateTime.now().millisecondsSinceEpoch;
+      var dest = p.join(dir.path, '$stampMs-$base');
+      // Uniquify if the same name lands twice within one millisecond — never
+      // overwrite an existing trash entry.
+      var n = 1;
+      while (await FileSystemEntity.type(dest) !=
+          FileSystemEntityType.notFound) {
+        dest = p.join(dir.path, '$stampMs-${n++}-$base');
+      }
+      await entity.rename(dest);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Hard-deletes trash entries older than [retention], dated by the epoch-ms
+  /// prefix [_moveToTrash] stamped into each entry's name. An entry without a
+  /// parseable prefix is never deleted (don't age out bytes we can't date).
+  /// Returns the number of entries removed.
+  ///
+  /// Deliberately called by NOTHING in this class: the boot sequence wires it
+  /// to run once AFTER a successful store open, so trash only ages out on a
+  /// boot that proved the database (and with it the pool's ownership info) is
+  /// healthy.
+  Future<int> pruneTrash({
+    Duration retention = const Duration(days: 30),
+  }) async {
+    final dir = trashDir;
+    if (!await dir.exists()) return 0;
+    final cutoffMs = DateTime.now().subtract(retention).millisecondsSinceEpoch;
+    var removed = 0;
+    await for (final e in dir.list()) {
+      final name = p.basename(e.path);
+      final dash = name.indexOf('-');
+      final stampMs = dash > 0 ? int.tryParse(name.substring(0, dash)) : null;
+      if (stampMs == null || stampMs >= cutoffMs) continue;
+      try {
+        await e.delete(recursive: true);
+        removed++;
+      } catch (_) {}
     }
     return removed;
   }

@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 
 import '../../utils/id.dart';
+import '../db/asset_store.dart';
 import 'local_storage_service.dart';
 
 /// Owns technique example clips on disk. Imported files are copied into the app
@@ -37,8 +38,17 @@ class TechniqueMediaService {
     return dest;
   }
 
-  /// Deletes a single copied media file. Silently ignores a missing file.
+  /// Deletes a single copied media file. REFUSES content-addressed pool files
+  /// (under `assets/`, shared by content hash across techniques and clips) and
+  /// `asset://` references: those are owned by the [AssetStore] and reclaimed
+  /// only by its hash-refcount GC. Persisted examples hydrate to pool paths,
+  /// so deleting one by path would wipe the audio of every other row that
+  /// dedups to the same bytes. Same guards as AudioFileService.deleteAudio.
+  /// Silently ignores a missing file.
   Future<void> deleteMedia(String path) async {
+    if (AssetStore.assetIdOf(path) != null) return;
+    final pool = await _storage.assetDir('assets');
+    if (p.isWithin(pool.path, path)) return;
     final file = File(path);
     if (await file.exists()) {
       await file.delete();

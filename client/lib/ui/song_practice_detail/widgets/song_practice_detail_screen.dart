@@ -332,13 +332,17 @@ class _WorkspaceState extends State<_Workspace> {
         isVocal: !track.isBacking,
         canMergeDown: idx >= 0 && idx + 1 < vocals.length,
         // Only the Original (reference) can be separated — the Accompaniment is
-        // already the backing. Availability is checked at click time.
-        canSeparate: track.isReference,
+        // already the backing. The item is HIDDEN when the engine is unusable
+        // (vm probes availability once at construction, so it is resolved long
+        // before a menu opens) — a dead action must not be offered.
+        canSeparate: track.isReference && vm.separationAvailable,
+        canExport: track.hasClip,
         reseparate: vm.canReseparate,
         currentColorValue: track.colorValue,
         onPickColor: (value) => vm.setTrackColor(track.id, value),
         onRename: () => _renameTrack(track),
         onSeparate: () => _separateBacking(track),
+        onExport: () => vm.exportTrackAudio(track.id),
         onAddNote: () => _addNote(track.id),
         onAddTechnique: () => _addTechnique(track.id),
         onDuplicate: () => vm.duplicateTrack(track.id),
@@ -355,6 +359,7 @@ class _WorkspaceState extends State<_Workspace> {
       context,
       position,
       onDelete: () => vm.deleteClip(track.id, clipId),
+      onExport: () => vm.exportClipAudio(track.id, clipId),
     );
   }
 

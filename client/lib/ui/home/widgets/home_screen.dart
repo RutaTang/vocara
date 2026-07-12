@@ -5,6 +5,7 @@ import 'package:forui/forui.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
+import '../../../data/services/update_check_service.dart';
 import '../../../domain/models/song_practice.dart';
 import '../../../routing/routes.dart';
 import '../../../utils/result.dart';
@@ -14,6 +15,7 @@ import '../../core/widgets/studio_button.dart';
 import '../view_model/home_view_model.dart';
 import 'new_practice_dialog.dart';
 import 'practice_project_card.dart';
+import 'update_notice.dart';
 
 /// Home screen: the dark collection of song practices.
 class HomeScreen extends StatefulWidget {
@@ -31,6 +33,11 @@ class _HomeScreenState extends State<HomeScreen> {
 
   late final HomeViewModel _vm;
 
+  // The once-per-app-run update auto-check, deferred a beat after home mounts
+  // so it never competes with first paint. The service itself makes repeat
+  // mounts a no-op; this timer only spaces out the first one.
+  Timer? _updateCheckTimer;
+
   @override
   void initState() {
     super.initState();
@@ -40,10 +47,16 @@ class _HomeScreenState extends State<HomeScreen> {
     _vm = context.read<HomeViewModel>();
     _vm.createProject.addListener(_onMutationResult);
     _vm.deleteProject.addListener(_onMutationResult);
+    final updates = context.read<UpdateCheckService>();
+    _updateCheckTimer = Timer(const Duration(seconds: 5), () {
+      // Fire-and-forget: the check is non-blocking and swallows every failure.
+      unawaited(updates.autoCheck());
+    });
   }
 
   @override
   void dispose() {
+    _updateCheckTimer?.cancel();
     _vm.createProject.removeListener(_onMutationResult);
     _vm.deleteProject.removeListener(_onMutationResult);
     super.dispose();
@@ -91,6 +104,7 @@ class _HomeScreenState extends State<HomeScreen> {
       body: Column(
         children: [
           _Header(onNew: () => _createPractice(vm)),
+          UpdateNoticeBanner(updates: context.read<UpdateCheckService>()),
           Expanded(
             child: ListenableBuilder(
               listenable: Listenable.merge([

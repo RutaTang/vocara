@@ -1,8 +1,10 @@
+import 'dart:io' show Process, exit;
 import 'dart:ui' show AppExitResponse;
 
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:media_kit/media_kit.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -10,7 +12,9 @@ import 'app.dart';
 import 'config/dependencies.dart';
 import 'config/environment.dart';
 import 'data/db/persistence.dart';
+import 'data/services/diagnostics_log.dart';
 import 'data/services/recording_finalizer.dart';
+import 'ui/core/widgets/fatal_open_screen.dart';
 
 /// Channel to the native window (see MainFlutterWindow.swift): the window starts
 /// transparent and is revealed only after Flutter's first frame, so there's no
@@ -19,6 +23,11 @@ const _windowChannel = MethodChannel('vocara/window');
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Diagnostics first: from here on, every uncaught Flutter/platform error is
+  // appended to the rotating on-disk log (then forwarded to the default
+  // handlers), so a field failure leaves a trace exportArchive can bundle.
+  await DiagnosticsLog.instance.attachGlobalHooks();
 
   // Initialize media_kit, which backs the inline audio/video players used for
   // technique example clips.
@@ -55,7 +64,28 @@ Future<void> main() async {
   );
 
   // Open the drift/SQLite store (db file, device node id, asset pool) once.
-  final persistence = await Persistence.open();
+  // A fatal open MUST still end in a visible window: the native window stays
+  // transparent until the show call below, so awaiting open() bare would turn
+  // any open failure into an invisible, apparently-hung launch. Refusals and
+  // failures get a dedicated minimal error window instead.
+  final Persistence persistence;
+  try {
+    persistence = await Persistence.open();
+  } on NewerLibraryException catch (e) {
+    DiagnosticsLog.instance.log('boot', 'open refused: $e');
+    _runFatalWindow(FatalOpenScreen.newerLibrary(onQuit: _quit));
+    return;
+  } catch (e, stack) {
+    DiagnosticsLog.instance.log('boot', 'open failed: $e\n$stack');
+    _runFatalWindow(
+      FatalOpenScreen.openFailed(
+        detail: '$e',
+        onRevealLibrary: _revealLibraryFolder,
+        onQuit: _quit,
+      ),
+    );
+    return;
+  }
 
   runApp(
     MultiProvider(
@@ -68,6 +98,38 @@ Future<void> main() async {
   WidgetsBinding.instance.addPostFrameCallback((_) {
     _windowChannel.invokeMethod<void>('show');
   });
+}
+
+/// Runs the minimal fatal-error app and reveals the native window (see the
+/// show-channel comment above: without the reveal, a fatal open would leave
+/// the window transparent forever).
+void _runFatalWindow(FatalOpenScreen screen) {
+  runApp(FatalOpenApp(screen: screen));
+  WidgetsBinding.instance.addPostFrameCallback((_) {
+    _windowChannel.invokeMethod<void>('show');
+  });
+}
+
+/// Opens the app's library folder (the app support directory holding the
+/// database and asset pool) in Finder, for backups or support.
+Future<void> _revealLibraryFolder() async {
+  try {
+    final dir = await getApplicationSupportDirectory();
+    await Process.run('open', [dir.path]);
+  } catch (_) {
+    // Best-effort: the fatal window stays up either way.
+  }
+}
+
+/// Quits from the fatal window. destroy() routes through the normal
+/// cancellable-termination flow (the exit guard's finalizeAll is a no-op with
+/// no recording in flight); a hard exit is the last resort.
+Future<void> _quit() async {
+  try {
+    await windowManager.destroy();
+  } catch (_) {
+    exit(0);
+  }
 }
 
 /// Keeps the exit-request guard alive for the app's lifetime (registered in

@@ -1,0 +1,240 @@
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:flutter/foundation.dart';
+
+import 'diagnostics_log.dart';
+
+/// The outcome of the most recent update check.
+enum UpdateStatus {
+  /// No check has completed yet, or the last check could not reach / parse
+  /// the manifest. Never surfaced as an error on the automatic check.
+  unknown,
+
+  /// The manifest was read and this build is the latest (or newer).
+  upToDate,
+
+  /// The manifest advertises a strictly newer version.
+  updateAvailable,
+}
+
+/// A parsed "latest release" manifest entry.
+@immutable
+class UpdateInfo {
+  const UpdateInfo({
+    required this.version,
+    required this.url,
+    required this.notes,
+  });
+
+  /// The advertised latest version, normalized (no leading `v`).
+  final String version;
+
+  /// The https download / release page for that version.
+  final String url;
+
+  /// Release notes, possibly empty.
+  final String notes;
+}
+
+/// Test seam: fetches the manifest body for [UpdateCheckService.manifestUrl].
+typedef UpdateFetcher = Future<String> Function(Uri url);
+
+/// Checks whether a newer Vocara exists, once per app run automatically and
+/// on demand from Settings. This is the app's one release-time escape hatch:
+/// with no update path, nothing shipped after release would ever reach users.
+///
+/// Failure policy: an update check can never make anything worse. Offline,
+/// 404, TLS trouble, or a malformed manifest all collapse to
+/// [UpdateStatus.unknown] silently; only Settings' manual check shows even a
+/// gentle "could not check" line.
+class UpdateCheckService extends ChangeNotifier {
+  UpdateCheckService({UpdateFetcher? fetch, String currentVersion = appVersion})
+    : _fetch = fetch ?? _fetchOverHttp,
+      _currentVersion = currentVersion;
+
+  /// Where the version manifest lives.
+  ///
+  /// OWNER: change this when the release process settles. The default is
+  /// derived from `git remote get-url origin`
+  /// (https://github.com/RutaTang/vocara): GitHub's "latest release" API,
+  /// which serves unauthenticated JSON as soon as the repo (or a dedicated
+  /// public releases repo) is public and has at least one release. The parser
+  /// accepts EITHER GitHub's release shape (`tag_name` / `html_url` / `body`)
+  /// OR a plain hand-hosted manifest:
+  ///
+  ///     {"latest": "1.1.0", "url": "https://...", "notes": "..."}
+  ///
+  /// so pointing this at a static JSON file (e.g. GitHub raw or any web host)
+  /// also works without code changes.
+  static const String manifestUrl =
+      'https://api.github.com/repos/RutaTang/vocara/releases/latest';
+
+  /// The running app's version. Keep in sync with pubspec.yaml `version:`
+  /// (the part before `+`). Vocara does not depend on package_info_plus
+  /// directly, so this const is the single source the check compares against.
+  static const String appVersion = '1.0.0';
+
+  /// The running app's build number. Keep in sync with pubspec.yaml
+  /// `version:` (the part after `+`).
+  static const String appBuildNumber = '1';
+
+  final UpdateFetcher _fetch;
+  final String _currentVersion;
+
+  UpdateStatus _status = UpdateStatus.unknown;
+  UpdateInfo? _available;
+  bool _checking = false;
+  bool _autoCheckDone = false;
+  bool _noticeDismissed = false;
+  DateTime? _lastCheckedAt;
+
+  /// The outcome of the most recent completed check.
+  UpdateStatus get status => _status;
+
+  /// The newer release, non-null exactly when [status] is
+  /// [UpdateStatus.updateAvailable].
+  UpdateInfo? get available => _available;
+
+  /// True while a check is in flight.
+  bool get checking => _checking;
+
+  /// When the last check completed (successfully or not); null before any.
+  DateTime? get lastCheckedAt => _lastCheckedAt;
+
+  /// True once the user dismissed the home banner for this app run.
+  bool get noticeDismissed => _noticeDismissed;
+
+  /// Hides the home banner for the rest of this app run (Settings still
+  /// shows the available update).
+  void dismissNotice() {
+    if (_noticeDismissed) return;
+    _noticeDismissed = true;
+    notifyListeners();
+  }
+
+  /// The once-per-app-run automatic check (home schedules it shortly after
+  /// mounting). Re-entering home later never re-checks; Settings' manual
+  /// [check] always does.
+  Future<void> autoCheck() {
+    if (_autoCheckDone) return Future<void>.value();
+    _autoCheckDone = true;
+    return check();
+  }
+
+  /// Fetches and parses the manifest, then updates [status] / [available].
+  /// Never throws; every failure degrades to [UpdateStatus.unknown].
+  Future<void> check() async {
+    if (_checking) return;
+    _checking = true;
+    notifyListeners();
+    var next = UpdateStatus.unknown;
+    UpdateInfo? info;
+    try {
+      final body = await _fetch(Uri.parse(manifestUrl));
+      final parsed = parseManifest(body);
+      if (parsed != null) {
+        if (isNewer(parsed.version, _currentVersion)) {
+          next = UpdateStatus.updateAvailable;
+          info = parsed;
+        } else {
+          next = UpdateStatus.upToDate;
+        }
+      }
+    } catch (_) {
+      // Offline / 404 / TLS / timeout: silently unknown. The check must never
+      // become an error the user has to deal with.
+    }
+    _status = next;
+    _available = info;
+    _lastCheckedAt = DateTime.now();
+    _checking = false;
+    // Only the version strings ever reach the log — no user content.
+    DiagnosticsLog.instance.log(
+      'update',
+      'check: ${next.name}${info == null ? '' : ' latest=${info.version}'}',
+    );
+    notifyListeners();
+  }
+
+  /// Parses a manifest body into an [UpdateInfo], or null when it isn't one.
+  /// Accepts the plain `{latest, url, notes}` shape and GitHub's
+  /// releases/latest shape (`tag_name` / `html_url` / `body`). The URL must
+  /// be http(s) — a manifest can't make the app open anything else.
+  @visibleForTesting
+  static UpdateInfo? parseManifest(String body) {
+    try {
+      final decoded = jsonDecode(body);
+      if (decoded is! Map<String, dynamic>) return null;
+      final Object? version = decoded['latest'] ?? decoded['tag_name'];
+      final Object? url = decoded['url'] ?? decoded['html_url'];
+      final Object? notes = decoded['notes'] ?? decoded['body'];
+      if (version is! String || version.trim().isEmpty) return null;
+      if (url is! String) return null;
+      final uri = Uri.tryParse(url.trim());
+      if (uri == null || (uri.scheme != 'https' && uri.scheme != 'http')) {
+        return null;
+      }
+      return UpdateInfo(
+        version: version.trim().replaceFirst(RegExp('^[vV]'), ''),
+        url: url.trim(),
+        notes: notes is String ? notes.trim() : '',
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// True when [candidate] is a strictly newer dotted-numeric version than
+  /// [current]. Tolerates a leading `v` and a `+build` suffix; anything not
+  /// purely numeric-dotted (e.g. `1.1.0-rc1`) is conservatively NOT newer, so
+  /// a malformed manifest can never raise the banner.
+  @visibleForTesting
+  static bool isNewer(String candidate, String current) {
+    final a = _parseVersion(candidate);
+    final b = _parseVersion(current);
+    if (a == null || b == null) return false;
+    final len = a.length > b.length ? a.length : b.length;
+    for (var i = 0; i < len; i++) {
+      final x = i < a.length ? a[i] : 0;
+      final y = i < b.length ? b[i] : 0;
+      if (x != y) return x > y;
+    }
+    return false;
+  }
+
+  static List<int>? _parseVersion(String raw) {
+    var s = raw.trim();
+    if (s.startsWith('v') || s.startsWith('V')) s = s.substring(1);
+    final plus = s.indexOf('+');
+    if (plus >= 0) s = s.substring(0, plus);
+    if (s.isEmpty) return null;
+    final parts = <int>[];
+    for (final part in s.split('.')) {
+      final n = int.tryParse(part);
+      if (n == null || n < 0) return null;
+      parts.add(n);
+    }
+    return parts;
+  }
+
+  /// The production fetcher: plain dart:io HttpClient (no extra dependency),
+  /// bounded by timeouts so a wedged connection can't hold resources.
+  static Future<String> _fetchOverHttp(Uri url) async {
+    const timeout = Duration(seconds: 10);
+    final client = HttpClient()..connectionTimeout = timeout;
+    try {
+      final request = await client.getUrl(url).timeout(timeout);
+      // GitHub's API rejects requests without a User-Agent.
+      request.headers.set(HttpHeaders.userAgentHeader, 'vocara-update-check');
+      request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      final response = await request.close().timeout(timeout);
+      if (response.statusCode != HttpStatus.ok) {
+        throw HttpException('status ${response.statusCode}', uri: url);
+      }
+      return await response.transform(utf8.decoder).join().timeout(timeout);
+    } finally {
+      client.close(force: true);
+    }
+  }
+}

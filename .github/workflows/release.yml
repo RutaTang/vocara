@@ -1,0 +1,89 @@
+# Tag-triggered release: universal build, Developer ID sign, notarize, staple,
+# and attach the DMG to a GitHub release. Delegates the build/sign/notarize
+# logic to scripts/release.sh so CI and local releases stay identical.
+#
+# Required repository secrets (setup steps in docs/release-runbook.md):
+#   DEVELOPER_ID_P12   base64-encoded .p12 export of the
+#                      'Developer ID Application: Weizhi Tang (TP7LCYW3NY)' cert
+#   P12_PASSWORD       password chosen when exporting the .p12
+#   NOTARY_KEY         App Store Connect API key, raw .p8 file contents
+#   NOTARY_KEY_ID      key ID of that API key
+#   NOTARY_ISSUER_ID   issuer ID of that API key
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag matches pubspec version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PUBSPEC="$(sed -n 's/^version: *\([0-9][^+ ]*\).*/\1/p' client/pubspec.yaml)"
+          if [ "$TAG" != "$PUBSPEC" ]; then
+            echo "Tag v$TAG does not match client/pubspec.yaml version $PUBSPEC" >&2
+            exit 1
+          fi
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Import Developer ID certificate into a throwaway keychain
+        env:
+          DEVELOPER_ID_P12: ${{ secrets.DEVELOPER_ID_P12 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN="$RUNNER_TEMP/release.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          echo "$DEVELOPER_ID_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" \
+            -P "$P12_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/cert.p12"
+          # Allow codesign to use the key without a UI prompt.
+          security set-key-partition-list -S apple-tool:,apple: \
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+
+      - name: Write notary API key
+        env:
+          NOTARY_KEY: ${{ secrets.NOTARY_KEY }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$NOTARY_KEY" > "$RUNNER_TEMP/notary_key.p8"
+
+      - name: Build, sign, notarize, staple
+        env:
+          NOTARY_KEY_PATH: ${{ runner.temp }}/notary_key.p8
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: bash scripts/release.sh
+
+      - name: Attach DMG to GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.dmg
+          generate_release_notes: true
+
+      - name: Clean up keychain
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/release.keychain-db" || true
+          rm -f "$RUNNER_TEMP/notary_key.p8"

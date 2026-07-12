@@ -50,6 +50,34 @@ abstract class SourceSeparationService {
   void cancel();
 }
 
+/// The engine wired in PROD builds, where no separation engine ships yet:
+/// it reports unavailable WITHOUT touching the host machine — never spawning
+/// a process or probing for Python interpreters the way
+/// [ProcessSourceSeparationService.isAvailable] does. The UI hides the
+/// separation action when [isAvailable] is false, so [separate] throwing is
+/// only a guard against a call that slipped past the gate.
+class NullSourceSeparationService implements SourceSeparationService {
+  const NullSourceSeparationService();
+
+  @override
+  Future<bool> isAvailable() async => false;
+
+  @override
+  void cancel() {
+    /* nothing can be in flight */
+  }
+
+  @override
+  Future<SeparationResult> separate(
+    String sourcePath, {
+    void Function(double progress)? onProgress,
+  }) async {
+    throw UnsupportedError(
+      'Source separation is not available in this version.',
+    );
+  }
+}
+
 /// A no-op engine for tests/dev: it doesn't actually separate, it just copies
 /// the source to both stem paths so the surrounding flow can be exercised.
 class FakeSourceSeparationService implements SourceSeparationService {
