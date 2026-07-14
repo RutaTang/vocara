@@ -14,6 +14,7 @@ import 'config/environment.dart';
 import 'data/db/persistence.dart';
 import 'data/services/diagnostics_log.dart';
 import 'data/services/recording_finalizer.dart';
+import 'data/services/source_separation_service.dart';
 import 'ui/core/widgets/fatal_open_screen.dart';
 
 /// Channel to the native window (see MainFlutterWindow.swift): the window starts
@@ -58,6 +59,11 @@ Future<void> main() async {
   // sweeping it.
   _exitGuard = AppLifecycleListener(
     onExitRequested: () async {
+      // Kill any in-flight separation sidecar first (synchronous SIGKILL):
+      // it is a child process that macOS reparents rather than kills on app
+      // exit, so without this it would keep burning CPU/RAM for minutes.
+      // Its orphaned .tmp output is swept on the next launch.
+      SeparationQuitGuard.instance.killAll();
       await RecordingFinalizer.instance.finalizeAll();
       return AppExitResponse.exit;
     },
@@ -150,6 +156,8 @@ class _QuitGuard with WindowListener {
   void onWindowClose() async {
     if (_closing) return;
     _closing = true;
+    // See onExitRequested: the sidecar would outlive the process otherwise.
+    SeparationQuitGuard.instance.killAll();
     await RecordingFinalizer.instance.finalizeAll();
     await windowManager.destroy();
   }

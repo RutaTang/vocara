@@ -3,10 +3,60 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:path/path.dart' as p;
 
 import 'local_storage_service.dart';
+
+/// Process-wide registry of in-flight separation kill hooks, so the quit paths
+/// in `main.dart` can tear down the sidecar subprocess before the app exits
+/// (mirrors the `RecordingFinalizer` pattern: main can't reach the Provider
+/// graph, so the service registers itself here). Without this, quitting
+/// mid-separation orphans a heavy torch process that keeps burning CPU/RAM
+/// for minutes after the app is gone — child processes are reparented on
+/// macOS, not killed with the parent.
+class SeparationQuitGuard {
+  SeparationQuitGuard._();
+
+  /// The single app-wide instance.
+  static final SeparationQuitGuard instance = SeparationQuitGuard._();
+
+  final _kills = <void Function()>{};
+
+  void register(void Function() kill) => _kills.add(kill);
+
+  void unregister(void Function() kill) => _kills.remove(kill);
+
+  /// Kills every in-flight separation (best-effort; one failure never blocks
+  /// the rest or the quit). Synchronous: it only sends kill signals — the app
+  /// is exiting, so nothing waits for the processes to be reaped.
+  void killAll() {
+    for (final kill in _kills.toList()) {
+      try {
+        kill();
+      } catch (_) {}
+    }
+  }
+}
+
+/// Per-run mutable state for [ProcessSourceSeparationService.separate]. Runs
+/// can overlap in time (a cancelled run is still draining its exitCode while
+/// the next screen starts a fresh one), so every field that used to live on
+/// the service — the process handle and the cancel verdict — lives here
+/// instead, where a stale run can't clobber a newer run's state.
+class _SeparationRun {
+  /// The sidecar process, once started (null during the hashing/cache phase).
+  Process? process;
+
+  /// Set by cancel/quit teardown; the run reports [SeparationCancelled]
+  /// instead of a failure once its process exits.
+  bool cancelled = false;
+
+  /// Completes when the run has fully wound down (process gone, temp files
+  /// cleaned, unregistered). Never completes with an error.
+  final Completer<void> done = Completer<void>();
+}
 
 /// The two stems produced by separating a full song: the instrumental (to sing
 /// over) and the isolated vocal (a reference to A/B against).
@@ -123,7 +173,19 @@ class ProcessSourceSeparationService implements SourceSeparationService {
     required LocalStorageService storage,
     this.pythonExecutable = 'python3',
     this.modelName,
-  }) : _storage = storage;
+  }) : _storage = storage {
+    // Reclaim .tmp orphans left by runs that never got to clean up (hard
+    // crash, force-quit, or the quit-path SIGKILL below). Done here rather
+    // than in _capStemsCache because the cap only evicts once the 3 GB budget
+    // trips — orphans below the budget would otherwise live forever, and the
+    // cap's .wav filter would skip them anyway. Age-gated so another app
+    // instance's live run is never hit. Best-effort and fire-and-forget:
+    // _sweepStaleTmps never throws.
+    _staleTmpSweep = _sweepStaleTmps();
+    // Let the quit path (main.dart) kill an in-flight sidecar before exit.
+    // The service is app-lifetime, so it never unregisters.
+    SeparationQuitGuard.instance.register(_killForQuit);
+  }
 
   final LocalStorageService _storage;
 
@@ -134,10 +196,56 @@ class ProcessSourceSeparationService implements SourceSeparationService {
   /// Optional override for the separation model the sidecar loads.
   final String? modelName;
 
-  // The in-flight sidecar process and a flag distinguishing a user cancel from
-  // a real failure. Only one separation runs at a time (the VM guards re-entry).
-  Process? _active;
-  bool _cancelled = false;
+  // The currently-registered run. All cancellation/process state lives on the
+  // run (see [_SeparationRun]), not the service: the service is app-lifetime,
+  // while a run can outlive the ViewModel that started it — so a stale run
+  // draining after a cancel must never clobber a newer run's registration,
+  // cancel verdict, or temp files.
+  _SeparationRun? _active;
+
+  // Monotonic counter folded into each run's .tmp names so overlapping runs
+  // (old one draining, new one writing) can never share a temp path.
+  int _runSeq = 0;
+
+  // Completion of the construction-time orphan-.tmp sweep (see constructor).
+  late final Future<void> _staleTmpSweep;
+
+  /// Test hook: completes when the construction-time .tmp sweep has finished.
+  @visibleForTesting
+  Future<void> get staleTmpSweepDone => _staleTmpSweep;
+
+  /// A .tmp in the stems cache older than this is an orphan of a dead run —
+  /// no separation takes anywhere near an hour, so anything older cannot be
+  /// a live sidecar's output.
+  static const _staleTmpAge = Duration(hours: 1);
+
+  Future<void> _sweepStaleTmps() async {
+    try {
+      final dir = await _storage.assetDir('stems_cache');
+      final cutoff = DateTime.now().subtract(_staleTmpAge);
+      await for (final e in dir.list()) {
+        if (e is! File || !e.path.endsWith('.tmp')) continue;
+        try {
+          if ((await e.stat()).modified.isBefore(cutoff)) await e.delete();
+        } catch (_) {
+          // A vanished/locked file is fine; the next launch retries.
+        }
+      }
+    } catch (_) {
+      // Best-effort: a failed sweep must never break separation itself.
+    }
+  }
+
+  // Quit-path teardown (see [SeparationQuitGuard]): SIGKILL immediately — the
+  // app is exiting, so there is no time for the SIGTERM->SIGKILL escalation
+  // dance. The orphaned .tmp output is reclaimed by the construction-time
+  // sweep on the next launch.
+  void _killForQuit() {
+    final run = _active;
+    if (run == null) return;
+    run.cancelled = true;
+    run.process?.kill(ProcessSignal.sigkill);
+  }
 
   // The resolved interpreter that actually has audio-separator, discovered once
   // and cached. A macOS app gets a minimal PATH (no conda/homebrew), so bare
@@ -192,18 +300,27 @@ class ProcessSourceSeparationService implements SourceSeparationService {
 
   @override
   void cancel() {
-    _cancelled = true;
-    final proc = _active;
+    // Flags the CURRENT registered run; a stale run draining in the
+    // background already carries its own verdict and is not re-targeted.
+    final run = _active;
+    if (run != null) _cancelRun(run);
+  }
+
+  /// Flags [run] cancelled and kills its process. Safe before the process
+  /// exists (hashing/cache phase): separate() re-routes through here right
+  /// after Process.start when it finds the flag already set.
+  void _cancelRun(_SeparationRun run) {
+    run.cancelled = true;
+    final proc = run.process;
     if (proc == null) return;
     proc.kill(); // SIGTERM
     // A native torch/ML process may ignore SIGTERM while in a long compute
     // call, which would hang the teardown (and the overlay). Escalate to
     // SIGKILL if it hasn't exited shortly — SIGKILL can't be ignored, so stdout
-    // closes and exitCode resolves.
+    // closes and exitCode resolves. `done` completing is the run's own signal
+    // that the process has been reaped and no escalation is needed.
     Future.delayed(const Duration(seconds: 3), () {
-      if (_cancelled && identical(_active, proc)) {
-        proc.kill(ProcessSignal.sigkill);
-      }
+      if (!run.done.isCompleted) proc.kill(ProcessSignal.sigkill);
     });
   }
 
@@ -223,9 +340,43 @@ class ProcessSourceSeparationService implements SourceSeparationService {
     String sourcePath, {
     void Function(double progress)? onProgress,
   }) async {
-    // Clear the cancel flag at entry (before any await) so a cancel arriving
-    // during the hashing/cache phase below is preserved, not clobbered.
-    _cancelled = false;
+    // Same-VM re-entry is guarded upstream (isSeparating), but a run can
+    // outlive its ViewModel: navigating away disposes the VM (which calls
+    // cancel()), yet this service is app-lifetime and the sidecar takes up to
+    // seconds to die — reopening the song can call separate() again while the
+    // old run is still draining. Cancel the old run and wait for it to wind
+    // down completely before starting, rather than throwing a StateError:
+    // the new request is the one the user actually wants, and an error here
+    // would punish them merely for navigating away. Two live sidecars would
+    // also fight over CPU/RAM.
+    //
+    // Register the new run synchronously (before any await) so cancel() and
+    // the quit-path kill target it from the very start — including while it
+    // waits for the old run and during the hashing/cache phase.
+    final prior = _active;
+    final run = _SeparationRun();
+    _active = run;
+    try {
+      if (prior != null && !prior.done.isCompleted) {
+        _cancelRun(prior);
+        await prior.done.future;
+      }
+      if (run.cancelled) throw const SeparationCancelled();
+      return await _separate(run, sourcePath, onProgress);
+    } finally {
+      // Unregister ONLY if this run is still the registered one — never
+      // clobber a newer run's registration (that would leave the newer run
+      // uncancellable).
+      if (identical(_active, run)) _active = null;
+      run.done.complete();
+    }
+  }
+
+  Future<SeparationResult> _separate(
+    _SeparationRun run,
+    String sourcePath,
+    void Function(double progress)? onProgress,
+  ) async {
     onProgress?.call(0.0);
     final cacheDir = await _storage.assetDir('stems_cache');
     final model = _effectiveModel();
@@ -239,7 +390,7 @@ class ProcessSourceSeparationService implements SourceSeparationService {
     // Cache hit — separation is expensive, so reuse prior stems verbatim (but
     // still honor a cancel that landed during hashing).
     if (await inst.exists() && await voc.exists()) {
-      if (_cancelled) throw const SeparationCancelled();
+      if (run.cancelled) throw const SeparationCancelled();
       onProgress?.call(1.0);
       return (instrumentalPath: inst.path, vocalPath: voc.path);
     }
@@ -253,9 +404,15 @@ class ProcessSourceSeparationService implements SourceSeparationService {
     }
 
     // Write to temp paths and atomically rename in only on success, so the
-    // cache never holds a partial/old pair from a failed run.
-    final instTmp = File('${inst.path}.tmp');
-    final vocTmp = File('${voc.path}.tmp');
+    // cache never holds a partial/old pair from a failed run. The temp names
+    // carry a per-run nonce: a deterministic '<cachepath>.tmp' would collide
+    // across overlapping runs (an old run's cleanup deleting the very files a
+    // new run's sidecar is writing, since the cache path is deterministic per
+    // source hash + model). The final rename target stays the deterministic
+    // cache path.
+    final nonce = '${DateTime.now().microsecondsSinceEpoch}.${_runSeq++}';
+    final instTmp = File('${inst.path}.$nonce.tmp');
+    final vocTmp = File('${voc.path}.$nonce.tmp');
     final script = await _ensureScript();
     final args = <String>[
       script,
@@ -281,13 +438,14 @@ class ProcessSourceSeparationService implements SourceSeparationService {
         'Could not start the separation engine. Is Python installed?',
       );
     }
-    _active = proc;
-    // A cancel that arrived during startup (now preserved, since the reset is at
-    // function entry) still aborts the just-started process. Route it through
-    // cancel() — now that _active points at proc — so it gets the same
-    // SIGTERM->SIGKILL escalation a live cancel would, rather than a lone SIGTERM
-    // a torch/ML subprocess could ignore.
-    if (_cancelled) cancel();
+    run.process = proc;
+    // A cancel that arrived during the hashing/cache phase (the run is
+    // registered from entry, so the flag is per-run and preserved) still
+    // aborts the just-started process. Route it through _cancelRun — now that
+    // run.process is set — so it gets the same SIGTERM->SIGKILL escalation a
+    // live cancel would, rather than a lone SIGTERM a torch/ML subprocess
+    // could ignore.
+    if (run.cancelled) _cancelRun(run);
 
     // Set once the stems are renamed into the cache; until then the .tmp files are
     // orphans the finally must clean up on ANY early/error exit.
@@ -331,7 +489,7 @@ class ProcessSourceSeparationService implements SourceSeparationService {
       await stderrDone; // ensure stderr is fully consumed before reading errBuf
       final detail = errBuf.toString().trim();
 
-      if (_cancelled) {
+      if (run.cancelled) {
         await _deleteQuietly(instTmp);
         await _deleteQuietly(vocTmp);
         throw const SeparationCancelled();
@@ -374,9 +532,9 @@ class ProcessSourceSeparationService implements SourceSeparationService {
       // failure paths it has already exited, so kill() is a harmless no-op; on an
       // unexpected stream / decode / onProgress-callback exception before exitCode
       // resolved, this tears down the still-running (heavy torch/ML) subprocess
-      // instead of orphaning it uncancellably (we null _active just below).
+      // instead of orphaning it uncancellably. (Unregistration happens in the
+      // caller's finally, guarded so a stale run never clobbers a newer one.)
       proc.kill(ProcessSignal.sigkill);
-      _active = null;
       // Clean up orphan .tmp files on any path that didn't rename them in — an
       // unexpected stream/pipe/decode error (the await-for / exitCode / stderrDone
       // awaits), or the cancel/failure branches. The stems-cache GC only reclaims

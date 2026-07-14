@@ -5,6 +5,7 @@ import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 
 import '../../domain/models/audio_device.dart';
 import '../../domain/models/audio_fx.dart';
@@ -98,12 +99,48 @@ Future<(int, int)> _decodeInIsolate(String path, int rate) {
   });
 }
 
+/// Thrown by [decodeMediaToMono] when the decoded media is longer than the
+/// caller's `maxDuration` cap. The message is user-presentable.
+class MediaTooLongException implements Exception {
+  const MediaTooLongException(this.maxDuration);
+
+  /// The cap the media exceeded.
+  final Duration maxDuration;
+
+  @override
+  String toString() =>
+      'This file is too long to analyze. '
+      'The limit is ${maxDuration.inMinutes} minutes.';
+}
+
+/// Whether [frames] mono frames at [rate] Hz exceed the [maxDuration] cap.
+/// Extracted from the decode isolate for testability (the decode itself needs
+/// the native engine).
+@visibleForTesting
+bool exceedsDecodeCap(int frames, int rate, Duration maxDuration) =>
+    frames > maxDuration.inMilliseconds * rate ~/ 1000;
+
 /// Decodes any engine-supported media file (wav/mp3/m4a/aac/video/…) to mono
 /// samples in [-1, 1] for offline analysis, on a background isolate. The engine
 /// hands back interleaved-stereo f32 (`frames * 2`); we average L/R to mono and
 /// free the native buffer. Returns null when the file can't be decoded or is
 /// empty. Stateless — touches no live engine.
-Future<PcmAudio?> decodeMediaToMono(String path, {int rate = 44100}) {
+///
+/// [maxDuration] bounds the decoded length for ANALYSIS callers: the whole
+/// file materializes as a Float64List here and is copied AGAIN when the
+/// result crosses back to the calling isolate (and typically a third time
+/// into the analysis isolate), so an arbitrary-length input (a technique
+/// reference can be any media) would blow memory — an hour of mono at
+/// 44.1 kHz is ~1.3 GB per copy. Exceeding the cap throws
+/// [MediaTooLongException] BEFORE the mono buffer is allocated (the native
+/// f32 buffer is unavoidable without a streaming decode, but it is freed
+/// immediately). Null (the default) keeps the decode unbounded — the
+/// playback/engine pipeline does not go through here and is never capped.
+Future<PcmAudio?> decodeMediaToMono(
+  String path, {
+  int rate = 44100,
+  Duration? maxDuration,
+}) {
   return Isolate.run(() {
     final bindings = VocaraEngineBindings(_openVocaraLibrary());
     final cpath = path.toNativeUtf8();
@@ -112,6 +149,12 @@ Future<PcmAudio?> decodeMediaToMono(String path, {int rate = 44100}) {
     final frames = pcm.frames;
     try {
       if (frames <= 0 || ptr.address == 0) return null;
+      // Judge against the ACTUAL decode rate the engine reports, not the
+      // requested one, so the cap is a true duration bound.
+      if (maxDuration != null &&
+          exceedsDecodeCap(frames, pcm.rate, maxDuration)) {
+        throw MediaTooLongException(maxDuration);
+      }
       final inter = ptr.asTypedList(frames * 2);
       final mono = Float64List(frames);
       for (var i = 0; i < frames; i++) {

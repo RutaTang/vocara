@@ -12,11 +12,17 @@ class _FakeStorage implements LocalStorageService {
   Map<String, dynamic>? lastWrite;
   int writes = 0;
 
+  /// When true every write fails, like a full/read-only disk.
+  bool failWrites = false;
+
   @override
   Future<Map<String, dynamic>?> read(String collection, String id) async => doc;
 
   @override
   Future<void> write(String collection, String id, Map<String, dynamic> json) {
+    if (failWrites) {
+      return Future.error(const FileSystemException('disk full'));
+    }
     lastWrite = json;
     writes++;
     return Future.value();
@@ -229,6 +235,24 @@ void main() {
       // The refreshed name was persisted (fire-and-forget).
       await Future<void>.delayed(Duration.zero);
       expect(storage.lastWrite?['outputDeviceName'], _headphones.name);
+    });
+
+    test('a failing fire-and-forget name persist is swallowed, not rethrown '
+        'into the root zone', () async {
+      storage.doc = {
+        'outputDeviceUid': _headphones.uid,
+        'outputDeviceName': 'Old Name',
+      };
+      storage.failWrites = true;
+      outs = [_builtInOut, _headphones];
+      await service.load();
+
+      // Let the discarded persist future settle. Before the error handler
+      // was attached, its I/O failure surfaced as an unhandled async error
+      // in the test zone and this test would fail.
+      await Future<void>.delayed(Duration.zero);
+      // The in-memory rename still took effect; only persistence degraded.
+      expect(service.outputDeviceName, _headphones.name);
     });
   });
 }

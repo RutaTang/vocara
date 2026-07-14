@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 
 import '../../domain/models/audio_device.dart';
+import 'diagnostics_log.dart';
 import 'graph_audio_playback_service.dart';
 import 'local_storage_service.dart';
 
@@ -250,7 +251,19 @@ class AppSettingsService extends ChangeNotifier {
       dirty = true;
     }
     // Fire-and-forget: a failed name persist only degrades the offline label.
-    if (dirty) unawaited(_persist());
+    // The write can throw (LocalStorageService.write rethrows I/O failures),
+    // so swallow-and-log here — an unhandled async error in a discarded
+    // future would otherwise hit the root zone as a spurious crash report.
+    if (dirty) {
+      unawaited(
+        _persist().catchError((Object e) {
+          DiagnosticsLog.instance.log(
+            'settings',
+            'device-name persist failed: ${e.runtimeType}',
+          );
+        }),
+      );
+    }
   }
 
   /// Attach the active engine. Applies the persisted devices immediately so a freshly-created

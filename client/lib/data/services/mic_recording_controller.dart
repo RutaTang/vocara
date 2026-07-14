@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 
+import 'diagnostics_log.dart';
 import 'graph_audio_playback_service.dart';
 import 'mic_permission.dart';
 import 'monitor_service.dart';
@@ -268,14 +269,14 @@ class MicRecordingController {
       // window can't stop a recording that hasn't started. Don't arm
       // hardware/timers; drop the just-created destination.
       if (_disposed || _generation != generation) {
-        unawaited(destination.discard(path));
+        _discardQuietly(destination, path);
         return const MicRecordingStart.invalidated();
       }
       // A false return means the writer could not create the WAV (disk full /
       // permissions) and nothing would be recorded: fail loudly instead of
       // "recording" into nowhere, and arm no timers or state.
       if (!engine.startInputRecording(path)) {
-        unawaited(destination.discard(path));
+        _discardQuietly(destination, path);
         return const MicRecordingStart.failed(
           MicRecordingFailure.fileCreateFailed,
         );
@@ -330,6 +331,18 @@ class MicRecordingController {
       // NEWER start may already be pending and own it.
       if (_generation == generation) _starting = false;
     }
+  }
+
+  /// Fire-and-forget discard of an aborted start's file. A discard strategy
+  /// can throw (deleteAudio permission/IO errors), and these calls are
+  /// unawaited — log the failure instead of letting it escape into the root
+  /// zone as an unhandled async error.
+  static void _discardQuietly(RecordingPathStrategy destination, String path) {
+    unawaited(
+      destination.discard(path).catchError((Object e) {
+        DiagnosticsLog.instance.log('mic', 'discard failed for $path: $e');
+      }),
+    );
   }
 
   /// Stops the mic hardware, live capture/monitor feed and meter (without
