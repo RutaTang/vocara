@@ -87,12 +87,21 @@ class InterpretationsController extends ChangeNotifier {
     if (!practice.versions.any((v) => v.id == versionId)) return;
     final wasPlaying = _playback.isPlaying;
     await _playback.pause();
-    _setPractice(practice.copyWith(activeVersionId: versionId));
+    // Re-read the LIVE practice after the pause await (the rule [delete]
+    // follows): a take recorded/imported during it must survive the rebuild,
+    // and the target interpretation may have been deleted meanwhile.
+    final cur = _practiceOf();
+    if (cur == null || cur.activeVersionId == versionId) return;
+    if (!cur.versions.any((v) => v.id == versionId)) return;
+    _setPractice(cur.copyWith(activeVersionId: versionId));
     _ensureSelection();
     await _save();
     if (_analysis.dockOpen && _analysis.dockShowsTake) {
       unawaited(_analysis.ensureSelectedSpectrogram());
     }
+    // The route can pop while the save is in flight; don't drive the disposed
+    // engine wiring back into play.
+    if (_disposed) return;
     if (wasPlaying) await _playback.play();
   }
 
@@ -106,17 +115,22 @@ class InterpretationsController extends ChangeNotifier {
       return;
     }
     final trimmed = name.trim();
+    await _playback.pause();
+    // Re-read the LIVE practice after the pause await (see setActive): a take
+    // recorded/imported during it must survive the rebuild, and the default
+    // name numbers against the current version count.
+    final cur = _practiceOf();
+    if (cur == null) return;
     final version = TakeVersion(
       id: newId(),
       name: trimmed.isEmpty
-          ? 'Interpretation ${practice.versions.length + 1}'
+          ? 'Interpretation ${cur.versions.length + 1}'
           : trimmed,
       createdAt: DateTime.now(),
     );
-    await _playback.pause();
     _setPractice(
-      practice.copyWith(
-        versions: [...practice.versions, version],
+      cur.copyWith(
+        versions: [...cur.versions, version],
         activeVersionId: version.id,
       ),
     );

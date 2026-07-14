@@ -495,12 +495,42 @@ class _AddZoneState extends State<_AddZone> {
 
 /// A tiny single-field dialog to rename a clip. Returns the trimmed label, or
 /// null if cancelled. An empty value clears back to the file name.
-Future<String?> _promptLabel(BuildContext context, String current) async {
-  final controller = TextEditingController(text: current);
-  final result = await showDialog<String>(
+Future<String?> _promptLabel(BuildContext context, String current) {
+  return showDialog<String>(
     context: context,
     barrierColor: const Color(0xB0000000),
-    builder: (dialogContext) => Center(
+    builder: (dialogContext) => _RenameExampleDialog(current: current),
+  );
+}
+
+/// Owns its [TextEditingController] so it is disposed in [State.dispose] —
+/// which runs only after the dialog route's exit transition completes.
+/// Disposing right after `await showDialog` would free it mid-fade-out,
+/// letting the dialog rebuild its `EditableText` over a disposed controller
+/// (the use-after-dispose _StudioPrompt / _NewTechniqueDialog already fixed).
+class _RenameExampleDialog extends StatefulWidget {
+  const _RenameExampleDialog({required this.current});
+
+  final String current;
+
+  @override
+  State<_RenameExampleDialog> createState() => _RenameExampleDialogState();
+}
+
+class _RenameExampleDialogState extends State<_RenameExampleDialog> {
+  late final TextEditingController _controller = TextEditingController(
+    text: widget.current,
+  );
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
       child: Padding(
         padding: const EdgeInsets.all(24),
         child: Material(
@@ -537,7 +567,7 @@ Future<String?> _promptLabel(BuildContext context, String current) async {
                     vertical: 10,
                   ),
                   child: TextField(
-                    controller: controller,
+                    controller: _controller,
                     autofocus: true,
                     cursorColor: Studio.accent,
                     style: const TextStyle(
@@ -553,8 +583,7 @@ Future<String?> _promptLabel(BuildContext context, String current) async {
                         fontSize: 14,
                       ),
                     ),
-                    onSubmitted: (v) =>
-                        Navigator.of(dialogContext).pop(v.trim()),
+                    onSubmitted: (v) => Navigator.of(context).pop(v.trim()),
                   ),
                 ),
                 const SizedBox(height: 18),
@@ -563,15 +592,14 @@ Future<String?> _promptLabel(BuildContext context, String current) async {
                     const Spacer(),
                     _DialogButton(
                       label: 'Cancel',
-                      onTap: () => Navigator.of(dialogContext).pop(),
+                      onTap: () => Navigator.of(context).pop(),
                     ),
                     const SizedBox(width: 8),
                     _DialogButton(
                       label: 'Save',
                       accent: true,
-                      onTap: () => Navigator.of(
-                        dialogContext,
-                      ).pop(controller.text.trim()),
+                      onTap: () =>
+                          Navigator.of(context).pop(_controller.text.trim()),
                     ),
                   ],
                 ),
@@ -580,10 +608,8 @@ Future<String?> _promptLabel(BuildContext context, String current) async {
           ),
         ),
       ),
-    ),
-  );
-  controller.dispose();
-  return result;
+    );
+  }
 }
 
 class _DialogButton extends StatelessWidget {

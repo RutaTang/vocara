@@ -38,7 +38,17 @@ class BusyGate extends ChangeNotifier {
   /// Runs [action] under the busy flag: sets [busy], clears [errorMessage],
   /// notifies; a throw lands in [errorMessage] + [onError]; [busy] clears in
   /// finally with a second notify.
-  Future<void> run(Future<void> Function() action) async {
+  ///
+  /// ATOMIC: when an action already holds the gate, the call does nothing and
+  /// returns false — the mutex must hold even for a caller whose own pre-guard
+  /// raced the latch (two overlapping runs would let the first finisher clear
+  /// [busy] while the second still mutates, re-opening the gate to a third).
+  /// Returns true when [action] ran (even if it threw — the error is surfaced
+  /// through [errorMessage] + [onError], not the return value). No caller may
+  /// nest a [run] inside another run's action: the inner call would be
+  /// rejected, silently skipping its work.
+  Future<bool> run(Future<void> Function() action) async {
+    if (_busy) return false;
     _busy = true;
     _errorMessage = null;
     notifyListeners();
@@ -51,6 +61,7 @@ class BusyGate extends ChangeNotifier {
       _busy = false;
       notifyListeners();
     }
+    return true;
   }
 
   @override

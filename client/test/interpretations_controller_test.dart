@@ -9,10 +9,13 @@ import 'package:vocara/ui/song_practice_detail/view_model/interpretations_contro
 import 'package:vocara/utils/busy_gate.dart';
 
 /// Transport fake: records the pause/play order so the switch flow
-/// (pause → save → resume-only-if-playing) is observable.
+/// (pause → save → resume-only-if-playing) is observable. [onPause] lets a
+/// test mutate the host's practice DURING the pause await, modelling a take
+/// committed concurrently.
 class _FakeEngine extends Fake implements PlaybackEngine {
   bool transportRunning = false;
   final List<String> log = [];
+  void Function()? onPause;
 
   @override
   bool get isPlaying => transportRunning;
@@ -21,6 +24,7 @@ class _FakeEngine extends Fake implements PlaybackEngine {
   Future<void> pause() async {
     log.add('pause');
     transportRunning = false;
+    onPause?.call();
   }
 
   @override
@@ -75,6 +79,10 @@ class _Host {
   bool recording = false;
   bool separating = false;
 
+  /// Runs inside the save closure, so a test can e.g. dispose the controller
+  /// mid-save (route popped while a switch persists).
+  void Function()? onSave;
+
   late final BusyGate busyGate = BusyGate(onError: (e) => toasts.add('$e'));
 
   late final InterpretationsController controller = InterpretationsController(
@@ -86,6 +94,7 @@ class _Host {
     setPractice: (p) => practice = p,
     save: () async {
       saves++;
+      onSave?.call();
       return saveResult;
     },
     ensureSelection: () => ensureSelectionCalls++,
@@ -213,6 +222,46 @@ void main() {
       expect(host.saves, 0);
       expect(host.engine.log, isEmpty);
     });
+
+    test('a take committed during the pause await survives the switch '
+        '(rebuilds from the LIVE practice, not the pre-await snapshot)',
+        () async {
+      final host = _Host(
+        _practice(
+          versions: [_version('v1', 'One'), _version('v2', 'Two')],
+          activeVersionId: 'v1',
+        ),
+      );
+      // A recording finalize lands a new take while pause() is in flight.
+      host.engine.onPause = () {
+        final cur = host.practice!;
+        host.practice = cur.copyWith(
+          vocalTracks: [...cur.vocalTracks, _take('t-new', 'v1')],
+        );
+      };
+      await host.controller.setActive('v2');
+
+      expect(host.practice!.activeVersionId, 'v2');
+      expect(
+        host.practice!.vocalTracks.map((t) => t.id),
+        contains('t-new'),
+        reason: 'the concurrently-committed take must not be clobbered',
+      );
+    });
+
+    test('does not resume playback when disposed during the save', () async {
+      final host = _Host(
+        _practice(
+          versions: [_version('v1', 'One'), _version('v2', 'Two')],
+          activeVersionId: 'v1',
+        ),
+      );
+      host.engine.transportRunning = true;
+      host.onSave = host.controller.dispose; // route popped mid-save
+      await host.controller.setActive('v2');
+
+      expect(host.engine.log, ['pause']); // no play() on the disposed wiring
+    });
   });
 
   group('create', () {
@@ -246,6 +295,23 @@ void main() {
       await host.controller.create('X');
       expect(host.practice!.versions, hasLength(1));
       expect(host.toasts, ['Stop recording to add an interpretation.']);
+    });
+
+    test('a take committed during the pause await survives the create',
+        () async {
+      final host = _Host(
+        _practice(versions: [_version('v1', 'One')], activeVersionId: 'v1'),
+      );
+      host.engine.onPause = () {
+        final cur = host.practice!;
+        host.practice = cur.copyWith(
+          vocalTracks: [...cur.vocalTracks, _take('t-new', 'v1')],
+        );
+      };
+      await host.controller.create('Soft ballad');
+
+      expect(host.practice!.versions, hasLength(2));
+      expect(host.practice!.vocalTracks.map((t) => t.id), contains('t-new'));
     });
   });
 

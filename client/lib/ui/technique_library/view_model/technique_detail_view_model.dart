@@ -81,7 +81,10 @@ class TechniqueDetailViewModel extends ChangeNotifier
     if (isRecordingExample) {
       await stopExampleRecording();
     } else if (isRecordingPractice) {
-      await stopPractice();
+      // A practice take is ephemeral: the dying process would never show the
+      // analysis result, so skip the full DSP pass and only clean up — quit
+      // must not block on a discarded compute.
+      await stopPractice(skipAnalysis: true);
     }
   }
 
@@ -524,7 +527,11 @@ class TechniqueDetailViewModel extends ChangeNotifier
 
   /// Stops the practice recording, analyzes it, and shows it on the card. The
   /// recording file is deleted afterwards (never persisted).
-  Future<void> stopPractice() async {
+  ///
+  /// [skipAnalysis] is the quit-finalize path: stop the hardware and clean up
+  /// the temp dir WITHOUT the analysis pass — the process is exiting, so its
+  /// result would never be shown (an ephemeral take persists nothing either).
+  Future<void> stopPractice({bool skipAnalysis = false}) async {
     if (!isRecordingPractice) return;
     // False = the writer hit an IO error during the take, so the WAV on disk
     // is missing, damaged, or incomplete; handled conservatively below.
@@ -532,6 +539,12 @@ class TechniqueDetailViewModel extends ChangeNotifier
     final path = _practiceTempPath;
     if (path == null) {
       notifyListeners();
+      return;
+    }
+    if (skipAnalysis) {
+      // Only the cleanup from the finally below matters at quit.
+      _practiceTempPath = null;
+      await deleteTempRecordingDir(path);
       return;
     }
     _practiceLoading = true;

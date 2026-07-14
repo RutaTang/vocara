@@ -220,14 +220,37 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   // Recording never uses this pump (its capture belongs to the take).
   Timer? _captureTimer;
 
+  /// Intent latch for a live start parked on its pause await: set
+  /// synchronously at [setLiveMonitor]\(true)'s entry, cleared when the start
+  /// arms, aborts, or ANY [setLiveMonitor]\(false) arrives. Without it,
+  /// startRecording's `setLiveMonitor(false)` would no-op on the
+  /// `_liveMonitor == on` early-return while the start is still parked, and
+  /// the capture pump would arm DURING the take (a later Live-off would then
+  /// stopCapture underneath the recording).
+  bool _liveStartPending = false;
+
   /// Starts/stops feeding the engine's live input into the spectrogram analyzer. Can't run while
-  /// recording (the capture is busy with the take); pauses playback when starting.
+  /// recording — including REC's arm window, see the host's isRecording wiring — because the
+  /// engine capture is single-owner and belongs to the take; pauses playback when starting.
   Future<void> setLiveMonitor(bool on) async {
+    // Cancel a start parked on its pause await BEFORE the early-return below:
+    // while parked, _liveMonitor is still false, so an OFF request would
+    // otherwise be swallowed and the abandoned start would arm anyway.
+    if (!on) _liveStartPending = false;
     if (_liveMonitor == on) return;
     final engine = _graphEngine();
     if (on) {
       if (_isRecording() || engine == null) return;
+      _liveStartPending = true;
       if (_isPlaying()) await _pausePlayback();
+      // Re-check after EVERY await: a recording start (which owns the
+      // capture) or a cancel/dispose during the pause aborts this start —
+      // nothing was armed yet, so there is nothing to undo.
+      if (_disposed || !_liveStartPending || _isRecording()) {
+        _liveStartPending = false;
+        return;
+      }
+      _liveStartPending = false;
       engine.startCapture();
       _monitor.start();
       _liveMonitor = true;

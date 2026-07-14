@@ -195,6 +195,19 @@ class RecordingController extends ChangeNotifier {
   /// True while a take is armed (WAV being written, pumps running).
   bool get isRecording => _mic.isRecording;
 
+  /// True during REC's arm window — after the user tapped Record but before
+  /// the permission/file awaits resolve and [isRecording] flips true. The live
+  /// view treats it like recording: the capture already belongs to the
+  /// incoming take.
+  bool get isStartingTake => _mic.isStarting;
+
+  /// Synchronous Stop latch: set at [stopRecording]'s entry (before its pause/
+  /// finalize awaits) and cleared when the finalize completes. During those
+  /// awaits [isRecording] is already false and the busy gate not yet held, so
+  /// without this a fast Stop→REC would arm take #2 interleaved with take #1's
+  /// finalize. Checked by [startRecording]'s guard.
+  bool _stopping = false;
+
   /// Live input level (0..1) while recording. Drives the meter only.
   /// NOTE: currently no widget on this screen reads it (kept for parity;
   /// flagged for deletion in the cleanup stage).
@@ -270,12 +283,17 @@ class RecordingController extends ChangeNotifier {
   // --- Recording ------------------------------------------------------------
 
   Future<void> startRecording() async {
-    // `|| busy` closes the re-arm race: stopRecording clears isRecording BEFORE
-    // its finalize runs inside the busy gate (which holds busy), so without this a fast
-    // Stop→Record would start a second take whose createEmptyVocalTake/resyncPlayback
-    // interleave with the still-running finalize's save (lost update + graph thrash).
+    // `_stopping || busy` closes the re-arm race: stopRecording clears
+    // isRecording FIRST, then awaits the transport pause and only THEN runs
+    // its finalize inside the busy gate — `_stopping` covers the whole window
+    // (it is set synchronously at stopRecording's entry), `busy` the gated
+    // tail. Without them a fast Stop→Record would start a second take whose
+    // createEmptyVocalTake/resyncPlayback interleave with the still-running
+    // finalize's save (lost update + graph thrash).
     // isStarting is the synchronous re-entrancy guard for a fast double-tap.
-    if (_mic.isRecording || _mic.isStarting || _busyGate.busy) return;
+    if (_mic.isRecording || _mic.isStarting || _stopping || _busyGate.busy) {
+      return;
+    }
     try {
       // The live view and the take can't share the engine capture.
       await _analysis.setLiveMonitor(false);
@@ -331,9 +349,22 @@ class RecordingController extends ChangeNotifier {
 
   Future<void> stopRecording() async {
     // Stops the hardware + pumps and unregisters the quit finalizer; null means
-    // no take was in flight (incl. a still-pending start).
+    // no take was in flight (incl. a still-pending start). Everything up to the
+    // `_stopping` latch below is synchronous, so the latch is armed before any
+    // await can yield to a racing REC tap.
     final stopped = _mic.stop();
     if (stopped == null) return;
+    _stopping = true;
+    try {
+      await _finishStop(stopped);
+    } finally {
+      _stopping = false;
+    }
+  }
+
+  /// The tail of [stopRecording] (meter reset → pause → gated finalize), split
+  /// out so the `_stopping` latch brackets it in one try/finally.
+  Future<void> _finishStop(MicRecordingStop stopped) async {
     recordLevel.value = 0;
     // The recording loop was driving the shared MIC meter; unless monitoring is
     // also on (its own timer keeps updating it), nothing else will, so clear it
@@ -361,7 +392,7 @@ class RecordingController extends ChangeNotifier {
     recordingPeaks.value = const [];
     notifyListeners();
 
-    await _busyGate.run(() async {
+    Future<void> finalize() async {
       WaveformResult analysis;
       if (recordingClean) {
         analysis = await _waveforms.analyze(path);
@@ -416,7 +447,16 @@ class RecordingController extends ChangeNotifier {
         _analysis.onTrackAudioChanged(target.id);
       }
       await _save();
-    });
+    }
+
+    // The gate is normally free here — every structural action pre-guards on
+    // isRecording — but the finalize must NEVER be dropped (the take would be
+    // stranded on disk until the next boot sweep), so on the off-chance an
+    // action still holds the gate, wait it out and retry.
+    while (!await _busyGate.run(finalize)) {
+      if (_disposed) return;
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    }
   }
 
   // --- Input monitoring -----------------------------------------------------

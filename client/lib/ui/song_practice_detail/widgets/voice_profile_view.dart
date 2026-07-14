@@ -125,6 +125,12 @@ class DynamicsView extends StatelessWidget {
             if (m.frames == 0 || !p.hasDynamics) {
               return const StudioHint('Sing a passage to see your dynamics.');
             }
+            // [m] covers the analysis SUBJECT's span (one clip of a multi-clip
+            // lane when a specific clip is selected), not always the whole
+            // lane — map the loudness curve and playhead over that subject
+            // axis, like the other tabs (see PitchTab / TimbreTab).
+            final startMs = vm.analysisStartMs;
+            final spanMs = vm.analysisDurationMs;
             return Padding(
               padding: const EdgeInsets.fromLTRB(20, 16, 20, 18),
               child: Column(
@@ -166,7 +172,7 @@ class DynamicsView extends StatelessWidget {
                             child: CustomPaint(
                               painter: LoudnessLanePainter(
                                 metrics: m,
-                                timelineDurationMs: track.durationMs,
+                                timelineDurationMs: spanMs,
                                 startMs: 0,
                               ),
                             ),
@@ -176,9 +182,9 @@ class DynamicsView extends StatelessWidget {
                               child: CustomPaint(
                                 painter: PlayheadPainter(
                                   position: vm.position,
-                                  timelineDurationMs: track.durationMs,
+                                  timelineDurationMs: spanMs,
                                   color: Studio.playhead,
-                                  startMs: track.startMs,
+                                  startMs: startMs,
                                 ),
                               ),
                             ),

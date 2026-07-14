@@ -2,6 +2,7 @@ import 'package:flutter/widgets.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
+import '../data/db/persistence.dart';
 import '../data/repositories/song_practice_repository.dart';
 import '../data/repositories/technique_repository.dart';
 import '../data/services/app_settings_service.dart';
@@ -48,6 +49,9 @@ GoRouter createRouter() {
           ChangeNotifierProvider(
             create: (context) => HomeViewModel(
               repository: context.read<SongPracticeRepository>(),
+              // Freshness reloads when sync applies remote rows; with no sync
+              // configured the stream simply never fires.
+              remoteApplied: context.read<Persistence>().remoteApplied,
             ),
             child: const HomeScreen(),
           ),
@@ -68,6 +72,7 @@ GoRouter createRouter() {
                 separationService: context.read<SourceSeparationService>(),
                 appSettings: context.read<AppSettingsService>(),
                 practiceId: id,
+                remoteApplied: context.read<Persistence>().remoteApplied,
               ),
               child: const SongPracticeDetailScreen(),
             ),
@@ -85,6 +90,7 @@ GoRouter createRouter() {
             create: (context) => TechniqueLibraryViewModel(
               repository: context.read<TechniqueRepository>(),
               mediaService: context.read<TechniqueMediaService>(),
+              remoteApplied: context.read<Persistence>().remoteApplied,
             ),
             child: const TechniqueLibraryScreen(),
           ),
@@ -101,6 +107,7 @@ GoRouter createRouter() {
                 mediaService: context.read<TechniqueMediaService>(),
                 techniqueId: id,
                 appSettings: context.read<AppSettingsService>(),
+                remoteApplied: context.read<Persistence>().remoteApplied,
               ),
               child: const TechniqueDetailScreen(),
             ),

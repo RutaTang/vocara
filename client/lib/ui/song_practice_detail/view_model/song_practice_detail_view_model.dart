@@ -178,8 +178,10 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       // The live view pauses the transport before taking over the capture.
       pausePlayback: _playback.pause,
       isPlaying: () => playback.isPlaying,
-      // Recording owns the capture — the live view can't start during a take.
-      isRecording: () => recording.isRecording,
+      // Recording owns the capture — the live view can't start during a take,
+      // INCLUDING the arm window before isRecording flips true (a live start
+      // slipping in there would pull input frames from under the take).
+      isRecording: () => recording.isRecording || recording.isStartingTake,
       selectedTrack: () => selectedTrack,
       selectedClipId: () => _selectedClipId,
       trackById: _trackById,
@@ -720,22 +722,45 @@ class SongPracticeDetailViewModel extends ChangeNotifier
 
   /// Persists a lyrics change without re-syncing the audio engine (lyrics don't
   /// affect playback), so tap-to-time while playing doesn't glitch the audio.
+  /// Runs on the same save chain as [_save] (one in-flight write at a time).
   Future<void> _setLyrics(List<LyricLine> lines) async {
     final practice = _practice;
     if (practice == null) return;
     _practice = practice.copyWith(lyrics: lines);
-    // Same save bracket as [_save]: supersede in-flight remote reloads and
+    await _enqueueSave(_writeLyrics);
+  }
+
+  /// The lyrics-only persist body (see [_setLyrics]); queued via [_enqueueSave].
+  Future<void> _writeLyrics() async {
+    final sent = _practice;
+    if (sent == null) return;
+    // Same save bracket as [_doSave]: supersede in-flight remote reloads and
     // block new ones until the fresh base is captured.
     _reloadEpoch++;
     _saving = true;
     try {
       final result = await _repository.savePracticeWithBase(
-        _practice!,
+        sent,
         baseHashes: _baseHashes,
       );
+      if (_disposed) return;
       if (result is Ok<Loaded<SongPractice>>) {
-        _practice = result.value.aggregate;
         _baseHashes = result.value.baseHashes;
+        // Keep a model mutated during the write (see [_doSave]); the queued
+        // save behind this one persists it against the fresh base above.
+        if (identical(_practice, sent)) {
+          _practice = result.value.aggregate;
+        }
+      } else {
+        // Mirror [_doSave]'s failure path: revert the optimistic lyrics to
+        // what's actually on disk, so the screen never keeps showing lines a
+        // failed write already lost (they'd silently vanish on restart).
+        final reloaded = await _repository.loadPractice(sent.id);
+        if (reloaded is Ok<Loaded<SongPractice>>) {
+          _practice = reloaded.value.aggregate;
+          _baseHashes = reloaded.value.baseHashes;
+        }
+        _toast("Couldn't save your changes.");
       }
     } finally {
       _saving = false;
@@ -776,7 +801,10 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// Imports [sourcePath] as the accompaniment (replacing any existing one).
   Future<void> addAccompaniment(String sourcePath) async {
     if (_practice == null) return;
-    if (busy || isSeparating) return; // no concurrent structural edit
+    // No concurrent structural edit. isRecording is part of EVERY structural
+    // pre-guard: the gate must be free when the stop finalize needs it, or the
+    // finalize would be rejected and the take stranded until the boot sweep.
+    if (busy || isSeparating || isRecording) return;
     await _busyGate.run(() async {
       final dest = await _audioFiles.importAudio(
         practiceId: _practiceId,
@@ -823,7 +851,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// existing one).
   Future<void> addReference(String sourcePath) async {
     if (_practice == null) return;
-    if (busy || isSeparating) return; // no concurrent structural edit
+    if (busy || isSeparating || isRecording) return; // no concurrent structural edit
     await _busyGate.run(() async {
       final dest = await _audioFiles.importAudio(
         practiceId: _practiceId,
@@ -862,6 +890,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   Future<void> addVocalTake(String sourcePath) async {
     final practice = _practice;
     if (practice == null) return;
+    if (busy || isSeparating || isRecording) return; // no concurrent structural edit
     await _busyGate.run(() async {
       final dest = await _audioFiles.importAudio(
         practiceId: _practiceId,
@@ -885,6 +914,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     if (practice == null) return;
     final target = _trackById(trackId);
     if (target == null || target.kind != AudioTrackKind.vocal) return;
+    if (busy || isSeparating || isRecording) return; // no concurrent structural edit
     await _busyGate.run(() async {
       final dest = await _audioFiles.importAudio(
         practiceId: _practiceId,
@@ -1227,45 +1257,41 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   Future<void> deleteTrack(String trackId) async {
     final practice = _practice;
     if (practice == null) return;
-    if (busy || isSeparating) return; // no concurrent structural edit
-    if (practice.accompaniment?.id == trackId) {
-      for (final c in practice.accompaniment!.clips) {
-        analysis.evictAnalysis(c.audioFilePath);
-        await _audioFiles.deleteAudio(c.audioFilePath);
-      }
+    if (busy || isSeparating || isRecording) return; // no concurrent structural edit
+    await _busyGate.run(() async {
+      // No awaits happened since the guard, so the model is still live here.
       final cur = _practice;
       if (cur == null) return;
-      _practice = cur.copyWith(clearAccompaniment: true);
-    } else if (practice.reference?.id == trackId) {
-      for (final c in practice.reference!.clips) {
-        analysis.evictAnalysis(c.audioFilePath);
-        await _audioFiles.deleteAudio(c.audioFilePath);
+      final List<AudioClip> doomed;
+      if (cur.accompaniment?.id == trackId) {
+        doomed = cur.accompaniment!.clips;
+        _practice = cur.copyWith(clearAccompaniment: true);
+      } else if (cur.reference?.id == trackId) {
+        doomed = cur.reference!.clips;
+        _practice = cur.copyWith(clearReference: true);
+      } else {
+        // Delete EVERY clip's file — a multi-clip take would otherwise orphan
+        // its trailing clips' audio.
+        doomed = [
+          for (final t in cur.vocalTracks)
+            if (t.id == trackId) ...t.clips,
+        ];
+        _practice = cur.copyWith(
+          vocalTracks: cur.vocalTracks.where((t) => t.id != trackId).toList(),
+        );
       }
-      final cur = _practice;
-      if (cur == null) return;
-      _practice = cur.copyWith(clearReference: true);
-    } else {
-      for (final t in practice.vocalTracks) {
-        if (t.id == trackId) {
-          // Delete EVERY clip's file — a multi-clip take would otherwise orphan
-          // its trailing clips' audio.
-          for (final c in t.clips) {
-            analysis.evictAnalysis(c.audioFilePath);
-            await _audioFiles.deleteAudio(c.audioFilePath);
-          }
-          break;
+      // Persist BEFORE deleting any audio, and ONLY delete when the save
+      // succeeded — a failed save reverts the model back to referencing these
+      // clips, so their files must survive (mirrors separateBacking and
+      // InterpretationsController.delete).
+      if (await _save()) {
+        analysis.dropLaneState(trackId);
+        for (final c in doomed) {
+          analysis.evictAnalysis(c.audioFilePath);
+          await _audioFiles.deleteAudio(c.audioFilePath);
         }
       }
-      // Rebuild from the LIVE practice so a take recorded/imported during the
-      // deleteAudio awaits isn't dropped by a stale-snapshot rebuild.
-      final cur = _practice;
-      if (cur == null) return;
-      _practice = cur.copyWith(
-        vocalTracks: cur.vocalTracks.where((t) => t.id != trackId).toList(),
-      );
-    }
-    analysis.dropLaneState(trackId);
-    await _save();
+    });
   }
 
   /// Deletes a single clip from a lane (Logic / Cubase style), keeping the lane
@@ -1275,37 +1301,49 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     final track = _trackById(trackId);
     final clip = track?.clipById(clipId);
     if (track == null || clip == null) return;
-    final remaining = track.clips.where((c) => c.id != clipId).toList();
-    // Drop markers anchored inside the deleted clip; for a range that starts
-    // before the clip, clamp its end to the clip edge so it doesn't overhang the
-    // gap left behind.
-    final keptNotes = track.notes
-        .where((n) => n.positionMs < clip.startMs || n.positionMs >= clip.endMs)
-        .map(
-          (n) =>
-              n.positionMs < clip.startMs ? clampNoteEnd(n, clip.startMs) : n,
-        )
-        .toList();
-    final keptMarkers = track.techniqueMarkers
-        .where((m) => m.positionMs < clip.startMs || m.positionMs >= clip.endMs)
-        .map(
-          (m) =>
-              m.positionMs < clip.startMs ? clampMarkerEnd(m, clip.startMs) : m,
-        )
-        .toList();
-    _updateTrack(
-      trackId,
-      (t) => t.copyWith(
-        clips: remaining,
-        notes: keptNotes,
-        techniqueMarkers: keptMarkers,
-      ),
-    );
-    if (_selectedClipId == clipId) _selectedClipId = null;
-    analysis.evictAnalysis(clip.audioFilePath);
-    await _audioFiles.deleteAudio(clip.audioFilePath);
-    analysis.onTrackAudioChanged(trackId);
-    await _save();
+    if (busy || isSeparating || isRecording) return; // no concurrent structural edit
+    await _busyGate.run(() async {
+      final remaining = track.clips.where((c) => c.id != clipId).toList();
+      // Drop markers anchored inside the deleted clip; for a range that starts
+      // before the clip, clamp its end to the clip edge so it doesn't overhang the
+      // gap left behind.
+      final keptNotes = track.notes
+          .where(
+            (n) => n.positionMs < clip.startMs || n.positionMs >= clip.endMs,
+          )
+          .map(
+            (n) =>
+                n.positionMs < clip.startMs ? clampNoteEnd(n, clip.startMs) : n,
+          )
+          .toList();
+      final keptMarkers = track.techniqueMarkers
+          .where(
+            (m) => m.positionMs < clip.startMs || m.positionMs >= clip.endMs,
+          )
+          .map(
+            (m) => m.positionMs < clip.startMs
+                ? clampMarkerEnd(m, clip.startMs)
+                : m,
+          )
+          .toList();
+      _updateTrack(
+        trackId,
+        (t) => t.copyWith(
+          clips: remaining,
+          notes: keptNotes,
+          techniqueMarkers: keptMarkers,
+        ),
+      );
+      if (_selectedClipId == clipId) _selectedClipId = null;
+      // Persist BEFORE deleting the audio, and ONLY delete when the save
+      // succeeded — a failed save reverts the model back to referencing this
+      // clip, so its file must survive.
+      if (await _save()) {
+        analysis.evictAnalysis(clip.audioFilePath);
+        await _audioFiles.deleteAudio(clip.audioFilePath);
+      }
+      analysis.onTrackAudioChanged(trackId);
+    });
   }
 
   // --- Clip editing (drag-move, reorder, split, merge, …) -----------------
@@ -1381,7 +1419,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   Future<void> duplicateTrack(String trackId) async {
     final src = _trackById(trackId);
     if (_practice == null || src == null || src.isBacking) return;
-    if (busy || isSeparating) return; // no concurrent structural edit
+    if (busy || isSeparating || isRecording) return; // no concurrent structural edit
     await _busyGate.run(() async {
       // Copy EVERY clip's file (not just the primary) to a fresh path and give it
       // a fresh id, so the duplicate is fully independent: a later delete of the
@@ -1436,7 +1474,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     final practice = _practice;
     final src = _trackById(trackId);
     if (practice == null || src == null || src.isBacking) return;
-    if (busy || isSeparating) return; // no concurrent structural edit
+    if (busy || isSeparating || isRecording) return; // no concurrent structural edit
     // Byte-splitting is a ONE-FILE operation: a multi-clip lane has several
     // independent files, and its lane span (startMs/durationMs) covers gaps no
     // file byte maps to — refuse rather than silently drop the other clips
@@ -1528,10 +1566,22 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       list[idx] = first;
       list.insert(idx + 1, second);
       _practice = cur.copyWith(vocalTracks: list);
-      analysis.evictAnalysis(clip.audioFilePath);
-      await _audioFiles.deleteAudio(clip.audioFilePath);
-      await _save();
-      _toast('Take split.');
+      // Persist BEFORE deleting any old audio, so a failed save can't leave
+      // the model pointing at a file that's already gone.
+      if (await _save()) {
+        analysis.evictAnalysis(clip.audioFilePath);
+        await _audioFiles.deleteAudio(clip.audioFilePath);
+        _toast('Take split.');
+      } else {
+        // The failed save reverted the model to the original one-clip take,
+        // so the split halves are orphans — clean them up instead.
+        try {
+          await _audioFiles.deleteAudio(parts.firstPath);
+          await _audioFiles.deleteAudio(parts.secondPath);
+        } catch (_) {
+          /* best-effort: a lingering working file is harmless */
+        }
+      }
     });
     // The surviving take keeps its id but now points at a new file.
     analysis.onTrackAudioChanged(trackId);
@@ -1543,7 +1593,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   Future<void> mergeTrackDown(String trackId) async {
     final practice = _practice;
     if (practice == null) return;
-    if (busy || isSeparating) return; // no concurrent structural edit
+    if (busy || isSeparating || isRecording) return; // no concurrent structural edit
     // Pick the partner from the VISIBLE (active-interpretation) order — the same list the
     // UI's "Merge down" affordance is gated on. Using the next take in the FULL vocalTracks
     // list could grab (and then delete) a take belonging to a DIFFERENT interpretation.
@@ -1626,13 +1676,24 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       newList[idx] = merged;
       newList.removeAt(bottomIdx);
       _practice = cur.copyWith(vocalTracks: newList);
-      analysis.dropLaneState(bottom.id); // the absorbed take is gone
-      analysis.evictAnalysis(topClip.audioFilePath);
-      analysis.evictAnalysis(bottomClip.audioFilePath);
-      await _audioFiles.deleteAudio(topClip.audioFilePath);
-      await _audioFiles.deleteAudio(bottomClip.audioFilePath);
-      await _save();
-      _toast('Takes merged.');
+      // Persist BEFORE deleting any old audio, so a failed save can't leave
+      // the model pointing at files that are already gone.
+      if (await _save()) {
+        analysis.dropLaneState(bottom.id); // the absorbed take is gone
+        analysis.evictAnalysis(topClip.audioFilePath);
+        analysis.evictAnalysis(bottomClip.audioFilePath);
+        await _audioFiles.deleteAudio(topClip.audioFilePath);
+        await _audioFiles.deleteAudio(bottomClip.audioFilePath);
+        _toast('Takes merged.');
+      } else {
+        // The failed save reverted the model to the two original takes, so
+        // the merged output is an orphan — clean it up instead.
+        try {
+          await _audioFiles.deleteAudio(mergedPath);
+        } catch (_) {
+          /* best-effort: a lingering working file is harmless */
+        }
+      }
     });
     // The merged take keeps the top take's id but now points at a new file.
     analysis.onTrackAudioChanged(trackId);
@@ -1643,6 +1704,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   Future<void> reanalyzeTrack(String trackId) async {
     final track = _trackById(trackId);
     if (track == null) return;
+    if (busy || isSeparating || isRecording) return; // no concurrent structural edit
     await _busyGate.run(() async {
       // Analyze EVERY clip's file (a lane can hold several independent files),
       // then fold the results back in BY CLIP ID against the live model — a
@@ -1852,10 +1914,30 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     }
   }
 
+  /// The tail of the save chain (see [_save]): the completion of the latest
+  /// queued persist, with its error swallowed (each op surfaces its own).
+  Future<void> _saveTail = Future.value();
+
+  /// Serializes every persist of [_practice] (gated or not): two in-flight
+  /// [SongPracticeRepository.savePracticeWithBase] calls would otherwise share
+  /// one [_baseHashes] snapshot (two rapid interpretation clicks, a lyric
+  /// stamp racing a gated save), and whichever landed second would three-way
+  /// merge against a base that no longer describes the store. Each op starts
+  /// only after the previous one fully completed, then reads the LIVE
+  /// [_practice]/[_baseHashes]. Independent of [BusyGate]: ops never wait on
+  /// the gate, so a gated save chaining after an ungated one cannot deadlock.
+  Future<T> _enqueueSave<T>(Future<T> Function() op) {
+    final next = _saveTail.then((_) => op());
+    _saveTail = next.then<void>((_) {}, onError: (_) {});
+    return next;
+  }
+
   /// Persists [_practice]. Returns whether the write succeeded — callers that
   /// then delete files must gate the deletion on a successful save so a failed
   /// write can't leave the JSON referencing audio that's already gone.
-  Future<bool> _save() async {
+  Future<bool> _save() => _enqueueSave(_doSave);
+
+  Future<bool> _doSave() async {
     if (_practice == null) return false;
     _ensureTimeline();
     // A starting save supersedes any in-flight remote-applied reload (its read
@@ -1866,8 +1948,9 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       // Three-way save against the base captured at load / the previous save,
       // so a stale aggregate can't revert or tombstone concurrent (synced-in)
       // changes; the returned fresh base replaces ours for the next save.
+      final sent = _practice!;
       final result = await _repository.savePracticeWithBase(
-        _practice!,
+        sent,
         baseHashes: _baseHashes,
       );
       final ok = result is Ok<Loaded<SongPractice>>;
@@ -1876,8 +1959,14 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       // playback/selection resync below must not touch now-disposed notifiers.
       if (_disposed) return ok;
       if (ok) {
-        _practice = result.value.aggregate;
         _baseHashes = result.value.baseHashes;
+        // Adopt the re-read aggregate only if no caller mutated the model
+        // while the write was in flight: a save queued behind this one already
+        // carries the newer model and will persist it against the fresh base
+        // above — overwriting [_practice] here would silently drop that edit.
+        if (identical(_practice, sent)) {
+          _practice = result.value.aggregate;
+        }
       } else {
         // Revert the optimistic in-memory model to what's actually on disk, so the
         // UI never keeps showing edits a failed write didn't persist. The base

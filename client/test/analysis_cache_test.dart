@@ -1,5 +1,8 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:vocara/data/services/graph_audio_playback_service.dart';
 import 'package:vocara/data/services/monitor_service.dart';
 import 'package:vocara/data/services/spectrogram_service.dart';
 import 'package:vocara/domain/models/audio_track.dart';
@@ -33,19 +36,49 @@ class _StubSpectrograms extends Fake implements SpectrogramService {
   }) async => metricsByPath[path];
 }
 
-class _FakeMonitor extends Fake implements MonitorService {}
+class _FakeMonitor extends Fake implements MonitorService {
+  int starts = 0;
+  int stops = 0;
+
+  @override
+  void start() => starts++;
+
+  @override
+  void stop() => stops++;
+}
+
+/// Capture-side fake of the native engine: counts start/stopCapture so the
+/// live-monitor interlock tests can assert the pump never armed.
+class _FakeGraphEngine extends Fake implements GraphAudioPlaybackService {
+  int captureStarts = 0;
+  int captureStops = 0;
+
+  @override
+  void startCapture() => captureStarts++;
+
+  @override
+  void stopCapture() => captureStops++;
+
+  @override
+  Float32List pullInputFrames() => Float32List(0);
+}
 
 AnalysisCache _cache({
   SpectrogramService? spectrograms,
   AudioTrack? Function()? selectedTrack,
   String? Function()? selectedClipId,
+  GraphAudioPlaybackService? graphEngine,
+  MonitorService? monitor,
+  Future<void> Function()? pausePlayback,
+  bool Function()? isPlaying,
+  bool Function()? isRecording,
 }) => AnalysisCache(
   spectrograms: spectrograms ?? _FakeSpectrograms(),
-  monitor: _FakeMonitor(),
-  graphEngine: () => null,
-  pausePlayback: () async {},
-  isPlaying: () => false,
-  isRecording: () => false,
+  monitor: monitor ?? _FakeMonitor(),
+  graphEngine: () => graphEngine,
+  pausePlayback: pausePlayback ?? () async {},
+  isPlaying: isPlaying ?? () => false,
+  isRecording: isRecording ?? () => false,
   selectedTrack: selectedTrack ?? () => null,
   selectedClipId: selectedClipId ?? () => null,
   trackById: (_) => null,
@@ -323,6 +356,83 @@ void main() {
       expect(cache.dockHeight, 760);
       cache.setDockHeight(300);
       expect(cache.dockHeight, 300);
+      cache.dispose();
+    });
+  });
+
+  group('live monitor vs recording interlock', () {
+    test('a normal live start arms the capture once', () async {
+      final engine = _FakeGraphEngine();
+      final monitor = _FakeMonitor();
+      final cache = _cache(graphEngine: engine, monitor: monitor);
+
+      await cache.setLiveMonitor(true);
+      expect(cache.liveMonitor, isTrue);
+      expect(engine.captureStarts, 1);
+      expect(monitor.starts, 1);
+
+      await cache.setLiveMonitor(false);
+      expect(cache.liveMonitor, isFalse);
+      expect(engine.captureStops, 1);
+      cache.dispose();
+    });
+
+    test('a live start parked on the pause await ABORTS when a recording '
+        'started meanwhile (the take owns the capture)', () async {
+      final engine = _FakeGraphEngine();
+      final monitor = _FakeMonitor();
+      final pauseParked = Completer<void>();
+      var recording = false;
+      final cache = _cache(
+        graphEngine: engine,
+        monitor: monitor,
+        isPlaying: () => true,
+        pausePlayback: () => pauseParked.future,
+        isRecording: () => recording,
+      );
+
+      final start = cache.setLiveMonitor(true); // parks on the pause await
+      recording = true; // REC arms during the pause
+      pauseParked.complete();
+      await start;
+
+      expect(cache.liveMonitor, isFalse);
+      expect(engine.captureStarts, 0, reason: 'no pump under the take');
+      expect(monitor.starts, 0);
+      cache.dispose();
+    });
+
+    test('setLiveMonitor(false) cancels a live start parked on its pause '
+        'await (startRecording\'s force-off must not no-op)', () async {
+      final engine = _FakeGraphEngine();
+      final monitor = _FakeMonitor();
+      final pauseParked = Completer<void>();
+      final cache = _cache(
+        graphEngine: engine,
+        monitor: monitor,
+        isPlaying: () => true,
+        pausePlayback: () => pauseParked.future,
+      );
+
+      final start = cache.setLiveMonitor(true); // parks on the pause await
+      // startRecording's interlock call: _liveMonitor is still false here, so
+      // pre-fix this returned early and the parked start armed DURING the take.
+      await cache.setLiveMonitor(false);
+      pauseParked.complete();
+      await start;
+
+      expect(cache.liveMonitor, isFalse);
+      expect(engine.captureStarts, 0);
+      expect(monitor.starts, 0);
+      cache.dispose();
+    });
+
+    test('a live start cannot begin while recording', () async {
+      final engine = _FakeGraphEngine();
+      final cache = _cache(graphEngine: engine, isRecording: () => true);
+      await cache.setLiveMonitor(true);
+      expect(cache.liveMonitor, isFalse);
+      expect(engine.captureStarts, 0);
       cache.dispose();
     });
   });
