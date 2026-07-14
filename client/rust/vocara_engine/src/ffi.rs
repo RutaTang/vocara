@@ -155,6 +155,26 @@ fn cache_retain(
     }
 }
 
+/// Store freshly decoded PCM in the cache under `path`, REPLACING any existing entry (the
+/// file's content may have changed under a reused path — a cached Arc would serve the stale
+/// audio), and return the shared samples for staging.
+fn cache_store_pcm(
+    cache: &mut std::collections::HashMap<String, CachedPcm>,
+    path: &str,
+    pcm: &[Smp],
+    seq: u64,
+) -> Arc<[Smp]> {
+    let arc: Arc<[Smp]> = Arc::from(pcm);
+    cache.insert(
+        path.to_string(),
+        CachedPcm {
+            pcm: arc.clone(),
+            staged_seq: seq,
+        },
+    );
+    arc
+}
+
 /// Create the engine: build the P0 graph at the fixed `ENGINE_SR`, then spawn the audio-host
 /// thread which opens the default output and starts rendering (resampling `ENGINE_SR` → the
 /// device's native rate at the boundary). Returns null on any failure.
@@ -194,8 +214,15 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
             Arc::clone(&input_frames_in),
         );
         let writer = RecordWriter::spawn(rec_cons);
-        let (host, current_output_uid) =
-            device::spawn_audio_host(rt_cell, input_cell, Arc::clone(&device_event))?;
+        // The host maintains the handle's renderer gate (stream up/down), so the control
+        // thread can free retired graphs immediately while no stream callback runs (the
+        // grace epoch never elapses without a callback advancing the block counter).
+        let (host, current_output_uid) = device::spawn_audio_host(
+            rt_cell,
+            input_cell,
+            Arc::clone(&device_event),
+            handle.renderer_gate(),
+        )?;
         Ok(Box::into_raw(Box::new(VeEngine {
             host,
             handle,
@@ -1129,24 +1156,13 @@ pub extern "C" fn ve_tracks_add_pcm(
         let rate = eng.handle.sample_rate();
         eng.cache_seq += 1;
         let seq = eng.cache_seq;
-        let arc = match eng.cache.get_mut(path) {
-            Some(c) => {
-                c.staged_seq = seq;
-                c.pcm.clone()
-            }
-            None => {
-                let slice = unsafe { std::slice::from_raw_parts(pcm, frames * CHANNELS) };
-                let arc: Arc<[Smp]> = Arc::from(slice);
-                eng.cache.insert(
-                    path.to_string(),
-                    CachedPcm {
-                        pcm: arc.clone(),
-                        staged_seq: seq,
-                    },
-                );
-                arc
-            }
-        };
+        // The caller ALWAYS hands freshly decoded PCM here (Dart only reaches this after a
+        // `ve_tracks_add` cache miss, and it just decoded the file), so store/replace the
+        // cache entry unconditionally: serving a cached Arc on a path hit returned STALE
+        // samples whenever the file's content changed under a reused path. Path-only cache
+        // lookups stay in `ve_tracks_add`, which is documented cache-only.
+        let slice = unsafe { std::slice::from_raw_parts(pcm, frames * CHANNELS) };
+        let arc = cache_store_pcm(&mut eng.cache, path, slice, seq);
         let start_frame = (start_ms as f64 * rate / 1000.0) as i64;
         let idx = eng.pending.len() as c_int;
         eng.pending.push(PendingTrack {
@@ -1814,7 +1830,7 @@ pub extern "C" fn ve_track_gr(e: *mut VeEngine, track: c_int) -> f32 {
 
 #[cfg(test)]
 mod cache_tests {
-    use super::{cache_retain, CachedPcm};
+    use super::{cache_retain, cache_store_pcm, CachedPcm};
     use crate::sample::Smp;
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
@@ -1872,5 +1888,20 @@ mod cache_tests {
         let live: HashSet<&str> = ["a", "b"].into_iter().collect();
         cache_retain(&mut cache, &live, 0);
         assert_eq!(cache.len(), 2);
+    }
+
+    #[test]
+    fn fresh_pcm_replaces_a_stale_entry_at_the_same_path() {
+        // `ve_tracks_add_pcm` always receives freshly decoded samples: a path hit must serve
+        // the NEW content, not the cached Arc (a file re-rendered/re-recorded under a reused
+        // path used to keep playing its old audio).
+        let mut cache = HashMap::new();
+        let old = cache_store_pcm(&mut cache, "take.wav", &[0.1, 0.1, 0.2, 0.2], 1);
+        assert_eq!(&old[..], &[0.1, 0.1, 0.2, 0.2]);
+        let new = cache_store_pcm(&mut cache, "take.wav", &[0.9, 0.9], 2);
+        assert_eq!(&new[..], &[0.9, 0.9], "the staged Arc must be the fresh samples");
+        let cached = cache.get("take.wav").expect("path stays cached");
+        assert_eq!(&cached.pcm[..], &[0.9, 0.9], "the cache must hold the fresh samples");
+        assert_eq!(cached.staged_seq, 2, "the LRU stamp follows the re-stage");
     }
 }

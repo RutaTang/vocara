@@ -190,3 +190,35 @@ fn rcu_hot_swap_takes_effect_next_block() {
     assert!(rms(&out) < 1e-3, "after swap to gain-0 graph: silent, got {}", rms(&out));
     h.reap(); // free the retired graph on the control thread
 }
+
+#[test]
+fn no_renderer_frees_retired_graphs_immediately() {
+    // With no stream callback running, the block counter never advances, so the grace epoch
+    // never elapses — every commit would park one more full graph (unbounded while the output
+    // device is lost). The audio host lowers the renderer gate whenever no stream is up; reap
+    // must then free retirees immediately instead of waiting for an epoch that never comes.
+    let (mut h, _rt, _src) = one_source_engine();
+    let build = || {
+        let (_p, cons) = spsc::<[f32; CHANNELS]>(64);
+        let desc = GraphDesc {
+            nodes: vec![
+                NodeEntry::new(1, Box::new(RingSource::new(cons))),
+                NodeEntry::new(2, Box::new(MasterNode::unity())),
+            ],
+            edges: vec![Edge::simple(1, 2)],
+            master: 2,
+        };
+        desc.compile(SR, BLOCK).unwrap()
+    };
+    // Gate defaults to true (a renderer may be running): the retiree parks for its epoch.
+    h.publish_graph(build());
+    assert_eq!(h.retired_count(), 1, "with the gate up the grace epoch applies");
+    // The host reports all streams down: the parked graph AND the fresh retiree free at once.
+    *h.renderer_gate().lock().unwrap() = false;
+    h.publish_graph(build());
+    assert_eq!(h.retired_count(), 0, "with the gate down retirees free immediately");
+    // And a raised gate restores the grace-epoch behavior.
+    *h.renderer_gate().lock().unwrap() = true;
+    h.publish_graph(build());
+    assert_eq!(h.retired_count(), 1, "raising the gate re-arms the grace epoch");
+}

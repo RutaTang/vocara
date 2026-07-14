@@ -47,7 +47,8 @@ use crate::aec::Aec;
 use crate::device::InputCell;
 use crate::live::RtCell;
 use crate::ring::{spsc, Consumer, Producer};
-use crate::sample::{CHANNELS, ENGINE_SR};
+use crate::ring_sync::{duplex_rates_ok, RefRingSync};
+use crate::sample::{frames_at_engine_rate, CHANNELS, ENGINE_SR};
 
 const VPIO_RATE: f64 = ENGINE_SR; // 48_000.0 — requested rate; verified against the effective ASBD.
 const REQ_CH: u32 = CHANNELS as u32; // 2 — what we request; VPIO may negotiate fewer (e.g. mono).
@@ -241,6 +242,10 @@ struct InCtx {
     aec: Aec,
     /// Far-end reference (the rendered backing, mono) produced by `output_cb`.
     ref_cons: Consumer<f32>,
+    /// Keeps the reference ring's depth healthy across input glitches (see `ring_sync.rs`):
+    /// a backlog left by missed pops would delay the reference past the AEC's modeled
+    /// round-trip and the filter could never re-converge.
+    ref_sync: RefRingSync,
     /// Mono AEC scratch (mic-in / far-end / clean-out), `MAX_FRAMES` each.
     mic_mono: Vec<f32>,
     far_mono: Vec<f32>,
@@ -379,6 +384,7 @@ impl Vpio {
                 scratch: vec![0.0; MAX_FRAMES * MAX_CH],
                 aec,
                 ref_cons,
+                ref_sync: RefRingSync::new(MAX_FRAMES),
                 mic_mono: vec![0.0; MAX_FRAMES],
                 far_mono: vec![0.0; MAX_FRAMES],
                 clean_mono: vec![0.0; MAX_FRAMES],
@@ -440,6 +446,22 @@ impl Vpio {
                     .map(|a| Layout::from(&a))
                     .unwrap_or(placeholder);
                 oc.layout = out_layout;
+                // Duplex sanity: the far-end ring is pushed at the output element's rate and
+                // popped at the input element's, and `output_cb` writes engine-rate samples
+                // without resampling — so both negotiated rates must equal VPIO_RATE. A
+                // mismatch drifts the AEC reference continuously (it never converges) and
+                // pitches the playback, so refuse to start; the caller falls back (default
+                // input, then a plain cpal output without a mic).
+                if !duplex_rates_ok(in_layout.rate, out_layout.rate, VPIO_RATE) {
+                    AudioUnitUninitialize(unit);
+                    return bail(
+                        unit,
+                        format!(
+                            "VPIO negotiated mismatched sample rates: input {} Hz, output {} Hz, expected {} Hz",
+                            in_layout.rate, out_layout.rate, VPIO_RATE
+                        ),
+                    );
+                }
             }
 
             let st = AudioOutputUnitStart(unit);
@@ -614,6 +636,13 @@ unsafe extern "C-unwind" fn input_cb(
                 ctx.event
                     .fetch_or(crate::device::EVENT_INPUT_LOST, Ordering::Release);
             }
+            // The output callback still pushed this cycle's reference: consume (discard) it so
+            // push/pop stay 1:1 and the ring never accumulates a permanent backlog (which would
+            // delay the reference past the AEC's modeled round-trip — a non-causal echo the
+            // filter can never re-converge on). RT-safe: bounded wait-free pops.
+            for _ in 0..ctx.ref_sync.on_failure(frames) {
+                let _ = ctx.ref_cons.pop();
+            }
             return st;
         }
         if got_samples == 0 {
@@ -626,6 +655,11 @@ unsafe extern "C-unwind" fn input_cb(
             if ctx.err_streak == INPUT_LOST_STREAK {
                 ctx.event
                     .fetch_or(crate::device::EVENT_INPUT_LOST, Ordering::Release);
+            }
+            // Same 1:1 discard as the render-failure path above: an empty success also skipped
+            // the normal pops while the output side kept pushing.
+            for _ in 0..ctx.ref_sync.on_failure(frames) {
+                let _ = ctx.ref_cons.pop();
             }
             return 0;
         }
@@ -648,6 +682,13 @@ unsafe extern "C-unwind" fn input_cb(
                 0.5 * (ctx.render_buf[i * act_ch] + ctx.render_buf[i * act_ch + 1])
             };
             ctx.far_mono[i] = ctx.ref_cons.pop().unwrap_or(0.0);
+        }
+        // Trim any standing backlog left by cycles where this callback did not run at all
+        // (a silent device stall never reports an error): `ref_sync` compares the depth after
+        // the normal pops against its recorded healthy baseline and returns the extra samples
+        // to discard. Bounded by the ring capacity; RT-safe (wait-free pops).
+        for _ in 0..ctx.ref_sync.on_success(ctx.ref_cons.len()) {
+            let _ = ctx.ref_cons.pop();
         }
         // Cancel the loudspeaker echo from the mic, preserving the singing voice.
         ctx.aec
@@ -791,6 +832,32 @@ unsafe fn dev_get_u32(dev: u32, sel: u32, scope: u32) -> Option<u32> {
     }
 }
 
+unsafe fn dev_get_f64(dev: u32, sel: u32, scope: u32) -> Option<f64> {
+    use objc2_core_audio::{
+        kAudioObjectPropertyElementMain, AudioObjectGetPropertyData, AudioObjectPropertyAddress,
+    };
+    let addr = AudioObjectPropertyAddress {
+        mSelector: sel,
+        mScope: scope,
+        mElement: kAudioObjectPropertyElementMain,
+    };
+    let mut v: f64 = 0.0;
+    let mut size = std::mem::size_of::<f64>() as u32;
+    let st = AudioObjectGetPropertyData(
+        dev,
+        NonNull::from(&addr),
+        0,
+        std::ptr::null(),
+        NonNull::from(&mut size),
+        NonNull::new(&mut v as *mut f64 as *mut c_void)?,
+    );
+    if st == 0 {
+        Some(v)
+    } else {
+        None
+    }
+}
+
 unsafe fn dev_set_u32(dev: u32, sel: u32, scope: u32, v: u32) -> i32 {
     use objc2_core_audio::{
         kAudioObjectPropertyElementMain, AudioObjectPropertyAddress, AudioObjectSetPropertyData,
@@ -841,8 +908,9 @@ unsafe fn has_output_streams(dev: u32) -> bool {
 
 /// Request a small IO buffer on the device(s) the VPIO unit binds (cuts monitor/record latency and
 /// keeps the speaker→mic echo inside the AEC's filter), and return the estimated record round-trip
-/// in frames: ACOUSTIC flight + each leg's (buffer + safety offset + hardware latency). The AEC's
-/// own block latency is added by the caller. Used to time-align recorded takes on the timeline.
+/// in frames @ `ENGINE_SR`: ACOUSTIC flight + each leg's (buffer + safety offset + hardware
+/// latency), the per-device counts scaled from the device's nominal rate to engine-rate frames.
+/// The AEC's own block latency is added by the caller. Used to time-align recorded takes.
 ///
 /// `device_uid` is the mic the caller is about to bind (via `kAudioOutputUnitProperty_CurrentDevice`
 /// below). Decision logic per leg:
@@ -860,9 +928,10 @@ unsafe fn has_output_streams(dev: u32) -> bool {
 fn tune_io_and_round_trip(device_uid: Option<&str>) -> u32 {
     use objc2_core_audio::{
         kAudioDevicePropertyBufferFrameSize, kAudioDevicePropertyLatency,
-        kAudioDevicePropertySafetyOffset, kAudioHardwarePropertyDefaultInputDevice,
-        kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyScopeGlobal,
-        kAudioObjectPropertyScopeInput, kAudioObjectPropertyScopeOutput, kAudioObjectSystemObject,
+        kAudioDevicePropertyNominalSampleRate, kAudioDevicePropertySafetyOffset,
+        kAudioHardwarePropertyDefaultInputDevice, kAudioHardwarePropertyDefaultOutputDevice,
+        kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyScopeInput,
+        kAudioObjectPropertyScopeOutput, kAudioObjectSystemObject,
     };
     const WANT_FRAMES: u32 = 256;
     /// Speaker→mic acoustic flight on a laptop (~0.3 m ≈ 1.3 ms).
@@ -913,7 +982,17 @@ fn tune_io_and_round_trip(device_uid: Option<&str>) -> u32 {
             let buf = dev_get_u32(dev, kAudioDevicePropertyBufferFrameSize, kAudioObjectPropertyScopeGlobal).unwrap_or(WANT_FRAMES);
             let latency = dev_get_u32(dev, kAudioDevicePropertyLatency, lscope).unwrap_or(0);
             let safety = dev_get_u32(dev, kAudioDevicePropertySafetyOffset, lscope).unwrap_or(0);
-            round_trip += buf + latency + safety;
+            // BufferFrameSize/Latency/SafetyOffset are reported in frames at the DEVICE's
+            // nominal rate, but RECORD_LATENCY_FRAMES is published (and consumed by Dart) as
+            // frames @ ENGINE_SR — scale each leg before summing, or a 44.1/96 kHz device
+            // skews the take alignment by its rate ratio.
+            let dev_rate = dev_get_f64(
+                dev,
+                kAudioDevicePropertyNominalSampleRate,
+                kAudioObjectPropertyScopeGlobal,
+            )
+            .unwrap_or(ENGINE_SR);
+            round_trip += frames_at_engine_rate(buf + latency + safety, dev_rate);
         }
     }
     round_trip

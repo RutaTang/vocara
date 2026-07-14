@@ -15,6 +15,7 @@ pub mod graph_cell;
 pub mod live;
 pub mod node;
 pub mod ring;
+pub mod ring_sync;
 pub mod sample;
 pub mod source;
 pub mod wav;

@@ -2,6 +2,7 @@
 //! is fed back (clamped < 1) and mixed wet/dry. Buffers are sized in `prepare` (control thread),
 //! never on the audio callback.
 
+use crate::dsp::denormals::sanitize;
 use crate::node::{Node, ProcessIo};
 use crate::sample::{Smp, CHANNELS};
 
@@ -110,8 +111,10 @@ impl Node for DelayNode {
             let read = (self.pos + len - d) % len;
             let dl = self.buf_l[read];
             let dr = self.buf_r[read];
-            self.buf_l[self.pos] = l + dl * fb;
-            self.buf_r[self.pos] = r + dr * fb;
+            // Sanitize the feedback write (like reverb/biquad/compressor/gate): one non-finite
+            // input would otherwise re-inject NaN*fb into the ring every `d` samples forever.
+            self.buf_l[self.pos] = sanitize(l + dl * fb);
+            self.buf_r[self.pos] = sanitize(r + dr * fb);
             out[CHANNELS * i] = l * (1.0 - mix) + dl * mix;
             out[CHANNELS * i + 1] = r * (1.0 - mix) + dr * mix;
             self.pos = (self.pos + 1) % len;

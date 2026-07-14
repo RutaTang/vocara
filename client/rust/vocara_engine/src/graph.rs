@@ -121,6 +121,12 @@ impl GraphDesc {
         for e in &edges {
             let from = *id_to_pos.get(&e.from).ok_or(CompileError::BadEdge)?;
             let to = *id_to_pos.get(&e.to).ok_or(CompileError::BadEdge)?;
+            // Every node has exactly one output port (enforced above), so any from_port > 0 is
+            // out of range. Reject it here: in release the renderer would otherwise silently
+            // read port 0's buffer (only a debug_assert used to catch it).
+            if e.from_port != 0 {
+                return Err(CompileError::BadEdge);
+            }
             indeg[to] += 1;
             succ[from].push(to);
         }

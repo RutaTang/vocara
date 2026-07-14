@@ -6,7 +6,7 @@
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::command::{command_channel, CommandReceiver, CommandSender};
 use crate::dsp::denormals::FlushGuard;
@@ -271,6 +271,14 @@ pub struct EngineHandle {
     cmd_tx: CommandSender,
     sources: HashMap<NodeId, Producer<[Smp; CHANNELS]>>,
     retired: Vec<(*mut Graph, u64)>, // (ptr, block after which it's safe to free)
+    /// Whether a stream callback that can render the graph may be running. Maintained by the
+    /// audio host (device feature): it holds the lock while setting `true` BEFORE any stream is
+    /// built and `false` only AFTER every stream has been dropped (drop joins the callback).
+    /// `reap` reads it under the same lock, so a `false` read proves no RT thread can hold a
+    /// retired graph pointer — retirees are then freed immediately (the grace epoch would never
+    /// elapse, since `blocks` only advances while a callback renders). Defaults to `true`
+    /// (conservative: without a host the grace-epoch path behaves exactly as before).
+    renderer_gate: Arc<Mutex<bool>>,
     sr: f64,
     max_block: usize,
 }
@@ -359,6 +367,18 @@ impl EngineHandle {
         self.reap();
     }
 
+    /// The renderer-activity gate shared with the audio host (see the field doc). The host
+    /// stores stream up/down transitions through it; `reap` frees retirees immediately on a
+    /// `false` read.
+    pub fn renderer_gate(&self) -> Arc<Mutex<bool>> {
+        Arc::clone(&self.renderer_gate)
+    }
+
+    /// Retired graphs still awaiting their grace epoch (diagnostics / tests).
+    pub fn retired_count(&self) -> usize {
+        self.retired.len()
+    }
+
     /// Free any retired graphs whose grace epoch has elapsed, and drain any parameter
     /// commands a previous [`flush`](Self::flush) left pending against a full ring. Safe to
     /// call anytime on the control thread.
@@ -369,6 +389,25 @@ impl EngineHandle {
         // of a storm finishes delivering within milliseconds during playback instead of
         // waiting for the next user edit. Cheap no-op when nothing is pending.
         self.cmd_tx.flush();
+
+        if self.retired.is_empty() {
+            return;
+        }
+        // With no stream callback running (gate false) the grace epoch can never elapse —
+        // `blocks` only advances inside a render — so each commit would park one more full
+        // graph forever. A false read under the gate lock proves quiescence (the host sets
+        // false only after dropping — i.e. joining — every stream, and sets true before
+        // building one), so everything can be freed immediately. Poisoned lock → assume a
+        // renderer is running (conservative: fall through to the grace-epoch path).
+        let idle = self.renderer_gate.lock().map(|g| !*g).unwrap_or(false);
+        if idle {
+            for (ptr, _) in self.retired.drain(..) {
+                // SAFETY: the gate read proved no stream callback exists, and any stream the
+                // host starts later loads the CURRENT cell value — this retiree is unreachable.
+                unsafe { drop(Box::from_raw(ptr)) };
+            }
+            return;
+        }
 
         let now = self.shared.blocks.load(Ordering::Acquire);
         let mut i = 0;
@@ -416,6 +455,7 @@ pub fn spawn(
         cmd_tx,
         sources: producers,
         retired: Vec::new(),
+        renderer_gate: Arc::new(Mutex::new(true)),
         sr,
         max_block,
     };

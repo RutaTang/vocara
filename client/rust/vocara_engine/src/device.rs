@@ -10,7 +10,7 @@
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -569,9 +569,20 @@ fn writer_run(mut rec: Consumer<[Smp; CHANNELS]>, rx: mpsc::Receiver<WriterCmd>)
         loop {
             match rx.try_recv() {
                 Ok(WriterCmd::Start(path, ack)) => {
-                    if let Some(w) = wav.take() {
+                    // A Start while already recording finalizes the previous take first,
+                    // draining its buffered tail into it (mirroring Stop) so those frames
+                    // land in the take they belong to.
+                    if let Some(mut w) = wav.take() {
+                        while let Some(f) = rec.pop() {
+                            let _ = w.write_sample(f[0]);
+                        }
                         let _ = w.finalize();
                     }
+                    // Discard any stale frames still in the ring before creating the file:
+                    // the RT callback samples `rec_active` once per buffer, so a tail pushed
+                    // after the previous Stop's drain (or between drops of `rec_active`)
+                    // would otherwise be PREPENDED to the new take's WAV.
+                    while rec.pop().is_some() {}
                     match crate::wav::WavStream::create(&path, 1, ENGINE_SR as u32) {
                         Ok(w) => {
                             wav = Some(w);
@@ -835,9 +846,21 @@ fn audio_host_run(
     rt: Arc<RtCell>,
     input_cell: Arc<InputCell>,
     event: Arc<AtomicU32>,
+    renderer_gate: Arc<Mutex<bool>>,
     rx: mpsc::Receiver<HostCmd>,
     ready_tx: mpsc::Sender<Result<String, String>>,
 ) {
+    // Renderer-activity gate shared with `EngineHandle::reap`: it must read `true` from
+    // BEFORE any stream is built (a callback can fire the instant a build succeeds) until
+    // AFTER every stream has been dropped (drop joins the callback). A `false` read on the
+    // control thread then proves no RT callback can hold a retired graph pointer. A poisoned
+    // lock is impossible here (no panics while held), but degrade to a no-op regardless.
+    let set_gate = |v: bool| {
+        if let Ok(mut g) = renderer_gate.lock() {
+            *g = v;
+        }
+    };
+    set_gate(true);
     // Open the default output before serving commands; report success/failure.
     let mut out_stream = match build_output(None, &rt, &event) {
         Ok((handle, uid)) => {
@@ -845,6 +868,7 @@ fn audio_host_run(
             Some(handle)
         }
         Err(e) => {
+            set_gate(false);
             let _ = ready_tx.send(Err(e));
             return;
         }
@@ -858,6 +882,11 @@ fn audio_host_run(
     let mut cur_out_uid: Option<String> = None;
 
     while let Ok(cmd) = rx.recv() {
+        // Raise the gate BEFORE any command that may build a stream, then settle it to the
+        // real stream state after the command completes (Shutdown breaks out and settles to
+        // false after the loop). Conservative: a raised gate only means retirees wait for
+        // their grace epoch, exactly the pre-gate behavior.
+        set_gate(true);
         match cmd {
             HostCmd::SetOutput { uid, reply } => {
                 // While duplex VPIO owns the output (mic active), do NOT bring up a competing cpal
@@ -969,24 +998,29 @@ fn audio_host_run(
                 break;
             }
         }
+        set_gate(out_stream.is_some() || in_stream.is_some());
     }
     // Both streams (and this thread's `rt`/`input_cell` clones) drop here, on the host thread.
     drop(in_stream);
     drop(out_stream);
+    set_gate(false);
 }
 
 /// Spawn the audio-host thread, open the default output, and start rendering `rt`. Blocks until
 /// the initial stream is up (or fails). Returns the host handle plus the opened device's UID.
+/// `renderer_gate` (from [`crate::live::EngineHandle::renderer_gate`]) tracks whether any stream
+/// callback may be running, so the control thread can free retired graphs when none is.
 pub fn spawn_audio_host(
     rt: Arc<RtCell>,
     input_cell: Arc<InputCell>,
     event: Arc<AtomicU32>,
+    renderer_gate: Arc<Mutex<bool>>,
 ) -> Result<(AudioHost, String), String> {
     let (tx, rx) = mpsc::channel::<HostCmd>();
     let (ready_tx, ready_rx) = mpsc::channel::<Result<String, String>>();
     let join = std::thread::Builder::new()
         .name("vocara-audio-host".to_string())
-        .spawn(move || audio_host_run(rt, input_cell, event, rx, ready_tx))
+        .spawn(move || audio_host_run(rt, input_cell, event, renderer_gate, rx, ready_tx))
         .map_err(|e| format!("spawn audio host: {e}"))?;
     match ready_rx.recv() {
         Ok(Ok(uid)) => Ok((AudioHost { tx, join: Some(join) }, uid)),
@@ -1141,5 +1175,63 @@ mod record_writer_tests {
         assert!(prod.push([0.5, 0.5]));
         assert!(w.stop(), "a later clean recording must report success again");
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn start_discards_stale_ring_frames_from_the_previous_take() {
+        // The RT callback samples `rec_active` once per buffer, so a tail of the PREVIOUS
+        // take can land in the ring after Stop's drain. Drive `writer_run` directly so the
+        // stale frames are deterministically still in the ring when Start is processed
+        // (commands are handled before the drain step): they must be discarded, not
+        // prepended to the new take's WAV.
+        use super::{writer_run, WriterCmd};
+        let (mut prod, cons) = spsc::<[Smp; CHANNELS]>(1024);
+        for _ in 0..30 {
+            assert!(prod.push([0.5, 0.0])); // stale frames from the previous take
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let join = std::thread::spawn(move || writer_run(cons, rx));
+        let path = temp_wav("stale_start");
+        let (ack, ack_rx) = std::sync::mpsc::channel();
+        tx.send(WriterCmd::Start(path.to_str().unwrap().to_string(), ack)).unwrap();
+        assert!(ack_rx.recv().unwrap(), "start must ack the file creation");
+        for _ in 0..20 {
+            assert!(prod.push([0.75, 0.0])); // the new take's frames
+        }
+        let (sack, sack_rx) = std::sync::mpsc::channel();
+        tx.send(WriterCmd::Stop(sack)).unwrap();
+        assert!(sack_rx.recv().unwrap());
+        tx.send(WriterCmd::Shutdown).unwrap();
+        join.join().unwrap();
+        let bytes = std::fs::read(&path).expect("recorded WAV must exist");
+        // 44-byte header + ONLY the take's 20 mono 16-bit samples (30 stale ones discarded).
+        assert_eq!(bytes.len(), 44 + 20 * 2, "stale frames must not lead the new take");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn start_while_recording_finalizes_the_previous_take_and_starts_clean() {
+        let (mut prod, cons) = spsc::<[Smp; CHANNELS]>(1024);
+        let w = RecordWriter::spawn(cons);
+        let p1 = temp_wav("restart_a");
+        let p2 = temp_wav("restart_b");
+        assert!(w.start(p1.to_str().unwrap()));
+        for _ in 0..25 {
+            assert!(prod.push([0.25, 0.0]));
+        }
+        // Restart straight into take 2 without a Stop: take 1 must keep every frame pushed
+        // while it was live (its buffered tail drains into it, mirroring Stop), and take 2
+        // must contain only its own frames.
+        assert!(w.start(p2.to_str().unwrap()));
+        for _ in 0..10 {
+            assert!(prod.push([0.75, 0.0]));
+        }
+        assert!(w.stop());
+        let b1 = std::fs::read(&p1).expect("take 1 must exist");
+        let b2 = std::fs::read(&p2).expect("take 2 must exist");
+        assert_eq!(b1.len(), 44 + 25 * 2, "take 1 keeps its buffered tail");
+        assert_eq!(b2.len(), 44 + 10 * 2, "take 2 contains only its own frames");
+        let _ = std::fs::remove_file(&p1);
+        let _ = std::fs::remove_file(&p2);
     }
 }

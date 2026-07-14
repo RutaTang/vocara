@@ -244,6 +244,44 @@ fn delay_bypass_toggle_does_not_replay_stale_tail() {
     assert!(ghost < 1e-6, "stale pre-bypass audio replayed as a ghost echo, rms={ghost}");
 }
 
+/// One NaN input sample must not permanently poison the delay's feedback ring: the write
+/// `buf[pos] = in + delayed*fb` is sanitized (like reverb/biquad/compressor/gate), so the
+/// output recovers to finite once the poisoned frame has passed. Unsanitized, NaN*fb was
+/// re-injected into the ring every TIME_MS for the rest of the session.
+#[test]
+fn delay_recovers_after_a_nan_input() {
+    let block = 256usize;
+    let mut d = DelayNode::new();
+    d.prepare(SR, block);
+    d.set_param(dlparam::BYPASS, 0.0); // active (the node constructs bypassed)
+    d.set_param(dlparam::TIME_MS, 50.0); // 2400-frame line @ 48 kHz
+    d.set_param(dlparam::FEEDBACK, 0.5);
+    d.set_param(dlparam::MIX, 0.5);
+
+    // 1 s of tone with a single NaN frame near the start.
+    let mut input = to_stereo(&sine_mono(440.0, SR, 48_000, 0.5));
+    input[1000 * CHANNELS] = f32::NAN;
+    input[1000 * CHANNELS + 1] = f32::NAN;
+    let out = run_phase(&mut d, &input, SR, block);
+
+    // Sanity: the wet path is live (out != dry input), so the ring is actually exercised —
+    // a bypassed delay would pass this test trivially.
+    let wet_diff = input[100 * CHANNELS..200 * CHANNELS]
+        .iter()
+        .zip(&out[100 * CHANNELS..200 * CHANNELS])
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    assert!(wet_diff > 1e-3, "the wet path must be active for this test to be meaningful");
+
+    // The NaN input frame itself is unavoidably NaN (the dry path passes it through), but
+    // every later frame must be finite. Unsanitized, the poisoned ring slot re-emerged at
+    // frame 1000 + 2400 (and every 2400 frames after that, forever).
+    assert!(
+        all_finite(&out[1001 * CHANNELS..]),
+        "delay output must recover to finite after a single NaN input"
+    );
+}
+
 /// Same ghost-echo guard for the doubler's modulated delay lines (its bypass branch mirrors
 /// the delay's progressive clear).
 #[test]

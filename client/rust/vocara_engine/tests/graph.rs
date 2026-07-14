@@ -73,6 +73,22 @@ fn cycle_is_rejected_at_compile() {
 }
 
 #[test]
+fn out_of_range_from_port_is_rejected_at_compile() {
+    // Every node has exactly one output port, so from_port > 0 can never be valid. It must
+    // fail compile: in release the renderer silently read port 0's buffer instead (only a
+    // debug_assert caught the mismatch before).
+    let desc = GraphDesc {
+        nodes: vec![
+            NodeEntry::new(1, Box::new(GainPanNode::unity())),
+            NodeEntry::new(2, Box::new(MasterNode::unity())),
+        ],
+        edges: vec![Edge { from: 1, from_port: 1, to: 2, to_port: 0 }],
+        master: 2,
+    };
+    assert_eq!(desc.compile(SR, BLOCK).err(), Some(CompileError::BadEdge));
+}
+
+#[test]
 fn missing_master_is_rejected() {
     let desc = GraphDesc {
         nodes: vec![NodeEntry::new(1, Box::new(GainPanNode::unity()))],

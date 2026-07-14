@@ -32,6 +32,20 @@ pub fn lin_to_db(lin: f32) -> f32 {
     20.0 * (lin.abs() + DB_FLOOR).log10()
 }
 
+/// Convert a frame count measured at `device_rate` into the equivalent frame count at
+/// `ENGINE_SR`. CoreAudio reports device buffer sizes / latencies / safety offsets in frames
+/// at the DEVICE's nominal rate, while the engine publishes latencies in engine-rate frames
+/// (the Dart side divides by 48 000) — summing them unscaled skews every non-48 kHz device's
+/// latency by its rate ratio. A non-finite or non-positive rate passes the count through.
+#[inline]
+pub fn frames_at_engine_rate(frames: u32, device_rate: f64) -> u32 {
+    if device_rate.is_finite() && device_rate > 0.0 {
+        ((frames as f64) * (ENGINE_SR / device_rate)).round() as u32
+    } else {
+        frames
+    }
+}
+
 /// Zero an interleaved stereo buffer (only the live `frames` region).
 #[inline]
 pub fn clear(buf: &mut [Smp], frames: usize) {
@@ -45,5 +59,26 @@ pub fn clear(buf: &mut [Smp], frames: usize) {
 pub fn add_into(dst: &mut [Smp], src: &[Smp], frames: usize) {
     for i in 0..frames * CHANNELS {
         dst[i] += src[i];
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::frames_at_engine_rate;
+
+    #[test]
+    fn frames_scale_to_engine_rate() {
+        // Identity at the engine rate.
+        assert_eq!(frames_at_engine_rate(512, 48_000.0), 512);
+        // 44.1 kHz device frames grow by 48/44.1 (e.g. a 44.1 kHz USB interface).
+        assert_eq!(frames_at_engine_rate(441, 44_100.0), 480);
+        assert_eq!(frames_at_engine_rate(512, 44_100.0), 557); // 512 * 48/44.1 = 557.28 → 557
+        // High-rate device frames shrink.
+        assert_eq!(frames_at_engine_rate(960, 96_000.0), 480);
+        assert_eq!(frames_at_engine_rate(882, 88_200.0), 480);
+        // Degenerate rates pass the count through unchanged.
+        assert_eq!(frames_at_engine_rate(512, 0.0), 512);
+        assert_eq!(frames_at_engine_rate(512, -1.0), 512);
+        assert_eq!(frames_at_engine_rate(512, f64::NAN), 512);
     }
 }
