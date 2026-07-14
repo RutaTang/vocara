@@ -179,6 +179,35 @@ class _Oracle {
     rootWrites.putIfAbsent(handle, () => []).add((hlcPacked, live));
   }
 
+  /// Every OBSERVED committed root-row state, per handle: (packed hlc,
+  /// content field). The content field is the root's human-visible column
+  /// (practices.title / techniques.name), read back from the row right after
+  /// every creation and every successful save — each entry is a real,
+  /// committed (hlc -> content) association. This is the lost-update canary:
+  /// at quiescence a LIVE root must show the content of the highest-HLC
+  /// observation. Derived writes (integrity heals, slot resolutions) bump a
+  /// row's HLC WITHOUT changing content, so a device may hold a higher HLC
+  /// than any observation — but never different content, unless a derived
+  /// full-row snapshot reverted a real edit (the known derived-repair-stamp
+  /// gap; see docs/sync-protocol.md, "Known design gap").
+  final Map<String, List<(String, String)>> rootContent = {};
+
+  void recordRootContent(String handle, String hlcPacked, String content) {
+    rootContent.putIfAbsent(handle, () => []).add((hlcPacked, content));
+  }
+
+  /// The content of the highest-HLC observed root state (never null for a
+  /// created root — creation records the first observation).
+  String? expectedContent(String handle) {
+    final states = rootContent[handle];
+    if (states == null || states.isEmpty) return null;
+    var best = states.first;
+    for (final s in states.skip(1)) {
+      if (s.$1.compareTo(best.$1) > 0) best = s;
+    }
+    return best.$2;
+  }
+
   /// Whether [handle] should be LIVE everywhere at quiescence: the recorded
   /// write with the greatest packed HLC wins (exactly the engine's LWW rule).
   bool expectedLive(String handle) {
@@ -515,6 +544,7 @@ class _Episode {
       await _rootHlc(d, 'practices', id),
       live: true,
     );
+    await _observeRootContent(d, handle);
     _log('#$_opIndex ${d.name} createPractice($handle)');
   }
 
@@ -543,6 +573,7 @@ class _Episode {
       await _rootHlc(d, 'techniques', id),
       live: true,
     );
+    await _observeRootContent(d, handle);
     _log('#$_opIndex ${d.name} createTechnique($handle)');
   }
 
@@ -579,6 +610,29 @@ class _Episode {
       _fail('#$_opIndex ${d.name} expected a $table row for $id');
     }
     return row.data['h']! as String;
+  }
+
+  /// Records an oracle content observation of [handle]'s committed root row
+  /// on [d]: the (hlc_packed, title/name) pair exactly as persisted right
+  /// now. Called after every creation and every successful save, so the
+  /// oracle knows which content belongs to which HLC (see
+  /// [_Oracle.rootContent]).
+  Future<void> _observeRootContent(_Dev d, String handle) async {
+    final table = oracle.rootTable[handle]!;
+    final id = oracle.rootId[handle]!;
+    final col = table == 'practices' ? 'title' : 'name';
+    final row = await d.db
+        .customSelect(
+          'SELECT hlc_packed AS h, $col AS c FROM $table WHERE id = ?',
+          variables: [Variable.withString(id)],
+        )
+        .getSingleOrNull();
+    if (row == null) return;
+    oracle.recordRootContent(
+      handle,
+      row.data['h']! as String,
+      row.data['c']! as String,
+    );
   }
 
   Future<void> _openEditor(_Dev d, {String note = ''}) async {
@@ -1003,6 +1057,13 @@ class _Episode {
         live: true,
       );
     }
+    // Content observation for EVERY successful save (not just root-dirty
+    // ones): a save whose reconciled root content changed for any reason —
+    // e.g. a child edit moving the timeline duration — rewrites the root row
+    // with a fresh HLC while keeping whatever title this device held, and
+    // that state can legitimately win fleet-wide LWW. Observing it keeps the
+    // content oracle exactly as permissive as the engine's real semantics.
+    await _observeRootContent(d, e.handle);
     // Oracle: removals that actually tombstoned a persisted row are explicit
     // deletes; if such a row is live at quiescence, some editor must have
     // touched it (rule 3/5: active editor wins) — anything else is a
@@ -1457,6 +1518,31 @@ class _Episode {
             '  row state: ${states.join('; ')}\n'
             '  cloud history:\n    ${history.join('\n    ')}',
           );
+        }
+        // Content canary: a live root must show the content of the
+        // highest-HLC OBSERVED committed state. Derived writes (heals, slot
+        // resolutions) raise a row's HLC but never its content, so any
+        // mismatch means a full-row snapshot reverted a real edit — the
+        // derived-repair-stamp lost-update class (docs/sync-protocol.md,
+        // "Known design gap").
+        if (expectLive) {
+          final col = table == 'practices' ? 'title' : 'name';
+          final expected = oracle.expectedContent(handle);
+          final shown = await d.db
+              .customSelect(
+                'SELECT $col AS c FROM $table WHERE id = ?',
+                variables: [Variable.withString(id)],
+              )
+              .getSingle();
+          final actual = shown.data['c'] as String?;
+          if (expected != null && actual != expected) {
+            _fail(
+              'ORACLE FAILURE: $handle ($table/$id) on ${d.name} shows '
+              '$col "$actual" but the highest-HLC observed state holds '
+              '"$expected" — a full-row snapshot reverted a real edit '
+              '(derived-repair-stamp lost update)',
+            );
+          }
         }
       }
     }

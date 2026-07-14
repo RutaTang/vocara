@@ -456,6 +456,147 @@ void main() {
     });
   });
 
+  group('quarantine replay', () {
+    test('a fresh device with a slow clock parks EVERY inbound row while the '
+        'token marches to head; fixing the clock lets the next pull replay '
+        'them all (quarantine is not a black hole)', () async {
+      // Rows stamped at "true" time by a healthy remote device.
+      cloud.accept(remotePractice('P1', 'one', remoteHlc(t0)));
+      cloud.accept(remotePractice('P2', 'two', remoteHlc(t0 + 10)));
+      // This device's wall clock is 10 minutes SLOW. Fresh install: empty DB
+      // means maxWallEverSeen is 0, so the drift gate judges against the bad
+      // local `now` alone and every correctly-stamped row looks far-future.
+      nowMs = t0 - 10 * 60 * 1000;
+
+      final bad = await engine.pumpPull();
+      expect(bad.failed, isFalse);
+      expect(bad.quarantined, 2);
+      expect(await practiceTitle('P1'), isNull);
+      expect(await quarantine.list(), hasLength(2));
+      expect(
+        await state.changeToken(),
+        '2',
+        reason: 'the token is already PAST the parked rows: the server will '
+            'never re-deliver them, only replay can let them in',
+      );
+
+      // The clock is corrected. The cloud has nothing new (token at head).
+      nowMs = t0 + 1000;
+      final recovered = await engine.pumpPull();
+      expect(recovered.failed, isFalse);
+      expect(await practiceTitle('P1'), 'one');
+      expect(await practiceTitle('P2'), 'two');
+      expect(await quarantine.list(), isEmpty);
+      expect(await oplogCount(), 0, reason: 'replayed applies journal nothing');
+    });
+
+    test('an apply-failure record replays once the failure cause is gone '
+        '(the schema gains the unknown column)', () async {
+      final rec = remotePractice('P', 'future schema', remoteHlc(t0 - 1000));
+      cloud.accept(
+        SyncRow(
+          table: 'practices',
+          fields: {...rec.fields, 'brand_new_column': 7},
+        ),
+      );
+
+      final first = await engine.pumpPull();
+      expect(first.failed, isFalse);
+      expect(first.failedRecords, 1);
+      expect(await practiceTitle('P'), isNull);
+      expect(await quarantine.list(), hasLength(1));
+
+      // Simulate the app upgrade that understands the new column.
+      await db.customStatement(
+        'ALTER TABLE practices ADD COLUMN brand_new_column INTEGER',
+      );
+      final upgraded = await engine.pumpPull();
+      expect(upgraded.failed, isFalse);
+      expect(await practiceTitle('P'), 'future schema');
+      expect(await quarantine.list(), isEmpty);
+    });
+
+    test('a parked row that lost LWW meanwhile replays as a clean no-op and '
+        'its entry is removed (LWW settles it even while the original '
+        'failure cause persists)', () async {
+      // v1 carries a column from the future -> parked on arrival.
+      final v1 = remotePractice('P', 'stale v1', remoteHlc(t0 - 2000));
+      cloud.accept(
+        SyncRow(
+          table: 'practices',
+          fields: {...v1.fields, 'brand_new_column': 1},
+        ),
+      );
+      final first = await engine.pumpPull();
+      expect(first.failedRecords, 1);
+      expect(await practiceTitle('P'), isNull);
+      expect(await quarantine.list(), hasLength(1));
+
+      // A NEWER, well-formed edit of the same row arrives and applies. The
+      // end-of-run replay then finds the parked v1 strictly older than the
+      // stored row: the applier's LWW comparison short-circuits BEFORE any
+      // write (the unknown column never matters again), the replay is a
+      // clean no-op, and the obsolete entry is settled — never a regression
+      // of the row, never an entry retried forever.
+      cloud.accept(remotePractice('P', 'fresh v2', remoteHlc(t0 - 1000)));
+      final second = await engine.pumpPull();
+      expect(second.failed, isFalse);
+      expect(second.applied, 1);
+      expect(
+        await practiceTitle('P'),
+        'fresh v2',
+        reason: 'the stale replay lost LWW cleanly',
+      );
+      expect(
+        await quarantine.list(),
+        isEmpty,
+        reason: 'the obsolete entry is removed, not retried forever',
+      );
+    });
+
+    test('parked parent and child replay parent-first (table rank order) '
+        'even when the child parked first', () async {
+      nowMs = t0 - 10 * 60 * 1000; // slow clock: everything inbound parks
+      // The child arrives (and parks) BEFORE its parent: parked-at order is
+      // child-first, so replay must re-order by the FK-derived table rank.
+      cloud.accept(remoteTrack('T', 'P', remoteHlc(t0)));
+      expect((await engine.pumpPull()).quarantined, 1);
+      cloud.accept(remotePractice('P', 'parent', remoteHlc(t0 + 10)));
+      expect((await engine.pumpPull()).quarantined, 1);
+      expect(await quarantine.list(), hasLength(2));
+
+      nowMs = t0 + 1000; // clock fixed
+      final run = await engine.pumpPull();
+      expect(run.failed, isFalse);
+      expect(await practiceTitle('P'), 'parent');
+      final track = await db
+          .customSelect(
+            'SELECT id FROM tracks WHERE id = ?',
+            variables: [Variable.withString(_id('T'))],
+          )
+          .getSingleOrNull();
+      expect(track, isNotNull, reason: 'the child landed after its parent');
+      expect(await quarantine.list(), isEmpty);
+    });
+
+    test('a still-rejected record keeps its entry parked (replay is a bounded '
+        'retry, never a drop)', () async {
+      cloud.accept(
+        remotePractice('FUT', 'poison', remoteHlc(t0 + 6 * 60 * 1000)),
+      );
+      await engine.pumpPull();
+      expect(await quarantine.list(), hasLength(1));
+      // The clock has NOT recovered: every later pull replays, re-rejects,
+      // and re-parks the same single entry — no growth, no loss.
+      await engine.pumpPull();
+      await engine.pumpPull();
+      final parked = await quarantine.list();
+      expect(parked, hasLength(1));
+      expect(parked.single.id, _id('FUT'));
+      expect(await practiceTitle('FUT'), isNull);
+    });
+  });
+
   group('poke wiring', () {
     test('pokes fire only AFTER a transaction completes, and a rolled-back '
         'write drains to a no-op push', () async {

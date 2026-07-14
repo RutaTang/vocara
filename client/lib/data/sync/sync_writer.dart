@@ -64,12 +64,27 @@ class SyncWriter {
   /// excluded by the caller). Used both as the oplog payload hash and for
   /// reconcile change-detection. Values are canonicalized (a fixed encoding)
   /// so a re-serialization that only reorders fields is not a phantom change.
+  ///
+  /// Non-finite doubles (NaN / ±Infinity) are refused loudly with a clear
+  /// [ArgumentError]: jsonEncode would throw on them anyway, but with an
+  /// unactionable message — and letting one anywhere near a row write would
+  /// be worse (SQLite stores NaN as NULL, so the hash would stop describing
+  /// the persisted row). No bounded UI input produces one today; this is the
+  /// deterministic guard at the hashing boundary (repositories surface it as
+  /// a save-time Result.error, like every data-layer refusal).
   static String contentHashOf(List<Object?> contentColumns) {
     final canonical = jsonEncode(contentColumns.map(_canonical).toList());
     return sha256.convert(utf8.encode(canonical)).toString();
   }
 
   static Object? _canonical(Object? v) {
+    if (v is double && !v.isFinite) {
+      throw ArgumentError.value(
+        v,
+        'contentColumns',
+        'non-finite double is not representable in a sync content hash',
+      );
+    }
     if (v is Map) {
       final keys = v.keys.map((k) => k.toString()).toList()..sort();
       return {for (final k in keys) k: _canonical(v[k])};

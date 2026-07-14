@@ -129,7 +129,10 @@ class SyncApplier {
               // UNIQUE index; inserting a second LIVE row for an occupied slot raises a
               // UNIQUE violation. Resolving here (and the whole write) is in this
               // record's savepoint, so a failure rolls back the occupant tombstone too.
-              final columns = await _resolveSlot(rec);
+              final columns = _stripPerDevice(
+                rec.table,
+                await _resolveSlot(rec),
+              );
               if (existing == null) {
                 await _insert(rec.table, columns);
                 didInsert = true;
@@ -412,6 +415,28 @@ class SyncApplier {
             createdAt: hlc.wallMs,
           ),
         );
+  }
+
+  /// Drops [perDeviceColumns] from an inbound record before writing. The
+  /// builder already strips them from the outbound projection, but a peer on
+  /// an older build (or any non-conforming pusher) may still send them —
+  /// applying them verbatim would overwrite THIS device's local bookkeeping
+  /// (e.g. clobbering assets.local_rel_path so resolve() misses bytes that
+  /// exist here). Stripped, they are ordinary missing columns: an UPDATE
+  /// leaves the local values untouched and an INSERT takes the schema
+  /// defaults.
+  static Map<String, Object?> _stripPerDevice(
+    String table,
+    Map<String, Object?> columns,
+  ) {
+    final perDevice = perDeviceColumns[table];
+    if (perDevice == null || !columns.keys.any(perDevice.contains)) {
+      return columns;
+    }
+    return {
+      for (final e in columns.entries)
+        if (!perDevice.contains(e.key)) e.key: e.value,
+    };
   }
 
   Future<void> _insert(String table, Map<String, Object?> columns) {

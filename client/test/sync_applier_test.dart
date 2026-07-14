@@ -256,6 +256,104 @@ void main() {
     });
   });
 
+  group('per-device asset columns', () {
+    RemoteRecord asset(
+      String id,
+      Hlc h, {
+      String ext = 'wav',
+      Map<String, Object?> extra = const {},
+    }) => RemoteRecord(
+      table: 'assets',
+      columns: {
+        'id': _id(id),
+        'content_hash': 'HASH_$id',
+        'byte_size': 8,
+        'ext': ext,
+        'kind': 'audio',
+        'created_at': h.wallMs,
+        'updated_at': h.wallMs,
+        'deleted_at': null,
+        'hlc_wall': h.wallMs,
+        'hlc_ctr': h.counter,
+        'hlc_node': h.node,
+        'hlc_packed': h.packed,
+        'schema_v': 1,
+        ...extra,
+      },
+    );
+
+    Future<Map<String, Object?>> assetRow(String id) async {
+      final r = await db
+          .customSelect(
+            'SELECT ext, local_rel_path, record_sync_state, '
+            'bytes_sync_state, remote_ref FROM assets WHERE id = ?',
+            variables: [Variable.withString(_id(id))],
+          )
+          .getSingle();
+      return r.data;
+    }
+
+    test('a remote UPDATE that still carries per-device columns (older-build '
+        'peer) wins LWW without clobbering local bookkeeping', () async {
+      // Local state: bytes materialized HERE as an .mp3 under this device's
+      // pool path, with its own sync-state bookkeeping.
+      await applier.apply([asset('A', hlc(900), ext: 'mp3')]);
+      await db.customStatement(
+        "UPDATE assets SET local_rel_path = 'assets/HA/SH/HASH_A.mp3', "
+        "record_sync_state = 'synced', bytes_sync_state = 'present', "
+        "remote_ref = 'blob://HASH_A' WHERE id = ?",
+        [_id('A')],
+      );
+
+      // A newer remote version arrives carrying the SENDER's per-device
+      // values (a .wav rel path that does not exist here, localOnly states).
+      final res = await applier.apply([
+        asset(
+          'A',
+          hlc(950),
+          extra: const {
+            'local_rel_path': 'assets/HA/SH/HASH_A.wav',
+            'record_sync_state': 'localOnly',
+            'bytes_sync_state': 'localOnly',
+            'remote_ref': null,
+          },
+        ),
+      ]);
+      expect(res.applied, 1);
+
+      final row = await assetRow('A');
+      expect(row['ext'], 'wav', reason: 'the synced content applied');
+      // The per-device bookkeeping survived the winning remote apply.
+      expect(row['local_rel_path'], 'assets/HA/SH/HASH_A.mp3');
+      expect(row['record_sync_state'], 'synced');
+      expect(row['bytes_sync_state'], 'present');
+      expect(row['remote_ref'], 'blob://HASH_A');
+    });
+
+    test('a remote INSERT with per-device columns lands on schema defaults '
+        '(no adopted foreign bookkeeping)', () async {
+      final res = await applier.apply([
+        asset(
+          'B',
+          hlc(900),
+          extra: const {
+            'local_rel_path': 'assets/XX/YY/HASH_B.wav',
+            'record_sync_state': 'synced',
+            'bytes_sync_state': 'present',
+            'remote_ref': 'blob://HASH_B',
+          },
+        ),
+      ]);
+      expect(res.applied, 1);
+
+      final row = await assetRow('B');
+      expect(row['local_rel_path'], isNull, reason: 'no bytes here yet');
+      expect(row['record_sync_state'], 'localOnly');
+      expect(row['bytes_sync_state'], 'localOnly');
+      expect(row['remote_ref'], isNull);
+    });
+  });
+
   group('quarantine persistence', () {
     late QuarantineStore store;
 

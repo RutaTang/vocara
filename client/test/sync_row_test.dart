@@ -227,6 +227,42 @@ void main() {
       expect(row.fieldClocks, isNull); // v1 never sets the reserved slot
     });
 
+    test('strips the PER-DEVICE asset columns from the wire projection '
+        '(local_rel_path and the sync-state bookkeeping stay home)', () async {
+      await db
+          .into(db.assets)
+          .insert(
+            AssetsCompanion.insert(
+              id: _id('A1'),
+              contentHash: 'HASH_A1',
+              byteSize: 8,
+              ext: const Value('wav'),
+              localRelPath: const Value('assets/HA/SH/HASH_A1.wav'),
+              recordSyncState: const Value('synced'),
+              bytesSyncState: const Value('present'),
+              remoteRef: const Value('blob://HASH_A1'),
+              createdAt: 1,
+              updatedAt: 2,
+              hlcWall: hlc.wallMs,
+              hlcCtr: hlc.counter,
+              hlcNode: hlc.node,
+              hlcPacked: hlc.packed,
+            ),
+          );
+      final row = await builder.build('assets', _id('A1'));
+      expect(row, isNotNull);
+      // Exactly the drift schema minus the per-device set — tables.dart
+      // documents these as "stripped from the wire projection".
+      final expected = db.assets.$columns.map((c) => c.name).toSet()
+        ..removeAll(perDeviceColumns['assets']!);
+      expect(row!.fields.keys.toSet(), expected);
+      expect(row.fields['content_hash'], 'HASH_A1');
+      expect(row.fields.containsKey('local_rel_path'), isFalse);
+      expect(row.fields.containsKey('record_sync_state'), isFalse);
+      expect(row.fields.containsKey('bytes_sync_state'), isFalse);
+      expect(row.fields.containsKey('remote_ref'), isFalse);
+    });
+
     test('returns null for a missing row id', () async {
       await seed();
       expect(await builder.build('practices', _id('NOPE')), isNull);

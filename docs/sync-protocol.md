@@ -104,6 +104,29 @@ compaction only removes superseded entries).
   re-push its full state (all rows are full-state LWW). Blob backups are
   still recommended (audio bytes may exist on only one device).
 
+## Known design gap (must be addressed in the P1 protocol pass)
+
+**Derived-repair-stamp lost update.** Client-side derived writes (integrity
+repair heals, the single-slot resolution tombstone) deliberately stamp
+`(base.wall, base.counter + 1, healerNode)` — just above the row state they
+repaired, so bookkeeping never out-ranks a later real edit. The gap: an
+AUTHOR editing the same row while its clock wall is HELD (offline with a
+clock corrected backwards, or a second edit within one wall millisecond)
+stamps `(base.wall, base.counter + 1, authorNode)` for the same base — the
+two stamps tie on (wall, counter) and the node id breaks the tie. If
+`healerNode > authorNode`, the healer's push WINS, and because rows are
+FULL-ROW snapshots the healer's copy — which may predate the author's edit —
+silently reverts every other field of that edit (e.g. a title change riding
+in the same row as the healed pointer), fleet-wide. Exposure in P0 is narrow
+(held wall + losing node id + a heal of the same row on a peer that has not
+yet applied the edit), but the P1 design must close it. Candidates:
+column-level LWW via the reserved `fieldClocks` slot, or a derived-stamp
+discipline that can never enter another device's tick range. Do NOT paper
+over it by changing the stamp derivation alone — a fresh-tick stamp was the
+original resurrection bug (seed `0xab1a57`). The convergence simulation's
+oracle now also compares root CONTENT (titles/names) at quiescence, so this
+class of lost update is detectable if an episode ever hits it.
+
 ## Auth (Phase 1 decision)
 
 The transport carries an opaque bearer token; account/identity management is

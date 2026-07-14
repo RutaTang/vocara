@@ -61,4 +61,31 @@ void main() {
     ]);
     expect(h3, isNot(h1));
   });
+
+  test('contentHashOf rejects non-finite doubles with a clear ArgumentError '
+      '(jsonEncode would throw an unactionable Error instead)', () {
+    expect(() => SyncWriter.contentHashOf([double.nan]), throwsArgumentError);
+    expect(
+      () => SyncWriter.contentHashOf(['x', double.infinity]),
+      throwsArgumentError,
+    );
+    // Nested values are guarded too (the canonicalizer recurses).
+    expect(
+      () => SyncWriter.contentHashOf([
+        {'pan': double.negativeInfinity},
+      ]),
+      throwsArgumentError,
+    );
+    expect(
+      () => SyncWriter.contentHashOf([
+        [1.0, double.nan],
+      ]),
+      throwsArgumentError,
+    );
+    // Ordinary finite doubles keep hashing deterministically.
+    expect(
+      SyncWriter.contentHashOf([1.0, -0.5]),
+      SyncWriter.contentHashOf([1.0, -0.5]),
+    );
+  });
 }

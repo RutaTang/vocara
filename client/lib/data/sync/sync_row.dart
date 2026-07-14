@@ -6,9 +6,10 @@ import '../db/app_database.dart';
 import 'hlc.dart';
 
 /// One synced row in transit — the single wire shape shared by the transport
-/// (push/pull) and the [SyncApplier]. [fields] carries EVERY column of the row
-/// under its SQL name, in the database's value conventions (booleans as ints,
-/// REAL as double, NULL as null); the envelope duplicates the identity trio
+/// (push/pull) and the [SyncApplier]. [fields] carries every SYNCED column of
+/// the row under its SQL name (all columns minus the few [perDeviceColumns]),
+/// in the database's value conventions (booleans as ints, REAL as double,
+/// NULL as null); the envelope duplicates the identity trio
 /// (id / schema_v / hlc_packed) at the top level for cheap routing without
 /// parsing the field map — encode/decode verifies the two stay consistent.
 class SyncRow {
@@ -149,6 +150,24 @@ const Set<String> _syncColNames = {
   'schema_v',
 };
 
+/// PER-DEVICE columns, by table: local bookkeeping that must never cross the
+/// wire (the Assets doc in tables.dart — "stripped from the wire
+/// projection"). [SyncRowBuilder] omits them from the outbound projection and
+/// [SyncApplier] drops them from inbound records, so one device's bookkeeping
+/// can never clobber another's (e.g. A's `<hash>.wav` local_rel_path
+/// overwriting the path of B's already-materialized `<hash>.mp3`, making B's
+/// resolve() miss bytes that exist). An absent column is the applier's normal
+/// missing-column case: an UPDATE leaves the local value untouched and an
+/// INSERT takes the schema default.
+const Map<String, Set<String>> perDeviceColumns = {
+  'assets': {
+    'local_rel_path',
+    'record_sync_state',
+    'bytes_sync_state',
+    'remote_ref',
+  },
+};
+
 /// Table name -> drift [TableInfo] for exactly the SYNCED tables. Derived
 /// structurally from the SyncCols mixin's columns rather than a hand-kept list
 /// so a new synced table can never be silently left out (same philosophy as
@@ -162,7 +181,8 @@ Map<String, TableInfo<Table, dynamic>> syncedTableRegistry(AppDatabase db) => {
 
 /// Reads current rows generically (via the drift [TableInfo] registry) and
 /// projects them into the wire format. Every column of a synced table is
-/// synced by design, so the projection is simply "all columns".
+/// synced by design, so the projection is "all columns" minus the few
+/// [perDeviceColumns] (local bookkeeping that must not leave this device).
 class SyncRowBuilder {
   SyncRowBuilder(this._db) : _tables = syncedTableRegistry(_db);
 
@@ -250,8 +270,11 @@ class SyncRowBuilder {
         )
         .getSingleOrNull();
     if (row == null) return null;
+    final perDevice =
+        perDeviceColumns[info.actualTableName] ?? const <String>{};
     final fields = <String, Object?>{};
     for (final c in info.$columns) {
+      if (perDevice.contains(c.name)) continue; // never leaves this device
       final value = row.data[c.name];
       if (value is List<int>) {
         // No synced table carries a BLOB today; refuse loudly rather than let

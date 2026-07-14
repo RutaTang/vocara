@@ -135,6 +135,13 @@ class PullRun {
 ///    rollback's spurious poke drains to a no-op, see [start]).
 ///  * Data safety over progress: any failure leaves the oplog entries unacked
 ///    and the token unmoved; the next pump simply retries.
+///  * Quarantine is a parking lot, never a black hole: the change token
+///    advances past a quarantined record's page when its batch commits, and
+///    the server only re-delivers seq > token — so nothing would ever deliver
+///    a parked row again. Every pull run therefore REPLAYS the parking lot
+///    through the applier with fresh drift/schema checks
+///    ([_replayQuarantine]); a recovered clock or an upgraded schema lets the
+///    rows in, and a row that lost LWW meanwhile is settled and dropped.
 ///
 /// ASSET GATE: an oplog entry carrying [PendingOplogEntry.dependsOnAssetId]
 /// whose asset bytes have no `asset_sync` upload marker is HELD BACK — the row
@@ -442,6 +449,8 @@ class SyncEngine {
 
   /// Fetches remote pages and applies each one atomically WITH its change
   /// token (one transaction per page, via the applier's `beforeCommit` hook).
+  /// The quarantine parking lot is replayed at the START of the run and
+  /// again once caught up (see [_replayQuarantine] for why pull owns this).
   /// After the run has caught up: ONE integrity repair in its own
   /// transaction, then the buffered [onRemoteApplied] events. Stops at the
   /// first failure with the token exactly at the last committed page.
@@ -473,10 +482,19 @@ class SyncEngine {
     var skipped = 0;
     var quarantined = 0;
     var failedRecords = 0;
+    // Rows the quarantine replay landed this run (they count toward the
+    // repair gate, not toward the page counters — they are not page rows).
+    var replayed = 0;
     // Events buffered until the end-of-run repair has run (listeners must
     // always reload an already-consistent view).
     final announcements = <RemoteApplied>[];
     try {
+      // Replay the quarantine parking lot FIRST: the token is already past
+      // those rows, so no fetch will ever re-deliver them — a recovered
+      // clock or an upgraded schema must be able to let them in even when
+      // this run fetches nothing new (the fresh-device-with-a-slow-clock
+      // case parks EVERY first-pull row while the token marches to head).
+      replayed = await _replayQuarantine();
       var token = await _state.changeToken();
       while (true) {
         final page = await _transport.fetchChanges(token);
@@ -514,7 +532,11 @@ class SyncEngine {
         }
         if (!page.hasMore) break;
       }
-      if (applied > 0 || _repairDebt) {
+      // Replay once more after catching up: this run's successful receives
+      // may have raised the clock's max-wall-ever-seen (or delivered a
+      // missing parent), unlocking rows parked just moments ago.
+      replayed += await _replayQuarantine();
+      if (applied > 0 || replayed > 0 || _repairDebt) {
         // Caught up: repair the invariants closure ONCE, in one transaction
         // so each repair write commits with its journal entry, then announce.
         await _db.transaction(() => _integrity.repair());
@@ -534,7 +556,7 @@ class SyncEngine {
       // Aborted mid-backlog: committed pages exist without their repair (and
       // without their announcements — freshness only, see [RemoteApplied]).
       // Carry the repair forward so the next successful run settles it.
-      if (applied > 0) _repairDebt = true;
+      if (applied > 0 || replayed > 0) _repairDebt = true;
       return PullRun(
         pages: pages,
         applied: applied,
@@ -544,6 +566,66 @@ class SyncEngine {
         failure: e,
       );
     }
+  }
+
+  /// Re-attempts every quarantined record through the NORMAL applier path
+  /// and returns how many actually applied. Bounded and idempotent — safe to
+  /// run every cycle: one single-record apply per parked row, nothing spins.
+  ///
+  /// Each replay gets a FRESH gate pass inside [SyncApplier.apply]: the HLC
+  /// drift check runs against the clock's CURRENT state (a corrected local
+  /// clock, or honest stamps received since parking raising
+  /// max-wall-ever-seen, un-park drift rejects) and the write re-runs against
+  /// the CURRENT schema (an app upgrade un-parks forward-incompatible rows).
+  ///
+  /// Ordering: parent tables before child tables (the same parent-first
+  /// contract as push, via [SyncRowBuilder.tableRanks], so a parked child
+  /// lands after its parked parent within one pass), original parked order
+  /// within a rank (the quarantine store lists parked-at ascending).
+  ///
+  /// Interaction with rows applied since parking is safe by construction —
+  /// row-level LWW makes a stale replay lose cleanly: the applier compares
+  /// the parked hlc_packed against the CURRENT row and skips the write when
+  /// the parked state is older. Outcomes per row:
+  ///  * applied — the record landed; its parking-lot entry is deleted.
+  ///  * skipped — lost LWW to something newer applied since parking; the
+  ///    parked state is obsolete, so its entry is deleted too. (The delete
+  ///    runs after the apply's commit; a crash in between just re-replays it
+  ///    as another clean skip next run.)
+  ///  * quarantined / failed — still rejected; the applier itself re-parked
+  ///    the latest state, so the entry stays for a later cycle.
+  /// An undecodable payload is kept parked for manual review (it can never
+  /// re-apply, but dropping it silently is exactly what quarantine exists to
+  /// prevent).
+  Future<int> _replayQuarantine() async {
+    final store = _applier.quarantine;
+    if (store == null) return 0;
+    final parked = await store.list();
+    if (parked.isEmpty) return 0;
+    final ranks = parked.length > 1
+        ? await _builder.tableRanks()
+        : const <String, int>{};
+    final indexed = parked.indexed.toList()
+      ..sort((a, b) {
+        final byRank = (ranks[a.$2.tbl] ?? 0).compareTo(ranks[b.$2.tbl] ?? 0);
+        return byRank != 0 ? byRank : a.$1.compareTo(b.$1);
+      });
+    var applied = 0;
+    for (final (_, q) in indexed) {
+      SyncRow row;
+      try {
+        row = SyncRow.decode(q.payload);
+      } on FormatException {
+        continue; // undecodable: keep parked (see doc comment)
+      }
+      final result = await _applier.apply([row]);
+      if (!result.committed) break; // storage trouble — retry next run
+      if (result.applied > 0 || result.skipped > 0) {
+        await store.delete(q.tbl, q.id);
+        applied += result.applied;
+      }
+    }
+    return applied;
   }
 
   void _fireRemoteApplied(RemoteApplied event) {
