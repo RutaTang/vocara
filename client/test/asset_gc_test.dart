@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:drift/native.dart';
@@ -7,6 +8,7 @@ import 'package:vocara/data/db/app_database.dart';
 import 'package:vocara/data/db/asset_store.dart';
 import 'package:vocara/data/repositories/song_practice_repository_drift.dart';
 import 'package:vocara/data/sync/hlc.dart';
+import 'package:vocara/data/sync/quarantine_store.dart';
 import 'package:vocara/data/sync/sync_writer.dart';
 import 'package:vocara/domain/models/audio_track.dart';
 import 'package:vocara/domain/models/song_practice.dart';
@@ -42,9 +44,61 @@ void main() {
     final path = (await assets.resolve(id))!;
     expect(await File(path).exists(), isTrue);
 
-    expect(await assets.sweepUnreferenced(), 1);
+    // minAge zero: these mechanics tests exercise the reclaim itself; the
+    // default age grace window has its own test below.
+    expect(await assets.sweepUnreferenced(minAge: Duration.zero), 1);
     expect(await assets.resolve(id), isNull); // tombstoned
     expect(await File(path).exists(), isFalse); // file reclaimed
+  });
+
+  test('sweepUnreferenced skips assets younger than the age grace window '
+      '(a transiently-unreferenced row is in flight, not garbage)', () async {
+    final id = await assets.importFile(await makeSrc('young.wav', [1, 2]));
+    // Default grace: a brand-new unreferenced row survives the sweep (its
+    // referencing clip/media rows may simply not have committed yet, and a
+    // journaled tombstone would propagate fleet-wide once sync ships).
+    expect(await assets.sweepUnreferenced(), 0);
+    expect(await assets.resolve(id), isNotNull);
+    // Aged past the window it is ordinary garbage again.
+    await db.customStatement(
+      'UPDATE assets SET created_at = 1, updated_at = 1 WHERE id = ?',
+      [id],
+    );
+    expect(await assets.sweepUnreferenced(), 1);
+    expect(await assets.resolve(id), isNull);
+  });
+
+  test('sweepUnreferenced treats assets referenced by quarantined payloads '
+      'as reachable (a parked page must not become a tombstone)', () async {
+    final id = await assets.importFile(await makeSrc('parked.wav', [3, 4, 5]));
+    const clipId = 'CLIPCLIPCLIPCLIPCLIPCLIP01';
+    // A rejected remote clip referencing the asset, parked for review: until
+    // an upgrade or manual review re-applies it, the parked payload may hold
+    // the ONLY pointer at these bytes.
+    await QuarantineStore(db).put(
+      table: 'clips',
+      id: clipId,
+      hlcPacked: 'z',
+      schemaV: 1,
+      payload: jsonEncode({
+        'table': 'clips',
+        'id': clipId,
+        'schemaV': 1,
+        'hlcPacked': 'z',
+        'fields': {'id': clipId, 'asset_id': id},
+        'fieldClocks': null,
+      }),
+      reason: 'apply-failed',
+      quarantinedAt: DateTime.now().millisecondsSinceEpoch,
+    );
+
+    expect(await assets.sweepUnreferenced(minAge: Duration.zero), 0);
+    expect(await assets.resolve(id), isNotNull);
+
+    // Unparked (re-applied or discarded): the asset is sweepable again.
+    await QuarantineStore(db).delete('clips', clipId);
+    expect(await assets.sweepUnreferenced(minAge: Duration.zero), 1);
+    expect(await assets.resolve(id), isNull);
   });
 
   test(
@@ -97,7 +151,7 @@ void main() {
       final id = await assets.importFile(await makeSrc('gone.wav', [1, 2, 3]));
       final path = (await assets.resolve(id))!;
 
-      expect(await assets.sweepUnreferenced(), 1);
+      expect(await assets.sweepUnreferenced(minAge: Duration.zero), 1);
       expect(await File(path).exists(), isFalse); // gone from the pool...
 
       // ...and sitting in trash under `<epochMs>-<originalName>`, bytes intact.
@@ -186,7 +240,7 @@ void main() {
       expect(await File(mp3Path).exists(), isTrue);
       // The asset is unreferenced -> sweep tombstones it and deletes ALL files for the
       // hash, not just the current row's `.wav`.
-      expect(await assets.sweepUnreferenced(), 1);
+      expect(await assets.sweepUnreferenced(minAge: Duration.zero), 1);
       expect(await File(wavPath).exists(), isFalse);
       expect(await File(mp3Path).exists(), isFalse);
     },
@@ -223,13 +277,14 @@ void main() {
       expect(await db.select(db.assets).get(), hasLength(2));
 
       // Sweep removes only the orphan; the clip's asset survives.
-      expect(await assets.sweepUnreferenced(), 1);
+      expect(await assets.sweepUnreferenced(minAge: Duration.zero), 1);
       final liveAssets = await (db.select(
         db.assets,
       )..where((a) => a.deletedAt.isNull())).get();
       expect(liveAssets, hasLength(1));
 
-      // Drop the clip -> its asset is now unreferenced -> a later sweep reclaims it.
+      // Drop the clip -> its asset is now unreferenced -> a later sweep
+      // (past the age grace window) reclaims it.
       (await repo.savePractice(
                 SongPractice(
                   id: base.id,
@@ -242,7 +297,7 @@ void main() {
               )
               as Ok<SongPractice>)
           .value;
-      expect(await assets.sweepUnreferenced(), 1);
+      expect(await assets.sweepUnreferenced(minAge: Duration.zero), 1);
       final remaining = await (db.select(
         db.assets,
       )..where((a) => a.deletedAt.isNull())).get();

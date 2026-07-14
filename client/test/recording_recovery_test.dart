@@ -150,6 +150,144 @@ void main() {
     expect(await orphan.exists(), isFalse);
   });
 
+  /// Runs the graceful-stop + same-session-delete sequence: saves a take from
+  /// its staging WAV (the save pools the bytes and deliberately leaves the
+  /// staging copy for the boot sweep), then deletes the take (tombstoning the
+  /// clip row while the staging copy survives — deleteAudio refuses pool
+  /// paths). Returns the surviving staging file.
+  Future<File> saveThenDeleteTake(SongPractice practice) async {
+    final staged = await stageOrphan(practice.id, monoWav(4800));
+    final saved = await persistence.songRepo.savePractice(
+      practice.copyWith(
+        vocalTracks: [
+          AudioTrack(
+            id: newId(),
+            kind: AudioTrackKind.vocal,
+            displayName: 'Take 1',
+            audioFilePath: staged.path,
+            durationMs: 100,
+            createdAt: DateTime.now(),
+            versionId: practice.activeVersionId,
+          ),
+        ],
+      ),
+    );
+    final withTake = (saved as Ok<SongPractice>).value;
+    expect(await staged.exists(), isTrue);
+    final deleted = await persistence.songRepo.savePractice(
+      withTake.copyWith(vocalTracks: []),
+    );
+    expect(deleted, isA<Ok<SongPractice>>());
+    return staged;
+  }
+
+  test('a saved-then-deleted take is never resurrected: its staging copy '
+      'matches a tombstoned reference', () async {
+    final practice = await createPractice();
+    final staged = await saveThenDeleteTake(practice);
+
+    // Next boot: recovery must NOT adopt the leftover as a "(recovered)"
+    // take — the bytes match a reference that was deliberately deleted.
+    expect(await persistence.recoverStagedRecordings(analyze: fakeAnalyze), 0);
+    expect((await reload(practice.id)).vocalTracks, isEmpty);
+    // The leftover is the sweep's to reclaim, exactly as before.
+    await persistence.assets.sweepStaging();
+    expect(await staged.exists(), isFalse);
+  });
+
+  test('a deleted take stays deleted even after the GC tombstoned its asset '
+      'and reclaimed its pool file', () async {
+    final practice = await createPractice();
+    await saveThenDeleteTake(practice);
+    // The GC pass a later boot would run: the take's asset is unreferenced
+    // by live rows, so it is tombstoned and its pooled bytes reclaimed.
+    expect(
+      await persistence.assets.sweepUnreferenced(minAge: Duration.zero),
+      1,
+    );
+
+    expect(await persistence.recoverStagedRecordings(analyze: fakeAnalyze), 0);
+    expect((await reload(practice.id)).vocalTracks, isEmpty);
+  });
+
+  test(
+    'files under audio/<pid>/edits/ are invisible to recovery but swept',
+    () async {
+      // Split/concat/punch-in outputs stage under audio/<pid>/edits/ exactly
+      // so a kill between the file write and the save commit cannot become a
+      // phantom "(recovered)" take — recovery only adopts files DIRECTLY
+      // under audio/<pid>/, while the staging sweep reclaims the whole tree.
+      final practice = await createPractice();
+      final f = File(
+        p.join(root.path, 'audio', practice.id, 'edits', '${newId()}.wav'),
+      );
+      await f.parent.create(recursive: true);
+      await f.writeAsBytes(monoWav(4800), flush: true);
+
+      expect(
+        await persistence.recoverStagedRecordings(analyze: fakeAnalyze),
+        0,
+      );
+      expect((await reload(practice.id)).vocalTracks, isEmpty);
+      expect(await f.exists(), isTrue); // untouched by recovery...
+      await persistence.assets.sweepStaging();
+      expect(await f.exists(), isFalse); // ...reclaimed by the boot sweep
+    },
+  );
+
+  test('a thrown recovery attempt is exempted from this boot\'s sweep and '
+      'retried next boot', () async {
+    final practice = await createPractice();
+    final failing = await stageOrphan(practice.id, monoWav(4800));
+    final junk = await stageOrphan(
+      practice.id,
+      List<int>.generate(64, (i) => i),
+    );
+
+    // A systemic failure (broken decoder, disk error) — NOT per-file junk.
+    Future<WaveformResult> brokenAnalyze(String path) async =>
+        throw StateError('decoder down fleet-wide');
+    expect(
+      await persistence.recoverStagedRecordings(analyze: brokenAnalyze),
+      0,
+    );
+    expect(persistence.recoveryRetryPaths, {failing.path});
+
+    // The boot sweep spares exactly the failed attempt; ordinary junk goes.
+    await persistence.assets.sweepStaging(
+      keep: persistence.recoveryRetryPaths,
+    );
+    expect(await failing.exists(), isTrue);
+    expect(await junk.exists(), isFalse);
+
+    // Next boot, healthy decoder: the exempted take is recovered normally.
+    expect(await persistence.recoverStagedRecordings(analyze: fakeAnalyze), 1);
+    expect((await reload(practice.id)).vocalTracks, hasLength(1));
+  });
+
+  test('a staged file that has kept failing for over 7 days is released to '
+      'the sweep after all', () async {
+    final practice = await createPractice();
+    final stale = await stageOrphan(practice.id, monoWav(4800));
+    await stale.setLastModified(
+      DateTime.now().subtract(const Duration(days: 8)),
+    );
+
+    Future<WaveformResult> brokenAnalyze(String path) async =>
+        throw StateError('decoder down');
+    expect(
+      await persistence.recoverStagedRecordings(analyze: brokenAnalyze),
+      0,
+    );
+    // Too old to keep protecting: the exemption lapses and the sweep takes it
+    // (the trash still holds it for its own retention window).
+    expect(persistence.recoveryRetryPaths, isEmpty);
+    await persistence.assets.sweepStaging(
+      keep: persistence.recoveryRetryPaths,
+    );
+    expect(await stale.exists(), isFalse);
+  });
+
   test(
     'numbering continues after existing takes in the interpretation',
     () async {

@@ -195,10 +195,16 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
   /// The one save core. [base] is the per-row content-hash map captured when
   /// the caller loaded the aggregate (three-way merge); null means "adopt the
   /// current persisted state as base" (the legacy two-way diff).
+  ///
+  /// The WHOLE import+commit sequence runs under the store write gate's
+  /// shared side: asset imports land before the clip/media rows referencing
+  /// them commit, and a maintenance pass (Persistence.repairLibrary / the
+  /// boot sweeps, which hold the gate exclusively) running in that window
+  /// would tombstone the just-imported asset and trash its pool file.
   Future<Result<Loaded<SongPractice>>> _save(
     SongPractice practice, {
     required Map<String, String>? base,
-  }) async {
+  }) => assets.gate.shared(() async {
     try {
       // All tracks flattened (accompaniment + reference + vocals).
       final allTracks = <AudioTrack>[
@@ -286,7 +292,7 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
       // so the caller's revert/toast runs instead of crashing.
       return Result.error(e is Exception ? e : Exception(e.toString()));
     }
-  }
+  });
 
   // --- write helpers --------------------------------------------------------
 

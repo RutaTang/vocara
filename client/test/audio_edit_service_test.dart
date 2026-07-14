@@ -362,6 +362,46 @@ void main() {
     );
   });
 
+  test('edit outputs land under an edits/ subdirectory, never directly in '
+      'the recovery-scanned staging root', () async {
+    // Boot recovery adopts orphan recording-shaped WAVs lying DIRECTLY under
+    // audio/<pid>/; edit outputs written there would be resurrected as
+    // phantom "(recovered)" takes after a kill between the file write and the
+    // save commit. Split/concat/duplicate must therefore stage one level
+    // down, under edits/ (still importable, still swept at boot).
+    final dir = await Directory.systemTemp.createTemp('vocara_editsdir');
+    addTearDown(() => dir.delete(recursive: true));
+
+    const sr = 8000;
+    final samples = Float64List.fromList([
+      for (var i = 0; i < sr; i++) (i % 100) / 100 - 0.5,
+    ]);
+    final srcPath = '${dir.path}/src.wav';
+    await File(srcPath).writeAsBytes(writeWavMono(samples, sr));
+
+    final edit = AudioEditService(files: _TempFiles(dir));
+    final parts = await edit.splitWav(
+      practiceId: 'p',
+      sourcePath: srcPath,
+      splitFileMs: 500,
+    );
+    final merged = await edit.concatWav(
+      practiceId: 'p',
+      firstPath: parts.firstPath,
+      secondPath: parts.secondPath,
+    );
+    final copy = await edit.duplicate(practiceId: 'p', sourcePath: srcPath);
+
+    for (final path in [parts.firstPath, parts.secondPath, merged, copy]) {
+      expect(
+        File(path).parent.path,
+        '${dir.path}/edits',
+        reason: 'edit outputs must stage under edits/, not the staging root',
+      );
+      expect(await File(path).exists(), isTrue);
+    }
+  });
+
   test('splitWav rejects non-WAV audio', () async {
     final dir = await Directory.systemTemp.createTemp('vocara_edit');
     addTearDown(() => dir.delete(recursive: true));

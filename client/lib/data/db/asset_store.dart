@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
@@ -6,9 +7,11 @@ import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 
 import '../../utils/id.dart';
+import '../sync/quarantine_store.dart';
 import '../sync/sync_writer.dart';
 import 'app_database.dart';
 import 'durable_fs.dart';
+import 'write_gate.dart';
 
 /// Owns immutable audio/media files and the [Assets] indirection table.
 ///
@@ -24,7 +27,8 @@ class AssetStore {
     required this.root,
     required this.writer,
     this.fs = const DurableFs(),
-  });
+    WriteGate? gate,
+  }) : gate = gate ?? WriteGate();
 
   final AppDatabase db;
 
@@ -34,10 +38,24 @@ class AssetStore {
   final SyncWriter writer;
   final DurableFs fs;
 
+  /// The app-wide store write gate (see [WriteGate]): saves/imports run under
+  /// its shared side, repairLibrary and the boot sweeps take it exclusively so
+  /// a GC pass can never race an import+commit sequence. Owned here because
+  /// every writer already holds an [AssetStore]; Persistence exposes it too.
+  final WriteGate gate;
+
   /// Imports [sourcePath] into the pool and returns its asset id. Dedups by
   /// content hash: re-importing identical bytes reuses the existing live asset
   /// (and re-materializes the file if it had been GC'd locally).
-  Future<String> importFile(String sourcePath, {String kind = 'audio'}) async {
+  ///
+  /// Runs under the shared side of [gate] (nesting inside a caller's shared
+  /// section is fine — the gate is reader-preferring), so an exclusive
+  /// maintenance pass can never interleave with the pool write + asset-row
+  /// commit and trash the in-flight `.part` or the just-placed file.
+  Future<String> importFile(String sourcePath, {String kind = 'audio'}) =>
+      gate.shared(() => _importFile(sourcePath, kind: kind));
+
+  Future<String> _importFile(String sourcePath, {required String kind}) async {
     final src = File(sourcePath);
     final size = await src.length();
     final hash = await _hashFile(src);
@@ -184,12 +202,44 @@ class AssetStore {
   /// out), never deleted in place. Meant to run once at startup, when nothing
   /// is in flight. Never touches the content-addressed pool (`assets/`).
   /// Best-effort.
-  Future<void> sweepStaging() async {
+  ///
+  /// [keep]: absolute paths of files that must SURVIVE this sweep — staged
+  /// recordings whose boot recovery ATTEMPT threw (an environment-wide decoder
+  /// or disk failure, not per-file junk). Sweeping those would destroy the
+  /// only copy of a take with no retry ever; leaving them lets the next boot's
+  /// recovery try again. Persistence bounds the exemption by file age.
+  Future<void> sweepStaging({Set<String> keep = const {}}) async {
     for (final name in const ['audio', 'technique_media']) {
       try {
         final d = Directory(p.join(root.path, name));
-        if (await d.exists()) await _moveToTrash(d);
+        if (!await d.exists()) continue;
+        if (keep.isEmpty) {
+          await _moveToTrash(d);
+          continue;
+        }
+        await _sweepTreeExcept(d, keep);
+        // Drop the top-level tree itself once nothing kept remains inside.
+        try {
+          if (await d.list().isEmpty) await d.delete();
+        } catch (_) {}
       } catch (_) {}
+    }
+  }
+
+  /// Moves every entry under [dir] (recursively) into the trash except files
+  /// whose exact path is in [keep]; subdirectories emptied by the sweep are
+  /// removed. Best-effort per entry, like the whole-tree path.
+  Future<void> _sweepTreeExcept(Directory dir, Set<String> keep) async {
+    await for (final e in dir.list()) {
+      if (e is Directory) {
+        await _sweepTreeExcept(e, keep);
+        try {
+          if (await e.list().isEmpty) await e.delete();
+        } catch (_) {}
+      } else {
+        if (keep.contains(e.path)) continue;
+        await _moveToTrash(e);
+      }
     }
   }
 
@@ -200,9 +250,10 @@ class AssetStore {
   /// their bytes. Guarded by a test (asset_gc_test.dart) that derives this set
   /// structurally from the live schema and fails on any drift.
   ///
-  /// NOTE: Persistence._referencedContentHashes hand-copies the same
-  /// enumeration for the staged-recording recovery; keep the two in step until
-  /// it can share this constant.
+  /// NOTE: Persistence._referencedContentHashes derives its hash set from
+  /// this same constant, but WITHOUT the live-row filter — the staged
+  /// recording recovery must respect tombstoned references too (a deleted
+  /// take must not be resurrected); see its doc for why the filters differ.
   static const List<({String table, String column})> assetRefColumns = [
     (table: 'clips', column: 'asset_id'),
     (table: 'technique_media', column: 'asset_id'),
@@ -218,7 +269,23 @@ class AssetStore {
   /// counter that a crash could desync. NOTE: this only reclaims LOCAL disk;
   /// cloud-byte deletion is a separate, knowledge-gated step that never runs on
   /// a time horizon.
-  Future<int> sweepUnreferenced() async {
+  ///
+  /// Two guards against sweeping assets that are only TRANSIENTLY
+  /// unreferenced (a tombstone here is journaled, so once sync ships it would
+  /// propagate as a fleet-wide delete — a moment of local blindness must
+  /// never become permanent):
+  ///
+  ///  * Rows parked in the sync quarantine count as references: a quarantined
+  ///    payload (half-delivered page, forward-incompatible record) may carry
+  ///    the ONLY pointer at an asset until a later app upgrade re-applies it.
+  ///  * An asset row younger than [minAge] (by its created/updated stamp) is
+  ///    never swept: a save's clip/media rows commit AFTER its importFile, so
+  ///    a brand-new unreferenced row is far more likely an in-flight save (or
+  ///    a not-yet-applied sync backlog) than garbage. Real garbage is still
+  ///    reclaimed by the next sweep once it ages past the window.
+  Future<int> sweepUnreferenced({
+    Duration minAge = const Duration(hours: 24),
+  }) async {
     final referenced = <String>{};
     for (final ref in assetRefColumns) {
       final sql =
@@ -229,18 +296,27 @@ class AssetStore {
         if (a is String) referenced.add(a);
       }
     }
+    referenced.addAll(await _quarantineReferencedAssetIds());
 
     final live = await db
         .customSelect(
-          'SELECT id, content_hash, local_rel_path FROM assets '
-          'WHERE deleted_at IS NULL',
+          'SELECT id, content_hash, local_rel_path, created_at, updated_at '
+          'FROM assets WHERE deleted_at IS NULL',
         )
         .get();
 
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final minAgeMs = minAge.inMilliseconds;
     var removed = 0;
     for (final a in live) {
       final id = a.read<String>('id');
       if (referenced.contains(id)) continue;
+      // The age grace window (see doc): a young unreferenced row is treated
+      // as in flight, not as garbage.
+      final createdAt = a.read<int>('created_at');
+      final updatedAt = a.read<int>('updated_at');
+      final newest = createdAt > updatedAt ? createdAt : updatedAt;
+      if (nowMs - newest < minAgeMs) continue;
 
       final s = writer.stamp();
       // The tombstone UPDATE and its oplog entry MUST commit together (a row
@@ -293,6 +369,45 @@ class AssetStore {
       }
     }
     return removed;
+  }
+
+  /// Asset ids referenced by row payloads parked in the sync quarantine.
+  ///
+  /// Quarantined records are rejected-but-not-dropped remote state (see
+  /// QuarantineStore): a parked clip/media/practice payload may be the only
+  /// thing pointing at an asset until an app upgrade or manual review
+  /// re-applies it. Read through the store's own API and the SyncRow wire
+  /// shape (`{"fields": {<column>: <value>, ...}}`), scanning exactly the
+  /// [assetRefColumns] columns. Best-effort: a malformed payload (or an
+  /// unreadable quarantine table) contributes no references — the age grace
+  /// window in [sweepUnreferenced] still softens that case.
+  Future<Set<String>> _quarantineReferencedAssetIds() async {
+    final out = <String>{};
+    final colsByTable = <String, List<String>>{};
+    for (final ref in assetRefColumns) {
+      (colsByTable[ref.table] ??= []).add(ref.column);
+    }
+    try {
+      for (final row in await QuarantineStore(db).list()) {
+        final cols = colsByTable[row.tbl];
+        if (cols == null) continue;
+        try {
+          final decoded = jsonDecode(row.payload);
+          if (decoded is! Map) continue;
+          final fields = decoded['fields'];
+          if (fields is! Map) continue;
+          for (final col in cols) {
+            final v = fields[col];
+            if (v is String && v.isNotEmpty) out.add(v);
+          }
+        } catch (_) {
+          // Undecodable payload: nothing to protect from this row.
+        }
+      }
+    } catch (_) {
+      // Quarantine unreadable: fall through with whatever was gathered.
+    }
+    return out;
   }
 
   /// Moves every pooled file named `<hash>` or `<hash>.<ext>` from the hash's

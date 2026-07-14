@@ -152,6 +152,29 @@ class AudioEditService {
 
   final AudioFileService _files;
 
+  /// A fresh output path under `audio/<practiceId>/edits/` — a sibling of the
+  /// take staging tree, NOT the tree itself. Boot recovery
+  /// (Persistence.recoverStagedRecordings) adopts any orphan recording-shaped
+  /// WAV lying DIRECTLY under `audio/<practiceId>/`, so writing edit outputs
+  /// there means a kill between the file write and the save commit resurrects
+  /// each output as a phantom "(recovered)" take next boot while the original
+  /// clip is intact. Files under `edits/` are invisible to recovery (it skips
+  /// subdirectories) but still reclaimed by the boot staging sweep, which
+  /// trashes the whole `audio/` tree. The paths stay ordinary sandbox paths,
+  /// so the save flow imports them into the pool exactly as before.
+  Future<String> _newEditPath({
+    required String practiceId,
+    String extension = 'wav',
+  }) async {
+    final base = await _files.newRecordingPath(
+      practiceId: practiceId,
+      extension: extension,
+    );
+    final dir = Directory(p.join(p.dirname(base), 'edits'));
+    await dir.create(recursive: true);
+    return p.join(dir.path, p.basename(base));
+  }
+
   /// Splits the WAV at [splitFileMs] (offset from the file's start) into two
   /// new WAV files. Returns their paths. Throws if the source isn't a WAV.
   Future<({String firstPath, String secondPath})> splitWav({
@@ -184,8 +207,8 @@ class AudioEditService {
       w.dataStart + w.dataLen,
     );
 
-    final firstPath = await _files.newRecordingPath(practiceId: practiceId);
-    final secondPath = await _files.newRecordingPath(practiceId: practiceId);
+    final firstPath = await _newEditPath(practiceId: practiceId);
+    final secondPath = await _newEditPath(practiceId: practiceId);
     await File(
       firstPath,
     ).writeAsBytes(_buildWav(w.fmt, Uint8List.sublistView(data, 0, cut)));
@@ -238,7 +261,7 @@ class AudioEditService {
       ..setRange(0, da.length, da)
       ..setRange(da.length, da.length + db.length, db);
 
-    final path = await _files.newRecordingPath(practiceId: practiceId);
+    final path = await _newEditPath(practiceId: practiceId);
     await File(path).writeAsBytes(_buildWav(wa.fmt, merged));
     return path;
   }
@@ -255,7 +278,7 @@ class AudioEditService {
     required String newPath,
     required int splitMs,
   }) async {
-    final outPath = await _files.newRecordingPath(practiceId: practiceId);
+    final outPath = await _newEditPath(practiceId: practiceId);
     final ok = await Isolate.run(() {
       final bindings = VocaraEngineBindings(_openVocaraLibrary());
       final oldC = oldPath.toNativeUtf8();
@@ -289,7 +312,10 @@ class AudioEditService {
     required String sourcePath,
   }) async {
     final ext = p.extension(sourcePath).replaceFirst('.', '');
-    final dest = await _files.newRecordingPath(
+    // Duplicates would dedup to an already-referenced content hash (so
+    // recovery skips them anyway), but they go through the edits dir too:
+    // one rule for every edit output beats a per-operation safety proof.
+    final dest = await _newEditPath(
       practiceId: practiceId,
       extension: ext.isEmpty ? 'wav' : ext,
     );

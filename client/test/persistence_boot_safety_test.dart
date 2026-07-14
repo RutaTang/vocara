@@ -7,6 +7,7 @@
 // partially corrupt database — every destructive sweep must be skipped, or
 // the sweep destroys exactly the file recovery existed to save.
 
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -161,15 +162,40 @@ void main() {
         'UPDATE practices SET deleted_at = 1 WHERE id = ?',
         [practice.id],
       );
-      // An asset nothing references, for the sweep half of the pass.
+      // An asset nothing references, for the sweep half of the pass — aged
+      // past the sweep's 24h grace window (a young unreferenced row is
+      // deliberately treated as in-flight, not garbage).
       final src = File(p.join(persistence.assets.root.path, 'src.wav'));
       await src.writeAsBytes(monoWav(100), flush: true);
       await persistence.assets.importFile(src.path);
+      await persistence.db.customStatement(
+        'UPDATE assets SET created_at = 1, updated_at = 1',
+      );
 
       final report = await persistence.repairLibrary();
       expect(report.violationsFound, greaterThan(0));
       expect(report.violationsRepaired, report.violationsFound);
       expect(report.assetsSwept, greaterThanOrEqualTo(1));
+
+      // Atomicity floor: every repair journals in the SAME transaction as
+      // its row mutation, so each repaired (tombstoned) interpretation has a
+      // matching oplog entry.
+      final interpRows = await persistence.db
+          .customSelect(
+            'SELECT id FROM interpretations WHERE deleted_at IS NOT NULL',
+          )
+          .get();
+      expect(interpRows, isNotEmpty);
+      final ops = await persistence.db
+          .customSelect(
+            'SELECT entity_id FROM oplog WHERE entity_table = '
+            "'interpretations' AND op = 'tombstone'",
+          )
+          .get();
+      expect(
+        ops.map((r) => r.data['entity_id']).toSet(),
+        containsAll(interpRows.map((r) => r.data['id'])),
+      );
 
       // A second pass finds a clean library.
       final again = await persistence.repairLibrary();
@@ -177,4 +203,115 @@ void main() {
       expect(again.violationsRepaired, 0);
     },
   );
+
+  test('a systemic analyzer failure exempts staged takes from this boot\'s '
+      'sweep, so the next boot retries and recovers them', () async {
+    final practiceId = await createPracticeAndClose();
+    final staged = await stageOrphan(practiceId, monoWav(4800));
+
+    // Every recovery attempt throws (broken decoder / disk): before the
+    // exemption, the sweep then trashed ALL orphans in the same boot and
+    // recovery never retried (staging empty next boot).
+    Future<WaveformResult> failing(String path) async =>
+        throw StateError('decoder down');
+    final sick = await Persistence.open(dir: root, analyze: failing);
+    await sick.db.close();
+    expect(await staged.exists(), isTrue); // spared for a retry
+
+    // Next boot, decoder healthy: the take is recovered normally.
+    final healthy = await boot();
+    addTearDown(healthy.db.close);
+    final res = await healthy.songRepo.getPractice(practiceId);
+    expect((res as Ok<SongPractice>).value.vocalTracks, hasLength(1));
+    expect(await staged.exists(), isFalse);
+  });
+
+  test('repairLibrary started during an in-flight save waits for it and '
+      'cannot tombstone the asset the save just imported', () async {
+    final persistence = Persistence.memory();
+    addTearDown(() async {
+      await persistence.db.close();
+      final dir = persistence.assets.root;
+      if (await dir.exists()) await dir.delete(recursive: true);
+    });
+    final src = File(p.join(persistence.assets.root.path, 'take.wav'));
+    await src.writeAsBytes(monoWav(200), flush: true);
+
+    Future<bool> assetLive(String id) async {
+      final rows = await persistence.db
+          .customSelect("SELECT deleted_at FROM assets WHERE id = '$id'")
+          .get();
+      return rows.single.data['deleted_at'] == null;
+    }
+
+    // The repository save shape under the gate's shared side: the asset
+    // import lands first, the rows referencing it commit later — hold the
+    // gate open across that window.
+    final events = <String>[];
+    final holdSave = Completer<void>();
+    String? assetId;
+    final save = persistence.writeGate.shared(() async {
+      assetId = await persistence.assets.importFile(src.path);
+      events.add('imported');
+      await holdSave.future;
+      events.add('save-committed');
+    });
+    while (assetId == null) {
+      await Future<void>.delayed(const Duration(milliseconds: 1));
+    }
+
+    final repair = persistence.repairLibrary().whenComplete(
+      () => events.add('repair-done'),
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 25));
+    // The exclusive pass must still be queued behind the in-flight save...
+    expect(events, ['imported']);
+    // ...so the freshly imported, not-yet-referenced asset is untouched.
+    expect(await assetLive(assetId!), isTrue);
+
+    holdSave.complete();
+    await save;
+    await repair;
+    expect(events, ['imported', 'save-committed', 'repair-done']);
+    // Once the repair does run, the young unreferenced row is additionally
+    // protected by the sweep's age grace window.
+    expect(await assetLive(assetId!), isTrue);
+  });
+
+  test('device node id survives restarts', () async {
+    final p1 = await boot();
+    await p1.db.close();
+    final nodeFile = File(p.join(root.path, 'device_node'));
+    final first = (await nodeFile.readAsString()).trim();
+    expect(first, hasLength(26));
+
+    final p2 = await boot();
+    await p2.db.close();
+    expect((await nodeFile.readAsString()).trim(), first);
+  });
+
+  test('an empty or corrupt device_node is treated as absent: a fresh id is '
+      'minted instead of silently adopting a truncated identity', () async {
+    // A power cut mid-write under the old non-durable writeAsString could
+    // leave exactly these shapes on disk.
+    final nodeFile = File(p.join(root.path, 'device_node'));
+    await nodeFile.writeAsString('');
+    final p1 = await boot();
+    await p1.db.close();
+    final minted = (await nodeFile.readAsString()).trim();
+    expect(minted, hasLength(26));
+
+    // A truncated id is corrupt, not a shorter identity.
+    await nodeFile.writeAsString('01ABC');
+    final p2 = await boot();
+    await p2.db.close();
+    final reminted = (await nodeFile.readAsString()).trim();
+    expect(reminted, hasLength(26));
+    expect(reminted, isNot('01ABC'));
+
+    // A valid id keeps being preserved byte-for-byte.
+    final p3 = await boot();
+    await p3.db.close();
+    expect((await nodeFile.readAsString()).trim(), reminted);
+  });
 }

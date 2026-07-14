@@ -28,7 +28,9 @@ import '../sync/sync_transport.dart';
 import '../sync/sync_writer.dart';
 import 'app_database.dart';
 import 'asset_store.dart';
+import 'durable_fs.dart';
 import 'safe_migrator.dart';
+import 'write_gate.dart';
 
 /// Signature of the audio analyzer used to rebuild a recovered take's waveform
 /// peaks + duration — [WaveformService.analyze] in production, injectable so
@@ -101,6 +103,10 @@ class Persistence {
   final AssetStore assets;
   final SongPracticeRepositoryDrift songRepo;
   final TechniqueRepositoryDrift techRepo;
+
+  /// The app-wide store write gate: saves/imports run under its shared side,
+  /// [repairLibrary] and the boot sweeps take it exclusively — see [WriteGate].
+  WriteGate get writeGate => assets.gate;
 
   /// "Remote changes were applied by sync" notifications for the UI layer:
   /// one event per committed pull page that changed rows, fired strictly
@@ -221,45 +227,56 @@ class Persistence {
       );
     }
     if (sweepGateOpen) {
-      // Reclaim staging leftovers: after a save, a recording/import has been copied
-      // into the content-addressed pool and its working file under audio/ or
-      // technique_media/ is an orphan (nothing persistent references it — clips
-      // and media reference pool assets). At startup nothing is in flight, so the
-      // staging tree is safe to clear. Best-effort; never blocks launch.
-      await persistence.assets.sweepStaging();
-      // Reclaim pooled bytes for assets no live clip/media/practice references any
-      // more (removed takes, replaced accompaniment, deleted examples). Derives the
-      // refcount from a query, so it's safe to run at startup when nothing is in
-      // flight. Best-effort — a GC failure must never block launch.
-      try {
-        await persistence.assets.sweepUnreferenced();
-      } catch (e) {
-        DiagnosticsLog.instance.log(
-          'persistence',
-          'sweepUnreferenced failed (${e.runtimeType})',
+      // The whole boot maintenance pass holds the write gate exclusively.
+      // Nothing user-facing is running yet, so this is uncontended today; it
+      // exists so the sweeps and a save can structurally never interleave
+      // (the same discipline repairLibrary follows on a live store).
+      await persistence.writeGate.exclusive(() async {
+        // Reclaim staging leftovers: after a save, a recording/import has been copied
+        // into the content-addressed pool and its working file under audio/ or
+        // technique_media/ is an orphan (nothing persistent references it — clips
+        // and media reference pool assets). At startup nothing is in flight, so the
+        // staging tree is safe to clear. Best-effort; never blocks launch.
+        // Files whose recovery ATTEMPT threw are kept for a retry next boot
+        // (see recoverStagedRecordings) instead of being funneled to trash by
+        // one environment-wide analyzer failure.
+        await persistence.assets.sweepStaging(
+          keep: persistence._recoveryRetryPaths,
         );
-      }
-      // Reclaim pool files left with no asset row at all (a crash between the pool write and the
-      // asset-row commit). Best-effort — a GC failure must never block launch.
-      try {
-        await persistence.assets.sweepOrphanPoolFiles();
-      } catch (e) {
-        DiagnosticsLog.instance.log(
-          'persistence',
-          'sweepOrphanPoolFiles failed (${e.runtimeType})',
-        );
-      }
-      // The sweeps above park reclaimed files in the asset trash rather than
-      // unlinking them; age trash out ONLY after a fully healthy boot, so a
-      // sick boot can never shorten the recovery window.
-      try {
-        await persistence.assets.pruneTrash();
-      } catch (e) {
-        DiagnosticsLog.instance.log(
-          'persistence',
-          'pruneTrash failed (${e.runtimeType})',
-        );
-      }
+        // Reclaim pooled bytes for assets no live clip/media/practice references any
+        // more (removed takes, replaced accompaniment, deleted examples). Derives the
+        // refcount from a query, so it's safe to run at startup when nothing is in
+        // flight. Best-effort — a GC failure must never block launch.
+        try {
+          await persistence.assets.sweepUnreferenced();
+        } catch (e) {
+          DiagnosticsLog.instance.log(
+            'persistence',
+            'sweepUnreferenced failed (${e.runtimeType})',
+          );
+        }
+        // Reclaim pool files left with no asset row at all (a crash between the pool write and the
+        // asset-row commit). Best-effort — a GC failure must never block launch.
+        try {
+          await persistence.assets.sweepOrphanPoolFiles();
+        } catch (e) {
+          DiagnosticsLog.instance.log(
+            'persistence',
+            'sweepOrphanPoolFiles failed (${e.runtimeType})',
+          );
+        }
+        // The sweeps above park reclaimed files in the asset trash rather than
+        // unlinking them; age trash out ONLY after a fully healthy boot, so a
+        // sick boot can never shorten the recovery window.
+        try {
+          await persistence.assets.pruneTrash();
+        } catch (e) {
+          DiagnosticsLog.instance.log(
+            'persistence',
+            'pruneTrash failed (${e.runtimeType})',
+          );
+        }
+      });
     }
     return persistence;
   }
@@ -289,13 +306,22 @@ class Persistence {
   /// One user-invoked "repair library" pass: runs the cross-row integrity
   /// repair to a fixpoint, then reclaims unreferenced assets and orphaned
   /// pool files. Repairs journal through the normal write chokepoint like any
-  /// edit, so this is safe on a live store between user actions. Meant for a
-  /// diagnostics/settings action, never the boot path (boot has its own
-  /// gated sweeps in [open]).
-  Future<RepairReport> repairLibrary() async {
+  /// edit. Safe on a live store because the whole pass holds [writeGate]
+  /// exclusively: an in-flight save (import committed, clip/media rows not
+  /// yet) finishes first, and no new save starts mid-pass — so the GC can
+  /// never tombstone an asset a save just imported, or trash its in-flight
+  /// pool file. Meant for a diagnostics/settings action, never the boot path
+  /// (boot has its own gated sweeps in [open]).
+  Future<RepairReport> repairLibrary() => writeGate.exclusive(() async {
     final checker = IntegrityChecker(db, writer);
     final found = await checker.check();
-    final unrepaired = await checker.repair();
+    // One transaction around the whole repair fixpoint, exactly like the sync
+    // engine's end-of-pull repair: each individual repair is a row UPDATE plus
+    // its oplog entry, and the invariant "a row mutation and its journal entry
+    // commit in the SAME transaction" must hold here too — two autocommit
+    // statements would let a crash between them tombstone/heal a synced row
+    // with no journal entry, so the change would never propagate.
+    final unrepaired = await db.transaction(() => checker.repair());
     // A cascade can repair MORE than the initial scan saw; the report never
     // claims a negative remainder.
     final repaired = (found.length - unrepaired.length).clamp(0, found.length);
@@ -308,7 +334,7 @@ class Persistence {
     );
     DiagnosticsLog.instance.log('persistence', 'repairLibrary: $report');
     return report;
-  }
+  });
 
   /// Boot-time recovery of hard-kill orphaned take recordings. Returns the
   /// number of takes recovered.
@@ -332,9 +358,11 @@ class Persistence {
   /// Crash-safety / idempotency (this recovery can itself be hard-killed): the
   /// per-file order is (1) pool import + take/clip row commit — both inside
   /// [SongPracticeRepositoryDrift.savePractice], rows in one transaction —
-  /// then (2) delete the staging file. A file is only recovered when NO live
-  /// clip / technique-media / separation reference carries its content hash,
-  /// so:
+  /// then (2) delete the staging file. A file is only recovered when NO
+  /// clip / technique-media / separation reference — live OR tombstoned —
+  /// carries its content hash (bytes that match anything EVER saved are
+  /// either a normal already-pooled leftover or a deliberately deleted take;
+  /// see [_referencedContentHashes]), so:
   ///  * killed before the rows commit → nothing references the hash yet; the
   ///    next boot retries the whole recovery (the pool import dedups by hash,
   ///    so a half-done import is reused, never duplicated);
@@ -342,16 +370,18 @@ class Persistence {
   ///    references the hash; the next boot SKIPS the file and the sweep
   ///    deletes it — the take can never be attached twice.
   Future<int> recoverStagedRecordings({required WavAnalyzer analyze}) async {
+    _recoveryRetryPaths.clear();
     final staging = Directory(p.join(assets.root.path, 'audio'));
     if (!await staging.exists()) return 0;
 
-    // Content hashes referenced by any live row (clips, technique media, the
-    // kept separation source) — the same reference derivation as
-    // [AssetStore.sweepUnreferenced]. A staging file whose bytes match one was
-    // already saved into the pool and must NOT become a second take. Note the
-    // set covers only rows a save COMPLETED for: an asset row alone (a crash
-    // between the pool import and the row commit) does not mark its file as
-    // saved, so that take is still recovered on the retry.
+    // Content hashes referenced by any clip / technique-media / separation
+    // row, live or tombstoned — see [_referencedContentHashes] for why the
+    // tombstoned ones count. A staging file whose bytes match one was already
+    // saved into the pool (or deliberately deleted) and must NOT become a
+    // second take. Note the set covers only rows a save COMPLETED for: an
+    // asset row alone (a crash between the pool import and the row commit)
+    // does not mark its file as saved, so that take is still recovered on the
+    // retry.
     final referenced = await _referencedContentHashes();
 
     var recovered = 0;
@@ -367,18 +397,49 @@ class Persistence {
             recovered++;
           }
         } catch (e) {
-          // Best-effort per file: a failed recovery (decode error, disk
-          // error) leaves the file to the sweep and never blocks the other
-          // orphans or the launch.
+          // Best-effort per file: a failed recovery never blocks the other
+          // orphans or the launch. But a THROWN attempt (decode error, disk
+          // error) is an environmental failure, not proof the file is junk —
+          // a systemic analyzer breakage would otherwise funnel EVERY orphan
+          // to trash this boot, with staging empty next boot so recovery
+          // never retries. Exempt the file from this boot's staging sweep so
+          // the next boot tries again, bounded by age: a file that has kept
+          // failing for over 7 days goes to the sweep after all (the trash
+          // then still holds it for 30 days).
+          if (await _youngEnoughToRetry(f)) {
+            _recoveryRetryPaths.add(f.path);
+          }
           DiagnosticsLog.instance.log(
             'persistence',
             'one staged recording failed to recover (${e.runtimeType}); '
-                'left for the sweep',
+                'exempted from this boot\'s sweep if young enough to retry',
           );
         }
       }
     }
     return recovered;
+  }
+
+  /// Staging files whose recovery attempt THREW this boot — exempted from the
+  /// boot staging sweep so the next boot's recovery retries them. Repopulated
+  /// by every [recoverStagedRecordings] run.
+  Set<String> get recoveryRetryPaths => Set.unmodifiable(_recoveryRetryPaths);
+  final Set<String> _recoveryRetryPaths = <String>{};
+
+  /// How long a repeatedly-failing staged recording is protected from the
+  /// boot sweep before it is released to it (trash retention then still
+  /// applies on top).
+  static const Duration _recoveryRetryMaxAge = Duration(days: 7);
+
+  /// Whether [f] is young enough (by mtime) to hold back for a retry. An
+  /// unstat-able file is kept — lingering is always safer than trashing.
+  static Future<bool> _youngEnoughToRetry(File f) async {
+    try {
+      final modified = (await f.stat()).modified;
+      return DateTime.now().difference(modified) < _recoveryRetryMaxAge;
+    } catch (_) {
+      return true;
+    }
   }
 
   /// Recovers one staged WAV as a new vocal take of [practiceId]. False means
@@ -468,23 +529,35 @@ class Persistence {
     return max + 1;
   }
 
-  /// Content hashes of every asset a live row references — bytes a completed
-  /// save already owns. Derived from [AssetStore.assetRefColumns], the single
-  /// source of truth for asset-referencing columns (guarded by a
-  /// schema-derived test), so a future referencing column cannot be silently
-  /// missed here while the GC honors it.
+  /// Content hashes of every asset ANY referencing row — live or tombstoned —
+  /// ever pointed at: bytes a save COMPLETED for at some point. Derived from
+  /// [AssetStore.assetRefColumns], the single source of truth for
+  /// asset-referencing columns (guarded by a schema-derived test), so a future
+  /// referencing column cannot be silently missed here while the GC honors it.
+  ///
+  /// Tombstoned references (and tombstoned assets) count on purpose: a
+  /// graceful stop deliberately leaves the streamed staging WAV for the boot
+  /// sweep, and deleteAudio refuses pool paths — so when the user deletes
+  /// that take in the same session, the staging copy survives while the clip
+  /// row (and possibly the asset row) is only tombstoned. If this set covered
+  /// live rows only, the next boot would adopt those bytes as a "(recovered)"
+  /// take and resurrect the deleted recording. Bytes matching anything EVER
+  /// saved are never adopted; they're left to the sweep. The crash-retry
+  /// window is unaffected: a crash between the pool import and the clip-row
+  /// commit leaves NO referencing row at all (live or tombstoned), so that
+  /// take is still recovered.
   Future<Set<String>> _referencedContentHashes() async {
     final union = AssetStore.assetRefColumns
         .map(
           (r) =>
               'SELECT ${r.column} FROM ${r.table} '
-              'WHERE deleted_at IS NULL AND ${r.column} IS NOT NULL',
+              'WHERE ${r.column} IS NOT NULL',
         )
         .join(' UNION ');
     final rows = await db
         .customSelect(
           'SELECT DISTINCT content_hash AS h FROM assets '
-          'WHERE deleted_at IS NULL AND id IN ($union)',
+          'WHERE id IN ($union)',
         )
         .get();
     return {
@@ -572,17 +645,42 @@ class Persistence {
     return HlcClock(node: node, initial: max);
   }
 
+  /// The shape of a valid device node id: exactly the 26 Crockford base32
+  /// characters a [newId] ULID produces (I, L, O, U excluded).
+  static final RegExp _nodeIdShape = RegExp(
+    r'^[0-9ABCDEFGHJKMNPQRSTVWXYZ]{26}$',
+  );
+
   /// Reads (or mints + persists once) the stable per-install device node id —
   /// the final HLC tiebreak, kept distinct from the data so reinstalling the app
   /// is a new node.
+  ///
+  /// Durability: the mint path writes temp → fsync → atomic rename → dir
+  /// fsync (the [DurableFs] idiom used by the asset pool and the migrator),
+  /// because a power cut mid-`writeAsString` could leave an empty or
+  /// truncated file — and the node id is this install's sync identity, which
+  /// must never silently change. Symmetrically, the read path treats an
+  /// unreadable, empty, or malformed existing file as ABSENT (mint fresh)
+  /// rather than adopting a corrupted identity.
   static Future<String> _readOrCreateNode(Directory dir) async {
     final f = File(p.join(dir.path, 'device_node'));
     if (await f.exists()) {
-      final s = (await f.readAsString()).trim();
-      if (s.isNotEmpty) return s;
+      String s = '';
+      try {
+        s = (await f.readAsString()).trim();
+      } catch (_) {
+        // Unreadable/undecodable (e.g. truncated to invalid UTF-8): treat as
+        // absent — never let a corrupt file brick startup or leak in as an id.
+      }
+      if (_nodeIdShape.hasMatch(s)) return s;
     }
     final node = newId();
-    await f.writeAsString(node);
+    const fs = DurableFs();
+    final tmp = File('${f.path}.tmp');
+    await tmp.writeAsString(node, flush: true);
+    await fs.fsyncFile(tmp.path);
+    await fs.atomicRename(tmp.path, f.path);
+    await fs.fsyncDir(dir.path);
     return node;
   }
 }

@@ -127,4 +127,35 @@ void main() {
     );
     expect(await checker.repair(), isEmpty);
   });
+
+  test('repair composes into an enclosing transaction: a rollback reverts '
+      'both the row mutations and their oplog entries', () async {
+    // Persistence.repairLibrary (like the sync engine's end-of-pull repair)
+    // wraps repair() in ONE db.transaction so each repair's row UPDATE and
+    // its journal entry can never commit separately. This proves the repair
+    // internals genuinely compose into a caller transaction: everything a
+    // full repair pass wrote is undone atomically by a rollback.
+    await seed();
+    await rawTombstone('tracks', await firstId('tracks'));
+    expect(await checker.check(), isNotEmpty);
+    final opsBefore = (await db.select(db.oplog).get()).length;
+
+    await expectLater(
+      db.transaction(() async {
+        await checker.repair();
+        throw StateError('injected post-repair crash');
+      }),
+      throwsStateError,
+    );
+
+    // The violations are all still present and not one journal entry leaked.
+    expect(await checker.check(), isNotEmpty);
+    expect((await db.select(db.oplog).get()).length, opsBefore);
+
+    // The same repair inside a COMMITTED transaction resolves everything and
+    // journals it.
+    await db.transaction(() => checker.repair());
+    expect(await checker.check(), isEmpty);
+    expect((await db.select(db.oplog).get()).length, greaterThan(opsBefore));
+  });
 }

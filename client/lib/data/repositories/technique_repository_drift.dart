@@ -122,10 +122,16 @@ class TechniqueRepositoryDrift implements TechniqueRepository {
   /// The one save core. [base] is the per-row content-hash map captured when
   /// the caller loaded the technique (three-way merge); null means "adopt the
   /// current persisted state as base" (the legacy two-way diff).
+  ///
+  /// The WHOLE import+commit sequence runs under the store write gate's
+  /// shared side: asset imports land before the media rows referencing them
+  /// commit, and a maintenance pass (Persistence.repairLibrary / the boot
+  /// sweeps, which hold the gate exclusively) running in that window would
+  /// tombstone the just-imported asset and trash its pool file.
   Future<Result<Loaded<Technique>>> _save(
     Technique technique, {
     required Map<String, String>? base,
-  }) async {
+  }) => assets.gate.shared(() async {
     try {
       // Assets first (outside the row transaction, idempotent + deduped): a
       // dependent media row never exists without its asset.
@@ -359,7 +365,7 @@ class TechniqueRepositoryDrift implements TechniqueRepository {
       // so the caller's revert/toast runs instead of crashing.
       return Result.error(e is Exception ? e : Exception(e.toString()));
     }
-  }
+  });
 
   @override
   Future<Result<void>> deleteTechnique(String id) async {

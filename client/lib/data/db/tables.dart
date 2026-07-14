@@ -244,8 +244,13 @@ class Oplog extends Table {
   IntColumn get createdAt => integer()();
 }
 
-/// In-progress recordings, so a recorder crash leaves a sweepable .part with a
-/// pid-tied anchor (a long live recording is never age-swept).
+/// RESERVED — currently unwired: nothing in the app reads or writes this
+/// table. It was designed as an in-progress-recording registry (a pid-tied
+/// anchor so an age-based sweep could never reclaim a long live recording),
+/// but no such protection is needed today: every destructive sweep runs ONLY
+/// at boot (Persistence.open), when no recording can be in flight. Kept
+/// rather than dropped to avoid schema churn; it MUST be wired up before any
+/// sweep is ever scheduled to run while the app is live.
 @DataClassName('RecordingInflightRow')
 class RecordingsInflight extends Table {
   TextColumn get id => text()(); // the asset ULID being recorded
