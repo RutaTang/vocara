@@ -27,12 +27,27 @@ use crate::sample::{Smp, CHANNELS, ENGINE_SR};
 use std::os::raw::c_float;
 use crate::source::{BufferSource, RingSource};
 
+/// (size, mtime) of a cache entry's source file, captured when the PCM was stored. Size+mtime
+/// is the standard freshness heuristic: a same-size rewrite inside one mtime tick can evade it,
+/// but every real re-render/re-record changes at least one of the two.
+type FileStamp = (u64, std::time::SystemTime);
+
+/// Stat `path` for freshness comparison. `None` when the file is unreadable (missing, perms).
+fn file_stamp(path: &str) -> Option<FileStamp> {
+    let m = std::fs::metadata(path).ok()?;
+    Some((m.len(), m.modified().ok()?))
+}
+
 /// A decoded-PCM cache entry: the samples plus the stage-recency stamp used for the
 /// bounded LRU eviction at commit (see [`cache_retain`]).
 struct CachedPcm {
     pcm: Arc<[Smp]>,
     /// `VeEngine::cache_seq` at the last time this path was staged (higher = more recent).
     staged_seq: u64,
+    /// Source-file stamp at store time, so a path hit can detect the file changing on disk
+    /// underneath the cache (see [`cache_lookup_fresh`]). `None` when the file could not be
+    /// statted at store time.
+    stamp: Option<FileStamp>,
 }
 
 /// A track staged for the next [`ve_tracks_commit`].
@@ -170,9 +185,34 @@ fn cache_store_pcm(
         CachedPcm {
             pcm: arc.clone(),
             staged_seq: seq,
+            // Stamp the source file NOW (moments after it was decoded). A rewrite landing in
+            // the decode→stat window would stamp newer metadata onto older samples; that
+            // ms-scale race is accepted — the next rewrite is caught normally.
+            stamp: file_stamp(path),
         },
     );
     arc
+}
+
+/// Look up `path` for staging and bump its LRU stamp — but only when the file on disk still
+/// matches the [`FileStamp`] captured at store time. A changed stamp (or an entry stored
+/// without one) returns `None`, turning the stale hit into a MISS: `ve_tracks_add` then
+/// reports -1 and Dart decodes fresh, which re-stores the entry via [`cache_store_pcm`].
+/// An UNREADABLE file (deleted/perms) still serves the cache: the staged audio may outlive
+/// its source file, and a forced re-decode would only fail (pre-existing behavior).
+fn cache_lookup_fresh(
+    cache: &mut std::collections::HashMap<String, CachedPcm>,
+    path: &str,
+    seq: u64,
+) -> Option<Arc<[Smp]>> {
+    let c = cache.get_mut(path)?;
+    match (c.stamp, file_stamp(path)) {
+        (_, None) => {}                              // source gone: keep serving the cache
+        (Some(stored), Some(now)) if stored == now => {} // verified fresh
+        _ => return None,                            // changed on disk (or unverifiable): miss
+    }
+    c.staged_seq = seq;
+    Some(c.pcm.clone())
 }
 
 /// Create the engine: build the P0 graph at the fixed `ENGINE_SR`, then spawn the audio-host
@@ -859,10 +899,13 @@ pub extern "C" fn ve_set_bus_send_level(
 }
 
 /// Stage one track from the decoded-PCM cache: place it at `start_ms` with linear `gain`
-/// and `muted`. Returns the track index (>= 0), or -1 when `path` is not cached — the
-/// caller then decodes OFF this thread ([`ve_decode`] on an isolate) and stages the samples
-/// via [`ve_tracks_add_pcm`]. This function never decodes: it runs on the UI thread, and a
-/// cache miss (first stage, or evicted at an earlier commit) must not block it on file I/O.
+/// and `muted`. Returns the track index (>= 0), or -1 when `path` is not cached OR its file
+/// changed on disk since it was cached (freshness is verified by size+mtime, so a take
+/// re-rendered under a reused path can never re-stage stale audio) — the caller then decodes
+/// OFF this thread ([`ve_decode`] on an isolate) and stages the samples via
+/// [`ve_tracks_add_pcm`]. This function never decodes: it runs on the UI thread, and a cache
+/// miss (first stage, or evicted at an earlier commit) must not block it on file I/O (the
+/// freshness stat is one metadata syscall, not a decode).
 #[no_mangle]
 pub extern "C" fn ve_tracks_add(
     e: *mut VeEngine,
@@ -885,11 +928,13 @@ pub extern "C" fn ve_tracks_add(
         let rate = eng.handle.sample_rate();
         eng.cache_seq += 1;
         let seq = eng.cache_seq;
-        let pcm = match eng.cache.get_mut(path) {
-            Some(c) => {
-                c.staged_seq = seq;
-                c.pcm.clone()
-            }
+        // Freshness-checked lookup: a path whose file changed on disk since it was cached
+        // (re-rendered/re-recorded under a reused name) counts as a MISS, so the caller
+        // decodes the NEW content instead of silently re-staging the stale samples. The
+        // stat runs on this (UI) thread, which is the same thread that would otherwise
+        // decode — one metadata syscall is negligible next to that.
+        let pcm = match cache_lookup_fresh(&mut eng.cache, path, seq) {
+            Some(pcm) => pcm,
             None => return -1,
         };
         let start_frame = (start_ms as f64 * rate / 1000.0) as i64;
@@ -1830,7 +1875,7 @@ pub extern "C" fn ve_track_gr(e: *mut VeEngine, track: c_int) -> f32 {
 
 #[cfg(test)]
 mod cache_tests {
-    use super::{cache_retain, cache_store_pcm, CachedPcm};
+    use super::{cache_lookup_fresh, cache_retain, cache_store_pcm, CachedPcm};
     use crate::sample::Smp;
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
@@ -1840,6 +1885,7 @@ mod cache_tests {
         CachedPcm {
             pcm: Arc::from(vec![0.0 as Smp; bytes / std::mem::size_of::<Smp>()]),
             staged_seq: seq,
+            stamp: None,
         }
     }
 
@@ -1903,5 +1949,39 @@ mod cache_tests {
         let cached = cache.get("take.wav").expect("path stays cached");
         assert_eq!(&cached.pcm[..], &[0.9, 0.9], "the cache must hold the fresh samples");
         assert_eq!(cached.staged_seq, 2, "the LRU stamp follows the re-stage");
+    }
+
+    #[test]
+    fn overwritten_file_at_a_cached_path_is_a_miss() {
+        // `ve_tracks_add` used to serve the cached Arc on ANY path hit: a take re-rendered
+        // under a reused path silently kept playing its OLD audio (the dominant stale-PCM
+        // flow — Dart only decodes after a miss). The freshness stamp turns a changed file
+        // into a miss, forcing the fresh decode + re-store.
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("vocara_cache_stamp_{}.bin", std::process::id()));
+        let p = path.to_str().unwrap();
+        std::fs::write(&path, [0u8; 8]).unwrap();
+        let mut cache = HashMap::new();
+        cache_store_pcm(&mut cache, p, &[0.1, 0.1], 1);
+        let hit = cache_lookup_fresh(&mut cache, p, 2).expect("unchanged file must hit");
+        assert_eq!(&hit[..], &[0.1, 0.1]);
+        assert_eq!(cache.get(p).unwrap().staged_seq, 2, "a hit bumps the LRU stamp");
+        // Overwrite with a different SIZE so the check cannot depend on mtime granularity.
+        std::fs::write(&path, [0u8; 16]).unwrap();
+        assert!(
+            cache_lookup_fresh(&mut cache, p, 3).is_none(),
+            "a file overwritten under a cached path must MISS"
+        );
+        // The fresh decode re-stores and hits again.
+        cache_store_pcm(&mut cache, p, &[0.9, 0.9], 4);
+        let fresh = cache_lookup_fresh(&mut cache, p, 5).expect("re-stored entry hits");
+        assert_eq!(&fresh[..], &[0.9, 0.9]);
+        // A DELETED source keeps serving the cache (staged audio may outlive its file; a
+        // forced re-decode could only fail).
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            cache_lookup_fresh(&mut cache, p, 6).is_some(),
+            "an unreadable source file must not invalidate the cache"
+        );
     }
 }

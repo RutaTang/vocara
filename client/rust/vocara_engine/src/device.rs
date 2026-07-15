@@ -24,6 +24,27 @@ pub const EVENT_OUTPUT_LOST: u32 = 1;
 /// `ve_poll_device_event` bit: the active input device was lost (stream error / disconnect).
 pub const EVENT_INPUT_LOST: u32 = 2;
 
+/// Latched when a stream teardown failed to synchronously stop its callback (a cpal `pause()`
+/// error, or `AudioOutputUnitStop` failing in `vpio`). The renderer gate's `false` state means
+/// "no streams, hence no callbacks, hence retired graphs can be freed immediately" — a failed
+/// teardown breaks that proof for the rest of the process (a zombie callback may outlive its
+/// handle), so once latched the gate is never settled to `false` again and `EngineHandle::reap`
+/// stays on the pre-gate grace-epoch path (worst case: retirees park until teardown, a bounded
+/// leak — never a use-after-free under a possibly-live callback).
+static STREAM_TEARDOWN_FAILED: AtomicBool = AtomicBool::new(false);
+
+/// Record a failed stream teardown (see [`STREAM_TEARDOWN_FAILED`]). Called from `Drop` paths
+/// on the audio-host thread; the `Release` store pairs with `effective_gate`'s `Acquire` load.
+pub(crate) fn note_stream_teardown_failure() {
+    STREAM_TEARDOWN_FAILED.store(true, Ordering::Release);
+}
+
+/// The renderer-gate value to publish for a desired stream state: a latched teardown failure
+/// pins the gate raised (grace-epoch reaping only).
+fn effective_gate(streams_up: bool) -> bool {
+    streams_up || STREAM_TEARDOWN_FAILED.load(Ordering::Acquire)
+}
+
 /// Keeps the cpal stream alive; dropping it stops audio. `cpal::Stream` is `!Send`, so this
 /// only ever lives on the [`AudioHost`] thread that created it.
 pub struct DeviceHandle {
@@ -40,9 +61,14 @@ impl Drop for DeviceHandle {
         // `pause()` takes the same inner lock those monitor threads use and synchronously
         // executes `AudioOutputUnitStop`, which joins any in-flight render callback; nothing
         // ever restarts a paused stream (the monitors only pause), so after this returns no
-        // callback is executing and none will start. The result is ignored: a failed stop
-        // just leaves the pre-existing narrow race, never a new failure mode.
-        let _ = self._stream.pause();
+        // callback is executing and none will start. A FAILED stop leaves the pre-existing
+        // narrow callback race — and would also invalidate the renderer gate's "no streams
+        // => no callbacks" proof, so it is latched: the gate then never settles to `false`
+        // and retired graphs stay on the grace-epoch path instead of being freed under a
+        // possibly-live callback.
+        if self._stream.pause().is_err() {
+            note_stream_teardown_failure();
+        }
     }
 }
 
@@ -571,12 +597,18 @@ fn writer_run(mut rec: Consumer<[Smp; CHANNELS]>, rx: mpsc::Receiver<WriterCmd>)
                 Ok(WriterCmd::Start(path, ack)) => {
                     // A Start while already recording finalizes the previous take first,
                     // draining its buffered tail into it (mirroring Stop) so those frames
-                    // land in the take they belong to.
+                    // land in the take they belong to. IO errors on that drain/finalize are
+                    // carried into `failed` (matching Stop) rather than swallowed.
+                    let mut old_take_damaged = false;
                     if let Some(mut w) = wav.take() {
                         while let Some(f) = rec.pop() {
-                            let _ = w.write_sample(f[0]);
+                            if w.write_sample(f[0]).is_err() {
+                                old_take_damaged = true;
+                            }
                         }
-                        let _ = w.finalize();
+                        if w.finalize().is_err() {
+                            old_take_damaged = true;
+                        }
                     }
                     // Discard any stale frames still in the ring before creating the file:
                     // the RT callback samples `rec_active` once per buffer, so a tail pushed
@@ -586,7 +618,12 @@ fn writer_run(mut rec: Consumer<[Smp; CHANNELS]>, rx: mpsc::Receiver<WriterCmd>)
                     match crate::wav::WavStream::create(&path, 1, ENGINE_SR as u32) {
                         Ok(w) => {
                             wav = Some(w);
-                            failed = false;
+                            // Carry old-take damage forward instead of resetting: the
+                            // restart path has no ack channel of its own, so the NEXT Stop
+                            // reports it (a surfaced-if-misattributed failure beats silent
+                            // corruption; the normal stop-then-start flow never reaches
+                            // here with a live take).
+                            failed = old_take_damaged;
                             let _ = ack.send(true);
                         }
                         Err(_) => {
@@ -853,9 +890,12 @@ fn audio_host_run(
     // Renderer-activity gate shared with `EngineHandle::reap`: it must read `true` from
     // BEFORE any stream is built (a callback can fire the instant a build succeeds) until
     // AFTER every stream has been dropped (drop joins the callback). A `false` read on the
-    // control thread then proves no RT callback can hold a retired graph pointer. A poisoned
-    // lock is impossible here (no panics while held), but degrade to a no-op regardless.
+    // control thread then proves no RT callback can hold a retired graph pointer — which is
+    // why a latched teardown failure (`effective_gate`) pins the gate raised: "dropped" no
+    // longer implies "joined" then. A poisoned lock is impossible here (no panics while
+    // held), but degrade to a no-op regardless.
     let set_gate = |v: bool| {
+        let v = effective_gate(v);
         if let Ok(mut g) = renderer_gate.lock() {
             *g = v;
         }
@@ -1207,6 +1247,26 @@ mod record_writer_tests {
         // 44-byte header + ONLY the take's 20 mono 16-bit samples (30 stale ones discarded).
         assert_eq!(bytes.len(), 44 + 20 * 2, "stale frames must not lead the new take");
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn failed_teardown_latches_the_renderer_gate_raised() {
+        // A failed pause()/AudioOutputUnitStop means "no streams" no longer proves "no
+        // callbacks": once latched, the host must never publish a lowered gate again, so
+        // reap() sticks to the grace-epoch path instead of freeing retirees under a
+        // possibly-live zombie callback.
+        use super::{effective_gate, note_stream_teardown_failure, STREAM_TEARDOWN_FAILED};
+        use std::sync::atomic::Ordering;
+        assert!(effective_gate(true), "streams up always raises the gate");
+        assert!(!effective_gate(false), "a clean teardown may lower the gate");
+        note_stream_teardown_failure();
+        assert!(
+            effective_gate(false),
+            "a latched teardown failure must pin the gate raised"
+        );
+        assert!(effective_gate(true));
+        // Reset the process-global latch so other tests in this binary see a clean state.
+        STREAM_TEARDOWN_FAILED.store(false, Ordering::Release);
     }
 
     #[test]

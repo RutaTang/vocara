@@ -22,7 +22,7 @@
 use std::ffi::c_void;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
 use objc2_audio_toolbox::{
@@ -47,7 +47,7 @@ use crate::aec::Aec;
 use crate::device::InputCell;
 use crate::live::RtCell;
 use crate::ring::{spsc, Consumer, Producer};
-use crate::ring_sync::{duplex_rates_ok, RefRingSync};
+use crate::ring_sync::{baseline_cap, classify_duplex_rates, DuplexRateCheck, RefRingSync};
 use crate::sample::{frames_at_engine_rate, CHANNELS, ENGINE_SR};
 
 const VPIO_RATE: f64 = ENGINE_SR; // 48_000.0 — requested rate; verified against the effective ASBD.
@@ -76,6 +76,12 @@ const INPUT_LOST_STREAK: u32 = 20;
 /// the engine playhead, so recorded takes are shifted earlier by it to sit on the beat the singer
 /// heard. Written when the mic opens; read by the FFI. 0 until the mic has opened once.
 pub(crate) static RECORD_LATENCY_FRAMES: AtomicU32 = AtomicU32::new(0);
+
+/// Diagnostic: whether the current duplex session runs with the AEC BYPASSED because the input
+/// element negotiated a non-engine rate (see [`DuplexRateCheck::BypassAec`]). Reset on every
+/// (re)start. Mic capture and playback keep working in that mode; only echo cancellation is off,
+/// so the backing track bleeds into speaker recordings exactly as it did before AEC existed.
+pub(crate) static AEC_BYPASSED: AtomicBool = AtomicBool::new(false);
 
 /// Default capture (record) gain (~+24 dB). The built-in mic has no AGC and records quiet; with the
 /// expander pulling the noise floor down, this boost lands mostly on the voice. User-adjustable at
@@ -246,6 +252,11 @@ struct InCtx {
     /// a backlog left by missed pops would delay the reference past the AEC's modeled
     /// round-trip and the filter could never re-converge.
     ref_sync: RefRingSync,
+    /// AEC bypass (set once before start, read-only on the RT callback): the input element
+    /// negotiated a non-engine rate, so far-end pairing is impossible (see
+    /// [`DuplexRateCheck::BypassAec`]). The mic passes through the same cleanup + gain path;
+    /// all far-end ring/`ref_sync` work is skipped (`output_cb` leaves the ring unpumped).
+    aec_bypass: bool,
     /// Mono AEC scratch (mic-in / far-end / clean-out), `MAX_FRAMES` each.
     mic_mono: Vec<f32>,
     far_mono: Vec<f32>,
@@ -273,6 +284,10 @@ struct OutCtx {
     scratch: Vec<f32>,
     /// Mono downmix of the rendered backing, pushed to the AEC far-end ring (the echo reference).
     ref_prod: Producer<f32>,
+    /// Whether to pump `ref_prod` (set once before start, read-only on the RT callback).
+    /// `false` when the AEC is bypassed: the input side never pops then, so pushing would
+    /// only grow the ring to capacity for nothing.
+    push_ref: bool,
     layout: Layout,
 }
 
@@ -329,8 +344,12 @@ impl Vpio {
             // and publish the record round-trip latency so recorded takes can be time-aligned.
             // Measure on the device the VPIO unit will actually bind to (`device_uid` below), not
             // the system defaults — a non-default mic has its own buffer/latency/safety offsets.
-            let round_trip = tune_io_and_round_trip(device_uid) + AEC_BLOCK_FRAMES;
-            RECORD_LATENCY_FRAMES.store(round_trip, Ordering::Relaxed);
+            // The IO-only figure (no AEC block) also bounds the ref-ring baseline below: an
+            // enshrined ring depth past it would make the echo non-causal (AEC dead for the
+            // session), so the baseline cap is derived from it, not from a buffer-size constant.
+            let io_round_trip = tune_io_and_round_trip(device_uid);
+            RECORD_LATENCY_FRAMES.store(io_round_trip + AEC_BLOCK_FRAMES, Ordering::Relaxed);
+            AEC_BYPASSED.store(false, Ordering::Relaxed);
 
             let on: u32 = 1;
             let off: u32 = 0;
@@ -384,7 +403,8 @@ impl Vpio {
                 scratch: vec![0.0; MAX_FRAMES * MAX_CH],
                 aec,
                 ref_cons,
-                ref_sync: RefRingSync::new(MAX_FRAMES),
+                ref_sync: RefRingSync::new(baseline_cap(io_round_trip, MAX_FRAMES)),
+                aec_bypass: false,
                 mic_mono: vec![0.0; MAX_FRAMES],
                 far_mono: vec![0.0; MAX_FRAMES],
                 clean_mono: vec![0.0; MAX_FRAMES],
@@ -400,6 +420,7 @@ impl Vpio {
                     rt,
                     scratch: vec![0.0; MAX_FRAMES * CHANNELS],
                     ref_prod,
+                    push_ref: true,
                     layout: placeholder,
                 }))
             } else {
@@ -448,19 +469,41 @@ impl Vpio {
                 oc.layout = out_layout;
                 // Duplex sanity: the far-end ring is pushed at the output element's rate and
                 // popped at the input element's, and `output_cb` writes engine-rate samples
-                // without resampling — so both negotiated rates must equal VPIO_RATE. A
-                // mismatch drifts the AEC reference continuously (it never converges) and
-                // pitches the playback, so refuse to start; the caller falls back (default
-                // input, then a plain cpal output without a mic).
-                if !duplex_rates_ok(in_layout.rate, out_layout.rate, VPIO_RATE) {
-                    AudioUnitUninitialize(unit);
-                    return bail(
-                        unit,
-                        format!(
-                            "VPIO negotiated mismatched sample rates: input {} Hz, output {} Hz, expected {} Hz",
-                            in_layout.rate, out_layout.rate, VPIO_RATE
-                        ),
-                    );
+                // without resampling — so the AEC needs both negotiated rates at VPIO_RATE.
+                match classify_duplex_rates(in_layout.rate, out_layout.rate, VPIO_RATE) {
+                    DuplexRateCheck::AecOn => {}
+                    DuplexRateCheck::BypassAec => {
+                        // The mic element negotiated VPIO's internal voice rate: far-end
+                        // pairing is impossible (the ring would drift without bound), but
+                        // capture itself is fine — `reconfigure` above already set the
+                        // resampler to the negotiated rate. Run the duplex with the AEC
+                        // BYPASSED instead of failing the whole mic: a working mic with
+                        // echo bleed always beats no mic at all. One-shot setup log
+                        // (host thread, not the RT callback).
+                        in_ctx.aec_bypass = true;
+                        oc.push_ref = false; // leave the ref ring unpumped so it can't grow
+                        // Without the AEC in the capture path its block latency no longer
+                        // applies to recorded takes.
+                        RECORD_LATENCY_FRAMES.store(io_round_trip, Ordering::Relaxed);
+                        AEC_BYPASSED.store(true, Ordering::Relaxed);
+                        eprintln!(
+                            "vocara: VPIO negotiated input {} Hz vs output {} Hz — running WITHOUT echo cancellation (mic + playback intact; expect backing bleed on speakers)",
+                            in_layout.rate, out_layout.rate
+                        );
+                    }
+                    DuplexRateCheck::Refuse => {
+                        // A non-engine OUTPUT rate corrupts playback itself (pitched audio),
+                        // which bypassing the AEC cannot save. Refuse; the caller falls back
+                        // (default input, then a plain cpal output without a mic).
+                        AudioUnitUninitialize(unit);
+                        return bail(
+                            unit,
+                            format!(
+                                "VPIO negotiated an unusable output rate: input {} Hz, output {} Hz, expected {} Hz",
+                                in_layout.rate, out_layout.rate, VPIO_RATE
+                            ),
+                        );
+                    }
                 }
             }
 
@@ -479,7 +522,16 @@ impl Vpio {
         unsafe {
             if !self.unit.is_null() {
                 if self.started {
-                    AudioOutputUnitStop(self.unit);
+                    let st = AudioOutputUnitStop(self.unit);
+                    if st != 0 {
+                        // Stop is the synchronization point that joins in-flight render
+                        // callbacks; if it failed they may keep running after this handle is
+                        // gone. Latch it so the audio host never lowers the renderer gate on
+                        // the strength of this teardown — retired graphs then wait for their
+                        // grace epoch (the pre-gate behavior) instead of being freed under a
+                        // possibly-live callback.
+                        crate::device::note_stream_teardown_failure();
+                    }
                     AudioUnitUninitialize(self.unit);
                     self.started = false;
                 }
@@ -596,6 +648,13 @@ unsafe extern "C-unwind" fn input_cb(
         let _fz = crate::dsp::denormals::FlushGuard::new();
         let ctx = &mut *(in_ref.as_ptr() as *mut InCtx);
         let frames = (frames as usize).min(MAX_FRAMES);
+        // Single ring-length snapshot for this callback's depth accounting (see the measurement
+        // contract on `RefRingSync::on_success`): the output callback pushes concurrently, so a
+        // live `len()` read after the pops can be inflated by a racing push — sustained over a
+        // trim window that inflation would be shed as if it were backlog, and the next cycle
+        // would underrun (zeros injected into the far-end stream). The snapshot can only
+        // UNDER-estimate (safe: a real backlog is then trimmed one cycle later).
+        let ref_len_entry = ctx.ref_cons.len();
         // Channels the negotiated format advertises (the room we provide). The mic is frequently
         // mono even when the format claims stereo, so we read the real count back after render.
         let req_ch = ctx.layout.channels.clamp(1, MAX_CH);
@@ -639,9 +698,12 @@ unsafe extern "C-unwind" fn input_cb(
             // The output callback still pushed this cycle's reference: consume (discard) it so
             // push/pop stay 1:1 and the ring never accumulates a permanent backlog (which would
             // delay the reference past the AEC's modeled round-trip — a non-causal echo the
-            // filter can never re-converge on). RT-safe: bounded wait-free pops.
-            for _ in 0..ctx.ref_sync.on_failure(frames) {
-                let _ = ctx.ref_cons.pop();
+            // filter can never re-converge on). RT-safe: bounded wait-free pops. Skipped when
+            // the AEC is bypassed (the ring is unpumped; there is no 1:1 flow to keep).
+            if !ctx.aec_bypass {
+                for _ in 0..ctx.ref_sync.on_failure(frames) {
+                    let _ = ctx.ref_cons.pop();
+                }
             }
             return st;
         }
@@ -658,41 +720,60 @@ unsafe extern "C-unwind" fn input_cb(
             }
             // Same 1:1 discard as the render-failure path above: an empty success also skipped
             // the normal pops while the output side kept pushing.
-            for _ in 0..ctx.ref_sync.on_failure(frames) {
-                let _ = ctx.ref_cons.pop();
+            if !ctx.aec_bypass {
+                for _ in 0..ctx.ref_sync.on_failure(frames) {
+                    let _ = ctx.ref_cons.pop();
+                }
             }
             return 0;
         }
         // Reset only on a real, non-empty capture (a healthy mic delivers frames every cycle).
         ctx.err_streak = 0;
 
-        // Downmix the RAW mic to mono and pull the matching far-end reference (the backing we sent
-        // to the speaker, mono; zero-filled if the ring momentarily lags). `n` = captured frames.
+        // Downmix the RAW mic to mono. `n` = captured frames.
         let n = (got_samples / act_ch).min(frames);
-        // Overflow guard ONLY: dropping reference samples warps the far-end stream and wrecks the
-        // adaptive filter (the previous per-block drain caused continuous mis-adaptation). Normal
-        // duplex is 1:1 so the ring stays shallow; only if it nears capacity do we shed the oldest.
-        while ctx.ref_cons.len() + MAX_FRAMES > REF_RING_CAP {
-            let _ = ctx.ref_cons.pop();
-        }
         for i in 0..n {
             ctx.mic_mono[i] = if act_ch == 1 {
                 ctx.render_buf[i]
             } else {
                 0.5 * (ctx.render_buf[i * act_ch] + ctx.render_buf[i * act_ch + 1])
             };
-            ctx.far_mono[i] = ctx.ref_cons.pop().unwrap_or(0.0);
         }
-        // Trim any standing backlog left by cycles where this callback did not run at all
-        // (a silent device stall never reports an error): `ref_sync` compares the depth after
-        // the normal pops against its recorded healthy baseline and returns the extra samples
-        // to discard. Bounded by the ring capacity; RT-safe (wait-free pops).
-        for _ in 0..ctx.ref_sync.on_success(ctx.ref_cons.len()) {
-            let _ = ctx.ref_cons.pop();
+        if ctx.aec_bypass {
+            // AEC bypassed (mismatched element rates): no far-end pairing exists, the ref
+            // ring is unpumped. The raw mic takes the same cleanup + makeup path below.
+            ctx.clean_mono[..n].copy_from_slice(&ctx.mic_mono[..n]);
+        } else {
+            // Overflow guard ONLY: dropping reference samples warps the far-end stream and
+            // wrecks the adaptive filter (the previous per-block drain caused continuous
+            // mis-adaptation). Normal duplex is 1:1 so the ring stays shallow; only if it
+            // nears capacity do we shed the oldest. This guard reads the LIVE length (it
+            // protects the real ring); the shed count feeds the snapshot accounting below.
+            let mut shed = 0usize;
+            while ctx.ref_cons.len() + MAX_FRAMES > REF_RING_CAP {
+                let _ = ctx.ref_cons.pop();
+                shed += 1;
+            }
+            // Pull the matching far-end reference (the backing we sent to the speaker,
+            // mono; zero-filled if the ring momentarily lags).
+            for i in 0..n {
+                ctx.far_mono[i] = ctx.ref_cons.pop().unwrap_or(0.0);
+            }
+            // Trim any standing backlog left by cycles where this callback did not run at
+            // all (a silent device stall never reports an error): `ref_sync` compares the
+            // post-pop depth against its recorded healthy baseline and returns the extra
+            // samples to discard. The depth is derived from the entry snapshot — NOT a live
+            // `len()`, which a concurrently racing push can inflate into spurious trims
+            // (see the measurement contract on `on_success`). Bounded by the ring capacity;
+            // RT-safe (wait-free pops).
+            let depth = ref_len_entry.saturating_sub(shed + n);
+            for _ in 0..ctx.ref_sync.on_success(depth) {
+                let _ = ctx.ref_cons.pop();
+            }
+            // Cancel the loudspeaker echo from the mic, preserving the singing voice.
+            ctx.aec
+                .process(&ctx.mic_mono[..n], &ctx.far_mono[..n], &mut ctx.clean_mono[..n]);
         }
-        // Cancel the loudspeaker echo from the mic, preserving the singing voice.
-        ctx.aec
-            .process(&ctx.mic_mono[..n], &ctx.far_mono[..n], &mut ctx.clean_mono[..n]);
         // Clean up (high-pass + expander) then apply the (user-adjustable) record gain, and
         // duplicate the clean mono voice up to the interleaved-stereo feed.
         let gain = f32::from_bits(INPUT_GAIN.load(Ordering::Relaxed));
@@ -743,8 +824,12 @@ unsafe extern "C-unwind" fn output_cb(
         // AEC stays consistent (it cancels whatever the speaker actually plays).
         // Publish the mono backing to the AEC far-end ring (the echo reference for input_cb). Drops
         // on a full ring (back-pressure; input_cb keeps it drained 1:1 every duplex cycle).
-        for i in 0..frames {
-            let _ = ctx.ref_prod.push(0.5 * (scratch[2 * i] + scratch[2 * i + 1]));
+        // Skipped when the AEC is bypassed (mismatched element rates): the input side never
+        // pops then, so pushing would only fill the ring to capacity for nothing.
+        if ctx.push_ref {
+            for i in 0..frames {
+                let _ = ctx.ref_prod.push(0.5 * (scratch[2 * i] + scratch[2 * i + 1]));
+            }
         }
         // Self-monitor: add the singer's voice to the OUTPUT (headphones) — AFTER the reference is
         // captured, so the voice never enters the AEC reference. Silent at monitor gain 0 (the
