@@ -1,7 +1,9 @@
 # Release runbook
 
-How to cut a Vocara macOS release. The artifact is a signed, notarized,
-stapled universal (arm64 + x86_64) DMG: `dist/Vocara-<version>.dmg`.
+How to cut a Vocara macOS release. Releases go through GitHub Actions ONLY
+(the `Release` workflow, `.github/workflows/release.yml`); there is no local
+release script. The artifact is a signed, notarized, stapled universal
+(arm64 + x86_64) DMG attached to a GitHub release: `Vocara-<version>.dmg`.
 
 ## Bundle-id freeze warning
 
@@ -11,50 +13,34 @@ keychain items, and the TCC microphone grant are all keyed off it. Changing it
 after release strands every user's data. It is frozen as of v1.0.0. (Dev/test
 flavors use `com.rutatang.vocara.dev` / `.test` and are not affected.)
 
-## One-time setup (local releases)
+## One-time setup
 
-1. **Developer ID certificate** — already in the login keychain:
-   `Developer ID Application: Weizhi Tang (TP7LCYW3NY)`. If it is ever lost,
-   re-download or re-create it at <https://developer.apple.com/account/resources/certificates>
-   (the private key only exists where the CSR was made, so keep a `.p12` backup).
-2. **Notary credentials** — create an app-specific password at
-   <https://account.apple.com> (Sign-In and Security → App-Specific Passwords),
-   then run once:
-
-   ```sh
-   xcrun notarytool store-credentials vocara-notary \
-     --apple-id "<your Apple ID email>" \
-     --team-id TP7LCYW3NY \
-     --password "<app-specific password>"
-   ```
-
-   `scripts/release.sh` detects a missing profile and prints this command.
-3. **Intel Rust target** — `rustup target add x86_64-apple-darwin`.
-
-## One-time setup (CI releases)
-
-Add these repository secrets (Settings → Secrets and variables → Actions):
+Add these repository secrets (Settings → Secrets and variables → Actions).
+The names match the convention used by the owner's other release pipelines,
+and notarization authenticates with Apple ID + app-specific password (the
+same method `notarytool` also supports via an App Store Connect API key —
+either works; this repo standardizes on the former).
 
 | Secret | How to get it |
 | --- | --- |
-| `DEVELOPER_ID_P12` | Keychain Access → My Certificates → right-click the Developer ID Application cert → Export as `.p12` with a password, then `base64 -i cert.p12 | pbcopy` |
-| `P12_PASSWORD` | the password chosen during that export |
-| `NOTARY_KEY` | App Store Connect → Users and Access → Integrations → App Store Connect API → Team Keys → create a key with **Developer** role; paste the downloaded `.p8` file contents |
-| `NOTARY_KEY_ID` | key ID shown next to that key |
-| `NOTARY_ISSUER_ID` | issuer ID shown at the top of the Team Keys page |
-
-The `.p8` can only be downloaded once — keep it somewhere safe too.
+| `MACOS_CERTIFICATE` | Keychain Access → My Certificates → right-click `Developer ID Application: Weizhi Tang (TP7LCYW3NY)` → Export as `.p12` with a password, then `base64 -i cert.p12 | pbcopy`. If the cert is ever lost, re-create it at <https://developer.apple.com/account/resources/certificates> (the private key only exists where the CSR was made, so keep a `.p12` backup). |
+| `MACOS_CERTIFICATE_PASSWORD` | the password chosen during that export |
+| `APPLE_ID` | the Apple ID email of the developer account |
+| `APPLE_TEAM_ID` | `TP7LCYW3NY` (shown on the certificate and at <https://developer.apple.com/account> → Membership) |
+| `APPLE_APP_SPECIFIC_PASSWORD` | <https://account.apple.com> → Sign-In and Security → App-Specific Passwords → generate one (e.g. named `vocara-ci`) |
 
 ## Cutting a release
 
-1. Bump `version:` in `client/pubspec.yaml`; commit everything (the release
-   script refuses a dirty tree).
-2. Either:
-   - **CI**: `git tag v<version> && git push origin v<version>` — the
-     `release` workflow builds, signs, notarizes, staples, and attaches the
-     DMG to a GitHub release. The tag must match the pubspec version.
-   - **Local**: `scripts/release.sh` from the repo root; the DMG lands in
-     `dist/`.
+1. Bump `version:` in `client/pubspec.yaml`; commit to master.
+2. `git tag v<version> && git push origin v<version>` — the `Release`
+   workflow runs the full pipeline:
+   - **Guard**: the tag must sit on master HEAD and match the pubspec version.
+   - **Validate**: format, analyze, unit tests, Rust engine tests (both
+     feature modes) + clippy, and all five e2e journeys.
+   - **Build**: universal prod build → deep re-sign → DMG → notarize →
+     staple → Gatekeeper assessment.
+   - **Publish**: GitHub release with the DMG and a `SHA256SUMS` file. A tag
+     containing a `-` (e.g. `v1.0.0-rc.1`) publishes as a prerelease.
 3. **Verify on a second machine** (or at minimum a different user account):
    download the DMG through a browser so it is quarantined, then:
 
@@ -71,16 +57,19 @@ The `.p8` can only be downloaded once — keep it somewhere safe too.
 
 ## What the pieces do
 
+All of these live as steps of the `build-macos` job in
+`.github/workflows/release.yml`:
+
 - **Signing config** — Release/Release-{Dev,Test,Prod} configs of the Runner
   target use manual signing with `Developer ID Application`, team
   `TP7LCYW3NY`, and hardened runtime. Debug/Profile stay ad-hoc for dev speed.
 - **Universal build** — the Rust engine builds arm64-only unless
-  `VOCARA_UNIVERSAL=1` (see `client/macos/build_rust.sh`); the release script
-  sets it and hard-fails if either the app binary or the embedded
-  `vocara_engine` is not fat.
+  `VOCARA_UNIVERSAL=1` (see `client/macos/build_rust.sh`); the workflow sets
+  it and hard-fails if either the app binary or the embedded `vocara_engine`
+  is not fat.
 - **Deep re-sign** — Xcode does not re-sign third-party frameworks (the
   mpv/ffmpeg stack in `media_kit`) with hardened runtime + timestamp, which
-  notarization requires; the script re-signs every Mach-O inside-out before
+  notarization requires; the workflow re-signs every Mach-O inside-out before
   building the DMG.
 - **Release entitlements** (`client/macos/Runner/Release.entitlements`):
   - `app-sandbox` — the shipping app is fully sandboxed.
@@ -89,11 +78,24 @@ The `.p8` can only be downloaded once — keep it somewhere safe too.
   - `files.user-selected.read-only` / `.read-write` — open panels for imports,
     save panels for exports.
 
+## In-app update check
+
+`UpdateCheckService` polls GitHub's `releases/latest` API and shows a
+notify-only banner (no auto-install). NOTE: the repository is currently
+private, so the unauthenticated API call returns 404 and the check silently
+reports "unknown" — it starts working the moment the repo (or a dedicated
+public releases repo, adjust `UpdateCheckService.manifestUrl`) is public.
+Auto-update via Sparkle was considered and deliberately deferred until that
+hosting decision is made.
+
 ## Troubleshooting
 
-- `notarytool submit` rejected: `xcrun notarytool log <submission-id>
-  --keychain-profile vocara-notary` lists the offending binaries (usually a
-  new unsigned dylib — the deep re-sign in `scripts/release.sh` should catch
-  it; check the find patterns still match the bundle layout).
-- `spctl` rejects a locally built app before notarization: expected.
-  Gatekeeper only accepts after notarize + staple (or an online ticket check).
+- Notarization rejected: the workflow's Notarize step prints
+  `notarytool log` output for the failed submission automatically (usually a
+  new unsigned dylib — the deep re-sign step should catch it; check its find
+  patterns still match the bundle layout).
+- Testing the release build locally without notarizing:
+  `cd client && VOCARA_UNIVERSAL=1 flutter build macos --release --flavor prod`
+  builds the same app bundle the workflow signs. An unsigned/un-notarized
+  local build is rejected by `spctl` — expected; Gatekeeper only accepts
+  after notarize + staple.

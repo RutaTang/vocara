@@ -1,51 +1,208 @@
-# Tag-triggered release: universal build, Developer ID sign, notarize, staple,
-# and attach the DMG to a GitHub release. Delegates the build/sign/notarize
-# logic to scripts/release.sh so CI and local releases stay identical.
+# Unified CD pipeline - triggered by version tags. GitHub Actions is the ONLY
+# release path: build, deep re-sign, DMG, notarize, staple, and publish all
+# happen here (no local release script).
+#
+# Phases:
+#   0  Guard     - tag must sit on master HEAD and match client/pubspec.yaml
+#   1  Validate  - format/analyze/unit tests, Rust engine tests, e2e journeys
+#   2  Build     - universal build -> Developer ID deep re-sign -> DMG
+#                  -> notarize -> staple -> Gatekeeper assessment
+#   3  Publish   - GitHub release with the DMG + SHA256SUMS
+#
+# There is no backend deploy phase yet: sync is local-only P0 today. When the
+# self-hosted sync server lands (P1, see docs/sync-protocol.md), its deploy
+# jobs slot in between Validate and Build.
 #
 # Required repository secrets (setup steps in docs/release-runbook.md):
-#   DEVELOPER_ID_P12   base64-encoded .p12 export of the
-#                      'Developer ID Application: Weizhi Tang (TP7LCYW3NY)' cert
-#   P12_PASSWORD       password chosen when exporting the .p12
-#   NOTARY_KEY         App Store Connect API key, raw .p8 file contents
-#   NOTARY_KEY_ID      key ID of that API key
-#   NOTARY_ISSUER_ID   issuer ID of that API key
-name: release
+#   MACOS_CERTIFICATE           base64-encoded .p12 export of the
+#                               'Developer ID Application: Weizhi Tang (TP7LCYW3NY)' cert
+#   MACOS_CERTIFICATE_PASSWORD  password chosen when exporting the .p12
+#   APPLE_ID                    Apple ID email of the developer account
+#   APPLE_TEAM_ID               TP7LCYW3NY
+#   APPLE_APP_SPECIFIC_PASSWORD app-specific password from account.apple.com
+name: Release
 
 on:
   push:
     tags: ["v*"]
 
+env:
+  # Pinned to the stable release matching client/.metadata (revision f6ff1529fd);
+  # keep in lockstep with ci.yml.
+  FLUTTER_VERSION: "3.38.5"
+
 permissions:
   contents: write
 
 jobs:
-  release:
-    runs-on: macos-latest
+  # ============================================================
+  # Phase 0: Guard - tag on master HEAD, tag matches pubspec
+  # ============================================================
+  guard:
+    name: Verify Tag
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Check tag matches pubspec version
+      - name: Verify tag points to HEAD of master
+        run: |
+          TAG_COMMIT=$(git rev-list -n 1 "$GITHUB_REF")
+          MASTER_HEAD=$(git rev-parse origin/master)
+          if [ "$TAG_COMMIT" != "$MASTER_HEAD" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME ($TAG_COMMIT) does not point to the HEAD of master ($MASTER_HEAD)."
+            exit 1
+          fi
+
+      - name: Verify tag matches pubspec version
         run: |
           TAG="${GITHUB_REF_NAME#v}"
           PUBSPEC="$(sed -n 's/^version: *\([0-9][^+ ]*\).*/\1/p' client/pubspec.yaml)"
           if [ "$TAG" != "$PUBSPEC" ]; then
-            echo "Tag v$TAG does not match client/pubspec.yaml version $PUBSPEC" >&2
+            echo "::error::Tag v$TAG does not match client/pubspec.yaml version $PUBSPEC."
             exit 1
           fi
 
-      - uses: subosito/flutter-action@v2
+  # ============================================================
+  # Phase 1: Validate - nothing ships that CI would not pass
+  # ============================================================
+  validate-flutter:
+    name: Validate Flutter
+    needs: guard
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
         with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
           cache: true
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Dependencies
+        run: flutter pub get
+
+      - name: Check Format
+        run: dart format --set-exit-if-changed lib test
+
+      - name: Analyze Code
+        run: flutter analyze
+
+      - name: Run Tests
+        run: flutter test
+
+  validate-rust:
+    name: Validate Rust Engine
+    needs: guard
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: client/rust/vocara_engine
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: client/rust/vocara_engine
+
+      # Both modes: plain `cargo test` skips ffi/vpio/device (feature-gated),
+      # so the device run is the one that actually compiles the FFI surface.
+      - name: Run Tests
+        run: |
+          cargo test
+          cargo test --features device
+
+      # Lib targets only: tests/aec_path_jump.rs carries known pre-existing
+      # style warnings, so --all-targets would be a false gate.
+      - name: Clippy
+        run: cargo clippy --features device -- -D warnings
+
+  # The UI-driven e2e journeys boot the full macOS app (TEST flavor, seeded
+  # sandbox store). They take several minutes each, which is why plain CI
+  # keeps them manual - but a release is exactly when they must all pass.
+  validate-e2e:
+    name: Validate E2E Journeys
+    needs: guard
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Install Dependencies
+        run: flutter pub get
+
+      - name: Home / Settings / Library navigation
+        run: flutter test integration_test/home_settings_journey_test.dart -d macos --flavor test
+
+      - name: Technique library
+        run: flutter test integration_test/technique_library_journey_test.dart -d macos --flavor test --dart-define=START=/techniques
+
+      - name: Song practice detail
+        run: flutter test integration_test/detail_arrange_journey_test.dart -d macos --flavor test --dart-define=START=/song/E2EPRACTICESEED0000000000001
+
+      - name: Technique detail editor
+        run: flutter test integration_test/technique_detail_journey_test.dart -d macos --flavor test --dart-define=START=/techniques/E2ETECHNIQUESEED000000000001
+
+      - name: Settings interactions
+        run: flutter test integration_test/settings_journey_test.dart -d macos --flavor test --dart-define=START=/settings
+
+  # ============================================================
+  # Phase 2: Build - universal, signed, notarized, stapled DMG
+  # ============================================================
+  build-macos:
+    name: Build macOS
+    runs-on: macos-latest
+    needs: [validate-flutter, validate-rust, validate-e2e]
+    outputs:
+      dmg_name: ${{ steps.package.outputs.dmg_name }}
+      sha256: ${{ steps.package.outputs.sha256 }}
+      size: ${{ steps.package.outputs.size }}
+    env:
+      APP_PATH: client/build/macos/Build/Products/Release-Prod/vocara.app
+      ENTITLEMENTS: client/macos/Runner/Release.entitlements
+      SIGN_IDENTITY: Developer ID Application
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Setup Rust (universal targets)
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - name: Import Developer ID certificate into a throwaway keychain
         env:
-          DEVELOPER_ID_P12: ${{ secrets.DEVELOPER_ID_P12 }}
-          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
         run: |
           set -euo pipefail
           KEYCHAIN="$RUNNER_TEMP/release.keychain-db"
@@ -53,37 +210,191 @@ jobs:
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           security set-keychain-settings -lut 21600 "$KEYCHAIN"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-          echo "$DEVELOPER_ID_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          echo "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
           security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" \
-            -P "$P12_PASSWORD" -T /usr/bin/codesign
+            -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
           rm -f "$RUNNER_TEMP/cert.p12"
           # Allow codesign to use the key without a UI prompt.
           security set-key-partition-list -S apple-tool:,apple: \
             -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
           security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          security find-identity -v -p codesigning "$KEYCHAIN" \
+            | grep -q "Developer ID Application" \
+            || { echo "::error::Developer ID Application certificate not found in the imported .p12."; exit 1; }
 
-      - name: Write notary API key
-        env:
-          NOTARY_KEY: ${{ secrets.NOTARY_KEY }}
+      - name: Build universal prod release
+        working-directory: client
         run: |
           set -euo pipefail
-          printf '%s' "$NOTARY_KEY" > "$RUNNER_TEMP/notary_key.p8"
+          flutter pub get
+          VOCARA_UNIVERSAL=1 flutter build macos --release --flavor prod
+          [ -d "$GITHUB_WORKSPACE/$APP_PATH" ] \
+            || { echo "::error::expected app bundle missing: $APP_PATH"; exit 1; }
 
-      - name: Build, sign, notarize, staple
+      # Both the app and the embedded Rust engine must be fat, or Intel users
+      # get a dead app / dead audio. Hard-fail rather than ship a broken DMG.
+      - name: Verify universal binaries
+        run: |
+          set -euo pipefail
+          for bin in \
+            "$APP_PATH/Contents/MacOS/vocara" \
+            "$APP_PATH/Contents/Frameworks/vocara_engine.framework/Versions/A/vocara_engine"; do
+            lipo -info "$bin"
+            lipo "$bin" -verify_arch x86_64 arm64 \
+              || { echo "::error::not universal: $bin"; exit 1; }
+          done
+
+      # Hardened runtime + secure timestamp on every Mach-O, innermost first,
+      # so the outer seals stay valid. Required for notarization; Xcode's own
+      # signing does not re-sign third-party frameworks (the mpv/ffmpeg stack
+      # in media_kit) with these flags.
+      - name: Deep re-sign (hardened runtime + timestamp), inside-out
+        run: |
+          set -euo pipefail
+          sign() { codesign --force --timestamp --options runtime --sign "$SIGN_IDENTITY" "$@"; }
+
+          # 1) Loose dylibs nested inside frameworks (ffmpeg/mpv libs and friends).
+          while IFS= read -r -d '' bin; do
+            sign "$bin"
+          done < <(find "$APP_PATH/Contents/Frameworks" -type f \( -name "*.dylib" -o -name "*.so" \) -print0)
+
+          # 2) The framework bundles themselves.
+          while IFS= read -r -d '' fw; do
+            sign "$fw"
+          done < <(find "$APP_PATH/Contents/Frameworks" -maxdepth 1 -name "*.framework" -print0)
+
+          # 3) Any bundled helper executables (none today; harmless if absent).
+          for dir in "$APP_PATH/Contents/Helpers" "$APP_PATH/Contents/XPCServices"; do
+            [ -d "$dir" ] || continue
+            while IFS= read -r -d '' bin; do
+              sign "$bin"
+            done < <(find "$dir" -type f -perm +111 -print0)
+          done
+
+          # 4) The app itself, last, with its sandbox entitlements.
+          sign --entitlements "$ENTITLEMENTS" "$APP_PATH"
+
+      - name: Verify signature
+        run: |
+          set -euo pipefail
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          codesign --display --verbose=2 "$APP_PATH" 2>&1 \
+            | grep -E "Authority=Developer ID|flags=.*runtime" \
+            || { echo "::error::app is not Developer ID signed with hardened runtime"; exit 1; }
+
+      - name: Create and sign DMG
+        id: dmg
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          DMG="dist/Vocara-$VERSION.dmg"
+          mkdir -p dist
+          STAGE="$(mktemp -d)"
+          ditto "$APP_PATH" "$STAGE/vocara.app"
+          ln -s /Applications "$STAGE/Applications"
+          hdiutil create -volname "Vocara" -srcfolder "$STAGE" -fs HFS+ -format UDZO -ov "$DMG"
+          rm -rf "$STAGE"
+          codesign --force --timestamp --sign "$SIGN_IDENTITY" "$DMG"
+          echo "dmg=$DMG" >> "$GITHUB_OUTPUT"
+
+      - name: Notarize
         env:
-          NOTARY_KEY_PATH: ${{ runner.temp }}/notary_key.p8
-          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
-          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
-        run: bash scripts/release.sh
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          set -euo pipefail
+          NOTARY_ARGS=(--apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD")
 
-      - name: Attach DMG to GitHub release
-        uses: softprops/action-gh-release@v2
+          # notarytool's exit code is not reliable across Xcode versions for a
+          # rejected submission, so check the reported status explicitly and
+          # fetch the log on failure.
+          SUBMIT_LOG="$(mktemp)"
+          xcrun notarytool submit "${{ steps.dmg.outputs.dmg }}" "${NOTARY_ARGS[@]}" --wait 2>&1 | tee "$SUBMIT_LOG"
+          if ! grep -q "status: Accepted" "$SUBMIT_LOG"; then
+            SUBMISSION_ID=$(grep "id:" "$SUBMIT_LOG" | head -1 | awk '{print $2}')
+            echo "::error::Notarization not accepted; log follows."
+            [ -n "$SUBMISSION_ID" ] && xcrun notarytool log "$SUBMISSION_ID" "${NOTARY_ARGS[@]}" || true
+            exit 1
+          fi
+
+      - name: Staple and Gatekeeper assessment
+        run: |
+          set -euo pipefail
+          xcrun stapler staple "${{ steps.dmg.outputs.dmg }}"
+          spctl --assess --type open --context context:primary-signature -v "${{ steps.dmg.outputs.dmg }}" \
+            || { echo "::error::Gatekeeper rejected the stapled DMG"; exit 1; }
+
+      - name: Checksum and Package Outputs
+        id: package
+        run: |
+          set -euo pipefail
+          DMG_FILE="${{ steps.dmg.outputs.dmg }}"
+          SHA256=$(shasum -a 256 "$DMG_FILE" | cut -d ' ' -f 1)
+          SIZE=$(stat -f%z "$DMG_FILE")
+          {
+            echo "dmg_name=$(basename "$DMG_FILE")"
+            echo "sha256=${SHA256}"
+            echo "size=${SIZE}"
+          } >> "$GITHUB_OUTPUT"
+          (cd dist && shasum -a 256 ./*.dmg > SHA256SUMS)
+
+      - name: Upload DMG Artifact
+        uses: actions/upload-artifact@v4
         with:
-          files: dist/*.dmg
-          generate_release_notes: true
+          name: macos-dmg
+          path: |
+            dist/*.dmg
+            dist/SHA256SUMS
+          retention-days: 7
+          if-no-files-found: error
 
-      - name: Clean up keychain
+      - name: Cleanup Keychain
         if: always()
         run: |
           security delete-keychain "$RUNNER_TEMP/release.keychain-db" || true
-          rm -f "$RUNNER_TEMP/notary_key.p8"
+
+      - name: Summary
+        run: |
+          {
+            echo "## macOS Build"
+            echo "- **Tag**: $GITHUB_REF_NAME"
+            echo "- **DMG**: ${{ steps.package.outputs.dmg_name }}"
+            echo "- **Size**: ${{ steps.package.outputs.size }} bytes"
+            echo "- **SHA256**: ${{ steps.package.outputs.sha256 }}"
+            echo "- Universal (arm64 + x86_64), Developer ID signed, notarized, stapled"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ============================================================
+  # Phase 3: Publish - GitHub release with DMG + checksums
+  # ============================================================
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: build-macos
+    steps:
+      - name: Download macOS DMG
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-dmg
+          path: artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Vocara ${{ github.ref_name }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
+          files: |
+            artifacts/*.dmg
+            artifacts/SHA256SUMS
+
+      - name: Summary
+        run: |
+          {
+            echo "## GitHub Release Created"
+            echo "- **Version**: $GITHUB_REF_NAME"
+            echo "- **DMG**: ${{ needs.build-macos.outputs.dmg_name }}"
+            echo "- **SHA256**: ${{ needs.build-macos.outputs.sha256 }}"
+          } >> "$GITHUB_STEP_SUMMARY"
