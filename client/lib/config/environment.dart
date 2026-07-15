@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter/services.dart' show appFlavor;
 
 /// The build environment, derived from the Flutter `--flavor` value.
@@ -25,10 +26,17 @@ enum AppEnvironment {
 
   /// Resolved once from the compile-time [appFlavor] (Flutter injects this from
   /// the `--flavor` argument). Unknown or absent flavor falls back to [dev].
-  static final AppEnvironment current = _resolve(appFlavor);
+  static final AppEnvironment current = resolve(appFlavor);
 
-  static AppEnvironment _resolve(String? flavor) {
-    switch (flavor) {
+  /// CASE-INSENSITIVE on purpose: `flutter build macos --flavor prod` injects
+  /// the Xcode SCHEME name ("Prod", capitalized), not the lowercase flavor
+  /// argument, so an exact match sent every release build down the dev
+  /// fallback. The badge was the visible symptom; the real harm is that dev
+  /// mode also selects the Python-sidecar separation service, which a
+  /// released build must never run (see createSourceSeparationService).
+  @visibleForTesting
+  static AppEnvironment resolve(String? flavor) {
+    switch (flavor?.toLowerCase()) {
       case 'prod':
         return AppEnvironment.prod;
       case 'test':
