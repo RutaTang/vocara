@@ -258,6 +258,24 @@ exit 0''';
       expect(await sep, isA<SeparationCancelled>());
     });
 
+    test('a quit during the hashing phase never spawns a sidecar', () async {
+      // Regression: at quit there is no process left to run the
+      // SIGTERM->SIGKILL escalation, so a sidecar spawned AFTER the kill
+      // sweep (cancel landed while the run was still hashing/resolving)
+      // could ignore a lone SIGTERM and orphan. The pre-Process.start
+      // cancelled check must abort the run before anything is spawned.
+      final stub = await writeStub(sleepBody);
+      final svc = buildService(stub);
+      final src = await writeSource();
+
+      final sep = outcome(svc.separate(src));
+      // The run is suspended in its hashing/cache phase; the quit sweep
+      // arrives before any Process.start.
+      SeparationQuitGuard.instance.killAll();
+      expect(await sep, isA<SeparationCancelled>());
+      expect(starts(), 0, reason: 'no sidecar may be spawned while quitting');
+    });
+
     test('construction sweeps stale .tmp orphans, keeps fresh + wav', () async {
       final cache = Directory(p.join(root.path, 'stems_cache'));
       await cache.create(recursive: true);

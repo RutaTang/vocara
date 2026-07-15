@@ -326,8 +326,12 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     super.notifyListeners();
   }
 
-  String _friendlyError(Object e) =>
-      e is FormatException ? e.message.toString() : 'Something went wrong.';
+  String _friendlyError(Object e) => switch (e) {
+    FormatException(:final message) => message,
+    // Carries user-presentable copy (the analysis decode-length cap).
+    MediaTooLongException() => e.toString(),
+    _ => 'Something went wrong.',
+  };
 
   SongPractice? _practice;
   SongPractice? get practice => _practice;
@@ -754,9 +758,12 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       } else {
         // Mirror [_doSave]'s failure path: revert the optimistic lyrics to
         // what's actually on disk, so the screen never keeps showing lines a
-        // failed write already lost (they'd silently vanish on restart).
+        // failed write already lost (they'd silently vanish on restart). The
+        // identical() guard protects a NEWER queued model from the revert,
+        // exactly as on the success path.
         final reloaded = await _repository.loadPractice(sent.id);
-        if (reloaded is Ok<Loaded<SongPractice>>) {
+        if (reloaded is Ok<Loaded<SongPractice>> &&
+            identical(_practice, sent)) {
           _practice = reloaded.value.aggregate;
           _baseHashes = reloaded.value.baseHashes;
         }
@@ -1971,8 +1978,14 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         // Revert the optimistic in-memory model to what's actually on disk, so the
         // UI never keeps showing edits a failed write didn't persist. The base
         // hashes are refreshed with it (they must always describe _practice).
-        final reloaded = await _repository.loadPractice(_practice!.id);
-        if (reloaded is Ok<Loaded<SongPractice>>) {
+        // The same identical() guard as the success path applies: a save queued
+        // behind this one carries a NEWER model — reverting over it would make
+        // that save persist pre-edit state (a silent lost update). Let the
+        // queued save retry the combined state; if it also fails, its own
+        // revert (then identical) restores disk state consistently.
+        final reloaded = await _repository.loadPractice(sent.id);
+        if (reloaded is Ok<Loaded<SongPractice>> &&
+            identical(_practice, sent)) {
           _practice = reloaded.value.aggregate;
           _baseHashes = reloaded.value.baseHashes;
         }

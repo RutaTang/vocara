@@ -27,6 +27,10 @@ class _FakeRepo extends Fake implements SongPracticeRepository {
   SongPractice stored;
   final List<String> events;
   bool failSaves = false;
+
+  /// Fails only the NEXT save, then heals — models a transient write error
+  /// with later saves succeeding (the queued-edit survival test).
+  bool failNextSave = false;
   int inFlight = 0;
   int maxInFlight = 0;
 
@@ -45,7 +49,8 @@ class _FakeRepo extends Fake implements SongPracticeRepository {
     // by the in-flight counter.
     await Future<void>.delayed(Duration.zero);
     inFlight--;
-    if (failSaves) {
+    if (failSaves || failNextSave) {
+      failNextSave = false;
       events.add('save-failed');
       return Result.error(Exception('save failed'));
     }
@@ -380,6 +385,45 @@ void main() {
         repo.stored.vocalTracks.firstWhere((t) => t.id == 'single').displayName,
         'B',
       );
+    });
+
+    test('an edit made WHILE a save is failing in flight survives (the '
+        'failure revert must not clobber the newer queued model)', () async {
+      // Regression: edit A's save is in flight (its model snapshot already
+      // captured) when edit B mutates the live model and queues save B. Save
+      // A then fails; its revert reloads disk state — without the
+      // identical(_practice, sent) guard it would overwrite B's model, so
+      // save B would persist PRE-EDIT state: edit B silently lost on disk
+      // with only A's failure toast shown. (When BOTH edits land before the
+      // save captures its snapshot, the failed write genuinely contained
+      // both and the revert-with-toast is the designed failure UX — that
+      // case is not what this test pins.)
+      final vm = await pumpVm();
+      final toasts = <String>[];
+      vm.toasts.listen(toasts.add);
+      repo.failNextSave = true;
+
+      final f1 = vm.renameTrack('single', 'A'); // this save fails
+      // Yield one microtask so save A starts and captures its model snapshot
+      // (it is now suspended inside the repository write) — THEN edit B
+      // arrives, exactly the mid-flight window the guard protects.
+      await null;
+      final f2 = vm.renameTrack('single', 'B'); // queued behind, must survive
+      await Future.wait([f1, f2]);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(events, ['save-failed', 'save']);
+      expect(
+        repo.stored.vocalTracks.firstWhere((t) => t.id == 'single').displayName,
+        'B',
+        reason: "edit B must reach the store despite edit A's failed save",
+      );
+      expect(
+        vm.practice!.vocalTracks.firstWhere((t) => t.id == 'single').displayName,
+        'B',
+        reason: 'the screen must keep showing the surviving edit',
+      );
+      expect(toasts, contains("Couldn't save your changes."));
     });
   });
 

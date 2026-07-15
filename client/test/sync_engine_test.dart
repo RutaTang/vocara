@@ -579,6 +579,33 @@ void main() {
       expect(await quarantine.list(), isEmpty);
     });
 
+    test('replayed rows are ANNOUNCED via RemoteApplied (a recovered backlog '
+        'must refresh open screens, not land invisibly)', () async {
+      // Regression: the replay used to apply rows without contributing to the
+      // run's announcements, so the primary recovery scenario — a whole
+      // first-pull backlog parked by a slow clock, then un-parked by a
+      // corrected clock in a run that fetches NOTHING new — landed an entire
+      // library with zero RemoteApplied events and no UI refresh.
+      cloud.accept(remotePractice('P1', 'one', remoteHlc(t0)));
+      cloud.accept(remotePractice('P2', 'two', remoteHlc(t0 + 10)));
+      nowMs = t0 - 10 * 60 * 1000; // slow clock: both rows park
+      await engine.pumpPull();
+      expect(events, isEmpty, reason: 'nothing applied, nothing announced');
+
+      nowMs = t0 + 1000; // clock corrected; the cloud has nothing new
+      final run = await engine.pumpPull();
+      expect(run.failed, isFalse);
+      expect(await practiceTitle('P1'), 'one');
+      expect(events, hasLength(1));
+      expect(events.single.practiceIds, {_id('P1'), _id('P2')});
+      expect(events.single.touchesTable('practices'), isTrue);
+
+      // A pull with nothing parked and nothing fetched stays silent.
+      events.clear();
+      await engine.pumpPull();
+      expect(events, isEmpty);
+    });
+
     test('a still-rejected record keeps its entry parked (replay is a bounded '
         'retry, never a drop)', () async {
       cloud.accept(

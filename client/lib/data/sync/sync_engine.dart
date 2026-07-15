@@ -494,7 +494,15 @@ class SyncEngine {
       // clock or an upgraded schema must be able to let them in even when
       // this run fetches nothing new (the fresh-device-with-a-slow-clock
       // case parks EVERY first-pull row while the token marches to head).
-      replayed = await _replayQuarantine();
+      final firstReplay = await _replayQuarantine();
+      replayed = firstReplay.count;
+      // Replayed rows are announced like page rows: the primary recovery
+      // scenario (a whole first-pull backlog parked, then un-parked by a
+      // corrected clock) can land an entire library in a run that fetches
+      // nothing — without an event, open screens would never refresh.
+      if (firstReplay.rows.isNotEmpty) {
+        announcements.add(await _describeRows(firstReplay.rows));
+      }
       var token = await _state.changeToken();
       while (true) {
         final page = await _transport.fetchChanges(token);
@@ -528,14 +536,18 @@ class SyncEngine {
         failedRecords += result.failed;
         token = page.nextToken;
         if (result.applied > 0) {
-          announcements.add(await _describePage(page));
+          announcements.add(await _describeRows(page.rows));
         }
         if (!page.hasMore) break;
       }
       // Replay once more after catching up: this run's successful receives
       // may have raised the clock's max-wall-ever-seen (or delivered a
       // missing parent), unlocking rows parked just moments ago.
-      replayed += await _replayQuarantine();
+      final secondReplay = await _replayQuarantine();
+      replayed += secondReplay.count;
+      if (secondReplay.rows.isNotEmpty) {
+        announcements.add(await _describeRows(secondReplay.rows));
+      }
       if (applied > 0 || replayed > 0 || _repairDebt) {
         // Caught up: repair the invariants closure ONCE, in one transaction
         // so each repair write commits with its journal entry, then announce.
@@ -597,11 +609,12 @@ class SyncEngine {
   /// An undecodable payload is kept parked for manual review (it can never
   /// re-apply, but dropping it silently is exactly what quarantine exists to
   /// prevent).
-  Future<int> _replayQuarantine() async {
+  Future<({int count, List<SyncRow> rows})> _replayQuarantine() async {
+    const nothing = (count: 0, rows: <SyncRow>[]);
     final store = _applier.quarantine;
-    if (store == null) return 0;
+    if (store == null) return nothing;
     final parked = await store.list();
-    if (parked.isEmpty) return 0;
+    if (parked.isEmpty) return nothing;
     final ranks = parked.length > 1
         ? await _builder.tableRanks()
         : const <String, int>{};
@@ -611,6 +624,9 @@ class SyncEngine {
         return byRank != 0 ? byRank : a.$1.compareTo(b.$1);
       });
     var applied = 0;
+    // Rows that actually landed, for the caller's RemoteApplied announcement
+    // (skips changed nothing locally, so they are not announced).
+    final landed = <SyncRow>[];
     for (final (_, q) in indexed) {
       SyncRow row;
       try {
@@ -623,9 +639,10 @@ class SyncEngine {
       if (result.applied > 0 || result.skipped > 0) {
         await store.delete(q.tbl, q.id);
         applied += result.applied;
+        if (result.applied > 0) landed.add(row);
       }
     }
-    return applied;
+    return (count: applied, rows: landed);
   }
 
   void _fireRemoteApplied(RemoteApplied event) {
@@ -634,16 +651,17 @@ class SyncEngine {
     sink(event);
   }
 
-  /// Builds the [RemoteApplied] event for a committed page: the (table, id)
-  /// pairs plus the practice/technique ids they roll up to. Runs AFTER the
-  /// commit; the one extra read (track_id -> practice_id) is over ids only.
-  Future<RemoteApplied> _describePage(FetchPage page) async {
+  /// Builds the [RemoteApplied] event for committed rows (a fetched page or
+  /// a batch of replayed quarantine rows): the (table, id) pairs plus the
+  /// practice/technique ids they roll up to. Runs AFTER the commit; the one
+  /// extra read (track_id -> practice_id) is over ids only.
+  Future<RemoteApplied> _describeRows(List<SyncRow> rows) async {
     final pairs = <(String, String)>[];
     final seen = <(String, String)>{};
     final practiceIds = <String>{};
     final techniqueIds = <String>{};
     final trackIds = <String>{};
-    for (final row in page.rows) {
+    for (final row in rows) {
       final pair = (row.table, row.id);
       if (seen.add(pair)) pairs.add(pair);
       switch (row.table) {
@@ -664,13 +682,13 @@ class SyncEngine {
     }
     if (trackIds.isNotEmpty) {
       final placeholders = List.filled(trackIds.length, '?').join(', ');
-      final rows = await _db
+      final trackRows = await _db
           .customSelect(
             'SELECT practice_id FROM tracks WHERE id IN ($placeholders)',
             variables: [for (final id in trackIds) Variable.withString(id)],
           )
           .get();
-      for (final r in rows) {
+      for (final r in trackRows) {
         practiceIds.add(r.read<String>('practice_id'));
       }
     }

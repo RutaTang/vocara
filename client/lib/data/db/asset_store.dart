@@ -287,6 +287,12 @@ class AssetStore {
     Duration minAge = const Duration(hours: 24),
   }) async {
     final referenced = <String>{};
+    // Quarantine FIRST, tables second: a concurrent pull's replay can apply a
+    // parked clip and delete its quarantine entry between the two scans. In
+    // this order the reference is visible either way — still parked when the
+    // quarantine is listed, or already a live row when the tables are read.
+    // The reverse order has a window where it is visible to neither.
+    referenced.addAll(await _quarantineReferencedAssetIds());
     for (final ref in assetRefColumns) {
       final sql =
           'SELECT DISTINCT ${ref.column} AS a FROM ${ref.table} '
@@ -296,7 +302,6 @@ class AssetStore {
         if (a is String) referenced.add(a);
       }
     }
-    referenced.addAll(await _quarantineReferencedAssetIds());
 
     final live = await db
         .customSelect(

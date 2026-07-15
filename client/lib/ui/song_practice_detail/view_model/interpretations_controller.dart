@@ -89,10 +89,16 @@ class InterpretationsController extends ChangeNotifier {
     await _playback.pause();
     // Re-read the LIVE practice after the pause await (the rule [delete]
     // follows): a take recorded/imported during it must survive the rebuild,
-    // and the target interpretation may have been deleted meanwhile.
+    // and the target interpretation may have been deleted meanwhile. An early
+    // return here must hand playback back (it was paused above but nothing
+    // changed), not strand the transport silently paused.
     final cur = _practiceOf();
-    if (cur == null || cur.activeVersionId == versionId) return;
-    if (!cur.versions.any((v) => v.id == versionId)) return;
+    if (cur == null ||
+        cur.activeVersionId == versionId ||
+        !cur.versions.any((v) => v.id == versionId)) {
+      if (wasPlaying && !_disposed) await _playback.play();
+      return;
+    }
     _setPractice(cur.copyWith(activeVersionId: versionId));
     _ensureSelection();
     await _save();

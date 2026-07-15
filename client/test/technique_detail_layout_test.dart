@@ -3,10 +3,14 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:forui/forui.dart';
 import 'package:provider/provider.dart';
 import 'package:vocara/data/repositories/technique_repository.dart';
+import 'package:vocara/data/services/graph_audio_playback_service.dart'
+    show MediaTooLongException;
 import 'package:vocara/data/services/local_storage_service.dart';
+import 'package:vocara/data/services/media_analysis_service.dart';
 import 'package:vocara/data/services/technique_media_service.dart';
 import 'package:vocara/data/sync/sync_hashes.dart';
 import 'package:vocara/domain/models/technique.dart';
+import 'package:vocara/domain/models/technique_analysis.dart';
 import 'package:vocara/domain/models/technique_media.dart';
 import 'package:vocara/ui/technique_library/view_model/technique_detail_view_model.dart';
 import 'package:vocara/ui/technique_library/widgets/technique_detail_screen.dart';
@@ -192,4 +196,42 @@ void main() {
     expect(find.textContaining('Drag an audio'), findsNothing);
     expect(tester.takeException(), isNull);
   });
+
+  test('a MediaTooLongException analysis failure surfaces its cause via '
+      'referenceAnalysisFailureMessage', () async {
+    // Regression: the decode-length cap throws with user-presentable copy,
+    // but the VM's generic catch used to reduce it to the anonymous
+    // "couldn't analyze" state — the message must reach the failure hint.
+    final media = TechniqueMedia(
+      id: 'm1',
+      path: '/tmp/hours-long.m4a',
+      kind: TechniqueMediaKind.audio,
+      addedAt: DateTime(2026, 6, 20),
+    );
+    final vm = TechniqueDetailViewModel(
+      repository: _FakeRepo(_technique(media: [media])),
+      mediaService: TechniqueMediaService(storage: LocalStorageService()),
+      techniqueId: 't1',
+      analysisService: _CapTrippingAnalysis(),
+    );
+    addTearDown(vm.dispose);
+    for (var i = 0; i < 200 && vm.technique == null; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+    expect(vm.technique, isNotNull);
+    expect(vm.referenceMedia?.path, media.path);
+
+    await vm.ensureReferenceAnalysis();
+
+    expect(vm.referenceAnalysisFailed, isTrue);
+    expect(vm.referenceAnalysisFailureMessage, contains('30 minutes'));
+  });
+}
+
+/// Analysis fake that always trips the decode-length cap, as a real
+/// hours-long reference clip would.
+class _CapTrippingAnalysis extends Fake implements MediaAnalysisService {
+  @override
+  Future<TechniqueAnalysis?> analyze(String path) async =>
+      throw const MediaTooLongException(Duration(minutes: 30));
 }

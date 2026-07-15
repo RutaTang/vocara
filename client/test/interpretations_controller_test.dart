@@ -249,6 +249,28 @@ void main() {
       );
     });
 
+    test('an early return after the pause (target became active meanwhile) '
+        'resumes playback instead of stranding the transport paused',
+        () async {
+      final host = _Host(
+        _practice(
+          versions: [_version('v1', 'One'), _version('v2', 'Two')],
+          activeVersionId: 'v1',
+        ),
+      );
+      host.engine.transportRunning = true;
+      // The target becomes active DURING the pause await (a racing switch or
+      // a remote apply): the post-pause re-read bails out — but playback was
+      // already paused and must be handed back.
+      host.engine.onPause = () {
+        host.practice = host.practice!.copyWith(activeVersionId: 'v2');
+      };
+      await host.controller.setActive('v2');
+
+      expect(host.engine.log, ['pause', 'play']);
+      expect(host.saves, 0, reason: 'nothing changed; no save');
+    });
+
     test('does not resume playback when disposed during the save', () async {
       final host = _Host(
         _practice(

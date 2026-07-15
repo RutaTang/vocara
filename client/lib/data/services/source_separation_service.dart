@@ -241,11 +241,17 @@ class ProcessSourceSeparationService implements SourceSeparationService {
   // dance. The orphaned .tmp output is reclaimed by the construction-time
   // sweep on the next launch.
   void _killForQuit() {
+    _quitting = true;
     final run = _active;
     if (run == null) return;
     run.cancelled = true;
     run.process?.kill(ProcessSignal.sigkill);
   }
+
+  // Latched by [_killForQuit]: the app is exiting, so no new sidecar may be
+  // spawned and any cancel becomes an immediate SIGKILL (the escalation timer
+  // would die with the process).
+  bool _quitting = false;
 
   // The resolved interpreter that actually has audio-separator, discovered once
   // and cached. A macOS app gets a minimal PATH (no conda/homebrew), so bare
@@ -426,6 +432,12 @@ class ProcessSourceSeparationService implements SourceSeparationService {
       model,
     ];
 
+    // A quit (or cancel) that arrived during the hashing/resolution phase must
+    // not spawn a sidecar at all: at quit there is no process left to run the
+    // SIGTERM->SIGKILL escalation, so a spawned-then-SIGTERMed torch process
+    // could ignore the signal and orphan. `_quitting` also covers a FRESH run
+    // entered after killAll() (its own cancelled flag is still false).
+    if (run.cancelled || _quitting) throw const SeparationCancelled();
     final Process proc;
     try {
       proc = await Process.start(
@@ -439,13 +451,17 @@ class ProcessSourceSeparationService implements SourceSeparationService {
       );
     }
     run.process = proc;
-    // A cancel that arrived during the hashing/cache phase (the run is
-    // registered from entry, so the flag is per-run and preserved) still
-    // aborts the just-started process. Route it through _cancelRun — now that
-    // run.process is set — so it gets the same SIGTERM->SIGKILL escalation a
-    // live cancel would, rather than a lone SIGTERM a torch/ML subprocess
-    // could ignore.
-    if (run.cancelled) _cancelRun(run);
+    // A cancel that raced the Process.start await still aborts the
+    // just-started process. During a quit, SIGKILL directly (the escalation
+    // timer dies with the exiting app); otherwise route through _cancelRun —
+    // now that run.process is set — for the normal SIGTERM->SIGKILL dance.
+    if (run.cancelled) {
+      if (_quitting) {
+        proc.kill(ProcessSignal.sigkill);
+      } else {
+        _cancelRun(run);
+      }
+    }
 
     // Set once the stems are renamed into the cache; until then the .tmp files are
     // orphans the finally must clean up on ANY early/error exit.

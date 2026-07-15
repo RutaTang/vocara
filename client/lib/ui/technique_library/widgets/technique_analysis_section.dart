@@ -406,9 +406,13 @@ class _AnalysisBox extends StatelessWidget {
     } else if (analysis == null) {
       body = StudioHint(
         failed
+            // Prefer the specific cause when the analysis refused the clip
+            // for a presentable reason (e.g. the length cap).
             ? (practice
-                  ? "Couldn't analyze your recording. Try again."
-                  : "Couldn't analyze this example clip.")
+                  ? vm.practiceAnalysisFailureMessage ??
+                        "Couldn't analyze your recording. Try again."
+                  : vm.referenceAnalysisFailureMessage ??
+                        "Couldn't analyze this example clip.")
             : 'Record yourself to compare against the reference.',
         fontSize: 12.5,
         padding: const EdgeInsets.all(20),

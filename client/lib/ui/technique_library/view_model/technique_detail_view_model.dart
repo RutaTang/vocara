@@ -249,6 +249,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
     for (final m in orphans) {
       _refCache.remove(m.path);
       _refFailed.remove(m.path);
+      _refFailedMessage.remove(m.path);
       _loadingPaths.remove(m.path);
       await _mediaService.deleteMedia(m.path);
     }
@@ -317,6 +318,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
   void _resetToReferenceSubject() {
     _practice = null;
     _practiceFailed = false;
+    _practiceFailedMessage = null;
     // Invalidate any in-flight stopPractice() analysis: its take was recorded
     // against the reference we're replacing.
     _practiceGeneration++;
@@ -330,6 +332,11 @@ class TechniqueDetailViewModel extends ChangeNotifier
 
   /// Paths whose analysis was attempted but produced nothing (undecodable file).
   final Set<String> _refFailed = {};
+
+  /// Per-path cause for a [_refFailed] entry when the exception carries a
+  /// user-presentable message (today: the decode-length cap). The failure
+  /// hint shows it instead of the generic "couldn't analyze" copy.
+  final Map<String, String> _refFailedMessage = {};
 
   /// Paths whose analysis is currently in flight.
   final Set<String> _loadingPaths = {};
@@ -349,6 +356,13 @@ class TechniqueDetailViewModel extends ChangeNotifier
   bool get referenceAnalysisFailed {
     final path = referenceMedia?.path;
     return path != null && _refFailed.contains(path);
+  }
+
+  /// A user-presentable cause for the current reference's failed analysis,
+  /// or null when only the generic copy applies.
+  String? get referenceAnalysisFailureMessage {
+    final path = referenceMedia?.path;
+    return path == null ? null : _refFailedMessage[path];
   }
 
   /// Computes the reference analysis from [referenceMedia] if it hasn't been
@@ -376,8 +390,13 @@ class TechniqueDetailViewModel extends ChangeNotifier
       } else {
         _refFailed.add(path);
       }
-    } catch (_) {
+    } catch (e) {
       _refFailed.add(path);
+      // Keep the cause when it is user-presentable (the decode-length cap),
+      // so the failure hint can say WHY instead of the generic copy.
+      if (e is MediaTooLongException) {
+        _refFailedMessage[path] = e.toString();
+      }
     } finally {
       _loadingPaths.remove(path);
     }
@@ -500,6 +519,12 @@ class TechniqueDetailViewModel extends ChangeNotifier
   bool _practiceFailed = false;
   bool get practiceAnalysisFailed => _practiceFailed;
 
+  /// A user-presentable cause for the failed practice analysis (today: the
+  /// decode-length cap), or null when only the generic copy applies. Mirrors
+  /// [referenceAnalysisFailureMessage] for the practice subject.
+  String? _practiceFailedMessage;
+  String? get practiceAnalysisFailureMessage => _practiceFailedMessage;
+
   /// Whether a practice take can be recorded right now.
   bool get canRecordPractice =>
       !_recorder.isRecording &&
@@ -577,17 +602,23 @@ class TechniqueDetailViewModel extends ChangeNotifier
       if (_practiceGeneration == generation) {
         _practice = result;
         _practiceFailed = result == null;
+        _practiceFailedMessage = null;
         if (result == null) _subject = TechniqueAnalysisSubject.reference;
       }
       // else: the reference changed mid-analysis; _resetToReferenceSubject already
       // dropped this take — keep it discarded (the temp file is still deleted below).
-    } catch (_) {
+    } catch (e) {
       if (!recordingClean) {
         _recordingNotice = 'Recording failed. The take could not be saved.';
       }
       if (_practiceGeneration == generation) {
         _practice = null;
         _practiceFailed = true;
+        // Keep the cause when it is user-presentable (the decode-length
+        // cap), mirroring the reference-analysis failure hint.
+        if (e is MediaTooLongException) {
+          _practiceFailedMessage = e.toString();
+        }
         _subject = TechniqueAnalysisSubject.reference;
       }
     } finally {
@@ -604,6 +635,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
     if (_practice == null && !_practiceFailed) return;
     _practice = null;
     _practiceFailed = false;
+    _practiceFailedMessage = null;
     // Invalidate any in-flight stopPractice() analysis so it doesn't resurrect
     // the take the user just discarded.
     _practiceGeneration++;
@@ -1047,6 +1079,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
       _draftLabels.remove(mediaId);
       _refCache.remove(m.path);
       _refFailed.remove(m.path);
+      _refFailedMessage.remove(m.path);
       _loadingPaths.remove(m.path);
       _fixSelectionAfterMediaChange();
       notifyListeners();
