@@ -699,36 +699,41 @@ class _EmptyState extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Center + scroll view: centered whenever there is room, and on a panel
+    // shorter than the content (tiny window with the dock open) it scrolls
+    // instead of overflowing the Column by a few pixels.
     return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const Icon(FIcons.quote, size: 26, color: Studio.textFaint),
-            const SizedBox(height: 14),
-            const Text(
-              'No lyrics yet',
-              style: TextStyle(
-                color: Studio.textSecondary,
-                fontSize: 13,
-                fontWeight: FontWeight.w600,
+      child: SingleChildScrollView(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(FIcons.quote, size: 26, color: Studio.textFaint),
+              const SizedBox(height: 14),
+              const Text(
+                'No lyrics yet',
+                style: TextStyle(
+                  color: Studio.textSecondary,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                ),
               ),
-            ),
-            const SizedBox(height: 16),
-            StudioButton(
-              label: 'Paste lyrics',
-              icon: FIcons.clipboard,
-              variant: StudioButtonVariant.accent,
-              onTap: () => vm.setLyricsMode(LyricsMode.edit),
-            ),
-            const SizedBox(height: 12),
-            const Text(
-              'or drop a .lrc file here',
-              textAlign: TextAlign.center,
-              style: TextStyle(color: Studio.textFaint, fontSize: 12),
-            ),
-          ],
+              const SizedBox(height: 16),
+              StudioButton(
+                label: 'Paste lyrics',
+                icon: FIcons.clipboard,
+                variant: StudioButtonVariant.accent,
+                onTap: () => vm.setLyricsMode(LyricsMode.edit),
+              ),
+              const SizedBox(height: 12),
+              const Text(
+                'or drop a .lrc file here',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Studio.textFaint, fontSize: 12),
+              ),
+            ],
+          ),
         ),
       ),
     );

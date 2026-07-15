@@ -476,7 +476,8 @@ void main() {
       expect(
         await state.changeToken(),
         '2',
-        reason: 'the token is already PAST the parked rows: the server will '
+        reason:
+            'the token is already PAST the parked rows: the server will '
             'never re-deliver them, only replay can let them in',
       );
 

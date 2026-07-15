@@ -387,32 +387,79 @@ class _BodyContent extends StatelessWidget {
   final SongPracticeDetailViewModel vm;
   final AudioTrack track;
 
+  /// Below this panel height the pinned-footer layout cannot fit its fixed
+  /// chrome (take header + channel-strip footer) and would overflow; the
+  /// strip falls back to scrolling as one column instead. Generous on
+  /// purpose: near this height the FX list has no usable room anyway.
+  static const double _kMinPinnedHeight = 420;
+
   @override
   Widget build(BuildContext context) {
     // A Logic-style channel strip: the FX inserts (EQ/comp/reverb) scroll above,
     // and the channel-strip footer (output routing, pan, fader, mute/solo) is
     // pinned to the bottom. Analysis moved to the bottom dock's summary tab.
     final isVocal = !track.isBacking && vm.mixer.supportsEffects;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(14, 12, 14, 0),
-          child: _TakeHeader(vm: vm, track: track),
-        ),
-        Expanded(
-          child: isVocal
-              ? Padding(
-                  padding: const EdgeInsets.fromLTRB(14, 12, 14, 0),
-                  child: FxPanel(vm: vm, track: track),
-                )
-              : const _Empty(
-                  'Backing track plays dry, with no effects.',
-                  inset: false,
-                ),
-        ),
-        _TrackChannelFooter(vm: vm, track: track, showRouting: isVocal),
-      ],
+    final header = Padding(
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 0),
+      child: _TakeHeader(vm: vm, track: track),
+    );
+    final footer = _TrackChannelFooter(
+      vm: vm,
+      track: track,
+      showRouting: isVocal,
+    );
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        if (constraints.maxHeight < _kMinPinnedHeight) {
+          // Degenerate height (tiny window with the dock open): scroll the
+          // whole strip. FxPanel's inner ListView needs a bounded height, so
+          // it gets a fixed window inside the scrolling column.
+          return SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                header,
+                if (isVocal)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(14, 12, 14, 0),
+                    child: SizedBox(
+                      height: 220,
+                      child: FxPanel(vm: vm, track: track),
+                    ),
+                  )
+                else
+                  const SizedBox(
+                    height: 120,
+                    child: _Empty(
+                      'Backing track plays dry, with no effects.',
+                      inset: false,
+                    ),
+                  ),
+                footer,
+              ],
+            ),
+          );
+        }
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            header,
+            Expanded(
+              child: isVocal
+                  ? Padding(
+                      padding: const EdgeInsets.fromLTRB(14, 12, 14, 0),
+                      child: FxPanel(vm: vm, track: track),
+                    )
+                  : const _Empty(
+                      'Backing track plays dry, with no effects.',
+                      inset: false,
+                    ),
+            ),
+            footer,
+          ],
+        );
+      },
     );
   }
 }

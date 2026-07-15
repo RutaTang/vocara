@@ -279,9 +279,7 @@ void main() {
       await vm.deleteClip('multi', 'clip-a');
 
       expect(events, ['save', 'delete:/pool/clipA.wav']);
-      final multi = vm.practice!.vocalTracks.firstWhere(
-        (t) => t.id == 'multi',
-      );
+      final multi = vm.practice!.vocalTracks.firstWhere((t) => t.id == 'multi');
       expect(multi.clips.map((c) => c.id), ['clip-b']);
     });
 
@@ -296,9 +294,7 @@ void main() {
       await Future<void>.delayed(Duration.zero);
 
       expect(events.where((e) => e.startsWith('delete:')), isEmpty);
-      final multi = vm.practice!.vocalTracks.firstWhere(
-        (t) => t.id == 'multi',
-      );
+      final multi = vm.practice!.vocalTracks.firstWhere((t) => t.id == 'multi');
       expect(multi.clips.map((c) => c.id), ['clip-a', 'clip-b']);
       expect(toasts, contains("Couldn't save your changes."));
     });
@@ -347,8 +343,7 @@ void main() {
       expect(vm.practice!.vocalTracks.map((t) => t.id), ['single', 'multi']);
     });
 
-    test('merge saves FIRST, then deletes only the two source files',
-        () async {
+    test('merge saves FIRST, then deletes only the two source files', () async {
       final vm = await pumpVm(vocalTracks: _mergeableTakes());
       await vm.mergeTrackDown('top');
 
@@ -419,7 +414,9 @@ void main() {
         reason: "edit B must reach the store despite edit A's failed save",
       );
       expect(
-        vm.practice!.vocalTracks.firstWhere((t) => t.id == 'single').displayName,
+        vm.practice!.vocalTracks
+            .firstWhere((t) => t.id == 'single')
+            .displayName,
         'B',
         reason: 'the screen must keep showing the surviving edit',
       );
@@ -428,22 +425,24 @@ void main() {
   });
 
   group('lyrics save failure', () {
-    test('a failed lyrics save reverts the optimistic lines and toasts',
-        () async {
-      final vm = await pumpVm();
-      final toasts = <String>[];
-      vm.toasts.listen(toasts.add);
-      repo.failSaves = true;
+    test(
+      'a failed lyrics save reverts the optimistic lines and toasts',
+      () async {
+        final vm = await pumpVm();
+        final toasts = <String>[];
+        vm.toasts.listen(toasts.add);
+        repo.failSaves = true;
 
-      await vm.stampLyricAt(0); // optimistic timeMs stamp, then failed write
-      await Future<void>.delayed(Duration.zero);
+        await vm.stampLyricAt(0); // optimistic timeMs stamp, then failed write
+        await Future<void>.delayed(Duration.zero);
 
-      expect(
-        vm.practice!.lyrics.single.timeMs,
-        isNull,
-        reason: 'the un-persisted stamp must not stay on screen',
-      );
-      expect(toasts, contains("Couldn't save your changes."));
-    });
+        expect(
+          vm.practice!.lyrics.single.timeMs,
+          isNull,
+          reason: 'the un-persisted stamp must not stay on screen',
+        );
+        expect(toasts, contains("Couldn't save your changes."));
+      },
+    );
   });
 }

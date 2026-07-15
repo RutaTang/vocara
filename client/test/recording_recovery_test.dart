@@ -254,9 +254,7 @@ void main() {
     expect(persistence.recoveryRetryPaths, {failing.path});
 
     // The boot sweep spares exactly the failed attempt; ordinary junk goes.
-    await persistence.assets.sweepStaging(
-      keep: persistence.recoveryRetryPaths,
-    );
+    await persistence.assets.sweepStaging(keep: persistence.recoveryRetryPaths);
     expect(await failing.exists(), isTrue);
     expect(await junk.exists(), isFalse);
 
@@ -282,9 +280,7 @@ void main() {
     // Too old to keep protecting: the exemption lapses and the sweep takes it
     // (the trash still holds it for its own retention window).
     expect(persistence.recoveryRetryPaths, isEmpty);
-    await persistence.assets.sweepStaging(
-      keep: persistence.recoveryRetryPaths,
-    );
+    await persistence.assets.sweepStaging(keep: persistence.recoveryRetryPaths);
     expect(await stale.exists(), isFalse);
   });
 

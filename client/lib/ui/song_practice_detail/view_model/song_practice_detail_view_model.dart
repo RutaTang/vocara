@@ -858,7 +858,9 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// existing one).
   Future<void> addReference(String sourcePath) async {
     if (_practice == null) return;
-    if (busy || isSeparating || isRecording) return; // no concurrent structural edit
+    if (busy || isSeparating || isRecording) {
+      return;
+    } // no concurrent structural edit
     await _busyGate.run(() async {
       final dest = await _audioFiles.importAudio(
         practiceId: _practiceId,
@@ -897,7 +899,9 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   Future<void> addVocalTake(String sourcePath) async {
     final practice = _practice;
     if (practice == null) return;
-    if (busy || isSeparating || isRecording) return; // no concurrent structural edit
+    if (busy || isSeparating || isRecording) {
+      return;
+    } // no concurrent structural edit
     await _busyGate.run(() async {
       final dest = await _audioFiles.importAudio(
         practiceId: _practiceId,
@@ -921,7 +925,9 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     if (practice == null) return;
     final target = _trackById(trackId);
     if (target == null || target.kind != AudioTrackKind.vocal) return;
-    if (busy || isSeparating || isRecording) return; // no concurrent structural edit
+    if (busy || isSeparating || isRecording) {
+      return;
+    } // no concurrent structural edit
     await _busyGate.run(() async {
       final dest = await _audioFiles.importAudio(
         practiceId: _practiceId,
@@ -1264,7 +1270,9 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   Future<void> deleteTrack(String trackId) async {
     final practice = _practice;
     if (practice == null) return;
-    if (busy || isSeparating || isRecording) return; // no concurrent structural edit
+    if (busy || isSeparating || isRecording) {
+      return;
+    } // no concurrent structural edit
     await _busyGate.run(() async {
       // No awaits happened since the guard, so the model is still live here.
       final cur = _practice;
@@ -1308,7 +1316,9 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     final track = _trackById(trackId);
     final clip = track?.clipById(clipId);
     if (track == null || clip == null) return;
-    if (busy || isSeparating || isRecording) return; // no concurrent structural edit
+    if (busy || isSeparating || isRecording) {
+      return;
+    } // no concurrent structural edit
     await _busyGate.run(() async {
       final remaining = track.clips.where((c) => c.id != clipId).toList();
       // Drop markers anchored inside the deleted clip; for a range that starts
@@ -1426,7 +1436,9 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   Future<void> duplicateTrack(String trackId) async {
     final src = _trackById(trackId);
     if (_practice == null || src == null || src.isBacking) return;
-    if (busy || isSeparating || isRecording) return; // no concurrent structural edit
+    if (busy || isSeparating || isRecording) {
+      return;
+    } // no concurrent structural edit
     await _busyGate.run(() async {
       // Copy EVERY clip's file (not just the primary) to a fresh path and give it
       // a fresh id, so the duplicate is fully independent: a later delete of the
@@ -1481,7 +1493,9 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     final practice = _practice;
     final src = _trackById(trackId);
     if (practice == null || src == null || src.isBacking) return;
-    if (busy || isSeparating || isRecording) return; // no concurrent structural edit
+    if (busy || isSeparating || isRecording) {
+      return;
+    } // no concurrent structural edit
     // Byte-splitting is a ONE-FILE operation: a multi-clip lane has several
     // independent files, and its lane span (startMs/durationMs) covers gaps no
     // file byte maps to — refuse rather than silently drop the other clips
@@ -1600,7 +1614,9 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   Future<void> mergeTrackDown(String trackId) async {
     final practice = _practice;
     if (practice == null) return;
-    if (busy || isSeparating || isRecording) return; // no concurrent structural edit
+    if (busy || isSeparating || isRecording) {
+      return;
+    } // no concurrent structural edit
     // Pick the partner from the VISIBLE (active-interpretation) order — the same list the
     // UI's "Merge down" affordance is gated on. Using the next take in the FULL vocalTracks
     // list could grab (and then delete) a take belonging to a DIFFERENT interpretation.
@@ -1711,7 +1727,9 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   Future<void> reanalyzeTrack(String trackId) async {
     final track = _trackById(trackId);
     if (track == null) return;
-    if (busy || isSeparating || isRecording) return; // no concurrent structural edit
+    if (busy || isSeparating || isRecording) {
+      return;
+    } // no concurrent structural edit
     await _busyGate.run(() async {
       // Analyze EVERY clip's file (a lane can hold several independent files),
       // then fold the results back in BY CLIP ID against the live model — a

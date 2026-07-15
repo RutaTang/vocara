@@ -5,49 +5,53 @@ import 'package:vocara/utils/busy_gate.dart';
 
 void main() {
   group('BusyGate.run', () {
-    test('runs the action under the busy latch and reports acceptance',
-        () async {
-      final errors = <Object>[];
-      final gate = BusyGate(onError: errors.add);
-      var ran = false;
+    test(
+      'runs the action under the busy latch and reports acceptance',
+      () async {
+        final errors = <Object>[];
+        final gate = BusyGate(onError: errors.add);
+        var ran = false;
 
-      final accepted = await gate.run(() async {
-        ran = true;
+        final accepted = await gate.run(() async {
+          ran = true;
+          expect(gate.busy, isTrue);
+        });
+
+        expect(accepted, isTrue);
+        expect(ran, isTrue);
+        expect(gate.busy, isFalse);
+        expect(errors, isEmpty);
+        gate.dispose();
+      },
+    );
+
+    test(
+      'is ATOMIC: a second concurrent run is rejected and its action '
+      'never executes, busy stays latched until the FIRST finishes',
+      () async {
+        final gate = BusyGate(onError: (_) {});
+        final firstBlocked = Completer<void>();
+        var secondRan = false;
+
+        final first = gate.run(() => firstBlocked.future);
+        // The latch is set synchronously before the action's first await.
         expect(gate.busy, isTrue);
-      });
 
-      expect(accepted, isTrue);
-      expect(ran, isTrue);
-      expect(gate.busy, isFalse);
-      expect(errors, isEmpty);
-      gate.dispose();
-    });
+        final second = await gate.run(() async => secondRan = true);
+        expect(second, isFalse, reason: 'the overlapping run must be rejected');
+        expect(secondRan, isFalse);
+        expect(
+          gate.busy,
+          isTrue,
+          reason: 'a rejected run must not clear the first run\'s latch',
+        );
 
-    test('is ATOMIC: a second concurrent run is rejected and its action '
-        'never executes, busy stays latched until the FIRST finishes',
-        () async {
-      final gate = BusyGate(onError: (_) {});
-      final firstBlocked = Completer<void>();
-      var secondRan = false;
-
-      final first = gate.run(() => firstBlocked.future);
-      // The latch is set synchronously before the action's first await.
-      expect(gate.busy, isTrue);
-
-      final second = await gate.run(() async => secondRan = true);
-      expect(second, isFalse, reason: 'the overlapping run must be rejected');
-      expect(secondRan, isFalse);
-      expect(
-        gate.busy,
-        isTrue,
-        reason: 'a rejected run must not clear the first run\'s latch',
-      );
-
-      firstBlocked.complete();
-      expect(await first, isTrue);
-      expect(gate.busy, isFalse);
-      gate.dispose();
-    });
+        firstBlocked.complete();
+        expect(await first, isTrue);
+        expect(gate.busy, isFalse);
+        gate.dispose();
+      },
+    );
 
     test('accepts a new run once the previous one finished', () async {
       final gate = BusyGate(onError: (_) {});

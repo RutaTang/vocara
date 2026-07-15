@@ -683,7 +683,7 @@ unsafe extern "C-unwind" fn input_cb(
         // reading 1 mono sample-per-frame as an L/R pair is exactly the "helium voice" bug).
         let got_bytes = (ctx.abl.m_buffers[0].mDataByteSize as usize).min(cap_samples * 4);
         let got_samples = got_bytes / std::mem::size_of::<f32>();
-        let act_ch = if frames > 0 { (got_samples / frames).clamp(1, MAX_CH) } else { 1 };
+        let act_ch = got_samples.checked_div(frames).map_or(1, |c| c.clamp(1, MAX_CH));
 
         if st != 0 {
             // Sustained AudioUnitRender failure means the input device went away (hot-unplug /

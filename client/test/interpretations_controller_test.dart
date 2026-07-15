@@ -223,35 +223,36 @@ void main() {
       expect(host.engine.log, isEmpty);
     });
 
-    test('a take committed during the pause await survives the switch '
-        '(rebuilds from the LIVE practice, not the pre-await snapshot)',
-        () async {
-      final host = _Host(
-        _practice(
-          versions: [_version('v1', 'One'), _version('v2', 'Two')],
-          activeVersionId: 'v1',
-        ),
-      );
-      // A recording finalize lands a new take while pause() is in flight.
-      host.engine.onPause = () {
-        final cur = host.practice!;
-        host.practice = cur.copyWith(
-          vocalTracks: [...cur.vocalTracks, _take('t-new', 'v1')],
+    test(
+      'a take committed during the pause await survives the switch '
+      '(rebuilds from the LIVE practice, not the pre-await snapshot)',
+      () async {
+        final host = _Host(
+          _practice(
+            versions: [_version('v1', 'One'), _version('v2', 'Two')],
+            activeVersionId: 'v1',
+          ),
         );
-      };
-      await host.controller.setActive('v2');
+        // A recording finalize lands a new take while pause() is in flight.
+        host.engine.onPause = () {
+          final cur = host.practice!;
+          host.practice = cur.copyWith(
+            vocalTracks: [...cur.vocalTracks, _take('t-new', 'v1')],
+          );
+        };
+        await host.controller.setActive('v2');
 
-      expect(host.practice!.activeVersionId, 'v2');
-      expect(
-        host.practice!.vocalTracks.map((t) => t.id),
-        contains('t-new'),
-        reason: 'the concurrently-committed take must not be clobbered',
-      );
-    });
+        expect(host.practice!.activeVersionId, 'v2');
+        expect(
+          host.practice!.vocalTracks.map((t) => t.id),
+          contains('t-new'),
+          reason: 'the concurrently-committed take must not be clobbered',
+        );
+      },
+    );
 
     test('an early return after the pause (target became active meanwhile) '
-        'resumes playback instead of stranding the transport paused',
-        () async {
+        'resumes playback instead of stranding the transport paused', () async {
       final host = _Host(
         _practice(
           versions: [_version('v1', 'One'), _version('v2', 'Two')],
@@ -319,22 +320,24 @@ void main() {
       expect(host.toasts, ['Stop recording to add an interpretation.']);
     });
 
-    test('a take committed during the pause await survives the create',
-        () async {
-      final host = _Host(
-        _practice(versions: [_version('v1', 'One')], activeVersionId: 'v1'),
-      );
-      host.engine.onPause = () {
-        final cur = host.practice!;
-        host.practice = cur.copyWith(
-          vocalTracks: [...cur.vocalTracks, _take('t-new', 'v1')],
+    test(
+      'a take committed during the pause await survives the create',
+      () async {
+        final host = _Host(
+          _practice(versions: [_version('v1', 'One')], activeVersionId: 'v1'),
         );
-      };
-      await host.controller.create('Soft ballad');
+        host.engine.onPause = () {
+          final cur = host.practice!;
+          host.practice = cur.copyWith(
+            vocalTracks: [...cur.vocalTracks, _take('t-new', 'v1')],
+          );
+        };
+        await host.controller.create('Soft ballad');
 
-      expect(host.practice!.versions, hasLength(2));
-      expect(host.practice!.vocalTracks.map((t) => t.id), contains('t-new'));
-    });
+        expect(host.practice!.versions, hasLength(2));
+        expect(host.practice!.vocalTracks.map((t) => t.id), contains('t-new'));
+      },
+    );
   });
 
   group('rename', () {

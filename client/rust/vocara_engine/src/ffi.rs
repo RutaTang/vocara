@@ -160,7 +160,7 @@ fn cache_retain(
         })
         .collect();
     // Most recently staged first; evict every entry past the point the budget overflows.
-    idle.sort_by(|a, b| b.1.cmp(&a.1));
+    idle.sort_by_key(|e| std::cmp::Reverse(e.1));
     let mut used = 0usize;
     for (path, _, bytes) in idle {
         used = used.saturating_add(bytes);
