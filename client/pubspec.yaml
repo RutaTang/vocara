@@ -1,7 +1,7 @@
 name: vocara
 description: "Vocara — a macOS app for singing practice notes and analysis"
 publish_to: 'none'
-version: 1.0.0+1
+version: 0.1.0+1
 
 environment:
   sdk: ^3.10.4

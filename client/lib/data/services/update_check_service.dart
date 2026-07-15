@@ -73,7 +73,7 @@ class UpdateCheckService extends ChangeNotifier {
   /// The running app's version. Keep in sync with pubspec.yaml `version:`
   /// (the part before `+`). Vocara does not depend on package_info_plus
   /// directly, so this const is the single source the check compares against.
-  static const String appVersion = '1.0.0';
+  static const String appVersion = '0.1.0';
 
   /// The running app's build number. Keep in sync with pubspec.yaml
   /// `version:` (the part after `+`).
