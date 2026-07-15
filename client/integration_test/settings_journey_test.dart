@@ -100,6 +100,12 @@ void main() {
     final slider = find.byType(Slider);
     expect(await pumpUntil(tester, () => present(slider)), isTrue);
 
+    // On a short display (CI runner) the MONITORING section sits below the
+    // fold: the slider exists in the tree but a drag at its coordinates
+    // would land outside the viewport and silently do nothing.
+    await tester.ensureVisible(slider);
+    await tester.pumpAndSettle();
+
     final before = reverbPercent(tester);
     // Drag right: a Material slider seeks to the press point then follows, so
     // the wet level (and its readout) must end up different from the start.
