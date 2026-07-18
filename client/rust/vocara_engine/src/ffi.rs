@@ -584,8 +584,9 @@ pub extern "C" fn ve_set_monitor_gain(e: *mut VeEngine, gain: c_float) -> c_int 
     })
 }
 
-/// Set the record/input gain (linear) — the mic-input fader's makeup gain applied to the captured
-/// voice before recording/analysis. 0 = ok.
+/// Set the record/input gain (linear) — the mic-input fader's gain applied to the captured voice
+/// before recording/analysis. Applied as a pure linear scale (recordings are 32-bit float, so
+/// levels past 0 dBFS are stored losslessly, never clipped or soft-limited). 0 = ok.
 #[no_mangle]
 pub extern "C" fn ve_set_input_gain(_e: *mut VeEngine, gain: c_float) -> c_int {
     #[cfg(target_vendor = "apple")]
@@ -1119,7 +1120,8 @@ pub extern "C" fn ve_free_decoded(ptr: *mut f32, frames: usize) {
 }
 
 /// Punch-in splice: decode `old_path` and `new_path` (resampled to interleaved-stereo at
-/// `rate`), build `old[0..split] ++ new`, and write it to `out_path` as a 16-bit PCM WAV.
+/// `rate`), build `old[0..split] ++ new`, and write it to `out_path` as a 32-bit float WAV
+/// (the recording/take format; legacy 16-bit inputs decode fine and re-encode as float).
 /// `split_ms` is measured from the START of old's audio; if it lands past old's end, the gap
 /// is padded with silence so the new audio keeps its timeline position. Returns the output
 /// frame count, or -1 on error. Stateless — safe to call on a background isolate.
@@ -1166,7 +1168,7 @@ pub extern "C" fn ve_punch_wav(
         }
 
         let out_frames = (flat.len() / CHANNELS) as i64;
-        match crate::wav::write_wav_i16(out_p, &flat, CHANNELS as u16, rate) {
+        match crate::wav::write_wav_f32(out_p, &flat, CHANNELS as u16, rate) {
             Ok(_) => out_frames,
             Err(_) => -1,
         }

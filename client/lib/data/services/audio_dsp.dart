@@ -47,8 +47,10 @@ Uint8List writeWavMono(Float64List samples, int sampleRate) {
   return b.toBytes();
 }
 
-/// Parses a 16-bit PCM WAV into mono samples in [-1, 1]. Returns null if the
-/// bytes aren't uncompressed PCM16 (e.g. compressed m4a/mp3). Isolate-safe.
+/// Parses an uncompressed WAV into mono samples: 16-bit PCM (legacy takes and
+/// imports) or 32-bit IEEE float (what the recording engine writes — values may
+/// exceed [-1, 1] and are passed through verbatim). Returns null for anything
+/// else (e.g. compressed m4a/mp3). Isolate-safe.
 PcmAudio? readWavMono(Uint8List bytes) {
   if (bytes.length < 44) return null;
   final bd = ByteData.sublistView(bytes);
@@ -82,23 +84,27 @@ PcmAudio? readWavMono(Uint8List bytes) {
     offset = body + size + (size & 1); // chunks are word-aligned
   }
 
+  final isPcm16 = format == 1 && bits == 16;
+  final isFloat32 = format == 3 && bits == 32;
   if (dataOffset < 0 ||
-      format != 1 ||
-      bits != 16 ||
+      (!isPcm16 && !isFloat32) ||
       channels < 1 ||
       sampleRate <= 0) {
     return null;
   }
 
-  final total = math.min(dataLen, bytes.length - dataOffset) ~/ 2;
+  final bytesPerSample = isPcm16 ? 2 : 4;
+  final total = math.min(dataLen, bytes.length - dataOffset) ~/ bytesPerSample;
   final frames = total ~/ channels;
   final out = Float64List(frames);
   var p = dataOffset;
   for (var i = 0; i < frames; i++) {
     var sum = 0.0;
     for (var c = 0; c < channels; c++) {
-      sum += bd.getInt16(p, Endian.little) / 32768.0;
-      p += 2;
+      sum += isPcm16
+          ? bd.getInt16(p, Endian.little) / 32768.0
+          : bd.getFloat32(p, Endian.little);
+      p += bytesPerSample;
     }
     out[i] = sum / channels;
   }

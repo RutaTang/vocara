@@ -6,6 +6,9 @@
 //! leaves a valid WAV covering everything up to the last patch. These tests simulate
 //! the kill with `std::mem::forget` (no destructor, no flush, no finalize), which is
 //! the closest in-process equivalent of the process dying mid-record.
+//!
+//! The stream writes 32-bit IEEE float (format tag 3) — the recording/take format:
+//! samples are stored verbatim, including levels past 0 dBFS (nothing clamped).
 
 use std::fs;
 use std::path::PathBuf;
@@ -20,8 +23,8 @@ fn le_u32(b: &[u8], o: usize) -> u32 {
     u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
 }
 
-fn le_i16(b: &[u8], o: usize) -> i16 {
-    i16::from_le_bytes([b[o], b[o + 1]])
+fn le_f32(b: &[u8], o: usize) -> f32 {
+    f32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
 }
 
 /// A unique temp path for one test (the leaked-on-purpose stream keeps its fd open,
@@ -32,33 +35,32 @@ fn temp_wav(name: &str) -> PathBuf {
     dir.join(name)
 }
 
-/// Asserts the canonical 44-byte header written by `WavStream` and returns the data size.
+/// Asserts the canonical 44-byte float32 header written by `WavStream`; returns the data size.
 fn assert_valid_header(bytes: &[u8], channels: u16, sample_rate: u32) -> u32 {
     assert!(bytes.len() >= 44, "file shorter than a WAV header");
     assert_eq!(&bytes[0..4], b"RIFF");
     assert_eq!(&bytes[8..12], b"WAVE");
     assert_eq!(&bytes[12..16], b"fmt ");
     assert_eq!(le_u32(bytes, 16), 16, "fmt chunk size");
-    assert_eq!(le_u16(bytes, 20), 1, "PCM format tag");
+    assert_eq!(le_u16(bytes, 20), 3, "IEEE-float format tag");
     assert_eq!(le_u16(bytes, 22), channels);
     assert_eq!(le_u32(bytes, 24), sample_rate);
-    let block_align = channels * 2;
+    let block_align = channels * 4;
     assert_eq!(le_u32(bytes, 28), sample_rate * u32::from(block_align));
     assert_eq!(le_u16(bytes, 32), block_align);
-    assert_eq!(le_u16(bytes, 34), 16, "bits per sample");
+    assert_eq!(le_u16(bytes, 34), 32, "bits per sample");
     assert_eq!(&bytes[36..40], b"data");
     let data_size = le_u32(bytes, 40);
-    assert_eq!(le_u32(bytes, 4), 36 + data_size, "RIFF size tracks data size");
+    assert_eq!(
+        le_u32(bytes, 4),
+        36 + data_size,
+        "RIFF size tracks data size"
+    );
     assert!(
         bytes.len() as u64 >= 44 + u64::from(data_size),
         "header must never claim more bytes than the file holds"
     );
     data_size
-}
-
-/// The same 16-bit quantization `WavStream::write_sample` applies.
-fn pcm16(s: f32) -> i16 {
-    (s.clamp(-1.0, 1.0) * 32767.0).round() as i16
 }
 
 #[test]
@@ -88,14 +90,15 @@ fn hard_kill_leaves_valid_wav_covering_samples_up_to_last_patch() {
     let bytes = fs::read(&path).unwrap();
     let data_size = assert_valid_header(&bytes, 1, SR);
     // Everything up to the LAST patch (2000 samples) is covered by the header...
-    assert_eq!(data_size, 2000 * 2);
+    assert_eq!(data_size, 2000 * 4);
     // ...and was actually flushed: the patch seeks flush the BufWriter, and nothing after
     // the last patch was flushed, so the file ends exactly at the patched payload.
     assert_eq!(bytes.len() as u64, 44 + u64::from(data_size));
-    // The covered payload decodes to the samples that were written (spot-check the ramp).
+    // The covered payload decodes to the samples that were written (spot-check the ramp;
+    // float storage is exact — no quantization).
     for &n in &[0usize, 50, 199, 1500, 1999] {
-        let expect = pcm16((n % 100) as f32 / 200.0);
-        assert_eq!(le_i16(&bytes, 44 + n * 2), expect, "sample {n}");
+        let expect = (n % 100) as f32 / 200.0;
+        assert_eq!(le_f32(&bytes, 44 + n * 4), expect, "sample {n}");
     }
 }
 
@@ -135,8 +138,34 @@ fn finalize_still_stamps_exact_sizes_after_periodic_patches() {
 
     let bytes = fs::read(&path).unwrap();
     let data_size = assert_valid_header(&bytes, 1, SR);
-    assert_eq!(data_size, 23 * 110 * 2);
+    assert_eq!(data_size, 23 * 110 * 4);
     assert_eq!(bytes.len() as u64, 44 + u64::from(data_size));
-    assert_eq!(le_i16(&bytes, 44), pcm16(-0.125));
-    assert_eq!(le_i16(&bytes, 44 + (23 * 110 - 1) * 2), pcm16(-0.125));
+    assert_eq!(le_f32(&bytes, 44), -0.125);
+    assert_eq!(le_f32(&bytes, 44 + (23 * 110 - 1) * 4), -0.125);
+}
+
+#[test]
+fn over_unity_and_nonfinite_samples_are_stored_losslessly_or_zeroed() {
+    // The reason the take format is float: levels past 0 dBFS survive verbatim (the old
+    // 16-bit path clamped them), while non-finite input is stored as 0, never propagated.
+    const SR: u32 = 1000;
+    let path = temp_wav("over_unity.wav");
+    let mut w = WavStream::create(&path, 1, SR).unwrap();
+    w.write_sample(1.75).unwrap();
+    w.write_sample(-2.5).unwrap();
+    w.write_sample(f32::NAN).unwrap();
+    w.write_sample(f32::INFINITY).unwrap();
+    w.finalize().unwrap();
+
+    let bytes = fs::read(&path).unwrap();
+    let data_size = assert_valid_header(&bytes, 1, SR);
+    assert_eq!(data_size, 4 * 4);
+    assert_eq!(
+        le_f32(&bytes, 44),
+        1.75,
+        "over-unity peak must NOT be clamped"
+    );
+    assert_eq!(le_f32(&bytes, 48), -2.5);
+    assert_eq!(le_f32(&bytes, 52), 0.0, "NaN must be stored as silence");
+    assert_eq!(le_f32(&bytes, 56), 0.0, "inf must be stored as silence");
 }

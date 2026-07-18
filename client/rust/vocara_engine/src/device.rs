@@ -1158,6 +1158,48 @@ pub fn resample_linear(frames: &[[Smp; CHANNELS]], from: u32, to: u32) -> Vec<[S
 }
 
 #[cfg(test)]
+mod decode_tests {
+    //! Playback compatibility of the take formats: the engine must decode BOTH the current
+    //! 32-bit float recordings and legacy 16-bit takes (symphonia wav + pcm codecs).
+
+    fn temp_wav(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("vocara_decode_{}_{}.wav", std::process::id(), name))
+    }
+
+    #[test]
+    fn float32_wav_take_decodes_for_playback() {
+        let path = temp_wav("f32");
+        // Interleaved stereo, including an over-unity peak (allowed in float takes).
+        let samples: Vec<f32> = vec![0.5, 0.5, -0.25, -0.25, 1.5, 1.5, 0.0, 0.0];
+        crate::wav::write_wav_f32(&path, &samples, 2, 48_000).unwrap();
+        let (frames, rate) = super::decode_file(path.to_str().unwrap()).expect("f32 wav decodes");
+        assert_eq!(rate, 48_000);
+        assert_eq!(frames.len(), 4);
+        assert!((frames[0][0] - 0.5).abs() < 1e-6);
+        assert!((frames[1][0] + 0.25).abs() < 1e-6);
+        assert!(
+            (frames[2][0] - 1.5).abs() < 1e-6,
+            "over-unity float samples must decode verbatim, got {}",
+            frames[2][0]
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn legacy_pcm16_wav_take_still_decodes() {
+        let path = temp_wav("i16");
+        let samples: Vec<f32> = vec![0.5, 0.5, -0.25, -0.25];
+        crate::wav::write_wav_i16(&path, &samples, 2, 48_000).unwrap();
+        let (frames, rate) = super::decode_file(path.to_str().unwrap()).expect("i16 wav decodes");
+        assert_eq!(rate, 48_000);
+        assert_eq!(frames.len(), 2);
+        assert!((frames[0][0] - 0.5).abs() < 1e-3);
+        assert!((frames[1][0] + 0.25).abs() < 1e-3);
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
 mod record_writer_tests {
     //! The recording writer's IO-failure reporting: `start` must ack file creation and
     //! `stop` must report a clean vs. damaged/missing take (no device needed — the writer
@@ -1196,10 +1238,15 @@ mod record_writer_tests {
         // Stop drains the ring tail before finalizing, so all 100 frames must land on disk.
         assert!(w.stop(), "a clean recording must report success");
         let bytes = std::fs::read(&path).expect("recorded WAV must exist");
-        // 44-byte header + 100 mono 16-bit samples, with both size fields patched.
-        assert_eq!(bytes.len(), 44 + 200);
-        assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 36 + 200);
-        assert_eq!(u32::from_le_bytes(bytes[40..44].try_into().unwrap()), 200);
+        // 44-byte header + 100 mono float32 samples, with both size fields patched.
+        assert_eq!(bytes.len(), 44 + 400);
+        assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 36 + 400);
+        assert_eq!(u32::from_le_bytes(bytes[40..44].try_into().unwrap()), 400);
+        // Float takes store the L channel verbatim (no quantization).
+        let first = f32::from_le_bytes(bytes[44..48].try_into().unwrap());
+        assert_eq!(first, 0.0 / 200.0);
+        let last = f32::from_le_bytes(bytes[44 + 99 * 4..44 + 100 * 4].try_into().unwrap());
+        assert_eq!(last, 99.0 / 200.0);
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1244,8 +1291,8 @@ mod record_writer_tests {
         tx.send(WriterCmd::Shutdown).unwrap();
         join.join().unwrap();
         let bytes = std::fs::read(&path).expect("recorded WAV must exist");
-        // 44-byte header + ONLY the take's 20 mono 16-bit samples (30 stale ones discarded).
-        assert_eq!(bytes.len(), 44 + 20 * 2, "stale frames must not lead the new take");
+        // 44-byte header + ONLY the take's 20 mono float32 samples (30 stale ones discarded).
+        assert_eq!(bytes.len(), 44 + 20 * 4, "stale frames must not lead the new take");
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1289,8 +1336,8 @@ mod record_writer_tests {
         assert!(w.stop());
         let b1 = std::fs::read(&p1).expect("take 1 must exist");
         let b2 = std::fs::read(&p2).expect("take 2 must exist");
-        assert_eq!(b1.len(), 44 + 25 * 2, "take 1 keeps its buffered tail");
-        assert_eq!(b2.len(), 44 + 10 * 2, "take 2 contains only its own frames");
+        assert_eq!(b1.len(), 44 + 25 * 4, "take 1 keeps its buffered tail");
+        assert_eq!(b2.len(), 44 + 10 * 4, "take 2 contains only its own frames");
         let _ = std::fs::remove_file(&p1);
         let _ = std::fs::remove_file(&p2);
     }

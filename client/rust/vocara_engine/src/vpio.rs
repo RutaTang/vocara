@@ -45,6 +45,7 @@ use objc2_core_audio_types::{
 
 use crate::aec::Aec;
 use crate::device::InputCell;
+use crate::dsp::capture_cleanup::HighPass;
 use crate::live::RtCell;
 use crate::ring::{spsc, Consumer, Producer};
 use crate::ring_sync::{baseline_cap, classify_duplex_rates, DuplexRateCheck, RefRingSync};
@@ -83,14 +84,19 @@ pub(crate) static RECORD_LATENCY_FRAMES: AtomicU32 = AtomicU32::new(0);
 /// so the backing track bleeds into speaker recordings exactly as it did before AEC existed.
 pub(crate) static AEC_BYPASSED: AtomicBool = AtomicBool::new(false);
 
-/// Default capture (record) gain (~+24 dB). The built-in mic has no AGC and records quiet; with the
-/// expander pulling the noise floor down, this boost lands mostly on the voice. User-adjustable at
-/// runtime via [`INPUT_GAIN`]; paired with a soft ceiling so peaks saturate gently, not hard-clip.
+/// Default capture (record) gain (+12 dB). The built-in mic has no AGC and records quiet; +12 dB
+/// lands a typical sung take around -14 dBFS with peaks near -6 — the tracking headroom pro
+/// practice calls for — instead of the old +24 dB that pushed every loud note into a ceiling.
+/// The capture path is deliberately STATIC and LINEAR (40 Hz high-pass + this pure scale; no
+/// gate/expander/AGC, no soft knee — see `dsp::capture_cleanup`), so the boost also amplifies
+/// inter-phrase mic hiss — accepted. Recording is 32-bit float, so even a fader pushed far past
+/// this default stores over-0 dBFS peaks losslessly; playback is tamed by the master limiter.
+/// User-adjustable at runtime via [`INPUT_GAIN`].
 ///
 /// NOTE: the backing track is no longer auto-ducked while recording — the singer sets the backing
 /// level themselves on the mixer. (Removed; the speaker now plays the backing at its mixer level
 /// during a take, so the AEC reference and the take's bleed reflect exactly that.)
-const DEFAULT_INPUT_GAIN: f32 = 15.85;
+const DEFAULT_INPUT_GAIN: f32 = 3.981; // 10^(12/20)
 
 /// Runtime record/input gain (linear bits), set from the mixer's mic-input fader.
 pub(crate) static INPUT_GAIN: AtomicU32 = AtomicU32::new(DEFAULT_INPUT_GAIN.to_bits());
@@ -98,83 +104,6 @@ pub(crate) static INPUT_GAIN: AtomicU32 = AtomicU32::new(DEFAULT_INPUT_GAIN.to_b
 /// Set the record/input gain (linear).
 pub(crate) fn set_input_gain(linear: f32) {
     INPUT_GAIN.store(linear.max(0.0).to_bits(), Ordering::Relaxed);
-}
-
-/// Apply the capture gain with a soft knee: quiet/moderate audio stays linear (analysis-safe) and
-/// only peaks above the knee saturate smoothly toward ±1 (no hard clipping). RT-safe.
-#[inline]
-fn makeup(x: f32, gain: f32) -> f32 {
-    const KNEE: f32 = 0.7;
-    let y = x * gain;
-    let a = y.abs();
-    if a <= KNEE {
-        y
-    } else {
-        y.signum() * (KNEE + (1.0 - KNEE) * ((a - KNEE) / (1.0 - KNEE)).tanh())
-    }
-}
-
-/// Post-AEC capture cleanup, applied BEFORE the makeup gain so the boost doesn't amplify the noise
-/// floor: a ~80 Hz high-pass (kills low rumble) + an adaptive downward expander. The expander tracks
-/// the running noise floor and pulls the signal down BETWEEN phrases (where the mic hiss + residual
-/// backing sit), but never fully gates (partial −18 dB floor) and uses fast-attack / slow-release,
-/// so the singing voice is never chopped. RT-safe (no alloc/lock; denormal-guarded by the caller's
-/// flush-to-zero).
-struct Cleanup {
-    hp_x: f32,
-    hp_y: f32,
-    env: f32,
-    nf: f32,
-    gain: f32,
-}
-
-impl Cleanup {
-    fn new() -> Self {
-        Cleanup { hp_x: 0.0, hp_y: 0.0, env: 0.0, nf: 1.0e-4, gain: 1.0 }
-    }
-
-    #[inline]
-    fn process(&mut self, x: f32) -> f32 {
-        // One-pole high-pass ~80 Hz @ 48 kHz.
-        const HP_A: f32 = 0.9896;
-        self.hp_y = HP_A * (self.hp_y + x - self.hp_x);
-        self.hp_x = x;
-        let s = self.hp_y;
-
-        // Fast-attack / ~5 ms-release peak envelope.
-        const ENV_REL: f32 = 0.9959;
-        let a = s.abs();
-        self.env = a.max(self.env * ENV_REL);
-
-        // Adaptive noise floor: drop to the envelope instantly, creep up very slowly (~1 s) so it
-        // settles at the hiss/residual level and the voice always sits well above it.
-        const NF_RISE: f32 = 2.1e-5;
-        if self.env < self.nf {
-            self.nf = self.env;
-        } else {
-            self.nf += (self.env - self.nf) * NF_RISE;
-        }
-
-        // Downward expander: full gain when the envelope is comfortably above the floor, easing to a
-        // partial floor (never silent) when it approaches the noise floor.
-        const OPEN_MARGIN: f32 = 4.0; // open ~+12 dB above the noise floor
-        const GATE_FLOOR: f32 = 0.12; // ≈ −18 dB, the most it ever pulls down
-        let thresh = (self.nf * OPEN_MARGIN).max(1.0e-6);
-        let target = if self.env >= thresh {
-            1.0
-        } else {
-            let r = self.env / thresh; // 0..1
-            (r * r).max(GATE_FLOOR)
-        };
-
-        // Asymmetric gain slew: ~2 ms attack (don't clip onsets), ~200 ms release (don't chop tails).
-        const ATTACK: f32 = 0.0103;
-        const RELEASE: f32 = 1.04e-4;
-        let slew = if target > self.gain { ATTACK } else { RELEASE };
-        self.gain += (target - self.gain) * slew;
-
-        s * self.gain
-    }
 }
 
 const ELEM_OUTPUT: u32 = 0; // speaker (AEC reference lives here)
@@ -254,15 +183,16 @@ struct InCtx {
     ref_sync: RefRingSync,
     /// AEC bypass (set once before start, read-only on the RT callback): the input element
     /// negotiated a non-engine rate, so far-end pairing is impossible (see
-    /// [`DuplexRateCheck::BypassAec`]). The mic passes through the same cleanup + gain path;
+    /// [`DuplexRateCheck::BypassAec`]). The mic passes through the same high-pass + gain path;
     /// all far-end ring/`ref_sync` work is skipped (`output_cb` leaves the ring unpumped).
     aec_bypass: bool,
     /// Mono AEC scratch (mic-in / far-end / clean-out), `MAX_FRAMES` each.
     mic_mono: Vec<f32>,
     far_mono: Vec<f32>,
     clean_mono: Vec<f32>,
-    /// Post-AEC high-pass + adaptive expander, applied before the makeup gain.
-    cleanup: Cleanup,
+    /// Post-AEC 40 Hz high-pass (DC/rumble removal), applied before the record gain. The only
+    /// processing between the AEC and the fan-out besides the gain — static on purpose.
+    hp: HighPass,
     layout: Layout,
     /// Shared device-event flags (polled by the host via `ve_poll_device_event`). We raise
     /// EVENT_INPUT_LOST on a sustained render-failure streak so a mid-session mic disconnect is
@@ -408,7 +338,7 @@ impl Vpio {
                 mic_mono: vec![0.0; MAX_FRAMES],
                 far_mono: vec![0.0; MAX_FRAMES],
                 clean_mono: vec![0.0; MAX_FRAMES],
-                cleanup: Cleanup::new(),
+                hp: HighPass::new(),
                 layout: placeholder,
                 event,
                 err_streak: 0,
@@ -741,7 +671,7 @@ unsafe extern "C-unwind" fn input_cb(
         }
         if ctx.aec_bypass {
             // AEC bypassed (mismatched element rates): no far-end pairing exists, the ref
-            // ring is unpumped. The raw mic takes the same cleanup + makeup path below.
+            // ring is unpumped. The raw mic takes the same high-pass + gain path below.
             ctx.clean_mono[..n].copy_from_slice(&ctx.mic_mono[..n]);
         } else {
             // Overflow guard ONLY: dropping reference samples warps the far-end stream and
@@ -774,11 +704,12 @@ unsafe extern "C-unwind" fn input_cb(
             ctx.aec
                 .process(&ctx.mic_mono[..n], &ctx.far_mono[..n], &mut ctx.clean_mono[..n]);
         }
-        // Clean up (high-pass + expander) then apply the (user-adjustable) record gain, and
-        // duplicate the clean mono voice up to the interleaved-stereo feed.
+        // High-pass (DC/rumble) then apply the (user-adjustable) record gain — a pure linear
+        // scale (the float take stores over-0 dBFS losslessly; the master limiter guards
+        // playback) — and duplicate the clean mono voice up to the interleaved-stereo feed.
         let gain = f32::from_bits(INPUT_GAIN.load(Ordering::Relaxed));
         for i in 0..n {
-            let s = makeup(ctx.cleanup.process(ctx.clean_mono[i]), gain);
+            let s = ctx.hp.process(ctx.clean_mono[i]) * gain;
             ctx.scratch[2 * i] = s;
             ctx.scratch[2 * i + 1] = s;
         }

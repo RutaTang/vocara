@@ -241,12 +241,37 @@ class AudioEditService {
     // first's format (wrong rate or channel deinterleave for its whole half).
     // The format TAG may differ (a plain-PCM recording vs an imported
     // WAVE_FORMAT_EXTENSIBLE of the same actual format), so compare those three
-    // fields rather than byte-equal fmt chunks. Reject real mismatches loudly.
+    // fields rather than byte-equal fmt chunks.
     if (!_compatibleForMerge(wa, wb)) {
-      throw const FormatException(
-        'These takes have different audio formats (sample rate, channels, or '
-        'bit depth), so they can\'t be merged without re-encoding.',
+      final sameLayout =
+          wa.sampleRate == wb.sampleRate &&
+          _fmtU16(wa.fmt, 2) == _fmtU16(wb.fmt, 2);
+      if (!sameLayout) {
+        throw const FormatException(
+          'These takes have different audio formats (sample rate or '
+          'channels), so they can\'t be merged without re-encoding.',
+        );
+      }
+      // Same rate/channels, different sample format: the seam between a legacy
+      // 16-bit take and a new 32-bit float recording. Byte-splicing is
+      // impossible, so fall back to the engine's decode → splice → re-encode
+      // path with the split pinned at old's full duration (ceil, so no old
+      // audio is dropped; at most <1 ms of pad). Output is a float WAV.
+      final frames = wa.dataLen ~/ wa.blockAlign;
+      final oldMs = (frames * 1000 + wa.sampleRate - 1) ~/ wa.sampleRate;
+      final merged = await punchIn(
+        practiceId: practiceId,
+        oldPath: firstPath,
+        newPath: secondPath,
+        splitMs: oldMs,
       );
+      if (merged == null) {
+        throw const FormatException(
+          'These takes have different sample formats and merging them by '
+          're-encoding failed.',
+        );
+      }
+      return merged;
     }
     // Trim each half DOWN to a whole number of frames before joining. A truncated
     // or malformed source can report a dataLen that isn't block-aligned, which would

@@ -103,16 +103,20 @@ class AudioFileService {
     final bd = ByteData.sublistView(head);
     String tag(int o) => String.fromCharCodes(head, o, o + 4);
     if (tag(0) != 'RIFF' || tag(8) != 'WAVE' || tag(12) != 'fmt ') return null;
-    // Canonical layout only: a 16-byte PCM fmt chunk immediately followed by
-    // the data chunk (what WavStream writes). Foreign files with extensible
-    // fmt / extra chunks are simply "not a recording" here.
+    // Canonical layout only: a 16-byte fmt chunk immediately followed by the
+    // data chunk (what WavStream writes). Foreign files with extensible fmt /
+    // extra chunks are simply "not a recording" here. The engine records
+    // 32-bit float (format 3); pre-float recordings were 16-bit PCM (format 1).
     if (bd.getUint32(16, Endian.little) != 16) return null;
-    if (bd.getUint16(20, Endian.little) != 1) return null; // PCM
+    final format = bd.getUint16(20, Endian.little);
     final channels = bd.getUint16(22, Endian.little);
     final sampleRate = bd.getUint32(24, Endian.little);
     final bits = bd.getUint16(34, Endian.little);
+    final isPcm16 = format == 1 && bits == 16;
+    final isFloat32 = format == 3 && bits == 32;
+    if (!isPcm16 && !isFloat32) return null;
     if (tag(36) != 'data') return null;
-    if (channels < 1 || sampleRate <= 0 || bits == 0) return null;
+    if (channels < 1 || sampleRate <= 0) return null;
     final headerDataBytes = bd.getUint32(40, Endian.little);
     // The payload both the header and the file cover. min() tolerates the
     // hard-kill shape (real bytes past the last header patch) and rejects a

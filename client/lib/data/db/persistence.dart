@@ -452,14 +452,15 @@ class Persistence {
     WavAnalyzer analyze,
   ) async {
     // Only what the recording engine writes is a candidate: a canonical-header
-    // 16-bit PCM MONO WAV with a non-empty payload. Staged imports are almost
-    // never that shape, and misreviving an import as a "take" would be worse
-    // than sweeping it. An empty payload (killed before the first ~1 s header
-    // patch) carries no audio worth keeping.
+    // MONO WAV — 32-bit float today, 16-bit PCM from pre-float versions — with
+    // a non-empty payload. Staged imports are almost never that shape, and
+    // misreviving an import as a "take" would be worse than sweeping it. An
+    // empty payload (killed before the first ~1 s header patch) carries no
+    // audio worth keeping.
     final probe = await AudioFileService.probeWav(file);
     if (probe == null ||
         probe.channels != 1 ||
-        probe.bitsPerSample != 16 ||
+        (probe.bitsPerSample != 16 && probe.bitsPerSample != 32) ||
         probe.dataBytes <= 0) {
       return false;
     }

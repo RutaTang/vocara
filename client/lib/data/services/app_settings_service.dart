@@ -53,7 +53,10 @@ class AppSettingsService extends ChangeNotifier {
   String? _outputDeviceName;
   String? _inputDeviceName;
   double _monitorReverbWet = 0.2;
-  double _recordGainDb = 24.0; // mic-input makeup (≈ the engine's default)
+  // Mic-input gain (= the engine's default): +12 dB records a typical take with
+  // tracking headroom (peaks ~-6 dBFS); the take file is 32-bit float, so even
+  // a hotter fader never clips the recording.
+  double _recordGainDb = 12.0;
   double _monitorGain =
       0.0; // hear-yourself level (linear); 0 = off (e.g. on a speaker)
   List<AudioDevice> _outputDevices = const [];
@@ -182,7 +185,7 @@ class AppSettingsService extends ChangeNotifier {
       0.0,
       1.0,
     );
-    _recordGainDb = ((doc?[_kRecordGainDb] as num?)?.toDouble() ?? 24.0).clamp(
+    _recordGainDb = ((doc?[_kRecordGainDb] as num?)?.toDouble() ?? 12.0).clamp(
       recordGainMinDb,
       recordGainMaxDb,
     );
