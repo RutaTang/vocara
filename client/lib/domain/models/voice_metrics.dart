@@ -46,8 +46,10 @@ class VoiceMetrics {
   /// lower = breathier / leakier.
   final Float32List cpp;
 
-  /// Per-frame loudness (F9): RMS level in dBFS (≤ 0). The dynamics/phrasing
-  /// envelope — drops at phrase ends, swells on crescendos.
+  /// Per-frame loudness (F9): RMS level in dBFS, normally ≤ 0 (float takes can
+  /// exceed 0 when the record gain drives past full scale; chart axes clamp).
+  /// The dynamics/phrasing envelope — drops at phrase ends, swells on
+  /// crescendos.
   final Float32List loudness;
 
   /// Fundamental frequency F0 in Hz per frame (the pitch / lowest harmonic);

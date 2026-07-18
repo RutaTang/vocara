@@ -101,9 +101,15 @@ PcmAudio? readWavMono(Uint8List bytes) {
   for (var i = 0; i < frames; i++) {
     var sum = 0.0;
     for (var c = 0; c < channels; c++) {
-      sum += isPcm16
-          ? bd.getInt16(p, Endian.little) / 32768.0
-          : bd.getFloat32(p, Endian.little);
+      if (isPcm16) {
+        sum += bd.getInt16(p, Endian.little) / 32768.0;
+      } else {
+        // Foreign float WAVs can carry NaN/inf samples; one would poison every
+        // FFT/metric downstream. (Engine recordings are already sanitized on
+        // write.) Read them as silence.
+        final v = bd.getFloat32(p, Endian.little);
+        sum += v.isFinite ? v : 0.0;
+      }
       p += bytesPerSample;
     }
     out[i] = sum / channels;
