@@ -20,6 +20,7 @@ class TrackMenuActions {
     required this.onExport,
     required this.onAddNote,
     required this.onAddTechnique,
+    required this.onAddClip,
     required this.onDuplicate,
     required this.onSplit,
     required this.onMergeDown,
@@ -54,6 +55,10 @@ class TrackMenuActions {
   final VoidCallback onExport;
   final VoidCallback onAddNote;
   final VoidCallback onAddTechnique;
+
+  /// Picks audio files and adds them as new clips on this take at the playhead
+  /// — the click-to-upload twin of dropping audio onto the lane.
+  final VoidCallback onAddClip;
   final VoidCallback onDuplicate;
   final VoidCallback onSplit;
   final VoidCallback onMergeDown;
@@ -146,6 +151,11 @@ Future<void> showTrackContextMenu(
         _MenuRow(FIcons.waypoints, 'Add technique at playhead', () {
           close();
           actions.onAddTechnique();
+        }),
+      if (actions.isVocal)
+        _MenuRow(FIcons.filePlus, 'Add audio clip at playhead…', () {
+          close();
+          actions.onAddClip();
         }),
       if (actions.isVocal)
         _MenuRow(FIcons.copy, 'Duplicate', () {

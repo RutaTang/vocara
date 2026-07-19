@@ -1,4 +1,5 @@
 import 'package:desktop_drop/desktop_drop.dart';
+import 'package:file_selector/file_selector.dart' show XTypeGroup, openFile;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:forui/forui.dart' show FIcons;
@@ -176,11 +177,24 @@ class _LyricsTabState extends State<_LyricsTab> {
     }
   }
 
+  /// Click-to-upload twin of the drop: the macOS open panel filtered to the
+  /// same extensions the VM's import validation accepts, routed through the
+  /// same handler (validation, toasts and editor re-seeding included).
+  Future<void> _browseImport() async {
+    final group = XTypeGroup(
+      label: 'Lyrics',
+      extensions: ['lrc', 'txt', 'text'],
+    );
+    final file = await openFile(acceptedTypeGroups: [group]);
+    if (file == null) return;
+    await _importDrop(file.path);
+  }
+
   @override
   Widget build(BuildContext context) {
     return Column(
       children: [
-        if (vm.hasLyrics) _LyricsToolbar(vm: vm),
+        if (vm.hasLyrics) _LyricsToolbar(vm: vm, onImport: _browseImport),
         Expanded(
           child: DropTarget(
             onDragDone: (d) async {
@@ -200,17 +214,25 @@ class _LyricsTabState extends State<_LyricsTab> {
       case LyricsMode.edit:
         return _LyricsEditor(key: ValueKey(_editorSeed), vm: vm);
       case LyricsMode.read:
-        return vm.hasLyrics ? _LyricsReader(vm: vm) : _EmptyState(vm: vm);
+        return vm.hasLyrics
+            ? _LyricsReader(vm: vm)
+            : _EmptyState(vm: vm, onImport: _browseImport);
       case LyricsMode.sync:
-        return vm.hasLyrics ? _LyricsSync(vm: vm) : _EmptyState(vm: vm);
+        return vm.hasLyrics
+            ? _LyricsSync(vm: vm)
+            : _EmptyState(vm: vm, onImport: _browseImport);
     }
   }
 }
 
 class _LyricsToolbar extends StatelessWidget {
-  const _LyricsToolbar({required this.vm});
+  const _LyricsToolbar({required this.vm, required this.onImport});
 
   final SongPracticeDetailViewModel vm;
+
+  /// Opens the lyrics-file picker (the click twin of dropping a file anywhere
+  /// on the panel).
+  final VoidCallback onImport;
 
   @override
   Widget build(BuildContext context) {
@@ -220,6 +242,7 @@ class _LyricsToolbar extends StatelessWidget {
       child: Row(
         children: [
           const Spacer(),
+          _IconBtn(FIcons.fileUp, 'Import lyrics file', onImport),
           _IconBtn(
             FIcons.pencil,
             'Edit lyrics',
@@ -693,9 +716,12 @@ class _IconBtn extends StatelessWidget {
 }
 
 class _EmptyState extends StatelessWidget {
-  const _EmptyState({required this.vm});
+  const _EmptyState({required this.vm, required this.onImport});
 
   final SongPracticeDetailViewModel vm;
+
+  /// Opens the lyrics-file picker (the click twin of dropping a file here).
+  final VoidCallback onImport;
 
   @override
   Widget build(BuildContext context) {
@@ -726,9 +752,16 @@ class _EmptyState extends StatelessWidget {
                 variant: StudioButtonVariant.accent,
                 onTap: () => vm.setLyricsMode(LyricsMode.edit),
               ),
+              const SizedBox(height: 10),
+              StudioButton(
+                label: 'Import lyrics file',
+                icon: FIcons.fileUp,
+                variant: StudioButtonVariant.subtle,
+                onTap: onImport,
+              ),
               const SizedBox(height: 12),
               const Text(
-                'or drop a .lrc file here',
+                'or drop a .lrc or .txt file here',
                 textAlign: TextAlign.center,
                 style: TextStyle(color: Studio.textFaint, fontSize: 12),
               ),

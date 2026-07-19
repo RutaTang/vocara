@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:desktop_drop/desktop_drop.dart';
+import 'package:file_selector/file_selector.dart' show XTypeGroup, openFiles;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -52,6 +53,18 @@ bool _isAudioPath(String path) {
   final dot = path.lastIndexOf('.');
   if (dot < 0) return false;
   return _audioExtensions.contains(path.substring(dot).toLowerCase());
+}
+
+/// The macOS open panel, filtered to the same formats the drop path accepts so
+/// both entry paths take identical files. Multi-select: every zone that accepts
+/// a drop of many files accepts a browse of many files. Empty on cancel.
+Future<List<String>> _pickAudioPaths() async {
+  final group = XTypeGroup(
+    label: 'Audio',
+    extensions: [for (final e in _audioExtensions) e.substring(1)],
+  );
+  final files = await openFiles(acceptedTypeGroups: [group]);
+  return [for (final f in files) f.path];
 }
 
 /// Detail view of one song practice — a dark studio workspace:
@@ -345,6 +358,10 @@ class _WorkspaceState extends State<_Workspace> {
         onExport: () => vm.exportTrackAudio(track.id),
         onAddNote: () => _addNote(track.id),
         onAddTechnique: () => _addTechnique(track.id),
+        onAddClip: () async {
+          final paths = await _pickAudioPaths();
+          if (paths.isNotEmpty) await _dropClipToTake(track.id, paths);
+        },
         onDuplicate: () => vm.duplicateTrack(track.id),
         onSplit: () => vm.splitTrackAtPlayhead(track.id),
         onMergeDown: () => vm.mergeTrackDown(track.id),
@@ -726,12 +743,15 @@ class _Center extends StatelessWidget {
                                     child: _row(backing),
                                   )
                                 : _LanePad(
-                                    child: _DropHint(
-                                      icon: ref ? FIcons.disc3 : FIcons.music,
-                                      text: ref
-                                          ? 'Drag the original song here'
-                                          : 'Drag a backing track here',
-                                      highlighted: hover,
+                                    child: _BrowseTap(
+                                      onPaths: onDropBacking,
+                                      child: _DropHint(
+                                        icon: ref ? FIcons.disc3 : FIcons.music,
+                                        text: ref
+                                            ? 'Drag the original song here, or click to browse'
+                                            : 'Drag a backing track here, or click to browse',
+                                        highlighted: hover,
+                                      ),
                                     ),
                                   ),
                           ),
@@ -740,11 +760,14 @@ class _Center extends StatelessWidget {
                             _AudioDropZone(
                               onDropPaths: onDropNewTake,
                               builder: (hover) => _LanePad(
-                                child: _DropHint(
-                                  icon: FIcons.mic,
-                                  text:
-                                      'Record a take, or drag in vocal audio to compare',
-                                  highlighted: hover,
+                                child: _BrowseTap(
+                                  onPaths: onDropNewTake,
+                                  child: _DropHint(
+                                    icon: FIcons.mic,
+                                    text:
+                                        'Record a take, drag in vocal audio, or click to browse',
+                                    highlighted: hover,
+                                  ),
                                 ),
                               ),
                             )
@@ -1692,6 +1715,31 @@ class _DropHint extends StatelessWidget {
           const SizedBox(width: 8),
           Text(text, style: TextStyle(color: color, fontSize: 13)),
         ],
+      ),
+    );
+  }
+}
+
+/// Makes an empty-state drop hint ALSO a click target: tapping opens the audio
+/// file picker and feeds the picked paths through the same handler the drop
+/// path uses (busy guard, format filter and toasts included). Only hints are
+/// wrapped — never whole lanes, whose taps belong to clips/seek/menus.
+class _BrowseTap extends StatelessWidget {
+  const _BrowseTap({required this.onPaths, required this.child});
+
+  final Future<void> Function(List<String> paths) onPaths;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: () async {
+          final paths = await _pickAudioPaths();
+          if (paths.isNotEmpty) await onPaths(paths);
+        },
+        child: child,
       ),
     );
   }

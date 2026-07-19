@@ -6,6 +6,7 @@ TrackMenuActions _actions({
   bool isVocal = true,
   bool canSeparate = false,
   bool canExport = false,
+  VoidCallback? onAddClip,
 }) {
   return TrackMenuActions(
     isVocal: isVocal,
@@ -20,6 +21,7 @@ TrackMenuActions _actions({
     onExport: () {},
     onAddNote: () {},
     onAddTechnique: () {},
+    onAddClip: onAddClip ?? () {},
     onDuplicate: () {},
     onSplit: () {},
     onMergeDown: () {},
@@ -89,6 +91,28 @@ void main() {
       await _openTrackMenu(tester, _actions());
       expect(find.text('Export take…'), findsNothing);
       expect(find.text('Export audio…'), findsNothing);
+    });
+  });
+
+  group('track context menu add clip', () {
+    testWidgets('offers "Add audio clip at playhead…" on a vocal lane', (
+      tester,
+    ) async {
+      // The click-to-upload twin of dropping audio onto the lane.
+      var added = 0;
+      await _openTrackMenu(tester, _actions(onAddClip: () => added++));
+      final item = find.text('Add audio clip at playhead…');
+      expect(item, findsOneWidget);
+      await tester.tap(item);
+      await tester.pump();
+      expect(added, 1);
+    });
+
+    testWidgets('hides it on a backing lane (clips are a takes feature)', (
+      tester,
+    ) async {
+      await _openTrackMenu(tester, _actions(isVocal: false));
+      expect(find.text('Add audio clip at playhead…'), findsNothing);
     });
   });
 
