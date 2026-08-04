@@ -137,7 +137,9 @@ void main() {
     // Regression: a failed list read used to fall through to the empty state,
     // indistinguishable from a genuinely empty library and with no way to
     // retry.
-    final techniques = [_t('1', 'Twang', const ['EVT'])];
+    final techniques = [
+      _t('1', 'Twang', const ['EVT']),
+    ];
     await _pump(tester, techniques, repository: _FailOnceRepo(techniques));
 
     // The error state — never the empty-library pitch — with a Retry button.

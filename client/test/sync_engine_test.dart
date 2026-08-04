@@ -500,7 +500,8 @@ void main() {
       expect(
         await state.changeToken(),
         isNull,
-        reason: 'the stored token was already dead; cleared is the honest state',
+        reason:
+            'the stored token was already dead; cleared is the honest state',
       );
     });
 

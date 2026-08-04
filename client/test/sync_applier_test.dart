@@ -152,25 +152,31 @@ void main() {
     expect(await row('FUT'), isNull);
   });
 
-  test('a malformed record is quarantined without discarding the batch', () async {
-    final good = practice('GOOD', 'kept', hlc(900));
-    // A record carrying a column that does not exist locally is refused at
-    // the applier's structural column gate (its name must never reach the SQL
-    // text). It must reject only itself, not the whole batch, so the
-    // already-applied good record stays.
-    final bad = RemoteRecord(
-      table: 'practices',
-      columns: {
-        ...practice('BAD', 'dropped', hlc(910)).columns,
-        'column_from_the_future': 1,
-      },
-    );
-    final res = await applier.apply([good, bad]);
-    expect(res.applied, 1);
-    expect(res.failed, 1);
-    expect((await row('GOOD'))!['title'], 'kept'); // survived the later failure
-    expect(await row('BAD'), isNull); // never written
-  });
+  test(
+    'a malformed record is quarantined without discarding the batch',
+    () async {
+      final good = practice('GOOD', 'kept', hlc(900));
+      // A record carrying a column that does not exist locally is refused at
+      // the applier's structural column gate (its name must never reach the SQL
+      // text). It must reject only itself, not the whole batch, so the
+      // already-applied good record stays.
+      final bad = RemoteRecord(
+        table: 'practices',
+        columns: {
+          ...practice('BAD', 'dropped', hlc(910)).columns,
+          'column_from_the_future': 1,
+        },
+      );
+      final res = await applier.apply([good, bad]);
+      expect(res.applied, 1);
+      expect(res.failed, 1);
+      expect(
+        (await row('GOOD'))!['title'],
+        'kept',
+      ); // survived the later failure
+      expect(await row('BAD'), isNull); // never written
+    },
+  );
 
   test('an unknown table is quarantined at the door (its name must never '
       'reach the SQL text) and the rest of the batch applies', () async {

@@ -392,7 +392,8 @@ void main() {
       expect(
         batch.entries.single.dependsOnAssetId,
         asset,
-        reason: 'the gate must survive compaction exactly as it survives '
+        reason:
+            'the gate must survive compaction exactly as it survives '
             'the drain collapse',
       );
     });
