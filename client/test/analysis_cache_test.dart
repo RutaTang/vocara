@@ -34,6 +34,15 @@ class _StubSpectrograms extends Fake implements SpectrogramService {
     int fftSize = 2048,
     int hop = 512,
   }) async => metricsByPath[path];
+
+  @override
+  Future<TakeAnalysis?> computeBothFromFile(
+    String path, {
+    int fftSize = 2048,
+    int hop = 512,
+    double maxHz = 5000,
+  }) async =>
+      (spectrogram: specsByPath[path], metrics: metricsByPath[path]);
 }
 
 class _FakeMonitor extends Fake implements MonitorService {

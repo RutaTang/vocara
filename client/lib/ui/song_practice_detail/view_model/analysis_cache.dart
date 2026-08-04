@@ -602,11 +602,57 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     }
   }
 
-  /// Computes spectrogram + metrics for one clip's file together.
-  Future<void> _ensureClipAnalysis(String path) => Future.wait([
-    _ensureSpectrogramForPath(path),
-    _ensureMetricsForPath(path),
-  ]);
+  /// Computes spectrogram + metrics for one clip's file together. When BOTH
+  /// are missing (the common case: a take was just selected), they come from
+  /// ONE decode in ONE isolate — the old shape ran two concurrent isolates
+  /// that each read and decoded the same file, doubling peak memory for the
+  /// whole compute. Falls back to the individual paths when only one side is
+  /// missing (its twin stays cached).
+  Future<void> _ensureClipAnalysis(String path) async {
+    if (path.isEmpty) return;
+    final needSpec =
+        !_spectrogramCache.containsKey(path) &&
+        !_spectrogramLoading.contains(path) &&
+        !_spectrogramUnavailable.contains(path);
+    final needMetrics =
+        !_metricsCache.containsKey(path) &&
+        !_metricsLoading.contains(path) &&
+        !_metricsUnavailable.contains(path);
+    if (!needSpec || !needMetrics) {
+      await Future.wait([
+        _ensureSpectrogramForPath(path),
+        _ensureMetricsForPath(path),
+      ]);
+      return;
+    }
+    _spectrogramLoading.add(path);
+    _metricsLoading.add(path);
+    notifyListeners();
+    try {
+      final both = await _spectrograms.computeBothFromFile(path);
+      final spec = both?.spectrogram;
+      final m = both?.metrics;
+      if (spec != null) {
+        _spectrogramCache[path] = spec;
+      } else {
+        _spectrogramUnavailable.add(path);
+      }
+      if (m != null) {
+        _metricsCache[path] = m;
+      } else {
+        _metricsUnavailable.add(path);
+      }
+    } catch (_) {
+      // Compute failed; latch both so neither is retried (matching the
+      // individual paths' latch discipline).
+      _spectrogramUnavailable.add(path);
+      _metricsUnavailable.add(path);
+    } finally {
+      _spectrogramLoading.remove(path);
+      _metricsLoading.remove(path);
+      notifyListeners();
+    }
+  }
 
   /// The pre-EQ input spectrum column at the playhead for [trackId]'s currently
   /// sounding clip, plus its bin width (Hz) — drives the FX EQ analyzer. Null
@@ -678,9 +724,14 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     _aggLoading.add(key);
     notifyListeners();
     try {
-      await Future.wait([
-        for (final c in track.clips) _ensureClipAnalysis(c.audioFilePath),
-      ]);
+      // Sequential on purpose: each clip's analysis holds its file bytes plus
+      // a Float64 PCM in an isolate, so N clips in a Future.wait meant N
+      // concurrent full-file copies with no upper bound. One at a time keeps
+      // the peak at a single clip; the per-path caches make later clips warm
+      // for every other consumer either way.
+      for (final c in track.clips) {
+        await _ensureClipAnalysis(c.audioFilePath);
+      }
       // Offsets are relative to the lane's span start (min over ALL clips, even
       // ones whose analysis failed), so the merged frames line up with the lane
       // axis (track.startMs/durationMs) every consumer maps against.
