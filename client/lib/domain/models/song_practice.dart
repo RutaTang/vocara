@@ -129,19 +129,25 @@ class SongPractice {
     return max;
   }
 
-  /// Total number of notes across every lane.
+  /// Total number of notes across every lane. The reference lane counts too:
+  /// no local UI attaches notes to it today, but note updates route to it
+  /// (see the detail view model's _updateTrack), so reference notes — e.g.
+  /// arriving via sync — must never be silently uncounted.
   int get noteCount {
     var count = accompaniment?.notes.length ?? 0;
+    count += reference?.notes.length ?? 0;
     for (final track in vocalTracks) {
       count += track.notes.length;
     }
     return count;
   }
 
-  /// Notes across the accompaniment + the active interpretation's takes — what
-  /// the timeline actually shows (so it tracks the visible take count).
+  /// Notes across the accompaniment + reference + the active interpretation's
+  /// takes — what the timeline actually shows (so it tracks the visible take
+  /// count). Both non-vocal lanes are always visible, so both always count.
   int get activeNoteCount {
     var count = accompaniment?.notes.length ?? 0;
+    count += reference?.notes.length ?? 0;
     for (final t in activeVocalTracks) {
       count += t.notes.length;
     }

@@ -112,9 +112,16 @@ class TechniqueDetailViewModel extends ChangeNotifier
 
   StreamSubscription<RemoteApplied>? _remoteSub;
 
-  /// True while [_commit] is writing; a remote-applied reload must not
-  /// interleave with it (the save returns the fresh aggregate + base itself).
+  /// True while [save] is writing (the commit plus its file cleanup); a
+  /// remote-applied reload must not interleave with it (the save returns the
+  /// fresh aggregate + base itself).
   bool _saving = false;
+
+  /// True while [save] runs. The screen disables both Save (a second commit
+  /// would race the first on the same [_baseHashes]) and Cancel (a discard
+  /// would delete staged media files the airborne commit is persisting rows
+  /// for) while this holds.
+  bool get saving => _saving;
 
   /// Bumped when a save or a newer remote reload starts so an older in-flight
   /// reload's result is discarded (stale-read-completes-last race).
@@ -950,36 +957,54 @@ class TechniqueDetailViewModel extends ChangeNotifier
   /// Saves edited text fields plus the staged media draft. Returns whether it
   /// persisted.
   Future<bool> save(Technique edited) async {
-    // Fold the staged media into the technique being saved.
-    final media = effectiveMedia;
-    // Files of examples staged for removal — delete only after the technique
-    // without them persists.
-    final removedPaths = <String>[
-      for (final m in (_technique?.media ?? const <TechniqueMedia>[]))
-        if (_draftRemoves.contains(m.id)) m.path,
-    ];
-    final ok = await _commit(edited.copyWith(media: media));
-    if (ok) {
-      // A successful save ends the edit session (the screen leaves edit mode):
-      // invalidate a recording start still pending behind its awaits, and stop
-      // an example recording that armed while the commit was in flight — in the
-      // read view a live example mic would have no stop affordance.
-      _recorder.invalidatePendingStart();
-      if (_recorder.isRecording && _recordingExample) {
-        await _recorder.abort();
-        _recordingExample = false;
-        _exampleTempPath = null;
+    // Re-entrancy guard (the UI also disables Save, this is the backstop):
+    // a second commit racing the first would run against the same, now-stale
+    // [_baseHashes] — the three-way save would see the first commit's rows as
+    // concurrent edits and could double-apply or mis-merge. Report "did not
+    // persist"; the button re-enables when the in-flight save resolves.
+    if (_saving) return false;
+    // Held across the commit AND its cleanup below, not just the repository
+    // write: until the successful commit's draft is cleared, a Cancel →
+    // discardMediaDraft would delete staged files whose rows just persisted.
+    _saving = true;
+    try {
+      // Fold the staged media into the technique being saved.
+      final media = effectiveMedia;
+      // Files of examples staged for removal — delete only after the technique
+      // without them persists.
+      final removedPaths = <String>[
+        for (final m in (_technique?.media ?? const <TechniqueMedia>[]))
+          if (_draftRemoves.contains(m.id)) m.path,
+      ];
+      final ok = await _commit(edited.copyWith(media: media));
+      if (ok) {
+        // A successful save ends the edit session (the screen leaves edit mode):
+        // invalidate a recording start still pending behind its awaits, and stop
+        // an example recording that armed while the commit was in flight — in the
+        // read view a live example mic would have no stop affordance.
+        _recorder.invalidatePendingStart();
+        if (_recorder.isRecording && _recordingExample) {
+          await _recorder.abort();
+          _recordingExample = false;
+          _exampleTempPath = null;
+        }
+        for (final path in removedPaths) {
+          await _mediaService.deleteMedia(path);
+        }
+        // The staged additions are now part of the persisted technique; clear the
+        // draft so their files aren't treated as orphans.
+        _draftAdds.clear();
+        _draftRemoves.clear();
+        _draftLabels.clear();
       }
-      for (final path in removedPaths) {
-        await _mediaService.deleteMedia(path);
-      }
-      // The staged additions are now part of the persisted technique; clear the
-      // draft so their files aren't treated as orphans.
-      _draftAdds.clear();
-      _draftRemoves.clear();
-      _draftLabels.clear();
+      return ok;
+    } finally {
+      // Clear BEFORE the notify so the rebuild that shows the outcome also
+      // re-enables Save/Cancel (and a throwing repository can't strand the UI
+      // saving forever).
+      _saving = false;
+      notifyListeners();
     }
-    return ok;
   }
 
   /// Deletes this technique and its example files. Returns whether it persisted
@@ -1121,37 +1146,32 @@ class TechniqueDetailViewModel extends ChangeNotifier
   /// Applies [next] optimistically, persists it, reverts on failure. Returns
   /// whether the save persisted (callers gate file deletion on this).
   Future<bool> _commit(Technique next) async {
+    // A starting save supersedes any in-flight remote-applied reload (its
+    // read predates this write) and blocks new ones until the fresh base is
+    // captured below. [save] already holds _saving here, so this optimistic
+    // notify also disables the header's Save/Cancel.
+    _reloadEpoch++;
     final previous = _technique;
     _technique = next;
     notifyListeners();
-
-    // A starting save supersedes any in-flight remote-applied reload (its
-    // read predates this write) and blocks new ones until the fresh base is
-    // captured below.
-    _reloadEpoch++;
-    _saving = true;
-    try {
-      // Three-way save against the base captured at load / the previous save,
-      // so a stale technique can't revert or tombstone concurrent (synced-in)
-      // changes; the returned fresh base replaces ours for the next save.
-      final result = await _repository.saveTechniqueWithBase(
-        next,
-        baseHashes: _baseHashes,
-      );
-      final ok = result is Ok<Loaded<Technique>>;
-      if (ok) {
-        _technique = result.value.aggregate;
-        _baseHashes = result.value.baseHashes;
-      } else {
-        // Revert to the previous aggregate; _baseHashes stays as-is — it still
-        // describes the last state this session loaded or saved, which is what
-        // the reverted model matches.
-        _technique = previous;
-      }
-      notifyListeners();
-      return ok;
-    } finally {
-      _saving = false;
+    // Three-way save against the base captured at load / the previous save,
+    // so a stale technique can't revert or tombstone concurrent (synced-in)
+    // changes; the returned fresh base replaces ours for the next save.
+    final result = await _repository.saveTechniqueWithBase(
+      next,
+      baseHashes: _baseHashes,
+    );
+    final ok = result is Ok<Loaded<Technique>>;
+    if (ok) {
+      _technique = result.value.aggregate;
+      _baseHashes = result.value.baseHashes;
+    } else {
+      // Revert to the previous aggregate; _baseHashes stays as-is — it still
+      // describes the last state this session loaded or saved, which is what
+      // the reverted model matches.
+      _technique = previous;
     }
+    notifyListeners();
+    return ok;
   }
 }

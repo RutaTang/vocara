@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vocara/domain/models/audio_track.dart';
+import 'package:vocara/domain/models/practice_note.dart';
 import 'package:vocara/domain/models/song_practice.dart';
 import 'package:vocara/domain/models/take_version.dart';
 
@@ -11,6 +12,32 @@ AudioTrack _vocal(String id, {String? versionId}) => AudioTrack(
   durationMs: 1000,
   createdAt: DateTime(2026),
   versionId: versionId,
+);
+
+PracticeNote _note(String id) => PracticeNote(
+  id: id,
+  positionMs: 100,
+  content: 'note $id',
+  createdAt: DateTime(2026),
+  updatedAt: DateTime(2026),
+);
+
+/// A lane of the given [kind] carrying [noteCount] notes (ids are namespaced
+/// by the lane id so they stay unique across lanes).
+AudioTrack _laneWithNotes(
+  String id,
+  AudioTrackKind kind,
+  int noteCount, {
+  String? versionId,
+}) => AudioTrack(
+  id: id,
+  kind: kind,
+  displayName: id,
+  audioFilePath: '/tmp/$id.wav',
+  durationMs: 1000,
+  createdAt: DateTime(2026),
+  versionId: versionId,
+  notes: [for (var i = 0; i < noteCount; i++) _note('$id-n$i')],
 );
 
 void main() {
@@ -147,6 +174,50 @@ void main() {
         );
       },
     );
+
+    test('noteCount counts the reference lane, not just accompaniment and '
+        'takes', () {
+      // The reference lane can carry notes (note updates route to it, and sync
+      // can deliver them), so it must never be silently uncounted.
+      final p = SongPractice(
+        id: 'p',
+        title: 'S',
+        accompaniment: _laneWithNotes('acc', AudioTrackKind.accompaniment, 1),
+        reference: _laneWithNotes('ref', AudioTrackKind.reference, 2),
+        vocalTracks: [_laneWithNotes('take', AudioTrackKind.vocal, 3)],
+        createdAt: DateTime(2026),
+        updatedAt: DateTime(2026),
+      );
+      expect(p.noteCount, 6);
+      // Without a reference the count still works (nullable lane).
+      expect(p.copyWith(clearReference: true).noteCount, 4);
+    });
+
+    test('activeNoteCount counts reference notes plus only the active '
+        'interpretation\'s takes', () {
+      final p = SongPractice(
+        id: 'p',
+        title: 'S',
+        versions: [
+          TakeVersion(id: 'v1', name: 'Tender', createdAt: DateTime(2026)),
+          TakeVersion(id: 'v2', name: 'Powerful', createdAt: DateTime(2026)),
+        ],
+        activeVersionId: 'v2',
+        accompaniment: _laneWithNotes('acc', AudioTrackKind.accompaniment, 1),
+        reference: _laneWithNotes('ref', AudioTrackKind.reference, 2),
+        vocalTracks: [
+          _laneWithNotes('a', AudioTrackKind.vocal, 4, versionId: 'v1'),
+          _laneWithNotes('b', AudioTrackKind.vocal, 8, versionId: 'v2'),
+        ],
+        createdAt: DateTime(2026),
+        updatedAt: DateTime(2026),
+      );
+      // Accompaniment (1) + reference (2) + active take b (8); the inactive
+      // interpretation's take a (4) stays out.
+      expect(p.activeNoteCount, 11);
+      // Every lane counts in the total regardless of interpretation.
+      expect(p.noteCount, 15);
+    });
 
     test('a stale activeVersionId falls back to the first interpretation', () {
       final p = SongPractice(

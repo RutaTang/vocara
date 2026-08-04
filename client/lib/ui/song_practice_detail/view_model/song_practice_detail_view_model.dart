@@ -528,6 +528,11 @@ class SongPracticeDetailViewModel extends ChangeNotifier
 
     final acc = practice.accompaniment;
     if (acc != null) collect(acc);
+    // The reference lane too: _updateTrack routes note updates to it, so
+    // reference notes (e.g. arriving via sync) must show up here — mirroring
+    // SongPractice.noteCount / activeNoteCount.
+    final ref = practice.reference;
+    if (ref != null) collect(ref);
     for (final v in practice.activeVocalTracks) {
       collect(v);
     }

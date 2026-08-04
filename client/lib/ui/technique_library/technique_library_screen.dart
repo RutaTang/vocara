@@ -468,6 +468,14 @@ class _Body extends StatelessWidget {
         ),
       );
     }
+    // A failed list read must read as an error (with Retry), never collapse
+    // into the empty state — otherwise a load failure looks like "Build your
+    // technique library" over a library that still exists. Mirrors the home
+    // screen's practice list. Only when nothing is cached: with techniques
+    // already on screen, a failed refresh shouldn't blank them out.
+    if (vm.load.error && vm.all.isEmpty) {
+      return _ErrorState(onRetry: () => vm.load.execute());
+    }
     if (vm.all.isEmpty) {
       return const _EmptyState();
     }
@@ -777,6 +785,44 @@ class _NoMatches extends StatelessWidget {
       child: Text(
         'No techniques match this filter.',
         style: TextStyle(color: Studio.textFaint, fontSize: 13),
+      ),
+    );
+  }
+}
+
+/// Shown when the technique list fails to load — distinct from the empty state
+/// so a read error is never mistaken for a lost library. Offers a Retry that
+/// re-runs load.
+class _ErrorState extends StatelessWidget {
+  const _ErrorState({required this.onRetry});
+
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(FIcons.triangleAlert, size: 48, color: Studio.textFaint),
+          const SizedBox(height: 16),
+          const Text(
+            'Could not load your techniques',
+            style: TextStyle(
+              color: Studio.textPrimary,
+              fontSize: 20,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            'Something went wrong reading your library. Your data is safe.',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Studio.textSecondary, fontSize: 13),
+          ),
+          const SizedBox(height: 20),
+          StudioButton(icon: FIcons.refreshCw, label: 'Retry', onTap: onRetry),
+        ],
       ),
     );
   }

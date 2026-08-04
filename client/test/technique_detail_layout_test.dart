@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:forui/forui.dart';
@@ -12,6 +14,7 @@ import 'package:vocara/data/sync/sync_hashes.dart';
 import 'package:vocara/domain/models/technique.dart';
 import 'package:vocara/domain/models/technique_analysis.dart';
 import 'package:vocara/domain/models/technique_media.dart';
+import 'package:vocara/ui/core/widgets/studio_button.dart';
 import 'package:vocara/ui/technique_library/view_model/technique_detail_view_model.dart';
 import 'package:vocara/ui/technique_library/widgets/technique_detail_screen.dart';
 import 'package:vocara/utils/result.dart';
@@ -50,6 +53,25 @@ class _FakeRepo implements TechniqueRepository {
   @override
   Future<Result<void>> deleteTechnique(String id) async =>
       const Result.ok(null);
+}
+
+/// A repo whose [saveTechniqueWithBase] parks on [gate] until the test releases
+/// it — models a slow disk so a save can be observed mid-flight.
+class _GatedSaveRepo extends _FakeRepo {
+  _GatedSaveRepo(super.technique);
+
+  final Completer<void> gate = Completer<void>();
+  int saveWithBaseCalls = 0;
+
+  @override
+  Future<Result<Loaded<Technique>>> saveTechniqueWithBase(
+    Technique t, {
+    required Map<String, String> baseHashes,
+  }) async {
+    saveWithBaseCalls++;
+    await gate.future;
+    return super.saveTechniqueWithBase(t, baseHashes: baseHashes);
+  }
 }
 
 Technique _technique({
@@ -225,6 +247,89 @@ void main() {
 
     expect(vm.referenceAnalysisFailed, isTrue);
     expect(vm.referenceAnalysisFailureMessage, contains('30 minutes'));
+  });
+
+  test('save() is a no-op while a save is already in flight', () async {
+    // Regression: a double-click on Save used to run two commits against the
+    // same stale base hashes. The second call must not reach the repository.
+    final repo = _GatedSaveRepo(_technique());
+    final vm = TechniqueDetailViewModel(
+      repository: repo,
+      mediaService: TechniqueMediaService(storage: LocalStorageService()),
+      techniqueId: 't1',
+    );
+    addTearDown(vm.dispose);
+    for (var i = 0; i < 200 && vm.technique == null; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+    expect(vm.technique, isNotNull);
+
+    final edited = vm.technique!.copyWith(summary: 'changed');
+    final first = vm.save(edited);
+    // The flag flips synchronously, so a re-entrant call sees it immediately.
+    expect(vm.saving, isTrue);
+    expect(await vm.save(edited), isFalse, reason: 'second save is a no-op');
+    expect(repo.saveWithBaseCalls, 1, reason: 'one repository write only');
+
+    repo.gate.complete();
+    expect(await first, isTrue, reason: 'the original save still persists');
+    expect(vm.saving, isFalse, reason: 'flag clears when the save resolves');
+  });
+
+  testWidgets('Save and Cancel are disabled while the save is in flight', (
+    tester,
+  ) async {
+    // Tall window so the whole edit form lays out (as in the Edit test above).
+    tester.view.physicalSize = const Size(1200, 2600);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+
+    final repo = _GatedSaveRepo(_technique(body: false));
+    final vm = TechniqueDetailViewModel(
+      repository: repo,
+      mediaService: TechniqueMediaService(storage: LocalStorageService()),
+      techniqueId: 't1',
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ChangeNotifierProvider.value(
+          value: vm,
+          child: const TechniqueDetailScreen(),
+        ),
+      ),
+    );
+    await tester.pump(); // let the load command resolve
+    await tester.pump();
+
+    await tester.tap(find.text('Edit').first);
+    await tester.pump();
+
+    StudioButton button(String label) =>
+        tester.widget<StudioButton>(find.widgetWithText(StudioButton, label));
+    expect(button('Save').enabled, isTrue);
+    expect(button('Cancel').enabled, isTrue);
+
+    // Start a save; the repo parks on the gate so it stays in flight.
+    await tester.tap(find.text('Save'));
+    await tester.pump();
+    expect(button('Save').enabled, isFalse, reason: 'no double commit');
+    expect(
+      button('Cancel').enabled,
+      isFalse,
+      reason: 'Cancel -> Discard would delete files the commit references',
+    );
+    // A tap on the disabled Cancel must not open the discard dialog (which
+    // would tear down the edit session mid-save).
+    await tester.tap(find.text('Cancel'));
+    await tester.pump();
+    expect(find.text('Discard unsaved changes?'), findsNothing);
+
+    // Release the save: it completes, the screen leaves edit mode.
+    repo.gate.complete();
+    await tester.pumpAndSettle();
+    expect(repo.saveWithBaseCalls, 1);
+    expect(find.text('Cancel'), findsNothing, reason: 'back in the read view');
+    expect(tester.takeException(), isNull);
   });
 }
 

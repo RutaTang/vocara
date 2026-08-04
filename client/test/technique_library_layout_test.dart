@@ -43,6 +43,23 @@ class _FakeRepo implements TechniqueRepository {
       const Result.ok(null);
 }
 
+/// A repo whose first [listTechniques] fails, then succeeds — models a
+/// transient read failure so the error state and its Retry can be exercised.
+class _FailOnceRepo extends _FakeRepo {
+  _FailOnceRepo(super.techniques);
+
+  bool _failNext = true;
+
+  @override
+  Future<Result<List<Technique>>> listTechniques() async {
+    if (_failNext) {
+      _failNext = false;
+      return Result.error(Exception('simulated read failure'));
+    }
+    return super.listTechniques();
+  }
+}
+
 Technique _t(String id, String name, List<String> tags) {
   final now = DateTime(2026, 6, 20);
   return Technique(
@@ -55,9 +72,13 @@ Technique _t(String id, String name, List<String> tags) {
   );
 }
 
-Future<void> _pump(WidgetTester tester, List<Technique> techniques) async {
+Future<void> _pump(
+  WidgetTester tester,
+  List<Technique> techniques, {
+  TechniqueRepository? repository,
+}) async {
   final vm = TechniqueLibraryViewModel(
-    repository: _FakeRepo(techniques),
+    repository: repository ?? _FakeRepo(techniques),
     mediaService: TechniqueMediaService(storage: LocalStorageService()),
   );
   await tester.pumpWidget(
@@ -107,6 +128,29 @@ void main() {
 
   testWidgets('empty library lays out without overflow', (tester) async {
     await _pump(tester, const []);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('load failure shows the error state, and Retry reloads', (
+    tester,
+  ) async {
+    // Regression: a failed list read used to fall through to the empty state,
+    // indistinguishable from a genuinely empty library and with no way to
+    // retry.
+    final techniques = [_t('1', 'Twang', const ['EVT'])];
+    await _pump(tester, techniques, repository: _FailOnceRepo(techniques));
+
+    // The error state — never the empty-library pitch — with a Retry button.
+    expect(find.text('Could not load your techniques'), findsOneWidget);
+    expect(find.widgetWithText(StudioButton, 'Retry'), findsOneWidget);
+    expect(find.text('Build your technique library'), findsNothing);
+
+    // Retry re-runs the load; the repo now succeeds and the grid appears.
+    await tester.tap(find.text('Retry'));
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('Twang'), findsOneWidget);
+    expect(find.text('Could not load your techniques'), findsNothing);
     expect(tester.takeException(), isNull);
   });
 

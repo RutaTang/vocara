@@ -247,7 +247,8 @@ class _TechniqueDetailScreenState extends State<TechniqueDetailScreen> {
             onDelete: () => _delete(vm),
             onCancel: () => _cancelEdit(vm),
             onSave: () => _save(vm),
-            saveBlocked: vm.savingExample || vm.importingMedia,
+            saveBlocked: vm.saving || vm.savingExample || vm.importingMedia,
+            cancelBlocked: vm.saving,
           ),
           Expanded(child: _content(vm)),
         ],
@@ -346,6 +347,7 @@ class _Header extends StatelessWidget {
     required this.onCancel,
     required this.onSave,
     required this.saveBlocked,
+    required this.cancelBlocked,
   });
 
   final String title;
@@ -360,8 +362,16 @@ class _Header extends StatelessWidget {
   /// While true Save is disabled because a media import is mid-flight (a just-
   /// stopped example still importing, OR a drag-drop/browse import copying) — the
   /// clip isn't in the draft yet, so saving now would persist the technique
-  /// without it and orphan the copied file.
+  /// without it and orphan the copied file — OR the technique save itself is
+  /// in flight (a double-click would run two commits against the same stale
+  /// base hashes).
   final bool saveBlocked;
+
+  /// While true Cancel is disabled: the save is committing, and Cancel →
+  /// Discard would delete the staged media files the airborne commit is
+  /// persisting rows for (committed rows pointing at deleted files). It also
+  /// keeps the edit form alive until the save resolves either way.
+  final bool cancelBlocked;
 
   @override
   Widget build(BuildContext context) {
@@ -413,7 +423,11 @@ class _Header extends StatelessWidget {
           ),
           const SizedBox(width: 12),
           if (editing) ...[
-            StudioButton(label: 'Cancel', onTap: onCancel),
+            StudioButton(
+              label: 'Cancel',
+              enabled: !cancelBlocked,
+              onTap: onCancel,
+            ),
             const SizedBox(width: 8),
             StudioButton(
               icon: FIcons.check,
