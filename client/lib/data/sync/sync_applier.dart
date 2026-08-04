@@ -23,7 +23,9 @@ class ApplyResult {
   int applied = 0;
   int skipped = 0; // lost the LWW comparison (we already hold something newer)
   int quarantined = 0; // implausibly-future clock; not applied
-  int failed = 0; // threw while applying (malformed / forward-incompatible row)
+  // Rejected while applying: an unknown table/column, a newer schema_v, or a
+  // throw inside the record's savepoint (malformed / forward-incompatible row).
+  int failed = 0;
 
   /// Whether the batch's OUTER transaction committed. False means the whole
   /// batch rolled back (nothing was applied, quarantined-to-store, or written
@@ -76,6 +78,34 @@ class SyncApplier {
   /// behavior unchanged.
   final QuarantineStore? quarantine;
 
+  /// Table name -> drift [TableInfo] for exactly the SYNCED tables, derived
+  /// structurally (see [syncedTableRegistry]) so a new synced table can never
+  /// be silently missed by the structural gate in [apply]. The gate exists
+  /// because [_insert]/[_update] (and the LWW SELECT) build SQL TEXT from the
+  /// record's table and field names — an unvetted name from the wire must
+  /// never reach the SQL parser.
+  late final Map<String, TableInfo<Table, dynamic>> _tables =
+      syncedTableRegistry(db);
+
+  /// The column-name set of [table], read from the LIVE schema
+  /// (PRAGMA table_info) rather than the compiled drift [TableInfo], and
+  /// cached only per [apply] call (the caller passes [cache]). Both choices
+  /// are deliberate: the live schema is the ground truth the INSERT/UPDATE
+  /// below actually runs against, and re-reading it per batch keeps the
+  /// quarantine-replay contract intact — a schema upgrade must un-park a
+  /// previously forward-incompatible row on the NEXT replay, not after a
+  /// process restart (see SyncEngine._replayQuarantine). [table] is already
+  /// vetted against [_tables] before this is called.
+  Future<Set<String>> _liveColumns(
+    String table,
+    Map<String, Set<String>> cache,
+  ) async {
+    final cached = cache[table];
+    if (cached != null) return cached;
+    final rows = await db.customSelect('PRAGMA table_info("$table")').get();
+    return cache[table] = {for (final r in rows) r.read<String>('name')};
+  }
+
   /// Applies one batch of remote records in ONE outer transaction.
   ///
   /// [beforeCommit], when given, runs INSIDE that outer transaction as its
@@ -93,23 +123,91 @@ class SyncApplier {
     // (table, id) pairs INSERTED by this batch — the only rows the FK sweep is
     // allowed to hard-delete (see _sweepFkOrphans).
     final insertedThisBatch = <(String, String)>{};
+    // Per-batch live-schema cache for the column gate (see [_liveColumns]).
+    final liveColumns = <String, Set<String>>{};
     try {
       await db.transaction(() async {
         await db.customStatement('PRAGMA defer_foreign_keys = ON');
         for (final rec in records) {
+          // EVERYTHING a single record does is wrapped so that ANY per-record
+          // exception — not just the enumerated gates below — quarantines that
+          // record and lets the loop continue. Before this, only
+          // HlcDriftException was caught around clock.receive; anything else
+          // (a mistyped HLC field, a DB error) escaped the loop, failed the
+          // whole page, and the engine retried the SAME page forever ("token
+          // unmoved") — one bad record bricked sync and blocked every good
+          // record behind it.
           try {
-            clock.receive(rec.hlc);
-          } on HlcDriftException catch (e) {
-            result.quarantined++;
-            await _quarantine(rec, 'hlc-drift: $e');
-            continue;
-          }
-          try {
+            // STRUCTURAL GATE — before any SQL is built from the record.
+            // [_insert]/[_update] (and the LWW SELECT) interpolate rec.table
+            // and its field names into SQL text, so both must be vetted
+            // against the schema, never trusted off the wire.
+            if (!_tables.containsKey(rec.table)) {
+              result.failed++;
+              await _quarantine(rec, 'unknown-table: "${rec.table}"');
+              continue;
+            }
+            // LWW settle — deliberately AHEAD of the schema_v/column gates
+            // (the table name above is the only thing this SELECT
+            // interpolates, and it is vetted): a record that is not strictly
+            // newer than the local row is a clean skip, and since no write
+            // will happen its (possibly forward-incompatible) shape never
+            // matters. The quarantine replay relies on this order — a parked
+            // row that lost LWW meanwhile must SETTLE as a skip (its entry is
+            // then removed) instead of being re-parked on its shape forever.
+            final held = await db
+                .customSelect(
+                  'SELECT hlc_packed FROM ${rec.table} WHERE id = ?',
+                  variables: [Variable.withString(rec.id)],
+                )
+                .getSingleOrNull();
+            if (held != null &&
+                rec.hlcPacked.compareTo(held.read<String>('hlc_packed')) <= 0) {
+              result.skipped++;
+              continue;
+            }
+            // A record from a NEWER record-schema version is quarantined
+            // before the column gate, keeping the pre-gate behavior (and its
+            // apply-failed reason) for genuinely newer peers: its shape is by
+            // definition not fully understood here, and the quarantine replay
+            // un-parks it after the app upgrade that is.
+            if (rec.schemaV > currentRecordSchemaV) {
+              result.failed++;
+              await _quarantine(
+                rec,
+                'apply-failed: schema_v ${rec.schemaV} is newer than this '
+                'build understands ($currentRecordSchemaV)',
+              );
+              continue;
+            }
+            // At an accepted schema_v an unknown column is never legitimate:
+            // quarantine it at the door instead of letting the name reach the
+            // SQL text below.
+            final known = await _liveColumns(rec.table, liveColumns);
+            final unknown = rec.fields.keys
+                .where((k) => !known.contains(k))
+                .toList();
+            if (unknown.isNotEmpty) {
+              result.failed++;
+              await _quarantine(
+                rec,
+                'unknown-column: ${unknown.map((c) => '"$c"').join(', ')} '
+                'not in "${rec.table}"',
+              );
+              continue;
+            }
+            try {
+              clock.receive(rec.hlc);
+            } on HlcDriftException catch (e) {
+              result.quarantined++;
+              await _quarantine(rec, 'hlc-drift: $e');
+              continue;
+            }
             // Apply each record inside a nested transaction (SQLite SAVEPOINT) so a
-            // single malformed / forward-incompatible record — a column from a newer
-            // schema_v, a CHECK/NOT NULL violation, an unknown table — rolls back ONLY
-            // itself and is quarantined, instead of throwing out of the batch and
-            // discarding every other (good) record. Counters are updated OUTSIDE the
+            // single malformed record — a CHECK/NOT NULL violation, a constraint
+            // the gates above cannot see — rolls back ONLY itself and is
+            // quarantined, instead of throwing out of the batch and discarding
+            // every other (good) record. Counters are updated OUTSIDE the
             // savepoint so a rollback can't desync them.
             var didInsert = false;
             final applied = await db.transaction(() async {
@@ -148,7 +246,11 @@ class SyncApplier {
               result.skipped++;
             }
           } catch (e) {
-            // Forward-incompat / malformed record: its savepoint rolled back.
+            // Any other per-record failure. If the record was inside its
+            // savepoint, drift rolled the savepoint back BEFORE rethrowing,
+            // so by the time this quarantine write runs the record's partial
+            // writes are gone while the quarantine row (written in the OUTER
+            // transaction) survives with the rest of the batch.
             result.failed++;
             await _quarantine(rec, 'apply-failed: $e');
           }

@@ -504,8 +504,28 @@ class SyncEngine {
         announcements.add(await _describeRows(firstReplay.rows));
       }
       var token = await _state.changeToken();
+      // One token reset per run: a transport signalling an EXPIRED change
+      // token ([SyncTokenExpiredException], e.g. HTTP 410 from a server that
+      // compacted its change log past it) is recovered by clearing the
+      // persisted token and restarting the pull from the beginning of the
+      // zone, in this same run. Safe by construction: the applier is
+      // idempotent entity-level LWW, so re-applying the whole zone is a
+      // stream of clean skips for rows we already hold and normal applies
+      // for the rest. Bounded to ONE reset — a transport that rejects even a
+      // fresh (null) token is treated as an ordinary failed run instead of
+      // spinning clear-and-refetch forever.
+      var tokenResetUsed = false;
       while (true) {
-        final page = await _transport.fetchChanges(token);
+        final FetchPage page;
+        try {
+          page = await _transport.fetchChanges(token);
+        } on SyncTokenExpiredException {
+          if (token == null || tokenResetUsed) rethrow;
+          tokenResetUsed = true;
+          await _state.clearChangeToken();
+          token = null;
+          continue;
+        }
         if (page.rows.isEmpty) {
           // Caught up. Persist a moved empty-page token (a server may advance
           // the token without changes); there is no batch to be atomic with.

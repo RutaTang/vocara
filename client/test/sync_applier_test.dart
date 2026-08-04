@@ -154,9 +154,10 @@ void main() {
 
   test('a malformed record is quarantined without discarding the batch', () async {
     final good = practice('GOOD', 'kept', hlc(900));
-    // A record carrying a column that does not exist locally (e.g. from a newer
-    // schema_v) fails at INSERT — a NON-drift error. It must roll back only itself
-    // (its SAVEPOINT), not the whole batch, so the already-applied good record stays.
+    // A record carrying a column that does not exist locally is refused at
+    // the applier's structural column gate (its name must never reach the SQL
+    // text). It must reject only itself, not the whole batch, so the
+    // already-applied good record stays.
     final bad = RemoteRecord(
       table: 'practices',
       columns: {
@@ -168,7 +169,61 @@ void main() {
     expect(res.applied, 1);
     expect(res.failed, 1);
     expect((await row('GOOD'))!['title'], 'kept'); // survived the later failure
-    expect(await row('BAD'), isNull); // rolled back to its savepoint
+    expect(await row('BAD'), isNull); // never written
+  });
+
+  test('an unknown table is quarantined at the door (its name must never '
+      'reach the SQL text) and the rest of the batch applies', () async {
+    final good = practice('GOOD', 'kept', hlc(900));
+    final bad = RemoteRecord(
+      // A table name that is not in the synced registry — whether a hostile
+      // payload or a table from a future schema, it must not be interpolated.
+      table: 'practices; DROP TABLE practices; --',
+      columns: practice('BAD', 'dropped', hlc(910)).columns,
+    );
+    final res = await applier.apply([good, bad]);
+    expect(res.applied, 1);
+    expect(res.failed, 1);
+    expect((await row('GOOD'))!['title'], 'kept');
+    expect(await row('BAD'), isNull);
+  });
+
+  test('a local-only table is refused even though it exists in the database '
+      '(only SYNCED tables are writable through the remote door)', () async {
+    final res = await applier.apply([
+      RemoteRecord(
+        table: 'sync_state', // real table, not in the synced registry
+        columns: practice('X', 'nope', hlc(900)).columns,
+      ),
+    ]);
+    expect(res.failed, 1);
+    expect(res.applied, 0);
+    expect(await db.select(db.syncState).get(), isEmpty);
+  });
+
+  test('a record whose HLC quad is mistyped is quarantined alone; the page '
+      'survives and later records still apply', () async {
+    // Regression: a TypeError out of rec.hlc used to escape the per-record
+    // handling, fail the WHOLE batch, and (through the engine) retry the same
+    // page forever — one bad record bricked sync and blocked every good
+    // record on the page.
+    final bad = RemoteRecord(
+      table: 'practices',
+      columns: {
+        ...practice('BAD', 'dropped', hlc(910)).columns,
+        'hlc_wall': 'not-an-int',
+      },
+    );
+    final res = await applier.apply([
+      practice('BEFORE', 'first', hlc(900)),
+      bad,
+      practice('AFTER', 'second', hlc(920)),
+    ]);
+    expect(res.applied, 2);
+    expect(res.failed, 1);
+    expect((await row('BEFORE'))!['title'], 'first');
+    expect((await row('AFTER'))!['title'], 'second');
+    expect(await row('BAD'), isNull);
   });
 
   test('applying remote changes writes NO oplog (no ping-pong)', () async {
@@ -387,8 +442,8 @@ void main() {
       expect(replay.fields, equals(rec.columns));
     });
 
-    test('a forward-incompatible record is parked with reason apply-failed '
-        'and the good record still applies', () async {
+    test('an unknown column at an accepted schema_v is parked with reason '
+        'unknown-column and the good record still applies', () async {
       final good = practice('GOOD', 'kept', hlc(900));
       final bad = RemoteRecord(
         table: 'practices',
@@ -406,11 +461,61 @@ void main() {
       final parked = await store.list();
       expect(parked, hasLength(1));
       expect(parked.single.id, _id('BAD'));
-      expect(parked.single.reason, startsWith('apply-failed'));
+      expect(parked.single.reason, startsWith('unknown-column'));
       // The unknown column rides along in the parked payload for a future
       // (schema-upgraded) re-apply.
       final replay = SyncRow.decode(parked.single.payload);
       expect(replay.fields['column_from_the_future'], 1);
+    });
+
+    test('a genuinely NEWER schema_v is parked with the apply-failed reason '
+        'BEFORE the column gate (an upgrade un-parks it via replay)', () async {
+      final bad = RemoteRecord(
+        table: 'practices',
+        columns: {
+          ...practice('BAD', 'from a newer build', hlc(910)).columns,
+          'schema_v': currentRecordSchemaV + 1,
+          'column_from_the_future': 1,
+        },
+      );
+      final res = await applier.apply([bad]);
+      expect(res.failed, 1);
+      expect(await row('BAD'), isNull);
+
+      final parked = await store.list();
+      expect(parked, hasLength(1));
+      expect(parked.single.schemaV, currentRecordSchemaV + 1);
+      expect(parked.single.reason, startsWith('apply-failed'));
+    });
+
+    test('an unknown table is parked with reason unknown-table', () async {
+      await applier.apply([
+        RemoteRecord(
+          table: 'not_a_table',
+          columns: practice('BAD', 'dropped', hlc(910)).columns,
+        ),
+      ]);
+      final parked = await store.list();
+      expect(parked, hasLength(1));
+      expect(parked.single.tbl, 'not_a_table');
+      expect(parked.single.reason, startsWith('unknown-table'));
+    });
+
+    test('a mistyped HLC quad is parked with reason apply-failed (any '
+        'per-record throw quarantines that record alone)', () async {
+      final res = await applier.apply([
+        RemoteRecord(
+          table: 'practices',
+          columns: {
+            ...practice('BAD', 'dropped', hlc(910)).columns,
+            'hlc_ctr': 'seven',
+          },
+        ),
+      ]);
+      expect(res.failed, 1);
+      final parked = await store.list();
+      expect(parked, hasLength(1));
+      expect(parked.single.reason, startsWith('apply-failed'));
     });
 
     test('re-quarantining the same row keeps only the latest state', () async {

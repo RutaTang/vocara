@@ -101,6 +101,38 @@ void main() {
     expect(await assets.resolve(id), isNull);
   });
 
+  test('sweepUnreferenced never touches an asset that has EVER been synced '
+      '(local reachability is not knowledge for a synced asset; a future '
+      'server-side refcount owns that lifecycle)', () async {
+    // Three unreferenced assets, aged past the grace window below: one whose
+    // RECORD crossed the wire, one whose BYTES did, one fully local.
+    final syncedRecord = await assets.importFile(
+      await makeSrc('synced_record.wav', [1, 1]),
+    );
+    final syncedBytes = await assets.importFile(
+      await makeSrc('synced_bytes.wav', [2, 2]),
+    );
+    final localOnly = await assets.importFile(
+      await makeSrc('local_only.wav', [3, 3]),
+    );
+    await db.customStatement(
+      "UPDATE assets SET record_sync_state = 'synced' WHERE id = ?",
+      [syncedRecord],
+    );
+    await db.customStatement(
+      "UPDATE assets SET bytes_sync_state = 'uploaded' WHERE id = ?",
+      [syncedBytes],
+    );
+
+    // Only the never-synced asset is swept: a device behind on pull cannot
+    // tell a remotely-referenced synced asset from garbage, and the journaled
+    // tombstone would propagate as a fleet-wide delete.
+    expect(await assets.sweepUnreferenced(minAge: Duration.zero), 1);
+    expect(await assets.resolve(localOnly), isNull); // tombstoned
+    expect(await assets.resolve(syncedRecord), isNotNull); // left alone
+    expect(await assets.resolve(syncedBytes), isNotNull); // left alone
+  });
+
   test(
     'sweepOrphanPoolFiles reclaims a file left after a tombstone (crash)',
     () async {

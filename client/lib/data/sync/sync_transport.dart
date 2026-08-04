@@ -15,6 +15,24 @@ class SyncTransportException implements Exception {
       'SyncTransportException($message${cause == null ? '' : ', cause: $cause'})';
 }
 
+/// Thrown by [SyncTransport.fetchChanges] when the server can no longer honor
+/// [FetchPage.nextToken]-style resume token it was given — the canonical case
+/// is HTTP 410 Gone from a server that compacted its change log past the
+/// token. Typed, unlike the generic retry-later [SyncTransportException],
+/// because retrying a dead token retries forever; the recovery is a POLICY
+/// decision that lives ABOVE the transport (see the class docs): the
+/// [SyncEngine] clears the persisted token and re-pulls the zone from
+/// scratch, which is safe because the applier is idempotent entity-level LWW.
+/// A transport must only throw this — never clear the token itself.
+class SyncTokenExpiredException implements Exception {
+  SyncTokenExpiredException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => 'SyncTokenExpiredException($message)';
+}
+
 /// The per-row outcome of a [SyncTransport.pushRows] call.
 ///
 /// [accepted] means the server durably stored [row]. Otherwise the push was
@@ -88,9 +106,9 @@ class FetchPage {
 /// must advance the token whenever it returns rows; returning an unchanged
 /// token WITH an empty row list is the "caught up" signal. A transport that
 /// can no longer honor a token (e.g. the server compacted its change log past
-/// it) should throw
-/// — clearing the token and re-pulling from scratch is a policy decision that
-/// lives above the transport.
+/// it) must throw [SyncTokenExpiredException] — clearing the token and
+/// re-pulling from scratch is a policy decision that lives above the
+/// transport (the [SyncEngine]'s pull loop implements it).
 abstract class SyncTransport {
   /// Uploads full row states. Returns one result per row, in input order.
   ///

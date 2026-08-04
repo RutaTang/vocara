@@ -68,6 +68,12 @@ class _HeldPush {
 ///  * [redeliverNextFetches] — the next N fetchChanges calls re-serve the
 ///    previously served page verbatim (same rows, same nextToken): the
 ///    at-least-once duplicate-delivery case.
+///  * [expireNextFetches] — the next N fetchChanges calls throw
+///    [SyncTokenExpiredException] (the server compacted its change log past
+///    the token, HTTP 410). By default only NON-null tokens expire — a
+///    from-scratch re-pull is honored, like a real server; set
+///    [expireFreshTokensToo] to reject null tokens as well (exercises the
+///    engine's refuse-to-spin guard).
 class FakeSyncTransport implements SyncTransport {
   FakeSyncTransport(this.cloud, {this.name = 'device'});
 
@@ -80,6 +86,8 @@ class FakeSyncTransport implements SyncTransport {
   int pageSize = 200;
   bool holdPushes = false;
   int redeliverNextFetches = 0;
+  int expireNextFetches = 0;
+  bool expireFreshTokensToo = false;
 
   final List<_HeldPush> _heldPushes = [];
   final Map<(String, String), int> _conflictOnce = {};
@@ -147,6 +155,12 @@ class FakeSyncTransport implements SyncTransport {
     fetchCalls++;
     if (partitioned) {
       throw SyncTransportException('$name is partitioned (fetch)');
+    }
+    if (expireNextFetches > 0 && (sinceToken != null || expireFreshTokensToo)) {
+      expireNextFetches--;
+      throw SyncTokenExpiredException(
+        '$name: change token "$sinceToken" is no longer honorable',
+      );
     }
     if (redeliverNextFetches > 0 && _lastServedPage != null) {
       redeliverNextFetches--;

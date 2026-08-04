@@ -260,8 +260,8 @@ class AssetStore {
     (table: 'practices', column: 'separation_asset_id'),
   ];
 
-  /// Reclaims local disk: tombstones any live asset row no live clip /
-  /// technique-media / practice references, and moves its pooled file into the
+  /// Reclaims local disk: tombstones any never-synced live asset row no live
+  /// clip / technique-media / practice references, and moves its pooled file into the
   /// trash once no surviving asset shares that content hash (and drops its
   /// waveform cache). Returns the number of assets tombstoned.
   ///
@@ -270,11 +270,22 @@ class AssetStore {
   /// cloud-byte deletion is a separate, knowledge-gated step that never runs on
   /// a time horizon.
   ///
-  /// Two guards against sweeping assets that are only TRANSIENTLY
-  /// unreferenced (a tombstone here is journaled, so once sync ships it would
-  /// propagate as a fleet-wide delete — a moment of local blindness must
-  /// never become permanent):
+  /// Three guards against sweeping assets that are only LOCALLY (or
+  /// transiently) unreferenced — a tombstone here is journaled, so once sync
+  /// ships it would propagate as a fleet-wide delete, and a moment of local
+  /// blindness must never become permanent:
   ///
+  ///  * Only NEVER-SYNCED assets (both per-device sync-state columns still at
+  ///    their 'localOnly' default — see the Assets doc in tables.dart) are
+  ///    sweepable at all. Reachability below is computed from the LOCAL
+  ///    database only, and for an asset that has crossed the wire that is not
+  ///    knowledge: a device days behind on pull would see a remotely
+  ///    referenced asset as garbage and broadcast its delete fleet-wide. An
+  ///    asset this device has ever pushed (or whose bytes were ever synced)
+  ///    is therefore left alone by this sweep entirely; a future server-side
+  ///    refcount — the only party that can see EVERY reference — owns the
+  ///    lifecycle of synced assets. Today, with no transport attached, every
+  ///    asset is unsynced, so single-device behavior is unchanged.
   ///  * Rows parked in the sync quarantine count as references: a quarantined
   ///    payload (half-delivered page, forward-incompatible record) may carry
   ///    the ONLY pointer at an asset until a later app upgrade re-applies it.
@@ -303,10 +314,17 @@ class AssetStore {
       }
     }
 
+    // The never-synced guard (first bullet of the doc): only assets whose
+    // record AND bytes never left this device are candidates. Both columns
+    // are per-device bookkeeping that only this device's sync engine ever
+    // advances past 'localOnly', so the predicate is exactly "no other device
+    // can possibly hold a reference we can't see".
     final live = await db
         .customSelect(
           'SELECT id, content_hash, local_rel_path, created_at, updated_at '
-          'FROM assets WHERE deleted_at IS NULL',
+          'FROM assets WHERE deleted_at IS NULL '
+          "AND record_sync_state = 'localOnly' "
+          "AND bytes_sync_state = 'localOnly'",
         )
         .get();
 

@@ -94,6 +94,40 @@ class SyncRow {
         'SyncRow: fields must carry id/schema_v/hlc_packed',
       );
     }
+    // The HLC rides in two representations: the packed string (the LWW
+    // comparison key) and the wall/ctr/node quad (what the applier's drift
+    // gate and HlcClock.receive judge). LWW compares the PACKED value while
+    // the drift gate judges the QUAD's wall — if the two could disagree, a
+    // record with an honest-looking quad but a forged far-future hlc_packed
+    // would sail through the drift gate and then win every LWW comparison
+    // fleet-wide. Require the quad to be well-typed AND to re-pack (via the
+    // same [Hlc.packed] routine every stamp in the codebase uses) to exactly
+    // the carried hlc_packed, so the two views of one stamp can never
+    // disagree past this door. This also removes the last unchecked casts
+    // behind the [hlc] getter: a mistyped quad fails HERE as a per-record
+    // parse error instead of a TypeError deep inside an apply.
+    final hlcWall = fields['hlc_wall'];
+    final hlcCtr = fields['hlc_ctr'];
+    final hlcNode = fields['hlc_node'];
+    if (hlcWall is! int ||
+        hlcCtr is! int ||
+        hlcNode is! String ||
+        hlcNode.isEmpty) {
+      throw const FormatException(
+        'SyncRow: fields must carry an int hlc_wall/hlc_ctr and a '
+        'non-empty hlc_node',
+      );
+    }
+    final repacked = Hlc(
+      wallMs: hlcWall,
+      counter: hlcCtr,
+      node: hlcNode,
+    ).packed;
+    if (repacked != fields['hlc_packed']) {
+      throw const FormatException(
+        'SyncRow: hlc_packed disagrees with the hlc_wall/hlc_ctr/hlc_node quad',
+      );
+    }
     // The envelope trio must agree with the field map — a mismatch means a
     // corrupt or tampered payload and is refused rather than guessed at.
     if (json['id'] != fields['id'] ||
@@ -132,6 +166,14 @@ class SyncRow {
   String toString() =>
       'SyncRow($table/${fields['id']} @${fields['hlc_packed']})';
 }
+
+/// The record schema version this build writes (and fully understands).
+/// Every synced table's schema_v column defaults to it (tables.dart), and the
+/// [SyncApplier] quarantines a record claiming a NEWER version: such a
+/// record's shape is by definition not fully understood here, and the
+/// quarantine replay lets it in after the app upgrade that is. Bump ONLY
+/// together with the tables.dart default when the wire record shape changes.
+const int currentRecordSchemaV = 1;
 
 /// The full SyncCols column set — the structural marker of a synced table.
 /// Requiring ALL of them (not just hlc_packed) keeps the registry from ever

@@ -12,6 +12,7 @@ import 'package:vocara/data/sync/sync_applier.dart';
 import 'package:vocara/data/sync/sync_engine.dart';
 import 'package:vocara/data/sync/sync_row.dart';
 import 'package:vocara/data/sync/sync_state_store.dart';
+import 'package:vocara/data/sync/sync_transport.dart';
 import 'package:vocara/data/sync/sync_writer.dart';
 
 import 'support/fake_sync_transport.dart';
@@ -427,6 +428,81 @@ void main() {
         expect(await quarantine.list(), hasLength(1));
       },
     );
+
+    test('a record with a mistyped HLC quad is quarantined ALONE: the rest of '
+        'the page applies and the token advances (one bad record must never '
+        'brick sync)', () async {
+      // Regression: the TypeError out of rec.hlc used to escape the applier's
+      // per-record handling, roll back the whole page, and leave the engine
+      // throwing "pull page failed to commit; token unmoved" — the same page
+      // then retried forever, blocking every good record behind it.
+      cloud.accept(remotePractice('GOOD', 'kept', remoteHlc(t0 - 2000)));
+      final bad = remotePractice('BAD', 'poison', remoteHlc(t0 - 1000));
+      cloud.accept(
+        SyncRow(
+          table: 'practices',
+          fields: {...bad.fields, 'hlc_wall': 'not-an-int'},
+        ),
+      );
+      cloud.accept(remotePractice('ALSO', 'behind', remoteHlc(t0 - 500)));
+
+      final run = await engine.pumpPull();
+      expect(run.failed, isFalse);
+      expect(run.applied, 2);
+      expect(run.failedRecords, 1);
+      expect(await practiceTitle('GOOD'), 'kept');
+      expect(await practiceTitle('ALSO'), 'behind');
+      expect(await practiceTitle('BAD'), isNull);
+      expect(await state.changeToken(), '3', reason: 'sync is not stalled');
+      final parked = await quarantine.list();
+      expect(parked, hasLength(1));
+      expect(parked.single.id, _id('BAD'));
+      expect(parked.single.reason, startsWith('apply-failed'));
+    });
+
+    test('an expired change token (server compacted its log) clears the '
+        'token and re-pulls from scratch within the same run', () async {
+      cloud.accept(remotePractice('P1', 'one', remoteHlc(t0 - 2000)));
+      cloud.accept(remotePractice('P2', 'two', remoteHlc(t0 - 1000)));
+      final first = await engine.pumpPull();
+      expect(first.applied, 2);
+      expect(await state.changeToken(), '2');
+
+      // The server compacts its change log past our token: the next fetch
+      // with it throws SyncTokenExpiredException. The engine must clear the
+      // token and restart from the beginning of the zone — safe because
+      // re-applied rows are LWW no-ops.
+      transport.expireNextFetches = 1;
+      final recovered = await engine.pumpPull();
+      expect(recovered.failed, isFalse);
+      expect(recovered.applied, 0);
+      expect(recovered.skipped, 2, reason: 're-applied rows settle as skips');
+      expect(await practiceTitle('P1'), 'one');
+      expect(await practiceTitle('P2'), 'two');
+      expect(await state.changeToken(), '2', reason: 'token rebuilt to head');
+    });
+
+    test('a transport that rejects even a FRESH token degrades to a normal '
+        'failed run instead of spinning clear-and-refetch forever', () async {
+      cloud.accept(remotePractice('P', 'one', remoteHlc(t0 - 1000)));
+      await engine.pumpPull();
+      expect(await state.changeToken(), '1');
+
+      transport.expireNextFetches = 10;
+      transport.expireFreshTokensToo = true;
+      final before = transport.fetchCalls;
+      final run = await engine.pumpPull();
+      expect(run.failed, isTrue);
+      expect(run.failure, isA<SyncTokenExpiredException>());
+      // Exactly two fetches: the expired stored token, then the one bounded
+      // retry with a fresh (null) token — never a spin.
+      expect(transport.fetchCalls - before, 2);
+      expect(
+        await state.changeToken(),
+        isNull,
+        reason: 'the stored token was already dead; cleared is the honest state',
+      );
+    });
 
     test('remoteApplied carries (table, id) pairs and rolls child rows up to '
         'their practice', () async {

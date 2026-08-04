@@ -11,6 +11,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:drift/drift.dart' hide isNull, isNotNull;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:sqlite3/sqlite3.dart';
@@ -18,6 +19,8 @@ import 'package:vocara/data/db/app_database.dart';
 import 'package:vocara/data/db/persistence.dart';
 import 'package:vocara/data/services/audio_dsp.dart';
 import 'package:vocara/data/services/waveform_service.dart';
+import 'package:vocara/data/sync/hlc.dart';
+import 'package:vocara/data/sync/oplog_drain.dart';
 import 'package:vocara/domain/models/song_practice.dart';
 import 'package:vocara/utils/result.dart';
 
@@ -313,5 +316,131 @@ void main() {
     final p3 = await boot();
     await p3.db.close();
     expect((await nodeFile.readAsString()).trim(), reminted);
+  });
+
+  group('oplog compaction', () {
+    late Persistence persistence;
+
+    setUp(() {
+      persistence = Persistence.memory();
+      addTearDown(() async {
+        await persistence.db.close();
+        final dir = persistence.assets.root;
+        if (await dir.exists()) await dir.delete(recursive: true);
+      });
+    });
+
+    /// Journals one entry through the production chokepoint (no row mutation
+    /// needed — compaction is about the ledger alone).
+    Future<Hlc> journal(
+      String table,
+      String id,
+      String op, {
+      String? dependsOnAssetId,
+    }) async {
+      final s = persistence.writer.stamp();
+      await persistence.writer.journal(
+        table: table,
+        id: id,
+        op: op,
+        hlc: s.hlc,
+        payloadHash: op == 'tombstone' ? '' : 'h',
+        dependsOnAssetId: dependsOnAssetId,
+      );
+      return s.hlc;
+    }
+
+    Future<int> oplogCount() async =>
+        (await persistence.db.select(persistence.db.oplog).get()).length;
+
+    test('keeps only the latest op per entity; the drain ships exactly what '
+        'its own collapse would have shipped', () async {
+      final id1 = 'P1'.padRight(26, '0');
+      final id2 = 'P2'.padRight(26, '0');
+      await journal('practices', id1, 'insert');
+      await journal('practices', id1, 'update');
+      await journal('practices', id2, 'insert');
+      final tomb = await journal('practices', id1, 'tombstone');
+      expect(await oplogCount(), 4);
+
+      expect(await persistence.compactOplog(), 2);
+      expect(await oplogCount(), 2);
+
+      // The drain result is IDENTICAL to an uncompacted drain: latest op per
+      // entity, trailing tombstone preserved (its collapse rule is exactly
+      // what compaction enforced in place).
+      final batch = await OplogDrain(persistence.db).readPending();
+      expect(batch.entries, hasLength(2));
+      expect(batch.entries[0].id, id2);
+      expect(batch.entries[0].op, 'insert');
+      expect(batch.entries[1].id, id1);
+      expect(batch.entries[1].op, 'tombstone');
+      expect(batch.entries[1].hlcPacked, tomb.packed);
+      expect(batch.maxSeq, 4, reason: 'surviving seqs keep their values');
+    });
+
+    test('carries the latest non-null dependsOnAssetId onto the surviving '
+        'row (a content-only update must not shed the asset gate)', () async {
+      final id = 'C1'.padRight(26, '0');
+      final asset = 'AX'.padRight(26, '0');
+      await journal('clips', id, 'insert', dependsOnAssetId: asset);
+      await journal('clips', id, 'update'); // no dependency of its own
+
+      expect(await persistence.compactOplog(), 1);
+      final batch = await OplogDrain(persistence.db).readPending();
+      expect(batch.entries.single.op, 'update');
+      expect(
+        batch.entries.single.dependsOnAssetId,
+        asset,
+        reason: 'the gate must survive compaction exactly as it survives '
+            'the drain collapse',
+      );
+    });
+
+    test('is idempotent and a no-op on an already-compact ledger', () async {
+      final id = 'P1'.padRight(26, '0');
+      await journal('practices', id, 'insert');
+      expect(await persistence.compactOplog(), 0);
+      expect(await persistence.compactOplog(), 0);
+      expect(await oplogCount(), 1);
+    });
+
+    test('the boot maintenance pass compacts superseded history', () async {
+      // Boot #1: a real practice (several entities, one entry each) plus a
+      // superseded extra op for the practice row itself.
+      final first = await boot();
+      final res = await first.songRepo.createPractice('Song');
+      final id = (res as Ok<SongPractice>).value.id;
+      final s = first.writer.stamp();
+      await first.writer.journal(
+        table: 'practices',
+        id: id,
+        op: 'update',
+        hlc: s.hlc,
+        payloadHash: 'h2',
+      );
+      final before = await first.db
+          .customSelect(
+            "SELECT COUNT(*) AS n FROM oplog WHERE entity_table = 'practices' "
+            'AND entity_id = ?',
+            variables: [Variable.withString(id)],
+          )
+          .getSingle();
+      expect(before.read<int>('n'), 2);
+      await first.db.close();
+
+      // Boot #2 runs the gated maintenance pass, which compacts.
+      final second = await boot();
+      addTearDown(second.db.close);
+      final after = await second.db
+          .customSelect(
+            'SELECT COUNT(*) AS n, MAX(op) AS op FROM oplog WHERE '
+            "entity_table = 'practices' AND entity_id = ?",
+            variables: [Variable.withString(id)],
+          )
+          .getSingle();
+      expect(after.read<int>('n'), 1);
+      expect(after.read<String>('op'), 'update', reason: 'the LATEST op won');
+    });
   });
 }

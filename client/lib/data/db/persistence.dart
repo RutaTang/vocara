@@ -276,6 +276,19 @@ class Persistence {
             'pruneTrash failed (${e.runtimeType})',
           );
         }
+        // Compact the durability ledger: production attaches no sync
+        // transport today, so nothing ever acks (deletes) oplog rows — every
+        // save appends and the ledger only grows. Safe under the drain
+        // contract (see [compactOplog]); best-effort like the other
+        // maintenance steps.
+        try {
+          await persistence.compactOplog();
+        } catch (e) {
+          DiagnosticsLog.instance.log(
+            'persistence',
+            'compactOplog failed (${e.runtimeType})',
+          );
+        }
       });
     }
     return persistence;
@@ -334,6 +347,45 @@ class Persistence {
     );
     DiagnosticsLog.instance.log('persistence', 'repairLibrary: $report');
     return report;
+  });
+
+  /// Compacts the oplog: for every (entity_table, entity_id), keeps only the
+  /// LATEST journaled op and deletes the superseded history. Returns the
+  /// number of rows deleted.
+  ///
+  /// This preserves the drain contract exactly: the ledger's only consumer,
+  /// [OplogDrain.readPending], already collapses each (table, id) to its
+  /// latest op before pushing (the pusher uploads CURRENT row state, so
+  /// intermediate ops are redundant by design — a trailing tombstone is the
+  /// latest op and survives). Two details are handled deliberately:
+  ///
+  ///  * The asset gate: the drain's collapse keeps the latest NON-null
+  ///    depends_on_asset_id across a row's entries (a content-only update
+  ///    must not shed its insert's dependency), so before deleting we carry
+  ///    that value onto the surviving row in the same transaction.
+  ///  * synced = true rows cannot exist: nothing ever sets the flag — the ack
+  ///    path hard-DELETES instead (see [OplogDrain.ack]) — so the SQL needs
+  ///    no synced filter; keep-latest-per-entity alone is exact. If a future
+  ///    change ever starts marking rows synced, revisit this predicate.
+  ///
+  /// Run from the gated boot maintenance pass (under [writeGate] exclusive,
+  /// nothing in flight); one transaction so a crash can never leave a
+  /// dependency carried but its history half-deleted, or vice versa.
+  Future<int> compactOplog() => db.transaction(() async {
+    await db.customStatement(
+      'UPDATE oplog SET depends_on_asset_id = ('
+      'SELECT o.depends_on_asset_id FROM oplog o '
+      'WHERE o.entity_table = oplog.entity_table '
+      'AND o.entity_id = oplog.entity_id '
+      'AND o.depends_on_asset_id IS NOT NULL '
+      'ORDER BY o.seq DESC LIMIT 1'
+      ') WHERE depends_on_asset_id IS NULL AND seq IN ('
+      'SELECT MAX(seq) FROM oplog GROUP BY entity_table, entity_id)',
+    );
+    return db.customUpdate(
+      'DELETE FROM oplog WHERE seq NOT IN ('
+      'SELECT MAX(seq) FROM oplog GROUP BY entity_table, entity_id)',
+    );
   });
 
   /// Boot-time recovery of hard-kill orphaned take recordings. Returns the

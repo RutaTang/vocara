@@ -1,6 +1,9 @@
+import 'dart:io';
+
 import 'package:drift/drift.dart';
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
 import 'package:vocara/data/db/app_database.dart';
 
 /// A 26-char ULID-shaped stub id for tests.
@@ -117,4 +120,36 @@ void main() {
       expect(vocals, hasLength(2));
     },
   );
+
+  test('derived indexes are re-applied on every open, so one added in a '
+      'newer build reaches an existing library without a migration', () async {
+    Future<Set<String>> indexNames(AppDatabase d) async {
+      final rows = await d
+          .customSelect(
+            "SELECT name FROM sqlite_master WHERE type = 'index' "
+            "AND name LIKE 'ix\\_%' ESCAPE '\\'",
+          )
+          .get();
+      return {for (final r in rows) r.read<String>('name')};
+    }
+
+    final dir = await Directory.systemTemp.createTemp('vocara_idx');
+    addTearDown(() => dir.delete(recursive: true));
+    final file = File(p.join(dir.path, 'library.db'));
+
+    // First open (onCreate): all derived indexes exist, the oplog HLC-seed
+    // index among them.
+    var onDisk = AppDatabase(NativeDatabase(file));
+    await onDisk.customSelect('SELECT 1').get(); // force the lazy open
+    expect(await indexNames(onDisk), contains('ix_oplog_hlc'));
+    // Simulate a library created by an OLDER build that never had the index.
+    await onDisk.customStatement('DROP INDEX ix_oplog_hlc');
+    await onDisk.close();
+
+    // Re-open: beforeOpen re-runs the derived indexes idempotently, so the
+    // "new" index appears with no schema-version bump and no migration.
+    onDisk = AppDatabase(NativeDatabase(file));
+    addTearDown(onDisk.close);
+    expect(await indexNames(onDisk), contains('ix_oplog_hlc'));
+  });
 }

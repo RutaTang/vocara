@@ -63,12 +63,21 @@ class AppDatabase extends _$AppDatabase {
     beforeOpen: (details) async {
       await customStatement('PRAGMA foreign_keys = ON');
       await customStatement('PRAGMA journal_mode = WAL');
+      // Derived indexes are VERSIONLESS schema: re-applied idempotently on
+      // every open (IF NOT EXISTS), not only in onCreate, so an index added
+      // in a newer build reaches existing libraries without a schema-version
+      // bump or a SafeMigrator step. Cheap when nothing is missing — SQLite
+      // resolves each IF NOT EXISTS against the schema table without
+      // touching data. (onCreate also runs this for a fresh file; the
+      // duplicate call is a no-op.)
+      await _createDerivedIndexes();
     },
   );
 
   /// Indexes + partial-unique constraints that drift's table definitions can't
   /// express directly. Re-run with IF NOT EXISTS so a migration that recreates
-  /// the schema stays idempotent.
+  /// the schema stays idempotent; applied from BOTH onCreate and beforeOpen so
+  /// a newly added index reaches existing libraries on their next open.
   Future<void> _createDerivedIndexes() async {
     // Single-slot rule: at most one LIVE accompaniment and one LIVE reference
     // track per practice (two offline devices each importing a backing must
@@ -119,6 +128,13 @@ class AppDatabase extends _$AppDatabase {
     );
     await customStatement(
       'CREATE INDEX IF NOT EXISTS ix_oplog_unsynced ON oplog (synced, seq)',
+    );
+    // Boot HLC seeding (Persistence._seedClock) runs SELECT MAX(hlc_packed)
+    // over every hlc-carrying table; the synced tables are small, but the
+    // oplog gains a row per save and is only trimmed by ack/compaction, so
+    // give its scan an index (MAX resolves off the btree tail).
+    await customStatement(
+      'CREATE INDEX IF NOT EXISTS ix_oplog_hlc ON oplog (hlc_packed)',
     );
   }
 }

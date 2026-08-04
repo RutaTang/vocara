@@ -140,6 +140,62 @@ void main() {
       expect(() => SyncRow.decode('not json'), throwsFormatException);
       expect(() => SyncRow.decode('[1,2]'), throwsFormatException);
     });
+
+    test('decode rejects a mistyped or missing HLC quad (the applier must '
+        'never hit a TypeError deep inside an apply)', () {
+      Map<String, Object?> jsonWith(Map<String, Object?> patch) {
+        final fields = {..._practiceFields('P1', hlc), ...patch}
+          ..removeWhere((_, v) => v == #absent);
+        return {
+          'table': 'practices',
+          'id': fields['id'],
+          'schemaV': fields['schema_v'],
+          'hlcPacked': fields['hlc_packed'],
+          'fields': fields,
+          'fieldClocks': null,
+        };
+      }
+
+      // Well-formed control: the helper itself must decode.
+      expect(SyncRow.fromJson(jsonWith(const {})).hlc, hlc);
+      expect(
+        () => SyncRow.fromJson(
+          jsonWith({'hlc_wall': '${hlc.wallMs}'}), // string, not int
+        ),
+        throwsFormatException,
+      );
+      expect(
+        () => SyncRow.fromJson(jsonWith(const {'hlc_ctr': 'seven'})),
+        throwsFormatException,
+      );
+      expect(
+        () => SyncRow.fromJson(jsonWith(const {'hlc_node': ''})),
+        throwsFormatException,
+      );
+      expect(
+        () => SyncRow.fromJson(jsonWith(const {'hlc_wall': #absent})),
+        throwsFormatException,
+      );
+    });
+
+    test('decode rejects an hlc_packed that disagrees with the quad (a forged '
+        'LWW key must not pass the drift gate on an honest-looking quad)', () {
+      final forged = Hlc(
+        wallMs: hlc.wallMs + 999999999, // far future: would win every LWW
+        counter: 0,
+        node: hlc.node,
+      ).packed;
+      final fields = {..._practiceFields('P1', hlc), 'hlc_packed': forged};
+      final json = {
+        'table': 'practices',
+        'id': fields['id'],
+        'schemaV': 1,
+        'hlcPacked': forged, // envelope agrees with fields — only the quad
+        'fields': fields, //    (what the drift gate judges) tells the truth
+        'fieldClocks': null,
+      };
+      expect(() => SyncRow.fromJson(json), throwsFormatException);
+    });
   });
 
   group('synced table registry', () {
