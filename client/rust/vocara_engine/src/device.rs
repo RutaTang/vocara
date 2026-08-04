@@ -241,11 +241,15 @@ struct OutResampler {
     /// Scratch for one engine render block.
     scratch: Vec<Smp>,
     max_block: usize,
+    /// The last observed transport flush generation: a bump (seek/pause) means the FIFO holds
+    /// audio from BEFORE the transport change, which must be dropped, not played out.
+    flush_gen: u32,
 }
 
 impl OutResampler {
     fn new(device_rate: f64, max_block: usize, rt: Arc<RtCell>) -> Self {
         let step = ENGINE_SR / device_rate;
+        let flush_gen = rt.transport().out_flush_gen();
         // Peak FIFO occupancy in a sub-chunk is `need = floor(pos + (chunk-1)*step) + 2`
         // (chunk <= max_block, pos in [0,1)) plus up to one extra render block (max_block) to
         // reach it. Size from the ACTUAL step so `push` never reallocates on the RT callback —
@@ -259,6 +263,7 @@ impl OutResampler {
             fifo: Vec::with_capacity(cap),
             scratch: vec![0.0; max_block * CHANNELS],
             max_block,
+            flush_gen,
         }
     }
 
@@ -275,6 +280,16 @@ impl OutResampler {
     }
 
     fn process(&mut self, out: &mut [Smp], out_frames: usize) {
+        // A seek/pause happened since the last callback: everything pre-rendered into the
+        // FIFO belongs to the OLD transport position and must not reach the listener —
+        // dropping it makes the transport respond within one callback instead of playing out
+        // up to a full render block (~21 ms) of stale audio. clear() keeps the allocation.
+        let gen = self.rt.transport().out_flush_gen();
+        if gen != self.flush_gen {
+            self.flush_gen = gen;
+            self.fifo.clear();
+            self.pos = 0.0;
+        }
         let mut done = 0;
         while done < out_frames {
             let chunk = (out_frames - done).min(self.max_block);
@@ -313,6 +328,10 @@ impl OutResampler {
             }
             done += chunk;
         }
+        // Publish the rendered-but-unheard depth so the control side can subtract it from
+        // the reported playhead (EngineHandle::frame) — without this, position/seek/pause
+        // on a non-48 kHz device read up to a render block (~21 ms) ahead of the sound.
+        self.rt.transport().set_out_backlog(self.fifo.len() as u32);
     }
 }
 
@@ -412,24 +431,33 @@ struct InputState {
     level: Arc<AtomicU32>,
     /// Total input frames the callback has received — a diagnostic for "is the mic delivering?".
     frames_in: Arc<AtomicU64>,
+    /// Frames the RECORDING ring refused because it was full (writer thread stalled longer
+    /// than the ring's headroom). Those samples are gone from the take, so the count must
+    /// surface to the caller — a take with silent holes must never report as clean.
+    rec_dropped: Arc<AtomicU64>,
 }
 
 impl InputState {
     /// Fan one resampled frame out to the monitor ring (always) + the capture/recording rings
-    /// (when their consumer is active). Drops on a full ring (back-pressure; never blocks).
+    /// (when their consumer is active). Drops on a full ring (back-pressure; never blocks) —
+    /// but a drop on the RECORDING ring is counted: monitor/capture drops only cost a live
+    /// view a frame, a recording drop is a permanent hole in the take on disk.
     #[inline]
     fn emit(&mut self, f: [Smp; CHANNELS], cap: bool, rec: bool) {
         self.mic.push(f);
         if cap {
             self.cap.push(f);
         }
-        if rec {
-            self.rec.push(f);
+        if rec && !self.rec.push(f) {
+            self.rec_dropped.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
 
 impl InputCell {
+    // One positional slot per fan-out ring/flag/meter: a builder or params struct would only
+    // restate the InputState field list this constructor forwards to.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         mic: Producer<[Smp; CHANNELS]>,
         cap: Producer<[Smp; CHANNELS]>,
@@ -438,6 +466,7 @@ impl InputCell {
         rec_active: Arc<AtomicBool>,
         level: Arc<AtomicU32>,
         frames_in: Arc<AtomicU64>,
+        rec_dropped: Arc<AtomicU64>,
     ) -> Arc<InputCell> {
         Arc::new(InputCell(UnsafeCell::new(InputState {
             mic,
@@ -452,6 +481,7 @@ impl InputCell {
             primed: false,
             level,
             frames_in,
+            rec_dropped,
         })))
     }
 
@@ -1063,7 +1093,13 @@ pub fn spawn_audio_host(
         .spawn(move || audio_host_run(rt, input_cell, event, renderer_gate, rx, ready_tx))
         .map_err(|e| format!("spawn audio host: {e}"))?;
     match ready_rx.recv() {
-        Ok(Ok(uid)) => Ok((AudioHost { tx, join: Some(join) }, uid)),
+        Ok(Ok(uid)) => Ok((
+            AudioHost {
+                tx,
+                join: Some(join),
+            },
+            uid,
+        )),
         Ok(Err(e)) => {
             let _ = join.join();
             Err(e)
@@ -1072,9 +1108,23 @@ pub fn spawn_audio_host(
     }
 }
 
+/// Why [`decode_file`] refused a file. `TooLong` is distinct so callers can surface a
+/// duration-cap message instead of a generic decode failure.
+#[derive(Debug)]
+pub enum DecodeError {
+    /// The audio exceeds the caller's duration budget. Raised BEFORE decoding when the
+    /// container declares its frame count, or the moment the budget is crossed mid-decode —
+    /// either way peak memory stays bounded by the budget, never by the file.
+    TooLong,
+    /// Any other open/probe/decode failure.
+    Other(String),
+}
+
 /// Decode a file (wav/flac/mp3/aac/m4a/ogg) to interleaved-stereo f32 at its source rate.
-/// Mono is duplicated; >2 channels take the first two.
-pub fn decode_file(path: &str) -> Result<(Vec<[Smp; CHANNELS]>, u32), String> {
+/// Mono is duplicated; >2 channels take the first two. `max_secs` (0.0 = unbounded) caps the
+/// decoded duration: the full track lives in memory here, so an arbitrary-length input must
+/// be refused up front rather than after gigabytes of Vec growth.
+pub fn decode_file(path: &str, max_secs: f64) -> Result<(Vec<[Smp; CHANNELS]>, u32), DecodeError> {
     use symphonia::core::audio::SampleBuffer;
     use symphonia::core::codecs::DecoderOptions;
     use symphonia::core::formats::FormatOptions;
@@ -1082,11 +1132,15 @@ pub fn decode_file(path: &str) -> Result<(Vec<[Smp; CHANNELS]>, u32), String> {
     use symphonia::core::meta::MetadataOptions;
     use symphonia::core::probe::Hint;
 
-    let file = std::fs::File::open(path).map_err(|e| format!("open {path}: {e}"))?;
+    let err = |m: String| DecodeError::Other(m);
+    let file = std::fs::File::open(path).map_err(|e| err(format!("open {path}: {e}")))?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
     let mut hint = Hint::new();
-    if let Some(ext) = std::path::Path::new(path).extension().and_then(|e| e.to_str()) {
+    if let Some(ext) = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+    {
         hint.with_extension(ext);
     }
 
@@ -1097,18 +1151,32 @@ pub fn decode_file(path: &str) -> Result<(Vec<[Smp; CHANNELS]>, u32), String> {
             &FormatOptions::default(),
             &MetadataOptions::default(),
         )
-        .map_err(|e| format!("probe: {e}"))?;
+        .map_err(|e| err(format!("probe: {e}")))?;
     let mut format = probed.format;
     let track = format
         .default_track()
-        .ok_or_else(|| "no default track".to_string())?;
+        .ok_or_else(|| err("no default track".to_string()))?;
     let track_id = track.id;
     let src_rate = track.codec_params.sample_rate.unwrap_or(44_100);
+    // The duration budget in source-rate frames (u64::MAX = unbounded).
+    let max_frames: u64 = if max_secs > 0.0 {
+        (max_secs * src_rate as f64).ceil() as u64
+    } else {
+        u64::MAX
+    };
+    // Refuse a declared-too-long track BEFORE decoding a single packet. When the declared
+    // length fits, pre-size the Vec so packet pushes never realloc-copy the whole track
+    // (the count is clamped by the budget first — a lying header must not drive a huge
+    // allocation on its own).
+    let mut out: Vec<[Smp; CHANNELS]> = match track.codec_params.n_frames {
+        Some(n) if n > max_frames => return Err(DecodeError::TooLong),
+        Some(n) => Vec::with_capacity(n.min(max_frames) as usize),
+        None => Vec::new(),
+    };
     let mut decoder = symphonia::default::get_codecs()
         .make(&track.codec_params, &DecoderOptions::default())
-        .map_err(|e| format!("make decoder: {e}"))?;
+        .map_err(|e| err(format!("make decoder: {e}")))?;
 
-    let mut out: Vec<[Smp; CHANNELS]> = Vec::new();
     // Iterate packets until next_packet errors (EOF or read error).
     while let Ok(packet) = format.next_packet() {
         if packet.track_id() != track_id {
@@ -1127,18 +1195,25 @@ pub fn decode_file(path: &str) -> Result<(Vec<[Smp; CHANNELS]>, u32), String> {
             let r = if ch > 1 { frame[1] } else { l };
             out.push([l, r]);
         }
+        // Containers without a declared frame count (e.g. plain mp3) can only be bounded
+        // mid-decode: bail the moment the budget is crossed, keeping the peak at ~budget.
+        if out.len() as u64 > max_frames {
+            return Err(DecodeError::TooLong);
+        }
     }
     if out.is_empty() {
-        return Err(format!("decoded no audio from {path}"));
+        return Err(err(format!("decoded no audio from {path}")));
     }
     Ok((out, src_rate))
 }
 
 /// Linear-interpolation sample-rate conversion (interleaved stereo). Simple and correct; a
-/// production build swaps in a sinc/FFT resampler (rubato) on the feeder thread.
-pub fn resample_linear(frames: &[[Smp; CHANNELS]], from: u32, to: u32) -> Vec<[Smp; CHANNELS]> {
+/// production build swaps in a sinc/FFT resampler (rubato) on the feeder thread. Consumes
+/// its input so the identity case moves the buffer through instead of duplicating a whole
+/// track (the decode paths' peak memory is measured in full-track copies).
+pub fn resample_linear(frames: Vec<[Smp; CHANNELS]>, from: u32, to: u32) -> Vec<[Smp; CHANNELS]> {
     if from == to || frames.is_empty() {
-        return frames.to_vec();
+        return frames;
     }
     let ratio = to as f64 / from as f64;
     let out_len = ((frames.len() as f64) * ratio).round() as usize;
@@ -1149,10 +1224,7 @@ pub fn resample_linear(frames: &[[Smp; CHANNELS]], from: u32, to: u32) -> Vec<[S
         let frac = (src - i0 as f64) as f32;
         let a = frames[i0.min(frames.len() - 1)];
         let b = frames[(i0 + 1).min(frames.len() - 1)];
-        out.push([
-            a[0] + (b[0] - a[0]) * frac,
-            a[1] + (b[1] - a[1]) * frac,
-        ]);
+        out.push([a[0] + (b[0] - a[0]) * frac, a[1] + (b[1] - a[1]) * frac]);
     }
     out
 }
@@ -1172,7 +1244,8 @@ mod decode_tests {
         // Interleaved stereo, including an over-unity peak (allowed in float takes).
         let samples: Vec<f32> = vec![0.5, 0.5, -0.25, -0.25, 1.5, 1.5, 0.0, 0.0];
         crate::wav::write_wav_f32(&path, &samples, 2, 48_000).unwrap();
-        let (frames, rate) = super::decode_file(path.to_str().unwrap()).expect("f32 wav decodes");
+        let (frames, rate) =
+            super::decode_file(path.to_str().unwrap(), 0.0).expect("f32 wav decodes");
         assert_eq!(rate, 48_000);
         assert_eq!(frames.len(), 4);
         assert!((frames[0][0] - 0.5).abs() < 1e-6);
@@ -1190,11 +1263,38 @@ mod decode_tests {
         let path = temp_wav("i16");
         let samples: Vec<f32> = vec![0.5, 0.5, -0.25, -0.25];
         crate::wav::write_wav_i16(&path, &samples, 2, 48_000).unwrap();
-        let (frames, rate) = super::decode_file(path.to_str().unwrap()).expect("i16 wav decodes");
+        let (frames, rate) =
+            super::decode_file(path.to_str().unwrap(), 0.0).expect("i16 wav decodes");
         assert_eq!(rate, 48_000);
         assert_eq!(frames.len(), 2);
         assert!((frames[0][0] - 0.5).abs() < 1e-3);
         assert!((frames[1][0] + 0.25).abs() < 1e-3);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn declared_too_long_file_is_refused_before_decoding() {
+        // 100 frames @ 48k declared in the WAV header; a 1 ms budget (48 frames) must refuse
+        // it up front with the distinct TooLong error, never with a generic failure.
+        let path = temp_wav("too_long");
+        let samples: Vec<f32> = vec![0.1; 200]; // 100 stereo frames
+        crate::wav::write_wav_f32(&path, &samples, 2, 48_000).unwrap();
+        match super::decode_file(path.to_str().unwrap(), 0.001) {
+            Err(super::DecodeError::TooLong) => {}
+            other => panic!("expected TooLong, got {other:?}"),
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn file_within_the_budget_decodes_normally() {
+        let path = temp_wav("under_cap");
+        let samples: Vec<f32> = vec![0.1; 200]; // 100 stereo frames ≈ 2.08 ms @ 48k
+        crate::wav::write_wav_f32(&path, &samples, 2, 48_000).unwrap();
+        let (frames, rate) =
+            super::decode_file(path.to_str().unwrap(), 1.0).expect("under-budget file decodes");
+        assert_eq!(rate, 48_000);
+        assert_eq!(frames.len(), 100);
         let _ = std::fs::remove_file(&path);
     }
 }
@@ -1340,5 +1440,175 @@ mod record_writer_tests {
         assert_eq!(b2.len(), 44 + 10 * 4, "take 2 contains only its own frames");
         let _ = std::fs::remove_file(&p1);
         let _ = std::fs::remove_file(&p2);
+    }
+}
+
+#[cfg(test)]
+mod out_resampler_tests {
+    //! The output-boundary resampler's transport honesty: the reported playhead must track
+    //! what the listener HEARS (not what has merely rendered into the FIFO), and a
+    //! seek/pause must drop pre-rendered audio instead of playing it out.
+
+    use super::OutResampler;
+    use crate::dsp::master::MasterNode;
+    use crate::graph::{Edge, GraphDesc, NodeEntry};
+    use crate::live::{spawn, EngineHandle, RtCell};
+    use crate::ring::spsc;
+    use crate::sample::{Smp, CHANNELS, ENGINE_SR};
+    use crate::source::BufferSource;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    const BLOCK: usize = 128;
+
+    /// A live engine playing a mono ramp (sample i = i * 1e-4) from frame 0, wrapped in an
+    /// RtCell + a 44.1 kHz output resampler (step > 1, so the FIFO always retains frames).
+    fn ramp_engine() -> (EngineHandle, OutResampler) {
+        let n = 48_000usize;
+        let mut pcm = Vec::with_capacity(n * CHANNELS);
+        for i in 0..n {
+            let v = i as Smp * 1e-4;
+            pcm.push(v);
+            pcm.push(v);
+        }
+        let desc = GraphDesc {
+            nodes: vec![
+                NodeEntry::new(1, Box::new(BufferSource::new(pcm, 0))),
+                NodeEntry::new(2, Box::new(MasterNode::unity())),
+            ],
+            edges: vec![Edge::simple(1, 2)],
+            master: 2,
+        };
+        let g = desc.compile(ENGINE_SR, BLOCK).unwrap();
+        let (_mic_prod, mic_cons) = spsc::<[Smp; CHANNELS]>(256);
+        let (h, rt) = spawn(g, HashMap::new(), mic_cons, 256);
+        let cell = RtCell::new(rt);
+        let res = OutResampler::new(44_100.0, BLOCK, Arc::clone(&cell));
+        (h, res)
+    }
+
+    #[test]
+    fn reported_playhead_subtracts_the_unplayed_fifo_backlog() {
+        let (h, mut res) = ramp_engine();
+        h.play();
+        // 441 device frames consume exactly 480 engine frames; rendering happens in whole
+        // 128-frame blocks, so the raw render clock lands PAST 480 with the excess parked
+        // in the FIFO. The reported playhead must reflect the consumed 480, not the render.
+        let mut out = vec![0.0; 441 * CHANNELS];
+        res.process(&mut out, 441);
+        let frame = h.frame();
+        assert!(
+            (frame - 480).abs() <= 2,
+            "playhead must track audio delivered to the device (~480), got {frame}"
+        );
+    }
+
+    #[test]
+    fn seek_flushes_prerendered_audio_and_restarts_at_the_target() {
+        let (h, mut res) = ramp_engine();
+        h.play();
+        let mut out = vec![0.0; 441 * CHANNELS];
+        res.process(&mut out, 441);
+        // Mid-ramp now. Seek home: the FIFO still holds pre-seek samples (values ~0.048);
+        // the next callback must start from the ramp's beginning, not play them out.
+        h.seek(0);
+        res.process(&mut out, 441);
+        assert!(
+            out[0].abs() < 1e-3,
+            "first post-seek sample must come from the seek target, got {}",
+            out[0]
+        );
+        let frame = h.frame();
+        assert!(
+            (frame - 480).abs() <= 2,
+            "post-seek playhead restarts at the target (~480 after one buffer), got {frame}"
+        );
+    }
+
+    #[test]
+    fn pause_flushes_the_fifo_and_reports_the_paused_position() {
+        let (h, mut res) = ramp_engine();
+        h.play();
+        let mut out = vec![0.0; 441 * CHANNELS];
+        res.process(&mut out, 441);
+        h.pause();
+        // The pause dropped the backlog immediately: the paused position must not read
+        // ahead of (or behind) what was actually heard by more than the flush precision.
+        let paused_at = h.frame();
+        res.process(&mut out, 441);
+        assert!(
+            out.iter().all(|s| s.abs() < 1e-6),
+            "paused output must be silence, not the FIFO's stale tail"
+        );
+        assert_eq!(h.frame(), paused_at, "paused playhead must hold still");
+    }
+}
+
+#[cfg(test)]
+mod input_cell_tests {
+    //! The capture fan-out's overflow accounting: a full recording ring must COUNT every
+    //! dropped frame (the take on disk has a hole there), never lose them silently.
+
+    use super::InputCell;
+    use crate::ring::spsc;
+    use crate::sample::{Smp, CHANNELS};
+    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    fn cell_with_rec_capacity(
+        rec_cap: usize,
+    ) -> (
+        Arc<InputCell>,
+        Arc<AtomicBool>,
+        Arc<AtomicU64>,
+        Arc<AtomicU64>,
+    ) {
+        let (mic_prod, _mic_cons) = spsc::<[Smp; CHANNELS]>(1 << 10);
+        let (cap_prod, _cap_cons) = spsc::<[Smp; CHANNELS]>(1 << 10);
+        let (rec_prod, _rec_cons) = spsc::<[Smp; CHANNELS]>(rec_cap);
+        let rec_active = Arc::new(AtomicBool::new(true));
+        let frames_in = Arc::new(AtomicU64::new(0));
+        let rec_dropped = Arc::new(AtomicU64::new(0));
+        let cell = InputCell::new(
+            mic_prod,
+            cap_prod,
+            rec_prod,
+            Arc::new(AtomicBool::new(false)),
+            Arc::clone(&rec_active),
+            Arc::new(AtomicU32::new(0)),
+            Arc::clone(&frames_in),
+            Arc::clone(&rec_dropped),
+        );
+        // Identity resample path (input already at ENGINE_SR), mono input.
+        cell.reconfigure(crate::sample::ENGINE_SR, 1);
+        (cell, rec_active, frames_in, rec_dropped)
+    }
+
+    #[test]
+    fn recording_ring_overflow_is_counted() {
+        let (cell, _rec_active, frames_in, rec_dropped) = cell_with_rec_capacity(4);
+        // 12 mono frames into a 4-slot recording ring: 4 fit, 8 must be counted as dropped.
+        let data = [0.5f32; 12];
+        // SAFETY: no input callback exists in this test; we are the single accessor.
+        unsafe { cell.feed(&data) };
+        assert_eq!(frames_in.load(Ordering::Relaxed), 12);
+        assert_eq!(
+            rec_dropped.load(Ordering::Relaxed),
+            8,
+            "every frame refused by the full recording ring must be counted"
+        );
+    }
+
+    #[test]
+    fn no_drops_are_counted_while_the_ring_has_room() {
+        let (cell, rec_active, _frames_in, rec_dropped) = cell_with_rec_capacity(64);
+        let data = [0.25f32; 32];
+        // SAFETY: single accessor (see above).
+        unsafe { cell.feed(&data) };
+        assert_eq!(rec_dropped.load(Ordering::Relaxed), 0);
+        // Frames emitted while recording is DISARMED never touch the ring or the counter.
+        rec_active.store(false, Ordering::Release);
+        unsafe { cell.feed(&data) };
+        assert_eq!(rec_dropped.load(Ordering::Relaxed), 0);
     }
 }

@@ -183,6 +183,7 @@ class RecordingController extends ChangeNotifier {
       }
       _recordingTargetId = targetId;
       _recordingStartMs = _playback.position.value.inMilliseconds;
+      _recordingPreRollMs = 0;
       _recPeaks.clear();
       recordingPeaks.value = const [];
       return _audioFiles.newRecordingPath(practiceId: _practiceId);
@@ -223,6 +224,13 @@ class RecordingController extends ChangeNotifier {
 
   int _recordingStartMs = 0;
   int get recordingStartMs => _recordingStartMs;
+
+  /// Milliseconds of audio recorded BEFORE the backing playback actually
+  /// started (mic arm → play), measured from the engine's input-frame counter.
+  /// The WAV's content sung along to the backing begins this far into the
+  /// file, so take placement subtracts it — without this, everything between
+  /// arm and play (graph resync, decode, seek) lands as unbounded skew.
+  int _recordingPreRollMs = 0;
 
   /// The vocal take the in-flight recording is punching into (frozen at start);
   /// null when REC is instead creating a brand-new take.
@@ -319,6 +327,14 @@ class RecordingController extends ChangeNotifier {
           case MicRecordingFailure.engineUnavailable:
             // No usable audio device (the take setup was skipped entirely).
             _toast('No audio device is available to record with.');
+          case MicRecordingFailure.inputNotDelivering:
+            // The mic armed but never delivered a frame within the ready
+            // timeout (async input-stream open failed or stalled). The take
+            // was already discarded by the controller.
+            _toast(
+              'The microphone did not start. Try again, or pick a '
+              'different input device in Settings.',
+            );
         }
         return;
       }
@@ -336,6 +352,18 @@ class RecordingController extends ChangeNotifier {
       if (_disposed) return;
       _playback.position.value = Duration(milliseconds: _recordingStartMs);
       await _playback.engine.play();
+      // Pre-roll: the recording has been rolling since the arm (WAV offset 0),
+      // but the backing only started just now — everything above (resync,
+      // decode, seek) sat between the two. Measure the gap in actual captured
+      // frames so the stop-side placement can subtract it; the acoustic
+      // round-trip is compensated separately (recordLatencyMs). Frame counter
+      // at 48 kHz — the engine's fixed rate (see recordLatencyMs).
+      final framesAtArm = _mic.framesAtArm;
+      final engineNow = _graphEngine();
+      if (framesAtArm != null && engineNow != null) {
+        final pre = engineNow.inputFramesReceived() - framesAtArm;
+        if (pre > 0) _recordingPreRollMs = pre * 1000 ~/ 48000;
+      }
     } catch (e) {
       // Setup failed partway (createEmptyVocalTake/save, newRecordingPath I/O,
       // playback). If the take armed before the throw, stop it — the WAV stays
@@ -378,14 +406,16 @@ class RecordingController extends ChangeNotifier {
     final recordingClean = stopped.clean;
     final path = stopped.path;
     await _playback.engine.pause();
-    // Record-latency compensation: the first captured sample is the vocal sung in response to the
-    // backing the singer heard ~round-trip ago (output IO + acoustic + input IO + AEC), so the take
-    // belongs that much EARLIER on the timeline — otherwise it plays back behind the beat.
+    // Placement compensation, two independent terms:
+    //  * pre-roll — the WAV has been recording since the arm, but the backing started
+    //    `_recordingPreRollMs` later, so the sung content begins that far INTO the file;
+    //  * record latency — the first sample sung against the backing is the response to audio
+    //    the singer heard ~round-trip ago (output IO + acoustic + input IO + AEC).
+    // Both shift the take EARLIER on the timeline; without them it plays behind the beat.
     final latencyMs = _graphEngine()?.recordLatencyMs() ?? 0.0;
-    final startMs = (_recordingStartMs - latencyMs).round().clamp(
-      0,
-      _recordingStartMs,
-    );
+    final startMs = (_recordingStartMs - _recordingPreRollMs - latencyMs)
+        .round()
+        .clamp(0, _recordingStartMs);
     final targetId = _recordingTargetId;
     _recordingTargetId = null;
     _recPeaks.clear();
@@ -420,6 +450,17 @@ class RecordingController extends ChangeNotifier {
         }
         _toast('Recording hit a disk error. The take may be incomplete.');
         analysis = partial;
+      }
+      // The writer finalized fine but the recording ring overflowed mid-take
+      // (writer thread or disk stalled): the WAV is valid yet missing frames as
+      // silent holes. Keep the take — most of it is fine — but never present
+      // it as gapless.
+      if (recordingClean && stopped.droppedFrames > 0) {
+        final droppedMs = stopped.droppedFrames * 1000 ~/ 48000;
+        _toast(
+          'Recording dropped about $droppedMs ms of audio while the disk '
+          'was busy. The take has small gaps.',
+        );
       }
       final target = targetId == null ? null : _trackById(targetId);
       if (target == null || target.kind != AudioTrackKind.vocal) {

@@ -68,6 +68,21 @@ class _FakeEngine implements GraphAudioPlaybackService {
     return events;
   }
 
+  /// Per-call advance of the input frame counter. The default (a warm stream)
+  /// satisfies the controller's ready handshake on its first poll; 0 simulates
+  /// a mic that armed but never delivers (async stream open failed).
+  int framesReceivedStep = 512;
+  int _framesReceived = 0;
+
+  @override
+  int inputFramesReceived() => _framesReceived += framesReceivedStep;
+
+  /// Frames the fake reports as dropped by the recording ring at stop.
+  int droppedFrames = 0;
+
+  @override
+  int recordDroppedFrames() => droppedFrames;
+
   @override
   dynamic noSuchMethod(Invocation invocation) =>
       throw UnsupportedError('FakeEngine: ${invocation.memberName}');
@@ -415,6 +430,58 @@ void main() {
     expect(r2.failure, isNull);
     expect(second.created, isEmpty);
     controller.stop();
+    controller.dispose();
+  });
+
+  testWidgets('mic never delivers frames: start fails with '
+      'inputNotDelivering, recording disarmed, file discarded', (tester) async {
+    // framesReceivedStep 0 = the counter never advances (async input-stream
+    // open failed after startInputRecording claimed success). A zero timeout
+    // forces the deterministic timeout path (the ready wait polls a REAL
+    // stopwatch, which the fake clock can't advance).
+    final engine = _FakeEngine()..framesReceivedStep = 0;
+    final dest = _FakeDestination();
+    final controller = MicRecordingController(
+      acquireEngine: () => engine,
+      requestPermission: () async => true,
+      readyTimeout: Duration.zero,
+    );
+
+    final result = await controller.start(dest.strategy);
+    await tester.pump(); // flush the unawaited discard
+
+    expect(result.started, isFalse);
+    expect(result.failure, MicRecordingFailure.inputNotDelivering);
+    expect(controller.isRecording, isFalse);
+    // The armed recording was rolled back and its file discarded.
+    expect(engine.startCalls, 1);
+    expect(engine.stopCalls, 1);
+    expect(dest.discarded, [dest.path]);
+    expect(RecordingFinalizer.instance.hasActive, isFalse);
+    controller.dispose();
+  });
+
+  testWidgets('ring overflow is surfaced: stop reports droppedFrames and '
+      'framesAtArm tracks the armed window', (tester) async {
+    final engine = _FakeEngine()..droppedFrames = 4800;
+    final dest = _FakeDestination();
+    final controller = MicRecordingController(
+      acquireEngine: () => engine,
+      requestPermission: () async => true,
+    );
+
+    expect(controller.framesAtArm, isNull);
+    final result = await controller.start(dest.strategy);
+    expect(result.started, isTrue);
+    // The arm snapshot is exposed for pre-roll measurement while armed…
+    expect(controller.framesAtArm, isNotNull);
+
+    final stopped = controller.stop();
+    expect(stopped, isNotNull);
+    expect(stopped!.clean, isTrue);
+    // …the overflow count rides the stop result, and the snapshot clears.
+    expect(stopped.droppedFrames, 4800);
+    expect(controller.framesAtArm, isNull);
     controller.dispose();
   });
 

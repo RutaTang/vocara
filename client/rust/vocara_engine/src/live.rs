@@ -36,6 +36,14 @@ pub struct Shared {
     mon_rev_room: AtomicU32,
     mon_rev_damping: AtomicU32,
     mon_rev_wet: AtomicU32,
+    /// Engine-rate frames rendered ahead of what the device has played (the output-boundary
+    /// resampler's FIFO depth; 0 on the identity 48 kHz path). `frame` advances at RENDER
+    /// time, so the audible playhead trails it by this much — [`EngineHandle::frame`]
+    /// subtracts it so reported positions match what the listener hears.
+    out_backlog: AtomicU32,
+    /// Bumped by seek/pause: the resampler's FIFO still holds pre-seek/pre-pause audio, which
+    /// must be dropped (not played out) for the transport to respond within one callback.
+    out_flush: AtomicU32,
 }
 
 impl Shared {
@@ -52,7 +60,21 @@ impl Shared {
             mon_rev_room: AtomicU32::new(0.6f32.to_bits()),
             mon_rev_damping: AtomicU32::new(0.5f32.to_bits()),
             mon_rev_wet: AtomicU32::new(0.2f32.to_bits()),
+            out_backlog: AtomicU32::new(0),
+            out_flush: AtomicU32::new(0),
         }
+    }
+
+    /// Publish the output resampler's un-played FIFO depth (engine-rate frames). Called by
+    /// the stream callback after each device buffer (the device module; public so the
+    /// dependency-free build doesn't flag it dead).
+    pub fn set_out_backlog(&self, frames: u32) {
+        self.out_backlog.store(frames, Ordering::Release);
+    }
+
+    /// The current flush generation; the resampler drops its FIFO when this changes.
+    pub fn out_flush_gen(&self) -> u32 {
+        self.out_flush.load(Ordering::Acquire)
     }
 }
 
@@ -221,7 +243,12 @@ impl RtProcessor {
 /// — so there is never concurrent access. This mirrors the single-accessor discipline already
 /// used by [`GraphCell`]. The `cmd_rx` therefore lives here for the engine's whole lifetime and
 /// is never moved or recreated across device switches.
-pub struct RtCell(UnsafeCell<RtProcessor>);
+pub struct RtCell {
+    inner: UnsafeCell<RtProcessor>,
+    /// The transport atomics, cloned out at construction so boundary code (the output
+    /// resampler) can reach them WITHOUT dereferencing the single-accessor cell.
+    shared: Arc<Shared>,
+}
 
 // SAFETY: see the type doc — exactly one stream callback accesses the inner processor at a time.
 unsafe impl Send for RtCell {}
@@ -229,7 +256,16 @@ unsafe impl Sync for RtCell {}
 
 impl RtCell {
     pub fn new(rt: RtProcessor) -> Arc<RtCell> {
-        Arc::new(RtCell(UnsafeCell::new(rt)))
+        let shared = Arc::clone(&rt.shared);
+        Arc::new(RtCell {
+            inner: UnsafeCell::new(rt),
+            shared,
+        })
+    }
+
+    /// The transport atomics (safe — never touches the processor cell).
+    pub fn transport(&self) -> &Shared {
+        &self.shared
     }
 
     /// Render one device callback's worth of audio.
@@ -239,7 +275,7 @@ impl RtCell {
     /// host thread guarantees this by dropping the old stream before building a new one).
     #[inline]
     pub unsafe fn render(&self, out: &mut [Smp], frames: usize) {
-        (*self.0.get()).process(out, frames);
+        (*self.inner.get()).process(out, frames);
     }
 
     /// Render playback only (no monitor) — for the VPIO output / AEC reference. See
@@ -249,7 +285,7 @@ impl RtCell {
     /// Same single-accessor contract as [`RtCell::render`].
     #[inline]
     pub unsafe fn render_playback(&self, out: &mut [Smp], frames: usize) {
-        (*self.0.get()).process_playback(out, frames);
+        (*self.inner.get()).process_playback(out, frames);
     }
 
     /// Add the live-input monitor (mic → reverb → smoothed gain) on top of `out`. For the VPIO
@@ -260,7 +296,7 @@ impl RtCell {
     /// Same single-accessor contract as [`RtCell::render`].
     #[inline]
     pub unsafe fn mix_monitor(&self, out: &mut [Smp], frames: usize) {
-        (*self.0.get()).add_monitor(out, frames);
+        (*self.inner.get()).add_monitor(out, frames);
     }
 }
 
@@ -289,6 +325,7 @@ impl EngineHandle {
     }
     pub fn pause(&self) {
         self.shared.playing.store(false, Ordering::Release);
+        self.flush_out_boundary();
     }
     pub fn is_playing(&self) -> bool {
         self.shared.playing.load(Ordering::Acquire)
@@ -296,9 +333,19 @@ impl EngineHandle {
     /// Request a seek; the audio thread applies it at the next block (resets node tails).
     pub fn seek(&self, frame: i64) {
         self.shared.seek_req.store(frame.max(0), Ordering::Release);
+        self.flush_out_boundary();
+    }
+
+    /// Drop the output resampler's pre-rendered FIFO (it holds pre-seek/pre-pause audio the
+    /// listener must not hear) and zero the reported backlog until the callback republishes.
+    fn flush_out_boundary(&self) {
+        self.shared.out_flush.fetch_add(1, Ordering::Release);
+        self.shared.out_backlog.store(0, Ordering::Release);
     }
     pub fn set_loop(&self, enabled: bool, start: i64, end: i64) {
-        self.shared.loop_start.store(start.max(0), Ordering::Relaxed);
+        self.shared
+            .loop_start
+            .store(start.max(0), Ordering::Relaxed);
         self.shared.loop_end.store(end.max(0), Ordering::Relaxed);
         self.shared.loop_enabled.store(enabled, Ordering::Release);
     }
@@ -322,9 +369,18 @@ impl EngineHandle {
             .mon_rev_wet
             .store(wet.clamp(0.0, 1.0).to_bits(), Ordering::Release);
     }
-    /// Current playhead in samples (atomic read; nanoseconds).
+    /// Current playhead in samples (atomic read). `frame` advances when a block RENDERS; on a
+    /// non-48 kHz device the output resampler holds up to one render block of that audio in
+    /// its FIFO before the listener hears it, so the audible playhead is `frame` minus that
+    /// backlog (0 on the identity path — no change there). Only while playing: a paused
+    /// engine's FIFO refills with silence, whose depth says nothing about position.
     pub fn frame(&self) -> i64 {
-        self.shared.frame.load(Ordering::Acquire)
+        let rendered = self.shared.frame.load(Ordering::Acquire);
+        if !self.shared.playing.load(Ordering::Acquire) {
+            return rendered;
+        }
+        let backlog = self.shared.out_backlog.load(Ordering::Acquire) as i64;
+        (rendered - backlog).max(0)
     }
     pub fn sample_rate(&self) -> f64 {
         self.sr
@@ -461,7 +517,7 @@ pub fn spawn(
     };
     let mut mon_gain = Smoothed::new(0.0);
     mon_gain.set_time(0.010, ENGINE_SR); // 10 ms arm/disarm ramp
-    // Monitor reverb: a pleasant vocal room, dry kept at 1 so the direct voice is always heard.
+                                         // Monitor reverb: a pleasant vocal room, dry kept at 1 so the direct voice is always heard.
     let mut mon_reverb = ReverbNode::new(0.6, 0.5, 0.2, 1.0, 1.0);
     mon_reverb.prepare(ENGINE_SR, max_block);
     let rt = RtProcessor {

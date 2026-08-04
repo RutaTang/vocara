@@ -22,6 +22,13 @@ enum MicRecordingFailure {
   /// The engine could not create the WAV file (disk full / permissions);
   /// nothing would be recorded.
   fileCreateFailed,
+
+  /// The recording armed but the microphone never started delivering frames
+  /// within the ready timeout (the native input-stream open is asynchronous
+  /// and can fail after `startInputRecording` returns success). The take was
+  /// discarded — recording ahead against a silent mic would bake a hole into
+  /// the front of the take.
+  inputNotDelivering,
 }
 
 /// Result of a [MicRecordingController.start] attempt. Exactly one shape:
@@ -54,8 +61,11 @@ class MicRecordingStart {
 /// and whether the writer finalized it cleanly. `clean == false` means the
 /// writer hit an IO error (create/write/finalize) during the take, so the WAV
 /// on disk is missing, damaged, or incomplete — the owner decides whether the
-/// partial file is worth keeping.
-typedef MicRecordingStop = ({String path, bool clean});
+/// partial file is worth keeping. `droppedFrames > 0` means the recording ring
+/// overflowed (writer thread stalled) and the WAV is missing that many 48 kHz
+/// frames as silent holes — the file finalized fine, but it is not gapless,
+/// so the owner should tell the user instead of presenting it as clean.
+typedef MicRecordingStop = ({String path, bool clean, int droppedFrames});
 
 /// Best-effort delete of the temp dir holding a temp-strategy recording at
 /// [path] (see [RecordingPathStrategy.tempDir]: one dir per take, so removing
@@ -135,11 +145,19 @@ class MicRecordingController {
     this.onLevelTick,
     Future<bool> Function() requestPermission = MicPermission.request,
     RecordingFinalizer? finalizer,
+    this.readyTimeout = const Duration(seconds: 2),
   }) : _acquireEngine = acquireEngine,
        _monitor = monitor,
        _onQuitFinalize = onQuitFinalize,
        _requestPermission = requestPermission,
        _finalizer = finalizer ?? RecordingFinalizer.instance;
+
+  /// How long [start] waits for the armed mic to actually deliver frames
+  /// before giving up (see [MicRecordingFailure.inputNotDelivering]). A warm
+  /// stream answers within one callback (~10 ms); a cold VoiceProcessingIO
+  /// open takes a few hundred. Injectable so tests can force the timeout
+  /// deterministically.
+  final Duration readyTimeout;
 
   /// Live-preview cadence: pull captured frames into the monitor every 30 ms
   /// so the live spectrogram/metrics stay smooth.
@@ -201,6 +219,14 @@ class MicRecordingController {
   bool _starting = false;
   bool _feedingMonitor = false;
   bool _disposed = false;
+
+  /// The engine's cumulative input-frame counter snapshotted at the moment the
+  /// take armed (WAV file offset 0). Owners subtract it from the counter at
+  /// "backing playback actually started" to measure the take's pre-roll — the
+  /// audio recorded before the backing began — and place the take accordingly.
+  /// Null when no take is armed.
+  int? _framesAtArm;
+  int? get framesAtArm => _framesAtArm;
 
   /// Bumped whenever a pending start must be abandoned; each [start] snapshots
   /// it before its awaits and arms nothing on a mismatch.
@@ -281,6 +307,42 @@ class MicRecordingController {
           MicRecordingFailure.fileCreateFailed,
         );
       }
+      // Snapshot the frame counter right AFTER arming: frames counted before
+      // this moment never reached the recording ring, so this value is the
+      // counter reading that corresponds to WAV file offset 0 (within one
+      // callback slice).
+      final framesAtArm = engine.inputFramesReceived();
+      // Ready handshake. startInputRecording == true proves only that the WAV
+      // exists — the native input-stream open is deliberately asynchronous (a
+      // blocking open froze the UI), so the mic may still be opening, or may
+      // fail to open, right now. Wait (bounded) until the input callback is
+      // demonstrably delivering frames before reporting the take armed:
+      // otherwise the owner starts the backing against a silent mic and the
+      // take begins with a hole no later placement can repair. When the stream
+      // is already open (monitoring), the first advance lands within one
+      // callback (~10 ms); a cold VoiceProcessingIO open takes a few hundred.
+      var ready = false;
+      final readyClock = Stopwatch()..start();
+      while (readyClock.elapsed < readyTimeout) {
+        if (_disposed || _generation != generation) {
+          engine.stopInputRecording();
+          _discardQuietly(destination, path);
+          return const MicRecordingStart.invalidated();
+        }
+        if (engine.inputFramesReceived() > framesAtArm) {
+          ready = true;
+          break;
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 25));
+      }
+      if (!ready) {
+        engine.stopInputRecording();
+        _discardQuietly(destination, path);
+        return const MicRecordingStart.failed(
+          MicRecordingFailure.inputNotDelivering,
+        );
+      }
+      _framesAtArm = framesAtArm;
       _isRecording = true;
       _path = path;
       _destination = destination;
@@ -357,17 +419,21 @@ class MicRecordingController {
     level.value = 0;
     final engine = _engine;
     final clean = engine?.stopInputRecording() ?? true;
+    // Read AFTER stop: the counter is stable once the recording is disarmed,
+    // and any overflow during the final drain is included.
+    final dropped = engine?.recordDroppedFrames() ?? 0;
     if (_feedingMonitor) {
       engine?.stopCapture();
       _monitor?.stop();
       _feedingMonitor = false;
     }
     _isRecording = false;
+    _framesAtArm = null;
     _finalizer.unregister(_finalizeOnQuit);
     final path = _path!;
     _path = null;
     _destination = null;
-    return (path: path, clean: clean);
+    return (path: path, clean: clean, droppedFrames: dropped);
   }
 
   /// Stops AND discards an in-flight take (its file is deleted via the path
@@ -418,6 +484,7 @@ class MicRecordingController {
     // a half-torn-down widget tree.
     _isRecording = false;
     _feedingMonitor = false;
+    _framesAtArm = null;
     _path = null;
     _destination = null;
     level.dispose();

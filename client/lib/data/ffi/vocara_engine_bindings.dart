@@ -359,6 +359,20 @@ class VocaraEngineBindings {
   late final _ve_stop_input_recording = _ve_stop_input_recordingPtr
       .asFunction<int Function(ffi.Pointer<VeEngine>)>();
 
+  /// Frames the recording ring dropped during the current/latest take (reset at each start).
+  /// Nonzero = the take on disk is missing that many frames (writer thread stalled past the
+  /// ring's headroom) — the UI must not present the take as gapless.
+  int ve_record_dropped_frames(ffi.Pointer<VeEngine> e) {
+    return _ve_record_dropped_frames(e);
+  }
+
+  late final _ve_record_dropped_framesPtr =
+      _lookup<ffi.NativeFunction<ffi.Uint64 Function(ffi.Pointer<VeEngine>)>>(
+        've_record_dropped_frames',
+      );
+  late final _ve_record_dropped_frames = _ve_record_dropped_framesPtr
+      .asFunction<int Function(ffi.Pointer<VeEngine>)>();
+
   int ve_play(ffi.Pointer<VeEngine> e) {
     return _ve_play(e);
   }
@@ -744,17 +758,33 @@ class VocaraEngineBindings {
   late final _ve_set_bus_send_level = _ve_set_bus_send_levelPtr
       .asFunction<int Function(ffi.Pointer<VeEngine>, int, int, double)>();
 
-  /// Stateless decode for a background isolate (no engine state touched).
-  VePcm ve_decode(ffi.Pointer<ffi.Char> path, int rate) {
-    return _ve_decode(path, rate);
+  /// Stateless decode for a background isolate (no engine state touched). `max_frames` (at the
+  /// output `rate`; 0 = unbounded) caps the decoded duration BEFORE the full track allocates —
+  /// a too-long file sets VE_DECODE_TOO_LONG in `status` (nullable) and returns empty PCM.
+  VePcm ve_decode(
+    ffi.Pointer<ffi.Char> path,
+    int rate,
+    int max_frames,
+    ffi.Pointer<ffi.Int> status,
+  ) {
+    return _ve_decode(path, rate, max_frames, status);
   }
 
   late final _ve_decodePtr =
       _lookup<
-        ffi.NativeFunction<VePcm Function(ffi.Pointer<ffi.Char>, ffi.Uint32)>
+        ffi.NativeFunction<
+          VePcm Function(
+            ffi.Pointer<ffi.Char>,
+            ffi.Uint32,
+            ffi.Uint64,
+            ffi.Pointer<ffi.Int>,
+          )
+        >
       >('ve_decode');
   late final _ve_decode = _ve_decodePtr
-      .asFunction<VePcm Function(ffi.Pointer<ffi.Char>, int)>();
+      .asFunction<
+        VePcm Function(ffi.Pointer<ffi.Char>, int, int, ffi.Pointer<ffi.Int>)
+      >();
 
   void ve_free_decoded(ffi.Pointer<ffi.Float> ptr, int frames) {
     return _ve_free_decoded(ptr, frames);
@@ -1707,3 +1737,9 @@ final class VeDeviceInfo extends ffi.Struct {
   @ffi.Uint8()
   external int is_bluetooth;
 }
+
+const int VE_DECODE_OK = 0;
+
+const int VE_DECODE_ERR = -1;
+
+const int VE_DECODE_TOO_LONG = -2;

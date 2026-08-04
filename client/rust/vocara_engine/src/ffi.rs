@@ -96,6 +96,10 @@ pub struct VeEngine {
     input_level: Arc<AtomicU32>,
     /// Total input frames received (diagnostic for whether the mic is actually delivering data).
     input_frames_in: Arc<AtomicU64>,
+    /// Frames the recording ring dropped during the CURRENT take (reset on each start).
+    /// Nonzero means the take on disk has silent holes — surfaced via
+    /// `ve_record_dropped_frames` so the UI never reports such a take as clean.
+    rec_dropped: Arc<AtomicU64>,
     /// Whether audible monitoring is on (one of the reasons to keep the input stream open).
     monitoring: bool,
     /// Capture gate (analysis) — the input callback fans frames to the capture ring while set.
@@ -129,7 +133,11 @@ const MAX_BLOCK: usize = 1024;
 const RING_FRAMES: usize = 1 << 16; // ~1.4 s @ 48k of headroom
 const MIC_RING_FRAMES: usize = 1 << 12; // 4096 frames ≈ 85 ms @ 48k (monitor jitter buffer)
 const CAP_RING_FRAMES: usize = 1 << 13; // analysis capture (Dart polls ve_input_frames)
-const REC_RING_FRAMES: usize = 1 << 14; // recording (drained by the writer thread)
+                                        // Recording ring (drained by the writer thread). 2^17 frames ≈ 2.7 s @ 48k (1 MiB): the
+                                        // writer's ~1 s header-patch flush can stall multi-hundred ms on a slow or full disk, and
+                                        // the old 2^14 (≈ 341 ms) headroom made such a stall silently drop take audio. Overflow is
+                                        // still counted (`rec_dropped`) and surfaced — headroom reduces the odds, never the honesty.
+const REC_RING_FRAMES: usize = 1 << 17;
 
 /// Keep-alive budget for decoded PCM whose path is NOT in the committed graph. Live paths
 /// are pinned by the graph's own Arcs regardless, so this bounds the cache's real overhead.
@@ -242,6 +250,7 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
         let device_event = Arc::new(AtomicU32::new(0));
         let input_level = Arc::new(AtomicU32::new(0));
         let input_frames_in = Arc::new(AtomicU64::new(0));
+        let rec_dropped = Arc::new(AtomicU64::new(0));
         let cap_active = Arc::new(AtomicBool::new(false));
         let rec_active = Arc::new(AtomicBool::new(false));
         let input_cell = device::InputCell::new(
@@ -252,6 +261,7 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
             Arc::clone(&rec_active),
             Arc::clone(&input_level),
             Arc::clone(&input_frames_in),
+            Arc::clone(&rec_dropped),
         );
         let writer = RecordWriter::spawn(rec_cons);
         // The host maintains the handle's renderer gate (stream up/down), so the control
@@ -271,6 +281,7 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
             current_input_uid: String::new(),
             input_level,
             input_frames_in,
+            rec_dropped,
             monitoring: false,
             cap_active,
             rec_active,
@@ -552,6 +563,9 @@ pub extern "C" fn ve_start_input_recording(e: *mut VeEngine, path: *const c_char
         if !eng.writer.start(p) {
             return -1;
         }
+        // A fresh take starts with a clean drop count: the counter belongs to exactly one
+        // recording (read via `ve_record_dropped_frames` after stop).
+        eng.rec_dropped.store(0, Ordering::Release);
         eng.rec_active.store(true, Ordering::Release);
         sync_input(eng);
         0
@@ -564,7 +578,25 @@ pub extern "C" fn ve_start_input_recording(e: *mut VeEngine, path: *const c_char
 #[no_mangle]
 pub extern "C" fn ve_stop_input_recording(e: *mut VeEngine) -> c_int {
     with_engine(e, -1, |eng| {
+        // The input callback samples `rec_active` ONCE per buffer, so a callback already in
+        // flight when the flag drops still pushes its whole slice. Stopping the writer
+        // immediately would drain + finalize BEFORE that tail lands — the take would lose up
+        // to one callback slice, and the frames would be discarded by the next take's
+        // stale-ring sweep. Wait for two frame-counter advances (the in-flight callback plus
+        // one boundary that provably observed the cleared flag) before finalizing; bail out
+        // on a deadline so a dead input stream (device loss mid-take) can't hang the stop.
+        let mut last = eng.input_frames_in.load(Ordering::Acquire);
         eng.rec_active.store(false, Ordering::Release);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
+        let mut advances = 0u32;
+        while advances < 2 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            let now = eng.input_frames_in.load(Ordering::Acquire);
+            if now != last {
+                advances += 1;
+                last = now;
+            }
+        }
         let clean = eng.writer.stop();
         sync_input(eng);
         if clean {
@@ -573,6 +605,14 @@ pub extern "C" fn ve_stop_input_recording(e: *mut VeEngine) -> c_int {
             -2
         }
     })
+}
+
+/// Frames the recording ring dropped during the current/latest take (reset at each recording
+/// start). Nonzero means the take on disk is missing that many frames — the writer thread
+/// stalled past the ring's headroom — so the UI must not present the take as gapless.
+#[no_mangle]
+pub extern "C" fn ve_record_dropped_frames(e: *mut VeEngine) -> u64 {
+    with_engine(e, 0, |eng| eng.rec_dropped.load(Ordering::Acquire))
 }
 
 /// Set the live-input monitor gain (linear, 0 = muted). 0 = ok.
@@ -741,12 +781,7 @@ pub extern "C" fn ve_buses_begin(e: *mut VeEngine) -> c_int {
 /// Stage one FX bus: linear `gain`, `muted`, and `output` routing (another staged
 /// bus index, or -1 for the master). Returns the bus index (>= 0) or -1.
 #[no_mangle]
-pub extern "C" fn ve_buses_add(
-    e: *mut VeEngine,
-    gain: f32,
-    muted: c_int,
-    output: c_int,
-) -> c_int {
+pub extern "C" fn ve_buses_add(e: *mut VeEngine, gain: f32, muted: c_int, output: c_int) -> c_int {
     with_engine(e, -1, |eng| {
         let idx = eng.pending_buses.len() as c_int;
         eng.pending_buses.push(PendingBus {
@@ -788,12 +823,7 @@ pub extern "C" fn ve_track_chain(
 /// Sets a staged FX bus's insert-chain order (FxKind tags). Call after
 /// [`ve_buses_add`] and before [`ve_tracks_commit`].
 #[no_mangle]
-pub extern "C" fn ve_bus_chain(
-    e: *mut VeEngine,
-    bus: c_int,
-    tags: *const u8,
-    n: usize,
-) -> c_int {
+pub extern "C" fn ve_bus_chain(e: *mut VeEngine, bus: c_int, tags: *const u8, n: usize) -> c_int {
     with_engine(e, -1, |eng| {
         let chain = if tags.is_null() || n == 0 {
             Vec::new()
@@ -1071,11 +1101,50 @@ pub extern "C" fn ve_tracks_commit(e: *mut VeEngine) -> c_int {
     })
 }
 
+/// Reinterpret a decoded stereo-frame Vec as its flat interleaved layout WITHOUT copying:
+/// `[f32; CHANNELS]` and `CHANNELS` consecutive `f32`s share size and alignment, so only the
+/// len/capacity bookkeeping changes. The decode paths' peak memory is measured in full-track
+/// copies — this removes one.
+fn flatten_stereo(mut v: Vec<[Smp; CHANNELS]>) -> Vec<Smp> {
+    let ptr = v.as_mut_ptr() as *mut Smp;
+    let len = v.len() * CHANNELS;
+    let cap = v.capacity() * CHANNELS;
+    std::mem::forget(v);
+    // SAFETY: same allocation, identical layout (size cap*8, align 4) under both types;
+    // the original Vec is forgotten so ownership transfers exactly once.
+    unsafe { Vec::from_raw_parts(ptr, len, cap) }
+}
+
+/// `ve_decode` status: decoded successfully.
+pub const VE_DECODE_OK: c_int = 0;
+/// `ve_decode` status: open/probe/decode failure (unreadable or unsupported file).
+pub const VE_DECODE_ERR: c_int = -1;
+/// `ve_decode` status: the audio exceeds `max_frames` — refused before/while decoding so the
+/// peak allocation stays bounded by the caller's budget, never by the file.
+pub const VE_DECODE_TOO_LONG: c_int = -2;
+
 /// Stateless decode (no engine handle) for a background isolate: decode `path` and resample
 /// to `rate`, returning malloc'd interleaved-stereo f32. Free with [`ve_free_decoded`]. Safe
 /// to call off the main thread (touches no shared engine state).
+///
+/// `max_frames` (at the OUTPUT `rate`; 0 = unbounded) caps the decoded duration up front:
+/// the whole track materializes in memory here, so the caller's budget must be enforced
+/// BEFORE the allocation happens, not checked after. `status` (nullable) receives
+/// [`VE_DECODE_OK`] / [`VE_DECODE_ERR`] / [`VE_DECODE_TOO_LONG`] so a too-long file can
+/// surface its own message instead of a generic decode failure.
 #[no_mangle]
-pub extern "C" fn ve_decode(path: *const c_char, rate: u32) -> VePcm {
+pub extern "C" fn ve_decode(
+    path: *const c_char,
+    rate: u32,
+    max_frames: u64,
+    status: *mut c_int,
+) -> VePcm {
+    let set_status = |code: c_int| {
+        if !status.is_null() {
+            unsafe { *status = code };
+        }
+    };
+    set_status(VE_DECODE_ERR);
     if path.is_null() || rate == 0 {
         return VePcm::empty();
     }
@@ -1084,20 +1153,39 @@ pub extern "C" fn ve_decode(path: *const c_char, rate: u32) -> VePcm {
             Ok(p) => p,
             Err(_) => return VePcm::empty(),
         };
-        let (frames, src_rate) = match device::decode_file(path) {
-            Ok(v) => v,
-            Err(_) => return VePcm::empty(),
+        // The budget converts to seconds here and back to source-rate frames inside
+        // decode_file (which knows the source rate); f64 keeps the round-trip exact enough
+        // that the boundary error is < 1 frame.
+        let max_secs = if max_frames == 0 {
+            0.0
+        } else {
+            max_frames as f64 / rate as f64
         };
-        let resampled = device::resample_linear(&frames, src_rate, rate);
+        let (frames, src_rate) = match device::decode_file(path, max_secs) {
+            Ok(v) => v,
+            Err(device::DecodeError::TooLong) => {
+                set_status(VE_DECODE_TOO_LONG);
+                return VePcm::empty();
+            }
+            Err(device::DecodeError::Other(_)) => return VePcm::empty(),
+        };
+        // Consuming resample: the identity case moves the buffer through un-copied, so the
+        // peak here is 2 full-track buffers when resampling and 1 otherwise (down from 3).
+        let resampled = device::resample_linear(frames, src_rate, rate);
+        // Resampling can overshoot the budget by a rounding frame; clamp defensively.
         let n = resampled.len();
-        let mut flat: Vec<f32> = Vec::with_capacity(n * CHANNELS);
-        for f in resampled {
-            flat.push(f[0]);
-            flat.push(f[1]);
+        if max_frames > 0 && n as u64 > max_frames {
+            set_status(VE_DECODE_TOO_LONG);
+            return VePcm::empty();
         }
+        let flat = flatten_stereo(resampled);
+        // into_boxed_slice guarantees len == capacity, which ve_free_decoded relies on. It
+        // only realloc-copies when capacity overshoots len (growth-by-push decode with no
+        // declared frame count); the exact-capacity paths shrink for free.
         let mut boxed = flat.into_boxed_slice();
         let ptr = boxed.as_mut_ptr();
         std::mem::forget(boxed);
+        set_status(VE_DECODE_OK);
         VePcm {
             ptr,
             frames: n,
@@ -1143,8 +1231,9 @@ pub extern "C" fn ve_punch_wav(
             _ => return -1,
         };
         let decode = |p: &str| -> Option<Vec<[Smp; CHANNELS]>> {
-            let (frames, src_rate) = device::decode_file(p).ok()?;
-            Some(device::resample_linear(&frames, src_rate, rate))
+            // Unbounded: both inputs are takes this app recorded (bounded by session length).
+            let (frames, src_rate) = device::decode_file(p, 0.0).ok()?;
+            Some(device::resample_linear(frames, src_rate, rate))
         };
         let (old_frames, new_frames) = match (decode(old_p), decode(new_p)) {
             (Some(a), Some(b)) => (a, b),
@@ -1265,8 +1354,11 @@ pub extern "C" fn ve_set_pan(e: *mut VeEngine, index: c_int, pan: f32) -> c_int 
 #[no_mangle]
 pub extern "C" fn ve_set_master(e: *mut VeEngine, gain: f32) -> c_int {
     with_engine(e, -1, |eng| {
-        eng.handle
-            .set_param(build::MASTER_ID, crate::dsp::master::param::GAIN, gain.max(0.0));
+        eng.handle.set_param(
+            build::MASTER_ID,
+            crate::dsp::master::param::GAIN,
+            gain.max(0.0),
+        );
         eng.handle.flush();
         0
     })
@@ -1307,18 +1399,16 @@ pub extern "C" fn ve_decode_file(e: *mut VeEngine, path: *const c_char) -> VePcm
             Err(_) => return VePcm::empty(),
         };
         let rate = eng.handle.sample_rate() as u32;
-        let (frames, src_rate) = match device::decode_file(path) {
+        // Unbounded here: callers gate duration at the ve_decode chokepoint; this legacy
+        // path still benefits from the moved (not copied) identity resample + flatten.
+        let (frames, src_rate) = match device::decode_file(path, 0.0) {
             Ok(v) => v,
             Err(_) => return VePcm::empty(),
         };
-        let resampled = device::resample_linear(&frames, src_rate, rate);
+        let resampled = device::resample_linear(frames, src_rate, rate);
         let n = resampled.len();
-        // Flatten [f32;2] -> Vec<f32> and hand ownership to the caller.
-        let mut flat: Vec<f32> = Vec::with_capacity(n * CHANNELS);
-        for f in resampled {
-            flat.push(f[0]);
-            flat.push(f[1]);
-        }
+        // Flatten [f32;2] -> Vec<f32> in place and hand ownership to the caller.
+        let flat = flatten_stereo(resampled);
         let mut boxed = flat.into_boxed_slice();
         let ptr = boxed.as_mut_ptr();
         std::mem::forget(boxed);

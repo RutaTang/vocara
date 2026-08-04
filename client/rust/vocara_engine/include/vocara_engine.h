@@ -92,6 +92,10 @@ int ve_start_input_recording(VeEngine *e, const char *path);
 /* Stop the input recording (finalizes the WAV). 0 = ok; -2 = an IO error occurred during
  * the recording (the WAV at the recorded path is missing, damaged, or incomplete). */
 int ve_stop_input_recording(VeEngine *e);
+/* Frames the recording ring dropped during the current/latest take (reset at each start).
+ * Nonzero = the take on disk is missing that many frames (writer thread stalled past the
+ * ring's headroom) — the UI must not present the take as gapless. */
+uint64_t ve_record_dropped_frames(VeEngine *e);
 
 int ve_play(VeEngine *e);
 int ve_pause(VeEngine *e);
@@ -135,8 +139,14 @@ int ve_bus_sends(VeEngine *e, int bus, const int32_t *targets, const float *leve
 int ve_set_send_level(VeEngine *e, int track, int slot, float level_db);
 int ve_set_bus_send_level(VeEngine *e, int bus, int slot, float level_db);
 
-/* Stateless decode for a background isolate (no engine state touched). */
-VePcm ve_decode(const char *path, uint32_t rate);
+/* ve_decode status codes (written through its `status` out-pointer). */
+#define VE_DECODE_OK 0
+#define VE_DECODE_ERR -1
+#define VE_DECODE_TOO_LONG -2
+/* Stateless decode for a background isolate (no engine state touched). `max_frames` (at the
+ * output `rate`; 0 = unbounded) caps the decoded duration BEFORE the full track allocates —
+ * a too-long file sets VE_DECODE_TOO_LONG in `status` (nullable) and returns empty PCM. */
+VePcm ve_decode(const char *path, uint32_t rate, uint64_t max_frames, int *status);
 void ve_free_decoded(float *ptr, size_t frames);
 /* Punch-in splice: write old[0..split_ms] ++ new to out_path as a 16-bit WAV.
    Stateless; returns the output frame count or -1. */

@@ -497,6 +497,9 @@ class TechniqueDetailViewModel extends ChangeNotifier
           'try again.',
     MicRecordingFailure.fileCreateFailed =>
       "Couldn't create the recording file. Check your free disk space.",
+    MicRecordingFailure.inputNotDelivering =>
+      'The microphone did not start. Try again, or pick a different '
+          'input device in Settings.',
   };
 
   // --- Ephemeral practice recording ----------------------------------------

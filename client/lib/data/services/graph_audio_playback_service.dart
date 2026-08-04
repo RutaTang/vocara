@@ -83,24 +83,44 @@ List<AudioDevice> enumerateOutputDevices() => _enumDevices(input: false);
 /// The available input devices (static; no engine required).
 List<AudioDevice> enumerateInputDevices() => _enumDevices(input: true);
 
+/// Hard duration cap for the PLAYBACK/import decode path. Committed tracks live in memory
+/// as full-length engine-rate stereo f32 (~1.4 GB/hour resident, with a ~2x transient while
+/// decoding), so an arbitrary-length import is an OOM, not a feature. The cap is enforced
+/// natively BEFORE the track allocates (see `ve_decode`'s `max_frames`), and is deliberately
+/// far above any song-practice use so only runaway inputs (a DJ set, a podcast rip) hit it.
+const Duration maxPlaybackDuration = Duration(minutes: 60);
+
 /// Decode `path` to device-rate PCM on a background isolate (the CPU-heavy part). Returns the
 /// native buffer's address + frame count; the malloc'd buffer lives on the shared process
-/// heap, so the main isolate reads/frees it. (0, 0) on failure.
+/// heap, so the main isolate reads/frees it. (0, 0) on failure. Throws
+/// [MediaTooLongException] when the file exceeds [maxPlaybackDuration] — refused natively
+/// before the full track allocates.
 Future<(int, int)> _decodeInIsolate(String path, int rate) {
   return Isolate.run(() {
     final bindings = VocaraEngineBindings(_openVocaraLibrary());
     final cpath = path.toNativeUtf8();
+    final status = malloc<ffi.Int>();
     try {
-      final pcm = bindings.ve_decode(cpath.cast(), rate);
+      final maxFrames = maxPlaybackDuration.inMilliseconds * rate ~/ 1000;
+      final pcm = bindings.ve_decode(cpath.cast(), rate, maxFrames, status);
+      if (status.value == veDecodeTooLong) {
+        throw const MediaTooLongException(maxPlaybackDuration);
+      }
       return (pcm.ptr.address, pcm.frames);
     } finally {
       malloc.free(cpath);
+      malloc.free(status);
     }
   });
 }
 
-/// Thrown by [decodeMediaToMono] when the decoded media is longer than the
-/// caller's `maxDuration` cap. The message is user-presentable.
+/// `ve_decode` status: the file exceeded the caller's frame budget (see the C header's
+/// VE_DECODE_TOO_LONG). Mirrored here because ffigen only binds functions/structs.
+const int veDecodeTooLong = -2;
+
+/// Thrown when media is longer than the decode path's duration cap
+/// ([maxPlaybackDuration] for playback/import, the caller's `maxDuration` for
+/// analysis). The message is user-presentable.
 class MediaTooLongException implements Exception {
   const MediaTooLongException(this.maxDuration);
 
@@ -109,7 +129,7 @@ class MediaTooLongException implements Exception {
 
   @override
   String toString() =>
-      'This file is too long to analyze. '
+      'This file is too long. '
       'The limit is ${maxDuration.inMinutes} minutes.';
 }
 
@@ -131,11 +151,11 @@ bool exceedsDecodeCap(int frames, int rate, Duration maxDuration) =>
 /// result crosses back to the calling isolate (and typically a third time
 /// into the analysis isolate), so an arbitrary-length input (a technique
 /// reference can be any media) would blow memory — an hour of mono at
-/// 44.1 kHz is ~1.3 GB per copy. Exceeding the cap throws
-/// [MediaTooLongException] BEFORE the mono buffer is allocated (the native
-/// f32 buffer is unavoidable without a streaming decode, but it is freed
-/// immediately). Null (the default) keeps the decode unbounded — the
-/// playback/engine pipeline does not go through here and is never capped.
+/// 44.1 kHz is ~1.3 GB per copy. The cap is enforced NATIVELY, before the
+/// full-track f32 buffer allocates (`ve_decode`'s `max_frames` refuses a
+/// declared-too-long container up front and bails mid-decode otherwise), and
+/// exceeding it throws [MediaTooLongException]. Null (the default) falls back
+/// to [maxPlaybackDuration] — nothing decodes truly unbounded anymore.
 Future<PcmAudio?> decodeMediaToMono(
   String path, {
   int rate = 44100,
@@ -144,16 +164,22 @@ Future<PcmAudio?> decodeMediaToMono(
   return Isolate.run(() {
     final bindings = VocaraEngineBindings(_openVocaraLibrary());
     final cpath = path.toNativeUtf8();
-    final pcm = bindings.ve_decode(cpath.cast(), rate);
+    final status = malloc<ffi.Int>();
+    final cap = maxDuration ?? maxPlaybackDuration;
+    final maxFrames = cap.inMilliseconds * rate ~/ 1000;
+    final pcm = bindings.ve_decode(cpath.cast(), rate, maxFrames, status);
+    final tooLong = status.value == veDecodeTooLong;
+    malloc.free(status);
     final ptr = pcm.ptr;
     final frames = pcm.frames;
     try {
+      if (tooLong) throw MediaTooLongException(cap);
       if (frames <= 0 || ptr.address == 0) return null;
-      // Judge against the ACTUAL decode rate the engine reports, not the
-      // requested one, so the cap is a true duration bound.
-      if (maxDuration != null &&
-          exceedsDecodeCap(frames, pcm.rate, maxDuration)) {
-        throw MediaTooLongException(maxDuration);
+      // Belt-and-braces re-check against the ACTUAL decode rate the engine
+      // reports, so the cap stays a true duration bound even if the native
+      // budget (computed at the REQUESTED rate) and the file's rate disagree.
+      if (exceedsDecodeCap(frames, pcm.rate, cap)) {
+        throw MediaTooLongException(cap);
       }
       final inter = ptr.asTypedList(frames * 2);
       final mono = Float64List(frames);
@@ -350,6 +376,13 @@ class GraphAudioPlaybackService implements PlaybackEngine {
     if (!_available) return false;
     return _bindings.ve_stop_input_recording(_engine) == 0;
   }
+
+  /// Frames the recording ring dropped during the current/latest take (reset
+  /// at each start). Nonzero means the WAV on disk is missing that many frames
+  /// — the writer thread stalled past the ring's headroom — so the take has
+  /// silent holes and must not be presented as gapless.
+  int recordDroppedFrames() =>
+      _available ? _bindings.ve_record_dropped_frames(_engine) : 0;
 
   @override
   Stream<Duration> get position => _position.stream;
