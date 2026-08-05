@@ -59,7 +59,9 @@ class RecordingController extends ChangeNotifier {
     required Future<bool> Function() save,
     required void Function(String) toast,
     required String Function(Object) friendlyError,
+    @visibleForTesting MicRecordingController? mic,
   }) : _graphEngine = graphEngine,
+       _micOverride = mic,
        _playback = playback,
        _mixer = mixer,
        _analysis = analysis,
@@ -146,20 +148,28 @@ class RecordingController extends ChangeNotifier {
   /// CLEARS ON READ, and this controller's own 1 s device watch must remain the
   /// process's ONLY poller — a second poller would steal the output-lost/
   /// input-lost bits and device loss would never heal.
-  late final MicRecordingController _mic = MicRecordingController(
-    // Only called after startRecording's own null check passed, and the VM
-    // holds one engine for its whole lifetime — the cast stays valid.
-    acquireEngine: () => _graphEngine()!,
-    monitor: null,
-    onInputDeviceLost: null,
-    // Registered for exactly the armed window (replaces the old VM-lifetime
-    // registration): finalize the in-flight take if the app quits mid-record.
-    onQuitFinalize: () async {
-      if (isRecording) await stopRecording();
-    },
-    onLevelTick: _onLevelTick,
-    finalizer: _finalizer,
-  );
+  /// Test seam: a fake recorder so controller-level races (the take ABA, the
+  /// stop-vs-continuation windows) are testable without the platform channels
+  /// the real controller's permission/engine path needs. Mirrors the technique
+  /// VM's recorder override.
+  final MicRecordingController? _micOverride;
+
+  late final MicRecordingController _mic =
+      _micOverride ??
+      MicRecordingController(
+        // Only called after startRecording's own null check passed, and the VM
+        // holds one engine for its whole lifetime — the cast stays valid.
+        acquireEngine: () => _graphEngine()!,
+        monitor: null,
+        onInputDeviceLost: null,
+        // Registered for exactly the armed window (replaces the old VM-lifetime
+        // registration): finalize the in-flight take if the app quits mid-record.
+        onQuitFinalize: () async {
+          if (isRecording) await stopRecording();
+        },
+        onLevelTick: _onLevelTick,
+        finalizer: _finalizer,
+      );
 
   /// Where a take records to, and the take setup that must run in ORDER —
   /// after the permission gate, exactly like the pre-controller flow: resolve

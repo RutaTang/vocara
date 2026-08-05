@@ -416,17 +416,19 @@ class VocaraEngineBindings {
   late final _ve_input_intent_seq = _ve_input_intent_seqPtr
       .asFunction<int Function(ffi.Pointer<VeEngine>)>();
 
-  /// The intent sequence the audio host last CONVERGED to. applied >= S proves the host has
-  /// acted on an intent at least as new as S — the ordering half of the ready handshake.
-  int ve_input_applied_seq(ffi.Pointer<VeEngine> e) {
-    return _ve_input_applied_seq(e);
+  /// The host's last SUCCESSFUL convergence as (intent_seq << 24) | input_generation. Only
+  /// published when the desired state was reached (a failed open leaves it untouched). Ready
+  /// contract: (applied >> 24) >= armSeq AND the state word shows running with the SAME
+  /// generation — all three ready facts then anchor to one stream instance.
+  int ve_input_applied_state(ffi.Pointer<VeEngine> e) {
+    return _ve_input_applied_state(e);
   }
 
-  late final _ve_input_applied_seqPtr =
+  late final _ve_input_applied_statePtr =
       _lookup<ffi.NativeFunction<ffi.Uint64 Function(ffi.Pointer<VeEngine>)>>(
-        've_input_applied_seq',
+        've_input_applied_state',
       );
-  late final _ve_input_applied_seq = _ve_input_applied_seqPtr
+  late final _ve_input_applied_state = _ve_input_applied_statePtr
       .asFunction<int Function(ffi.Pointer<VeEngine>)>();
 
   int ve_play(ffi.Pointer<VeEngine> e) {

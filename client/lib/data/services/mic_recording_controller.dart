@@ -307,15 +307,19 @@ class MicRecordingController {
       //    actually LANDED in this take's recording ring (reset at the arm);
       //    a nonzero value is unforgeable (pre-arm and dying-stream callbacks
       //    read the disarmed flag and never write this ring);
-      //  * ordering — inputAppliedSeq >= the arm's intent sequence proves the
-      //    host has CONVERGED to a desired state at least as new as this arm
-      //    (want = on, since recording holds it on). Without it, a warm
-      //    stream's frames could land before the host processed an older
-      //    queued teardown; the host's desired-state cell makes that teardown
-      //    a no-op, and this watermark is the observable receipt that the
-      //    convergence actually happened.
-      // When the stream is already open (monitoring), both resolve within one
-      // callback (~10 ms); a cold VoiceProcessingIO open takes a few hundred.
+      //  * ordering + same-instance anchoring — the applied pair
+      //    (seq << 24 | generation) is published only on a SUCCESSFUL
+      //    convergence, its seq must be >= this arm's intent sequence, and its
+      //    generation must equal the CURRENT state word's generation with the
+      //    running bit set. That anchors all three facts to ONE stream
+      //    instance: a warm stream's frames plus a later failed reopen's
+      //    watermark (or any other splice of evidence from two generations)
+      //    can no longer assemble a false ready — the reviewed splice was
+      //    exactly "old stream wrote frames, teardown ran, reopen failed,
+      //    applied advanced anyway".
+      // When the stream is already open (monitoring), everything resolves
+      // within one callback (~10 ms); a cold VoiceProcessingIO open takes a
+      // few hundred.
       final armSeq = engine.inputIntentSeq();
       var ready = false;
       final readyClock = Stopwatch()..start();
@@ -325,8 +329,13 @@ class MicRecordingController {
           _discardQuietly(destination, path);
           return const MicRecordingStart.invalidated();
         }
+        final applied = engine.inputAppliedState();
+        final stream = engine.inputStreamState();
         if (engine.recordWrittenFrames() > 0 &&
-            engine.inputAppliedSeq() >= armSeq) {
+            GraphAudioPlaybackService.appliedSeqOf(applied) >= armSeq &&
+            GraphAudioPlaybackService.inputStateRunning(stream) &&
+            GraphAudioPlaybackService.appliedGenOf(applied) ==
+                GraphAudioPlaybackService.stateGenOf(stream)) {
           ready = true;
           break;
         }

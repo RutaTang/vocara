@@ -1046,6 +1046,13 @@ fn audio_host_run(
                     // same state.
                     let intent = input_intent.load(Ordering::Acquire);
                     let want = intent & 1 == 1;
+                    // Whether this convergence actually REACHED the desired state — the
+                    // applied watermark below is published only then, so a consumer can
+                    // never read "applied >= my arm" off a convergence that FAILED (the
+                    // reviewed splice: old warm frames + a failed reopen still advanced
+                    // applied, and two true-but-unrelated conditions assembled a false
+                    // ready).
+                    let mut converged = true;
                     if want && in_stream.is_none() {
                         // Duplex VPIO renders the engine through its own output element, so
                         // drop the cpal output FIRST (only one path may touch RtCell). Fall
@@ -1061,6 +1068,7 @@ fn audio_host_run(
                                 input_started(&input_state);
                             }
                             Err(_) => {
+                                converged = false;
                                 input_stopped(&input_state);
                                 // Mic failed to come up → restore cpal output so playback
                                 // survives. Restore the user's chosen output (not the system
@@ -1091,9 +1099,21 @@ fn audio_host_run(
                                 .map(|(h, _)| h);
                         }
                     }
-                    // Publish AFTER converging: applied >= S proves the host has acted on
-                    // an intent at least as new as S — the ready handshake's ordering half.
-                    input_applied.store(intent >> 1, Ordering::Release);
+                    // Publish AFTER converging, ONLY on success, and PAIRED with the input
+                    // generation the convergence left behind: (seq << 24) | generation. The
+                    // consumer requires the applied pair's generation to equal the CURRENT
+                    // state word's generation with the running bit set — all three ready
+                    // facts (progress, running, applied) are then anchored to one stream
+                    // instance, and evidence from two different generations can no longer
+                    // be spliced into a false ready. Generations are never reused, so the
+                    // 24-bit field wraps after ~16M stream starts — beyond any session.
+                    if converged {
+                        let generation = input_state.load(Ordering::Acquire) >> 1;
+                        input_applied.store(
+                            ((intent >> 1) << 24) | (generation & 0xFF_FFFF),
+                            Ordering::Release,
+                        );
+                    }
                     let _ = reply.send(0);
                 }
                 HostCmd::SetInput { uid, reply } => {
@@ -1190,6 +1210,10 @@ pub fn spawn_audio_host(
         Err(e) => Err(format!("audio host startup: {e}")),
     }
 }
+
+/// Counts [`decode_file`] entries (tests only) — see the note at its top.
+#[cfg(test)]
+pub static DECODE_CALLS: AtomicU64 = AtomicU64::new(0);
 
 /// Probe `path`'s DECLARED duration in milliseconds without decoding a single packet:
 /// container probe only, so an import gate can refuse an hours-long file before any copy or
@@ -1739,9 +1763,13 @@ mod out_resampler_tests {
     #[test]
     fn pause_right_after_a_loop_wrap_never_folds_before_loop_start() {
         let (h, mut res) = ramp_engine();
-        // Loop [200, 680): 441 device frames consume exactly the 480-frame region, landing
-        // the render clock right AT the wrap with the pre-wrap tail still in the FIFO.
-        h.set_loop(true, 200, 680);
+        // Loop [200, 700), region 500: the device consumes 480 (no wrap HEARD) but the
+        // renderer runs ahead in 128-frame blocks to 512, crossing the wrap — clock lands
+        // at 200 + 12, backlog is 32. An unclamped fold computes 212 − 32 = 180, BELOW
+        // loop_start: the violation needs region > consumed (the renderer's overshoot past
+        // the wrap smaller than the backlog), which the earlier fixtures never produced —
+        // remove the clamp and this test fails at 180.
+        h.set_loop(true, 200, 700);
         h.seek(200);
         h.play();
         let mut out = vec![0.0; 441 * CHANNELS];
@@ -1749,7 +1777,7 @@ mod out_resampler_tests {
         h.pause();
         let paused_at = h.frame();
         assert!(
-            (200..=680).contains(&paused_at),
+            (200..=700).contains(&paused_at),
             "the pause fold must clamp inside the loop region, got {paused_at}"
         );
     }

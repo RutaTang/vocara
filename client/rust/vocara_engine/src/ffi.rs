@@ -108,9 +108,10 @@ pub struct VeEngine {
     /// the cell's current value, never on a queued command's historical payload, which is
     /// what linearizes "monitoring off, then REC" into a single kept-open stream.
     input_intent: Arc<AtomicU64>,
-    /// The intent sequence the host last CONVERGED to (published after acting). The ready
-    /// handshake requires applied >= the sequence of this take's arm, proving the host has
-    /// acted on an intent at least as new as the arm.
+    /// The (intent_seq << 24 | input_generation) pair of the host's last SUCCESSFUL
+    /// convergence. Published only when the desired state was actually reached, so the
+    /// ready handshake can anchor progress + running + applied to ONE stream instance
+    /// (see `ve_input_applied_state`).
     input_applied: Arc<AtomicU64>,
     /// Control-thread-only monotonic counter feeding `input_intent`'s sequence half.
     intent_seq: u64,
@@ -726,12 +727,15 @@ pub extern "C" fn ve_input_intent_seq(e: *mut VeEngine) -> u64 {
     with_engine(e, 0, |eng| eng.input_intent.load(Ordering::Acquire) >> 1)
 }
 
-/// The intent sequence the audio host last CONVERGED to (published after acting on the
-/// cell). `applied >= S` proves the host has acted on an intent at least as new as S — the
-/// ordering half of the mic ready handshake; the recorded-progress half is
-/// `ve_record_written_frames`.
+/// The host's last SUCCESSFUL convergence, as `(intent_seq << 24) | input_generation`.
+/// Published only when the desired state was actually reached (a failed stream open leaves
+/// it untouched), and paired with the generation so the consumer can demand that progress,
+/// the running bit, and the applied watermark all come from the SAME stream instance:
+/// `(applied >> 24) >= armSeq && state.running && (applied & 0xFFFFFF) == state.generation`.
+/// Without the pairing, a warm stream's frames plus a later failed reopen's watermark could
+/// be spliced into a false ready.
 #[no_mangle]
-pub extern "C" fn ve_input_applied_seq(e: *mut VeEngine) -> u64 {
+pub extern "C" fn ve_input_applied_state(e: *mut VeEngine) -> u64 {
     with_engine(e, 0, |eng| eng.input_applied.load(Ordering::Acquire))
 }
 
@@ -1377,9 +1381,13 @@ pub extern "C" fn ve_punch_wav(
             let (frames, src_rate) = device::decode_file(p, MAX_PLAYBACK_SECS).ok()?;
             Some(device::resample_linear(frames, src_rate, rate))
         };
-        let (old_frames, new_frames) = match (decode(old_p), decode(new_p)) {
-            (Some(a), Some(b)) => (a, b),
-            _ => return -1,
+        // SERIALIZED decode: old is decoded, its keep+pad prefix is moved into the output,
+        // and its buffer DROPPED before new decodes — two legal long inputs used to be
+        // resident simultaneously (the pre-decode declared-length check cannot refuse two
+        // individually-legal files). Peak: one input plus the accumulating output.
+        let old_frames = match decode(old_p) {
+            Some(a) => a,
+            None => return -1,
         };
 
         // Checked all the way to the allocation: the old `as usize` cast of the i128 split
@@ -1395,25 +1403,37 @@ pub extern "C" fn ve_punch_wav(
         let keep = split.min(old_frames.len());
         // Silence frames when the cursor sits past old's end (preserves new's timing).
         let pad = split.saturating_sub(old_frames.len());
+        // keep + pad == split <= ceiling by construction; checked anyway (unchecked adds on
+        // attacker-influenced sizes are how ceilings get bypassed).
+        let Some(prefix) = keep.checked_add(pad) else {
+            return -1;
+        };
+        let Some(prefix_len) = prefix.checked_mul(CHANNELS) else {
+            return -1;
+        };
+        let mut flat: Vec<f32> = Vec::with_capacity(prefix_len);
+        for f in &old_frames[..keep] {
+            flat.push(f[0]);
+            flat.push(f[1]);
+        }
+        flat.extend(std::iter::repeat_n(0.0, pad * CHANNELS));
+        // Old's buffer is DONE — drop it before new decodes (the serialization's point).
+        drop(old_frames);
+
+        let new_frames = match decode(new_p) {
+            Some(b) => b,
+            None => return -1,
+        };
         // The OUTPUT is bounded too, not just the two input decodes: a runaway `split_ms`
-        // would otherwise size an arbitrarily large silence pad straight into with_capacity.
-        let total = match keep
-            .checked_add(pad)
-            .and_then(|t| t.checked_add(new_frames.len()))
-        {
+        // would otherwise size an arbitrarily large silence pad into the accumulator.
+        let total = match prefix.checked_add(new_frames.len()) {
             Some(t) if (t as i128) <= ceiling_frames => t,
             _ => return -1,
         };
         let Some(flat_len) = total.checked_mul(CHANNELS) else {
             return -1;
         };
-
-        let mut flat: Vec<f32> = Vec::with_capacity(flat_len);
-        for f in &old_frames[..keep] {
-            flat.push(f[0]);
-            flat.push(f[1]);
-        }
-        flat.extend(std::iter::repeat_n(0.0, pad * CHANNELS));
+        flat.reserve_exact(flat_len - flat.len());
         for f in &new_frames {
             flat.push(f[0]);
             flat.push(f[1]);
@@ -2262,7 +2282,10 @@ mod punch_tests {
         let c = |p: &std::path::Path| CString::new(p.to_str().unwrap()).unwrap();
         let (c_old, c_new, c_out) = (c(&old), c(&new), c(&out));
 
-        // A two-hour cursor offset would demand a two-hour silence pad: refused.
+        // A two-hour cursor offset would demand a two-hour silence pad: refused — and
+        // provably BEFORE any decode ran (an outcome-only assertion could not tell a
+        // pre-decode refusal from one that transiently decoded two full inputs first).
+        let calls_before = crate::device::DECODE_CALLS.load(std::sync::atomic::Ordering::Relaxed);
         let frames = super::ve_punch_wav(
             c_old.as_ptr(),
             c_new.as_ptr(),
@@ -2271,6 +2294,11 @@ mod punch_tests {
             c_out.as_ptr(),
         );
         assert_eq!(frames, -1, "an over-ceiling output must be refused");
+        assert_eq!(
+            crate::device::DECODE_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+            calls_before,
+            "the refusal must happen before either input decodes"
+        );
 
         // An absurd output rate is refused before any arithmetic uses it.
         let frames = super::ve_punch_wav(c_old.as_ptr(), c_new.as_ptr(), 1, 10_000_000, c_out.as_ptr());

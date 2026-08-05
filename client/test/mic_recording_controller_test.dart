@@ -99,19 +99,33 @@ class _FakeEngine implements GraphAudioPlaybackService {
   @override
   int inputIntentSeq() => intentSeq;
 
-  /// Scripted host-converged sequence returned by successive
-  /// [inputAppliedSeq] reads (last repeats). Default: already converged to
-  /// the arm's intent.
-  List<int> appliedSeqScript = [1];
+  /// Scripted host-converged pairs returned by successive [inputAppliedState]
+  /// reads (last repeats), packed (seq << 24) | generation like the native
+  /// word. Default: converged to the arm's intent on generation 1.
+  List<int> appliedStateScript = [(1 << 24) | 1];
   int appliedReads = 0;
 
   @override
-  int inputAppliedSeq() {
-    final i = appliedReads < appliedSeqScript.length
+  int inputAppliedState() {
+    final i = appliedReads < appliedStateScript.length
         ? appliedReads
-        : appliedSeqScript.length - 1;
+        : appliedStateScript.length - 1;
     appliedReads++;
-    return appliedSeqScript[i];
+    return appliedStateScript[i];
+  }
+
+  /// Scripted state words ((generation << 1) | running) for successive
+  /// [inputStreamState] reads (last repeats). Default: generation 1, running.
+  List<int> streamStateScript = [3];
+  int stateReads = 0;
+
+  @override
+  int inputStreamState() {
+    final i = stateReads < streamStateScript.length
+        ? stateReads
+        : streamStateScript.length - 1;
+    stateReads++;
+    return streamStateScript[i];
   }
 
   /// Frames the fake reports as dropped by the recording ring at stop.
@@ -582,10 +596,11 @@ void main() {
       'have converged past the arm (applied watermark)', (tester) async {
     // A warm stream's frames land instantly, but the host has not yet
     // converged to an intent as new as this arm — a queued older teardown
-    // could still be ahead of it. Ready must wait for applied >= armSeq.
+    // could still be ahead of it. Ready must wait for applied >= armSeq
+    // (all on the same generation).
     final engine = _FakeEngine()
       ..intentSeq = 5
-      ..appliedSeqScript = [3, 4, 5];
+      ..appliedStateScript = [(3 << 24) | 1, (4 << 24) | 1, (5 << 24) | 1];
     final dest = _FakeDestination();
     final controller = MicRecordingController(
       acquireEngine: () => engine,
@@ -607,6 +622,47 @@ void main() {
       reason: 'ready must have waited for the host to converge to the arm',
     );
     controller.stop();
+    controller.dispose();
+  });
+
+  testWidgets('evidence from two generations never splices into ready: the '
+      'applied pair from a dead generation is refused even with frames '
+      'written and a newer stream running', (tester) async {
+    // The reviewed splice: an old warm stream wrote real frames, its teardown
+    // ran, and a FAILED reopen used to advance the watermark anyway. Modeled
+    // exactly: applied stays paired with generation 1 (the last SUCCESSFUL
+    // convergence), while the current state word shows generation 2 running.
+    // The generation-equality condition must refuse; applied never catches up
+    // (the reopen keeps failing), so the start times out.
+    final engine = _FakeEngine()
+      ..intentSeq = 2
+      ..appliedStateScript =
+          [(2 << 24) | 1] // seq new enough, gen STALE
+      ..streamStateScript = [5]; // generation 2, running
+    final dest = _FakeDestination();
+    final controller = MicRecordingController(
+      acquireEngine: () => engine,
+      requestPermission: () async => true,
+      readyTimeout: const Duration(milliseconds: 1),
+    );
+
+    var settled = false;
+    final future = controller.start(dest.strategy);
+    unawaited(future.whenComplete(() => settled = true));
+    for (var i = 0; i < 200 && !settled; i++) {
+      await tester.pump(const Duration(milliseconds: 25));
+    }
+    expect(settled, isTrue, reason: 'the ready wait must hit its deadline');
+    final result = await future;
+    await tester.pump();
+
+    expect(result.started, isFalse);
+    expect(result.failure, MicRecordingFailure.inputNotDelivering);
+    expect(
+      engine.appliedReads,
+      greaterThanOrEqualTo(1),
+      reason: 'the generation comparison must actually have run',
+    );
     controller.dispose();
   });
 

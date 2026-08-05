@@ -109,9 +109,11 @@ uint64_t ve_record_dropped_frames(VeEngine *e);
 uint64_t ve_record_written_frames(VeEngine *e);
 /* The newest published input-intent sequence (read after arming = the arm's watermark). */
 uint64_t ve_input_intent_seq(VeEngine *e);
-/* The intent sequence the audio host last CONVERGED to. applied >= S proves the host has
- * acted on an intent at least as new as S — the ordering half of the ready handshake. */
-uint64_t ve_input_applied_seq(VeEngine *e);
+/* The host's last SUCCESSFUL convergence as (intent_seq << 24) | input_generation. Only
+ * published when the desired state was reached (a failed open leaves it untouched). Ready
+ * contract: (applied >> 24) >= armSeq AND the state word shows running with the SAME
+ * generation — all three ready facts then anchor to one stream instance. */
+uint64_t ve_input_applied_state(VeEngine *e);
 
 int ve_play(VeEngine *e);
 int ve_pause(VeEngine *e);

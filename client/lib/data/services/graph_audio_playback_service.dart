@@ -364,12 +364,25 @@ class GraphAudioPlaybackService implements PlaybackEngine {
   int inputIntentSeq() =>
       _available ? _bindings.ve_input_intent_seq(_engine) : 0;
 
-  /// The intent sequence the audio host last CONVERGED to (published after it
-  /// acted on the desired-state cell). `applied >= S` proves the host has
-  /// acted on an intent at least as new as S — the ordering half of the mic
-  /// ready handshake; the recorded-progress half is [recordWrittenFrames].
-  int inputAppliedSeq() =>
-      _available ? _bindings.ve_input_applied_seq(_engine) : 0;
+  /// The host's last SUCCESSFUL convergence, packed as
+  /// `(intent_seq << 24) | input_generation`. Published only when the desired
+  /// state was actually reached (a failed stream open leaves it untouched),
+  /// and paired with the generation so the ready check can demand that
+  /// progress, the running bit, and the applied watermark all come from the
+  /// SAME stream instance — see [appliedSeqOf]/[appliedGenOf].
+  int inputAppliedState() =>
+      _available ? _bindings.ve_input_applied_state(_engine) : 0;
+
+  /// The intent-sequence half of [inputAppliedState].
+  static int appliedSeqOf(int applied) => applied >> 24;
+
+  /// The generation half of [inputAppliedState] (24 bits, matching the
+  /// generation carried in [inputStreamState]'s high bits).
+  static int appliedGenOf(int applied) => applied & 0xFFFFFF;
+
+  /// The generation half of [inputStreamState], truncated to the same 24 bits
+  /// the applied pairing carries.
+  static int stateGenOf(int state) => (state >> 1) & 0xFFFFFF;
 
   /// Record round-trip latency in milliseconds: how far behind the playhead a captured vocal lands
   /// (output IO + acoustic + input IO + AEC block). Shift recorded takes earlier by this so they
