@@ -82,7 +82,12 @@ void main() {
 
   SyncEngine buildEngine({SyncTimerFactory? timers}) => SyncEngine(
     db: db,
-    applier: SyncApplier(db, clock, quarantine: quarantine),
+    applier: SyncApplier(
+      db,
+      clock,
+      builder: SyncRowBuilder(db),
+      quarantine: quarantine,
+    ),
     drain: OplogDrain(db),
     builder: SyncRowBuilder(db),
     state: state,
@@ -1091,6 +1096,112 @@ void main() {
       expect(track, isNotNull, reason: 'the child landed after its parent');
       expect(await quarantine.list(), isEmpty);
     });
+
+    test('an fk-orphan child parked beside its quarantined parent recovers '
+        'WHOLE after the upgrade: replay lands both, parent-first', () async {
+      // The parent is forward-incompatible — an unknown column stands in for
+      // a newer build's schema, the same upgrade seam the replay tests above
+      // use — so the schema gate parks it. The child is a perfectly
+      // current-schema row: it APPLIES, and the FK sweep must then park it as
+      // an fk-orphan rather than hard-delete it. The old sweep deleted it
+      // with the token already advanced — the server never re-sent it, and
+      // the upgrade replayed the parent from quarantine into a library whose
+      // child was permanently gone.
+      final parent = remotePractice('P', 'parent', remoteHlc(t0 - 2000));
+      cloud.accept(
+        SyncRow(
+          table: 'practices',
+          fields: {...parent.fields, 'brand_new_column': 7},
+        ),
+      );
+      cloud.accept(remoteTrack('T', 'P', remoteHlc(t0 - 1000)));
+
+      final first = await engine.pumpPull();
+      expect(first.failed, isFalse);
+      expect(first.failedRecords, 2, reason: 'parked parent + swept child');
+      expect(await practiceTitle('P'), isNull);
+      final parked = await quarantine.list();
+      expect(parked, hasLength(2));
+      expect(parked.map((q) => q.reason.split(':').first).toSet(), {
+        'unknown-column',
+        'fk-orphan',
+      });
+
+      // Simulate the app upgrade that understands the parent's shape.
+      await db.customStatement(
+        'ALTER TABLE practices ADD COLUMN brand_new_column INTEGER',
+      );
+      final upgraded = await engine.pumpPull();
+      expect(upgraded.failed, isFalse);
+      expect(await practiceTitle('P'), 'parent');
+      final track = await db
+          .customSelect(
+            'SELECT id FROM tracks WHERE id = ?',
+            variables: [Variable.withString(_id('T'))],
+          )
+          .getSingleOrNull();
+      expect(
+        track,
+        isNotNull,
+        reason: 'the swept child came back with its parent',
+      );
+      expect(await quarantine.list(), isEmpty);
+    });
+
+    test('a replayed fk-orphan whose parent is STILL missing is re-parked — '
+        'never lost, never an error, no growth', () async {
+      cloud.accept(remoteTrack('T', 'P', remoteHlc(t0 - 1000)));
+      final first = await engine.pumpPull();
+      expect(first.failed, isFalse);
+      expect(first.failedRecords, 1);
+      // Every later pull replays the parked child (start and end of each
+      // run): it applies, the sweep finds the parent still missing, and the
+      // store's (table, id) upsert REPLACES the entry — no primary-key
+      // error, no pile-up, no drop.
+      await engine.pumpPull();
+      await engine.pumpPull();
+      final parked = await quarantine.list();
+      expect(parked, hasLength(1));
+      expect(parked.single.tbl, 'tracks');
+      expect(parked.single.id, _id('T'));
+      expect(parked.single.reason, startsWith('fk-orphan'));
+      final track = await db
+          .customSelect(
+            'SELECT id FROM tracks WHERE id = ?',
+            variables: [Variable.withString(_id('T'))],
+          )
+          .getSingleOrNull();
+      expect(track, isNull, reason: 'never live while the parent is missing');
+    });
+
+    test(
+      'a batch-internal orphan whose parent arrives on the NEXT page '
+      'still converges within the run (the sweep\'s original design case)',
+      () async {
+        // A peer without the parent-first push sort can upload child-first;
+        // with one row per page the child lands alone on page 1.
+        cloud.accept(remoteTrack('T', 'P', remoteHlc(t0 - 2000)));
+        cloud.accept(remotePractice('P', 'parent', remoteHlc(t0 - 1000)));
+        transport.pageSize = 1;
+
+        final run = await engine.pumpPull();
+        expect(run.failed, isFalse);
+        // Page 1 parked the child (fk-orphan) and advanced the token past it;
+        // page 2 delivered the parent. The server does NOT re-send the child
+        // (its page is behind the token), so what lands it is the END-OF-RUN
+        // quarantine replay: the parked child now finds its parent, applies,
+        // and its entry settles.
+        expect(await practiceTitle('P'), 'parent');
+        final track = await db
+            .customSelect(
+              'SELECT id FROM tracks WHERE id = ?',
+              variables: [Variable.withString(_id('T'))],
+            )
+            .getSingleOrNull();
+        expect(track, isNotNull, reason: 'the run itself converged the orphan');
+        expect(await quarantine.list(), isEmpty);
+      },
+    );
 
     test('replayed rows are ANNOUNCED via RemoteApplied (a recovered backlog '
         'must refresh open screens, not land invisibly)', () async {

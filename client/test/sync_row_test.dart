@@ -342,6 +342,7 @@ void main() {
       final applier = SyncApplier(
         other,
         HlcClock(node: _id('OTHER'), now: () => hlc.wallMs),
+        builder: SyncRowBuilder(other),
       );
       final res = await applier.apply([SyncRow.decode(wire)]);
       expect(res.applied, 1);

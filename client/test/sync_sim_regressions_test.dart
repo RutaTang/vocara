@@ -9,6 +9,7 @@ import 'package:vocara/data/db/persistence.dart';
 import 'package:vocara/data/sync/hlc.dart';
 import 'package:vocara/data/sync/integrity_checker.dart';
 import 'package:vocara/data/sync/sync_applier.dart';
+import 'package:vocara/data/sync/sync_row.dart';
 import 'package:vocara/data/sync/sync_writer.dart';
 import 'package:vocara/domain/models/audio_track.dart';
 import 'package:vocara/utils/id.dart';
@@ -352,7 +353,7 @@ void main() {
       clock = HlcClock(node: _id('LOCAL'), now: () => healerNow);
       writer = SyncWriter(db, clock);
       checker = IntegrityChecker(db, writer);
-      applier = SyncApplier(db, clock);
+      applier = SyncApplier(db, clock, builder: SyncRowBuilder(db));
     });
 
     tearDown(() => db.close());

@@ -33,7 +33,11 @@ void main() {
 
   setUp(() {
     db = AppDatabase(NativeDatabase.memory());
-    applier = SyncApplier(db, HlcClock(node: _id('LOCAL'), now: () => 1000));
+    applier = SyncApplier(
+      db,
+      HlcClock(node: _id('LOCAL'), now: () => 1000),
+      builder: SyncRowBuilder(db),
+    );
   });
   tearDown(() => db.close());
 
@@ -280,6 +284,7 @@ void main() {
       applier = SyncApplier(
         db,
         HlcClock(node: _id('LOCAL'), now: () => 1000),
+        builder: SyncRowBuilder(db),
         quarantine: store,
       );
       await applier.apply([practice('P', 'v1', hlc(900))]);
@@ -425,7 +430,7 @@ void main() {
     test('a committed batch advances the clock exactly once per settled '
         'record, never for rejected ones', () async {
       final clock = _CountingClock(node: _id('LOCAL'), now: () => 1000);
-      applier = SyncApplier(db, clock);
+      applier = SyncApplier(db, clock, builder: SyncRowBuilder(db));
       // Seed P so a stale copy below settles as a clean LWW skip at the
       // door (the pre-savepoint settle, which never advances the clock —
       // unchanged by the post-commit deferral).
@@ -457,7 +462,7 @@ void main() {
       // gate time (now = 1000, reference = max(now, maxWallEverSeen) = 1000).
       var now = 1000;
       final clock = HlcClock(node: _id('LOCAL'), now: () => now);
-      applier = SyncApplier(db, clock);
+      applier = SyncApplier(db, clock, builder: SyncRowBuilder(db));
       final stamp = hlc(1000 + HlcClock.defaultMaxDriftMs);
       final res = await applier.apply(
         [practice('P', 'vetted', stamp)],
@@ -500,6 +505,20 @@ void main() {
   });
 
   group('FK sweep', () {
+    late QuarantineStore store;
+
+    setUp(() {
+      // The sweep parks orphans instead of losing them, so this group runs
+      // with the persistent parking lot wired (production wiring).
+      store = QuarantineStore(db);
+      applier = SyncApplier(
+        db,
+        HlcClock(node: _id('LOCAL'), now: () => 1000),
+        builder: SyncRowBuilder(db),
+        quarantine: store,
+      );
+    });
+
     test(
       'a child arriving BEFORE its parent within a batch applies fine',
       () async {
@@ -515,7 +534,8 @@ void main() {
     );
 
     test(
-      'a true orphan whose parent never arrives is quarantined ALONE',
+      'a true orphan whose parent never arrives is PARKED alone (fk-orphan), '
+      'not lost; the rest of the batch applies',
       () async {
         final res = await applier.apply([
           practice('P', 'kept', hlc(900)),
@@ -524,12 +544,66 @@ void main() {
         expect(res.applied, 1); // the good record stuck
         expect(res.failed, 1); // the orphan did not
         expect((await row('P'))!['title'], 'kept');
-        expect(await trackRow('T'), isNull); // hard-deleted; re-arrives later
+        // Deleted from the table (the deferred FK still requires the row
+        // gone before the outer commit)...
+        expect(await trackRow('T'), isNull);
+        // ...but parked, never dropped: the change token advances past this
+        // page, so only the quarantine replay can ever land the row again.
+        final parked = await store.list();
+        expect(parked, hasLength(1));
+        expect(parked.single.tbl, 'tracks');
+        expect(parked.single.id, _id('T'));
+        expect(
+          parked.single.reason,
+          'fk-orphan: parent practices/${_id('NEVER')} missing',
+        );
       },
     );
 
+    test('a child whose parent sits QUARANTINED (newer schema) is parked as an '
+        'fk-orphan with its own HLC and full wire snapshot', () async {
+      // The parent is from a newer build: the schema gate parks it, so it
+      // never applies — yet the child (current schema_v) does. The child's
+      // page is then behind the change token and the server never
+      // re-delivers it; hard-deleting it here (the old sweep) lost it
+      // forever, surfacing only after the app upgrade replayed the parent
+      // from quarantine with no child to be found.
+      final parent = RemoteRecord(
+        table: 'practices',
+        columns: {
+          ...practice('P', 'from a newer build', hlc(900)).columns,
+          'schema_v': currentRecordSchemaV + 1,
+        },
+      );
+      final child = track('T', 'P', hlc(910));
+      final res = await applier.apply([parent, child]);
+      expect(res.applied, 0);
+      expect(res.failed, 2); // the parked parent and the swept child
+      expect(await row('P'), isNull);
+      expect(await trackRow('T'), isNull, reason: 'deleted from the table');
+
+      final parked = await store.list();
+      expect(parked, hasLength(2));
+      final parkedChild = parked.singleWhere((q) => q.tbl == 'tracks');
+      expect(parkedChild.id, _id('T'));
+      expect(
+        parkedChild.reason,
+        'fk-orphan: parent practices/${_id('P')} missing',
+      );
+      // The snapshot carries the record's OWN HLC (not a fresh local
+      // stamp): a later, newer state of the same row must still be able to
+      // settle the parked one by plain LWW.
+      expect(parkedChild.remoteHlcPacked, hlc(910).packed);
+      expect(parkedChild.schemaV, currentRecordSchemaV);
+      // The payload is the full wire snapshot, replayable verbatim — the
+      // shared outbound projection, not a hand-written second one.
+      final replayable = SyncRow.decode(parkedChild.payload);
+      expect(replayable.table, 'tracks');
+      expect(replayable.fields, equals(child.columns));
+    });
+
     test(
-      'an orphan violating TWO foreign keys is deleted + counted once',
+      'an orphan violating TWO foreign keys is parked + counted once',
       () async {
         final res = await applier.apply([
           practice('P', 'kept', hlc(900)),
@@ -540,6 +614,12 @@ void main() {
         expect(res.applied, 1);
         expect(res.failed, 1);
         expect((await row('P'))!['title'], 'kept');
+        // One parked entry, not one per violated constraint (the second
+        // foreign_key_check entry finds the row already deleted).
+        final parked = await store.list();
+        expect(parked, hasLength(1));
+        expect(parked.single.id, _id('C'));
+        expect(parked.single.reason, startsWith('fk-orphan'));
       },
     );
 
@@ -709,6 +789,7 @@ void main() {
       applier = SyncApplier(
         db,
         HlcClock(node: _id('LOCAL'), now: () => 1000),
+        builder: SyncRowBuilder(db),
         quarantine: store,
       );
     });

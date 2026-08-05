@@ -11,6 +11,7 @@ import 'package:vocara/data/repositories/song_practice_repository_drift.dart';
 import 'package:vocara/data/sync/hlc.dart';
 import 'package:vocara/data/sync/quarantine_store.dart';
 import 'package:vocara/data/sync/sync_applier.dart';
+import 'package:vocara/data/sync/sync_row.dart';
 import 'package:vocara/data/sync/sync_state_store.dart';
 import 'package:vocara/data/sync/sync_writer.dart';
 import 'package:vocara/domain/models/audio_track.dart';
@@ -309,7 +310,11 @@ void main() {
     // device may reference it — local reachability is not knowledge here.
     const remoteId = 'ASSETASSETASSETASSETASSET1';
     final h = Hlc(wallMs: 1, counter: 0, node: 'REMOTE'.padRight(26, '0'));
-    final applier = SyncApplier(db, HlcClock(node: 'GC'.padRight(26, '0')));
+    final applier = SyncApplier(
+      db,
+      HlcClock(node: 'GC'.padRight(26, '0')),
+      builder: SyncRowBuilder(db),
+    );
     final res = await applier.apply([
       RemoteRecord(
         table: 'assets',

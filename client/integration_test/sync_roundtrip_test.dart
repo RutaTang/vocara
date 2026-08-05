@@ -6,6 +6,7 @@ import 'package:vocara/data/db/persistence.dart';
 import 'package:vocara/data/sync/hlc.dart';
 import 'package:vocara/data/sync/integrity_checker.dart';
 import 'package:vocara/data/sync/sync_applier.dart';
+import 'package:vocara/data/sync/sync_row.dart';
 import 'package:vocara/domain/models/song_practice.dart';
 import 'package:vocara/utils/result.dart';
 
@@ -30,8 +31,8 @@ void main() {
   setUp(() {
     a = Persistence.memory();
     b = Persistence.memory();
-    applierA = SyncApplier(a.db, a.writer.clock);
-    applierB = SyncApplier(b.db, b.writer.clock);
+    applierA = SyncApplier(a.db, a.writer.clock, builder: SyncRowBuilder(a.db));
+    applierB = SyncApplier(b.db, b.writer.clock, builder: SyncRowBuilder(b.db));
   });
   tearDown(() async {
     await a.db.close();

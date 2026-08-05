@@ -71,16 +71,26 @@ class ApplyResult {
 /// Because defer_foreign_keys pushes FK enforcement to the OUTER commit (outside
 /// every savepoint), a record whose parent never arrives in the batch would fail
 /// the whole commit — so before committing we sweep foreign_key_check
-/// ([_sweepFkOrphans]): rows INSERTED by this batch are hard-deleted (they
-/// re-arrive with their parent on a later page) while PRE-EXISTING rows are
-/// never deleted, only their dangling pointer column is nulled. The outer
-/// transaction is wrapped so a commit failure degrades to a failed batch
-/// instead of throwing out of apply().
+/// ([_sweepFkOrphans]): rows INSERTED by this batch are PARKED to the
+/// quarantine store and then deleted (the parent may be locally quarantined —
+/// e.g. a newer-schema row the schema gate rejected — in which case the
+/// server never re-delivers the child, and only the quarantine replay can
+/// land it once the parent exists) while PRE-EXISTING rows are never deleted,
+/// only their dangling pointer column is nulled. The outer transaction is
+/// wrapped so a commit failure degrades to a failed batch instead of throwing
+/// out of apply().
 class SyncApplier {
-  SyncApplier(this.db, this.clock, {this.quarantine});
+  SyncApplier(this.db, this.clock, {required this.builder, this.quarantine});
 
   final AppDatabase db;
   final HlcClock clock;
+
+  /// Projects a just-inserted row back into its full wire snapshot so the FK
+  /// sweep can PARK an orphan instead of losing it (see [_sweepFkOrphans]).
+  /// Deliberately REQUIRED (unlike [quarantine]): an absent projection would
+  /// silently degrade the sweep to the old hard-delete, and a locally
+  /// quarantined parent then makes that deletion a permanent row loss.
+  final SyncRowBuilder builder;
 
   /// Optional collaborator: when present, a rejected record (HLC drift or a
   /// per-record apply failure) is PERSISTED to the quarantine parking lot
@@ -132,7 +142,7 @@ class SyncApplier {
   }) async {
     final result = ApplyResult();
     // (table, id) pairs INSERTED by this batch — the only rows the FK sweep is
-    // allowed to hard-delete (see _sweepFkOrphans).
+    // allowed to park-and-delete (see _sweepFkOrphans).
     final insertedThisBatch = <(String, String)>{};
     // Per-batch live-schema cache for the column gate (see [_liveColumns]).
     final liveColumns = <String, Set<String>>{};
@@ -372,7 +382,7 @@ class SyncApplier {
       // reference (assertPlausible never raises it), turning a committed
       // page into a reported failure. Clamping the stamp instead was
       // rejected: it would corrupt causal order. Stamps of records the
-      // FK-orphan sweep later hard-deleted merge too, deliberately: HLC
+      // FK-orphan sweep later parked-and-deleted merge too, deliberately: HLC
       // semantics advance on any RECEIVED message; row survival is a
       // different layer. Deferring the advance also means the drift gate
       // judged every record of this batch against the PRE-batch clock
@@ -423,9 +433,25 @@ class SyncApplier {
   /// necessarily one this batch created: a remote UPDATE can plant a dangling
   /// pointer into a row that existed long before. Healing is by provenance:
   ///
-  ///  * A row INSERTED by this batch is hard-deleted. Its parent truly never
-  ///    arrived (a later page carries both), and deleting it destroys nothing
-  ///    that existed before this apply.
+  ///  * A row INSERTED by this batch is PARKED, then deleted. The delete is
+  ///    non-negotiable — the deferred FK still fails the outer commit while
+  ///    the row exists — but deleting ALONE is not enough: "it re-arrives
+  ///    with its parent on a later page" is false when the parent is locally
+  ///    QUARANTINED (e.g. a newer-schema row parked by the schema gate) while
+  ///    the child applied — the child's page is then already behind the
+  ///    change token, the server never re-delivers it, and the row would be
+  ///    lost forever. So its full wire snapshot (reconstructed via
+  ///    [SyncRowBuilder.build], carrying the row's OWN HLC so a later LWW
+  ///    settle still works) goes to the quarantine store first, with the
+  ///    distinct `fk-orphan` reason. The pull run's quarantine replay then
+  ///    converges it: a replayed orphan whose parent now exists applies
+  ///    normally (and its entry settles), one whose parent is STILL missing
+  ///    is re-swept here and re-parked (the store's upsert replaces the
+  ///    entry) — never lost, never a hot loop. Unlike [_quarantine]'s
+  ///    best-effort bookkeeping the park is NOT swallowed on error: after
+  ///    the delete a failed park IS a lost row, so a storage error aborts
+  ///    the batch (a retried page over silent loss). Without a quarantine
+  ///    store (counter-only test wiring) the old hard-delete stands.
   ///  * A PRE-EXISTING row is NEVER deleted (deleting it — and then its whole
   ///    subtree via the fixpoint loop — would silently destroy local data with
   ///    no tombstone and no oplog). It satisfied every FK when the batch began
@@ -472,6 +498,30 @@ class SyncApplier {
         if (idRow == null) continue;
         final id = idRow.read<String>('id');
         if (insertedThisBatch.contains((table, id))) {
+          final store = quarantine;
+          if (store != null) {
+            // Park BEFORE deleting (same outer transaction, so the entry and
+            // the delete commit or roll back together). The snapshot is the
+            // shared outbound projection — never a hand-written second one —
+            // and reads the row's own adopted HLC straight from the table.
+            final snapshot = await builder.build(table, id);
+            if (snapshot != null) {
+              final fkid = v.readNullable<int>('fkid');
+              final column = fkid == null ? null : await _fkColumn(table, fkid);
+              final parentId = column == null ? null : snapshot.fields[column];
+              await store.put(
+                table: table,
+                id: id,
+                hlcPacked: snapshot.hlcPacked,
+                schemaV: snapshot.schemaV,
+                payload: snapshot.encode(),
+                reason:
+                    'fk-orphan: parent ${v.read<String>('parent')}/'
+                    '${parentId ?? 'unknown'} missing',
+                quarantinedAt: DateTime.now().millisecondsSinceEpoch,
+              );
+            }
+          }
           await db.customStatement('DELETE FROM $table WHERE rowid = ?', [
             rowid,
           ]);

@@ -137,11 +137,20 @@ class Persistence {
     if (_sync != null) {
       throw StateError('a SyncEngine is already attached to this store');
     }
+    // One builder shared by the engine (push projection) and the applier
+    // (the FK sweep's park-instead-of-lose snapshot) — same schema, same
+    // memoized table ranks.
+    final builder = SyncRowBuilder(db);
     final engine = SyncEngine(
       db: db,
-      applier: SyncApplier(db, writer.clock, quarantine: QuarantineStore(db)),
+      applier: SyncApplier(
+        db,
+        writer.clock,
+        builder: builder,
+        quarantine: QuarantineStore(db),
+      ),
       drain: OplogDrain(db),
-      builder: SyncRowBuilder(db),
+      builder: builder,
       state: SyncStateStore(db),
       integrity: IntegrityChecker(db, writer),
       transport: transport,
