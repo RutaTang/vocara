@@ -19,7 +19,12 @@ class MediaAnalysisService {
   /// [decodeMediaToMono]), so an unbounded input could exhaust memory.
   /// 30 minutes covers any realistic technique reference or practice take
   /// while bounding the transient allocations to a few hundred MB.
-  static const Duration maxAnalysisDuration = Duration(minutes: 30);
+  /// 10 minutes: takes and technique references are minutes long, and the
+  /// analysis pipeline's peak memory scales linearly with this (the Float64
+  /// mono buffer plus the decimation working copy — roughly 16 bytes per
+  /// frame, ~460 MB at this cap). The previous 30-minute value predated the
+  /// memory budgeting and put the legal worst case well past 1 GB.
+  static const Duration maxAnalysisDuration = Duration(minutes: 10);
 
   /// Decodes [path] and runs the complete analysis suite. Returns null when the
   /// file can't be decoded or is empty; throws [MediaTooLongException] when it

@@ -528,8 +528,12 @@ Float64List _hamming(int n) {
   return w;
 }
 
-/// One 2nd-order Butterworth low-pass (RBJ biquad, Q≈0.707).
-Float64List _biquadLp(Float64List x, double fc, double fs) {
+/// One 2nd-order Butterworth low-pass (RBJ biquad, Q≈0.707), IN PLACE.
+/// Direct Form I stays exact when writing over the input: each output needs
+/// x[i] plus the two PREVIOUS raw inputs, which live in the x1/x2 scalars —
+/// x[i] is captured before it is overwritten, so nothing downstream reads a
+/// filtered value as a raw one.
+void _biquadLpInPlace(Float64List x, double fc, double fs) {
   final w0 = 2 * math.pi * fc / fs;
   final cosw = math.cos(w0), sinw = math.sin(w0);
   final alpha = sinw / math.sqrt2;
@@ -539,21 +543,24 @@ Float64List _biquadLp(Float64List x, double fc, double fs) {
   final b2 = b0;
   final a1 = -2 * cosw / a0;
   final a2 = (1 - alpha) / a0;
-  final out = Float64List(x.length);
   var x1 = 0.0, x2 = 0.0, y1 = 0.0, y2 = 0.0;
   for (var i = 0; i < x.length; i++) {
     final xi = x[i];
     final yi = b0 * xi + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
-    out[i] = yi;
+    x[i] = yi;
     x2 = x1;
     x1 = xi;
     y2 = y1;
     y1 = yi;
   }
-  return out;
 }
 
-/// Anti-aliased decimation by integer [factor] (two cascaded Butterworth LPs).
+/// Anti-aliased decimation by integer [factor] (three cascaded Butterworth
+/// LPs). MEMORY: exactly one working copy of [x] — the three filter stages
+/// run in place on it. The old shape chained three allocating stages, so a
+/// long take transiently held three extra full-length Float64 buffers; on the
+/// analysis path that tripled the dominant term of the whole compute's peak.
+/// [x] itself is never mutated (callers keep using the undecimated samples).
 Float64List _decimate(Float64List x, int factor, double fs) {
   if (factor <= 1) return x;
   // Anti-alias below the new Nyquist. Three cascaded biquads (~6th order) give
@@ -561,7 +568,10 @@ Float64List _decimate(Float64List x, int factor, double fs) {
   // fold doesn't alias into the formant bands. fc = 0.45·newSampleRate, i.e.
   // 0.9·newNyquist, so F3 (≤ ~3.8 kHz) is still well inside the passband.
   final fc = 0.45 * fs / factor;
-  final lp = _biquadLp(_biquadLp(_biquadLp(x, fc, fs), fc, fs), fc, fs);
+  final lp = Float64List.fromList(x);
+  _biquadLpInPlace(lp, fc, fs);
+  _biquadLpInPlace(lp, fc, fs);
+  _biquadLpInPlace(lp, fc, fs);
   final m = x.length ~/ factor;
   final out = Float64List(m);
   for (var i = 0; i < m; i++) {

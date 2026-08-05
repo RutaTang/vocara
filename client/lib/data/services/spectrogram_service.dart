@@ -42,15 +42,15 @@ class SpectrogramService {
   /// Absolute ceilings for the admission gate, INDEPENDENT of the header's
   /// arithmetic — a forged header must not be able to talk its way past them.
   /// Derivation: the legal upper bound the analysis is designed for is a
-  /// 30-minute 48 kHz stereo float32 WAV, i.e. 30*60*48000 = 86.4 M frames
-  /// and ~691 MB of PCM. Frames matter separately from bytes because the
-  /// decoder expands to Float64 MONO (frames * 8 bytes): a 1 GiB 8-bit mono
-  /// file is only ~1 GiB on disk but ~8 GiB decoded, so a byte ceiling alone
-  /// is not a memory bound.
+  /// 10-minute 48 kHz stereo float32 WAV (MediaAnalysisService's cap), i.e.
+  /// 10*60*48000 = 28.8 M frames and ~230 MB of PCM. Frames matter separately
+  /// from bytes because the decoder expands to Float64 MONO (frames * 8
+  /// bytes): a large 8-bit mono file is small on disk but 8x bigger decoded,
+  /// so a byte ceiling alone is not a memory bound.
   @visibleForTesting
-  static const int maxAnalysisFrames = 90 * 1000 * 1000;
+  static const int maxAnalysisFrames = 30 * 1000 * 1000;
   @visibleForTesting
-  static const int maxAnalysisBytes = 720 * 1000 * 1000;
+  static const int maxAnalysisBytes = 240 * 1000 * 1000;
 
   /// Header-only admission gate for the analysis paths: walks the WAV chunk
   /// list from a [RandomAccessFile] (seeking over chunk bodies, so a
@@ -109,9 +109,11 @@ class SpectrogramService {
           format = tag2 == 0xFFFE && body.length >= 26
               ? bd.getUint16(24, Endian.little)
               : tag2;
-          const legalBits = {8, 16, 24, 32, 64};
+          // Integer PCM64 does not exist in the wild and the reference
+          // decoder has no branch for it — admitting it would decode a whole
+          // track of silence (the reviewed regression). Float is 32/64.
           final legalFormat = switch (format) {
-            1 => legalBits.contains(bits),
+            1 => const {8, 16, 24, 32}.contains(bits),
             3 => bits == 32 || bits == 64,
             _ => false,
           };
@@ -166,6 +168,8 @@ class SpectrogramService {
     }
   }
 
+  static double _finiteOrZero(double v) => v.isFinite ? v : 0.0;
+
   /// Streams the admitted PCM straight into the ONE Float64 mono analysis
   /// buffer, in bounded frame-aligned chunks (4 MiB). Runs inside the
   /// analysis isolate. This is the memory-budget half of the gate: the old
@@ -203,8 +207,12 @@ class SpectrogramService {
                         .toSigned(24) /
                     8388608.0,
               (1, 32) => bd.getInt32(o, Endian.little) / 2147483648.0,
-              (3, 32) => bd.getFloat32(o, Endian.little),
-              (3, 64) => bd.getFloat64(o, Endian.little),
+              // Float samples can carry NaN/Inf (a buggy encoder, a corrupted
+              // file); they must be scrubbed to 0 like the reference decoder
+              // does, or one poisoned sample propagates through the whole FFT
+              // and every derived metric.
+              (3, 32) => _finiteOrZero(bd.getFloat32(o, Endian.little)),
+              (3, 64) => _finiteOrZero(bd.getFloat64(o, Endian.little)),
               _ => 0.0, // unreachable: the gate admitted the format
             };
           }

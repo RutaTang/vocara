@@ -83,9 +83,9 @@ Uint8List _wavHeader8ch({
 }
 
 void main() {
-  // 30 min cap @ 44.1 kHz mono 16-bit = 44100 * 2 bytes * 1800 s.
+  // 10 min cap @ 44.1 kHz mono 16-bit = 44100 * 2 bytes * 600 s.
   const underCap = 44100 * 2 * 60; // 1 minute
-  const overCap = 44100 * 2 * 1860; // 31 minutes
+  const overCap = 44100 * 2 * 660; // 11 minutes
 
   Future<File> write(Uint8List bytes) async {
     final dir = await Directory.systemTemp.createTemp('vocara_gate');
@@ -322,6 +322,78 @@ void main() {
       u32(data.length);
       b.add(data);
       await check('extensible stereo pcm16', b.toBytes());
+    });
+
+    test('integer PCM64 is refused at the gate (no decoder branch exists: '
+        'admitting it decoded a whole track of silence)', () async {
+      final b = BytesBuilder();
+      void str(String s) => b.add(s.codeUnits);
+      void u32(int v) => b.add(
+        (ByteData(4)..setUint32(0, v, Endian.little)).buffer.asUint8List(),
+      );
+      void u16(int v) => b.add(
+        (ByteData(2)..setUint16(0, v, Endian.little)).buffer.asUint8List(),
+      );
+      str('RIFF');
+      u32(36 + 80);
+      str('WAVE');
+      str('fmt ');
+      u32(16);
+      u16(1); // integer PCM…
+      u16(1);
+      u32(48000);
+      u32(48000 * 8);
+      u16(8); // blockAlign = 1 ch * 8 bytes
+      u16(64); // …at 64 bits: not a real format
+      str('data');
+      u32(80);
+      b.add(Uint8List(80));
+      final f = await write(b.toBytes());
+      expect(await SpectrogramService.admitForAnalysis(f), isNull);
+    });
+
+    test('non-finite float samples are scrubbed to zero, matching the '
+        'reference decoder', () async {
+      final data = Uint8List(6 * 4);
+      final dv = ByteData.sublistView(data);
+      dv.setFloat32(0, 0.5, Endian.little);
+      dv.setFloat32(4, double.nan, Endian.little);
+      dv.setFloat32(8, double.infinity, Endian.little);
+      dv.setFloat32(12, double.negativeInfinity, Endian.little);
+      dv.setFloat32(16, -0.25, Endian.little);
+      dv.setFloat32(20, 0.125, Endian.little);
+      final b = BytesBuilder();
+      void str(String s) => b.add(s.codeUnits);
+      void u32(int v) => b.add(
+        (ByteData(4)..setUint32(0, v, Endian.little)).buffer.asUint8List(),
+      );
+      void u16(int v) => b.add(
+        (ByteData(2)..setUint16(0, v, Endian.little)).buffer.asUint8List(),
+      );
+      str('RIFF');
+      u32(36 + data.length);
+      str('WAVE');
+      str('fmt ');
+      u32(16);
+      u16(3);
+      u16(1);
+      u32(48000);
+      u32(48000 * 4);
+      u16(4);
+      u16(32);
+      str('data');
+      u32(data.length);
+      b.add(data);
+      await check('float32 with NaN/Inf poison', b.toBytes());
+      // Belt-and-braces beyond the equivalence: the poisoned slots really are
+      // zero, not merely "whatever the reference produced".
+      final f = await write(b.toBytes());
+      final admission = (await SpectrogramService.admitForAnalysis(f))!;
+      final pcm = SpectrogramService.readWavMonoStreaming(f.path, admission)!;
+      expect(pcm.samples[1], 0.0);
+      expect(pcm.samples[2], 0.0);
+      expect(pcm.samples[3], 0.0);
+      expect(pcm.samples[0], closeTo(0.5, 1e-9));
     });
 
     test('float32 (the take format)', () async {
