@@ -42,12 +42,24 @@ class SyncTokenExpiredException implements Exception {
 /// state so the caller can resolve. Resolution is the ENGINE's job, not the
 /// transport's, and the engine VALIDATES the claim before acting on it — see
 /// [SyncTransport.pushRows].
+///
+/// [row] is a wire ECHO: whatever the transport decoded from the response,
+/// nominally the row as pushed. The engine uses it ONLY to correlate the
+/// result with the matching row of its own push array (a 1:1 identity match
+/// on (table, id)); every decision — conflict validation, retry-or-drop,
+/// asset marking — then reads that attempt row, never the echo. This holds
+/// even for a future production transport that GUARANTEES [row] is taken
+/// verbatim from the request array: the client deliberately does not rely on
+/// any such guarantee, because the echo crosses the trust boundary either
+/// way and a forged echo would otherwise re-anchor the engine's HLC
+/// comparisons (see SyncEngine._pushChunkResolvingConflicts).
 class PushRowResult {
   const PushRowResult.accepted(this.row) : serverRow = null;
 
   const PushRowResult.conflicted(this.row, {required SyncRow this.serverRow});
 
-  /// The row as pushed (identifies which input this result is for).
+  /// The wire echo of the pushed row — correlation key ONLY (see the class
+  /// docs); decisions bind to the caller's own copy of the row.
   final SyncRow row;
 
   /// The server's current record when the push conflicted; null when accepted.

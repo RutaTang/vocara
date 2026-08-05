@@ -178,6 +178,106 @@ void main() {
     expect(await assets.resolve(id), isNull);
   });
 
+  test('tombstone-time re-verification: a first push landing between the '
+      'candidate scan and the tombstone (transport marker + pending journal '
+      'entry) aborts the tombstone — nothing journaled, bytes kept', () async {
+    final id = await assets.importFile(await makeSrc('race.wav', [6, 6]));
+    await ackJournal(); // scan-time state: clean and sweepable
+    await db.customStatement(
+      'UPDATE assets SET created_at = 1, updated_at = 1 WHERE id = ?',
+      [id],
+    );
+    final path = (await assets.resolve(id))!;
+
+    var fired = 0;
+    final removed = await assets.sweepUnreferenced(
+      minAge: Duration.zero,
+      debugBeforeTombstone: (assetId) async {
+        fired++;
+        expect(assetId, id);
+        // The first-ever push races the sweep: the engine durably marks the
+        // transport BEFORE its first wire call, and the asset's row is
+        // journaled for the wire — the exact crash-window shape the
+        // pending-journal guard exists for, appearing AFTER the candidate
+        // scan already read clean state. The conditional tombstone must
+        // re-see both atomically and stand down.
+        await SyncStateStore(db).markTransportSeen();
+        await db
+            .into(db.oplog)
+            .insert(
+              OplogCompanion.insert(
+                entityTable: 'assets',
+                entityId: assetId,
+                op: 'insert',
+                hlcPacked: 'x',
+                payloadHash: '',
+                createdAt: 1,
+              ),
+            );
+      },
+    );
+
+    expect(fired, 1);
+    expect(removed, 0, reason: 'the conditional tombstone matched 0 rows');
+    expect(await assets.resolve(id), isNotNull, reason: 'row still live');
+    expect(await File(path).exists(), isTrue, reason: 'bytes untouched');
+    final tombstones = await db
+        .customSelect("SELECT 1 AS x FROM oplog WHERE op = 'tombstone'")
+        .get();
+    expect(tombstones, isEmpty, reason: 'no fleet-wide delete journaled');
+  });
+
+  test('tombstone-time re-verification: record_sync_state advancing after '
+      'the scan (a concurrent push ack marking the record synced) also '
+      'aborts the tombstone', () async {
+    final id = await assets.importFile(await makeSrc('marked.wav', [4, 2]));
+    await ackJournal();
+    await db.customStatement(
+      'UPDATE assets SET created_at = 1, updated_at = 1 WHERE id = ?',
+      [id],
+    );
+
+    final removed = await assets.sweepUnreferenced(
+      minAge: Duration.zero,
+      debugBeforeTombstone: (assetId) async {
+        await db.customStatement(
+          "UPDATE assets SET record_sync_state = 'synced' WHERE id = ?",
+          [assetId],
+        );
+      },
+    );
+    expect(removed, 0);
+    expect(await assets.resolve(id), isNotNull);
+    expect(
+      await db.select(db.oplog).get(),
+      isEmpty,
+      reason: 'no tombstone journaled for a row the UPDATE refused',
+    );
+  });
+
+  test('tombstone-time re-verification changes nothing when no race occurs: '
+      'a clean candidate still tombstones, journals and reclaims', () async {
+    final id = await assets.importFile(await makeSrc('clean.wav', [5, 5]));
+    await ackJournal();
+    await db.customStatement(
+      'UPDATE assets SET created_at = 1, updated_at = 1 WHERE id = ?',
+      [id],
+    );
+    final path = (await assets.resolve(id))!;
+
+    final removed = await assets.sweepUnreferenced(
+      minAge: Duration.zero,
+      debugBeforeTombstone: (_) async {}, // seam armed, state untouched
+    );
+    expect(removed, 1);
+    expect(await assets.resolve(id), isNull);
+    expect(await File(path).exists(), isFalse);
+    final tombstones = await db
+        .customSelect("SELECT 1 AS x FROM oplog WHERE op = 'tombstone'")
+        .get();
+    expect(tombstones, hasLength(1), reason: 'the delete still propagates');
+  });
+
   test('with NO transport ever seen the pending-journal guard stands down: '
       'a journaled local asset still reclaims (production has no transport '
       'and nothing ever acks, so the guard would otherwise hold everything '

@@ -316,8 +316,28 @@ class AssetStore {
   ///    a brand-new unreferenced row is far more likely an in-flight save (or
   ///    a not-yet-applied sync backlog) than garbage. Real garbage is still
   ///    reclaimed by the next sweep once it ages past the window.
+  ///
+  /// The transport-seen / pending-journal / never-synced guards are read
+  /// TWICE: coarsely in the candidate scan below, and again ATOMICALLY inside
+  /// each asset's tombstone transaction (as conditions of the UPDATE itself).
+  /// The scan alone is racy: the first-ever push can run concurrently with a
+  /// user-triggered repairLibrary sweep, and the durable transport marker,
+  /// the asset's journal entry, or its sync-state columns can change between
+  /// the scan and the tombstone write — the scan then sweeps (and journals a
+  /// fleet-wide delete for) a row the server may already hold. Holding
+  /// [gate] exclusively across the push was rejected (it would block repair
+  /// across a network await), so the guards are re-verified where they
+  /// cannot race: a conditional UPDATE that affects 0 rows means the asset's
+  /// fate changed hands mid-sweep, and it is skipped whole — no tombstone,
+  /// no journal entry, no file trash.
+  ///
+  /// [debugBeforeTombstone] is a test-only seam (same pattern as
+  /// SyncEngine's debugBeforePageCommit): it runs after the candidate scan
+  /// decided to sweep an asset and before that asset's tombstone
+  /// transaction — exactly the window the atomic re-verification protects.
   Future<int> sweepUnreferenced({
     Duration minAge = const Duration(hours: 24),
+    Future<void> Function(String assetId)? debugBeforeTombstone,
   }) async {
     final referenced = <String>{};
     // Quarantine FIRST, tables second: a concurrent pull's replay can apply a
@@ -381,15 +401,34 @@ class AssetStore {
       final newest = createdAt > updatedAt ? createdAt : updatedAt;
       if (nowMs - newest < minAgeMs) continue;
 
+      if (debugBeforeTombstone != null) await debugBeforeTombstone(id);
+
       final s = writer.stamp();
       // The tombstone UPDATE and its oplog entry MUST commit together (a row
       // mutation and its journal entry in the SAME transaction), exactly as
       // importFile does; otherwise a crash between them would tombstone a synced
       // asset with no journal entry and the delete would never propagate.
-      await db.transaction(() async {
-        await db.customUpdate(
+      //
+      // The WHERE clause RE-VERIFIES, atomically with the write, every guard
+      // the candidate scan read in a separate step (see the doc comment): the
+      // row must still be live, still never-synced on both per-device
+      // columns, and still clear of the pending-journal guard — expressed as
+      // "no transport marker OR no pending oplog entry", the exact predicate
+      // the scan applies (the guard engages only once a transport has ever
+      // existed). A first push racing this sweep flips one of those between
+      // the scan and here; the UPDATE then matches 0 rows and the asset is
+      // skipped whole.
+      final tombstoned = await db.transaction(() async {
+        final changed = await db.customUpdate(
           'UPDATE assets SET deleted_at = ?, updated_at = ?, hlc_wall = ?, '
-          'hlc_ctr = ?, hlc_node = ?, hlc_packed = ? WHERE id = ?',
+          'hlc_ctr = ?, hlc_node = ?, hlc_packed = ? WHERE id = ? '
+          'AND deleted_at IS NULL '
+          "AND record_sync_state = 'localOnly' "
+          "AND bytes_sync_state = 'localOnly' "
+          'AND (NOT EXISTS (SELECT 1 FROM sync_state '
+          "WHERE \"key\" = 'transport_seen') "
+          'OR NOT EXISTS (SELECT 1 FROM oplog '
+          "WHERE entity_table = 'assets' AND entity_id = assets.id))",
           variables: [
             Variable.withInt(s.at),
             Variable.withInt(s.at),
@@ -399,7 +438,12 @@ class AssetStore {
             Variable.withString(s.hlc.packed),
             Variable.withString(id),
           ],
+          updates: {db.assets},
         );
+        if (changed == 0) return false;
+        // The journal entry is written ONLY when the row actually tombstoned:
+        // a journaled tombstone for a row the conditional UPDATE refused
+        // would broadcast a fleet-wide delete for a row that is still live.
         await writer.journal(
           table: 'assets',
           id: id,
@@ -407,7 +451,11 @@ class AssetStore {
           hlc: s.hlc,
           payloadHash: '',
         );
+        return true;
       });
+      // Fate changed hands mid-sweep (first push landed, repair raced us):
+      // not removed, and the file-trash step below must not run either.
+      if (!tombstoned) continue;
       removed++;
 
       // Reclaim the file only if no surviving asset still maps to this hash.

@@ -48,18 +48,21 @@ class ApplyResult {
 /// is the single-slot RESOLUTION tombstone, which is a new derived local
 /// decision — not an echo of the applied record — and must replicate to
 /// converge; it is bounded to one write per losing row, see [_resolveSlot].)
-/// The clock is advanced via [HlcClock.receive] so subsequent LOCAL writes
-/// stay causally after everything we've seen; a record whose clock is
-/// implausibly far in the future is quarantined instead of merged (one bad
-/// peer can't poison the fleet). The gate and the advance are split
-/// deliberately: [HlcClock.assertPlausible] (check-only, same drift rule)
-/// runs with the other door gates, and the state-changing receive() calls run
-/// only AFTER the batch's outer transaction has committed, for the records
-/// whose savepoint settled as applied or skipped — a record that fails inside
-/// its savepoint, and equally a whole batch whose outer commit fails (an
-/// FK-sweep abort, a throwing beforeCommit hook), must leave NO side effect
-/// behind, and an in-memory clock advanced for writes the database rolled
-/// back is a side effect.
+/// The clock is advanced so subsequent LOCAL writes stay causally after
+/// everything we've seen; a record whose clock is implausibly far in the
+/// future is quarantined instead of merged (one bad peer can't poison the
+/// fleet). The gate and the advance are split deliberately:
+/// [HlcClock.assertPlausible] (check-only, same drift rule) runs with the
+/// other door gates, and the state-changing [HlcClock.mergeVerified] calls
+/// run only AFTER the batch's outer transaction has committed, for the
+/// records whose savepoint settled as applied or skipped — a record that
+/// fails inside its savepoint, and equally a whole batch whose outer commit
+/// fails (an FK-sweep abort, a throwing beforeCommit hook), must leave NO
+/// side effect behind, and an in-memory clock advanced for writes the
+/// database rolled back is a side effect. The post-commit advance is
+/// mergeVerified rather than [HlcClock.receive] because re-running the drift
+/// check after the commit could throw for stamps that are already durable
+/// (see the bottom of [apply]).
 ///
 /// Apply is order-tolerant and per-record resilient: defer_foreign_keys lets a
 /// child arrive before its parent within the batch, and each record applies
@@ -134,9 +137,10 @@ class SyncApplier {
     // Per-batch live-schema cache for the column gate (see [_liveColumns]).
     final liveColumns = <String, Set<String>>{};
     // Stamps of records whose savepoint settled as applied or skipped. Their
-    // state-changing clock.receive runs only once the outer transaction has
-    // committed (bottom of this method) — an advance for records the outer
-    // commit then rolled back would be a side effect surviving the rollback.
+    // state-changing clock.mergeVerified runs only once the outer transaction
+    // has committed (bottom of this method) — an advance for records the
+    // outer commit then rolled back would be a side effect surviving the
+    // rollback.
     final settledHlcs = <Hlc>[];
     try {
       await db.transaction(() async {
@@ -274,8 +278,8 @@ class SyncApplier {
             try {
               // Check-only: the drift gate must not advance the clock, or a
               // record that then fails/quarantines inside its savepoint would
-              // still have moved it. The advancing receive() runs only after
-              // the outer transaction commits (bottom of this method).
+              // still have moved it. The advancing mergeVerified() runs only
+              // after the outer transaction commits (bottom of this method).
               clock.assertPlausible(rec.hlc);
             } on HlcDriftException catch (e) {
               result.quarantined++;
@@ -319,7 +323,7 @@ class SyncApplier {
               return true;
             });
             // The record settled (applied, or cleanly lost LWW): remember its
-            // stamp for the post-commit clock advance. NOT receive()d here —
+            // stamp for the post-commit clock advance. NOT merged here —
             // this line still runs inside the outer transaction, and an
             // FK-sweep abort, a throwing beforeCommit hook, or a failed
             // outer commit would roll the database back while the in-memory
@@ -360,17 +364,24 @@ class SyncApplier {
     if (result.committed) {
       // The batch is durably committed: only now advance the clock past every
       // settled record's stamp, so subsequent local writes stay causally
-      // after everything the database actually holds. This cannot throw:
-      // assertPlausible passed for each stamp under the same drift rule, and
-      // its reference (max(now, maxWallEverSeen)) only grows between the two
-      // calls. Deferring the advance also means the drift gate judged every
-      // record of this batch against the PRE-batch clock reference — that is
-      // deliberate and conservative: a record plausible only relative to an
-      // earlier in-batch stamp quarantines now and is un-parked by the sync
-      // engine's end-of-run quarantine replay, once this commit's receives
-      // have raised the reference.
+      // after everything the database actually holds. mergeVerified, NOT
+      // receive: every stamp here already passed assertPlausible at its
+      // gate, and re-running the drift check now could THROW after the data
+      // and the change token are durable — a wall clock rolled back between
+      // the gate and this line shrinks the max(now, maxWallEverSeen)
+      // reference (assertPlausible never raises it), turning a committed
+      // page into a reported failure. Clamping the stamp instead was
+      // rejected: it would corrupt causal order. Stamps of records the
+      // FK-orphan sweep later hard-deleted merge too, deliberately: HLC
+      // semantics advance on any RECEIVED message; row survival is a
+      // different layer. Deferring the advance also means the drift gate
+      // judged every record of this batch against the PRE-batch clock
+      // reference — that is deliberate and conservative: a record plausible
+      // only relative to an earlier in-batch stamp quarantines now and is
+      // un-parked by the sync engine's end-of-run quarantine replay, once
+      // this commit's merges have raised the reference.
       for (final hlc in settledHlcs) {
-        clock.receive(hlc);
+        clock.mergeVerified(hlc);
       }
     }
     return result;

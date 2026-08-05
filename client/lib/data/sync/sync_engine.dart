@@ -424,6 +424,16 @@ class SyncEngine {
   /// on it (see [_validateAck]), and every conflicted result's serverRow is
   /// validated before it may drive the retry-or-drop decision (see
   /// [_validateConflict]) — each retry round validates its own attempt list.
+  ///
+  /// Every DECISION binds to the ATTEMPT row — the row from our own push
+  /// array — never to the echoed [PushRowResult.row], which is wire data a
+  /// hostile server controls and is used ONLY to find which attempt a result
+  /// answers. Trusted for anything more, a forged OLDER echo paired with an
+  /// internally-consistent serverRow stamped between the echo and the true
+  /// attempt passes every per-result check, the engine judges "server
+  /// newer", drops the local edit, and acks away its oplog entry — silent
+  /// data loss on nothing but a mangled ack.
+  ///
   /// Handled assets rows are marked record-synced here, inside the round and
   /// therefore strictly BEFORE the caller's oplog ack (see
   /// [_markAssetRecordsSynced] for why that order matters).
@@ -433,11 +443,29 @@ class SyncEngine {
     for (var tries = 0; attempt.isNotEmpty; tries++) {
       final ack = await _transport.pushRows(attempt);
       _validateAck(attempt, ack);
+      // Correlate each result back to the attempt's OWN row. Keys are unique
+      // here — the drain collapses to one entry per (table, id), and the
+      // retry list below inherits that — so the map can never conflate two
+      // attempts; refuse loudly if that invariant ever breaks rather than
+      // resolve results ambiguously.
+      final attemptByKey = <(String, String), SyncRow>{};
+      for (final row in attempt) {
+        final prior = attemptByKey.putIfAbsent((row.table, row.id), () => row);
+        if (!identical(prior, row)) {
+          throw StateError(
+            'push attempt carries duplicate rows for ${row.table}/${row.id}; '
+            'ack results cannot be correlated unambiguously',
+          );
+        }
+      }
       // Same discipline as _validateAck: the WHOLE round is vetted before
       // anything in it takes effect, so an invalid conflict claim can't land
-      // after part of the round was already counted/marked.
+      // after part of the round was already counted/marked. ([_validateAck]
+      // proved the 1:1 identity cover, so the lookups here cannot miss.)
       for (final r in ack.results) {
-        if (!r.accepted) _validateConflict(r);
+        if (!r.accepted) {
+          _validateConflict(attemptByKey[(r.row.table, r.row.id)]!, r);
+        }
       }
       final retry = <SyncRow>[];
       // Assets rows the server now durably HOLDS after this round — accepted
@@ -445,20 +473,24 @@ class SyncEngine {
       // record has crossed the wire either way).
       final syncedAssetIds = <String>[];
       for (final r in ack.results) {
+        // From here on the echo is never read again: identity, HLC and asset
+        // marking all come from the attempt row.
+        final ours = attemptByKey[(r.row.table, r.row.id)]!;
         if (r.accepted) {
           accepted++;
-          if (r.row.table == 'assets') syncedAssetIds.add(r.row.id);
-        } else if (r.row.hlcPacked.compareTo(r.serverRow!.hlcPacked) > 0) {
+          if (ours.table == 'assets') syncedAssetIds.add(ours.id);
+        } else if (ours.hlcPacked.compareTo(r.serverRow!.hlcPacked) > 0) {
           // Unreachable against a validated ack ([_validateConflict] requires
-          // the server row STRICTLY newer); kept as the documented resolution
-          // policy so that a deliberate future relaxation of the conflict
-          // contract makes "local wins" re-push instead of silently dropping.
-          retry.add(r.row);
+          // the server row STRICTLY newer than the attempt); kept as the
+          // documented resolution policy so that a deliberate future
+          // relaxation of the conflict contract makes "local wins" re-push
+          // instead of silently dropping.
+          retry.add(ours);
         } else {
-          // Server holds something newer (or equal) — drop ours. For an
-          // assets row that still counts as synced: the server holds the
-          // record, so another device may reference the asset.
-          if (r.row.table == 'assets') syncedAssetIds.add(r.row.id);
+          // Server holds something newer — drop ours. For an assets row that
+          // still counts as synced: the server holds the record, so another
+          // device may reference the asset.
+          if (ours.table == 'assets') syncedAssetIds.add(ours.id);
         }
       }
       await _markAssetRecordsSynced(syncedAssetIds);
@@ -516,26 +548,31 @@ class SyncEngine {
   }
 
   /// Refuses a `conflicted` [PushRowResult] whose serverRow cannot be an
-  /// honest CAS rejection. The serverRow decides retry-or-drop; trusted
-  /// blind, a lazy lie could make the engine silently drop — and then ack
-  /// away — a local edit the server never stored. Four checks, all cheap:
+  /// honest CAS rejection of [attempt] — the row from OUR push array this
+  /// result was correlated to, never the echoed `r.row` (which a hostile
+  /// server controls; see [_pushChunkResolvingConflicts]). The serverRow
+  /// decides retry-or-drop; trusted blind, a lazy lie could make the engine
+  /// silently drop — and then ack away — a local edit the server never
+  /// stored. Four checks, all cheap:
   ///
   ///  * it must EXIST — a conflict claim with no server state is
   ///    meaningless (structurally unrepresentable through
   ///    [PushRowResult]'s own constructors, but a decoding transport seam
   ///    must not be able to smuggle one through);
-  ///  * it must carry the SAME (table, id) as the rejected row — checked on
+  ///  * it must carry the SAME (table, id) as the attempt row — checked on
   ///    the raw field map, so a mistyped id fails as a transport violation
   ///    rather than a TypeError;
   ///  * it must be internally CONSISTENT: its HLC quad must re-pack to its
   ///    hlc_packed — the exact rule [SyncRow.fromJson] enforces at the pull
   ///    door, applied via the shared [SyncRow.checkHlcConsistency] so the
   ///    two doors can never diverge;
-  ///  * its hlcPacked must be STRICTLY greater than the pushed row's: a
+  ///  * its hlcPacked must be STRICTLY greater than the ATTEMPT row's: a
   ///    conforming server accepts a push it holds nothing newer than
   ///    (docs/sync-protocol.md), so a CAS reject by an older-or-equal row is
   ///    nonsensical — and the canonical low-cost lie is echoing the pushed
-  ///    row straight back as "the server's".
+  ///    row straight back as "the server's". Comparing against the echo
+  ///    instead would let a forged OLDER echo smuggle a mid-HLC serverRow
+  ///    through this very check.
   ///
   /// Any violation throws [SyncTransportException]: the run fails, nothing
   /// is acked, and every journaled entry re-pushes on a later run. This
@@ -544,18 +581,17 @@ class SyncEngine {
   /// legitimately holding it, and is therefore outside the client's
   /// defensible model — the documented trust boundary (docs/sync-protocol.md
   /// "Trust model"), equivalent to the server withholding rows on pull.
-  void _validateConflict(PushRowResult r) {
-    final pushed = r.row;
+  void _validateConflict(SyncRow attempt, PushRowResult r) {
     final server = r.serverRow;
     if (server == null) {
       throw SyncTransportException(
-        'conflicted push result for ${pushed.table}/${pushed.id} carries no '
-        'serverRow',
+        'conflicted push result for ${attempt.table}/${attempt.id} carries '
+        'no serverRow',
       );
     }
-    if (server.table != pushed.table || server.fields['id'] != pushed.id) {
+    if (server.table != attempt.table || server.fields['id'] != attempt.id) {
       throw SyncTransportException(
-        'conflicted push result for ${pushed.table}/${pushed.id} carries a '
+        'conflicted push result for ${attempt.table}/${attempt.id} carries a '
         'serverRow for ${server.table}/${server.fields['id']}',
       );
     }
@@ -563,18 +599,18 @@ class SyncEngine {
       SyncRow.checkHlcConsistency(server.fields);
     } on FormatException catch (e) {
       throw SyncTransportException(
-        'conflicted serverRow for ${pushed.table}/${pushed.id} is internally '
-        'inconsistent',
+        'conflicted serverRow for ${attempt.table}/${attempt.id} is '
+        'internally inconsistent',
         e,
       );
     }
     // checkHlcConsistency proved hlc_packed is a String, so the getter below
     // cannot throw.
-    if (server.hlcPacked.compareTo(pushed.hlcPacked) <= 0) {
+    if (server.hlcPacked.compareTo(attempt.hlcPacked) <= 0) {
       throw SyncTransportException(
-        'conflicted serverRow for ${pushed.table}/${pushed.id} is not '
+        'conflicted serverRow for ${attempt.table}/${attempt.id} is not '
         'strictly newer than the pushed row '
-        '("${server.hlcPacked}" <= "${pushed.hlcPacked}"); a conforming '
+        '("${server.hlcPacked}" <= "${attempt.hlcPacked}"); a conforming '
         'server accepts a push it holds nothing newer than',
       );
     }

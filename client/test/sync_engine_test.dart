@@ -231,6 +231,22 @@ void main() {
         },
       );
 
+  /// A wire ECHO of [real] forged to claim the HLC [h] — same (table, id)
+  /// identity and an internally-consistent quad, so it correlates cleanly
+  /// with the attempt and passes every shape check. Models a hostile ack
+  /// trying to re-anchor the engine's HLC comparisons; the engine must bind
+  /// every decision to its own attempt row instead.
+  SyncRow forgedEcho(SyncRow real, Hlc h) => SyncRow(
+    table: real.table,
+    fields: {
+      ...real.fields,
+      'hlc_wall': h.wallMs,
+      'hlc_ctr': h.counter,
+      'hlc_node': h.node,
+      'hlc_packed': h.packed,
+    },
+  );
+
   Future<int> oplogCount() async => (await db.select(db.oplog).get()).length;
 
   Future<String?> practiceTitle(String id) async {
@@ -552,6 +568,72 @@ void main() {
       expect(retry.failed, isFalse);
       expect(await oplogCount(), 0);
     });
+
+    test('a forged OLDER echo with an internally-consistent mid-HLC serverRow '
+        'fails the run: every decision binds to the ATTEMPT row, never the '
+        'echo', () async {
+      // The counter-example this rule exists for: we push P@100. A hostile
+      // ack echoes P@0 as "the pushed row" and pairs it with a consistent
+      // serverRow P@50 — strictly newer than the ECHO, strictly older than
+      // the true attempt. Validated against the echo, this passed every
+      // check; the engine judged "server newer", dropped ours, and acked
+      // away the drained oplog entry — the local edit silently lost to
+      // nothing but a mangled ack.
+      await savePractice('P', 'local-new');
+      transport.mangleNextAck = (pushed, ack) => PushAck([
+        PushRowResult.conflicted(
+          forgedEcho(pushed.single, remoteHlc(t0 - 10000)),
+          serverRow: remotePractice('P', 'server-mid', remoteHlc(t0 - 5000)),
+        ),
+      ]);
+
+      final run = await engine.pumpPush();
+      expect(run.failed, isTrue);
+      expect(run.failure, isA<SyncTransportException>());
+      expect(await oplogCount(), 1, reason: 'nothing acked, nothing lost');
+      expect(await practiceTitle('P'), 'local-new');
+
+      // The knob cleared itself: an honest server drains the retry and the
+      // local edit survives to the cloud.
+      final retry = await engine.pumpPush();
+      expect(retry.failed, isFalse);
+      expect(
+        cloud.serverRowFor('practices', _id('P'))!.fields['title'],
+        'local-new',
+      );
+      expect(await oplogCount(), 0);
+    });
+
+    test('a GENUINE conflict (serverRow strictly newer than the attempt) '
+        'still resolves as a drop even when the echo is forged: the echo is '
+        'the correlation key and nothing else', () async {
+      await savePractice('P', 'local-stale');
+      final serverNew = remotePractice(
+        'P',
+        'server-new',
+        remoteHlc(nowMs + 60000),
+      );
+      cloud.accept(serverNew);
+      transport.injectConflictOnce('practices', _id('P'));
+      // A conforming CAS rejection, except the echo claims an ancient HLC.
+      // Judged against the attempt the serverRow is still strictly newer, so
+      // the conflict is genuine and resolves exactly as with an honest echo.
+      transport.mangleNextAck = (pushed, ack) => PushAck([
+        PushRowResult.conflicted(
+          forgedEcho(pushed.single, remoteHlc(t0 - 10000)),
+          serverRow: ack.results.single.serverRow!,
+        ),
+      ]);
+
+      final run = await engine.pumpPush();
+      expect(run.failed, isFalse);
+      expect(transport.pushCalls, 1, reason: 'a losing row is not re-pushed');
+      expect(await oplogCount(), 0, reason: 'the dropped row is handled');
+      expect(
+        cloud.serverRowFor('practices', _id('P'))!.fields['title'],
+        'server-new',
+      );
+    });
   });
 
   group('asset record sync-state (push side)', () {
@@ -644,6 +726,31 @@ void main() {
       expect(run.failed, isFalse);
       expect(transport.pushCalls, 1, reason: 'a losing row is not re-pushed');
       expect((await assetState('A'))['record_sync_state'], 'synced');
+      expect(await oplogCount(), 0);
+    });
+
+    test('asset record-sync marking binds to the attempt row too: a genuine '
+        'server-newer conflict whose echo is forged still marks the asset '
+        'synced', () async {
+      await saveAsset('A', 'HASH_A');
+      cloud.accept(remoteAsset('A', 'HASH_A', remoteHlc(nowMs + 60000)));
+      transport.injectConflictOnce('assets', _id('A'));
+      transport.mangleNextAck = (pushed, ack) => PushAck([
+        PushRowResult.conflicted(
+          forgedEcho(pushed.single, remoteHlc(t0 - 10000)),
+          serverRow: ack.results.single.serverRow!,
+        ),
+      ]);
+
+      final run = await engine.pumpPush();
+      expect(run.failed, isFalse);
+      expect(
+        (await assetState('A'))['record_sync_state'],
+        'synced',
+        reason:
+            'the drop decision and the marking both read the attempt row — '
+            'the mangled echo must not divert either',
+      );
       expect(await oplogCount(), 0);
     });
 

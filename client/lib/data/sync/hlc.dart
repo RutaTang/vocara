@@ -96,7 +96,8 @@ class HlcDriftException implements Exception {
 
 /// A device's Hybrid Logical Clock. The SINGLE producer of HLC stamps for local
 /// writes ([tick]) and the only place that advances when a remote stamp is seen
-/// ([receive]). Inject [now] in tests for determinism.
+/// ([receive], or [mergeVerified] for stamps already gated by
+/// [assertPlausible]). Inject [now] in tests for determinism.
 class HlcClock {
   HlcClock({
     required this.node,
@@ -185,10 +186,35 @@ class HlcClock {
   /// Refuses a remote whose wall is more than [maxDriftMs] in the future
   /// ([HlcDriftException]) so one device's bad clock can't contaminate ours. A
   /// remote in the past is fine (it simply doesn't advance us). The check-only
-  /// form of the same rule is [assertPlausible].
+  /// form of the same rule is [assertPlausible]; the advance WITHOUT the
+  /// drift check is [mergeVerified].
   Hlc receive(Hlc remote) {
     final now = _now();
     _checkDrift(remote, now);
+    return _advance(remote, now);
+  }
+
+  /// Merges a [remote] stamp that ALREADY passed [assertPlausible] earlier in
+  /// the same batch: the exact advance [receive] performs, with NO drift
+  /// re-check. Never call this on a stamp that has not been gated.
+  ///
+  /// This exists for the [SyncApplier]'s deferred post-commit advance. Each
+  /// record is gated with [assertPlausible] before its savepoint, but the
+  /// state-changing merge runs only after the batch's outer transaction has
+  /// committed — and between the two, the wall clock can roll BACKWARD.
+  /// [assertPlausible] never raises [maxWallEverSeen] (it is check-only by
+  /// contract), so the drift reference `max(now, maxWallEverSeen)` can
+  /// SHRINK across that window, and re-running the check in [receive] would
+  /// then throw for a stamp whose data and change token are already durable:
+  /// the run reports failure for a committed page. Clamping the remote stamp
+  /// instead was considered and rejected — it would corrupt causal order.
+  /// Both methods share [_advance], so the two merges can never diverge.
+  Hlc mergeVerified(Hlc remote) => _advance(remote, _now());
+
+  /// The shared advance rule behind [receive] and [mergeVerified]: adopt the
+  /// max wall of (now, ours, remote) and pick the counter that keeps the new
+  /// stamp strictly after both our last stamp and the remote one.
+  Hlc _advance(Hlc remote, int now) {
     var wall = [
       now,
       _last.wallMs,

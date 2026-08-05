@@ -207,6 +207,69 @@ void main() {
     });
   });
 
+  group('HlcClock.mergeVerified (post-commit advance, no drift re-check)', () {
+    test('advances exactly like receive for a plausible stamp — same result, '
+        'same clock state, same behavior afterwards', () {
+      final viaMerge = HlcClock(node: 'N', now: () => 1000);
+      final viaReceive = HlcClock(node: 'N', now: () => 1000);
+      viaMerge.tick();
+      viaReceive.tick();
+      final remote = Hlc(wallMs: 1005, counter: 3, node: 'M');
+      expect(viaMerge.mergeVerified(remote), viaReceive.receive(remote));
+      expect(viaMerge.last, viaReceive.last);
+      expect(viaMerge.maxWallEverSeen, viaReceive.maxWallEverSeen);
+      // The two clocks keep agreeing: the shared advance left identical state.
+      expect(viaMerge.tick(), viaReceive.tick());
+      final again = Hlc(wallMs: 1005, counter: 9, node: 'M');
+      expect(viaMerge.mergeVerified(again), viaReceive.receive(again));
+    });
+
+    test('accepts a stamp receive would reject for drift, advances '
+        'monotonically past it, and later ticks stay uncorrupted', () {
+      var now = 1000;
+      final clock = HlcClock(node: 'N', now: () => now, maxDriftMs: 60000);
+      final before = clock.tick(); // 1000/0
+      // Far beyond the drift bound: receive refuses (and mutates nothing)...
+      final vetted = Hlc(wallMs: 1000 + 60000 + 5000, counter: 2, node: 'M');
+      expect(() => clock.receive(vetted), throwsA(isA<HlcDriftException>()));
+      expect(clock.last, before);
+      // ...but mergeVerified — for a stamp the caller already gated — merges
+      // per the canonical receive rule.
+      final merged = clock.mergeVerified(vetted);
+      expect(merged > before, isTrue);
+      expect(merged > vetted, isTrue, reason: 'strictly after the remote');
+      expect(merged.wallMs, vetted.wallMs);
+      expect(merged.counter, vetted.counter + 1);
+      expect(clock.maxWallEverSeen, vetted.wallMs);
+      // Later ticks are strictly monotonic on top of the merged stamp (the
+      // held-wall degradation, exactly as after any future-ward receive).
+      final t1 = clock.tick();
+      expect(t1 > merged, isTrue);
+      expect(t1.packed.length, merged.packed.length);
+      now = 2000;
+      final t2 = clock.tick();
+      expect(t2 > t1, isTrue);
+    });
+
+    test('a stamp vetted by assertPlausible still merges after the wall clock '
+        'rolls back past the drift bound (the post-commit case)', () {
+      var now = 1000;
+      final clock = HlcClock(node: 'N', now: () => now, maxDriftMs: 60000);
+      final stamp = Hlc(wallMs: 1000 + 60000, counter: 0, node: 'M');
+      // The gate passes at the boundary...
+      expect(() => clock.assertPlausible(stamp), returnsNormally);
+      // ...then the wall clock rolls BACK before the advance runs.
+      // assertPlausible (check-only) never raised maxWallEverSeen, so the
+      // drift reference shrank with it: re-running the check would now
+      // reject the very stamp the gate admitted.
+      now = 500;
+      expect(() => clock.receive(stamp), throwsA(isA<HlcDriftException>()));
+      final merged = clock.mergeVerified(stamp);
+      expect(merged > stamp, isTrue);
+      expect(clock.last, merged);
+    });
+  });
+
   group('counter cap (fixed 6-digit packed field)', () {
     test('tick spills into the next millisecond at counter 999999', () {
       // Hold the wall (now < last.wallMs) so every tick lands in the same

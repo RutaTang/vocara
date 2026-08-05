@@ -9,18 +9,20 @@ import 'package:vocara/data/sync/sync_row.dart';
 
 String _id(String s) => s.padRight(26, '0').substring(0, 26);
 
-/// An [HlcClock] that counts its state-changing [receive] calls, so a test
-/// can assert not just WHERE the clock ended up but HOW OFTEN the applier
-/// advanced it (once per settled record, only after the outer commit).
+/// An [HlcClock] that counts its state-changing advances — [mergeVerified],
+/// the call the applier's post-commit loop uses (never the drift-checking
+/// [receive], see the applier docs) — so a test can assert not just WHERE
+/// the clock ended up but HOW OFTEN the applier advanced it (once per
+/// settled record, only after the outer commit).
 class _CountingClock extends HlcClock {
   _CountingClock({required super.node, super.now});
 
-  int receives = 0;
+  int advances = 0;
 
   @override
-  Hlc receive(Hlc remote) {
-    receives++;
-    return super.receive(remote);
+  Hlc mergeVerified(Hlc remote) {
+    advances++;
+    return super.mergeVerified(remote);
   }
 }
 
@@ -428,7 +430,7 @@ void main() {
       // door (the pre-savepoint settle, which never advances the clock —
       // unchanged by the post-commit deferral).
       await applier.apply([practice('P', 'v1', hlc(950))]);
-      clock.receives = 0;
+      clock.advances = 0;
 
       final res = await applier.apply([
         practice('A', 'applied', hlc(960)),
@@ -439,12 +441,44 @@ void main() {
       expect(res.skipped, 1);
       expect(res.quarantined, 1);
       expect(
-        clock.receives,
+        clock.advances,
         1,
         reason:
             'exactly the applied record — a door-settled skip never '
-            'received (before or after the deferral), and a quarantined '
+            'merged (before or after the deferral), and a quarantined '
             'record must leave the clock alone',
+      );
+    });
+
+    test('the post-commit advance survives a wall-clock rollback between the '
+        'drift gate and the commit: the run must not report failure for a '
+        'page that is already durable', () async {
+      // A stamp exactly at the drift boundary: assertPlausible admits it at
+      // gate time (now = 1000, reference = max(now, maxWallEverSeen) = 1000).
+      var now = 1000;
+      final clock = HlcClock(node: _id('LOCAL'), now: () => now);
+      applier = SyncApplier(db, clock);
+      final stamp = hlc(1000 + HlcClock.defaultMaxDriftMs);
+      final res = await applier.apply(
+        [practice('P', 'vetted', stamp)],
+        beforeCommit: () async {
+          // The wall clock rolls BACK inside the batch's transaction — after
+          // every record passed its assertPlausible gate, before the
+          // post-commit advance. The check-only gate never raised
+          // maxWallEverSeen, so the drift reference shrank with the clock:
+          // re-running the drift check in receive() would now THROW for the
+          // very stamps whose data and change token just committed.
+          now = 500;
+        },
+      );
+      expect(res.committed, isTrue, reason: 'the page is durable');
+      expect(res.applied, 1);
+      expect(res.failed, 0);
+      expect((await row('P'))!['title'], 'vetted');
+      expect(
+        clock.last > stamp,
+        isTrue,
+        reason: 'the clock still advanced past the committed stamp',
       );
     });
   });
