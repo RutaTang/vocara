@@ -13,6 +13,7 @@
 //!     arm the breaker (the dead band), and
 //!   * on non-stationary material a single below-trip block reset the 96-consecutive-blocks
 //!     debounce, starving the breaker even above the trip.
+//!
 //! These tests pin the reworked arming (hangover held + mic coherent with the echo estimate,
 //! drain-on-miss debounce): the deadlock must engage, the breaker must fire, and ERLE must
 //! recover — for a power jump INSIDE the old dead band (2.5x) and above it (4x) — while
@@ -53,10 +54,10 @@ impl Rng {
 fn make_echo_path(len: usize, bulk_delay: usize) -> Vec<f32> {
     let mut h = vec![0.0f32; len];
     let mut rng = Rng::new(0xC0FFEE);
-    for i in bulk_delay..len {
+    for (i, tap) in h.iter_mut().enumerate().skip(bulk_delay) {
         let t = (i - bulk_delay) as f32;
         let decay = (-t / 1500.0).exp();
-        h[i] = 0.15 * decay * rng.next_f32();
+        *tap = 0.15 * decay * rng.next_f32();
     }
     h[bulk_delay] = 0.5;
     h[bulk_delay + 80] = -0.3;
@@ -241,11 +242,11 @@ fn double_talk_does_not_fire_breaker() {
     // Pulsed sung tone: 47 blocks on / 28 blocks off, 330 Hz (between the far tones).
     let two_pi = 2.0 * std::f32::consts::PI;
     let mut voice = vec![0.0f32; total];
-    for n in conv_len..total {
+    for (n, v) in voice.iter_mut().enumerate().skip(conv_len) {
         let blk = (n - conv_len) / BLOCK;
         if blk % 75 < 47 {
             let t = n as f32 / sr;
-            voice[n] = 0.8 * (two_pi * 330.0 * t).sin();
+            *v = 0.8 * (two_pi * 330.0 * t).sin();
         }
     }
     let mic: Vec<f32> = (0..total).map(|n| echo[n] + voice[n]).collect();
