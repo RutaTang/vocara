@@ -239,6 +239,12 @@ class TechniqueDetailViewModel extends ChangeNotifier
   /// Drops the media draft and deletes any files copied for staged additions
   /// (they were never committed). Called when an edit is cancelled.
   Future<void> discardMediaDraft() async {
+    // Never during an in-flight save: the commit is persisting rows for the
+    // exact files this would delete (the screen disables Cancel while saving,
+    // but this method is callable directly). The save's own success path
+    // clears the draft; its failure path leaves the edit session — and this
+    // draft — alive for the user to retry or cancel.
+    if (_saving) return;
     // Invalidate any in-flight import: a clip that finishes copying after this
     // must be treated as an orphan (deleted), not appended to the now-cleared
     // draft (which would strand its file and show a phantom clip in the read view).
@@ -1022,6 +1028,15 @@ class TechniqueDetailViewModel extends ChangeNotifier
     // concurrent edits and could double-apply or mis-merge. Report "did not
     // persist"; the button re-enables when the in-flight save resolves.
     if (_saving) return false;
+    // The REVERSE races of the in-flight-save freeze: a save entering while a
+    // media import / example save / recording start is mid-await would
+    // snapshot effectiveMedia BEFORE that operation lands — its result would
+    // then be silently thrown away when this save clears the draft and the
+    // screen leaves edit mode. The UI disables Save for all of these; this is
+    // the invariant backstop for a same-frame click.
+    if (_importingMedia || savingExample || _recorder.isRecording) {
+      return false;
+    }
     // Held across the commit AND its cleanup below, not just the repository
     // write: until the successful commit's draft is cleared, a Cancel →
     // discardMediaDraft would delete staged files whose rows just persisted.

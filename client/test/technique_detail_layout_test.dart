@@ -320,6 +320,54 @@ void main() {
     expect(repo.technique.media.single.label, isEmpty);
   });
 
+  test('the reverse races are refused too: no second save and no draft '
+      'discard while the commit is airborne', () async {
+    final media = TechniqueMedia(
+      id: 'm1',
+      path: '/tmp/a.m4a',
+      kind: TechniqueMediaKind.audio,
+      addedAt: DateTime(2026, 6, 20),
+    );
+    final repo = _GatedSaveRepo(_technique(media: [media]));
+    final vm = TechniqueDetailViewModel(
+      repository: repo,
+      mediaService: TechniqueMediaService(storage: LocalStorageService()),
+      techniqueId: 't1',
+    );
+    addTearDown(vm.dispose);
+    for (var i = 0; i < 200 && vm.technique == null; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+    expect(vm.technique, isNotNull);
+
+    vm.beginMediaDraft();
+    // Stage a rename so the draft is non-empty when the save launches (a
+    // rename touches no files, so the commit's cleanup stays IO-free in this
+    // harness): the discard below would clear it if the guard failed.
+    await vm.renameMedia('m1', 'kept label');
+    expect(vm.hasMediaDraft, isTrue);
+    final first = vm.save(vm.technique!.copyWith(summary: 'changed'));
+    expect(vm.saving, isTrue);
+
+    // A racing second save must refuse against the same base…
+    expect(await vm.save(vm.technique!.copyWith(summary: 'racer')), isFalse);
+    // …and a direct discard (Cancel is disabled, but the method is callable)
+    // must be a no-op while the commit is persisting the draft's outcome.
+    await vm.discardMediaDraft();
+    expect(
+      vm.hasMediaDraft,
+      isTrue,
+      reason: 'the airborne save owns the draft; discard must not clear it',
+    );
+
+    repo.gate.complete();
+    expect(await first, isTrue);
+    // Exactly the FIRST save persisted, with the staged rename applied.
+    expect(repo.technique.summary, 'changed');
+    expect(repo.technique.media.single.label, 'kept label');
+    expect(vm.hasMediaDraft, isFalse, reason: 'the save cleared its draft');
+  });
+
   testWidgets('Save and Cancel are disabled while the save is in flight', (
     tester,
   ) async {
