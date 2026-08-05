@@ -123,6 +123,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     AudioEditService? editService,
     RecordingFinalizer? finalizer,
     Future<String?> Function(String suggestedName)? saveLocationPicker,
+    @visibleForTesting Duration? Function(String path)? probeDuration,
   }) : _repository = repository,
        _techniqueRepository = techniqueRepository,
        _audioFiles = audioFileService,
@@ -135,6 +136,9 @@ class SongPracticeDetailViewModel extends ChangeNotifier
        _pickSaveLocation = saveLocationPicker ?? _systemSaveLocation,
        _monitor = monitor ?? MonitorService(),
        _edits = editService ?? AudioEditService(files: audioFileService),
+       // Injectable because the real probe is a direct FFI call into the
+       // engine dylib, which plain unit tests cannot load.
+       _probeDuration = probeDuration ?? probeMediaDuration,
        _finalizer = finalizer ?? RecordingFinalizer.instance {
     // Adopt the persisted output-device choice and let the global settings panel drive this
     // engine live. The native engine is the only one with device support.
@@ -288,6 +292,10 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// disposed); controllers only borrow it.
   final PlaybackEngine _playback;
   final AudioEditService _edits;
+
+  /// Probes a media file's declared duration for the import admission gate
+  /// (see [_admitImportDuration]); the default is the engine's container probe.
+  final Duration? Function(String path) _probeDuration;
   final MonitorService _monitor;
   final RecordingFinalizer _finalizer;
   @override
@@ -810,6 +818,32 @@ class SongPracticeDetailViewModel extends ChangeNotifier
 
   // --- Importing audio -----------------------------------------------------
 
+  /// Import admission gate: refuses a file whose DECLARED duration exceeds the
+  /// playback cap BEFORE anything happens — the decode-time budget alone would
+  /// only reject the file at playback staging, after it was already copied,
+  /// waveform-analyzed and persisted as an unplayable clip. Containers that
+  /// declare no length (probe returns null) are admitted; the native decode
+  /// budget still bounds them later. Returns true when the import may proceed.
+  bool _admitImportDuration(String sourcePath) {
+    Duration? declared;
+    try {
+      declared = _probeDuration(sourcePath);
+    } catch (_) {
+      // A probe that can't run (no engine dylib in plain unit tests, an
+      // unreadable file) must admit: the native decode budget still bounds
+      // the file at staging, this gate only improves WHERE the refusal lands.
+      declared = null;
+    }
+    if (declared != null && declared > maxPlaybackDuration) {
+      _toast(
+        'That file is ${declared.inMinutes} minutes long. The limit is '
+        '${maxPlaybackDuration.inMinutes} minutes.',
+      );
+      return false;
+    }
+    return true;
+  }
+
   /// Imports [sourcePath] as the accompaniment (replacing any existing one).
   Future<void> addAccompaniment(String sourcePath) async {
     if (_practice == null) return;
@@ -817,6 +851,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     // pre-guard: the gate must be free when the stop finalize needs it, or the
     // finalize would be rejected and the take stranded until the boot sweep.
     if (busy || isSeparating || isRecording) return;
+    if (!_admitImportDuration(sourcePath)) return;
     await _busyGate.run(() async {
       final dest = await _audioFiles.importAudio(
         practiceId: _practiceId,
@@ -866,6 +901,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     if (busy || isSeparating || isRecording) {
       return;
     } // no concurrent structural edit
+    if (!_admitImportDuration(sourcePath)) return;
     await _busyGate.run(() async {
       final dest = await _audioFiles.importAudio(
         practiceId: _practiceId,
@@ -907,6 +943,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     if (busy || isSeparating || isRecording) {
       return;
     } // no concurrent structural edit
+    if (!_admitImportDuration(sourcePath)) return;
     await _busyGate.run(() async {
       final dest = await _audioFiles.importAudio(
         practiceId: _practiceId,
@@ -933,6 +970,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     if (busy || isSeparating || isRecording) {
       return;
     } // no concurrent structural edit
+    if (!_admitImportDuration(sourcePath)) return;
     await _busyGate.run(() async {
       final dest = await _audioFiles.importAudio(
         practiceId: _practiceId,

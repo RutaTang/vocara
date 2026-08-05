@@ -231,6 +231,7 @@ void main() {
 
   Future<SongPracticeDetailViewModel> pumpVm({
     List<AudioTrack>? vocalTracks,
+    Duration? Function(String path)? probeDuration,
   }) async {
     events = <String>[];
     repo = _FakeRepo(_seedPractice(vocalTracks: vocalTracks), events);
@@ -247,6 +248,7 @@ void main() {
       practiceId: 'p1',
       playbackEngine: _FakeEngine(),
       editService: _FakeEdits(),
+      probeDuration: probeDuration,
     );
     addTearDown(vm.dispose);
     for (var i = 0; i < 400 && vm.practice == null; i++) {
@@ -258,6 +260,39 @@ void main() {
   }
 
   group('structural-edit mutex', () {
+    test('an import whose declared duration exceeds the playback cap is '
+        'refused before anything is copied or persisted', () async {
+      final vm = await pumpVm(probeDuration: (_) => const Duration(hours: 2));
+      final toasts = <String>[];
+      final sub = vm.toasts.listen(toasts.add);
+      addTearDown(sub.cancel);
+      final before = vm.practice!.vocalTracks.length;
+
+      await vm.addVocalTake('/src/very_long.mp3');
+      await vm.addAccompaniment('/src/very_long.mp3');
+      await vm.addClipToTake(vm.practice!.vocalTracks.first.id, '/src/x.mp3');
+      // Let the toast stream deliver.
+      await Future<void>.delayed(Duration.zero);
+
+      // The refusal happens at the admission gate: no copy, no waveform
+      // analysis, no save — the practice never learns the file existed.
+      expect(events, isEmpty);
+      expect(vm.practice!.vocalTracks.length, before);
+      expect(vm.practice!.accompaniment, isNull);
+      expect(toasts, hasLength(3));
+      expect(toasts.first, contains('limit is 60 minutes'));
+    });
+
+    test('a probe that cannot run admits the import (the decode budget still '
+        'bounds it downstream)', () async {
+      final vm = await pumpVm(probeDuration: (_) => throw StateError('no ffi'));
+      final before = vm.practice!.vocalTracks.length;
+
+      await vm.addVocalTake('/src/a.wav');
+
+      expect(vm.practice!.vocalTracks.length, before + 1);
+    });
+
     test('an overlapping structural action is rejected while the gate is '
         'held (only ONE import lands)', () async {
       final vm = await pumpVm();
