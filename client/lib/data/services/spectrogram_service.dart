@@ -12,6 +12,19 @@ import 'media_analysis_service.dart';
 /// [SpectrogramService.computeBothFromFile].
 typedef TakeAnalysis = ({Spectrogram? spectrogram, VoiceMetrics? metrics});
 
+/// Everything the admission gate learned from the header, handed to the
+/// streaming reader so the isolate never re-walks (or re-trusts) the chunks:
+/// where the PCM lives, its layout, and the effective sample format
+/// (1 = integer PCM, 3 = IEEE float — extensible resolved to its SubFormat).
+typedef WavAdmission = ({
+  int dataStart,
+  int frames,
+  int sampleRate,
+  int channels,
+  int bits,
+  int format,
+});
+
 /// Computes spectrograms from audio files off the UI thread. v1 supports
 /// uncompressed WAV (our recordings + dropped WAV); returns null for other
 /// formats.
@@ -56,7 +69,7 @@ class SpectrogramService {
   /// canonical-44-byte take probe — an imported WAV is exactly the file most
   /// likely to carry them.
   @visibleForTesting
-  static Future<int?> admittedReadLength(File file) async {
+  static Future<WavAdmission?> admitForAnalysis(File file) async {
     RandomAccessFile? raf;
     try {
       raf = await file.open();
@@ -65,7 +78,7 @@ class SpectrogramService {
       String tag(Uint8List b, int o) => String.fromCharCodes(b, o, o + 4);
       if (tag(head, 0) != 'RIFF' || tag(head, 8) != 'WAVE') return null;
       var offset = 12;
-      var sampleRate = 0, blockAlign = 0;
+      var sampleRate = 0, blockAlign = 0, channels = 0, bits = 0, format = 0;
       // Bounded walk: a well-formed WAV reaches `data` within a handful of
       // chunks; 64 tolerates every real-world metadata pile-up while a
       // malformed chain can't spin forever.
@@ -88,31 +101,59 @@ class SpectrogramService {
           // channels * ceil(bits / 8), and the supported envelope is bounded
           // (channels, bit depth, rate) so no header arithmetic can inflate
           // the ceilings below.
-          final channels = bd.getUint16(2, Endian.little);
-          final bits = bd.getUint16(14, Endian.little);
+          channels = bd.getUint16(2, Endian.little);
+          bits = bd.getUint16(14, Endian.little);
+          // Effective sample format: WAVE_FORMAT_EXTENSIBLE (0xFFFE) resolves
+          // to the SubFormat GUID's leading code at fmt offset 24.
+          final tag2 = bd.getUint16(0, Endian.little);
+          format = tag2 == 0xFFFE && body.length >= 26
+              ? bd.getUint16(24, Endian.little)
+              : tag2;
           const legalBits = {8, 16, 24, 32, 64};
+          final legalFormat = switch (format) {
+            1 => legalBits.contains(bits),
+            3 => bits == 32 || bits == 64,
+            _ => false,
+          };
           if (channels < 1 ||
               channels > 8 ||
-              !legalBits.contains(bits) ||
+              !legalFormat ||
               sampleRate < 8000 ||
               sampleRate > 384000 ||
               blockAlign != channels * ((bits + 7) ~/ 8)) {
             return null;
           }
         } else if (id == 'data') {
-          if (sampleRate <= 0 || blockAlign <= 0) return null;
-          final frames = size ~/ blockAlign;
+          if (sampleRate <= 0 || blockAlign <= 0 || format == 0) return null;
+          // Ceilings judge the DECLARED size first — the whole point of the
+          // gate is refusing a big file from its header, before any physical
+          // size is consulted.
+          final declaredFrames = size ~/ blockAlign;
           final capFrames =
               MediaAnalysisService.maxAnalysisDuration.inMilliseconds *
               sampleRate ~/
               1000;
-          if (frames > capFrames) return null;
+          if (declaredFrames > capFrames) return null;
           // Header-independent ceilings (see their doc): bytes bound what the
-          // isolate reads, frames bound what the decoder expands to.
-          if (frames > maxAnalysisFrames) return null;
-          final limit = offset + 8 + size;
-          if (limit > maxAnalysisBytes) return null;
-          return limit;
+          // reader streams through, frames bound the Float64 analysis buffer.
+          if (declaredFrames > maxAnalysisFrames) return null;
+          if (offset + 8 + size > maxAnalysisBytes) return null;
+          // Only THEN clamp to what the file physically holds (a hard-killed
+          // or lying header must not make the reader wait on missing bytes).
+          final fileLen = await file.length();
+          final avail = fileLen - (offset + 8);
+          if (avail <= 0) return null;
+          final dataLen = size < avail ? size : avail;
+          final frames = dataLen ~/ blockAlign;
+          if (frames == 0) return null;
+          return (
+            dataStart: offset + 8,
+            frames: frames,
+            sampleRate: sampleRate,
+            channels: channels,
+            bits: bits,
+            format: format,
+          );
         }
         offset += 8 + size + (size & 1); // chunks are word-aligned
       }
@@ -125,13 +166,58 @@ class SpectrogramService {
     }
   }
 
-  /// Reads at most [limit] bytes of [path] — the gate-admitted region (header
-  /// through the end of the data chunk). Runs inside the analysis isolate.
-  static Uint8List _readAdmitted(String path, int limit) {
+  /// Streams the admitted PCM straight into the ONE Float64 mono analysis
+  /// buffer, in bounded frame-aligned chunks (4 MiB). Runs inside the
+  /// analysis isolate. This is the memory-budget half of the gate: the old
+  /// shape read the whole byte payload first and THEN decoded, so a legal
+  /// 30-minute stereo float take held ~691 MB of bytes beside ~691 MB of
+  /// Float64 — the peak is now the analysis buffer plus one chunk.
+  @visibleForTesting
+  static PcmAudio? readWavMonoStreaming(String path, WavAdmission a) {
+    final sampleBytes = (a.bits + 7) ~/ 8;
+    final frameBytes = a.channels * sampleBytes;
+    final out = Float64List(a.frames);
     final raf = File(path).openSync();
     try {
-      final len = raf.lengthSync();
-      return raf.readSync(len < limit ? len : limit);
+      raf.setPositionSync(a.dataStart);
+      const chunkBudget = 4 << 20;
+      final framesPerChunk = (chunkBudget ~/ frameBytes).clamp(1, a.frames);
+      var frame = 0;
+      final inv = 1.0 / a.channels;
+      while (frame < a.frames) {
+        final want = (a.frames - frame).clamp(0, framesPerChunk);
+        final bytes = raf.readSync(want * frameBytes);
+        final got = bytes.length ~/ frameBytes;
+        if (got == 0) break; // truncated on disk: keep what exists
+        final bd = ByteData.sublistView(bytes);
+        for (var f = 0; f < got; f++) {
+          var acc = 0.0;
+          final base = f * frameBytes;
+          for (var c = 0; c < a.channels; c++) {
+            final o = base + c * sampleBytes;
+            acc += switch ((a.format, a.bits)) {
+              (1, 8) => (bytes[o] - 128) / 128.0,
+              (1, 16) => bd.getInt16(o, Endian.little) / 32768.0,
+              (1, 24) =>
+                (bytes[o] | (bytes[o + 1] << 8) | (bytes[o + 2] << 16))
+                        .toSigned(24) /
+                    8388608.0,
+              (1, 32) => bd.getInt32(o, Endian.little) / 2147483648.0,
+              (3, 32) => bd.getFloat32(o, Endian.little),
+              (3, 64) => bd.getFloat64(o, Endian.little),
+              _ => 0.0, // unreachable: the gate admitted the format
+            };
+          }
+          out[frame + f] = acc * inv;
+        }
+        frame += got;
+      }
+      if (frame == 0) return null;
+      // A truncated file yields a shorter buffer; keep the honest length.
+      return PcmAudio(
+        frame == a.frames ? out : Float64List.sublistView(out, 0, frame),
+        a.sampleRate,
+      );
     } finally {
       raf.closeSync();
     }
@@ -145,12 +231,12 @@ class SpectrogramService {
   }) async {
     final file = File(path);
     if (!await file.exists()) return null;
-    final limit = await admittedReadLength(file);
-    if (limit == null) return null;
-    // STFT is heavy — run it in a background isolate (which also reads the
-    // bytes — capped at the admitted length — so they never exist twice).
+    final admission = await admitForAnalysis(file);
+    if (admission == null) return null;
+    // STFT is heavy — run it in a background isolate (which also streams the
+    // decode, so raw bytes never materialize whole).
     return Isolate.run(() {
-      final pcm = readWavMono(_readAdmitted(path, limit));
+      final pcm = readWavMonoStreaming(path, admission);
       if (pcm == null) return null;
       return computeSpectrogram(
         pcm.samples,
@@ -171,10 +257,10 @@ class SpectrogramService {
   }) async {
     final file = File(path);
     if (!await file.exists()) return null;
-    final limit = await admittedReadLength(file);
-    if (limit == null) return null;
+    final admission = await admitForAnalysis(file);
+    if (admission == null) return null;
     return Isolate.run(() {
-      final pcm = readWavMono(_readAdmitted(path, limit));
+      final pcm = readWavMonoStreaming(path, admission);
       if (pcm == null) return null;
       return computeVoiceMetrics(
         pcm.samples,
@@ -199,10 +285,10 @@ class SpectrogramService {
   }) async {
     final file = File(path);
     if (!await file.exists()) return null;
-    final limit = await admittedReadLength(file);
-    if (limit == null) return null;
+    final admission = await admitForAnalysis(file);
+    if (admission == null) return null;
     return Isolate.run(() {
-      final pcm = readWavMono(_readAdmitted(path, limit));
+      final pcm = readWavMonoStreaming(path, admission);
       if (pcm == null) return null;
       final spectrogram = computeSpectrogram(
         pcm.samples,

@@ -1,7 +1,9 @@
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:vocara/data/services/audio_dsp.dart';
 import 'package:vocara/data/services/spectrogram_service.dart';
 
 /// Builds a RIFF/WAVE header with an arbitrary chunk sequence and a `data`
@@ -94,10 +96,19 @@ void main() {
   }
 
   test('a canonical WAV under the cap is admitted', () async {
-    final f = await write(
-      _wavHeader(sampleRate: 44100, blockAlign: 2, declaredDataBytes: underCap),
-    );
-    expect(await SpectrogramService.admittedReadLength(f), isNotNull);
+    // The gate clamps the declared payload to what the file physically holds,
+    // so the admitted fixture needs its bytes actually present.
+    final withBody = BytesBuilder()
+      ..add(
+        _wavHeader(
+          sampleRate: 44100,
+          blockAlign: 2,
+          declaredDataBytes: underCap,
+        ),
+      )
+      ..add(Uint8List(underCap));
+    final f = await write(withBody.toBytes());
+    expect(await SpectrogramService.admitForAnalysis(f), isNotNull);
   });
 
   test('an EXTENSIBLE WAV with extra chunks is still measured, and skipped '
@@ -105,16 +116,19 @@ void main() {
     // The old canonical-44-byte probe returned "unknown" for exactly this
     // shape and the whole file was then loaded; the chunk walk must both admit
     // a short one and refuse a long one.
-    final short = await write(
-      _wavHeader(
-        sampleRate: 44100,
-        blockAlign: 2,
-        declaredDataBytes: underCap,
-        extensible: true,
-        extraListChunk: true,
-      ),
-    );
-    expect(await SpectrogramService.admittedReadLength(short), isNotNull);
+    final shortBody = BytesBuilder()
+      ..add(
+        _wavHeader(
+          sampleRate: 44100,
+          blockAlign: 2,
+          declaredDataBytes: underCap,
+          extensible: true,
+          extraListChunk: true,
+        ),
+      )
+      ..add(Uint8List(underCap));
+    final short = await write(shortBody.toBytes());
+    expect(await SpectrogramService.admitForAnalysis(short), isNotNull);
 
     final long = await write(
       _wavHeader(
@@ -125,7 +139,7 @@ void main() {
         extraListChunk: true,
       ),
     );
-    expect(await SpectrogramService.admittedReadLength(long), isNull);
+    expect(await SpectrogramService.admitForAnalysis(long), isNull);
   });
 
   test(
@@ -140,18 +154,18 @@ void main() {
           declaredDataBytes: overCap,
         ),
       );
-      expect(await SpectrogramService.admittedReadLength(f), isNull);
+      expect(await SpectrogramService.admitForAnalysis(f), isNull);
     },
   );
 
   test('non-WAV files are skipped without reading the body', () async {
     final f = await write(Uint8List.fromList(List.filled(4096, 7)));
-    expect(await SpectrogramService.admittedReadLength(f), isNull);
+    expect(await SpectrogramService.admitForAnalysis(f), isNull);
   });
 
   test('a missing file is skipped, not crashed on', () async {
     expect(
-      await SpectrogramService.admittedReadLength(File('/nonexistent/x.wav')),
+      await SpectrogramService.admitForAnalysis(File('/nonexistent/x.wav')),
       isNull,
     );
   });
@@ -170,7 +184,7 @@ void main() {
           declaredDataBytes: overCap,
         ),
       );
-      expect(await SpectrogramService.admittedReadLength(f), isNull);
+      expect(await SpectrogramService.admitForAnalysis(f), isNull);
     },
   );
 
@@ -185,7 +199,7 @@ void main() {
           declaredDataBytes: underCap,
         ),
       );
-      expect(await SpectrogramService.admittedReadLength(f), isNull);
+      expect(await SpectrogramService.admitForAnalysis(f), isNull);
     },
   );
 
@@ -198,7 +212,7 @@ void main() {
     final f = await write(
       _wavHeader8ch(sampleRate: 44100, declaredDataBytes: 850 * 1000 * 1000),
     );
-    expect(await SpectrogramService.admittedReadLength(f), isNull);
+    expect(await SpectrogramService.admitForAnalysis(f), isNull);
   });
 
   test('the admitted length stops at the end of the data chunk: trailing '
@@ -217,12 +231,129 @@ void main() {
       ..add(Uint8List.fromList(List.filled(1 << 20, 0x5A))); // trailing junk
     final f = await write(withJunk.toBytes());
 
-    final limit = await SpectrogramService.admittedReadLength(f);
-    expect(limit, header.length + underCap);
+    final admission = await SpectrogramService.admitForAnalysis(f);
+    expect(admission, isNotNull);
     expect(
-      limit! < await f.length(),
-      isTrue,
-      reason: 'the junk tail must sit past the admitted read length',
+      admission!.dataStart + admission.frames * 2,
+      header.length + underCap,
+      reason: 'the admitted PCM ends exactly at the data chunk boundary',
     );
+    expect(
+      admission.dataStart + admission.frames * 2 < await f.length(),
+      isTrue,
+      reason: 'the junk tail must sit past the admitted region',
+    );
+  });
+
+  group('readWavMonoStreaming equals the reference decoder', () {
+    Future<void> check(String name, Uint8List bytes) async {
+      final f = await write(bytes);
+      final admission = await SpectrogramService.admitForAnalysis(f);
+      expect(admission, isNotNull, reason: '$name must be admitted');
+      final streamed = SpectrogramService.readWavMonoStreaming(
+        f.path,
+        admission!,
+      );
+      final reference = readWavMono(bytes);
+      expect(streamed, isNotNull, reason: name);
+      expect(reference, isNotNull, reason: name);
+      expect(streamed!.sampleRate, reference!.sampleRate, reason: name);
+      expect(streamed.samples.length, reference.samples.length, reason: name);
+      for (var i = 0; i < streamed.samples.length; i++) {
+        expect(
+          streamed.samples[i],
+          closeTo(reference.samples[i], 1e-9),
+          reason: '$name sample $i',
+        );
+      }
+    }
+
+    test('mono PCM16', () async {
+      final samples = Float64List.fromList([
+        for (var i = 0; i < 500; i++) math.sin(i / 25) * 0.8,
+      ]);
+      await check('mono pcm16', writeWavMono(samples, 8000));
+    });
+
+    test('EXTENSIBLE PCM16 with extra chunks (stereo downmix path)', () async {
+      // Interleaved stereo with distinct channels, so the downmix averaging is
+      // genuinely exercised.
+      final data = Uint8List(400 * 4);
+      final dv = ByteData.sublistView(data);
+      for (var i = 0; i < 400; i++) {
+        dv.setInt16(i * 4, (math.sin(i / 10) * 12000).round(), Endian.little);
+        dv.setInt16(
+          i * 4 + 2,
+          (math.cos(i / 10) * 9000).round(),
+          Endian.little,
+        );
+      }
+      final b = BytesBuilder();
+      void str(String s) => b.add(s.codeUnits);
+      void u32(int v) => b.add(
+        (ByteData(4)..setUint32(0, v, Endian.little)).buffer.asUint8List(),
+      );
+      void u16(int v) => b.add(
+        (ByteData(2)..setUint16(0, v, Endian.little)).buffer.asUint8List(),
+      );
+      str('RIFF');
+      u32(4 + 12 + (8 + 40) + (8 + data.length));
+      str('WAVE');
+      str('LIST');
+      u32(4);
+      b.add(Uint8List(4));
+      str('fmt ');
+      u32(40);
+      u16(0xFFFE);
+      u16(2); // channels
+      u32(8000);
+      u32(8000 * 4);
+      u16(4); // blockAlign
+      u16(16);
+      u16(22);
+      u16(16);
+      u32(3);
+      u16(1); // SubFormat = PCM
+      b.add(const [
+        0x00, 0x00, 0x00, 0x00, 0x10, 0x00, //
+        0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71, //
+      ]);
+      str('data');
+      u32(data.length);
+      b.add(data);
+      await check('extensible stereo pcm16', b.toBytes());
+    });
+
+    test('float32 (the take format)', () async {
+      final data = Uint8List(300 * 4);
+      final dv = ByteData.sublistView(data);
+      for (var i = 0; i < 300; i++) {
+        // Includes an over-unity peak, legal in float takes.
+        dv.setFloat32(i * 4, math.sin(i / 7) * 1.2, Endian.little);
+      }
+      final b = BytesBuilder();
+      void str(String s) => b.add(s.codeUnits);
+      void u32(int v) => b.add(
+        (ByteData(4)..setUint32(0, v, Endian.little)).buffer.asUint8List(),
+      );
+      void u16(int v) => b.add(
+        (ByteData(2)..setUint16(0, v, Endian.little)).buffer.asUint8List(),
+      );
+      str('RIFF');
+      u32(36 + data.length);
+      str('WAVE');
+      str('fmt ');
+      u32(16);
+      u16(3); // IEEE float
+      u16(1);
+      u32(48000);
+      u32(48000 * 4);
+      u16(4);
+      u16(32);
+      str('data');
+      u32(data.length);
+      b.add(data);
+      await check('mono float32', b.toBytes());
+    });
   });
 }
