@@ -151,6 +151,62 @@ void main() {
     });
   });
 
+  group('HlcClock.assertPlausible (check-only drift gate)', () {
+    test('accepts and rejects on exactly the same boundary as receive, '
+        'without mutating any clock state', () {
+      const maxDrift = 60000;
+      Hlc remote(int wall) => Hlc(wallMs: wall, counter: 0, node: 'M');
+
+      // Two identical clocks: one probed check-only, one driven by receive —
+      // the drift verdicts must match on both sides of the boundary.
+      final probe = HlcClock(node: 'N', now: () => 1000, maxDriftMs: maxDrift);
+      final mutate = HlcClock(node: 'N', now: () => 1000, maxDriftMs: maxDrift);
+
+      // At the boundary: both accept.
+      final atEdge = remote(1000 + maxDrift);
+      expect(() => probe.assertPlausible(atEdge), returnsNormally);
+      expect(() => mutate.receive(atEdge), returnsNormally);
+      // One past the boundary: both refuse. (mutate advanced to the edge
+      // stamp above, raising maxWallEverSeen — probe the SAME reference by
+      // judging a stamp one past drift from that raised reference.)
+      expect(
+        () => probe.assertPlausible(remote(1000 + maxDrift + 1)),
+        throwsA(isA<HlcDriftException>()),
+      );
+      expect(
+        () => mutate.receive(remote(1000 + maxDrift + maxDrift + 1)),
+        throwsA(isA<HlcDriftException>()),
+      );
+
+      // The check-only clock is bit-for-bit where it started: neither the
+      // accepted nor the refused probe moved last or maxWallEverSeen.
+      expect(probe.last, Hlc(wallMs: 0, counter: 0, node: 'N'));
+      expect(probe.maxWallEverSeen, 0);
+      // A subsequent tick behaves as if the probes never happened.
+      expect(probe.tick(), Hlc(wallMs: 1000, counter: 0, node: 'N'));
+    });
+
+    test('judges against max(now, maxWallEverSeen) exactly like receive '
+        '(a slow local clock still accepts honest remotes)', () {
+      const trueNow = 10 * 60 * 1000;
+      // Local clock 10 minutes behind real time; the persisted last stamp
+      // anchors maxWallEverSeen near real time (same setup as the receive
+      // test above).
+      final clock = HlcClock(
+        node: 'N',
+        now: () => 1000,
+        initial: Hlc(wallMs: trueNow, counter: 0, node: 'N'),
+      );
+      final honest = Hlc(wallMs: trueNow + 1000, counter: 0, node: 'M');
+      expect(() => clock.assertPlausible(honest), returnsNormally);
+      // And the plausible-but-unreceived stamp changed nothing.
+      expect(clock.last.wallMs, trueNow);
+      expect(clock.maxWallEverSeen, trueNow);
+      // receive agrees with the check-only verdict.
+      expect(() => clock.receive(honest), returnsNormally);
+    });
+  });
+
   group('counter cap (fixed 6-digit packed field)', () {
     test('tick spills into the next millisecond at counter 999999', () {
       // Hold the wall (now < last.wallMs) so every tick lands in the same

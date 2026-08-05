@@ -166,30 +166,27 @@ class HlcClock {
     return _last;
   }
 
+  /// Judges [remote] against the drift rule WITHOUT advancing the clock:
+  /// throws [HlcDriftException] exactly when [receive] would, and mutates
+  /// nothing. This exists so the [SyncApplier] can GATE a record before its
+  /// savepoint while deferring the state-changing [receive] until the record
+  /// actually settled — before the split, a record that failed (or was
+  /// quarantined) inside its savepoint had already advanced the in-memory
+  /// clock, so a rolled-back record still left a side effect behind. Both
+  /// methods share [_checkDrift], so the two rules can never diverge.
+  void assertPlausible(Hlc remote) => _checkDrift(remote, _now());
+
   /// Merges a [remote] stamp seen on an inbound record, advancing the local
   /// clock per the canonical HLC receive rule so subsequent local stamps stay
   /// causally after anything we have observed. Returns the new local stamp.
   ///
   /// Refuses a remote whose wall is more than [maxDriftMs] in the future
   /// ([HlcDriftException]) so one device's bad clock can't contaminate ours. A
-  /// remote in the past is fine (it simply doesn't advance us).
+  /// remote in the past is fine (it simply doesn't advance us). The check-only
+  /// form of the same rule is [assertPlausible].
   Hlc receive(Hlc remote) {
     final now = _now();
-    // Judge "implausibly far in the future" against the best estimate of true time
-    // we have: the later of our local clock and the highest wall we have ever seen
-    // from an honest peer. Gating on the local clock alone meant that if OUR clock
-    // ran slow by more than [maxDriftMs], every correctly-stamped remote looked
-    // far-future and ALL inbound sync was quarantined. Using max(now, seen) keeps
-    // the gate working through a slow local clock while still rejecting a genuinely
-    // far-future remote clock.
-    final reference = now > _maxWallEverSeen ? now : _maxWallEverSeen;
-    if (remote.wallMs - reference > maxDriftMs) {
-      throw HlcDriftException(
-        remote: remote,
-        nowMs: reference,
-        maxDriftMs: maxDriftMs,
-      );
-    }
+    _checkDrift(remote, now);
     var wall = [
       now,
       _last.wallMs,
@@ -215,6 +212,25 @@ class HlcClock {
     _last = Hlc(wallMs: wall, counter: counter, node: node);
     _track(wall);
     return _last;
+  }
+
+  /// The shared drift rule behind [receive] and [assertPlausible]. Judge
+  /// "implausibly far in the future" against the best estimate of true time
+  /// we have: the later of our local clock and the highest wall we have ever
+  /// seen from an honest peer. Gating on the local clock alone meant that if
+  /// OUR clock ran slow by more than [maxDriftMs], every correctly-stamped
+  /// remote looked far-future and ALL inbound sync was quarantined. Using
+  /// max(now, seen) keeps the gate working through a slow local clock while
+  /// still rejecting a genuinely far-future remote clock.
+  void _checkDrift(Hlc remote, int now) {
+    final reference = now > _maxWallEverSeen ? now : _maxWallEverSeen;
+    if (remote.wallMs - reference > maxDriftMs) {
+      throw HlcDriftException(
+        remote: remote,
+        nowMs: reference,
+        maxDriftMs: maxDriftMs,
+      );
+    }
   }
 
   void _track(int wall) {

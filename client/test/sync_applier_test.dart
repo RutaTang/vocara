@@ -23,6 +23,10 @@ void main() {
   Hlc hlc(int wall, [int ctr = 0]) =>
       Hlc(wallMs: wall, counter: ctr, node: remoteNode);
 
+  // Every helper below builds a FULL-row snapshot (all non-per-device columns
+  // of its table), matching the wire contract the applier now enforces for
+  // schema_v == currentRecordSchemaV records: a partial row is quarantined at
+  // the missing-column gate, never partially applied.
   RemoteRecord practice(
     String id,
     String title,
@@ -36,8 +40,12 @@ void main() {
       'title': title,
       'timeline_duration_ms': 0,
       'master_volume': 1.0,
-      if (separationAssetId != null)
-        'separation_asset_id': _id(separationAssetId),
+      'active_interpretation_id': null,
+      'separation_asset_id': separationAssetId == null
+          ? null
+          : _id(separationAssetId),
+      'reverb_json': null,
+      'lyrics_json': null,
       'created_at': h.wallMs,
       'updated_at': h.wallMs,
       'deleted_at': deletedAt,
@@ -55,11 +63,16 @@ void main() {
       'id': _id(id),
       'practice_id': _id(practiceId),
       'kind': 'vocal',
+      'interpretation_id': null,
       'display_name': '',
+      'color_value': null,
       'muted': 0,
       'soloed': 0,
       'volume': 1.0,
       'pan': 0.0,
+      'bus_id': null,
+      'fx_json': null,
+      'sends_json': null,
       'order_index': 0,
       'created_at': h.wallMs,
       'updated_at': h.wallMs,
@@ -232,6 +245,138 @@ void main() {
     expect(await row('BAD'), isNull);
   });
 
+  group('missing-column gate (full-row wire contract)', () {
+    Future<String> hlcPackedOf(String id) async {
+      final r = await db
+          .customSelect(
+            'SELECT hlc_packed FROM practices WHERE id = ?',
+            variables: [Variable.withString(_id(id))],
+          )
+          .getSingle();
+      return r.read<String>('hlc_packed');
+    }
+
+    test('a PARTIAL row at the current schema_v is quarantined whole — '
+        'neither content nor hlc_packed moves, so a later genuine full row '
+        'with an intermediate HLC still wins LWW', () async {
+      final store = QuarantineStore(db);
+      applier = SyncApplier(
+        db,
+        HlcClock(node: _id('LOCAL'), now: () => 1000),
+        quarantine: store,
+      );
+      await applier.apply([practice('P', 'v1', hlc(900))]);
+
+      // A partial row with the NEWEST HLC. Accepting it would write
+      // hlc_packed 950 while keeping stale content for the missing column —
+      // and the genuine full row below (HLC 920) would then lose LWW forever.
+      final partial = Map<String, Object?>.of(
+        practice('P', 'poisoner', hlc(950)).columns,
+      )..remove('reverb_json');
+      final res = await applier.apply([
+        RemoteRecord(table: 'practices', columns: partial),
+      ]);
+      expect(res.failed, 1);
+      expect(res.applied, 0);
+      expect((await row('P'))!['title'], 'v1', reason: 'content unchanged');
+      expect(
+        await hlcPackedOf('P'),
+        hlc(900).packed,
+        reason: 'the LWW key must not advance on a rejected partial row',
+      );
+      final parked = await store.list();
+      expect(parked, hasLength(1));
+      expect(parked.single.reason, startsWith('missing-column'));
+      expect(parked.single.reason, contains('reverb_json'));
+
+      // The genuine full row between the two HLCs applies normally.
+      final late = await applier.apply([practice('P', 'v2', hlc(920))]);
+      expect(late.applied, 1);
+      expect((await row('P'))!['title'], 'v2');
+      expect(await hlcPackedOf('P'), hlc(920).packed);
+    });
+
+    test('a partial row from an OLDER schema_v is NOT enforced (an older '
+        'peer legitimately lacks newly added columns)', () async {
+      await applier.apply([practice('P', 'v1', hlc(900))]);
+
+      // A v0 peer's row: full for ITS shape, partial for ours. Simulated as
+      // a subset carrying schema_v 0 — the gate must let it through, and the
+      // update touches only the carried columns.
+      final h = hlc(950);
+      final res = await applier.apply([
+        RemoteRecord(
+          table: 'practices',
+          columns: {
+            'id': _id('P'),
+            'title': 'from an old build',
+            'created_at': h.wallMs,
+            'updated_at': h.wallMs,
+            'deleted_at': null,
+            'hlc_wall': h.wallMs,
+            'hlc_ctr': h.counter,
+            'hlc_node': h.node,
+            'hlc_packed': h.packed,
+            'schema_v': 0,
+          },
+        ),
+      ]);
+      expect(res.applied, 1);
+      expect(res.failed, 0);
+      expect((await row('P'))!['title'], 'from an old build');
+      expect(await hlcPackedOf('P'), h.packed);
+    });
+  });
+
+  group('clock advance timing', () {
+    test(
+      'a record that fails inside its savepoint leaves the clock exactly '
+      'where it was (the gate is check-only; receive runs post-settle)',
+      () async {
+        final before = applier.clock.last;
+        // Passes every door gate (full columns, plausible HLC one minute
+        // ahead) and then violates the byte_size CHECK inside its savepoint.
+        final h = hlc(1000 + 60 * 1000);
+        final res = await applier.apply([
+          RemoteRecord(
+            table: 'assets',
+            columns: {
+              'id': _id('BAD'),
+              'content_hash': 'HASH_BAD',
+              'byte_size': -1, // CHECK (byte_size >= 0) fires in the savepoint
+              'ext': 'wav',
+              'kind': 'audio',
+              'created_at': h.wallMs,
+              'updated_at': h.wallMs,
+              'deleted_at': null,
+              'hlc_wall': h.wallMs,
+              'hlc_ctr': h.counter,
+              'hlc_node': h.node,
+              'hlc_packed': h.packed,
+              'schema_v': 1,
+            },
+          ),
+        ]);
+        expect(res.failed, 1);
+        expect(res.applied, 0);
+        expect(
+          applier.clock.last,
+          before,
+          reason:
+              'a rolled-back record must leave NO side effect — an advanced '
+              'in-memory clock included',
+        );
+      },
+    );
+
+    test('an applied record advances the clock past its stamp', () async {
+      final h = hlc(1000 + 60 * 1000); // one minute ahead, within drift
+      final res = await applier.apply([practice('P', 'applied', h)]);
+      expect(res.applied, 1);
+      expect(applier.clock.last.wallMs, greaterThanOrEqualTo(h.wallMs));
+    });
+  });
+
   test('applying remote changes writes NO oplog (no ping-pong)', () async {
     await applier.apply([
       practice('A', 'a', hlc(900)),
@@ -391,15 +536,16 @@ void main() {
       expect(row['remote_ref'], 'blob://HASH_A');
     });
 
-    test('a remote INSERT with per-device columns lands on schema defaults '
-        '(no adopted foreign bookkeeping)', () async {
+    test('a remote INSERT with per-device columns adopts no foreign '
+        'bookkeeping: schema defaults, except record_sync_state which is '
+        'forced to synced (the row demonstrably crossed the wire)', () async {
       final res = await applier.apply([
         asset(
           'B',
           hlc(900),
           extra: const {
             'local_rel_path': 'assets/XX/YY/HASH_B.wav',
-            'record_sync_state': 'synced',
+            'record_sync_state': 'localOnly',
             'bytes_sync_state': 'present',
             'remote_ref': 'blob://HASH_B',
           },
@@ -409,10 +555,43 @@ void main() {
 
       final row = await assetRow('B');
       expect(row['local_rel_path'], isNull, reason: 'no bytes here yet');
-      expect(row['record_sync_state'], 'localOnly');
-      expect(row['bytes_sync_state'], 'localOnly');
+      // NOT the sender's value and NOT the drift default: a wire-arrived
+      // assets row is by definition record-synced, and leaving it at
+      // 'localOnly' would make it sweepable by the asset-GC's never-synced
+      // guard — the exact rows the guard exists to protect.
+      expect(row['record_sync_state'], 'synced');
+      expect(row['bytes_sync_state'], 'localOnly', reason: 'no bytes here');
       expect(row['remote_ref'], isNull);
     });
+
+    test(
+      'a remote UPDATE of an existing localOnly asset row marks it '
+      'record-synced (another device now provably holds the record)',
+      () async {
+        // A locally-created asset row, never synced (drift defaults).
+        await db.customStatement(
+          'INSERT INTO assets (id, content_hash, byte_size, ext, kind, '
+          'created_at, updated_at, hlc_wall, hlc_ctr, hlc_node, hlc_packed, '
+          'schema_v) VALUES (?, ?, 8, ?, ?, 900, 900, 900, 0, ?, ?, 1)',
+          [_id('A'), 'HASH_A', 'wav', 'audio', remoteNode, hlc(900).packed],
+        );
+        expect((await assetRow('A'))['record_sync_state'], 'localOnly');
+
+        // A newer remote version of the SAME row arrives: the update must
+        // advance record_sync_state along with the content — a remote peer
+        // holding (and editing) the record is proof it crossed the wire.
+        final res = await applier.apply([asset('A', hlc(950), ext: 'mp3')]);
+        expect(res.applied, 1);
+        final row = await assetRow('A');
+        expect(row['ext'], 'mp3', reason: 'the content update applied');
+        expect(row['record_sync_state'], 'synced');
+        expect(
+          row['bytes_sync_state'],
+          'localOnly',
+          reason: 'blob upload state is untouched — it has no transport yet',
+        );
+      },
+    );
   });
 
   group('quarantine persistence', () {

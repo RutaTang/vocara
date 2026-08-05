@@ -51,7 +51,12 @@ class ApplyResult {
 /// The clock is advanced via [HlcClock.receive] so subsequent LOCAL writes
 /// stay causally after everything we've seen; a record whose clock is
 /// implausibly far in the future is quarantined instead of merged (one bad
-/// peer can't poison the fleet).
+/// peer can't poison the fleet). The gate and the advance are split
+/// deliberately: [HlcClock.assertPlausible] (check-only, same drift rule)
+/// runs with the other door gates, and the state-changing receive() runs only
+/// once the record's savepoint has settled as applied or skipped — a record
+/// that fails inside its savepoint must leave NO side effect behind, and an
+/// advanced in-memory clock is a side effect.
 ///
 /// Apply is order-tolerant and per-record resilient: defer_foreign_keys lets a
 /// child arrive before its parent within the batch, and each record applies
@@ -196,8 +201,48 @@ class SyncApplier {
               );
               continue;
             }
+            // The mirror gate: at the CURRENT record schema version a record
+            // must carry EVERY column of the table (minus the per-device set,
+            // which never rides the wire) — the wire contract is full-row
+            // snapshots (docs/sync-protocol.md). A partial row that won LWW
+            // would advance hlc_packed while keeping STALE local content for
+            // its missing columns, and a later genuine full row with an
+            // intermediate HLC then loses LWW forever — the row is poisoned,
+            // not just briefly wrong. Quarantined like an unknown column: the
+            // sender is non-conforming, and the parking lot (not a silent
+            // partial write) is where a non-conforming record belongs.
+            //
+            // Deliberately NOT enforced for schema_v < current: an older peer
+            // legitimately lacks columns this build added, and its full-row
+            // snapshot of the OLD shape is still the safest thing to apply. A
+            // per-version column registry (required set keyed by schema_v) is
+            // the future-proof answer once a v2 exists; until then the live
+            // schema — the same source the unknown-column gate reads — IS the
+            // v-current column set.
+            if (rec.schemaV == currentRecordSchemaV) {
+              final perDevice = perDeviceColumns[rec.table] ?? const <String>{};
+              final missing = known
+                  .where(
+                    (c) => !perDevice.contains(c) && !rec.fields.containsKey(c),
+                  )
+                  .toList();
+              if (missing.isNotEmpty) {
+                result.failed++;
+                await _quarantine(
+                  rec,
+                  'missing-column: ${missing.map((c) => '"$c"').join(', ')} '
+                  'absent from a schema_v $currentRecordSchemaV record for '
+                  '"${rec.table}" (the wire contract is full-row snapshots)',
+                );
+                continue;
+              }
+            }
             try {
-              clock.receive(rec.hlc);
+              // Check-only: the drift gate must not advance the clock, or a
+              // record that then fails/quarantines inside its savepoint would
+              // still have moved it. The advancing receive() runs after the
+              // savepoint settles, below.
+              clock.assertPlausible(rec.hlc);
             } on HlcDriftException catch (e) {
               result.quarantined++;
               await _quarantine(rec, 'hlc-drift: $e');
@@ -227,7 +272,7 @@ class SyncApplier {
               // UNIQUE index; inserting a second LIVE row for an occupied slot raises a
               // UNIQUE violation. Resolving here (and the whole write) is in this
               // record's savepoint, so a failure rolls back the occupant tombstone too.
-              final columns = _stripPerDevice(
+              final columns = _localizePerDevice(
                 rec.table,
                 await _resolveSlot(rec),
               );
@@ -239,6 +284,12 @@ class SyncApplier {
               }
               return true;
             });
+            // The record settled (applied, or cleanly lost LWW) — only NOW
+            // advance the clock past its stamp, so subsequent local writes
+            // stay causally after it. This cannot throw: assertPlausible
+            // above passed with the same drift rule, and its reference
+            // (max(now, maxWallEverSeen)) only grows between the two calls.
+            clock.receive(rec.hlc);
             if (applied) {
               result.applied++;
               if (didInsert) insertedThisBatch.add((rec.table, rec.id));
@@ -519,25 +570,33 @@ class SyncApplier {
         );
   }
 
-  /// Drops [perDeviceColumns] from an inbound record before writing. The
-  /// builder already strips them from the outbound projection, but a peer on
-  /// an older build (or any non-conforming pusher) may still send them —
-  /// applying them verbatim would overwrite THIS device's local bookkeeping
-  /// (e.g. clobbering assets.local_rel_path so resolve() misses bytes that
-  /// exist here). Stripped, they are ordinary missing columns: an UPDATE
-  /// leaves the local values untouched and an INSERT takes the schema
-  /// defaults.
-  static Map<String, Object?> _stripPerDevice(
+  /// Localizes an inbound record's per-device bookkeeping before writing:
+  /// drops [perDeviceColumns] and then force-sets [inboundPerDeviceOverrides].
+  ///
+  /// The strip: the builder already omits per-device columns from the
+  /// outbound projection, but a peer on an older build (or any non-conforming
+  /// pusher) may still send them — applying them verbatim would overwrite
+  /// THIS device's local bookkeeping (e.g. clobbering assets.local_rel_path
+  /// so resolve() misses bytes that exist here). Stripped, they are ordinary
+  /// missing columns: an UPDATE leaves the local values untouched and an
+  /// INSERT takes the schema defaults.
+  ///
+  /// The overrides: some per-device state is DEDUCIBLE from the arrival
+  /// itself — an assets row that came over the wire is by definition
+  /// record-synced, and leaving an inserted row on the 'localOnly' schema
+  /// default would hand the asset-GC's never-synced guard exactly the rows it
+  /// must protect (see [inboundPerDeviceOverrides] for the full rationale).
+  static Map<String, Object?> _localizePerDevice(
     String table,
     Map<String, Object?> columns,
   ) {
     final perDevice = perDeviceColumns[table];
-    if (perDevice == null || !columns.keys.any(perDevice.contains)) {
-      return columns;
-    }
+    final overrides = inboundPerDeviceOverrides[table];
+    if (perDevice == null && overrides == null) return columns;
     return {
       for (final e in columns.entries)
-        if (!perDevice.contains(e.key)) e.key: e.value,
+        if (perDevice == null || !perDevice.contains(e.key)) e.key: e.value,
+      ...?overrides,
     };
   }
 

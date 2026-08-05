@@ -210,6 +210,26 @@ const Map<String, Set<String>> perDeviceColumns = {
   },
 };
 
+/// Per-device column VALUES the [SyncApplier] force-sets on an INBOUND row
+/// (insert and update alike), after stripping [perDeviceColumns]. Kept next to
+/// that map — the two are the single structural description of how per-device
+/// bookkeeping behaves at the remote door — so a new override can never be
+/// string-scattered through the applier.
+///
+/// Why `assets.record_sync_state = 'synced'`: a row that arrived over the
+/// wire has BY DEFINITION crossed it, and another device may already reference
+/// the asset. Left at the drift default 'localOnly' (which is exactly what an
+/// insert of a stripped row lands with), the asset-GC's never-synced guard
+/// (AssetStore.sweepUnreferenced) would treat the very rows it must protect as
+/// sweepable, tombstone them off local knowledge alone, and replicate the
+/// delete fleet-wide. `bytes_sync_state` is deliberately NOT overridden: it
+/// tracks this device's blob upload/download state, which has no transport yet
+/// — and the GC predicate requires BOTH columns to be 'localOnly', so marking
+/// the record side alone already protects every wire-arrived row.
+const Map<String, Map<String, Object?>> inboundPerDeviceOverrides = {
+  'assets': {'record_sync_state': 'synced'},
+};
+
 /// Table name -> drift [TableInfo] for exactly the SYNCED tables. Derived
 /// structurally from the SyncCols mixin's columns rather than a hand-kept list
 /// so a new synced table can never be silently left out (same philosophy as

@@ -160,17 +160,24 @@ void main() {
         },
       );
 
+  // Full-row snapshot (the wire contract): the applier's missing-column gate
+  // quarantines a schema_v-current record that omits any table column.
   SyncRow remoteTrack(String id, String practiceId, Hlc h) => SyncRow(
     table: 'tracks',
     fields: {
       'id': _id(id),
       'practice_id': _id(practiceId),
       'kind': 'vocal',
+      'interpretation_id': null,
       'display_name': 'take',
+      'color_value': null,
       'muted': 0,
       'soloed': 0,
       'volume': 1.0,
       'pan': 0.0,
+      'bus_id': null,
+      'fx_json': null,
+      'sends_json': null,
       'order_index': 0,
       ...syncCols(h),
     },
@@ -362,6 +369,167 @@ void main() {
       expect(retry.failed, isFalse);
       expect(await oplogCount(), 0);
       expect(cloud.serverRowFor('practices', _id('P')), isNotNull);
+    });
+  });
+
+  group('push ack validation', () {
+    // A PushAck is never trusted blind: the result set must cover EXACTLY the
+    // pushed rows, or the engine must fail the run BEFORE the oplog ack —
+    // otherwise a buggy or hostile server returning a short/wrong ack lets
+    // the engine delete journal entries for rows the server never stored.
+    // The well-formed-ack path is covered by every other push test.
+
+    test('an ack with FEWER results than pushed rows fails the run and '
+        'leaves the oplog intact', () async {
+      await savePractice('P1', 'one');
+      await savePractice('P2', 'two');
+      transport.mangleNextAck = (pushed, ack) =>
+          PushAck(ack.results.sublist(0, 1));
+
+      final run = await engine.pumpPush();
+      expect(run.failed, isTrue);
+      expect(run.failure, isA<SyncTransportException>());
+      expect(run.ackedThrough, 0);
+      expect(await oplogCount(), 2, reason: 'nothing acked on a bad ack');
+
+      // The knob cleared itself: an honest server drains the retry (the
+      // re-push of already-stored rows is a harmless LWW no-op server-side).
+      final retry = await engine.pumpPush();
+      expect(retry.failed, isFalse);
+      expect(await oplogCount(), 0);
+    });
+
+    test('an ack whose result is for a DIFFERENT row than was pushed fails '
+        'the run (same count is not enough — identity must match)', () async {
+      await savePractice('P1', 'one');
+      transport.mangleNextAck = (pushed, ack) => PushAck([
+        PushRowResult.accepted(
+          remotePractice('IMPOSTOR', 'not what we sent', remoteHlc(t0)),
+        ),
+      ]);
+
+      final run = await engine.pumpPush();
+      expect(run.failed, isTrue);
+      expect(run.failure, isA<SyncTransportException>());
+      expect(await oplogCount(), 1);
+    });
+
+    test('DUPLICATE results for one row (masking a missing one) fail the '
+        'run — the match is 1:1, not set membership', () async {
+      await savePractice('P1', 'one');
+      await savePractice('P2', 'two');
+      transport.mangleNextAck = (pushed, ack) =>
+          PushAck([ack.results.first, ack.results.first]);
+
+      final run = await engine.pumpPush();
+      expect(run.failed, isTrue);
+      expect(run.failure, isA<SyncTransportException>());
+      expect(await oplogCount(), 2);
+    });
+  });
+
+  group('asset record sync-state (push side)', () {
+    /// A LOCAL asset row + its journal entry, exactly as importFile commits
+    /// them (row and oplog entry in one transaction, drift defaults for the
+    /// per-device sync-state columns).
+    Future<void> saveAsset(String id, String hash) async {
+      nowMs += 1000;
+      final s = writer.stamp();
+      await db.transaction(() async {
+        await db
+            .into(db.assets)
+            .insert(
+              AssetsCompanion.insert(
+                id: _id(id),
+                contentHash: hash,
+                byteSize: 3,
+                createdAt: s.at,
+                updatedAt: s.at,
+                hlcWall: s.hlc.wallMs,
+                hlcCtr: s.hlc.counter,
+                hlcNode: s.hlc.node,
+                hlcPacked: s.hlc.packed,
+              ),
+            );
+        await writer.journal(
+          table: 'assets',
+          id: _id(id),
+          op: 'insert',
+          hlc: s.hlc,
+          payloadHash: 'h:$hash',
+        );
+      });
+    }
+
+    Future<Map<String, Object?>> assetState(String id) async {
+      final r = await db
+          .customSelect(
+            'SELECT record_sync_state, bytes_sync_state, updated_at, '
+            'hlc_packed FROM assets WHERE id = ?',
+            variables: [Variable.withString(_id(id))],
+          )
+          .getSingle();
+      return r.data;
+    }
+
+    test(
+      'a pushed-and-accepted asset is marked record-synced as pure '
+      'bookkeeping: no journal entry, no updated_at, no HLC change',
+      () async {
+        await saveAsset('A', 'HASH_A');
+        final before = await assetState('A');
+        expect(before['record_sync_state'], 'localOnly');
+
+        final run = await engine.pumpPush();
+        expect(run.failed, isFalse);
+        expect(cloud.serverRowFor('assets', _id('A')), isNotNull);
+
+        final after = await assetState('A');
+        expect(
+          after['record_sync_state'],
+          'synced',
+          reason:
+              'the record crossed the wire — the GC never-synced guard must '
+              'now protect this row',
+        );
+        expect(
+          after['bytes_sync_state'],
+          'localOnly',
+          reason: 'blob upload has no transport yet; its state is untouched',
+        );
+        expect(after['updated_at'], before['updated_at']);
+        expect(after['hlc_packed'], before['hlc_packed']);
+        expect(
+          await oplogCount(),
+          0,
+          reason: 'the marking is per-device bookkeeping and journals nothing',
+        );
+      },
+    );
+
+    test('an asset dropped as server-newer counts as synced too (the server '
+        'holds the record either way)', () async {
+      await saveAsset('A', 'HASH_A');
+      // The server already holds a strictly newer version of the record.
+      cloud.accept(remoteAsset('A', 'HASH_A', remoteHlc(nowMs + 60000)));
+      transport.injectConflictOnce('assets', _id('A'));
+
+      final run = await engine.pumpPush();
+      expect(run.failed, isFalse);
+      expect(transport.pushCalls, 1, reason: 'a losing row is not re-pushed');
+      expect((await assetState('A'))['record_sync_state'], 'synced');
+      expect(await oplogCount(), 0);
+    });
+
+    test('a local asset never accepted by the server stays localOnly (a '
+        'failed run must not pre-mark anything)', () async {
+      transport.partitioned = true;
+      await saveAsset('A', 'HASH_A');
+
+      final run = await engine.pumpPush();
+      expect(run.failed, isTrue);
+      expect((await assetState('A'))['record_sync_state'], 'localOnly');
+      expect(await oplogCount(), 1, reason: 'still journaled for the retry');
     });
   });
 

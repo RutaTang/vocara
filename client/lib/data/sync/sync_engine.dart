@@ -403,20 +403,37 @@ class SyncEngine {
   /// local HLC strictly greater than the server row's → re-push (bounded by
   /// [maxConflictRetries]); otherwise drop ours — the newer server state
   /// arrives via pull, and LWW makes dropping safe. Returns rows accepted.
+  ///
+  /// Every ack is VALIDATED against the rows just pushed before anything acts
+  /// on it (see [_validateAck]) — each retry round validates its own attempt
+  /// list. Handled assets rows are marked record-synced here, inside the
+  /// round and therefore strictly BEFORE the caller's oplog ack (see
+  /// [_markAssetRecordsSynced] for why that order matters).
   Future<int> _pushChunkResolvingConflicts(List<SyncRow> chunk) async {
     var accepted = 0;
     var attempt = chunk;
     for (var tries = 0; attempt.isNotEmpty; tries++) {
       final ack = await _transport.pushRows(attempt);
+      _validateAck(attempt, ack);
       final retry = <SyncRow>[];
+      // Assets rows the server now durably HOLDS after this round — accepted
+      // ones, and ones dropped because the server's version is newer (the
+      // record has crossed the wire either way).
+      final syncedAssetIds = <String>[];
       for (final r in ack.results) {
         if (r.accepted) {
           accepted++;
+          if (r.row.table == 'assets') syncedAssetIds.add(r.row.id);
         } else if (r.row.hlcPacked.compareTo(r.serverRow!.hlcPacked) > 0) {
           retry.add(r.row);
+        } else {
+          // Server holds something newer (or equal) — drop ours. For an
+          // assets row that still counts as synced: the server holds the
+          // record, so another device may reference the asset.
+          if (r.row.table == 'assets') syncedAssetIds.add(r.row.id);
         }
-        // else: server holds something newer (or equal) — drop ours.
       }
+      await _markAssetRecordsSynced(syncedAssetIds);
       if (retry.isEmpty) break;
       if (tries + 1 >= maxConflictRetries) {
         // Give up this run WITHOUT acking: the rows stay journaled and the
@@ -429,6 +446,62 @@ class SyncEngine {
       attempt = retry;
     }
     return accepted;
+  }
+
+  /// Refuses a [PushAck] whose result set is not EXACTLY the rows that were
+  /// pushed: same count, and a 1:1 identity match on (table, id) — order may
+  /// differ, duplicates are invalid. Without this the ack was trusted blind:
+  /// a buggy (or hostile) server returning an empty or wrong result list
+  /// still let the caller ack — i.e. DELETE — the whole drained oplog range,
+  /// silently losing every row the server never actually stored.
+  ///
+  /// The throw is a [SyncTransportException], so [pumpPush]'s existing catch
+  /// handles it like any transport failure: the run reports failed, the
+  /// oplog ack for this window never runs, and every unacked entry re-pushes
+  /// on a later run — verified to hold, since the ack in [_pushLocked] sits
+  /// after all chunk pushes inside the same try block this throw escapes.
+  void _validateAck(List<SyncRow> pushed, PushAck ack) {
+    if (ack.results.length != pushed.length) {
+      throw SyncTransportException(
+        'push ack has ${ack.results.length} results for ${pushed.length} '
+        'pushed rows',
+      );
+    }
+    // Multiset match: every result must consume exactly one pushed row. The
+    // drain collapses to one entry per row, so pushed keys are unique in
+    // practice — but counting keeps the check exact even if that changes.
+    final expected = <(String, String), int>{};
+    for (final row in pushed) {
+      expected.update((row.table, row.id), (n) => n + 1, ifAbsent: () => 1);
+    }
+    for (final r in ack.results) {
+      final key = (r.row.table, r.row.id);
+      final n = expected[key] ?? 0;
+      if (n == 0) {
+        throw SyncTransportException(
+          'push ack carries a result for ${key.$1}/${key.$2}, which was not '
+          'in the pushed rows (or is a duplicate result)',
+        );
+      }
+      expected[key] = n - 1;
+    }
+  }
+
+  /// Marks the given assets rows' record_sync_state 'synced' — per-device
+  /// bookkeeping ONLY, so deliberately a direct drift update touching nothing
+  /// but that one column: never through SyncWriter (marking must not journal
+  /// — an oplog echo would re-push forever) and never touching updated_at or
+  /// the HLC columns (bookkeeping must not look like an edit or shift LWW).
+  ///
+  /// Called BEFORE the batch's oplog ack so a crash between the two errs
+  /// toward 'synced': the asset-GC's never-synced guard then merely refuses
+  /// to sweep a row the server may not hold — conservative — instead of
+  /// sweeping (and fleet-wide tombstoning) a row the server DOES hold.
+  Future<void> _markAssetRecordsSynced(List<String> ids) async {
+    if (ids.isEmpty) return;
+    await (_db.update(_db.assets)..where((a) => a.id.isIn(ids))).write(
+      const AssetsCompanion(recordSyncState: Value('synced')),
+    );
   }
 
   /// Whether [assetId]'s BYTES are durably uploaded: its content hash has an

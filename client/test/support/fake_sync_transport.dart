@@ -89,6 +89,12 @@ class FakeSyncTransport implements SyncTransport {
   int expireNextFetches = 0;
   bool expireFreshTokensToo = false;
 
+  /// When set, the NEXT push's ack is passed through this transform before it
+  /// is returned, then the knob clears itself. Models a buggy or hostile
+  /// server whose ack does not match the pushed rows (short, wrong-row,
+  /// duplicated results) — the engine must refuse to ack its oplog on it.
+  PushAck Function(List<SyncRow> pushed, PushAck ack)? mangleNextAck;
+
   final List<_HeldPush> _heldPushes = [];
   final Map<(String, String), int> _conflictOnce = {};
   FetchPage? _lastServedPage;
@@ -147,7 +153,13 @@ class FakeSyncTransport implements SyncTransport {
       cloud.accept(row);
       results.add(PushRowResult.accepted(row));
     }
-    return PushAck(results);
+    final ack = PushAck(results);
+    final mangle = mangleNextAck;
+    if (mangle != null) {
+      mangleNextAck = null;
+      return mangle(rows, ack);
+    }
+    return ack;
   }
 
   @override

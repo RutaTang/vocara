@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:drift/drift.dart' hide isNull, isNotNull;
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
@@ -9,6 +10,7 @@ import 'package:vocara/data/db/asset_store.dart';
 import 'package:vocara/data/repositories/song_practice_repository_drift.dart';
 import 'package:vocara/data/sync/hlc.dart';
 import 'package:vocara/data/sync/quarantine_store.dart';
+import 'package:vocara/data/sync/sync_applier.dart';
 import 'package:vocara/data/sync/sync_writer.dart';
 import 'package:vocara/domain/models/audio_track.dart';
 import 'package:vocara/domain/models/song_practice.dart';
@@ -131,6 +133,59 @@ void main() {
     expect(await assets.resolve(localOnly), isNull); // tombstoned
     expect(await assets.resolve(syncedRecord), isNotNull); // left alone
     expect(await assets.resolve(syncedBytes), isNotNull); // left alone
+  });
+
+  test('an asset row that arrived over the wire is marked record-synced by '
+      'the applier and the sweep skips it; a never-synced local asset stays '
+      'sweepable', () async {
+    // Local, never-synced garbage for contrast — aged past the grace window.
+    final localId = await assets.importFile(await makeSrc('local.wav', [9]));
+    await db.customStatement(
+      'UPDATE assets SET created_at = 1, updated_at = 1 WHERE id = ?',
+      [localId],
+    );
+
+    // A remote asset record lands through the applier (no local bytes at
+    // all): unreferenced and ancient, i.e. exactly what the sweep would eat
+    // if the applier left the row on the 'localOnly' drift default. Another
+    // device may reference it — local reachability is not knowledge here.
+    const remoteId = 'ASSETASSETASSETASSETASSET1';
+    final h = Hlc(wallMs: 1, counter: 0, node: 'REMOTE'.padRight(26, '0'));
+    final applier = SyncApplier(db, HlcClock(node: 'GC'.padRight(26, '0')));
+    final res = await applier.apply([
+      RemoteRecord(
+        table: 'assets',
+        columns: {
+          'id': remoteId,
+          'content_hash': 'HASH_REMOTE',
+          'byte_size': 8,
+          'ext': 'wav',
+          'kind': 'audio',
+          'created_at': h.wallMs,
+          'updated_at': h.wallMs,
+          'deleted_at': null,
+          'hlc_wall': h.wallMs,
+          'hlc_ctr': h.counter,
+          'hlc_node': h.node,
+          'hlc_packed': h.packed,
+          'schema_v': 1,
+        },
+      ),
+    ]);
+    expect(res.applied, 1);
+
+    // Only the local never-synced asset is swept; the wire-arrived row is
+    // protected by the record_sync_state the applier stamped on it.
+    expect(await assets.sweepUnreferenced(minAge: Duration.zero), 1);
+    expect(await assets.resolve(localId), isNull, reason: 'still sweepable');
+    final remote = await db
+        .customSelect(
+          'SELECT deleted_at, record_sync_state FROM assets WHERE id = ?',
+          variables: [Variable.withString(remoteId)],
+        )
+        .getSingle();
+    expect(remote.data['record_sync_state'], 'synced');
+    expect(remote.data['deleted_at'], isNull, reason: 'never tombstoned');
   });
 
   test(
