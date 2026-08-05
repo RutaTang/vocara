@@ -26,6 +26,19 @@ typedef TakeAnalysis = ({Spectrogram? spectrogram, VoiceMetrics? metrics});
 class SpectrogramService {
   const SpectrogramService();
 
+  /// Absolute ceilings for the admission gate, INDEPENDENT of the header's
+  /// arithmetic — a forged header must not be able to talk its way past them.
+  /// Derivation: the legal upper bound the analysis is designed for is a
+  /// 30-minute 48 kHz stereo float32 WAV, i.e. 30*60*48000 = 86.4 M frames
+  /// and ~691 MB of PCM. Frames matter separately from bytes because the
+  /// decoder expands to Float64 MONO (frames * 8 bytes): a 1 GiB 8-bit mono
+  /// file is only ~1 GiB on disk but ~8 GiB decoded, so a byte ceiling alone
+  /// is not a memory bound.
+  @visibleForTesting
+  static const int maxAnalysisFrames = 90 * 1000 * 1000;
+  @visibleForTesting
+  static const int maxAnalysisBytes = 720 * 1000 * 1000;
+
   /// Header-only admission gate for the analysis paths: walks the WAV chunk
   /// list from a [RandomAccessFile] (seeking over chunk bodies, so a
   /// multi-gigabyte file costs a few hundred bytes of IO) and answers "should
@@ -68,6 +81,24 @@ class SpectrogramService {
           final bd = ByteData.sublistView(body);
           sampleRate = bd.getUint32(4, Endian.little);
           blockAlign = bd.getUint16(12, Endian.little);
+          // The gate's frame count comes from size / blockAlign, so a FORGED
+          // blockAlign is exactly how a huge file talks its frame count down
+          // under the duration cap. Same admission rules as the edit
+          // service's parser: an uncompressed blockAlign is exactly
+          // channels * ceil(bits / 8), and the supported envelope is bounded
+          // (channels, bit depth, rate) so no header arithmetic can inflate
+          // the ceilings below.
+          final channels = bd.getUint16(2, Endian.little);
+          final bits = bd.getUint16(14, Endian.little);
+          const legalBits = {8, 16, 24, 32, 64};
+          if (channels < 1 ||
+              channels > 8 ||
+              !legalBits.contains(bits) ||
+              sampleRate < 8000 ||
+              sampleRate > 384000 ||
+              blockAlign != channels * ((bits + 7) ~/ 8)) {
+            return null;
+          }
         } else if (id == 'data') {
           if (sampleRate <= 0 || blockAlign <= 0) return null;
           final frames = size ~/ blockAlign;
@@ -76,7 +107,12 @@ class SpectrogramService {
               sampleRate ~/
               1000;
           if (frames > capFrames) return null;
-          return offset + 8 + size;
+          // Header-independent ceilings (see their doc): bytes bound what the
+          // isolate reads, frames bound what the decoder expands to.
+          if (frames > maxAnalysisFrames) return null;
+          final limit = offset + 8 + size;
+          if (limit > maxAnalysisBytes) return null;
+          return limit;
         }
         offset += 8 + size + (size & 1); // chunks are word-aligned
       }

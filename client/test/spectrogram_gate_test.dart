@@ -52,6 +52,34 @@ Uint8List _wavHeader({
   return b.toBytes();
 }
 
+/// A canonical header with 8 channels of 32-bit samples (blockAlign 32,
+/// consistent) — for exercising the absolute byte ceiling.
+Uint8List _wavHeader8ch({
+  required int sampleRate,
+  required int declaredDataBytes,
+}) {
+  final b = BytesBuilder();
+  void str(String s) => b.add(s.codeUnits);
+  void u32(int v) =>
+      b.add((ByteData(4)..setUint32(0, v, Endian.little)).buffer.asUint8List());
+  void u16(int v) =>
+      b.add((ByteData(2)..setUint16(0, v, Endian.little)).buffer.asUint8List());
+  str('RIFF');
+  u32(0xFFFFFFF0);
+  str('WAVE');
+  str('fmt ');
+  u32(16);
+  u16(1); // PCM
+  u16(8); // channels
+  u32(sampleRate);
+  u32(sampleRate * 32);
+  u16(32); // blockAlign = 8 * 4
+  u16(32); // bits
+  str('data');
+  u32(declaredDataBytes);
+  return b.toBytes();
+}
+
 void main() {
   // 30 min cap @ 44.1 kHz mono 16-bit = 44100 * 2 bytes * 1800 s.
   const underCap = 44100 * 2 * 60; // 1 minute
@@ -126,6 +154,51 @@ void main() {
       await SpectrogramService.admittedReadLength(File('/nonexistent/x.wav')),
       isNull,
     );
+  });
+
+  test(
+    'a forged blockAlign cannot talk the frame count under the cap',
+    () async {
+      // channels=1, bits=16 → a truthful blockAlign is 2. A forged huge value
+      // divides the declared size down to a tiny frame count that sails under
+      // the duration cap — while the admitted READ would still be the full
+      // multi-gigabyte data chunk. The consistency check must refuse it.
+      final f = await write(
+        _wavHeader(
+          sampleRate: 44100,
+          blockAlign: 4096, // lies: 1 channel * 16 bits is 2 bytes per frame
+          declaredDataBytes: overCap,
+        ),
+      );
+      expect(await SpectrogramService.admittedReadLength(f), isNull);
+    },
+  );
+
+  test(
+    'headers outside the supported envelope are refused (absurd rate)',
+    () async {
+      final f = await write(
+        _wavHeader(
+          sampleRate:
+              4000000, // no real recording; inflates every rate-derived cap
+          blockAlign: 2,
+          declaredDataBytes: underCap,
+        ),
+      );
+      expect(await SpectrogramService.admittedReadLength(f), isNull);
+    },
+  );
+
+  test('the header-independent byte ceiling holds even when the per-rate '
+      'duration math would admit', () async {
+    // 8 channels of 32-bit at 44.1 kHz: blockAlign 32 is CONSISTENT, and the
+    // declared duration (~15 min) is under the 30-minute cap — but the byte
+    // total (~850 MB) crosses maxAnalysisBytes. The absolute ceiling must
+    // refuse regardless of the header's arithmetic.
+    final f = await write(
+      _wavHeader8ch(sampleRate: 44100, declaredDataBytes: 850 * 1000 * 1000),
+    );
+    expect(await SpectrogramService.admittedReadLength(f), isNull);
   });
 
   test('the admitted length stops at the end of the data chunk: trailing '
