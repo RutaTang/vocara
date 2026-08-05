@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -212,4 +213,69 @@ void main() {
     expect(vm.recordingNotice, isNull);
     expect(vm.effectiveMedia, hasLength(1));
   });
+
+  test('dispose during an airborne save never deletes the staged files the '
+      'commit is persisting (real file, in-flight dispose)', () async {
+    // The route can pop while save() awaits the repository. dispose() used to
+    // delete every staged-addition file unconditionally — the commit then
+    // landed rows pointing at nothing.
+    final gated = _GatedRepo(_technique());
+    final rec2 = _FakeRecorder();
+    final vm2 = TechniqueDetailViewModel(
+      repository: gated,
+      mediaService: TechniqueMediaService(storage: _TempStorage(tmp)),
+      techniqueId: 't1',
+      analysisService: _NullAnalysis(),
+      recorder: rec2,
+    );
+    for (var i = 0; i < 200 && vm2.technique == null; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+    expect(vm2.technique, isNotNull);
+
+    // Stage a REAL recorded example file into the draft.
+    vm2.beginMediaDraft();
+    expect(await vm2.startExampleRecording(), isNull);
+    await vm2.stopExampleRecording();
+    final staged = vm2.effectiveMedia.single.path;
+    expect(File(staged).existsSync(), isTrue);
+
+    // Save goes airborne, then the screen is torn down mid-await.
+    final saving = vm2.save(vm2.technique!.copyWith(summary: 'kept'));
+    expect(vm2.saving, isTrue);
+    vm2.dispose();
+    // Let any (wrong) fire-and-forget deletions run before asserting.
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(
+      File(staged).existsSync(),
+      isTrue,
+      reason: 'dispose must not delete files the airborne commit references',
+    );
+
+    gated.gate.complete();
+    expect(await saving, isTrue);
+    expect(gated.technique.media.single.path, staged);
+    expect(
+      File(staged).existsSync(),
+      isTrue,
+      reason: 'the committed row must keep pointing at a real file',
+    );
+  });
+}
+
+/// A repo whose base-hash save parks on [gate] — models the airborne commit
+/// window the dispose test tears the screen down inside of.
+class _GatedRepo extends _FakeRepo {
+  _GatedRepo(super.technique);
+
+  final gate = Completer<void>();
+
+  @override
+  Future<Result<Loaded<Technique>>> saveTechniqueWithBase(
+    Technique t, {
+    required Map<String, String> baseHashes,
+  }) async {
+    await gate.future;
+    return super.saveTechniqueWithBase(t, baseHashes: baseHashes);
+  }
 }
