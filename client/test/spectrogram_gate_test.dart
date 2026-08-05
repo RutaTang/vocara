@@ -69,7 +69,7 @@ void main() {
     final f = await write(
       _wavHeader(sampleRate: 44100, blockAlign: 2, declaredDataBytes: underCap),
     );
-    expect(await SpectrogramService.shouldSkipAnalysis(f), isFalse);
+    expect(await SpectrogramService.admittedReadLength(f), isNotNull);
   });
 
   test('an EXTENSIBLE WAV with extra chunks is still measured, and skipped '
@@ -86,7 +86,7 @@ void main() {
         extraListChunk: true,
       ),
     );
-    expect(await SpectrogramService.shouldSkipAnalysis(short), isFalse);
+    expect(await SpectrogramService.admittedReadLength(short), isNotNull);
 
     final long = await write(
       _wavHeader(
@@ -97,7 +97,7 @@ void main() {
         extraListChunk: true,
       ),
     );
-    expect(await SpectrogramService.shouldSkipAnalysis(long), isTrue);
+    expect(await SpectrogramService.admittedReadLength(long), isNull);
   });
 
   test(
@@ -112,19 +112,44 @@ void main() {
           declaredDataBytes: overCap,
         ),
       );
-      expect(await SpectrogramService.shouldSkipAnalysis(f), isTrue);
+      expect(await SpectrogramService.admittedReadLength(f), isNull);
     },
   );
 
   test('non-WAV files are skipped without reading the body', () async {
     final f = await write(Uint8List.fromList(List.filled(4096, 7)));
-    expect(await SpectrogramService.shouldSkipAnalysis(f), isTrue);
+    expect(await SpectrogramService.admittedReadLength(f), isNull);
   });
 
   test('a missing file is skipped, not crashed on', () async {
     expect(
-      await SpectrogramService.shouldSkipAnalysis(File('/nonexistent/x.wav')),
+      await SpectrogramService.admittedReadLength(File('/nonexistent/x.wav')),
+      isNull,
+    );
+  });
+
+  test('the admitted length stops at the end of the data chunk: trailing '
+      'junk after it is never read', () async {
+    // A small honest data chunk followed by a pile of appended garbage: the
+    // gate must admit the file but cap the read at the data chunk's end, so
+    // the junk cannot ride into memory on the strength of the honest header.
+    final header = _wavHeader(
+      sampleRate: 44100,
+      blockAlign: 2,
+      declaredDataBytes: underCap,
+    );
+    final withJunk = BytesBuilder()
+      ..add(header)
+      ..add(Uint8List(underCap)) // the actual data payload
+      ..add(Uint8List.fromList(List.filled(1 << 20, 0x5A))); // trailing junk
+    final f = await write(withJunk.toBytes());
+
+    final limit = await SpectrogramService.admittedReadLength(f);
+    expect(limit, header.length + underCap);
+    expect(
+      limit! < await f.length(),
       isTrue,
+      reason: 'the junk tail must sit past the admitted read length',
     );
   });
 }

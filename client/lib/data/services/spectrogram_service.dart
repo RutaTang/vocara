@@ -29,23 +29,28 @@ class SpectrogramService {
   /// Header-only admission gate for the analysis paths: walks the WAV chunk
   /// list from a [RandomAccessFile] (seeking over chunk bodies, so a
   /// multi-gigabyte file costs a few hundred bytes of IO) and answers "should
-  /// this file be analyzed at all?". Skips when:
+  /// this file be analyzed, and how many bytes of it?". Returns null (skip)
+  /// when:
   ///  * the file is not RIFF/WAVE — the WAV-only decoder would fail AFTER the
   ///    whole file loaded;
   ///  * no fmt/data chunk can be found — same reasoning;
   ///  * the declared PCM duration exceeds the analysis cap.
+  /// Otherwise returns the byte offset where the data chunk ENDS: the analysis
+  /// isolate reads exactly that much, so a small declared data chunk with
+  /// gigabytes of trailing junk (appended metadata, garbage, a lying tail)
+  /// can no longer ride into memory on the strength of an honest header.
   /// Handles WAVE_FORMAT_EXTENSIBLE and extra chunks (LIST etc.), unlike the
   /// canonical-44-byte take probe — an imported WAV is exactly the file most
   /// likely to carry them.
   @visibleForTesting
-  static Future<bool> shouldSkipAnalysis(File file) async {
+  static Future<int?> admittedReadLength(File file) async {
     RandomAccessFile? raf;
     try {
       raf = await file.open();
       final head = await raf.read(12);
-      if (head.length < 12) return true;
+      if (head.length < 12) return null;
       String tag(Uint8List b, int o) => String.fromCharCodes(b, o, o + 4);
-      if (tag(head, 0) != 'RIFF' || tag(head, 8) != 'WAVE') return true;
+      if (tag(head, 0) != 'RIFF' || tag(head, 8) != 'WAVE') return null;
       var offset = 12;
       var sampleRate = 0, blockAlign = 0;
       // Bounded walk: a well-formed WAV reaches `data` within a handful of
@@ -54,32 +59,45 @@ class SpectrogramService {
       for (var i = 0; i < 64; i++) {
         await raf.setPosition(offset);
         final ch = await raf.read(8);
-        if (ch.length < 8) return true; // ran out before a data chunk
+        if (ch.length < 8) return null; // ran out before a data chunk
         final id = tag(ch, 0);
         final size = ByteData.sublistView(ch).getUint32(4, Endian.little);
         if (id == 'fmt ') {
           final body = await raf.read(size < 40 ? size : 40);
-          if (body.length < 16) return true;
+          if (body.length < 16) return null;
           final bd = ByteData.sublistView(body);
           sampleRate = bd.getUint32(4, Endian.little);
           blockAlign = bd.getUint16(12, Endian.little);
         } else if (id == 'data') {
-          if (sampleRate <= 0 || blockAlign <= 0) return true;
+          if (sampleRate <= 0 || blockAlign <= 0) return null;
           final frames = size ~/ blockAlign;
           final capFrames =
               MediaAnalysisService.maxAnalysisDuration.inMilliseconds *
               sampleRate ~/
               1000;
-          return frames > capFrames;
+          if (frames > capFrames) return null;
+          return offset + 8 + size;
         }
         offset += 8 + size + (size & 1); // chunks are word-aligned
       }
-      return true;
+      return null;
     } catch (_) {
       // Unreadable now → unreadable in the isolate too; don't load it there.
-      return true;
+      return null;
     } finally {
       await raf?.close();
+    }
+  }
+
+  /// Reads at most [limit] bytes of [path] — the gate-admitted region (header
+  /// through the end of the data chunk). Runs inside the analysis isolate.
+  static Uint8List _readAdmitted(String path, int limit) {
+    final raf = File(path).openSync();
+    try {
+      final len = raf.lengthSync();
+      return raf.readSync(len < limit ? len : limit);
+    } finally {
+      raf.closeSync();
     }
   }
 
@@ -91,11 +109,12 @@ class SpectrogramService {
   }) async {
     final file = File(path);
     if (!await file.exists()) return null;
-    if (await shouldSkipAnalysis(file)) return null;
+    final limit = await admittedReadLength(file);
+    if (limit == null) return null;
     // STFT is heavy — run it in a background isolate (which also reads the
-    // bytes, so they never exist twice).
+    // bytes — capped at the admitted length — so they never exist twice).
     return Isolate.run(() {
-      final pcm = readWavMono(File(path).readAsBytesSync());
+      final pcm = readWavMono(_readAdmitted(path, limit));
       if (pcm == null) return null;
       return computeSpectrogram(
         pcm.samples,
@@ -116,9 +135,10 @@ class SpectrogramService {
   }) async {
     final file = File(path);
     if (!await file.exists()) return null;
-    if (await shouldSkipAnalysis(file)) return null;
+    final limit = await admittedReadLength(file);
+    if (limit == null) return null;
     return Isolate.run(() {
-      final pcm = readWavMono(File(path).readAsBytesSync());
+      final pcm = readWavMono(_readAdmitted(path, limit));
       if (pcm == null) return null;
       return computeVoiceMetrics(
         pcm.samples,
@@ -143,9 +163,10 @@ class SpectrogramService {
   }) async {
     final file = File(path);
     if (!await file.exists()) return null;
-    if (await shouldSkipAnalysis(file)) return null;
+    final limit = await admittedReadLength(file);
+    if (limit == null) return null;
     return Isolate.run(() {
-      final pcm = readWavMono(File(path).readAsBytesSync());
+      final pcm = readWavMono(_readAdmitted(path, limit));
       if (pcm == null) return null;
       final spectrogram = computeSpectrogram(
         pcm.samples,

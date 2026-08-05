@@ -152,28 +152,108 @@ Uint8List _buildWav(Uint8List fmt, Uint8List data) {
 /// entire pre-roll/latency compensation. Throws [FormatException] when [path]
 /// is not an uncompressed WAV (callers treat that as best-effort and fall back
 /// to the un-trimmed take).
+///
+/// Runs in a background isolate and STREAMS the copy in bounded chunks: a long
+/// take is hundreds of megabytes, and the old whole-file
+/// read → rebuild → write held two full copies on the MAIN isolate.
 Future<void> trimWavHeadInPlace(String path, int trimMs) async {
   if (trimMs <= 0) return;
-  final bytes = await File(path).readAsBytes();
-  final w = _parseWav(bytes);
-  if (w == null) {
-    throw const FormatException('Only uncompressed WAV takes can be trimmed.');
+  await Isolate.run(() => _trimWavHeadSync(path, trimMs));
+}
+
+/// Isolate body of [trimWavHeadInPlace]: RandomAccessFile chunk walk (header
+/// bytes only), then a chunked data copy into the temp file.
+void _trimWavHeadSync(String path, int trimMs) {
+  const noWav = FormatException('Only uncompressed WAV takes can be trimmed.');
+  final raf = File(path).openSync();
+  Uint8List? fmt;
+  var dataStart = -1, dataLen = 0;
+  try {
+    final fileLen = raf.lengthSync();
+    final head = raf.readSync(12);
+    String tag(Uint8List b, int o) => String.fromCharCodes(b, o, o + 4);
+    if (head.length < 12 || tag(head, 0) != 'RIFF' || tag(head, 8) != 'WAVE') {
+      throw noWav;
+    }
+    var offset = 12;
+    // Bounded walk, mirroring _parseWav's chunk tolerance (see the analysis
+    // gate on why 64 covers every real-world metadata pile-up).
+    for (var i = 0; i < 64 && dataStart < 0; i++) {
+      raf.setPositionSync(offset);
+      final ch = raf.readSync(8);
+      if (ch.length < 8) break;
+      final id = tag(ch, 0);
+      final size = ByteData.sublistView(ch).getUint32(4, Endian.little);
+      if (id == 'fmt ' && size >= 16 && size <= 1024) {
+        fmt = raf.readSync(size);
+      } else if (id == 'data') {
+        dataStart = offset + 8;
+        dataLen = math.min(size, fileLen - dataStart);
+      }
+      offset += 8 + size + (size & 1); // chunks are word-aligned
+    }
+    final f = fmt;
+    if (f == null || f.length < 16 || dataStart < 0) throw noWav;
+    final bd = ByteData.sublistView(f);
+    final sampleRate = bd.getUint32(4, Endian.little);
+    final blockAlign = bd.getUint16(12, Endian.little);
+    // Same admission rules as _parseWav: uncompressed samples only, and a
+    // blockAlign that is a true PCM frame (see there for the rationale).
+    final eff = _effFmt(f);
+    final channels = _fmtU16(f, 2);
+    final bits = _fmtU16(f, 14);
+    if ((eff != 1 && eff != 3) ||
+        sampleRate <= 0 ||
+        channels <= 0 ||
+        bits <= 0 ||
+        blockAlign != channels * ((bits + 7) ~/ 8)) {
+      throw noWav;
+    }
+    // Whole frames only (see concatWav on why alignment matters), and never
+    // cut past the end — a trim longer than the take leaves an empty WAV.
+    final wholeLen = (dataLen ~/ blockAlign) * blockAlign;
+    final cut = ((trimMs / 1000 * sampleRate).round() * blockAlign).clamp(
+      0,
+      wholeLen,
+    );
+    final newLen = wholeLen - cut;
+
+    final tmpPath = '$path.trim';
+    final out = File(tmpPath).openSync(mode: FileMode.write);
+    try {
+      final header = BytesBuilder();
+      void str(String s) => header.add(s.codeUnits);
+      void u32(int v) => header.add(
+        (ByteData(4)..setUint32(0, v, Endian.little)).buffer.asUint8List(),
+      );
+      final pad = newLen.isOdd ? 1 : 0;
+      str('RIFF');
+      u32(4 + (8 + f.length) + (8 + newLen + pad));
+      str('WAVE');
+      str('fmt ');
+      u32(f.length);
+      header.add(f);
+      str('data');
+      u32(newLen);
+      out.writeFromSync(header.toBytes());
+      // Chunked copy: 4 MiB at a time keeps the peak bounded regardless of
+      // the take's length.
+      raf.setPositionSync(dataStart + cut);
+      var remaining = newLen;
+      while (remaining > 0) {
+        final chunk = raf.readSync(math.min(remaining, 4 << 20));
+        if (chunk.isEmpty) break; // truncated on disk: keep what exists
+        out.writeFromSync(chunk);
+        remaining -= chunk.length;
+      }
+      if (pad == 1) out.writeByteSync(0);
+    } finally {
+      out.closeSync();
+    }
+    File(tmpPath).renameSync(path);
+  } finally {
+    raf.closeSync();
   }
-  // Whole frames only (see concatWav on why alignment matters), and never cut
-  // past the end — a trim longer than the take leaves an empty-but-valid WAV.
-  final wholeLen = (w.dataLen ~/ w.blockAlign) * w.blockAlign;
-  final cut = ((trimMs / 1000 * w.sampleRate).round() * w.blockAlign).clamp(
-    0,
-    wholeLen,
-  );
-  final data = Uint8List.sublistView(
-    bytes,
-    w.dataStart + cut,
-    w.dataStart + wholeLen,
-  );
-  final tmp = '$path.trim';
-  await File(tmp).writeAsBytes(_buildWav(w.fmt, data));
-  await File(tmp).rename(path);
 }
 
 /// Non-destructive clip edits on WAV files. Split/merge slice and join the raw
