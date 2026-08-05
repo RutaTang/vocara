@@ -416,6 +416,16 @@ class GraphAudioPlaybackService implements PlaybackEngine {
   int recordDroppedFrames() =>
       _available ? _bindings.ve_record_dropped_frames(_engine) : 0;
 
+  /// Frames written into the recording ring for the CURRENT take (engine-rate,
+  /// reset at each start) — the per-take recorded-progress ack. Nonzero PROVES
+  /// audio is in this take's ring: a callback that entered before the arm read
+  /// the disarmed flag and never pushed, so unlike [inputFramesReceived] this
+  /// can never count frames that are not in the WAV. The mic ready handshake
+  /// waits for it to leave zero; read at play time it IS the take's file
+  /// offset (the pre-roll).
+  int recordWrittenFrames() =>
+      _available ? _bindings.ve_record_written_frames(_engine) : 0;
+
   @override
   Stream<Duration> get position => _position.stream;
   @override

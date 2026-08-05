@@ -182,6 +182,7 @@ class RecordingController extends ChangeNotifier {
         await _createEmptyVocalTake();
         targetId = _selectedTrackId();
       }
+      _takeGeneration++;
       _recordingTargetId = targetId;
       _recordingStartMs = _playback.position.value.inMilliseconds;
       _recordingPreRollMs = 0;
@@ -225,6 +226,13 @@ class RecordingController extends ChangeNotifier {
 
   int _recordingStartMs = 0;
   int get recordingStartMs => _recordingStartMs;
+
+  /// Monotonic per-take token, bumped when a take's destination is created.
+  /// The start continuation captures it and re-checks after every await: a
+  /// plain `isRecording` bool is ABA-vulnerable — take A's continuation can
+  /// park across A's stop AND take B's arm, resume, see `isRecording == true`
+  /// (B's!), and drive B's transport with A's stale seek/play/pre-roll.
+  int _takeGeneration = 0;
 
   /// Milliseconds of audio recorded BEFORE the backing playback actually
   /// started (mic arm → play), measured from the engine's input-frame counter.
@@ -346,8 +354,13 @@ class RecordingController extends ChangeNotifier {
       // The take is armed, which means the user can STOP it right now — every
       // await below must re-check, or a continuation resuming after the stop
       // would restart the transport against a finalized take and overwrite the
-      // pre-roll the placement already consumed.
-      bool stopped() => _disposed || !_mic.isRecording;
+      // pre-roll the placement already consumed. The generation token (not
+      // just the recording bool) closes the ABA: after this take's stop, a
+      // NEW take can arm while this continuation is still parked, and
+      // `isRecording` alone would read true again for the wrong take.
+      final takeGen = _takeGeneration;
+      bool stopped() =>
+          _disposed || !_mic.isRecording || _takeGeneration != takeGen;
 
       // Mute the take being recorded into (you can't monitor what you're laying
       // down); every other lane still obeys mute/solo. Play freely (no range wrap)
@@ -368,16 +381,16 @@ class RecordingController extends ChangeNotifier {
       }
       // Pre-roll: the recording has been rolling since the arm (WAV offset 0),
       // but the backing only started just now — everything above (resync,
-      // decode, seek) sat between the two. Measure the gap in actual captured
-      // frames so the stop-side placement can subtract it; the acoustic
-      // round-trip is compensated separately (recordLatencyMs). Frame counter
-      // at 48 kHz — the engine's fixed rate (see recordLatencyMs). Guarded:
-      // a stop that raced the play() above has already read (and reset) the
-      // pre-roll, so a late write here would leak into the NEXT take.
-      final framesAtArm = _mic.framesAtArm;
+      // decode, seek) sat between the two. recordWrittenFrames counts exactly
+      // the frames already in this take's ring, so its value at this moment
+      // IS the take's file offset (engine-rate, 48 kHz) — no global-counter
+      // subtraction, no ±1-callback ambiguity. The acoustic round-trip is
+      // compensated separately (recordLatencyMs). Guarded: a stop that raced
+      // the play() above has already read (and reset) the pre-roll, so a
+      // late write here would leak into the NEXT take.
       final engineNow = _graphEngine();
-      if (!stopped() && framesAtArm != null && engineNow != null) {
-        final pre = engineNow.inputFramesReceived() - framesAtArm;
+      if (!stopped() && engineNow != null) {
+        final pre = engineNow.recordWrittenFrames();
         if (pre > 0) _recordingPreRollMs = pre * 1000 ~/ 48000;
       }
     } catch (e) {

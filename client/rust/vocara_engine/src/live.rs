@@ -321,6 +321,13 @@ pub struct EngineHandle {
 
 impl EngineHandle {
     pub fn play(&self) {
+        // IDEMPOTENT: only a genuine stopped→playing transition acts. A repeated play()
+        // while already playing would run the flush below against LIVE audio sitting in
+        // the resampler FIFO — an audible skip of up to one render block. Single control
+        // thread, so load-then-act cannot race another play().
+        if self.shared.playing.load(Ordering::Acquire) {
+            return;
+        }
         // Drop whatever the output resampler pre-rendered while the transport was stopped —
         // a paused callback keeps the FIFO topped up with SILENCE, so without this flush a
         // resume on a non-48 kHz device played up to one render block of it before the
@@ -330,7 +337,13 @@ impl EngineHandle {
         self.shared.playing.store(true, Ordering::Release);
     }
     pub fn pause(&self) {
-        self.shared.playing.store(false, Ordering::Release);
+        // IDEMPOTENT: swap-and-check so only the playing→paused transition folds. A second
+        // pause() would otherwise fold the SILENCE the paused callback has since parked in
+        // the FIFO (whose depth it dutifully republishes) into the clock — rewinding the
+        // reported position though nothing played.
+        if !self.shared.playing.swap(false, Ordering::AcqRel) {
+            return;
+        }
         // Fold the un-played backlog into the clock ONCE: the paused position must be what
         // the listener actually heard, not the render clock (which ran up to a block ahead
         // on a non-48 kHz device). Rewinding also means resume re-renders exactly the frames

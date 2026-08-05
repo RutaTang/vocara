@@ -390,6 +390,20 @@ class VocaraEngineBindings {
   late final _ve_record_dropped_frames = _ve_record_dropped_framesPtr
       .asFunction<int Function(ffi.Pointer<VeEngine>)>();
 
+  /// Frames WRITTEN into the recording ring for the current take (engine-rate; reset at each
+  /// start) — the per-take recorded-progress ack. Nonzero proves audio is in this take's
+  /// ring; at play time it IS the take's file offset (the pre-roll).
+  int ve_record_written_frames(ffi.Pointer<VeEngine> e) {
+    return _ve_record_written_frames(e);
+  }
+
+  late final _ve_record_written_framesPtr =
+      _lookup<ffi.NativeFunction<ffi.Uint64 Function(ffi.Pointer<VeEngine>)>>(
+        've_record_written_frames',
+      );
+  late final _ve_record_written_frames = _ve_record_written_framesPtr
+      .asFunction<int Function(ffi.Pointer<VeEngine>)>();
+
   int ve_play(ffi.Pointer<VeEngine> e) {
     return _ve_play(e);
   }

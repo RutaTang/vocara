@@ -560,6 +560,12 @@ play flush the FIFO, and stream rebuilds clear the shared backlog. Three boundar
 * **A device switch drops the old stream's un-played FIFO tail.** The old stream is gone;
   its ≤ one render block of in-flight audio has no device to reach. Transferring FIFO
   contents across stream generations is not worth the coupling.
+* **Loop wrap on a non-48 kHz device reports loop_start while the pre-wrap tail plays.**
+  `rendered − backlog` is ambiguous across the wrap (the FIFO's remaining frames belong to
+  the pre-wrap segment, whose true position is near loop_end); the playhead clamps to
+  loop_start for that ≤ one render block instead of jumping backwards. This is a KNOWN
+  SEMANTIC BOUNDARY, not a precision bound — only the consumed-frames cursor below removes
+  the ambiguity, because it tracks delivery, not rendering.
 
 The clean long-term shape — noted for the next engine iteration — is a **consumed-frames
 cursor**: the output path (identity, resampler, VPIO) publishes the absolute engine-frame

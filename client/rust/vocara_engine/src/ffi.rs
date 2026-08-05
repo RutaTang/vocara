@@ -100,6 +100,9 @@ pub struct VeEngine {
     /// Nonzero means the take on disk has silent holes — surfaced via
     /// `ve_record_dropped_frames` so the UI never reports such a take as clean.
     rec_dropped: Arc<AtomicU64>,
+    /// Frames written into the recording ring for the CURRENT take (reset on each start):
+    /// the per-take recorded-progress ack behind `ve_record_written_frames`.
+    rec_written: Arc<AtomicU64>,
     /// Host-thread-authoritative input-stream state word: (generation << 1) | running.
     /// Set/bumped only by the audio-host thread — running set only after a successful
     /// stream start, cleared BEFORE any teardown joins the old callback, generation bumped
@@ -258,6 +261,7 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
         let input_level = Arc::new(AtomicU32::new(0));
         let input_frames_in = Arc::new(AtomicU64::new(0));
         let rec_dropped = Arc::new(AtomicU64::new(0));
+        let rec_written = Arc::new(AtomicU64::new(0));
         let cap_active = Arc::new(AtomicBool::new(false));
         let rec_active = Arc::new(AtomicBool::new(false));
         let input_cell = device::InputCell::new(
@@ -269,6 +273,7 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
             Arc::clone(&input_level),
             Arc::clone(&input_frames_in),
             Arc::clone(&rec_dropped),
+            Arc::clone(&rec_written),
         );
         let writer = RecordWriter::spawn(rec_cons);
         // The host maintains the handle's renderer gate (stream up/down), so the control
@@ -291,6 +296,7 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
             input_level,
             input_frames_in,
             rec_dropped,
+            rec_written,
             input_state,
             monitoring: false,
             cap_active,
@@ -573,9 +579,10 @@ pub extern "C" fn ve_start_input_recording(e: *mut VeEngine, path: *const c_char
         if !eng.writer.start(p) {
             return -1;
         }
-        // A fresh take starts with a clean drop count: the counter belongs to exactly one
-        // recording (read via `ve_record_dropped_frames` after stop).
+        // A fresh take starts with clean counters: both belong to exactly one recording
+        // (`ve_record_dropped_frames` after stop; `ve_record_written_frames` during it).
         eng.rec_dropped.store(0, Ordering::Release);
+        eng.rec_written.store(0, Ordering::Release);
         eng.rec_active.store(true, Ordering::Release);
         sync_input(eng);
         0
@@ -623,6 +630,18 @@ pub extern "C" fn ve_stop_input_recording(e: *mut VeEngine) -> c_int {
 #[no_mangle]
 pub extern "C" fn ve_record_dropped_frames(e: *mut VeEngine) -> u64 {
     with_engine(e, 0, |eng| eng.rec_dropped.load(Ordering::Acquire))
+}
+
+/// Frames written into the recording ring for the CURRENT take (engine-rate; reset at each
+/// recording start) — the per-take recorded-progress ack. Nonzero PROVES audio is in this
+/// take's ring: a callback that entered before the arm read the disarmed flag and never
+/// pushed, so this can never count frames that are not in the WAV (unlike the global frame
+/// counter, which a pre-arm or dying-stream callback also advances). The ready handshake
+/// waits for it to leave zero; the pre-roll measurement reads it at play time — it IS the
+/// take's file offset at that moment.
+#[no_mangle]
+pub extern "C" fn ve_record_written_frames(e: *mut VeEngine) -> u64 {
+    with_engine(e, 0, |eng| eng.rec_written.load(Ordering::Acquire))
 }
 
 /// Set the live-input monitor gain (linear, 0 = muted). 0 = ok.
@@ -1144,6 +1163,11 @@ fn flatten_stereo(mut v: Vec<[Smp; CHANNELS]>) -> Vec<Smp> {
 /// (60 min) — the two must move together.
 const MAX_PLAYBACK_SECS: f64 = 3600.0;
 
+/// Highest output rate any decode/splice entry point accepts. Every real caller passes the
+/// engine rate (48 kHz) or a common analysis rate; an absurd rate would multiply into every
+/// frame-count ceiling above, so it is bounded before any arithmetic uses it.
+const MAX_DECODE_RATE: u32 = 384_000;
+
 /// `ve_decode` status: decoded successfully.
 pub const VE_DECODE_OK: c_int = 0;
 /// `ve_decode` status: open/probe/decode failure (unreadable or unsupported file).
@@ -1174,7 +1198,7 @@ pub extern "C" fn ve_decode(
         }
     };
     set_status(VE_DECODE_ERR);
-    if path.is_null() || rate == 0 {
+    if path.is_null() || rate == 0 || rate > MAX_DECODE_RATE {
         return VePcm::empty();
     }
     catch_unwind(AssertUnwindSafe(|| {
@@ -1273,7 +1297,10 @@ pub extern "C" fn ve_punch_wav(
     rate: u32,
     out_path: *const c_char,
 ) -> i64 {
-    if old_path.is_null() || new_path.is_null() || out_path.is_null() || rate == 0 {
+    if old_path.is_null() || new_path.is_null() || out_path.is_null() {
+        return -1;
+    }
+    if rate == 0 || rate > MAX_DECODE_RATE {
         return -1;
     }
     catch_unwind(AssertUnwindSafe(|| {
@@ -1294,18 +1321,33 @@ pub extern "C" fn ve_punch_wav(
             _ => return -1,
         };
 
-        let split = ((split_ms.max(0) as i128 * rate as i128) / 1000) as usize;
+        // Checked all the way to the allocation: the old `as usize` cast of the i128 split
+        // TRUNCATED a huge split_ms (wrapping to a small value — no overflow, but silently
+        // wrong semantics), and unchecked adds/muls on attacker-influenced sizes are how
+        // ceilings get bypassed. The ceiling itself is compared in i128, before any cast.
+        let ceiling_frames = (MAX_PLAYBACK_SECS * rate as f64) as i128;
+        let split_i128 = (split_ms.max(0) as i128 * rate as i128) / 1000;
+        if split_i128 > ceiling_frames {
+            return -1;
+        }
+        let split = split_i128 as usize;
         let keep = split.min(old_frames.len());
         // Silence frames when the cursor sits past old's end (preserves new's timing).
         let pad = split.saturating_sub(old_frames.len());
         // The OUTPUT is bounded too, not just the two input decodes: a runaway `split_ms`
         // would otherwise size an arbitrarily large silence pad straight into with_capacity.
-        let total = keep + pad + new_frames.len();
-        if total as f64 > MAX_PLAYBACK_SECS * rate as f64 {
+        let total = match keep
+            .checked_add(pad)
+            .and_then(|t| t.checked_add(new_frames.len()))
+        {
+            Some(t) if (t as i128) <= ceiling_frames => t,
+            _ => return -1,
+        };
+        let Some(flat_len) = total.checked_mul(CHANNELS) else {
             return -1;
-        }
+        };
 
-        let mut flat: Vec<f32> = Vec::with_capacity(total * CHANNELS);
+        let mut flat: Vec<f32> = Vec::with_capacity(flat_len);
         for f in &old_frames[..keep] {
             flat.push(f[0]);
             flat.push(f[1]);
@@ -2168,6 +2210,10 @@ mod punch_tests {
             c_out.as_ptr(),
         );
         assert_eq!(frames, -1, "an over-ceiling output must be refused");
+
+        // An absurd output rate is refused before any arithmetic uses it.
+        let frames = super::ve_punch_wav(c_old.as_ptr(), c_new.as_ptr(), 1, 10_000_000, c_out.as_ptr());
+        assert_eq!(frames, -1, "an over-ceiling rate must be refused");
 
         // A sane splice is unaffected: old's first 1 ms (48 frames) ++ new's 48 frames.
         let frames = super::ve_punch_wav(c_old.as_ptr(), c_new.as_ptr(), 1, 48_000, c_out.as_ptr());

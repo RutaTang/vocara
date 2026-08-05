@@ -220,14 +220,6 @@ class MicRecordingController {
   bool _feedingMonitor = false;
   bool _disposed = false;
 
-  /// The engine's cumulative input-frame counter snapshotted at the moment the
-  /// take armed (WAV file offset 0). Owners subtract it from the counter at
-  /// "backing playback actually started" to measure the take's pre-roll — the
-  /// audio recorded before the backing began — and place the take accordingly.
-  /// Null when no take is armed.
-  int? _framesAtArm;
-  int? get framesAtArm => _framesAtArm;
-
   /// Bumped whenever a pending start must be abandoned; each [start] snapshots
   /// it before its awaits and arms nothing on a mismatch.
   int _generation = 0;
@@ -307,28 +299,22 @@ class MicRecordingController {
           MicRecordingFailure.fileCreateFailed,
         );
       }
-      // Snapshot the frame counter right AFTER arming: frames counted before
-      // this moment never reached the recording ring, so this value is the
-      // counter reading that corresponds to WAV file offset 0 (within one
-      // callback slice).
-      final framesAtArm = engine.inputFramesReceived();
       // Ready handshake. startInputRecording == true proves only that the WAV
       // exists — the native input-stream open is deliberately asynchronous (a
       // blocking open froze the UI), so the mic may still be opening, or may
-      // fail to open, right now. Wait (bounded) for a three-step proof that
-      // ONE live stream is delivering:
-      //  1. snapshot the host's stream-state word (generation<<1 | running) —
-      //     the running bit must be set;
-      //  2. the frame counter must have advanced past the arm snapshot;
-      //  3. re-read the state word — it must be UNCHANGED.
-      // An unchanged word brackets the frame observation inside a window with
-      // no teardown (which clears the running bit) and no restart (which
-      // bumps the generation), so the frames provably came from the same
-      // running stream — two separate reads of a running flag and the counter
-      // could interleave with a StopInput plus the old callback's final push
-      // and declare ready against a stream that is already gone. When the
-      // stream is already open (monitoring), this resolves within one
-      // callback (~10 ms); a cold VoiceProcessingIO open takes a few hundred.
+      // fail to open, right now. Wait (bounded) for the per-take
+      // recorded-progress ack: recordWrittenFrames counts only frames that
+      // actually LANDED in this take's recording ring (reset at the arm), so
+      // a nonzero value is an unforgeable proof the WAV is receiving audio.
+      // Every weaker signal was refuted in review: the global frame counter
+      // also advances for pre-arm and dying-stream callbacks that never wrote
+      // this ring, and running-flag reads can interleave with a queued
+      // teardown. A teardown queued ahead of the arm resolves correctly too —
+      // either the host's input-intent coalescing skips it, or it lands
+      // before any frame does and the counter stays zero into the timeout.
+      // When the stream is already open (monitoring), the first frames land
+      // within one callback (~10 ms); a cold VoiceProcessingIO open takes a
+      // few hundred.
       var ready = false;
       final readyClock = Stopwatch()..start();
       while (readyClock.elapsed < readyTimeout) {
@@ -337,10 +323,7 @@ class MicRecordingController {
           _discardQuietly(destination, path);
           return const MicRecordingStart.invalidated();
         }
-        final state = engine.inputStreamState();
-        if (GraphAudioPlaybackService.inputStateRunning(state) &&
-            engine.inputFramesReceived() > framesAtArm &&
-            engine.inputStreamState() == state) {
+        if (engine.recordWrittenFrames() > 0) {
           ready = true;
           break;
         }
@@ -353,7 +336,6 @@ class MicRecordingController {
           MicRecordingFailure.inputNotDelivering,
         );
       }
-      _framesAtArm = framesAtArm;
       _isRecording = true;
       _path = path;
       _destination = destination;
@@ -439,7 +421,6 @@ class MicRecordingController {
       _feedingMonitor = false;
     }
     _isRecording = false;
-    _framesAtArm = null;
     _finalizer.unregister(_finalizeOnQuit);
     final path = _path!;
     _path = null;
@@ -495,7 +476,6 @@ class MicRecordingController {
     // a half-torn-down widget tree.
     _isRecording = false;
     _feedingMonitor = false;
-    _framesAtArm = null;
     _path = null;
     _destination = null;
     level.dispose();

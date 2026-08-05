@@ -442,6 +442,13 @@ struct InputState {
     /// than the ring's headroom). Those samples are gone from the take, so the count must
     /// surface to the caller — a take with silent holes must never report as clean.
     rec_dropped: Arc<AtomicU64>,
+    /// Frames successfully pushed into the RECORDING ring for the CURRENT take (reset at
+    /// each recording start). This is the per-take recorded-progress ack: a nonzero value
+    /// PROVES audio is in this take's ring — a callback that entered before the arm read
+    /// `rec = false` and never pushed, so unlike the global frame counter this can never
+    /// count frames that aren't in the WAV. The ready handshake and the pre-roll
+    /// measurement both read it.
+    rec_written: Arc<AtomicU64>,
 }
 
 impl InputState {
@@ -455,8 +462,12 @@ impl InputState {
         if cap {
             self.cap.push(f);
         }
-        if rec && !self.rec.push(f) {
-            self.rec_dropped.fetch_add(1, Ordering::Relaxed);
+        if rec {
+            if self.rec.push(f) {
+                self.rec_written.fetch_add(1, Ordering::Relaxed);
+            } else {
+                self.rec_dropped.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -474,6 +485,7 @@ impl InputCell {
         level: Arc<AtomicU32>,
         frames_in: Arc<AtomicU64>,
         rec_dropped: Arc<AtomicU64>,
+        rec_written: Arc<AtomicU64>,
     ) -> Arc<InputCell> {
         Arc::new(InputCell(UnsafeCell::new(InputState {
             mic,
@@ -489,6 +501,7 @@ impl InputCell {
             level,
             frames_in,
             rec_dropped,
+            rec_written,
         })))
     }
 
@@ -601,7 +614,11 @@ impl RecordWriter {
     /// created, so the caller reports failure instead of silently losing the take.
     pub fn start(&self, path: &str) -> bool {
         let (ack, rx) = mpsc::channel();
-        if self.tx.send(WriterCmd::Start(path.to_string(), ack)).is_err() {
+        if self
+            .tx
+            .send(WriterCmd::Start(path.to_string(), ack))
+            .is_err()
+        {
             return false;
         }
         rx.recv().unwrap_or(false)
@@ -761,7 +778,9 @@ fn build_input_stream(
             None,
         )
         .map_err(|e| format!("build_input_stream: {e}"))?;
-    stream.play().map_err(|e| format!("input stream.play: {e}"))?;
+    stream
+        .play()
+        .map_err(|e| format!("input stream.play: {e}"))?;
     Ok(DeviceHandle { _stream: stream })
 }
 
@@ -983,131 +1002,159 @@ fn audio_host_run(
     // restored when duplex VPIO releases the output, instead of always falling back to default.
     let mut cur_out_uid: Option<String> = None;
 
-    while let Ok(cmd) = rx.recv() {
+    'serve: while let Ok(first) = rx.recv() {
+        // Drain everything already queued and COALESCE the input INTENT: only the LAST
+        // queued StartInput/StopInput acts, earlier ones just ack. The FFI side computes a
+        // desired input state (sync_input) but sends imperative commands, so a stale
+        // teardown can sit queued ahead of the start that supersedes it — "monitoring off,
+        // then REC" used to tear the warm stream down and rebuild it (or fail), AFTER the
+        // ready handshake had already passed on it. Converging on the final intent makes
+        // the handshake's observed state the host's TARGET state, not a stale intermediate.
+        // Non-intent commands (SetInput/SetOutput/Shutdown) still execute in order.
+        let mut queue = vec![first];
+        while let Ok(more) = rx.try_recv() {
+            queue.push(more);
+        }
+        let last_intent = queue
+            .iter()
+            .rposition(|c| matches!(c, HostCmd::StartInput { .. } | HostCmd::StopInput { .. }));
         // Raise the gate BEFORE any command that may build a stream, then settle it to the
-        // real stream state after the command completes (Shutdown breaks out and settles to
+        // real stream state after the batch completes (Shutdown breaks out and settles to
         // false after the loop). Conservative: a raised gate only means retirees wait for
         // their grace epoch, exactly the pre-gate behavior.
         set_gate(true);
-        match cmd {
-            HostCmd::SetOutput { uid, reply } => {
-                // While duplex VPIO owns the output (mic active), do NOT bring up a competing cpal
-                // output — two renderers of RtCell would violate the single-accessor invariant.
-                if VPIO_DUPLEX_AEC && in_stream.is_some() {
-                    // Record the request so StopInput restores THIS device (not the system
-                    // default) when the mic stops, and report the deferred success.
-                    cur_out_uid = Some(uid);
-                    let _ = reply.send(0);
-                } else {
-                    // Drop the old stream FIRST (joins its callback) so only one stream ever touches
-                    // the shared RtCell, then build the new one. Fall back to default if the
-                    // requested device can't be opened.
-                    out_stream = None;
-                    let built = build_output(Some(&uid), &rt, &event)
-                        .or_else(|_| build_output(None, &rt, &event));
-                    match built {
-                        Ok((handle, _)) => {
-                            out_stream = Some(handle);
-                            cur_out_uid = Some(uid);
-                            let _ = reply.send(0);
-                        }
-                        Err(_) => {
-                            event.fetch_or(EVENT_OUTPUT_LOST, Ordering::Release);
-                            let _ = reply.send(-1);
-                        }
+        for (ci, cmd) in queue.into_iter().enumerate() {
+            if Some(ci) != last_intent {
+                // A superseded input intent: acknowledge without acting (both commands are
+                // fire-and-forget on the FFI side; the reply only unblocks tests).
+                match cmd {
+                    HostCmd::StartInput { reply } | HostCmd::StopInput { reply } => {
+                        let _ = reply.send(0);
+                        continue;
                     }
+                    _ => {}
                 }
             }
-            HostCmd::StartInput { reply } => {
-                if in_stream.is_some() {
-                    let _ = reply.send(0);
-                } else {
-                    // Duplex VPIO renders the engine through its own output element, so drop the
-                    // cpal output FIRST (only one path may touch RtCell). Fall back to the default
-                    // input if the selected device can't be opened.
-                    if VPIO_DUPLEX_AEC {
+            match cmd {
+                HostCmd::SetOutput { uid, reply } => {
+                    // While duplex VPIO owns the output (mic active), do NOT bring up a competing cpal
+                    // output — two renderers of RtCell would violate the single-accessor invariant.
+                    if VPIO_DUPLEX_AEC && in_stream.is_some() {
+                        // Record the request so StopInput restores THIS device (not the system
+                        // default) when the mic stops, and report the deferred success.
+                        cur_out_uid = Some(uid);
+                        let _ = reply.send(0);
+                    } else {
+                        // Drop the old stream FIRST (joins its callback) so only one stream ever touches
+                        // the shared RtCell, then build the new one. Fall back to default if the
+                        // requested device can't be opened.
                         out_stream = None;
-                    }
-                    let built = open_mic(cur_in_uid.as_deref(), &rt, &input_cell, &event)
-                        .or_else(|_| open_mic(None, &rt, &input_cell, &event));
-                    match built {
-                        Ok(handle) => {
-                            in_stream = Some(handle);
-                            input_started(&input_state);
-                            let _ = reply.send(0);
-                        }
-                        Err(_) => {
-                            input_stopped(&input_state);
-                            // Mic failed to come up → restore cpal output so playback survives.
-                            if VPIO_DUPLEX_AEC && out_stream.is_none() {
-                                // Restore the user's chosen output (not the system default),
-                                // matching StopInput; fall back to default only if it can't open.
-                                out_stream = build_output(cur_out_uid.as_deref(), &rt, &event)
-                                    .or_else(|_| build_output(None, &rt, &event))
-                                    .ok()
-                                    .map(|(h, _)| h);
+                        let built = build_output(Some(&uid), &rt, &event)
+                            .or_else(|_| build_output(None, &rt, &event));
+                        match built {
+                            Ok((handle, _)) => {
+                                out_stream = Some(handle);
+                                cur_out_uid = Some(uid);
+                                let _ = reply.send(0);
                             }
-                            event.fetch_or(EVENT_INPUT_LOST, Ordering::Release);
-                            let _ = reply.send(-1);
+                            Err(_) => {
+                                event.fetch_or(EVENT_OUTPUT_LOST, Ordering::Release);
+                                let _ = reply.send(-1);
+                            }
                         }
                     }
                 }
-            }
-            HostCmd::StopInput { reply } => {
-                // Clear the running bit BEFORE the drop joins the dying callback: a consumer
-                // snapshotting the state word must never count the old stream's final frames
-                // as evidence that a NEW stream is delivering.
-                input_stopped(&input_state);
-                let was_on = in_stream.take().is_some();
-                // VPIO was rendering the output in duplex; hand playback back to cpal, restoring
-                // the user's last chosen output device (a SetOutput during duplex deferred it),
-                // falling back to the system default only if that device can't be opened.
-                if VPIO_DUPLEX_AEC && was_on && out_stream.is_none() {
-                    out_stream = build_output(cur_out_uid.as_deref(), &rt, &event)
-                        .or_else(|_| build_output(None, &rt, &event))
-                        .ok()
-                        .map(|(h, _)| h);
+                HostCmd::StartInput { reply } => {
+                    if in_stream.is_some() {
+                        let _ = reply.send(0);
+                    } else {
+                        // Duplex VPIO renders the engine through its own output element, so drop the
+                        // cpal output FIRST (only one path may touch RtCell). Fall back to the default
+                        // input if the selected device can't be opened.
+                        if VPIO_DUPLEX_AEC {
+                            out_stream = None;
+                        }
+                        let built = open_mic(cur_in_uid.as_deref(), &rt, &input_cell, &event)
+                            .or_else(|_| open_mic(None, &rt, &input_cell, &event));
+                        match built {
+                            Ok(handle) => {
+                                in_stream = Some(handle);
+                                input_started(&input_state);
+                                let _ = reply.send(0);
+                            }
+                            Err(_) => {
+                                input_stopped(&input_state);
+                                // Mic failed to come up → restore cpal output so playback survives.
+                                if VPIO_DUPLEX_AEC && out_stream.is_none() {
+                                    // Restore the user's chosen output (not the system default),
+                                    // matching StopInput; fall back to default only if it can't open.
+                                    out_stream = build_output(cur_out_uid.as_deref(), &rt, &event)
+                                        .or_else(|_| build_output(None, &rt, &event))
+                                        .ok()
+                                        .map(|(h, _)| h);
+                                }
+                                event.fetch_or(EVENT_INPUT_LOST, Ordering::Release);
+                                let _ = reply.send(-1);
+                            }
+                        }
+                    }
                 }
-                let _ = reply.send(0);
-            }
-            HostCmd::SetInput { uid, reply } => {
-                cur_in_uid = Some(uid.clone());
-                if in_stream.is_some() {
-                    // Reopen on the new device (drop old first → single-accessor; cpal output is
-                    // already off in duplex). Not-running for the whole swap window (see
-                    // StopInput on why the store precedes the drop).
+                HostCmd::StopInput { reply } => {
+                    // Clear the running bit BEFORE the drop joins the dying callback: a consumer
+                    // snapshotting the state word must never count the old stream's final frames
+                    // as evidence that a NEW stream is delivering.
+                    input_stopped(&input_state);
+                    let was_on = in_stream.take().is_some();
+                    // VPIO was rendering the output in duplex; hand playback back to cpal, restoring
+                    // the user's last chosen output device (a SetOutput during duplex deferred it),
+                    // falling back to the system default only if that device can't be opened.
+                    if VPIO_DUPLEX_AEC && was_on && out_stream.is_none() {
+                        out_stream = build_output(cur_out_uid.as_deref(), &rt, &event)
+                            .or_else(|_| build_output(None, &rt, &event))
+                            .ok()
+                            .map(|(h, _)| h);
+                    }
+                    let _ = reply.send(0);
+                }
+                HostCmd::SetInput { uid, reply } => {
+                    cur_in_uid = Some(uid.clone());
+                    if in_stream.is_some() {
+                        // Reopen on the new device (drop old first → single-accessor; cpal output is
+                        // already off in duplex). Not-running for the whole swap window (see
+                        // StopInput on why the store precedes the drop).
+                        input_stopped(&input_state);
+                        in_stream = None;
+                        match open_mic(Some(&uid), &rt, &input_cell, &event)
+                            .or_else(|_| open_mic(None, &rt, &input_cell, &event))
+                        {
+                            Ok(handle) => {
+                                in_stream = Some(handle);
+                                input_started(&input_state);
+                                let _ = reply.send(0);
+                            }
+                            Err(_) => {
+                                if VPIO_DUPLEX_AEC && out_stream.is_none() {
+                                    // Restore the user's chosen output (not the system default),
+                                    // matching StopInput; fall back to default only if it can't open.
+                                    out_stream = build_output(cur_out_uid.as_deref(), &rt, &event)
+                                        .or_else(|_| build_output(None, &rt, &event))
+                                        .ok()
+                                        .map(|(h, _)| h);
+                                }
+                                event.fetch_or(EVENT_INPUT_LOST, Ordering::Release);
+                                let _ = reply.send(-1);
+                            }
+                        }
+                    } else {
+                        let _ = reply.send(0);
+                    }
+                }
+                HostCmd::Shutdown => {
                     input_stopped(&input_state);
                     in_stream = None;
-                    match open_mic(Some(&uid), &rt, &input_cell, &event)
-                        .or_else(|_| open_mic(None, &rt, &input_cell, &event))
-                    {
-                        Ok(handle) => {
-                            in_stream = Some(handle);
-                            input_started(&input_state);
-                            let _ = reply.send(0);
-                        }
-                        Err(_) => {
-                            if VPIO_DUPLEX_AEC && out_stream.is_none() {
-                                // Restore the user's chosen output (not the system default),
-                                // matching StopInput; fall back to default only if it can't open.
-                                out_stream = build_output(cur_out_uid.as_deref(), &rt, &event)
-                                    .or_else(|_| build_output(None, &rt, &event))
-                                    .ok()
-                                    .map(|(h, _)| h);
-                            }
-                            event.fetch_or(EVENT_INPUT_LOST, Ordering::Release);
-                            let _ = reply.send(-1);
-                        }
-                    }
-                } else {
-                    let _ = reply.send(0);
+                    out_stream = None;
+                    break 'serve;
                 }
-            }
-            HostCmd::Shutdown => {
-                input_stopped(&input_state);
-                in_stream = None;
-                out_stream = None;
-                break;
             }
         }
         set_gate(out_stream.is_some() || in_stream.is_some());
@@ -1134,7 +1181,15 @@ pub fn spawn_audio_host(
     let join = std::thread::Builder::new()
         .name("vocara-audio-host".to_string())
         .spawn(move || {
-            audio_host_run(rt, input_cell, event, renderer_gate, input_state, rx, ready_tx)
+            audio_host_run(
+                rt,
+                input_cell,
+                event,
+                renderer_gate,
+                input_state,
+                rx,
+                ready_tx,
+            )
         })
         .map_err(|e| format!("spawn audio host: {e}"))?;
     match ready_rx.recv() {
@@ -1167,7 +1222,10 @@ pub fn probe_duration_ms(path: &str) -> Result<Option<u64>, String> {
     let file = std::fs::File::open(path).map_err(|e| format!("open {path}: {e}"))?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
     let mut hint = Hint::new();
-    if let Some(ext) = std::path::Path::new(path).extension().and_then(|e| e.to_str()) {
+    if let Some(ext) = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+    {
         hint.with_extension(ext);
     }
     let probed = symphonia::default::get_probe()
@@ -1408,7 +1466,11 @@ mod record_writer_tests {
     use crate::sample::{Smp, CHANNELS};
 
     fn temp_wav(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("vocara_recwriter_{}_{}.wav", std::process::id(), name))
+        std::env::temp_dir().join(format!(
+            "vocara_recwriter_{}_{}.wav",
+            std::process::id(),
+            name
+        ))
     }
 
     #[test]
@@ -1421,7 +1483,10 @@ mod record_writer_tests {
             "start must report a failed file creation"
         );
         // The failed start left no take on disk; stop must report the loss, not success.
-        assert!(!w.stop(), "stop after a failed start must not report a clean take");
+        assert!(
+            !w.stop(),
+            "stop after a failed start must not report a clean take"
+        );
     }
 
     #[test]
@@ -1429,7 +1494,10 @@ mod record_writer_tests {
         let (mut prod, cons) = spsc::<[Smp; CHANNELS]>(1024);
         let w = RecordWriter::spawn(cons);
         let path = temp_wav("clean");
-        assert!(w.start(path.to_str().unwrap()), "start must ack a successful create");
+        assert!(
+            w.start(path.to_str().unwrap()),
+            "start must ack a successful create"
+        );
         for i in 0..100 {
             assert!(prod.push([i as f32 / 200.0, 0.0]));
         }
@@ -1438,7 +1506,10 @@ mod record_writer_tests {
         let bytes = std::fs::read(&path).expect("recorded WAV must exist");
         // 44-byte header + 100 mono float32 samples, with both size fields patched.
         assert_eq!(bytes.len(), 44 + 400);
-        assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 36 + 400);
+        assert_eq!(
+            u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
+            36 + 400
+        );
         assert_eq!(u32::from_le_bytes(bytes[40..44].try_into().unwrap()), 400);
         // Float takes store the L channel verbatim (no quantization).
         let first = f32::from_le_bytes(bytes[44..48].try_into().unwrap());
@@ -1458,7 +1529,10 @@ mod record_writer_tests {
         let path = temp_wav("after_failure");
         assert!(w.start(path.to_str().unwrap()));
         assert!(prod.push([0.5, 0.5]));
-        assert!(w.stop(), "a later clean recording must report success again");
+        assert!(
+            w.stop(),
+            "a later clean recording must report success again"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1478,7 +1552,8 @@ mod record_writer_tests {
         let join = std::thread::spawn(move || writer_run(cons, rx));
         let path = temp_wav("stale_start");
         let (ack, ack_rx) = std::sync::mpsc::channel();
-        tx.send(WriterCmd::Start(path.to_str().unwrap().to_string(), ack)).unwrap();
+        tx.send(WriterCmd::Start(path.to_str().unwrap().to_string(), ack))
+            .unwrap();
         assert!(ack_rx.recv().unwrap(), "start must ack the file creation");
         for _ in 0..20 {
             assert!(prod.push([0.75, 0.0])); // the new take's frames
@@ -1490,7 +1565,11 @@ mod record_writer_tests {
         join.join().unwrap();
         let bytes = std::fs::read(&path).expect("recorded WAV must exist");
         // 44-byte header + ONLY the take's 20 mono float32 samples (30 stale ones discarded).
-        assert_eq!(bytes.len(), 44 + 20 * 4, "stale frames must not lead the new take");
+        assert_eq!(
+            bytes.len(),
+            44 + 20 * 4,
+            "stale frames must not lead the new take"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1503,7 +1582,10 @@ mod record_writer_tests {
         use super::{effective_gate, note_stream_teardown_failure, STREAM_TEARDOWN_FAILED};
         use std::sync::atomic::Ordering;
         assert!(effective_gate(true), "streams up always raises the gate");
-        assert!(!effective_gate(false), "a clean teardown may lower the gate");
+        assert!(
+            !effective_gate(false),
+            "a clean teardown may lower the gate"
+        );
         note_stream_teardown_failure();
         assert!(
             effective_gate(false),
@@ -1672,6 +1754,34 @@ mod out_resampler_tests {
     }
 
     #[test]
+    fn pause_and_play_are_idempotent() {
+        let (h, mut res) = ramp_engine();
+        h.play();
+        let mut out = vec![0.0; 441 * CHANNELS];
+        res.process(&mut out, 441);
+        h.pause();
+        let paused_at = h.frame();
+        // The paused callback refills the FIFO with silence and republishes its depth…
+        res.process(&mut out, 441);
+        // …which a SECOND pause must not fold into the clock (that was a position rewind).
+        h.pause();
+        assert_eq!(h.frame(), paused_at, "double pause must not rewind");
+        h.play();
+        res.process(&mut out, 441);
+        let resumed_first = out[0];
+        // A second play must not flush LIVE audio out of the FIFO: the next buffer has to
+        // continue the ramp seamlessly (one buffer = 480 engine frames = +0.048).
+        h.play();
+        res.process(&mut out, 441);
+        assert!(
+            (out[0] - (resumed_first + 0.048)).abs() < 0.005,
+            "double play must not skip: expected ~{} got {}",
+            resumed_first + 0.048,
+            out[0]
+        );
+    }
+
+    #[test]
     fn loop_wrap_never_reports_a_position_before_the_loop_start() {
         let (h, mut res) = ramp_engine();
         // Loop [200, 680): consuming 480 engine frames from 200 lands exactly on the wrap.
@@ -1699,20 +1809,22 @@ mod input_cell_tests {
     use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
     use std::sync::Arc;
 
-    fn cell_with_rec_capacity(
-        rec_cap: usize,
-    ) -> (
-        Arc<InputCell>,
-        Arc<AtomicBool>,
-        Arc<AtomicU64>,
-        Arc<AtomicU64>,
-    ) {
+    struct RecCell {
+        cell: Arc<InputCell>,
+        rec_active: Arc<AtomicBool>,
+        frames_in: Arc<AtomicU64>,
+        rec_dropped: Arc<AtomicU64>,
+        rec_written: Arc<AtomicU64>,
+    }
+
+    fn cell_with_rec_capacity(rec_cap: usize) -> RecCell {
         let (mic_prod, _mic_cons) = spsc::<[Smp; CHANNELS]>(1 << 10);
         let (cap_prod, _cap_cons) = spsc::<[Smp; CHANNELS]>(1 << 10);
         let (rec_prod, _rec_cons) = spsc::<[Smp; CHANNELS]>(rec_cap);
         let rec_active = Arc::new(AtomicBool::new(true));
         let frames_in = Arc::new(AtomicU64::new(0));
         let rec_dropped = Arc::new(AtomicU64::new(0));
+        let rec_written = Arc::new(AtomicU64::new(0));
         let cell = InputCell::new(
             mic_prod,
             cap_prod,
@@ -1722,37 +1834,54 @@ mod input_cell_tests {
             Arc::new(AtomicU32::new(0)),
             Arc::clone(&frames_in),
             Arc::clone(&rec_dropped),
+            Arc::clone(&rec_written),
         );
         // Identity resample path (input already at ENGINE_SR), mono input.
         cell.reconfigure(crate::sample::ENGINE_SR, 1);
-        (cell, rec_active, frames_in, rec_dropped)
+        RecCell {
+            cell,
+            rec_active,
+            frames_in,
+            rec_dropped,
+            rec_written,
+        }
     }
 
     #[test]
     fn recording_ring_overflow_is_counted() {
-        let (cell, _rec_active, frames_in, rec_dropped) = cell_with_rec_capacity(4);
-        // 12 mono frames into a 4-slot recording ring: 4 fit, 8 must be counted as dropped.
+        let c = cell_with_rec_capacity(4);
+        // 12 mono frames into a 4-slot recording ring: 4 fit (written), 8 dropped.
         let data = [0.5f32; 12];
         // SAFETY: no input callback exists in this test; we are the single accessor.
-        unsafe { cell.feed(&data) };
-        assert_eq!(frames_in.load(Ordering::Relaxed), 12);
+        unsafe { c.cell.feed(&data) };
+        assert_eq!(c.frames_in.load(Ordering::Relaxed), 12);
         assert_eq!(
-            rec_dropped.load(Ordering::Relaxed),
+            c.rec_dropped.load(Ordering::Relaxed),
             8,
             "every frame refused by the full recording ring must be counted"
+        );
+        assert_eq!(
+            c.rec_written.load(Ordering::Relaxed),
+            4,
+            "written counts exactly the frames that made it into the ring"
         );
     }
 
     #[test]
     fn no_drops_are_counted_while_the_ring_has_room() {
-        let (cell, rec_active, _frames_in, rec_dropped) = cell_with_rec_capacity(64);
+        let c = cell_with_rec_capacity(64);
         let data = [0.25f32; 32];
         // SAFETY: single accessor (see above).
-        unsafe { cell.feed(&data) };
-        assert_eq!(rec_dropped.load(Ordering::Relaxed), 0);
-        // Frames emitted while recording is DISARMED never touch the ring or the counter.
-        rec_active.store(false, Ordering::Release);
-        unsafe { cell.feed(&data) };
-        assert_eq!(rec_dropped.load(Ordering::Relaxed), 0);
+        unsafe { c.cell.feed(&data) };
+        assert_eq!(c.rec_dropped.load(Ordering::Relaxed), 0);
+        assert_eq!(c.rec_written.load(Ordering::Relaxed), 32);
+        // Frames emitted while recording is DISARMED never touch the ring or either
+        // counter — this is exactly why rec_written is the per-take proof the global
+        // frame counter cannot be: a pre-arm callback advances frames_in but not this.
+        c.rec_active.store(false, Ordering::Release);
+        unsafe { c.cell.feed(&data) };
+        assert_eq!(c.rec_dropped.load(Ordering::Relaxed), 0);
+        assert_eq!(c.rec_written.load(Ordering::Relaxed), 32);
+        assert_eq!(c.frames_in.load(Ordering::Relaxed), 64);
     }
 }

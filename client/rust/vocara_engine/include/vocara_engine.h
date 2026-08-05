@@ -103,6 +103,10 @@ int ve_stop_input_recording(VeEngine *e);
  * Nonzero = the take on disk is missing that many frames (writer thread stalled past the
  * ring's headroom) — the UI must not present the take as gapless. */
 uint64_t ve_record_dropped_frames(VeEngine *e);
+/* Frames WRITTEN into the recording ring for the current take (engine-rate; reset at each
+ * start) — the per-take recorded-progress ack. Nonzero proves audio is in this take's
+ * ring; at play time it IS the take's file offset (the pre-roll). */
+uint64_t ve_record_written_frames(VeEngine *e);
 
 int ve_play(VeEngine *e);
 int ve_pause(VeEngine *e);
