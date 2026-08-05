@@ -1008,9 +1008,17 @@ class TechniqueDetailViewModel extends ChangeNotifier
     // Clean up any abandoned recording (Stop never pressed before leaving).
     unawaited(deleteTempRecordingDir(_practiceTempPath));
     unawaited(deleteTempRecordingDir(_exampleTempPath));
-    // Delete files copied for staged additions that were never committed.
-    for (final m in _draftAdds) {
-      unawaited(_mediaService.deleteMedia(m.path));
+    // Delete files copied for staged additions that were never committed —
+    // but NEVER while a save is airborne: the commit is persisting rows for
+    // exactly these files, and deleting them here (the route can pop during
+    // the repository await) would leave committed rows pointing at nothing.
+    // The save's own completion path clears the draft it owns; if it fails
+    // after this dispose, the files leak as orphans — strictly better than
+    // dangling rows.
+    if (!_saving) {
+      for (final m in _draftAdds) {
+        unawaited(_mediaService.deleteMedia(m.path));
+      }
     }
     unawaited(_engine?.dispose());
     position.dispose();
