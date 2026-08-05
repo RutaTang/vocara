@@ -61,10 +61,14 @@ class _HeldPush {
 ///    [releaseHeldPushes] to land the rows and complete the acks (models
 ///    delivery delay; lets a test interleave work "during" a push).
 ///  * [pageSize] — fetchChanges page size (hasMore paging).
-///  * [injectConflictOnce] — the next push of that (table, id) is rejected
-///    with the server's CURRENT row (a compare-and-set rejection); the
-///    retry is then accepted. Ignored if the server holds no row for the key
-///    (a real server only conflicts against an existing record).
+///  * [injectConflictOnce] — the next push of that (table, id) is CAS-checked
+///    against the server's CURRENT row and rejected with it iff that row is
+///    strictly newer by hlcPacked, exactly the one conflict a conforming
+///    server may raise (docs/sync-protocol.md); against an older-or-equal
+///    held row (or no row at all) the injection is consumed but the push is
+///    accepted. A NON-conforming conflict (older/equal/mismatched serverRow)
+///    is modeled with [mangleNextAck] instead — the engine must refuse it
+///    (SyncEngine._validateConflict).
 ///  * [redeliverNextFetches] — the next N fetchChanges calls re-serve the
 ///    previously served page verbatim (same rows, same nextToken): the
 ///    at-least-once duplicate-delivery case.
@@ -107,8 +111,9 @@ class FakeSyncTransport implements SyncTransport {
   /// Number of pushes currently parked by [holdPushes].
   int get heldPushCount => _heldPushes.length;
 
-  /// Rejects the next [times] pushes of ([table], [id]) with the server's
-  /// current row.
+  /// Arms a CAS check for the next [times] pushes of ([table], [id]): each
+  /// is rejected with the server's current row iff that row is strictly
+  /// newer (see the class docs — the fake stays protocol-conforming).
   void injectConflictOnce(String table, String id, {int times = 1}) {
     _conflictOnce[(table, id)] = times;
   }
@@ -147,8 +152,14 @@ class FakeSyncTransport implements SyncTransport {
       final serverRow = cloud.serverRowFor(row.table, row.id);
       if (remaining > 0 && serverRow != null) {
         _conflictOnce[key] = remaining - 1;
-        results.add(PushRowResult.conflicted(row, serverRow: serverRow));
-        continue;
+        // Conforming CAS: reject ONLY when the held row is strictly newer
+        // (docs/sync-protocol.md). An older-or-equal held row falls through
+        // to acceptance — a real server never conflicts on those, and the
+        // engine now refuses such an ack as a protocol violation.
+        if (serverRow.hlcPacked.compareTo(row.hlcPacked) > 0) {
+          results.add(PushRowResult.conflicted(row, serverRow: serverRow));
+          continue;
+        }
       }
       cloud.accept(row);
       results.add(PushRowResult.accepted(row));

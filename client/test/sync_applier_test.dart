@@ -9,6 +9,21 @@ import 'package:vocara/data/sync/sync_row.dart';
 
 String _id(String s) => s.padRight(26, '0').substring(0, 26);
 
+/// An [HlcClock] that counts its state-changing [receive] calls, so a test
+/// can assert not just WHERE the clock ended up but HOW OFTEN the applier
+/// advanced it (once per settled record, only after the outer commit).
+class _CountingClock extends HlcClock {
+  _CountingClock({required super.node, super.now});
+
+  int receives = 0;
+
+  @override
+  Hlc receive(Hlc remote) {
+    receives++;
+    return super.receive(remote);
+  }
+}
+
 void main() {
   late AppDatabase db;
   late SyncApplier applier;
@@ -296,20 +311,24 @@ void main() {
       expect(await hlcPackedOf('P'), hlc(920).packed);
     });
 
-    test('a partial row from an OLDER schema_v is NOT enforced (an older '
-        'peer legitimately lacks newly added columns)', () async {
+    test('a below-range schema_v never reaches the older-peer exemption: '
+        'wire versions start at 1, so a v0/negative record is quarantined '
+        'whole — with missing columns it would otherwise walk between the '
+        'newer-schema and full-row gates and partially apply', () async {
       await applier.apply([practice('P', 'v1', hlc(900))]);
 
-      // A v0 peer's row: full for ITS shape, partial for ours. Simulated as
-      // a subset carrying schema_v 0 — the gate must let it through, and the
-      // update touches only the carried columns.
+      // A "v0 peer" cannot exist (currentRecordSchemaV has never been below
+      // 1): a subset row claiming schema_v 0 is malformed, and letting it
+      // through would advance hlc_packed while silently keeping stale local
+      // content for its missing columns — the exact poisoning the full-row
+      // gate exists to stop.
       final h = hlc(950);
       final res = await applier.apply([
         RemoteRecord(
           table: 'practices',
           columns: {
             'id': _id('P'),
-            'title': 'from an old build',
+            'title': 'from a below-range build',
             'created_at': h.wallMs,
             'updated_at': h.wallMs,
             'deleted_at': null,
@@ -321,10 +340,14 @@ void main() {
           },
         ),
       ]);
-      expect(res.applied, 1);
-      expect(res.failed, 0);
-      expect((await row('P'))!['title'], 'from an old build');
-      expect(await hlcPackedOf('P'), h.packed);
+      expect(res.failed, 1);
+      expect(res.applied, 0);
+      expect((await row('P'))!['title'], 'v1', reason: 'content unchanged');
+      expect(
+        await hlcPackedOf('P'),
+        hlc(900).packed,
+        reason: 'the LWW key must not advance on a rejected record',
+      );
     });
   });
 
@@ -374,6 +397,55 @@ void main() {
       final res = await applier.apply([practice('P', 'applied', h)]);
       expect(res.applied, 1);
       expect(applier.clock.last.wallMs, greaterThanOrEqualTo(h.wallMs));
+    });
+
+    test('a batch whose OUTER commit fails leaves the clock untouched even '
+        'though its records had settled inside the transaction', () async {
+      final before = applier.clock.last;
+      // The record itself is fine and settles as applied inside the loop;
+      // the throwing beforeCommit hook (the engine's token-write seam) then
+      // rolls the whole outer transaction back. The database forgot the
+      // record — the in-memory clock must have forgotten it too.
+      final res = await applier.apply([
+        practice('P', 'settled then rolled back', hlc(1000 + 60 * 1000)),
+      ], beforeCommit: () async => throw StateError('kill the outer commit'));
+      expect(res.committed, isFalse);
+      expect(await row('P'), isNull, reason: 'the batch rolled back');
+      expect(
+        applier.clock.last,
+        before,
+        reason:
+            'the database rolled back the settled record; an advanced '
+            'in-memory clock would be a side effect surviving the rollback',
+      );
+    });
+
+    test('a committed batch advances the clock exactly once per settled '
+        'record, never for rejected ones', () async {
+      final clock = _CountingClock(node: _id('LOCAL'), now: () => 1000);
+      applier = SyncApplier(db, clock);
+      // Seed P so a stale copy below settles as a clean LWW skip at the
+      // door (the pre-savepoint settle, which never advances the clock —
+      // unchanged by the post-commit deferral).
+      await applier.apply([practice('P', 'v1', hlc(950))]);
+      clock.receives = 0;
+
+      final res = await applier.apply([
+        practice('A', 'applied', hlc(960)),
+        practice('P', 'stale', hlc(900)), // clean LWW skip at the door
+        practice('FUT', 'poison', hlc(1000 + 6 * 60 * 1000)), // quarantined
+      ]);
+      expect(res.applied, 1);
+      expect(res.skipped, 1);
+      expect(res.quarantined, 1);
+      expect(
+        clock.receives,
+        1,
+        reason:
+            'exactly the applied record — a door-settled skip never '
+            'received (before or after the deferral), and a quarantined '
+            'record must leave the clock alone',
+      );
     });
   });
 
@@ -671,6 +743,53 @@ void main() {
       expect(parked, hasLength(1));
       expect(parked.single.schemaV, currentRecordSchemaV + 1);
       expect(parked.single.reason, startsWith('apply-failed'));
+    });
+
+    test('a schema_v of 0 is parked with reason invalid-schema_v; the rest '
+        'of the batch applies (versions start at 1, and a below-range value '
+        'would bypass both schema gates)', () async {
+      final res = await applier.apply([
+        practice('GOOD', 'kept', hlc(900)),
+        RemoteRecord(
+          table: 'practices',
+          columns: {
+            ...practice('BAD', 'dropped', hlc(910)).columns,
+            'schema_v': 0,
+          },
+        ),
+        practice('ALSO', 'behind', hlc(920)),
+      ]);
+      expect(res.failed, 1);
+      expect(res.applied, 2, reason: 'the batch continues around it');
+      expect((await row('GOOD'))!['title'], 'kept');
+      expect((await row('ALSO'))!['title'], 'behind');
+      expect(await row('BAD'), isNull, reason: 'never applied');
+
+      final parked = await store.list();
+      expect(parked, hasLength(1));
+      expect(parked.single.id, _id('BAD'));
+      expect(parked.single.reason, startsWith('invalid-schema_v'));
+      expect(parked.single.reason, contains('0'));
+    });
+
+    test('a NEGATIVE schema_v is parked the same way', () async {
+      final res = await applier.apply([
+        RemoteRecord(
+          table: 'practices',
+          columns: {
+            ...practice('BAD', 'dropped', hlc(910)).columns,
+            'schema_v': -1,
+          },
+        ),
+      ]);
+      expect(res.failed, 1);
+      expect(res.applied, 0);
+      expect(await row('BAD'), isNull);
+
+      final parked = await store.list();
+      expect(parked, hasLength(1));
+      expect(parked.single.reason, startsWith('invalid-schema_v'));
+      expect(parked.single.reason, contains('-1'));
     });
 
     test('an unknown table is parked with reason unknown-table', () async {

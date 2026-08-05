@@ -53,10 +53,13 @@ class ApplyResult {
 /// implausibly far in the future is quarantined instead of merged (one bad
 /// peer can't poison the fleet). The gate and the advance are split
 /// deliberately: [HlcClock.assertPlausible] (check-only, same drift rule)
-/// runs with the other door gates, and the state-changing receive() runs only
-/// once the record's savepoint has settled as applied or skipped — a record
-/// that fails inside its savepoint must leave NO side effect behind, and an
-/// advanced in-memory clock is a side effect.
+/// runs with the other door gates, and the state-changing receive() calls run
+/// only AFTER the batch's outer transaction has committed, for the records
+/// whose savepoint settled as applied or skipped — a record that fails inside
+/// its savepoint, and equally a whole batch whose outer commit fails (an
+/// FK-sweep abort, a throwing beforeCommit hook), must leave NO side effect
+/// behind, and an in-memory clock advanced for writes the database rolled
+/// back is a side effect.
 ///
 /// Apply is order-tolerant and per-record resilient: defer_foreign_keys lets a
 /// child arrive before its parent within the batch, and each record applies
@@ -130,6 +133,11 @@ class SyncApplier {
     final insertedThisBatch = <(String, String)>{};
     // Per-batch live-schema cache for the column gate (see [_liveColumns]).
     final liveColumns = <String, Set<String>>{};
+    // Stamps of records whose savepoint settled as applied or skipped. Their
+    // state-changing clock.receive runs only once the outer transaction has
+    // committed (bottom of this method) — an advance for records the outer
+    // commit then rolled back would be a side effect surviving the rollback.
+    final settledHlcs = <Hlc>[];
     try {
       await db.transaction(() async {
         await db.customStatement('PRAGMA defer_foreign_keys = ON');
@@ -169,6 +177,30 @@ class SyncApplier {
             if (held != null &&
                 rec.hlcPacked.compareTo(held.read<String>('hlc_packed')) <= 0) {
               result.skipped++;
+              continue;
+            }
+            // Wire schema versions start at 1 — no build has ever written a
+            // lower [currentRecordSchemaV] — so schema_v 0 or negative is
+            // never an "older peer": it is a malformed or non-conforming
+            // record, and it MUST be stopped here because the two schema
+            // gates below bracket it without catching it (the newer-schema
+            // gate matches only v > current, the full-row gate only
+            // v == current), so a below-range record used to walk between
+            // them and apply with missing columns silently accepted. This is
+            // an applier gate rather than a stricter SyncRow.fromJson:
+            // fromJson runs at the transport/page layer (a real transport
+            // decodes the WHOLE page, so one throw there fails every record
+            // on it) and on quarantine-replay decode (where a throw keeps
+            // the entry parked forever instead of letting LWW settle it) —
+            // only this per-record path can park the one bad record and keep
+            // the one-bad-record-never-bricks-the-page invariant.
+            if (rec.schemaV < 1) {
+              result.failed++;
+              await _quarantine(
+                rec,
+                'invalid-schema_v: ${rec.schemaV} is below 1, the lowest '
+                'version any build ever wrote',
+              );
               continue;
             }
             // A record from a NEWER record-schema version is quarantined
@@ -212,9 +244,11 @@ class SyncApplier {
             // sender is non-conforming, and the parking lot (not a silent
             // partial write) is where a non-conforming record belongs.
             //
-            // Deliberately NOT enforced for schema_v < current: an older peer
-            // legitimately lacks columns this build added, and its full-row
-            // snapshot of the OLD shape is still the safest thing to apply. A
+            // Deliberately NOT enforced for schema_v < current (which, past
+            // the below-range gate above, means valid older versions only —
+            // 1 <= schema_v < current): an older peer legitimately lacks
+            // columns this build added, and its full-row snapshot of the OLD
+            // shape is still the safest thing to apply. A
             // per-version column registry (required set keyed by schema_v) is
             // the future-proof answer once a v2 exists; until then the live
             // schema — the same source the unknown-column gate reads — IS the
@@ -240,8 +274,8 @@ class SyncApplier {
             try {
               // Check-only: the drift gate must not advance the clock, or a
               // record that then fails/quarantines inside its savepoint would
-              // still have moved it. The advancing receive() runs after the
-              // savepoint settles, below.
+              // still have moved it. The advancing receive() runs only after
+              // the outer transaction commits (bottom of this method).
               clock.assertPlausible(rec.hlc);
             } on HlcDriftException catch (e) {
               result.quarantined++;
@@ -284,12 +318,13 @@ class SyncApplier {
               }
               return true;
             });
-            // The record settled (applied, or cleanly lost LWW) — only NOW
-            // advance the clock past its stamp, so subsequent local writes
-            // stay causally after it. This cannot throw: assertPlausible
-            // above passed with the same drift rule, and its reference
-            // (max(now, maxWallEverSeen)) only grows between the two calls.
-            clock.receive(rec.hlc);
+            // The record settled (applied, or cleanly lost LWW): remember its
+            // stamp for the post-commit clock advance. NOT receive()d here —
+            // this line still runs inside the outer transaction, and an
+            // FK-sweep abort, a throwing beforeCommit hook, or a failed
+            // outer commit would roll the database back while the in-memory
+            // clock kept the advance.
+            settledHlcs.add(rec.hlc);
             if (applied) {
               result.applied++;
               if (didInsert) insertedThisBatch.add((rec.table, rec.id));
@@ -321,6 +356,22 @@ class SyncApplier {
       result.skipped = 0;
       result.failed = records.length - result.quarantined;
       result.committed = false;
+    }
+    if (result.committed) {
+      // The batch is durably committed: only now advance the clock past every
+      // settled record's stamp, so subsequent local writes stay causally
+      // after everything the database actually holds. This cannot throw:
+      // assertPlausible passed for each stamp under the same drift rule, and
+      // its reference (max(now, maxWallEverSeen)) only grows between the two
+      // calls. Deferring the advance also means the drift gate judged every
+      // record of this batch against the PRE-batch clock reference — that is
+      // deliberate and conservative: a record plausible only relative to an
+      // earlier in-batch stamp quarantines now and is un-parked by the sync
+      // engine's end-of-run quarantine replay, once this commit's receives
+      // have raised the reference.
+      for (final hlc in settledHlcs) {
+        clock.receive(hlc);
+      }
     }
     return result;
   }

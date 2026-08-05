@@ -300,11 +300,27 @@ class SyncEngine {
   /// accepted).
   Future<PushRun> pumpPush() => _exclusive(_pushLocked);
 
+  /// Once-per-instance durable marker that a transport exists (see
+  /// [SyncStateStore.transportSeenKey]); the asset GC's pending-journal guard
+  /// keys off it. Cached so steady-state pumps cost no extra query.
+  bool _transportSeenMarked = false;
+
+  Future<void> _ensureTransportSeen() async {
+    if (_transportSeenMarked) return;
+    await _state.markTransportSeen();
+    _transportSeenMarked = true;
+  }
+
   Future<PushRun> _pushLocked() async {
     var pushed = 0;
     var heldBack = 0;
     var ackedThrough = 0;
     try {
+      // Durable BEFORE the first wire call of this library's life: once a push
+      // may have reached a server, the asset GC's pending-journal guard must
+      // engage — a crash mid-push must never leave a server-held row in a
+      // library that still claims no transport ever existed.
+      await _ensureTransportSeen();
       var lastMaxSeq = 0;
       while (true) {
         final batch = await _drain.readPending(limit: drainLimit);
@@ -405,9 +421,11 @@ class SyncEngine {
   /// arrives via pull, and LWW makes dropping safe. Returns rows accepted.
   ///
   /// Every ack is VALIDATED against the rows just pushed before anything acts
-  /// on it (see [_validateAck]) — each retry round validates its own attempt
-  /// list. Handled assets rows are marked record-synced here, inside the
-  /// round and therefore strictly BEFORE the caller's oplog ack (see
+  /// on it (see [_validateAck]), and every conflicted result's serverRow is
+  /// validated before it may drive the retry-or-drop decision (see
+  /// [_validateConflict]) — each retry round validates its own attempt list.
+  /// Handled assets rows are marked record-synced here, inside the round and
+  /// therefore strictly BEFORE the caller's oplog ack (see
   /// [_markAssetRecordsSynced] for why that order matters).
   Future<int> _pushChunkResolvingConflicts(List<SyncRow> chunk) async {
     var accepted = 0;
@@ -415,6 +433,12 @@ class SyncEngine {
     for (var tries = 0; attempt.isNotEmpty; tries++) {
       final ack = await _transport.pushRows(attempt);
       _validateAck(attempt, ack);
+      // Same discipline as _validateAck: the WHOLE round is vetted before
+      // anything in it takes effect, so an invalid conflict claim can't land
+      // after part of the round was already counted/marked.
+      for (final r in ack.results) {
+        if (!r.accepted) _validateConflict(r);
+      }
       final retry = <SyncRow>[];
       // Assets rows the server now durably HOLDS after this round — accepted
       // ones, and ones dropped because the server's version is newer (the
@@ -425,6 +449,10 @@ class SyncEngine {
           accepted++;
           if (r.row.table == 'assets') syncedAssetIds.add(r.row.id);
         } else if (r.row.hlcPacked.compareTo(r.serverRow!.hlcPacked) > 0) {
+          // Unreachable against a validated ack ([_validateConflict] requires
+          // the server row STRICTLY newer); kept as the documented resolution
+          // policy so that a deliberate future relaxation of the conflict
+          // contract makes "local wins" re-push instead of silently dropping.
           retry.add(r.row);
         } else {
           // Server holds something newer (or equal) — drop ours. For an
@@ -484,6 +512,71 @@ class SyncEngine {
         );
       }
       expected[key] = n - 1;
+    }
+  }
+
+  /// Refuses a `conflicted` [PushRowResult] whose serverRow cannot be an
+  /// honest CAS rejection. The serverRow decides retry-or-drop; trusted
+  /// blind, a lazy lie could make the engine silently drop — and then ack
+  /// away — a local edit the server never stored. Four checks, all cheap:
+  ///
+  ///  * it must EXIST — a conflict claim with no server state is
+  ///    meaningless (structurally unrepresentable through
+  ///    [PushRowResult]'s own constructors, but a decoding transport seam
+  ///    must not be able to smuggle one through);
+  ///  * it must carry the SAME (table, id) as the rejected row — checked on
+  ///    the raw field map, so a mistyped id fails as a transport violation
+  ///    rather than a TypeError;
+  ///  * it must be internally CONSISTENT: its HLC quad must re-pack to its
+  ///    hlc_packed — the exact rule [SyncRow.fromJson] enforces at the pull
+  ///    door, applied via the shared [SyncRow.checkHlcConsistency] so the
+  ///    two doors can never diverge;
+  ///  * its hlcPacked must be STRICTLY greater than the pushed row's: a
+  ///    conforming server accepts a push it holds nothing newer than
+  ///    (docs/sync-protocol.md), so a CAS reject by an older-or-equal row is
+  ///    nonsensical — and the canonical low-cost lie is echoing the pushed
+  ///    row straight back as "the server's".
+  ///
+  /// Any violation throws [SyncTransportException]: the run fails, nothing
+  /// is acked, and every journaled entry re-pushes on a later run. This
+  /// closes every low-cost lie; a server that fabricates an
+  /// internally-consistent, strictly NEWER row is indistinguishable from one
+  /// legitimately holding it, and is therefore outside the client's
+  /// defensible model — the documented trust boundary (docs/sync-protocol.md
+  /// "Trust model"), equivalent to the server withholding rows on pull.
+  void _validateConflict(PushRowResult r) {
+    final pushed = r.row;
+    final server = r.serverRow;
+    if (server == null) {
+      throw SyncTransportException(
+        'conflicted push result for ${pushed.table}/${pushed.id} carries no '
+        'serverRow',
+      );
+    }
+    if (server.table != pushed.table || server.fields['id'] != pushed.id) {
+      throw SyncTransportException(
+        'conflicted push result for ${pushed.table}/${pushed.id} carries a '
+        'serverRow for ${server.table}/${server.fields['id']}',
+      );
+    }
+    try {
+      SyncRow.checkHlcConsistency(server.fields);
+    } on FormatException catch (e) {
+      throw SyncTransportException(
+        'conflicted serverRow for ${pushed.table}/${pushed.id} is internally '
+        'inconsistent',
+        e,
+      );
+    }
+    // checkHlcConsistency proved hlc_packed is a String, so the getter below
+    // cannot throw.
+    if (server.hlcPacked.compareTo(pushed.hlcPacked) <= 0) {
+      throw SyncTransportException(
+        'conflicted serverRow for ${pushed.table}/${pushed.id} is not '
+        'strictly newer than the pushed row '
+        '("${server.hlcPacked}" <= "${pushed.hlcPacked}"); a conforming '
+        'server accepts a push it holds nothing newer than',
+      );
     }
   }
 
@@ -562,6 +655,9 @@ class SyncEngine {
     // always reload an already-consistent view).
     final announcements = <RemoteApplied>[];
     try {
+      // A pull proves a transport exists just as much as a push does (see
+      // _pushLocked): record it before the first wire call.
+      await _ensureTransportSeen();
       // Replay the quarantine parking lot FIRST: the token is already past
       // those rows, so no fetch will ever re-deliver them — a recovered
       // clock or an upgraded schema must be able to let them in even when

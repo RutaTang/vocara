@@ -270,7 +270,7 @@ class AssetStore {
   /// cloud-byte deletion is a separate, knowledge-gated step that never runs on
   /// a time horizon.
   ///
-  /// Three guards against sweeping assets that are only LOCALLY (or
+  /// Four guards against sweeping assets that are only LOCALLY (or
   /// transiently) unreferenced — a tombstone here is journaled, so once sync
   /// ships it would propagate as a fleet-wide delete, and a moment of local
   /// blindness must never become permanent:
@@ -284,8 +284,30 @@ class AssetStore {
   ///    asset this device has ever pushed (or whose bytes were ever synced)
   ///    is therefore left alone by this sweep entirely; a future server-side
   ///    refcount — the only party that can see EVERY reference — owns the
-  ///    lifecycle of synced assets. Today, with no transport attached, every
-  ///    asset is unsynced, so single-device behavior is unchanged.
+  ///    lifecycle of synced assets.
+  ///  * Once a transport has EVER been active (the durable
+  ///    [SyncStateStore.transportSeenKey] marker, written before the first
+  ///    wire call), an asset with a PENDING oplog entry (entity_table
+  ///    'assets', matching entity_id) is never swept, even while both
+  ///    sync-state columns still read 'localOnly'. The push ack is what
+  ///    deletes a journal entry AND (just before it) what marks the record
+  ///    synced — and a crash can land between the server durably persisting
+  ///    a push and either of those: the row is then already server-side,
+  ///    where peers may have pulled it, while this device still looks
+  ///    never-synced. The boot GC runs BEFORE any sync pump could repair
+  ///    that bookkeeping, so without this guard it would sweep exactly such
+  ///    a row and journal a tombstone that broadcasts a fleet-wide delete
+  ///    for it. An unacked journal entry therefore means "this row may
+  ///    already be server-side; its fate is not locally decidable yet" —
+  ///    once the entry IS acked, the row was either marked synced (first
+  ///    guard) or truly never left. Failing safe is deliberate: holding a
+  ///    sweep leaks a little disk until the ledger drains; sweeping a
+  ///    server-held row loses data fleet-wide. On a library where NO
+  ///    transport has ever existed the guard stands down — nothing ever
+  ///    acks the oplog there (boot compaction keeps one entry per row
+  ///    forever), so the guard would otherwise hold EVERY asset and quietly
+  ///    turn off local disk reclaim, while the marker's absence is proof no
+  ///    server can hold any of these rows.
   ///  * Rows parked in the sync quarantine count as references: a quarantined
   ///    payload (half-delivered page, forward-incompatible record) may carry
   ///    the ONLY pointer at an asset until a later app upgrade re-applies it.
@@ -319,12 +341,30 @@ class AssetStore {
     // are per-device bookkeeping that only this device's sync engine ever
     // advances past 'localOnly', so the predicate is exactly "no other device
     // can possibly hold a reference we can't see".
+    // The pending-journal guard (second bullet of the doc) rides along as a
+    // NOT EXISTS conjunct — but only once a transport has ever existed: it
+    // can only shrink the candidate set the other guards produced, and on a
+    // never-synced library it would shrink it to nothing forever (see the
+    // bullet). Raw key read rather than SyncStateStore: this store must not
+    // depend on the sync layer.
+    final transportSeen =
+        (await db
+                .customSelect(
+                  'SELECT 1 AS x FROM sync_state WHERE "key" = \'transport_seen\'',
+                )
+                .get())
+            .isNotEmpty;
+    final pendingJournalGuard = transportSeen
+        ? 'AND NOT EXISTS (SELECT 1 FROM oplog '
+              "WHERE entity_table = 'assets' AND entity_id = assets.id)"
+        : '';
     final live = await db
         .customSelect(
           'SELECT id, content_hash, local_rel_path, created_at, updated_at '
           'FROM assets WHERE deleted_at IS NULL '
           "AND record_sync_state = 'localOnly' "
-          "AND bytes_sync_state = 'localOnly'",
+          "AND bytes_sync_state = 'localOnly' "
+          '$pendingJournalGuard',
         )
         .get();
 

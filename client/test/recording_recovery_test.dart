@@ -199,6 +199,12 @@ void main() {
       'and reclaimed its pool file', () async {
     final practice = await createPractice();
     await saveThenDeleteTake(practice);
+    // Settle the asset's journal entry as a push ack would (the ack
+    // hard-deletes): the sweep holds back any asset whose entry is still
+    // pending, since a pushed-but-unacked row may already be server-side.
+    await persistence.db.customStatement(
+      "DELETE FROM oplog WHERE entity_table = 'assets'",
+    );
     // The GC pass a later boot would run: the take's asset is unreferenced
     // by live rows, so it is tombstoned and its pooled bytes reclaimed.
     expect(

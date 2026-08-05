@@ -94,40 +94,11 @@ class SyncRow {
         'SyncRow: fields must carry id/schema_v/hlc_packed',
       );
     }
-    // The HLC rides in two representations: the packed string (the LWW
-    // comparison key) and the wall/ctr/node quad (what the applier's drift
-    // gate and HlcClock.receive judge). LWW compares the PACKED value while
-    // the drift gate judges the QUAD's wall — if the two could disagree, a
-    // record with an honest-looking quad but a forged far-future hlc_packed
-    // would sail through the drift gate and then win every LWW comparison
-    // fleet-wide. Require the quad to be well-typed AND to re-pack (via the
-    // same [Hlc.packed] routine every stamp in the codebase uses) to exactly
-    // the carried hlc_packed, so the two views of one stamp can never
-    // disagree past this door. This also removes the last unchecked casts
+    // The two HLC representations must agree — see [checkHlcConsistency].
+    // Checking here (the wire door) also removes the last unchecked casts
     // behind the [hlc] getter: a mistyped quad fails HERE as a per-record
     // parse error instead of a TypeError deep inside an apply.
-    final hlcWall = fields['hlc_wall'];
-    final hlcCtr = fields['hlc_ctr'];
-    final hlcNode = fields['hlc_node'];
-    if (hlcWall is! int ||
-        hlcCtr is! int ||
-        hlcNode is! String ||
-        hlcNode.isEmpty) {
-      throw const FormatException(
-        'SyncRow: fields must carry an int hlc_wall/hlc_ctr and a '
-        'non-empty hlc_node',
-      );
-    }
-    final repacked = Hlc(
-      wallMs: hlcWall,
-      counter: hlcCtr,
-      node: hlcNode,
-    ).packed;
-    if (repacked != fields['hlc_packed']) {
-      throw const FormatException(
-        'SyncRow: hlc_packed disagrees with the hlc_wall/hlc_ctr/hlc_node quad',
-      );
-    }
+    checkHlcConsistency(fields);
     // The envelope trio must agree with the field map — a mismatch means a
     // corrupt or tampered payload and is refused rather than guessed at.
     if (json['id'] != fields['id'] ||
@@ -152,6 +123,51 @@ class SyncRow {
       }
     }
     return SyncRow(table: table, fields: fields, fieldClocks: fieldClocks);
+  }
+
+  /// Verifies that [fields] carries a well-typed HLC quad
+  /// (hlc_wall / hlc_ctr / hlc_node) plus a String hlc_packed the quad
+  /// re-packs to EXACTLY (via the same [Hlc.packed] routine every stamp in
+  /// the codebase uses); throws [FormatException] otherwise.
+  ///
+  /// This is the SINGLE consistency rule for a row's two HLC
+  /// representations: LWW compares the PACKED string while the drift gate
+  /// (and [HlcClock.receive]) judge the QUAD's wall — if the two could
+  /// disagree, a record with an honest-looking quad but a forged far-future
+  /// hlc_packed would sail through the drift gate and then win every LWW
+  /// comparison fleet-wide. Shared by [fromJson] (the pull-side wire door)
+  /// and the push engine's conflicted-ack validation (a serverRow driving
+  /// the CAS retry-or-drop decision must satisfy the same rule) —
+  /// deliberately ONE routine so the two doors can never diverge.
+  static void checkHlcConsistency(Map<String, Object?> fields) {
+    final hlcPacked = fields['hlc_packed'];
+    if (hlcPacked is! String) {
+      throw const FormatException(
+        'SyncRow: fields must carry a String hlc_packed',
+      );
+    }
+    final hlcWall = fields['hlc_wall'];
+    final hlcCtr = fields['hlc_ctr'];
+    final hlcNode = fields['hlc_node'];
+    if (hlcWall is! int ||
+        hlcCtr is! int ||
+        hlcNode is! String ||
+        hlcNode.isEmpty) {
+      throw const FormatException(
+        'SyncRow: fields must carry an int hlc_wall/hlc_ctr and a '
+        'non-empty hlc_node',
+      );
+    }
+    final repacked = Hlc(
+      wallMs: hlcWall,
+      counter: hlcCtr,
+      node: hlcNode,
+    ).packed;
+    if (repacked != hlcPacked) {
+      throw const FormatException(
+        'SyncRow: hlc_packed disagrees with the hlc_wall/hlc_ctr/hlc_node quad',
+      );
+    }
   }
 
   factory SyncRow.decode(String json) {

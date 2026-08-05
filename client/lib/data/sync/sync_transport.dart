@@ -36,10 +36,12 @@ class SyncTokenExpiredException implements Exception {
 /// The per-row outcome of a [SyncTransport.pushRows] call.
 ///
 /// [accepted] means the server durably stored [row]. Otherwise the push was
-/// rejected because the server already holds a DIFFERENT version of the record
-/// (a compare-and-set rejection), and [serverRow] carries that current
-/// server state so the caller can resolve. Resolution is the ENGINE's job, not
-/// the transport's — see [SyncTransport.pushRows].
+/// rejected because the server already holds a STRICTLY NEWER version of the
+/// record by hlcPacked — the only comparison the server ever makes
+/// (docs/sync-protocol.md) — and [serverRow] carries that current server
+/// state so the caller can resolve. Resolution is the ENGINE's job, not the
+/// transport's, and the engine VALIDATES the claim before acting on it — see
+/// [SyncTransport.pushRows].
 class PushRowResult {
   const PushRowResult.accepted(this.row) : serverRow = null;
 
@@ -112,12 +114,17 @@ class FetchPage {
 abstract class SyncTransport {
   /// Uploads full row states. Returns one result per row, in input order.
   ///
-  /// A row the server already holds in a DIFFERENT version comes back as
-  /// [PushRowResult.conflicted] with the server's current record. The ENGINE
-  /// resolves: if the local row's
-  /// hlcPacked is strictly greater than the server row's, it retries the push
-  /// (which the server then accepts); otherwise it drops the local push and
-  /// lets the newer server state arrive via [fetchChanges].
+  /// A row the server already holds in a STRICTLY NEWER version comes back
+  /// as [PushRowResult.conflicted] with the server's current record — a
+  /// conforming server ACCEPTS a push it holds nothing newer than (an older
+  /// or equal stored row never conflicts; equal is the idempotent re-push).
+  /// The ENGINE resolves, after validating the claim (same identity,
+  /// internally consistent HLC, strictly newer — anything else fails the run
+  /// as a transport violation, see SyncEngine): a valid conflict means the
+  /// server row wins, so the local push is dropped and the newer state
+  /// arrives via [fetchChanges]. (The LWW re-push path for a local-newer
+  /// conflict is retained in the engine but is unreachable against a
+  /// conforming server.)
   ///
   /// Throws (e.g. [SyncTransportException]) on transport failure; the caller
   /// must then leave its ledger untouched and retry later.

@@ -44,6 +44,24 @@ class _FakeTimer implements Timer {
   int get tick => 0;
 }
 
+/// A conflicted push result WITHOUT a serverRow. Unrepresentable through
+/// [PushRowResult]'s own constructors ([PushRowResult.accepted] is derived
+/// from serverRow's absence), so this models the seam a decoding transport
+/// adds: a response that CLAIMS conflict while carrying no server state. The
+/// engine must refuse it rather than null-deref or misread it as accepted.
+class _ConflictWithoutServerRow implements PushRowResult {
+  _ConflictWithoutServerRow(this.row);
+
+  @override
+  final SyncRow row;
+
+  @override
+  SyncRow? get serverRow => null;
+
+  @override
+  bool get accepted => false;
+}
+
 void main() {
   // A fixed epoch anchor: every stamp in these tests is derived from it, so
   // nothing depends on the machine's wall clock.
@@ -305,25 +323,26 @@ void main() {
       },
     );
 
-    test(
-      'conflict with an OLDER server row: local wins, re-push accepted',
-      () async {
-        // The server already holds an older version of P (another device's push).
-        cloud.accept(remotePractice('P', 'server-old', remoteHlc(t0 - 5000)));
-        await savePractice('P', 'local-new');
-        transport.injectConflictOnce('practices', _id('P'));
+    test('a CAS check against an OLDER server row never conflicts: the '
+        'conforming server accepts the newer push outright', () async {
+      // The server holds an older version of P (another device's push); a
+      // conforming CAS accepts our strictly newer row — an "older-row
+      // conflict" does not exist in the protocol (the engine refuses one
+      // as a lie; see the conflicted-ack validation group).
+      cloud.accept(remotePractice('P', 'server-old', remoteHlc(t0 - 5000)));
+      await savePractice('P', 'local-new');
+      transport.injectConflictOnce('practices', _id('P'));
 
-        final run = await engine.pumpPush();
+      final run = await engine.pumpPush();
 
-        expect(run.failed, isFalse);
-        expect(transport.pushCalls, 2, reason: 'rejected once, then re-pushed');
-        expect(
-          cloud.serverRowFor('practices', _id('P'))!.fields['title'],
-          'local-new',
-        );
-        expect(await oplogCount(), 0);
-      },
-    );
+      expect(run.failed, isFalse);
+      expect(transport.pushCalls, 1, reason: 'accepted on the first push');
+      expect(
+        cloud.serverRowFor('practices', _id('P'))!.fields['title'],
+        'local-new',
+      );
+      expect(await oplogCount(), 0);
+    });
 
     test('conflict with a NEWER server row: ours is dropped and the server '
         'state arrives via pull', () async {
@@ -425,6 +444,113 @@ void main() {
       expect(run.failed, isTrue);
       expect(run.failure, isA<SyncTransportException>());
       expect(await oplogCount(), 2);
+    });
+  });
+
+  group('conflicted-ack validation', () {
+    // A conflicted result's serverRow decides retry-or-drop; trusted blind,
+    // a lazy lie lets the server make the engine silently drop (and ack
+    // away) an edit it never stored. The engine validates every conflicted
+    // serverRow — existence, identity, internal HLC consistency, strict
+    // newness — and fails the run on any violation, oplog intact. The
+    // legitimate conflict (server strictly newer, consistent) keeps
+    // resolving as a drop: see 'conflict with a NEWER server row' above.
+
+    test('a conflicted result carrying NO serverRow fails the run', () async {
+      await savePractice('P', 'one');
+      transport.mangleNextAck = (pushed, ack) =>
+          PushAck([_ConflictWithoutServerRow(ack.results.single.row)]);
+
+      final run = await engine.pumpPush();
+      expect(run.failed, isTrue);
+      expect(run.failure, isA<SyncTransportException>());
+      expect(await oplogCount(), 1, reason: 'nothing acked on a bad ack');
+    });
+
+    test('a conflicted serverRow with a MISMATCHED identity fails the run '
+        '(a rejection must be justified by the row it rejects)', () async {
+      await savePractice('P', 'one');
+      transport.mangleNextAck = (pushed, ack) => PushAck([
+        PushRowResult.conflicted(
+          ack.results.single.row,
+          // Internally consistent and plausibly newer — but for another row.
+          serverRow: remotePractice('OTHER', 'x', remoteHlc(nowMs + 60000)),
+        ),
+      ]);
+
+      final run = await engine.pumpPush();
+      expect(run.failed, isTrue);
+      expect(run.failure, isA<SyncTransportException>());
+      expect(await oplogCount(), 1);
+    });
+
+    test('a conflicted serverRow whose hlc_packed disagrees with its quad '
+        'fails the run (the forged-LWW-key lie, same rule as the pull '
+        'door)', () async {
+      await savePractice('P', 'one');
+      final honest = remotePractice('P', 'x', remoteHlc(nowMs + 60000));
+      transport.mangleNextAck = (pushed, ack) => PushAck([
+        PushRowResult.conflicted(
+          ack.results.single.row,
+          // The quad says +60s while the packed LWW key claims +120s: exactly
+          // the inconsistency SyncRow.fromJson refuses on pull, enforced here
+          // through the same shared routine.
+          serverRow: SyncRow(
+            table: 'practices',
+            fields: {
+              ...honest.fields,
+              'hlc_packed': remoteHlc(nowMs + 120000).packed,
+            },
+          ),
+        ),
+      ]);
+
+      final run = await engine.pumpPush();
+      expect(run.failed, isTrue);
+      expect(run.failure, isA<SyncTransportException>());
+      expect(await oplogCount(), 1);
+    });
+
+    test('a conflicted serverRow OLDER than the pushed row fails the run '
+        '(a conforming server accepts a push it holds nothing newer '
+        'than)', () async {
+      await savePractice('P', 'local-new');
+      transport.mangleNextAck = (pushed, ack) => PushAck([
+        PushRowResult.conflicted(
+          ack.results.single.row,
+          // Internally consistent, same identity — but strictly OLDER than
+          // the push it claims to reject: a nonsensical CAS.
+          serverRow: remotePractice('P', 'server-old', remoteHlc(t0 - 5000)),
+        ),
+      ]);
+
+      final run = await engine.pumpPush();
+      expect(run.failed, isTrue);
+      expect(run.failure, isA<SyncTransportException>());
+      expect(await oplogCount(), 1, reason: 'nothing acked on a bad ack');
+    });
+
+    test('a conflicted serverRow that merely ECHOES the pushed row (equal '
+        'HLC — not strictly newer) fails the run', () async {
+      await savePractice('P', 'one');
+      transport.mangleNextAck = (pushed, ack) => PushAck([
+        for (final r in ack.results)
+          // The cheapest possible lie: "I hold your row, therefore you
+          // conflict". An equal HLC can never legitimately CAS-reject
+          // (equal is the idempotent re-push, which a conforming server
+          // accepts).
+          PushRowResult.conflicted(r.row, serverRow: r.row),
+      ]);
+
+      final run = await engine.pumpPush();
+      expect(run.failed, isTrue);
+      expect(run.failure, isA<SyncTransportException>());
+      expect(await oplogCount(), 1);
+
+      // The knob cleared itself: an honest server drains the retry.
+      final retry = await engine.pumpPush();
+      expect(retry.failed, isFalse);
+      expect(await oplogCount(), 0);
     });
   });
 
@@ -626,6 +752,40 @@ void main() {
       expect(parked, hasLength(1));
       expect(parked.single.id, _id('BAD'));
       expect(parked.single.reason, startsWith('apply-failed'));
+    });
+
+    test('a record claiming a BELOW-RANGE schema_v (0 or negative) is '
+        'quarantined alone: the rest of the page applies and the token '
+        'advances', () async {
+      // Wire schema versions start at 1. A below-range claim used to slip
+      // between the newer-schema gate (> current) and the full-row gate
+      // (== current) and apply with missing columns accepted; now it parks.
+      cloud.accept(remotePractice('GOOD', 'kept', remoteHlc(t0 - 3000)));
+      final zero = remotePractice('Z', 'poison', remoteHlc(t0 - 2000));
+      cloud.accept(
+        SyncRow(table: 'practices', fields: {...zero.fields, 'schema_v': 0}),
+      );
+      final negative = remotePractice('N', 'poison', remoteHlc(t0 - 1000));
+      cloud.accept(
+        SyncRow(
+          table: 'practices',
+          fields: {...negative.fields, 'schema_v': -1},
+        ),
+      );
+
+      final run = await engine.pumpPull();
+      expect(run.failed, isFalse);
+      expect(run.applied, 1);
+      expect(run.failedRecords, 2);
+      expect(await practiceTitle('GOOD'), 'kept');
+      expect(await practiceTitle('Z'), isNull);
+      expect(await practiceTitle('N'), isNull);
+      expect(await state.changeToken(), '3', reason: 'sync is not stalled');
+      final parked = await quarantine.list();
+      expect(parked, hasLength(2));
+      for (final q in parked) {
+        expect(q.reason, startsWith('invalid-schema_v'));
+      }
     });
 
     test('an expired change token (server compacted its log) clears the '

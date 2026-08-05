@@ -174,6 +174,12 @@ void main() {
       await persistence.db.customStatement(
         'UPDATE assets SET created_at = 1, updated_at = 1',
       );
+      // Settle the asset's journal entry as a push ack would (the ack
+      // hard-deletes): the sweep holds back any asset whose entry is still
+      // pending, since a pushed-but-unacked row may already be server-side.
+      await persistence.db.customStatement(
+        "DELETE FROM oplog WHERE entity_table = 'assets'",
+      );
 
       final report = await persistence.repairLibrary();
       expect(report.violationsFound, greaterThan(0));

@@ -17,6 +17,22 @@ class SyncStateStore {
   /// The server change token (opaque, transport-encoded string).
   static const String changeTokenKey = 'change_token';
 
+  /// Set (durably, BEFORE the first outbound wire call ever made) once a sync
+  /// transport has existed for this library. Its absence is a proof: no push
+  /// was ever even attempted, so no server can possibly hold any of this
+  /// device's rows — which is what lets the asset GC's pending-journal guard
+  /// stand down on never-synced libraries (see AssetStore.sweepUnreferenced)
+  /// instead of deferring local disk reclaim forever.
+  static const String transportSeenKey = 'transport_seen';
+
+  /// Whether a sync transport has ever been active for this library.
+  Future<bool> transportSeen() async => await get(transportSeenKey) != null;
+
+  /// Records that a transport exists. Must complete BEFORE the first wire
+  /// call, so a crash mid-push can never leave a server-held row in a library
+  /// that still claims it never had a transport.
+  Future<void> markTransportSeen() => set(transportSeenKey, '1');
+
   /// Generic get: null when the key was never set.
   Future<String?> get(String key) async {
     final row = await (_db.select(

@@ -11,6 +11,7 @@ import 'package:vocara/data/repositories/song_practice_repository_drift.dart';
 import 'package:vocara/data/sync/hlc.dart';
 import 'package:vocara/data/sync/quarantine_store.dart';
 import 'package:vocara/data/sync/sync_applier.dart';
+import 'package:vocara/data/sync/sync_state_store.dart';
 import 'package:vocara/data/sync/sync_writer.dart';
 import 'package:vocara/domain/models/audio_track.dart';
 import 'package:vocara/domain/models/song_practice.dart';
@@ -41,10 +42,19 @@ void main() {
     return f.path;
   }
 
+  /// Settles the durability ledger, exactly as a push ack would
+  /// (OplogDrain.ack hard-DELETES the covered entries). sweepUnreferenced
+  /// holds back any asset whose journal entry is still pending — a
+  /// pushed-but-unacked row may already be server-side — so tests exercising
+  /// the sweep's OTHER mechanics drain the ledger first; the pending-journal
+  /// guard has its own test below.
+  Future<void> ackJournal() => db.delete(db.oplog).go();
+
   test('sweep tombstones + deletes a wholly-unreferenced asset', () async {
     final id = await assets.importFile(await makeSrc('lone.wav', [1, 2, 3]));
     final path = (await assets.resolve(id))!;
     expect(await File(path).exists(), isTrue);
+    await ackJournal();
 
     // minAge zero: these mechanics tests exercise the reclaim itself; the
     // default age grace window has its own test below.
@@ -56,6 +66,7 @@ void main() {
   test('sweepUnreferenced skips assets younger than the age grace window '
       '(a transiently-unreferenced row is in flight, not garbage)', () async {
     final id = await assets.importFile(await makeSrc('young.wav', [1, 2]));
+    await ackJournal();
     // Default grace: a brand-new unreferenced row survives the sweep (its
     // referencing clip/media rows may simply not have committed yet, and a
     // journaled tombstone would propagate fleet-wide once sync ships).
@@ -73,6 +84,7 @@ void main() {
   test('sweepUnreferenced treats assets referenced by quarantined payloads '
       'as reachable (a parked page must not become a tombstone)', () async {
     final id = await assets.importFile(await makeSrc('parked.wav', [3, 4, 5]));
+    await ackJournal();
     const clipId = 'CLIPCLIPCLIPCLIPCLIPCLIP01';
     // A rejected remote clip referencing the asset, parked for review: until
     // an upgrade or manual review re-applies it, the parked payload may hold
@@ -125,6 +137,7 @@ void main() {
       "UPDATE assets SET bytes_sync_state = 'uploaded' WHERE id = ?",
       [syncedBytes],
     );
+    await ackJournal();
 
     // Only the never-synced asset is swept: a device behind on pull cannot
     // tell a remotely-referenced synced asset from garbage, and the journaled
@@ -133,6 +146,50 @@ void main() {
     expect(await assets.resolve(localOnly), isNull); // tombstoned
     expect(await assets.resolve(syncedRecord), isNotNull); // left alone
     expect(await assets.resolve(syncedBytes), isNotNull); // left alone
+  });
+
+  test('sweepUnreferenced holds back an asset whose journal entry is still '
+      'PENDING (a pushed-but-unacked row may already be server-side); once '
+      'the entry is acked it is sweepable again', () async {
+    // The pending-journal guard engages only once a transport has ever
+    // existed (the durable marker the engine writes before its first wire
+    // call): before that, no server can hold anything.
+    await SyncStateStore(db).markTransportSeen();
+    final id = await assets.importFile(await makeSrc('inflight.wav', [8, 8]));
+    // Aged past the grace window, unreferenced, both sync states 'localOnly'
+    // — sweepable on every other guard. But importFile's journal entry is
+    // still pending, and a crash between the server durably persisting a push
+    // and the ack landing looks EXACTLY like this: record_sync_state never
+    // advanced, yet peers may already have pulled the row. Sweeping it would
+    // journal a tombstone that broadcasts a fleet-wide delete.
+    await db.customStatement(
+      'UPDATE assets SET created_at = 1, updated_at = 1 WHERE id = ?',
+      [id],
+    );
+    expect(await assets.sweepUnreferenced(minAge: Duration.zero), 0);
+    expect(await assets.resolve(id), isNotNull, reason: 'fate not decidable');
+
+    // The ack deletes the journal entry (simulated as the bare delete — on
+    // the happy path the same round also marks the record synced, but the
+    // crash-window row this guard protects is exactly the one that marking
+    // missed). With the ledger settled the row is ordinary garbage again.
+    await ackJournal();
+    expect(await assets.sweepUnreferenced(minAge: Duration.zero), 1);
+    expect(await assets.resolve(id), isNull);
+  });
+
+  test('with NO transport ever seen the pending-journal guard stands down: '
+      'a journaled local asset still reclaims (production has no transport '
+      'and nothing ever acks, so the guard would otherwise hold everything '
+      'forever)', () async {
+    final id = await assets.importFile(await makeSrc('offline.wav', [7, 7]));
+    await db.customStatement(
+      'UPDATE assets SET created_at = 1, updated_at = 1 WHERE id = ?',
+      [id],
+    );
+    // The journal entry is deliberately NOT acked — today's production shape.
+    expect(await assets.sweepUnreferenced(minAge: Duration.zero), 1);
+    expect(await assets.resolve(id), isNull, reason: 'local reclaim survives');
   });
 
   test('an asset row that arrived over the wire is marked record-synced by '
@@ -144,6 +201,7 @@ void main() {
       'UPDATE assets SET created_at = 1, updated_at = 1 WHERE id = ?',
       [localId],
     );
+    await ackJournal();
 
     // A remote asset record lands through the applier (no local bytes at
     // all): unreferenced and ancient, i.e. exactly what the sweep would eat
@@ -237,6 +295,7 @@ void main() {
     () async {
       final id = await assets.importFile(await makeSrc('gone.wav', [1, 2, 3]));
       final path = (await assets.resolve(id))!;
+      await ackJournal();
 
       expect(await assets.sweepUnreferenced(minAge: Duration.zero), 1);
       expect(await File(path).exists(), isFalse); // gone from the pool...
@@ -325,6 +384,7 @@ void main() {
       final mp3Path = wavPath.replaceAll(RegExp(r'\.wav$'), '.mp3');
       await File(wavPath).copy(mp3Path);
       expect(await File(mp3Path).exists(), isTrue);
+      await ackJournal();
       // The asset is unreferenced -> sweep tombstones it and deletes ALL files for the
       // hash, not just the current row's `.wav`.
       expect(await assets.sweepUnreferenced(minAge: Duration.zero), 1);
@@ -362,6 +422,7 @@ void main() {
       // One referenced asset + one standalone unreferenced asset.
       await assets.importFile(await makeSrc('orphan.wav', [4, 4]));
       expect(await db.select(db.assets).get(), hasLength(2));
+      await ackJournal();
 
       // Sweep removes only the orphan; the clip's asset survives.
       expect(await assets.sweepUnreferenced(minAge: Duration.zero), 1);
@@ -384,6 +445,7 @@ void main() {
               )
               as Ok<SongPractice>)
           .value;
+      await ackJournal();
       expect(await assets.sweepUnreferenced(minAge: Duration.zero), 1);
       final remaining = await (db.select(
         db.assets,

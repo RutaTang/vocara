@@ -11,6 +11,39 @@ The server is a **dumb, durable relay**. All conflict resolution (HLC
 last-writer-wins), merging, tombstones, and integrity live on the clients.
 The server never interprets payloads.
 
+## Trust model
+
+The server is a relay the user operates — trusted for availability and
+durability, never believed blindly. **An ack IS the persistence claim**: when
+the server answers `accepted`, the client deletes the covered oplog entries
+on that word alone, so the client validates everything about a response that
+is cheaply verifiable before acting on it:
+
+- **Structural row validation** — `SyncRow.fromJson` refuses non-scalar
+  fields, mistyped identity, and an envelope that disagrees with the field
+  map.
+- **HLC quad/packed consistency** — the packed LWW key must re-pack exactly
+  from the `hlc_wall`/`hlc_ctr`/`hlc_node` quad (one shared routine on both
+  the pull door and the push conflict path), so a forged far-future
+  `hlcPacked` cannot ride an honest-looking quad.
+- **Push-ack identity and count** — the result list must match the pushed
+  rows 1:1 by `(table, id)`; short, wrong-row, or duplicated acks fail the
+  run before anything is acked.
+- **CAS-reject monotonicity** — a `conflicted` result's `serverRow` must
+  exist, carry the same `(table, id)`, be internally consistent, and be
+  strictly newer by `hlcPacked` than the pushed row (a conforming server
+  accepts anything it holds nothing newer than).
+- **Quarantine isolation** — a record failing any client-side gate parks
+  alone; one bad record never rolls back a page or stalls the change token.
+
+Anything a violation of these checks could cheat is therefore closed. What
+remains is out of the client's defensible model by design: a server that
+fabricates an internally-consistent, strictly-newer row is indistinguishable
+from one that legitimately holds it, and a server that withholds rows on
+pull simply looks caught-up. Both reduce to the durability trust already
+placed in the relay — protecting against them would take signed rows, which
+is a different protocol.
+
 ## Data model
 
 One namespace ("zone") per user account. Two stores per zone:

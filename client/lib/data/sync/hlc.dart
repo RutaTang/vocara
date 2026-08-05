@@ -170,10 +170,12 @@ class HlcClock {
   /// throws [HlcDriftException] exactly when [receive] would, and mutates
   /// nothing. This exists so the [SyncApplier] can GATE a record before its
   /// savepoint while deferring the state-changing [receive] until the record
-  /// actually settled — before the split, a record that failed (or was
-  /// quarantined) inside its savepoint had already advanced the in-memory
-  /// clock, so a rolled-back record still left a side effect behind. Both
-  /// methods share [_checkDrift], so the two rules can never diverge.
+  /// has settled AND its batch's outer transaction has committed — before
+  /// the split, a record that failed (or was quarantined) inside its
+  /// savepoint had already advanced the in-memory clock, so a rolled-back
+  /// record still left a side effect behind; the same holds for a whole
+  /// batch whose outer commit fails. Both methods share [_checkDrift], so
+  /// the two rules can never diverge.
   void assertPlausible(Hlc remote) => _checkDrift(remote, _now());
 
   /// Merges a [remote] stamp seen on an inbound record, advancing the local
