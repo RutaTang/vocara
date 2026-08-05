@@ -325,7 +325,24 @@ impl EngineHandle {
     }
     pub fn pause(&self) {
         self.shared.playing.store(false, Ordering::Release);
-        self.flush_out_boundary();
+        // Fold the un-played backlog into the clock ONCE: the paused position must be what
+        // the listener actually heard, not the render clock (which ran up to a block ahead
+        // on a non-48 kHz device). Rewinding also means resume re-renders exactly the frames
+        // that never reached the ears — no gap, no repeat. A callback already in flight when
+        // `playing` flipped can still advance `frame` after this subtraction (its audio was
+        // partially delivered anyway); that race is bounded by one device buffer and only
+        // costs precision, never correctness of the transport state.
+        let backlog = self.shared.out_backlog.swap(0, Ordering::AcqRel) as i64;
+        if backlog > 0 {
+            let _ = self
+                .shared
+                .frame
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |f| {
+                    Some((f - backlog).max(0))
+                });
+        }
+        // Drop the FIFO's pre-pause audio so the output falls silent within one callback.
+        self.shared.out_flush.fetch_add(1, Ordering::Release);
     }
     pub fn is_playing(&self) -> bool {
         self.shared.playing.load(Ordering::Acquire)
@@ -377,10 +394,23 @@ impl EngineHandle {
     pub fn frame(&self) -> i64 {
         let rendered = self.shared.frame.load(Ordering::Acquire);
         if !self.shared.playing.load(Ordering::Acquire) {
+            // Paused: pause() already folded the backlog into the clock, and whatever the
+            // FIFO refills with afterwards is silence — its depth says nothing.
             return rendered;
         }
         let backlog = self.shared.out_backlog.load(Ordering::Acquire) as i64;
-        (rendered - backlog).max(0)
+        let compensated = (rendered - backlog).max(0);
+        // Loop wrap: right after the render clock wraps to loop_start, the FIFO still holds
+        // the PRE-wrap tail, so raw subtraction would report a position before the loop
+        // region. Clamping to loop_start trades a brief plateau for a false back-jump.
+        if self.shared.loop_enabled.load(Ordering::Acquire) {
+            let ls = self.shared.loop_start.load(Ordering::Relaxed);
+            let le = self.shared.loop_end.load(Ordering::Relaxed);
+            if le > ls && rendered >= ls && compensated < ls {
+                return ls;
+            }
+        }
+        compensated
     }
     pub fn sample_rate(&self) -> f64 {
         self.sr

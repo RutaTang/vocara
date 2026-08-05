@@ -315,12 +315,21 @@ class MicRecordingController {
       // Ready handshake. startInputRecording == true proves only that the WAV
       // exists — the native input-stream open is deliberately asynchronous (a
       // blocking open froze the UI), so the mic may still be opening, or may
-      // fail to open, right now. Wait (bounded) until the input callback is
-      // demonstrably delivering frames before reporting the take armed:
-      // otherwise the owner starts the backing against a silent mic and the
-      // take begins with a hole no later placement can repair. When the stream
-      // is already open (monitoring), the first advance lands within one
-      // callback (~10 ms); a cold VoiceProcessingIO open takes a few hundred.
+      // fail to open, right now. Wait (bounded) until BOTH hold before
+      // reporting the take armed:
+      //  * the audio-host thread says an input stream is up
+      //    (inputStreamRunning — authoritative: set true only after a
+      //    successful start, false before any teardown joins the old
+      //    callback), AND
+      //  * the frame counter is advancing past the arm snapshot.
+      // The pair is what makes this a handshake rather than a heuristic: a
+      // dying stream's final callback can advance the counter, but the host
+      // has already marked it not-running; a freshly-started stream is marked
+      // running before its callback delivers. Otherwise the owner would start
+      // the backing against a silent mic and the take would begin with a hole
+      // no later placement can repair. When the stream is already open
+      // (monitoring), the first advance lands within one callback (~10 ms); a
+      // cold VoiceProcessingIO open takes a few hundred.
       var ready = false;
       final readyClock = Stopwatch()..start();
       while (readyClock.elapsed < readyTimeout) {
@@ -329,7 +338,8 @@ class MicRecordingController {
           _discardQuietly(destination, path);
           return const MicRecordingStart.invalidated();
         }
-        if (engine.inputFramesReceived() > framesAtArm) {
+        if (engine.inputStreamRunning() &&
+            engine.inputFramesReceived() > framesAtArm) {
           ready = true;
           break;
         }

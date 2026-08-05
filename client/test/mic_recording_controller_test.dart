@@ -77,6 +77,14 @@ class _FakeEngine implements GraphAudioPlaybackService {
   @override
   int inputFramesReceived() => _framesReceived += framesReceivedStep;
 
+  /// Host-authoritative stream state half of the ready handshake. Defaults to
+  /// running (a warm stream); false simulates the arm racing a stream that is
+  /// down or being torn down.
+  bool streamRunning = true;
+
+  @override
+  bool inputStreamRunning() => streamRunning;
+
   /// Frames the fake reports as dropped by the recording ring at stop.
   int droppedFrames = 0;
 
@@ -458,6 +466,29 @@ void main() {
     expect(engine.stopCalls, 1);
     expect(dest.discarded, [dest.path]);
     expect(RecordingFinalizer.instance.hasActive, isFalse);
+    controller.dispose();
+  });
+
+  testWidgets('a dying stream cannot fake ready: advancing frames without the '
+      'host-side running flag never arm the take', (tester) async {
+    // The counter advances (an old stream's final callbacks) but the host has
+    // already marked the input not-running — the handshake must NOT declare
+    // ready on frames alone. Zero timeout forces the deterministic path.
+    final engine = _FakeEngine()..streamRunning = false;
+    final dest = _FakeDestination();
+    final controller = MicRecordingController(
+      acquireEngine: () => engine,
+      requestPermission: () async => true,
+      readyTimeout: Duration.zero,
+    );
+
+    final result = await controller.start(dest.strategy);
+    await tester.pump();
+
+    expect(result.started, isFalse);
+    expect(result.failure, MicRecordingFailure.inputNotDelivering);
+    expect(engine.stopCalls, 1);
+    expect(dest.discarded, [dest.path]);
     controller.dispose();
   });
 

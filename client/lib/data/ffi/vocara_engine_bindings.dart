@@ -253,7 +253,9 @@ class VocaraEngineBindings {
   late final _ve_input_level = _ve_input_levelPtr
       .asFunction<double Function(ffi.Pointer<VeEngine>)>();
 
-  /// Diagnostic: total input frames the mic callback received (0 = mic delivering nothing).
+  /// Diagnostic + pre-roll clock: total ENGINE-RATE (48 kHz, post-resample) frames the mic
+  /// callback has emitted (0 = mic delivering nothing). Engine-rate on purpose: callers divide
+  /// by 48000 to get time.
   int ve_input_frames_received(ffi.Pointer<VeEngine> e) {
     return _ve_input_frames_received(e);
   }
@@ -263,6 +265,20 @@ class VocaraEngineBindings {
         've_input_frames_received',
       );
   late final _ve_input_frames_received = _ve_input_frames_receivedPtr
+      .asFunction<int Function(ffi.Pointer<VeEngine>)>();
+
+  /// Host-thread-authoritative input stream state: 1 only after a successful start, 0 before
+  /// any teardown begins. Pair with an advancing ve_input_frames_received for a ready check a
+  /// dying stream's last callback cannot fake.
+  int ve_input_stream_running(ffi.Pointer<VeEngine> e) {
+    return _ve_input_stream_running(e);
+  }
+
+  late final _ve_input_stream_runningPtr =
+      _lookup<ffi.NativeFunction<ffi.Int Function(ffi.Pointer<VeEngine>)>>(
+        've_input_stream_running',
+      );
+  late final _ve_input_stream_running = _ve_input_stream_runningPtr
       .asFunction<int Function(ffi.Pointer<VeEngine>)>();
 
   /// Estimated record round-trip latency in frames @ 48 kHz (output IO + acoustic + input IO + AEC
@@ -796,6 +812,19 @@ class VocaraEngineBindings {
       >('ve_free_decoded');
   late final _ve_free_decoded = _ve_free_decodedPtr
       .asFunction<void Function(ffi.Pointer<ffi.Float>, int)>();
+
+  /// Declared duration of a media file in ms WITHOUT decoding (container probe only) — the
+  /// import gate's cheap pre-check. -1 = container declares no length; -2 = unreadable.
+  int ve_probe_duration_ms(ffi.Pointer<ffi.Char> path) {
+    return _ve_probe_duration_ms(path);
+  }
+
+  late final _ve_probe_duration_msPtr =
+      _lookup<ffi.NativeFunction<ffi.Int64 Function(ffi.Pointer<ffi.Char>)>>(
+        've_probe_duration_ms',
+      );
+  late final _ve_probe_duration_ms = _ve_probe_duration_msPtr
+      .asFunction<int Function(ffi.Pointer<ffi.Char>)>();
 
   /// Punch-in splice: write old[0..split_ms] ++ new to out_path as a 16-bit WAV.
   /// Stateless; returns the output frame count or -1.

@@ -143,6 +143,39 @@ Uint8List _buildWav(Uint8List fmt, Uint8List data) {
   return b.toBytes();
 }
 
+/// Cuts the first [trimMs] of audio out of the uncompressed WAV at [path],
+/// IN PLACE (temp file + atomic rename, so a crash mid-write leaves either the
+/// old file or the new one — never a torn WAV). Frame-quantized; preserves the
+/// exact sample format. Used by take placement when the computed start would
+/// land before timeline zero: the pre-roll head that precedes t=0 must be cut
+/// out of the FILE, otherwise clamping the position silently discards the
+/// entire pre-roll/latency compensation. Throws [FormatException] when [path]
+/// is not an uncompressed WAV (callers treat that as best-effort and fall back
+/// to the un-trimmed take).
+Future<void> trimWavHeadInPlace(String path, int trimMs) async {
+  if (trimMs <= 0) return;
+  final bytes = await File(path).readAsBytes();
+  final w = _parseWav(bytes);
+  if (w == null) {
+    throw const FormatException('Only uncompressed WAV takes can be trimmed.');
+  }
+  // Whole frames only (see concatWav on why alignment matters), and never cut
+  // past the end — a trim longer than the take leaves an empty-but-valid WAV.
+  final wholeLen = (w.dataLen ~/ w.blockAlign) * w.blockAlign;
+  final cut = ((trimMs / 1000 * w.sampleRate).round() * w.blockAlign).clamp(
+    0,
+    wholeLen,
+  );
+  final data = Uint8List.sublistView(
+    bytes,
+    w.dataStart + cut,
+    w.dataStart + wholeLen,
+  );
+  final tmp = '$path.trim';
+  await File(tmp).writeAsBytes(_buildWav(w.fmt, data));
+  await File(tmp).rename(path);
+}
+
 /// Non-destructive clip edits on WAV files. Split/merge slice and join the raw
 /// PCM **bytes** (preserving the source's exact sample format — 16/24/32-bit,
 /// integer or float, plain or WAVE_FORMAT_EXTENSIBLE), so any uncompressed WAV

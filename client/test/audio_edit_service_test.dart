@@ -414,4 +414,95 @@ void main() {
       throwsA(isA<FormatException>()),
     );
   });
+
+  group('trimWavHeadInPlace', () {
+    test(
+      'cuts exactly the head frames and preserves the sample format',
+      () async {
+        final dir = await Directory.systemTemp.createTemp('vocara_trim');
+        addTearDown(() => dir.delete(recursive: true));
+        // 1000 frames @ 1 kHz mono PCM16: sample i has value i, so the content
+        // after a 250 ms trim must start at value 250 (placement correctness is
+        // exactly "which frame is now file offset 0").
+        final samples = Int16List.fromList(List.generate(1000, (i) => i));
+        final path = '${dir.path}/take.wav';
+        await File(path).writeAsBytes(
+          _wavWithFmt(
+            formatTag: 1,
+            channels: 1,
+            sampleRate: 1000,
+            blockAlign: 2,
+            bits: 16,
+            data: samples.buffer.asUint8List(),
+          ),
+        );
+
+        await trimWavHeadInPlace(path, 250);
+
+        final pcm = readWavMono(await File(path).readAsBytes());
+        expect(pcm, isNotNull);
+        expect(pcm!.samples.length, 750);
+        expect((pcm.samples.first * 32768).round(), 250);
+        expect((pcm.samples.last * 32768).round(), 999);
+      },
+    );
+
+    test('a trim past the end leaves an empty but valid WAV', () async {
+      final dir = await Directory.systemTemp.createTemp('vocara_trim');
+      addTearDown(() => dir.delete(recursive: true));
+      final samples = Int16List.fromList(List.generate(100, (i) => i));
+      final path = '${dir.path}/take.wav';
+      await File(path).writeAsBytes(
+        _wavWithFmt(
+          formatTag: 1,
+          channels: 1,
+          sampleRate: 1000,
+          blockAlign: 2,
+          bits: 16,
+          data: samples.buffer.asUint8List(),
+        ),
+      );
+
+      await trimWavHeadInPlace(path, 5000);
+
+      final pcm = readWavMono(await File(path).readAsBytes());
+      expect(pcm, isNotNull);
+      expect(pcm!.samples.length, 0);
+    });
+
+    test('zero and negative trims are no-ops', () async {
+      final dir = await Directory.systemTemp.createTemp('vocara_trim');
+      addTearDown(() => dir.delete(recursive: true));
+      final samples = Int16List.fromList(List.generate(100, (i) => i));
+      final path = '${dir.path}/take.wav';
+      final bytes = _wavWithFmt(
+        formatTag: 1,
+        channels: 1,
+        sampleRate: 1000,
+        blockAlign: 2,
+        bits: 16,
+        data: samples.buffer.asUint8List(),
+      );
+      await File(path).writeAsBytes(bytes);
+
+      await trimWavHeadInPlace(path, 0);
+      await trimWavHeadInPlace(path, -10);
+
+      expect(await File(path).readAsBytes(), bytes);
+    });
+
+    test('rejects non-WAV audio instead of corrupting it', () async {
+      final dir = await Directory.systemTemp.createTemp('vocara_trim');
+      addTearDown(() => dir.delete(recursive: true));
+      final bogus = '${dir.path}/song.m4a';
+      final junk = Uint8List.fromList(List.filled(2048, 7));
+      await File(bogus).writeAsBytes(junk);
+
+      await expectLater(
+        () => trimWavHeadInPlace(bogus, 100),
+        throwsA(isA<FormatException>()),
+      );
+      expect(await File(bogus).readAsBytes(), junk, reason: 'left untouched');
+    });
+  });
 }

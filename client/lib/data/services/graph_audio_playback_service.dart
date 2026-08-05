@@ -118,6 +118,22 @@ Future<(int, int)> _decodeInIsolate(String path, int rate) {
 /// VE_DECODE_TOO_LONG). Mirrored here because ffigen only binds functions/structs.
 const int veDecodeTooLong = -2;
 
+/// The DECLARED duration of a media file, probed from the container without
+/// decoding a single packet — the import gate's cheap pre-check. Null when the
+/// container declares no length (the decode-time budget still bounds it later)
+/// or the file can't be probed (the import will fail on its own terms).
+/// Stateless FFI; cheap enough for the UI thread (header read only).
+Duration? probeMediaDuration(String path) {
+  final bindings = VocaraEngineBindings(_openVocaraLibrary());
+  final cpath = path.toNativeUtf8();
+  try {
+    final ms = bindings.ve_probe_duration_ms(cpath.cast());
+    return ms >= 0 ? Duration(milliseconds: ms) : null;
+  } finally {
+    malloc.free(cpath);
+  }
+}
+
 /// Thrown when media is longer than the decode path's duration cap
 /// ([maxPlaybackDuration] for playback/import, the caller's `maxDuration` for
 /// analysis). The message is user-presentable.
@@ -323,9 +339,18 @@ class GraphAudioPlaybackService implements PlaybackEngine {
   /// The current live-input peak level (0..1) for a meter; 0 when not capturing.
   double inputLevel() => _available ? _bindings.ve_input_level(_engine) : 0.0;
 
-  /// Diagnostic: total input frames the mic callback received (0 = mic delivering nothing).
+  /// Diagnostic + pre-roll clock: total ENGINE-RATE (48 kHz) frames the mic
+  /// callback has emitted (0 = mic delivering nothing). Engine-rate so callers
+  /// can divide by 48000 for time regardless of the device's native rate.
   int inputFramesReceived() =>
       _available ? _bindings.ve_input_frames_received(_engine) : 0;
+
+  /// Whether an input stream is up according to the audio-host thread (true
+  /// only after a successful start, false before any teardown begins). The
+  /// mic ready handshake pairs this with an advancing [inputFramesReceived]
+  /// so a dying stream's final callback can't fake a new stream coming up.
+  bool inputStreamRunning() =>
+      _available && _bindings.ve_input_stream_running(_engine) == 1;
 
   /// Record round-trip latency in milliseconds: how far behind the playhead a captured vocal lands
   /// (output IO + acoustic + input IO + AEC block). Shift recorded takes earlier by this so they

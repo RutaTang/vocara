@@ -349,6 +349,11 @@ fn build_stream(
 ) -> Result<DeviceHandle, String> {
     let channels = config.channels as usize;
     let device_rate = config.sample_rate as f64;
+    // A previous non-48 kHz stream's resampler published its FIFO depth into the shared
+    // backlog; this stream starts with an empty (or no) FIFO, so a stale value would make
+    // the reported playhead permanently lag. Reset before any callback can run — the
+    // identity path never publishes, so this is its only corrector.
+    rt.transport().set_out_backlog(0);
     let err_cb = move |err| {
         // No logging/alloc on the error path: flag the loss for the host's device-event poll.
         let _ = err;
@@ -429,7 +434,9 @@ struct InputState {
     primed: bool,
     /// Input peak level (f32 bits) for the meter — read by the FFI thread.
     level: Arc<AtomicU32>,
-    /// Total input frames the callback has received — a diagnostic for "is the mic delivering?".
+    /// Total ENGINE-RATE (48 kHz, post-resample) frames the callback has emitted — both the
+    /// "is the mic delivering?" diagnostic and the clock the take pre-roll measurement
+    /// divides by `ENGINE_SR`, so it must never count raw device-rate frames.
     frames_in: Arc<AtomicU64>,
     /// Frames the RECORDING ring refused because it was full (writer thread stalled longer
     /// than the ring's headroom). Those samples are gone from the take, so the count must
@@ -520,9 +527,13 @@ impl InputCell {
         let cap = st.cap_active.load(Ordering::Relaxed);
         let rec = st.rec_active.load(Ordering::Relaxed);
         let frames = data.len() / ch;
-        st.frames_in.fetch_add(frames as u64, Ordering::Relaxed);
         let identity = (st.step - 1.0).abs() < 1e-9;
         let mut peak = 0.0f32;
+        // Counted in EMITTED (post-resample, ENGINE_SR) frames, not raw device frames:
+        // consumers convert this counter to time by dividing by the engine rate (take
+        // pre-roll measurement), so a device-rate count would skew every derived duration
+        // whenever the input's native rate is not 48 kHz.
+        let mut emitted: u64 = 0;
         for fi in 0..frames {
             let base = fi * ch;
             let l = data[base];
@@ -530,6 +541,7 @@ impl InputCell {
             peak = peak.max(l.abs()).max(r.abs());
             if identity {
                 st.emit([l, r], cap, rec);
+                emitted += 1;
             } else {
                 if !st.primed {
                     st.prev = [l, r];
@@ -544,12 +556,14 @@ impl InputCell {
                         st.prev[1] + (cur[1] - st.prev[1]) * t,
                     ];
                     st.emit(f, cap, rec);
+                    emitted += 1;
                     st.pos += st.step;
                 }
                 st.pos -= 1.0;
                 st.prev = cur;
             }
         }
+        st.frames_in.fetch_add(emitted, Ordering::Relaxed);
         st.level.store(peak.to_bits(), Ordering::Relaxed);
     }
 }
@@ -890,6 +904,9 @@ fn open_mic(
     // Safe default; `Vpio::start` re-reconfigures the input cell from VPIO's *negotiated* format
     // (mono/stereo, native rate) after the unit initializes, which is what actually governs feed.
     input_cell.reconfigure(ENGINE_SR, CHANNELS);
+    // VPIO renders playback at 48 kHz with no boundary resampler: clear any backlog a
+    // non-48 kHz cpal stream left behind (see build_stream).
+    rt.transport().set_out_backlog(0);
     crate::vpio::Vpio::start(
         uid,
         Arc::clone(input_cell),
@@ -914,6 +931,7 @@ fn audio_host_run(
     input_cell: Arc<InputCell>,
     event: Arc<AtomicU32>,
     renderer_gate: Arc<Mutex<bool>>,
+    input_running: Arc<AtomicBool>,
     rx: mpsc::Receiver<HostCmd>,
     ready_tx: mpsc::Sender<Result<String, String>>,
 ) {
@@ -988,6 +1006,7 @@ fn audio_host_run(
             }
             HostCmd::StartInput { reply } => {
                 if in_stream.is_some() {
+                    input_running.store(true, Ordering::Release);
                     let _ = reply.send(0);
                 } else {
                     // Duplex VPIO renders the engine through its own output element, so drop the
@@ -1001,9 +1020,11 @@ fn audio_host_run(
                     match built {
                         Ok(handle) => {
                             in_stream = Some(handle);
+                            input_running.store(true, Ordering::Release);
                             let _ = reply.send(0);
                         }
                         Err(_) => {
+                            input_running.store(false, Ordering::Release);
                             // Mic failed to come up → restore cpal output so playback survives.
                             if VPIO_DUPLEX_AEC && out_stream.is_none() {
                                 // Restore the user's chosen output (not the system default),
@@ -1020,6 +1041,10 @@ fn audio_host_run(
                 }
             }
             HostCmd::StopInput { reply } => {
+                // Mark not-running BEFORE the drop joins the dying callback: a consumer
+                // polling running+frames must never count the old stream's final frames as
+                // evidence that a NEW stream is delivering.
+                input_running.store(false, Ordering::Release);
                 let was_on = in_stream.take().is_some();
                 // VPIO was rendering the output in duplex; hand playback back to cpal, restoring
                 // the user's last chosen output device (a SetOutput during duplex deferred it),
@@ -1036,13 +1061,16 @@ fn audio_host_run(
                 cur_in_uid = Some(uid.clone());
                 if in_stream.is_some() {
                     // Reopen on the new device (drop old first → single-accessor; cpal output is
-                    // already off in duplex).
+                    // already off in duplex). Not-running for the whole swap window (see
+                    // StopInput on why the store precedes the drop).
+                    input_running.store(false, Ordering::Release);
                     in_stream = None;
                     match open_mic(Some(&uid), &rt, &input_cell, &event)
                         .or_else(|_| open_mic(None, &rt, &input_cell, &event))
                     {
                         Ok(handle) => {
                             in_stream = Some(handle);
+                            input_running.store(true, Ordering::Release);
                             let _ = reply.send(0);
                         }
                         Err(_) => {
@@ -1063,6 +1091,7 @@ fn audio_host_run(
                 }
             }
             HostCmd::Shutdown => {
+                input_running.store(false, Ordering::Release);
                 in_stream = None;
                 out_stream = None;
                 break;
@@ -1085,12 +1114,15 @@ pub fn spawn_audio_host(
     input_cell: Arc<InputCell>,
     event: Arc<AtomicU32>,
     renderer_gate: Arc<Mutex<bool>>,
+    input_running: Arc<AtomicBool>,
 ) -> Result<(AudioHost, String), String> {
     let (tx, rx) = mpsc::channel::<HostCmd>();
     let (ready_tx, ready_rx) = mpsc::channel::<Result<String, String>>();
     let join = std::thread::Builder::new()
         .name("vocara-audio-host".to_string())
-        .spawn(move || audio_host_run(rt, input_cell, event, renderer_gate, rx, ready_tx))
+        .spawn(move || {
+            audio_host_run(rt, input_cell, event, renderer_gate, input_running, rx, ready_tx)
+        })
         .map_err(|e| format!("spawn audio host: {e}"))?;
     match ready_rx.recv() {
         Ok(Ok(uid)) => Ok((
@@ -1106,6 +1138,42 @@ pub fn spawn_audio_host(
         }
         Err(e) => Err(format!("audio host startup: {e}")),
     }
+}
+
+/// Probe `path`'s DECLARED duration in milliseconds without decoding a single packet:
+/// container probe only, so an import gate can refuse an hours-long file before any copy or
+/// allocation happens. `Ok(None)` = the container declares no frame count (e.g. a plain mp3
+/// without a Xing header) — the caller falls back to the decode-time budget, which bails
+/// mid-decode with peak memory bounded by the budget.
+pub fn probe_duration_ms(path: &str) -> Result<Option<u64>, String> {
+    use symphonia::core::formats::FormatOptions;
+    use symphonia::core::io::MediaSourceStream;
+    use symphonia::core::meta::MetadataOptions;
+    use symphonia::core::probe::Hint;
+
+    let file = std::fs::File::open(path).map_err(|e| format!("open {path}: {e}"))?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if let Some(ext) = std::path::Path::new(path).extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+    let probed = symphonia::default::get_probe()
+        .format(
+            &hint,
+            mss,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
+        .map_err(|e| format!("probe: {e}"))?;
+    let track = probed
+        .format
+        .default_track()
+        .ok_or_else(|| "no default track".to_string())?;
+    let rate = track.codec_params.sample_rate.unwrap_or(0) as u64;
+    Ok(match (track.codec_params.n_frames, rate) {
+        (Some(n), r) if r > 0 => Some(n.saturating_mul(1000) / r),
+        _ => None,
+    })
 }
 
 /// Why [`decode_file`] refused a file. `TooLong` is distinct so callers can surface a
@@ -1526,21 +1594,42 @@ mod out_resampler_tests {
     }
 
     #[test]
-    fn pause_flushes_the_fifo_and_reports_the_paused_position() {
+    fn pause_folds_the_backlog_and_reports_the_heard_position() {
         let (h, mut res) = ramp_engine();
         h.play();
         let mut out = vec![0.0; 441 * CHANNELS];
         res.process(&mut out, 441);
         h.pause();
-        // The pause dropped the backlog immediately: the paused position must not read
-        // ahead of (or behind) what was actually heard by more than the flush precision.
+        // pause() folds the un-played FIFO depth into the clock: the paused position is the
+        // ~480 frames actually delivered, NOT the block-rounded render clock (which would
+        // read ahead by the parked backlog — the old forward jump on pause).
         let paused_at = h.frame();
+        assert!(
+            (paused_at - 480).abs() <= 2,
+            "paused position must be what was heard (~480), got {paused_at}"
+        );
         res.process(&mut out, 441);
         assert!(
             out.iter().all(|s| s.abs() < 1e-6),
             "paused output must be silence, not the FIFO's stale tail"
         );
         assert_eq!(h.frame(), paused_at, "paused playhead must hold still");
+    }
+
+    #[test]
+    fn loop_wrap_never_reports_a_position_before_the_loop_start() {
+        let (h, mut res) = ramp_engine();
+        // Loop [200, 680): consuming 480 engine frames from 200 lands exactly on the wrap.
+        h.set_loop(true, 200, 680);
+        h.seek(200);
+        h.play();
+        let mut out = vec![0.0; 441 * CHANNELS];
+        res.process(&mut out, 441);
+        let frame = h.frame();
+        assert!(
+            (200..=680).contains(&frame),
+            "post-wrap playhead must stay inside the loop region, got {frame}"
+        );
     }
 }
 

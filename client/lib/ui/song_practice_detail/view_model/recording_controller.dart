@@ -6,6 +6,7 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 
 import '../../../data/services/app_settings_service.dart';
+import '../../../data/services/audio_edit_service.dart';
 import '../../../data/services/audio_file_service.dart';
 import '../../../data/services/graph_audio_playback_service.dart';
 import '../../../data/services/mic_permission.dart';
@@ -411,11 +412,24 @@ class RecordingController extends ChangeNotifier {
     //    `_recordingPreRollMs` later, so the sung content begins that far INTO the file;
     //  * record latency — the first sample sung against the backing is the response to audio
     //    the singer heard ~round-trip ago (output IO + acoustic + input IO + AEC).
-    // Both shift the take EARLIER on the timeline; without them it plays behind the beat.
+    // Both shift the take EARLIER on the timeline. When the shift would land before
+    // timeline zero (recording from the top — the common case), the compensation is
+    // applied by CUTTING that much off the file's head instead: clamping the position
+    // alone would silently discard the whole compensation and leave the take late.
     final latencyMs = _graphEngine()?.recordLatencyMs() ?? 0.0;
-    final startMs = (_recordingStartMs - _recordingPreRollMs - latencyMs)
-        .round()
-        .clamp(0, _recordingStartMs);
+    final rawStartMs = (_recordingStartMs - _recordingPreRollMs - latencyMs)
+        .round();
+    var startMs = rawStartMs;
+    if (rawStartMs < 0) {
+      startMs = 0;
+      try {
+        await trimWavHeadInPlace(path, -rawStartMs);
+      } catch (_) {
+        // Best-effort: a take that can't be trimmed (unparseable partial after
+        // an IO error) keeps its head and sits late by the untrimmed amount —
+        // strictly better than losing the take.
+      }
+    }
     final targetId = _recordingTargetId;
     _recordingTargetId = null;
     _recPeaks.clear();

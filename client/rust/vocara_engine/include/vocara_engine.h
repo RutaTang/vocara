@@ -72,8 +72,14 @@ int ve_set_input_gain(VeEngine *e, float gain);
 int ve_set_monitor_reverb(VeEngine *e, float room, float damping, float wet);
 /* Current live-input peak level (0..1) for a meter; 0 when not capturing. */
 float ve_input_level(VeEngine *e);
-/* Diagnostic: total input frames the mic callback received (0 = mic delivering nothing). */
+/* Diagnostic + pre-roll clock: total ENGINE-RATE (48 kHz, post-resample) frames the mic
+ * callback has emitted (0 = mic delivering nothing). Engine-rate on purpose: callers divide
+ * by 48000 to get time. */
 uint64_t ve_input_frames_received(VeEngine *e);
+/* Host-thread-authoritative input stream state: 1 only after a successful start, 0 before
+ * any teardown begins. Pair with an advancing ve_input_frames_received for a ready check a
+ * dying stream's last callback cannot fake. */
+int ve_input_stream_running(VeEngine *e);
 /* Estimated record round-trip latency in frames @ 48 kHz (output IO + acoustic + input IO + AEC
    block). Shift recorded takes earlier by this so they land on the beat the singer heard. */
 uint32_t ve_record_latency_frames(VeEngine *e);
@@ -148,6 +154,9 @@ int ve_set_bus_send_level(VeEngine *e, int bus, int slot, float level_db);
  * a too-long file sets VE_DECODE_TOO_LONG in `status` (nullable) and returns empty PCM. */
 VePcm ve_decode(const char *path, uint32_t rate, uint64_t max_frames, int *status);
 void ve_free_decoded(float *ptr, size_t frames);
+/* Declared duration of a media file in ms WITHOUT decoding (container probe only) — the
+ * import gate's cheap pre-check. -1 = container declares no length; -2 = unreadable. */
+int64_t ve_probe_duration_ms(const char *path);
 /* Punch-in splice: write old[0..split_ms] ++ new to out_path as a 16-bit WAV.
    Stateless; returns the output frame count or -1. */
 int64_t ve_punch_wav(const char *old_path, const char *new_path, int64_t split_ms,

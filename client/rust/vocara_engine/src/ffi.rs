@@ -100,6 +100,11 @@ pub struct VeEngine {
     /// Nonzero means the take on disk has silent holes — surfaced via
     /// `ve_record_dropped_frames` so the UI never reports such a take as clean.
     rec_dropped: Arc<AtomicU64>,
+    /// Host-thread-authoritative "an input stream is up and its callback may deliver":
+    /// set true only after a successful stream start, false BEFORE any teardown joins the
+    /// old callback. The ready handshake requires this AND advancing frames, so a dying
+    /// stream's final callback can never impersonate a new stream coming up.
+    input_running: Arc<AtomicBool>,
     /// Whether audible monitoring is on (one of the reasons to keep the input stream open).
     monitoring: bool,
     /// Capture gate (analysis) — the input callback fans frames to the capture ring while set.
@@ -267,11 +272,13 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
         // The host maintains the handle's renderer gate (stream up/down), so the control
         // thread can free retired graphs immediately while no stream callback runs (the
         // grace epoch never elapses without a callback advancing the block counter).
+        let input_running = Arc::new(AtomicBool::new(false));
         let (host, current_output_uid) = device::spawn_audio_host(
             rt_cell,
             input_cell,
             Arc::clone(&device_event),
             handle.renderer_gate(),
+            Arc::clone(&input_running),
         )?;
         Ok(Box::into_raw(Box::new(VeEngine {
             host,
@@ -282,6 +289,7 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
             input_level,
             input_frames_in,
             rec_dropped,
+            input_running,
             monitoring: false,
             cap_active,
             rec_active,
@@ -662,11 +670,28 @@ pub extern "C" fn ve_input_level(e: *mut VeEngine) -> c_float {
     })
 }
 
-/// Diagnostic: total input frames the mic callback has received. 0 = the input stream isn't
-/// delivering data (not open, or macOS is feeding silence due to a denied permission).
+/// Diagnostic + pre-roll clock: total ENGINE-RATE (48 kHz, post-resample) frames the mic
+/// callback has emitted. 0 = the input stream isn't delivering data (not open, or macOS is
+/// feeding silence due to a denied permission). Engine-rate on purpose: callers convert this
+/// to time by dividing by 48 000, which a raw device-rate count would skew.
 #[no_mangle]
 pub extern "C" fn ve_input_frames_received(e: *mut VeEngine) -> u64 {
     with_engine(e, 0, |eng| eng.input_frames_in.load(Ordering::Relaxed))
+}
+
+/// Whether an input stream is currently up according to the audio-host thread (true only
+/// after a successful start, false before any teardown begins). The ready handshake pairs
+/// this with an advancing `ve_input_frames_received`, so a dying stream's last callback can
+/// never impersonate a new stream coming up. 1 = running.
+#[no_mangle]
+pub extern "C" fn ve_input_stream_running(e: *mut VeEngine) -> c_int {
+    with_engine(e, 0, |eng| {
+        if eng.input_running.load(Ordering::Acquire) {
+            1
+        } else {
+            0
+        }
+    })
 }
 
 /// Estimated record round-trip latency in frames @ ENGINE_SR (48 kHz): how far behind the engine
@@ -1115,6 +1140,11 @@ fn flatten_stereo(mut v: Vec<[Smp; CHANNELS]>) -> Vec<Smp> {
     unsafe { Vec::from_raw_parts(ptr, len, cap) }
 }
 
+/// Hard ceiling (seconds) for the decode paths that don't take a caller budget
+/// (`ve_punch_wav`, `ve_decode_file`). Mirrors the Dart side's `maxPlaybackDuration`
+/// (60 min) — the two must move together.
+const MAX_PLAYBACK_SECS: f64 = 3600.0;
+
 /// `ve_decode` status: decoded successfully.
 pub const VE_DECODE_OK: c_int = 0;
 /// `ve_decode` status: open/probe/decode failure (unreadable or unsupported file).
@@ -1195,6 +1225,29 @@ pub extern "C" fn ve_decode(
     .unwrap_or_else(|_| VePcm::empty())
 }
 
+/// Probe `path`'s DECLARED duration in milliseconds without decoding (container probe only)
+/// — the import gate's cheap pre-check. Returns the duration in ms; -1 when the container
+/// declares no frame count (caller falls back to the decode-time budget); -2 when the file
+/// can't be opened/probed at all. Stateless; safe off the main thread.
+#[no_mangle]
+pub extern "C" fn ve_probe_duration_ms(path: *const c_char) -> i64 {
+    if path.is_null() {
+        return -2;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let path = match unsafe { CStr::from_ptr(path) }.to_str() {
+            Ok(p) => p,
+            Err(_) => return -2,
+        };
+        match device::probe_duration_ms(path) {
+            Ok(Some(ms)) => ms.min(i64::MAX as u64) as i64,
+            Ok(None) => -1,
+            Err(_) => -2,
+        }
+    }))
+    .unwrap_or(-2)
+}
+
 /// Free a buffer returned by [`ve_decode`].
 #[no_mangle]
 pub extern "C" fn ve_free_decoded(ptr: *mut f32, frames: usize) {
@@ -1231,8 +1284,10 @@ pub extern "C" fn ve_punch_wav(
             _ => return -1,
         };
         let decode = |p: &str| -> Option<Vec<[Smp; CHANNELS]>> {
-            // Unbounded: both inputs are takes this app recorded (bounded by session length).
-            let (frames, src_rate) = device::decode_file(p, 0.0).ok()?;
+            // Both inputs are normally takes this app recorded, but nothing enforces that,
+            // so they get the same generous ceiling as the playback path (the Dart side's
+            // maxPlaybackDuration, 60 min) instead of an unbounded decode.
+            let (frames, src_rate) = device::decode_file(p, MAX_PLAYBACK_SECS).ok()?;
             Some(device::resample_linear(frames, src_rate, rate))
         };
         let (old_frames, new_frames) = match (decode(old_p), decode(new_p)) {
@@ -1399,9 +1454,9 @@ pub extern "C" fn ve_decode_file(e: *mut VeEngine, path: *const c_char) -> VePcm
             Err(_) => return VePcm::empty(),
         };
         let rate = eng.handle.sample_rate() as u32;
-        // Unbounded here: callers gate duration at the ve_decode chokepoint; this legacy
-        // path still benefits from the moved (not copied) identity resample + flatten.
-        let (frames, src_rate) = match device::decode_file(path, 0.0) {
+        // Same ceiling as the playback path — this legacy entry must not stay the one
+        // unbounded decode door.
+        let (frames, src_rate) = match device::decode_file(path, MAX_PLAYBACK_SECS) {
             Ok(v) => v,
             Err(_) => return VePcm::empty(),
         };
