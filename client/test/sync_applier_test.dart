@@ -26,6 +26,38 @@ class _CountingClock extends HlcClock {
   }
 }
 
+/// A [QuarantineStore] whose [put] throws while [failing] is set — the
+/// injected storage failure for asserting that a record which cannot be
+/// PARKED fails the whole batch (token unmoved) instead of being silently
+/// lost behind an advanced change token.
+class _FlakyQuarantineStore extends QuarantineStore {
+  _FlakyQuarantineStore(super.db);
+
+  bool failing = true;
+
+  @override
+  Future<void> put({
+    required String table,
+    required String id,
+    required String hlcPacked,
+    required int schemaV,
+    required String payload,
+    required String reason,
+    required int quarantinedAt,
+  }) {
+    if (failing) throw StateError('quarantine storage unavailable');
+    return super.put(
+      table: table,
+      id: id,
+      hlcPacked: hlcPacked,
+      schemaV: schemaV,
+      payload: payload,
+      reason: reason,
+      quarantinedAt: quarantinedAt,
+    );
+  }
+}
+
 void main() {
   late AppDatabase db;
   late SyncApplier applier;
@@ -623,28 +655,242 @@ void main() {
       },
     );
 
-    test('a remote update pointing a PRE-EXISTING row at a not-yet-arrived '
-        'asset nulls the pointer; the row and its subtree survive', () async {
-      // Seed an earlier page: a practice with a child track (all FKs intact).
+    RemoteRecord assetRecord(String id, Hlc h) => RemoteRecord(
+      table: 'assets',
+      columns: {
+        'id': _id(id),
+        'content_hash': 'HASH_$id',
+        'byte_size': 8,
+        'ext': 'wav',
+        'kind': 'audio',
+        'created_at': h.wallMs,
+        'updated_at': h.wallMs,
+        'deleted_at': null,
+        'hlc_wall': h.wallMs,
+        'hlc_ctr': h.counter,
+        'hlc_node': h.node,
+        'hlc_packed': h.packed,
+        'schema_v': 1,
+      },
+    );
+
+    Future<Map<String, Object?>> practiceState(String id) async {
+      final r = await db
+          .customSelect(
+            'SELECT title, separation_asset_id, hlc_packed '
+            'FROM practices WHERE id = ?',
+            variables: [Variable.withString(_id(id))],
+          )
+          .getSingle();
+      return r.data;
+    }
+
+    Future<Map<String, Object?>> clipState(String id) async {
+      final r = await db
+          .customSelect(
+            'SELECT asset_id, hlc_packed FROM clips WHERE id = ?',
+            variables: [Variable.withString(_id(id))],
+          )
+          .getSingle();
+      return r.data;
+    }
+
+    // Mimics SyncEngine._replayQuarantine at applier level: parent tables
+    // first (the same parent-before-child contract tableRanks derives), one
+    // single-record apply per parked row, entry deleted when the record
+    // applied or settled as a stale LWW skip.
+    Future<void> replayParked() async {
+      const rank = ['assets', 'practices', 'tracks', 'clips'];
+      final parked = (await store.list()).toList()
+        ..sort((a, b) => rank.indexOf(a.tbl).compareTo(rank.indexOf(b.tbl)));
+      for (final q in parked) {
+        final res = await applier.apply([SyncRow.decode(q.payload)]);
+        if (res.applied > 0 || res.skipped > 0) {
+          await store.delete(q.tbl, q.id);
+        }
+      }
+    }
+
+    test('park-and-restore: a remote UPDATE repointing a pre-existing row at '
+        'a QUARANTINED parent parks the post-update snapshot and restores '
+        'the row verbatim; replay converges once the parent lands', () async {
+      // The parent is locally quarantined — here by an implausibly-future
+      // stamp, the same locally-parked mechanics as a newer-schema parent
+      // (which a test cannot un-park, since currentRecordSchemaV is a
+      // build-time const, while a drift park recovers once the clock
+      // catches up). Either way the child's page ends up behind the change
+      // token, the server never re-delivers it, and only the parking lot
+      // can converge the pair.
+      var now = 1000;
+      applier = SyncApplier(
+        db,
+        HlcClock(node: _id('LOCAL'), now: () => now),
+        builder: SyncRowBuilder(db),
+        quarantine: store,
+      );
+      await applier.apply([practice('P', 'v1', hlc(900))]);
+
+      final parentStamp = hlc(1000 + HlcClock.defaultMaxDriftMs + 60 * 1000);
+      final res = await applier.apply([
+        assetRecord('A', parentStamp), // quarantined at the drift gate
+        practice('P', 'v2', hlc(950), separationAssetId: 'A'),
+      ]);
+      expect(res.committed, isTrue);
+      expect(res.quarantined, 1); // the parent
+      expect(res.applied, 0, reason: 'the update applied but did not stick');
+      expect(res.failed, 1); // the parked update
+
+      // The row was restored VERBATIM to its exact pre-batch state: pointer
+      // intact (null), prior content, prior HLC — a pure revert, no derived
+      // stamp minted. NOT the old heal (update kept, pointer nulled, remote
+      // HLC adopted).
+      final p = await practiceState('P');
+      expect(p['title'], 'v1');
+      expect(p['separation_asset_id'], isNull);
+      expect(p['hlc_packed'], hlc(900).packed);
+
+      final parked = await store.list();
+      expect(parked, hasLength(2));
+      final parkedUpdate = parked.singleWhere((q) => q.tbl == 'practices');
+      expect(parkedUpdate.id, _id('P'));
+      expect(
+        parkedUpdate.reason,
+        'fk-orphan: parent assets/${_id('A')} missing',
+      );
+      // The parked snapshot is the POST-update state under the remote HLC:
+      // strictly newer than the restored row, so replay wins by plain LWW.
+      expect(parkedUpdate.remoteHlcPacked, hlc(950).packed);
+      final replayable = SyncRow.decode(parkedUpdate.payload);
+      expect(replayable.fields['title'], 'v2');
+      expect(replayable.fields['separation_asset_id'], _id('A'));
+
+      // The clock catches up (the drift analogue of the app upgrade that
+      // un-parks a newer-schema parent) and the replay runs: the parent
+      // lands first, then the parked update — BOTH land, the pointer is
+      // correct, and the parking lot is empty.
+      now = parentStamp.wallMs;
+      await replayParked();
+      final healed = await practiceState('P');
+      expect(healed['title'], 'v2');
+      expect(healed['separation_asset_id'], _id('A'));
+      expect(healed['hlc_packed'], hlc(950).packed);
+      expect(await store.list(), isEmpty);
+    });
+
+    test('a re-delivered IDENTICAL update is strictly newer than the '
+        'restored row: it re-applies and re-parks instead of the old '
+        'permanently-nulled pointer', () async {
+      await applier.apply([practice('P', 'v1', hlc(900))]);
+      final update = practice('P', 'v2', hlc(950), separationAssetId: 'A');
+
+      final first = await applier.apply([update]);
+      expect(first.applied, 0);
+      expect(first.failed, 1);
+      expect((await practiceState('P'))['hlc_packed'], hlc(900).packed);
+
+      // The server re-delivers the identical snapshot (e.g. a token reset
+      // replays the zone). Under the old null-the-pointer heal the row held
+      // the update's OWN HLC with the pointer nulled, so the re-delivery
+      // was LWW-EQUAL and skipped — the reference was lost forever unless
+      // some strictly-newer update ever arrived. Against the RESTORED row
+      // (prior HLC) it is strictly newer: it re-applies and is parked and
+      // restored again, converging on the same recoverable state.
+      final second = await applier.apply([update]);
+      expect(second.skipped, 0, reason: 'not LWW-equal to the restored row');
+      expect(second.applied, 0);
+      expect(second.failed, 1);
+      final p = await practiceState('P');
+      expect(p['title'], 'v1');
+      expect(p['separation_asset_id'], isNull);
+      expect(p['hlc_packed'], hlc(900).packed);
+      final parked = await store.list();
+      expect(parked, hasLength(1)); // upserted, not piled up
+      expect(parked.single.remoteHlcPacked, hlc(950).packed);
+
+      // Once the parent exists, the replay converges to the updated state.
+      final landed = await applier.apply([assetRecord('A', hlc(960))]);
+      expect(landed.applied, 1);
+      await replayParked();
+      final healed = await practiceState('P');
+      expect(healed['title'], 'v2');
+      expect(healed['separation_asset_id'], _id('A'));
+      expect(healed['hlc_packed'], hlc(950).packed);
+      expect(await store.list(), isEmpty);
+    });
+
+    test('a dangling NOT NULL FK on an updated-this-batch row COMMITS the '
+        'batch (the token seam runs) via the same park-and-restore path; '
+        'replay converges after the parent lands', () async {
       await applier.apply([
-        practice('P', 'v1', hlc(900)),
+        practice('P', 'p', hlc(900)),
         track('T', 'P', hlc(901)),
+        assetRecord('A1', hlc(902)),
+        clip('C', 'T', 'A1', hlc(903)),
       ]);
 
-      // A later page updates the practice, referencing an asset record that
-      // has not arrived yet. The OLD sweep hard-deleted the practice and then
-      // cascaded through its whole pre-existing subtree.
-      final res = await applier.apply([
-        practice('P', 'v2', hlc(950), separationAssetId: 'FUTUREASSET'),
-      ]);
+      // clips.asset_id is NOT NULL: the old sweep could only abort, and
+      // with the parent locally quarantined (never re-delivered) the engine
+      // retried the same page forever, until an app upgrade. The restore
+      // heals every repointed column at once, so the NOT NULL case rides
+      // the same path as the nullable one.
+      var tokenWrites = 0;
+      final res = await applier.apply(
+        [clip('C', 'T', 'A2', hlc(950))], // A2 never arrived
+        beforeCommit: () async => tokenWrites++,
+      );
+      expect(res.committed, isTrue, reason: 'no permanent page retry');
+      expect(tokenWrites, 1, reason: 'the change token advances past the page');
+      expect(res.applied, 0);
+      expect(res.failed, 1);
+
+      final c = await clipState('C');
+      expect(c['asset_id'], _id('A1'), reason: 'restored, not aborted');
+      expect(c['hlc_packed'], hlc(903).packed, reason: 'verbatim prior HLC');
+
+      final parked = await store.list();
+      expect(parked, hasLength(1));
+      expect(parked.single.tbl, 'clips');
+      expect(
+        parked.single.reason,
+        'fk-orphan: parent assets/${_id('A2')} missing',
+      );
+
+      // The missing asset lands (a later page, or an upgrade replay); the
+      // parked repoint then converges by plain LWW.
+      await applier.apply([assetRecord('A2', hlc(960))]);
+      await replayParked();
+      final healed = await clipState('C');
+      expect(healed['asset_id'], _id('A2'));
+      expect(healed['hlc_packed'], hlc(950).packed);
+      expect(await store.list(), isEmpty);
+    });
+
+    test('a dangling pre-existing row this batch never touched keeps the '
+        'old null-the-pointer heal', () async {
+      await applier.apply([practice('P', 'v1', hlc(900))]);
+      // No remote apply can produce this state any more (every dangling
+      // pre-existing row is one the batch just updated), so manufacture the
+      // residual case directly: a pointer left dangling outside the
+      // applier's control.
+      await db.customStatement('PRAGMA foreign_keys = OFF');
+      await db.customStatement(
+        'UPDATE practices SET separation_asset_id = ? WHERE id = ?',
+        [_id('GONE'), _id('P')],
+      );
+      await db.customStatement('PRAGMA foreign_keys = ON');
+
+      // Any batch triggers the sweep (foreign_key_check scans the whole
+      // database). P is in neither the inserted nor the updated set, so
+      // only its dangling column is nulled — no park, no restore, and no
+      // counter moves.
+      final res = await applier.apply([practice('Q', 'other', hlc(950))]);
+      expect(res.committed, isTrue);
       expect(res.applied, 1);
       expect(res.failed, 0);
-
-      final p = await row('P');
-      expect(p, isNotNull); // the practice row survived
-      expect(p!['title'], 'v2'); // the update itself stuck
-      expect(p['separation_asset_id'], isNull); // the dangler was healed
-      expect(await trackRow('T'), isNotNull); // subtree intact
+      final p = await practiceState('P');
+      expect(p['title'], 'v1', reason: 'row kept');
+      expect(p['separation_asset_id'], isNull, reason: 'pointer nulled');
+      expect(await store.list(), isEmpty);
     });
   });
 
@@ -947,6 +1193,51 @@ void main() {
       expect(parked, hasLength(1)); // latest per (tbl, id), not a pile-up
       expect(parked.single.remoteHlcPacked, drift2.packed);
       expect(SyncRow.decode(parked.single.payload).fields['title'], 'v2');
+    });
+
+    test('a quarantine storage failure fails the WHOLE batch — the token '
+        'seam never runs, nothing applies — and the same page succeeds once '
+        'the store recovers', () async {
+      final flaky = _FlakyQuarantineStore(db);
+      applier = SyncApplier(
+        db,
+        HlcClock(node: _id('LOCAL'), now: () => 1000),
+        builder: SyncRowBuilder(db),
+        quarantine: flaky,
+      );
+      var tokenWrites = 0;
+      final page = [
+        practice('OK', 'fine', hlc(900)),
+        // Parked at the drift gate — the failing put is what must not be
+        // swallowed: a committed batch would advance the token past a
+        // record that was never parked, losing it permanently.
+        practice('FUT', 'parked', hlc(1000 + 6 * 60 * 1000)),
+      ];
+      final res = await applier.apply(
+        page,
+        beforeCommit: () async => tokenWrites++,
+      );
+      expect(res.committed, isFalse);
+      expect(tokenWrites, 0, reason: 'the token seam must not run');
+      expect(await row('OK'), isNull, reason: 'the whole page rolled back');
+      expect(await flaky.list(), isEmpty);
+
+      // The store recovers: the engine retries the SAME page (its token
+      // never moved) and it now applies cleanly, park included.
+      flaky.failing = false;
+      final retry = await applier.apply(
+        page,
+        beforeCommit: () async => tokenWrites++,
+      );
+      expect(retry.committed, isTrue);
+      expect(tokenWrites, 1);
+      expect(retry.applied, 1);
+      expect(retry.quarantined, 1);
+      expect((await row('OK'))!['title'], 'fine');
+      final parked = await flaky.list();
+      expect(parked, hasLength(1));
+      expect(parked.single.id, _id('FUT'));
+      expect(parked.single.reason, startsWith('hlc-drift'));
     });
 
     test('quarantine rows commit atomically with the batch (same outer '

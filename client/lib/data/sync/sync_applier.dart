@@ -71,22 +71,27 @@ class ApplyResult {
 /// Because defer_foreign_keys pushes FK enforcement to the OUTER commit (outside
 /// every savepoint), a record whose parent never arrives in the batch would fail
 /// the whole commit — so before committing we sweep foreign_key_check
-/// ([_sweepFkOrphans]): rows INSERTED by this batch are PARKED to the
-/// quarantine store and then deleted (the parent may be locally quarantined —
-/// e.g. a newer-schema row the schema gate rejected — in which case the
-/// server never re-delivers the child, and only the quarantine replay can
-/// land it once the parent exists) while PRE-EXISTING rows are never deleted,
-/// only their dangling pointer column is nulled. The outer transaction is
-/// wrapped so a commit failure degrades to a failed batch instead of throwing
-/// out of apply().
+/// ([_sweepFkOrphans]), healing by provenance: a row INSERTED by this batch
+/// is PARKED to the quarantine store and then deleted (the parent may be
+/// locally quarantined — e.g. a newer-schema row the schema gate rejected —
+/// in which case the server never re-delivers the child, and only the
+/// quarantine replay can land it once the parent exists); a pre-existing row
+/// UPDATED by this batch is parked the same way and then RESTORED verbatim
+/// to its pre-batch snapshot (the update was effectively quarantined at the
+/// door); a dangling pre-existing row this batch never touched only has its
+/// dangling pointer column nulled. The outer transaction is wrapped so a
+/// commit failure degrades to a failed batch instead of throwing out of
+/// apply().
 class SyncApplier {
   SyncApplier(this.db, this.clock, {required this.builder, this.quarantine});
 
   final AppDatabase db;
   final HlcClock clock;
 
-  /// Projects a just-inserted row back into its full wire snapshot so the FK
-  /// sweep can PARK an orphan instead of losing it (see [_sweepFkOrphans]).
+  /// Projects a row back into its full wire snapshot so the FK sweep can
+  /// PARK an orphan instead of losing it, and so [apply] can capture the
+  /// pre-update restore point of every row it updates (see
+  /// [_sweepFkOrphans]).
   /// Deliberately REQUIRED (unlike [quarantine]): an absent projection would
   /// silently degrade the sweep to the old hard-delete, and a locally
   /// quarantined parent then makes that deletion a permanent row loss.
@@ -144,6 +149,13 @@ class SyncApplier {
     // (table, id) pairs INSERTED by this batch — the only rows the FK sweep is
     // allowed to park-and-delete (see _sweepFkOrphans).
     final insertedThisBatch = <(String, String)>{};
+    // (table, id) -> the PRE-BATCH wire snapshot of every pre-existing row
+    // this batch updated, captured just before the first update overwrote it.
+    // The FK sweep restores from these when the update itself planted a
+    // dangling pointer (see _sweepFkOrphans). Costs one extra row read per
+    // applied update — the price of never nulling a reference that a parked
+    // parent could still satisfy.
+    final updatedThisBatch = <(String, String), SyncRow>{};
     // Per-batch live-schema cache for the column gate (see [_liveColumns]).
     final liveColumns = <String, Set<String>>{};
     // Stamps of records whose savepoint settled as applied or skipped. Their
@@ -303,6 +315,7 @@ class SyncApplier {
             // every other (good) record. Counters are updated OUTSIDE the
             // savepoint so a rollback can't desync them.
             var didInsert = false;
+            SyncRow? priorSnapshot;
             final applied = await db.transaction(() async {
               final existing = await db
                   .customSelect(
@@ -328,6 +341,12 @@ class SyncApplier {
                 await _insert(rec.table, columns);
                 didInsert = true;
               } else {
+                // Capture the row's pre-update wire snapshot BEFORE the
+                // write, so the FK sweep can restore the exact prior state
+                // if this very update turns out to have planted a dangling
+                // pointer (see _sweepFkOrphans and [updatedThisBatch] for
+                // the one-extra-read cost note).
+                priorSnapshot = await builder.build(rec.table, rec.id);
                 await _update(rec.table, columns);
               }
               return true;
@@ -341,10 +360,34 @@ class SyncApplier {
             settledHlcs.add(rec.hlc);
             if (applied) {
               result.applied++;
-              if (didInsert) insertedThisBatch.add((rec.table, rec.id));
+              if (didInsert) {
+                insertedThisBatch.add((rec.table, rec.id));
+              } else {
+                final prior = priorSnapshot;
+                // A row inserted EARLIER IN THIS BATCH and updated now is
+                // already covered by the park-and-delete path; its mid-batch
+                // snapshot is not a restore point. putIfAbsent: with two
+                // updates to the same pre-existing row in one batch, the
+                // restore point must stay the PRE-BATCH state, not the state
+                // between the two updates.
+                if (prior != null &&
+                    !insertedThisBatch.contains((rec.table, rec.id))) {
+                  updatedThisBatch.putIfAbsent((
+                    rec.table,
+                    rec.id,
+                  ), () => prior);
+                }
+              }
             } else {
               result.skipped++;
             }
+          } on _QuarantinePutException {
+            // A record failed to PARK: the loop's usual answer to a
+            // per-record throw — quarantine it and move on — is exactly the
+            // thing that just failed. Rethrow so the outer transaction rolls
+            // back (token unmoved, page retried) instead of committing a
+            // batch that silently lost a rejected record (see [_quarantine]).
+            rethrow;
           } catch (e) {
             // Any other per-record failure. If the record was inside its
             // savepoint, drift rolled the savepoint back BEFORE rethrowing,
@@ -355,7 +398,7 @@ class SyncApplier {
             await _quarantine(rec, 'apply-failed: $e');
           }
         }
-        await _sweepFkOrphans(result, insertedThisBatch);
+        await _sweepFkOrphans(result, insertedThisBatch, updatedThisBatch);
         if (beforeCommit != null) await beforeCommit();
       });
     } catch (_) {
@@ -398,29 +441,52 @@ class SyncApplier {
   }
 
   /// Persists a rejected record to the quarantine parking lot (latest state
-  /// per row) INSIDE the current outer apply transaction. Strictly best-effort
-  /// bookkeeping: a record too malformed to describe (bad id/hlc types) or a
-  /// storage error here must never turn a per-record rejection into a batch
-  /// failure — the counters remain the source of truth for the caller.
+  /// per row) INSIDE the current outer apply transaction.
+  ///
+  /// A STORAGE failure here fails the WHOLE batch, aligned with the FK
+  /// sweep's park: the put is the only thing standing between a rejected
+  /// record and silent permanent loss — the change token advances past this
+  /// page when the batch commits, so a record whose park was dropped would
+  /// be forever behind the token (while its dependents may have parked
+  /// fine), unreachable by any replay. The failure is wrapped in
+  /// [_QuarantinePutException] so the per-record handler in [apply] rethrows
+  /// it (re-parking through the same failing store cannot succeed) and the
+  /// outer transaction rolls back: token unmoved, a retried page over a
+  /// silent loss.
+  ///
+  /// The two early returns below are the ONE remaining silent drop, and they
+  /// are unavoidable: a record with no usable id cannot be keyed into the
+  /// parking lot (or retried into any table) at all, and a payload that
+  /// cannot even be serialized can never be replayed — in both cases there
+  /// is genuinely nothing addressable to park, and the counters still record
+  /// the rejection.
   Future<void> _quarantine(SyncRow rec, String reason) async {
     final store = quarantine;
     if (store == null) return;
+    final id = rec.fields['id'];
+    if (id is! String || id.isEmpty) return; // nothing addressable to park
+    final String payload;
     try {
-      final id = rec.fields['id'];
-      if (id is! String || id.isEmpty) return; // nothing addressable to park
-      final hlcPacked = rec.fields['hlc_packed'];
-      final schemaV = rec.fields['schema_v'];
+      payload = rec.encode();
+    } catch (_) {
+      // Nothing replayable to park (see doc comment). Wire-decoded rows are
+      // scalar-only by SyncRow.fromJson, so this guards hand-built records.
+      return;
+    }
+    final hlcPacked = rec.fields['hlc_packed'];
+    final schemaV = rec.fields['schema_v'];
+    try {
       await store.put(
         table: rec.table,
         id: id,
         hlcPacked: hlcPacked is String ? hlcPacked : '',
         schemaV: schemaV is int ? schemaV : 0,
-        payload: rec.encode(),
+        payload: payload,
         reason: reason,
         quarantinedAt: DateTime.now().millisecondsSinceEpoch,
       );
-    } catch (_) {
-      // Swallowed by design (see doc comment).
+    } catch (e) {
+      throw _QuarantinePutException(e);
     }
   }
 
@@ -452,32 +518,63 @@ class SyncApplier {
   ///    the delete a failed park IS a lost row, so a storage error aborts
   ///    the batch (a retried page over silent loss). Without a quarantine
   ///    store (counter-only test wiring) the old hard-delete stands.
-  ///  * A PRE-EXISTING row is NEVER deleted (deleting it — and then its whole
-  ///    subtree via the fixpoint loop — would silently destroy local data with
-  ///    no tombstone and no oplog). It satisfied every FK when the batch began
-  ///    (SQLite enforced them at every earlier commit), so it can only be
-  ///    flagged because THIS batch repointed one of its FK columns — either at
-  ///    an id that never arrived, or at a batch-inserted parent this sweep
-  ///    just deleted. Only that column is nulled (the IntegrityChecker-style
-  ///    scalar self-heal), deliberately un-journaled like every remote apply;
-  ///    the pointer is restored when the missing parent and a fresher update
-  ///    arrive. Every FK column a remote update realistically repoints is
-  ///    nullable (separation_asset_id / interpretation_id / bus_id — the
-  ///    NOT NULL parent links practice_id / track_id / technique_id are never
-  ///    rewritten after insert); should a NOT NULL column ever dangle anyway
-  ///    (e.g. clips.asset_id repointed at a not-yet-arrived asset), we abort
-  ///    so the WHOLE batch rolls back — a retried page over silently deleting
-  ///    pre-existing data.
+  ///  * A PRE-EXISTING row UPDATED by this batch is PARKED, then RESTORED —
+  ///    never deleted. It satisfied every FK when the batch began (SQLite
+  ///    enforced them at every earlier commit), so the dangling pointer was
+  ///    planted by this batch's own update, and the record is treated
+  ///    exactly like the inserted case: it was effectively quarantined at
+  ///    the door. Its CURRENT (post-update, remote-HLC) snapshot goes to the
+  ///    quarantine store under the same fk-orphan reason, and the row is
+  ///    then reverted VERBATIM to the pre-batch snapshot [apply] captured
+  ///    just before the update — the exact prior state including its HLC,
+  ///    deliberately NOT a derived stamp (a derived stamp mints new state
+  ///    that can out-rank a peer's legitimate write — the resurrection class
+  ///    of bug docs/sync-protocol.md warns about — while a verbatim revert
+  ///    re-asserts state that already existed, so nothing new enters the
+  ///    fleet). Convergence: the parked snapshot is strictly newer than the
+  ///    restored row, so once the missing parent lands the quarantine replay
+  ///    applies it by plain LWW; and a re-delivered IDENTICAL update is
+  ///    likewise strictly newer than the restored row, so it re-applies (and
+  ///    is re-parked here while the parent is still missing) — under the old
+  ///    null-the-pointer heal that re-delivery was LWW-equal to the healed
+  ///    row and skipped, leaving the reference nulled FOREVER unless some
+  ///    strictly-newer update happened to arrive. Because the restore heals
+  ///    every repointed column at once, this path covers dangling NOT NULL
+  ///    columns too: the abort below is unreachable for updated-this-batch
+  ///    rows (with a store wired), turning the old retry-forever page into a
+  ///    committed batch plus a parked, replayable update.
+  ///  * A dangling PRE-EXISTING row this batch NEVER touched (and, without a
+  ///    quarantine store — counter-only test wiring — any dangling
+  ///    pre-existing row, since parking is impossible) keeps the old heal:
+  ///    only the dangling column is nulled (the IntegrityChecker-style
+  ///    scalar self-heal), deliberately un-journaled like every remote
+  ///    apply. No remote apply can CREATE this case any more — every
+  ///    dangling pre-existing row is one this batch just updated — so it
+  ///    guards states that arose outside the applier's control. Should a
+  ///    NOT NULL column dangle on such a row, we still abort so the WHOLE
+  ///    batch rolls back — a retried page over silently deleting
+  ///    pre-existing data (deleting the row — and then its subtree via the
+  ///    fixpoint loop — would destroy local data with no tombstone and no
+  ///    oplog).
   ///
   /// Loops to a fixpoint because deleting an orphan can strand its own
-  /// batch-inserted children. Counters: a deleted batch-insert moves from
-  /// applied to failed exactly once (duplicate violations for a multi-FK row
-  /// are skipped once the row is gone); a nulled pre-existing row changes no
-  /// counter (its update, if this batch carried one, genuinely applied).
+  /// batch-inserted children. Counters: a deleted batch-insert and a
+  /// restored batch-update each move from applied to failed exactly once
+  /// (duplicate violations for a multi-FK row are skipped once the row is
+  /// deleted or restored); a nulled untouched row changes no counter.
   Future<void> _sweepFkOrphans(
     ApplyResult result,
     Set<(String, String)> insertedThisBatch,
+    Map<(String, String), SyncRow> updatedThisBatch,
   ) async {
+    // Rows already park-and-restored by THIS sweep. A restored row can never
+    // be flagged by a LATER fixpoint pass (its pre-batch state satisfied
+    // every FK when the batch began, and the sweep only ever deletes rows
+    // this batch inserted — which a pre-batch snapshot cannot reference),
+    // but WITHIN the pass that restored it, foreign_key_check may have
+    // reported it once per violated constraint and the later entries are
+    // stale.
+    final restored = <(String, String)>{};
     while (true) {
       final violations = await db
           .customSelect('PRAGMA foreign_key_check')
@@ -497,8 +594,8 @@ class SyncApplier {
             .getSingleOrNull();
         if (idRow == null) continue;
         final id = idRow.read<String>('id');
+        final store = quarantine;
         if (insertedThisBatch.contains((table, id))) {
-          final store = quarantine;
           if (store != null) {
             // Park BEFORE deleting (same outer transaction, so the entry and
             // the delete commit or roll back together). The snapshot is the
@@ -530,12 +627,66 @@ class SyncApplier {
           result.failed++;
           continue;
         }
-        // Pre-existing row: null just the dangling column. Which column comes
-        // from the violation's fkid resolved against foreign_key_list.
+        // Pre-existing row UPDATED by this batch: the update itself planted
+        // the dangling pointer, so park the post-update snapshot and restore
+        // the pre-batch state verbatim (see the doc comment). Without a
+        // store the old null-the-pointer heal below stands, like the
+        // inserted case's hard-delete fallback.
+        final priorSnapshot = updatedThisBatch[(table, id)];
+        if (priorSnapshot != null && store != null) {
+          if (!restored.add((table, id))) {
+            // A later violation entry of the SAME pass for a row already
+            // restored (several FK columns repointed at once): the verbatim
+            // restore healed every column, so the entry is stale.
+            continue;
+          }
+          // Park the CURRENT (post-update, remote-HLC) snapshot BEFORE the
+          // restore overwrites it — the shared outbound projection and the
+          // same reason format as the inserted case. Strictly newer than the
+          // restored row, so the quarantine replay lands it by plain LWW
+          // once the parent exists. Like the inserted case's park, a storage
+          // failure here aborts the batch rather than losing the update.
+          final snapshot = await builder.build(table, id);
+          if (snapshot != null) {
+            final fkid = v.readNullable<int>('fkid');
+            final column = fkid == null ? null : await _fkColumn(table, fkid);
+            final parentId = column == null ? null : snapshot.fields[column];
+            await store.put(
+              table: table,
+              id: id,
+              hlcPacked: snapshot.hlcPacked,
+              schemaV: snapshot.schemaV,
+              payload: snapshot.encode(),
+              reason:
+                  'fk-orphan: parent ${v.read<String>('parent')}/'
+                  '${parentId ?? 'unknown'} missing',
+              quarantinedAt: DateTime.now().millisecondsSinceEpoch,
+            );
+            // Restore the prior snapshot VERBATIM: a pure revert to the
+            // exact pre-batch state including its HLC — never a derived
+            // stamp (see the doc comment for why deriving would risk
+            // resurrection). After this the row has no dangling pointer, so
+            // the nullable and NOT NULL cases converge on this same path.
+            await _update(table, priorSnapshot.fields);
+            // The update was counted as applied above; it did not stick.
+            if (result.applied > 0) result.applied--;
+            result.failed++;
+            continue;
+          }
+          // The violation proves the row exists, so a null snapshot cannot
+          // happen; if it ever does, fall through to the scalar heal below
+          // rather than crash the sweep.
+          restored.remove((table, id));
+        }
+        // Untouched pre-existing row (or counter-only wiring): null just the
+        // dangling column. Which column comes from the violation's fkid
+        // resolved against foreign_key_list.
         final fkid = v.readNullable<int>('fkid');
         final column = fkid == null ? null : await _fkColumn(table, fkid);
         if (column == null || !await _isNullable(table, column)) {
           // Un-heal-able (see doc comment): fail the batch, keep the data.
+          // Residual by construction — an updated-this-batch row (with a
+          // store wired) took the park-and-restore path above instead.
           throw StateError(
             'FK sweep: pre-existing $table/$id has a dangling NOT NULL '
             'foreign key (fkid: $fkid); failing the batch to preserve it',
@@ -733,4 +884,18 @@ class SyncApplier {
   /// SQLite bind values are int / double / String / null / blob; map bool to its
   /// integer form.
   static Object? _bind(Object? v) => v is bool ? (v ? 1 : 0) : v;
+}
+
+/// Marker for a quarantine-store STORAGE failure inside [SyncApplier.apply]:
+/// unlike every other per-record throw (which quarantines that record and
+/// continues), this one must fail the WHOLE batch — re-parking through the
+/// same failing store cannot succeed, and committing would advance the change
+/// token past a record that was never parked (see [SyncApplier._quarantine]).
+class _QuarantinePutException implements Exception {
+  _QuarantinePutException(this.cause);
+
+  final Object cause;
+
+  @override
+  String toString() => 'quarantine put failed: $cause';
 }
