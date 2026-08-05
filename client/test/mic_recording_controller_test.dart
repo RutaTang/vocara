@@ -93,6 +93,27 @@ class _FakeEngine implements GraphAudioPlaybackService {
     return recordWrittenScript[i];
   }
 
+  /// The published input-intent sequence (the arm's watermark).
+  int intentSeq = 1;
+
+  @override
+  int inputIntentSeq() => intentSeq;
+
+  /// Scripted host-converged sequence returned by successive
+  /// [inputAppliedSeq] reads (last repeats). Default: already converged to
+  /// the arm's intent.
+  List<int> appliedSeqScript = [1];
+  int appliedReads = 0;
+
+  @override
+  int inputAppliedSeq() {
+    final i = appliedReads < appliedSeqScript.length
+        ? appliedReads
+        : appliedSeqScript.length - 1;
+    appliedReads++;
+    return appliedSeqScript[i];
+  }
+
   /// Frames the fake reports as dropped by the recording ring at stop.
   int droppedFrames = 0;
 
@@ -451,20 +472,32 @@ void main() {
 
   testWidgets('mic never delivers frames: start fails with '
       'inputNotDelivering, recording disarmed, file discarded', (tester) async {
-    // framesReceivedStep 0 = the counter never advances (async input-stream
-    // open failed after startInputRecording claimed success). A zero timeout
-    // forces the deterministic timeout path (the ready wait polls a REAL
-    // stopwatch, which the fake clock can't advance).
-    final engine = _FakeEngine()..framesReceivedStep = 0;
+    // The take ring never receives a frame (async input-stream open failed
+    // after startInputRecording claimed success). One real millisecond of
+    // timeout guarantees the poll body runs at least once — a zero timeout
+    // would short-circuit the loop and prove nothing about it.
+    final engine = _FakeEngine()..recordWrittenScript = [0];
     final dest = _FakeDestination();
     final controller = MicRecordingController(
       acquireEngine: () => engine,
       requestPermission: () async => true,
-      readyTimeout: Duration.zero,
+      readyTimeout: const Duration(milliseconds: 1),
     );
 
-    final result = await controller.start(dest.strategy);
-    await tester.pump(); // flush the unawaited discard
+    var settled = false;
+    final future = controller.start(dest.strategy);
+    unawaited(future.whenComplete(() => settled = true));
+    for (var i = 0; i < 200 && !settled; i++) {
+      await tester.pump(const Duration(milliseconds: 25));
+    }
+    expect(settled, isTrue, reason: 'the ready wait must hit its deadline');
+    final result = await future;
+    await tester.pump();
+    expect(
+      engine.writtenReads,
+      greaterThanOrEqualTo(1),
+      reason: 'the poll body must actually have run',
+    ); // flush the unawaited discard
 
     expect(result.started, isFalse);
     expect(result.failure, MicRecordingFailure.inputNotDelivering);
@@ -482,8 +515,8 @@ void main() {
       'ring', (tester) async {
     // The global counter advances (pre-arm callbacks, an old stream's final
     // push) but recordWrittenFrames stays 0 — nothing entered THIS take's
-    // ring, so the recorded-progress ack must refuse. Zero timeout forces the
-    // deterministic path.
+    // ring, so the recorded-progress ack must refuse across REAL poll
+    // iterations, not a short-circuited loop.
     final engine = _FakeEngine()
       ..framesReceivedStep = 512
       ..recordWrittenScript = [0];
@@ -491,11 +524,23 @@ void main() {
     final controller = MicRecordingController(
       acquireEngine: () => engine,
       requestPermission: () async => true,
-      readyTimeout: Duration.zero,
+      readyTimeout: const Duration(milliseconds: 1),
     );
 
-    final result = await controller.start(dest.strategy);
+    var settled = false;
+    final future = controller.start(dest.strategy);
+    unawaited(future.whenComplete(() => settled = true));
+    for (var i = 0; i < 200 && !settled; i++) {
+      await tester.pump(const Duration(milliseconds: 25));
+    }
+    expect(settled, isTrue, reason: 'the ready wait must hit its deadline');
+    final result = await future;
     await tester.pump();
+    expect(
+      engine.writtenReads,
+      greaterThanOrEqualTo(1),
+      reason: 'the poll body must actually have run against the fake',
+    );
 
     expect(result.started, isFalse);
     expect(result.failure, MicRecordingFailure.inputNotDelivering);
@@ -528,6 +573,38 @@ void main() {
       engine.writtenReads,
       greaterThanOrEqualTo(3),
       reason: 'ready must have waited out the empty polls',
+    );
+    controller.stop();
+    controller.dispose();
+  });
+
+  testWidgets('frames in the ring alone are not ready: the host must also '
+      'have converged past the arm (applied watermark)', (tester) async {
+    // A warm stream's frames land instantly, but the host has not yet
+    // converged to an intent as new as this arm — a queued older teardown
+    // could still be ahead of it. Ready must wait for applied >= armSeq.
+    final engine = _FakeEngine()
+      ..intentSeq = 5
+      ..appliedSeqScript = [3, 4, 5];
+    final dest = _FakeDestination();
+    final controller = MicRecordingController(
+      acquireEngine: () => engine,
+      requestPermission: () async => true,
+    );
+
+    var settled = false;
+    final future = controller.start(dest.strategy);
+    unawaited(future.whenComplete(() => settled = true));
+    for (var i = 0; i < 200 && !settled; i++) {
+      await tester.pump(const Duration(milliseconds: 25));
+    }
+    final result = await future;
+
+    expect(result.started, isTrue);
+    expect(
+      engine.appliedReads,
+      greaterThanOrEqualTo(3),
+      reason: 'ready must have waited for the host to converge to the arm',
     );
     controller.stop();
     controller.dispose();

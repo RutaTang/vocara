@@ -404,6 +404,31 @@ class VocaraEngineBindings {
   late final _ve_record_written_frames = _ve_record_written_framesPtr
       .asFunction<int Function(ffi.Pointer<VeEngine>)>();
 
+  /// The newest published input-intent sequence (read after arming = the arm's watermark).
+  int ve_input_intent_seq(ffi.Pointer<VeEngine> e) {
+    return _ve_input_intent_seq(e);
+  }
+
+  late final _ve_input_intent_seqPtr =
+      _lookup<ffi.NativeFunction<ffi.Uint64 Function(ffi.Pointer<VeEngine>)>>(
+        've_input_intent_seq',
+      );
+  late final _ve_input_intent_seq = _ve_input_intent_seqPtr
+      .asFunction<int Function(ffi.Pointer<VeEngine>)>();
+
+  /// The intent sequence the audio host last CONVERGED to. applied >= S proves the host has
+  /// acted on an intent at least as new as S — the ordering half of the ready handshake.
+  int ve_input_applied_seq(ffi.Pointer<VeEngine> e) {
+    return _ve_input_applied_seq(e);
+  }
+
+  late final _ve_input_applied_seqPtr =
+      _lookup<ffi.NativeFunction<ffi.Uint64 Function(ffi.Pointer<VeEngine>)>>(
+        've_input_applied_seq',
+      );
+  late final _ve_input_applied_seq = _ve_input_applied_seqPtr
+      .asFunction<int Function(ffi.Pointer<VeEngine>)>();
+
   int ve_play(ffi.Pointer<VeEngine> e) {
     return _ve_play(e);
   }

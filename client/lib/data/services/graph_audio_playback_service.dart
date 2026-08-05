@@ -359,6 +359,18 @@ class GraphAudioPlaybackService implements PlaybackEngine {
   /// Bit 0 of [inputStreamState]: whether an input stream is currently up.
   static bool inputStateRunning(int state) => state & 1 == 1;
 
+  /// The newest published input-intent sequence. Read right after arming a
+  /// recording, it is the arm's watermark for [inputAppliedSeq].
+  int inputIntentSeq() =>
+      _available ? _bindings.ve_input_intent_seq(_engine) : 0;
+
+  /// The intent sequence the audio host last CONVERGED to (published after it
+  /// acted on the desired-state cell). `applied >= S` proves the host has
+  /// acted on an intent at least as new as S — the ordering half of the mic
+  /// ready handshake; the recorded-progress half is [recordWrittenFrames].
+  int inputAppliedSeq() =>
+      _available ? _bindings.ve_input_applied_seq(_engine) : 0;
+
   /// Record round-trip latency in milliseconds: how far behind the playhead a captured vocal lands
   /// (output IO + acoustic + input IO + AEC block). Shift recorded takes earlier by this so they
   /// sit on the beat the singer heard. 0 until the mic has opened once.

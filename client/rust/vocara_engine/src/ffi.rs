@@ -103,6 +103,17 @@ pub struct VeEngine {
     /// Frames written into the recording ring for the CURRENT take (reset on each start):
     /// the per-take recorded-progress ack behind `ve_record_written_frames`.
     rec_written: Arc<AtomicU64>,
+    /// Desired input state cell: (intent_seq << 1) | want_input, written by the control
+    /// thread (sync_input) and read by the audio host at CONVERGENCE time — the host acts on
+    /// the cell's current value, never on a queued command's historical payload, which is
+    /// what linearizes "monitoring off, then REC" into a single kept-open stream.
+    input_intent: Arc<AtomicU64>,
+    /// The intent sequence the host last CONVERGED to (published after acting). The ready
+    /// handshake requires applied >= the sequence of this take's arm, proving the host has
+    /// acted on an intent at least as new as the arm.
+    input_applied: Arc<AtomicU64>,
+    /// Control-thread-only monotonic counter feeding `input_intent`'s sequence half.
+    intent_seq: u64,
     /// Host-thread-authoritative input-stream state word: (generation << 1) | running.
     /// Set/bumped only by the audio-host thread — running set only after a successful
     /// stream start, cleared BEFORE any teardown joins the old callback, generation bumped
@@ -280,12 +291,16 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
         // thread can free retired graphs immediately while no stream callback runs (the
         // grace epoch never elapses without a callback advancing the block counter).
         let input_state = Arc::new(AtomicU64::new(0));
+        let input_intent = Arc::new(AtomicU64::new(0));
+        let input_applied = Arc::new(AtomicU64::new(0));
         let (host, current_output_uid) = device::spawn_audio_host(
             rt_cell,
             input_cell,
             Arc::clone(&device_event),
             handle.renderer_gate(),
             Arc::clone(&input_state),
+            Arc::clone(&input_intent),
+            Arc::clone(&input_applied),
         )?;
         Ok(Box::into_raw(Box::new(VeEngine {
             host,
@@ -297,6 +312,9 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
             input_frames_in,
             rec_dropped,
             rec_written,
+            input_intent,
+            input_applied,
+            intent_seq: 0,
             input_state,
             monitoring: false,
             cap_active,
@@ -482,17 +500,18 @@ pub extern "C" fn ve_current_input_device(e: *mut VeEngine, buf: *mut c_char, ca
     })
 }
 
-/// Open or close the input stream so it's running iff something needs it (monitoring, analysis
-/// capture, or recording). Idempotent — `start_input`/`stop_input` no-op when already in state.
-fn sync_input(eng: &VeEngine) {
+/// Publish the CURRENT desired input state (running iff something needs it: monitoring,
+/// analysis capture, or recording) into the intent cell and nudge the host to converge.
+/// The host reads the cell at convergence time, so a stale nudge can never execute a stale
+/// teardown; `ve_input_applied_seq` reports the sequence the host last converged to.
+fn sync_input(eng: &mut VeEngine) {
     let want = eng.monitoring
         || eng.cap_active.load(Ordering::Relaxed)
         || eng.rec_active.load(Ordering::Relaxed);
-    if want {
-        eng.host.start_input();
-    } else {
-        eng.host.stop_input();
-    }
+    eng.intent_seq += 1;
+    eng.input_intent
+        .store((eng.intent_seq << 1) | want as u64, Ordering::Release);
+    eng.host.sync_input_nudge();
 }
 
 /// Arm the live input (open the mic stream so the meter + recording work). The audible
@@ -698,6 +717,22 @@ pub extern "C" fn ve_input_level(e: *mut VeEngine) -> c_float {
 #[no_mangle]
 pub extern "C" fn ve_input_frames_received(e: *mut VeEngine) -> u64 {
     with_engine(e, 0, |eng| eng.input_frames_in.load(Ordering::Relaxed))
+}
+
+/// The sequence of the newest published input intent (the cell's high bits). Read right
+/// after arming a recording, it is the arm's watermark for `ve_input_applied_seq`.
+#[no_mangle]
+pub extern "C" fn ve_input_intent_seq(e: *mut VeEngine) -> u64 {
+    with_engine(e, 0, |eng| eng.input_intent.load(Ordering::Acquire) >> 1)
+}
+
+/// The intent sequence the audio host last CONVERGED to (published after acting on the
+/// cell). `applied >= S` proves the host has acted on an intent at least as new as S — the
+/// ordering half of the mic ready handshake; the recorded-progress half is
+/// `ve_record_written_frames`.
+#[no_mangle]
+pub extern "C" fn ve_input_applied_seq(e: *mut VeEngine) -> u64 {
+    with_engine(e, 0, |eng| eng.input_applied.load(Ordering::Acquire))
 }
 
 /// The host-thread-authoritative input-stream state word: `(generation << 1) | running`.
@@ -1309,6 +1344,32 @@ pub extern "C" fn ve_punch_wav(
             (Some(a), Some(b), Some(c)) => (a, b, c),
             _ => return -1,
         };
+        // BUDGET BEFORE DECODE: the output is exactly split + new (keep + pad == split by
+        // construction), so with DECLARED input durations the whole splice can be refused
+        // before either full-track decode allocates. Containers without a declared length
+        // fall through to the decode-time budgets below — bounded either way, but the
+        // pre-check keeps a doomed splice from transiently holding two 60-minute tracks.
+        let ceiling_pre = (MAX_PLAYBACK_SECS * rate as f64) as i128;
+        let split_pre = (split_ms.max(0) as i128 * rate as i128) / 1000;
+        if split_pre > ceiling_pre {
+            return -1;
+        }
+        let declared_frames = |p: &str| -> Option<i128> {
+            device::probe_duration_ms(p)
+                .ok()
+                .flatten()
+                .map(|ms| (ms as i128 * rate as i128) / 1000)
+        };
+        if let Some(new_decl) = declared_frames(new_p) {
+            if split_pre + new_decl > ceiling_pre {
+                return -1;
+            }
+        }
+        if let Some(old_decl) = declared_frames(old_p) {
+            if old_decl > ceiling_pre {
+                return -1;
+            }
+        }
         let decode = |p: &str| -> Option<Vec<[Smp; CHANNELS]>> {
             // Both inputs are normally takes this app recorded, but nothing enforces that,
             // so they get the same generous ceiling as the playback path (the Dart side's

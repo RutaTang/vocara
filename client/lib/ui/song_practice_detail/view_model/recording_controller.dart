@@ -311,6 +311,12 @@ class RecordingController extends ChangeNotifier {
     if (_mic.isRecording || _mic.isStarting || _stopping || _busyGate.busy) {
       return;
     }
+    // Captured after the take arms (see below); -1 = never armed. Declared out
+    // here so the catch can tell whether the armed take is still OURS — a
+    // catch that only checks isRecording is ABA-vulnerable exactly like the
+    // happy path (A throws after A's stop and B's arm → stopping "the" take
+    // would stop B).
+    var takeGen = -1;
     try {
       // The live view and the take can't share the engine capture.
       await _analysis.setLiveMonitor(false);
@@ -358,7 +364,7 @@ class RecordingController extends ChangeNotifier {
       // just the recording bool) closes the ABA: after this take's stop, a
       // NEW take can arm while this continuation is still parked, and
       // `isRecording` alone would read true again for the wrong take.
-      final takeGen = _takeGeneration;
+      takeGen = _takeGeneration;
       bool stopped() =>
           _disposed || !_mic.isRecording || _takeGeneration != takeGen;
 
@@ -375,8 +381,12 @@ class RecordingController extends ChangeNotifier {
       if (stopped()) {
         // A stop landed between the check above and play(): its own pause may
         // have run FIRST, in which case this play just restarted a transport
-        // the finalize believes is stopped — undo it.
-        await _playback.engine.pause();
+        // the finalize believes is stopped — undo it. ONLY while the transport
+        // is still ours: a different generation means a NEW take owns it, and
+        // pausing here would kill that take's backing.
+        if (!_disposed && _takeGeneration == takeGen) {
+          await _playback.engine.pause();
+        }
         return;
       }
       // Pre-roll: the recording has been rolling since the arm (WAV offset 0),
@@ -395,10 +405,11 @@ class RecordingController extends ChangeNotifier {
       }
     } catch (e) {
       // Setup failed partway (createEmptyVocalTake/save, newRecordingPath I/O,
-      // playback). If the take armed before the throw, stop it — the WAV stays
+      // playback). If OUR take armed before the throw, stop it — the WAV stays
       // on disk for the boot sweep — and surface the error so REC isn't left
-      // dead-buttoned.
-      if (_mic.isRecording) _mic.stop();
+      // dead-buttoned. Generation-guarded: after this take's stop a NEW take
+      // can already be armed, and a bare isRecording check would stop it.
+      if (_mic.isRecording && _takeGeneration == takeGen) _mic.stop();
       _toast(_friendlyError(e));
       notifyListeners();
     }

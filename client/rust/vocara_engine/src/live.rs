@@ -353,11 +353,19 @@ impl EngineHandle {
         // costs precision, never correctness of the transport state.
         let backlog = self.shared.out_backlog.swap(0, Ordering::AcqRel) as i64;
         if backlog > 0 {
+            // Fold floor: right after a loop wrap the FIFO's backlog spans the wrap, so a
+            // raw subtraction from the just-wrapped clock would park the transport BEFORE
+            // loop_start — outside the loop region, a state error rather than lost
+            // precision. Clamp to loop_start whenever the clock sits inside an active loop.
+            let loop_en = self.shared.loop_enabled.load(Ordering::Acquire);
+            let ls = self.shared.loop_start.load(Ordering::Relaxed);
+            let le = self.shared.loop_end.load(Ordering::Relaxed);
             let _ = self
                 .shared
                 .frame
                 .fetch_update(Ordering::AcqRel, Ordering::Acquire, |f| {
-                    Some((f - backlog).max(0))
+                    let floor = if loop_en && le > ls && f >= ls { ls } else { 0 };
+                    Some((f - backlog).max(floor))
                 });
         }
         // Drop the FIFO's pre-pause audio so the output falls silent within one callback.

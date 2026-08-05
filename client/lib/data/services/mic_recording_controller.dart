@@ -302,19 +302,21 @@ class MicRecordingController {
       // Ready handshake. startInputRecording == true proves only that the WAV
       // exists — the native input-stream open is deliberately asynchronous (a
       // blocking open froze the UI), so the mic may still be opening, or may
-      // fail to open, right now. Wait (bounded) for the per-take
-      // recorded-progress ack: recordWrittenFrames counts only frames that
-      // actually LANDED in this take's recording ring (reset at the arm), so
-      // a nonzero value is an unforgeable proof the WAV is receiving audio.
-      // Every weaker signal was refuted in review: the global frame counter
-      // also advances for pre-arm and dying-stream callbacks that never wrote
-      // this ring, and running-flag reads can interleave with a queued
-      // teardown. A teardown queued ahead of the arm resolves correctly too —
-      // either the host's input-intent coalescing skips it, or it lands
-      // before any frame does and the counter stays zero into the timeout.
-      // When the stream is already open (monitoring), the first frames land
-      // within one callback (~10 ms); a cold VoiceProcessingIO open takes a
-      // few hundred.
+      // fail to open, right now. Wait (bounded) for BOTH halves of the proof:
+      //  * recorded progress — recordWrittenFrames counts only frames that
+      //    actually LANDED in this take's recording ring (reset at the arm);
+      //    a nonzero value is unforgeable (pre-arm and dying-stream callbacks
+      //    read the disarmed flag and never write this ring);
+      //  * ordering — inputAppliedSeq >= the arm's intent sequence proves the
+      //    host has CONVERGED to a desired state at least as new as this arm
+      //    (want = on, since recording holds it on). Without it, a warm
+      //    stream's frames could land before the host processed an older
+      //    queued teardown; the host's desired-state cell makes that teardown
+      //    a no-op, and this watermark is the observable receipt that the
+      //    convergence actually happened.
+      // When the stream is already open (monitoring), both resolve within one
+      // callback (~10 ms); a cold VoiceProcessingIO open takes a few hundred.
+      final armSeq = engine.inputIntentSeq();
       var ready = false;
       final readyClock = Stopwatch()..start();
       while (readyClock.elapsed < readyTimeout) {
@@ -323,7 +325,8 @@ class MicRecordingController {
           _discardQuietly(destination, path);
           return const MicRecordingStart.invalidated();
         }
-        if (engine.recordWrittenFrames() > 0) {
+        if (engine.recordWrittenFrames() > 0 &&
+            engine.inputAppliedSeq() >= armSeq) {
           ready = true;
           break;
         }

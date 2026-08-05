@@ -107,6 +107,11 @@ uint64_t ve_record_dropped_frames(VeEngine *e);
  * start) — the per-take recorded-progress ack. Nonzero proves audio is in this take's
  * ring; at play time it IS the take's file offset (the pre-roll). */
 uint64_t ve_record_written_frames(VeEngine *e);
+/* The newest published input-intent sequence (read after arming = the arm's watermark). */
+uint64_t ve_input_intent_seq(VeEngine *e);
+/* The intent sequence the audio host last CONVERGED to. applied >= S proves the host has
+ * acted on an intent at least as new as S — the ordering half of the ready handshake. */
+uint64_t ve_input_applied_seq(VeEngine *e);
 
 int ve_play(VeEngine *e);
 int ve_pause(VeEngine *e);

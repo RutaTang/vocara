@@ -811,10 +811,11 @@ enum HostCmd {
         uid: String,
         reply: mpsc::Sender<i32>,
     },
-    /// Open the input stream (begin capture/monitor). Replies 0 / -1.
-    StartInput { reply: mpsc::Sender<i32> },
-    /// Close the input stream.
-    StopInput { reply: mpsc::Sender<i32> },
+    /// Nudge: converge the input stream to the CURRENT desired-state cell (see
+    /// `audio_host_run`'s `input_intent`). Carries no payload on purpose — the payload is
+    /// whatever the cell says at CONVERGENCE time, which is what makes stale nudges
+    /// harmless. Replies 0 (fire-and-forget on the FFI side).
+    SyncInput { reply: mpsc::Sender<i32> },
     /// Set the input device UID (reopens the stream live if capture is active). Replies 0 / -1.
     SetInput {
         uid: String,
@@ -841,21 +842,14 @@ impl AudioHost {
         })
     }
 
-    // Input commands are FIRE-AND-FORGET: VoiceProcessingIO setup (create/initialize/start a
-    // duplex AudioUnit) is slow, and these are called from the UI thread via FFI — blocking on the
-    // host reply froze the UI (spinner). The input-level meter / frame counter reflect the real
-    // result a moment later. Always returns 0 (optimistic).
+    // The input nudge is FIRE-AND-FORGET: VoiceProcessingIO setup (create/initialize/start a
+    // duplex AudioUnit) is slow, and it is called from the UI thread via FFI — blocking on the
+    // host reply froze the UI (spinner). Readiness is proven by the per-take recorded-progress
+    // ack plus the applied-sequence watermark, never by this return value.
 
-    /// Open the input (mic capture / monitoring). Fire-and-forget.
-    pub fn start_input(&self) -> i32 {
-        self.send(|reply| HostCmd::StartInput { reply });
-        0
-    }
-
-    /// Close the input. Fire-and-forget.
-    pub fn stop_input(&self) -> i32 {
-        self.send(|reply| HostCmd::StopInput { reply });
-        0
+    /// Ask the host to converge the input stream to the desired-state cell. Fire-and-forget.
+    pub fn sync_input_nudge(&self) {
+        self.send(|reply| HostCmd::SyncInput { reply });
     }
 
     /// Set the input device by UID (reopens live if capture is active). Fire-and-forget.
@@ -945,12 +939,17 @@ fn open_mic(
 }
 
 #[allow(unused_assignments)]
+// One positional slot per shared atomic/collaborator the host thread owns for its whole
+// life; a params struct would only restate this list.
+#[allow(clippy::too_many_arguments)]
 fn audio_host_run(
     rt: Arc<RtCell>,
     input_cell: Arc<InputCell>,
     event: Arc<AtomicU32>,
     renderer_gate: Arc<Mutex<bool>>,
     input_state: Arc<AtomicU64>,
+    input_intent: Arc<AtomicU64>,
+    input_applied: Arc<AtomicU64>,
     rx: mpsc::Receiver<HostCmd>,
     ready_tx: mpsc::Sender<Result<String, String>>,
 ) {
@@ -1002,40 +1001,13 @@ fn audio_host_run(
     // restored when duplex VPIO releases the output, instead of always falling back to default.
     let mut cur_out_uid: Option<String> = None;
 
-    'serve: while let Ok(first) = rx.recv() {
-        // Drain everything already queued and COALESCE the input INTENT: only the LAST
-        // queued StartInput/StopInput acts, earlier ones just ack. The FFI side computes a
-        // desired input state (sync_input) but sends imperative commands, so a stale
-        // teardown can sit queued ahead of the start that supersedes it — "monitoring off,
-        // then REC" used to tear the warm stream down and rebuild it (or fail), AFTER the
-        // ready handshake had already passed on it. Converging on the final intent makes
-        // the handshake's observed state the host's TARGET state, not a stale intermediate.
-        // Non-intent commands (SetInput/SetOutput/Shutdown) still execute in order.
-        let mut queue = vec![first];
-        while let Ok(more) = rx.try_recv() {
-            queue.push(more);
-        }
-        let last_intent = queue
-            .iter()
-            .rposition(|c| matches!(c, HostCmd::StartInput { .. } | HostCmd::StopInput { .. }));
+    while let Ok(cmd) = rx.recv() {
         // Raise the gate BEFORE any command that may build a stream, then settle it to the
-        // real stream state after the batch completes (Shutdown breaks out and settles to
+        // real stream state after the command completes (Shutdown breaks out and settles to
         // false after the loop). Conservative: a raised gate only means retirees wait for
         // their grace epoch, exactly the pre-gate behavior.
         set_gate(true);
-        for (ci, cmd) in queue.into_iter().enumerate() {
-            if Some(ci) != last_intent {
-                // A superseded input intent: acknowledge without acting (both commands are
-                // fire-and-forget on the FFI side; the reply only unblocks tests).
-                match cmd {
-                    HostCmd::StartInput { reply } | HostCmd::StopInput { reply } => {
-                        let _ = reply.send(0);
-                        continue;
-                    }
-                    _ => {}
-                }
-            }
-            match cmd {
+        match cmd {
                 HostCmd::SetOutput { uid, reply } => {
                     // While duplex VPIO owns the output (mic active), do NOT bring up a competing cpal
                     // output — two renderers of RtCell would violate the single-accessor invariant.
@@ -1064,13 +1036,20 @@ fn audio_host_run(
                         }
                     }
                 }
-                HostCmd::StartInput { reply } => {
-                    if in_stream.is_some() {
-                        let _ = reply.send(0);
-                    } else {
-                        // Duplex VPIO renders the engine through its own output element, so drop the
-                        // cpal output FIRST (only one path may touch RtCell). Fall back to the default
-                        // input if the selected device can't be opened.
+                HostCmd::SyncInput { reply } => {
+                    // LINEARIZED desired-state convergence: act on what the cell says NOW,
+                    // never on what the state was when this nudge was queued. A stale
+                    // teardown can no longer execute after the arm that superseded it —
+                    // "monitoring off, then REC" reads want=on here and keeps (or opens)
+                    // the stream; the old imperative Start/Stop commands executed history
+                    // instead. Idempotent, so any number of queued nudges converge to the
+                    // same state.
+                    let intent = input_intent.load(Ordering::Acquire);
+                    let want = intent & 1 == 1;
+                    if want && in_stream.is_none() {
+                        // Duplex VPIO renders the engine through its own output element, so
+                        // drop the cpal output FIRST (only one path may touch RtCell). Fall
+                        // back to the default input if the selected device can't be opened.
                         if VPIO_DUPLEX_AEC {
                             out_stream = None;
                         }
@@ -1080,40 +1059,41 @@ fn audio_host_run(
                             Ok(handle) => {
                                 in_stream = Some(handle);
                                 input_started(&input_state);
-                                let _ = reply.send(0);
                             }
                             Err(_) => {
                                 input_stopped(&input_state);
-                                // Mic failed to come up → restore cpal output so playback survives.
+                                // Mic failed to come up → restore cpal output so playback
+                                // survives. Restore the user's chosen output (not the system
+                                // default); fall back to default only if it can't open.
                                 if VPIO_DUPLEX_AEC && out_stream.is_none() {
-                                    // Restore the user's chosen output (not the system default),
-                                    // matching StopInput; fall back to default only if it can't open.
                                     out_stream = build_output(cur_out_uid.as_deref(), &rt, &event)
                                         .or_else(|_| build_output(None, &rt, &event))
                                         .ok()
                                         .map(|(h, _)| h);
                                 }
                                 event.fetch_or(EVENT_INPUT_LOST, Ordering::Release);
-                                let _ = reply.send(-1);
                             }
                         }
+                    } else if !want && in_stream.is_some() {
+                        // Clear the running bit BEFORE the drop joins the dying callback: a
+                        // consumer snapshotting the state word must never count the old
+                        // stream's final frames as evidence that a NEW stream is delivering.
+                        input_stopped(&input_state);
+                        in_stream = None;
+                        // VPIO was rendering the output in duplex; hand playback back to
+                        // cpal, restoring the user's last chosen output device (a SetOutput
+                        // during duplex deferred it), falling back to the system default
+                        // only if that device can't be opened.
+                        if VPIO_DUPLEX_AEC && out_stream.is_none() {
+                            out_stream = build_output(cur_out_uid.as_deref(), &rt, &event)
+                                .or_else(|_| build_output(None, &rt, &event))
+                                .ok()
+                                .map(|(h, _)| h);
+                        }
                     }
-                }
-                HostCmd::StopInput { reply } => {
-                    // Clear the running bit BEFORE the drop joins the dying callback: a consumer
-                    // snapshotting the state word must never count the old stream's final frames
-                    // as evidence that a NEW stream is delivering.
-                    input_stopped(&input_state);
-                    let was_on = in_stream.take().is_some();
-                    // VPIO was rendering the output in duplex; hand playback back to cpal, restoring
-                    // the user's last chosen output device (a SetOutput during duplex deferred it),
-                    // falling back to the system default only if that device can't be opened.
-                    if VPIO_DUPLEX_AEC && was_on && out_stream.is_none() {
-                        out_stream = build_output(cur_out_uid.as_deref(), &rt, &event)
-                            .or_else(|_| build_output(None, &rt, &event))
-                            .ok()
-                            .map(|(h, _)| h);
-                    }
+                    // Publish AFTER converging: applied >= S proves the host has acted on
+                    // an intent at least as new as S — the ready handshake's ordering half.
+                    input_applied.store(intent >> 1, Ordering::Release);
                     let _ = reply.send(0);
                 }
                 HostCmd::SetInput { uid, reply } => {
@@ -1153,10 +1133,9 @@ fn audio_host_run(
                     input_stopped(&input_state);
                     in_stream = None;
                     out_stream = None;
-                    break 'serve;
+                    break;
                 }
             }
-        }
         set_gate(out_stream.is_some() || in_stream.is_some());
     }
     // Both streams (and this thread's `rt`/`input_cell` clones) drop here, on the host thread.
@@ -1175,6 +1154,8 @@ pub fn spawn_audio_host(
     event: Arc<AtomicU32>,
     renderer_gate: Arc<Mutex<bool>>,
     input_state: Arc<AtomicU64>,
+    input_intent: Arc<AtomicU64>,
+    input_applied: Arc<AtomicU64>,
 ) -> Result<(AudioHost, String), String> {
     let (tx, rx) = mpsc::channel::<HostCmd>();
     let (ready_tx, ready_rx) = mpsc::channel::<Result<String, String>>();
@@ -1187,6 +1168,8 @@ pub fn spawn_audio_host(
                 event,
                 renderer_gate,
                 input_state,
+                input_intent,
+                input_applied,
                 rx,
                 ready_tx,
             )
@@ -1750,6 +1733,24 @@ mod out_resampler_tests {
             (out[0] - 0.048).abs() < 0.005,
             "resume must continue from the paused position (~0.048), got {}",
             out[0]
+        );
+    }
+
+    #[test]
+    fn pause_right_after_a_loop_wrap_never_folds_before_loop_start() {
+        let (h, mut res) = ramp_engine();
+        // Loop [200, 680): 441 device frames consume exactly the 480-frame region, landing
+        // the render clock right AT the wrap with the pre-wrap tail still in the FIFO.
+        h.set_loop(true, 200, 680);
+        h.seek(200);
+        h.play();
+        let mut out = vec![0.0; 441 * CHANNELS];
+        res.process(&mut out, 441);
+        h.pause();
+        let paused_at = h.frame();
+        assert!(
+            (200..=680).contains(&paused_at),
+            "the pause fold must clamp inside the loop region, got {paused_at}"
         );
     }
 
