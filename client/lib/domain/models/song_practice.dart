@@ -129,10 +129,12 @@ class SongPractice {
     return max;
   }
 
-  /// Total number of notes across every lane. The reference lane counts too:
-  /// no local UI attaches notes to it today, but note updates route to it
-  /// (see the detail view model's _updateTrack), so reference notes — e.g.
-  /// arriving via sync — must never be silently uncounted.
+  /// Total number of notes across every lane, in every interpretation — the
+  /// home card semantics ("everything this practice holds"). The reference
+  /// lane counts too: no local UI attaches notes to it today, but note
+  /// updates route to it (see the detail view model's _updateTrack), so
+  /// reference notes — e.g. arriving via sync — must never be silently
+  /// uncounted.
   int get noteCount {
     var count = accompaniment?.notes.length ?? 0;
     count += reference?.notes.length ?? 0;
@@ -143,8 +145,14 @@ class SongPractice {
   }
 
   /// Notes across the accompaniment + reference + the active interpretation's
-  /// takes — what the timeline actually shows (so it tracks the visible take
-  /// count). Both non-vocal lanes are always visible, so both always count.
+  /// takes. BOTH backings count here even though the workspace shows only one
+  /// at a time: the Accompaniment ⇄ Original choice is transient view-state
+  /// on the detail screen's mixer (MixerController.playReference), which this
+  /// model deliberately cannot know — so this getter is "active
+  /// interpretation", not "visible on screen". The count that matches what
+  /// the user actually sees lives with that view-state
+  /// (MixerController.visibleNoteCount); [noteCount] keeps the every-lane
+  /// total for the home card.
   int get activeNoteCount {
     var count = accompaniment?.notes.length ?? 0;
     count += reference?.notes.length ?? 0;

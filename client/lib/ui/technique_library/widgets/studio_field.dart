@@ -13,6 +13,7 @@ class StudioField extends StatelessWidget {
     this.minLines = 1,
     this.maxLines = 1,
     this.autofocus = false,
+    this.enabled = true,
     super.key,
   });
 
@@ -22,6 +23,12 @@ class StudioField extends StatelessWidget {
   final int minLines;
   final int maxLines;
   final bool autofocus;
+
+  /// False freezes the field (e.g. while the technique save is committing —
+  /// edits typed during the await would be thrown away when the save lands
+  /// and the screen leaves edit mode). Rendered like a disabled StudioButton:
+  /// still visible, text dimmed to the faint tone, no edit cursor.
+  final bool enabled;
 
   @override
   Widget build(BuildContext context) {
@@ -47,12 +54,13 @@ class StudioField extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
           child: TextField(
             controller: controller,
+            enabled: enabled,
             autofocus: autofocus,
             minLines: minLines,
             maxLines: maxLines,
             cursorColor: Studio.accent,
-            style: const TextStyle(
-              color: Studio.textPrimary,
+            style: TextStyle(
+              color: enabled ? Studio.textPrimary : Studio.textFaint,
               fontSize: 14,
               height: 1.45,
             ),

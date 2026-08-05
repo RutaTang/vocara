@@ -35,6 +35,7 @@ class TechniqueMediaSection extends StatelessWidget {
     this.onToggleExpand,
     this.analysisBuilder,
     this.liveMonitor = false,
+    this.enabled = true,
     super.key,
   });
 
@@ -72,6 +73,14 @@ class TechniqueMediaSection extends StatelessWidget {
   /// When false (the read view), the clips are play-only: no add/drop zone and
   /// no per-clip rename/remove controls.
   final bool editable;
+
+  /// False freezes every mutation control while keeping playback alive —
+  /// used while the technique save is committing, when a clip added, removed,
+  /// renamed or recorded during the await would be silently thrown away as
+  /// the save lands. Unlike [editable] it keeps the add zone and record row
+  /// visible (just inert), so the layout doesn't jump for the moment the
+  /// commit is in flight.
+  final bool enabled;
 
   /// Starts recording a clip to save as an example; returns an error to show, or
   /// null. When non-null (edit view), a "Record" affordance is offered.
@@ -129,7 +138,9 @@ class TechniqueMediaSection extends StatelessWidget {
         for (final m in media) ...[
           _MediaTile(
             media: m,
-            editable: editable,
+            // A frozen edit surface (in-flight save) hides the hover
+            // rename/remove icons too — the clip stays playable.
+            editable: editable && enabled,
             onRemove: () => onRemove(m.id),
             onRename: (label) => onRename(m.id, label),
             // Only the analyzed clip's player is linked to the analysis playhead
@@ -155,16 +166,19 @@ class TechniqueMediaSection extends StatelessWidget {
             onBrowse: _browse,
             onDropPaths: onAddPaths,
             dense: media.isNotEmpty,
-            enabled: !importing && !isRecording && !savingRecording,
+            enabled: enabled && !importing && !isRecording && !savingRecording,
           ),
           if (onStartRecord != null) ...[
             const SizedBox(height: 8),
             _RecordRow(
               onStart: onStartRecord!,
-              onStop: onStopRecord,
+              // A frozen surface also inerts Stop: finalizing a take
+              // mid-commit would stage a clip the airborne save has already
+              // snapshotted past (the VM guards this too).
+              onStop: enabled ? onStopRecord : null,
               isRecording: isRecording,
               saving: savingRecording,
-              canRecord: canRecord,
+              canRecord: canRecord && enabled,
               level: recordLevel,
             ),
           ],

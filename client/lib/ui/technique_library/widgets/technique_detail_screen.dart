@@ -284,11 +284,17 @@ class _TechniqueDetailScreenState extends State<TechniqueDetailScreen> {
         cues: _cues!,
         exercises: _exercises!,
         acoustic: _acoustic!,
+        // Freeze the whole edit surface while the save commits: the commit
+        // snapshotted the form and the media draft when it started, so text
+        // or media edits made during the await would be silently thrown away
+        // when the save lands and the screen drops out of edit mode.
+        enabled: !vm.saving,
         // Editable: add/drop zone + record + per-clip controls. Shows the
         // staged draft (added/removed/renamed examples not yet saved).
         mediaSection: TechniqueMediaSection(
           media: vm.effectiveMedia,
           importing: vm.importingMedia,
+          enabled: !vm.saving,
           onAddPaths: vm.addMedia,
           onRemove: (id) => _removeMedia(vm, id),
           onRename: vm.renameMedia,
@@ -582,6 +588,7 @@ class _EditForm extends StatelessWidget {
     required this.exercises,
     required this.acoustic,
     required this.mediaSection,
+    required this.enabled,
   });
 
   final TextEditingController name;
@@ -593,6 +600,10 @@ class _EditForm extends StatelessWidget {
   final TextEditingController exercises;
   final TextEditingController acoustic;
 
+  /// False while the save is committing: every field is frozen so edits typed
+  /// during the await can't be silently discarded when edit mode closes.
+  final bool enabled;
+
   /// The Examples block: each example card pairs its player with a collapsible
   /// analysis (so a just-recorded example's analysis is visible immediately).
   final Widget mediaSection;
@@ -603,6 +614,7 @@ class _EditForm extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(28, 20, 28, 28),
       children: [
         StudioField(
+          enabled: enabled,
           controller: name,
           label: 'Name',
           hint: 'e.g. Twang',
@@ -610,12 +622,14 @@ class _EditForm extends StatelessWidget {
         ),
         const SizedBox(height: 16),
         StudioField(
+          enabled: enabled,
           controller: aliases,
           label: 'Aliases (comma separated)',
           hint: 'e.g. Edge, Brassy quality',
         ),
         const SizedBox(height: 16),
         StudioField(
+          enabled: enabled,
           controller: tags,
           label: 'Tags (comma separated)',
           hint: 'e.g. EVT, Voice quality, Resonance',
@@ -630,6 +644,7 @@ class _EditForm extends StatelessWidget {
         const Divider(height: 1, thickness: 1, color: Studio.border),
         const SizedBox(height: 20),
         StudioField(
+          enabled: enabled,
           controller: summary,
           label: 'Summary',
           hint: 'One line shown on the card',
@@ -638,6 +653,7 @@ class _EditForm extends StatelessWidget {
         ),
         const SizedBox(height: 16),
         StudioField(
+          enabled: enabled,
           controller: description,
           label: 'Description',
           hint: 'What the technique is',
@@ -646,6 +662,7 @@ class _EditForm extends StatelessWidget {
         ),
         const SizedBox(height: 16),
         StudioField(
+          enabled: enabled,
           controller: cues,
           label: 'How to produce it',
           hint: 'Cues, sensations, steps',
@@ -654,6 +671,7 @@ class _EditForm extends StatelessWidget {
         ),
         const SizedBox(height: 16),
         StudioField(
+          enabled: enabled,
           controller: exercises,
           label: 'Exercises',
           hint: 'Drills to practise it',
@@ -662,6 +680,7 @@ class _EditForm extends StatelessWidget {
         ),
         const SizedBox(height: 16),
         StudioField(
+          enabled: enabled,
           controller: acoustic,
           label: 'Acoustic signature in Vocara',
           hint: 'How it reads in RING, tilt, CPP, formants',

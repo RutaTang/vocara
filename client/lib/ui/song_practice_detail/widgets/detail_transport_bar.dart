@@ -26,7 +26,12 @@ class DetailTransportBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final takes = practice.activeVocalTracks.length;
-    final notes = practice.activeNoteCount;
+    // The mixer-side count, not SongPractice.activeNoteCount: only ONE backing
+    // is on screen at a time (the Accompaniment ⇄ Original toggle), and the
+    // model can't know which — counting both could show more notes than the
+    // user can find. The toggle notifies the mixer, which notifies the view
+    // model, so this rebuilds when the backing flips.
+    final notes = vm.mixer.visibleNoteCount;
     // The reference (Original) is playable too — when the backing toggle is on
     // "Original" it's the active backing — so it must count toward playability.
     final hasTracks =

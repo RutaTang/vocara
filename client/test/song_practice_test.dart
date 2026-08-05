@@ -193,8 +193,13 @@ void main() {
       expect(p.copyWith(clearReference: true).noteCount, 4);
     });
 
-    test('activeNoteCount counts reference notes plus only the active '
+    test('activeNoteCount counts BOTH backings plus only the active '
         'interpretation\'s takes', () {
+      // Deliberate semantics: the Accompaniment / Original toggle is transient
+      // view-state on the detail screen's mixer, which the model cannot know,
+      // so activeNoteCount is "active interpretation" — not "visible on
+      // screen". The on-screen count (only the shown backing) is
+      // MixerController.visibleNoteCount, pinned in mixer_controller_test.
       final p = SongPractice(
         id: 'p',
         title: 'S',

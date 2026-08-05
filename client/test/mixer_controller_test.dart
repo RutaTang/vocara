@@ -4,6 +4,7 @@ import 'package:vocara/data/services/playback_engine.dart';
 import 'package:vocara/domain/models/audio_fx.dart';
 import 'package:vocara/domain/models/audio_track.dart';
 import 'package:vocara/domain/models/fx_bus.dart';
+import 'package:vocara/domain/models/practice_note.dart';
 import 'package:vocara/domain/models/song_practice.dart';
 import 'package:vocara/ui/song_practice_detail/view_model/mixer_controller.dart';
 
@@ -200,6 +201,41 @@ void main() {
       host.mixer.setPlayReferenceSilently(true);
       expect(host.mixer.playReference, isTrue);
       expect(host.engine.volumes, isEmpty);
+    });
+
+    test('visibleNoteCount counts only the shown backing plus the active '
+        'interpretation\'s takes', () {
+      // The workspace shows ONE backing at a time, so the transport bar's
+      // note count must never include the hidden backing's notes (the model's
+      // activeNoteCount deliberately counts both; see song_practice_test).
+      PracticeNote note(String id) => PracticeNote(
+        id: id,
+        positionMs: 100,
+        content: 'note $id',
+        createdAt: DateTime(2026),
+        updatedAt: DateTime(2026),
+      );
+      final base = _practice(vocals: [_vocal('v1'), _vocal('v2')]);
+      final host = _Host(
+        base.copyWith(
+          accompaniment: base.accompaniment!.copyWith(notes: [note('a1')]),
+          reference: base.reference!.copyWith(notes: [note('r1'), note('r2')]),
+          vocalTracks: [
+            base.vocalTracks[0].copyWith(notes: [note('t1')]),
+            base.vocalTracks[1],
+          ],
+        ),
+      );
+
+      // Accompaniment shown: its 1 note + the take's 1; the reference's 2
+      // stay hidden with the lane.
+      expect(host.mixer.visibleNoteCount, 2);
+      // Original shown: the reference's 2 + the take's 1; the accompaniment's
+      // 1 drops out.
+      host.mixer.setPlayReference(true);
+      expect(host.mixer.visibleNoteCount, 3);
+      // The model keeps counting both backings regardless of the toggle.
+      expect(host.practice!.activeNoteCount, 4);
     });
   });
 

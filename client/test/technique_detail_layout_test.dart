@@ -276,6 +276,50 @@ void main() {
     expect(vm.saving, isFalse, reason: 'flag clears when the save resolves');
   });
 
+  test('media mutations during an in-flight save are no-ops', () async {
+    // Regression: the commit snapshots effectiveMedia when it starts, so a
+    // clip removed/renamed/added during the await used to be silently thrown
+    // away (or worse, un-happen) when the save landed and cleared the draft.
+    final media = TechniqueMedia(
+      id: 'm1',
+      path: '/tmp/a.m4a',
+      kind: TechniqueMediaKind.audio,
+      addedAt: DateTime(2026, 6, 20),
+    );
+    final repo = _GatedSaveRepo(_technique(media: [media]));
+    final vm = TechniqueDetailViewModel(
+      repository: repo,
+      mediaService: TechniqueMediaService(storage: LocalStorageService()),
+      techniqueId: 't1',
+    );
+    addTearDown(vm.dispose);
+    for (var i = 0; i < 200 && vm.technique == null; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+    expect(vm.technique, isNotNull);
+
+    vm.beginMediaDraft();
+    final first = vm.save(vm.technique!.copyWith(summary: 'changed'));
+    expect(vm.saving, isTrue);
+
+    // Every mutation entry point must refuse while the commit is airborne.
+    await vm.removeMedia('m1');
+    await vm.renameMedia('m1', 'sneaky caption');
+    await vm.addMedia(['/tmp/never-imported.wav']);
+    expect(vm.hasMediaDraft, isFalse, reason: 'nothing staged mid-save');
+    expect(vm.importingMedia, isFalse, reason: 'no import launched mid-save');
+    expect(vm.canRecordExample, isFalse, reason: 'no take can arm mid-save');
+    expect(vm.canRecordPractice, isFalse);
+
+    repo.gate.complete();
+    expect(await first, isTrue);
+    // The saved result matches the pre-mutation state: the clip survives,
+    // unrenamed.
+    expect(repo.technique.media, hasLength(1));
+    expect(repo.technique.media.single.id, 'm1');
+    expect(repo.technique.media.single.label, isEmpty);
+  });
+
   testWidgets('Save and Cancel are disabled while the save is in flight', (
     tester,
   ) async {
@@ -309,6 +353,14 @@ void main() {
     expect(button('Save').enabled, isTrue);
     expect(button('Cancel').enabled, isTrue);
 
+    bool allFieldsEnabled() {
+      final fields = tester.widgetList<TextField>(find.byType(TextField));
+      expect(fields, isNotEmpty);
+      return fields.every((f) => f.enabled ?? true);
+    }
+
+    expect(allFieldsEnabled(), isTrue);
+
     // Start a save; the repo parks on the gate so it stays in flight.
     await tester.tap(find.text('Save'));
     await tester.pump();
@@ -317,6 +369,13 @@ void main() {
       button('Cancel').enabled,
       isFalse,
       reason: 'Cancel -> Discard would delete files the commit references',
+    );
+    // The FORM freezes too: text typed during the await would be thrown away
+    // when the save lands and the screen drops out of edit mode.
+    expect(
+      allFieldsEnabled(),
+      isFalse,
+      reason: 'every text field is frozen while the save commits',
     );
     // A tap on the disabled Cancel must not open the discard dialog (which
     // would tear down the edit session mid-save).

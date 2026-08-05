@@ -217,6 +217,24 @@ class MixerController extends ChangeNotifier {
   /// whose failure path restores the previous flag before reverting the model.
   void setPlayReferenceSilently(bool value) => _playReference = value;
 
+  /// Notes on the lanes the workspace is actually showing: the active backing
+  /// (accompaniment or reference, per [playReference]) plus the active
+  /// interpretation's takes. The hidden backing's notes stay out, so the
+  /// count shown next to the take count can never exceed what the user can
+  /// see. Lives here rather than on the model because the A/B choice is
+  /// transient view-state owned by this controller —
+  /// SongPractice.activeNoteCount deliberately counts both backings (see its
+  /// doc).
+  int get visibleNoteCount {
+    final practice = _practiceOf();
+    if (practice == null) return 0;
+    var count = activeBacking?.notes.length ?? 0;
+    for (final t in practice.activeVocalTracks) {
+      count += t.notes.length;
+    }
+    return count;
+  }
+
   // --- Audibility (mute / solo resolution) ---------------------------------
 
   /// True if a track should be heard, given the resolved [solo] state. Only the

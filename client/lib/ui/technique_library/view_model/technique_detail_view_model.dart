@@ -66,10 +66,12 @@ class TechniqueDetailViewModel extends ChangeNotifier
     Stream<RemoteApplied>? remoteApplied,
     AppSettingsService? appSettings,
     MediaAnalysisService analysisService = const MediaAnalysisService(),
+    @visibleForTesting MicRecordingController? recorder,
   }) : _repository = repository,
        _mediaService = mediaService,
        _appSettings = appSettings,
-       _analysis = analysisService {
+       _analysis = analysisService,
+       _recorderOverride = recorder {
     load = Command0(_load)..execute();
     // Freshness reloads when sync applies remote changes to THIS technique.
     _remoteSub = remoteApplied?.listen(_onRemoteApplied);
@@ -117,10 +119,15 @@ class TechniqueDetailViewModel extends ChangeNotifier
   /// fresh aggregate + base itself).
   bool _saving = false;
 
-  /// True while [save] runs. The screen disables both Save (a second commit
-  /// would race the first on the same [_baseHashes]) and Cancel (a discard
-  /// would delete staged media files the airborne commit is persisting rows
-  /// for) while this holds.
+  /// True while [save] runs. The screen disables the WHOLE edit surface while
+  /// this holds: Save (a second commit would race the first on the same
+  /// [_baseHashes]), Cancel (a discard would delete staged media files the
+  /// airborne commit is persisting rows for), the text fields and the media
+  /// add/remove/rename/record controls (the commit snapshotted the form and
+  /// the draft when it started, so edits made during the await would be
+  /// silently thrown away when the save lands and edit mode closes). The
+  /// media mutation methods also early-return on this flag — the UI disabling
+  /// is the affordance, the VM guard is the invariant.
   bool get saving => _saving;
 
   /// Bumped when a save or a newer remote reload starts so an older in-flight
@@ -438,25 +445,32 @@ class TechniqueDetailViewModel extends ChangeNotifier
   GraphAudioPlaybackService? _engine;
   bool _recordingExample = false;
 
+  /// Test seam: when the constructor received a recorder, [_recorder] uses it
+  /// instead of building the real controller (whose start path talks to the
+  /// native engine and the OS permission dialog).
+  final MicRecordingController? _recorderOverride;
+
   /// The shared mic-recording core (permission → temp WAV → engine → capture/
   /// level pumps → quit finalizer). The engine stays owned by this VM: created
   /// lazily on the first take, disposed in [dispose]; the controller borrows
   /// it per take.
-  late final MicRecordingController _recorder = MicRecordingController(
-    acquireEngine: () {
-      final engine = _engine ??= GraphAudioPlaybackService();
-      // Record from the input device the user chose in Settings (this VM owns
-      // its own engine, so without this it would capture from the OS default
-      // and silently contradict the global selection). No-op when the engine
-      // is unavailable.
-      final inUid = _appSettings?.inputDeviceUid;
-      if (inUid != null && inUid.isNotEmpty) engine.setInputDevice(inUid);
-      return engine;
-    },
-    monitor: _monitor,
-    onQuitFinalize: _quitFinalize,
-    onInputDeviceLost: _onInputDeviceLost,
-  );
+  late final MicRecordingController _recorder =
+      _recorderOverride ??
+      MicRecordingController(
+        acquireEngine: () {
+          final engine = _engine ??= GraphAudioPlaybackService();
+          // Record from the input device the user chose in Settings (this VM owns
+          // its own engine, so without this it would capture from the OS default
+          // and silently contradict the global selection). No-op when the engine
+          // is unavailable.
+          final inUid = _appSettings?.inputDeviceUid;
+          if (inUid != null && inUid.isNotEmpty) engine.setInputDevice(inUid);
+          return engine;
+        },
+        monitor: _monitor,
+        onQuitFinalize: _quitFinalize,
+        onInputDeviceLost: _onInputDeviceLost,
+      );
 
   /// True during the example/practice record START window — after the user tapped
   /// Record but before the permission + temp-dir awaits resolve and isRecording
@@ -509,6 +523,19 @@ class TechniqueDetailViewModel extends ChangeNotifier
           'input device in Settings.',
   };
 
+  /// The notice for a take that finalized CLEANLY but whose recording ring
+  /// overflowed mid-take (writer thread or disk stalled): the WAV is valid yet
+  /// missing [droppedFrames] frames as silent holes. The clip is kept — most
+  /// of it is fine — but it must never be presented as gapless. Mirrors the
+  /// song recording flow's dropped-frames toast.
+  static String _droppedFramesMessage(int droppedFrames) {
+    // The recording ring runs at 48 kHz, so frames convert to milliseconds
+    // directly (the same math as the song flow's toast).
+    final droppedMs = droppedFrames * 1000 ~/ 48000;
+    return 'Recording dropped about $droppedMs ms of audio while the disk '
+        'was busy. The clip has small gaps.';
+  }
+
   // --- Ephemeral practice recording ----------------------------------------
 
   String? _practiceTempPath;
@@ -535,11 +562,14 @@ class TechniqueDetailViewModel extends ChangeNotifier
   String? _practiceFailedMessage;
   String? get practiceAnalysisFailureMessage => _practiceFailedMessage;
 
-  /// Whether a practice take can be recorded right now.
+  /// Whether a practice take can be recorded right now. `!_saving` keeps the
+  /// mic from arming while a save is committing (the edit surface is frozen
+  /// then; see [save]).
   bool get canRecordPractice =>
       !_recorder.isRecording &&
       !_practiceLoading &&
       !_savingExample &&
+      !_saving &&
       !_recorder.isStarting;
 
   /// Starts an ephemeral practice recording. Returns an error to show, or null.
@@ -568,9 +598,14 @@ class TechniqueDetailViewModel extends ChangeNotifier
   /// result would never be shown (an ephemeral take persists nothing either).
   Future<void> stopPractice({bool skipAnalysis = false}) async {
     if (!isRecordingPractice) return;
+    final stopped = _recorder.stop();
     // False = the writer hit an IO error during the take, so the WAV on disk
     // is missing, damaged, or incomplete; handled conservatively below.
-    final recordingClean = _recorder.stop()?.clean ?? true;
+    final recordingClean = stopped?.clean ?? true;
+    // > 0 = the recording ring overflowed mid-take: the WAV finalized fine but
+    // is time-compressed (frames missing as silent holes) — never present it
+    // as clean.
+    final droppedFrames = stopped?.droppedFrames ?? 0;
     final path = _practiceTempPath;
     if (path == null) {
       notifyListeners();
@@ -581,6 +616,11 @@ class TechniqueDetailViewModel extends ChangeNotifier
       _practiceTempPath = null;
       await deleteTempRecordingDir(path);
       return;
+    }
+    if (recordingClean && droppedFrames > 0) {
+      // The take is kept and analyzed anyway; the notice only stops it from
+      // masquerading as gapless. A dirty stop surfaces its own notice below.
+      _recordingNotice = _droppedFramesMessage(droppedFrames);
     }
     _practiceLoading = true;
     _practiceFailed = false;
@@ -668,11 +708,15 @@ class TechniqueDetailViewModel extends ChangeNotifier
   /// read view with no stop affordance.
   bool get savingExample => _savingExample || _recorder.isStarting;
 
-  /// Whether an example clip can be recorded right now.
+  /// Whether an example clip can be recorded right now. `!_saving` is part of
+  /// the in-flight-save invariant: a take started during the commit would
+  /// stage its clip into a draft the save has already snapshotted, so the
+  /// clip would be silently dropped when the save lands (see [save]).
   bool get canRecordExample =>
       !_recorder.isRecording &&
       !_savingExample &&
       !_importingMedia &&
+      !_saving &&
       !_recorder.isStarting;
 
   /// Records a clip to add as an audio example (staged in the draft) — so a
@@ -701,14 +745,29 @@ class TechniqueDetailViewModel extends ChangeNotifier
   /// analysis shows immediately.
   Future<void> stopExampleRecording() async {
     if (!isRecordingExample) return;
+    // Backstop for the in-flight-save invariant (the screen's controls are
+    // disabled then): stopping here would stage a clip into the draft the
+    // airborne commit already snapshotted, silently dropping it when the save
+    // lands. The recording keeps running; save() itself aborts it on success.
+    if (_saving) return;
+    final stopped = _recorder.stop();
     // False = the writer hit an IO error during the take, so the WAV on disk
     // is missing, damaged, or incomplete; handled conservatively below.
-    final recordingClean = _recorder.stop()?.clean ?? true;
+    final recordingClean = stopped?.clean ?? true;
+    // > 0 = the recording ring overflowed mid-take: the WAV finalized fine but
+    // is time-compressed (frames missing as silent holes) — never present it
+    // as clean.
+    final droppedFrames = stopped?.droppedFrames ?? 0;
     _recordingExample = false;
     final path = _exampleTempPath;
     if (path == null) {
       notifyListeners();
       return;
+    }
+    if (recordingClean && droppedFrames > 0) {
+      // The clip is still staged below; the notice only stops it from
+      // masquerading as gapless. A dirty stop surfaces its own notice instead.
+      _recordingNotice = _droppedFramesMessage(droppedFrames);
     }
     _savingExample = true;
     // Snapshot the draft generation: a Cancel/discard (or dispose) while the clip
@@ -1024,6 +1083,11 @@ class TechniqueDetailViewModel extends ChangeNotifier
   Future<void> addMedia(List<String> sourcePaths) async {
     if (_importingMedia) return;
     if (_technique == null) return;
+    // In-flight-save invariant (the UI also disables the add zone; this is
+    // the backstop): the commit already snapshotted effectiveMedia, so a clip
+    // staged now would be thrown away when the save lands and the screen
+    // leaves edit mode — silent loss plus an orphaned copied file.
+    if (_saving) return;
 
     final supported = sourcePaths
         .where(TechniqueMedia.isSupportedMedia)
@@ -1101,6 +1165,12 @@ class TechniqueDetailViewModel extends ChangeNotifier
   /// its file deleted now; a persisted example is staged for removal (its file
   /// is deleted on save).
   Future<void> removeMedia(String mediaId) async {
+    // In-flight-save invariant (backstop behind the disabled UI): a removal
+    // staged now is invisible to the airborne commit and gets cleared with
+    // the draft when the save lands — the user's removal silently un-happens.
+    // Worse, removing a staged ADDITION would delete a file the commit is
+    // persisting a row for.
+    if (_saving) return;
     final draftIndex = _draftAdds.indexWhere((m) => m.id == mediaId);
     if (draftIndex >= 0) {
       final m = _draftAdds.removeAt(draftIndex);
@@ -1124,6 +1194,10 @@ class TechniqueDetailViewModel extends ChangeNotifier
 
   /// Updates the caption on one example clip (staged; applied on save).
   Future<void> renameMedia(String mediaId, String label) async {
+    // In-flight-save invariant (backstop behind the disabled UI): the commit
+    // already snapshotted the labels, so a caption staged now vanishes when
+    // the successful save clears the draft.
+    if (_saving) return;
     _draftLabels[mediaId] = label.trim();
     notifyListeners();
   }
