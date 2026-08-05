@@ -538,3 +538,31 @@ RT-safety + golden-file surface) are all identical to the settled language-agnos
 design. **Only the implementation language changes** — Rust supplies compile-time proof on
 the lock-free seams and one-crate decode coverage, and nothing else about the architecture
 moves.
+
+---
+
+## 7. Transport fidelity boundaries (as shipped)
+
+The output-boundary resampler (non-48 kHz devices) reports the playhead as
+`rendered − un-played FIFO backlog`, pause folds that backlog into the clock, seek/pause/
+play flush the FIFO, and stream rebuilds clear the shared backlog. Three boundaries are
+**deliberate** and documented rather than open bugs:
+
+* **Pause fold vs. an in-flight callback.** `pause()` runs on the control thread; a device
+  callback already inside `render_block` when `playing` flips can still advance the render
+  clock after the fold. The race is bounded by one device buffer and costs position
+  *precision only* — transport state can never corrupt. A hard barrier would mean blocking
+  the control thread on the RT callback, which the engine's wait-free contract forbids.
+* **DSP state does not rewind.** Resume re-renders the frames the listener never heard,
+  but compressor envelopes / reverb tails have already consumed them once — standard DAW
+  behavior; snapshotting the whole graph's DSP state per pause is out of proportion to a
+  ≤ one-block artifact.
+* **A device switch drops the old stream's un-played FIFO tail.** The old stream is gone;
+  its ≤ one render block of in-flight audio has no device to reach. Transferring FIFO
+  contents across stream generations is not worth the coupling.
+
+The clean long-term shape — noted for the next engine iteration — is a **consumed-frames
+cursor**: the output path (identity, resampler, VPIO) publishes the absolute engine-frame
+count actually delivered to the device, and `frame()` reads that cursor directly instead
+of reconstructing it as `rendered − backlog`. Pause, loop wrap, and stream switches then
+fall out for free.

@@ -76,10 +76,11 @@ float ve_input_level(VeEngine *e);
  * callback has emitted (0 = mic delivering nothing). Engine-rate on purpose: callers divide
  * by 48000 to get time. */
 uint64_t ve_input_frames_received(VeEngine *e);
-/* Host-thread-authoritative input stream state: 1 only after a successful start, 0 before
- * any teardown begins. Pair with an advancing ve_input_frames_received for a ready check a
- * dying stream's last callback cannot fake. */
-int ve_input_stream_running(VeEngine *e);
+/* Host-thread-authoritative input-stream state word: (generation << 1) | running. Running
+ * set only after a successful start, cleared BEFORE any teardown joins the old callback;
+ * the generation bumps on every start. Handshake: read, verify frames advanced, read again
+ * -- an unchanged word with bit 0 set proves the SAME stream delivered those frames. */
+uint64_t ve_input_stream_state(VeEngine *e);
 /* Estimated record round-trip latency in frames @ 48 kHz (output IO + acoustic + input IO + AEC
    block). Shift recorded takes earlier by this so they land on the beat the singer heard. */
 uint32_t ve_record_latency_frames(VeEngine *e);

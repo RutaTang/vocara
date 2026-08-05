@@ -931,10 +931,24 @@ fn audio_host_run(
     input_cell: Arc<InputCell>,
     event: Arc<AtomicU32>,
     renderer_gate: Arc<Mutex<bool>>,
-    input_running: Arc<AtomicBool>,
+    input_state: Arc<AtomicU64>,
     rx: mpsc::Receiver<HostCmd>,
     ready_tx: mpsc::Sender<Result<String, String>>,
 ) {
+    // Input-stream state word: (generation << 1) | running. One atomic so a consumer can
+    // SNAPSHOT "which stream, and is it up" in a single read: the ready handshake reads it,
+    // verifies the frame counter advanced, then reads it AGAIN — an unchanged word with the
+    // running bit set proves the SAME stream was up across the whole window (any teardown
+    // clears the bit, any restart bumps the generation), so the observed frames cannot have
+    // come from a dying predecessor. Two separate atomics could interleave exactly that way.
+    let input_started = |st: &Arc<AtomicU64>| {
+        let cur = st.load(Ordering::Acquire);
+        st.store((((cur >> 1) + 1) << 1) | 1, Ordering::Release);
+    };
+    let input_stopped = |st: &Arc<AtomicU64>| {
+        let cur = st.load(Ordering::Acquire);
+        st.store(cur & !1, Ordering::Release);
+    };
     // Renderer-activity gate shared with `EngineHandle::reap`: it must read `true` from
     // BEFORE any stream is built (a callback can fire the instant a build succeeds) until
     // AFTER every stream has been dropped (drop joins the callback). A `false` read on the
@@ -1006,7 +1020,6 @@ fn audio_host_run(
             }
             HostCmd::StartInput { reply } => {
                 if in_stream.is_some() {
-                    input_running.store(true, Ordering::Release);
                     let _ = reply.send(0);
                 } else {
                     // Duplex VPIO renders the engine through its own output element, so drop the
@@ -1020,11 +1033,11 @@ fn audio_host_run(
                     match built {
                         Ok(handle) => {
                             in_stream = Some(handle);
-                            input_running.store(true, Ordering::Release);
+                            input_started(&input_state);
                             let _ = reply.send(0);
                         }
                         Err(_) => {
-                            input_running.store(false, Ordering::Release);
+                            input_stopped(&input_state);
                             // Mic failed to come up → restore cpal output so playback survives.
                             if VPIO_DUPLEX_AEC && out_stream.is_none() {
                                 // Restore the user's chosen output (not the system default),
@@ -1041,10 +1054,10 @@ fn audio_host_run(
                 }
             }
             HostCmd::StopInput { reply } => {
-                // Mark not-running BEFORE the drop joins the dying callback: a consumer
-                // polling running+frames must never count the old stream's final frames as
-                // evidence that a NEW stream is delivering.
-                input_running.store(false, Ordering::Release);
+                // Clear the running bit BEFORE the drop joins the dying callback: a consumer
+                // snapshotting the state word must never count the old stream's final frames
+                // as evidence that a NEW stream is delivering.
+                input_stopped(&input_state);
                 let was_on = in_stream.take().is_some();
                 // VPIO was rendering the output in duplex; hand playback back to cpal, restoring
                 // the user's last chosen output device (a SetOutput during duplex deferred it),
@@ -1063,14 +1076,14 @@ fn audio_host_run(
                     // Reopen on the new device (drop old first → single-accessor; cpal output is
                     // already off in duplex). Not-running for the whole swap window (see
                     // StopInput on why the store precedes the drop).
-                    input_running.store(false, Ordering::Release);
+                    input_stopped(&input_state);
                     in_stream = None;
                     match open_mic(Some(&uid), &rt, &input_cell, &event)
                         .or_else(|_| open_mic(None, &rt, &input_cell, &event))
                     {
                         Ok(handle) => {
                             in_stream = Some(handle);
-                            input_running.store(true, Ordering::Release);
+                            input_started(&input_state);
                             let _ = reply.send(0);
                         }
                         Err(_) => {
@@ -1091,7 +1104,7 @@ fn audio_host_run(
                 }
             }
             HostCmd::Shutdown => {
-                input_running.store(false, Ordering::Release);
+                input_stopped(&input_state);
                 in_stream = None;
                 out_stream = None;
                 break;
@@ -1114,14 +1127,14 @@ pub fn spawn_audio_host(
     input_cell: Arc<InputCell>,
     event: Arc<AtomicU32>,
     renderer_gate: Arc<Mutex<bool>>,
-    input_running: Arc<AtomicBool>,
+    input_state: Arc<AtomicU64>,
 ) -> Result<(AudioHost, String), String> {
     let (tx, rx) = mpsc::channel::<HostCmd>();
     let (ready_tx, ready_rx) = mpsc::channel::<Result<String, String>>();
     let join = std::thread::Builder::new()
         .name("vocara-audio-host".to_string())
         .spawn(move || {
-            audio_host_run(rt, input_cell, event, renderer_gate, input_running, rx, ready_tx)
+            audio_host_run(rt, input_cell, event, renderer_gate, input_state, rx, ready_tx)
         })
         .map_err(|e| format!("spawn audio host: {e}"))?;
     match ready_rx.recv() {
@@ -1171,7 +1184,10 @@ pub fn probe_duration_ms(path: &str) -> Result<Option<u64>, String> {
         .ok_or_else(|| "no default track".to_string())?;
     let rate = track.codec_params.sample_rate.unwrap_or(0) as u64;
     Ok(match (track.codec_params.n_frames, rate) {
-        (Some(n), r) if r > 0 => Some(n.saturating_mul(1000) / r),
+        // Ceiling division: a gate comparing `declared > cap` must see a file that is even
+        // ONE sample past the cap as strictly longer — flooring would round it down onto
+        // the boundary and admit it.
+        (Some(n), r) if r > 0 => Some(n.saturating_mul(1000).div_ceil(r)),
         _ => None,
     })
 }
@@ -1351,6 +1367,20 @@ mod decode_tests {
             Err(super::DecodeError::TooLong) => {}
             other => panic!("expected TooLong, got {other:?}"),
         }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn probe_duration_rounds_up_so_a_boundary_file_reads_as_strictly_longer() {
+        // 100 frames @ 48 kHz = 2.083… ms: flooring to 2 would let a "one sample past the
+        // cap" file land exactly ON a millisecond cap and slip through a `>` gate.
+        let path = temp_wav("probe_ceil");
+        let samples: Vec<f32> = vec![0.1; 200]; // 100 stereo frames
+        crate::wav::write_wav_f32(&path, &samples, 2, 48_000).unwrap();
+        let ms = super::probe_duration_ms(path.to_str().unwrap())
+            .expect("probe succeeds")
+            .expect("wav declares its length");
+        assert_eq!(ms, 3, "ceil(100 * 1000 / 48000) = 3");
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1614,6 +1644,31 @@ mod out_resampler_tests {
             "paused output must be silence, not the FIFO's stale tail"
         );
         assert_eq!(h.frame(), paused_at, "paused playhead must hold still");
+    }
+
+    #[test]
+    fn resume_after_pause_plays_audio_immediately_not_the_parked_silence() {
+        let (h, mut res) = ramp_engine();
+        h.play();
+        let mut out = vec![0.0; 441 * CHANNELS];
+        res.process(&mut out, 441);
+        h.pause();
+        // The paused callback keeps topping the FIFO up with silence…
+        res.process(&mut out, 441);
+        // …which play() must flush: the first resumed buffer starts with the ramp content
+        // at the paused position (~frame 480 → value ~0.048), not a block of that silence.
+        h.play();
+        res.process(&mut out, 441);
+        assert!(
+            out[0] > 0.01,
+            "resume must start with fresh audio, got leading sample {}",
+            out[0]
+        );
+        assert!(
+            (out[0] - 0.048).abs() < 0.005,
+            "resume must continue from the paused position (~0.048), got {}",
+            out[0]
+        );
     }
 
     #[test]

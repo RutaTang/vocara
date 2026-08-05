@@ -345,12 +345,19 @@ class GraphAudioPlaybackService implements PlaybackEngine {
   int inputFramesReceived() =>
       _available ? _bindings.ve_input_frames_received(_engine) : 0;
 
-  /// Whether an input stream is up according to the audio-host thread (true
-  /// only after a successful start, false before any teardown begins). The
-  /// mic ready handshake pairs this with an advancing [inputFramesReceived]
-  /// so a dying stream's final callback can't fake a new stream coming up.
-  bool inputStreamRunning() =>
-      _available && _bindings.ve_input_stream_running(_engine) == 1;
+  /// The host-thread-authoritative input-stream state word:
+  /// `(generation << 1) | running`. Running is set only after a successful
+  /// stream start and cleared BEFORE any teardown joins the old callback; the
+  /// generation bumps on every start. The mic ready handshake snapshots it,
+  /// verifies [inputFramesReceived] advanced, then snapshots it AGAIN — an
+  /// unchanged word with bit 0 set proves the SAME stream delivered those
+  /// frames (a teardown clears the bit, a restart changes the generation), so
+  /// a dying stream's final callback can't fake a new stream coming up.
+  int inputStreamState() =>
+      _available ? _bindings.ve_input_stream_state(_engine) : 0;
+
+  /// Bit 0 of [inputStreamState]: whether an input stream is currently up.
+  static bool inputStateRunning(int state) => state & 1 == 1;
 
   /// Record round-trip latency in milliseconds: how far behind the playhead a captured vocal lands
   /// (output IO + acoustic + input IO + AEC block). Shift recorded takes earlier by this so they

@@ -77,13 +77,22 @@ class _FakeEngine implements GraphAudioPlaybackService {
   @override
   int inputFramesReceived() => _framesReceived += framesReceivedStep;
 
-  /// Host-authoritative stream state half of the ready handshake. Defaults to
-  /// running (a warm stream); false simulates the arm racing a stream that is
-  /// down or being torn down.
-  bool streamRunning = true;
+  /// Scripted host stream-state words ((generation << 1) | running) consumed
+  /// one per [inputStreamState] read; the last entry repeats once exhausted.
+  /// The default is a stable running stream (generation 1). Scripting distinct
+  /// consecutive values models the exact teardown/restart interleavings the
+  /// three-step handshake exists to refuse.
+  List<int> streamStateScript = [3];
+  int stateReads = 0;
 
   @override
-  bool inputStreamRunning() => streamRunning;
+  int inputStreamState() {
+    final i = stateReads < streamStateScript.length
+        ? stateReads
+        : streamStateScript.length - 1;
+    stateReads++;
+    return streamStateScript[i];
+  }
 
   /// Frames the fake reports as dropped by the recording ring at stop.
   int droppedFrames = 0;
@@ -470,11 +479,11 @@ void main() {
   });
 
   testWidgets('a dying stream cannot fake ready: advancing frames without the '
-      'host-side running flag never arm the take', (tester) async {
+      'host-side running bit never arm the take', (tester) async {
     // The counter advances (an old stream's final callbacks) but the host has
-    // already marked the input not-running — the handshake must NOT declare
-    // ready on frames alone. Zero timeout forces the deterministic path.
-    final engine = _FakeEngine()..streamRunning = false;
+    // already cleared the running bit — the handshake must NOT declare ready
+    // on frames alone. Zero timeout forces the deterministic path.
+    final engine = _FakeEngine()..streamStateScript = [2]; // gen 1, not running
     final dest = _FakeDestination();
     final controller = MicRecordingController(
       acquireEngine: () => engine,
@@ -489,6 +498,81 @@ void main() {
     expect(result.failure, MicRecordingFailure.inputNotDelivering);
     expect(engine.stopCalls, 1);
     expect(dest.discarded, [dest.path]);
+    controller.dispose();
+  });
+
+  testWidgets('the exact TOCTOU interleave is refused: running at the first '
+      'read, frames advancing, but torn down before the confirming read', (
+    tester,
+  ) async {
+    // First state read says running (gen 1), the frame counter advances (the
+    // dying stream's last push), and by the confirming read the host has
+    // cleared the bit — the OLD two-read shape declared ready here; the
+    // bracketing read must refuse. All later reads stay not-running, so the
+    // start must end in the timeout failure, never an armed take.
+    final engine = _FakeEngine()..streamStateScript = [3, 2];
+    final dest = _FakeDestination();
+    final controller = MicRecordingController(
+      acquireEngine: () => engine,
+      requestPermission: () async => true,
+      // One real millisecond: the first loop iteration (where the scripted
+      // interleave happens) always runs; the wall-clock deadline then expires
+      // within an iteration or two of fake-async pumping.
+      readyTimeout: const Duration(milliseconds: 1),
+    );
+
+    var settled = false;
+    final future = controller.start(dest.strategy);
+    unawaited(future.whenComplete(() => settled = true));
+    // Pump fake time so the loop's 25 ms sleeps fire while the real deadline
+    // lapses; bounded so a regression cannot hang the suite.
+    for (var i = 0; i < 200 && !settled; i++) {
+      await tester.pump(const Duration(milliseconds: 25));
+    }
+    expect(settled, isTrue, reason: 'the ready wait must hit its deadline');
+    final result = await future;
+    await tester.pump();
+
+    expect(result.started, isFalse);
+    expect(result.failure, MicRecordingFailure.inputNotDelivering);
+    expect(
+      engine.stateReads,
+      greaterThanOrEqualTo(2),
+      reason: 'the interleaved pair of reads must actually have happened',
+    );
+    expect(engine.stopCalls, 1);
+    expect(dest.discarded, [dest.path]);
+    controller.dispose();
+  });
+
+  testWidgets('a restart between the two reads (generation bump) is refused '
+      'for that iteration and ready lands on the NEW stream', (tester) async {
+    // Iteration 1: running gen 1 → frames advance → confirming read sees
+    // gen 2 (the host restarted the stream in between) — refused. Iteration 2:
+    // both reads agree on gen 2 → ready. The take must arm exactly once, on
+    // the stream whose generation stayed stable across the bracket.
+    final engine = _FakeEngine()..streamStateScript = [3, 5, 5];
+    final dest = _FakeDestination();
+    final controller = MicRecordingController(
+      acquireEngine: () => engine,
+      requestPermission: () async => true,
+    );
+
+    var settled = false;
+    final future = controller.start(dest.strategy);
+    unawaited(future.whenComplete(() => settled = true));
+    for (var i = 0; i < 200 && !settled; i++) {
+      await tester.pump(const Duration(milliseconds: 25));
+    }
+    final result = await future;
+
+    expect(result.started, isTrue);
+    expect(
+      engine.stateReads,
+      greaterThanOrEqualTo(4),
+      reason: 'ready must have taken a second, agreeing bracket',
+    );
+    controller.stop();
     controller.dispose();
   });
 

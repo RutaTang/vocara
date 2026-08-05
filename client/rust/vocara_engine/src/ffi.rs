@@ -100,11 +100,13 @@ pub struct VeEngine {
     /// Nonzero means the take on disk has silent holes — surfaced via
     /// `ve_record_dropped_frames` so the UI never reports such a take as clean.
     rec_dropped: Arc<AtomicU64>,
-    /// Host-thread-authoritative "an input stream is up and its callback may deliver":
-    /// set true only after a successful stream start, false BEFORE any teardown joins the
-    /// old callback. The ready handshake requires this AND advancing frames, so a dying
-    /// stream's final callback can never impersonate a new stream coming up.
-    input_running: Arc<AtomicBool>,
+    /// Host-thread-authoritative input-stream state word: (generation << 1) | running.
+    /// Set/bumped only by the audio-host thread — running set only after a successful
+    /// stream start, cleared BEFORE any teardown joins the old callback, generation bumped
+    /// on every start. One atomic so the ready handshake can snapshot it, check the frame
+    /// counter, and snapshot again: an unchanged word with the running bit proves the same
+    /// stream delivered those frames (see `ve_input_stream_state`).
+    input_state: Arc<AtomicU64>,
     /// Whether audible monitoring is on (one of the reasons to keep the input stream open).
     monitoring: bool,
     /// Capture gate (analysis) — the input callback fans frames to the capture ring while set.
@@ -272,13 +274,13 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
         // The host maintains the handle's renderer gate (stream up/down), so the control
         // thread can free retired graphs immediately while no stream callback runs (the
         // grace epoch never elapses without a callback advancing the block counter).
-        let input_running = Arc::new(AtomicBool::new(false));
+        let input_state = Arc::new(AtomicU64::new(0));
         let (host, current_output_uid) = device::spawn_audio_host(
             rt_cell,
             input_cell,
             Arc::clone(&device_event),
             handle.renderer_gate(),
-            Arc::clone(&input_running),
+            Arc::clone(&input_state),
         )?;
         Ok(Box::into_raw(Box::new(VeEngine {
             host,
@@ -289,7 +291,7 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
             input_level,
             input_frames_in,
             rec_dropped,
-            input_running,
+            input_state,
             monitoring: false,
             cap_active,
             rec_active,
@@ -679,19 +681,16 @@ pub extern "C" fn ve_input_frames_received(e: *mut VeEngine) -> u64 {
     with_engine(e, 0, |eng| eng.input_frames_in.load(Ordering::Relaxed))
 }
 
-/// Whether an input stream is currently up according to the audio-host thread (true only
-/// after a successful start, false before any teardown begins). The ready handshake pairs
-/// this with an advancing `ve_input_frames_received`, so a dying stream's last callback can
-/// never impersonate a new stream coming up. 1 = running.
+/// The host-thread-authoritative input-stream state word: `(generation << 1) | running`.
+/// Running is set only after a successful stream start and cleared BEFORE any teardown
+/// joins the old callback; the generation bumps on every start. Ready-handshake contract:
+/// read this word, verify `ve_input_frames_received` advanced, read the word AGAIN — an
+/// unchanged value with bit 0 set proves the SAME stream was up across the window, so the
+/// frames cannot have come from a dying predecessor (a teardown clears the bit, a restart
+/// changes the generation). 0 = no stream has ever run.
 #[no_mangle]
-pub extern "C" fn ve_input_stream_running(e: *mut VeEngine) -> c_int {
-    with_engine(e, 0, |eng| {
-        if eng.input_running.load(Ordering::Acquire) {
-            1
-        } else {
-            0
-        }
-    })
+pub extern "C" fn ve_input_stream_state(e: *mut VeEngine) -> u64 {
+    with_engine(e, 0, |eng| eng.input_state.load(Ordering::Acquire))
 }
 
 /// Estimated record round-trip latency in frames @ ENGINE_SR (48 kHz): how far behind the engine
@@ -1299,8 +1298,14 @@ pub extern "C" fn ve_punch_wav(
         let keep = split.min(old_frames.len());
         // Silence frames when the cursor sits past old's end (preserves new's timing).
         let pad = split.saturating_sub(old_frames.len());
+        // The OUTPUT is bounded too, not just the two input decodes: a runaway `split_ms`
+        // would otherwise size an arbitrarily large silence pad straight into with_capacity.
+        let total = keep + pad + new_frames.len();
+        if total as f64 > MAX_PLAYBACK_SECS * rate as f64 {
+            return -1;
+        }
 
-        let mut flat: Vec<f32> = Vec::with_capacity((keep + pad + new_frames.len()) * CHANNELS);
+        let mut flat: Vec<f32> = Vec::with_capacity(total * CHANNELS);
         for f in &old_frames[..keep] {
             flat.push(f[0]);
             flat.push(f[1]);
@@ -2130,5 +2135,45 @@ mod cache_tests {
             cache_lookup_fresh(&mut cache, p, 6).is_some(),
             "an unreadable source file must not invalidate the cache"
         );
+    }
+}
+
+#[cfg(test)]
+mod punch_tests {
+    //! The stateless punch splice's output ceiling: a runaway `split_ms` used to size an
+    //! arbitrarily large silence pad straight into the output allocation.
+
+    use std::ffi::CString;
+
+    fn temp_wav(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("vocara_punch_{}_{}.wav", std::process::id(), name))
+    }
+
+    #[test]
+    fn a_runaway_split_pad_is_refused_and_a_normal_splice_still_works() {
+        let old = temp_wav("old");
+        let new = temp_wav("new");
+        let out = temp_wav("out");
+        crate::wav::write_wav_f32(&old, &[0.1; 96], 2, 48_000).unwrap();
+        crate::wav::write_wav_f32(&new, &[0.2; 96], 2, 48_000).unwrap();
+        let c = |p: &std::path::Path| CString::new(p.to_str().unwrap()).unwrap();
+        let (c_old, c_new, c_out) = (c(&old), c(&new), c(&out));
+
+        // A two-hour cursor offset would demand a two-hour silence pad: refused.
+        let frames = super::ve_punch_wav(
+            c_old.as_ptr(),
+            c_new.as_ptr(),
+            2 * 3600 * 1000,
+            48_000,
+            c_out.as_ptr(),
+        );
+        assert_eq!(frames, -1, "an over-ceiling output must be refused");
+
+        // A sane splice is unaffected: old's first 1 ms (48 frames) ++ new's 48 frames.
+        let frames = super::ve_punch_wav(c_old.as_ptr(), c_new.as_ptr(), 1, 48_000, c_out.as_ptr());
+        assert_eq!(frames, 96, "1 ms of old plus all of new");
+        let _ = std::fs::remove_file(&old);
+        let _ = std::fs::remove_file(&new);
+        let _ = std::fs::remove_file(&out);
     }
 }

@@ -321,6 +321,12 @@ pub struct EngineHandle {
 
 impl EngineHandle {
     pub fn play(&self) {
+        // Drop whatever the output resampler pre-rendered while the transport was stopped —
+        // a paused callback keeps the FIFO topped up with SILENCE, so without this flush a
+        // resume on a non-48 kHz device played up to one render block of it before the
+        // freshly rendered audio. Flushed before the playing flip so the first playing
+        // callback starts from an empty FIFO.
+        self.flush_out_boundary();
         self.shared.playing.store(true, Ordering::Release);
     }
     pub fn pause(&self) {

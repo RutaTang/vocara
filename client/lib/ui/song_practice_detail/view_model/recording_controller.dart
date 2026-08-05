@@ -343,25 +343,40 @@ class RecordingController extends ChangeNotifier {
       if (!r.started) return;
       notifyListeners();
 
+      // The take is armed, which means the user can STOP it right now — every
+      // await below must re-check, or a continuation resuming after the stop
+      // would restart the transport against a finalized take and overwrite the
+      // pre-roll the placement already consumed.
+      bool stopped() => _disposed || !_mic.isRecording;
+
       // Mute the take being recorded into (you can't monitor what you're laying
       // down); every other lane still obeys mute/solo. Play freely (no range wrap)
       // from the cursor as a reference.
       await _mixer.resyncPlayback();
-      if (_disposed) return;
+      if (stopped()) return;
       _playback.engine.setLoop(false, 0, 0);
       await _playback.engine.seek(Duration(milliseconds: _recordingStartMs));
-      if (_disposed) return;
+      if (stopped()) return;
       _playback.position.value = Duration(milliseconds: _recordingStartMs);
       await _playback.engine.play();
+      if (stopped()) {
+        // A stop landed between the check above and play(): its own pause may
+        // have run FIRST, in which case this play just restarted a transport
+        // the finalize believes is stopped — undo it.
+        await _playback.engine.pause();
+        return;
+      }
       // Pre-roll: the recording has been rolling since the arm (WAV offset 0),
       // but the backing only started just now — everything above (resync,
       // decode, seek) sat between the two. Measure the gap in actual captured
       // frames so the stop-side placement can subtract it; the acoustic
       // round-trip is compensated separately (recordLatencyMs). Frame counter
-      // at 48 kHz — the engine's fixed rate (see recordLatencyMs).
+      // at 48 kHz — the engine's fixed rate (see recordLatencyMs). Guarded:
+      // a stop that raced the play() above has already read (and reset) the
+      // pre-roll, so a late write here would leak into the NEXT take.
       final framesAtArm = _mic.framesAtArm;
       final engineNow = _graphEngine();
-      if (framesAtArm != null && engineNow != null) {
+      if (!stopped() && framesAtArm != null && engineNow != null) {
         final pre = engineNow.inputFramesReceived() - framesAtArm;
         if (pre > 0) _recordingPreRollMs = pre * 1000 ~/ 48000;
       }

@@ -315,21 +315,20 @@ class MicRecordingController {
       // Ready handshake. startInputRecording == true proves only that the WAV
       // exists — the native input-stream open is deliberately asynchronous (a
       // blocking open froze the UI), so the mic may still be opening, or may
-      // fail to open, right now. Wait (bounded) until BOTH hold before
-      // reporting the take armed:
-      //  * the audio-host thread says an input stream is up
-      //    (inputStreamRunning — authoritative: set true only after a
-      //    successful start, false before any teardown joins the old
-      //    callback), AND
-      //  * the frame counter is advancing past the arm snapshot.
-      // The pair is what makes this a handshake rather than a heuristic: a
-      // dying stream's final callback can advance the counter, but the host
-      // has already marked it not-running; a freshly-started stream is marked
-      // running before its callback delivers. Otherwise the owner would start
-      // the backing against a silent mic and the take would begin with a hole
-      // no later placement can repair. When the stream is already open
-      // (monitoring), the first advance lands within one callback (~10 ms); a
-      // cold VoiceProcessingIO open takes a few hundred.
+      // fail to open, right now. Wait (bounded) for a three-step proof that
+      // ONE live stream is delivering:
+      //  1. snapshot the host's stream-state word (generation<<1 | running) —
+      //     the running bit must be set;
+      //  2. the frame counter must have advanced past the arm snapshot;
+      //  3. re-read the state word — it must be UNCHANGED.
+      // An unchanged word brackets the frame observation inside a window with
+      // no teardown (which clears the running bit) and no restart (which
+      // bumps the generation), so the frames provably came from the same
+      // running stream — two separate reads of a running flag and the counter
+      // could interleave with a StopInput plus the old callback's final push
+      // and declare ready against a stream that is already gone. When the
+      // stream is already open (monitoring), this resolves within one
+      // callback (~10 ms); a cold VoiceProcessingIO open takes a few hundred.
       var ready = false;
       final readyClock = Stopwatch()..start();
       while (readyClock.elapsed < readyTimeout) {
@@ -338,8 +337,10 @@ class MicRecordingController {
           _discardQuietly(destination, path);
           return const MicRecordingStart.invalidated();
         }
-        if (engine.inputStreamRunning() &&
-            engine.inputFramesReceived() > framesAtArm) {
+        final state = engine.inputStreamState();
+        if (GraphAudioPlaybackService.inputStateRunning(state) &&
+            engine.inputFramesReceived() > framesAtArm &&
+            engine.inputStreamState() == state) {
           ready = true;
           break;
         }

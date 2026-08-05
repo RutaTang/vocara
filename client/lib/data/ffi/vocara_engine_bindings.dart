@@ -267,18 +267,19 @@ class VocaraEngineBindings {
   late final _ve_input_frames_received = _ve_input_frames_receivedPtr
       .asFunction<int Function(ffi.Pointer<VeEngine>)>();
 
-  /// Host-thread-authoritative input stream state: 1 only after a successful start, 0 before
-  /// any teardown begins. Pair with an advancing ve_input_frames_received for a ready check a
-  /// dying stream's last callback cannot fake.
-  int ve_input_stream_running(ffi.Pointer<VeEngine> e) {
-    return _ve_input_stream_running(e);
+  /// Host-thread-authoritative input-stream state word: (generation << 1) | running. Running
+  /// set only after a successful start, cleared BEFORE any teardown joins the old callback;
+  /// the generation bumps on every start. Handshake: read, verify frames advanced, read again
+  /// -- an unchanged word with bit 0 set proves the SAME stream delivered those frames.
+  int ve_input_stream_state(ffi.Pointer<VeEngine> e) {
+    return _ve_input_stream_state(e);
   }
 
-  late final _ve_input_stream_runningPtr =
-      _lookup<ffi.NativeFunction<ffi.Int Function(ffi.Pointer<VeEngine>)>>(
-        've_input_stream_running',
+  late final _ve_input_stream_statePtr =
+      _lookup<ffi.NativeFunction<ffi.Uint64 Function(ffi.Pointer<VeEngine>)>>(
+        've_input_stream_state',
       );
-  late final _ve_input_stream_running = _ve_input_stream_runningPtr
+  late final _ve_input_stream_state = _ve_input_stream_statePtr
       .asFunction<int Function(ffi.Pointer<VeEngine>)>();
 
   /// Estimated record round-trip latency in frames @ 48 kHz (output IO + acoustic + input IO + AEC
