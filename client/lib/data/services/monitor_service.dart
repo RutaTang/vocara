@@ -151,7 +151,7 @@ class MonitorService extends ChangeNotifier {
   }
 
   /// Feed a chunk of mono samples (range ~[-1, 1], at 48 kHz) captured from the engine input.
-  void feedSamples(Float64List samples) {
+  void feedSamples(Float32List samples) {
     if (!_active) return;
     final n = samples.length;
     if (n == 0) return;

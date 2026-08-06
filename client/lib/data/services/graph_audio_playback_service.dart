@@ -184,11 +184,11 @@ bool exceedsDecodeCap(int frames, int rate, Duration maxDuration) =>
 /// empty. Stateless — touches no live engine.
 ///
 /// [maxDuration] bounds the decoded length for ANALYSIS callers: the whole
-/// file materializes as a Float64List here and is copied AGAIN when the
+/// file materializes as a Float32List here and is copied AGAIN when the
 /// result crosses back to the calling isolate (and typically a third time
 /// into the analysis isolate), so an arbitrary-length input (a technique
 /// reference can be any media) would blow memory — an hour of mono at
-/// 44.1 kHz is ~1.3 GB per copy. The cap is enforced NATIVELY, before the
+/// 44.1 kHz is ~635 MB per copy. The cap is enforced NATIVELY, before the
 /// full-track f32 buffer allocates (`ve_decode`'s `max_frames` refuses a
 /// declared-too-long container up front and bails mid-decode otherwise), and
 /// exceeding it throws [MediaTooLongException]. Null (the default) falls back
@@ -225,7 +225,7 @@ Future<PcmAudio?> decodeMediaToMono(
         throw MediaTooLongException(cap);
       }
       final inter = ptr.asTypedList(frames * 2);
-      final mono = Float64List(frames);
+      final mono = Float32List(frames);
       for (var i = 0; i < frames; i++) {
         mono[i] = (inter[i * 2] + inter[i * 2 + 1]) * 0.5;
       }

@@ -15,18 +15,18 @@ class MediaAnalysisService {
   const MediaAnalysisService();
 
   /// Longest media the analysis path will decode. The whole file materializes
-  /// as Float64 PCM and is copied again across the isolate boundaries (see
+  /// as Float32 PCM and is copied again across the isolate boundaries (see
   /// [decodeMediaToMono]), so an unbounded input could exhaust memory.
-  /// 30 minutes covers any realistic technique reference or practice take
-  /// while bounding the transient allocations to a few hundred MB.
   /// 10 minutes: takes and technique references are minutes long, and the
-  /// analysis pipeline's peak memory scales linearly with this. The measured
-  /// legal worst case at this cap is roughly 700 MB for computeBoth (the
-  /// Float64 mono buffer + the decimation working copy at ~16 bytes/frame,
-  /// plus the spectrogram result, per-metric arrays, and the cross-isolate
-  /// return copy) — NOT just the two big buffers; further reduction means a
-  /// Float32/windowed DSP migration, tracked separately. The previous
-  /// 30-minute value predated any memory budgeting.
+  /// analysis pipeline's peak memory scales linearly with this. The legal
+  /// worst case at this cap is roughly 350 MB for computeBoth (the Float32
+  /// mono buffer + the decimation working copy at ~8 bytes/frame, plus the
+  /// spectrogram result, per-metric arrays, and the cross-isolate return
+  /// copy) — halved from ~700 MB by the Float32 sample-buffer migration
+  /// (sources are 16/24/32-bit integer or float32, all exactly representable;
+  /// windowed math still runs in doubles). Further reduction means windowed
+  /// streaming DSP, tracked separately. The previous 30-minute value predated
+  /// any memory budgeting.
   static const Duration maxAnalysisDuration = Duration(minutes: 10);
 
   /// Decodes [path] and runs the complete analysis suite. Returns null when the
@@ -41,7 +41,7 @@ class MediaAnalysisService {
     return Isolate.run(() => _analyze(samples, rate));
   }
 
-  static TechniqueAnalysis? _analyze(Float64List samples, int sampleRate) {
+  static TechniqueAnalysis? _analyze(Float32List samples, int sampleRate) {
     if (samples.isEmpty || sampleRate <= 0) return null;
     final metrics = computeVoiceMetrics(samples, sampleRate);
     final spectrogram = computeSpectrogram(samples, sampleRate);

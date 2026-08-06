@@ -408,7 +408,7 @@ class MicRecordingController {
             final frames = engine.pullInputFrames(); // interleaved stereo
             if (frames.isEmpty) return;
             final n = frames.length ~/ 2;
-            final mono = Float64List(n);
+            final mono = Float32List(n);
             for (var i = 0; i < n; i++) {
               mono[i] = (frames[2 * i] + frames[2 * i + 1]) * 0.5;
             }

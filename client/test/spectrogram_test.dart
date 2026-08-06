@@ -10,7 +10,7 @@ void main() {
     () {
       const sr = 44100;
       final n = sr; // 1 second
-      final samples = Float64List(n);
+      final samples = Float32List(n);
       const tones = [500.0, 1500.0, 3000.0];
       for (var i = 0; i < n; i++) {
         var v = 0.0;
@@ -66,7 +66,7 @@ void main() {
     const tone = 2000.0;
     var phase = 0.0;
     for (var chunk = 0; chunk < 11; chunk++) {
-      final s = Float64List(4096);
+      final s = Float32List(4096);
       for (var i = 0; i < 4096; i++) {
         s[i] = sin(phase);
         phase += 2 * pi * tone / sr;

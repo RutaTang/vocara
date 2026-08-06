@@ -44,8 +44,8 @@ class SpectrogramService {
   /// Derivation: the legal upper bound the analysis is designed for is a
   /// 10-minute 48 kHz stereo float32 WAV (MediaAnalysisService's cap), i.e.
   /// 10*60*48000 = 28.8 M frames and ~230 MB of PCM. Frames matter separately
-  /// from bytes because the decoder expands to Float64 MONO (frames * 8
-  /// bytes): a large 8-bit mono file is small on disk but 8x bigger decoded,
+  /// from bytes because the decoder expands to Float32 MONO (frames * 4
+  /// bytes): a large 8-bit mono file is small on disk but 4x bigger decoded,
   /// so a byte ceiling alone is not a memory bound.
   @visibleForTesting
   static const int maxAnalysisFrames = 30 * 1000 * 1000;
@@ -137,7 +137,7 @@ class SpectrogramService {
               1000;
           if (declaredFrames > capFrames) return null;
           // Header-independent ceilings (see their doc): bytes bound what the
-          // reader streams through, frames bound the Float64 analysis buffer.
+          // reader streams through, frames bound the Float32 analysis buffer.
           if (declaredFrames > maxAnalysisFrames) return null;
           if (offset + 8 + size > maxAnalysisBytes) return null;
           // Only THEN clamp to what the file physically holds (a hard-killed
@@ -170,17 +170,17 @@ class SpectrogramService {
 
   static double _finiteOrZero(double v) => v.isFinite ? v : 0.0;
 
-  /// Streams the admitted PCM straight into the ONE Float64 mono analysis
+  /// Streams the admitted PCM straight into the ONE Float32 mono analysis
   /// buffer, in bounded frame-aligned chunks (4 MiB). Runs inside the
   /// analysis isolate. This is the memory-budget half of the gate: the old
-  /// shape read the whole byte payload first and THEN decoded, so a legal
-  /// 30-minute stereo float take held ~691 MB of bytes beside ~691 MB of
-  /// Float64 — the peak is now the analysis buffer plus one chunk.
+  /// shape read the whole byte payload first and THEN decoded into Float64,
+  /// so a legal 30-minute stereo float take held ~691 MB of bytes beside
+  /// ~691 MB of samples — the peak is now the analysis buffer plus one chunk.
   @visibleForTesting
   static PcmAudio? readWavMonoStreaming(String path, WavAdmission a) {
     final sampleBytes = (a.bits + 7) ~/ 8;
     final frameBytes = a.channels * sampleBytes;
-    final out = Float64List(a.frames);
+    final out = Float32List(a.frames);
     final raf = File(path).openSync();
     try {
       raf.setPositionSync(a.dataStart);
@@ -223,7 +223,7 @@ class SpectrogramService {
       if (frame == 0) return null;
       // A truncated file yields a shorter buffer; keep the honest length.
       return PcmAudio(
-        frame == a.frames ? out : Float64List.sublistView(out, 0, frame),
+        frame == a.frames ? out : Float32List.sublistView(out, 0, frame),
         a.sampleRate,
       );
     } finally {

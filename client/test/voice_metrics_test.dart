@@ -11,7 +11,7 @@ const _sr = 44100;
 /// Synthesizes a vowel: an impulse train at [f0] driven through three two-pole
 /// resonators at the given formant frequencies — a textbook source-filter vowel
 /// whose spectral envelope peaks at F1/F2/F3.
-Float64List _vowel(
+Float32List _vowel(
   double f1,
   double f2,
   double f3, {
@@ -19,7 +19,7 @@ Float64List _vowel(
   double sec = 1.0,
 }) {
   final n = (_sr * sec).round();
-  final src = Float64List(n);
+  final src = Float32List(n);
   final period = (_sr / f0).round();
   for (var i = 0; i < n; i += period) {
     src[i] = 1.0;
@@ -33,12 +33,12 @@ Float64List _vowel(
     g2 = g1 + 0.99 * g2;
     src[i] = g2 * 1e-3;
   }
-  Float64List reson(double fc, double bw, double gain) {
+  Float32List reson(double fc, double bw, double gain) {
     final r = exp(-pi * bw / _sr);
     final theta = 2 * pi * fc / _sr;
     final a1 = -2 * r * cos(theta);
     final a2 = r * r;
-    final out = Float64List(n);
+    final out = Float32List(n);
     for (var i = 0; i < n; i++) {
       final y1 = i >= 1 ? out[i - 1] : 0.0;
       final y2 = i >= 2 ? out[i - 2] : 0.0;
@@ -50,7 +50,7 @@ Float64List _vowel(
   final o1 = reson(f1, 70, 1.0);
   final o2 = reson(f2, 90, 0.6);
   final o3 = reson(f3, 120, 0.4);
-  final out = Float64List(n);
+  final out = Float32List(n);
   var peak = 1e-9;
   for (var i = 0; i < n; i++) {
     out[i] = o1[i] + o2[i] + o3[i];
@@ -64,9 +64,9 @@ Float64List _vowel(
 
 /// Sum of equal-amplitude sine tones — a controlled way to put energy in
 /// specific bands for the ring/tilt metrics.
-Float64List _tones(List<double> freqs, {double sec = 1.0}) {
+Float32List _tones(List<double> freqs, {double sec = 1.0}) {
   final n = (_sr * sec).round();
-  final out = Float64List(n);
+  final out = Float32List(n);
   for (final f in freqs) {
     for (var i = 0; i < n; i++) {
       out[i] += sin(2 * pi * f * i / _sr);
@@ -84,18 +84,18 @@ Float64List _tones(List<double> freqs, {double sec = 1.0}) {
 
 /// A pure sine at [hz] sampled at [sr], length [n] — for YIN boundary checks in
 /// the decimated domain (sr≈11025, n=512).
-Float64List _sine(double hz, double sr, int n) {
-  final out = Float64List(n);
+Float32List _sine(double hz, double sr, int n) {
+  final out = Float32List(n);
   for (var i = 0; i < n; i++) {
     out[i] = sin(2 * pi * hz * i / sr);
   }
   return out;
 }
 
-Float64List _noise({double sec = 1.0, int seed = 7}) {
+Float32List _noise({double sec = 1.0, int seed = 7}) {
   final n = (_sr * sec).round();
   final rnd = Random(seed);
-  final out = Float64List(n);
+  final out = Float32List(n);
   for (var i = 0; i < n; i++) {
     out[i] = (rnd.nextDouble() * 2 - 1) * 0.5;
   }
@@ -112,14 +112,14 @@ double _median(Float32List xs) {
 
 /// A sustained tone (with harmonics) whose pitch oscillates sinusoidally — a
 /// synthetic vibrato at [rateHz] / ±[extentCents] around [f0].
-Float64List _vibratoTone(
+Float32List _vibratoTone(
   double f0,
   double rateHz,
   double extentCents, {
   double sec = 1.6,
 }) {
   final n = (_sr * sec).round();
-  final out = Float64List(n);
+  final out = Float32List(n);
   var phase = 0.0;
   for (var i = 0; i < n; i++) {
     final t = i / _sr;
@@ -198,7 +198,7 @@ void main() {
 
   test('yinPitch tracks a pure tone with high periodicity', () {
     final sine = _tones([220]);
-    final y = yinPitch(Float64List.sublistView(sine, 0, 2048), _sr.toDouble());
+    final y = yinPitch(Float32List.sublistView(sine, 0, 2048), _sr.toDouble());
     expect(y.f0, closeTo(220, 3));
     expect(y.periodicity, greaterThan(0.9));
   });
@@ -208,7 +208,7 @@ void main() {
     // where autocorrelation/cepstrum report the octave (300 Hz). YIN should not.
     const f0 = 150.0;
     final n = 2048;
-    final frame = Float64List(n);
+    final frame = Float32List(n);
     for (var i = 0; i < n; i++) {
       frame[i] =
           0.6 * sin(2 * pi * f0 * i / _sr) +
@@ -224,7 +224,7 @@ void main() {
 
   test('yinPitch returns NaN (not a crash) on tiny frames', () {
     for (final len in [0, 1, 2, 3]) {
-      final y = yinPitch(Float64List(len), 11025);
+      final y = yinPitch(Float32List(len), 11025);
       expect(y.f0.isNaN, isTrue, reason: 'len=$len should be NaN, not throw');
     }
   });
@@ -254,11 +254,11 @@ void main() {
 
   test('yinPitch periodicity is far lower for noise than for a tone', () {
     final tone = yinPitch(
-      Float64List.sublistView(_tones([220]), 0, 2048),
+      Float32List.sublistView(_tones([220]), 0, 2048),
       _sr.toDouble(),
     );
     final noise = yinPitch(
-      Float64List.sublistView(_noise(), 0, 2048),
+      Float32List.sublistView(_noise(), 0, 2048),
       _sr.toDouble(),
     );
     expect(tone.periodicity, greaterThan(0.9));
@@ -331,7 +331,7 @@ void main() {
     final base = _tones([440]);
     final loud = computeVoiceMetrics(base, _sr);
     final quiet = computeVoiceMetrics(
-      Float64List.fromList([for (final s in base) s * 0.1]),
+      Float32List.fromList([for (final s in base) s * 0.1]),
       _sr,
     );
     double peak(Float32List x) => x.reduce((a, b) => a > b ? a : b);
@@ -400,7 +400,7 @@ void main() {
     // Feed in ~1000-sample packets, like a mic stream.
     for (var i = 0; i < samples.length; i += 1000) {
       final end = i + 1000 < samples.length ? i + 1000 : samples.length;
-      analyzer.addSamples(Float64List.sublistView(samples, i, end), frames.add);
+      analyzer.addSamples(Float32List.sublistView(samples, i, end), frames.add);
     }
     expect(frames.length, greaterThan(10));
     final f1s = [
@@ -436,7 +436,7 @@ void main() {
       final frames = <LiveFrame>[];
       for (var i = 0; i < noise.length; i += 1000) {
         final end = i + 1000 < noise.length ? i + 1000 : noise.length;
-        analyzer.addSamples(Float64List.sublistView(noise, i, end), frames.add);
+        analyzer.addSamples(Float32List.sublistView(noise, i, end), frames.add);
       }
       expect(frames.length, greaterThan(10));
       final voiced = frames.where((f) => f.active).length;
@@ -465,7 +465,7 @@ void main() {
       for (var i = 0; i < samples.length; i += 1000) {
         final end = i + 1000 < samples.length ? i + 1000 : samples.length;
         analyzer.addSamples(
-          Float64List.sublistView(samples, i, end),
+          Float32List.sublistView(samples, i, end),
           frames.add,
         );
       }
@@ -489,13 +489,13 @@ void main() {
   test('LiveVoiceAnalyzer gates out quiet (room-noise-level) frames', () {
     final analyzer = LiveVoiceAnalyzer();
     // A vowel attenuated to ~-66 dBFS — below the VAD floor.
-    final quiet = Float64List.fromList([
+    final quiet = Float32List.fromList([
       for (final s in _vowel(700, 1200, 2600, f0: 200)) s * 0.002,
     ]);
     final frames = <LiveFrame>[];
     for (var i = 0; i < quiet.length; i += 1000) {
       final end = i + 1000 < quiet.length ? i + 1000 : quiet.length;
-      analyzer.addSamples(Float64List.sublistView(quiet, i, end), frames.add);
+      analyzer.addSamples(Float32List.sublistView(quiet, i, end), frames.add);
     }
     expect(
       [
@@ -508,7 +508,7 @@ void main() {
   });
 
   test('truly empty input yields zero frames without throwing', () {
-    final m = computeVoiceMetrics(Float64List(0), _sr);
+    final m = computeVoiceMetrics(Float32List(0), _sr);
     expect(m.frames, 0);
     expect(m.ringAvg, 0);
   });
@@ -516,7 +516,7 @@ void main() {
   test(
     'a sub-fftSize take still yields a (zero-padded) frame, not empty curves',
     () {
-      final m = computeVoiceMetrics(Float64List(1000), _sr); // < 2048 samples
+      final m = computeVoiceMetrics(Float32List(1000), _sr); // < 2048 samples
       expect(m.frames, greaterThanOrEqualTo(1));
       expect(m.f1.length, m.frames);
     },
@@ -528,7 +528,7 @@ void main() {
     final vowel = _vowel(700, 1200, 2600, f0: 200, sec: 0.7);
     final gapLen = (_sr * 0.35).round();
     final n = vowel.length * 2 + gapLen;
-    final samples = Float64List(n)
+    final samples = Float32List(n)
       ..setRange(0, vowel.length, vowel)
       ..setRange(vowel.length + gapLen, n, vowel);
     final m = computeVoiceMetrics(samples, _sr);
@@ -570,7 +570,7 @@ void main() {
     // must bridge (while the previous test pins that gate-NaN stays NaN).
     const sr = 4000;
     final n = sr * 2;
-    final samples = Float64List(n);
+    final samples = Float32List(n);
     var phase = 0.0;
     for (var i = 0; i < n; i++) {
       final hz = 1000 + 60 * sin(2 * pi * 5 * i / sr);
@@ -601,7 +601,7 @@ void main() {
     // — fftea still emits a padded column — and is handled by a UI frames>0
     // guard rather than by matching here.)
     for (final len in [1000, 2048, 3000, 22050, 44100, 50000, 100000]) {
-      final samples = Float64List(len);
+      final samples = Float32List(len);
       final m = computeVoiceMetrics(samples, _sr);
       final s = computeSpectrogram(samples, _sr);
       expect(

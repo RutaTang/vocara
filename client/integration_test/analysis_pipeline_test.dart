@@ -17,7 +17,7 @@ import 'package:vocara/domain/models/voice_metrics.dart';
 const _sr = 44100;
 
 /// Writes mono 16-bit PCM WAV from samples in [-1, 1] and returns its path.
-Future<String> _writeWav(String path, Float64List samples) async {
+Future<String> _writeWav(String path, Float32List samples) async {
   final bytes = writeWavMono(samples, _sr);
   final file = File(path);
   await file.parent.create(recursive: true);
@@ -28,9 +28,9 @@ Future<String> _writeWav(String path, Float64List samples) async {
 /// A steady sine at [hz] with a few harmonics so the framing/voicing gate has a
 /// real periodic source to lock onto (a pure single sine can read low-confidence
 /// in some frames). Amplitude is kept well below clipping.
-Float64List _tone(double hz, {double sec = 1.5}) {
+Float32List _tone(double hz, {double sec = 1.5}) {
   final n = (_sr * sec).round();
-  final out = Float64List(n);
+  final out = Float32List(n);
   for (var i = 0; i < n; i++) {
     final t = i / _sr;
     out[i] =
@@ -42,9 +42,9 @@ Float64List _tone(double hz, {double sec = 1.5}) {
 }
 
 /// A pitch glide from [loHz] to [hiHz] over [sec] seconds, harmonically rich.
-Float64List _glide(double loHz, double hiHz, {double sec = 2.0}) {
+Float32List _glide(double loHz, double hiHz, {double sec = 2.0}) {
   final n = (_sr * sec).round();
-  final out = Float64List(n);
+  final out = Float32List(n);
   var phase = 0.0;
   for (var i = 0; i < n; i++) {
     final f = loHz + (hiHz - loHz) * (i / (n - 1));
@@ -56,14 +56,14 @@ Float64List _glide(double loHz, double hiHz, {double sec = 2.0}) {
 
 /// A sustained tone whose pitch oscillates sinusoidally — a synthetic vibrato at
 /// [rateHz] / ±[extentCents] around [f0].
-Float64List _vibratoTone(
+Float32List _vibratoTone(
   double f0,
   double rateHz,
   double extentCents, {
   double sec = 1.6,
 }) {
   final n = (_sr * sec).round();
-  final out = Float64List(n);
+  final out = Float32List(n);
   var phase = 0.0;
   for (var i = 0; i < n; i++) {
     final t = i / _sr;
@@ -266,7 +266,7 @@ void main() {
 
   group('edge cases must not crash', () {
     test('pure silence yields no voiced f0 and finite/empty aggregates', () {
-      final silence = Float64List((_sr * 1.0).round()); // all zeros
+      final silence = Float32List((_sr * 1.0).round()); // all zeros
       final m = computeVoiceMetrics(silence, _sr);
       // Framing still produces frames, but nothing should voice.
       expect(_voiced(m.f0), isEmpty, reason: 'silence has no pitch');
@@ -299,7 +299,7 @@ void main() {
     test(
       'a buffer shorter than the FFT window returns one padded frame, no crash',
       () {
-        final shortBuf = Float64List(1000); // < fftSize (2048)
+        final shortBuf = Float32List(1000); // < fftSize (2048)
         // Put a faint 440 Hz tone in it so it is not pure zeros.
         for (var i = 0; i < shortBuf.length; i++) {
           shortBuf[i] = 0.4 * sin(2 * pi * 440 * i / _sr);
@@ -339,10 +339,10 @@ void main() {
     );
 
     test('truly empty input yields zero frames', () {
-      final m = computeVoiceMetrics(Float64List(0), _sr);
+      final m = computeVoiceMetrics(Float32List(0), _sr);
       expect(m.frames, 0);
       expect(m.ringAvg, 0);
-      final spec = computeSpectrogram(Float64List(0), _sr);
+      final spec = computeSpectrogram(Float32List(0), _sr);
       expect(spec.frames, 0);
       expect(analyzeVoiceProfile(m).hasRange, isFalse);
     });

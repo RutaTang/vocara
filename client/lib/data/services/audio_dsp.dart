@@ -7,14 +7,21 @@ import '../../domain/models/spectrogram.dart';
 import '../../domain/models/voice_metrics.dart';
 
 /// Decoded mono PCM plus its sample rate.
+///
+/// Samples are held as Float32: 16-bit PCM and float32 takes (every source
+/// our own engine produces) are exactly representable, and the rare
+/// float64/24/32-bit-integer WAV rounds to 24-bit mantissa precision — far
+/// below any metric's resolution. The halved footprint of the ONE
+/// full-length analysis buffer is the dominant analysis-memory term; all
+/// windowed math downstream still runs in doubles.
 class PcmAudio {
   PcmAudio(this.samples, this.sampleRate);
-  final Float64List samples;
+  final Float32List samples;
   final int sampleRate;
 }
 
 /// Encodes mono [samples] (in [-1, 1]) as a 16-bit PCM WAV. Isolate-safe.
-Uint8List writeWavMono(Float64List samples, int sampleRate) {
+Uint8List writeWavMono(List<double> samples, int sampleRate) {
   final n = samples.length;
   final dataSize = n * 2;
   final b = BytesBuilder();
@@ -96,7 +103,7 @@ PcmAudio? readWavMono(Uint8List bytes) {
   final bytesPerSample = isPcm16 ? 2 : 4;
   final total = math.min(dataLen, bytes.length - dataOffset) ~/ bytesPerSample;
   final frames = total ~/ channels;
-  final out = Float64List(frames);
+  final out = Float32List(frames);
   var p = dataOffset;
   for (var i = 0; i < frames; i++) {
     var sum = 0.0;
@@ -119,7 +126,7 @@ PcmAudio? readWavMono(Uint8List bytes) {
 
 /// Computes a [Spectrogram] from mono [samples]. Pure + isolate-safe.
 Spectrogram computeSpectrogram(
-  Float64List samples,
+  Float32List samples,
   int sampleRate, {
   int fftSize = 2048,
   int hop = 512,
@@ -185,7 +192,7 @@ Spectrogram computeSpectrogram(
 /// first three formants F1/F2/F3 (F17). Same framing as [computeSpectrogram].
 /// Pure + isolate-safe. See [VoiceMetrics] for the meaning of each curve.
 VoiceMetrics computeVoiceMetrics(
-  Float64List samples,
+  Float32List samples,
   int sampleRate, {
   int fftSize = 2048,
   int hop = 512,
@@ -532,8 +539,9 @@ Float64List _hamming(int n) {
 /// Direct Form I stays exact when writing over the input: each output needs
 /// x[i] plus the two PREVIOUS raw inputs, which live in the x1/x2 scalars —
 /// x[i] is captured before it is overwritten, so nothing downstream reads a
-/// filtered value as a raw one.
-void _biquadLpInPlace(Float64List x, double fc, double fs) {
+/// filtered value as a raw one. The recursion state (x1/x2/y1/y2) and every
+/// intermediate stay double; only the stored output rounds to Float32.
+void _biquadLpInPlace(Float32List x, double fc, double fs) {
   final w0 = 2 * math.pi * fc / fs;
   final cosw = math.cos(w0), sinw = math.sin(w0);
   final alpha = sinw / math.sqrt2;
@@ -558,22 +566,22 @@ void _biquadLpInPlace(Float64List x, double fc, double fs) {
 /// Anti-aliased decimation by integer [factor] (three cascaded Butterworth
 /// LPs). MEMORY: exactly one working copy of [x] — the three filter stages
 /// run in place on it. The old shape chained three allocating stages, so a
-/// long take transiently held three extra full-length Float64 buffers; on the
+/// long take transiently held three extra full-length buffers; on the
 /// analysis path that tripled the dominant term of the whole compute's peak.
 /// [x] itself is never mutated (callers keep using the undecimated samples).
-Float64List _decimate(Float64List x, int factor, double fs) {
+Float32List _decimate(Float32List x, int factor, double fs) {
   if (factor <= 1) return x;
   // Anti-alias below the new Nyquist. Three cascaded biquads (~6th order) give
   // markedly more stopband attenuation than two, so audible energy above the
   // fold doesn't alias into the formant bands. fc = 0.45·newSampleRate, i.e.
   // 0.9·newNyquist, so F3 (≤ ~3.8 kHz) is still well inside the passband.
   final fc = 0.45 * fs / factor;
-  final lp = Float64List.fromList(x);
+  final lp = Float32List.fromList(x);
   _biquadLpInPlace(lp, fc, fs);
   _biquadLpInPlace(lp, fc, fs);
   _biquadLpInPlace(lp, fc, fs);
   final m = x.length ~/ factor;
-  final out = Float64List(m);
+  final out = Float32List(m);
   for (var i = 0; i < m; i++) {
     out[i] = lp[i * factor];
   }
@@ -664,7 +672,7 @@ List<List<double>> _durandKerner(List<double> coeffs) {
 /// centered at sample [center]: pre-emphasis → Hamming → autocorrelation →
 /// Levinson → polynomial roots → keep narrow-bandwidth in-range poles.
 List<double> _lpcFormants(
-  Float64List ds,
+  Float32List ds,
   double dsRate,
   int order,
   int win,
@@ -861,7 +869,7 @@ class StreamingStft {
 
   /// Appends [samples] and emits a dB column via [onColumn] for every [hop].
   void addSamples(
-    Float64List samples,
+    Float32List samples,
     void Function(Float32List col) onColumn,
   ) {
     _acc.addAll(samples);
@@ -902,7 +910,7 @@ const double _voicedConfidence = 0.55;
 /// zero-lag dip that makes those methods jump octaves — so it is both more
 /// accurate and far less prone to octave errors. Pure + isolate-safe.
 ({double f0, double periodicity}) yinPitch(
-  Float64List frame,
+  Float32List frame,
   double sampleRate, {
   double fmin = 70,
   double fmax = 1100,
@@ -994,12 +1002,12 @@ const double _voicedConfidence = 0.55;
 /// Extracts a [win]-sample frame from decimated signal [ds] centered at sample
 /// [center] (zero-padded at the edges) and runs [yinPitch] on it at [rate].
 ({double f0, double periodicity}) _yinWindow(
-  Float64List ds,
+  Float32List ds,
   double rate,
   int center,
   int win,
 ) {
-  final frame = Float64List(win);
+  final frame = Float32List(win);
   final start = center - win ~/ 2;
   for (var i = 0; i < win; i++) {
     final idx = start + i;
@@ -1119,9 +1127,9 @@ class LiveVoiceAnalyzer {
   double get frameRate => sampleRate / hop;
 
   /// Appends [samples] and emits a [LiveFrame] via [onFrame] for every [hop].
-  void addSamples(Float64List samples, void Function(LiveFrame f) onFrame) {
+  void addSamples(Float32List samples, void Function(LiveFrame f) onFrame) {
     _acc.addAll(samples);
-    final raw = Float64List(fftSize);
+    final raw = Float32List(fftSize);
     final frame = Float64List(fftSize);
     final logmag = Float64List(fftSize);
     while (_acc.length >= fftSize) {
@@ -1201,7 +1209,7 @@ class LiveVoiceAnalyzer {
       // F0 + voicing via YIN on a decimated copy of this window — but only when
       // the frame is audible, so a silent room skips the decimate + YIN cost
       // every hop (voiced requires audible anyway, so the result is unchanged).
-      Float64List? ds;
+      Float32List? ds;
       var yinF0 = double.nan, periodicity = 0.0;
       if (audible) {
         ds = _decimate(raw, _dsFactor, sampleRate.toDouble());
