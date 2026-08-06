@@ -220,6 +220,13 @@ class MicRecordingController {
   bool _feedingMonitor = false;
   bool _disposed = false;
 
+  /// Bumped every time a NATIVE recording arms (startInputRecording returned
+  /// true). A parked start's failure/invalidation cleanup may only call
+  /// engine.stopInputRecording() while this still equals the value captured
+  /// at ITS OWN arm — otherwise A's cleanup, resuming after A was invalidated
+  /// and B armed, would stop B's native recording (the pending-start ABA).
+  int _nativeArmToken = 0;
+
   /// Bumped whenever a pending start must be abandoned; each [start] snapshots
   /// it before its awaits and arms nothing on a mismatch.
   int _generation = 0;
@@ -299,6 +306,13 @@ class MicRecordingController {
           MicRecordingFailure.fileCreateFailed,
         );
       }
+      final armToken = ++_nativeArmToken;
+      // Only THIS start's cleanup paths may disarm the native recording, and
+      // only while no newer start has armed since (see _nativeArmToken).
+      void disarmIfStillOurs() {
+        if (_nativeArmToken == armToken) engine.stopInputRecording();
+      }
+
       // Ready handshake. startInputRecording == true proves only that the WAV
       // exists — the native input-stream open is deliberately asynchronous (a
       // blocking open froze the UI), so the mic may still be opening, or may
@@ -336,7 +350,7 @@ class MicRecordingController {
       final readyClock = Stopwatch()..start();
       while (readyClock.elapsed < readyTimeout) {
         if (_disposed || _generation != generation) {
-          engine.stopInputRecording();
+          disarmIfStillOurs();
           _discardQuietly(destination, path);
           return const MicRecordingStart.invalidated();
         }
@@ -352,7 +366,16 @@ class MicRecordingController {
             baselinePairing = applied;
             baselineWritten = engine.recordWrittenFrames();
           }
-          if (engine.recordWrittenFrames() > baselineWritten) {
+          if (engine.recordWrittenFrames() > baselineWritten &&
+              engine.inputAppliedState() == applied &&
+              engine.inputStreamState() == stream) {
+            // The growth is BRACKETED: the pairing was re-read after the
+            // progress observation and matched the opening snapshot bit for
+            // bit, so no teardown/restart interleaved — a SetInput could
+            // otherwise clear running, let the outgoing stream's in-flight
+            // callback grow the counter, and fail its reopen while this poll
+            // was still holding the stale snapshot (the state → progress →
+            // state discipline the native side documents).
             ready = true;
             break;
           }
@@ -362,7 +385,7 @@ class MicRecordingController {
         await Future<void>.delayed(const Duration(milliseconds: 25));
       }
       if (!ready) {
-        engine.stopInputRecording();
+        disarmIfStillOurs();
         _discardQuietly(destination, path);
         return const MicRecordingStart.failed(
           MicRecordingFailure.inputNotDelivering,

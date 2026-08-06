@@ -742,6 +742,99 @@ void main() {
     controller.dispose();
   });
 
+  testWidgets('the growth observation is BRACKETED: a state change between '
+      'progress and the confirming re-read refuses ready', (tester) async {
+    // Opening reads say running (gen 1) and the counter grows — but by the
+    // confirming re-read the state word has changed (a SetInput cleared
+    // running; the growth came from the outgoing stream's in-flight
+    // callback). The state → progress → state bracket must refuse; the state
+    // never recovers here, so the start times out.
+    final engine = _FakeEngine()
+      ..streamStateScript =
+          [3, 2] // running at the open read, gone at recheck
+      ..recordWrittenScript = [480]
+      ..writtenTailStep = 480; // the counter keeps growing (stale callback)
+    final dest = _FakeDestination();
+    final controller = MicRecordingController(
+      acquireEngine: () => engine,
+      requestPermission: () async => true,
+      readyTimeout: const Duration(milliseconds: 1),
+    );
+
+    var settled = false;
+    final future = controller.start(dest.strategy);
+    unawaited(future.whenComplete(() => settled = true));
+    for (var i = 0; i < 200 && !settled; i++) {
+      await tester.pump(const Duration(milliseconds: 25));
+    }
+    expect(settled, isTrue, reason: 'the ready wait must hit its deadline');
+    final result = await future;
+    await tester.pump();
+
+    expect(result.started, isFalse);
+    expect(result.failure, MicRecordingFailure.inputNotDelivering);
+    expect(
+      engine.stateReads,
+      greaterThanOrEqualTo(2),
+      reason: 'the confirming re-read must actually have happened',
+    );
+    controller.dispose();
+  });
+
+  testWidgets('pending-start ABA: an invalidated start\'s cleanup never '
+      'disarms the native recording a NEWER start armed', (tester) async {
+    // A arms natively and parks in its ready wait (nothing ever lands in its
+    // ring); A is invalidated and B starts immediately. A's cleanup used to
+    // call stopInputRecording() unconditionally — stopping B's native
+    // recording. The arm token must make it a no-op.
+    final engine = _FakeEngine()
+      ..recordWrittenScript = [0]
+      ..writtenTailStep = 0; // A never becomes ready
+    final destA = _FakeDestination(path: '/fake/a.wav');
+    final destB = _FakeDestination(path: '/fake/b.wav');
+    final controller = MicRecordingController(
+      acquireEngine: () => engine,
+      requestPermission: () async => true,
+    );
+
+    var aSettled = false;
+    final a = controller.start(destA.strategy);
+    unawaited(a.whenComplete(() => aSettled = true));
+    // Let A reach its ready wait (destination created + native arm done).
+    for (var i = 0; i < 50 && destA.created.isEmpty; i++) {
+      await tester.pump(const Duration(milliseconds: 5));
+    }
+    expect(engine.startCalls, 1, reason: 'A armed natively');
+
+    controller.invalidatePendingStart();
+    // B arms while A's cleanup is still parked behind its poll sleep. Reset
+    // the written script so B's ready handshake succeeds.
+    engine
+      ..recordWrittenScript = [512]
+      ..writtenTailStep = 480
+      ..writtenReads = 0;
+    var bSettled = false;
+    final b = controller.start(destB.strategy);
+    unawaited(b.whenComplete(() => bSettled = true));
+    for (var i = 0; i < 200 && !(aSettled && bSettled); i++) {
+      await tester.pump(const Duration(milliseconds: 25));
+    }
+    final aResult = await a;
+    final bResult = await b;
+    await tester.pump();
+
+    expect(aResult.started, isFalse, reason: 'A was invalidated');
+    expect(bResult.started, isTrue, reason: 'B armed');
+    expect(
+      engine.stopCalls,
+      0,
+      reason: "A's invalidation cleanup must not stop B's native recording",
+    );
+    expect(controller.isRecording, isTrue, reason: 'B survives');
+    controller.stop();
+    controller.dispose();
+  });
+
   testWidgets('ring overflow is surfaced: stop reports droppedFrames', (
     tester,
   ) async {
