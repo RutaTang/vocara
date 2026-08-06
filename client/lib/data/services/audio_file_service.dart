@@ -27,6 +27,16 @@ class AudioFileService {
   final LocalStorageService _storage;
 
   Future<Directory> _audioDir(String practiceId) async {
+    // Last line of defense for ids used as path components (the sync wire
+    // door already enforces this shape): a separator or `..` would escape
+    // the audio tree.
+    if (!RegExp(r'^[0-9A-Z]{26}$').hasMatch(practiceId)) {
+      throw ArgumentError.value(
+        practiceId,
+        'practiceId',
+        'not a well-formed id',
+      );
+    }
     final base = await _storage.assetDir('audio');
     final dir = Directory(p.join(base.path, practiceId));
     if (!await dir.exists()) {

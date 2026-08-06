@@ -1388,10 +1388,21 @@ pub extern "C" fn ve_punch_wav(
                 return -1;
             }
         }
-        if let Some(old_decl) = declared_frames(old_p) {
-            if old_decl > ceiling_pre {
-                return -1;
+        // Old's duration only matters when a prefix of it is actually kept: a split of 0
+        // never decodes old, so a too-long old must not veto the splice.
+        if split_pre > 0 {
+            if let Some(old_decl) = declared_frames(old_p) {
+                if old_decl > ceiling_pre {
+                    return -1;
+                }
             }
+        }
+        // The output must NEVER be one of the inputs: WavStream::create truncates its
+        // target, so an in-place splice destroyed the source before it was read (a 38 KB
+        // take became a 44-byte header). Compared by identity (dev, ino) when both paths
+        // exist, so aliases/symlinks are caught, not just equal strings.
+        if paths_alias(out_p, old_p) || paths_alias(out_p, new_p) {
+            return -1;
         }
         let decode = |p: &str| -> Option<Vec<[Smp; CHANNELS]>> {
             // Both inputs are normally takes this app recorded, but nothing enforces that,
@@ -1404,78 +1415,102 @@ pub extern "C" fn ve_punch_wav(
         };
         // Checked before any decode: the old `as usize` cast of the i128 split TRUNCATED a
         // huge split_ms (wrapping to a small value — no overflow, but silently wrong
-        // semantics). The ceiling is compared in i128, before any cast.
-        let ceiling_frames = (MAX_PLAYBACK_SECS * rate as f64) as i128;
+        // semantics). The ceiling is compared in i128, before any cast. It binds BOTH the
+        // 60-minute duration budget and what a RIFF u32 data size can describe — past
+        // 4 GiB a plain WAV header silently stops covering its own tail, so such an
+        // output is refused up front rather than written broken.
+        let max_riff_frames = ((u32::MAX as i128) - 44) / (CHANNELS as i128 * 4);
+        let ceiling_frames = ((MAX_PLAYBACK_SECS * rate as f64) as i128).min(max_riff_frames);
         let split_i128 = (split_ms.max(0) as i128 * rate as i128) / 1000;
         if split_i128 > ceiling_frames {
             return -1;
         }
         let split = split_i128 as usize;
 
-        // STREAMED output: frames go straight into the WAV writer, so no full-length
-        // accumulator ever exists — the peak is ONE decoded input at a time (the old
-        // shape held new's decode AND the flat output simultaneously, ~2 ceilings for a
-        // split=0 splice of a long take). WavStream patches its header periodically and
-        // finalize() stamps exact sizes, mirroring the recording writer.
-        let mut wav = match crate::wav::WavStream::create(out_p, CHANNELS as u16, rate) {
-            Ok(w) => w,
-            Err(_) => return -1,
-        };
-        let mut written: usize = 0;
-        let write_frame = |wav: &mut crate::wav::WavStream, f: [Smp; CHANNELS]| -> bool {
-            wav.write_sample(f[0]).is_ok() && wav.write_sample(f[1]).is_ok()
-        };
-
-        // Phase 1 — old's keep prefix + silence pad. A split of 0 keeps NOTHING of old, so
-        // decoding it would be pure waste (and a full-length transient): skip entirely.
-        let pad;
-        if split > 0 {
-            let old_frames = match decode(old_p) {
-                Some(a) => a,
-                None => return -1,
+        // TRANSACTIONAL output: stream into a sibling temp file and atomically rename it
+        // over `out_p` only after finalize succeeds. Any failure (or a crash) leaves the
+        // destination untouched — the old shape truncated the final path up front, so a
+        // failed splice destroyed whatever lived there, and a partial write masqueraded
+        // as a take.
+        let tmp_path = format!("{out_p}.punch{}.tmp", std::process::id());
+        let written = (|| -> Option<usize> {
+            let mut wav = crate::wav::WavStream::create(&tmp_path, CHANNELS as u16, rate).ok()?;
+            let write_frame = |wav: &mut crate::wav::WavStream, f: [Smp; CHANNELS]| -> bool {
+                wav.write_sample(f[0]).is_ok() && wav.write_sample(f[1]).is_ok()
             };
-            let keep = split.min(old_frames.len());
-            pad = split - keep; // silence when the cursor sits past old's end
-            for &f in &old_frames[..keep] {
-                if !write_frame(&mut wav, f) {
-                    return -1;
+
+            // Phase 1 — old's keep prefix + silence pad. A split of 0 keeps NOTHING of
+            // old, so decoding it would be pure waste (and a full-length transient):
+            // skip entirely.
+            let pad;
+            if split > 0 {
+                let old_frames = decode(old_p)?;
+                let keep = split.min(old_frames.len());
+                pad = split - keep; // silence when the cursor sits past old's end
+                for &f in &old_frames[..keep] {
+                    if !write_frame(&mut wav, f) {
+                        return None;
+                    }
+                }
+                // old drops here — before new decodes (the serialization's point).
+            } else {
+                pad = 0;
+            }
+            for _ in 0..pad {
+                if !write_frame(&mut wav, [0.0, 0.0]) {
+                    return None;
                 }
             }
-            // old drops here — before new decodes (the serialization's point).
-        } else {
-            pad = 0;
-        }
-        for _ in 0..pad {
-            if !write_frame(&mut wav, [0.0, 0.0]) {
-                return -1;
-            }
-        }
-        written += split;
 
-        // Phase 2 — new, decoded only now.
-        let new_frames = match decode(new_p) {
-            Some(b) => b,
-            None => return -1,
-        };
-        // The OUTPUT stays bounded even though it never materializes in memory.
-        match split.checked_add(new_frames.len()) {
-            Some(t) if (t as i128) <= ceiling_frames => {}
-            _ => return -1,
-        }
-        for &f in &new_frames {
-            if !write_frame(&mut wav, f) {
-                return -1;
+            // Phase 2 — new, decoded only now.
+            let new_frames = decode(new_p)?;
+            // The OUTPUT stays bounded even though it never materializes in memory.
+            match split.checked_add(new_frames.len()) {
+                Some(t) if (t as i128) <= ceiling_frames => {}
+                _ => return None,
             }
-        }
-        written += new_frames.len();
-        drop(new_frames);
+            for &f in &new_frames {
+                if !write_frame(&mut wav, f) {
+                    return None;
+                }
+            }
+            let total = split + new_frames.len();
+            drop(new_frames);
 
-        match wav.finalize() {
-            Ok(_) => written as i64,
-            Err(_) => -1,
+            wav.finalize().ok()?;
+            Some(total)
+        })();
+
+        match written {
+            Some(n) => {
+                // Atomic publish: the destination only ever holds a COMPLETE splice.
+                if std::fs::rename(&tmp_path, out_p).is_err() {
+                    let _ = std::fs::remove_file(&tmp_path);
+                    return -1;
+                }
+                n as i64
+            }
+            None => {
+                let _ = std::fs::remove_file(&tmp_path);
+                -1
+            }
         }
     }))
     .unwrap_or(-1)
+}
+
+/// True when `a` and `b` name the same file: equal strings, or (when both exist) the same
+/// (device, inode) identity — catching relative-path aliases and symlinks, which a plain
+/// string comparison would wave through.
+fn paths_alias(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::metadata(a), std::fs::metadata(b)) {
+        (Ok(ma), Ok(mb)) => ma.dev() == mb.dev() && ma.ino() == mb.ino(),
+        _ => false,
+    }
 }
 
 /// Stage a track from already-decoded PCM (from [`ve_decode`]), caching it under `path`. The
@@ -2301,6 +2336,119 @@ mod punch_tests {
             before_ok + 2,
             "a real splice decodes exactly its two inputs"
         );
+        let _ = std::fs::remove_file(&old);
+        let _ = std::fs::remove_file(&new);
+        let _ = std::fs::remove_file(&out);
+    }
+
+    #[test]
+    fn an_in_place_splice_is_refused_and_the_source_survives() {
+        // WavStream::create TRUNCATES its target: out == old used to cut the source to a
+        // 44-byte header before it was ever read (measured on a real take). Same-file
+        // identity is checked by (dev, ino), so a relative-path alias is caught too.
+        let old = temp_wav("ip_old");
+        let new = temp_wav("ip_new");
+        crate::wav::write_wav_f32(&old, &[0.1; 96], 2, 48_000).unwrap();
+        crate::wav::write_wav_f32(&new, &[0.2; 96], 2, 48_000).unwrap();
+        let size_before = std::fs::metadata(&old).unwrap().len();
+        let c = |p: &std::path::Path| CString::new(p.to_str().unwrap()).unwrap();
+        let (c_old, c_new) = (c(&old), c(&new));
+
+        let frames =
+            super::ve_punch_wav(c_old.as_ptr(), c_new.as_ptr(), 1, 48_000, c_old.as_ptr());
+        assert_eq!(frames, -1, "an in-place splice must be refused");
+        assert_eq!(
+            std::fs::metadata(&old).unwrap().len(),
+            size_before,
+            "the source must be byte-identical after the refusal"
+        );
+
+        // The same file addressed through a ./ alias must also be caught.
+        let aliased = old.parent().unwrap().join(format!(
+            "./{}",
+            old.file_name().unwrap().to_str().unwrap()
+        ));
+        let c_alias = CString::new(aliased.to_str().unwrap()).unwrap();
+        let frames =
+            super::ve_punch_wav(c_old.as_ptr(), c_new.as_ptr(), 1, 48_000, c_alias.as_ptr());
+        assert_eq!(frames, -1, "a path alias of the input must be refused");
+        assert_eq!(std::fs::metadata(&old).unwrap().len(), size_before);
+
+        let _ = std::fs::remove_file(&old);
+        let _ = std::fs::remove_file(&new);
+    }
+
+    #[test]
+    fn a_failed_splice_leaves_no_output_and_no_temp_litter() {
+        // Old is fine, new is missing: the splice fails AFTER the output stream was
+        // created. The destination must not exist (no partial WAV masquerading as a
+        // take) and the temp file must be cleaned up.
+        let old = temp_wav("fx_old");
+        let new = temp_wav("fx_new_missing");
+        let out = temp_wav("fx_out");
+        crate::wav::write_wav_f32(&old, &[0.1; 96], 2, 48_000).unwrap();
+        let c = |p: &std::path::Path| CString::new(p.to_str().unwrap()).unwrap();
+        let (c_old, c_new, c_out) = (c(&old), c(&new), c(&out));
+
+        let frames = super::ve_punch_wav(c_old.as_ptr(), c_new.as_ptr(), 1, 48_000, c_out.as_ptr());
+        assert_eq!(frames, -1);
+        assert!(!out.exists(), "a failed splice must not publish an output");
+        let dir = out.parent().unwrap();
+        let stem = out.file_name().unwrap().to_str().unwrap().to_string();
+        let litter: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with(&stem))
+            .collect();
+        assert!(litter.is_empty(), "no temp litter may survive a failure");
+
+        // And a PRE-EXISTING file at the destination survives a failed re-splice
+        // untouched (the old shape truncated it up front).
+        crate::wav::write_wav_f32(&out, &[0.3; 96], 2, 48_000).unwrap();
+        let before = std::fs::metadata(&out).unwrap().len();
+        let frames = super::ve_punch_wav(c_old.as_ptr(), c_new.as_ptr(), 1, 48_000, c_out.as_ptr());
+        assert_eq!(frames, -1);
+        assert_eq!(
+            std::fs::metadata(&out).unwrap().len(),
+            before,
+            "a failed splice must leave the previous output intact"
+        );
+
+        let _ = std::fs::remove_file(&old);
+        let _ = std::fs::remove_file(&out);
+    }
+
+    #[test]
+    fn a_zero_split_ignores_old_entirely_even_when_old_is_overlong() {
+        // split == 0 never decodes old, so old's declared duration is irrelevant — the
+        // pre-check used to veto the splice off a file it would never read. A header
+        // DECLARING two hours (no body needed) must not block a zero-split splice.
+        let old = temp_wav("ol_old");
+        let new = temp_wav("ol_new");
+        let out = temp_wav("ol_out");
+        let two_hours_frames: u32 = 2 * 3600 * 48_000;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&3u16.to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&48_000u32.to_le_bytes());
+        bytes.extend_from_slice(&(48_000u32 * 8).to_le_bytes());
+        bytes.extend_from_slice(&8u16.to_le_bytes());
+        bytes.extend_from_slice(&32u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&two_hours_frames.wrapping_mul(8).to_le_bytes());
+        std::fs::write(&old, &bytes).unwrap();
+        crate::wav::write_wav_f32(&new, &[0.2; 96], 2, 48_000).unwrap();
+        let c = |p: &std::path::Path| CString::new(p.to_str().unwrap()).unwrap();
+        let (c_old, c_new, c_out) = (c(&old), c(&new), c(&out));
+
+        let frames = super::ve_punch_wav(c_old.as_ptr(), c_new.as_ptr(), 0, 48_000, c_out.as_ptr());
+        assert_eq!(frames, 48, "output is exactly new; old's length is irrelevant");
+
         let _ = std::fs::remove_file(&old);
         let _ = std::fs::remove_file(&new);
         let _ = std::fs::remove_file(&out);

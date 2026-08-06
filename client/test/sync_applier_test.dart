@@ -300,6 +300,53 @@ void main() {
     expect(await row('BAD'), isNull);
   });
 
+  test('a record whose id would escape the media tree is quarantined alone '
+      '(ids become path components)', () async {
+    // `../../x` as a practice id would later be joined into
+    // `audio/<practiceId>/` and handed to recursive deletes — a hostile sync
+    // record must never get a path metacharacter into the table.
+    final evil = RemoteRecord(
+      table: 'practices',
+      columns: {
+        ...practice('EVIL', 'escape', hlc(910)).columns,
+        'id': '../../escape',
+      },
+    );
+    // An FK id column is the same primitive: technique media directories are
+    // keyed by the REFERENCED id.
+    final evilFk = RemoteRecord(
+      table: 'practices',
+      columns: {
+        ...practice('EVILFK', 'fk', hlc(915)).columns,
+        'separation_asset_id': '../pool',
+      },
+    );
+    final store = QuarantineStore(db);
+    final parkingApplier = SyncApplier(
+      db,
+      HlcClock(node: _id('LOCAL'), now: () => 1000),
+      builder: SyncRowBuilder(db),
+      quarantine: store,
+    );
+    final res = await parkingApplier.apply([
+      practice('GOODA', 'first', hlc(900)),
+      evil,
+      evilFk,
+      practice('GOODB', 'second', hlc(920)),
+    ]);
+    expect(res.applied, 2);
+    expect(res.failed, 2);
+    expect((await row('GOODA'))!['title'], 'first');
+    expect((await row('GOODB'))!['title'], 'second');
+    final parked = await store.list();
+    expect(parked, hasLength(2));
+    expect(parked.map((q) => q.reason), everyElement(startsWith('invalid-id')));
+    final count = await db
+        .customSelect('SELECT COUNT(*) AS n FROM practices')
+        .getSingle();
+    expect(count.read<int>('n'), 2, reason: 'neither hostile row may land');
+  });
+
   group('missing-column gate (full-row wire contract)', () {
     Future<String> hlcPackedOf(String id) async {
       final r = await db

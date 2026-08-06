@@ -217,6 +217,10 @@ class SpectrogramService {
             };
           }
           out[frame + f] = acc * inv;
+          // Judge finiteness on the NARROWED value: a float64 WAV can carry
+          // 1e300 — finite in the double above, Infinity once stored into
+          // Float32 — and one Inf poisons every FFT and metric downstream.
+          if (!out[frame + f].isFinite) out[frame + f] = 0.0;
         }
         frame += got;
       }

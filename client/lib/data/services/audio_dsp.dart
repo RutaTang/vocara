@@ -120,6 +120,10 @@ PcmAudio? readWavMono(Uint8List bytes) {
       p += bytesPerSample;
     }
     out[i] = sum / channels;
+    // Judge finiteness on the NARROWED value: a multi-channel sum of large
+    // finite floats can overflow the Float32 store even though `sum` itself
+    // was finite in double precision.
+    if (!out[i].isFinite) out[i] = 0.0;
   }
   return PcmAudio(out, sampleRate);
 }

@@ -16,7 +16,17 @@ class TechniqueMediaService {
 
   final LocalStorageService _storage;
 
+  /// Last line of defense for ids used as path components (the wire door
+  /// already enforces this shape): a separator or `..` in an id would escape
+  /// the media tree — worst on the recursive delete below.
+  static void _checkPathComponent(String id) {
+    if (!RegExp(r'^[0-9A-Z]{26}$').hasMatch(id)) {
+      throw ArgumentError.value(id, 'techniqueId', 'not a well-formed id');
+    }
+  }
+
   Future<Directory> _mediaDir(String techniqueId) async {
+    _checkPathComponent(techniqueId);
     final base = await _storage.assetDir('technique_media');
     final dir = Directory(p.join(base.path, techniqueId));
     if (!await dir.exists()) {
@@ -60,6 +70,7 @@ class TechniqueMediaService {
 
   /// Removes the whole media directory for a deleted technique (best effort).
   Future<void> deleteTechniqueMedia(String techniqueId) async {
+    _checkPathComponent(techniqueId);
     final base = await _storage.assetPath('technique_media');
     try {
       await Directory(p.join(base, techniqueId)).delete(recursive: true);

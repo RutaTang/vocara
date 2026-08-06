@@ -114,7 +114,7 @@ void main() {
 
       final edit = AudioEditService(files: _TempFiles(dir));
       final parts = await edit.splitWav(
-        practiceId: 'p',
+        practiceId: 'P0000000000000000000000000',
         sourcePath: srcPath,
         splitFileMs: 400,
       );
@@ -130,7 +130,7 @@ void main() {
       expect(second.samples.first, closeTo(samples[3200], 2e-4));
 
       final mergedPath = await edit.concatWav(
-        practiceId: 'p',
+        practiceId: 'P0000000000000000000000000',
         firstPath: parts.firstPath,
         secondPath: parts.secondPath,
       );
@@ -162,7 +162,7 @@ void main() {
 
     final edit = AudioEditService(files: _TempFiles(dir));
     final parts = await edit.splitWav(
-      practiceId: 'p',
+      practiceId: 'P0000000000000000000000000',
       sourcePath: srcPath,
       splitFileMs: 250,
     );
@@ -189,7 +189,11 @@ void main() {
 
     final edit = AudioEditService(files: _TempFiles(dir));
     expect(
-      () => edit.concatWav(practiceId: 'p', firstPath: a, secondPath: b),
+      () => edit.concatWav(
+        practiceId: 'P0000000000000000000000000',
+        firstPath: a,
+        secondPath: b,
+      ),
       throwsA(isA<FormatException>()),
     );
 
@@ -197,7 +201,7 @@ void main() {
     final c = '${dir.path}/c.wav';
     await File(c).writeAsBytes(writeWavMono(tone, 44100));
     final out = await edit.concatWav(
-      practiceId: 'p',
+      practiceId: 'P0000000000000000000000000',
       firstPath: a,
       secondPath: c,
     );
@@ -226,7 +230,7 @@ void main() {
 
     final edit = AudioEditService(files: _TempFiles(dir));
     final out = await edit.concatWav(
-      practiceId: 'p',
+      practiceId: 'P0000000000000000000000000',
       firstPath: pcm,
       secondPath: ext,
     );
@@ -254,11 +258,19 @@ void main() {
 
     final edit = AudioEditService(files: _TempFiles(dir));
     expect(
-      () => edit.splitWav(practiceId: 'p', sourcePath: path, splitFileMs: 100),
+      () => edit.splitWav(
+        practiceId: 'P0000000000000000000000000',
+        sourcePath: path,
+        splitFileMs: 100,
+      ),
       throwsA(isA<FormatException>()),
     );
     expect(
-      () => edit.concatWav(practiceId: 'p', firstPath: path, secondPath: path),
+      () => edit.concatWav(
+        practiceId: 'P0000000000000000000000000',
+        firstPath: path,
+        secondPath: path,
+      ),
       throwsA(isA<FormatException>()),
     );
   });
@@ -283,8 +295,11 @@ void main() {
 
       final edit = AudioEditService(files: _TempFiles(dir));
       expect(
-        () =>
-            edit.splitWav(practiceId: 'p', sourcePath: path, splitFileMs: 100),
+        () => edit.splitWav(
+          practiceId: 'P0000000000000000000000000',
+          sourcePath: path,
+          splitFileMs: 100,
+        ),
         throwsA(isA<FormatException>()),
       );
     },
@@ -311,8 +326,11 @@ void main() {
 
       final edit = AudioEditService(files: _TempFiles(dir));
       expect(
-        () =>
-            edit.splitWav(practiceId: 'p', sourcePath: path, splitFileMs: 100),
+        () => edit.splitWav(
+          practiceId: 'P0000000000000000000000000',
+          sourcePath: path,
+          splitFileMs: 100,
+        ),
         throwsA(isA<FormatException>()),
       );
     },
@@ -343,7 +361,7 @@ void main() {
 
     final edit = AudioEditService(files: _TempFiles(dir));
     final parts = await edit.splitWav(
-      practiceId: 'p',
+      practiceId: 'P0000000000000000000000000',
       sourcePath: path,
       splitFileMs: 250,
     );
@@ -381,16 +399,19 @@ void main() {
 
     final edit = AudioEditService(files: _TempFiles(dir));
     final parts = await edit.splitWav(
-      practiceId: 'p',
+      practiceId: 'P0000000000000000000000000',
       sourcePath: srcPath,
       splitFileMs: 500,
     );
     final merged = await edit.concatWav(
-      practiceId: 'p',
+      practiceId: 'P0000000000000000000000000',
       firstPath: parts.firstPath,
       secondPath: parts.secondPath,
     );
-    final copy = await edit.duplicate(practiceId: 'p', sourcePath: srcPath);
+    final copy = await edit.duplicate(
+      practiceId: 'P0000000000000000000000000',
+      sourcePath: srcPath,
+    );
 
     for (final path in [parts.firstPath, parts.secondPath, merged, copy]) {
       expect(
@@ -410,7 +431,11 @@ void main() {
 
     final edit = AudioEditService(files: _TempFiles(dir));
     expect(
-      () => edit.splitWav(practiceId: 'p', sourcePath: bogus, splitFileMs: 100),
+      () => edit.splitWav(
+        practiceId: 'P0000000000000000000000000',
+        sourcePath: bogus,
+        splitFileMs: 100,
+      ),
       throwsA(isA<FormatException>()),
     );
   });

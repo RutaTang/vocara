@@ -105,13 +105,30 @@ void main() {
 
     // A draft staging copy (what the service itself imports) is still deleted.
     final staged = await media.importMedia(
-      techniqueId: 't1',
+      techniqueId: 'T1000000000000000000000000',
       sourcePath: await makeSrc('b.wav', [4, 5]),
     );
     expect(await File(staged).exists(), isTrue);
     await media.deleteMedia(staged);
     expect(await File(staged).exists(), isFalse);
   });
+
+  test(
+    'a path-metacharacter technique id never reaches the filesystem',
+    () async {
+      // Ids become directory names and recursive-delete targets. The sync wire
+      // door quarantines hostile ids; this is the service-level last line.
+      for (final evil in ['../..', 'a/b', '..', 'AAAAAAAAAAAAAAAAAAAAAAAA/.']) {
+        expect(
+          () => media.importMedia(techniqueId: evil, sourcePath: 'irrelevant'),
+          throwsArgumentError,
+        );
+        expect(() => media.deleteTechniqueMedia(evil), throwsArgumentError);
+      }
+      // A well-formed id still works end to end (importMedia exercised above).
+      await media.deleteTechniqueMedia('T1000000000000000000000000');
+    },
+  );
 
   test('deleteMedia with the storage root torn down completes silently and '
       'creates NOTHING', () async {
@@ -121,13 +138,15 @@ void main() {
     // assetDir, whose mkdir raced the teardown into PathNotFoundException —
     // an unhandled zone error escaping from dispose.
     final staged = await media.importMedia(
-      techniqueId: 't1',
+      techniqueId: 'T1000000000000000000000000',
       sourcePath: await makeSrc('gone.wav', [7, 8]),
     );
     await tmp.delete(recursive: true);
 
     await media.deleteMedia(staged); // must not throw
-    await media.deleteTechniqueMedia('t1'); // must not throw
+    await media.deleteTechniqueMedia(
+      'T1000000000000000000000000',
+    ); // must not throw
 
     expect(
       await tmp.exists(),

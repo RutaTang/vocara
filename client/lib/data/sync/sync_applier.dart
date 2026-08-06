@@ -240,6 +240,20 @@ class SyncApplier {
               );
               continue;
             }
+            // Entity ids become filesystem path components once applied
+            // (`audio/<practiceId>/`, `technique_media/<techniqueId>/`, and
+            // the recursive deletes of both), so a hostile id carrying `../`
+            // or a separator is a write/delete primitive OUTSIDE the media
+            // tree. Parked per record, like every other malformed shape —
+            // and like them, deliberately here rather than in fromJson,
+            // which fails whole pages.
+            try {
+              SyncRow.checkIdShapes(rec.fields);
+            } on FormatException catch (e) {
+              result.failed++;
+              await _quarantine(rec, 'invalid-id: ${e.message}');
+              continue;
+            }
             // A record from a NEWER record-schema version is quarantined
             // before the column gate, keeping the pre-gate behavior (and its
             // apply-failed reason) for genuinely newer peers: its shape is by

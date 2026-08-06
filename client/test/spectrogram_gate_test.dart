@@ -447,5 +447,56 @@ void main() {
       b.add(data);
       await check('mono float32', b.toBytes());
     });
+
+    test('float64 finite-but-huge samples cannot smuggle Infinity through the '
+        'Float32 narrowing', () async {
+      // 1e300 is finite in the double the f64 branch reads — but Infinity
+      // once stored into the Float32 analysis buffer. The finiteness check
+      // must judge the NARROWED value, or one such sample poisons every FFT
+      // and metric downstream.
+      final data = Uint8List(6 * 8);
+      final dv = ByteData.sublistView(data);
+      dv.setFloat64(0, 0.5, Endian.little);
+      dv.setFloat64(8, 1e300, Endian.little);
+      dv.setFloat64(16, -1e300, Endian.little);
+      dv.setFloat64(24, double.nan, Endian.little);
+      dv.setFloat64(32, 0.25, Endian.little);
+      dv.setFloat64(40, -0.125, Endian.little);
+      final b = BytesBuilder();
+      void str(String s) => b.add(s.codeUnits);
+      void u32(int v) => b.add(
+        (ByteData(4)..setUint32(0, v, Endian.little)).buffer.asUint8List(),
+      );
+      void u16(int v) => b.add(
+        (ByteData(2)..setUint16(0, v, Endian.little)).buffer.asUint8List(),
+      );
+      str('RIFF');
+      u32(36 + data.length);
+      str('WAVE');
+      str('fmt ');
+      u32(16);
+      u16(3); // IEEE float
+      u16(1);
+      u32(48000);
+      u32(48000 * 8);
+      u16(8);
+      u16(64);
+      str('data');
+      u32(data.length);
+      b.add(data);
+      final f = await write(b.toBytes());
+      final admission = (await SpectrogramService.admitForAnalysis(f))!;
+      final pcm = SpectrogramService.readWavMonoStreaming(f.path, admission)!;
+      expect(
+        pcm.samples.every((s) => s.isFinite),
+        isTrue,
+        reason: 'no sample may narrow into Infinity',
+      );
+      expect(pcm.samples[1], 0.0);
+      expect(pcm.samples[2], 0.0);
+      expect(pcm.samples[3], 0.0);
+      expect(pcm.samples[0], closeTo(0.5, 1e-9));
+      expect(pcm.samples[4], closeTo(0.25, 1e-9));
+    });
   });
 }

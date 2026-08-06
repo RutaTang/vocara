@@ -51,10 +51,10 @@ objc2-core-foundation = { version = "0.3", optional = true, default-features = f
 rubato = { version = "4.0.0", optional = true }
 
 [profile.release]
-# Unwinding across the C ABI is UB; abort is deterministic. We validate inputs at the FFI
-# edge and wrap every entry point in catch_unwind so a panic never crosses the boundary.
-panic = "abort"
+# Default panic = "unwind", NOT abort: every FFI entry point is wrapped in catch_unwind,
+# and that guard only works when panics unwind. The old `panic = "abort"` made all those
+# guards dead code — a panic anywhere below (e.g. symphonia's TimeBase asserting on a
+# zero-sample-rate file) aborted the whole app instead of returning a decode error.
+# Unwinding never crosses the C ABI: catch_unwind at the boundary is the contract.
 lto = "fat"
 codegen-units = 1
-
-# NB: dev/test keep the default unwind so `cargo test` works and catch_unwind is exercised.

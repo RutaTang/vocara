@@ -1305,6 +1305,18 @@ pub fn decode_file(
 
     let err = |m: String| DecodeError::Other(m);
     let file = std::fs::File::open(path).map_err(|e| err(format!("open {path}: {e}")))?;
+
+    // WAV pre-sniff BEFORE symphonia sees the bytes: a zero sample rate makes symphonia's
+    // TimeBase constructor panic inside the probe itself, so the envelope must be judged
+    // from our own header parse for the one format an attacker can trivially craft. (The
+    // release profile unwinds and every FFI entry catches, so a panic in some other
+    // container's probe is still an error, not an abort — this makes the common case a
+    // clean deterministic refusal instead of an unwind.)
+    if let Ok(Some(rate)) = sniff_wav_sample_rate(path) {
+        if !(MIN_SRC_RATE..=MAX_SRC_RATE).contains(&rate) {
+            return Err(err(format!("source rate {rate} outside supported envelope")));
+        }
+    }
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
     let mut hint = Hint::new();
@@ -1329,6 +1341,14 @@ pub fn decode_file(
         .ok_or_else(|| err("no default track".to_string()))?;
     let track_id = track.id;
     let src_rate = track.codec_params.sample_rate.unwrap_or(44_100);
+    // Absolute source-rate envelope, independent of any caller ceiling. The FLOOR is a
+    // memory/CPU bound, not taste: resampling a 1 Hz source to 48 kHz is a 48000x ratio,
+    // which makes the sinc resampler plan ~49M output frames per 1024-frame input chunk —
+    // a decoder-driven allocation/CPU DoS from a tiny file. No real recording sits
+    // outside [8 kHz, 384 kHz]; the same envelope the Dart analysis gate enforces.
+    if !(MIN_SRC_RATE..=MAX_SRC_RATE).contains(&src_rate) {
+        return Err(err(format!("source rate {src_rate} outside supported envelope")));
+    }
     if max_src_rate > 0 && src_rate > max_src_rate {
         return Err(DecodeError::TooLong);
     }
@@ -1378,9 +1398,7 @@ pub fn decode_file(
             // the symphonia paths — analysis via ve_decode AND playback staging).
             let l = frame[0];
             let r = if ch > 1 { frame[1] } else { l };
-            let l = if l.is_finite() { l } else { 0.0 };
-            let r = if r.is_finite() { r } else { 0.0 };
-            out.push([l, r]);
+            out.push([scrub_sample(l), scrub_sample(r)]);
         }
         // Containers without a declared frame count (e.g. plain mp3) can only be bounded
         // mid-decode: bail the moment the budget is crossed, keeping the peak at ~budget.
@@ -1392,6 +1410,58 @@ pub fn decode_file(
         return Err(err(format!("decoded no audio from {path}")));
     }
     Ok((out, src_rate))
+}
+
+/// Absolute source-sample-rate envelope for every decoded file, mirroring the Dart analysis
+/// gate. Outside it nothing is a real recording, and the extremes are attacks: 0 panics
+/// symphonia's TimeBase, 1 Hz turns the sinc resampler into an allocation/CPU bomb, and
+/// beyond 384 kHz the per-second memory cost escapes every budget derivation.
+pub const MIN_SRC_RATE: u32 = 8_000;
+pub const MAX_SRC_RATE: u32 = 384_000;
+
+/// One decoded sample, made safe for every consumer downstream: NaN/Inf scrubbed to 0 and
+/// the amplitude clamped to ±16 (24 dB over full scale — beyond any real mastering
+/// headroom). The clamp is not cosmetic: finite-but-absurd samples (a hostile float WAV of
+/// `f32::MAX`) overflow the sinc resampler's convolution into NaN/Inf AFTER the decode-root
+/// scrub, and would otherwise reach playback and analysis as poison.
+#[inline]
+fn scrub_sample(v: Smp) -> Smp {
+    if v.is_finite() {
+        v.clamp(-16.0, 16.0)
+    } else {
+        0.0
+    }
+}
+
+/// Reads just enough of a RIFF/WAVE header to report its declared sample rate; `Ok(None)`
+/// when the file is not a WAV (other containers go straight to symphonia). Never reads
+/// more than the chunk walk needs.
+fn sniff_wav_sample_rate(path: &str) -> std::io::Result<Option<u32>> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path)?;
+    let mut head = [0u8; 12];
+    if f.read(&mut head)? < 12 || &head[0..4] != b"RIFF" || &head[8..12] != b"WAVE" {
+        return Ok(None);
+    }
+    // Walk chunks looking for `fmt `; bail after a bounded number so a hostile chunk list
+    // cannot turn the sniff into a long scan.
+    let mut hdr = [0u8; 8];
+    for _ in 0..64 {
+        if f.read(&mut hdr)? < 8 {
+            return Ok(None);
+        }
+        let size = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]) as u64;
+        if &hdr[0..4] == b"fmt " {
+            let mut fmt = [0u8; 8];
+            if size < 8 || f.read(&mut fmt)? < 8 {
+                return Ok(None);
+            }
+            return Ok(Some(u32::from_le_bytes([fmt[4], fmt[5], fmt[6], fmt[7]])));
+        }
+        use std::io::Seek;
+        f.seek(std::io::SeekFrom::Current((size + (size & 1)) as i64))?;
+    }
+    Ok(None)
 }
 
 /// Windowed-sinc sample-rate conversion (interleaved stereo) on the offline decode paths —
@@ -1446,7 +1516,10 @@ pub fn resample_sinc(
     let exact = ((n as f64) * ratio).round() as usize;
     let mut framed = Vec::with_capacity(exact);
     for chunk in flat.chunks_exact(CHANNELS).take(exact) {
-        framed.push([chunk[0], chunk[1]]);
+        // Second scrub line: the convolution of large-but-finite inputs can overflow to
+        // NaN/Inf even though the decode root sanitized its samples (and callers may feed
+        // this converter PCM that never went through decode_file at all).
+        framed.push([scrub_sample(chunk[0]), scrub_sample(chunk[1])]);
     }
     Ok(framed)
 }
@@ -1506,6 +1579,78 @@ mod decode_tests {
             other => panic!("expected TooLong, got {other:?}"),
         }
         let _ = std::fs::remove_file(&path);
+    }
+
+    fn f32_wav_at_rate(path: &std::path::Path, rate: u32, samples: &[f32]) {
+        let mut bytes = Vec::new();
+        let data_len = (samples.len() * 4) as u32;
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&3u16.to_le_bytes()); // IEEE float
+        bytes.extend_from_slice(&2u16.to_le_bytes()); // stereo
+        bytes.extend_from_slice(&rate.to_le_bytes());
+        bytes.extend_from_slice(&(rate.wrapping_mul(8)).to_le_bytes());
+        bytes.extend_from_slice(&8u16.to_le_bytes()); // block align
+        bytes.extend_from_slice(&32u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_len.to_le_bytes());
+        for v in samples {
+            bytes.extend_from_slice(&v.to_le_bytes()); // raw bits intact
+        }
+        std::fs::write(path, &bytes).unwrap();
+    }
+
+    #[test]
+    fn the_source_rate_envelope_refuses_the_panic_and_dos_extremes() {
+        // rate 0 used to PANIC inside symphonia's TimeBase during the probe — with the
+        // release profile aborting, that was a process kill from a crafted file. The
+        // pre-probe sniff must turn it into a plain decode error.
+        let z = temp_wav("rate0");
+        f32_wav_at_rate(&z, 0, &[0.1; 8]);
+        assert!(super::decode_file(z.to_str().unwrap(), 0.0, 0, 0).is_err());
+
+        // 1 Hz is the resampler DoS: ratio 48000x plans ~49M output frames per input
+        // chunk. Refused at the envelope floor, never reaching decode or resample.
+        let one = temp_wav("rate1");
+        f32_wav_at_rate(&one, 1, &[0.1; 8]);
+        assert!(super::decode_file(one.to_str().unwrap(), 0.0, 0, 0).is_err());
+
+        // Just below the floor refused; the floor itself admitted.
+        let low = temp_wav("rate4k");
+        f32_wav_at_rate(&low, 4_000, &[0.1; 8]);
+        assert!(super::decode_file(low.to_str().unwrap(), 0.0, 0, 0).is_err());
+        let floor = temp_wav("rate8k");
+        f32_wav_at_rate(&floor, 8_000, &[0.1; 8]);
+        let (frames, rate) = super::decode_file(floor.to_str().unwrap(), 0.0, 0, 0).unwrap();
+        assert_eq!((frames.len(), rate), (4, 8_000));
+
+        for p in [z, one, low, floor] {
+            let _ = std::fs::remove_file(&p);
+        }
+    }
+
+    #[test]
+    fn absurd_finite_amplitudes_are_clamped_at_the_decode_root() {
+        // f32::MAX samples are finite, so the NaN scrub alone waved them through — and
+        // the sinc resampler's convolution then overflowed them into NaN/Inf (measured:
+        // 100% of output frames). The root clamp bounds every decoded sample to ±16
+        // (24 dB over full scale), which no convolution with unit-gain kernels can
+        // overflow.
+        let p = temp_wav("huge");
+        f32_wav_at_rate(&p, 44_100, &[f32::MAX, f32::MAX, -f32::MAX, -f32::MAX, 0.5, 0.5]);
+        let (frames, rate) = super::decode_file(p.to_str().unwrap(), 0.0, 0, 0).unwrap();
+        assert!(frames.iter().all(|f| f[0].abs() <= 16.0 && f[1].abs() <= 16.0));
+        assert_eq!(frames[2], [0.5, 0.5], "sane samples pass through unclamped");
+
+        let out = super::resample_sinc(frames, rate, 48_000).unwrap();
+        assert!(
+            out.iter().all(|f| f[0].is_finite() && f[1].is_finite()),
+            "clamped input must stay finite through the sinc kernel"
+        );
+        let _ = std::fs::remove_file(&p);
     }
 
     #[test]
@@ -1885,6 +2030,16 @@ mod resample_sinc_tests {
             "15 kHz passband amplitude {amplitude}, expected ~1.0 \
              (linear interpolation attenuates and smears this tone)"
         );
+    }
+
+    #[test]
+    fn overflow_poison_never_leaves_the_converter() {
+        // Direct hostile input (bypassing decode_file's clamp): the convolution of
+        // f32::MAX samples overflows to NaN/Inf inside the kernel; the output scrub
+        // must zero them so no caller can receive poison from this function.
+        let frames = vec![[f32::MAX; CHANNELS]; 4096];
+        let out = resample_sinc(frames, 44_100, 48_000).unwrap();
+        assert!(out.iter().all(|f| f[0].is_finite() && f[1].is_finite()));
     }
 
     #[test]

@@ -99,6 +99,10 @@ class SyncRow {
     // behind the [hlc] getter: a mistyped quad fails HERE as a per-record
     // parse error instead of a TypeError deep inside an apply.
     checkHlcConsistency(fields);
+    // NOTE: [checkIdShapes] deliberately does NOT run here — fromJson decodes
+    // whole transport pages, where one hostile record must not fail every
+    // good record with it. The applier runs it per record (quarantining the
+    // one offender), the push engine per conflicted ack.
     // The envelope trio must agree with the field map — a mismatch means a
     // corrupt or tampered payload and is refused rather than guessed at.
     if (json['id'] != fields['id'] ||
@@ -167,6 +171,36 @@ class SyncRow {
       throw const FormatException(
         'SyncRow: hlc_packed disagrees with the hlc_wall/hlc_ctr/hlc_node quad',
       );
+    }
+  }
+
+  /// The envelope every entity id on the wire must fit: 1–64 characters of
+  /// `[0-9A-Za-z_-]`. This is a SECURITY gate, not a style check: ids become
+  /// filesystem path components (`audio/<practiceId>/`,
+  /// `technique_media/<techniqueId>/`) and are handed to recursive deletes —
+  /// an id carrying `..`, a separator, or an absolute path would let a
+  /// hostile sync record write or delete OUTSIDE the media tree. No dot and
+  /// no separator in the alphabet closes that entirely.
+  ///
+  /// Deliberately a SUPERSET of today's id grammars — [newId] ULIDs plus the
+  /// legacy-migration clip shape `<trackId>-c0` — rather than an exact
+  /// enumeration: the services whose components really are pure ULIDs
+  /// (audio/technique media dirs) enforce that stricter shape themselves.
+  static final RegExp _idShape = RegExp(r'^[0-9A-Za-z_-]{1,64}$');
+
+  /// Validates `id` and every `*_id` column (when non-null) against
+  /// [_idShape]; throws [FormatException] otherwise. Runs at the same wire
+  /// doors as [checkHlcConsistency]. `hlc_node` is deliberately excluded —
+  /// it never touches a path and has its own rules (the `'!'` derived space).
+  static void checkIdShapes(Map<String, Object?> fields) {
+    for (final entry in fields.entries) {
+      final key = entry.key;
+      if (key != 'id' && !key.endsWith('_id')) continue;
+      final value = entry.value;
+      if (value == null && key != 'id') continue;
+      if (value is! String || !_idShape.hasMatch(value)) {
+        throw FormatException('SyncRow: "$key" is not a well-formed entity id');
+      }
     }
   }
 

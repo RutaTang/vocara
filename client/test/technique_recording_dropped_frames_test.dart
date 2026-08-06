@@ -133,7 +133,12 @@ class _FakeRecorder extends Fake implements MicRecordingController {
 
 Technique _technique() {
   final now = DateTime(2026, 6, 20);
-  return Technique(id: 't1', name: 'Twang', createdAt: now, updatedAt: now);
+  return Technique(
+    id: 'T1000000000000000000000000',
+    name: 'Twang',
+    createdAt: now,
+    updatedAt: now,
+  );
 }
 
 void main() {
@@ -147,7 +152,7 @@ void main() {
     vm = TechniqueDetailViewModel(
       repository: _FakeRepo(_technique()),
       mediaService: TechniqueMediaService(storage: _TempStorage(tmp)),
-      techniqueId: 't1',
+      techniqueId: 'T1000000000000000000000000',
       analysisService: _NullAnalysis(),
       recorder: recorder,
     );
@@ -228,7 +233,7 @@ void main() {
     final vm2 = TechniqueDetailViewModel(
       repository: gated,
       mediaService: TechniqueMediaService(storage: _TempStorage(tmp)),
-      techniqueId: 't1',
+      techniqueId: 'T1000000000000000000000000',
       analysisService: _NullAnalysis(),
       recorder: rec2,
     );
