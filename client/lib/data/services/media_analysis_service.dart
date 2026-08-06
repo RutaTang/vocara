@@ -20,10 +20,13 @@ class MediaAnalysisService {
   /// 30 minutes covers any realistic technique reference or practice take
   /// while bounding the transient allocations to a few hundred MB.
   /// 10 minutes: takes and technique references are minutes long, and the
-  /// analysis pipeline's peak memory scales linearly with this (the Float64
-  /// mono buffer plus the decimation working copy — roughly 16 bytes per
-  /// frame, ~460 MB at this cap). The previous 30-minute value predated the
-  /// memory budgeting and put the legal worst case well past 1 GB.
+  /// analysis pipeline's peak memory scales linearly with this. The measured
+  /// legal worst case at this cap is roughly 700 MB for computeBoth (the
+  /// Float64 mono buffer + the decimation working copy at ~16 bytes/frame,
+  /// plus the spectrogram result, per-metric arrays, and the cross-isolate
+  /// return copy) — NOT just the two big buffers; further reduction means a
+  /// Float32/windowed DSP migration, tracked separately. The previous
+  /// 30-minute value predated any memory budgeting.
   static const Duration maxAnalysisDuration = Duration(minutes: 10);
 
   /// Decodes [path] and runs the complete analysis suite. Returns null when the

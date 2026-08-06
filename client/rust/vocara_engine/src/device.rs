@@ -1211,9 +1211,13 @@ pub fn spawn_audio_host(
     }
 }
 
-/// Counts [`decode_file`] entries (tests only) — see the note at its top.
 #[cfg(test)]
-pub static DECODE_CALLS: AtomicU64 = AtomicU64::new(0);
+thread_local! {
+    /// Counts [`decode_file`] entries on THIS thread (tests only — see the note at the
+    /// function's top). Thread-local so parallel tests cannot pollute each other's deltas:
+    /// every counter-sensitive test decodes on its own test thread.
+    pub static DECODE_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
 /// Probe `path`'s DECLARED duration in milliseconds without decoding a single packet:
 /// container probe only, so an import gate can refuse an hours-long file before any copy or
@@ -1273,7 +1277,21 @@ pub enum DecodeError {
 /// Mono is duplicated; >2 channels take the first two. `max_secs` (0.0 = unbounded) caps the
 /// decoded duration: the full track lives in memory here, so an arbitrary-length input must
 /// be refused up front rather than after gigabytes of Vec growth.
-pub fn decode_file(path: &str, max_secs: f64) -> Result<(Vec<[Smp; CHANNELS]>, u32), DecodeError> {
+/// `max_src_rate` (0 = unbounded) refuses files whose SOURCE sample rate exceeds it: the
+/// duration budget alone does not bound decode memory — a legal-duration 384 kHz file
+/// decodes ~8x the samples of the 48 kHz case at its source rate BEFORE any resample.
+/// Analysis callers pass a multiple of their output rate; the playback path passes 0
+/// (whole-track residency is its documented design).
+pub fn decode_file(
+    path: &str,
+    max_secs: f64,
+    max_src_rate: u32,
+) -> Result<(Vec<[Smp; CHANNELS]>, u32), DecodeError> {
+    // Test-only observability: lets a test PROVE a refusal (or a skip) happened before /
+    // without a decode — outcome-only assertions cannot tell "refused up front" from
+    // "decoded everything, then refused".
+    #[cfg(test)]
+    DECODE_CALLS.with(|c| c.set(c.get() + 1));
     use symphonia::core::audio::SampleBuffer;
     use symphonia::core::codecs::DecoderOptions;
     use symphonia::core::formats::FormatOptions;
@@ -1307,6 +1325,9 @@ pub fn decode_file(path: &str, max_secs: f64) -> Result<(Vec<[Smp; CHANNELS]>, u
         .ok_or_else(|| err("no default track".to_string()))?;
     let track_id = track.id;
     let src_rate = track.codec_params.sample_rate.unwrap_or(44_100);
+    if max_src_rate > 0 && src_rate > max_src_rate {
+        return Err(DecodeError::TooLong);
+    }
     // The duration budget in source-rate frames (u64::MAX = unbounded).
     let max_frames: u64 = if max_secs > 0.0 {
         (max_secs * src_rate as f64).ceil() as u64
@@ -1340,8 +1361,14 @@ pub fn decode_file(path: &str, max_secs: f64) -> Result<(Vec<[Smp; CHANNELS]>, u
         let mut sbuf = SampleBuffer::<f32>::new(decoded.capacity() as u64, spec);
         sbuf.copy_interleaved_ref(decoded);
         for frame in sbuf.samples().chunks(ch.max(1)) {
+            // Scrub NaN/Inf at the single deepest decode point: one poisoned sample
+            // would otherwise propagate through every FFT, metric, and DSP node fed
+            // from here (the WAV streaming reader scrubs independently; this covers
+            // the symphonia paths — analysis via ve_decode AND playback staging).
             let l = frame[0];
             let r = if ch > 1 { frame[1] } else { l };
+            let l = if l.is_finite() { l } else { 0.0 };
+            let r = if r.is_finite() { r } else { 0.0 };
             out.push([l, r]);
         }
         // Containers without a declared frame count (e.g. plain mp3) can only be bounded
@@ -1394,7 +1421,7 @@ mod decode_tests {
         let samples: Vec<f32> = vec![0.5, 0.5, -0.25, -0.25, 1.5, 1.5, 0.0, 0.0];
         crate::wav::write_wav_f32(&path, &samples, 2, 48_000).unwrap();
         let (frames, rate) =
-            super::decode_file(path.to_str().unwrap(), 0.0).expect("f32 wav decodes");
+            super::decode_file(path.to_str().unwrap(), 0.0, 0).expect("f32 wav decodes");
         assert_eq!(rate, 48_000);
         assert_eq!(frames.len(), 4);
         assert!((frames[0][0] - 0.5).abs() < 1e-6);
@@ -1413,7 +1440,7 @@ mod decode_tests {
         let samples: Vec<f32> = vec![0.5, 0.5, -0.25, -0.25];
         crate::wav::write_wav_i16(&path, &samples, 2, 48_000).unwrap();
         let (frames, rate) =
-            super::decode_file(path.to_str().unwrap(), 0.0).expect("i16 wav decodes");
+            super::decode_file(path.to_str().unwrap(), 0.0, 0).expect("i16 wav decodes");
         assert_eq!(rate, 48_000);
         assert_eq!(frames.len(), 2);
         assert!((frames[0][0] - 0.5).abs() < 1e-3);
@@ -1428,10 +1455,62 @@ mod decode_tests {
         let path = temp_wav("too_long");
         let samples: Vec<f32> = vec![0.1; 200]; // 100 stereo frames
         crate::wav::write_wav_f32(&path, &samples, 2, 48_000).unwrap();
-        match super::decode_file(path.to_str().unwrap(), 0.001) {
+        match super::decode_file(path.to_str().unwrap(), 0.001, 0) {
             Err(super::DecodeError::TooLong) => {}
             other => panic!("expected TooLong, got {other:?}"),
         }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn nonfinite_samples_are_scrubbed_at_the_decode_root() {
+        // A poisoned float sample must never leave decode_file: this is the single
+        // deepest point covering BOTH the analysis (ve_decode) and playback staging
+        // paths — one NaN would otherwise propagate through every FFT/metric/DSP node.
+        let path = temp_wav("nan");
+        let samples: Vec<f32> = vec![
+            0.5,
+            0.5,
+            f32::NAN,
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            -0.25,
+            -0.25,
+        ];
+        crate::wav::write_wav_f32(&path, &samples, 2, 48_000).unwrap();
+        let (frames, _) =
+            super::decode_file(path.to_str().unwrap(), 0.0, 0).expect("poisoned wav decodes");
+        assert_eq!(frames.len(), 4);
+        assert_eq!(frames[0][0], 0.5);
+        assert_eq!(frames[1], [0.0, 0.0], "NaN scrubbed to zero");
+        assert_eq!(frames[2], [0.0, 0.0], "Inf scrubbed to zero");
+        assert_eq!(frames[3][0], -0.25);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_source_rate_above_the_callers_ceiling_is_refused_before_decoding() {
+        // The duration budget alone does not bound decode memory: a legal-duration
+        // 96 kHz file decodes twice the samples of the 48 kHz case at its SOURCE rate.
+        let path = temp_wav("hi_rate");
+        let samples: Vec<f32> = vec![0.1; 200];
+        crate::wav::write_wav_f32(&path, &samples, 2, 96_000).unwrap();
+        let before = super::DECODE_CALLS.with(|c| c.get());
+        match super::decode_file(path.to_str().unwrap(), 10.0, 48_000) {
+            Err(super::DecodeError::TooLong) => {}
+            other => panic!("expected the source-rate refusal, got {other:?}"),
+        }
+        assert_eq!(
+            super::DECODE_CALLS.with(|c| c.get()),
+            before + 1,
+            "one ENTRY, but the refusal happens before any packet decodes"
+        );
+        // An adequate ceiling admits the same file.
+        let (frames, rate) = super::decode_file(path.to_str().unwrap(), 10.0, 96_000)
+            .expect("within-ceiling source rate decodes");
+        assert_eq!(rate, 96_000);
+        assert_eq!(frames.len(), 100);
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1455,7 +1534,7 @@ mod decode_tests {
         let samples: Vec<f32> = vec![0.1; 200]; // 100 stereo frames ≈ 2.08 ms @ 48k
         crate::wav::write_wav_f32(&path, &samples, 2, 48_000).unwrap();
         let (frames, rate) =
-            super::decode_file(path.to_str().unwrap(), 1.0).expect("under-budget file decodes");
+            super::decode_file(path.to_str().unwrap(), 1.0, 0).expect("under-budget file decodes");
         assert_eq!(rate, 48_000);
         assert_eq!(frames.len(), 100);
         let _ = std::fs::remove_file(&path);

@@ -78,19 +78,26 @@ class _FakeEngine implements GraphAudioPlaybackService {
   int inputFramesReceived() => _framesReceived += framesReceivedStep;
 
   /// Scripted per-take recorded-progress values returned by successive
-  /// [recordWrittenFrames] reads (the last entry repeats once exhausted).
-  /// The default has frames landing in the take's ring on the first poll (a
-  /// warm stream); [0] models a take whose ring never receives a frame.
+  /// [recordWrittenFrames] reads; once exhausted, every further read ADVANCES
+  /// by [writtenTailStep] (a live stream keeps delivering). The default is a
+  /// warm stream; script [0] with tail 0 models a take whose ring never
+  /// receives a frame, and a non-empty script with tail 0 models frames that
+  /// LANDED once (an outgoing stream's real audio) with the current stream
+  /// silent — the delta condition's exact target.
   List<int> recordWrittenScript = [512];
+  int writtenTailStep = 480;
   int writtenReads = 0;
+  int _writtenValue = 0;
 
   @override
   int recordWrittenFrames() {
-    final i = writtenReads < recordWrittenScript.length
-        ? writtenReads
-        : recordWrittenScript.length - 1;
+    if (writtenReads < recordWrittenScript.length) {
+      _writtenValue = recordWrittenScript[writtenReads];
+    } else {
+      _writtenValue += writtenTailStep;
+    }
     writtenReads++;
-    return recordWrittenScript[i];
+    return _writtenValue;
   }
 
   /// The published input-intent sequence (the arm's watermark).
@@ -490,7 +497,9 @@ void main() {
     // after startInputRecording claimed success). One real millisecond of
     // timeout guarantees the poll body runs at least once — a zero timeout
     // would short-circuit the loop and prove nothing about it.
-    final engine = _FakeEngine()..recordWrittenScript = [0];
+    final engine = _FakeEngine()
+      ..recordWrittenScript = [0]
+      ..writtenTailStep = 0;
     final dest = _FakeDestination();
     final controller = MicRecordingController(
       acquireEngine: () => engine,
@@ -533,7 +542,8 @@ void main() {
     // iterations, not a short-circuited loop.
     final engine = _FakeEngine()
       ..framesReceivedStep = 512
-      ..recordWrittenScript = [0];
+      ..recordWrittenScript = [0]
+      ..writtenTailStep = 0;
     final dest = _FakeDestination();
     final controller = MicRecordingController(
       acquireEngine: () => engine,
@@ -663,6 +673,72 @@ void main() {
       greaterThanOrEqualTo(1),
       reason: 'the generation comparison must actually have run',
     );
+    controller.dispose();
+  });
+
+  testWidgets('the reviewed cross-generation combo is refused: an outgoing '
+      'stream\'s frames plus a freshly-converged stream that has not '
+      'delivered yet', (tester) async {
+    // G1 wrote real frames into the take after the arm, was torn down by a
+    // stale off-intent, and G2 then converged SUCCESSFULLY — applied and the
+    // state word agree on G2, running. Every absolute condition holds, but
+    // the take's counter never moves again (G2 has not delivered): the DELTA
+    // condition must refuse until actual growth, which never comes here.
+    final engine = _FakeEngine()
+      ..recordWrittenScript =
+          [480] // G1's frames, already in the WAV
+      ..writtenTailStep = 0; // G2 converged but silent
+    final dest = _FakeDestination();
+    final controller = MicRecordingController(
+      acquireEngine: () => engine,
+      requestPermission: () async => true,
+      readyTimeout: const Duration(milliseconds: 1),
+    );
+
+    var settled = false;
+    final future = controller.start(dest.strategy);
+    unawaited(future.whenComplete(() => settled = true));
+    for (var i = 0; i < 200 && !settled; i++) {
+      await tester.pump(const Duration(milliseconds: 25));
+    }
+    expect(settled, isTrue, reason: 'the ready wait must hit its deadline');
+    final result = await future;
+    await tester.pump();
+
+    expect(result.started, isFalse);
+    expect(result.failure, MicRecordingFailure.inputNotDelivering);
+    expect(
+      engine.writtenReads,
+      greaterThanOrEqualTo(2),
+      reason: 'the baseline and at least one delta comparison must have run',
+    );
+    controller.dispose();
+  });
+
+  testWidgets('the same combo arms once the converged stream actually '
+      'delivers (growth over the baseline)', (tester) async {
+    // Same shape, but G2 comes alive: the counter grows past the baseline
+    // under the unchanged pairing and ready lands.
+    final engine = _FakeEngine()
+      ..recordWrittenScript = [480, 480, 480]
+      ..writtenTailStep = 480;
+    final dest = _FakeDestination();
+    final controller = MicRecordingController(
+      acquireEngine: () => engine,
+      requestPermission: () async => true,
+    );
+
+    var settled = false;
+    final future = controller.start(dest.strategy);
+    unawaited(future.whenComplete(() => settled = true));
+    for (var i = 0; i < 200 && !settled; i++) {
+      await tester.pump(const Duration(milliseconds: 25));
+    }
+    final result = await future;
+
+    expect(result.started, isTrue);
+    expect(engine.writtenReads, greaterThanOrEqualTo(4));
+    controller.stop();
     controller.dispose();
   });
 

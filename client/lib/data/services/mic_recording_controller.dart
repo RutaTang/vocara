@@ -322,6 +322,17 @@ class MicRecordingController {
       // few hundred.
       final armSeq = engine.inputIntentSeq();
       var ready = false;
+      // DELTA progress under a STABLE pairing: recorded frames are the file's
+      // truth but carry no generation — an outgoing stream's frames (real
+      // audio, genuinely in the take) could otherwise combine with a freshly
+      // converged stream that has not delivered yet. So ready demands growth:
+      // once the applied/state pairing holds, remember (pairing, written) and
+      // require written to INCREASE while the SAME pairing still holds — only
+      // the currently-running stream can produce that increase. A pairing
+      // change resets the baseline; a stream that converged but never
+      // delivers stays at its baseline into the timeout.
+      int? baselinePairing;
+      var baselineWritten = 0;
       final readyClock = Stopwatch()..start();
       while (readyClock.elapsed < readyTimeout) {
         if (_disposed || _generation != generation) {
@@ -331,13 +342,22 @@ class MicRecordingController {
         }
         final applied = engine.inputAppliedState();
         final stream = engine.inputStreamState();
-        if (engine.recordWrittenFrames() > 0 &&
+        final pairingOk =
             GraphAudioPlaybackService.appliedSeqOf(applied) >= armSeq &&
             GraphAudioPlaybackService.inputStateRunning(stream) &&
             GraphAudioPlaybackService.appliedGenOf(applied) ==
-                GraphAudioPlaybackService.stateGenOf(stream)) {
-          ready = true;
-          break;
+                GraphAudioPlaybackService.stateGenOf(stream);
+        if (pairingOk) {
+          if (baselinePairing != applied) {
+            baselinePairing = applied;
+            baselineWritten = engine.recordWrittenFrames();
+          }
+          if (engine.recordWrittenFrames() > baselineWritten) {
+            ready = true;
+            break;
+          }
+        } else {
+          baselinePairing = null;
         }
         await Future<void>.delayed(const Duration(milliseconds: 25));
       }

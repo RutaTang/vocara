@@ -1253,7 +1253,13 @@ pub extern "C" fn ve_decode(
         } else {
             max_frames as f64 / rate as f64
         };
-        let (frames, src_rate) = match device::decode_file(path, max_secs) {
+        // Source-rate ceiling at 4x the requested output rate: the duration budget alone
+        // does not bound decode MEMORY (a 10-minute 384 kHz file decodes ~1.8 GB at its
+        // source rate before any resample). 4x covers every real recording/media rate an
+        // analysis at 44.1/48 kHz meets (up to 176.4/192 kHz); beyond that is refused as
+        // too big for this caller's budget.
+        let (frames, src_rate) = match device::decode_file(path, max_secs, rate.saturating_mul(4))
+        {
             Ok(v) => v,
             Err(device::DecodeError::TooLong) => {
                 set_status(VE_DECODE_TOO_LONG);
@@ -1378,70 +1384,80 @@ pub extern "C" fn ve_punch_wav(
             // Both inputs are normally takes this app recorded, but nothing enforces that,
             // so they get the same generous ceiling as the playback path (the Dart side's
             // maxPlaybackDuration, 60 min) instead of an unbounded decode.
-            let (frames, src_rate) = device::decode_file(p, MAX_PLAYBACK_SECS).ok()?;
+            let (frames, src_rate) =
+                device::decode_file(p, MAX_PLAYBACK_SECS, 192_000).ok()?;
             Some(device::resample_linear(frames, src_rate, rate))
         };
-        // SERIALIZED decode: old is decoded, its keep+pad prefix is moved into the output,
-        // and its buffer DROPPED before new decodes — two legal long inputs used to be
-        // resident simultaneously (the pre-decode declared-length check cannot refuse two
-        // individually-legal files). Peak: one input plus the accumulating output.
-        let old_frames = match decode(old_p) {
-            Some(a) => a,
-            None => return -1,
-        };
-
-        // Checked all the way to the allocation: the old `as usize` cast of the i128 split
-        // TRUNCATED a huge split_ms (wrapping to a small value — no overflow, but silently
-        // wrong semantics), and unchecked adds/muls on attacker-influenced sizes are how
-        // ceilings get bypassed. The ceiling itself is compared in i128, before any cast.
+        // Checked before any decode: the old `as usize` cast of the i128 split TRUNCATED a
+        // huge split_ms (wrapping to a small value — no overflow, but silently wrong
+        // semantics). The ceiling is compared in i128, before any cast.
         let ceiling_frames = (MAX_PLAYBACK_SECS * rate as f64) as i128;
         let split_i128 = (split_ms.max(0) as i128 * rate as i128) / 1000;
         if split_i128 > ceiling_frames {
             return -1;
         }
         let split = split_i128 as usize;
-        let keep = split.min(old_frames.len());
-        // Silence frames when the cursor sits past old's end (preserves new's timing).
-        let pad = split.saturating_sub(old_frames.len());
-        // keep + pad == split <= ceiling by construction; checked anyway (unchecked adds on
-        // attacker-influenced sizes are how ceilings get bypassed).
-        let Some(prefix) = keep.checked_add(pad) else {
-            return -1;
-        };
-        let Some(prefix_len) = prefix.checked_mul(CHANNELS) else {
-            return -1;
-        };
-        let mut flat: Vec<f32> = Vec::with_capacity(prefix_len);
-        for f in &old_frames[..keep] {
-            flat.push(f[0]);
-            flat.push(f[1]);
-        }
-        flat.extend(std::iter::repeat_n(0.0, pad * CHANNELS));
-        // Old's buffer is DONE — drop it before new decodes (the serialization's point).
-        drop(old_frames);
 
+        // STREAMED output: frames go straight into the WAV writer, so no full-length
+        // accumulator ever exists — the peak is ONE decoded input at a time (the old
+        // shape held new's decode AND the flat output simultaneously, ~2 ceilings for a
+        // split=0 splice of a long take). WavStream patches its header periodically and
+        // finalize() stamps exact sizes, mirroring the recording writer.
+        let mut wav = match crate::wav::WavStream::create(out_p, CHANNELS as u16, rate) {
+            Ok(w) => w,
+            Err(_) => return -1,
+        };
+        let mut written: usize = 0;
+        let write_frame = |wav: &mut crate::wav::WavStream, f: [Smp; CHANNELS]| -> bool {
+            wav.write_sample(f[0]).is_ok() && wav.write_sample(f[1]).is_ok()
+        };
+
+        // Phase 1 — old's keep prefix + silence pad. A split of 0 keeps NOTHING of old, so
+        // decoding it would be pure waste (and a full-length transient): skip entirely.
+        let pad;
+        if split > 0 {
+            let old_frames = match decode(old_p) {
+                Some(a) => a,
+                None => return -1,
+            };
+            let keep = split.min(old_frames.len());
+            pad = split - keep; // silence when the cursor sits past old's end
+            for &f in &old_frames[..keep] {
+                if !write_frame(&mut wav, f) {
+                    return -1;
+                }
+            }
+            // old drops here — before new decodes (the serialization's point).
+        } else {
+            pad = 0;
+        }
+        for _ in 0..pad {
+            if !write_frame(&mut wav, [0.0, 0.0]) {
+                return -1;
+            }
+        }
+        written += split;
+
+        // Phase 2 — new, decoded only now.
         let new_frames = match decode(new_p) {
             Some(b) => b,
             None => return -1,
         };
-        // The OUTPUT is bounded too, not just the two input decodes: a runaway `split_ms`
-        // would otherwise size an arbitrarily large silence pad into the accumulator.
-        let total = match prefix.checked_add(new_frames.len()) {
-            Some(t) if (t as i128) <= ceiling_frames => t,
+        // The OUTPUT stays bounded even though it never materializes in memory.
+        match split.checked_add(new_frames.len()) {
+            Some(t) if (t as i128) <= ceiling_frames => {}
             _ => return -1,
-        };
-        let Some(flat_len) = total.checked_mul(CHANNELS) else {
-            return -1;
-        };
-        flat.reserve_exact(flat_len - flat.len());
-        for f in &new_frames {
-            flat.push(f[0]);
-            flat.push(f[1]);
         }
+        for &f in &new_frames {
+            if !write_frame(&mut wav, f) {
+                return -1;
+            }
+        }
+        written += new_frames.len();
+        drop(new_frames);
 
-        let out_frames = (flat.len() / CHANNELS) as i64;
-        match crate::wav::write_wav_f32(out_p, &flat, CHANNELS as u16, rate) {
-            Ok(_) => out_frames,
+        match wav.finalize() {
+            Ok(_) => written as i64,
             Err(_) => -1,
         }
     }))
@@ -1584,7 +1600,7 @@ pub extern "C" fn ve_decode_file(e: *mut VeEngine, path: *const c_char) -> VePcm
         let rate = eng.handle.sample_rate() as u32;
         // Same ceiling as the playback path — this legacy entry must not stay the one
         // unbounded decode door.
-        let (frames, src_rate) = match device::decode_file(path, MAX_PLAYBACK_SECS) {
+        let (frames, src_rate) = match device::decode_file(path, MAX_PLAYBACK_SECS, 0) {
             Ok(v) => v,
             Err(_) => return VePcm::empty(),
         };
@@ -2285,7 +2301,7 @@ mod punch_tests {
         // A two-hour cursor offset would demand a two-hour silence pad: refused — and
         // provably BEFORE any decode ran (an outcome-only assertion could not tell a
         // pre-decode refusal from one that transiently decoded two full inputs first).
-        let calls_before = crate::device::DECODE_CALLS.load(std::sync::atomic::Ordering::Relaxed);
+        let calls_before = crate::device::DECODE_CALLS.with(|c| c.get());
         let frames = super::ve_punch_wav(
             c_old.as_ptr(),
             c_new.as_ptr(),
@@ -2295,7 +2311,7 @@ mod punch_tests {
         );
         assert_eq!(frames, -1, "an over-ceiling output must be refused");
         assert_eq!(
-            crate::device::DECODE_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+            crate::device::DECODE_CALLS.with(|c| c.get()),
             calls_before,
             "the refusal must happen before either input decodes"
         );
@@ -2304,9 +2320,43 @@ mod punch_tests {
         let frames = super::ve_punch_wav(c_old.as_ptr(), c_new.as_ptr(), 1, 10_000_000, c_out.as_ptr());
         assert_eq!(frames, -1, "an over-ceiling rate must be refused");
 
-        // A sane splice is unaffected: old's first 1 ms (48 frames) ++ new's 48 frames.
+        // A sane splice is unaffected: old's first 1 ms (48 frames) ++ new's 48 frames —
+        // and the counter demonstrably ADVANCES on the decoding path, so the refusal
+        // assertions above cannot pass vacuously off a dead counter.
+        let before_ok = crate::device::DECODE_CALLS.with(|c| c.get());
         let frames = super::ve_punch_wav(c_old.as_ptr(), c_new.as_ptr(), 1, 48_000, c_out.as_ptr());
         assert_eq!(frames, 96, "1 ms of old plus all of new");
+        assert_eq!(
+            crate::device::DECODE_CALLS.with(|c| c.get()),
+            before_ok + 2,
+            "a real splice decodes exactly its two inputs"
+        );
+        let _ = std::fs::remove_file(&old);
+        let _ = std::fs::remove_file(&new);
+        let _ = std::fs::remove_file(&out);
+    }
+
+    #[test]
+    fn a_zero_split_never_decodes_the_old_input() {
+        // split = 0 keeps nothing of old: decoding it would be a pointless full-length
+        // transient (the reviewed 2.76 GB shape came from exactly this waste plus the
+        // in-memory accumulator, both now gone — the output streams to disk).
+        let old = temp_wav("zs_old");
+        let new = temp_wav("zs_new");
+        let out = temp_wav("zs_out");
+        crate::wav::write_wav_f32(&old, &[0.1; 96], 2, 48_000).unwrap();
+        crate::wav::write_wav_f32(&new, &[0.2; 96], 2, 48_000).unwrap();
+        let c = |p: &std::path::Path| CString::new(p.to_str().unwrap()).unwrap();
+        let (c_old, c_new, c_out) = (c(&old), c(&new), c(&out));
+
+        let before = crate::device::DECODE_CALLS.with(|c| c.get());
+        let frames = super::ve_punch_wav(c_old.as_ptr(), c_new.as_ptr(), 0, 48_000, c_out.as_ptr());
+        assert_eq!(frames, 48, "output is exactly new");
+        assert_eq!(
+            crate::device::DECODE_CALLS.with(|c| c.get()),
+            before + 1,
+            "only NEW may decode when the split keeps nothing of old"
+        );
         let _ = std::fs::remove_file(&old);
         let _ = std::fs::remove_file(&new);
         let _ = std::fs::remove_file(&out);

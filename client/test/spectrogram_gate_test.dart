@@ -205,12 +205,17 @@ void main() {
 
   test('the header-independent byte ceiling holds even when the per-rate '
       'duration math would admit', () async {
-    // 8 channels of 32-bit at 44.1 kHz: blockAlign 32 is CONSISTENT, and the
-    // declared duration (~15 min) is under the 30-minute cap — but the byte
-    // total (~850 MB) crosses maxAnalysisBytes. The absolute ceiling must
-    // refuse regardless of the header's arithmetic.
+    // 8 channels of 32-bit at 44.1 kHz: blockAlign 32 is CONSISTENT, the
+    // declared duration (4 min) is comfortably under the 10-minute cap AND
+    // the frame count is under the frame ceiling — but the byte total
+    // (~339 MB) crosses maxAnalysisBytes. Only the absolute byte ceiling can
+    // refuse this header (the previous 850 MB fixture was ~10 min of audio
+    // and got refused by the DURATION gate first, leaving the byte ceiling
+    // untested).
+    const declared = 4 * 60 * 44100 * 32; // 338,688,000 bytes
+    assert(declared > SpectrogramService.maxAnalysisBytes);
     final f = await write(
-      _wavHeader8ch(sampleRate: 44100, declaredDataBytes: 850 * 1000 * 1000),
+      _wavHeader8ch(sampleRate: 44100, declaredDataBytes: declared),
     );
     expect(await SpectrogramService.admitForAnalysis(f), isNull);
   });
