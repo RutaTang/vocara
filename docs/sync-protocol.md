@@ -137,46 +137,70 @@ compaction only removes superseded entries).
   re-push its full state (all rows are full-state LWW). Blob backups are
   still recommended (audio bytes may exist on only one device).
 
-## Derived-stamp discipline (closes the derived-repair-stamp lost update)
+## Derived-stamp discipline (node-space derivation)
 
-Client-side derived writes (integrity repair heals, the single-slot
-resolution tombstone) stamp `(base.wall, base.counter + 1, DERIVED node)`,
-where the derived node is the device node with its first character replaced
-by `'!'` (`HlcClock.derivedNode`). Real node ids are 26 Crockford base32
-characters (`0-9A-Z`, enforced at mint), and ASCII `'!'` sorts strictly
-below all of them — so a derived stamp loses EVERY (wall, counter) tie
-against any real edit, structurally.
+Client-side derived writes (integrity repair heals, slot-resolution
+tombstones, the FK sweep's collision restore) stamp
+`(base.wall, base.counter, base.node + '!' + deviceNode)` — the SAME
+(wall, counter) as the row state they derive from, with the node EXTENDED
+(`HlcClock.derived`). A prefix extension sorts strictly after the prefix,
+so the derived stamp:
 
-This closes the lost update the P0 draft documented here: an author editing
-a row while its clock wall is HELD (offline with a corrected clock, or a
-second edit within one wall millisecond) stamps
-`(base.wall, base.counter + 1, authorNode)` — the same (wall, counter) a
-healer derives from the same base. When the tie broke by real node id and
-the healer won, its FULL-ROW snapshot silently reverted every other field
-of the author's edit (e.g. a title change riding in the same row)
-fleet-wide. Under the derived node the author always wins the tie; the
-repair is DERIVABLE state, so the next integrity pass re-derives it one
-counter above the author's edit and the fleet converges holding both the
-edit and the heal (regression: `sync_applier_test.dart`, derived-node
-group).
+* out-ranks `base` — the write replicates over every peer holding base;
+* sorts strictly BELOW every stamp that out-ranks base — a held-wall author
+  edit at `(wall, counter + 1)`, a node-space tie winner at
+  `(wall, counter, biggerNode)`, and any later tick.
 
-The suffix keeps devices DISTINCT: two devices deriving different content
-from the same base (e.g. tombstoning one occupant against two different
-winners) mint distinct stamps, so LWW still picks one deterministically —
-a single shared sentinel node would let identical stamps carry different
-content and diverge. (ULID first characters carry the coarse timestamp and
-are identical across contemporaneous installs anyway; the entropy lives in
-the suffix, which the derivation preserves.)
+Deriving in NODE space (never counter space) closes both halves of the
+lost update the earlier drafts documented:
 
-The `'!'` prefix is RESERVED for derived stamps: wire validation continues
-to accept any non-empty node (older rows stamped under real healer nodes
-remain valid data), but no real device node can ever begin with `'!'`.
+* **counter escalation**: chained repairs under a counter+1 derivation
+  stamped base+1 then base+2, and base+2 bookkeeping beat a base+1 REAL
+  edit (two scalar heals on one practices row within a single pass reach
+  this). A re-derivation now just extends the node again and still loses to
+  every real edit above the ORIGINAL base.
+* **the restore collision**: a parked update that won its slot by NODE
+  alone — `(w, c, B)` over prior `(w, c, A)` — was beaten by a counter+1
+  restore tombstone, so its quarantine replay settled as an LWW skip and
+  the update was lost forever. `(w, c, A!device)` sits strictly between A
+  and B: the tombstone replicates AND the replay lands.
+
+The device suffix keeps derived writes from different devices distinct
+(same base, different content must not share one stamp). The node grammar
+on the wire is `[0-9A-Za-z!]{1,384}` with `'!'` RESERVED for derivation —
+real device nodes are 26 Crockford characters, enforced at mint. Wire
+validation also pins the packed encoding's numeric bounds (13-digit wall,
+6-digit counter): out-of-range values would "repack consistently" while
+their string order diverged from the tuple order.
 
 Do NOT replace the derivation with a fresh clock tick — a fresh-tick stamp
 was the original resurrection bug (seed `0xab1a57`): user-grade intent
 minted for bookkeeping let a scalar heal out-rank a genuinely later delete.
-The convergence simulation's oracle also compares root CONTENT
-(titles/names) at quiescence, so this class of lost update stays detectable.
+Regressions for all three failure shapes live in `sync_applier_test.dart`
+(derived-node group, NODE-ONLY winner) and `sync_sim_regressions_test.dart`.
+
+**Pre-release note**: this protocol has never shipped; there are no old
+clients minting counter+1 derived stamps, so no mixed-version migration is
+defined. If the derivation ever changes after release, that changes — a
+compatibility story becomes mandatory.
+
+**Server collation requirement**: every LWW comparison depends on BINARY
+(byte-wise/ASCII) ordering of `hlc_packed` — `'!' < '0' < 'A'` and so on.
+A server-side comparison (SQL `ORDER BY`, unique-conflict resolution) MUST
+use binary collation, never a locale collation (which may ignore or reorder
+punctuation). The reference server pins `COLLATE BINARY` / bytewise
+comparison on every `hlc_packed` touch.
+
+## Known design gap (register)
+
+**Entity-level LWW loses concurrent field edits on one row.** Full-row
+snapshots mean the LWW loser's OTHER fields are overwritten even when the
+two edits touched disjoint columns. The reserved `fieldClocks` slot is the
+upgrade path (column-level LWW); it is NOT implemented — the builder emits
+null, the applier ignores it, and no sidecar table exists. The node-space
+derivation above removes the bookkeeping-vs-user cases; genuine
+user-vs-user concurrent row edits still resolve whole-row. Tracked as an
+open design item, not silently absorbed.
 
 ## Auth (Phase 1 decision)
 

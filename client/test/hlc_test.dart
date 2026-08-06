@@ -36,42 +36,73 @@ void main() {
     });
   });
 
-  group('HlcClock.derivedNode (derived-write node space)', () {
-    test('sorts strictly below EVERY real node — even the smallest ULID a '
-        'device could mint — in both compareTo and packed order', () {
-      // Real node ids are 26 Crockford base32 chars ('0'-'9','A'-'Z' subset);
-      // '0' * 26 is the lexicographic floor of that space. A derived stamp
-      // from the LARGEST possible device must still sort below a real stamp
-      // from the smallest, or a (wall, counter) tie could pick bookkeeping
-      // over user intent.
-      final smallestReal = '0' * 26;
-      final derivedOfLargest = HlcClock.derivedNode('Z' * 26);
-      expect(derivedOfLargest.compareTo(smallestReal) < 0, isTrue);
+  group('HlcClock.derived (node-space derivation)', () {
+    const device = 'DEVICE00000000000000000000';
+    final base = Hlc(wallMs: 1000, counter: 5, node: 'A' * 26);
 
-      final real = Hlc(wallMs: 1000, counter: 6, node: smallestReal);
-      final derived = Hlc(wallMs: 1000, counter: 6, node: derivedOfLargest);
-      expect(derived < real, isTrue);
-      expect(derived.packed.compareTo(real.packed) < 0, isTrue);
+    test('out-ranks its base (the write replicates) yet sorts below EVERY '
+        'stamp that out-ranks the base', () {
+      final d = HlcClock.derived(base, device);
+      expect(d > base, isTrue, reason: 'must replicate over the base state');
+      expect(d.wallMs, base.wallMs);
+      expect(d.counter, base.counter, reason: 'never escalates the counter');
+
+      // A held-wall author edit one counter above the base.
+      final heldWall = Hlc(wallMs: 1000, counter: 6, node: '0' * 26);
+      expect(d < heldWall, isTrue);
+      // A node-space tie winner barely above the base — the parked-update
+      // shape whose replay must still beat the derived tombstone.
+      final nodeWinner = Hlc(wallMs: 1000, counter: 5, node: '${'A' * 25}B');
+      expect(nodeWinner > base, isTrue, reason: 'fixture sanity');
+      expect(d < nodeWinner, isTrue);
+      // Packed order agrees everywhere the tuple order does.
+      expect(d.packed.compareTo(base.packed) > 0, isTrue);
+      expect(d.packed.compareTo(heldWall.packed) < 0, isTrue);
+      expect(d.packed.compareTo(nodeWinner.packed) < 0, isTrue);
     });
 
-    test('keeps devices distinct: two installs derive different nodes, so '
-        'derived-vs-derived ties still order deterministically', () {
-      // ULID first chars carry the coarse timestamp (identical across
-      // contemporaneous installs); the entropy lives in the suffix, which
-      // the derivation preserves.
-      final a = HlcClock.derivedNode('0AAAAAAAAAAAAAAAAAAAAAAAA1');
-      final b = HlcClock.derivedNode('0AAAAAAAAAAAAAAAAAAAAAAAA2');
+    test('a CHAIN of derivations still loses to every real edit above the '
+        'original base (no counter escalation, ever)', () {
+      final d1 = HlcClock.derived(base, device);
+      final d2 = HlcClock.derived(d1, device);
+      final d3 = HlcClock.derived(d2, device);
+      expect(d1 < d2, isTrue);
+      expect(d2 < d3, isTrue, reason: 'each re-derivation replicates');
+      final heldWall = Hlc(wallMs: 1000, counter: 6, node: '0' * 26);
+      for (final d in [d1, d2, d3]) {
+        expect(
+          d < heldWall,
+          isTrue,
+          reason: 'chained bookkeeping must never beat user intent',
+        );
+      }
+    });
+
+    test('keeps devices distinct so derived-vs-derived orders '
+        'deterministically', () {
+      final a = HlcClock.derived(base, 'DEVICEA0000000000000000000');
+      final b = HlcClock.derived(base, 'DEVICEB0000000000000000000');
       expect(a == b, isFalse);
       expect(a.compareTo(b) == 0, isFalse);
     });
 
     test('round-trips through packed parse like any node', () {
-      final h = Hlc(
-        wallMs: 1000,
-        counter: 6,
-        node: HlcClock.derivedNode('01J9Z3KQ8V5N7P2R4T6W8XABCD'),
+      final d = HlcClock.derived(
+        HlcClock.derived(base, device),
+        '01J9Z3KQ8V5N7P2R4T6W8XABCD',
       );
-      expect(Hlc.parse(h.packed), h);
+      expect(Hlc.parse(d.packed), d);
+    });
+
+    test('falls back to the counter bump only past the node-length cap', () {
+      var d = base;
+      while (d.node.length + device.length + 1 <= HlcClock.maxNodeLength) {
+        d = HlcClock.derived(d, device);
+        expect(d.counter, base.counter);
+      }
+      final over = HlcClock.derived(d, device);
+      expect(over.counter, base.counter + 1, reason: 'documented fallback');
+      expect(over.node.length <= HlcClock.maxNodeLength, isTrue);
     });
   });
 

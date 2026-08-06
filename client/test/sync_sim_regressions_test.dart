@@ -407,8 +407,8 @@ void main() {
       // device with the fastest clock), letting bookkeeping resurrect a
       // deleted practice (simulation seed 0xab1a57).
       expect(healed.data['w'], rowHlc.wallMs);
-      expect(healed.data['c'], rowHlc.counter + 1);
-      expect(healed.data['n'], HlcClock.derivedNode(_id('LOCAL')));
+      expect(healed.data['c'], rowHlc.counter);
+      expect(healed.data['n'], '${rowHlc.node}!${_id('LOCAL')}');
 
       // A delete stamped causally AFTER the original row — but by a device
       // whose wall clock is far BEHIND the healer's — must still win.
@@ -483,8 +483,8 @@ void main() {
           .getSingle();
       expect(t.data['d'], isNotNull);
       expect(t.data['w'], childHlc.wallMs);
-      expect(t.data['c'], childHlc.counter + 1);
-      expect(t.data['n'], HlcClock.derivedNode(_id('LOCAL')));
+      expect(t.data['c'], childHlc.counter);
+      expect(t.data['n'], '${childHlc.node}!${_id('LOCAL')}');
     });
   });
 }

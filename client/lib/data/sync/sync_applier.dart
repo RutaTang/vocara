@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:drift/drift.dart';
 
 import '../db/app_database.dart';
@@ -508,30 +510,69 @@ class SyncApplier {
     final store = quarantine;
     if (store == null) return;
     final id = rec.fields['id'];
-    if (id is! String || id.isEmpty) return; // nothing addressable to park
-    final String payload;
-    try {
-      payload = rec.encode();
-    } catch (_) {
-      // Nothing replayable to park (see doc comment). Wire-decoded rows are
-      // scalar-only by SyncRow.fromJson, so this guards hand-built records.
-      return;
+    String parkId;
+    String payload;
+    var parkReason = reason;
+    if (id is String && id.isNotEmpty) {
+      parkId = id;
+      try {
+        payload = rec.encode();
+      } catch (_) {
+        // Un-encodable (hand-built non-scalar values — wire rows are
+        // scalar-only by SyncRow.fromJson): park a DEAD LETTER instead of
+        // dropping silently. It can never replay, but the raw evidence
+        // survives for review — silent loss is exactly what quarantine
+        // exists to prevent.
+        (parkId, payload) = _deadLetter(rec);
+        parkReason = 'dead-letter($reason)';
+      }
+    } else {
+      // No addressable id: same dead-letter treatment under a synthesized
+      // content-hash key.
+      (parkId, payload) = _deadLetter(rec);
+      parkReason = 'dead-letter($reason)';
     }
     final hlcPacked = rec.fields['hlc_packed'];
     final schemaV = rec.fields['schema_v'];
     try {
       await store.put(
         table: rec.table,
-        id: id,
+        id: parkId,
         hlcPacked: hlcPacked is String ? hlcPacked : '',
         schemaV: schemaV is int ? schemaV : 0,
         payload: payload,
-        reason: reason,
+        reason: parkReason,
         quarantinedAt: DateTime.now().millisecondsSinceEpoch,
       );
     } catch (e) {
       throw _QuarantinePutException(e);
     }
+  }
+
+  /// A best-effort, always-encodable snapshot of an otherwise unparkable
+  /// record, keyed by a content hash so distinct dead letters get distinct
+  /// rows. The payload is deliberately NOT a valid [SyncRow] envelope: the
+  /// quarantine replay's decode fails and keeps it parked — a dead letter is
+  /// for human review, never re-application.
+  (String, String) _deadLetter(SyncRow rec) {
+    final safe = <String, Object?>{};
+    rec.fields.forEach((k, v) {
+      safe[k] = (v == null || v is num || v is String || v is bool)
+          ? v
+          : v.toString();
+    });
+    final payload = jsonEncode({
+      'deadLetter': true,
+      'table': rec.table,
+      'fields': safe,
+    });
+    // FNV-1a over the payload: deterministic across runs (String.hashCode
+    // is not), so the same dead letter re-parks onto the same row.
+    var h = 0x811c9dc5;
+    for (final c in payload.codeUnits) {
+      h = ((h ^ c) * 0x01000193) & 0xFFFFFFFF;
+    }
+    return ('deadletter${h.toRadixString(16).padLeft(8, '0')}', payload);
   }
 
   /// Pre-commit sweep for rows that STILL violate a foreign key once the whole
@@ -1098,30 +1139,15 @@ class SyncApplier {
     return holder?.read<int>('hlc_wall');
   }
 
-  /// A DERIVED stamp for a local resolution write: one counter above [base],
-  /// under this device's DERIVED node ([HlcClock.derivedNode] — sorts below
-  /// every real node, so a held-wall author edit at the same (wall, counter)
-  /// always wins the tie and can never be reverted by bookkeeping). Strictly
-  /// above the row's current stamp (so the write replicates via LWW) yet
-  /// strictly below any later real edit (every device holding the row has
-  /// advanced its clock past [base], so its next tick out-ranks the bump) —
-  /// derived state must never out-rank user intent. Same derivation as
+  /// A DERIVED stamp for a local resolution write, via [HlcClock.derived]:
+  /// same (wall, counter) as [base], node extended by `'!' + device`. The
+  /// extension out-ranks [base] (the write replicates) yet sorts below EVERY
+  /// stamp above base — including the parked update that beat base by node
+  /// alone, whose quarantine replay must land over this tombstone once its
+  /// parent arrives. Deriving in node space (never counter space) is what
+  /// guarantees that; see [HlcClock.derived]. Same derivation as
   /// IntegrityChecker's repair stamps.
-  Hlc _derivedHlc(Hlc base) {
-    var wall = base.wallMs;
-    var counter = base.counter + 1;
-    if (counter > HlcClock.maxCounter) {
-      // Keep the packed encoding's fixed-width counter: spill to the next
-      // millisecond, exactly like HlcClock does.
-      wall += 1;
-      counter = 0;
-    }
-    return Hlc(
-      wallMs: wall,
-      counter: counter,
-      node: HlcClock.derivedNode(clock.node),
-    );
-  }
+  Hlc _derivedHlc(Hlc base) => HlcClock.derived(base, clock.node);
 
   /// Journals the slot-resolution tombstone so the resolution replicates,
   /// and returns the inserted entry's seq (drift's insert returns the new

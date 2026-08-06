@@ -125,29 +125,60 @@ class HlcClock {
   /// Stable per-install node id (final LWW tiebreak).
   final String node;
 
-  /// The node id DERIVED writes stamp under (integrity repairs, slot
-  /// resolution tombstones): [node] with its first character replaced by
-  /// `'!'`. Real node ids are 26 Crockford base32 characters (`0-9A-Z`,
-  /// enforced at mint), and ASCII `'!'` sorts strictly below all of them, so
-  /// a derived stamp LOSES every (wall, counter) tie against any real edit —
-  /// structurally, not by luck of the node draw.
+  /// The stamp a DERIVED write (integrity repair, slot-resolution tombstone,
+  /// FK-sweep collision restore) mints from the row state [base] it derives
+  /// from: the SAME (wall, counter), with the node extended by
+  /// `'!' + deviceNode`. String order makes a prefix extension sort strictly
+  /// AFTER the prefix, so the derived stamp out-ranks [base] (it replicates
+  /// over every peer still holding base) while sorting strictly BELOW every
+  /// stamp that out-ranks base — including a held-wall author edit at
+  /// `(base.wall, base.counter + 1)` AND a node-space tie winner at
+  /// `(base.wall, base.counter, biggerNode)`.
   ///
-  /// This closes the derived-repair-stamp lost update (sync-protocol.md): an
-  /// author editing a row while its clock wall is held stamps
-  /// `(base.wall, base.counter + 1, authorNode)` — the same (wall, counter) a
-  /// healer derives from the same base. With a real healer node the tie broke
-  /// by node id, and a winning healer's FULL-ROW snapshot silently reverted
-  /// every other field of the author's edit fleet-wide. Under the derived
-  /// node the author always wins; the repair is DERIVABLE state, so the next
-  /// integrity pass simply re-derives it one counter above the author's edit
-  /// and the fleet converges with both the edit and the heal.
+  /// Deriving in NODE space, never counter space, is the whole point — it
+  /// closes both halves of the derived-stamp lost update:
   ///
-  /// The suffix keeps the DEVICE distinct: two devices deriving different
-  /// content from the same base (e.g. tombstoning one occupant against two
-  /// different winners) still mint distinct stamps, so LWW picks one
-  /// deterministically — a single shared sentinel node would let identical
-  /// stamps carry different content and diverge.
-  static String derivedNode(String node) => '!${node.substring(1)}';
+  ///  * counter escalation: two chained repairs used to stamp base+1 then
+  ///    base+2, and base+2-derived beat a base+1 REAL edit, silently
+  ///    reverting it fleet-wide. Here a repair-of-a-repair just extends the
+  ///    node again — `(w, c, A!D!D)` — and still loses to every real edit
+  ///    above the ORIGINAL base. Bookkeeping can never out-rank user intent,
+  ///    no matter how many times it re-derives.
+  ///  * the restore collision: a parked update that won its slot by NODE
+  ///    only — `(w, c, B)` over prior `(w, c, A)` — used to be beaten by the
+  ///    restore's `(w, c + 1, …)` tombstone, so its quarantine replay lost
+  ///    LWW forever. `(w, c, A!D)` sorts between A and B: the tombstone
+  ///    replicates over the prior state AND the replay still lands.
+  ///
+  /// The device suffix keeps derived writes from DIFFERENT devices distinct
+  /// (two devices deriving different content from the same base must not
+  /// mint one stamp), and `'!'` (below the Crockford node alphabet) makes
+  /// derived stamps recognizable and reserved on the wire.
+  ///
+  /// The node cap guards the pathological regime only: a chain that somehow
+  /// re-derives dozens of times without an intervening real edit falls back
+  /// to the old counter bump rather than growing the key without bound —
+  /// accepting, in that unreachable corner, the narrow tie the extension
+  /// scheme otherwise closes.
+  static Hlc derived(Hlc base, String deviceNode) {
+    final extended = '${base.node}!$deviceNode';
+    if (extended.length <= maxNodeLength) {
+      return Hlc(wallMs: base.wallMs, counter: base.counter, node: extended);
+    }
+    var wall = base.wallMs;
+    var counter = base.counter + 1;
+    if (counter > maxCounter) {
+      wall += 1;
+      counter = 0;
+    }
+    return Hlc(wallMs: wall, counter: counter, node: '!$deviceNode');
+  }
+
+  /// Longest node the wire accepts (see [SyncRow.checkHlcConsistency]) and
+  /// the ceiling [derived] extends under: 26-char device ids plus a dozen
+  /// derivation segments, far beyond any real chain (the integrity fixpoint
+  /// caps at 8 passes).
+  static const int maxNodeLength = 384;
 
   /// Maximum tolerated forward drift of a remote (or the local) clock.
   final int maxDriftMs;

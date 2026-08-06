@@ -82,4 +82,20 @@ class QuarantineStore {
   Future<void> delete(String table, String id) => (_db.delete(
     _db.syncQuarantine,
   )..where((q) => q.tbl.equals(table) & q.id.equals(id))).go();
+
+  /// Removes one parked row ONLY while it still holds [hlcPacked] — the
+  /// settle-then-delete used by the quarantine replay. The replay lists,
+  /// applies, then deletes; a NEWER state for the same (table, id) can be
+  /// parked between the apply and the delete (a concurrent pull page), and
+  /// the unconditional delete threw that newer state away with the settled
+  /// one. Conditioning on the stamp closes the TOCTOU: the newer entry
+  /// simply survives for the next replay cycle.
+  Future<void> deleteIfStamp(String table, String id, String hlcPacked) =>
+      (_db.delete(_db.syncQuarantine)..where(
+            (q) =>
+                q.tbl.equals(table) &
+                q.id.equals(id) &
+                q.remoteHlcPacked.equals(hlcPacked),
+          ))
+          .go();
 }

@@ -125,6 +125,26 @@ void main() {
     expect(await store.list(), isEmpty);
   });
 
+  test('deleteIfStamp settles only the exact replayed state, never a newer '
+      'one parked meanwhile (replay TOCTOU)', () async {
+    // The replay lists Q@100, applies it, then deletes. If Q@200 was parked
+    // during the apply (a concurrent pull page), the unconditional delete
+    // dropped Q@200 unreplayed. The conditional delete leaves it for the
+    // next cycle.
+    await put('practices', 'P', hlcPacked: '0000000000100-000000-N');
+    await store.deleteIfStamp('practices', _id('P'), '0000000000100-000000-N');
+    expect(await store.list(), isEmpty, reason: 'exact stamp settles');
+
+    await put('practices', 'P', hlcPacked: '0000000000100-000000-N');
+    // The LWW put replaces the entry with a NEWER state mid-replay…
+    await put('practices', 'P', hlcPacked: '0000000000200-000000-N');
+    // …and the settle of the OLD stamp must not touch it.
+    await store.deleteIfStamp('practices', _id('P'), '0000000000100-000000-N');
+    final left = await store.list();
+    expect(left, hasLength(1));
+    expect(left.single.remoteHlcPacked, '0000000000200-000000-N');
+  });
+
   test('CLOCK-POISON GUARD: sync_quarantine must never carry a column named '
       'hlc_packed', () async {
     // Persistence._seedClock seeds the boot HLC from MAX(hlc_packed) of every

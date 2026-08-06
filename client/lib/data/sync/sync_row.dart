@@ -13,13 +13,15 @@ import 'hlc.dart';
 /// (id / schema_v / hlc_packed) at the top level for cheap routing without
 /// parsing the field map — encode/decode verifies the two stay consistent.
 class SyncRow {
-  /// [fields] is defensively copied and frozen: a SyncRow is a value in
-  /// transit, and silent mutation after LWW comparison would be a data bug.
+  /// [fields] and [fieldClocks] are defensively copied and frozen: a SyncRow
+  /// is a value in transit, and silent mutation after LWW comparison (or
+  /// after a future column-clock validation) would be a data bug.
   SyncRow({
     required this.table,
     required Map<String, Object?> fields,
-    this.fieldClocks,
-  }) : fields = Map.unmodifiable(fields);
+    Map<String, String>? fieldClocks,
+  }) : fields = Map.unmodifiable(fields),
+       fieldClocks = fieldClocks == null ? null : Map.unmodifiable(fieldClocks);
 
   /// The synced table this row belongs to (SQL name, e.g. 'practices').
   final String table;
@@ -162,6 +164,30 @@ class SyncRow {
         'non-empty hlc_node',
       );
     }
+    // Numeric bounds are ORDERING-CORRECTNESS, not pedantry: the packed
+    // encoding is fixed-width (13-digit wall, 6-digit counter), so a counter
+    // of 1000000 or a 14-digit wall would repack "consistently" while its
+    // string order diverged from the tuple order — the LWW comparison and
+    // the drift gate would then disagree about which stamp is newer. The
+    // node charset admits real (Crockford-envelope) ids and the reserved
+    // '!'-extended derived space, bounded so a hostile stamp cannot bloat
+    // every packed key it touches.
+    if (hlcCtr < 0 || hlcCtr > HlcClock.maxCounter) {
+      throw const FormatException(
+        'SyncRow: hlc_ctr outside the packed 6-digit range',
+      );
+    }
+    if (hlcWall < 0 || hlcWall > 9999999999999) {
+      throw const FormatException(
+        'SyncRow: hlc_wall outside the packed 13-digit range',
+      );
+    }
+    if (hlcNode.length > HlcClock.maxNodeLength ||
+        !_nodeShape.hasMatch(hlcNode)) {
+      throw const FormatException(
+        'SyncRow: hlc_node outside the supported node grammar',
+      );
+    }
     final repacked = Hlc(
       wallMs: hlcWall,
       counter: hlcCtr,
@@ -173,6 +199,12 @@ class SyncRow {
       );
     }
   }
+
+  /// Node grammar: alphanumerics plus the reserved `'!'` separator derived
+  /// stamps extend with ([HlcClock.derived]). No dash — the packed encoding
+  /// uses it as the field separator — and nothing a path or SQL context
+  /// could misread.
+  static final RegExp _nodeShape = RegExp(r'^[0-9A-Za-z!]+$');
 
   /// The envelope every entity id on the wire must fit: 1–64 characters of
   /// `[0-9A-Za-z_-]`. This is a SECURITY gate, not a style check: ids become

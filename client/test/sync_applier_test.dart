@@ -347,6 +347,39 @@ void main() {
     expect(count.read<int>('n'), 2, reason: 'neither hostile row may land');
   });
 
+  test(
+    'an unaddressable record parks as a DEAD LETTER instead of vanishing',
+    () async {
+      // A record with no usable id used to be dropped silently while its page
+      // committed and advanced the change token — unrecoverable, unaccounted.
+      // It now parks under a synthesized content-hash key with the raw
+      // evidence; the replay's decode refuses it, so it stays for review.
+      final store = QuarantineStore(db);
+      final parkingApplier = SyncApplier(
+        db,
+        HlcClock(node: _id('LOCAL'), now: () => 1000),
+        builder: SyncRowBuilder(db),
+        quarantine: store,
+      );
+      final noId = RemoteRecord(
+        table: 'practices',
+        columns: {...practice('X', 'x', hlc(910)).columns, 'id': ''},
+      );
+      final res = await parkingApplier.apply([
+        practice('GOOD', 'kept', hlc(900)),
+        noId,
+      ]);
+      expect(res.committed, isTrue);
+      expect(res.applied, 1);
+      expect(res.failed, 1);
+      final parked = (await store.list()).single;
+      expect(parked.reason, startsWith('dead-letter('));
+      expect(parked.id, startsWith('deadletter'));
+      // Never re-applied: the payload is deliberately not a SyncRow envelope.
+      expect(() => SyncRow.decode(parked.payload), throwsFormatException);
+    },
+  );
+
   group('missing-column gate (full-row wire contract)', () {
     Future<String> hlcPackedOf(String id) async {
       final r = await db
@@ -1404,8 +1437,10 @@ void main() {
     // loser's own stamp, under the resolving device's DERIVED node (which
     // sorts below every real node, so bookkeeping loses (wall, counter)
     // ties to real edits — see HlcClock.derivedNode).
-    Hlc derivedAt(int wall) =>
-        Hlc(wallMs: wall, counter: 1, node: HlcClock.derivedNode(_id('LOCAL')));
+    // The derived tombstone a slot resolution writes: the loser's own stamp
+    // with the node extended by this device — same (wall, counter), so a
+    // parked node-space winner's replay still out-ranks it (HlcClock.derived).
+    Hlc derivedAt(int wall) => HlcClock.derived(hlc(wall), _id('LOCAL'));
 
     test('park+delete: an inserted record that WON the slot (its bus parent '
         'quarantined, newer schema) takes the occupant tombstone and its '
@@ -1741,6 +1776,56 @@ void main() {
         expect(await oplogRows(), hasLength(2));
       });
 
+      test('a NODE-ONLY winner parked at the door still out-ranks the restore '
+          'tombstone, so its replay lands (the counter-bump derivation '
+          'buried it forever)', () async {
+        // X's update beats the prior state by NODE alone — same
+        // (wall, counter), bigger node. The restore tombstone derives from
+        // the prior (850, 0, REMOTE…): under the old counter+1 scheme that
+        // was (850, 1, …), OUT-RANKING the parked update — its replay then
+        // settled as an LWW skip and the update was lost forever. Node-space
+        // derivation stays at (850, 0, REMOTE…!LOCAL…), strictly between
+        // the prior and the winner.
+        await applier.apply([
+          practice('P', 'p', hlc(800)),
+          accTrack('X', 'P', hlc(850)), // prior: (850, 0, REMOTE…)
+        ]);
+        final nodeWin = Hlc(
+          wallMs: 850,
+          counter: 0,
+          node: _id('ZREMOTE'), // > REMOTE… in node space alone
+        );
+        final res = await applier.apply([
+          accTrack('X', 'P', nodeWin, busId: 'B'), // dangling bus -> parked
+          accTrack('W', 'P', hlc(950)), // a later winner takes the slot
+        ]);
+        expect(res.committed, isTrue);
+        expect(res.failed, 1);
+
+        // The restored row is tombstoned under the derived stamp…
+        final x = (await trackState('X'))!;
+        expect(x['deleted_at'], 950);
+        expect(x['hlc_packed'], derivedAt(850).packed);
+        // …and the parked update STILL out-ranks it. This comparison is the
+        // whole regression: counter-bump derivation reversed it.
+        final parked = (await store.list()).singleWhere(
+          (q) => q.tbl == 'tracks',
+        );
+        expect(
+          parked.remoteHlcPacked.compareTo(x['hlc_packed']! as String),
+          greaterThan(0),
+          reason: 'bookkeeping must never out-rank the state it parked',
+        );
+
+        // The parent lands; the replay must LAND, not settle as a skip.
+        await applier.apply([fxBus('B', 'P', hlc(985))]);
+        final replay = await applier.apply([SyncRow.decode(parked.payload)]);
+        expect(replay.applied, 1);
+        expect(replay.skipped, 0);
+        final after = (await trackState('X'))!;
+        expect(after['hlc_packed'], parked.remoteHlcPacked);
+      });
+
       test('prior-row restore hazard: the pre-batch snapshot of the parked '
           'update would land in a slot a later winner now holds — it is '
           'restored TOMBSTONED under a derived stamp and journaled, and the '
@@ -2023,11 +2108,14 @@ void main() {
       expect(await checker.repair(), isEmpty);
       var row = await practiceRow();
       expect(row['separation_asset_id'], isNull);
-      expect(row['hlc_ctr'], base.counter + 1);
+      // Node-space derivation: same (wall, counter) as the base, node
+      // extended — the repair replicates over the base yet loses to EVERY
+      // stamp above it.
+      expect(row['hlc_ctr'], base.counter);
       expect(
-        (row['hlc_node']! as String).startsWith('!'),
+        (row['hlc_node']! as String).contains('!'),
         isTrue,
-        reason: 'repairs must stamp under the derived node space',
+        reason: 'repairs must stamp in the derived node space',
       );
 
       // The author's held-wall edit arrives: the SAME (wall, counter) under
@@ -2076,8 +2164,133 @@ void main() {
       row = await practiceRow();
       expect(row['title'], 'renamed');
       expect(row['separation_asset_id'], isNull);
-      expect(row['hlc_ctr'], edit.counter + 1);
-      expect((row['hlc_node']! as String).startsWith('!'), isTrue);
+      expect(row['hlc_ctr'], edit.counter);
+      expect((row['hlc_node']! as String).contains('!'), isTrue);
+    });
+
+    test('CHAINED repairs on one row still lose to a held-wall author edit '
+        '(counter escalation was base+2 beating base+1 real)', () async {
+      // TWO dangling pointers on one practice row make the SAME repair pass
+      // derive twice: heal #1 from the base, heal #2 from heal #1's row. The
+      // old counter derivation stamped base+1 then base+2 — and base+2
+      // bookkeeping beat a base+1 REAL edit, silently reverting it
+      // fleet-wide. Node-space derivation never leaves the base's
+      // (wall, counter), so any number of chained heals stays below it.
+      final authorNode = _id('AAA');
+      final base = Hlc(wallMs: 1000, counter: 5, node: authorNode);
+      RemoteRecord interp(
+        String id,
+        String practiceId,
+        Hlc h, {
+        int? deletedAt,
+      }) => RemoteRecord(
+        table: 'interpretations',
+        columns: {
+          'id': _id(id),
+          'practice_id': _id(practiceId),
+          'name': '',
+          'order_index': 0,
+          'created_at': h.wallMs,
+          'updated_at': h.wallMs,
+          'deleted_at': deletedAt,
+          'hlc_wall': h.wallMs,
+          'hlc_ctr': h.counter,
+          'hlc_node': h.node,
+          'hlc_packed': h.packed,
+          'schema_v': 1,
+        },
+      );
+      await applier.apply([asset('A', hlc(900))]);
+      final seeded = await applier.apply([
+        RemoteRecord(
+          table: 'practices',
+          columns: {
+            'id': _id('P'),
+            'title': 'original',
+            'timeline_duration_ms': 0,
+            'master_volume': 1.0,
+            'active_interpretation_id': _id('I'),
+            'separation_asset_id': _id('A'),
+            'reverb_json': null,
+            'lyrics_json': null,
+            'created_at': base.wallMs,
+            'updated_at': base.wallMs,
+            'deleted_at': null,
+            'hlc_wall': base.wallMs,
+            'hlc_ctr': base.counter,
+            'hlc_node': base.node,
+            'hlc_packed': base.packed,
+            'schema_v': 1,
+          },
+        ),
+        interp('I', 'P', hlc(905)),
+      ]);
+      expect(seeded.applied, 2);
+      // Both targets die: the repair pass must heal BOTH pointers — two
+      // sequential derived writes on the same practices row.
+      await applier.apply([asset('A', hlc(1100), deletedAt: 1100)]);
+      await applier.apply([
+        interp(
+          'I',
+          'P',
+          Hlc(wallMs: 1105, counter: 0, node: hlc(0).node),
+          deletedAt: 1105,
+        ),
+      ]);
+      final checker = IntegrityChecker(
+        db,
+        SyncWriter(db, HlcClock(node: _id('LOCAL'), now: () => 2000)),
+      );
+      expect(await checker.repair(), isEmpty);
+      var row = await practiceRow();
+      expect(row['separation_asset_id'], isNull);
+      final chained = row['hlc_node']! as String;
+      expect(
+        '!'.allMatches(chained).length,
+        greaterThanOrEqualTo(2),
+        reason: 'the second heal must derive from the first (a chain)',
+      );
+      expect(row['hlc_ctr'], base.counter, reason: 'never a counter bump');
+
+      // The held-wall author edit at base+1 must beat the WHOLE chain.
+      final edit = Hlc(
+        wallMs: base.wallMs,
+        counter: base.counter + 1,
+        node: authorNode,
+      );
+      final applied = await applier.apply([
+        RemoteRecord(
+          table: 'practices',
+          columns: {
+            'id': _id('P'),
+            'title': 'renamed',
+            'timeline_duration_ms': 0,
+            'master_volume': 1.0,
+            'active_interpretation_id': _id('I'),
+            'separation_asset_id': _id('A'),
+            'reverb_json': null,
+            'lyrics_json': null,
+            'created_at': base.wallMs,
+            'updated_at': edit.wallMs,
+            'deleted_at': null,
+            'hlc_wall': edit.wallMs,
+            'hlc_ctr': edit.counter,
+            'hlc_node': edit.node,
+            'hlc_packed': edit.packed,
+            'schema_v': 1,
+          },
+        ),
+      ]);
+      expect(applied.applied, 1);
+      row = await practiceRow();
+      expect(row['title'], 'renamed', reason: 'chained bookkeeping lost');
+
+      // And the heals re-derive above the edit, keeping the rename.
+      expect(await checker.repair(), isEmpty);
+      row = await practiceRow();
+      expect(row['title'], 'renamed');
+      expect(row['separation_asset_id'], isNull);
+      expect(row['hlc_ctr'], edit.counter);
     });
   });
 }

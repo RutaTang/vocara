@@ -863,7 +863,10 @@ class SyncEngine {
       final result = await _applier.apply([row]);
       if (!result.committed) break; // storage trouble — retry next run
       if (result.applied > 0 || result.skipped > 0) {
-        await store.delete(q.tbl, q.id);
+        // Conditional on the stamp we REPLAYED: a newer state for this
+        // (table, id) can be parked while the apply above ran, and an
+        // unconditional delete would drop it unreplayed (TOCTOU).
+        await store.deleteIfStamp(q.tbl, q.id, q.remoteHlcPacked);
         applied += result.applied;
         if (result.applied > 0) landed.add(row);
       }
