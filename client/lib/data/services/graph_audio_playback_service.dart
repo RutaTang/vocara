@@ -90,6 +90,21 @@ List<AudioDevice> enumerateInputDevices() => _enumDevices(input: true);
 /// far above any song-practice use so only runaway inputs (a DJ set, a podcast rip) hit it.
 const Duration maxPlaybackDuration = Duration(minutes: 60);
 
+/// ABSOLUTE source-frame memory budgets handed to `ve_decode` — the bound the
+/// native allocation actually obeys (duration and rate ceilings alone still
+/// multiply to gigabytes inside both limits; one stereo frame is 8 bytes in
+/// the decode buffer).
+/// Playback staging: 60 minutes at a 96 kHz source ≈ 346 M frames ≈ 2.8 GB —
+/// whole-track residency is the playback design's documented cost, and this
+/// bounds what a single import can demand of it (a 60-minute 192 kHz file
+/// would have doubled it).
+const int maxPlaybackSrcFrames = 346000000;
+
+/// Analysis: ~33 M frames ≈ 264 MB — a 10-minute take at up to ~55 kHz
+/// source, shorter at higher rates; the analysis targets vocal takes
+/// recorded at 48 kHz, so this refuses only exotic hi-rate media.
+const int maxAnalysisSrcFrames = 33000000;
+
 /// Decode `path` to device-rate PCM on a background isolate (the CPU-heavy part). Returns the
 /// native buffer's address + frame count; the malloc'd buffer lives on the shared process
 /// heap, so the main isolate reads/frees it. (0, 0) on failure. Throws
@@ -102,7 +117,13 @@ Future<(int, int)> _decodeInIsolate(String path, int rate) {
     final status = malloc<ffi.Int>();
     try {
       final maxFrames = maxPlaybackDuration.inMilliseconds * rate ~/ 1000;
-      final pcm = bindings.ve_decode(cpath.cast(), rate, maxFrames, status);
+      final pcm = bindings.ve_decode(
+        cpath.cast(),
+        rate,
+        maxFrames,
+        maxPlaybackSrcFrames,
+        status,
+      );
       if (status.value == veDecodeTooLong) {
         throw const MediaTooLongException(maxPlaybackDuration);
       }
@@ -183,7 +204,13 @@ Future<PcmAudio?> decodeMediaToMono(
     final status = malloc<ffi.Int>();
     final cap = maxDuration ?? maxPlaybackDuration;
     final maxFrames = cap.inMilliseconds * rate ~/ 1000;
-    final pcm = bindings.ve_decode(cpath.cast(), rate, maxFrames, status);
+    final pcm = bindings.ve_decode(
+      cpath.cast(),
+      rate,
+      maxFrames,
+      maxAnalysisSrcFrames,
+      status,
+    );
     final tooLong = status.value == veDecodeTooLong;
     malloc.free(status);
     final ptr = pcm.ptr;

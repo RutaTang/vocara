@@ -17,8 +17,8 @@ extern "C" {
 /* Opaque engine handle. */
 typedef struct VeEngine VeEngine;
 
-/* Decoded PCM handed back from ve_decode_file (interleaved stereo f32, `frames * 2`
- * floats). Free with ve_free_pcm. */
+/* Decoded PCM handed back from ve_decode (interleaved stereo f32, `frames * 2` floats).
+ * Free with ve_free_decoded. */
 typedef struct VePcm {
   float *ptr;
   size_t frames;
@@ -164,7 +164,11 @@ int ve_set_bus_send_level(VeEngine *e, int bus, int slot, float level_db);
 /* Stateless decode for a background isolate (no engine state touched). `max_frames` (at the
  * output `rate`; 0 = unbounded) caps the decoded duration BEFORE the full track allocates —
  * a too-long file sets VE_DECODE_TOO_LONG in `status` (nullable) and returns empty PCM. */
-VePcm ve_decode(const char *path, uint32_t rate, uint64_t max_frames, int *status);
+/* max_src_frames (0 = unbounded) is the caller's ABSOLUTE memory budget in SOURCE-rate
+ * frames (8 bytes each in the decode buffer): duration and rate ceilings alone still scale
+ * to gigabytes inside both limits; this is the bound the allocation obeys. */
+VePcm ve_decode(const char *path, uint32_t rate, uint64_t max_frames, uint64_t max_src_frames,
+                int *status);
 void ve_free_decoded(float *ptr, size_t frames);
 /* Declared duration of a media file in ms WITHOUT decoding (container probe only) — the
  * import gate's cheap pre-check. -1 = container declares no length; -2 = unreadable. */
@@ -218,8 +222,6 @@ int ve_set_reverb_insert(VeEngine *e, int track, float room, float damping, floa
 int ve_set_bus_reverb_insert(VeEngine *e, int bus, float room, float damping, float wet, float width);
 
 /* Decode a file to interleaved-stereo f32 at the engine's device rate. */
-VePcm ve_decode_file(VeEngine *e, const char *path);
-void ve_free_pcm(VePcm pcm);
 
 #ifdef __cplusplus
 }

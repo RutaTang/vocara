@@ -818,14 +818,18 @@ class VocaraEngineBindings {
 
   /// Stateless decode for a background isolate (no engine state touched). `max_frames` (at the
   /// output `rate`; 0 = unbounded) caps the decoded duration BEFORE the full track allocates —
-  /// a too-long file sets VE_DECODE_TOO_LONG in `status` (nullable) and returns empty PCM.
+  /// a too-long file sets VE_DECODE_TOO_LONG in `status` (nullable) and returns empty PCM. */
+  /// /* max_src_frames (0 = unbounded) is the caller's ABSOLUTE memory budget in SOURCE-rate
+  /// frames (8 bytes each in the decode buffer): duration and rate ceilings alone still scale
+  /// to gigabytes inside both limits; this is the bound the allocation obeys.
   VePcm ve_decode(
     ffi.Pointer<ffi.Char> path,
     int rate,
     int max_frames,
+    int max_src_frames,
     ffi.Pointer<ffi.Int> status,
   ) {
-    return _ve_decode(path, rate, max_frames, status);
+    return _ve_decode(path, rate, max_frames, max_src_frames, status);
   }
 
   late final _ve_decodePtr =
@@ -835,13 +839,20 @@ class VocaraEngineBindings {
             ffi.Pointer<ffi.Char>,
             ffi.Uint32,
             ffi.Uint64,
+            ffi.Uint64,
             ffi.Pointer<ffi.Int>,
           )
         >
       >('ve_decode');
   late final _ve_decode = _ve_decodePtr
       .asFunction<
-        VePcm Function(ffi.Pointer<ffi.Char>, int, int, ffi.Pointer<ffi.Int>)
+        VePcm Function(
+          ffi.Pointer<ffi.Char>,
+          int,
+          int,
+          int,
+          ffi.Pointer<ffi.Int>,
+        )
       >();
 
   void ve_free_decoded(ffi.Pointer<ffi.Float> ptr, int frames) {
@@ -1741,36 +1752,12 @@ class VocaraEngineBindings {
       .asFunction<
         int Function(ffi.Pointer<VeEngine>, int, double, double, double, double)
       >();
-
-  /// Decode a file to interleaved-stereo f32 at the engine's device rate.
-  VePcm ve_decode_file(ffi.Pointer<VeEngine> e, ffi.Pointer<ffi.Char> path) {
-    return _ve_decode_file(e, path);
-  }
-
-  late final _ve_decode_filePtr =
-      _lookup<
-        ffi.NativeFunction<
-          VePcm Function(ffi.Pointer<VeEngine>, ffi.Pointer<ffi.Char>)
-        >
-      >('ve_decode_file');
-  late final _ve_decode_file = _ve_decode_filePtr
-      .asFunction<
-        VePcm Function(ffi.Pointer<VeEngine>, ffi.Pointer<ffi.Char>)
-      >();
-
-  void ve_free_pcm(VePcm pcm) {
-    return _ve_free_pcm(pcm);
-  }
-
-  late final _ve_free_pcmPtr =
-      _lookup<ffi.NativeFunction<ffi.Void Function(VePcm)>>('ve_free_pcm');
-  late final _ve_free_pcm = _ve_free_pcmPtr.asFunction<void Function(VePcm)>();
 }
 
 final class VeEngine extends ffi.Opaque {}
 
-/// Decoded PCM handed back from ve_decode_file (interleaved stereo f32, `frames * 2`
-/// floats). Free with ve_free_pcm.
+/// Decoded PCM handed back from ve_decode (interleaved stereo f32, `frames * 2` floats).
+/// Free with ve_free_decoded.
 final class VePcm extends ffi.Struct {
   external ffi.Pointer<ffi.Float> ptr;
 

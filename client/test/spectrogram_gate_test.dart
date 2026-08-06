@@ -214,8 +214,23 @@ void main() {
     // untested).
     const declared = 4 * 60 * 44100 * 32; // 338,688,000 bytes
     assert(declared > SpectrogramService.maxAnalysisBytes);
-    final f = await write(
-      _wavHeader8ch(sampleRate: 44100, declaredDataBytes: declared),
+    final header = _wavHeader8ch(
+      sampleRate: 44100,
+      declaredDataBytes: declared,
+    );
+    // The payload must PHYSICALLY exist: a header-only file is refused by the
+    // physical-availability clamp regardless, which would leave the byte
+    // ceiling untested. A sparse file (seek past the end, write one byte)
+    // gives the declared length without 339 MB of disk I/O.
+    final f = await write(header);
+    final raf = await f.open(mode: FileMode.writeOnlyAppend);
+    await raf.setPosition(header.length + declared - 1);
+    await raf.writeByte(0);
+    await raf.close();
+    expect(
+      await f.length(),
+      header.length + declared,
+      reason: 'the fixture must be physically as long as it declares',
     );
     expect(await SpectrogramService.admitForAnalysis(f), isNull);
   });

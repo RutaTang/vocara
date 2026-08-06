@@ -1277,15 +1277,19 @@ pub enum DecodeError {
 /// Mono is duplicated; >2 channels take the first two. `max_secs` (0.0 = unbounded) caps the
 /// decoded duration: the full track lives in memory here, so an arbitrary-length input must
 /// be refused up front rather than after gigabytes of Vec growth.
-/// `max_src_rate` (0 = unbounded) refuses files whose SOURCE sample rate exceeds it: the
-/// duration budget alone does not bound decode memory — a legal-duration 384 kHz file
-/// decodes ~8x the samples of the 48 kHz case at its source rate BEFORE any resample.
-/// Analysis callers pass a multiple of their output rate; the playback path passes 0
-/// (whole-track residency is its documented design).
+/// `max_src_rate` (0 = unbounded) refuses files whose SOURCE sample rate exceeds it, and
+/// `max_src_frames` (0 = unbounded) is the ABSOLUTE memory budget in source-rate frames:
+/// the duration budget alone never bounded decode memory (a legal 10-minute 384 kHz file
+/// decoded ~1.8 GB at its source rate before any resample), and a RATE ceiling alone is
+/// not a byte budget either — duration x rate still scales to gigabytes inside both
+/// limits. The frame budget is the bound the allocation actually obeys: pre-sizing,
+/// mid-decode bail, and the declared-length refusal all clamp against
+/// min(duration-derived, absolute).
 pub fn decode_file(
     path: &str,
     max_secs: f64,
     max_src_rate: u32,
+    max_src_frames: u64,
 ) -> Result<(Vec<[Smp; CHANNELS]>, u32), DecodeError> {
     // Test-only observability: lets a test PROVE a refusal (or a skip) happened before /
     // without a decode — outcome-only assertions cannot tell "refused up front" from
@@ -1328,12 +1332,19 @@ pub fn decode_file(
     if max_src_rate > 0 && src_rate > max_src_rate {
         return Err(DecodeError::TooLong);
     }
-    // The duration budget in source-rate frames (u64::MAX = unbounded).
-    let max_frames: u64 = if max_secs > 0.0 {
+    // The effective frame budget: the duration-derived bound AND the caller's absolute
+    // memory budget, whichever is tighter (u64::MAX = unbounded).
+    let duration_frames: u64 = if max_secs > 0.0 {
         (max_secs * src_rate as f64).ceil() as u64
     } else {
         u64::MAX
     };
+    let absolute = if max_src_frames > 0 {
+        max_src_frames
+    } else {
+        u64::MAX
+    };
+    let max_frames = duration_frames.min(absolute);
     // Refuse a declared-too-long track BEFORE decoding a single packet. When the declared
     // length fits, pre-size the Vec so packet pushes never realloc-copy the whole track
     // (the count is clamped by the budget first — a lying header must not drive a huge
@@ -1421,7 +1432,7 @@ mod decode_tests {
         let samples: Vec<f32> = vec![0.5, 0.5, -0.25, -0.25, 1.5, 1.5, 0.0, 0.0];
         crate::wav::write_wav_f32(&path, &samples, 2, 48_000).unwrap();
         let (frames, rate) =
-            super::decode_file(path.to_str().unwrap(), 0.0, 0).expect("f32 wav decodes");
+            super::decode_file(path.to_str().unwrap(), 0.0, 0, 0).expect("f32 wav decodes");
         assert_eq!(rate, 48_000);
         assert_eq!(frames.len(), 4);
         assert!((frames[0][0] - 0.5).abs() < 1e-6);
@@ -1440,7 +1451,7 @@ mod decode_tests {
         let samples: Vec<f32> = vec![0.5, 0.5, -0.25, -0.25];
         crate::wav::write_wav_i16(&path, &samples, 2, 48_000).unwrap();
         let (frames, rate) =
-            super::decode_file(path.to_str().unwrap(), 0.0, 0).expect("i16 wav decodes");
+            super::decode_file(path.to_str().unwrap(), 0.0, 0, 0).expect("i16 wav decodes");
         assert_eq!(rate, 48_000);
         assert_eq!(frames.len(), 2);
         assert!((frames[0][0] - 0.5).abs() < 1e-3);
@@ -1455,7 +1466,7 @@ mod decode_tests {
         let path = temp_wav("too_long");
         let samples: Vec<f32> = vec![0.1; 200]; // 100 stereo frames
         crate::wav::write_wav_f32(&path, &samples, 2, 48_000).unwrap();
-        match super::decode_file(path.to_str().unwrap(), 0.001, 0) {
+        match super::decode_file(path.to_str().unwrap(), 0.001, 0, 0) {
             Err(super::DecodeError::TooLong) => {}
             other => panic!("expected TooLong, got {other:?}"),
         }
@@ -1467,8 +1478,12 @@ mod decode_tests {
         // A poisoned float sample must never leave decode_file: this is the single
         // deepest point covering BOTH the analysis (ve_decode) and playback staging
         // paths — one NaN would otherwise propagate through every FFT/metric/DSP node.
+        //
+        // The fixture is HAND-ASSEMBLED bytes: write_wav_f32 scrubs non-finite values
+        // on WRITE, so a writer-produced fixture contains no poison and the earlier
+        // version of this test passed with the decoder scrub deleted (review finding).
         let path = temp_wav("nan");
-        let samples: Vec<f32> = vec![
+        let samples: [f32; 8] = [
             0.5,
             0.5,
             f32::NAN,
@@ -1478,14 +1493,57 @@ mod decode_tests {
             -0.25,
             -0.25,
         ];
-        crate::wav::write_wav_f32(&path, &samples, 2, 48_000).unwrap();
+        let mut bytes = Vec::new();
+        let data_len = (samples.len() * 4) as u32;
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&3u16.to_le_bytes()); // IEEE float
+        bytes.extend_from_slice(&2u16.to_le_bytes()); // stereo
+        bytes.extend_from_slice(&48_000u32.to_le_bytes());
+        bytes.extend_from_slice(&(48_000u32 * 8).to_le_bytes());
+        bytes.extend_from_slice(&8u16.to_le_bytes()); // block align
+        bytes.extend_from_slice(&32u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_len.to_le_bytes());
+        for v in samples {
+            bytes.extend_from_slice(&v.to_le_bytes()); // raw bits, NaN intact
+        }
+        std::fs::write(&path, &bytes).unwrap();
+        // Prove the fixture really carries the poison the writer would have scrubbed.
+        let raw = std::fs::read(&path).unwrap();
+        let third = f32::from_le_bytes(raw[44 + 8..44 + 12].try_into().unwrap());
+        assert!(third.is_nan(), "fixture must contain a REAL NaN on disk");
+
         let (frames, _) =
-            super::decode_file(path.to_str().unwrap(), 0.0, 0).expect("poisoned wav decodes");
+            super::decode_file(path.to_str().unwrap(), 0.0, 0, 0).expect("poisoned wav decodes");
         assert_eq!(frames.len(), 4);
         assert_eq!(frames[0][0], 0.5);
         assert_eq!(frames[1], [0.0, 0.0], "NaN scrubbed to zero");
         assert_eq!(frames[2], [0.0, 0.0], "Inf scrubbed to zero");
         assert_eq!(frames[3][0], -0.25);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn the_absolute_source_frame_budget_binds_regardless_of_rate() {
+        // 100 frames within every duration/rate limit — but over an absolute budget of
+        // 50 source frames. The budget must refuse from the DECLARED length, before
+        // decoding (one counter entry, no packets).
+        let path = temp_wav("budget");
+        let samples: Vec<f32> = vec![0.1; 200];
+        crate::wav::write_wav_f32(&path, &samples, 2, 48_000).unwrap();
+        let before = super::DECODE_CALLS.with(|c| c.get());
+        match super::decode_file(path.to_str().unwrap(), 10.0, 0, 50) {
+            Err(super::DecodeError::TooLong) => {}
+            other => panic!("expected the absolute-budget refusal, got {other:?}"),
+        }
+        assert_eq!(super::DECODE_CALLS.with(|c| c.get()), before + 1);
+        let (frames, _) = super::decode_file(path.to_str().unwrap(), 10.0, 0, 100)
+            .expect("within-budget decodes");
+        assert_eq!(frames.len(), 100);
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1497,7 +1555,7 @@ mod decode_tests {
         let samples: Vec<f32> = vec![0.1; 200];
         crate::wav::write_wav_f32(&path, &samples, 2, 96_000).unwrap();
         let before = super::DECODE_CALLS.with(|c| c.get());
-        match super::decode_file(path.to_str().unwrap(), 10.0, 48_000) {
+        match super::decode_file(path.to_str().unwrap(), 10.0, 48_000, 0) {
             Err(super::DecodeError::TooLong) => {}
             other => panic!("expected the source-rate refusal, got {other:?}"),
         }
@@ -1507,7 +1565,7 @@ mod decode_tests {
             "one ENTRY, but the refusal happens before any packet decodes"
         );
         // An adequate ceiling admits the same file.
-        let (frames, rate) = super::decode_file(path.to_str().unwrap(), 10.0, 96_000)
+        let (frames, rate) = super::decode_file(path.to_str().unwrap(), 10.0, 96_000, 0)
             .expect("within-ceiling source rate decodes");
         assert_eq!(rate, 96_000);
         assert_eq!(frames.len(), 100);
@@ -1534,7 +1592,7 @@ mod decode_tests {
         let samples: Vec<f32> = vec![0.1; 200]; // 100 stereo frames ≈ 2.08 ms @ 48k
         crate::wav::write_wav_f32(&path, &samples, 2, 48_000).unwrap();
         let (frames, rate) =
-            super::decode_file(path.to_str().unwrap(), 1.0, 0).expect("under-budget file decodes");
+            super::decode_file(path.to_str().unwrap(), 1.0, 0, 0).expect("under-budget file decodes");
         assert_eq!(rate, 48_000);
         assert_eq!(frames.len(), 100);
         let _ = std::fs::remove_file(&path);

@@ -1197,10 +1197,15 @@ fn flatten_stereo(mut v: Vec<[Smp; CHANNELS]>) -> Vec<Smp> {
     unsafe { Vec::from_raw_parts(ptr, len, cap) }
 }
 
-/// Hard ceiling (seconds) for the decode paths that don't take a caller budget
-/// (`ve_punch_wav`, `ve_decode_file`). Mirrors the Dart side's `maxPlaybackDuration`
-/// (60 min) — the two must move together.
+/// Hard ceiling (seconds) for the splice path (`ve_punch_wav`). Mirrors the Dart side's
+/// `maxPlaybackDuration` (60 min) — the two must move together.
 const MAX_PLAYBACK_SECS: f64 = 3600.0;
+
+/// Absolute source-frame budget for the splice's two input decodes: 60 minutes at the
+/// 48 kHz take rate ≈ 173 M frames ≈ 1.4 GB in the decode vec — the take format's own
+/// worst case; higher-rate imports shorten proportionally. `ve_decode` callers pass their
+/// own budget as a parameter instead (analysis and playback staging differ by 10x).
+const MAX_SPLICE_SRC_FRAMES: u64 = 173_000_000;
 
 /// Highest output rate any decode/splice entry point accepts. Every real caller passes the
 /// engine rate (48 kHz) or a common analysis rate; an absurd rate would multiply into every
@@ -1229,6 +1234,7 @@ pub extern "C" fn ve_decode(
     path: *const c_char,
     rate: u32,
     max_frames: u64,
+    max_src_frames: u64,
     status: *mut c_int,
 ) -> VePcm {
     let set_status = |code: c_int| {
@@ -1258,8 +1264,12 @@ pub extern "C" fn ve_decode(
         // source rate before any resample). 4x covers every real recording/media rate an
         // analysis at 44.1/48 kHz meets (up to 176.4/192 kHz); beyond that is refused as
         // too big for this caller's budget.
-        let (frames, src_rate) = match device::decode_file(path, max_secs, rate.saturating_mul(4))
-        {
+        let (frames, src_rate) = match device::decode_file(
+            path,
+            max_secs,
+            rate.saturating_mul(4),
+            max_src_frames,
+        ) {
             Ok(v) => v,
             Err(device::DecodeError::TooLong) => {
                 set_status(VE_DECODE_TOO_LONG);
@@ -1385,7 +1395,8 @@ pub extern "C" fn ve_punch_wav(
             // so they get the same generous ceiling as the playback path (the Dart side's
             // maxPlaybackDuration, 60 min) instead of an unbounded decode.
             let (frames, src_rate) =
-                device::decode_file(p, MAX_PLAYBACK_SECS, 192_000).ok()?;
+                device::decode_file(p, MAX_PLAYBACK_SECS, 192_000, MAX_SPLICE_SRC_FRAMES)
+                    .ok()?;
             Some(device::resample_linear(frames, src_rate, rate))
         };
         // Checked before any decode: the old `as usize` cast of the i128 split TRUNCATED a
@@ -1566,7 +1577,7 @@ pub extern "C" fn ve_set_master(e: *mut VeEngine, gain: f32) -> c_int {
 // ---- File decode (so Dart hands a path and feeds the returned device-rate PCM) ----------
 
 /// Decoded PCM handed back to Dart. `ptr` is `frames * 2` interleaved f32; free with
-/// [`ve_free_pcm`].
+/// [`ve_free_decoded`].
 #[repr(C)]
 pub struct VePcm {
     pub ptr: *mut f32,
@@ -1584,53 +1595,9 @@ impl VePcm {
     }
 }
 
-/// Decode `path` to interleaved-stereo f32 resampled to the engine's device rate. The caller
-/// frees the returned buffer with [`ve_free_pcm`].
-#[no_mangle]
-pub extern "C" fn ve_decode_file(e: *mut VeEngine, path: *const c_char) -> VePcm {
-    if e.is_null() || path.is_null() {
-        return VePcm::empty();
-    }
-    catch_unwind(AssertUnwindSafe(|| {
-        let eng = unsafe { &mut *e };
-        let path = match unsafe { CStr::from_ptr(path) }.to_str() {
-            Ok(p) => p,
-            Err(_) => return VePcm::empty(),
-        };
-        let rate = eng.handle.sample_rate() as u32;
-        // Same ceiling as the playback path — this legacy entry must not stay the one
-        // unbounded decode door.
-        let (frames, src_rate) = match device::decode_file(path, MAX_PLAYBACK_SECS, 0) {
-            Ok(v) => v,
-            Err(_) => return VePcm::empty(),
-        };
-        let resampled = device::resample_linear(frames, src_rate, rate);
-        let n = resampled.len();
-        // Flatten [f32;2] -> Vec<f32> in place and hand ownership to the caller.
-        let flat = flatten_stereo(resampled);
-        let mut boxed = flat.into_boxed_slice();
-        let ptr = boxed.as_mut_ptr();
-        std::mem::forget(boxed);
-        VePcm {
-            ptr,
-            frames: n,
-            rate,
-        }
-    }))
-    .unwrap_or_else(|_| VePcm::empty())
-}
-
-/// Free PCM returned by [`ve_decode_file`].
-#[no_mangle]
-pub extern "C" fn ve_free_pcm(pcm: VePcm) {
-    if pcm.ptr.is_null() {
-        return;
-    }
-    let _ = catch_unwind(AssertUnwindSafe(|| unsafe {
-        let len = pcm.frames * CHANNELS;
-        drop(Vec::from_raw_parts(pcm.ptr, len, len));
-    }));
-}
+// ve_decode_file / ve_free_pcm are GONE: the pair had zero Dart callers and was the one
+// remaining decode entry without a caller-supplied memory budget — a dead door is removed,
+// not budgeted. VePcm stays: ve_decode returns it (freed with ve_free_decoded).
 
 // ---- Per-track effect parameters (vocal tracks) + the shared reverb bus -----------------
 // `track` is the committed track index. Setting a param on a node a backing track doesn't
