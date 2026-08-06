@@ -375,8 +375,8 @@ class SyncApplier {
               // savepoint committed (a rolled-back savepoint discards
               // slotEffects with everything else). Accumulated per row:
               // several records for the same id can each trigger a
-              // resolution, and the sweep must be able to revert all of
-              // their journal entries at once.
+              // resolution, and the sweep must be able to walk every one of
+              // their revert pairs when the row is parked.
               final effects = slotEffects;
               if (effects != null) {
                 final acc = slotResolutions.putIfAbsent((
@@ -561,7 +561,12 @@ class SyncApplier {
   ///    that can out-rank a peer's legitimate write — the resurrection class
   ///    of bug docs/sync-protocol.md warns about — while a verbatim revert
   ///    re-asserts state that already existed, so nothing new enters the
-  ///    fleet). Convergence: the parked snapshot is strictly newer than the
+  ///    fleet). One carve-out: a live single-slot snapshot whose slot a
+  ///    LATER in-page winner now holds is restored TOMBSTONED under a
+  ///    derived stamp and journaled instead — a verbatim live restore would
+  ///    trip ux_track_slot and brick the page (see [_restorePriorSnapshot]
+  ///    for the full invariant). Convergence: the parked snapshot is
+  ///    strictly newer than the
   ///    restored row, so once the missing parent lands the quarantine replay
   ///    applies it by plain LWW; and a re-delivered IDENTICAL update is
   ///    likewise strictly newer than the restored row, so it re-applies (and
@@ -595,12 +600,15 @@ class SyncApplier {
   ///
   /// Slot-resolution revert: parking a row is "quarantined at the door", so
   /// on BOTH park paths any slot-resolution side effects the parked record
-  /// triggered ([slotResolutions]) are reverted with it — the resolution's
-  /// oplog entries are deleted and the tombstoned occupant is restored to
-  /// its pre-resolution snapshot (see [_revertSlotResolution]). The revert
-  /// runs AFTER the parked row itself is deleted/restored, deliberately: the
-  /// occupant comes back LIVE, and restoring it while the parked record
-  /// still held the slot live would trip the ux_track_slot unique index.
+  /// triggered ([slotResolutions]) are reverted with it — per occupant, as
+  /// atomic pairs: exactly that resolution's oplog entries are deleted and
+  /// that occupant restored to its pre-resolution snapshot, or (when the
+  /// stamp was superseded or a later winner holds the slot) the WHOLE pair
+  /// is kept — tombstone and journal together, never a ghost (see
+  /// [_revertSlotResolution]). The revert runs AFTER the parked row itself
+  /// is deleted/restored, deliberately: a restored occupant comes back LIVE,
+  /// and restoring it while the parked record still held the slot live
+  /// would trip the ux_track_slot unique index.
   /// A parked record that LOST the slot was stored tombstoned at the door
   /// under a derived stamp; parking that derived state would replay an
   /// UN-journaled tombstone (the revert just deleted its journal entry), so
@@ -728,12 +736,13 @@ class SyncApplier {
                   '${parentId ?? 'unknown'} missing',
               quarantinedAt: DateTime.now().millisecondsSinceEpoch,
             );
-            // Restore the prior snapshot VERBATIM: a pure revert to the
-            // exact pre-batch state including its HLC — never a derived
-            // stamp (see the doc comment for why deriving would risk
-            // resurrection). After this the row has no dangling pointer, so
-            // the nullable and NOT NULL cases converge on this same path.
-            await _update(table, priorSnapshot.fields);
+            // Restore the prior snapshot — verbatim in the normal case,
+            // tombstoned under a derived stamp when a later in-page winner
+            // now holds its single-track slot live (see
+            // [_restorePriorSnapshot] for the invariant). After this the
+            // row has no dangling pointer, so the nullable and NOT NULL
+            // cases converge on this same path.
+            await _restorePriorSnapshot(priorSnapshot);
             // Quarantined at the door, like the inserted case: revert any
             // slot resolution the parked record triggered — after the
             // restore above put the row back on its (pre-batch, slot-free
@@ -772,6 +781,57 @@ class SyncApplier {
     }
   }
 
+  /// Restores an updated-this-batch row the sweep just parked to its
+  /// pre-batch [snapshot] — verbatim in the normal case: a pure revert to
+  /// the exact prior state including its HLC, never a derived stamp (a
+  /// derived stamp mints new state that can out-rank a peer's legitimate
+  /// write — the resurrection class of bug docs/sync-protocol.md warns
+  /// about — while a verbatim revert re-asserts state that already
+  /// existed).
+  ///
+  /// The one exception is a live single-slot track whose slot a LATER
+  /// in-page winner now holds: restoring the snapshot live would trip the
+  /// ux_track_slot partial unique index OUTSIDE any savepoint, fail the
+  /// outer commit and retry the same page forever (token unmoved). Skipping
+  /// the restore is no answer either — the post-update row still dangles,
+  /// so the sweep's fixpoint would spin — and nulling just the pointer
+  /// leaves the table LWW-equal to the parked snapshot, which then never
+  /// replays (the permanent-null regression the park-and-restore path
+  /// exists to fix). So the collision is resolved the way the applier
+  /// resolves every slot conflict: the snapshot is restored TOMBSTONED
+  /// under a derived stamp (one counter above its own prior HLC, dated to
+  /// the winner's wall like every slot tombstone) and the tombstone is
+  /// JOURNALED.
+  ///
+  /// INVARIANT (pinned by test): the page stays committable — the
+  /// tombstoned row escapes the partial index — and every state left behind
+  /// is accounted. The journaled tombstone matches the row the table
+  /// actually holds and replicates to peers, out-ranking the pre-batch
+  /// state they still hold — exactly the resolution they would have derived
+  /// had they applied the winner themselves. And the PARKED post-update
+  /// snapshot still out-ranks the derived stamp (it beat the prior state by
+  /// LWW, and a derived stamp stays below any later real edit — see
+  /// [_derivedHlc]), so the quarantine replay lands it once the missing
+  /// parent arrives and re-runs the slot resolution from scratch.
+  Future<void> _restorePriorSnapshot(SyncRow snapshot) async {
+    final winnerWall = await _slotWinnerWall(snapshot);
+    if (winnerWall == null) {
+      await _update(snapshot.table, snapshot.fields);
+      return;
+    }
+    final stamp = _derivedHlc(snapshot.hlc);
+    await _update(snapshot.table, {
+      ...snapshot.fields,
+      'deleted_at': winnerWall,
+      'updated_at': winnerWall,
+      'hlc_wall': stamp.wallMs,
+      'hlc_ctr': stamp.counter,
+      'hlc_node': stamp.node,
+      'hlc_packed': stamp.packed,
+    });
+    await _journalSlotTombstone(snapshot.id, stamp);
+  }
+
   /// The child column of foreign key [fkid] on [table] (our FKs are all
   /// single-column, so the first component is the whole key).
   Future<String?> _fkColumn(String table, int fkid) async {
@@ -796,13 +856,14 @@ class SyncApplier {
   /// the loser is tombstoned. When [rec] is the loser, the returned map is tombstoned so
   /// the row is still stored (a later sync can update it) without occupying the live slot.
   ///
-  /// Alongside the columns it returns the resolution's side effects (the
-  /// occupant's pre-tombstone snapshot, the derived stamps, the journal
-  /// seq) so [apply] can remember them per row and the FK sweep can REVERT
-  /// them if the very record that triggered the resolution is later parked —
-  /// without the revert, a record "quarantined at the door" would leave a
-  /// tombstoned track and a journaled resolution behind for a write that
-  /// never landed (see [_revertSlotResolution]).
+  /// Alongside the columns it returns the resolution's side effects (a
+  /// per-occupant revert pair — pre-tombstone snapshot, derived stamp,
+  /// journal seq — or the record's own at-the-door stamp and seq) so [apply]
+  /// can remember them per row and the FK sweep can REVERT them if the very
+  /// record that triggered the resolution is later parked — without the
+  /// revert, a record "quarantined at the door" would leave a tombstoned
+  /// track and a journaled resolution behind for a write that never landed
+  /// (see [_revertSlotResolution]).
   ///
   /// The resolution REPLICATES: the loser's tombstone is stamped one HLC
   /// counter above the loser's own stamp (under OUR node — see
@@ -849,9 +910,8 @@ class SyncApplier {
       // occupant's pre-tombstone snapshot is captured FIRST — the revert's
       // restore point if this record is later parked.
       final loserId = occupant.read<String>('id');
-      effects.occupantSnapshot = await builder.build('tracks', loserId);
+      final snapshot = await builder.build('tracks', loserId);
       final stamp = _derivedHlc(Hlc.parse(occupant.read<String>('hlc_packed')));
-      effects.occupantStampPacked = stamp.packed;
       final tombstoneAt = rec.fields['hlc_wall'];
       await db.customStatement(
         'UPDATE tracks SET deleted_at = ?, updated_at = ?, hlc_wall = ?, '
@@ -866,7 +926,20 @@ class SyncApplier {
           loserId,
         ],
       );
-      effects.oplogSeqs.add(await _journalSlotTombstone(loserId, stamp));
+      final seq = await _journalSlotTombstone(loserId, stamp);
+      // The occupant was selected just above, so build() returning null is a
+      // never-expected race; without a restore point the pair is simply not
+      // recorded, and on a revert the tombstone then stays WITH its journal
+      // row — still an accounted state, never a ghost.
+      if (snapshot != null) {
+        effects.occupants.add(
+          _OccupantRevert(
+            snapshot: snapshot,
+            stampPacked: stamp.packed,
+            oplogSeqs: [seq],
+          ),
+        );
+      }
       return (columns: rec.fields, effects: effects);
     }
     // Incoming loses → store it tombstoned (stamped one counter above its own
@@ -874,7 +947,7 @@ class SyncApplier {
     // slot and the resolution replicates to peers still holding it live.
     final stamp = _derivedHlc(rec.hlc);
     effects.selfStampPacked = stamp.packed;
-    effects.oplogSeqs.add(await _journalSlotTombstone(rec.id, stamp));
+    effects.selfOplogSeqs.add(await _journalSlotTombstone(rec.id, stamp));
     return (
       columns: {
         ...rec.fields,
@@ -914,30 +987,101 @@ class SyncApplier {
   /// as the park, like every sweep write. A null [resolution] (no resolution
   /// recorded for the parked row) is a no-op.
   ///
-  /// The occupant restore is a pure VERBATIM revert to its pre-resolution
-  /// snapshot — its own prior HLC, never a derived stamp — and is guarded:
-  /// it only runs while the occupant still holds the resolution's derived
-  /// tombstone stamp. If a later record in the batch legitimately overwrote
-  /// the tombstone by LWW (or the occupant row was itself swept away), that
-  /// state must stand — reverting over it would resurrect old state.
+  /// Occupants are reverted per entry as atomic PAIRS ([_OccupantRevert]):
+  /// exactly this resolution's journal rows are deleted and the occupant is
+  /// restored VERBATIM to its pre-resolution snapshot — its own prior HLC,
+  /// never a derived stamp — together, or the WHOLE pair is skipped. A pair
+  /// is restorable only while
+  ///
+  ///  * the occupant row still carries this resolution's derived tombstone
+  ///    stamp — if a later record legitimately overwrote the tombstone by
+  ///    LWW (or the occupant row was itself swept away), that state must
+  ///    stand, reverting over it would resurrect old state — AND
+  ///  * no OTHER live row currently holds the occupant's single-track slot,
+  ///    checked with the same predicate the ux_track_slot partial unique
+  ///    index enforces ([_slotWinnerWall]): a later in-page winner may have
+  ///    claimed the slot after the parked record did, and restoring the
+  ///    occupant live under it would trip the index OUTSIDE any savepoint,
+  ///    fail the outer commit and retry the same page forever.
+  ///
+  /// A skipped pair leaves the occupant tombstoned WITH its journal rows —
+  /// an accounted tombstone peers still learn — never the ghost of a kept
+  /// tombstone whose ledger entry was deleted, and never a double-occupied
+  /// live slot.
+  ///
+  /// Entries are walked LATEST-FIRST, deliberately: successive occupants of
+  /// one slot were each tombstoned so the next could hold it, and restoring
+  /// the latest restorable one (the earlier entries then skip on its
+  /// occupancy) reproduces the state a peer that never saw the parked
+  /// record derives from its own resolutions — the latest occupant live,
+  /// every earlier one tombstoned under the same derived stamps. Walking
+  /// earliest-first would instead restore the OLDEST occupant live, an
+  /// un-journaled state no peer can converge to.
   Future<void> _revertSlotResolution(_SlotResolution? resolution) async {
     if (resolution == null) return;
-    if (resolution.oplogSeqs.isNotEmpty) {
+    // The record's own at-the-door tombstone entries go with the park
+    // unconditionally: the sweep just deleted/restored the row itself, and
+    // the parked payload substitutes the ORIGINAL record for the derived
+    // state (see [_parkableSnapshot]).
+    if (resolution.selfOplogSeqs.isNotEmpty) {
       await (db.delete(
         db.oplog,
-      )..where((o) => o.seq.isIn(resolution.oplogSeqs))).go();
+      )..where((o) => o.seq.isIn(resolution.selfOplogSeqs))).go();
     }
-    final snapshot = resolution.occupantSnapshot;
-    final stamp = resolution.occupantStampPacked;
-    if (snapshot == null || stamp == null) return;
-    final current = await db
+    for (final entry in resolution.occupants.reversed) {
+      final snapshot = entry.snapshot;
+      final current = await db
+          .customSelect(
+            'SELECT hlc_packed FROM ${snapshot.table} WHERE id = ?',
+            variables: [Variable.withString(snapshot.id)],
+          )
+          .getSingleOrNull();
+      if (current == null ||
+          current.read<String>('hlc_packed') != entry.stampPacked) {
+        continue; // superseded by a later LWW winner: skip the whole pair
+      }
+      if (await _slotWinnerWall(snapshot) != null) {
+        continue; // the slot is held by a live later winner: skip the pair
+      }
+      await (db.delete(
+        db.oplog,
+      )..where((o) => o.seq.isIn(entry.oplogSeqs))).go();
+      await _update(snapshot.table, snapshot.fields);
+    }
+  }
+
+  /// The hlc_wall of the LIVE row — other than [snapshot]'s own id —
+  /// currently holding [snapshot]'s single-track slot, or null when the slot
+  /// is free or [snapshot] would not enter a slot at all (not a live
+  /// accompaniment/reference track). The occupancy predicate mirrors the
+  /// ux_track_slot partial unique index EXACTLY: this is the pre-flight
+  /// check for every sweep-time restore, whose UPDATE runs outside any
+  /// savepoint and would otherwise trip the index and fail the outer
+  /// commit. The returned wall doubles as the tombstone time when the
+  /// caller resolves the collision by restoring tombstoned
+  /// ([_restorePriorSnapshot]), matching [_resolveSlot]'s convention that a
+  /// slot tombstone is dated to the winner's wall clock.
+  Future<int?> _slotWinnerWall(SyncRow snapshot) async {
+    if (snapshot.table != 'tracks') return null;
+    if (snapshot.fields['deleted_at'] != null) return null;
+    final kind = snapshot.fields['kind'];
+    if (kind is! String || (kind != 'accompaniment' && kind != 'reference')) {
+      return null;
+    }
+    final practiceId = snapshot.fields['practice_id'];
+    if (practiceId is! String) return null;
+    final holder = await db
         .customSelect(
-          'SELECT hlc_packed FROM ${snapshot.table} WHERE id = ?',
-          variables: [Variable.withString(snapshot.id)],
+          'SELECT hlc_wall FROM tracks WHERE practice_id = ? AND kind = ? '
+          'AND deleted_at IS NULL AND id <> ?',
+          variables: [
+            Variable.withString(practiceId),
+            Variable.withString(kind),
+            Variable.withString(snapshot.id),
+          ],
         )
         .getSingleOrNull();
-    if (current == null || current.read<String>('hlc_packed') != stamp) return;
-    await _update(snapshot.table, snapshot.fields);
+    return holder?.read<int>('hlc_wall');
   }
 
   /// A DERIVED stamp for a local resolution write: one counter above [base],
@@ -1040,7 +1184,13 @@ class SyncApplier {
 /// resolution ran BEFORE the record's own application, so "quarantined at
 /// the door" must undo it too (delete its oplog entries, restore the
 /// tombstoned occupant). Several records for the same id can each trigger a
-/// resolution within one batch; their effects are merged via [absorb].
+/// resolution within one batch; their effects are merged via [absorb],
+/// which APPENDS — occupant entries are never folded into one another,
+/// because each is an independent revert PAIR the sweep must decide on its
+/// own. (Folding used to keep the FIRST occupant's snapshot under the LAST
+/// occupant's derived stamp, so a two-occupant revert restored NEITHER
+/// occupant while deleting BOTH journal entries — two tracks left
+/// tombstoned with their ledger gone, a permanent unaccounted loss.)
 class _SlotResolution {
   _SlotResolution(this.record);
 
@@ -1049,34 +1199,58 @@ class _SlotResolution {
   /// tombstoned-at-the-door state (see [SyncApplier._parkableSnapshot]).
   SyncRow record;
 
-  /// The occupant's full wire snapshot captured BEFORE the resolution
-  /// tombstoned it (incoming-wins case): the verbatim restore point, its own
-  /// prior HLC included. The FIRST captured snapshot is kept across merges —
-  /// it is the occupant's pre-batch-resolution state.
-  SyncRow? occupantSnapshot;
-
-  /// The derived stamp the resolution wrote INTO the occupant's row. The
-  /// revert restores the occupant only while the row still carries this
-  /// stamp (a later LWW winner over the tombstone must stand).
-  String? occupantStampPacked;
-
-  /// The derived stamp the resolution wrote into the INCOMING record's own
-  /// row (incoming-loses case): identifies the tombstoned-at-the-door state
-  /// so the sweep can park the original record instead.
+  /// The derived stamp the (latest) resolution wrote into the INCOMING
+  /// record's own row (incoming-loses case): identifies the
+  /// tombstoned-at-the-door state so the sweep can park the original record
+  /// instead.
   String? selfStampPacked;
 
-  /// Oplog seqs of the journal entries the resolution(s) wrote; the revert
-  /// deletes exactly these rows.
-  final List<int> oplogSeqs = [];
+  /// Oplog seqs of the at-the-door tombstone entries the incoming-loses
+  /// resolution(s) journaled for the record's OWN row. Deleted
+  /// unconditionally with the park: the sweep just deleted/restored the row
+  /// itself and parks the ORIGINAL record in place of the derived state, so
+  /// these entries would journal a decision minted for a write that never
+  /// landed.
+  final List<int> selfOplogSeqs = [];
+
+  /// One revert pair per occupant this row's resolution(s) tombstoned, in
+  /// resolution order (earliest first). See [_OccupantRevert].
+  final List<_OccupantRevert> occupants = [];
 
   /// Merges a later resolution's effects for the same row into this one.
   void absorb(_SlotResolution other) {
     record = other.record;
-    occupantSnapshot ??= other.occupantSnapshot;
-    occupantStampPacked = other.occupantStampPacked ?? occupantStampPacked;
     selfStampPacked = other.selfStampPacked ?? selfStampPacked;
-    oplogSeqs.addAll(other.oplogSeqs);
+    selfOplogSeqs.addAll(other.selfOplogSeqs);
+    occupants.addAll(other.occupants);
   }
+}
+
+/// One occupant a slot resolution tombstoned, held as an atomic revert
+/// PAIR: the oplog rows exactly THIS resolution journaled, and the
+/// occupant's verbatim restore point. [SyncApplier._revertSlotResolution]
+/// either applies both halves (journal deleted + snapshot restored) or
+/// neither (the occupant stays tombstoned WITH its journal rows — an
+/// accounted tombstone peers still learn) — never the ghost in between, a
+/// tombstone whose ledger entry was deleted and that therefore replicates
+/// nowhere.
+class _OccupantRevert {
+  _OccupantRevert({
+    required this.snapshot,
+    required this.stampPacked,
+    required this.oplogSeqs,
+  });
+
+  /// The occupant's full wire snapshot captured BEFORE the resolution
+  /// tombstoned it: the verbatim restore point, its own prior HLC included.
+  final SyncRow snapshot;
+
+  /// The derived stamp the resolution wrote INTO the occupant's row; the
+  /// pair is restorable only while the row still carries it.
+  final String stampPacked;
+
+  /// Oplog seqs of exactly this resolution's journal rows.
+  final List<int> oplogSeqs;
 }
 
 /// Marker for a quarantine-store STORAGE failure inside [SyncApplier.apply]:

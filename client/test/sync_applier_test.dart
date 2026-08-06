@@ -1351,6 +1351,11 @@ void main() {
         r.data,
     ];
 
+    // The derived stamp a slot resolution writes: one counter above the
+    // loser's own stamp, under the LOCAL (resolving) node.
+    Hlc derivedAt(int wall) =>
+        Hlc(wallMs: wall, counter: 1, node: _id('LOCAL'));
+
     test('park+delete: an inserted record that WON the slot (its bus parent '
         'quarantined, newer schema) takes the occupant tombstone and its '
         'journal entry back out with it; the replayed record kills the '
@@ -1502,6 +1507,303 @@ void main() {
       expect(journal, hasLength(1));
       expect(journal.single['entity_id'], _id('T'));
       expect(journal.single['op'], 'tombstone');
+    });
+
+    test('a record that tombstoned TWO successive occupants and is then '
+        'parked reverts them as INDEPENDENT pairs: the latest occupant is '
+        'restored with its journal entry deleted, the earlier one stays '
+        'tombstoned WITH its journal entry — never tombstoned with a '
+        'deleted journal — and the batch commits', () async {
+      await applier.apply([
+        practice('P', 'p', hlc(800)),
+        accTrack('O1', 'P', hlc(850)),
+      ]);
+      expect(await oplogRows(), isEmpty);
+
+      // One page: T@900 (bus parent never arrives) beats O1; O2@950 beats
+      // T; T@980 beats O2 — T's revert now carries two occupant pairs.
+      // Folding them into one (the FIRST snapshot under the LAST derived
+      // stamp) used to restore NEITHER occupant while deleting BOTH
+      // journal entries: two tracks tombstoned with their ledger gone.
+      final incoming = accTrack('T', 'P', hlc(980), busId: 'B');
+      final res = await applier.apply([
+        accTrack('T', 'P', hlc(900), busId: 'B'),
+        accTrack('O2', 'P', hlc(950)),
+        incoming,
+      ]);
+      expect(res.committed, isTrue);
+      expect(res.applied, 2);
+      expect(res.failed, 1);
+
+      // The LATEST occupant (O2) is restored verbatim: live, prior HLC —
+      // exactly the state a peer that never saw T derives (O2 beats O1).
+      final o2 = (await trackState('O2'))!;
+      expect(o2['deleted_at'], isNull);
+      expect(o2['hlc_packed'], hlc(950).packed);
+      // The EARLIER occupant (O1) is not restorable — the restored O2 now
+      // holds the slot — so its pair is kept WHOLE: still tombstoned AND
+      // still journaled, an accounted tombstone peers learn.
+      final o1 = (await trackState('O1'))!;
+      expect(o1['deleted_at'], 900); // the winner's wall when T claimed it
+      expect(o1['hlc_packed'], derivedAt(850).packed);
+      expect(await trackState('T'), isNull);
+      // Journal: O1's entry survives with its tombstone; O2's went with its
+      // restore. The T entry was minted by O2's OWN resolution (O2 landed,
+      // its ledger stands); with T's row gone it is a harmless dirty flag —
+      // the pusher pushes CURRENT row state and skips missing rows.
+      final journal = await oplogRows();
+      expect(journal, hasLength(2));
+      expect(journal[0]['entity_id'], _id('O1'));
+      expect(journal[0]['hlc_packed'], derivedAt(850).packed);
+      expect(journal[1]['entity_id'], _id('T'));
+      expect(journal[1]['hlc_packed'], derivedAt(900).packed);
+      // T parked under its own latest HLC with the ORIGINAL payload.
+      final parked = (await store.list()).singleWhere((q) => q.tbl == 'tracks');
+      expect(parked.remoteHlcPacked, hlc(980).packed);
+      expect(SyncRow.decode(parked.payload).fields, equals(incoming.columns));
+
+      // Convergence: the parent lands and the replay takes the slot for
+      // real — O2 loses it with a journaled tombstone, exactly once.
+      await applier.apply([fxBus('B', 'P', hlc(985))]);
+      final replay = await applier.apply([SyncRow.decode(parked.payload)]);
+      expect(replay.applied, 1);
+      expect((await trackState('T'))!['deleted_at'], isNull);
+      final o2After = (await trackState('O2'))!;
+      expect(o2After['deleted_at'], 980);
+      expect(o2After['hlc_packed'], derivedAt(950).packed);
+      expect((await trackState('O1'))!['hlc_packed'], derivedAt(850).packed);
+      final after = await oplogRows();
+      expect(after, hasLength(3));
+      expect(after[2]['entity_id'], _id('O2'));
+      expect(after[2]['hlc_packed'], derivedAt(950).packed);
+    });
+
+    group('a later in-page winner holds the slot when the revert runs (a '
+        'restore must not trip ux_track_slot and brick the page)', () {
+      test('inserted winner parked after a later winner took the slot: the '
+          'occupant pair is skipped whole and the page commits', () async {
+        await applier.apply([
+          practice('P', 'p', hlc(800)),
+          accTrack('O', 'P', hlc(850)),
+        ]);
+
+        // T (bus parent never arrives) beats O; W then beats T. At revert
+        // time W holds the slot live, so restoring O would violate
+        // ux_track_slot — the old unconditional restore failed the OUTER
+        // commit and retried this same page forever (token never advanced).
+        final res = await applier.apply([
+          accTrack('T', 'P', hlc(900), busId: 'B'),
+          accTrack('W', 'P', hlc(950)),
+        ]);
+        expect(res.committed, isTrue);
+        expect(res.applied, 1);
+        expect(res.failed, 1);
+
+        final w = (await trackState('W'))!;
+        expect(w['deleted_at'], isNull);
+        expect(w['hlc_packed'], hlc(950).packed);
+        // O's pair was skipped WHOLE: tombstoned AND journaled (peers still
+        // learn an accounted tombstone), never one without the other.
+        final o = (await trackState('O'))!;
+        expect(o['deleted_at'], 900);
+        expect(o['hlc_packed'], derivedAt(850).packed);
+        expect(await trackState('T'), isNull);
+        final journal = await oplogRows();
+        expect(journal, hasLength(2));
+        expect(journal[0]['entity_id'], _id('O'));
+        expect(journal[0]['hlc_packed'], derivedAt(850).packed);
+        // T's tombstone entry belongs to W's resolution (W landed, so its
+        // ledger stands); the parked snapshot below carries exactly that
+        // journaled state — not an un-journaled ghost.
+        expect(journal[1]['entity_id'], _id('T'));
+        expect(journal[1]['hlc_packed'], derivedAt(900).packed);
+        final parked = (await store.list()).singleWhere(
+          (q) => q.tbl == 'tracks',
+        );
+        expect(parked.remoteHlcPacked, derivedAt(900).packed);
+        expect(SyncRow.decode(parked.payload).fields['deleted_at'], 950);
+
+        // Convergence: the parent lands and the replay applies the
+        // tombstoned state as-is (no resolution runs for a dead record).
+        await applier.apply([fxBus('B', 'P', hlc(985))]);
+        final replay = await applier.apply([SyncRow.decode(parked.payload)]);
+        expect(replay.applied, 1);
+        expect((await trackState('T'))!['deleted_at'], 950);
+        expect((await trackState('W'))!['deleted_at'], isNull);
+        expect(await oplogRows(), hasLength(2));
+      });
+
+      test('updated winner parked after a later winner took the slot: the '
+          'prior row restores verbatim into its own (free) slot, the '
+          'occupant pair is skipped whole, and the page commits', () async {
+        await applier.apply([
+          practice('P', 'p', hlc(800)),
+          practice('Q', 'q', hlc(801)),
+          accTrack('O', 'P', hlc(850)),
+          accTrack('T', 'Q', hlc(820)), // pre-exists in Q's slot
+        ]);
+
+        // The update MOVES T into P's slot (beating O) with a dangling bus;
+        // W then beats T. The old code restored O under the live W — brick.
+        final res = await applier.apply([
+          accTrack('T', 'P', hlc(900), busId: 'B'),
+          accTrack('W', 'P', hlc(950)),
+        ]);
+        expect(res.committed, isTrue);
+        expect(res.applied, 1);
+        expect(res.failed, 1);
+
+        // T is back verbatim in Q's slot (free, so no index hazard)...
+        final t = (await trackState('T'))!;
+        expect(t['practice_id'], _id('Q'));
+        expect(t['deleted_at'], isNull);
+        expect(t['bus_id'], isNull);
+        expect(t['hlc_packed'], hlc(820).packed);
+        // ...W holds P's slot, and O's pair was skipped whole.
+        expect((await trackState('W'))!['deleted_at'], isNull);
+        final o = (await trackState('O'))!;
+        expect(o['deleted_at'], 900);
+        expect(o['hlc_packed'], derivedAt(850).packed);
+        final journal = await oplogRows();
+        expect(journal, hasLength(2));
+        expect(journal[0]['entity_id'], _id('O'));
+        // W's resolution entry for T outlived the verbatim restore: a
+        // harmless dirty flag — the pusher pushes CURRENT row state (T@820,
+        // state the fleet already holds), never the stale stamp.
+        expect(journal[1]['entity_id'], _id('T'));
+        expect(journal[1]['hlc_packed'], derivedAt(900).packed);
+        final parked = (await store.list()).singleWhere(
+          (q) => q.tbl == 'tracks',
+        );
+        expect(parked.remoteHlcPacked, derivedAt(900).packed);
+
+        // Convergence: the parent lands; the parked (slot-lost, tombstoned,
+        // journal-backed) state out-ranks the restored row and lands as-is.
+        await applier.apply([fxBus('B', 'P', hlc(985))]);
+        final replay = await applier.apply([SyncRow.decode(parked.payload)]);
+        expect(replay.applied, 1);
+        final after = (await trackState('T'))!;
+        expect(after['practice_id'], _id('P'));
+        expect(after['deleted_at'], 950);
+        expect(after['hlc_packed'], derivedAt(900).packed);
+        expect((await trackState('W'))!['deleted_at'], isNull);
+        expect(await oplogRows(), hasLength(2));
+      });
+
+      test('prior-row restore hazard: the pre-batch snapshot of the parked '
+          'update would land in a slot a later winner now holds — it is '
+          'restored TOMBSTONED under a derived stamp and journaled, and the '
+          'page commits', () async {
+        await applier.apply([
+          practice('P', 'p', hlc(800)),
+          accTrack('X', 'P', hlc(850)), // the slot's original occupant
+        ]);
+
+        // X updates itself (dangling bus, no occupant to resolve against),
+        // then W beats X. The sweep must put X's PRE-BATCH state back, but
+        // its slot is now W's: a verbatim live restore would trip
+        // ux_track_slot (brick); skipping would leave the dangling row
+        // spinning the sweep's fixpoint; nulling just the pointer would
+        // leave the table LWW-equal to the parked snapshot, which then
+        // never replays. The pinned invariant: restore the snapshot
+        // tombstoned + journaled, so the page commits, every remaining
+        // state is accounted, and the parked snapshot still wins LWW.
+        final res = await applier.apply([
+          accTrack('X', 'P', hlc(900), busId: 'B'),
+          accTrack('W', 'P', hlc(950)),
+        ]);
+        expect(res.committed, isTrue);
+        expect(res.applied, 1);
+        expect(res.failed, 1);
+
+        // X: pre-batch content, tombstoned at the winner's wall, derived
+        // stamp one counter above its own prior HLC.
+        final x = (await trackState('X'))!;
+        expect(x['practice_id'], _id('P'));
+        expect(x['bus_id'], isNull);
+        expect(x['deleted_at'], 950);
+        expect(x['hlc_packed'], derivedAt(850).packed);
+        expect((await trackState('W'))!['deleted_at'], isNull);
+        // The ledger holds W's resolution entry (superseded WITHIN the
+        // ledger — the drain collapses per row to the latest entry) and the
+        // tombstone-restore entry, which matches the row exactly.
+        final journal = await oplogRows();
+        expect(journal, hasLength(2));
+        expect(journal[0]['entity_id'], _id('X'));
+        expect(journal[0]['hlc_packed'], derivedAt(900).packed);
+        expect(journal[1]['entity_id'], _id('X'));
+        expect(journal[1]['op'], 'tombstone');
+        expect(journal[1]['hlc_packed'], derivedAt(850).packed);
+        // The parked post-update snapshot out-ranks the derived stamp...
+        final parked = (await store.list()).singleWhere(
+          (q) => q.tbl == 'tracks',
+        );
+        expect(parked.remoteHlcPacked, derivedAt(900).packed);
+        expect(
+          parked.remoteHlcPacked.compareTo(derivedAt(850).packed),
+          greaterThan(0),
+        );
+
+        // ...so the replay lands it once the parent arrives.
+        await applier.apply([fxBus('B', 'P', hlc(985))]);
+        final replay = await applier.apply([SyncRow.decode(parked.payload)]);
+        expect(replay.applied, 1);
+        final after = (await trackState('X'))!;
+        expect(after['deleted_at'], 950);
+        expect(after['bus_id'], _id('B'));
+        expect(after['hlc_packed'], derivedAt(900).packed);
+        expect((await trackState('W'))!['deleted_at'], isNull);
+        expect(await oplogRows(), hasLength(2));
+      });
+
+      test('three-way chain: the parked record beat the ORIGINAL occupant, '
+          'was beaten by a second, which a third then beat — the revert '
+          'skips the original occupant under the live final winner and the '
+          'page commits', () async {
+        await applier.apply([
+          practice('P', 'p', hlc(800)),
+          accTrack('O', 'P', hlc(850)),
+        ]);
+
+        final res = await applier.apply([
+          accTrack('T', 'P', hlc(900), busId: 'B'),
+          accTrack('O2', 'P', hlc(950)),
+          accTrack('W', 'P', hlc(980)),
+        ]);
+        expect(res.committed, isTrue);
+        expect(res.applied, 2);
+        expect(res.failed, 1);
+
+        expect((await trackState('W'))!['deleted_at'], isNull);
+        final o2 = (await trackState('O2'))!;
+        expect(o2['deleted_at'], 980); // W's wall — O2's loss stands
+        expect(o2['hlc_packed'], derivedAt(950).packed);
+        final o = (await trackState('O'))!;
+        expect(o['deleted_at'], 900);
+        expect(o['hlc_packed'], derivedAt(850).packed);
+        expect(await trackState('T'), isNull);
+        // Every tombstone is journaled: O by the parked T's kept pair, T by
+        // O2's resolution, O2 by W's — none reverted, none half-reverted.
+        final journal = await oplogRows();
+        expect(journal, hasLength(3));
+        expect(journal[0]['entity_id'], _id('O'));
+        expect(journal[0]['hlc_packed'], derivedAt(850).packed);
+        expect(journal[1]['entity_id'], _id('T'));
+        expect(journal[1]['hlc_packed'], derivedAt(900).packed);
+        expect(journal[2]['entity_id'], _id('O2'));
+        expect(journal[2]['hlc_packed'], derivedAt(950).packed);
+
+        // Convergence after the parent lands.
+        await applier.apply([fxBus('B', 'P', hlc(985))]);
+        final parked = (await store.list()).singleWhere(
+          (q) => q.tbl == 'tracks',
+        );
+        final replay = await applier.apply([SyncRow.decode(parked.payload)]);
+        expect(replay.applied, 1);
+        expect((await trackState('T'))!['deleted_at'], 950); // O2's wall
+        expect((await trackState('W'))!['deleted_at'], isNull);
+        expect(await oplogRows(), hasLength(3));
+      });
     });
   });
 
