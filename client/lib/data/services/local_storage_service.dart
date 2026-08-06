@@ -81,10 +81,14 @@ class LocalStorageService {
   /// belong to [collection], e.g. `audio/`. Callers join their own filenames.
   Future<Directory> assetDir(String collection) => _collectionDir(collection);
 
-  /// Where [collection]'s assets live, WITHOUT creating anything on disk.
-  /// Guard checks and delete paths must use this instead of [assetDir]: a
-  /// delete must never mkdir as a side effect, and resolving a path guard
-  /// must still succeed while the storage root is being torn down.
+  /// Where [collection]'s assets live, without creating the COLLECTION
+  /// directory. Guard checks and delete paths must use this instead of
+  /// [assetDir]: a delete must never mkdir the collection as a side effect,
+  /// and resolving a path guard must still succeed while the storage tree
+  /// is being torn down. Caveat, stated honestly: the FIRST call on a cold
+  /// instance resolves the app-support ROOT via path_provider, which may
+  /// create that root directory — everything after (and every warmed
+  /// instance) is pure path math.
   Future<String> assetPath(String collection) async {
     _root ??= await getApplicationSupportDirectory();
     return p.join(_root!.path, collection);

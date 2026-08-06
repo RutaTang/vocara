@@ -288,5 +288,19 @@ void main() {
       expect(identical(s, a), isTrue);
       expect(mergeSpectrograms([_sAt(0, empty)]), isNull);
     });
+
+    test('an absurd lane span fails soft instead of allocating by the gap', () {
+      // The merged array is sized by offset + frames: two TINY clips with a
+      // huge gap between them used to allocate gigabytes of silence columns.
+      // Beyond the span cap the merge yields no view rather than an OOM.
+      final a = _spec(db: [1, 2], frames: 1, minDb: 0, maxDb: 5);
+      final b = _spec(db: [3, 4], frames: 1, minDb: 0, maxDb: 5);
+      // ~10 years of lane offset at this framing.
+      final s = mergeSpectrograms([_sAt(0, a), _sAt(320000000000, b)]);
+      expect(s, isNull);
+      // A sane gap still merges.
+      final ok = mergeSpectrograms([_sAt(0, a), _sAt(500, b)]);
+      expect(ok, isNotNull);
+    });
   });
 }

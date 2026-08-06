@@ -237,6 +237,36 @@ void main() {
     expect(readWavMono(await File(out).readAsBytes())!.samples.length, 200);
   });
 
+  test('a validBitsPerSample or channel-mask mismatch is NOT byte-spliceable '
+      '(24-in-32 style reinterpretation is corruption)', () {
+    // The byte-splice keeps the FIRST header: joining a full-16 take with a
+    // valid-bits-12 EXTENSIBLE take would reinterpret the second half's
+    // samples under the wrong significance. Container bits match, so only
+    // the validBits comparison can catch it — the incompatibility routes
+    // concat through the decode -> re-encode path instead.
+    const sr = 8000;
+    final plain = writeWavMono(
+      Float64List.fromList([for (var i = 0; i < 100; i++) 0.1]),
+      sr,
+    );
+    final ext = _extensibleWavPcm16(
+      Int16List.fromList([for (var i = 0; i < 100; i++) 1000]),
+      sr,
+    );
+    expect(wavCompatibleForMerge(plain, ext), isTrue, reason: 'baseline');
+
+    // Patch validBitsPerSample (fmt offset 18; fmt body starts at byte 20).
+    final vb12 = Uint8List.fromList(ext)..[38] = 12;
+    expect(wavCompatibleForMerge(plain, vb12), isFalse);
+
+    // Two EXTENSIBLE takes with different channel masks must not byte-splice
+    // under the first's mask either (fmt offset 20).
+    final maskFront = Uint8List.fromList(ext)..[40] = 1;
+    final maskBack = Uint8List.fromList(ext)..[40] = 4;
+    expect(wavCompatibleForMerge(maskFront, maskBack), isFalse);
+    expect(wavCompatibleForMerge(maskFront, maskFront), isTrue);
+  });
+
   test('splitWav/concatWav reject a compressed (ADPCM) WAV instead of '
       'byte-splicing it with PCM frame math', () async {
     // A structurally valid RIFF/WAVE whose fmt tag is MS ADPCM (2): its

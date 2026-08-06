@@ -106,6 +106,13 @@ Spectrogram? mergeSpectrograms(
     if (p.spectrogram.minDb < minDb) minDb = p.spectrogram.minDb;
     if (p.spectrogram.maxDb > maxDb) maxDb = p.spectrogram.maxDb;
   }
+  // The merged array is sized by the lane SPAN, not the audio in it: two
+  // short clips hours apart would allocate gigabytes of gap columns. Cap the
+  // span-derived allocation and fail soft (no merged view) beyond it — at
+  // ~214 bins that admits roughly 50 minutes of lane, far past any legal
+  // per-clip analysis (10 min) while refusing corrupt/hostile offsets.
+  const maxMergedCells = 64 * 1000 * 1000; // Float32 cells ≈ 256 MB
+  if (total * bins > maxMergedCells) return null;
   final floorDb = minDb.isFinite ? minDb : 0.0;
 
   // Pre-fill with the merged floor so gap columns read as silence (the darkest

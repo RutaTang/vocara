@@ -1035,7 +1035,12 @@ class TechniqueDetailViewModel extends ChangeNotifier
   void _deleteMediaQuietly(String path) {
     unawaited(
       _mediaService.deleteMedia(path).catchError((Object e) {
-        DiagnosticsLog.instance.log('technique', 'delete failed for $path: $e');
+        // No path in the log: DiagnosticsLog's contract forbids media paths
+        // (they name user content). The error TYPE is enough to diagnose.
+        DiagnosticsLog.instance.log(
+          'technique',
+          'draft media delete failed: ${e.runtimeType}',
+        );
       }),
     );
   }

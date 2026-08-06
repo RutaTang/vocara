@@ -5,6 +5,7 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:path/path.dart' as p;
 
 import '../ffi/vocara_engine_bindings.dart';
@@ -107,22 +108,48 @@ _WavLayout? _parseWav(Uint8List bytes) {
   return _WavLayout(fmt, sampleRate, blockAlign, dataStart, dataLen);
 }
 
-/// Re-emits a WAV from a preserved `fmt ` chunk body and raw PCM [data] bytes.
-/// Whether two WAVs can be concatenated losslessly under one fmt header: same
-/// sample rate, channel count, and bit depth. The format tag may differ (plain
-/// PCM vs WAVE_FORMAT_EXTENSIBLE of the same actual format) since the PCM bytes
-/// are interpreted identically. Channels live at fmt offset 2, bits at 14.
+/// Testable face of [_compatibleForMerge]: parses two whole-file byte
+/// buffers and answers whether they can be BYTE-spliced under the first's
+/// header (false routes concat through the decode → re-encode path); null
+/// when either buffer is not an uncompressed WAV.
+@visibleForTesting
+bool? wavCompatibleForMerge(Uint8List a, Uint8List b) {
+  final wa = _parseWav(a);
+  final wb = _parseWav(b);
+  if (wa == null || wb == null) return null;
+  return _compatibleForMerge(wa, wb);
+}
+
+/// Whether two WAVs can be concatenated losslessly under ONE fmt header:
+/// same sample rate, channel count, bit depth, effective sample type, and
+/// (for EXTENSIBLE) valid bits + channel mask. The format TAG may differ
+/// (plain PCM vs EXTENSIBLE of the same actual format).
 bool _compatibleForMerge(_WavLayout a, _WavLayout b) {
   // Comparing the effective format — not just rate/channels/bits — stops a
   // 32-bit int WAV and a 32-bit float WAV (same rate/channels/depth) from
   // merging into reinterpreted noise, while still allowing plain PCM vs
   // EXTENSIBLE-PCM of the same actual format (both resolve to 1).
-  return a.sampleRate == b.sampleRate &&
-      _fmtU16(a.fmt, 2) == _fmtU16(b.fmt, 2) &&
-      _fmtU16(a.fmt, 14) == _fmtU16(b.fmt, 14) &&
-      _effFmt(a.fmt) == _effFmt(b.fmt);
+  if (a.sampleRate != b.sampleRate ||
+      _fmtU16(a.fmt, 2) != _fmtU16(b.fmt, 2) ||
+      _fmtU16(a.fmt, 14) != _fmtU16(b.fmt, 14) ||
+      _effFmt(a.fmt) != _effFmt(b.fmt)) {
+    return false;
+  }
+  // EXTENSIBLE extras: the merged file keeps A's header, so B's samples
+  // would be reinterpreted under A's valid-bits (24-in-32 vs full 32 is
+  // real corruption, not metadata) and rendered under A's channel mask.
+  // A plain-fmt file implies validBits == bits and no mask claim.
+  int validBits(_WavLayout w) =>
+      w.fmt.length >= 40 ? _fmtU16(w.fmt, 18) : _fmtU16(w.fmt, 14);
+  int mask(_WavLayout w) =>
+      w.fmt.length >= 40 ? _fmtU16(w.fmt, 20) | (_fmtU16(w.fmt, 22) << 16) : 0;
+  if (validBits(a) != validBits(b)) return false;
+  final bothExtensible = a.fmt.length >= 40 && b.fmt.length >= 40;
+  if (bothExtensible && mask(a) != mask(b)) return false;
+  return true;
 }
 
+/// Re-emits a WAV from a preserved `fmt ` chunk body and raw PCM [data] bytes.
 Uint8List _buildWav(Uint8List fmt, Uint8List data) {
   final b = BytesBuilder();
   void str(String s) => b.add(s.codeUnits);
