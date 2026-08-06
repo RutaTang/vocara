@@ -3,7 +3,7 @@
 //! The cpal output `Stream` is `!Send`, so all stream lifecycle (build / drop / device switch)
 //! is confined to one dedicated [`AudioHost`] thread; FFI threads only message it. The audio
 //! thread renders the engine's fixed `ENGINE_SR` mix and `build_stream` resamples it to the
-//! device's native rate at the I/O boundary. `decode_file` + `resample_linear` turn any
+//! device's native rate at the I/O boundary. `decode_file` + `resample_sinc` turn any
 //! supported file into engine-rate interleaved-stereo PCM the feeder pushes to a source ring.
 //! Gated behind the `device` feature so the DSP core stays dependency-free.
 
@@ -1394,26 +1394,61 @@ pub fn decode_file(
     Ok((out, src_rate))
 }
 
-/// Linear-interpolation sample-rate conversion (interleaved stereo). Simple and correct; a
-/// production build swaps in a sinc/FFT resampler (rubato) on the feeder thread. Consumes
-/// its input so the identity case moves the buffer through instead of duplicating a whole
-/// track (the decode paths' peak memory is measured in full-track copies).
-pub fn resample_linear(frames: Vec<[Smp; CHANNELS]>, from: u32, to: u32) -> Vec<[Smp; CHANNELS]> {
+/// Windowed-sinc sample-rate conversion (interleaved stereo) on the offline decode paths —
+/// the production kernel the linear-interpolation interim explicitly promised (linear leaves
+/// audible aliasing above a few kHz on non-48 kHz sources). Consumes its input so the
+/// identity case moves the buffer through instead of duplicating a whole track (the decode
+/// paths' peak memory is measured in full-track copies; when actually resampling the peak
+/// is input + output, same as before).
+///
+/// Alignment: `process_all` trims the resampler's group delay off the head and flushes the
+/// tail, so a feature at input frame `k` lands at output frame `round(k * to/from)` — the
+/// punch-splice paths depend on this sample mapping (pinned by test).
+///
+/// Errors are structurally impossible for the validated rates the decode gates admit
+/// (ratio > 0, stereo, non-zero chunk); the Result keeps this library-safe rather than
+/// panicking should that ever change.
+pub fn resample_sinc(
+    frames: Vec<[Smp; CHANNELS]>,
+    from: u32,
+    to: u32,
+) -> Result<Vec<[Smp; CHANNELS]>, String> {
+    use rubato::audioadapter_buffers::direct::InterleavedSlice;
+    use rubato::{
+        Async, FixedAsync, Resampler, SincInterpolationParameters, SincInterpolationType,
+        WindowFunction,
+    };
+
     if from == to || frames.is_empty() {
-        return frames;
+        return Ok(frames);
     }
     let ratio = to as f64 / from as f64;
-    let out_len = ((frames.len() as f64) * ratio).round() as usize;
-    let mut out = Vec::with_capacity(out_len);
-    for i in 0..out_len {
-        let src = i as f64 / ratio;
-        let i0 = src.floor() as usize;
-        let frac = (src - i0 as f64) as f32;
-        let a = frames[i0.min(frames.len() - 1)];
-        let b = frames[(i0 + 1).min(frames.len() - 1)];
-        out.push([a[0] + (b[0] - a[0]) * frac, a[1] + (b[1] - a[1]) * frac]);
+    let n = frames.len();
+    // [[f32; 2]] is contiguous interleaved stereo — the adapter borrows it in place.
+    let input = InterleavedSlice::new(frames.as_flattened(), CHANNELS, n)
+        .map_err(|e| format!("resample input adapter: {e}"))?;
+    // rubato's reference offline-quality parameters (SincFixedInput in its examples):
+    // 128-tap sinc, 256x oversampled table, quadratic table interpolation, Blackman2
+    // window, cutoff derived from the window/taps by the library.
+    let params = SincInterpolationParameters::new(128, WindowFunction::Blackman2)
+        .oversampling_factor(256)
+        .interpolation(SincInterpolationType::Quadratic);
+    let mut rs = Async::<Smp>::new_sinc(ratio, 1.0, &params, 1024, CHANNELS, FixedAsync::Input)
+        .map_err(|e| format!("resampler construction: {e}"))?;
+    let out = rs
+        .process_all(&input, n, None)
+        .map_err(|e| format!("resample: {e}"))?;
+    drop(frames); // the input copy is dead before the flat output is re-framed
+    let flat = out.take_data();
+    // process_all zero-pads up to ceil(n * ratio), which can overshoot the exact
+    // mapping by a frame; trim to round(n * ratio) so the duration contract is
+    // deterministic (the same one the linear kernel kept).
+    let exact = ((n as f64) * ratio).round() as usize;
+    let mut framed = Vec::with_capacity(exact);
+    for chunk in flat.chunks_exact(CHANNELS).take(exact) {
+        framed.push([chunk[0], chunk[1]]);
     }
-    out
+    Ok(framed)
 }
 
 #[cfg(test)]
@@ -1764,6 +1799,119 @@ mod record_writer_tests {
         assert_eq!(b2.len(), 44 + 10 * 4, "take 2 contains only its own frames");
         let _ = std::fs::remove_file(&p1);
         let _ = std::fs::remove_file(&p2);
+    }
+}
+
+#[cfg(test)]
+mod resample_sinc_tests {
+    //! The offline windowed-sinc converter: sample-mapping alignment (the punch splice
+    //! depends on it), passband fidelity, and the alias rejection that motivated replacing
+    //! the linear interim kernel.
+
+    use super::resample_sinc;
+    use crate::sample::CHANNELS;
+
+    fn frames_of(mono: impl Iterator<Item = f32>) -> Vec<[f32; CHANNELS]> {
+        mono.map(|s| [s, s]).collect()
+    }
+
+    #[test]
+    fn identity_rate_passes_the_buffer_through_unchanged() {
+        let frames = frames_of((0..1000).map(|i| (i as f32 / 999.0) - 0.5));
+        let out = resample_sinc(frames.clone(), 48_000, 48_000).unwrap();
+        assert_eq!(out, frames);
+    }
+
+    #[test]
+    fn output_length_is_the_rounded_rate_ratio_exactly() {
+        let out = resample_sinc(frames_of((0..44_100).map(|_| 0.25)), 44_100, 48_000).unwrap();
+        // round(44100 * 48000/44100) = 48000: one second stays one second.
+        assert_eq!(out.len(), 48_000);
+    }
+
+    #[test]
+    fn an_impulse_lands_at_the_mapped_frame_so_splice_alignment_holds() {
+        // The resampler's group delay must be trimmed exactly: a feature at input
+        // frame k has to land at round(k * ratio), or every punch splice would be
+        // shifted by the sinc latency.
+        let n = 20_000;
+        let k = 10_000usize;
+        let mut frames = vec![[0.0f32; CHANNELS]; n];
+        frames[k] = [1.0, 1.0];
+        let out = resample_sinc(frames, 44_100, 48_000).unwrap();
+        let expected = (k as f64 * 48_000.0 / 44_100.0).round() as usize;
+        let peak = out
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1[0].abs().partial_cmp(&b.1[0].abs()).unwrap())
+            .map(|(i, _)| i)
+            .unwrap();
+        assert!(
+            (peak as i64 - expected as i64).abs() <= 1,
+            "impulse at {k} mapped to {peak}, expected ~{expected}"
+        );
+    }
+
+    #[test]
+    fn a_passband_tone_survives_upsampling_with_high_fidelity() {
+        // 15 kHz at 44.1 kHz — well inside the passband but exactly where linear
+        // interpolation audibly falls apart. The output must match the ideal
+        // 15 kHz tone at 48 kHz sample-for-sample (interior; edges carry the
+        // windowed tail).
+        let sr_in = 44_100.0f64;
+        let sr_out = 48_000.0f64;
+        let hz = 15_000.0f64;
+        let n = 44_100;
+        let input = frames_of(
+            (0..n).map(|i| (2.0 * std::f64::consts::PI * hz * i as f64 / sr_in).sin() as f32),
+        );
+        let out = resample_sinc(input, 44_100, 48_000).unwrap();
+        // Quadrature demodulation at 15 kHz: phase-independent amplitude of the
+        // surviving tone. (A pointwise ideal-sine comparison would punish the
+        // converter's sub-sample group delay — a pure, inaudible time shift.)
+        let skip = 2_000;
+        let mut a = 0.0f64;
+        let mut b = 0.0f64;
+        let mut count = 0usize;
+        for (i, f) in out.iter().enumerate().skip(skip).take(out.len() - 2 * skip) {
+            let ph = 2.0 * std::f64::consts::PI * hz * i as f64 / sr_out;
+            a += f[0] as f64 * ph.sin();
+            b += f[0] as f64 * ph.cos();
+            count += 1;
+        }
+        let amplitude = 2.0 * (a * a + b * b).sqrt() / count as f64;
+        assert!(
+            (amplitude - 1.0).abs() < 0.02,
+            "15 kHz passband amplitude {amplitude}, expected ~1.0 \
+             (linear interpolation attenuates and smears this tone)"
+        );
+    }
+
+    #[test]
+    fn a_tone_above_the_target_nyquist_is_rejected_not_aliased() {
+        // 23 kHz at 48 kHz downsampled to 44.1 kHz (Nyquist 22.05 kHz): a correct
+        // converter suppresses it; linear interpolation folds it into the audible
+        // band at nearly full amplitude.
+        let sr_in = 48_000.0f64;
+        let hz = 23_000.0f64;
+        let n = 48_000;
+        let input = frames_of(
+            (0..n).map(|i| (2.0 * std::f64::consts::PI * hz * i as f64 / sr_in).sin() as f32),
+        );
+        let out = resample_sinc(input, 48_000, 44_100).unwrap();
+        let skip = 2_000;
+        let mut sq = 0.0f64;
+        let mut count = 0usize;
+        for f in out.iter().skip(skip).take(out.len() - 2 * skip) {
+            sq += (f[0] as f64) * (f[0] as f64);
+            count += 1;
+        }
+        let rms = (sq / count as f64).sqrt();
+        assert!(
+            rms < 0.02,
+            "alias residue RMS {rms} for a tone above the target Nyquist \
+             (linear interpolation leaves ~0.7 here)"
+        );
     }
 }
 

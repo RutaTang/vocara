@@ -20,6 +20,7 @@ device = [
     "dep:objc2-core-audio",
     "dep:objc2-core-audio-types",
     "dep:objc2-core-foundation",
+    "dep:rubato",
 ]
 
 [dependencies]
@@ -47,6 +48,7 @@ objc2-core-foundation = { version = "0.3", optional = true, default-features = f
     "CFString",
     "CFBase",
 ] }
+rubato = { version = "4.0.0", optional = true }
 
 [profile.release]
 # Unwinding across the C ABI is UB; abort is deterministic. We validate inputs at the FFI

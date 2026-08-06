@@ -1279,7 +1279,10 @@ pub extern "C" fn ve_decode(
         };
         // Consuming resample: the identity case moves the buffer through un-copied, so the
         // peak here is 2 full-track buffers when resampling and 1 otherwise (down from 3).
-        let resampled = device::resample_linear(frames, src_rate, rate);
+        let resampled = match device::resample_sinc(frames, src_rate, rate) {
+            Ok(v) => v,
+            Err(_) => return VePcm::empty(),
+        };
         // Resampling can overshoot the budget by a rounding frame; clamp defensively.
         let n = resampled.len();
         if max_frames > 0 && n as u64 > max_frames {
@@ -1397,7 +1400,7 @@ pub extern "C" fn ve_punch_wav(
             let (frames, src_rate) =
                 device::decode_file(p, MAX_PLAYBACK_SECS, 192_000, MAX_SPLICE_SRC_FRAMES)
                     .ok()?;
-            Some(device::resample_linear(frames, src_rate, rate))
+            device::resample_sinc(frames, src_rate, rate).ok()
         };
         // Checked before any decode: the old `as usize` cast of the i128 split TRUNCATED a
         // huge split_ms (wrapping to a small value — no overflow, but silently wrong
