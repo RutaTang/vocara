@@ -1253,4 +1253,338 @@ void main() {
       expect(await db.select(db.oplog).get(), isEmpty);
     });
   });
+
+  group('slot-resolution revert (a park undoes the resolution it rode in '
+      'on)', () {
+    late QuarantineStore store;
+
+    setUp(() {
+      store = QuarantineStore(db);
+      applier = SyncApplier(
+        db,
+        HlcClock(node: _id('LOCAL'), now: () => 1000),
+        builder: SyncRowBuilder(db),
+        quarantine: store,
+      );
+    });
+
+    // A single-slot track (accompaniment) with a routable bus pointer — the
+    // FK the sweep trips over when the bus parent never lands.
+    RemoteRecord accTrack(
+      String id,
+      String practiceId,
+      Hlc h, {
+      String? busId,
+    }) => RemoteRecord(
+      table: 'tracks',
+      columns: {
+        'id': _id(id),
+        'practice_id': _id(practiceId),
+        'kind': 'accompaniment',
+        'interpretation_id': null,
+        'display_name': '',
+        'color_value': null,
+        'muted': 0,
+        'soloed': 0,
+        'volume': 1.0,
+        'pan': 0.0,
+        'bus_id': busId == null ? null : _id(busId),
+        'fx_json': null,
+        'sends_json': null,
+        'order_index': 0,
+        'created_at': h.wallMs,
+        'updated_at': h.wallMs,
+        'deleted_at': null,
+        'hlc_wall': h.wallMs,
+        'hlc_ctr': h.counter,
+        'hlc_node': h.node,
+        'hlc_packed': h.packed,
+        'schema_v': 1,
+      },
+    );
+
+    RemoteRecord fxBus(String id, String practiceId, Hlc h, {int? schemaV}) =>
+        RemoteRecord(
+          table: 'fx_buses',
+          columns: {
+            'id': _id(id),
+            'practice_id': _id(practiceId),
+            'name': 'bus',
+            'color_value': null,
+            'volume': 1.0,
+            'pan': 0.0,
+            'muted': 0,
+            'soloed': 0,
+            'output_bus_id': null,
+            'fx_json': null,
+            'sends_json': null,
+            'order_index': 0,
+            'created_at': h.wallMs,
+            'updated_at': h.wallMs,
+            'deleted_at': null,
+            'hlc_wall': h.wallMs,
+            'hlc_ctr': h.counter,
+            'hlc_node': h.node,
+            'hlc_packed': h.packed,
+            'schema_v': schemaV ?? 1,
+          },
+        );
+
+    Future<Map<String, Object?>?> trackState(String id) async {
+      final r = await db
+          .customSelect(
+            'SELECT practice_id, kind, deleted_at, hlc_packed, bus_id '
+            'FROM tracks WHERE id = ?',
+            variables: [Variable.withString(_id(id))],
+          )
+          .getSingleOrNull();
+      return r?.data;
+    }
+
+    Future<List<Map<String, Object?>>> oplogRows() async => [
+      for (final r
+          in await db
+              .customSelect(
+                'SELECT entity_id, op, hlc_packed FROM oplog ORDER BY seq',
+              )
+              .get())
+        r.data,
+    ];
+
+    test('park+delete: an inserted record that WON the slot (its bus parent '
+        'quarantined, newer schema) takes the occupant tombstone and its '
+        'journal entry back out with it; the replayed record kills the '
+        'occupant only when it actually lands', () async {
+      await applier.apply([
+        practice('P', 'p', hlc(800)),
+        accTrack('O', 'P', hlc(850)), // the current slot occupant
+      ]);
+      expect(await oplogRows(), isEmpty);
+
+      // The bus parent is from a newer build (parked at the schema gate);
+      // the incoming accompaniment routes into it AND wins the (P, acc)
+      // slot, so applying it tombstones + journals the occupant BEFORE the
+      // sweep discovers the record itself cannot stay.
+      final incoming = accTrack('T', 'P', hlc(900), busId: 'B');
+      final res = await applier.apply([
+        fxBus('B', 'P', hlc(890), schemaV: currentRecordSchemaV + 1),
+        incoming,
+      ]);
+      expect(res.committed, isTrue);
+      expect(res.applied, 0);
+      expect(res.failed, 2); // the parked bus and the swept track
+
+      // The occupant is fully restored — live, prior HLC, no track killed
+      // for a record that never landed...
+      final occupant = (await trackState('O'))!;
+      expect(occupant['deleted_at'], isNull);
+      expect(occupant['hlc_packed'], hlc(850).packed);
+      // ...and no oplog entry from the resolution remains.
+      expect(await oplogRows(), isEmpty);
+      // The incoming record itself was quarantined at the door: row gone,
+      // parked under its own HLC with its original payload.
+      expect(await trackState('T'), isNull);
+      final parked = (await store.list()).singleWhere((q) => q.tbl == 'tracks');
+      expect(parked.remoteHlcPacked, hlc(900).packed);
+      expect(parked.reason, 'fk-orphan: parent fx_buses/${_id('B')} missing');
+      final payload = SyncRow.decode(parked.payload);
+      expect(payload.fields, equals(incoming.columns));
+
+      // The parent lands; the replayed record applies — and only THEN does
+      // the occupant lose the slot, with a journaled tombstone.
+      await applier.apply([fxBus('B', 'P', hlc(905))]);
+      final replay = await applier.apply([payload]);
+      expect(replay.applied, 1);
+      expect((await trackState('T'))!['deleted_at'], isNull);
+      final lost = (await trackState('O'))!;
+      expect(lost['deleted_at'], isNotNull);
+      final derived = Hlc(wallMs: 850, counter: 1, node: _id('LOCAL'));
+      expect(lost['hlc_packed'], derived.packed);
+      final journal = await oplogRows();
+      expect(journal, hasLength(1));
+      expect(journal.single['entity_id'], _id('O'));
+      expect(journal.single['op'], 'tombstone');
+      expect(journal.single['hlc_packed'], derived.packed);
+    });
+
+    test('park+restore: an UPDATED pre-existing track that won the slot is '
+        'parked and reverted along with the occupant tombstone — the journal '
+        'stays consistent with the restored rows', () async {
+      await applier.apply([
+        practice('P', 'p', hlc(800)),
+        practice('Q', 'q', hlc(801)),
+        accTrack('O', 'P', hlc(850)), // occupies (P, accompaniment)
+        accTrack('T', 'Q', hlc(820)), // pre-exists in Q's slot
+      ]);
+      expect(await oplogRows(), isEmpty);
+
+      // The incoming update MOVES T into P's slot (winning it, 900 > 850)
+      // while also routing it into a bus from a newer build — the update
+      // itself plants the dangling pointer that parks it.
+      final incoming = accTrack('T', 'P', hlc(900), busId: 'B');
+      final res = await applier.apply([
+        fxBus('B', 'P', hlc(890), schemaV: currentRecordSchemaV + 1),
+        incoming,
+      ]);
+      expect(res.committed, isTrue);
+      expect(res.applied, 0);
+      expect(res.failed, 2);
+
+      // The updated row is restored verbatim to its pre-batch state...
+      final t = (await trackState('T'))!;
+      expect(t['practice_id'], _id('Q'));
+      expect(t['deleted_at'], isNull);
+      expect(t['bus_id'], isNull);
+      expect(t['hlc_packed'], hlc(820).packed);
+      // ...the occupant is restored live on its own prior stamp...
+      final occupant = (await trackState('O'))!;
+      expect(occupant['deleted_at'], isNull);
+      expect(occupant['hlc_packed'], hlc(850).packed);
+      // ...and the journal carries no stray resolution entries for either.
+      expect(await oplogRows(), isEmpty);
+      // The post-update snapshot is parked under the remote HLC (strictly
+      // newer than both restored rows, so replay wins by plain LWW).
+      final parked = (await store.list()).singleWhere((q) => q.tbl == 'tracks');
+      expect(parked.remoteHlcPacked, hlc(900).packed);
+
+      // Convergence: the parent lands and the replay takes the slot for
+      // real — occupant tombstoned, resolution journaled, exactly once.
+      await applier.apply([fxBus('B', 'P', hlc(905))]);
+      final replay = await applier.apply([SyncRow.decode(parked.payload)]);
+      expect(replay.applied, 1);
+      expect((await trackState('T'))!['practice_id'], _id('P'));
+      expect((await trackState('O'))!['deleted_at'], isNotNull);
+      final journal = await oplogRows();
+      expect(journal, hasLength(1));
+      expect(journal.single['entity_id'], _id('O'));
+      expect(journal.single['op'], 'tombstone');
+    });
+
+    test('a parked record that LOST the slot parks its ORIGINAL payload, '
+        'not the tombstoned-at-the-door state whose journal entry the '
+        'revert just deleted', () async {
+      await applier.apply([
+        practice('P', 'p', hlc(800)),
+        accTrack('O', 'P', hlc(900)), // newer than the incoming record
+      ]);
+
+      final incoming = accTrack('T', 'P', hlc(850), busId: 'B');
+      final res = await applier.apply([
+        fxBus('B', 'P', hlc(890), schemaV: currentRecordSchemaV + 1),
+        incoming,
+      ]);
+      expect(res.applied, 0);
+      expect(res.failed, 2);
+
+      // The occupant was never touched (the incoming record lost) and no
+      // journal entry survives for the at-the-door tombstone.
+      final occupant = (await trackState('O'))!;
+      expect(occupant['deleted_at'], isNull);
+      expect(occupant['hlc_packed'], hlc(900).packed);
+      expect(await oplogRows(), isEmpty);
+      expect(await trackState('T'), isNull);
+      // Parked under the record's OWN hlc with the original live payload:
+      // parking the derived tombstone state would later replay an
+      // UN-journaled tombstone no peer ever learns about.
+      final parked = (await store.list()).singleWhere((q) => q.tbl == 'tracks');
+      expect(parked.remoteHlcPacked, hlc(850).packed);
+      final payload = SyncRow.decode(parked.payload);
+      expect(payload.fields, equals(incoming.columns));
+
+      // Replay after the parent lands: the resolution re-runs from scratch,
+      // the record still loses, and THIS time the tombstone is journaled.
+      await applier.apply([fxBus('B', 'P', hlc(905))]);
+      final replay = await applier.apply([payload]);
+      expect(replay.applied, 1);
+      expect((await trackState('T'))!['deleted_at'], isNotNull);
+      expect((await trackState('O'))!['deleted_at'], isNull);
+      final journal = await oplogRows();
+      expect(journal, hasLength(1));
+      expect(journal.single['entity_id'], _id('T'));
+      expect(journal.single['op'], 'tombstone');
+    });
+  });
+
+  group('LWW quarantine store at the applier (a stale park never overwrites '
+      'a newer one)', () {
+    late QuarantineStore store;
+    late int now;
+
+    setUp(() {
+      now = 1000;
+      store = QuarantineStore(db);
+      applier = SyncApplier(
+        db,
+        HlcClock(node: _id('LOCAL'), now: () => now),
+        builder: SyncRowBuilder(db),
+        quarantine: store,
+      );
+    });
+
+    RemoteRecord assetRecord(String id, Hlc h) => RemoteRecord(
+      table: 'assets',
+      columns: {
+        'id': _id(id),
+        'content_hash': 'HASH_$id',
+        'byte_size': 8,
+        'ext': 'wav',
+        'kind': 'audio',
+        'created_at': h.wallMs,
+        'updated_at': h.wallMs,
+        'deleted_at': null,
+        'hlc_wall': h.wallMs,
+        'hlc_ctr': h.counter,
+        'hlc_node': h.node,
+        'hlc_packed': h.packed,
+        'schema_v': 1,
+      },
+    );
+
+    test(
+      'legal same-page ordering — P@950 applies then is FK-swept, P@1000 '
+      'was parked at the drift gate — keeps the parked entry at P@1000, '
+      'and the replay lands P@1000 once the parent and clock recover',
+      () async {
+        final future = hlc(1000 + HlcClock.defaultMaxDriftMs + 60 * 1000);
+        final res = await applier.apply([
+          // Applies first, into a missing asset parent (locally never seen).
+          practice('P', 'v950', hlc(950), separationAssetId: 'A'),
+          // Arrives later on the same page; parked at the drift gate @1000.
+          practice('P', 'v1000', future),
+        ]);
+        expect(res.committed, isTrue);
+        expect(res.quarantined, 1); // P@1000
+        expect(res.applied, 0); // P@950 applied but was swept
+        expect(res.failed, 1); // ...and parked as an fk-orphan (a no-op put)
+        expect(await row('P'), isNull);
+
+        // The sweep's park of the CURRENT db row (P@950) ran LAST — under an
+        // unconditional upsert it overwrote the newer state forever, because
+        // the server never re-delivers either page. The store is LWW: the
+        // parked entry still holds P@1000.
+        final parked = await store.list();
+        expect(parked, hasLength(1));
+        expect(parked.single.tbl, 'practices');
+        expect(parked.single.remoteHlcPacked, future.packed);
+        expect(SyncRow.decode(parked.single.payload).fields['title'], 'v1000');
+
+        // The parent lands and the clock catches up: the replay lands the
+        // NEWEST state (P@1000), not the swept 950.
+        await applier.apply([assetRecord('A', hlc(960))]);
+        now = future.wallMs;
+        final replay = await applier.apply([
+          SyncRow.decode(parked.single.payload),
+        ]);
+        expect(replay.applied, 1);
+        final r = await db
+            .customSelect(
+              'SELECT title, hlc_packed FROM practices WHERE id = ?',
+              variables: [Variable.withString(_id('P'))],
+            )
+            .getSingle();
+        expect(r.data['title'], 'v1000');
+        expect(r.data['hlc_packed'], future.packed);
+      },
+    );
+  });
 }

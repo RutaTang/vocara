@@ -68,6 +68,45 @@ void main() {
     expect(rows.single.quarantinedAt, 200);
   });
 
+  test('a strictly OLDER park is a no-op: the store is LWW by hlcPacked, '
+      'not last-caller-wins (parks are not ordered by arrival)', () async {
+    await put(
+      'practices',
+      'P1',
+      hlcPacked: '0000000002000-000000-N',
+      reason: 'hlc-drift: newest state, parked at the door',
+      at: 100,
+    );
+    // The end-of-batch FK sweep can legally park an OLDER db-row state of
+    // the same row later in the same page; the newest parked state must
+    // survive it untouched.
+    await put(
+      'practices',
+      'P1',
+      hlcPacked: '0000000001000-000000-N',
+      reason: 'fk-orphan: stale sweep park',
+      at: 200,
+    );
+
+    final rows = await store.list();
+    expect(rows, hasLength(1));
+    expect(rows.single.remoteHlcPacked, '0000000002000-000000-N');
+    expect(rows.single.reason, 'hlc-drift: newest state, parked at the door');
+    expect(rows.single.payload, '{"stub":true}');
+    expect(rows.single.quarantinedAt, 100, reason: 'entirely untouched');
+  });
+
+  test('an EQUAL-HLC re-park still refreshes reason/payload (the fk-orphan '
+      'replay cycle re-parks the identical state every pass)', () async {
+    await put('practices', 'P1', reason: 'fk-orphan: first pass', at: 100);
+    await put('practices', 'P1', reason: 'fk-orphan: second pass', at: 200);
+
+    final rows = await store.list();
+    expect(rows, hasLength(1));
+    expect(rows.single.reason, 'fk-orphan: second pass');
+    expect(rows.single.quarantinedAt, 200);
+  });
+
   test('the same id under two different tables parks two rows (composite '
       'key)', () async {
     await put('practices', 'X');

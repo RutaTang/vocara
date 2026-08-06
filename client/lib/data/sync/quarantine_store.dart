@@ -2,9 +2,9 @@ import 'package:drift/drift.dart';
 
 import '../db/app_database.dart';
 
-/// Persistence for the LOCAL-ONLY `sync_quarantine` parking lot: the LATEST
-/// rejected remote state per (table, id) — see tables.dart for the schema and
-/// the remote_hlc_packed naming rationale.
+/// Persistence for the LOCAL-ONLY `sync_quarantine` parking lot: the NEWEST
+/// (by HLC) rejected remote state per (table, id) — see tables.dart for the
+/// schema and the remote_hlc_packed naming rationale.
 ///
 /// Like [SyncStateStore], every method is a plain drift operation so it joins
 /// a caller-provided transaction: the [SyncApplier] persists a quarantine
@@ -15,10 +15,27 @@ class QuarantineStore {
 
   final AppDatabase _db;
 
-  /// Upserts the LATEST quarantined state for ([table], [id]): the composite
-  /// primary key makes a re-quarantine of the same row replace the older one,
-  /// so the parking lot holds one (the newest) rejected state per row instead
-  /// of growing without bound on every failed pull.
+  /// Upserts the quarantined state for ([table], [id]), keeping the NEWEST
+  /// state per row by [hlcPacked] — the store itself is Last-Writer-Wins, not
+  /// last-caller-wins. The composite primary key already bounds the lot to
+  /// one entry per row; the HLC guard decides WHICH state that entry holds:
+  ///
+  ///  * a strictly newer [hlcPacked] replaces the stored entry;
+  ///  * an EQUAL [hlcPacked] also replaces it (a refreshed reason/payload for
+  ///    the same state — the fk-orphan re-park flow re-parks the identical
+  ///    snapshot every replay cycle and must keep working);
+  ///  * a strictly OLDER [hlcPacked] is a deliberate no-op. Parks are not
+  ///    ordered by arrival: a page can legally deliver P@1000 (parked at the
+  ///    door) before the end-of-batch FK sweep parks the current db row
+  ///    P@950, and the round-6 park+restore can put a live row BACK on an
+  ///    older HLC — so ordering alone can never protect the newest state.
+  ///    Dropping the older park loses nothing: under LWW the replay of the
+  ///    newer parked snapshot supersedes anything the older state could have
+  ///    contributed (the older state would lose that same LWW settle anyway).
+  ///
+  /// The SQL-level `ON CONFLICT ... DO UPDATE ... WHERE` makes the guard
+  /// race-free inside the caller's transaction (no read-modify-write gap),
+  /// and a filtered-out update is silently kept as the old row, not an error.
   Future<void> put({
     required String table,
     required String id,
@@ -27,19 +44,29 @@ class QuarantineStore {
     required String payload,
     required String reason,
     required int quarantinedAt,
-  }) => _db
-      .into(_db.syncQuarantine)
-      .insertOnConflictUpdate(
-        SyncQuarantineCompanion.insert(
-          tbl: table,
-          id: id,
-          remoteHlcPacked: hlcPacked,
-          schemaV: schemaV,
-          payload: payload,
-          reason: reason,
-          quarantinedAt: quarantinedAt,
-        ),
-      );
+  }) {
+    final row = SyncQuarantineCompanion.insert(
+      tbl: table,
+      id: id,
+      remoteHlcPacked: hlcPacked,
+      schemaV: schemaV,
+      payload: payload,
+      reason: reason,
+      quarantinedAt: quarantinedAt,
+    );
+    return _db
+        .into(_db.syncQuarantine)
+        .insert(
+          row,
+          onConflict: DoUpdate(
+            (old) => row,
+            // Overwrite only when the stored state is not newer than the
+            // incoming one (packed HLCs compare lexically).
+            where: (old) =>
+                old.remoteHlcPacked.isSmallerOrEqualValue(hlcPacked),
+          ),
+        );
+  }
 
   /// All quarantined rows, oldest quarantine first (stable review order).
   Future<List<SyncQuarantineRow>> list() =>
