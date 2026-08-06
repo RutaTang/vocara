@@ -3,9 +3,11 @@ import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vocara/data/db/app_database.dart';
 import 'package:vocara/data/sync/hlc.dart';
+import 'package:vocara/data/sync/integrity_checker.dart';
 import 'package:vocara/data/sync/quarantine_store.dart';
 import 'package:vocara/data/sync/sync_applier.dart';
 import 'package:vocara/data/sync/sync_row.dart';
+import 'package:vocara/data/sync/sync_writer.dart';
 
 String _id(String s) => s.padRight(26, '0').substring(0, 26);
 
@@ -1352,9 +1354,11 @@ void main() {
     ];
 
     // The derived stamp a slot resolution writes: one counter above the
-    // loser's own stamp, under the LOCAL (resolving) node.
+    // loser's own stamp, under the resolving device's DERIVED node (which
+    // sorts below every real node, so bookkeeping loses (wall, counter)
+    // ties to real edits — see HlcClock.derivedNode).
     Hlc derivedAt(int wall) =>
-        Hlc(wallMs: wall, counter: 1, node: _id('LOCAL'));
+        Hlc(wallMs: wall, counter: 1, node: HlcClock.derivedNode(_id('LOCAL')));
 
     test('park+delete: an inserted record that WON the slot (its bus parent '
         'quarantined, newer schema) takes the occupant tombstone and its '
@@ -1403,7 +1407,7 @@ void main() {
       expect((await trackState('T'))!['deleted_at'], isNull);
       final lost = (await trackState('O'))!;
       expect(lost['deleted_at'], isNotNull);
-      final derived = Hlc(wallMs: 850, counter: 1, node: _id('LOCAL'));
+      final derived = derivedAt(850);
       expect(lost['hlc_packed'], derived.packed);
       final journal = await oplogRows();
       expect(journal, hasLength(1));
@@ -1888,5 +1892,145 @@ void main() {
         expect(r.data['hlc_packed'], future.packed);
       },
     );
+  });
+
+  group('derived-node stamps (bookkeeping can never revert a held-wall '
+      'author edit)', () {
+    RemoteRecord asset(String id, Hlc h, {int? deletedAt}) => RemoteRecord(
+      table: 'assets',
+      columns: {
+        'id': _id(id),
+        'content_hash': 'HASH_$id',
+        'byte_size': 8,
+        'ext': 'wav',
+        'kind': 'audio',
+        'created_at': h.wallMs,
+        'updated_at': h.wallMs,
+        'deleted_at': deletedAt,
+        'hlc_wall': h.wallMs,
+        'hlc_ctr': h.counter,
+        'hlc_node': h.node,
+        'hlc_packed': h.packed,
+        'schema_v': 1,
+      },
+    );
+
+    Future<Map<String, Object?>> practiceRow() async {
+      final r = await db
+          .customSelect(
+            'SELECT title, separation_asset_id, hlc_ctr, hlc_node '
+            'FROM practices WHERE id = ?',
+            variables: [Variable.withString(_id('P'))],
+          )
+          .getSingle();
+      return r.data;
+    }
+
+    test('a repair tying a concurrent real edit on (wall, counter) LOSES to '
+        'it, and the heal re-derives above the edit', () async {
+      // The protocol's documented lost update: an author whose clock wall is
+      // HELD stamps a real edit at (base.wall, base.counter + 1) — exactly
+      // the stamp a healer derives from the same base. Author node 'AAA…'
+      // sorts BELOW the healer device 'LOCAL…', the precise draw where the
+      // old real-node repair stamp won the tie and its full-row snapshot
+      // reverted the author's title fleet-wide.
+      final authorNode = _id('AAA');
+      final base = Hlc(wallMs: 1000, counter: 5, node: authorNode);
+      await applier.apply([asset('A', hlc(900))]);
+      final seeded = await applier.apply([
+        RemoteRecord(
+          table: 'practices',
+          columns: {
+            'id': _id('P'),
+            'title': 'original',
+            'timeline_duration_ms': 0,
+            'master_volume': 1.0,
+            'active_interpretation_id': null,
+            'separation_asset_id': _id('A'),
+            'reverb_json': null,
+            'lyrics_json': null,
+            'created_at': base.wallMs,
+            'updated_at': base.wallMs,
+            'deleted_at': null,
+            'hlc_wall': base.wallMs,
+            'hlc_ctr': base.counter,
+            'hlc_node': base.node,
+            'hlc_packed': base.packed,
+            'schema_v': 1,
+          },
+        ),
+      ]);
+      expect(seeded.applied, 1);
+      // The asset is tombstoned remotely: P's pointer now dangles (the row
+      // still exists, so the FK is satisfied — only the live-target
+      // invariant broke, which is exactly what IntegrityChecker heals).
+      await applier.apply([asset('A', hlc(1100), deletedAt: 1100)]);
+
+      // The local heal derives (base.wall, base.counter + 1) under the
+      // DERIVED node — '!' + the device suffix, sorting below every real
+      // node id.
+      final checker = IntegrityChecker(
+        db,
+        SyncWriter(db, HlcClock(node: _id('LOCAL'), now: () => 2000)),
+      );
+      expect(await checker.repair(), isEmpty);
+      var row = await practiceRow();
+      expect(row['separation_asset_id'], isNull);
+      expect(row['hlc_ctr'], base.counter + 1);
+      expect(
+        (row['hlc_node']! as String).startsWith('!'),
+        isTrue,
+        reason: 'repairs must stamp under the derived node space',
+      );
+
+      // The author's held-wall edit arrives: the SAME (wall, counter) under
+      // its real node, a renamed title, and the pre-heal dangling pointer.
+      // It must win the tie — the old healer-node stamp beat it and silently
+      // threw the rename away.
+      final edit = Hlc(
+        wallMs: base.wallMs,
+        counter: base.counter + 1,
+        node: authorNode,
+      );
+      final applied = await applier.apply([
+        RemoteRecord(
+          table: 'practices',
+          columns: {
+            'id': _id('P'),
+            'title': 'renamed',
+            'timeline_duration_ms': 0,
+            'master_volume': 1.0,
+            'active_interpretation_id': null,
+            'separation_asset_id': _id('A'),
+            'reverb_json': null,
+            'lyrics_json': null,
+            'created_at': base.wallMs,
+            'updated_at': edit.wallMs,
+            'deleted_at': null,
+            'hlc_wall': edit.wallMs,
+            'hlc_ctr': edit.counter,
+            'hlc_node': edit.node,
+            'hlc_packed': edit.packed,
+            'schema_v': 1,
+          },
+        ),
+      ]);
+      expect(applied.applied, 1);
+      row = await practiceRow();
+      expect(
+        row['title'],
+        'renamed',
+        reason: 'user intent must win the (wall, counter) tie',
+      );
+
+      // The heal is DERIVABLE state: the next pass re-derives it one counter
+      // above the author's edit, keeping both the rename and the heal.
+      expect(await checker.repair(), isEmpty);
+      row = await practiceRow();
+      expect(row['title'], 'renamed');
+      expect(row['separation_asset_id'], isNull);
+      expect(row['hlc_ctr'], edit.counter + 1);
+      expect((row['hlc_node']! as String).startsWith('!'), isTrue);
+    });
   });
 }

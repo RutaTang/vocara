@@ -1085,11 +1085,14 @@ class SyncApplier {
   }
 
   /// A DERIVED stamp for a local resolution write: one counter above [base],
-  /// under this device's node. Strictly above the row's current stamp (so
-  /// the write replicates via LWW) yet strictly below any later real edit
-  /// (every device holding the row has advanced its clock past [base], so
-  /// its next tick out-ranks the bump) — derived state must never out-rank
-  /// user intent. Same derivation as IntegrityChecker's repair stamps.
+  /// under this device's DERIVED node ([HlcClock.derivedNode] — sorts below
+  /// every real node, so a held-wall author edit at the same (wall, counter)
+  /// always wins the tie and can never be reverted by bookkeeping). Strictly
+  /// above the row's current stamp (so the write replicates via LWW) yet
+  /// strictly below any later real edit (every device holding the row has
+  /// advanced its clock past [base], so its next tick out-ranks the bump) —
+  /// derived state must never out-rank user intent. Same derivation as
+  /// IntegrityChecker's repair stamps.
   Hlc _derivedHlc(Hlc base) {
     var wall = base.wallMs;
     var counter = base.counter + 1;
@@ -1099,7 +1102,11 @@ class SyncApplier {
       wall += 1;
       counter = 0;
     }
-    return Hlc(wallMs: wall, counter: counter, node: clock.node);
+    return Hlc(
+      wallMs: wall,
+      counter: counter,
+      node: HlcClock.derivedNode(clock.node),
+    );
   }
 
   /// Journals the slot-resolution tombstone so the resolution replicates,

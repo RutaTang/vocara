@@ -125,6 +125,30 @@ class HlcClock {
   /// Stable per-install node id (final LWW tiebreak).
   final String node;
 
+  /// The node id DERIVED writes stamp under (integrity repairs, slot
+  /// resolution tombstones): [node] with its first character replaced by
+  /// `'!'`. Real node ids are 26 Crockford base32 characters (`0-9A-Z`,
+  /// enforced at mint), and ASCII `'!'` sorts strictly below all of them, so
+  /// a derived stamp LOSES every (wall, counter) tie against any real edit —
+  /// structurally, not by luck of the node draw.
+  ///
+  /// This closes the derived-repair-stamp lost update (sync-protocol.md): an
+  /// author editing a row while its clock wall is held stamps
+  /// `(base.wall, base.counter + 1, authorNode)` — the same (wall, counter) a
+  /// healer derives from the same base. With a real healer node the tie broke
+  /// by node id, and a winning healer's FULL-ROW snapshot silently reverted
+  /// every other field of the author's edit fleet-wide. Under the derived
+  /// node the author always wins; the repair is DERIVABLE state, so the next
+  /// integrity pass simply re-derives it one counter above the author's edit
+  /// and the fleet converges with both the edit and the heal.
+  ///
+  /// The suffix keeps the DEVICE distinct: two devices deriving different
+  /// content from the same base (e.g. tombstoning one occupant against two
+  /// different winners) still mint distinct stamps, so LWW picks one
+  /// deterministically — a single shared sentinel node would let identical
+  /// stamps carry different content and diverge.
+  static String derivedNode(String node) => '!${node.substring(1)}';
+
   /// Maximum tolerated forward drift of a remote (or the local) clock.
   final int maxDriftMs;
 

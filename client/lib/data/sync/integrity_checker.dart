@@ -35,7 +35,7 @@ class IntegrityChecker {
   final SyncWriter writer;
 
   /// The stamp for one repair write, DERIVED from the repaired row's own HLC:
-  /// one counter above it, under this device's node.
+  /// one counter above it, under this device's DERIVED node.
   ///
   /// A repair is derived state, not user intent. It must be strictly ABOVE
   /// the row's current stamp (so the repair wins LWW on every peer and the
@@ -46,8 +46,15 @@ class IntegrityChecker {
   /// scalar heal on a practice could out-rank a genuinely later delete and
   /// resurrect the deleted practice fleet-wide (convergence simulation, seed
   /// 0xab1a57). Two devices repairing the same row independently derive the
-  /// same (wall, counter) with their node as the only difference, so their
-  /// identical-content repairs converge by the node tiebreak.
+  /// same (wall, counter) with their derived node as the only difference, so
+  /// their identical-content repairs converge by the node tiebreak.
+  ///
+  /// The node is [HlcClock.derivedNode], not the real device node: an author
+  /// whose clock wall is HELD can stamp a real edit at this same
+  /// (wall, counter), and a repair that won that tie by node id would revert
+  /// the author's whole row snapshot fleet-wide. The derived node sorts below
+  /// every real node, so user intent always wins the tie and the repair is
+  /// simply re-derived above it on the next pass.
   SyncStamp _repairStamp(String rowHlcPacked) {
     final base = Hlc.parse(rowHlcPacked);
     var wall = base.wallMs;
@@ -59,7 +66,11 @@ class IntegrityChecker {
       counter = 0;
     }
     return SyncStamp(
-      Hlc(wallMs: wall, counter: counter, node: writer.clock.node),
+      Hlc(
+        wallMs: wall,
+        counter: counter,
+        node: HlcClock.derivedNode(writer.clock.node),
+      ),
     );
   }
 

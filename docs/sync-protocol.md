@@ -137,28 +137,46 @@ compaction only removes superseded entries).
   re-push its full state (all rows are full-state LWW). Blob backups are
   still recommended (audio bytes may exist on only one device).
 
-## Known design gap (must be addressed in the P1 protocol pass)
+## Derived-stamp discipline (closes the derived-repair-stamp lost update)
 
-**Derived-repair-stamp lost update.** Client-side derived writes (integrity
-repair heals, the single-slot resolution tombstone) deliberately stamp
-`(base.wall, base.counter + 1, healerNode)` — just above the row state they
-repaired, so bookkeeping never out-ranks a later real edit. The gap: an
-AUTHOR editing the same row while its clock wall is HELD (offline with a
-clock corrected backwards, or a second edit within one wall millisecond)
-stamps `(base.wall, base.counter + 1, authorNode)` for the same base — the
-two stamps tie on (wall, counter) and the node id breaks the tie. If
-`healerNode > authorNode`, the healer's push WINS, and because rows are
-FULL-ROW snapshots the healer's copy — which may predate the author's edit —
-silently reverts every other field of that edit (e.g. a title change riding
-in the same row as the healed pointer), fleet-wide. Exposure in P0 is narrow
-(held wall + losing node id + a heal of the same row on a peer that has not
-yet applied the edit), but the P1 design must close it. Candidates:
-column-level LWW via the reserved `fieldClocks` slot, or a derived-stamp
-discipline that can never enter another device's tick range. Do NOT paper
-over it by changing the stamp derivation alone — a fresh-tick stamp was the
-original resurrection bug (seed `0xab1a57`). The convergence simulation's
-oracle now also compares root CONTENT (titles/names) at quiescence, so this
-class of lost update is detectable if an episode ever hits it.
+Client-side derived writes (integrity repair heals, the single-slot
+resolution tombstone) stamp `(base.wall, base.counter + 1, DERIVED node)`,
+where the derived node is the device node with its first character replaced
+by `'!'` (`HlcClock.derivedNode`). Real node ids are 26 Crockford base32
+characters (`0-9A-Z`, enforced at mint), and ASCII `'!'` sorts strictly
+below all of them — so a derived stamp loses EVERY (wall, counter) tie
+against any real edit, structurally.
+
+This closes the lost update the P0 draft documented here: an author editing
+a row while its clock wall is HELD (offline with a corrected clock, or a
+second edit within one wall millisecond) stamps
+`(base.wall, base.counter + 1, authorNode)` — the same (wall, counter) a
+healer derives from the same base. When the tie broke by real node id and
+the healer won, its FULL-ROW snapshot silently reverted every other field
+of the author's edit (e.g. a title change riding in the same row)
+fleet-wide. Under the derived node the author always wins the tie; the
+repair is DERIVABLE state, so the next integrity pass re-derives it one
+counter above the author's edit and the fleet converges holding both the
+edit and the heal (regression: `sync_applier_test.dart`, derived-node
+group).
+
+The suffix keeps devices DISTINCT: two devices deriving different content
+from the same base (e.g. tombstoning one occupant against two different
+winners) mint distinct stamps, so LWW still picks one deterministically —
+a single shared sentinel node would let identical stamps carry different
+content and diverge. (ULID first characters carry the coarse timestamp and
+are identical across contemporaneous installs anyway; the entropy lives in
+the suffix, which the derivation preserves.)
+
+The `'!'` prefix is RESERVED for derived stamps: wire validation continues
+to accept any non-empty node (older rows stamped under real healer nodes
+remain valid data), but no real device node can ever begin with `'!'`.
+
+Do NOT replace the derivation with a fresh clock tick — a fresh-tick stamp
+was the original resurrection bug (seed `0xab1a57`): user-grade intent
+minted for bookkeeping let a scalar heal out-rank a genuinely later delete.
+The convergence simulation's oracle also compares root CONTENT
+(titles/names) at quiescence, so this class of lost update stays detectable.
 
 ## Auth (Phase 1 decision)
 

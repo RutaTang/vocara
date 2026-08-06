@@ -36,6 +36,45 @@ void main() {
     });
   });
 
+  group('HlcClock.derivedNode (derived-write node space)', () {
+    test('sorts strictly below EVERY real node — even the smallest ULID a '
+        'device could mint — in both compareTo and packed order', () {
+      // Real node ids are 26 Crockford base32 chars ('0'-'9','A'-'Z' subset);
+      // '0' * 26 is the lexicographic floor of that space. A derived stamp
+      // from the LARGEST possible device must still sort below a real stamp
+      // from the smallest, or a (wall, counter) tie could pick bookkeeping
+      // over user intent.
+      final smallestReal = '0' * 26;
+      final derivedOfLargest = HlcClock.derivedNode('Z' * 26);
+      expect(derivedOfLargest.compareTo(smallestReal) < 0, isTrue);
+
+      final real = Hlc(wallMs: 1000, counter: 6, node: smallestReal);
+      final derived = Hlc(wallMs: 1000, counter: 6, node: derivedOfLargest);
+      expect(derived < real, isTrue);
+      expect(derived.packed.compareTo(real.packed) < 0, isTrue);
+    });
+
+    test('keeps devices distinct: two installs derive different nodes, so '
+        'derived-vs-derived ties still order deterministically', () {
+      // ULID first chars carry the coarse timestamp (identical across
+      // contemporaneous installs); the entropy lives in the suffix, which
+      // the derivation preserves.
+      final a = HlcClock.derivedNode('0AAAAAAAAAAAAAAAAAAAAAAAA1');
+      final b = HlcClock.derivedNode('0AAAAAAAAAAAAAAAAAAAAAAAA2');
+      expect(a == b, isFalse);
+      expect(a.compareTo(b) == 0, isFalse);
+    });
+
+    test('round-trips through packed parse like any node', () {
+      final h = Hlc(
+        wallMs: 1000,
+        counter: 6,
+        node: HlcClock.derivedNode('01J9Z3KQ8V5N7P2R4T6W8XABCD'),
+      );
+      expect(Hlc.parse(h.packed), h);
+    });
+  });
+
   group('HlcClock.tick (local writes)', () {
     test(
       'counter increments within a millisecond, resets when wall advances',
