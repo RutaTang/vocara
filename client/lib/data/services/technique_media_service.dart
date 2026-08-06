@@ -47,20 +47,24 @@ class TechniqueMediaService {
   /// Silently ignores a missing file.
   Future<void> deleteMedia(String path) async {
     if (AssetStore.assetIdOf(path) != null) return;
-    final pool = await _storage.assetDir('assets');
-    if (p.isWithin(pool.path, path)) return;
-    final file = File(path);
-    if (await file.exists()) {
-      await file.delete();
+    // Path-only guard: a delete must never create the pool directory as a
+    // side effect (and must still resolve while the root is being torn down).
+    final pool = await _storage.assetPath('assets');
+    if (p.isWithin(pool, path)) return;
+    try {
+      await File(path).delete();
+    } on PathNotFoundException {
+      // Already gone (or a concurrent cleanup won): deletion achieved.
     }
   }
 
   /// Removes the whole media directory for a deleted technique (best effort).
   Future<void> deleteTechniqueMedia(String techniqueId) async {
-    final base = await _storage.assetDir('technique_media');
-    final dir = Directory(p.join(base.path, techniqueId));
-    if (await dir.exists()) {
-      await dir.delete(recursive: true);
+    final base = await _storage.assetPath('technique_media');
+    try {
+      await Directory(p.join(base, techniqueId)).delete(recursive: true);
+    } on PathNotFoundException {
+      // Never had media, or it is already gone: deletion achieved.
     }
   }
 }

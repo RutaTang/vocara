@@ -31,6 +31,10 @@ class _FakeStorage implements LocalStorageService {
   @override
   Future<Directory> assetDir(String collection) =>
       throw UnimplementedError('not used by AppSettingsService');
+
+  @override
+  Future<String> assetPath(String collection) =>
+      throw UnimplementedError('not used by AppSettingsService');
 }
 
 /// Engine fake that records the device UIDs pushed to it.

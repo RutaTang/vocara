@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 
 import '../../../data/repositories/technique_repository.dart';
 import '../../../data/services/app_settings_service.dart';
+import '../../../data/services/diagnostics_log.dart';
 import '../../../data/services/graph_audio_playback_service.dart';
 import '../../../data/services/media_analysis_service.dart';
 import '../../../data/services/mic_recording_controller.dart';
@@ -838,7 +839,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
     if (_draftGeneration != generation || _disposed) {
       // Draft abandoned (Cancel) or VM disposed mid-save; the copied clip is an
       // orphan — delete it rather than staging it behind the read view.
-      unawaited(_mediaService.deleteMedia(added.path));
+      _deleteMediaQuietly(added.path);
     } else {
       // A dirty stop already validated the partial take: reuse its analysis
       // so the reference view doesn't decode the clip a second time.
@@ -1017,7 +1018,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
     // dangling rows.
     if (!_saving) {
       for (final m in _draftAdds) {
-        unawaited(_mediaService.deleteMedia(m.path));
+        _deleteMediaQuietly(m.path);
       }
     }
     unawaited(_engine?.dispose());
@@ -1025,6 +1026,18 @@ class TechniqueDetailViewModel extends ChangeNotifier
     _scrub.dispose();
     _monitor.dispose();
     super.dispose();
+  }
+
+  /// Fire-and-forget deletion of an orphaned media copy. These calls run from
+  /// dispose and abandoned-draft paths where nothing can await them; an IO
+  /// failure (permissions, the storage root itself being torn down) must be
+  /// logged, never escape into the root zone as an unhandled async error.
+  void _deleteMediaQuietly(String path) {
+    unawaited(
+      _mediaService.deleteMedia(path).catchError((Object e) {
+        DiagnosticsLog.instance.log('technique', 'delete failed for $path: $e');
+      }),
+    );
   }
 
   /// Saves edited text fields plus the staged media draft. Returns whether it
@@ -1158,7 +1171,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
     if (_draftGeneration != generation || _disposed) {
       _importingMedia = false;
       for (final m in added) {
-        unawaited(_mediaService.deleteMedia(m.path));
+        _deleteMediaQuietly(m.path);
       }
       return;
     }

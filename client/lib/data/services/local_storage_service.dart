@@ -80,4 +80,13 @@ class LocalStorageService {
   /// Returns (creating if needed) a directory for storing binary assets that
   /// belong to [collection], e.g. `audio/`. Callers join their own filenames.
   Future<Directory> assetDir(String collection) => _collectionDir(collection);
+
+  /// Where [collection]'s assets live, WITHOUT creating anything on disk.
+  /// Guard checks and delete paths must use this instead of [assetDir]: a
+  /// delete must never mkdir as a side effect, and resolving a path guard
+  /// must still succeed while the storage root is being torn down.
+  Future<String> assetPath(String collection) async {
+    _root ??= await getApplicationSupportDirectory();
+    return p.join(_root!.path, collection);
+  }
 }

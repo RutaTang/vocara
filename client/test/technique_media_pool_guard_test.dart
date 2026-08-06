@@ -30,6 +30,21 @@ class _TempStorage extends LocalStorageService {
     if (!await dir.exists()) await dir.create(recursive: true);
     return dir;
   }
+
+  @override
+  Future<String> assetPath(String collection) async =>
+      p.join(root.path, collection);
+}
+
+/// Imports normally but fails every delete, standing in for permission / IO
+/// errors on the dispose-time cleanup path.
+class _ThrowingDeleteMedia extends TechniqueMediaService {
+  _ThrowingDeleteMedia({required super.storage});
+
+  @override
+  Future<void> deleteMedia(String path) async {
+    throw const FileSystemException('injected delete failure');
+  }
 }
 
 void main() {
@@ -96,6 +111,59 @@ void main() {
     expect(await File(staged).exists(), isTrue);
     await media.deleteMedia(staged);
     expect(await File(staged).exists(), isFalse);
+  });
+
+  test('deleteMedia with the storage root torn down completes silently and '
+      'creates NOTHING', () async {
+    // The dispose path fire-and-forgets deleteMedia while the app (or a test
+    // teardown) is removing the storage root. The delete must neither throw
+    // nor recreate any directory: the old shape resolved the pool guard via
+    // assetDir, whose mkdir raced the teardown into PathNotFoundException —
+    // an unhandled zone error escaping from dispose.
+    final staged = await media.importMedia(
+      techniqueId: 't1',
+      sourcePath: await makeSrc('gone.wav', [7, 8]),
+    );
+    await tmp.delete(recursive: true);
+
+    await media.deleteMedia(staged); // must not throw
+    await media.deleteTechniqueMedia('t1'); // must not throw
+
+    expect(
+      await tmp.exists(),
+      isFalse,
+      reason: 'a delete must never mkdir the storage tree back into existence',
+    );
+  });
+
+  test('dispose-time draft cleanup failure is contained, never an unhandled '
+      'zone error', () async {
+    // dispose() fire-and-forgets deleteMedia for staged drafts. If that
+    // future's failure escapes, it lands in the root zone as an unhandled
+    // async error — under tests it fails whichever test is CURRENT when it
+    // surfaces (the flake this pins), in the app it is a crash report from a
+    // best-effort cleanup. The VM must contain and log it.
+    final t1Id = newId();
+    final saved = await repo.saveTechnique(
+      techniqueWith(t1Id, newId(), await makeSrc('keep.wav', [1, 2])),
+    );
+    expect(saved, isA<Ok<Technique>>());
+    final vm = TechniqueDetailViewModel(
+      repository: repo,
+      mediaService: _ThrowingDeleteMedia(storage: _TempStorage(tmp)),
+      techniqueId: t1Id,
+    );
+    for (var i = 0; vm.technique == null && i < 200; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 1));
+    }
+    await vm.addMedia([
+      await makeSrc('draft.wav', [3, 4]),
+    ]);
+
+    vm.dispose();
+    // Let the unawaited cleanup futures resolve: an escaped error would fail
+    // THIS test via the test zone's unhandled-error handler.
+    await Future<void>.delayed(const Duration(milliseconds: 50));
   });
 
   test('removing a persisted example never reclaims shared pool bytes '

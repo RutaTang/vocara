@@ -20,6 +20,10 @@ class _DirStorage implements LocalStorageService {
   }
 
   @override
+  Future<String> assetPath(String collection) async =>
+      p.join(root.path, collection);
+
+  @override
   Future<Map<String, dynamic>?> read(String collection, String id) async =>
       null;
 

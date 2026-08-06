@@ -71,6 +71,10 @@ class _TempStorage extends LocalStorageService {
     if (!await dir.exists()) await dir.create(recursive: true);
     return dir;
   }
+
+  @override
+  Future<String> assetPath(String collection) async =>
+      p.join(root.path, collection);
 }
 
 /// Recorder fake: [start] writes a real WAV stub into its own temp dir (the

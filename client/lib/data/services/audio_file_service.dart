@@ -65,11 +65,14 @@ class AudioFileService {
   /// of every other clip that dedups to the same hash.
   Future<void> deleteAudio(String path) async {
     if (path.startsWith('asset://')) return;
-    final pool = await _storage.assetDir('assets');
-    if (p.isWithin(pool.path, path)) return;
-    final file = File(path);
-    if (await file.exists()) {
-      await file.delete();
+    // Path-only guard: a delete must never create the pool directory as a
+    // side effect (and must still resolve while the root is being torn down).
+    final pool = await _storage.assetPath('assets');
+    if (p.isWithin(pool, path)) return;
+    try {
+      await File(path).delete();
+    } on PathNotFoundException {
+      // Already gone (or a concurrent cleanup won): deletion achieved.
     }
   }
 
