@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import '../../domain/models/technique_analysis.dart';
 import '../../domain/models/voice_metrics.dart';
+import '../../utils/analysis_gate.dart';
 import 'audio_dsp.dart';
 import 'graph_audio_playback_service.dart'
     show MediaTooLongException, decodeMediaToMono;
@@ -34,11 +35,20 @@ class MediaAnalysisService {
   /// exceeds [maxAnalysisDuration] (a clear, user-presentable message —
   /// callers already handle analyze() throwing).
   Future<TechniqueAnalysis?> analyze(String path) async {
-    final pcm = await decodeMediaToMono(path, maxDuration: maxAnalysisDuration);
-    if (pcm == null || pcm.samples.isEmpty) return null;
-    final samples = pcm.samples;
-    final rate = pcm.sampleRate;
-    return Isolate.run(() => _analyze(samples, rate));
+    // Gated end to end: the DECODE is the larger peak of this pipeline, so
+    // it must sit inside the same admission as the analysis isolate —
+    // otherwise two callers could stack full-track decodes while "only"
+    // their analyses were serialized.
+    return analysisGate.run(() async {
+      final pcm = await decodeMediaToMono(
+        path,
+        maxDuration: maxAnalysisDuration,
+      );
+      if (pcm == null || pcm.samples.isEmpty) return null;
+      final samples = pcm.samples;
+      final rate = pcm.sampleRate;
+      return Isolate.run(() => _analyze(samples, rate));
+    });
   }
 
   static TechniqueAnalysis? _analyze(Float32List samples, int sampleRate) {

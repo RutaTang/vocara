@@ -844,6 +844,31 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     return true;
   }
 
+  /// Imports [sourcePath] into the sandbox and runs [body] with the copy.
+  /// When any later step throws (waveform analysis, persistence), the copy
+  /// is deleted before the error propagates — a failed import must not
+  /// strand bytes in the official audio directory (repeat attempts used to
+  /// pile orphans until the trash sweep).
+  Future<void> _withImportedAudio(
+    String sourcePath,
+    Future<void> Function(String dest) body,
+  ) async {
+    final dest = await _audioFiles.importAudio(
+      practiceId: _practiceId,
+      sourcePath: sourcePath,
+    );
+    try {
+      await body(dest);
+    } catch (_) {
+      try {
+        await _audioFiles.deleteAudio(dest);
+      } catch (_) {
+        // Best-effort: the orphan sweep remains the backstop.
+      }
+      rethrow;
+    }
+  }
+
   /// Imports [sourcePath] as the accompaniment (replacing any existing one).
   Future<void> addAccompaniment(String sourcePath) async {
     if (_practice == null) return;
@@ -853,44 +878,42 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     if (busy || isSeparating || isRecording) return;
     if (!_admitImportDuration(sourcePath)) return;
     await _busyGate.run(() async {
-      final dest = await _audioFiles.importAudio(
-        practiceId: _practiceId,
-        sourcePath: sourcePath,
-      );
-      final analysis = await _waveforms.analyze(dest);
-      final track = AudioTrack(
-        id: newId(),
-        kind: AudioTrackKind.accompaniment,
-        displayName: p.basenameWithoutExtension(sourcePath),
-        audioFilePath: dest,
-        durationMs: analysis.durationMs,
-        waveformPeaks: analysis.peaks,
-        createdAt: DateTime.now(),
-      );
-      // Re-read the LIVE practice after the import/analyze awaits: a take
-      // recorded/imported during them must survive, so rebuild from the current
-      // model rather than a stale pre-await snapshot (lost-update). The
-      // accompaniment slot is single-writer (guarded above), so the replaced
-      // backing + kept original are read from the fresh model too.
-      final cur = _practice;
-      if (cur == null) return;
-      final old = cur.accompaniment;
-      final staleSource = cur.separationSource;
-      // A manual import replaces any separation-derived backing — drop the kept
-      // original so "Re-separate" can't later target a stale source.
-      _practice = cur.copyWith(
-        accompaniment: track,
-        clearSeparationSource: true,
-      );
-      if (old != null) {
-        for (final c in old.clips) {
-          await _audioFiles.deleteAudio(c.audioFilePath);
+      await _withImportedAudio(sourcePath, (dest) async {
+        final analysis = await _waveforms.analyze(dest);
+        final track = AudioTrack(
+          id: newId(),
+          kind: AudioTrackKind.accompaniment,
+          displayName: p.basenameWithoutExtension(sourcePath),
+          audioFilePath: dest,
+          durationMs: analysis.durationMs,
+          waveformPeaks: analysis.peaks,
+          createdAt: DateTime.now(),
+        );
+        // Re-read the LIVE practice after the import/analyze awaits: a take
+        // recorded/imported during them must survive, so rebuild from the current
+        // model rather than a stale pre-await snapshot (lost-update). The
+        // accompaniment slot is single-writer (guarded above), so the replaced
+        // backing + kept original are read from the fresh model too.
+        final cur = _practice;
+        if (cur == null) return;
+        final old = cur.accompaniment;
+        final staleSource = cur.separationSource;
+        // A manual import replaces any separation-derived backing — drop the kept
+        // original so "Re-separate" can't later target a stale source.
+        _practice = cur.copyWith(
+          accompaniment: track,
+          clearSeparationSource: true,
+        );
+        if (old != null) {
+          for (final c in old.clips) {
+            await _audioFiles.deleteAudio(c.audioFilePath);
+          }
         }
-      }
-      if (staleSource != null) {
-        await _audioFiles.deleteAudio(staleSource);
-      }
-      await _save();
+        if (staleSource != null) {
+          await _audioFiles.deleteAudio(staleSource);
+        }
+        await _save();
+      });
     });
   }
 
@@ -903,36 +926,34 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     } // no concurrent structural edit
     if (!_admitImportDuration(sourcePath)) return;
     await _busyGate.run(() async {
-      final dest = await _audioFiles.importAudio(
-        practiceId: _practiceId,
-        sourcePath: sourcePath,
-      );
-      final analysis = await _waveforms.analyze(dest);
-      final track = AudioTrack(
-        id: newId(),
-        kind: AudioTrackKind.reference,
-        displayName: p.basenameWithoutExtension(sourcePath),
-        audioFilePath: dest,
-        durationMs: analysis.durationMs,
-        waveformPeaks: analysis.peaks,
-        createdAt: DateTime.now(),
-      );
-      // Re-read the LIVE practice after the awaits (see addAccompaniment) so a
-      // concurrently-committed take isn't lost to a stale-snapshot rebuild.
-      final cur = _practice;
-      if (cur == null) return;
-      final old = cur.reference;
-      final staleSource = cur.separationSource;
-      _practice = cur.copyWith(reference: track, clearSeparationSource: true);
-      if (old != null) {
-        for (final c in old.clips) {
-          await _audioFiles.deleteAudio(c.audioFilePath);
+      await _withImportedAudio(sourcePath, (dest) async {
+        final analysis = await _waveforms.analyze(dest);
+        final track = AudioTrack(
+          id: newId(),
+          kind: AudioTrackKind.reference,
+          displayName: p.basenameWithoutExtension(sourcePath),
+          audioFilePath: dest,
+          durationMs: analysis.durationMs,
+          waveformPeaks: analysis.peaks,
+          createdAt: DateTime.now(),
+        );
+        // Re-read the LIVE practice after the awaits (see addAccompaniment) so a
+        // concurrently-committed take isn't lost to a stale-snapshot rebuild.
+        final cur = _practice;
+        if (cur == null) return;
+        final old = cur.reference;
+        final staleSource = cur.separationSource;
+        _practice = cur.copyWith(reference: track, clearSeparationSource: true);
+        if (old != null) {
+          for (final c in old.clips) {
+            await _audioFiles.deleteAudio(c.audioFilePath);
+          }
         }
-      }
-      if (staleSource != null) {
-        await _audioFiles.deleteAudio(staleSource);
-      }
-      await _save();
+        if (staleSource != null) {
+          await _audioFiles.deleteAudio(staleSource);
+        }
+        await _save();
+      });
     });
   }
 
@@ -945,17 +966,15 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     } // no concurrent structural edit
     if (!_admitImportDuration(sourcePath)) return;
     await _busyGate.run(() async {
-      final dest = await _audioFiles.importAudio(
-        practiceId: _practiceId,
-        sourcePath: sourcePath,
-      );
-      final analysis = await _waveforms.analyze(dest);
-      _appendVocal(
-        path: dest,
-        displayName: p.basenameWithoutExtension(sourcePath),
-        analysis: analysis,
-      );
-      await _save();
+      await _withImportedAudio(sourcePath, (dest) async {
+        final analysis = await _waveforms.analyze(dest);
+        _appendVocal(
+          path: dest,
+          displayName: p.basenameWithoutExtension(sourcePath),
+          analysis: analysis,
+        );
+        await _save();
+      });
     });
   }
 
@@ -972,23 +991,21 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     } // no concurrent structural edit
     if (!_admitImportDuration(sourcePath)) return;
     await _busyGate.run(() async {
-      final dest = await _audioFiles.importAudio(
-        practiceId: _practiceId,
-        sourcePath: sourcePath,
-      );
-      final waveform = await _waveforms.analyze(dest);
-      final clip = AudioClip(
-        id: newId(),
-        audioFilePath: dest,
-        durationMs: waveform.durationMs,
-        startMs: math.max(0, position.value.inMilliseconds),
-        waveformPeaks: waveform.peaks,
-      );
-      _updateTrack(target.id, (t) => t.copyWith(clips: [...t.clips, clip]));
-      _selectedTrackId = target.id;
-      _selectedClipId = clip.id;
-      analysis.onTrackAudioChanged(target.id);
-      await _save();
+      await _withImportedAudio(sourcePath, (dest) async {
+        final waveform = await _waveforms.analyze(dest);
+        final clip = AudioClip(
+          id: newId(),
+          audioFilePath: dest,
+          durationMs: waveform.durationMs,
+          startMs: math.max(0, position.value.inMilliseconds),
+          waveformPeaks: waveform.peaks,
+        );
+        _updateTrack(target.id, (t) => t.copyWith(clips: [...t.clips, clip]));
+        _selectedTrackId = target.id;
+        _selectedClipId = clip.id;
+        analysis.onTrackAudioChanged(target.id);
+        await _save();
+      });
     });
   }
 

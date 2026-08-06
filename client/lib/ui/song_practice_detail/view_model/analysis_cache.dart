@@ -9,6 +9,7 @@ import '../../../data/services/spectrogram_service.dart';
 import '../../../domain/models/audio_track.dart';
 import '../../../domain/models/spectrogram.dart';
 import '../../../domain/models/voice_metrics.dart';
+import '../../../utils/lru_bytes_cache.dart';
 import 'analysis_source.dart';
 
 /// The tabs of the collapsible bottom dock — one analysis feature each, plus
@@ -103,8 +104,22 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
 
   // --- Caches ---------------------------------------------------------------
 
-  final Map<String, Spectrogram> _spectrogramCache = {};
-  final Map<String, VoiceMetrics> _metricsCache = {};
+  // The heavy caches are byte-budgeted LRUs: a long session used to keep
+  // every take/lane/EQ result ever opened resident. Reads refresh recency,
+  // so the on-screen subject is never the eviction victim. Sizes are the
+  // typed-data payloads (the dominant term).
+  static int _specBytes(Spectrogram s) => s.db.length * 4;
+  static int _metricsBytes(VoiceMetrics m) =>
+      // Eleven Float32 curves plus two byte masks per frame.
+      m.frames * (11 * 4 + 2);
+  final LruBytesCache<Spectrogram> _spectrogramCache = LruBytesCache(
+    192 * 1000 * 1000,
+    _specBytes,
+  );
+  final LruBytesCache<VoiceMetrics> _metricsCache = LruBytesCache(
+    64 * 1000 * 1000,
+    _metricsBytes,
+  );
   // Derived voice profile (range/passaggio/dynamics) per take path, memoized so
   // it isn't recomputed on every unrelated rebuild.
   final Map<String, VoiceProfile> _profileCache = {};
@@ -122,8 +137,14 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   // result merged in timeline order, keyed by [aggregateKeyFor] (which embeds
   // the ordered clip ids, so the key self-invalidates when the clip set
   // changes). Only multi-clip takes ever populate these.
-  final Map<String, Spectrogram> _aggSpectrogramCache = {};
-  final Map<String, VoiceMetrics> _aggMetricsCache = {};
+  final LruBytesCache<Spectrogram> _aggSpectrogramCache = LruBytesCache(
+    192 * 1000 * 1000,
+    _specBytes,
+  );
+  final LruBytesCache<VoiceMetrics> _aggMetricsCache = LruBytesCache(
+    64 * 1000 * 1000,
+    _metricsBytes,
+  );
   final Map<String, VoiceProfile> _aggProfileCache = {};
   final Map<String, Ltas> _aggLtasCache = {};
   final Map<String, RegisterMap> _aggRegisterCache = {};
@@ -133,7 +154,10 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   // input/output spectrum analyzer. Kept separate from the 5 kHz analysis
   // spectrogram, which is tuned for voice metrics rather than a wide display.
   static const double _eqDisplayMaxHz = 18000;
-  final Map<String, Spectrogram> _eqSpectroCache = {};
+  final LruBytesCache<Spectrogram> _eqSpectroCache = LruBytesCache(
+    128 * 1000 * 1000,
+    _specBytes,
+  );
   final Set<String> _eqSpectroLoading = {};
   final Set<String> _eqSpectroUnavailable = {};
   // Inline analysis sub-lanes (view state, not persisted): which tracks are

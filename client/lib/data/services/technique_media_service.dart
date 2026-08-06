@@ -4,6 +4,7 @@ import 'package:path/path.dart' as p;
 
 import '../../utils/id.dart';
 import '../db/asset_store.dart';
+import 'audio_file_service.dart';
 import 'local_storage_service.dart';
 
 /// Owns technique example clips on disk. Imported files are copied into the app
@@ -36,11 +37,23 @@ class TechniqueMediaService {
   }
 
   /// Copies [sourcePath] into the technique's media directory and returns the
-  /// new sandbox path (preserving the original extension).
+  /// new sandbox path (preserving the original extension). Throws
+  /// [FormatException] past [AudioFileService.maxImportBytes] — judged from a
+  /// stat, before any bytes move (a full copy of an oversized file was pure
+  /// disk burn for media that could never decode here).
   Future<String> importMedia({
     required String techniqueId,
     required String sourcePath,
   }) async {
+    // Order: pure id validation, then the source stat, then any mkdir — a
+    // refusal must precede every filesystem side effect.
+    _checkPathComponent(techniqueId);
+    if (await File(sourcePath).length() > AudioFileService.maxImportBytes) {
+      throw const FormatException(
+        'This file is too large to import. Media longer than an hour is not '
+        'supported.',
+      );
+    }
     final dir = await _mediaDir(techniqueId);
     final ext = p.extension(sourcePath);
     final dest = p.join(dir.path, '${newId()}$ext');

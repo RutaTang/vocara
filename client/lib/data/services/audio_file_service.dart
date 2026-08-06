@@ -26,10 +26,10 @@ class AudioFileService {
 
   final LocalStorageService _storage;
 
-  Future<Directory> _audioDir(String practiceId) async {
-    // Last line of defense for ids used as path components (the sync wire
-    // door already enforces this shape): a separator or `..` would escape
-    // the audio tree.
+  /// Last line of defense for ids used as path components (the sync wire
+  /// door already enforces this shape): a separator or `..` would escape
+  /// the audio tree.
+  static void _checkPathComponent(String practiceId) {
     if (!RegExp(r'^[0-9A-Z]{26}$').hasMatch(practiceId)) {
       throw ArgumentError.value(
         practiceId,
@@ -37,6 +37,10 @@ class AudioFileService {
         'not a well-formed id',
       );
     }
+  }
+
+  Future<Directory> _audioDir(String practiceId) async {
+    _checkPathComponent(practiceId);
     final base = await _storage.assetDir('audio');
     final dir = Directory(p.join(base.path, practiceId));
     if (!await dir.exists()) {
@@ -45,12 +49,30 @@ class AudioFileService {
     return dir;
   }
 
+  /// Hard ceiling on any single imported file. Derivation: the longest media
+  /// playback will ever decode is 60 minutes, and the fattest legal 60-minute
+  /// source the decode budgets admit (96 kHz stereo float32 WAV) is ~2.8 GB;
+  /// 4 GB clears that with headroom while refusing movie-sized junk BEFORE a
+  /// full copy lands in the sandbox. Anything bigger could never play or
+  /// analyze here anyway — copying it first was pure disk burn.
+  static const int maxImportBytes = 4 * 1000 * 1000 * 1000;
+
   /// Copies [sourcePath] into the practice's audio directory and returns the
-  /// new sandbox path.
+  /// new sandbox path. Throws [FormatException] when the source exceeds
+  /// [maxImportBytes] — judged from a stat, before any bytes move.
   Future<String> importAudio({
     required String practiceId,
     required String sourcePath,
   }) async {
+    // Order: pure id validation, then the source stat, then any mkdir — a
+    // refusal must precede every filesystem side effect.
+    _checkPathComponent(practiceId);
+    if (await File(sourcePath).length() > maxImportBytes) {
+      throw const FormatException(
+        'This file is too large to import. Media longer than an hour is not '
+        'supported.',
+      );
+    }
     final dir = await _audioDir(practiceId);
     final ext = p.extension(sourcePath);
     final dest = p.join(dir.path, '${newId()}$ext');

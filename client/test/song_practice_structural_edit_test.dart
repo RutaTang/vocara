@@ -83,6 +83,16 @@ class _FakeFiles extends Fake implements AudioFileService {
   Future<void> deleteAudio(String path) async => events.add('delete:$path');
 }
 
+/// Waveform fake that always fails — the injected post-import failure for
+/// asserting the sandbox copy is rolled back.
+class _ThrowingWaveforms extends Fake implements WaveformService {
+  @override
+  Future<WaveformResult> analyze(
+    String audioFilePath, {
+    int targetBuckets = 1000,
+  }) async => throw StateError('injected analyze failure');
+}
+
 class _FakeWaveforms extends Fake implements WaveformService {
   @override
   Future<WaveformResult> analyze(
@@ -232,6 +242,7 @@ void main() {
   Future<SongPracticeDetailViewModel> pumpVm({
     List<AudioTrack>? vocalTracks,
     Duration? Function(String path)? probeDuration,
+    WaveformService? waveforms,
   }) async {
     events = <String>[];
     repo = _FakeRepo(_seedPractice(vocalTracks: vocalTracks), events);
@@ -241,7 +252,7 @@ void main() {
       repository: repo,
       techniqueRepository: _FakeTechRepo(),
       audioFileService: files,
-      waveformService: _FakeWaveforms(),
+      waveformService: waveforms ?? _FakeWaveforms(),
       spectrogramService: const SpectrogramService(),
       separationService: FakeSourceSeparationService(available: false),
       appSettings: AppSettingsService(storage: storage),
@@ -258,6 +269,27 @@ void main() {
     events.clear();
     return vm;
   }
+
+  group('import rollback', () {
+    test('a failed step AFTER the import deletes the sandbox copy instead of '
+        'stranding an orphan', () async {
+      // importAudio succeeded, waveform analysis throws: the official audio
+      // directory used to keep the copy while nothing referenced it — repeat
+      // attempts piled orphans until the sweep.
+      final vm = await pumpVm(waveforms: _ThrowingWaveforms());
+      final before = vm.practice!.vocalTracks.length;
+
+      // BusyGate surfaces the failure as a toast; the future completes.
+      await vm.addVocalTake('/src/a.wav');
+      expect(
+        events,
+        contains('delete:/import/0.wav'),
+        reason: 'the sandbox copy must be rolled back',
+      );
+      expect(vm.practice!.vocalTracks.length, before, reason: 'nothing lands');
+      expect(vm.errorMessage, isNotNull, reason: 'the failure is surfaced');
+    });
+  });
 
   group('structural-edit mutex', () {
     test('an import whose declared duration exceeds the playback cap is '

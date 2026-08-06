@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 
 import '../../domain/models/spectrogram.dart';
 import '../../domain/models/voice_metrics.dart';
+import '../../utils/analysis_gate.dart';
 import 'audio_dsp.dart';
 import 'media_analysis_service.dart';
 
@@ -246,18 +247,21 @@ class SpectrogramService {
     final admission = await admitForAnalysis(file);
     if (admission == null) return null;
     // STFT is heavy — run it in a background isolate (which also streams the
-    // decode, so raw bytes never materialize whole).
-    return Isolate.run(() {
-      final pcm = readWavMonoStreaming(path, admission);
-      if (pcm == null) return null;
-      return computeSpectrogram(
-        pcm.samples,
-        pcm.sampleRate,
-        fftSize: fftSize,
-        hop: hop,
-        maxHz: maxHz,
-      );
-    });
+    // decode, so raw bytes never materialize whole). Gated: heavy analyses
+    // queue behind the app-wide AnalysisGate instead of stacking peaks.
+    return analysisGate.run(
+      () => Isolate.run(() {
+        final pcm = readWavMonoStreaming(path, admission);
+        if (pcm == null) return null;
+        return computeSpectrogram(
+          pcm.samples,
+          pcm.sampleRate,
+          fftSize: fftSize,
+          hop: hop,
+          maxHz: maxHz,
+        );
+      }),
+    );
   }
 
   /// Computes per-frame voice-timbre metrics (ring/tilt/CPP/formants) for a take
@@ -271,16 +275,18 @@ class SpectrogramService {
     if (!await file.exists()) return null;
     final admission = await admitForAnalysis(file);
     if (admission == null) return null;
-    return Isolate.run(() {
-      final pcm = readWavMonoStreaming(path, admission);
-      if (pcm == null) return null;
-      return computeVoiceMetrics(
-        pcm.samples,
-        pcm.sampleRate,
-        fftSize: fftSize,
-        hop: hop,
-      );
-    });
+    return analysisGate.run(
+      () => Isolate.run(() {
+        final pcm = readWavMonoStreaming(path, admission);
+        if (pcm == null) return null;
+        return computeVoiceMetrics(
+          pcm.samples,
+          pcm.sampleRate,
+          fftSize: fftSize,
+          hop: hop,
+        );
+      }),
+    );
   }
 
   /// Computes the spectrogram AND the voice metrics from a single decode, in a
@@ -299,23 +305,25 @@ class SpectrogramService {
     if (!await file.exists()) return null;
     final admission = await admitForAnalysis(file);
     if (admission == null) return null;
-    return Isolate.run(() {
-      final pcm = readWavMonoStreaming(path, admission);
-      if (pcm == null) return null;
-      final spectrogram = computeSpectrogram(
-        pcm.samples,
-        pcm.sampleRate,
-        fftSize: fftSize,
-        hop: hop,
-        maxHz: maxHz,
-      );
-      final metrics = computeVoiceMetrics(
-        pcm.samples,
-        pcm.sampleRate,
-        fftSize: fftSize,
-        hop: hop,
-      );
-      return (spectrogram: spectrogram, metrics: metrics);
-    });
+    return analysisGate.run(
+      () => Isolate.run(() {
+        final pcm = readWavMonoStreaming(path, admission);
+        if (pcm == null) return null;
+        final spectrogram = computeSpectrogram(
+          pcm.samples,
+          pcm.sampleRate,
+          fftSize: fftSize,
+          hop: hop,
+          maxHz: maxHz,
+        );
+        final metrics = computeVoiceMetrics(
+          pcm.samples,
+          pcm.sampleRate,
+          fftSize: fftSize,
+          hop: hop,
+        );
+        return (spectrogram: spectrogram, metrics: metrics);
+      }),
+    );
   }
 }
