@@ -1391,19 +1391,33 @@ pub fn decode_file(
         let ch = spec.channels.count();
         let mut sbuf = SampleBuffer::<f32>::new(decoded.capacity() as u64, spec);
         sbuf.copy_interleaved_ref(decoded);
+        let packet_frames = sbuf.samples().len() / ch.max(1);
+        // The budget is an ALLOCATION cap, not just a logical-length cap: judged BEFORE
+        // this packet's frames are pushed, and the Vec's growth is clamped to the budget
+        // (a plain doubling push could hold up to 2x the cap in capacity — a 173M-frame
+        // budget transiently backed by a 268M-frame allocation). Containers without a
+        // declared frame count (e.g. plain mp3) are bounded exactly the same way,
+        // packet by packet.
+        let needed = out.len() + packet_frames;
+        if needed as u64 > max_frames {
+            return Err(DecodeError::TooLong);
+        }
+        if needed > out.capacity() {
+            // Amortized geometric growth, capped at the budget so capacity can never
+            // exceed what the budget promised the caller.
+            let cap_limit = max_frames.min(usize::MAX as u64) as usize;
+            let target = out.capacity().max(4096).saturating_mul(2).clamp(needed, cap_limit);
+            out.reserve_exact(target - out.len());
+        }
         for frame in sbuf.samples().chunks(ch.max(1)) {
-            // Scrub NaN/Inf at the single deepest decode point: one poisoned sample
-            // would otherwise propagate through every FFT, metric, and DSP node fed
-            // from here (the WAV streaming reader scrubs independently; this covers
-            // the symphonia paths — analysis via ve_decode AND playback staging).
+            // Scrub NaN/Inf (and clamp absurd amplitudes) at the single deepest decode
+            // point: one poisoned sample would otherwise propagate through every FFT,
+            // metric, and DSP node fed from here (the WAV streaming reader scrubs
+            // independently; this covers the symphonia paths — analysis via ve_decode
+            // AND playback staging).
             let l = frame[0];
             let r = if ch > 1 { frame[1] } else { l };
             out.push([scrub_sample(l), scrub_sample(r)]);
-        }
-        // Containers without a declared frame count (e.g. plain mp3) can only be bounded
-        // mid-decode: bail the moment the budget is crossed, keeping the peak at ~budget.
-        if out.len() as u64 > max_frames {
-            return Err(DecodeError::TooLong);
         }
     }
     if out.is_empty() {
@@ -1471,9 +1485,14 @@ fn sniff_wav_sample_rate(path: &str) -> std::io::Result<Option<u32>> {
 /// paths' peak memory is measured in full-track copies; when actually resampling the peak
 /// is input + output, same as before).
 ///
-/// Alignment: `process_all` trims the resampler's group delay off the head and flushes the
-/// tail, so a feature at input frame `k` lands at output frame `round(k * to/from)` — the
-/// punch-splice paths depend on this sample mapping (pinned by test).
+/// Alignment: the chunk loop below drives `process_into_buffer` DIRECTLY and cuts the
+/// window `[delay, delay + round(n * ratio))` out of the produced stream, flushing zeros
+/// until the tail is fully rendered. rubato's own `process_all` convenience was measured
+/// mishandling exactly the edges that matter here: a frame-0 impulse appeared at BOTH
+/// output 0 and ~69 (the group delay), and a sub-chunk clip came out shifted by the whole
+/// delay — the punch-splice paths depend on `k -> round(k * ratio)` holding at the edges,
+/// not just in the interior (all pinned by tests). The remaining sub-sample fraction of
+/// the group delay is a pure, inaudible time shift.
 ///
 /// Errors are structurally impossible for the validated rates the decode gates admit
 /// (ratio > 0, stereo, non-zero chunk); the Result keeps this library-safe rather than
@@ -1485,8 +1504,8 @@ pub fn resample_sinc(
 ) -> Result<Vec<[Smp; CHANNELS]>, String> {
     use rubato::audioadapter_buffers::direct::InterleavedSlice;
     use rubato::{
-        Async, FixedAsync, Resampler, SincInterpolationParameters, SincInterpolationType,
-        WindowFunction,
+        Async, FixedAsync, Indexing, Resampler, SincInterpolationParameters,
+        SincInterpolationType, WindowFunction,
     };
 
     if from == to || frames.is_empty() {
@@ -1494,9 +1513,6 @@ pub fn resample_sinc(
     }
     let ratio = to as f64 / from as f64;
     let n = frames.len();
-    // [[f32; 2]] is contiguous interleaved stereo — the adapter borrows it in place.
-    let input = InterleavedSlice::new(frames.as_flattened(), CHANNELS, n)
-        .map_err(|e| format!("resample input adapter: {e}"))?;
     // rubato's reference offline-quality parameters (SincFixedInput in its examples):
     // 128-tap sinc, 256x oversampled table, quadratic table interpolation, Blackman2
     // window, cutoff derived from the window/taps by the library.
@@ -1505,17 +1521,66 @@ pub fn resample_sinc(
         .interpolation(SincInterpolationType::Quadratic);
     let mut rs = Async::<Smp>::new_sinc(ratio, 1.0, &params, 1024, CHANNELS, FixedAsync::Input)
         .map_err(|e| format!("resampler construction: {e}"))?;
-    let out = rs
-        .process_all(&input, n, None)
-        .map_err(|e| format!("resample: {e}"))?;
-    drop(frames); // the input copy is dead before the flat output is re-framed
-    let flat = out.take_data();
-    // process_all zero-pads up to ceil(n * ratio), which can overshoot the exact
-    // mapping by a frame; trim to round(n * ratio) so the duration contract is
-    // deterministic (the same one the linear kernel kept).
+
+    let delay = rs.output_delay();
     let exact = ((n as f64) * ratio).round() as usize;
+    let needed = delay + exact;
+    let out_max = rs.output_frames_max();
+    // Room for every produced frame including the final overshooting chunk; the valid
+    // window is cut out below.
+    let mut outbuf = vec![0.0f32; (needed + out_max) * CHANNELS];
+
+    // [[f32; 2]] is contiguous interleaved stereo — the adapter borrows it in place.
+    let input = InterleavedSlice::new(frames.as_flattened(), CHANNELS, n)
+        .map_err(|e| format!("resample input adapter: {e}"))?;
+    let mut indexing = Indexing {
+        input_offset: 0,
+        output_offset: 0,
+        partial_len: None,
+        active_channels_mask: None,
+    };
+    let mut consumed = 0usize;
+    let mut produced = 0usize;
+    while consumed < n {
+        let next = rs.input_frames_next();
+        let remaining = n - consumed;
+        indexing.input_offset = consumed;
+        indexing.output_offset = produced;
+        indexing.partial_len = (remaining < next).then_some(remaining);
+        let mut sink = InterleavedSlice::new_mut(&mut outbuf, CHANNELS, needed + out_max)
+            .map_err(|e| format!("resample output adapter: {e}"))?;
+        let (n_in, n_out) = rs
+            .process_into_buffer(&input, &mut sink, Some(&indexing))
+            .map_err(|e| format!("resample: {e}"))?;
+        consumed += n_in.max(1); // a stalled converter must not loop forever
+        produced += n_out;
+    }
+    let _ = input; // end the borrow of `frames` so the input copy can die here
+    drop(frames);
+    // Flush with silence until the delayed tail of the real audio has fully emerged.
+    indexing.partial_len = Some(0);
+    indexing.input_offset = 0;
+    let empty_in: [Smp; 0] = [];
+    let empty = InterleavedSlice::new(&empty_in[..], CHANNELS, 0)
+        .map_err(|e| format!("resample flush adapter: {e}"))?;
+    while produced < needed {
+        indexing.output_offset = produced;
+        let mut sink = InterleavedSlice::new_mut(&mut outbuf, CHANNELS, needed + out_max)
+            .map_err(|e| format!("resample output adapter: {e}"))?;
+        let (_, n_out) = rs
+            .process_into_buffer(&empty, &mut sink, Some(&indexing))
+            .map_err(|e| format!("resample flush: {e}"))?;
+        if n_out == 0 {
+            return Err("resample flush made no progress".to_string());
+        }
+        produced += n_out;
+    }
+
+    // The valid output is exactly [delay, delay + exact): group delay off the head, the
+    // deterministic round(n * ratio) duration contract on the length.
+    let start = delay * CHANNELS;
     let mut framed = Vec::with_capacity(exact);
-    for chunk in flat.chunks_exact(CHANNELS).take(exact) {
+    for chunk in outbuf[start..start + exact * CHANNELS].chunks_exact(CHANNELS) {
         // Second scrub line: the convolution of large-but-finite inputs can overflow to
         // NaN/Inf even though the decode root sanitized its samples (and callers may feed
         // this converter PCM that never went through decode_file at all).
@@ -2030,6 +2095,74 @@ mod resample_sinc_tests {
             "15 kHz passband amplitude {amplitude}, expected ~1.0 \
              (linear interpolation attenuates and smears this tone)"
         );
+    }
+
+    /// Index of the peak-magnitude frame (left channel).
+    fn peak_index(out: &[[f32; CHANNELS]]) -> usize {
+        out.iter()
+            .enumerate()
+            .max_by(|a, b| a.1[0].abs().partial_cmp(&b.1[0].abs()).unwrap())
+            .map(|(i, _)| i)
+            .unwrap()
+    }
+
+    #[test]
+    fn edge_impulses_map_correctly_frame_zero_and_last_frame_long_and_short() {
+        // rubato's process_all convenience was measured duplicating a frame-0 impulse
+        // (at output 0 AND ~69, the group delay) and shifting sub-chunk clips by the
+        // whole delay. The manual drive loop must map edges exactly: k -> round(k*ratio),
+        // with no duplicate energy at the stale location.
+        let ratio: f64 = 48_000.0 / 44_100.0;
+
+        // Frame 0, long clip.
+        let mut long = vec![[0.0f32; CHANNELS]; 20_000];
+        long[0] = [1.0, 1.0];
+        let out = resample_sinc(long, 44_100, 48_000).unwrap();
+        assert!(peak_index(&out) <= 1, "frame-0 impulse must stay at the head");
+        // No duplicate: outside the head lobe the signal is tiny everywhere.
+        let stray = out[200..]
+            .iter()
+            .map(|f| f[0].abs())
+            .fold(0.0f32, f32::max);
+        assert!(stray < 0.01, "stray energy {stray} — a duplicated impulse?");
+
+        // Frame 0, SHORT clip (under one 1024-frame chunk).
+        let mut short = vec![[0.0f32; CHANNELS]; 500];
+        short[0] = [1.0, 1.0];
+        let out = resample_sinc(short, 44_100, 48_000).unwrap();
+        assert_eq!(out.len(), (500.0 * ratio).round() as usize);
+        assert!(
+            peak_index(&out) <= 1,
+            "sub-chunk clips must not come out shifted by the group delay (was ~69)"
+        );
+
+        // LAST frame: the tail flush must render the delayed end of the audio.
+        let n = 5_000usize;
+        let mut tail = vec![[0.0f32; CHANNELS]; n];
+        tail[n - 1] = [1.0, 1.0];
+        let out = resample_sinc(tail, 44_100, 48_000).unwrap();
+        let expected = ((n - 1) as f64 * ratio).round() as usize;
+        let peak = peak_index(&out);
+        assert!(
+            (peak as i64 - expected as i64).abs() <= 1,
+            "last-frame impulse at {peak}, expected ~{expected}"
+        );
+    }
+
+    #[test]
+    fn a_short_clip_keeps_its_amplitude() {
+        // A 500-frame 1 kHz burst must come through at full level — the shifted output
+        // of the old shape rendered short clips partially (or nearly) silent.
+        let n = 500;
+        let input: Vec<[f32; CHANNELS]> = (0..n)
+            .map(|i| {
+                let s = (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / 44_100.0).sin() as f32;
+                [s, s]
+            })
+            .collect();
+        let out = resample_sinc(input, 44_100, 48_000).unwrap();
+        let peak = out.iter().map(|f| f[0].abs()).fold(0.0f32, f32::max);
+        assert!(peak > 0.9, "short-clip peak {peak}, expected ~1.0");
     }
 
     #[test]
