@@ -848,20 +848,23 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// Imports [sourcePath] into the sandbox, TRANSCODES compressed media to an
   /// engine-streamable WAV once (the industry import discipline — decode at
   /// import, never in full at every open; see ensureStreamableWav), and runs
-  /// [body] with the playable copy. When any later step throws (transcode,
-  /// waveform analysis, persistence), every file this call created is
-  /// deleted before the error propagates — a failed import must not strand
-  /// bytes in the official audio directory (repeat attempts used to pile
-  /// orphans until the trash sweep).
+  /// [body] with the playable copy. [body] returns whether the import was
+  /// COMMITTED (its save landed): on false — a failed save reports through
+  /// _doSave's revert+toast, not an exception — and on any throw, every file
+  /// this call created is deleted before returning. A failed import must not
+  /// strand bytes in the official audio directory: if the leftover happens to
+  /// be a canonical mono WAV, boot recovery would resurrect it as a phantom
+  /// take pointing at a practice whose save never happened.
   Future<void> _withImportedAudio(
     String sourcePath,
-    Future<void> Function(String dest) body,
+    Future<bool> Function(String dest) body,
   ) async {
     final imported = await _audioFiles.importAudio(
       practiceId: _practiceId,
       sourcePath: sourcePath,
     );
     var dest = imported;
+    var committed = false;
     try {
       dest = await _edits.ensureStreamableWav(
         practiceId: _practiceId,
@@ -871,15 +874,16 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         // The compressed original is now redundant: the WAV is the track.
         await _audioFiles.deleteAudio(imported);
       }
-      await body(dest);
-    } catch (_) {
-      try {
-        await _audioFiles.deleteAudio(dest);
-        if (dest != imported) await _audioFiles.deleteAudio(imported);
-      } catch (_) {
-        // Best-effort: the orphan sweep remains the backstop.
+      committed = await body(dest);
+    } finally {
+      if (!committed) {
+        try {
+          await _audioFiles.deleteAudio(dest);
+          if (dest != imported) await _audioFiles.deleteAudio(imported);
+        } catch (_) {
+          // Best-effort: the orphan sweep remains the backstop.
+        }
       }
-      rethrow;
     }
   }
 
@@ -909,7 +913,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         // accompaniment slot is single-writer (guarded above), so the replaced
         // backing + kept original are read from the fresh model too.
         final cur = _practice;
-        if (cur == null) return;
+        if (cur == null) return false;
         final old = cur.accompaniment;
         final staleSource = cur.separationSource;
         // A manual import replaces any separation-derived backing — drop the kept
@@ -918,6 +922,10 @@ class SongPracticeDetailViewModel extends ChangeNotifier
           accompaniment: track,
           clearSeparationSource: true,
         );
+        // Persist-before-delete: the replaced files fall only after the save
+        // landed. Deleting them first meant a failed save reverted the model
+        // to rows whose audio was already gone.
+        if (!await _save()) return false;
         if (old != null) {
           for (final c in old.clips) {
             await _audioFiles.deleteAudio(c.audioFilePath);
@@ -926,7 +934,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         if (staleSource != null) {
           await _audioFiles.deleteAudio(staleSource);
         }
-        await _save();
+        return true;
       });
     });
   }
@@ -954,10 +962,12 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         // Re-read the LIVE practice after the awaits (see addAccompaniment) so a
         // concurrently-committed take isn't lost to a stale-snapshot rebuild.
         final cur = _practice;
-        if (cur == null) return;
+        if (cur == null) return false;
         final old = cur.reference;
         final staleSource = cur.separationSource;
         _practice = cur.copyWith(reference: track, clearSeparationSource: true);
+        // Persist-before-delete (see addAccompaniment).
+        if (!await _save()) return false;
         if (old != null) {
           for (final c in old.clips) {
             await _audioFiles.deleteAudio(c.audioFilePath);
@@ -966,7 +976,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         if (staleSource != null) {
           await _audioFiles.deleteAudio(staleSource);
         }
-        await _save();
+        return true;
       });
     });
   }
@@ -987,7 +997,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
           displayName: p.basenameWithoutExtension(sourcePath),
           analysis: analysis,
         );
-        await _save();
+        return _save();
       });
     });
   }
@@ -1018,7 +1028,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         _selectedTrackId = target.id;
         _selectedClipId = clip.id;
         analysis.onTrackAudioChanged(target.id);
-        await _save();
+        return _save();
       });
     });
   }
@@ -1550,14 +1560,26 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       );
       // Re-read the LIVE practice after the file copies so a take recorded/
       // imported meanwhile isn't dropped by a stale-snapshot rebuild.
+      Future<void> discardCopies() async {
+        for (final c in newClips) {
+          await _audioFiles.deleteAudio(c.audioFilePath);
+        }
+      }
+
       final cur = _practice;
-      if (cur == null) return;
+      if (cur == null) return discardCopies();
       final list = [...cur.vocalTracks];
       final idx = list.indexWhere((t) => t.id == trackId);
-      if (idx < 0) return; // source removed during the copy
+      if (idx < 0) return discardCopies(); // source removed during the copy
       list.insert(idx + 1, copy);
       _practice = cur.copyWith(vocalTracks: list);
-      if (await _save()) _toast('Take duplicated.');
+      if (await _save()) {
+        _toast('Take duplicated.');
+      } else {
+        // The save reverted the model; the copied files would sit orphaned
+        // in edits/ until the boot sweep otherwise.
+        await discardCopies();
+      }
     });
   }
 

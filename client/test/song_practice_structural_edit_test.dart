@@ -141,6 +141,14 @@ class _FakeEdits extends Fake implements AudioEditService {
     required String firstPath,
     required String secondPath,
   }) async => '/edit/merged.wav';
+
+  int _dups = 0;
+
+  @override
+  Future<String> duplicate({
+    required String practiceId,
+    required String sourcePath,
+  }) async => '/edit/dup${_dups++}.wav';
 }
 
 /// A do-nothing engine (mirrors export_take_test's fake): just enough surface
@@ -502,6 +510,59 @@ void main() {
       final deletes = events.where((e) => e.startsWith('delete:')).toList();
       expect(deletes, ['delete:/edit/merged.wav']);
       expect(vm.practice!.vocalTracks.map((t) => t.id), ['top', 'bottom']);
+    });
+
+    test('addVocalTake on a FAILED save deletes the imported file', () async {
+      final vm = await pumpVm();
+      repo.failSaves = true;
+      final before = vm.practice!.vocalTracks.length;
+
+      await vm.addVocalTake('/src/a.wav');
+
+      expect(events, contains('delete:/import/0.wav'));
+      expect(vm.practice!.vocalTracks.length, before);
+    });
+
+    test('addAccompaniment deletes the replaced backing only AFTER the save '
+        'landed, and a FAILED save keeps it', () async {
+      final vm = await pumpVm();
+      await vm.addAccompaniment('/src/back1.wav'); // -> /import/0.wav
+      final oldPath = vm.practice!.accompaniment!.clips.single.audioFilePath;
+      events.clear();
+
+      await vm.addAccompaniment('/src/back2.wav'); // replaces the first
+      final saveIdx = events.indexOf('save');
+      final delIdx = events.indexOf('delete:$oldPath');
+      expect(saveIdx, isNonNegative);
+      expect(
+        delIdx,
+        greaterThan(saveIdx),
+        reason: 'the replaced backing falls only after the save landed',
+      );
+
+      final curPath = vm.practice!.accompaniment!.clips.single.audioFilePath;
+      events.clear();
+      repo.failSaves = true;
+      await vm.addAccompaniment('/src/back3.wav');
+
+      expect(
+        events,
+        isNot(contains('delete:$curPath')),
+        reason: 'a failed replacement must keep the current backing audio',
+      );
+      expect(vm.practice!.accompaniment!.clips.single.audioFilePath, curPath);
+      // The freshly imported file was rolled back.
+      expect(events.where((e) => e.startsWith('delete:/import/')), isNotEmpty);
+    });
+
+    test('duplicateTrack on a FAILED save deletes the copied files', () async {
+      final vm = await pumpVm();
+      repo.failSaves = true;
+
+      await vm.duplicateTrack('single');
+
+      expect(events, contains('delete:/edit/dup0.wav'));
+      expect(vm.practice!.vocalTracks.map((t) => t.id), ['single', 'multi']);
     });
   });
 
