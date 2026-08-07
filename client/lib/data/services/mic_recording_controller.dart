@@ -449,8 +449,10 @@ class MicRecordingController {
   /// zone as an unhandled async error.
   static void _discardQuietly(RecordingPathStrategy destination, String path) {
     unawaited(
+      // No path in the message — the diagnostics log never records user media
+      // locations (the log's own scrubber would strip it anyway).
       destination.discard(path).catchError((Object e) {
-        DiagnosticsLog.instance.log('mic', 'discard failed for $path: $e');
+        DiagnosticsLog.instance.log('mic', 'discard failed: $e');
       }),
     );
   }

@@ -14,7 +14,10 @@ import '../db/safe_migrator.dart';
 ///  * NEVER makes anything worse — every write is best-effort and swallowed;
 ///    a diagnostics failure must not take down the code path it observes.
 ///  * NO user content — callers log counts, error types and area tags, never
-///    lyrics, titles, paths into user media, or audio.
+///    lyrics, titles, paths into user media, or audio. Because the global
+///    hooks record raw exception strings (FileSystemException messages carry
+///    full paths), [log] additionally scrubs absolute filesystem paths from
+///    every entry — the promise is enforced here, not just asked of callers.
 ///  * Bounded — two files of [_defaultMaxBytesPerFile] each
 ///    (`diagnostics.log` + `diagnostics.log.1`), rotated by size.
 ///
@@ -106,8 +109,12 @@ class DiagnosticsLog {
 
   /// Appends one timestamped entry. Synchronous and infallible for the
   /// caller: the write is queued (ordered) and any IO failure is swallowed.
+  /// Absolute filesystem paths in [message] are scrubbed before anything is
+  /// buffered or written.
   void log(String area, String message) {
-    var entry = '${DateTime.now().toUtc().toIso8601String()} [$area] $message';
+    var entry =
+        '${DateTime.now().toUtc().toIso8601String()} '
+        '[$area] ${scrubPaths(message)}';
     if (entry.length > _maxEntryChars) {
       entry = entry.substring(0, _maxEntryChars);
     }
@@ -198,6 +205,33 @@ class DiagnosticsLog {
     final head = '$stack'.split('\n').take(8).join('\n');
     return '$error\n$head';
   }
+
+  /// Replaces absolute filesystem paths with a `<path>` placeholder (the
+  /// extension survives, it identifies the file kind without naming it).
+  /// Anchored to user-space roots so `package:` URIs in stack frames — the
+  /// most valuable diagnostic content — pass through untouched. Paths may
+  /// contain spaces (song titles do), so a match runs greedily to the next
+  /// quote or line end and is then cut back at the first extension; when in
+  /// doubt this over-scrubs rather than leak.
+  @visibleForTesting
+  static String scrubPaths(String message) {
+    return message.replaceAllMapped(_absolutePath, (m) {
+      final matched = m[0]!;
+      final ext = _extensionInside.firstMatch(matched);
+      if (ext == null) return '<path>';
+      // Text after the extension is prose, not path — but it may hold another
+      // path of its own, so scrub it recursively (it is strictly shorter).
+      return '<path>${ext[0]}${scrubPaths(matched.substring(ext.end))}';
+    });
+  }
+
+  static final RegExp _absolutePath = RegExp(
+    "/(?:Users|private|var|tmp|Volumes|Library|Applications|home|etc|opt)"
+    "(?:/[^'\"\\n]+)+",
+  );
+  static final RegExp _extensionInside = RegExp(
+    r'\.[A-Za-z0-9]{1,8}(?=[\s.,;:)\]}]|$)',
+  );
 
   /// The running bundle's version (CFBundleShortVersionString + build +
   /// bundle id), read from the app bundle's own Info.plist. 'unknown' outside

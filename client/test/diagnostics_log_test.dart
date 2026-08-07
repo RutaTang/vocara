@@ -111,6 +111,62 @@ void main() {
     }
   });
 
+  group('scrubPaths', () {
+    test('strips absolute user-space paths, keeping only the extension', () {
+      expect(
+        DiagnosticsLog.scrubPaths(
+          "FileSystemException: Cannot open file, path = "
+          "'/Users/ruta/Music/My Song Title.wav' (OS Error: No such file)",
+        ),
+        "FileSystemException: Cannot open file, path = "
+        "'<path>.wav' (OS Error: No such file)",
+      );
+      expect(
+        DiagnosticsLog.scrubPaths(
+          'copy failed: /private/var/folders/ab/T/vocara/audio/01ABC/take.wav',
+        ),
+        'copy failed: <path>.wav',
+      );
+      expect(
+        DiagnosticsLog.scrubPaths('/Volumes/USB/session (final)/mix.aiff gone'),
+        '<path>.aiff gone',
+      );
+      // Prose after one path can hold another path; both are scrubbed.
+      expect(
+        DiagnosticsLog.scrubPaths('cp /Users/a/x.wav /Users/b/y.wav failed'),
+        'cp <path>.wav <path>.wav failed',
+      );
+    });
+
+    test('leaves package URIs and non-path text untouched', () {
+      const stackFrame =
+          '#0  AssetStore._importFile '
+          '(package:vocara/data/db/asset_store.dart:61:5)';
+      expect(DiagnosticsLog.scrubPaths(stackFrame), stackFrame);
+      expect(
+        DiagnosticsLog.scrubPaths('ratio 44100/48000'),
+        'ratio 44100/48000',
+      );
+      expect(DiagnosticsLog.scrubPaths('dart:async boom'), 'dart:async boom');
+    });
+
+    test(
+      'log entries written through the hooks carry no absolute paths',
+      () async {
+        final log = DiagnosticsLog.forTesting(directory: dir);
+        log.log(
+          'mic',
+          'discard failed: FileSystemException: Deletion failed, path = '
+              "'/Users/ruta/Library/Containers/app/take.wav'",
+        );
+        await log.flush();
+        final content = await currentFile().readAsString();
+        expect(content, isNot(contains('/Users')));
+        expect(content, contains('<path>.wav'));
+      },
+    );
+  });
+
   test('exportArchive bundles both log files with version metadata', () async {
     final log = DiagnosticsLog.forTesting(directory: dir, maxBytesPerFile: 400);
     for (var i = 0; i < 40; i++) {
