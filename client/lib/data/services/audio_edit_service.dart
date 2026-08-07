@@ -264,21 +264,11 @@ void _trimWavHeadSync(String path, int trimMs) {
         // The source was truncated under us: keep whole frames and patch
         // both size fields so the header never claims bytes the file does
         // not hold (a header written up front describes the EXPECTED length).
-        final actual = ((newLen - remaining) ~/ blockAlign) * blockAlign;
-        out.truncateSync(28 + f.length + actual);
-        if (actual.isOdd) {
-          out.setPositionSync(28 + f.length + actual);
-          out.writeByteSync(0);
-        }
-        void u32At(int off, int v) {
-          out.setPositionSync(off);
-          out.writeFromSync(
-            (ByteData(4)..setUint32(0, v, Endian.little)).buffer.asUint8List(),
-          );
-        }
-
-        u32At(4, 4 + (8 + f.length) + (8 + actual + (actual.isOdd ? 1 : 0)));
-        u32At(24 + f.length, actual);
+        _patchWavSizesSync(
+          out,
+          f,
+          ((newLen - remaining) ~/ blockAlign) * blockAlign,
+        );
       }
       ok = true;
     } finally {
@@ -359,6 +349,29 @@ _WavLayout? _parseWavAtPath(String path) {
   } finally {
     raf.closeSync();
   }
+}
+
+/// Patches the RIFF + data sizes written by [_writeWavHeaderSync] down to
+/// [actualLen] (whole-frame bytes, caller-aligned) and truncates the torn
+/// tail. Used when a source turned out shorter than its header promised: the
+/// up-front header describes the EXPECTED length, and publishing it unpatched
+/// means a header claiming bytes the file does not hold.
+void _patchWavSizesSync(RandomAccessFile out, Uint8List fmt, int actualLen) {
+  final pad = actualLen.isOdd ? 1 : 0;
+  out.truncateSync(28 + fmt.length + actualLen);
+  if (pad == 1) {
+    out.setPositionSync(28 + fmt.length + actualLen);
+    out.writeByteSync(0);
+  }
+  void u32At(int off, int v) {
+    out.setPositionSync(off);
+    out.writeFromSync(
+      (ByteData(4)..setUint32(0, v, Endian.little)).buffer.asUint8List(),
+    );
+  }
+
+  u32At(4, 4 + (8 + fmt.length) + (8 + actualLen + pad));
+  u32At(24 + fmt.length, actualLen);
 }
 
 /// Writes a WAV header (RIFF + preserved fmt + data size) to [out].
@@ -468,17 +481,46 @@ class AudioEditService {
     await Isolate.run(() {
       final src = File(sourcePath).openSync();
       try {
-        for (final (path, start, len) in [
-          (firstPath, w.dataStart, cut),
-          (secondPath, w.dataStart + cut, w.dataLen - cut),
-        ]) {
-          final out = File(path).openSync(mode: FileMode.write);
-          try {
-            _writeWavHeaderSync(out, w.fmt, len);
-            _copyRangeSync(src, start, len, out);
-            if (len.isOdd) out.writeByteSync(0);
-          } finally {
-            out.closeSync();
+        // Both halves are written to unique temps and published together at
+        // the end: a failure mid-way must not leave one half sitting at a
+        // final path masquerading as a finished edit.
+        final nonce = '$pid.${DateTime.now().microsecondsSinceEpoch}';
+        final tmpFirst = '$firstPath.$nonce.tmp';
+        final tmpSecond = '$secondPath.$nonce.tmp';
+        var ok = false;
+        try {
+          for (final (tmpPath, start, len) in [
+            (tmpFirst, w.dataStart, cut),
+            (tmpSecond, w.dataStart + cut, w.dataLen - cut),
+          ]) {
+            final out = File(tmpPath).openSync(mode: FileMode.write);
+            try {
+              _writeWavHeaderSync(out, w.fmt, len);
+              final copied = _copyRangeSync(src, start, len, out);
+              if (copied == len) {
+                if (len.isOdd) out.writeByteSync(0);
+              } else {
+                // Truncated on disk: keep what exists, header kept honest.
+                _patchWavSizesSync(
+                  out,
+                  w.fmt,
+                  (copied ~/ w.blockAlign) * w.blockAlign,
+                );
+              }
+            } finally {
+              out.closeSync();
+            }
+          }
+          File(tmpFirst).renameSync(firstPath);
+          File(tmpSecond).renameSync(secondPath);
+          ok = true;
+        } finally {
+          if (!ok) {
+            for (final t in [tmpFirst, tmpSecond]) {
+              try {
+                File(t).deleteSync();
+              } catch (_) {}
+            }
           }
         }
       } finally {
@@ -550,27 +592,66 @@ class AudioEditService {
     // no-op for every well-formed file. blockAlign > 0 is guaranteed by the parse.
     final aLen = (wa.dataLen ~/ wa.blockAlign) * wa.blockAlign;
     final bLen = (wb.dataLen ~/ wb.blockAlign) * wb.blockAlign;
+    // Classic RIFF sizes are u32: refuse a merge whose header could not cover
+    // its own payload instead of writing one that silently lies past 4 GiB.
+    if (aLen + bLen > 0xFFFFFFFF - 20 - wa.fmt.length) {
+      throw const FormatException(
+        'These takes are too long to merge into a single WAV file.',
+      );
+    }
 
     final path = await _newEditPath(practiceId: practiceId);
     await Isolate.run(() {
-      final out = File(path).openSync(mode: FileMode.write);
+      // Unique temp + rename: the final path only ever holds a COMPLETE merge.
+      final tmpPath = '$path.$pid.${DateTime.now().microsecondsSinceEpoch}.tmp';
+      final out = File(tmpPath).openSync(mode: FileMode.write);
+      var ok = false;
       try {
         _writeWavHeaderSync(out, wa.fmt, aLen + bLen);
-        for (final (src, start, len) in [
-          (firstPath, wa.dataStart, aLen),
-          (secondPath, wb.dataStart, bLen),
+        var copiedA = 0, copiedB = 0;
+        for (final (src, start, len, isFirst) in [
+          (firstPath, wa.dataStart, aLen, true),
+          (secondPath, wb.dataStart, bLen, false),
         ]) {
           final raf = File(src).openSync();
           try {
-            _copyRangeSync(raf, start, len, out);
+            final copied = _copyRangeSync(raf, start, len, out);
+            if (isFirst) {
+              copiedA = copied;
+            } else {
+              copiedB = copied;
+            }
           } finally {
             raf.closeSync();
           }
         }
-        if ((aLen + bLen).isOdd) out.writeByteSync(0);
+        if (copiedA != aLen) {
+          // A shortfall in the FIRST half shifts every frame of the second
+          // half across the seam — that is corruption, not tolerance.
+          throw const FormatException(
+            'The first take changed on disk while merging.',
+          );
+        }
+        if (copiedB == bLen) {
+          if ((aLen + bLen).isOdd) out.writeByteSync(0);
+        } else {
+          // A short tail is safe to keep: it starts on a frame boundary.
+          _patchWavSizesSync(
+            out,
+            wa.fmt,
+            aLen + (copiedB ~/ wa.blockAlign) * wa.blockAlign,
+          );
+        }
+        ok = true;
       } finally {
         out.closeSync();
+        if (!ok) {
+          try {
+            File(tmpPath).deleteSync();
+          } catch (_) {}
+        }
       }
+      File(tmpPath).renameSync(path);
     });
     return path;
   }
@@ -660,7 +741,9 @@ class AudioEditService {
       practiceId: practiceId,
       extension: ext.isEmpty ? 'wav' : ext,
     );
-    await File(sourcePath).copy(dest);
+    // Bounded, transactional copy (temp + rename, cleaned up on failure):
+    // a half-copied duplicate must never sit at a final edits/ path.
+    await AudioFileService.copyBounded(sourcePath, dest);
     return dest;
   }
 }
