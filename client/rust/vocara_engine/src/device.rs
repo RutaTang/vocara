@@ -562,6 +562,14 @@ struct InputState {
     /// count frames that aren't in the WAV. The ready handshake and the pre-roll
     /// measurement both read it.
     rec_written: Arc<AtomicU64>,
+    /// Engine-rate frames this input WOULD have emitted at ratio 1.0 — the
+    /// drift estimator's input signal. It must NOT include the correction:
+    /// measuring the corrected emission fed the published ratio back into
+    /// its own error signal, and the loop settled at sqrt(realRatio) — only
+    /// half the ppm ever compensated (~15 ppm residual on a 30 ppm mic).
+    nominal_frames_in: Arc<AtomicU64>,
+    /// Fractional carry for [`nominal_frames_in`] (device frames / step).
+    nominal_acc: f64,
 }
 
 impl InputState {
@@ -600,6 +608,7 @@ impl InputCell {
         rec_dropped: Arc<AtomicU64>,
         rec_written: Arc<AtomicU64>,
         drift_ratio_bits: Arc<AtomicU64>,
+        nominal_frames_in: Arc<AtomicU64>,
     ) -> Arc<InputCell> {
         Arc::new(InputCell(UnsafeCell::new(InputState {
             mic,
@@ -617,6 +626,8 @@ impl InputCell {
             frames_in,
             rec_dropped,
             rec_written,
+            nominal_frames_in,
+            nominal_acc: 0.0,
         })))
     }
 
@@ -639,6 +650,7 @@ impl InputCell {
         st.pos = 0.0;
         st.primed = false;
         st.prev = [0.0, 0.0];
+        st.nominal_acc = 0.0;
     }
 
     /// Feed one input callback's interleaved samples: downmix to stereo, resample to `ENGINE_SR`,
@@ -698,14 +710,26 @@ impl InputCell {
             }
         }
         st.frames_in.fetch_add(emitted, Ordering::Relaxed);
+        // The estimator's signal: engine-rate frames at the NOMINAL step,
+        // untouched by the published ratio (see nominal_frames_in). Carried
+        // fractionally so non-integer steps lose nothing across callbacks.
+        st.nominal_acc += frames as f64 / st.step;
+        let whole = st.nominal_acc as u64;
+        if whole > 0 {
+            st.nominal_frames_in.fetch_add(whole, Ordering::Relaxed);
+            st.nominal_acc -= whole as f64;
+        }
         st.level.store(peak.to_bits(), Ordering::Relaxed);
     }
 }
 
 /// Control-side clock-drift estimator: compares the growth of the input's
-/// emitted engine-rate frame counter against the output's consumed cursor
-/// over ~1 s ticks and publishes a smoothed correction ratio for the input
-/// resampler ([`InputState::drift_ratio_bits`]).
+/// NOMINAL engine-rate frame counter (device frames / nominal step — never
+/// the corrected emission, which would feed the published ratio back into
+/// its own error signal and settle the loop at sqrt of the real ratio)
+/// against the output's consumed cursor, and publishes a smoothed
+/// correction ratio for the input resampler
+/// ([`InputState::drift_ratio_bits`]).
 ///
 /// Two independent crystals never run at exactly the same rate; a mic 30 ppm
 /// fast drifts a take ~18 ms ahead of the backing over 10 minutes, which
@@ -776,7 +800,14 @@ impl DriftEstimator {
         if !(0.995..=1.005).contains(&inst) {
             return self.published(); // glitch (stall/rebuild), not drift
         }
-        self.ema += 0.05 * (inst - self.ema);
+        // α normalized to the MEASURED interval (0.05 per second of output
+        // clock): early-returned ticks accumulate their deltas into the next
+        // measurement, and the technique page polls at 50 ms while the song
+        // page polls at 1 s — a fixed per-measurement α made the EMA's time
+        // constant depend on which page was open.
+        let seconds = dout as f64 / ENGINE_SR;
+        let alpha = 1.0 - 0.95f64.powf(seconds);
+        self.ema += alpha * (inst - self.ema);
         let err = self.ema - 1.0;
         let corrected = if err.abs() < 2e-6 {
             1.0 // deadband: exactly 1.0 keeps the identity fast path
@@ -889,6 +920,73 @@ mod drift_tests {
     }
 
     #[test]
+    fn the_closed_loop_cancels_the_drift_not_half_of_it() {
+        // FULL-pipeline simulation with the real feedback topology: device
+        // frames arrive at the true (30 ppm fast) rate, the published ratio
+        // corrects the cell's emission, and the estimator sees the NOMINAL
+        // counter. The old wiring fed the CORRECTED emission back into the
+        // estimator, so the correction damped its own error signal and the
+        // loop settled at sqrt(1+e) — ~14.7 ppm residual on a 30 ppm mic
+        // after 600 s. Steady-state emission must now match the output
+        // clock to well under 1 ppm.
+        use crate::ring::spsc;
+        use crate::sample::{Smp, CHANNELS};
+        let ppm = 30.0f64;
+        let (mic_prod, mut mic_cons) = spsc::<[Smp; CHANNELS]>(1 << 17);
+        let (cap_prod, _cap_cons) = spsc::<[Smp; CHANNELS]>(8);
+        let (rec_prod, _rec_cons) = spsc::<[Smp; CHANNELS]>(8);
+        let frames_in = Arc::new(AtomicU64::new(0));
+        let nominal = Arc::new(AtomicU64::new(0));
+        let ratio = Arc::new(AtomicU64::new(1.0f64.to_bits()));
+        let cell = super::InputCell::new(
+            mic_prod,
+            cap_prod,
+            rec_prod,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            Arc::clone(&frames_in),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::clone(&ratio),
+            Arc::clone(&nominal),
+        );
+        cell.reconfigure(crate::sample::ENGINE_SR, 1);
+        let mut est = DriftEstimator::new(Arc::clone(&ratio));
+
+        let mut dev_acc = 0.0f64;
+        let mut emitted_at_500 = 0u64;
+        for s in 1..=600u64 {
+            // One wall-clock second of device frames at the true fast rate,
+            // fed in callback-sized blocks; the mic ring is drained after
+            // each second (the monitor consumer stands in for real drain).
+            dev_acc += 48_000.0 * (1.0 + ppm * 1e-6);
+            let mut n = dev_acc as usize;
+            dev_acc -= n as f64;
+            let block = vec![0.25f32; 480];
+            while n > 0 {
+                let take = n.min(480);
+                cell.feed_rt(&block[..take]);
+                n -= take;
+            }
+            while mic_cons.pop().is_some() {}
+            // The output clock consumes exactly 48 000 engine frames/s.
+            est.tick(nominal.load(Ordering::Relaxed), s * 48_000);
+            if s == 500 {
+                emitted_at_500 = frames_in.load(Ordering::Relaxed);
+            }
+        }
+        let emitted = frames_in.load(Ordering::Relaxed) - emitted_at_500;
+        let residual_ppm = (emitted as f64 / (100.0 * 48_000.0) - 1.0) * 1e6;
+        assert!(
+            residual_ppm.abs() < 1.0,
+            "steady-state emission must match the output clock \
+             (residual {residual_ppm:.2} ppm; the old feedback left ~{:.1})",
+            ppm / 2.0
+        );
+    }
+
+    #[test]
     fn the_input_resampler_applies_the_ratio_to_its_emission_rate() {
         // A 48 kHz-nominal mic whose crystal is 1000 ppm fast (exaggerated
         // for a short test): with the correction published, feeding N input
@@ -912,6 +1010,7 @@ mod drift_tests {
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
             Arc::clone(&ratio),
+            Arc::new(AtomicU64::new(0)),
         );
         cell.reconfigure(crate::sample::ENGINE_SR, 1);
         let block = vec![0.25f32; 4800];
@@ -3059,6 +3158,7 @@ mod input_cell_tests {
             Arc::clone(&rec_dropped),
             Arc::clone(&rec_written),
             Arc::new(AtomicU64::new(1.0f64.to_bits())),
+            Arc::new(AtomicU64::new(0)),
         );
         // Identity resample path (input already at ENGINE_SR), mono input.
         cell.reconfigure(crate::sample::ENGINE_SR, 1);

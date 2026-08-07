@@ -100,6 +100,10 @@ pub struct VeEngine {
     input_level: Arc<AtomicU32>,
     /// Total input frames received (diagnostic for whether the mic is actually delivering data).
     input_frames_in: Arc<AtomicU64>,
+    /// Correction-free engine-rate emission counter — the drift estimator's
+    /// input signal (see DriftEstimator's docs on why it must not observe
+    /// its own correction).
+    input_nominal_frames: Arc<AtomicU64>,
     /// Frames the recording ring dropped during the CURRENT take (reset on each start).
     /// Nonzero means the take on disk has silent holes — surfaced via
     /// `ve_record_dropped_frames` so the UI never reports such a take as clean.
@@ -319,6 +323,7 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
         let device_event = Arc::new(AtomicU32::new(0));
         let input_level = Arc::new(AtomicU32::new(0));
         let input_frames_in = Arc::new(AtomicU64::new(0));
+        let input_nominal_frames = Arc::new(AtomicU64::new(0));
         let rec_dropped = Arc::new(AtomicU64::new(0));
         let rec_written = Arc::new(AtomicU64::new(0));
         let cap_active = Arc::new(AtomicBool::new(false));
@@ -335,6 +340,7 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
             Arc::clone(&rec_dropped),
             Arc::clone(&rec_written),
             Arc::clone(&drift_ratio),
+            Arc::clone(&input_nominal_frames),
         );
         let writer = RecordWriter::spawn(rec_cons);
         // The host maintains the handle's renderer gate (stream up/down), so the control
@@ -360,6 +366,7 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
             current_input_uid: String::new(),
             input_level,
             input_frames_in,
+            input_nominal_frames,
             rec_dropped,
             rec_written,
             input_intent,
@@ -521,13 +528,15 @@ pub extern "C" fn ve_current_output_device(
 pub extern "C" fn ve_poll_device_event(e: *mut VeEngine) -> u32 {
     with_engine(e, 0, |eng| {
         // Piggyback the ~1 s clock-drift tick on the process's single poller:
-        // it compares the input's emitted-frame counter against the output's
-        // consumed cursor and publishes the input resampler's correction
-        // ratio. Self-gating — a closed mic or a paused transport advances
-        // one counter only, and the estimator freezes.
-        let frames_in = eng.input_frames_in.load(Ordering::Acquire);
+        // it compares the input's NOMINAL emission counter (correction-free —
+        // feeding the corrected counter closed the loop on itself and only
+        // half the drift was ever compensated) against the output's consumed
+        // cursor and publishes the input resampler's correction ratio.
+        // Self-gating — a closed mic or a paused transport advances one
+        // counter only, and the estimator freezes.
+        let nominal_in = eng.input_nominal_frames.load(Ordering::Acquire);
         let consumed = eng.handle.transport().consumed_frames();
-        eng.drift.tick(frames_in, consumed);
+        eng.drift.tick(nominal_in, consumed);
         eng.device_event.swap(0, Ordering::AcqRel)
     })
 }
