@@ -303,14 +303,26 @@ class SpectrogramService {
     if (admission == null) return null;
     return analysisGate.run(
       () => Isolate.run(() {
-        final pcm = readWavMonoStreaming(path, admission);
-        if (pcm == null) return null;
-        return computeVoiceMetrics(
-          pcm.samples,
-          pcm.sampleRate,
+        // Windowed like computeBothFromFile, minus the spectrogram.
+        final expectedFrames = admission.frames == 0
+            ? 0
+            : (admission.frames <= fftSize
+                  ? 1
+                  : ((admission.frames - fftSize + hop - 1) ~/ hop) + 1);
+        final analyzer = StreamingTakeAnalyzer(
+          admission.sampleRate,
           fftSize: fftSize,
           hop: hop,
+          expectedFrames: expectedFrames,
+          spectrogram: false,
         );
+        var any = false;
+        readWavMonoChunked(path, admission, (chunk) {
+          any = true;
+          analyzer.add(chunk);
+        });
+        if (!any) return null;
+        return analyzer.finish().metrics;
       }),
     );
   }
@@ -333,22 +345,31 @@ class SpectrogramService {
     if (admission == null) return null;
     return analysisGate.run(
       () => Isolate.run(() {
-        final pcm = readWavMonoStreaming(path, admission);
-        if (pcm == null) return null;
-        final spectrogram = computeSpectrogram(
-          pcm.samples,
-          pcm.sampleRate,
+        // FULLY windowed: decode chunks feed the streaming analyzer (whose
+        // per-frame math IS the batch computeVoiceMetrics, pinned
+        // bit-identical by test) — neither the whole-track sample buffer nor
+        // the full decimated copies ever exist. The resident set is a few
+        // analysis windows plus the RESULTS.
+        final expectedFrames = admission.frames == 0
+            ? 0
+            : (admission.frames <= fftSize
+                  ? 1
+                  : ((admission.frames - fftSize + hop - 1) ~/ hop) + 1);
+        final analyzer = StreamingTakeAnalyzer(
+          admission.sampleRate,
           fftSize: fftSize,
           hop: hop,
+          expectedFrames: expectedFrames,
           maxHz: maxHz,
         );
-        final metrics = computeVoiceMetrics(
-          pcm.samples,
-          pcm.sampleRate,
-          fftSize: fftSize,
-          hop: hop,
-        );
-        return (spectrogram: spectrogram, metrics: metrics);
+        var any = false;
+        readWavMonoChunked(path, admission, (chunk) {
+          any = true;
+          analyzer.add(chunk);
+        });
+        if (!any) return null;
+        final out = analyzer.finish();
+        return (spectrogram: out.spectrogram, metrics: out.metrics);
       }),
     );
   }

@@ -272,109 +272,163 @@ Spectrogram computeSpectrogram(
   );
 }
 
-/// Computes per-frame voice-timbre metrics from mono [samples] — ring/SPR (F18),
-/// spectral tilt / alpha ratio (F19), cepstral peak prominence (F20) and the
-/// first three formants F1/F2/F3 (F17). Same framing as [computeSpectrogram].
-/// Pure + isolate-safe. See [VoiceMetrics] for the meaning of each curve.
-VoiceMetrics computeVoiceMetrics(
-  Float32List samples,
-  int sampleRate, {
-  int fftSize = 2048,
-  int hop = 512,
-}) {
-  const ln10 = 2.302585092994046;
-  double db(double mag) => 20.0 * (math.log(mag + 1e-9) / ln10);
+/// A zero-padded window copy: [count] values from [src] starting at absolute
+/// index [start]; indices outside `[0, srcLen)` read as 0 (the exact
+/// edge semantics the batch metrics loop always had).
+Float32List _padSlice(Float32List src, int start, int count, int srcLen) {
+  final out = Float32List(count);
+  final from = start.clamp(0, srcLen);
+  final to = (start + count).clamp(0, srcLen);
+  for (var i = from; i < to; i++) {
+    out[i - start] = src[i];
+  }
+  return out;
+}
 
-  final binHz = sampleRate / fftSize;
-  final half = fftSize ~/ 2;
-  int binOf(double hz) {
+/// The per-frame metrics computation and its whole-take finish, shared by the
+/// batch [computeVoiceMetrics] and the windowed [StreamingTakeAnalyzer] —
+/// ONE function body, so the two paths cannot diverge (pinned bit-identical
+/// by test). Callers extract the three zero-padded windows (raw fftSize,
+/// decimated lpcWin+1 with one pre-emphasis lookback sample, yin yinWin) and
+/// stream the raw samples through [feedClip]; everything else lives here.
+class _MetricsPass {
+  _MetricsPass(
+    this.sampleRate, {
+    required this.fftSize,
+    required this.hop,
+    required int capacityFrames,
+  }) : half = fftSize ~/ 2,
+       binHz = sampleRate / fftSize,
+       window = Window.hanning(fftSize),
+       fft = FFT(fftSize),
+       dsFactor = (sampleRate / 11000).round().clamp(1, 8),
+       yinFactor = (sampleRate / 22050).round().clamp(1, 2),
+       ring = Float32List(capacityFrames),
+       tilt = Float32List(capacityFrames),
+       cpp = Float32List(capacityFrames),
+       loudness = Float32List(capacityFrames),
+       f0 = Float32List(capacityFrames),
+       f1 = Float32List(capacityFrames),
+       f2 = Float32List(capacityFrames),
+       f3 = Float32List(capacityFrames),
+       h1h2 = Float32List(capacityFrames),
+       active = Uint8List(capacityFrames),
+       energy = Float64List(capacityFrames),
+       rf0 = Float32List(capacityFrames),
+       rf1 = Float32List(capacityFrames),
+       rf2 = Float32List(capacityFrames),
+       rf3 = Float32List(capacityFrames),
+       rh1h2 = Float32List(capacityFrames),
+       per = Float32List(capacityFrames),
+       voicedMask = Uint8List(capacityFrames),
+       frame = Float64List(fftSize),
+       logmag = Float64List(fftSize) {
+    dsRate = sampleRate / dsFactor;
+    yinRate = sampleRate / yinFactor;
+    lpcOrder = (2 + dsRate / 1000).round().clamp(8, 20);
+    lpcWin = fftSize ~/ dsFactor;
+    lpcWindow = _hamming(lpcWin);
+    yinWin = (fftSize / yinFactor).round();
+    b2k = _binOf(2000);
+    b4k = _binOf(4000);
+    b50 = _binOf(50);
+    b1k = _binOf(1000);
+    b5k = _binOf(5000);
+    qMin = (sampleRate / 500).floor().clamp(2, half);
+    qMax = (sampleRate / 60).ceil().clamp(qMin + 1, half);
+  }
+
+  static const double _ln10 = 2.302585092994046;
+  static const double preCoef = 0.97;
+
+  final int sampleRate;
+  final int fftSize;
+  final int hop;
+  final int half;
+  final double binHz;
+  final Float64List window;
+  final FFT fft;
+  final int dsFactor;
+  final int yinFactor;
+  late final double dsRate;
+  late final double yinRate;
+  late final int lpcOrder;
+  late final int lpcWin;
+  late final Float64List lpcWindow;
+  late final int yinWin;
+  late final int b2k, b4k, b50, b1k, b5k, qMin, qMax;
+
+  // Per-frame outputs (capacity-sized; [emitted] is the truth).
+  final Float32List ring, tilt, cpp, loudness, f0, f1, f2, f3, h1h2;
+  final Uint8List active;
+  final Float64List energy;
+  final Float32List rf0, rf1, rf2, rf3, rh1h2, per;
+  final Uint8List voicedMask;
+  final Float64List frame, logmag;
+
+  var _maxEnergy = 1e-12;
+  var _emitted = 0;
+
+  // Clip/peak scan state (streamed; the batch feeds the whole track once).
+  var _len = 0;
+  var _peak = 0.0;
+  var _clipped = 0;
+  var _run = 0;
+  var _prevHigh = 0.0;
+
+  int _binOf(double hz) {
     var b = (hz / binHz).round();
     if (b < 0) b = 0;
     if (b > half) b = half;
     return b;
   }
 
-  final window = Window.hanning(fftSize);
-  final fft = FFT(fftSize);
+  static double _db(double mag) => 20.0 * (math.log(mag + 1e-9) / _ln10);
 
-  // Match fftea's STFT framing exactly (computeSpectrogram uses STFT.run, which
-  // zero-pads and emits a trailing partial frame) so VoiceMetrics.frames ==
-  // Spectrogram.frames and the per-frame overlay/playhead stay aligned. The
-  // final frame is zero-padded past the end of [samples].
-  final len = samples.length;
-  final nFrames = len == 0
-      ? 0
-      : (len <= fftSize ? 1 : ((len - fftSize + hop - 1) ~/ hop) + 1);
+  /// Streams raw samples through the input-quality scan (peak / true-clipping
+  /// run detection). Chunk boundaries are invisible: the run state carries.
+  void feedClip(Float32List chunk) {
+    const clipLevel = 0.997, clipRun = 4, flatEps = 0.0003;
+    for (var i = 0; i < chunk.length; i++) {
+      final a = chunk[i].abs();
+      if (a > _peak) _peak = a;
+      if (a >= clipLevel && (_run == 0 || (a - _prevHigh).abs() <= flatEps)) {
+        _run++;
+        _prevHigh = a;
+        if (_run == clipRun) {
+          _clipped += clipRun;
+        } else if (_run > clipRun) {
+          _clipped++;
+        }
+      } else {
+        _run = 0;
+      }
+    }
+    _len += chunk.length;
+  }
 
-  final ring = Float32List(nFrames);
-  final tilt = Float32List(nFrames);
-  final cpp = Float32List(nFrames);
-  final loudness = Float32List(nFrames);
-  final f0 = Float32List(nFrames);
-  final f1 = Float32List(nFrames);
-  final f2 = Float32List(nFrames);
-  final f3 = Float32List(nFrames);
-  final h1h2 = Float32List(nFrames);
-  final active = Uint8List(nFrames);
-  final energy = Float64List(nFrames);
-  final rf0 = Float32List(nFrames);
-  final rh1h2 = Float32List(nFrames); // raw H1−H2, median-smoothed into h1h2
-  final per = Float32List(nFrames); // YIN periodicity per frame (voicing gate)
-  final voicedMask = Uint8List(nFrames); // gate verdict, re-applied post-median
-
-  // Band edges (bins).
-  final b2k = binOf(2000), b4k = binOf(4000);
-  final b50 = binOf(50), b1k = binOf(1000), b5k = binOf(5000);
-  // CPP quefrency search window (F0 ≈ 60..500 Hz).
-  final qMin = (sampleRate / 500).floor().clamp(2, half);
-  // Clamp to `half`: the cepstrum is symmetric (logmag is mirrored above the Nyquist bin
-  // below), so only quefrencies q in [0, half] are independent. The old `fftSize - 1`
-  // upper bound let the search read mirrored (aliased) quefrencies at sample rates above
-  // ~62 kHz, corrupting CPP for low pitches.
-  final qMax = (sampleRate / 60).ceil().clamp(qMin + 1, half);
-  // F17 formants use LPC on a band-limited (decimated to ~11 kHz) copy of the
-  // signal — far steadier than spectral peak-picking. Raw per-frame estimates
-  // go to rf1/rf2/rf3 and are median-smoothed into f1/f2/f3 at the end.
-  final dsFactor = (sampleRate / 11000).round().clamp(1, 8);
-  final dsRate = sampleRate / dsFactor;
-  final ds = _decimate(samples, dsFactor, sampleRate.toDouble());
-  final lpcOrder = (2 + dsRate / 1000).round().clamp(8, 20);
-  final lpcWin = fftSize ~/ dsFactor;
-  final lpcWindow = _hamming(lpcWin);
-  const preCoef = 0.97;
-  final rf1 = Float32List(nFrames);
-  final rf2 = Float32List(nFrames);
-  final rf3 = Float32List(nFrames);
-
-  // F0 runs on an only-lightly-decimated copy (~22 kHz) — NOT the 11 kHz formant
-  // decimation. YIN is a time-domain lag estimator, so its precision is set by
-  // the sample rate; at 11 kHz the integer-lag spacing is ~1.5 semitones near
-  // the top of the range (1100 Hz ≈ 10-sample period), which causes octave/
-  // subharmonic locks under noise. ~22 kHz keeps the lag fine enough to stay
-  // octave-robust across 70–1100 Hz at a fraction of full-rate cost.
-  final yinFactor = (sampleRate / 22050).round().clamp(1, 2);
-  final yinRate = sampleRate / yinFactor;
-  final yinSig = yinFactor == 1
-      ? samples
-      : _decimate(samples, yinFactor, sampleRate.toDouble());
-  final yinWin = (fftSize / yinFactor).round();
-
-  final frame = Float64List(fftSize);
-  final logmag = Float64List(fftSize);
-  var maxEnergy = 1e-12;
-
-  for (var fr = 0; fr < nFrames; fr++) {
-    final start = fr * hop;
+  /// One analysis frame. [rawPadded] is the fftSize raw window (zero-padded
+  /// past the end), [dsPadded] the lpcWin+1 decimated window whose first
+  /// sample is the pre-emphasis lookback, [yinPadded] the yinWin decimated
+  /// YIN window — all extracted by the caller with [_padSlice] semantics.
+  void emitFrame(
+    int fr,
+    Float32List rawPadded,
+    Float32List dsPadded,
+    Float32List yinPadded,
+  ) {
+    assert(fr == _emitted, 'frames are emitted in order');
+    _emitted = fr + 1;
 
     // --- Plain windowed magnitude spectrum (F18 / F19 / energy / CPP) +
     // the raw-RMS loudness (F9). ---
     var rawSq = 0.0;
     for (var i = 0; i < fftSize; i++) {
-      final s = start + i < len ? samples[start + i] : 0.0;
+      final s = rawPadded[i];
       rawSq += s * s;
       frame[i] = s * window[i];
     }
-    loudness[fr] = 20.0 * (math.log(math.sqrt(rawSq / fftSize) + 1e-9) / ln10);
+    loudness[fr] = 20.0 * (math.log(math.sqrt(rawSq / fftSize) + 1e-9) / _ln10);
     final mags = fft.realFft(frame).discardConjugates().magnitudes();
 
     var e = 0.0;
@@ -382,7 +436,7 @@ VoiceMetrics computeVoiceMetrics(
       e += mags[b] * mags[b];
     }
     energy[fr] = e;
-    if (e > maxEnergy) maxEnergy = e;
+    if (e > _maxEnergy) _maxEnergy = e;
 
     // F18 — ring / Singing Power Ratio. Skip the DC bin so a decode offset can
     // never be picked as the low-band peak.
@@ -393,7 +447,7 @@ VoiceMetrics computeVoiceMetrics(
     for (var b = b2k; b < b4k; b++) {
       if (mags[b] > highPk) highPk = mags[b];
     }
-    ring[fr] = db(highPk) - db(lowPk);
+    ring[fr] = _db(highPk) - _db(lowPk);
 
     // F19 — spectral tilt / alpha ratio.
     var lowE = 0.0, highE = 0.0;
@@ -403,12 +457,12 @@ VoiceMetrics computeVoiceMetrics(
     for (var b = b1k; b < b5k; b++) {
       highE += mags[b] * mags[b];
     }
-    tilt[fr] = 10.0 * (math.log((highE + 1e-12) / (lowE + 1e-12)) / ln10);
+    tilt[fr] = 10.0 * (math.log((highE + 1e-12) / (lowE + 1e-12)) / _ln10);
 
     // F20 — CPP: real cepstrum of the dB spectrum, peak prominence above its
     // least-squares regression over the F0 quefrency window.
     for (var k = 0; k <= half; k++) {
-      logmag[k] = db(mags[k]);
+      logmag[k] = _db(mags[k]);
     }
     for (var k = half + 1; k < fftSize; k++) {
       logmag[k] = logmag[fftSize - k];
@@ -446,12 +500,7 @@ VoiceMetrics computeVoiceMetrics(
 
     // F0 — YIN on the decimated frame centered at this time: octave-robust and
     // time-domain, with a periodicity confidence that drives the voicing gate.
-    final yin = _yinWindow(
-      yinSig,
-      yinRate,
-      ((fr * hop + fftSize / 2) / yinFactor).round(),
-      yinWin,
-    );
+    final yin = yinPitch(yinPadded, yinRate);
     rf0[fr] = yin.f0;
     per[fr] = yin.periodicity;
 
@@ -463,22 +512,21 @@ VoiceMetrics computeVoiceMetrics(
       // overlap (overlap lets H1's leakage inflate H2 and biases H1−H2 down).
       final hw = ((f0Hz / binHz - 1) / 2).floor().clamp(0, 2);
       rh1h2[fr] =
-          db(_harmonicPeak(mags, f0Hz / binHz, hw)) -
-          db(_harmonicPeak(mags, 2 * f0Hz / binHz, hw));
+          _db(_harmonicPeak(mags, f0Hz / binHz, hw)) -
+          _db(_harmonicPeak(mags, 2 * f0Hz / binHz, hw));
     } else {
       rh1h2[fr] = double.nan;
     }
 
     // F17 — formants via LPC on the decimated frame centered at this time, then
     // assign poles to the F1/F2/F3 bands (stable ordinal labels).
-    final cands = _lpcFormants(
-      ds,
+    final cands = _lpcFormantsPadded(
+      dsPadded,
       dsRate,
       lpcOrder,
       lpcWin,
       lpcWindow,
       preCoef,
-      ((fr * hop + fftSize / 2) / dsFactor).round(),
     );
     final (af1, af2, af3) = _assignFormants(cands);
     rf1[fr] = af1;
@@ -486,123 +534,435 @@ VoiceMetrics computeVoiceMetrics(
     rf3[fr] = af3;
   }
 
-  // Voicing gate: a frame is voiced only when it is both audible (within 30 dB
-  // of peak energy) AND periodic (YIN periodicity ≥ _voicedConfidence). Averages
-  // use audible frames; F0/formants are nulled on every non-voiced frame so the
-  // overlay never draws pitch/formant dots on noise or breath.
-  final gate = maxEnergy * 1e-3;
-  var rSum = 0.0, tSum = 0.0, cSum = 0.0, n = 0;
-  for (var fr = 0; fr < nFrames; fr++) {
-    final audible = energy[fr] >= gate;
-    final voiced = audible && per[fr] >= _voicedConfidence;
-    // [active] tracks audible frames (LTAS), but the ring/tilt/CPP timbre
-    // averages use only VOICED frames — averaging over breath/consonant noise
-    // dilutes them and mismatched the live readout's voiced-only average.
-    if (audible) active[fr] = 1;
-    if (voiced) {
-      voicedMask[fr] = 1;
-      rSum += ring[fr];
-      tSum += tilt[fr];
-      cSum += cpp[fr];
-      n++;
-    } else {
-      rf0[fr] = double.nan;
-      rf1[fr] = double.nan;
-      rf2[fr] = double.nan;
-      rf3[fr] = double.nan;
-      rh1h2[fr] = double.nan;
-    }
-  }
-  // Temporal median smoothing (±2 frames) turns the raw F0/formants into steady
-  // tracks, removing the per-frame jitter spectral peak-picking suffered from.
-  _medianInto(rf0, f0, 2);
-  _medianInto(rf1, f1, 2);
-  _medianInto(rf2, f2, 2);
-  _medianInto(rf3, f3, 2);
-  _medianInto(rh1h2, h1h2, 2);
-  // Re-apply the voicing gate AFTER smoothing. The two NaN meanings differ:
-  // the median bridges measurement dropouts (LPC/H1−H2 misses on frames the
-  // gate declared VOICED) from valid neighbours, while this mask keeps every
-  // gate-NaN frame NaN so smoothing never paints F0/formants onto breath or
-  // silence. Mirrors the live path's _smoothGated, which separates "unvoiced"
-  // from "voiced but unmeasured" the same way.
-  for (var fr = 0; fr < nFrames; fr++) {
-    if (voicedMask[fr] == 0) {
-      f0[fr] = double.nan;
-      f1[fr] = double.nan;
-      f2[fr] = double.nan;
-      f3[fr] = double.nan;
-      h1h2[fr] = double.nan;
-    }
-  }
-  final inv = n == 0 ? 0.0 : 1.0 / n;
+  /// Whole-take post-processing (voicing gate, median smoothing, quality
+  /// stats) — verbatim the batch tail, over the emitted frames.
+  VoiceMetrics finish() {
+    final nFrames = _emitted;
+    Float32List f32(Float32List a) =>
+        a.length == nFrames ? a : Float32List.sublistView(a, 0, nFrames);
+    Uint8List u8(Uint8List a) =>
+        a.length == nFrames ? a : Uint8List.sublistView(a, 0, nFrames);
+    final ring = f32(this.ring),
+        tilt = f32(this.tilt),
+        cpp = f32(this.cpp),
+        loudness = f32(this.loudness),
+        f0 = f32(this.f0),
+        f1 = f32(this.f1),
+        f2 = f32(this.f2),
+        f3 = f32(this.f3),
+        h1h2 = f32(this.h1h2),
+        rf0 = f32(this.rf0),
+        rf1 = f32(this.rf1),
+        rf2 = f32(this.rf2),
+        rf3 = f32(this.rf3),
+        rh1h2 = f32(this.rh1h2),
+        per = f32(this.per);
+    final active = u8(this.active), voicedMask = u8(this.voicedMask);
 
-  // --- Input quality: peak level, clipping, SNR ----------------------------
-  // True clipping is a near-full-scale run whose samples are PINNED (flat top):
-  // a clean loud tone curves through its peak, so its samples differ frame to
-  // frame; a clipped one holds the same ceiling value. Requiring near-flatness
-  // (Δ ≤ flatEps) over a run ≥ clipRun avoids false-positiving a hot low-F0 tone.
-  var peak = 0.0, clipped = 0, run = 0;
-  var prevHigh = 0.0;
-  const clipLevel = 0.997, clipRun = 4, flatEps = 0.0003;
-  for (var i = 0; i < len; i++) {
-    final a = samples[i].abs();
-    if (a > peak) peak = a;
-    if (a >= clipLevel && (run == 0 || (a - prevHigh).abs() <= flatEps)) {
-      run++;
-      prevHigh = a;
-      if (run == clipRun) {
-        clipped += clipRun;
-      } else if (run > clipRun) {
-        clipped++;
+    // Voicing gate: a frame is voiced only when it is both audible (within 30 dB
+    // of peak energy) AND periodic (YIN periodicity ≥ _voicedConfidence). Averages
+    // use audible frames; F0/formants are nulled on every non-voiced frame so the
+    // overlay never draws pitch/formant dots on noise or breath.
+    final gate = _maxEnergy * 1e-3;
+    var rSum = 0.0, tSum = 0.0, cSum = 0.0, n = 0;
+    for (var fr = 0; fr < nFrames; fr++) {
+      final audible = energy[fr] >= gate;
+      final voiced = audible && per[fr] >= _voicedConfidence;
+      // [active] tracks audible frames (LTAS), but the ring/tilt/CPP timbre
+      // averages use only VOICED frames — averaging over breath/consonant noise
+      // dilutes them and mismatched the live readout's voiced-only average.
+      if (audible) active[fr] = 1;
+      if (voiced) {
+        voicedMask[fr] = 1;
+        rSum += ring[fr];
+        tSum += tilt[fr];
+        cSum += cpp[fr];
+        n++;
+      } else {
+        rf0[fr] = double.nan;
+        rf1[fr] = double.nan;
+        rf2[fr] = double.nan;
+        rf3[fr] = double.nan;
+        rh1h2[fr] = double.nan;
       }
-    } else {
-      run = 0;
     }
+    // Temporal median smoothing (±2 frames) turns the raw F0/formants into steady
+    // tracks, removing the per-frame jitter spectral peak-picking suffered from.
+    _medianInto(rf0, f0, 2);
+    _medianInto(rf1, f1, 2);
+    _medianInto(rf2, f2, 2);
+    _medianInto(rf3, f3, 2);
+    _medianInto(rh1h2, h1h2, 2);
+    // Re-apply the voicing gate AFTER smoothing. The two NaN meanings differ:
+    // the median bridges measurement dropouts (LPC/H1−H2 misses on frames the
+    // gate declared VOICED) from valid neighbours, while this mask keeps every
+    // gate-NaN frame NaN so smoothing never paints F0/formants onto breath or
+    // silence. Mirrors the live path's _smoothGated, which separates "unvoiced"
+    // from "voiced but unmeasured" the same way.
+    for (var fr = 0; fr < nFrames; fr++) {
+      if (voicedMask[fr] == 0) {
+        f0[fr] = double.nan;
+        f1[fr] = double.nan;
+        f2[fr] = double.nan;
+        f3[fr] = double.nan;
+        h1h2[fr] = double.nan;
+      }
+    }
+    final inv = n == 0 ? 0.0 : 1.0 / n;
+
+    // --- Input quality: peak level, clipping, SNR --------------------------
+    final peakDbfs = _len == 0
+        ? double.nan
+        : 20.0 * (math.log(_peak + 1e-9) / _ln10);
+    final clippedFraction = _len == 0 ? 0.0 : _clipped / _len;
+    // SNR: median loudness of VOICED frames over the noise floor (the 10th-pct
+    // of all frame loudness ≈ background between phrases).
+    final allLoud = <double>[], voicedLoud = <double>[];
+    for (var fr = 0; fr < nFrames; fr++) {
+      final v = loudness[fr];
+      if (!v.isFinite) continue;
+      allLoud.add(v);
+      if (active[fr] == 1 && per[fr] >= _voicedConfidence) voicedLoud.add(v);
+    }
+    var snrDb = double.nan;
+    if (allLoud.length >= 8 && voicedLoud.isNotEmpty) {
+      allLoud.sort();
+      voicedLoud.sort();
+      final noise = allLoud[(allLoud.length * 0.1).floor()];
+      final signal = voicedLoud[voicedLoud.length ~/ 2];
+      snrDb = signal - noise;
+    }
+
+    return VoiceMetrics(
+      frames: nFrames,
+      hop: hop,
+      sampleRate: sampleRate,
+      ring: ring,
+      tilt: tilt,
+      cpp: cpp,
+      loudness: loudness,
+      f0: f0,
+      f1: f1,
+      f2: f2,
+      f3: f3,
+      h1h2: h1h2,
+      active: active,
+      ringAvg: rSum * inv,
+      tiltAvg: tSum * inv,
+      cppAvg: cSum * inv,
+      peakDbfs: peakDbfs,
+      clippedFraction: clippedFraction,
+      snrDb: snrDb,
+    );
   }
-  final peakDbfs = len == 0
-      ? double.nan
-      : 20.0 * (math.log(peak + 1e-9) / ln10);
-  final clippedFraction = len == 0 ? 0.0 : clipped / len;
-  // SNR: median loudness of VOICED frames over the noise floor (the 10th-pct of
-  // all frame loudness ≈ background between phrases).
-  final allLoud = <double>[], voicedLoud = <double>[];
-  for (var fr = 0; fr < nFrames; fr++) {
-    final v = loudness[fr];
-    if (!v.isFinite) continue;
-    allLoud.add(v);
-    if (active[fr] == 1 && per[fr] >= _voicedConfidence) voicedLoud.add(v);
-  }
-  var snrDb = double.nan;
-  if (allLoud.length >= 8 && voicedLoud.isNotEmpty) {
-    allLoud.sort();
-    voicedLoud.sort();
-    final noise = allLoud[(allLoud.length * 0.1).floor()];
-    final signal = voicedLoud[voicedLoud.length ~/ 2];
-    snrDb = signal - noise;
+}
+
+/// A 3-stage Butterworth decimator producing [_decimate]'s output
+/// INCREMENTALLY: each incoming sample runs the cascade per stage with the
+/// same Float32 rounding between stages the in-place batch filter has (each
+/// batch stage reads the previous stage's f32-stored output), so the
+/// streamed decimated signal is bit-identical to the batch copy.
+class _StreamDecimator {
+  _StreamDecimator(this.factor, double fs)
+    : assert(factor >= 1),
+      _stages = List.generate(3, (_) => _BiquadState()) {
+    final fc = 0.45 * fs / factor;
+    final w0 = 2 * math.pi * fc / fs;
+    final cosw = math.cos(w0), sinw = math.sin(w0);
+    final alpha = sinw / math.sqrt2;
+    final a0 = 1 + alpha;
+    _b0 = (1 - cosw) / 2 / a0;
+    _b1 = (1 - cosw) / a0;
+    _b2 = _b0;
+    _a1 = -2 * cosw / a0;
+    _a2 = (1 - alpha) / a0;
   }
 
-  return VoiceMetrics(
-    frames: nFrames,
+  final int factor;
+  final List<_BiquadState> _stages;
+  late final double _b0, _b1, _b2, _a1, _a2;
+  var _phase = 0;
+
+  /// Feeds one raw sample; appends the decimated output sample to [out]
+  /// when this position lands on the decimation grid.
+  void feed(double x, void Function(double) out) {
+    var v = x;
+    if (factor > 1) {
+      for (final st in _stages) {
+        // Round to Float32 between stages, matching the batch's in-place
+        // Float32List storage exactly.
+        v = _f32(st.step(v, _b0, _b1, _b2, _a1, _a2));
+      }
+    }
+    if (_phase == 0) out(v);
+    _phase = (_phase + 1) % factor;
+  }
+
+  static final Float32List _round = Float32List(1);
+  static double _f32(double v) {
+    _round[0] = v;
+    return _round[0];
+  }
+}
+
+class _BiquadState {
+  var x1 = 0.0, x2 = 0.0, y1 = 0.0, y2 = 0.0;
+
+  double step(
+    double xi,
+    double b0,
+    double b1,
+    double b2,
+    double a1,
+    double a2,
+  ) {
+    final yi = b0 * xi + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+    x2 = x1;
+    x1 = xi;
+    y2 = y1;
+    y1 = yi;
+    return yi;
+  }
+}
+
+/// A growable append-only Float32 buffer with COMPACTION: absolute indexing
+/// survives dropping the consumed head, so the streaming analyzer's rolling
+/// windows never hold more than the lookback they need.
+class _RollingF32 {
+  var _buf = Float32List(1 << 15);
+  var _base = 0; // absolute index of _buf[0]
+  var _len = 0; // absolute total appended
+
+  int get length => _len;
+
+  void add(double v) {
+    final local = _len - _base;
+    if (local >= _buf.length) {
+      final grown = Float32List(_buf.length * 2);
+      grown.setRange(0, local, _buf);
+      _buf = grown;
+    }
+    _buf[local] = v;
+    _len++;
+  }
+
+  /// Value at absolute index [i]; 0 outside `[base, len)` — the zero-pad
+  /// edge semantics of [_padSlice].
+  double at(int i) {
+    if (i < _base || i >= _len) return 0;
+    return _buf[i - _base];
+  }
+
+  /// Drops everything below absolute index [keepFrom] (clamped), compacting
+  /// the storage when the dead head has grown past a block.
+  void dropBelow(int keepFrom) {
+    final target = keepFrom.clamp(_base, _len);
+    final dead = target - _base;
+    if (dead < (1 << 14)) return;
+    final live = _len - target;
+    final next = Float32List(math.max(1 << 15, _nextPow2(live + (1 << 15))));
+    for (var i = 0; i < live; i++) {
+      next[i] = _buf[dead + i];
+    }
+    _buf = next;
+    _base = target;
+  }
+
+  static int _nextPow2(int v) {
+    var p = 1;
+    while (p < v) {
+      p <<= 1;
+    }
+    return p;
+  }
+
+  /// Zero-padded window copy; [maxLen] caps the readable length (indices at
+  /// or past it read 0 — the batch-equivalent signal length, see the
+  /// decimator tail note in [StreamingTakeAnalyzer]).
+  Float32List slice(int start, int count, int maxLen) {
+    final out = Float32List(count);
+    for (var i = 0; i < count; i++) {
+      final idx = start + i;
+      out[i] = idx >= maxLen ? 0 : at(idx);
+    }
+    return out;
+  }
+}
+
+/// WINDOWED streaming take analysis: feeds mono chunks, computes the
+/// spectrogram (optional) and the full [VoiceMetrics] without the whole-track
+/// buffer or the full decimated copies ever existing. The per-frame math IS
+/// [_MetricsPass] — the same code the batch [computeVoiceMetrics] runs — and
+/// the decimators reproduce [_decimate] bit-exactly, so the result is pinned
+/// bit-identical to the batch path by test (batch = the equality oracle).
+///
+/// Rolling lookback: raw needs `[fr*hop, fr*hop + fftSize)`, the decimated
+/// signals a centered window each — a frame is emitted the moment all three
+/// are available, and consumed head is dropped, so the resident set is a few
+/// windows regardless of take length.
+class StreamingTakeAnalyzer {
+  StreamingTakeAnalyzer(
+    this.sampleRate, {
+    this.fftSize = 2048,
+    this.hop = 512,
+    required int expectedFrames,
+    bool spectrogram = true,
+    double maxHz = 5000,
+  }) : _pass = _MetricsPass(
+         sampleRate,
+         fftSize: fftSize,
+         hop: hop,
+         capacityFrames: expectedFrames,
+       ),
+       _spectro = spectrogram
+           ? StreamingSpectrogramBuilder(
+               sampleRate,
+               fftSize: fftSize,
+               hop: hop,
+               maxHz: maxHz,
+             )
+           : null {
+    _dsDec = _StreamDecimator(_pass.dsFactor, sampleRate.toDouble());
+    _yinDec = _StreamDecimator(_pass.yinFactor, sampleRate.toDouble());
+  }
+
+  final int sampleRate;
+  final int fftSize;
+  final int hop;
+  final _MetricsPass _pass;
+  final StreamingSpectrogramBuilder? _spectro;
+  late final _StreamDecimator _dsDec;
+  late final _StreamDecimator _yinDec;
+  final _raw = _RollingF32();
+  final _ds = _RollingF32();
+  final _yin = _RollingF32();
+  var _nextFrame = 0;
+
+  /// Feeds the next chunk of mono samples.
+  void add(Float32List chunk) {
+    _pass.feedClip(chunk);
+    _spectro?.add(chunk);
+    for (var i = 0; i < chunk.length; i++) {
+      final s = chunk[i];
+      _raw.add(s);
+      _dsDec.feed(s, _ds.add);
+      _yinDec.feed(s, _yin.add);
+    }
+    _emitReady(flush: false);
+  }
+
+  void _emitReady({required bool flush}) {
+    final len = _raw.length;
+    // The frame count is fixed by the FINAL length; during feeding only
+    // frames whose inputs are complete may emit (they exist for any longer
+    // final length too).
+    final nFrames = len == 0
+        ? 0
+        : (len <= fftSize ? 1 : ((len - fftSize + hop - 1) ~/ hop) + 1);
+    while (_nextFrame < nFrames) {
+      final fr = _nextFrame;
+      final start = fr * hop;
+      final dsCenter = ((fr * hop + fftSize / 2) / _pass.dsFactor).round();
+      final yinCenter = ((fr * hop + fftSize / 2) / _pass.yinFactor).round();
+      // The BATCH decimated length is len over the factor (floored); the
+      // incremental decimator can be one provisional sample ahead when len
+      // is not a multiple of the factor. Readiness AND extraction cap at the
+      // batch-equivalent length, so a tail frame never reads a sample the
+      // batch would have zero-padded (bit-exactness at the edges).
+      final dsMax = len ~/ _pass.dsFactor;
+      final yinMax = _pass.yinFactor == 1 ? len : len ~/ _pass.yinFactor;
+      if (!flush) {
+        final rawReady = start + fftSize <= len;
+        final dsReady =
+            dsCenter - _pass.lpcWin ~/ 2 - 1 + _pass.lpcWin + 1 <= dsMax;
+        final yinReady = yinCenter - _pass.yinWin ~/ 2 + _pass.yinWin <= yinMax;
+        if (!rawReady || !dsReady || !yinReady) return;
+      }
+      _pass.emitFrame(
+        fr,
+        _raw.slice(start, fftSize, len),
+        _ds.slice(dsCenter - _pass.lpcWin ~/ 2 - 1, _pass.lpcWin + 1, dsMax),
+        _yin.slice(yinCenter - _pass.yinWin ~/ 2, _pass.yinWin, yinMax),
+      );
+      _nextFrame = fr + 1;
+      // Retain only what future frames can still reach.
+      final nextStart = _nextFrame * hop;
+      _raw.dropBelow(nextStart);
+      final nextDsCenter = ((_nextFrame * hop + fftSize / 2) / _pass.dsFactor)
+          .round();
+      _ds.dropBelow(nextDsCenter - _pass.lpcWin ~/ 2 - 1);
+      final nextYinCenter = ((_nextFrame * hop + fftSize / 2) / _pass.yinFactor)
+          .round();
+      _yin.dropBelow(nextYinCenter - _pass.yinWin ~/ 2);
+    }
+  }
+
+  /// Flushes the tail (frames whose windows extend past the end, zero-padded
+  /// exactly like the batch) and assembles the results.
+  ({VoiceMetrics metrics, Spectrogram? spectrogram}) finish() {
+    _emitReady(flush: true);
+    return (metrics: _pass.finish(), spectrogram: _spectro?.finish());
+  }
+}
+
+/// Computes per-frame voice-timbre metrics from mono [samples] — ring/SPR (F18),
+/// spectral tilt / alpha ratio (F19), cepstral peak prominence (F20) and the
+/// first three formants F1/F2/F3 (F17). Same framing as [computeSpectrogram].
+/// Pure + isolate-safe. See [VoiceMetrics] for the meaning of each curve.
+/// The per-frame math lives in [_MetricsPass], shared verbatim with the
+/// windowed [StreamingTakeAnalyzer] (this batch path doubles as its
+/// equality oracle).
+VoiceMetrics computeVoiceMetrics(
+  Float32List samples,
+  int sampleRate, {
+  int fftSize = 2048,
+  int hop = 512,
+}) {
+  // Match fftea's STFT framing exactly (computeSpectrogram uses STFT.run, which
+  // zero-pads and emits a trailing partial frame) so VoiceMetrics.frames ==
+  // Spectrogram.frames and the per-frame overlay/playhead stay aligned. The
+  // final frame is zero-padded past the end of [samples].
+  final len = samples.length;
+  final nFrames = len == 0
+      ? 0
+      : (len <= fftSize ? 1 : ((len - fftSize + hop - 1) ~/ hop) + 1);
+  final pass = _MetricsPass(
+    sampleRate,
+    fftSize: fftSize,
     hop: hop,
-    sampleRate: sampleRate,
-    ring: ring,
-    tilt: tilt,
-    cpp: cpp,
-    loudness: loudness,
-    f0: f0,
-    f1: f1,
-    f2: f2,
-    f3: f3,
-    h1h2: h1h2,
-    active: active,
-    ringAvg: rSum * inv,
-    tiltAvg: tSum * inv,
-    cppAvg: cSum * inv,
-    peakDbfs: peakDbfs,
-    clippedFraction: clippedFraction,
-    snrDb: snrDb,
+    capacityFrames: nFrames,
   );
+  pass.feedClip(samples);
+
+  // Whole-track decimated copies (the streaming path produces these
+  // incrementally with identical filter math; see StreamingTakeAnalyzer).
+  final ds = _decimate(samples, pass.dsFactor, sampleRate.toDouble());
+  final yinSig = pass.yinFactor == 1
+      ? samples
+      : _decimate(samples, pass.yinFactor, sampleRate.toDouble());
+
+  for (var fr = 0; fr < nFrames; fr++) {
+    final start = fr * hop;
+    final dsCenter = ((fr * hop + fftSize / 2) / pass.dsFactor).round();
+    final yinCenter = ((fr * hop + fftSize / 2) / pass.yinFactor).round();
+    pass.emitFrame(
+      fr,
+      _padSlice(samples, start, fftSize, len),
+      _padSlice(
+        ds,
+        dsCenter - pass.lpcWin ~/ 2 - 1,
+        pass.lpcWin + 1,
+        ds.length,
+      ),
+      _padSlice(
+        yinSig,
+        yinCenter - pass.yinWin ~/ 2,
+        pass.yinWin,
+        yinSig.length,
+      ),
+    );
+  }
+  return pass.finish();
 }
 
 // ---- F17 formant estimation (LPC) ---------------------------------------
@@ -767,12 +1127,32 @@ List<double> _lpcFormants(
 ) {
   if (ds.length < 2) return const [];
   final start = center - win ~/ 2;
+  return _lpcFormantsPadded(
+    _padSlice(ds, start - 1, win + 1, ds.length),
+    dsRate,
+    order,
+    win,
+    window,
+    preCoef,
+  );
+}
+
+/// [_lpcFormants] on a pre-extracted window: [padded] holds `win + 1`
+/// zero-padded samples whose FIRST value is the pre-emphasis lookback
+/// (`ds[start - 1]`). Shared by the batch and streaming metrics paths.
+List<double> _lpcFormantsPadded(
+  Float32List padded,
+  double dsRate,
+  int order,
+  int win,
+  Float64List window,
+  double preCoef,
+) {
   final frame = Float64List(win);
-  var prev = (start - 1 >= 0 && start - 1 < ds.length) ? ds[start - 1] : 0.0;
+  var prev = padded[0];
   var energy = 0.0;
   for (var i = 0; i < win; i++) {
-    final idx = start + i;
-    final s = (idx >= 0 && idx < ds.length) ? ds[idx] : 0.0;
+    final s = padded[1 + i];
     frame[i] = (s - preCoef * prev) * window[i];
     prev = s;
     energy += frame[i] * frame[i];
@@ -1082,23 +1462,6 @@ const double _voicedConfidence = 0.55;
     return (f0: double.nan, periodicity: periodicity);
   }
   return (f0: f0, periodicity: periodicity);
-}
-
-/// Extracts a [win]-sample frame from decimated signal [ds] centered at sample
-/// [center] (zero-padded at the edges) and runs [yinPitch] on it at [rate].
-({double f0, double periodicity}) _yinWindow(
-  Float32List ds,
-  double rate,
-  int center,
-  int win,
-) {
-  final frame = Float32List(win);
-  final start = center - win ~/ 2;
-  for (var i = 0; i < win; i++) {
-    final idx = start + i;
-    frame[i] = (idx >= 0 && idx < ds.length) ? ds[idx] : 0.0;
-  }
-  return yinPitch(frame, rate);
 }
 
 /// One live-analysis frame: the dB spectrogram column plus the per-frame voice

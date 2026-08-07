@@ -8,6 +8,22 @@ import 'package:vocara/ui/song_practice_detail/widgets/pitch_lane.dart';
 
 const _sr = 44100;
 
+/// Bitwise Float32List equality — NaN-safe (NaN != NaN under ==, but the
+/// streaming/batch contract is BIT-identical output, NaNs included).
+void _expectBitsEqual(Float32List a, Float32List b, String what) {
+  expect(a.length, b.length, reason: '$what length');
+  final ab = a.buffer.asUint32List(a.offsetInBytes, a.length);
+  final bb = b.buffer.asUint32List(b.offsetInBytes, b.length);
+  for (var i = 0; i < ab.length; i++) {
+    expect(ab[i], bb[i], reason: '$what[$i] bits');
+  }
+}
+
+void _expectScalarEqual(double a, double b, String what) {
+  if (a.isNaN && b.isNaN) return;
+  expect(a, b, reason: what);
+}
+
 /// Synthesizes a vowel: an impulse train at [f0] driven through three two-pole
 /// resonators at the given formant frequencies — a textbook source-filter vowel
 /// whose spectral envelope peaks at F1/F2/F3.
@@ -117,20 +133,99 @@ Float32List _vibratoTone(
   double rateHz,
   double extentCents, {
   double sec = 1.6,
+  int sr = _sr,
 }) {
-  final n = (_sr * sec).round();
+  final n = (sr * sec).round();
   final out = Float32List(n);
   var phase = 0.0;
   for (var i = 0; i < n; i++) {
-    final t = i / _sr;
+    final t = i / sr;
     final ratio = pow(2, (extentCents / 1200) * sin(2 * pi * rateHz * t));
-    phase += 2 * pi * f0 * ratio / _sr;
+    phase += 2 * pi * f0 * ratio / sr;
     out[i] = 0.6 * sin(phase) + 0.3 * sin(2 * phase) + 0.15 * sin(3 * phase);
   }
   return out;
 }
 
 void main() {
+  test('StreamingTakeAnalyzer equals computeVoiceMetrics BIT-FOR-BIT over '
+      'ragged chunk boundaries (batch is the oracle)', () {
+    // Same _MetricsPass body, decimators reproducing _decimate exactly,
+    // identical zero-pad edges — pinned here, NaNs compared by bits.
+    for (final (sr, seconds) in [(_sr, 1.2), (48000, 0.9), (22050, 0.7)]) {
+      final base = _vibratoTone(220, 5.5, 30, sec: seconds, sr: sr);
+      // Splice in silence and a noisy tail so voicing gates/NaN paths and
+      // the zero-padded final frame all exercise.
+      final n = base.length;
+      final samples = Float32List(n + 700);
+      samples.setRange(0, n, base);
+      final rng = Random(11);
+      for (var i = 0; i < 500; i++) {
+        samples[n + 200 + i] = (rng.nextDouble() - 0.5) * 0.02;
+      }
+      final batch = computeVoiceMetrics(samples, sr);
+
+      for (final chunkSizes in [
+        [samples.length],
+        [1, 313, 4097, samples.length - 1 - 313 - 4097],
+        List.filled(samples.length ~/ 777, 777) + [samples.length % 777],
+      ]) {
+        final an = StreamingTakeAnalyzer(
+          sr,
+          expectedFrames: batch.frames,
+          spectrogram: true,
+        );
+        var at = 0;
+        for (final c in chunkSizes) {
+          if (c == 0) continue;
+          an.add(Float32List.sublistView(samples, at, at + c));
+          at += c;
+        }
+        expect(at, samples.length, reason: 'fixture sanity');
+        final out = an.finish();
+        final m = out.metrics;
+        expect(m.frames, batch.frames, reason: 'sr=$sr frames');
+        _expectBitsEqual(m.ring, batch.ring, 'ring');
+        _expectBitsEqual(m.tilt, batch.tilt, 'tilt');
+        _expectBitsEqual(m.cpp, batch.cpp, 'cpp');
+        _expectBitsEqual(m.loudness, batch.loudness, 'loudness');
+        _expectBitsEqual(m.f0, batch.f0, 'f0');
+        _expectBitsEqual(m.f1, batch.f1, 'f1');
+        _expectBitsEqual(m.f2, batch.f2, 'f2');
+        _expectBitsEqual(m.f3, batch.f3, 'f3');
+        _expectBitsEqual(m.h1h2, batch.h1h2, 'h1h2');
+        expect(m.active, batch.active, reason: 'active');
+        _expectScalarEqual(m.ringAvg, batch.ringAvg, 'ringAvg');
+        _expectScalarEqual(m.tiltAvg, batch.tiltAvg, 'tiltAvg');
+        _expectScalarEqual(m.cppAvg, batch.cppAvg, 'cppAvg');
+        _expectScalarEqual(m.peakDbfs, batch.peakDbfs, 'peakDbfs');
+        _expectScalarEqual(
+          m.clippedFraction,
+          batch.clippedFraction,
+          'clippedFraction',
+        );
+        _expectScalarEqual(m.snrDb, batch.snrDb, 'snrDb');
+        // The bundled spectrogram equals the batch one too.
+        final spec = out.spectrogram!;
+        final bSpec = computeSpectrogram(samples, sr);
+        expect(spec.frames, bSpec.frames);
+        _expectBitsEqual(spec.db, bSpec.db, 'spectrogram db');
+      }
+    }
+
+    // Sub-fftSize and empty inputs match the batch edge semantics.
+    final tiny = Float32List(300);
+    for (var i = 0; i < 300; i++) {
+      tiny[i] = sin(i / 5) * 0.4;
+    }
+    final tb = computeVoiceMetrics(tiny, _sr);
+    final ta = StreamingTakeAnalyzer(_sr, expectedFrames: tb.frames)..add(tiny);
+    expect(ta.finish().metrics.frames, tb.frames);
+    final eb = computeVoiceMetrics(Float32List(0), _sr);
+    final ea = StreamingTakeAnalyzer(_sr, expectedFrames: 0);
+    expect(ea.finish().metrics.frames, eb.frames);
+  });
+
   test('formants land near a synthetic /a/ (F1~700, F2~1200)', () {
     final m = computeVoiceMetrics(_vowel(700, 1200, 2600), _sr);
     expect(_median(m.f1), inInclusiveRange(560, 860));
