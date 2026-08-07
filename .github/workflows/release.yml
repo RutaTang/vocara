@@ -121,13 +121,13 @@ jobs:
       # so the device run is the one that actually compiles the FFI surface.
       - name: Run Tests
         run: |
-          cargo test
-          cargo test --features device
+          cargo test --locked
+          cargo test --locked --features device
 
       # Lib targets only: tests/aec_path_jump.rs carries known pre-existing
       # style warnings, so --all-targets would be a false gate.
       - name: Clippy
-        run: cargo clippy --features device -- -D warnings
+        run: cargo clippy --locked --features device -- -D warnings
 
   # The UI-driven e2e journeys boot the full macOS app (TEST flavor, seeded
   # sandbox store). They take several minutes each, which is why plain CI

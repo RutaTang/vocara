@@ -16,7 +16,7 @@ cd "$CRATE"
 
 build_one() {
   local target="$1"
-  cargo build --release --features device --target "$target" >&2
+  cargo build --release --locked --features device --target "$target" >&2
   echo "$CRATE/target/$target/release/$LIB"
 }
 

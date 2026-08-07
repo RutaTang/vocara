@@ -39,7 +39,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: client/rust/vocara_engine
-      - run: cargo test --features device
+      - run: cargo test --locked --features device
 
   # The UI-driven e2e suites boot the full macOS app (TEST flavor, seeded
   # sandbox store) and take several minutes each, so they are manual-only:
