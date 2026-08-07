@@ -19,15 +19,16 @@ class MediaAnalysisService {
   /// as Float32 PCM and is copied again across the isolate boundaries (see
   /// [decodeMediaToMono]), so an unbounded input could exhaust memory.
   /// 10 minutes: takes and technique references are minutes long, and the
-  /// analysis pipeline's peak memory scales linearly with this. The legal
-  /// worst case at this cap is roughly 350 MB for computeBoth (the Float32
-  /// mono buffer + the decimation working copy at ~8 bytes/frame, plus the
-  /// spectrogram result, per-metric arrays, and the cross-isolate return
-  /// copy) — halved from ~700 MB by the Float32 sample-buffer migration
-  /// (sources are 16/24/32-bit integer or float32, all exactly representable;
-  /// windowed math still runs in doubles). Further reduction means windowed
-  /// streaming DSP, tracked separately. The previous 30-minute value predated
-  /// any memory budgeting.
+  /// analysis pipeline's peak memory scales linearly with this. MEASURED
+  /// (test/measure_analysis_peak_test.dart, RSS delta while computeBoth runs
+  /// on the max legal 10-minute 48 kHz float WAV): ≈ 400 MB — the Float32
+  /// mono buffer, the decimation working copies, the spectrogram result,
+  /// per-metric arrays, and the cross-isolate return copy together, roughly
+  /// half the pre-Float32 pipeline. The arbitrary-media path through the
+  /// NATIVE decoder adds its own staging copies (estimated ~450–480 MB;
+  /// unmeasurable in VM tests, which cannot load the engine framework).
+  /// Further reduction means windowed streaming DSP, tracked separately.
+  /// The previous 30-minute value predated any memory budgeting.
   static const Duration maxAnalysisDuration = Duration(minutes: 10);
 
   /// Decodes [path] and runs the complete analysis suite. Returns null when the
