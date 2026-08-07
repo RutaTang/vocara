@@ -1698,6 +1698,26 @@ pub extern "C" fn ve_tracks_add_pcm(
     .unwrap_or(-1)
 }
 
+/// Total streaming-source underruns across the live graph's tracks: frames a
+/// disk-streamed track had to render as silence because its ring was empty.
+/// 0 is the healthy steady state; a growing count on real hardware means the
+/// device callback outruns the ~10 ms feeder pump and the ring depth needs a
+/// bump. The offline suites prove bit-exactness; THIS is the field
+/// instrument.
+#[no_mangle]
+pub extern "C" fn ve_stream_xruns(e: *mut VeEngine) -> u64 {
+    with_engine(e, 0, |eng| {
+        eng.feeders
+            .lock()
+            .map(|set| {
+                set.iter()
+                    .map(|f| f.ctrl.xruns.load(std::sync::atomic::Ordering::Relaxed))
+                    .sum()
+            })
+            .unwrap_or(0)
+    })
+}
+
 /// Live volume/mute for a committed track (no rebuild) — A/B toggle, mute/solo, sliders.
 #[no_mangle]
 pub extern "C" fn ve_set_track_volume(

@@ -53,6 +53,9 @@ size_t ve_current_output_device(VeEngine *e, char *buf, size_t cap);
 /* Poll + clear pending device events (bit 1 = output lost, bit 2 = input lost,
  * bit 4 = mic opened WITHOUT echo cancellation). 0 = none. */
 uint32_t ve_poll_device_event(VeEngine *e);
+/* Total streaming-source underruns (frames rendered silent because a track ring was
+ * empty). 0 is healthy; growth on hardware means the feeder pump lags the callback. */
+uint64_t ve_stream_xruns(VeEngine *e);
 
 /* Live input + monitoring. The input stream is opened only while monitoring/recording. */
 /* Fill up to `cap` input devices into `out`; returns the total input device count. */

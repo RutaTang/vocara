@@ -99,7 +99,6 @@ pub struct StreamingSource {
     /// visible yet (the two pushes publish separately): finish adoption on
     /// the next pop.
     pending_fence: Option<u32>,
-    xrun: u64,
 }
 
 impl StreamingSource {
@@ -119,13 +118,12 @@ impl StreamingSource {
             ring_pos: 0,
             armed: false,
             pending_fence: None,
-            xrun: 0,
         }
     }
 
-    /// Underruns observed so far (ring empty when audio was needed).
+    /// Underruns observed so far (mirrors ctrl.xruns for tests).
     pub fn xruns(&self) -> u64 {
-        self.xrun
+        self.ctrl.xruns.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// True when `f` is a generation fence's FIRST frame (NaN left channel —
@@ -282,7 +280,11 @@ impl Node for StreamingSource {
                     out[o] = 0.0;
                     out[o + 1] = 0.0;
                     if self.rx.is_empty() && self.pending_fence.is_none() {
-                        self.xrun = self.xrun.wrapping_add(1);
+                        // Wait-free health signal, read via the ctrl by the
+                        // FFI aggregate (ve_stream_xruns).
+                        self.ctrl
+                            .xruns
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
             }

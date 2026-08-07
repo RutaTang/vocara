@@ -8,6 +8,7 @@ import 'package:flutter/foundation.dart';
 import '../../../data/services/app_settings_service.dart';
 import '../../../data/services/audio_edit_service.dart';
 import '../../../data/services/audio_file_service.dart';
+import '../../../data/services/diagnostics_log.dart';
 import '../../../data/services/graph_audio_playback_service.dart';
 import '../../../data/services/mic_permission.dart';
 import '../../../data/services/mic_recording_controller.dart';
@@ -636,6 +637,7 @@ class RecordingController extends ChangeNotifier {
   // Input-stall watchdog: macOS VPIO raises no device-loss event, so the device-watch also
   // treats a non-advancing input frame counter (while capturing) as a lost input.
   int _lastInputFrames = 0;
+  int _lastStreamXruns = 0;
   int _inputStallTicks = 0;
 
   /// Watch for lost audio devices and self-heal. The playhead is driven by the output stream's
@@ -651,6 +653,17 @@ class RecordingController extends ChangeNotifier {
       if (events & 1 != 0) {
         // Output lost: re-open the current output so transport doesn't freeze.
         engine.setOutputDevice(engine.currentOutputDevice());
+      }
+      // Streaming health: log underrun growth (never toast — brief silence
+      // already told the user; the log is for diagnosing feeder timing on
+      // real hardware, where offline bit-exactness can't reach).
+      final xruns = engine.streamXruns();
+      if (xruns > _lastStreamXruns) {
+        DiagnosticsLog.instance.log(
+          'engine',
+          'stream underruns grew to $xruns (+${xruns - _lastStreamXruns})',
+        );
+        _lastStreamXruns = xruns;
       }
       if (events & 4 != 0) {
         // The mic opened WITHOUT echo cancellation (VPIO negotiated

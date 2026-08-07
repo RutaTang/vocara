@@ -102,7 +102,8 @@ class VocaraEngineBindings {
         int Function(ffi.Pointer<VeEngine>, ffi.Pointer<ffi.Char>, int)
       >();
 
-  /// Poll + clear pending device events (bit 1 = output lost, bit 2 = input lost). 0 = none.
+  /// Poll + clear pending device events (bit 1 = output lost, bit 2 = input lost,
+  /// bit 4 = mic opened WITHOUT echo cancellation). 0 = none.
   int ve_poll_device_event(ffi.Pointer<VeEngine> e) {
     return _ve_poll_device_event(e);
   }
@@ -112,6 +113,19 @@ class VocaraEngineBindings {
         've_poll_device_event',
       );
   late final _ve_poll_device_event = _ve_poll_device_eventPtr
+      .asFunction<int Function(ffi.Pointer<VeEngine>)>();
+
+  /// Total streaming-source underruns (frames rendered silent because a track ring was
+  /// empty). 0 is healthy; growth on hardware means the feeder pump lags the callback.
+  int ve_stream_xruns(ffi.Pointer<VeEngine> e) {
+    return _ve_stream_xruns(e);
+  }
+
+  late final _ve_stream_xrunsPtr =
+      _lookup<ffi.NativeFunction<ffi.Uint64 Function(ffi.Pointer<VeEngine>)>>(
+        've_stream_xruns',
+      );
+  late final _ve_stream_xruns = _ve_stream_xrunsPtr
       .asFunction<int Function(ffi.Pointer<VeEngine>)>();
 
   /// Live input + monitoring. The input stream is opened only while monitoring/recording. */
@@ -1801,3 +1815,9 @@ const int VE_DECODE_OK = 0;
 const int VE_DECODE_ERR = -1;
 
 const int VE_DECODE_TOO_LONG = -2;
+
+const int VE_DECODE_TOO_BIG = -3;
+
+const int VE_DECODE_RATE_UNSUPPORTED = -4;
+
+const int VE_DECODE_IO = -5;

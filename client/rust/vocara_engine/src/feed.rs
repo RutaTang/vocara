@@ -43,6 +43,12 @@ pub struct StreamCtrl {
     /// the pre-wrap tail must still play out, so the node adopts the wrap's
     /// fence IN BAND when it reaches it.
     pub flush_seq: AtomicU32,
+    /// Underruns the RT node observed (ring empty when audio was needed) —
+    /// the streaming-health signal the FFI aggregates for the UI. Offline
+    /// equivalence is bit-exact; whether a REAL device's callback jitter
+    /// ever outruns the 10 ms pump is only observable on hardware, and this
+    /// counter is that instrument.
+    pub xruns: std::sync::atomic::AtomicU64,
 }
 
 impl StreamCtrl {
@@ -50,6 +56,7 @@ impl StreamCtrl {
         Arc::new(StreamCtrl {
             gen: AtomicU32::new(0),
             flush_seq: AtomicU32::new(0),
+            xruns: std::sync::atomic::AtomicU64::new(0),
         })
     }
 }

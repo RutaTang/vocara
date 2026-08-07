@@ -356,6 +356,12 @@ class GraphAudioPlaybackService implements PlaybackEngine {
   int pollDeviceEvents() =>
       _available ? _bindings.ve_poll_device_event(_engine) : 0;
 
+  /// Total streaming-source underruns (frames a disk-streamed track rendered
+  /// silent because its ring was empty). 0 is the healthy steady state; the
+  /// device watch logs growth — the field instrument for feeder health on
+  /// real hardware.
+  int streamXruns() => _available ? _bindings.ve_stream_xruns(_engine) : 0;
+
   /// Select the input device by UID (reopens the input stream live if monitoring). Returns true
   /// on success. No-op if the engine is down.
   bool setInputDevice(String uid) {
