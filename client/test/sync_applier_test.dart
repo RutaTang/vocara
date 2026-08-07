@@ -375,10 +375,44 @@ void main() {
       final parked = (await store.list()).single;
       expect(parked.reason, startsWith('dead-letter('));
       expect(parked.id, startsWith('deadletter'));
+      // Wide enough that two distinct dead letters cannot share a row: a
+      // collision here is silent LOSS, because the quarantine upsert compares
+      // hlc_packed and a dead letter's is usually empty, so the second would
+      // be dropped rather than stored.
+      expect(parked.id.length, greaterThan(24));
       // Never re-applied: the payload is deliberately not a SyncRow envelope.
       expect(() => SyncRow.decode(parked.payload), throwsFormatException);
     },
   );
+
+  test('two DIFFERENT dead letters park separately', () async {
+    // They key off a content digest, and the quarantine upsert resolves a
+    // (table, id) clash by hlc_packed — which a dead letter usually has none
+    // of, so a digest collision silently discarded the second record.
+    final store = QuarantineStore(db);
+    final parkingApplier = SyncApplier(
+      db,
+      HlcClock(node: _id('LOCAL'), now: () => 1000),
+      builder: SyncRowBuilder(db),
+      quarantine: store,
+    );
+    await parkingApplier.apply([
+      RemoteRecord(
+        table: 'practices',
+        columns: {...practice('X', 'first', hlc(910)).columns, 'id': ''},
+      ),
+    ]);
+    await parkingApplier.apply([
+      RemoteRecord(
+        table: 'practices',
+        columns: {...practice('Y', 'second', hlc(911)).columns, 'id': ''},
+      ),
+    ]);
+
+    final parked = await store.list();
+    expect(parked, hasLength(2));
+    expect(parked.map((q) => q.id).toSet(), hasLength(2));
+  });
 
   group('missing-column gate (full-row wire contract)', () {
     Future<String> hlcPackedOf(String id) async {

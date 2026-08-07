@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:crypto/crypto.dart';
 import 'package:drift/drift.dart';
 
 import '../db/app_database.dart';
@@ -566,13 +567,15 @@ class SyncApplier {
       'table': rec.table,
       'fields': safe,
     });
-    // FNV-1a over the payload: deterministic across runs (String.hashCode
-    // is not), so the same dead letter re-parks onto the same row.
-    var h = 0x811c9dc5;
-    for (final c in payload.codeUnits) {
-      h = ((h ^ c) * 0x01000193) & 0xFFFFFFFF;
-    }
-    return ('deadletter${h.toRadixString(16).padLeft(8, '0')}', payload);
+    // A content digest of the payload: deterministic across runs
+    // (String.hashCode is not), so the same dead letter re-parks onto the same
+    // row. Wide on purpose — the previous 32-bit FNV collided in a space small
+    // enough to reach, and a collision is SILENT DATA LOSS here: two distinct
+    // dead letters share a (table, id), and the quarantine upsert compares
+    // hlc_packed, which is usually '' for a dead letter, so the second is
+    // dropped rather than stored.
+    final digest = sha256.convert(utf8.encode(payload)).toString();
+    return ('deadletter${digest.substring(0, 32)}', payload);
   }
 
   /// Pre-commit sweep for rows that STILL violate a foreign key once the whole

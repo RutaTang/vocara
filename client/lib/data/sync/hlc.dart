@@ -155,30 +155,63 @@ class HlcClock {
   /// mint one stamp), and `'!'` (below the Crockford node alphabet) makes
   /// derived stamps recognizable and reserved on the wire.
   ///
-  /// The node cap guards the pathological regime only: a chain that somehow
-  /// re-derives dozens of times without an intervening real edit falls back
-  /// to the old counter bump rather than growing the key without bound —
-  /// accepting, in that unreachable corner, the narrow tie the extension
-  /// scheme otherwise closes.
+  /// At the chain's ceiling ([maxNodeSegments] segments) the derivation stays
+  /// in NODE space rather than bumping the counter. A counter bump leaves node
+  /// space entirely, so the derived stamp outranks any same-millisecond honest
+  /// write — exactly the tie the extension scheme exists to avoid — and the
+  /// wire's node grammar makes the ceiling unreachable without a chain of real
+  /// derivations anyway. Advancing the final segment keeps the stamp strictly
+  /// above its base and strictly below the next real edit, which is the whole
+  /// contract.
   static Hlc derived(Hlc base, String deviceNode) {
     final extended = '${base.node}!$deviceNode';
     if (extended.length <= maxNodeLength) {
       return Hlc(wallMs: base.wallMs, counter: base.counter, node: extended);
     }
-    var wall = base.wallMs;
-    var counter = base.counter + 1;
-    if (counter > maxCounter) {
-      wall += 1;
-      counter = 0;
-    }
-    return Hlc(wallMs: wall, counter: counter, node: '!$deviceNode');
+    return Hlc(
+      wallMs: base.wallMs,
+      counter: base.counter,
+      node: _advanceFinalSegment(base.node),
+    );
   }
 
+  /// [node] with its final segment replaced by its successor in the node
+  /// alphabet. [_nodeAlphabet] is listed in code-unit order AND the wire
+  /// grammar admits nothing outside it, so alphabet order is string order
+  /// here and no legal node sits between a segment and its successor.
+  static String _advanceFinalSegment(String node) {
+    final cut = node.lastIndexOf('!') + 1;
+    final chars = node.substring(cut).split('');
+    for (var i = chars.length - 1; i >= 0; i--) {
+      final next = _nodeAlphabet.indexOf(chars[i]) + 1;
+      if (next == 0) break; // not a segment character: see the throw below
+      if (next < _nodeAlphabet.length) {
+        chars[i] = _nodeAlphabet[next];
+        return node.substring(0, cut) + chars.join();
+      }
+      chars[i] = _nodeAlphabet[0]; // carry one character left
+    }
+    throw StateError('HlcClock: no derived stamp remains above node "$node"');
+  }
+
+  static const String _nodeAlphabet =
+      '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+
+  /// One node segment: a device id is a 26-character ULID, and every
+  /// derivation appends exactly one more.
+  static const int nodeSegmentLength = 26;
+
+  /// Longest derivation CHAIN a node may carry: the minting device plus 13
+  /// derived writes. Far beyond any real chain — the integrity fixpoint caps
+  /// at 8 passes per run — and bounded so a hostile stamp cannot bloat every
+  /// packed key it touches.
+  static const int maxNodeSegments = 14;
+
   /// Longest node the wire accepts (see [SyncRow.checkHlcConsistency]) and
-  /// the ceiling [derived] extends under: 26-char device ids plus a dozen
-  /// derivation segments, far beyond any real chain (the integrity fixpoint
-  /// caps at 8 passes).
-  static const int maxNodeLength = 384;
+  /// the ceiling [derived] extends under: [maxNodeSegments] segments joined
+  /// by '!'.
+  static const int maxNodeLength =
+      nodeSegmentLength * maxNodeSegments + (maxNodeSegments - 1);
 
   /// Maximum tolerated forward drift of a remote (or the local) clock.
   final int maxDriftMs;

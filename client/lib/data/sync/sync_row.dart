@@ -200,11 +200,20 @@ class SyncRow {
     }
   }
 
-  /// Node grammar: alphanumerics plus the reserved `'!'` separator derived
-  /// stamps extend with ([HlcClock.derived]). No dash — the packed encoding
-  /// uses it as the field separator — and nothing a path or SQL context
-  /// could misread.
-  static final RegExp _nodeShape = RegExp(r'^[0-9A-Za-z!]+$');
+  /// Node grammar: a DERIVATION CHAIN — the minting device's 26-character id,
+  /// then one `'!'`-joined segment per derived write ([HlcClock.derived]).
+  /// Pinning the segment WIDTH, not just the alphabet, is what keeps the
+  /// node-space derivation available: an arbitrary blob one character below
+  /// the ceiling would force every stamp derived from it into the ceiling
+  /// rule. Deliberately a SUPERSET of the Crockford alphabet ids are minted
+  /// from, like [_idShape] — the wire depends on the shape, and only the mint
+  /// needs the exact alphabet. No dash: the packed encoding uses it as the
+  /// field separator.
+  static final RegExp _nodeShape = RegExp(
+    '^[0-9A-Za-z]{${HlcClock.nodeSegmentLength}}'
+    '(?:![0-9A-Za-z]{${HlcClock.nodeSegmentLength}})*'
+    r'$',
+  );
 
   /// The envelope every entity id on the wire must fit: 1–64 characters of
   /// `[0-9A-Za-z_-]`. This is a SECURITY gate, not a style check: ids become

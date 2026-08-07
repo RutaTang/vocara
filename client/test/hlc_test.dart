@@ -94,15 +94,41 @@ void main() {
       expect(Hlc.parse(d.packed), d);
     });
 
-    test('falls back to the counter bump only past the node-length cap', () {
+    test('at the chain ceiling it stays in NODE space instead of bumping the '
+        'counter past an honest same-millisecond write', () {
       var d = base;
       while (d.node.length + device.length + 1 <= HlcClock.maxNodeLength) {
         d = HlcClock.derived(d, device);
         expect(d.counter, base.counter);
       }
       final over = HlcClock.derived(d, device);
-      expect(over.counter, base.counter + 1, reason: 'documented fallback');
+
+      // A counter bump would leave node space entirely and outrank every
+      // same-millisecond honest write — the exact tie the extension scheme
+      // exists to avoid.
+      expect(over.counter, base.counter, reason: 'no counter bump');
+      expect(over.wallMs, base.wallMs);
       expect(over.node.length <= HlcClock.maxNodeLength, isTrue);
+      // Still strictly above its base…
+      expect(over.compareTo(d) > 0, isTrue);
+      // …and still strictly below a real next edit at the same wall clock.
+      final realEdit = Hlc(
+        wallMs: base.wallMs,
+        counter: base.counter + 1,
+        node: device,
+      );
+      expect(over.compareTo(realEdit) < 0, isTrue);
+    });
+
+    test('a further derivation at the ceiling keeps advancing', () {
+      var d = base;
+      while (d.node.length + device.length + 1 <= HlcClock.maxNodeLength) {
+        d = HlcClock.derived(d, device);
+      }
+      final first = HlcClock.derived(d, device);
+      final second = HlcClock.derived(first, device);
+      expect(second.compareTo(first) > 0, isTrue);
+      expect(second.counter, base.counter);
     });
   });
 
