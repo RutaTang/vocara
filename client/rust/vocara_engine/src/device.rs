@@ -2926,6 +2926,26 @@ mod out_resampler_tests {
     }
 
     #[test]
+    fn a_degenerate_loop_request_is_clamped_and_still_maps_exactly() {
+        let (h, mut res) = ramp_engine();
+        // A 10-frame loop request is clamped to MIN_LOOP_FRAMES (256):
+        // unclamped, one render block wraps dozens of times and overwrites
+        // the whole segment ring inside the mapping window, detaching the
+        // playhead from the consumed cursor. Clamped to [200, 456), the 480
+        // consumed frames are 256 to the wrap plus 224 after it.
+        h.set_loop(true, 200, 210);
+        h.seek(200);
+        h.play();
+        let mut out = vec![0.0; 441 * CHANNELS];
+        res.process(&mut out, 441);
+        let frame = h.frame();
+        assert!(
+            (423..=424).contains(&frame),
+            "clamped-loop playhead must map exactly (~200 + 480 - 256), got {frame}"
+        );
+    }
+
+    #[test]
     fn loop_wrap_never_reports_a_position_before_the_loop_start() {
         let (h, mut res) = ramp_engine();
         // Loop [200, 680): consuming 480 engine frames from 200 lands exactly on the wrap.

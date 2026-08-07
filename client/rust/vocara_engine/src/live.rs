@@ -35,9 +35,22 @@ struct RenderSegment {
 
 /// Segment-ring capacity. The consumed cursor only ever lags the render
 /// counter by the output FIFO (a handful of render blocks), so the mapping
-/// scans recent slots only; 64 covers the deepest in-flight window (an 8 kHz
-/// device, step 6) with an order of magnitude to spare.
-const SEG_RING: usize = 64;
+/// scans recent slots only. Every loop wrap ends a segment, so the shortest
+/// wrap distance bounds how fast the ring recycles: with loops clamped to
+/// [`MIN_LOOP_FRAMES`], 128 slots cover at least 128 × 256 = 32768 frames of
+/// in-flight window — an order of magnitude past the deepest device buffer
+/// plus FIFO lag (a 4096-frame VPIO slice twice over is ~8k frames).
+const SEG_RING: usize = 128;
+
+/// Shortest loop the engine honors, in frames (~5 ms at engine rate). The
+/// FFI boundary would happily accept a 10-frame loop; it has no musical
+/// meaning, but one render block then wraps dozens of times, each wrap
+/// pushing a segment, and the segment ring gets overwritten inside the very
+/// window the consumed-cursor mapping still needs — the playhead detaches
+/// from what the listener hears. Clamping the loop length bounds
+/// wraps-per-block so the ring always covers the in-flight window. An end at
+/// or before start still means "no active loop", exactly as before.
+pub const MIN_LOOP_FRAMES: i64 = 256;
 
 /// Transport state shared between the control and audio threads.
 pub struct Shared {
@@ -565,10 +578,15 @@ impl EngineHandle {
         self.shared.out_flush.fetch_add(1, Ordering::Release);
     }
     pub fn set_loop(&self, enabled: bool, start: i64, end: i64) {
-        self.shared
-            .loop_start
-            .store(start.max(0), Ordering::Relaxed);
-        self.shared.loop_end.store(end.max(0), Ordering::Relaxed);
+        let start = start.max(0);
+        let mut end = end.max(0);
+        // Degenerate-length loops are clamped (see MIN_LOOP_FRAMES); an
+        // end at or before start keeps meaning "no active loop".
+        if end > start && end - start < MIN_LOOP_FRAMES {
+            end = start + MIN_LOOP_FRAMES;
+        }
+        self.shared.loop_start.store(start, Ordering::Relaxed);
+        self.shared.loop_end.store(end, Ordering::Relaxed);
         self.shared.loop_enabled.store(enabled, Ordering::Release);
     }
 
