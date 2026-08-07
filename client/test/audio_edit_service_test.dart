@@ -267,15 +267,15 @@ void main() {
     expect(wavCompatibleForMerge(maskFront, maskFront), isTrue);
   });
 
-  test('ensureStreamableWav passes an uncompressed WAV through untouched '
-      '(no re-encode, no copy)', () async {
+  test('ensureStreamableWav passes an ENGINE-RATE canonical WAV through '
+      'untouched (no re-encode, no copy)', () async {
     final dir = await Directory.systemTemp.createTemp('vocara_streamable');
     addTearDown(() => dir.delete(recursive: true));
     final tone = Float64List.fromList([
       for (var i = 0; i < 400; i++) (i % 50) / 50 - 0.5,
     ]);
     final src = '${dir.path}/take.wav';
-    await File(src).writeAsBytes(writeWavMono(tone, 44100));
+    await File(src).writeAsBytes(writeWavMono(tone, 48000));
     final before = await File(src).length();
 
     final edit = AudioEditService(files: _TempFiles(dir));
@@ -283,10 +283,51 @@ void main() {
       practiceId: 'P0000000000000000000000000',
       path: src,
     );
-    expect(out, src, reason: 'a WAV is already streamable');
+    expect(out, src, reason: 'a canonical engine-rate WAV is streamable');
     expect(await File(src).length(), before, reason: 'byte-identical');
     // The transcode branch itself needs the native engine (integration
     // coverage); the WAV passthrough is the decision this test pins.
+  });
+
+  test('isEngineStreamableWav mirrors the native feeder admission '
+      '(WavTrackReader::open) — the two rules must not drift', () async {
+    // Vectors matched by the engine's feed tests: only a canonical 44-byte
+    // header at the engine rate with 1-2 PCM16/f32 channels streams from
+    // disk; everything else must be transcoded at import or it silently
+    // falls back to the full-decode RAM path.
+    final dir = await Directory.systemTemp.createTemp('vocara_streamable_adm');
+    addTearDown(() => dir.delete(recursive: true));
+    final tone = Float64List.fromList([
+      for (var i = 0; i < 64; i++) (i % 16) / 16 - 0.5,
+    ]);
+    Future<bool> judge(String name, List<int> bytes) async {
+      final path = '${dir.path}/$name';
+      await File(path).writeAsBytes(bytes);
+      return AudioEditService.isEngineStreamableWav(path);
+    }
+
+    expect(await judge('ok48k.wav', writeWavMono(tone, 48000)), isTrue);
+    expect(
+      await judge('cd44k.wav', writeWavMono(tone, 44100)),
+      isFalse,
+      reason: '44.1 kHz is not the engine rate',
+    );
+    expect(
+      await judge(
+        'ext.wav',
+        _extensibleWavPcm16(Int16List.fromList(List.filled(64, 100)), 48000),
+      ),
+      isFalse,
+      reason: 'EXTENSIBLE fmt is not the canonical 44-byte layout',
+    );
+    // PCM24: canonical layout but a sample format the feeder refuses.
+    final pcm24 = writeWavMono(tone, 48000);
+    pcm24[34] = 24; // bitsPerSample 16 -> 24
+    expect(
+      await judge('pcm24.wav', pcm24),
+      isFalse,
+      reason: 'PCM24 is not PCM16/float32',
+    );
   });
 
   test('splitWav/concatWav reject a compressed (ADPCM) WAV instead of '

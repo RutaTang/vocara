@@ -658,11 +658,12 @@ class AudioEditService {
 
   /// Industry-standard import discipline: media becomes an engine-streamable
   /// WAV ONCE, at import — never decoded-in-full again at every project open.
-  /// Returns [path] unchanged when it is already an uncompressed WAV;
-  /// otherwise transcodes it to an engine-rate float WAV (via the punch
-  /// engine's streamed, transactional split-0 path — output streams to disk,
-  /// lands atomically, and the decode budgets apply) and returns the NEW
-  /// path. The caller owns deleting the original compressed copy.
+  /// Returns [path] unchanged when the native feeder can stream it from disk
+  /// as-is (see [isEngineStreamableWav]); otherwise transcodes it to an
+  /// engine-rate float WAV (via the punch engine's streamed, transactional
+  /// split-0 path — output streams to disk, lands atomically, and the decode
+  /// budgets apply) and returns the NEW path. The caller owns deleting the
+  /// original compressed copy.
   ///
   /// This is P0 of the disk-streaming migration (docs/audio-streaming-plan):
   /// once every track is engine-rate WAV, playback can move from full-RAM
@@ -671,7 +672,7 @@ class AudioEditService {
     required String practiceId,
     required String path,
   }) async {
-    if (_parseWavAtPath(path) != null) return path;
+    if (await isEngineStreamableWav(path)) return path;
     final out = await punchIn(
       practiceId: practiceId,
       // split == 0 keeps nothing of old and never reads it (pinned by test);
@@ -686,6 +687,23 @@ class AudioEditService {
       );
     }
     return out;
+  }
+
+  /// Whether the native feeder (`WavTrackReader::open` in feed.rs) can stream
+  /// this file from disk: canonical 44-byte header (16-byte `fmt ` followed
+  /// immediately by `data`), PCM16 or float32, 1-2 channels, engine rate.
+  /// This MUST mirror the Rust admission exactly — the old check accepted ANY
+  /// uncompressed WAV (44.1 kHz, EXTENSIBLE, PCM24, extra chunks), so those
+  /// imports skipped the transcode, the feeder then refused them at commit,
+  /// and the track silently fell back to the full-decode RAM path with none
+  /// of the streaming migration's benefit. Pinned by mirrored test vectors
+  /// here and in the engine's feed tests.
+  static Future<bool> isEngineStreamableWav(String path) async {
+    final probe = await AudioFileService.probeWav(File(path));
+    if (probe == null) return false;
+    return probe.sampleRate == _engineRate &&
+        probe.channels >= 1 &&
+        probe.channels <= 2;
   }
 
   /// Punch-in splice: produces a new WAV = `old[0..splitMs] ++ new`, where

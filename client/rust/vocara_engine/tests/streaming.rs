@@ -248,3 +248,57 @@ fn starvation_produces_counted_silence_and_self_heals() {
     );
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn reader_admission_mirrors_the_dart_import_gate() {
+    // Vectors matched by isEngineStreamableWav (audio_edit_service.dart):
+    // only a canonical 44-byte header at the engine rate with 1-2 PCM16/f32
+    // channels streams from disk. If the two rules drift, Dart skips the
+    // import transcode for a file this reader then refuses at commit, and
+    // the track silently falls back to the full-decode RAM path.
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let write = |name: &str, bytes: &[u8]| {
+        let p = dir.join(format!("vocara_adm_{pid}_{name}.wav"));
+        std::fs::write(&p, bytes).unwrap();
+        p
+    };
+    let admitted = |p: &std::path::Path| WavTrackReader::open(p.to_str().unwrap()).is_ok();
+
+    let ok = dir.join(format!("vocara_adm_{pid}_ok.wav"));
+    write_wav_f32(&ok, &ramp_pcm(64), CHANNELS as u16, 48_000).unwrap();
+    assert!(admitted(&ok), "canonical 48 kHz stereo f32 must stream");
+    let canonical = std::fs::read(&ok).unwrap();
+
+    let cd = dir.join(format!("vocara_adm_{pid}_cd.wav"));
+    write_wav_f32(&cd, &ramp_pcm(64), CHANNELS as u16, 44_100).unwrap();
+    assert!(!admitted(&cd), "44.1 kHz is not the engine rate");
+
+    let quad = dir.join(format!("vocara_adm_{pid}_quad.wav"));
+    write_wav_f32(&quad, &ramp_pcm(64), 4, 48_000).unwrap();
+    assert!(!admitted(&quad), "more than 2 channels is refused");
+
+    // PCM24: canonical layout, refused sample format.
+    let mut pcm24 = canonical.clone();
+    pcm24[20] = 1; // format: float -> integer PCM
+    pcm24[34] = 24; // bits: 32 -> 24
+    assert!(!admitted(&write("pcm24", &pcm24)), "PCM24 is refused");
+
+    // A chunk between fmt and data breaks the canonical 44-byte layout.
+    let mut chunked = Vec::with_capacity(canonical.len() + 12);
+    chunked.extend_from_slice(&canonical[..36]);
+    chunked.extend_from_slice(b"JUNK");
+    chunked.extend_from_slice(&4u32.to_le_bytes());
+    chunked.extend_from_slice(&[0; 4]);
+    chunked.extend_from_slice(&canonical[36..]);
+    let riff = u32::from_le_bytes(canonical[4..8].try_into().unwrap()) + 12;
+    chunked[4..8].copy_from_slice(&riff.to_le_bytes());
+    assert!(
+        !admitted(&write("junk", &chunked)),
+        "extra chunks between fmt and data are refused"
+    );
+
+    for p in [ok, cd, quad] {
+        let _ = std::fs::remove_file(p);
+    }
+}
