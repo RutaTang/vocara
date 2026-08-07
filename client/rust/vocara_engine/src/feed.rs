@@ -28,7 +28,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
-use crate::live::EngineHandle;
+use crate::live::Shared;
 use crate::ring::Producer;
 use crate::sample::{Smp, CHANNELS};
 
@@ -250,8 +250,8 @@ impl TrackFeeder {
     /// Re-plan from the CURRENT transport position after a DISCARDING
     /// discontinuity (flush / loop-param / play state change): bump
     /// flush_seq so the node discards to this fence, then start the run.
-    fn replan(&mut self, h: &EngineHandle, basis: PlanBasis) {
-        let pos = h.frame().max(0);
+    fn replan(&mut self, t: &Shared, basis: PlanBasis) {
+        let pos = t.playhead().max(0);
         let next_gen = self.generation.wrapping_add(1);
         self.basis = Some(basis);
         self.run_end = if basis.loop_on && basis.le > basis.ls && pos < basis.le {
@@ -274,8 +274,7 @@ impl TrackFeeder {
     /// Top the ring up. Returns Err only on unreadable file (the caller
     /// tears the streaming source down; playback degrades to silence for
     /// this track rather than corrupting anything).
-    pub fn pump(&mut self, h: &EngineHandle) -> Result<(), String> {
-        let t = h.transport();
+    pub fn pump(&mut self, t: &Shared) -> Result<(), String> {
         let basis = PlanBasis {
             flush_gen: t.out_flush_gen(),
             playing: t.is_playing(),
@@ -284,7 +283,7 @@ impl TrackFeeder {
             le: t.loop_end(),
         };
         if self.basis != Some(basis) {
-            self.replan(h, basis);
+            self.replan(t, basis);
         }
         if !basis.playing {
             return Ok(()); // paused: hold the plan; play() bumps flush_gen
@@ -295,7 +294,7 @@ impl TrackFeeder {
         // position with an in-band fence instead (no flush_seq — nothing in
         // the ring needs discarding; it is empty by definition of having
         // starved).
-        let pos = h.frame().max(0);
+        let pos = t.playhead().max(0);
         if pos > self.next_tl && self.run_end != i64::MAX && pos >= self.run_end {
             // The transport also wrapped meanwhile; realign the run first.
             self.next_tl = self.run_end;

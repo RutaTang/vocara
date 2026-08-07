@@ -63,7 +63,7 @@ fn render_streamed(
 ) -> Vec<Smp> {
     let mut out = vec![0.0; blocks * BLOCK * CHANNELS];
     for b in 0..blocks {
-        feeder.pump(h).unwrap();
+        feeder.pump(h.transport()).unwrap();
         let s = b * BLOCK * CHANNELS;
         let e = s + BLOCK * CHANNELS;
         unsafe { rt.render(&mut out[s..e], BLOCK) };
@@ -164,6 +164,40 @@ fn a_loop_wrap_streams_seamlessly_via_the_wrap_fence() {
 }
 
 #[test]
+fn a_streamed_track_through_the_full_project_graph_equals_the_arc_build() {
+    // Wiring-level: the streaming source must behave identically inside the
+    // REAL track chain (vocal insert chain, gains, master) that
+    // ve_tracks_commit builds — not just as a bare node.
+    use vocara_engine::build::{build, ProjectSpec, TrackSpec};
+    let frames = 4096;
+    let path = write_track(frames);
+
+    let ctrl = StreamCtrl::new();
+    let (prod, cons) = spsc::<[Smp; CHANNELS]>(8192);
+    let reader = WavTrackReader::open(path.to_str().unwrap()).unwrap();
+    let len = reader.frames;
+    let streamed_node = StreamingSource::new(Arc::clone(&ctrl), cons, 0, len);
+    let mut feeder = TrackFeeder::new(ctrl, prod, reader, 0);
+
+    let mk = |source: Box<dyn vocara_engine::node::Node + Send>| {
+        let desc = build(ProjectSpec::new(vec![TrackSpec::backing(1, source)]));
+        let g = desc.compile(ENGINE_SR, BLOCK).unwrap();
+        let (_p, mic) = spsc::<[Smp; CHANNELS]>(256);
+        let (h, rt) = spawn(g, HashMap::new(), mic, 256);
+        (h, RtCell::new(rt))
+    };
+    let (h1, rt1) = mk(Box::new(streamed_node));
+    h1.play();
+    let streamed = render_streamed(&h1, &rt1, &mut feeder, 30);
+
+    let (h2, rt2) = mk(Box::new(BufferSource::new(ramp_pcm(frames), 0)));
+    h2.play();
+    let arc = render_arc(&h2, &rt2, 30);
+    assert_eq!(streamed, arc, "full-graph streamed render must match");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
 fn out_of_span_positions_are_silent_without_consuming_the_ring() {
     let frames = 512;
     let path = write_track(frames);
@@ -183,7 +217,7 @@ fn starvation_produces_counted_silence_and_self_heals() {
     h.play();
     // Prime once, then render MORE than the ring holds without pumping:
     // the tail of the window starves.
-    feeder.pump(&h).unwrap();
+    feeder.pump(h.transport()).unwrap();
     let mut out = vec![0.0; 30 * BLOCK * CHANNELS];
     unsafe { rt.render(&mut out, 30 * BLOCK) };
     rt.transport().sync_consumed_to_rendered();

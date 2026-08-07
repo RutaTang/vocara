@@ -191,6 +191,22 @@ impl Shared {
         self.out_flush.load(Ordering::Acquire)
     }
 
+    /// The audible playhead (see [`EngineHandle::frame`], which delegates
+    /// here): a pending seek reports its target; paused holds the fold;
+    /// playing maps the consumed cursor. Also the position source for the
+    /// streaming feeders, which only hold a [`Shared`].
+    pub fn playhead(&self) -> i64 {
+        let seek = self.seek_req.load(Ordering::Acquire);
+        if seek >= 0 {
+            return seek;
+        }
+        if !self.playing.load(Ordering::Acquire) {
+            return self.frame.load(Ordering::Acquire);
+        }
+        self.map_consumed()
+            .unwrap_or_else(|| self.frame.load(Ordering::Acquire))
+    }
+
     // Plan-basis reads for the streaming feeders (crate::feed): a change in
     // any of these is a plan discontinuity.
     pub fn is_playing(&self) -> bool {
@@ -483,6 +499,12 @@ impl EngineHandle {
         &self.shared
     }
 
+    /// The transport Arc itself — for the feeder pump thread, which outlives
+    /// any single borrow of the handle.
+    pub fn shared_arc(&self) -> &Arc<Shared> {
+        &self.shared
+    }
+
     pub fn play(&self) {
         // IDEMPOTENT: only a genuine stopped→playing transition acts. A repeated play()
         // while already playing would run the flush below against LIVE audio sitting in
@@ -571,16 +593,7 @@ impl EngineHandle {
     /// clock holds the fold pause() latched. Before anything has ever been
     /// delivered, the render clock is the only truth there is.
     pub fn frame(&self) -> i64 {
-        let seek = self.shared.seek_req.load(Ordering::Acquire);
-        if seek >= 0 {
-            return seek;
-        }
-        if !self.shared.playing.load(Ordering::Acquire) {
-            return self.shared.frame.load(Ordering::Acquire);
-        }
-        self.shared
-            .map_consumed()
-            .unwrap_or_else(|| self.shared.frame.load(Ordering::Acquire))
+        self.shared.playhead()
     }
     pub fn sample_rate(&self) -> f64 {
         self.sr

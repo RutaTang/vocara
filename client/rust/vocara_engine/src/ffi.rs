@@ -55,6 +55,10 @@ struct PendingTrack {
     /// Cache key (the source file path), so the commit can evict cache entries whose
     /// paths are not in the newly-committed graph.
     path: String,
+    /// True: the path is a canonical engine-rate WAV — the commit builds a
+    /// disk-STREAMING source (a small ring; RAM independent of length) and
+    /// `pcm` stays empty. False: the decoded-Arc fallback (foreign files).
+    stream: bool,
     pcm: Arc<[Smp]>,
     start_frame: i64,
     gain: f32,
@@ -149,6 +153,46 @@ pub struct VeEngine {
     gr_meters: Vec<Option<Arc<AtomicU32>>>,
     // Per committed FX bus: the bus compressor's gain-reduction meter.
     bus_gr_meters: Vec<Option<Arc<AtomicU32>>>,
+    /// Streaming-track feeders for the LIVE graph (swapped whole on commit).
+    /// Pumped by [`VeEngine::ensure_feeder_thread`]'s thread every ~10 ms;
+    /// a pump error (unreadable file) drops that feeder — its track
+    /// degrades to counted-underrun silence, never corruption.
+    feeders: Arc<std::sync::Mutex<Vec<crate::feed::TrackFeeder>>>,
+    feeder_stop: Arc<std::sync::atomic::AtomicBool>,
+    feeder_join: Option<std::thread::JoinHandle<()>>,
+}
+
+impl VeEngine {
+    /// Spawns the feeder pump thread once (idempotent). The thread holds
+    /// only the transport Arc and the feeder set; it exits when
+    /// [`feeder_stop`] flips at engine destruction.
+    fn ensure_feeder_thread(&mut self) {
+        if self.feeder_join.is_some() {
+            return;
+        }
+        let feeders = Arc::clone(&self.feeders);
+        let stop = Arc::clone(&self.feeder_stop);
+        let transport = Arc::clone(self.handle.shared_arc());
+        self.feeder_join = Some(std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::Acquire) {
+                {
+                    let mut set = feeders.lock().unwrap();
+                    set.retain_mut(|f| f.pump(&transport).is_ok());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }));
+    }
+}
+
+impl Drop for VeEngine {
+    fn drop(&mut self) {
+        self.feeder_stop
+            .store(true, std::sync::atomic::Ordering::Release);
+        if let Some(j) = self.feeder_join.take() {
+            let _ = j.join();
+        }
+    }
 }
 
 const MAX_BLOCK: usize = 1024;
@@ -329,6 +373,9 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
             track_gain_nodes: Vec::new(),
             gr_meters: Vec::new(),
             bus_gr_meters: Vec::new(),
+            feeders: Arc::new(std::sync::Mutex::new(Vec::new())),
+            feeder_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            feeder_join: None,
         })))
     });
     match built {
@@ -1041,6 +1088,28 @@ pub extern "C" fn ve_tracks_add(
         let rate = eng.handle.sample_rate();
         eng.cache_seq += 1;
         let seq = eng.cache_seq;
+        // STREAMING fast path: a canonical engine-rate WAV (every take and
+        // every transcoded import) needs no decode and no PCM cache at all —
+        // the commit builds a disk-streaming source over the file itself.
+        // The header probe is a handful of small reads on this thread,
+        // cheaper than the freshness stat below.
+        if crate::feed::WavTrackReader::open(path).is_ok() {
+            let start_frame = (start_ms as f64 * rate / 1000.0) as i64;
+            let idx = eng.pending.len() as c_int;
+            eng.pending.push(PendingTrack {
+                path: path.to_string(),
+                stream: true,
+                pcm: Arc::from(Vec::new()),
+                start_frame,
+                gain,
+                muted: muted != 0,
+                vocal: is_vocal != 0,
+                bus,
+                chain: Vec::new(),
+                sends: Vec::new(),
+            });
+            return idx;
+        }
         // Freshness-checked lookup: a path whose file changed on disk since it was cached
         // (re-rendered/re-recorded under a reused name) counts as a MISS, so the caller
         // decodes the NEW content instead of silently re-staging the stale samples. The
@@ -1054,6 +1123,7 @@ pub extern "C" fn ve_tracks_add(
         let idx = eng.pending.len() as c_int;
         eng.pending.push(PendingTrack {
             path: path.to_string(),
+            stream: false,
             pcm,
             start_frame,
             gain,
@@ -1074,6 +1144,7 @@ pub extern "C" fn ve_tracks_add(
 pub extern "C" fn ve_tracks_commit(e: *mut VeEngine) -> c_int {
     with_engine(e, -1, |eng| {
         let rate = eng.handle.sample_rate();
+        let mut new_feeders: Vec<crate::feed::TrackFeeder> = Vec::new();
 
         // FX buses first, so a track can route into one by index. Each bus gets a
         // gain-reduction meter; effect params are pushed after commit.
@@ -1147,9 +1218,37 @@ pub extern "C" fn ve_tracks_commit(e: *mut VeEngine) -> c_int {
             } else {
                 Vec::new()
             };
+            // File-backed tracks stream from disk (a ~16k-frame ring each);
+            // foreign files keep the decoded-Arc source. A streamable path
+            // that fails to reopen here degrades to a silent track rather
+            // than failing the whole commit (the file vanished mid-commit).
+            let source: Box<dyn crate::node::Node + Send> = if pt.stream {
+                match crate::feed::WavTrackReader::open(&pt.path) {
+                    Ok(reader) => {
+                        let ctrl = crate::feed::StreamCtrl::new();
+                        let (prod, cons) = crate::ring::spsc::<[Smp; CHANNELS]>(16384);
+                        let len = reader.frames;
+                        new_feeders.push(crate::feed::TrackFeeder::new(
+                            Arc::clone(&ctrl),
+                            prod,
+                            reader,
+                            pt.start_frame,
+                        ));
+                        Box::new(crate::source::StreamingSource::new(
+                            ctrl,
+                            cons,
+                            pt.start_frame,
+                            len,
+                        ))
+                    }
+                    Err(_) => Box::new(BufferSource::from_arc(pt.pcm.clone(), pt.start_frame)),
+                }
+            } else {
+                Box::new(BufferSource::from_arc(pt.pcm.clone(), pt.start_frame))
+            };
             specs.push(TrackSpec {
                 id: (i + 1) as u32,
-                source: Box::new(BufferSource::from_arc(pt.pcm.clone(), pt.start_frame)),
+                source,
                 vocal: pt.vocal,
                 gain: if pt.muted { 0.0 } else { pt.gain },
                 pan: 0.0,
@@ -1168,7 +1267,23 @@ pub extern "C" fn ve_tracks_commit(e: *mut VeEngine) -> c_int {
             Ok(g) => g,
             Err(_) => return -1,
         };
+        // Prime every new stream ring BEFORE the graph goes live, so the
+        // first rendered block finds audio, not a cold ring.
+        let transport = Arc::clone(eng.handle.shared_arc());
+        for f in &mut new_feeders {
+            let _ = f.pump(&transport);
+        }
         eng.handle.publish_graph(graph);
+        // Swap the feeder set; the pump thread exists only while needed.
+        {
+            let mut feeders = eng.feeders.lock().unwrap();
+            *feeders = new_feeders;
+            let active = !feeders.is_empty();
+            drop(feeders);
+            if active {
+                eng.ensure_feeder_thread();
+            }
+        }
         eng.track_gain_nodes = (0..n).map(|i| build::gain_id((i + 1) as u32)).collect();
         eng.gr_meters = meters;
         eng.bus_gr_meters = bus_meters;
@@ -1568,6 +1683,7 @@ pub extern "C" fn ve_tracks_add_pcm(
         let idx = eng.pending.len() as c_int;
         eng.pending.push(PendingTrack {
             path: path.to_string(),
+            stream: false,
             pcm: arc,
             start_frame,
             gain,
