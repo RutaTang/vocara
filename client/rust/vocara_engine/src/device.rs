@@ -228,48 +228,125 @@ pub fn enum_input_devices() -> Vec<DeviceDesc> {
 
 /// Output-boundary sample-rate converter: the engine renders at `ENGINE_SR`; the device
 /// callback demands frames at its native rate. This pulls engine-rate frames from
-/// [`RtProcessor`] into a small pre-allocated FIFO and linearly interpolates the device-rate
-/// output. RT-safe: no alloc/lock/syscall in `process` (the FIFO never reallocs because each
-/// callback is processed in `max_block`-bounded sub-chunks and consumed frames are drained).
+/// [`RtProcessor`] into a small pre-allocated FIFO and produces the device-rate output
+/// through a POLYPHASE WINDOWED-SINC kernel (64 taps, 256x oversampled table, Blackman
+/// window, cutoff scaled for downsampling) — the production kernel, replacing the linear
+/// interim that audibly rolled off and aliased on non-48 kHz devices. RT-safe: the table
+/// is precomputed at construction; `process` allocates nothing, takes no lock, makes no
+/// syscall (64 multiply-adds per output frame is negligible arithmetic).
 ///
-/// Linear interpolation is the interim boundary kernel (a windowed-sinc/`rubato` upgrade lands
-/// with the input-side drift compensation in a later phase). It is only used when the device
-/// rate differs from `ENGINE_SR`; at 48 kHz the engine renders straight into the cpal buffer.
+/// POSITION SEMANTICS ARE UNCHANGED from the linear kernel: the kernel is symmetric
+/// around the read position, so output content position == read position, and the
+/// consumed cursor advances by the read position's integer progression — every
+/// transport-honesty test holds as-is. The FIFO keeps `HALF` frames of history for the
+/// kernel's left lobe (zero-prefilled at start/flush, at negative content indices the
+/// cursor never counts), and only frames the read position has passed beyond the history
+/// margin are dropped.
 struct OutResampler {
     rt: Arc<RtCell>,
     /// Engine input frames advanced per device output frame (`ENGINE_SR / device_rate`).
     step: f64,
-    /// Fractional read position within `fifo` (kept in `[0, 1)` after each sub-chunk drain).
+    /// Read position in CONTENT frames (monotone within a flush generation).
     pos: f64,
-    /// Pending engine-rate frames awaiting interpolation.
+    /// Content index of `fifo[0]` (starts at `-HALF`: the zero-prefilled history).
+    origin: i64,
+    /// Integer content frames the cursor has already been advanced past.
+    consumed_floor: i64,
+    /// Pending engine-rate frames (history + lookahead) awaiting the kernel.
     fifo: Vec<[Smp; CHANNELS]>,
     /// Scratch for one engine render block.
     scratch: Vec<Smp>,
+    /// The polyphase kernel: `(OVERSAMPLE + 1)` rows of `TAPS` unity-DC-normalized
+    /// coefficients; adjacent rows are linearly interpolated by the sub-phase.
+    table: Vec<f32>,
     max_block: usize,
     /// The last observed transport flush generation: a bump (seek/pause) means the FIFO holds
     /// audio from BEFORE the transport change, which must be dropped, not played out.
     flush_gen: u32,
 }
 
+/// Kernel width in engine frames. 64 taps at 256x table resolution yields ~70 dB stopband
+/// with a passband flat well past 20 kHz — far beyond the linear kernel — at 64 MACs per
+/// output frame (~2.8 M MAC/s at 44.1 kHz: negligible).
+const SINC_TAPS: usize = 64;
+const SINC_HALF: usize = SINC_TAPS / 2;
+const SINC_OVERSAMPLE: usize = 256;
+
+/// Builds the polyphase table for [step] (engine frames per output frame): row `r` holds
+/// the windowed-sinc weights for sub-phase `r / OVERSAMPLE`, cutoff scaled below the
+/// output Nyquist when downsampling (step > 1), each row normalized to unity DC so the
+/// converter has exactly 0 dB gain at every phase.
+fn build_sinc_table(step: f64) -> Vec<f32> {
+    let fc = if step > 1.0 { 0.92 / step } else { 0.92 };
+    let mut table = vec![0.0f32; (SINC_OVERSAMPLE + 1) * SINC_TAPS];
+    for r in 0..=SINC_OVERSAMPLE {
+        let frac = r as f64 / SINC_OVERSAMPLE as f64;
+        let mut sum = 0.0f64;
+        for k in 0..SINC_TAPS {
+            // Contribution of content index floor(pos) - (HALF-1) + k at offset x from pos.
+            let x = k as f64 - (SINC_HALF as f64 - 1.0) - frac;
+            let sinc = if x.abs() < 1e-12 {
+                1.0
+            } else {
+                let px = std::f64::consts::PI * fc * x;
+                px.sin() / px * fc
+            };
+            // Blackman window over the kernel span.
+            let w = {
+                let t = (x + SINC_HALF as f64) / (SINC_TAPS as f64);
+                let t = t.clamp(0.0, 1.0);
+                0.42 - 0.5 * (2.0 * std::f64::consts::PI * t).cos()
+                    + 0.08 * (4.0 * std::f64::consts::PI * t).cos()
+            };
+            let v = sinc * w;
+            table[r * SINC_TAPS + k] = v as f32;
+            sum += v;
+        }
+        // Unity DC per row: without this the gain ripples with the sub-phase.
+        if sum.abs() > 1e-12 {
+            let inv = (1.0 / sum) as f32;
+            for k in 0..SINC_TAPS {
+                table[r * SINC_TAPS + k] *= inv;
+            }
+        }
+    }
+    table
+}
+
 impl OutResampler {
     fn new(device_rate: f64, max_block: usize, rt: Arc<RtCell>) -> Self {
         let step = ENGINE_SR / device_rate;
         let flush_gen = rt.transport().out_flush_gen();
-        // Peak FIFO occupancy in a sub-chunk is `need = floor(pos + (chunk-1)*step) + 2`
-        // (chunk <= max_block, pos in [0,1)) plus up to one extra render block (max_block) to
-        // reach it. Size from the ACTUAL step so `push` never reallocates on the RT callback —
-        // the old fixed `4*max_block` underflowed for device rates below ~12 kHz (step > 4,
-        // e.g. an 8 kHz Bluetooth HFP route), forcing a heap realloc inside the audio callback.
-        let cap = (max_block as f64 * step).ceil() as usize + max_block + CHANNELS + 2;
-        OutResampler {
+        // Peak FIFO occupancy in a sub-chunk: history (TAPS) + the span the chunk's read
+        // positions cover + one render block of slack. Sized from the ACTUAL step so `push`
+        // never reallocates on the RT callback.
+        let cap = (max_block as f64 * step).ceil() as usize + max_block + SINC_TAPS + 4;
+        let mut r = OutResampler {
             rt,
             step,
             pos: 0.0,
+            origin: 0,
+            consumed_floor: 0,
             fifo: Vec::with_capacity(cap),
             scratch: vec![0.0; max_block * CHANNELS],
+            table: build_sinc_table(step),
             max_block,
             flush_gen,
+        };
+        r.reset_stream();
+        r
+    }
+
+    /// (Re)starts the stream state: empty content, zero history for the kernel's left lobe
+    /// at negative content indices the cursor never counts.
+    fn reset_stream(&mut self) {
+        self.fifo.clear();
+        for _ in 0..SINC_HALF {
+            self.fifo.push([0.0, 0.0]);
         }
+        self.origin = -(SINC_HALF as i64);
+        self.pos = 0.0;
+        self.consumed_floor = 0;
     }
 
     #[inline]
@@ -288,58 +365,73 @@ impl OutResampler {
         // A seek/pause happened since the last callback: everything pre-rendered into the
         // FIFO belongs to the OLD transport position and must not reach the listener —
         // dropping it makes the transport respond within one callback instead of playing out
-        // up to a full render block (~21 ms) of stale audio. clear() keeps the allocation.
+        // up to a full render block (~21 ms) of stale audio.
         let gen = self.rt.transport().out_flush_gen();
         if gen != self.flush_gen {
             self.flush_gen = gen;
-            // The discarded frames were rendered but will never be heard —
-            // the consumed cursor SKIPS them so it stays in the render
-            // counter's coordinate space (their content re-renders after the
-            // transport's clock rewind; the cursor must not wait for frames
-            // that no longer exist).
-            self.rt.transport().advance_consumed(self.fifo.len() as u64);
-            self.fifo.clear();
-            self.pos = 0.0;
+            // The discarded CONTENT frames (rendered, never heard, cursor not yet past
+            // them) are skipped so the cursor stays in the render counter's coordinate
+            // space. History below the cursor and the zero prefill are already counted
+            // or never count.
+            let content_end = self.origin + self.fifo.len() as i64;
+            let unconsumed = (content_end - self.consumed_floor).max(0);
+            self.rt.transport().advance_consumed(unconsumed as u64);
+            self.reset_stream();
         }
         let mut done = 0;
         while done < out_frames {
             let chunk = (out_frames - done).min(self.max_block);
-            // Interpolation touches up to index floor(pos + (chunk-1)*step) + 1, so it needs
-            // floor(pos + (chunk-1)*step) + 2 frames present. The drain below advances `pos`
-            // by chunk*step and removes floor(pos + chunk*step) frames, so the FIFO must ALSO
-            // hold at least that many. Sizing `need` to the max keeps the drained count equal
-            // to the `pos` adjustment; without it, on device rates <= 24 kHz (step >= 2) the
-            // drop was clamped below `consumed` and the read position drifted (audible glitch).
-            let need_interp =
-                (self.pos + (chunk.saturating_sub(1)) as f64 * self.step).floor() as usize + 2;
-            let need_consumed = (self.pos + chunk as f64 * self.step).floor() as usize;
-            let need = need_interp.max(need_consumed);
-            // The FIFO is sized in `new` so reaching `need` never reallocates (no RT alloc).
-            debug_assert!(need + self.max_block <= self.fifo.capacity());
-            while self.fifo.len() < need {
+            // The kernel for the chunk's LAST read position touches content index
+            // floor(pos + (chunk-1)*step) + HALF; render until the FIFO covers it.
+            let last_pos = self.pos + (chunk.saturating_sub(1)) as f64 * self.step;
+            let need_content = last_pos.floor() as i64 + SINC_HALF as i64;
+            let need_len = (need_content - self.origin + 1) as usize;
+            // The FIFO is sized in `new` so reaching `need_len` never reallocates.
+            debug_assert!(need_len + self.max_block <= self.fifo.capacity());
+            while self.fifo.len() < need_len {
                 self.render_block();
             }
             for k in 0..chunk {
-                let i = self.pos.floor() as usize;
-                let frac = (self.pos - i as f64) as Smp;
-                let a = self.fifo[i];
-                let b = self.fifo[i + 1];
+                let ip = self.pos.floor();
+                let frac = self.pos - ip;
+                // Polyphase row pair for this sub-phase, linearly interpolated.
+                let rf = frac * SINC_OVERSAMPLE as f64;
+                let r0 = rf.floor() as usize;
+                let rw = (rf - r0 as f64) as f32;
+                let row0 = r0 * SINC_TAPS;
+                let row1 = (r0 + 1) * SINC_TAPS;
+                let base = (ip as i64 - self.origin) as usize - (SINC_HALF - 1);
+                let mut l = 0.0f32;
+                let mut r = 0.0f32;
+                for t in 0..SINC_TAPS {
+                    let w =
+                        self.table[row0 + t] + (self.table[row1 + t] - self.table[row0 + t]) * rw;
+                    let f = self.fifo[base + t];
+                    l += f[0] * w;
+                    r += f[1] * w;
+                }
                 let o = (done + k) * CHANNELS;
-                out[o] = a[0] + (b[0] - a[0]) * frac;
-                out[o + 1] = a[1] + (b[1] - a[1]) * frac;
+                out[o] = l;
+                out[o + 1] = r;
                 self.pos += self.step;
             }
-            let consumed = self.pos.floor() as usize;
-            if consumed > 0 {
-                // `need >= need_consumed` guarantees `consumed <= fifo.len()`, so `drop`
-                // equals `consumed`; subtract the actually-dropped count to stay consistent.
-                let drop = consumed.min(self.fifo.len());
+            // Consumed cursor: the read position's integer progression over CONTENT
+            // frames — identical semantics to the linear kernel, so every transport
+            // test holds unchanged.
+            let floor_now = self.pos.floor() as i64;
+            if floor_now > self.consumed_floor {
+                self.rt
+                    .transport()
+                    .advance_consumed((floor_now - self.consumed_floor) as u64);
+                self.consumed_floor = floor_now;
+            }
+            // Drain everything below the kernel's history reach.
+            let keep_from = floor_now - (SINC_HALF as i64 - 1);
+            let drop = (keep_from - self.origin).max(0) as usize;
+            let drop = drop.min(self.fifo.len());
+            if drop > 0 {
                 self.fifo.drain(0..drop);
-                self.pos -= drop as f64;
-                // These frames just reached the device: advance the consumed
-                // cursor, which the control side maps back to the timeline
-                // for the audible playhead (EngineHandle::frame).
-                self.rt.transport().advance_consumed(drop as u64);
+                self.origin += drop as i64;
             }
             done += chunk;
         }
@@ -2315,6 +2407,87 @@ mod out_resampler_tests {
 
     /// A live engine playing a mono ramp (sample i = i * 1e-4) from frame 0, wrapped in an
     /// RtCell + a 44.1 kHz output resampler (step > 1, so the FIFO always retains frames).
+    /// An engine playing a pure [hz] tone from frame 0, behind an OutResampler
+    /// to [device_rate] — the full-boundary harness for kernel-quality tests.
+    fn tone_engine(hz: f64, device_rate: f64) -> (EngineHandle, OutResampler) {
+        let n = 96_000usize;
+        let mut pcm = Vec::with_capacity(n * CHANNELS);
+        for i in 0..n {
+            let v = (2.0 * std::f64::consts::PI * hz * i as f64 / ENGINE_SR).sin() as Smp;
+            pcm.push(v);
+            pcm.push(v);
+        }
+        let desc = GraphDesc {
+            nodes: vec![
+                NodeEntry::new(1, Box::new(BufferSource::new(pcm, 0))),
+                NodeEntry::new(2, Box::new(MasterNode::unity())),
+            ],
+            edges: vec![Edge::simple(1, 2)],
+            master: 2,
+        };
+        let g = desc.compile(ENGINE_SR, BLOCK).unwrap();
+        let (_mic_prod, mic_cons) = spsc::<[Smp; CHANNELS]>(256);
+        let (h, rt) = spawn(g, HashMap::new(), mic_cons, 256);
+        let cell = RtCell::new(rt);
+        let res = OutResampler::new(device_rate, BLOCK, Arc::clone(&cell));
+        (h, res)
+    }
+
+    #[test]
+    fn a_passband_tone_survives_the_output_boundary_at_unit_amplitude() {
+        // 15 kHz through 48 kHz -> 44.1 kHz: exactly where the old linear
+        // kernel rolled off and smeared. Quadrature demodulation at the
+        // DEVICE rate is phase-independent, so the kernel's sub-sample
+        // delay cannot masquerade as attenuation.
+        let (h, mut res) = tone_engine(15_000.0, 44_100.0);
+        h.play();
+        let frames = 44_100usize;
+        let mut out = vec![0.0; frames * CHANNELS];
+        res.process(&mut out, frames);
+        let skip = 2_000;
+        let mut a = 0.0f64;
+        let mut b = 0.0f64;
+        let mut count = 0usize;
+        for i in skip..frames - skip {
+            let ph = 2.0 * std::f64::consts::PI * 15_000.0 * i as f64 / 44_100.0;
+            a += out[i * CHANNELS] as f64 * ph.sin();
+            b += out[i * CHANNELS] as f64 * ph.cos();
+            count += 1;
+        }
+        let amplitude = 2.0 * (a * a + b * b).sqrt() / count as f64;
+        assert!(
+            (amplitude - 1.0).abs() < 0.03,
+            "15 kHz passband amplitude {amplitude}, expected ~1.0 \
+             (the linear kernel attenuated and aliased here)"
+        );
+    }
+
+    #[test]
+    fn a_tone_above_the_device_nyquist_is_suppressed_not_aliased() {
+        // 23 kHz exists at the 48 kHz engine rate but is above the 44.1 kHz
+        // device Nyquist (22.05 kHz): the kernel's downsampling cutoff must
+        // suppress it; the linear kernel folded it into the audible band at
+        // near full amplitude.
+        let (h, mut res) = tone_engine(23_000.0, 44_100.0);
+        h.play();
+        let frames = 44_100usize;
+        let mut out = vec![0.0; frames * CHANNELS];
+        res.process(&mut out, frames);
+        let skip = 2_000;
+        let mut sq = 0.0f64;
+        let mut count = 0usize;
+        for i in skip..frames - skip {
+            let v = out[i * CHANNELS] as f64;
+            sq += v * v;
+            count += 1;
+        }
+        let rms = (sq / count as f64).sqrt();
+        assert!(
+            rms < 0.05,
+            "alias residue RMS {rms} for a tone above the device Nyquist"
+        );
+    }
+
     fn ramp_engine() -> (EngineHandle, OutResampler) {
         let n = 48_000usize;
         let mut pcm = Vec::with_capacity(n * CHANNELS);
