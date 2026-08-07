@@ -57,7 +57,9 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     required AudioTrack? Function(String) trackById,
     required ValueListenable<Duration> position,
     required Future<void> Function(Duration) seek,
-  }) : _spectrograms = spectrograms,
+    @visibleForTesting int aggregateCacheBytes = _aggregateCacheBytes,
+  }) : _aggAnalysisCache = LruBytesCache(aggregateCacheBytes, _aggBytes),
+       _spectrograms = spectrograms,
        _monitor = monitor,
        _graphEngine = graphEngine,
        _pausePlayback = pausePlayback,
@@ -141,14 +143,23 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   // result merged in timeline order, keyed by [aggregateKeyFor] (which embeds
   // the ordered clip ids, so the key self-invalidates when the clip set
   // changes). Only multi-clip takes ever populate these.
-  final LruBytesCache<Spectrogram> _aggSpectrogramCache = LruBytesCache(
-    192 * 1000 * 1000,
-    _specBytes,
-  );
-  final LruBytesCache<VoiceMetrics> _aggMetricsCache = LruBytesCache(
-    64 * 1000 * 1000,
-    _metricsBytes,
-  );
+  //
+  // Spectrogram and metrics share ONE entry so eviction can never keep half a
+  // subject: a merged spectrogram costs ~856 B per frame against the metrics'
+  // 41, so any split budget drops the spectrogram first and leaves behind a
+  // half that still answers `containsKey` — which the ready latch reads as
+  // "done", so the missing half was never recomputed and the view stayed
+  // empty without even a loading state. The budget is what the two halves are
+  // worth together, and [LruBytesCache] keeps a lone oversized entry — for a
+  // pair that means both halves stay, never one of them.
+  static const int _aggregateCacheBytes = 256 * 1000 * 1000;
+  static int _aggBytes(TakeAnalysis a) {
+    final s = a.spectrogram;
+    final m = a.metrics;
+    return (s == null ? 0 : _specBytes(s)) + (m == null ? 0 : _metricsBytes(m));
+  }
+
+  final LruBytesCache<TakeAnalysis> _aggAnalysisCache;
   final Map<String, VoiceProfile> _aggProfileCache = {};
   final Map<String, Ltas> _aggLtasCache = {};
   final Map<String, RegisterMap> _aggRegisterCache = {};
@@ -386,7 +397,9 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   Spectrogram? get selectedSpectrogram {
     final s = _analysisSubject;
     if (s == null) return null;
-    return s.aggregate ? _aggSpectrogramCache[s.key] : _spectrogramCache[s.key];
+    return s.aggregate
+        ? _aggAnalysisCache[s.key]?.spectrogram
+        : _spectrogramCache[s.key];
   }
 
   /// The computed voice-timbre metrics (ring/tilt/CPP/formants) for the analysis
@@ -395,7 +408,9 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   VoiceMetrics? get selectedMetrics {
     final s = _analysisSubject;
     if (s == null) return null;
-    return s.aggregate ? _aggMetricsCache[s.key] : _metricsCache[s.key];
+    return s.aggregate
+        ? _aggAnalysisCache[s.key]?.metrics
+        : _metricsCache[s.key];
   }
 
   /// True when the subject's metrics compute already ran and produced nothing
@@ -414,7 +429,9 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   VoiceProfile? get selectedProfile {
     final s = _analysisSubject;
     if (s == null) return null;
-    final m = s.aggregate ? _aggMetricsCache[s.key] : _metricsCache[s.key];
+    final m = s.aggregate
+        ? _aggAnalysisCache[s.key]?.metrics
+        : _metricsCache[s.key];
     if (m == null) return null;
     final cache = s.aggregate ? _aggProfileCache : _profileCache;
     return cache[s.key] ??= analyzeVoiceProfile(m);
@@ -426,11 +443,14 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   Ltas? get selectedLtas {
     final s = _analysisSubject;
     if (s == null) return null;
-    final spec = s.aggregate
-        ? _aggSpectrogramCache[s.key]
-        : _spectrogramCache[s.key];
+    // ONE lookup for the pair: the memo is keyed by subject alone, so it must
+    // never be built from a spectrogram and a metrics half that did not come
+    // from the same compute — computeLtas silently drops its voiced-frame gate
+    // when the metrics are missing.
+    final agg = s.aggregate ? _aggAnalysisCache[s.key] : null;
+    final spec = s.aggregate ? agg?.spectrogram : _spectrogramCache[s.key];
     if (spec == null) return null;
-    final m = s.aggregate ? _aggMetricsCache[s.key] : _metricsCache[s.key];
+    final m = s.aggregate ? agg?.metrics : _metricsCache[s.key];
     final cache = s.aggregate ? _aggLtasCache : _ltasCache;
     return cache[s.key] ??= computeLtas(spec, m);
   }
@@ -440,7 +460,9 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   RegisterMap? get selectedRegister {
     final s = _analysisSubject;
     if (s == null) return null;
-    final m = s.aggregate ? _aggMetricsCache[s.key] : _metricsCache[s.key];
+    final m = s.aggregate
+        ? _aggAnalysisCache[s.key]?.metrics
+        : _metricsCache[s.key];
     if (m == null) return null;
     final cache = s.aggregate ? _aggRegisterCache : _registerCache;
     return cache[s.key] ??= analyzeRegister(m);
@@ -463,7 +485,9 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   VoiceMetrics? metricsFor(String trackId) {
     final t = _trackById(trackId);
     if (t == null) return null;
-    if (t.clips.length > 1) return _aggMetricsCache[aggregateKeyFor(t)];
+    if (t.clips.length > 1) {
+      return _aggAnalysisCache[aggregateKeyFor(t)]?.metrics;
+    }
     final clip = t.primaryClip;
     return clip == null ? null : _metricsCache[clip.audioFilePath];
   }
@@ -481,7 +505,9 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   Spectrogram? spectrogramFor(String trackId) {
     final t = _trackById(trackId);
     if (t == null) return null;
-    if (t.clips.length > 1) return _aggSpectrogramCache[aggregateKeyFor(t)];
+    if (t.clips.length > 1) {
+      return _aggAnalysisCache[aggregateKeyFor(t)]?.spectrogram;
+    }
     final clip = t.primaryClip;
     return clip == null ? null : _spectrogramCache[clip.audioFilePath];
   }
@@ -753,7 +779,7 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   /// simply skipped; the aggregate is built from whatever analyzed.
   Future<void> _ensureAggregateAnalysis(AudioTrack track) async {
     final key = aggregateKeyFor(track);
-    if (_aggMetricsCache.containsKey(key) ||
+    if (_aggAnalysisCache.containsKey(key) ||
         _aggLoading.contains(key) ||
         _aggUnavailable.contains(key)) {
       return;
@@ -813,9 +839,19 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
       // caches, where a cached partial would be permanent (the key only
       // changes with the clip set).
       if (complete) {
-        if (mergedMetrics != null) _aggMetricsCache[key] = mergedMetrics;
-        if (mergedSpec != null) _aggSpectrogramCache[key] = mergedSpec;
-        if (mergedMetrics == null && mergedSpec == null) {
+        // Stored as ONE entry: both merges describe the same clips at the same
+        // offsets, every derived view (LTAS, profile, register) is only sound
+        // against that exact pair, and the guard above takes a cached entry to
+        // be the whole answer. A null spectrogram beside live metrics is a
+        // SETTLED answer, not a miss — mergeSpectrograms refuses lane spans
+        // past its cell budget where the metrics merge still succeeds, and the
+        // pitch and timbre views remain worth showing on their own.
+        if (mergedMetrics != null || mergedSpec != null) {
+          _aggAnalysisCache[key] = (
+            spectrogram: mergedSpec,
+            metrics: mergedMetrics,
+          );
+        } else {
           _aggUnavailable.add(key);
         }
       }
@@ -851,13 +887,8 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   /// so a changed clip set self-invalidates, but a clip's *file* can change with
   /// its id intact (re-analyze), so any file mutation clears them outright.
   void _evictAggregates() {
-    if (_aggMetricsCache.isEmpty &&
-        _aggSpectrogramCache.isEmpty &&
-        _aggUnavailable.isEmpty) {
-      return;
-    }
-    _aggSpectrogramCache.clear();
-    _aggMetricsCache.clear();
+    if (_aggAnalysisCache.isEmpty && _aggUnavailable.isEmpty) return;
+    _aggAnalysisCache.clear();
     _aggProfileCache.clear();
     _aggLtasCache.clear();
     _aggRegisterCache.clear();

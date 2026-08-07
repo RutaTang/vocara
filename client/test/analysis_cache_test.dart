@@ -39,6 +39,9 @@ class _StubSpectrograms extends Fake implements SpectrogramService {
   /// something landing mid-loop — a budget eviction of an earlier clip.
   void Function(String path)? onCompute;
 
+  /// How many times the aggregate compute ran, for the pairing tests.
+  int bothCalls = 0;
+
   @override
   Future<TakeAnalysis?> computeBothFromFile(
     String path, {
@@ -46,6 +49,7 @@ class _StubSpectrograms extends Fake implements SpectrogramService {
     int hop = 512,
     double maxHz = 5000,
   }) async {
+    bothCalls++;
     onCompute?.call(path);
     return (spectrogram: specsByPath[path], metrics: metricsByPath[path]);
   }
@@ -87,6 +91,7 @@ AnalysisCache _cache({
   Future<void> Function()? pausePlayback,
   bool Function()? isPlaying,
   bool Function()? isRecording,
+  int aggregateCacheBytes = 1 << 30,
 }) => AnalysisCache(
   spectrograms: spectrograms ?? _FakeSpectrograms(),
   monitor: monitor ?? _FakeMonitor(),
@@ -99,10 +104,11 @@ AnalysisCache _cache({
   trackById: (_) => null,
   position: ValueNotifier(Duration.zero),
   seek: (_) async {},
+  aggregateCacheBytes: aggregateCacheBytes,
 );
 
-AudioTrack _lane(List<AudioClip> clips) => AudioTrack(
-  id: 'lane',
+AudioTrack _lane(List<AudioClip> clips, {String id = 'lane'}) => AudioTrack(
+  id: id,
   kind: AudioTrackKind.vocal,
   displayName: 'Lane',
   createdAt: DateTime(2026),
@@ -144,14 +150,14 @@ VoiceMetrics _metrics(int frames) {
   );
 }
 
-Spectrogram _spec(int frames) => Spectrogram(
+Spectrogram _spec(int frames, {int bins = 2}) => Spectrogram(
   frames: frames,
-  bins: 2,
+  bins: bins,
   maxHz: 5000,
   sampleRate: _sr,
   fftSize: 2048,
   hop: _hop,
-  db: Float32List(frames * 2),
+  db: Float32List(frames * bins),
   minDb: -60,
   maxDb: 0,
 );
@@ -479,6 +485,86 @@ void main() {
       await cache.setLiveMonitor(true);
       expect(cache.liveMonitor, isFalse);
       expect(engine.captureStarts, 0);
+      cache.dispose();
+    });
+  });
+
+  group('aggregate pair cache', () {
+    test('the aggregate is evicted as a PAIR, never leaving a half that '
+        'answers the ready latch', () async {
+      // A merged spectrogram costs ~20x its metrics per frame, so split
+      // budgets always dropped the spectrogram first — and the ready latch
+      // keyed off metrics alone, so the surviving half made the guard report
+      // "done" and the missing half was never recomputed: no data, no
+      // loading state, forever.
+      final laneA = _lane([_clip('a1', 0), _clip('a2', 2000)], id: 'A');
+      final laneB = _lane([_clip('b1', 0), _clip('b2', 2000)], id: 'B');
+      var track = laneA;
+      final stub = _StubSpectrograms(
+        metricsByPath: {
+          for (final p in ['a1.wav', 'a2.wav', 'b1.wav', 'b2.wav'])
+            p: _metrics(10),
+        },
+        specsByPath: {
+          for (final p in ['a1.wav', 'a2.wav', 'b1.wav', 'b2.wav'])
+            p: _spec(10),
+        },
+      );
+      // Budget for roughly one lane's pair, so caching B evicts A.
+      final cache = _cache(
+        spectrograms: stub,
+        selectedTrack: () => track,
+        aggregateCacheBytes: 4000,
+      );
+
+      await cache.ensureSelectedSpectrogram();
+      expect(cache.selectedMetrics, isNotNull);
+      expect(cache.selectedSpectrogram, isNotNull);
+
+      track = laneB;
+      await cache.ensureSelectedSpectrogram();
+      // Back to A: whatever eviction did, it did to BOTH halves — so the
+      // guard sees a miss and recomputes, rather than serving a half.
+      track = laneA;
+      await cache.ensureSelectedSpectrogram();
+      expect(cache.selectedMetrics, isNotNull);
+      expect(
+        cache.selectedSpectrogram,
+        isNotNull,
+        reason: 'a recomputed aggregate is whole',
+      );
+      cache.dispose();
+    });
+
+    test('a refused spectrogram merge still serves the metrics, and is a '
+        'settled answer rather than an endless recompute', () async {
+      // The spectrogram merge refuses lane spans past its cell budget where
+      // the metrics merge succeeds. Half a pair is the honest result there;
+      // what must not happen is the compute running again on every read.
+      // A lane exactly at the span budget (300000 frames) at the production
+      // spectrogram width (214 bins): 300000 x 214 cells is past the cell
+      // budget while 300000 frames of metrics curves is not.
+      final track = _lane([_clip('c1', 0), _clip('c2', 29999000)]);
+      final stub = _StubSpectrograms(
+        metricsByPath: {'c1.wav': _metrics(10), 'c2.wav': _metrics(10)},
+        specsByPath: {
+          'c1.wav': _spec(10, bins: 214),
+          'c2.wav': _spec(10, bins: 214),
+        },
+      );
+      final cache = _cache(spectrograms: stub, selectedTrack: () => track);
+
+      await cache.ensureSelectedSpectrogram();
+      final callsAfterFirst = stub.bothCalls;
+      expect(cache.selectedMetrics, isNotNull, reason: 'metrics still serve');
+      expect(cache.selectedSpectrogram, isNull, reason: 'the merge refused it');
+
+      await cache.ensureSelectedSpectrogram();
+      expect(
+        stub.bothCalls,
+        callsAfterFirst,
+        reason: 'a settled pair is not recomputed on the next read',
+      );
       cache.dispose();
     });
   });
