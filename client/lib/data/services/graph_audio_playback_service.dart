@@ -11,6 +11,7 @@ import '../../domain/models/audio_device.dart';
 import '../../domain/models/audio_fx.dart';
 import '../ffi/vocara_engine_bindings.dart';
 import 'audio_dsp.dart';
+import 'diagnostics_log.dart';
 import 'playback_engine.dart';
 
 /// Open the native engine framework (embedded + linked via CocoaPods). Top-level so a
@@ -312,6 +313,20 @@ class GraphAudioPlaybackService implements PlaybackEngine {
   // The committed graph's topology signature (paths + routing + bus set); a change
   // triggers a rebuild, otherwise sync only pushes live volumes/mutes.
   String _committedSig = '';
+
+  /// True between a degraded commit and the one rebuild it triggers, so a file
+  /// that stays unreadable settles instead of rebuilding the graph (and
+  /// re-running its isolate decodes) on every sync for the rest of the session.
+  bool _retryingDegradedCommit = false;
+
+  static int _bitCount(int mask) {
+    var n = 0;
+    for (var m = mask; m != 0; m >>= 1) {
+      n += m & 1;
+    }
+    return n;
+  }
+
   final Map<String, int> _trackIndex = {};
   // Each FX bus id's index into the committed graph (for live bus FX/volume/meter).
   final Map<String, int> _busIndex = {};
@@ -748,7 +763,32 @@ class GraphAudioPlaybackService implements PlaybackEngine {
     // path; a skipped track is restaged on the next real topology change (a structural
     // edit, backing toggle or reopen — all of which change `sig`), which is also when a
     // transiently-unreadable file would have become readable again.
-    _committedSig = sig;
+    //
+    // A DEGRADED track is different from a skipped one and must not be treated
+    // the same way. Staging probes a streamable WAV and then hands the engine
+    // an empty buffer, trusting the commit to reopen the file; when that
+    // second open fails the track is IN the graph, holds an index, has gain
+    // and meters — and renders silence forever, while the commit returns
+    // success and the track contributes no underruns. Recording the signature
+    // over that would make it permanent for the session, so the signature is
+    // withheld once, which makes the very next sync rebuild. That rebuild
+    // re-probes on a fresh open: if the file came back non-canonical it is
+    // decoded and staged as PCM instead (it plays), and if it is truly gone
+    // the stage MISSES and the track is left out — neither of which can
+    // degrade again, so one retry is enough and there is no rebuild loop.
+    final degraded = _bindings.ve_commit_degraded_mask(_engine);
+    if (degraded != 0 && !_retryingDegradedCommit) {
+      _retryingDegradedCommit = true;
+      DiagnosticsLog.instance.log(
+        'engine',
+        'commit degraded ${_bitCount(degraded)} streaming track(s) to silence; '
+            'rebuilding once from a fresh probe',
+      );
+      _committedSig = '';
+    } else {
+      _retryingDegradedCommit = false;
+      _committedSig = sig;
+    }
 
     // The rebuild reset every node to defaults — re-apply persisted effects + levels.
     for (final t in tracks) {

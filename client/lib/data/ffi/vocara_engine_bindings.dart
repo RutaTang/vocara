@@ -104,7 +104,8 @@ class VocaraEngineBindings {
 
   /// Poll + clear the pending device events selected by `mask` (bit 1 = output
   /// lost, bit 2 = input lost, bit 4 = mic opened WITHOUT echo cancellation,
-  /// bit 8 = selected input unavailable, fell back to the system default).
+  /// bit 8 = selected input unavailable, fell back to the system default,
+  /// bit 16 = the take reached the longest recording a WAV header can describe).
   /// Returns the claimed bits; bits outside the mask stay pending for their own
   /// consumer. 0 = none.
   int ve_poll_device_event(ffi.Pointer<VeEngine> e, int mask) {
@@ -131,6 +132,22 @@ class VocaraEngineBindings {
         've_stream_xruns',
       );
   late final _ve_stream_xruns = _ve_stream_xrunsPtr
+      .asFunction<int Function(ffi.Pointer<VeEngine>)>();
+
+  /// Staged-track indices the last SUCCESSFUL commit could not open as streaming sources —
+  /// one bit each, matching the indices ve_tracks_add returned. Such a track is in the graph
+  /// but renders SILENCE forever, and the commit still reports success, so this is the only
+  /// way to tell a good commit from a degraded one. Indices past bit 63 fold into the top
+  /// bit. 0 = the committed graph is exactly what was staged.
+  int ve_commit_degraded_mask(ffi.Pointer<VeEngine> e) {
+    return _ve_commit_degraded_mask(e);
+  }
+
+  late final _ve_commit_degraded_maskPtr =
+      _lookup<ffi.NativeFunction<ffi.Uint64 Function(ffi.Pointer<VeEngine>)>>(
+        've_commit_degraded_mask',
+      );
+  late final _ve_commit_degraded_mask = _ve_commit_degraded_maskPtr
       .asFunction<int Function(ffi.Pointer<VeEngine>)>();
 
   /// Clock-drift estimator's published input correction in parts-per-million

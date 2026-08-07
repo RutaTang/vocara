@@ -176,11 +176,32 @@ pub struct VeEngine {
     /// underruns stay in the total — removal used to make the aggregate
     /// DECREASE, which the Dart watch's monotonic compare read as healthy.
     stream_ctrls: Vec<Arc<crate::feed::StreamCtrl>>,
+    /// Staged-track indices whose streamable file could not be reopened by the
+    /// last SUCCESSFUL commit — one bit each (see [`mark_degraded`] for how a
+    /// project wider than the mask folds). Such a track went into the graph
+    /// over an EMPTY buffer and renders silence forever, while the commit
+    /// returned 0 and the track contributes no underruns: this word is the
+    /// only evidence the committed graph is not what was staged.
+    degraded_mask: u64,
     feeder_stop: Arc<std::sync::atomic::AtomicBool>,
     feeder_join: Option<std::thread::JoinHandle<()>>,
     /// Input-vs-output clock-drift estimator, ticked by the Dart device
     /// watch's 1 s poll (ve_poll_device_event — the process's one poller).
     drift: device::DriftEstimator,
+}
+
+/// Highest staged-track index [`ve_commit_degraded_mask`] can name on its own.
+/// A song stages one track per CLIP, so a punch-heavy project can hold more
+/// tracks than the mask has bits, and a raw `1u64 << 64` panics in a debug
+/// build — inside the commit's `catch_unwind`, which would cost the whole
+/// graph. Every index at or above this one folds into the top bit instead: the
+/// report stays truthful that SOMETHING degraded even where it can no longer
+/// say which.
+const DEGRADED_OVERFLOW_BIT: usize = 63;
+
+/// Fold one degraded staged-track index into the report mask.
+fn mark_degraded(mask: u64, index: usize) -> u64 {
+    mask | (1u64 << index.min(DEGRADED_OVERFLOW_BIT))
 }
 
 /// One streaming feeder plus its retry state (see the `feeders` field docs).
@@ -470,6 +491,7 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
             bus_gr_meters: Vec::new(),
             feeders: Arc::new(std::sync::Mutex::new(Vec::new())),
             stream_ctrls: Vec::new(),
+            degraded_mask: 0,
             feeder_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             feeder_join: None,
             drift: device::DriftEstimator::new(drift_ratio),
@@ -1284,6 +1306,7 @@ pub extern "C" fn ve_tracks_commit(e: *mut VeEngine) -> c_int {
         let rate = eng.handle.sample_rate();
         let mut new_feeders: Vec<crate::feed::TrackFeeder> = Vec::new();
         let mut new_ctrls: Vec<Arc<crate::feed::StreamCtrl>> = Vec::new();
+        let mut degraded: u64 = 0;
 
         // FX buses first, so a track can route into one by index. Each bus gets a
         // gain-reduction meter; effect params are pushed after commit.
@@ -1381,7 +1404,18 @@ pub extern "C" fn ve_tracks_commit(e: *mut VeEngine) -> c_int {
                             len,
                         ))
                     }
-                    Err(_) => Box::new(BufferSource::from_arc(pt.pcm.clone(), pt.start_frame)),
+                    Err(_) => {
+                        // A streamable track carries NO pcm — staging skipped the
+                        // decode precisely because the file could be read directly —
+                        // so this fallback is an EMPTY buffer: silence for as long as
+                        // the graph lives. It keeps its slot regardless (dropping a
+                        // track mid-commit would renumber every later one under the
+                        // index map the caller already holds), and the degradation is
+                        // recorded so the caller can rebuild from a fresh probe
+                        // instead of trusting a commit that returned success.
+                        degraded = mark_degraded(degraded, i);
+                        Box::new(BufferSource::from_arc(pt.pcm.clone(), pt.start_frame))
+                    }
                 }
             } else {
                 Box::new(BufferSource::from_arc(pt.pcm.clone(), pt.start_frame))
@@ -1418,6 +1452,7 @@ pub extern "C" fn ve_tracks_commit(e: *mut VeEngine) -> c_int {
         // control blocks are recorded separately so ve_stream_xruns keeps
         // counting a track whose feeder is later dropped.
         eng.stream_ctrls = new_ctrls;
+        eng.degraded_mask = degraded;
         {
             let slots: Vec<_> = new_feeders
                 .into_iter()
@@ -1890,6 +1925,17 @@ pub extern "C" fn ve_stream_xruns(e: *mut VeEngine) -> u64 {
             .map(|c| c.xruns.load(std::sync::atomic::Ordering::Relaxed))
             .sum()
     })
+}
+
+/// Staged-track indices the last SUCCESSFUL commit could not open as streaming
+/// sources — one bit each, matching the indices `ve_tracks_add` returned. Such
+/// a track is in the graph but renders SILENCE forever (its staged buffer is
+/// empty by design), and the commit still reports success, so this is the only
+/// way to tell a good commit from a degraded one. Indices past bit 63 fold
+/// into the top bit. 0 = the committed graph is exactly what was staged.
+#[no_mangle]
+pub extern "C" fn ve_commit_degraded_mask(e: *mut VeEngine) -> u64 {
+    with_engine(e, 0, |eng| eng.degraded_mask)
 }
 
 /// The clock-drift estimator's published input correction in parts-per-million
@@ -2900,5 +2946,29 @@ mod punch_tests {
         let _ = std::fs::remove_file(&old);
         let _ = std::fs::remove_file(&new);
         let _ = std::fs::remove_file(&out);
+    }
+}
+
+#[cfg(test)]
+mod degraded_mask_tests {
+    //! The commit-degradation report's width fold. A song stages one track per
+    //! CLIP, so a punch-heavy project outgrows the mask — and a raw shift by 64
+    //! panics in a debug build, inside the commit's catch_unwind, which would
+    //! cost the whole graph rather than one track's report.
+
+    use super::{mark_degraded, DEGRADED_OVERFLOW_BIT};
+
+    #[test]
+    fn indices_map_to_their_own_bit_and_fold_past_the_last_one() {
+        assert_eq!(mark_degraded(0, 0), 1);
+        assert_eq!(mark_degraded(0, 3), 8);
+        assert_eq!(mark_degraded(1, 3), 9, "marks accumulate");
+
+        let top = 1u64 << DEGRADED_OVERFLOW_BIT;
+        assert_eq!(mark_degraded(0, DEGRADED_OVERFLOW_BIT), top);
+        // Past the width the report stays TRUTHFUL that something degraded,
+        // it just can no longer say which track.
+        assert_eq!(mark_degraded(0, DEGRADED_OVERFLOW_BIT + 1), top);
+        assert_eq!(mark_degraded(0, 5000), top);
     }
 }

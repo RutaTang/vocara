@@ -60,6 +60,12 @@ uint32_t ve_poll_device_event(VeEngine *e, uint32_t mask);
 /* Total streaming-source underruns (frames rendered silent because a track ring was
  * empty). 0 is healthy; growth on hardware means the feeder pump lags the callback. */
 uint64_t ve_stream_xruns(VeEngine *e);
+/* Staged-track indices the last SUCCESSFUL commit could not open as streaming sources —
+ * one bit each, matching the indices ve_tracks_add returned. Such a track is in the graph
+ * but renders SILENCE forever, and the commit still reports success, so this is the only
+ * way to tell a good commit from a degraded one. Indices past bit 63 fold into the top
+ * bit. 0 = the committed graph is exactly what was staged. */
+uint64_t ve_commit_degraded_mask(VeEngine *e);
 /* Clock-drift estimator's published input correction in parts-per-million
  * (0.0 = identity / deadband / frozen). Diagnostics only. */
 double ve_drift_ppm(VeEngine *e);
