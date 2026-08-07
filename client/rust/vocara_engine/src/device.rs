@@ -534,6 +534,14 @@ struct InputState {
     /// Push-based linear resampler: input-position advance per engine output frame
     /// (`in_rate / ENGINE_SR`). `1.0` → identity passthrough.
     step: f64,
+    /// CLOCK-DRIFT ratio (f64 bits; 1.0 = no correction), published by the
+    /// control-side [`DriftEstimator`]: the measured input-clock rate over
+    /// the output-clock rate. The effective step is `step * ratio`, so the
+    /// emission rate matches what the OUTPUT device actually consumes — a
+    /// mic whose crystal runs 30 ppm fast no longer drifts the take ahead
+    /// of the backing over a long recording. Exactly 1.0 (the estimator's
+    /// deadband) keeps the 48 kHz identity fast path.
+    drift_ratio_bits: Arc<AtomicU64>,
     pos: f64,
     prev: [Smp; CHANNELS],
     primed: bool,
@@ -591,6 +599,7 @@ impl InputCell {
         frames_in: Arc<AtomicU64>,
         rec_dropped: Arc<AtomicU64>,
         rec_written: Arc<AtomicU64>,
+        drift_ratio_bits: Arc<AtomicU64>,
     ) -> Arc<InputCell> {
         Arc::new(InputCell(UnsafeCell::new(InputState {
             mic,
@@ -600,6 +609,7 @@ impl InputCell {
             rec_active,
             in_channels: 1,
             step: 1.0,
+            drift_ratio_bits,
             pos: 0.0,
             prev: [0.0, 0.0],
             primed: false,
@@ -645,7 +655,13 @@ impl InputCell {
         let cap = st.cap_active.load(Ordering::Relaxed);
         let rec = st.rec_active.load(Ordering::Relaxed);
         let frames = data.len() / ch;
-        let identity = (st.step - 1.0).abs() < 1e-9;
+        // Clock-drift compensation: the estimator's published ratio scales
+        // the position advance, so emission tracks the OUTPUT clock instead
+        // of the input crystal's nominal rate. Ratio 1.0 (the deadband)
+        // preserves the identity fast path bit-for-bit.
+        let ratio = f64::from_bits(st.drift_ratio_bits.load(Ordering::Relaxed));
+        let step = st.step * ratio;
+        let identity = (step - 1.0).abs() < 1e-9;
         let mut peak = 0.0f32;
         // Counted in EMITTED (post-resample, ENGINE_SR) frames, not raw device frames:
         // consumers convert this counter to time by dividing by the engine rate (take
@@ -675,7 +691,7 @@ impl InputCell {
                     ];
                     st.emit(f, cap, rec);
                     emitted += 1;
-                    st.pos += st.step;
+                    st.pos += step;
                 }
                 st.pos -= 1.0;
                 st.prev = cur;
@@ -683,6 +699,228 @@ impl InputCell {
         }
         st.frames_in.fetch_add(emitted, Ordering::Relaxed);
         st.level.store(peak.to_bits(), Ordering::Relaxed);
+    }
+}
+
+/// Control-side clock-drift estimator: compares the growth of the input's
+/// emitted engine-rate frame counter against the output's consumed cursor
+/// over ~1 s ticks and publishes a smoothed correction ratio for the input
+/// resampler ([`InputState::drift_ratio_bits`]).
+///
+/// Two independent crystals never run at exactly the same rate; a mic 30 ppm
+/// fast drifts a take ~18 ms ahead of the backing over 10 minutes, which
+/// pre-roll (a START-time constant) cannot fix. Aligning the input to the
+/// OUTPUT clock is the goal — the take must sit against what the listener
+/// heard — so both absolute crystal errors cancel out of the design.
+///
+/// Robustness over reactivity, deliberately:
+///  * a tick only measures when BOTH counters advanced ≥ [`MIN_DELTA`]
+///    (mic closed or transport paused → the estimate FREEZES, never decays);
+///  * instantaneous ratios beyond ±5000 ppm are glitches (a stall, a stream
+///    rebuild) and are discarded, not averaged;
+///  * an EMA (α = 0.05 per tick, ~20 s time constant) smooths the estimate,
+///    so the published ratio slews far below audibility;
+///  * a ±2 ppm deadband publishes EXACTLY 1.0 (keeping the identity fast
+///    path for healthy 48 kHz chains), and the correction clamps at
+///    ±500 ppm — anything larger is a broken device, not drift.
+///
+/// The mechanism is fully simulation-tested; hardware-in-the-loop
+/// CALIBRATION (real crystal pairs) remains the follow-up noted in memory.
+pub struct DriftEstimator {
+    ratio_bits: Arc<AtomicU64>,
+    last_in: u64,
+    last_out: u64,
+    primed: bool,
+    ema: f64,
+}
+
+/// Minimum per-tick advance (engine frames) on each counter before a tick
+/// measures: ~100 ms of audio, enough to average callback jitter away.
+const MIN_DELTA: u64 = 4_800;
+
+impl DriftEstimator {
+    pub fn new(ratio_bits: Arc<AtomicU64>) -> Self {
+        ratio_bits.store(1.0f64.to_bits(), Ordering::Relaxed);
+        DriftEstimator {
+            ratio_bits,
+            last_in: 0,
+            last_out: 0,
+            primed: false,
+            ema: 1.0,
+        }
+    }
+
+    /// One ~1 s tick with the CURRENT counter values (monotonic totals).
+    /// Publishes the updated ratio; returns it for tests.
+    pub fn tick(&mut self, frames_in: u64, frames_out: u64) -> f64 {
+        let din = frames_in.wrapping_sub(self.last_in);
+        let dout = frames_out.wrapping_sub(self.last_out);
+        // Prime on first observation; measure only when both sides moved
+        // enough to mean something (a paused transport or a closed mic
+        // freezes the estimate rather than corrupting it).
+        if !self.primed {
+            self.primed = true;
+            self.last_in = frames_in;
+            self.last_out = frames_out;
+            return self.published();
+        }
+        if din < MIN_DELTA || dout < MIN_DELTA {
+            return self.published();
+        }
+        self.last_in = frames_in;
+        self.last_out = frames_out;
+        let inst = din as f64 / dout as f64;
+        if !(0.995..=1.005).contains(&inst) {
+            return self.published(); // glitch (stall/rebuild), not drift
+        }
+        self.ema += 0.05 * (inst - self.ema);
+        let err = self.ema - 1.0;
+        let corrected = if err.abs() < 2e-6 {
+            1.0 // deadband: exactly 1.0 keeps the identity fast path
+        } else {
+            1.0 + err.clamp(-500e-6, 500e-6)
+        };
+        self.ratio_bits.store(corrected.to_bits(), Ordering::Relaxed);
+        corrected
+    }
+
+    fn published(&self) -> f64 {
+        f64::from_bits(self.ratio_bits.load(Ordering::Relaxed))
+    }
+}
+
+#[cfg(test)]
+mod drift_tests {
+    //! The clock-drift compensation MECHANISM, simulation-tested end to end
+    //! (the estimator's convergence/freeze/reject behavior, and the input
+    //! resampler applying the ratio). Hardware CALIBRATION — real crystal
+    //! pairs — is the documented follow-up; nothing here needs a device.
+
+    use super::DriftEstimator;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    fn ratio_of(bits: &Arc<AtomicU64>) -> f64 {
+        f64::from_bits(bits.load(Ordering::Relaxed))
+    }
+
+    /// Simulated 1 s ticks: the mic crystal runs [ppm] fast relative to the
+    /// output clock, both counters advancing accordingly.
+    fn run_ticks(est: &mut DriftEstimator, ppm: f64, seconds: u64) -> f64 {
+        let mut last = 0.0;
+        for s in 1..=seconds {
+            let out = s * 48_000;
+            let inn = (out as f64 * (1.0 + ppm * 1e-6)) as u64;
+            last = est.tick(inn, out);
+        }
+        last
+    }
+
+    #[test]
+    fn converges_to_the_true_drift_within_the_ema_time_constant() {
+        let bits = Arc::new(AtomicU64::new(0));
+        let mut est = DriftEstimator::new(Arc::clone(&bits));
+        let r = run_ticks(&mut est, 30.0, 120); // 30 ppm fast mic, 2 min
+        assert!(
+            ((r - 1.0) * 1e6 - 30.0).abs() < 3.0,
+            "converged correction {} ppm, expected ~30",
+            (r - 1.0) * 1e6
+        );
+        assert_eq!(r, ratio_of(&bits), "published ratio matches");
+    }
+
+    #[test]
+    fn a_paused_output_or_closed_mic_freezes_the_estimate() {
+        let bits = Arc::new(AtomicU64::new(0));
+        let mut est = DriftEstimator::new(Arc::clone(&bits));
+        let before = run_ticks(&mut est, 30.0, 120);
+        // Output stops (transport paused): the input keeps counting, the
+        // estimate must HOLD — decaying toward 1.0 would re-drift the next
+        // take, and averaging the stall would corrupt it.
+        let (inn0, out0) = (300 * 48_000, 120 * 48_000);
+        for s in 0..60u64 {
+            est.tick(inn0 + s * 48_100, out0); // out frozen
+        }
+        assert_eq!(ratio_of(&bits), before, "estimate must freeze, not drift");
+        // Mic closed: same.
+        for _ in 0..60 {
+            est.tick(inn0 + 60 * 48_100, out0);
+        }
+        assert_eq!(ratio_of(&bits), before);
+    }
+
+    #[test]
+    fn glitches_are_rejected_and_the_correction_clamps() {
+        let bits = Arc::new(AtomicU64::new(0));
+        let mut est = DriftEstimator::new(Arc::clone(&bits));
+        let before = run_ticks(&mut est, 20.0, 60);
+        // A stream rebuild produces a wild instantaneous ratio: discarded.
+        est.tick(60 * 48_000 * 2, 61 * 48_000);
+        assert_eq!(ratio_of(&bits), before, "a glitch tick must not move it");
+
+        // A pathologically fast clock clamps at +500 ppm (a broken device,
+        // not drift — larger corrections would be audible pitch).
+        let bits2 = Arc::new(AtomicU64::new(0));
+        let mut est2 = DriftEstimator::new(Arc::clone(&bits2));
+        let r = run_ticks(&mut est2, 4_000.0, 600);
+        assert!(
+            ((r - 1.0) * 1e6 - 500.0).abs() < 1.0,
+            "clamped at +500 ppm, got {} ppm",
+            (r - 1.0) * 1e6
+        );
+    }
+
+    #[test]
+    fn the_deadband_publishes_exactly_one_for_healthy_chains() {
+        let bits = Arc::new(AtomicU64::new(0));
+        let mut est = DriftEstimator::new(Arc::clone(&bits));
+        let r = run_ticks(&mut est, 0.5, 300); // half a ppm: below deadband
+        assert_eq!(r, 1.0, "sub-deadband drift must publish EXACTLY 1.0");
+    }
+
+    #[test]
+    fn the_input_resampler_applies_the_ratio_to_its_emission_rate() {
+        // A 48 kHz-nominal mic whose crystal is 1000 ppm fast (exaggerated
+        // for a short test): with the correction published, feeding N input
+        // frames emits ~N / (1 + 1000 ppm) engine frames — matched to what
+        // the output actually consumes, which is the whole point.
+        use crate::ring::spsc;
+        use crate::sample::{Smp, CHANNELS};
+        let (mic_prod, mut mic_cons) = spsc::<[Smp; CHANNELS]>(1 << 17);
+        let (cap_prod, _cap_cons) = spsc::<[Smp; CHANNELS]>(8);
+        let (rec_prod, _rec_cons) = spsc::<[Smp; CHANNELS]>(8);
+        let frames_in = Arc::new(AtomicU64::new(0));
+        let ratio = Arc::new(AtomicU64::new((1.0f64 + 1000e-6).to_bits()));
+        let cell = super::InputCell::new(
+            mic_prod,
+            cap_prod,
+            rec_prod,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            Arc::clone(&frames_in),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::clone(&ratio),
+        );
+        cell.reconfigure(crate::sample::ENGINE_SR, 1);
+        let block = vec![0.25f32; 4800];
+        for _ in 0..10 {
+            cell.feed_rt(&block);
+        }
+        let emitted = frames_in.load(Ordering::Relaxed);
+        let expected = (48_000.0 / (1.0 + 1000e-6)) as u64;
+        assert!(
+            (emitted as i64 - expected as i64).unsigned_abs() <= 2,
+            "emitted {emitted}, expected ~{expected} (rate matched to output)"
+        );
+        // And the emitted audio is still the same content (a constant here).
+        let mut n = 0;
+        while let Some(f) = mic_cons.pop() {
+            assert!((f[0] - 0.25).abs() < 1e-6);
+            n += 1;
+        }
+        assert_eq!(n as u64, emitted);
     }
 }
 
@@ -2731,6 +2969,7 @@ mod input_cell_tests {
             Arc::clone(&frames_in),
             Arc::clone(&rec_dropped),
             Arc::clone(&rec_written),
+            Arc::new(AtomicU64::new(1.0f64.to_bits())),
         );
         // Identity resample path (input already at ENGINE_SR), mono input.
         cell.reconfigure(crate::sample::ENGINE_SR, 1);

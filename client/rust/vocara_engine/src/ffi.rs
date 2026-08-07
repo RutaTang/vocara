@@ -160,6 +160,9 @@ pub struct VeEngine {
     feeders: Arc<std::sync::Mutex<Vec<crate::feed::TrackFeeder>>>,
     feeder_stop: Arc<std::sync::atomic::AtomicBool>,
     feeder_join: Option<std::thread::JoinHandle<()>>,
+    /// Input-vs-output clock-drift estimator, ticked by the Dart device
+    /// watch's 1 s poll (ve_poll_device_event — the process's one poller).
+    drift: device::DriftEstimator,
 }
 
 impl VeEngine {
@@ -320,6 +323,7 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
         let rec_written = Arc::new(AtomicU64::new(0));
         let cap_active = Arc::new(AtomicBool::new(false));
         let rec_active = Arc::new(AtomicBool::new(false));
+        let drift_ratio = Arc::new(AtomicU64::new(1.0f64.to_bits()));
         let input_cell = device::InputCell::new(
             mic_prod,
             cap_prod,
@@ -330,6 +334,7 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
             Arc::clone(&input_frames_in),
             Arc::clone(&rec_dropped),
             Arc::clone(&rec_written),
+            Arc::clone(&drift_ratio),
         );
         let writer = RecordWriter::spawn(rec_cons);
         // The host maintains the handle's renderer gate (stream up/down), so the control
@@ -376,6 +381,7 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
             feeders: Arc::new(std::sync::Mutex::new(Vec::new())),
             feeder_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             feeder_join: None,
+            drift: device::DriftEstimator::new(drift_ratio),
         })))
     });
     match built {
@@ -513,7 +519,17 @@ pub extern "C" fn ve_current_output_device(
 /// Poll and clear pending device events (bitmask; see `device::EVENT_*`). 0 = none.
 #[no_mangle]
 pub extern "C" fn ve_poll_device_event(e: *mut VeEngine) -> u32 {
-    with_engine(e, 0, |eng| eng.device_event.swap(0, Ordering::AcqRel))
+    with_engine(e, 0, |eng| {
+        // Piggyback the ~1 s clock-drift tick on the process's single poller:
+        // it compares the input's emitted-frame counter against the output's
+        // consumed cursor and publishes the input resampler's correction
+        // ratio. Self-gating — a closed mic or a paused transport advances
+        // one counter only, and the estimator freezes.
+        let frames_in = eng.input_frames_in.load(Ordering::Acquire);
+        let consumed = eng.handle.transport().consumed_frames();
+        eng.drift.tick(frames_in, consumed);
+        eng.device_event.swap(0, Ordering::AcqRel)
+    })
 }
 
 /// Select the input device by UID (reopens the input stream live if monitoring is active).

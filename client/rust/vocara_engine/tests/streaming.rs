@@ -28,10 +28,17 @@ fn ramp_pcm(frames: usize) -> Vec<Smp> {
 }
 
 fn write_track(frames: usize) -> std::path::PathBuf {
+    // Unique per CALL, not just per (pid, frames): the harness runs tests in
+    // parallel threads, and two tests sharing a frame count would otherwise
+    // share a path — one's truncating rewrite tears the file under the
+    // other's reader (observed as a rare short-read → silence mismatch).
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!(
-        "vocara_stream_{}_{}.wav",
+        "vocara_stream_{}_{}_{}.wav",
         std::process::id(),
-        frames
+        frames,
+        seq
     ));
     write_wav_f32(&path, &ramp_pcm(frames), CHANNELS as u16, ENGINE_SR as u32).unwrap();
     path

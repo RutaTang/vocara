@@ -207,6 +207,13 @@ impl Shared {
             .unwrap_or_else(|| self.frame.load(Ordering::Acquire))
     }
 
+    /// Engine frames delivered to the output device so far (the consumed
+    /// cursor's raw counter) — the OUTPUT-clock reference the drift
+    /// estimator compares the input counter against.
+    pub fn consumed_frames(&self) -> u64 {
+        self.consumed_total.load(Ordering::Acquire)
+    }
+
     // Plan-basis reads for the streaming feeders (crate::feed): a change in
     // any of these is a plan discontinuity.
     pub fn is_playing(&self) -> bool {
