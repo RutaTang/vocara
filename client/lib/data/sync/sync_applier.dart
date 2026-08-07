@@ -251,7 +251,7 @@ class SyncApplier {
             // and like them, deliberately here rather than in fromJson,
             // which fails whole pages.
             try {
-              SyncRow.checkIdShapes(rec.fields);
+              SyncRow.checkIdShapes(rec.table, rec.fields);
             } on FormatException catch (e) {
               result.failed++;
               await _quarantine(rec, 'invalid-id: ${e.message}');

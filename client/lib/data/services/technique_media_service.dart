@@ -21,7 +21,7 @@ class TechniqueMediaService {
   /// already enforces this shape): a separator or `..` in an id would escape
   /// the media tree — worst on the recursive delete below.
   static void _checkPathComponent(String id) {
-    if (!RegExp(r'^[0-9A-Z]{26}$').hasMatch(id)) {
+    if (!isPathComponentId(id)) {
       throw ArgumentError.value(id, 'techniqueId', 'not a well-formed id');
     }
   }

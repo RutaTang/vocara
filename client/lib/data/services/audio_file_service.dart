@@ -30,7 +30,7 @@ class AudioFileService {
   /// door already enforces this shape): a separator or `..` would escape
   /// the audio tree.
   static void _checkPathComponent(String practiceId) {
-    if (!RegExp(r'^[0-9A-Z]{26}$').hasMatch(practiceId)) {
+    if (!isPathComponentId(practiceId)) {
       throw ArgumentError.value(
         practiceId,
         'practiceId',

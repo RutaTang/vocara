@@ -5,6 +5,7 @@ import 'package:vocara/data/db/app_database.dart';
 import 'package:vocara/data/sync/hlc.dart';
 import 'package:vocara/data/sync/sync_applier.dart';
 import 'package:vocara/data/sync/sync_row.dart';
+import 'package:vocara/utils/id.dart';
 
 String _id(String s) => s.padRight(26, '0').substring(0, 26);
 
@@ -354,6 +355,67 @@ void main() {
       expect(landed.title, 'Song');
       expect(landed.masterVolume, 0.75);
       expect(landed.hlcPacked, hlc.packed);
+    });
+  });
+
+  group('path-component id gate', () {
+    Map<String, Object?> practiceFields(String id) => {
+      'id': id,
+      'schema_v': 1,
+      'hlc_wall': 1000,
+      'hlc_ctr': 0,
+      'hlc_node': 'N'.padRight(26, '0'),
+      'hlc_packed': '0000000001000-000000-${'N'.padRight(26, '0')}',
+    };
+
+    test('a practice id the media services could not use is refused at the '
+        'wire, not left to fail locally', () {
+      // practices.id and techniques.id become audio/<id>/ and
+      // technique_media/<id>/, built and recursively deleted by the media
+      // services under a strict shape. The wire's superset otherwise admits a
+      // row that syncs cleanly and is then un-operable: every media call for
+      // it throws, with nothing to fix it short of editing the database.
+      expect(
+        () => SyncRow.checkIdShapes('practices', practiceFields('p1')),
+        throwsFormatException,
+      );
+      expect(
+        () => SyncRow.checkIdShapes('techniques', practiceFields('short')),
+        throwsFormatException,
+      );
+      // A real id passes.
+      expect(
+        () => SyncRow.checkIdShapes('practices', practiceFields(newId())),
+        returnsNormally,
+      );
+    });
+
+    test('the wire rule and the media services agree exactly', () {
+      // Two rules that drift apart reintroduce the same gap from the other
+      // side, so they read the ONE predicate.
+      for (final id in [newId(), 'A'.padRight(26, '0'), '0' * 26]) {
+        expect(isPathComponentId(id), isTrue, reason: id);
+        expect(
+          () => SyncRow.checkIdShapes('practices', practiceFields(id)),
+          returnsNormally,
+          reason: id,
+        );
+      }
+      for (final id in ['p1', 'a' * 26, '${'A' * 25}/', '${'A' * 25}.']) {
+        expect(isPathComponentId(id), isFalse, reason: id);
+      }
+    });
+
+    test('a CHILD table keeps the superset (the legacy derived clip shape '
+        'never names a directory)', () {
+      final trackId = newId();
+      expect(
+        () => SyncRow.checkIdShapes('clips', {
+          ...practiceFields('$trackId-c0'),
+          'track_id': trackId,
+        }),
+        returnsNormally,
+      );
     });
   });
 }

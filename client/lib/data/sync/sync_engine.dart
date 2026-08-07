@@ -598,7 +598,7 @@ class SyncEngine {
     }
     try {
       SyncRow.checkHlcConsistency(server.fields);
-      SyncRow.checkIdShapes(server.fields);
+      SyncRow.checkIdShapes(server.table, server.fields);
     } on FormatException catch (e) {
       throw SyncTransportException(
         'conflicted serverRow for ${attempt.table}/${attempt.id} is '

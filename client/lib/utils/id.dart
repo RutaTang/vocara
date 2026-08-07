@@ -65,3 +65,23 @@ String _encode(BigInt value) {
   }
   return chars.join();
 }
+
+/// The shape an id must have to be usable as a FILESYSTEM PATH COMPONENT:
+/// exactly 26 uppercase alphanumerics, which every [newId] ULID satisfies.
+///
+/// Deliberately the whole uppercase-alphanumeric set rather than the Crockford
+/// alphabet [newId] mints from: this is a PATH-SAFETY rule (no separator, no
+/// `..`, no extension, fixed width), not a check that an id came from this
+/// app's minter, and being stricter than the property it guards would reject
+/// ids the filesystem handles perfectly well.
+///
+/// The sync wire otherwise admits a superset (see `SyncRow.checkIdShapes`) so
+/// legacy derived ids like `<trackId>-c0` keep syncing, but the media services
+/// build `audio/<practiceId>/` and `technique_media/<techniqueId>/` from these
+/// and recursively delete them — so for those columns the two rules must
+/// agree, or a row can sync successfully and then be un-operable locally
+/// (every media call for it throws). One definition, read by the wire gate and
+/// by the services that do the building.
+bool isPathComponentId(String id) => _pathComponentShape.hasMatch(id);
+
+final RegExp _pathComponentShape = RegExp(r'^[0-9A-Z]{26}$');

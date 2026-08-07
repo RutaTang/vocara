@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:drift/drift.dart';
 
+import '../../utils/id.dart';
 import '../db/app_database.dart';
 import 'hlc.dart';
 
@@ -229,11 +230,24 @@ class SyncRow {
   /// (audio/technique media dirs) enforce that stricter shape themselves.
   static final RegExp _idShape = RegExp(r'^[0-9A-Za-z_-]{1,64}$');
 
+  /// Tables whose OWN id becomes a filesystem path component: the media
+  /// services build `audio/<practiceId>/` and `technique_media/<techniqueId>/`
+  /// from them and recursively delete those trees. For these the wire must
+  /// enforce the same strict shape the services do ([isPathComponentId]) —
+  /// the superset [_idShape] otherwise admits a row that syncs cleanly and is
+  /// then un-operable locally, because every media call for it throws.
+  ///
+  /// Child tables are absent on purpose: a clip carries `<trackId>-c0` under
+  /// the legacy shape and never names a directory itself.
+  static const Set<String> pathComponentTables = {'practices', 'techniques'};
+
   /// Validates `id` and every `*_id` column (when non-null) against
-  /// [_idShape]; throws [FormatException] otherwise. Runs at the same wire
-  /// doors as [checkHlcConsistency]. `hlc_node` is deliberately excluded —
-  /// it never touches a path and has its own rules (the `'!'` derived space).
-  static void checkIdShapes(Map<String, Object?> fields) {
+  /// [_idShape], plus the stricter [isPathComponentId] for the id of a
+  /// [pathComponentTables] row; throws [FormatException] otherwise. Runs at
+  /// the same wire doors as [checkHlcConsistency]. `hlc_node` is deliberately
+  /// excluded — it never touches a path and has its own rules (the `'!'`
+  /// derived space).
+  static void checkIdShapes(String table, Map<String, Object?> fields) {
     for (final entry in fields.entries) {
       final key = entry.key;
       if (key != 'id' && !key.endsWith('_id')) continue;
@@ -241,6 +255,13 @@ class SyncRow {
       if (value == null && key != 'id') continue;
       if (value is! String || !_idShape.hasMatch(value)) {
         throw FormatException('SyncRow: "$key" is not a well-formed entity id');
+      }
+      if (key == 'id' &&
+          pathComponentTables.contains(table) &&
+          !isPathComponentId(value)) {
+        throw FormatException(
+          'SyncRow: "$table.id" must be usable as a path component',
+        );
       }
     }
   }
