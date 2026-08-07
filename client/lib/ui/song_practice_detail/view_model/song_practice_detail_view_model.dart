@@ -336,8 +336,9 @@ class SongPracticeDetailViewModel extends ChangeNotifier
 
   String _friendlyError(Object e) => switch (e) {
     FormatException(:final message) => message,
-    // Carries user-presentable copy (the analysis decode-length cap).
+    // Carry user-presentable copy (duration cap / density / rate / IO).
     MediaTooLongException() => e.toString(),
+    MediaUnsupportedException() => e.toString(),
     _ => 'Something went wrong.',
   };
 

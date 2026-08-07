@@ -50,7 +50,8 @@ size_t ve_enum_output_devices(VeDeviceInfo *out, size_t cap);
 int ve_set_output_device(VeEngine *e, const char *uid);
 /* Write the active output UID into `buf` (<= cap, NUL-terminated); returns its byte length. */
 size_t ve_current_output_device(VeEngine *e, char *buf, size_t cap);
-/* Poll + clear pending device events (bit 1 = output lost, bit 2 = input lost). 0 = none. */
+/* Poll + clear pending device events (bit 1 = output lost, bit 2 = input lost,
+ * bit 4 = mic opened WITHOUT echo cancellation). 0 = none. */
 uint32_t ve_poll_device_event(VeEngine *e);
 
 /* Live input + monitoring. The input stream is opened only while monitoring/recording. */
@@ -161,6 +162,14 @@ int ve_set_bus_send_level(VeEngine *e, int bus, int slot, float level_db);
 #define VE_DECODE_OK 0
 #define VE_DECODE_ERR -1
 #define VE_DECODE_TOO_LONG -2
+/* The audio exceeds a MEMORY budget (source-rate ceiling / absolute source-frame cap)
+ * without being over-duration - a short but extremely dense file. */
+#define VE_DECODE_TOO_BIG -3
+/* The source sample rate is outside the supported [8 kHz, 384 kHz] envelope. */
+#define VE_DECODE_RATE_UNSUPPORTED -4
+/* The file could not be READ (open failure or a mid-file read error that is not a
+ * normal end of stream) - the disk, not the format. */
+#define VE_DECODE_IO -5
 /* Stateless decode for a background isolate (no engine state touched). `max_frames` (at the
  * output `rate`; 0 = unbounded) caps the decoded duration BEFORE the full track allocates —
  * a too-long file sets VE_DECODE_TOO_LONG in `status` (nullable) and returns empty PCM. */

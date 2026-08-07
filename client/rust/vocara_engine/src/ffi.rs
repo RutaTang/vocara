@@ -1216,9 +1216,19 @@ const MAX_DECODE_RATE: u32 = 384_000;
 pub const VE_DECODE_OK: c_int = 0;
 /// `ve_decode` status: open/probe/decode failure (unreadable or unsupported file).
 pub const VE_DECODE_ERR: c_int = -1;
-/// `ve_decode` status: the audio exceeds `max_frames` — refused before/while decoding so the
-/// peak allocation stays bounded by the caller's budget, never by the file.
+/// `ve_decode` status: the audio exceeds the caller's DURATION budget — refused before/while
+/// decoding so the peak allocation stays bounded by the budget, never by the file.
 pub const VE_DECODE_TOO_LONG: c_int = -2;
+/// `ve_decode` status: the audio exceeds a MEMORY budget (source-rate ceiling or absolute
+/// source-frame cap) without being over-duration — a short but extremely dense file. Distinct
+/// from [`VE_DECODE_TOO_LONG`] so the UI reports what is actually wrong.
+pub const VE_DECODE_TOO_BIG: c_int = -3;
+/// `ve_decode` status: the source sample rate is outside the supported [8 kHz, 384 kHz]
+/// envelope — not a real recording.
+pub const VE_DECODE_RATE_UNSUPPORTED: c_int = -4;
+/// `ve_decode` status: the file could not be READ (open failure or a mid-file read error
+/// that is not a normal end of stream) — the disk, not the format.
+pub const VE_DECODE_IO: c_int = -5;
 
 /// Stateless decode (no engine handle) for a background isolate: decode `path` and resample
 /// to `rate`, returning malloc'd interleaved-stereo f32. Free with [`ve_free_decoded`]. Safe
@@ -1273,6 +1283,18 @@ pub extern "C" fn ve_decode(
             Ok(v) => v,
             Err(device::DecodeError::TooLong) => {
                 set_status(VE_DECODE_TOO_LONG);
+                return VePcm::empty();
+            }
+            Err(device::DecodeError::TooBig) => {
+                set_status(VE_DECODE_TOO_BIG);
+                return VePcm::empty();
+            }
+            Err(device::DecodeError::RateUnsupported) => {
+                set_status(VE_DECODE_RATE_UNSUPPORTED);
+                return VePcm::empty();
+            }
+            Err(device::DecodeError::Io(_)) => {
+                set_status(VE_DECODE_IO);
                 return VePcm::empty();
             }
             Err(device::DecodeError::Other(_)) => return VePcm::empty(),

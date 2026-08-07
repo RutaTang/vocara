@@ -23,6 +23,11 @@ use crate::sample::{Smp, CHANNELS, ENGINE_SR};
 pub const EVENT_OUTPUT_LOST: u32 = 1;
 /// `ve_poll_device_event` bit: the active input device was lost (stream error / disconnect).
 pub const EVENT_INPUT_LOST: u32 = 2;
+/// The mic opened WITHOUT echo cancellation (VPIO negotiated mismatched element
+/// rates — see vpio.rs's bypass rationale: a working mic with echo bleed beats
+/// no mic). Raised so the UI can tell the user speaker playback may bleed into
+/// the take instead of leaving the degradation silent (stderr is not a UI).
+pub const EVENT_AEC_BYPASSED: u32 = 4;
 
 /// Latched when a stream teardown failed to synchronously stop its callback (a cpal `pause()`
 /// error, or `AudioOutputUnitStop` failing in `vpio`). The renderer gate's `false` state means
@@ -1130,6 +1135,21 @@ fn audio_host_run(
                             Ok(handle) => {
                                 in_stream = Some(handle);
                                 input_started(&input_state);
+                                // The reopen minted a NEW stream generation while the applied
+                                // pair still carried the old one, so a recorder arming right
+                                // after a device switch waited on a convergence that had in
+                                // fact already happened — until some unrelated input intent
+                                // nudged the host. Re-attest the SAME applied seq under the
+                                // new generation: the desired state (input running) is
+                                // satisfied by the stream just opened, which is exactly what
+                                // "applied" means. Failure republishes nothing — the state
+                                // word is not running and EVENT_INPUT_LOST fires.
+                                let seq = input_applied.load(Ordering::Acquire) >> 24;
+                                let generation = input_state.load(Ordering::Acquire) >> 1;
+                                input_applied.store(
+                                    (seq << 24) | (generation & 0xFF_FFFF),
+                                    Ordering::Release,
+                                );
                                 let _ = reply.send(0);
                             }
                             Err(_) => {
@@ -1261,15 +1281,31 @@ pub fn probe_duration_ms(path: &str) -> Result<Option<u64>, String> {
     })
 }
 
-/// Why [`decode_file`] refused a file. `TooLong` is distinct so callers can surface a
-/// duration-cap message instead of a generic decode failure.
+/// Why [`decode_file`] refused a file. The variants are DIAGNOSTIC taxonomy,
+/// not decoration: every refusal used to collapse into "too long", so a
+/// 30-second 384 kHz file was reported as over-duration and a mid-file disk
+/// error as a clean EOF.
 #[derive(Debug)]
 pub enum DecodeError {
-    /// The audio exceeds the caller's duration budget. Raised BEFORE decoding when the
-    /// container declares its frame count, or the moment the budget is crossed mid-decode —
-    /// either way peak memory stays bounded by the budget, never by the file.
+    /// The audio exceeds the caller's DURATION budget. Raised BEFORE decoding
+    /// when the container declares its frame count, or the moment the budget
+    /// is crossed mid-decode — either way peak memory stays bounded by the
+    /// budget, never by the file.
     TooLong,
-    /// Any other open/probe/decode failure.
+    /// The audio exceeds a caller's MEMORY budget (source-rate ceiling or
+    /// absolute source-frame cap) without being over-duration — a short but
+    /// extremely dense file. Distinct from [`DecodeError::TooLong`] so the UI
+    /// can say what is actually wrong.
+    TooBig,
+    /// The source sample rate sits outside the supported envelope
+    /// ([`MIN_SRC_RATE`], [`MAX_SRC_RATE`]) — no real recording, refused
+    /// before symphonia parses anything.
+    RateUnsupported,
+    /// The FILE could not be read (open failure, or a read error mid-decode
+    /// that is not a normal end of stream). Distinct from a malformed
+    /// container: the bytes may be fine and the disk is not.
+    Io(String),
+    /// Any other probe/decode failure (unsupported or corrupt container).
     Other(String),
 }
 
@@ -1304,7 +1340,8 @@ pub fn decode_file(
     use symphonia::core::probe::Hint;
 
     let err = |m: String| DecodeError::Other(m);
-    let file = std::fs::File::open(path).map_err(|e| err(format!("open {path}: {e}")))?;
+    let file =
+        std::fs::File::open(path).map_err(|e| DecodeError::Io(format!("open {path}: {e}")))?;
 
     // WAV pre-sniff BEFORE symphonia sees the bytes: a zero sample rate makes symphonia's
     // TimeBase constructor panic inside the probe itself, so the envelope must be judged
@@ -1314,7 +1351,7 @@ pub fn decode_file(
     // clean deterministic refusal instead of an unwind.)
     if let Ok(Some(rate)) = sniff_wav_sample_rate(path) {
         if !(MIN_SRC_RATE..=MAX_SRC_RATE).contains(&rate) {
-            return Err(err(format!("source rate {rate} outside supported envelope")));
+            return Err(DecodeError::RateUnsupported);
         }
     }
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
@@ -1347,10 +1384,13 @@ pub fn decode_file(
     // a decoder-driven allocation/CPU DoS from a tiny file. No real recording sits
     // outside [8 kHz, 384 kHz]; the same envelope the Dart analysis gate enforces.
     if !(MIN_SRC_RATE..=MAX_SRC_RATE).contains(&src_rate) {
-        return Err(err(format!("source rate {src_rate} outside supported envelope")));
+        return Err(DecodeError::RateUnsupported);
     }
+    // A caller's source-rate ceiling is a MEMORY budget (per-second decode
+    // cost), not a duration bound: a short 384 kHz file is refused as too
+    // BIG, not "too long" — the old conflation misdiagnosed every dense file.
     if max_src_rate > 0 && src_rate > max_src_rate {
-        return Err(DecodeError::TooLong);
+        return Err(DecodeError::TooBig);
     }
     // The effective frame budget: the duration-derived bound AND the caller's absolute
     // memory budget, whichever is tighter (u64::MAX = unbounded).
@@ -1365,12 +1405,22 @@ pub fn decode_file(
         u64::MAX
     };
     let max_frames = duration_frames.min(absolute);
+    // Which budget actually tripped decides the DIAGNOSIS: over the duration
+    // bound is "too long"; under it but over the absolute source-frame cap is
+    // "too big" (a short, dense file the memory budget refuses).
+    let budget_err = |frames: u64| -> DecodeError {
+        if frames > duration_frames {
+            DecodeError::TooLong
+        } else {
+            DecodeError::TooBig
+        }
+    };
     // Refuse a declared-too-long track BEFORE decoding a single packet. When the declared
     // length fits, pre-size the Vec so packet pushes never realloc-copy the whole track
     // (the count is clamped by the budget first — a lying header must not drive a huge
     // allocation on its own).
     let mut out: Vec<[Smp; CHANNELS]> = match track.codec_params.n_frames {
-        Some(n) if n > max_frames => return Err(DecodeError::TooLong),
+        Some(n) if n > max_frames => return Err(budget_err(n)),
         Some(n) => Vec::with_capacity(n.min(max_frames) as usize),
         None => Vec::new(),
     };
@@ -1378,14 +1428,32 @@ pub fn decode_file(
         .make(&track.codec_params, &DecoderOptions::default())
         .map_err(|e| err(format!("make decoder: {e}")))?;
 
-    // Iterate packets until next_packet errors (EOF or read error).
-    while let Ok(packet) = format.next_packet() {
+    // Iterate packets until end of stream. Error taxonomy matters here (#19):
+    // a normal EOF ends the loop cleanly, a corrupt PACKET is skipped (the
+    // standard symphonia discipline — one damaged frame must not kill a
+    // recovering take), but a mid-file READ error is a failing disk, not an
+    // end of stream — returning the partial audio as a clean success would
+    // silently truncate the user's media.
+    loop {
+        let packet = match format.next_packet() {
+            Ok(p) => p,
+            Err(symphonia::core::errors::Error::IoError(e))
+                if e.kind() == std::io::ErrorKind::UnexpectedEof =>
+            {
+                break; // normal end of stream
+            }
+            Err(symphonia::core::errors::Error::ResetRequired) => break,
+            Err(symphonia::core::errors::Error::IoError(e)) => {
+                return Err(DecodeError::Io(format!("read {path}: {e}")));
+            }
+            Err(e) => return Err(err(format!("packet: {e}"))),
+        };
         if packet.track_id() != track_id {
             continue;
         }
         let decoded = match decoder.decode(&packet) {
             Ok(d) => d,
-            Err(_) => continue,
+            Err(_) => continue, // one corrupt frame is skipped, not fatal
         };
         let spec = *decoded.spec();
         let ch = spec.channels.count();
@@ -1400,7 +1468,7 @@ pub fn decode_file(
         // packet by packet.
         let needed = out.len() + packet_frames;
         if needed as u64 > max_frames {
-            return Err(DecodeError::TooLong);
+            return Err(budget_err(needed as u64));
         }
         if needed > out.capacity() {
             // Amortized geometric growth, capped at the budget so capacity can never
@@ -1675,7 +1743,10 @@ mod decode_tests {
         // pre-probe sniff must turn it into a plain decode error.
         let z = temp_wav("rate0");
         f32_wav_at_rate(&z, 0, &[0.1; 8]);
-        assert!(super::decode_file(z.to_str().unwrap(), 0.0, 0, 0).is_err());
+        assert!(matches!(
+            super::decode_file(z.to_str().unwrap(), 0.0, 0, 0),
+            Err(super::DecodeError::RateUnsupported)
+        ));
 
         // 1 Hz is the resampler DoS: ratio 48000x plans ~49M output frames per input
         // chunk. Refused at the envelope floor, never reaching decode or resample.
@@ -1782,7 +1853,10 @@ mod decode_tests {
         crate::wav::write_wav_f32(&path, &samples, 2, 48_000).unwrap();
         let before = super::DECODE_CALLS.with(|c| c.get());
         match super::decode_file(path.to_str().unwrap(), 10.0, 0, 50) {
-            Err(super::DecodeError::TooLong) => {}
+            // A memory-budget refusal, NOT over-duration: the taxonomy must
+            // say what is actually wrong (the old conflation reported it as
+            // too long).
+            Err(super::DecodeError::TooBig) => {}
             other => panic!("expected the absolute-budget refusal, got {other:?}"),
         }
         assert_eq!(super::DECODE_CALLS.with(|c| c.get()), before + 1);
@@ -1801,7 +1875,8 @@ mod decode_tests {
         crate::wav::write_wav_f32(&path, &samples, 2, 96_000).unwrap();
         let before = super::DECODE_CALLS.with(|c| c.get());
         match super::decode_file(path.to_str().unwrap(), 10.0, 48_000, 0) {
-            Err(super::DecodeError::TooLong) => {}
+            // The rate ceiling is a memory budget: refused as too BIG.
+            Err(super::DecodeError::TooBig) => {}
             other => panic!("expected the source-rate refusal, got {other:?}"),
         }
         assert_eq!(

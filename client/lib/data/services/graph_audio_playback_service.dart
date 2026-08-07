@@ -124,9 +124,11 @@ Future<(int, int)> _decodeInIsolate(String path, int rate) {
         maxPlaybackSrcFrames,
         status,
       );
-      if (status.value == veDecodeTooLong) {
-        throw const MediaTooLongException(maxPlaybackDuration);
-      }
+      final refused = decodeStatusToException(
+        status.value,
+        maxPlaybackDuration,
+      );
+      if (refused != null) throw refused;
       return (pcm.ptr.address, pcm.frames);
     } finally {
       malloc.free(cpath);
@@ -135,9 +137,52 @@ Future<(int, int)> _decodeInIsolate(String path, int rate) {
   });
 }
 
-/// `ve_decode` status: the file exceeded the caller's frame budget (see the C header's
-/// VE_DECODE_TOO_LONG). Mirrored here because ffigen only binds functions/structs.
+/// `ve_decode` statuses (see the C header's VE_DECODE_* constants). Mirrored
+/// here because ffigen only binds functions/structs. The taxonomy matters for
+/// diagnosis: every refusal used to surface as "too long", so a short 384 kHz
+/// file and a failing disk both read as an over-duration file.
 const int veDecodeTooLong = -2;
+const int veDecodeTooBig = -3;
+const int veDecodeRateUnsupported = -4;
+const int veDecodeIo = -5;
+
+/// Thrown when media is refused by a MEMORY budget or the supported-rate
+/// envelope rather than the duration cap — a short but extremely dense file
+/// (e.g. 384 kHz), which "too long" would misdiagnose. The message is
+/// user-presentable.
+class MediaUnsupportedException implements Exception {
+  const MediaUnsupportedException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
+/// Maps a refusing `ve_decode` status to its typed exception; returns null
+/// for OK and for the generic failure (callers treat that as "not decodable"
+/// without a special message).
+Exception? decodeStatusToException(int status, Duration durationCap) {
+  switch (status) {
+    case veDecodeTooLong:
+      return MediaTooLongException(durationCap);
+    case veDecodeTooBig:
+      return const MediaUnsupportedException(
+        'This file is too dense to process. Sample rates this high are not '
+        'supported.',
+      );
+    case veDecodeRateUnsupported:
+      return const MediaUnsupportedException(
+        'This file uses an unsupported sample rate.',
+      );
+    case veDecodeIo:
+      return const MediaUnsupportedException(
+        'The file could not be read. Check the disk and try again.',
+      );
+    default:
+      return null;
+  }
+}
 
 /// The DECLARED duration of a media file, probed from the container without
 /// decoding a single packet — the import gate's cheap pre-check. Null when the
@@ -211,12 +256,12 @@ Future<PcmAudio?> decodeMediaToMono(
       maxAnalysisSrcFrames,
       status,
     );
-    final tooLong = status.value == veDecodeTooLong;
+    final refused = decodeStatusToException(status.value, cap);
     malloc.free(status);
     final ptr = pcm.ptr;
     final frames = pcm.frames;
     try {
-      if (tooLong) throw MediaTooLongException(cap);
+      if (refused != null) throw refused;
       if (frames <= 0 || ptr.address == 0) return null;
       // Belt-and-braces re-check against the ACTUAL decode rate the engine
       // reports, so the cap stays a true duration bound even if the native
@@ -306,7 +351,8 @@ class GraphAudioPlaybackService implements PlaybackEngine {
     }
   }
 
-  /// Poll + clear pending device events (bitmask; bit 1 = output lost, bit 2 = input lost).
+  /// Poll + clear pending device events (bitmask; bit 1 = output lost,
+  /// bit 2 = input lost, bit 4 = mic opened without echo cancellation).
   int pollDeviceEvents() =>
       _available ? _bindings.ve_poll_device_event(_engine) : 0;
 

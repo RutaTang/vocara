@@ -32,5 +32,30 @@ void main() {
     test('the analysis service caps at 10 minutes of decoded audio', () {
       expect(MediaAnalysisService.maxAnalysisDuration, cap);
     });
+
+    test('refusal statuses map to DISTINCT user-presentable diagnoses', () {
+      // Every refusal used to collapse into "too long": a short 384 kHz file
+      // and a failing disk both read as an over-duration file.
+      expect(
+        decodeStatusToException(veDecodeTooLong, cap),
+        isA<MediaTooLongException>(),
+      );
+      final tooBig = decodeStatusToException(veDecodeTooBig, cap);
+      expect(tooBig, isA<MediaUnsupportedException>());
+      expect('$tooBig', isNot(contains('too long')));
+      final rate = decodeStatusToException(veDecodeRateUnsupported, cap);
+      expect(rate, isA<MediaUnsupportedException>());
+      expect('$rate', contains('sample rate'));
+      final io = decodeStatusToException(veDecodeIo, cap);
+      expect(io, isA<MediaUnsupportedException>());
+      expect('$io', contains('read'));
+      expect(decodeStatusToException(0, cap), isNull);
+      expect(decodeStatusToException(-1, cap), isNull);
+      // UI copy rule: sentences are never joined with dashes.
+      for (final e in [tooBig, rate, io]) {
+        expect('$e', isNot(contains(' - ')));
+        expect('$e', isNot(contains('—')));
+      }
+    });
   });
 }

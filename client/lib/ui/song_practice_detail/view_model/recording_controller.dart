@@ -652,6 +652,15 @@ class RecordingController extends ChangeNotifier {
         // Output lost: re-open the current output so transport doesn't freeze.
         engine.setOutputDevice(engine.currentOutputDevice());
       }
+      if (events & 4 != 0) {
+        // The mic opened WITHOUT echo cancellation (VPIO negotiated
+        // mismatched element rates): capture works, but speaker playback can
+        // bleed into the take. Silent degradation is worse than the notice.
+        _toast(
+          'Echo cancellation is unavailable for this microphone. '
+          'Use headphones to keep playback out of the recording.',
+        );
+      }
       if (events & 2 != 0) {
         _onInputDeviceLost();
       } else if (isRecording || _inputMonitorOn || _analysis.liveMonitor) {

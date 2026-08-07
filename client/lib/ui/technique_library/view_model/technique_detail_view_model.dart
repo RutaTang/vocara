@@ -415,7 +415,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
       _refFailed.add(path);
       // Keep the cause when it is user-presentable (the decode-length cap),
       // so the failure hint can say WHY instead of the generic copy.
-      if (e is MediaTooLongException) {
+      if (e is MediaTooLongException || e is MediaUnsupportedException) {
         _refFailedMessage[path] = e.toString();
       }
     } finally {
@@ -673,7 +673,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
         _practiceFailed = true;
         // Keep the cause when it is user-presentable (the decode-length
         // cap), mirroring the reference-analysis failure hint.
-        if (e is MediaTooLongException) {
+        if (e is MediaTooLongException || e is MediaUnsupportedException) {
           _practiceFailedMessage = e.toString();
         }
         _subject = TechniqueAnalysisSubject.reference;

@@ -416,6 +416,11 @@ impl Vpio {
                         // applies to recorded takes.
                         RECORD_LATENCY_FRAMES.store(io_round_trip, Ordering::Relaxed);
                         AEC_BYPASSED.store(true, Ordering::Relaxed);
+                        // Tell the UI, not just stderr: the user should know
+                        // speaker playback may bleed into the take.
+                        in_ctx
+                            .event
+                            .fetch_or(crate::device::EVENT_AEC_BYPASSED, Ordering::Release);
                         eprintln!(
                             "vocara: VPIO negotiated input {} Hz vs output {} Hz — running WITHOUT echo cancellation (mic + playback intact; expect backing bleed on speakers)",
                             in_layout.rate, out_layout.rate
