@@ -87,6 +87,20 @@ impl<T: Copy> Producer<T> {
 }
 
 impl<T: Copy> Consumer<T> {
+    /// Read the next element WITHOUT consuming it, or None if empty. SPSC:
+    /// the slot stays exclusively readable until this side advances `head`.
+    #[inline]
+    pub fn peek(&self) -> Option<T> {
+        let inner = &*self.inner;
+        let head = inner.head.load(Ordering::Relaxed);
+        let tail = inner.tail.load(Ordering::Acquire);
+        if head == tail {
+            return None;
+        }
+        // SAFETY: SPSC — the producer published this slot via the Release on `tail`.
+        Some(unsafe { *inner.buf[head & inner.mask].get() })
+    }
+
     /// Pop one element, or None if empty.
     #[inline]
     pub fn pop(&mut self) -> Option<T> {

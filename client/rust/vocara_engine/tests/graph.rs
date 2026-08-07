@@ -35,7 +35,11 @@ fn source_through_eq_to_master() {
     let mut out = vec![0.0; 256 * CHANNELS];
     g.render(256, 0, &mut out);
     // Flat EQ + unity gain => master ≈ source DC.
-    assert!((rms(&out) - 0.25).abs() < 1e-3, "expected ~0.25, got {}", rms(&out));
+    assert!(
+        (rms(&out) - 0.25).abs() < 1e-3,
+        "expected ~0.25, got {}",
+        rms(&out)
+    );
 }
 
 #[test]
@@ -82,7 +86,12 @@ fn out_of_range_from_port_is_rejected_at_compile() {
             NodeEntry::new(1, Box::new(GainPanNode::unity())),
             NodeEntry::new(2, Box::new(MasterNode::unity())),
         ],
-        edges: vec![Edge { from: 1, from_port: 1, to: 2, to_port: 0 }],
+        edges: vec![Edge {
+            from: 1,
+            from_port: 1,
+            to: 2,
+            to_port: 0,
+        }],
         master: 2,
     };
     assert_eq!(desc.compile(SR, BLOCK).err(), Some(CompileError::BadEdge));
@@ -95,7 +104,10 @@ fn missing_master_is_rejected() {
         edges: vec![],
         master: 99,
     };
-    assert_eq!(desc.compile(SR, BLOCK).err(), Some(CompileError::MissingMaster));
+    assert_eq!(
+        desc.compile(SR, BLOCK).err(),
+        Some(CompileError::MissingMaster)
+    );
 }
 
 #[test]
@@ -132,7 +144,10 @@ fn shared_reverb_send_bus_renders() {
         g.render(BLOCK, (b * BLOCK) as i64, &mut out);
     }
     assert!(all_finite(&out), "shared-bus graph must stay finite");
-    assert!(rms(&out) > 1e-3, "expected audible output from the bus graph");
+    assert!(
+        rms(&out) > 1e-3,
+        "expected audible output from the bus graph"
+    );
 }
 
 #[test]
@@ -140,7 +155,10 @@ fn set_param_reaches_node() {
     let desc = GraphDesc {
         nodes: vec![
             NodeEntry::new(1, Box::new(BufferSource::new(dc(0.5, 500), 0))),
-            NodeEntry::new(2, Box::new(EqNode::new(&[BandSpec::peaking(1000.0, 1.0, 0.0)]))),
+            NodeEntry::new(
+                2,
+                Box::new(EqNode::new(&[BandSpec::peaking(1000.0, 1.0, 0.0)])),
+            ),
             NodeEntry::new(3, Box::new(MasterNode::unity())),
         ],
         edges: vec![Edge::simple(1, 2), Edge::simple(2, 3)],
@@ -153,5 +171,9 @@ fn set_param_reaches_node() {
     for _ in 0..20 {
         g.render(BLOCK, 0, &mut out);
     }
-    assert!(rms(&out) < 1e-3, "master gain 0 should mute, got {}", rms(&out));
+    assert!(
+        rms(&out) < 1e-3,
+        "master gain 0 should mute, got {}",
+        rms(&out)
+    );
 }

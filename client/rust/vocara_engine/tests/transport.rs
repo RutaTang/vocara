@@ -42,7 +42,10 @@ fn source_is_silent_outside_its_span() {
     eng.render(400, &mut out);
     let l = left(&out);
     assert!(l[..100].iter().all(|&x| x == 0.0), "silent before start");
-    assert!(l[100..300].iter().all(|&x| (x - 0.5).abs() < 1e-6), "audible in span");
+    assert!(
+        l[100..300].iter().all(|&x| (x - 0.5).abs() < 1e-6),
+        "audible in span"
+    );
     assert!(l[300..].iter().all(|&x| x == 0.0), "silent after end");
 }
 
@@ -66,7 +69,10 @@ fn seek_repositions_the_clock() {
     let mut out = vec![0.0; 4 * CHANNELS];
     eng.render(4, &mut out);
     // First emitted sample should be timeline frame 500.
-    assert!((left(&out)[0] - 500.0).abs() < 1e-6, "seek should read frame 500");
+    assert!(
+        (left(&out)[0] - 500.0).abs() < 1e-6,
+        "seek should read frame 500"
+    );
     assert_eq!(eng.frame(), 504);
 }
 
@@ -85,11 +91,19 @@ fn gapless_loop_wraps_on_sample_boundary() {
     // The ramp restarts at the wrap: out[100] and out[200] read frame 0 again.
     assert!((l[0] - 0.0).abs() < 1e-6);
     assert!((l[99] - 99.0).abs() < 1e-6);
-    assert!((l[100] - 0.0).abs() < 1e-6, "wrap should re-read frame 0, got {}", l[100]);
+    assert!(
+        (l[100] - 0.0).abs() < 1e-6,
+        "wrap should re-read frame 0, got {}",
+        l[100]
+    );
     assert!((l[199] - 99.0).abs() < 1e-6);
     assert!((l[200] - 0.0).abs() < 1e-6, "second wrap, got {}", l[200]);
     // Contiguity: no discontinuity larger than the ramp's own step except at the seam.
-    assert_eq!(eng.frame(), 50, "250 frames over a 100-frame loop ends at 50");
+    assert_eq!(
+        eng.frame(),
+        50,
+        "250 frames over a 100-frame loop ends at 50"
+    );
 }
 
 #[test]
@@ -114,5 +128,9 @@ fn two_sources_stay_sample_aligned() {
     let l = left(&out);
     // [0,1000): only A => 0.5 ; [1000,2000): A+B => 1.0
     assert!((l[500] - 0.5).abs() < 1e-6, "only A before 1000");
-    assert!((l[1500] - 1.0).abs() < 1e-6, "A+B after 1000, got {}", l[1500]);
+    assert!(
+        (l[1500] - 1.0).abs() < 1e-6,
+        "A+B after 1000, got {}",
+        l[1500]
+    );
 }

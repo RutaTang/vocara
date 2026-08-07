@@ -20,7 +20,11 @@ fn frames_dc(value: f32, n: usize) -> Vec<[f32; CHANNELS]> {
 }
 
 /// Build a one-source live engine: RingSource(1) -> Master(2).
-fn one_source_engine() -> (vocara_engine::live::EngineHandle, vocara_engine::live::RtProcessor, u32) {
+fn one_source_engine() -> (
+    vocara_engine::live::EngineHandle,
+    vocara_engine::live::RtProcessor,
+    u32,
+) {
     let (prod, cons) = spsc::<[f32; CHANNELS]>(8192);
     let desc = GraphDesc {
         nodes: vec![
@@ -46,7 +50,11 @@ fn ring_source_streams_fed_pcm() {
     h.play();
     let mut out = vec![0.0; BLOCK * CHANNELS];
     rt.process(&mut out, BLOCK);
-    assert!((rms(&out) - 0.5).abs() < 1e-3, "streamed DC 0.5, got {}", rms(&out));
+    assert!(
+        (rms(&out) - 0.5).abs() < 1e-3,
+        "streamed DC 0.5, got {}",
+        rms(&out)
+    );
     assert_eq!(h.frame(), BLOCK as i64, "clock advanced by one block");
 }
 
@@ -61,8 +69,16 @@ fn large_io_block_does_not_overrun_monitor_scratch() {
     let big = 512; // 4 * max_block — would overrun the 1-block monitor scratch without chunking
     let mut out = vec![0.0; big * CHANNELS];
     rt.process(&mut out, big); // must not panic
-    assert_eq!(h.frame(), big as i64, "clock advanced by the full large block");
-    assert!((rms(&out) - 0.25).abs() < 1e-3, "streamed DC across the large block, got {}", rms(&out));
+    assert_eq!(
+        h.frame(),
+        big as i64,
+        "clock advanced by the full large block"
+    );
+    assert!(
+        (rms(&out) - 0.25).abs() < 1e-3,
+        "streamed DC across the large block, got {}",
+        rms(&out)
+    );
 }
 
 #[test]
@@ -88,7 +104,11 @@ fn params_applied_through_handle() {
     for _ in 0..40 {
         rt.process(&mut out, BLOCK);
     }
-    assert!(rms(&out) < 1e-3, "master gain 0 via handle should mute, got {}", rms(&out));
+    assert!(
+        rms(&out) < 1e-3,
+        "master gain 0 via handle should mute, got {}",
+        rms(&out)
+    );
 }
 
 #[test]
@@ -151,7 +171,10 @@ fn underrun_emits_silence_not_garbage() {
     // First 10 frames have signal; the rest are silent.
     let l = left(&out);
     assert!((l[0] - 0.5).abs() < 1e-6);
-    assert!(l[20..].iter().all(|&x| x == 0.0), "underrun region is silent");
+    assert!(
+        l[20..].iter().all(|&x| x == 0.0),
+        "underrun region is silent"
+    );
 }
 
 #[test]
@@ -187,7 +210,11 @@ fn rcu_hot_swap_takes_effect_next_block() {
     for _ in 0..40 {
         rt.process(&mut out, BLOCK);
     }
-    assert!(rms(&out) < 1e-3, "after swap to gain-0 graph: silent, got {}", rms(&out));
+    assert!(
+        rms(&out) < 1e-3,
+        "after swap to gain-0 graph: silent, got {}",
+        rms(&out)
+    );
     h.reap(); // free the retired graph on the control thread
 }
 
@@ -212,13 +239,25 @@ fn no_renderer_frees_retired_graphs_immediately() {
     };
     // Gate defaults to true (a renderer may be running): the retiree parks for its epoch.
     h.publish_graph(build());
-    assert_eq!(h.retired_count(), 1, "with the gate up the grace epoch applies");
+    assert_eq!(
+        h.retired_count(),
+        1,
+        "with the gate up the grace epoch applies"
+    );
     // The host reports all streams down: the parked graph AND the fresh retiree free at once.
     *h.renderer_gate().lock().unwrap() = false;
     h.publish_graph(build());
-    assert_eq!(h.retired_count(), 0, "with the gate down retirees free immediately");
+    assert_eq!(
+        h.retired_count(),
+        0,
+        "with the gate down retirees free immediately"
+    );
     // And a raised gate restores the grace-epoch behavior.
     *h.renderer_gate().lock().unwrap() = true;
     h.publish_graph(build());
-    assert_eq!(h.retired_count(), 1, "raising the gate re-arms the grace epoch");
+    assert_eq!(
+        h.retired_count(),
+        1,
+        "raising the gate re-arms the grace epoch"
+    );
 }

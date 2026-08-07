@@ -115,7 +115,10 @@ fn command_overflow_delivers_all_in_order() {
         tx.set(7, p, p as f32);
     }
     tx.flush();
-    assert!(tx.pending_len() > 0, "storm must overflow the ring for this test to bite");
+    assert!(
+        tx.pending_len() > 0,
+        "storm must overflow the ring for this test to bite"
+    );
 
     // Alternate bounded audio-thread drains (like the render callback) with control-thread
     // re-flushes until everything is delivered.
@@ -129,7 +132,10 @@ fn command_overflow_delivers_all_in_order() {
 
     let seen = seen.lock().unwrap();
     let expect: Vec<(u16, f32)> = (0..total).map(|p| (p, p as f32)).collect();
-    assert_eq!(*seen, expect, "every command arrives exactly once, in submission order");
+    assert_eq!(
+        *seen, expect,
+        "every command arrives exactly once, in submission order"
+    );
 }
 
 #[test]
@@ -137,7 +143,10 @@ fn rcu_graph_swap_changes_output() {
     fn dc_graph(value: f32) -> Box<Graph> {
         let desc = GraphDesc {
             nodes: vec![
-                NodeEntry::new(1, Box::new(BufferSource::new(vec![value; 1000 * CHANNELS], 0))),
+                NodeEntry::new(
+                    1,
+                    Box::new(BufferSource::new(vec![value; 1000 * CHANNELS], 0)),
+                ),
                 NodeEntry::new(2, Box::new(vocara_engine::dsp::master::MasterNode::unity())),
             ],
             edges: vec![vocara_engine::Edge::simple(1, 2)],
@@ -197,5 +206,8 @@ fn builder_assembles_vocal_and_backing_inserts() {
         g.render(BLOCK, (b * BLOCK) as i64, &mut out);
     }
     assert!(all_finite(&out), "vocara graph must stay finite");
-    assert!(rms(&out) > 1e-3, "expected audible mix from the built graph");
+    assert!(
+        rms(&out) > 1e-3,
+        "expected audible mix from the built graph"
+    );
 }

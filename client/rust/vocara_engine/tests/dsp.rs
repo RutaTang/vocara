@@ -55,7 +55,10 @@ fn eq_flat_is_identity() {
         .fold(0.0f32, f32::max);
     // Mathematically identity (numerator == denominator at 0 dB); ~1e-5 f32 rounding
     // across the 4-band cascade is inaudible (< -90 dB).
-    assert!(max_err < 1e-4, "flat EQ should be ~identity, max err {max_err}");
+    assert!(
+        max_err < 1e-4,
+        "flat EQ should be ~identity, max err {max_err}"
+    );
 }
 
 #[test]
@@ -83,7 +86,10 @@ fn eq_lowpass_attenuates_highs() {
     let input = to_stereo(&sine_mono(10_000.0, SR, 8192, 0.5));
     let out = run_node(&mut eq, &input, SR, 256);
     let g = rms(&out[out.len() / 2..]) / rms(&input[input.len() / 2..]);
-    assert!(g < 0.2, "10k through a 1k LP should be heavily attenuated, got {g}");
+    assert!(
+        g < 0.2,
+        "10k through a 1k LP should be heavily attenuated, got {g}"
+    );
     assert!(all_finite(&out));
 }
 
@@ -105,8 +111,14 @@ fn eq_high_shelf_boosts_highs_not_lows() {
     let lo_out = run_node(&mut shelf(), &lo, SR, 256);
     let hi_gain = rms(&hi_out[hi_out.len() / 2..]) / rms(&hi[hi.len() / 2..]);
     let lo_gain = rms(&lo_out[lo_out.len() / 2..]) / rms(&lo[lo.len() / 2..]);
-    assert!(hi_gain > 3.0, "high-shelf should lift 10k ~4x, got {hi_gain}");
-    assert!(lo_gain < 1.3, "high-shelf should barely touch 200 Hz, got {lo_gain}");
+    assert!(
+        hi_gain > 3.0,
+        "high-shelf should lift 10k ~4x, got {hi_gain}"
+    );
+    assert!(
+        lo_gain < 1.3,
+        "high-shelf should barely touch 200 Hz, got {lo_gain}"
+    );
 }
 
 #[test]
@@ -117,7 +129,10 @@ fn compressor_reduces_loud_passes_quiet() {
     let out = run_node(&mut comp, &loud, SR, 256);
     let g = rms(&out[out.len() / 2..]) / rms(&loud[loud.len() / 2..]);
     assert!(g < 0.85, "loud signal should be compressed, ratio {g}");
-    assert!(comp.gain_reduction_db() > 1.0, "GR meter should register reduction");
+    assert!(
+        comp.gain_reduction_db() > 1.0,
+        "GR meter should register reduction"
+    );
 
     // Quiet sine below threshold passes ~unchanged.
     let mut comp2 = CompressorNode::new(-18.0, 4.0, 6.0, 5.0, 80.0, 0.0);
@@ -147,7 +162,10 @@ fn compressor_bypass_is_identity() {
         .zip(out.iter())
         .map(|(a, b)| (a - b).abs())
         .fold(0.0f32, f32::max);
-    assert!(max_err < 1e-6, "bypassed compressor must be identity, err {max_err}");
+    assert!(
+        max_err < 1e-6,
+        "bypassed compressor must be identity, err {max_err}"
+    );
 }
 
 #[test]
@@ -163,9 +181,15 @@ fn reverb_impulse_produces_decaying_finite_tail() {
     // Tail energy well after the impulse is present...
     let early = rms(&out[200..20_000]);
     let late = rms(&out[80_000..96_000]);
-    assert!(early > 1e-5, "reverb should ring after the impulse, got {early}");
+    assert!(
+        early > 1e-5,
+        "reverb should ring after the impulse, got {early}"
+    );
     // ...and decays over time.
-    assert!(late < early, "reverb tail should decay: early {early} late {late}");
+    assert!(
+        late < early,
+        "reverb tail should decay: early {early} late {late}"
+    );
 }
 
 #[test]
@@ -187,7 +211,10 @@ fn gain_pan_scales_and_pans() {
     let input = to_stereo(&sine_mono(440.0, SR, 4000, 0.8));
     let out = run_node(&mut g, &input, SR, 256);
     let ratio = rms(&out[out.len() / 2..]) / rms(&input[input.len() / 2..]);
-    assert!((ratio - 0.5).abs() < 0.02, "gain 0.5 at center-unity pan ≈ 0.5, got {ratio}");
+    assert!(
+        (ratio - 0.5).abs() < 0.02,
+        "gain 0.5 at center-unity pan ≈ 0.5, got {ratio}"
+    );
 
     // Hard left: right channel silent, left stays at unity (attenuate-only: the kept side is
     // never cut). Pan ramps over ~10 ms (click-free), so measure the settled tail (last 10%)
@@ -198,7 +225,10 @@ fn gain_pan_scales_and_pans() {
     let tail = &out2[out2.len() * 9 / 10..];
     let in_tail = &input[input.len() * 9 / 10..];
     let r = rms(&right(tail));
-    assert!(r < 1e-3, "hard-left pan should silence the right channel, got {r}");
+    assert!(
+        r < 1e-3,
+        "hard-left pan should silence the right channel, got {r}"
+    );
     let l_ratio = rms(&left(tail)) / rms(&left(in_tail));
     assert!(
         (l_ratio - 1.0).abs() < 0.02,
@@ -234,14 +264,20 @@ fn delay_bypass_toggle_does_not_replay_stale_tail() {
         .zip(out_b.iter())
         .map(|(a, b)| (a - b).abs())
         .fold(0.0f32, f32::max);
-    assert!(max_err < 1e-6, "bypassed delay must pass the dry input through, err {max_err}");
+    assert!(
+        max_err < 1e-6,
+        "bypassed delay must pass the dry input through, err {max_err}"
+    );
 
     // Phase C (re-activated, silent input): the wet path must be silent. Before the fix the
     // ring still held phase A's tone and replayed ~TIME_MS of it as a ghost echo.
     d.set_param(dlparam::BYPASS, 0.0);
     let out_c = run_phase(&mut d, &vec![0.0f32; 24_000 * CHANNELS], SR, block);
     let ghost = rms(&out_c);
-    assert!(ghost < 1e-6, "stale pre-bypass audio replayed as a ghost echo, rms={ghost}");
+    assert!(
+        ghost < 1e-6,
+        "stale pre-bypass audio replayed as a ghost echo, rms={ghost}"
+    );
 }
 
 /// One NaN input sample must not permanently poison the delay's feedback ring: the write
@@ -271,7 +307,10 @@ fn delay_recovers_after_a_nan_input() {
         .zip(&out[100 * CHANNELS..200 * CHANNELS])
         .map(|(a, b)| (a - b).abs())
         .fold(0.0f32, f32::max);
-    assert!(wet_diff > 1e-3, "the wet path must be active for this test to be meaningful");
+    assert!(
+        wet_diff > 1e-3,
+        "the wet path must be active for this test to be meaningful"
+    );
 
     // The NaN input frame itself is unavoidably NaN (the dry path passes it through), but
     // every later frame must be finite. Unsanitized, the poisoned ring slot re-emerged at
@@ -306,5 +345,8 @@ fn doubler_bypass_toggle_does_not_replay_stale_tail() {
     db.set_param(dbparam::BYPASS, 0.0);
     let out_c = run_phase(&mut db, &vec![0.0f32; 9_600 * CHANNELS], SR, block);
     let ghost = rms(&out_c);
-    assert!(ghost < 1e-6, "stale pre-bypass audio replayed as a ghost, rms={ghost}");
+    assert!(
+        ghost < 1e-6,
+        "stale pre-bypass audio replayed as a ghost, rms={ghost}"
+    );
 }

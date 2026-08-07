@@ -8,8 +8,8 @@
 use vocara_engine::build::{self, build, ProjectSpec, TrackSpec};
 use vocara_engine::dsp::biquad::param as eqp;
 use vocara_engine::dsp::compressor::param as cp;
-use vocara_engine::{BufferSource, Engine, CHANNELS};
 use vocara_engine::wav::write_wav_i16;
+use vocara_engine::{BufferSource, Engine, CHANNELS};
 
 const SR: f64 = 48_000.0;
 const BLOCK: usize = 512;
@@ -31,7 +31,10 @@ fn stereo(mono: &[f32]) -> Vec<f32> {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let out = args.get(1).cloned().unwrap_or_else(|| "render_out.wav".to_string());
+    let out = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| "render_out.wav".to_string());
     let seconds: f64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(3.0);
     let total_frames = (SR * seconds) as usize;
 

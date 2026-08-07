@@ -26,21 +26,21 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
 use objc2_audio_toolbox::{
+    kAUVoiceIOProperty_BypassVoiceProcessing, kAUVoiceIOProperty_VoiceProcessingEnableAGC,
     kAudioOutputUnitProperty_CurrentDevice, kAudioOutputUnitProperty_EnableIO,
-    kAudioOutputUnitProperty_SetInputCallback, kAudioUnitProperty_MaximumFramesPerSlice,
-    kAudioUnitProperty_SetRenderCallback, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Global,
-    kAudioUnitManufacturer_Apple, kAudioUnitScope_Input, kAudioUnitScope_Output,
-    kAudioUnitSubType_VoiceProcessingIO, kAudioUnitType_Output,
-    kAUVoiceIOProperty_BypassVoiceProcessing,
-    kAUVoiceIOProperty_VoiceProcessingEnableAGC, AURenderCallbackStruct, AudioComponentDescription,
-    AudioComponentFindNext, AudioComponentInstanceDispose, AudioComponentInstanceNew, AudioUnit,
-    AudioUnitGetProperty, AudioUnitInitialize, AudioUnitRender, AudioUnitRenderActionFlags,
-    AudioUnitSetProperty, AudioUnitUninitialize,
+    kAudioOutputUnitProperty_SetInputCallback, kAudioUnitManufacturer_Apple,
+    kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitProperty_SetRenderCallback,
+    kAudioUnitProperty_StreamFormat, kAudioUnitScope_Global, kAudioUnitScope_Input,
+    kAudioUnitScope_Output, kAudioUnitSubType_VoiceProcessingIO, kAudioUnitType_Output,
+    AURenderCallbackStruct, AudioComponentDescription, AudioComponentFindNext,
+    AudioComponentInstanceDispose, AudioComponentInstanceNew, AudioUnit, AudioUnitGetProperty,
+    AudioUnitInitialize, AudioUnitRender, AudioUnitRenderActionFlags, AudioUnitSetProperty,
+    AudioUnitUninitialize,
 };
 use objc2_audio_toolbox::{AudioOutputUnitStart, AudioOutputUnitStop};
 use objc2_core_audio_types::{
-    kAudioFormatFlagIsFloat, kAudioFormatFlagIsPacked,
-    kAudioFormatLinearPCM, AudioBuffer, AudioBufferList, AudioStreamBasicDescription, AudioTimeStamp,
+    kAudioFormatFlagIsFloat, kAudioFormatFlagIsPacked, kAudioFormatLinearPCM, AudioBuffer,
+    AudioBufferList, AudioStreamBasicDescription, AudioTimeStamp,
 };
 
 use crate::aec::Aec;
@@ -139,7 +139,11 @@ impl Layout {
     fn from(asbd: &AudioStreamBasicDescription) -> Layout {
         Layout {
             channels: (asbd.mChannelsPerFrame as usize).max(1),
-            rate: if asbd.mSampleRate > 0.0 { asbd.mSampleRate } else { VPIO_RATE },
+            rate: if asbd.mSampleRate > 0.0 {
+                asbd.mSampleRate
+            } else {
+                VPIO_RATE
+            },
         }
     }
 }
@@ -284,18 +288,36 @@ impl Vpio {
             let on: u32 = 1;
             let off: u32 = 0;
             // Enable input element (1); enable/disable output element (0) per mode.
-            if let Err(e) = set_u32(unit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Input, ELEM_INPUT, on) {
+            if let Err(e) = set_u32(
+                unit,
+                kAudioOutputUnitProperty_EnableIO,
+                kAudioUnitScope_Input,
+                ELEM_INPUT,
+                on,
+            ) {
                 return bail(unit, e);
             }
             let out_flag = if with_output { on } else { off };
-            if let Err(e) = set_u32(unit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Output, ELEM_OUTPUT, out_flag) {
+            if let Err(e) = set_u32(
+                unit,
+                kAudioOutputUnitProperty_EnableIO,
+                kAudioUnitScope_Output,
+                ELEM_OUTPUT,
+                out_flag,
+            ) {
                 return bail(unit, e);
             }
 
             // Bind the selected input device (best-effort; default device on failure).
             if let Some(uid) = device_uid {
                 if let Some(dev_id) = device_id_for_uid(uid) {
-                    let _ = set_u32(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, dev_id);
+                    let _ = set_u32(
+                        unit,
+                        kAudioOutputUnitProperty_CurrentDevice,
+                        kAudioUnitScope_Global,
+                        0,
+                        dev_id,
+                    );
                 }
             }
 
@@ -309,12 +331,24 @@ impl Vpio {
                 let _ = set_asbd(unit, kAudioUnitScope_Input, ELEM_OUTPUT, &asbd);
             }
 
-            let _ = set_u32(unit, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0, VPIO_MAX_SLICE);
+            let _ = set_u32(
+                unit,
+                kAudioUnitProperty_MaximumFramesPerSlice,
+                kAudioUnitScope_Global,
+                0,
+                VPIO_MAX_SLICE,
+            );
 
             // BYPASS VPIO's voice processing (Bypass = 1): its AEC/NS is voice-call-tuned and ducked
             // the sung voice during the continuous double-talk of singing over music. We take the RAW
             // mic and run our own echo canceller (crate::aec) instead. AGC off too (moot under bypass).
-            let _ = set_u32(unit, kAUVoiceIOProperty_BypassVoiceProcessing, kAudioUnitScope_Global, 0, on);
+            let _ = set_u32(
+                unit,
+                kAUVoiceIOProperty_BypassVoiceProcessing,
+                kAudioUnitScope_Global,
+                0,
+                on,
+            );
             let _ = set_u32(unit, VP_AGC_ENABLE_AGC, kAudioUnitScope_Global, 0, off);
 
             // Far-end reference ring (rendered backing, mono) + our AEC. `output_cb` produces the
@@ -324,11 +358,17 @@ impl Vpio {
 
             // Pinned contexts (their addresses are the callback refcons). Layouts are placeholders
             // until we read the negotiated formats after initialize (no callback fires before start).
-            let placeholder = Layout { channels: REQ_CH as usize, rate: VPIO_RATE };
+            let placeholder = Layout {
+                channels: REQ_CH as usize,
+                rate: VPIO_RATE,
+            };
             let mut in_ctx = Box::new(InCtx {
                 input,
                 unit,
-                abl: AblN { m_number_buffers: 1, m_buffers: [zero_buffer(), zero_buffer()] },
+                abl: AblN {
+                    m_number_buffers: 1,
+                    m_buffers: [zero_buffer(), zero_buffer()],
+                },
                 render_buf: vec![0.0; MAX_FRAMES * MAX_CH],
                 scratch: vec![0.0; MAX_FRAMES * MAX_CH],
                 aec,
@@ -362,7 +402,13 @@ impl Vpio {
                 inputProc: Some(input_cb),
                 inputProcRefCon: in_ptr,
             };
-            if let Err(e) = set_struct(unit, kAudioOutputUnitProperty_SetInputCallback, kAudioUnitScope_Global, 0, &in_cb) {
+            if let Err(e) = set_struct(
+                unit,
+                kAudioOutputUnitProperty_SetInputCallback,
+                kAudioUnitScope_Global,
+                0,
+                &in_cb,
+            ) {
                 return bail(unit, e);
             }
 
@@ -373,7 +419,13 @@ impl Vpio {
                     inputProc: Some(output_cb),
                     inputProcRefCon: out_ptr,
                 };
-                if let Err(e) = set_struct(unit, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, ELEM_OUTPUT, &out_cb) {
+                if let Err(e) = set_struct(
+                    unit,
+                    kAudioUnitProperty_SetRenderCallback,
+                    kAudioUnitScope_Input,
+                    ELEM_OUTPUT,
+                    &out_cb,
+                ) {
                     return bail(unit, e);
                 }
             }
@@ -412,8 +464,8 @@ impl Vpio {
                         // (host thread, not the RT callback).
                         in_ctx.aec_bypass = true;
                         oc.push_ref = false; // leave the ref ring unpumped so it can't grow
-                        // Without the AEC in the capture path its block latency no longer
-                        // applies to recorded takes.
+                                             // Without the AEC in the capture path its block latency no longer
+                                             // applies to recorded takes.
                         RECORD_LATENCY_FRAMES.store(io_round_trip, Ordering::Relaxed);
                         AEC_BYPASSED.store(true, Ordering::Relaxed);
                         // Tell the UI, not just stderr: the user should know
@@ -448,7 +500,12 @@ impl Vpio {
                 return bail(unit, format!("AudioOutputUnitStart failed: {st}"));
             }
 
-            Ok(Vpio { unit, _in: in_ctx, _out: out_ctx, started: true })
+            Ok(Vpio {
+                unit,
+                _in: in_ctx,
+                _out: out_ctx,
+                started: true,
+            })
         }
     }
 
@@ -498,7 +555,9 @@ unsafe fn set_u32(unit: AudioUnit, id: u32, scope: u32, elem: u32, v: u32) -> Re
     if st == 0 {
         Ok(())
     } else {
-        Err(format!("SetProperty {id} (scope {scope}, elem {elem}) failed: {st}"))
+        Err(format!(
+            "SetProperty {id} (scope {scope}, elem {elem}) failed: {st}"
+        ))
     }
 }
 
@@ -519,7 +578,9 @@ unsafe fn set_asbd(
     if st == 0 {
         Ok(())
     } else {
-        Err(format!("StreamFormat (scope {scope}, elem {elem}) failed: {st}"))
+        Err(format!(
+            "StreamFormat (scope {scope}, elem {elem}) failed: {st}"
+        ))
     }
 }
 
@@ -618,7 +679,9 @@ unsafe extern "C-unwind" fn input_cb(
         // reading 1 mono sample-per-frame as an L/R pair is exactly the "helium voice" bug).
         let got_bytes = (ctx.abl.m_buffers[0].mDataByteSize as usize).min(cap_samples * 4);
         let got_samples = got_bytes / std::mem::size_of::<f32>();
-        let act_ch = got_samples.checked_div(frames).map_or(1, |c| c.clamp(1, MAX_CH));
+        let act_ch = got_samples
+            .checked_div(frames)
+            .map_or(1, |c| c.clamp(1, MAX_CH));
 
         if st != 0 {
             // Sustained AudioUnitRender failure means the input device went away (hot-unplug /
@@ -706,8 +769,11 @@ unsafe extern "C-unwind" fn input_cb(
                 let _ = ctx.ref_cons.pop();
             }
             // Cancel the loudspeaker echo from the mic, preserving the singing voice.
-            ctx.aec
-                .process(&ctx.mic_mono[..n], &ctx.far_mono[..n], &mut ctx.clean_mono[..n]);
+            ctx.aec.process(
+                &ctx.mic_mono[..n],
+                &ctx.far_mono[..n],
+                &mut ctx.clean_mono[..n],
+            );
         }
         // High-pass (DC/rumble) then apply the (user-adjustable) record gain — a pure linear
         // scale (the float take stores over-0 dBFS losslessly; the master limiter guards
@@ -767,7 +833,9 @@ unsafe extern "C-unwind" fn output_cb(
         // pops then, so pushing would only fill the ring to capacity for nothing.
         if ctx.push_ref {
             for i in 0..frames {
-                let _ = ctx.ref_prod.push(0.5 * (scratch[2 * i] + scratch[2 * i + 1]));
+                let _ = ctx
+                    .ref_prod
+                    .push(0.5 * (scratch[2 * i] + scratch[2 * i + 1]));
             }
         }
         // Self-monitor: add the singer's voice to the OUTPUT (headphones) — AFTER the reference is
@@ -967,7 +1035,11 @@ fn tune_io_and_round_trip(device_uid: Option<&str>) -> u32 {
         // only the input leg (VPIO plays through the default OUTPUT device, which must still be
         // tuned and measured); unbound falls back to the system defaults for both legs.
         let default_dev = |sel: u32| {
-            dev_get_u32(kAudioObjectSystemObject as u32, sel, kAudioObjectPropertyScopeGlobal)
+            dev_get_u32(
+                kAudioObjectSystemObject as u32,
+                sel,
+                kAudioObjectPropertyScopeGlobal,
+            )
         };
         let bound = device_uid.and_then(device_id_for_uid);
         let legs: [(Option<u32>, u32); 2] = match bound {
@@ -1003,7 +1075,12 @@ fn tune_io_and_round_trip(device_uid: Option<&str>) -> u32 {
                 kAudioObjectPropertyScopeGlobal,
                 WANT_FRAMES,
             );
-            let buf = dev_get_u32(dev, kAudioDevicePropertyBufferFrameSize, kAudioObjectPropertyScopeGlobal).unwrap_or(WANT_FRAMES);
+            let buf = dev_get_u32(
+                dev,
+                kAudioDevicePropertyBufferFrameSize,
+                kAudioObjectPropertyScopeGlobal,
+            )
+            .unwrap_or(WANT_FRAMES);
             let latency = dev_get_u32(dev, kAudioDevicePropertyLatency, lscope).unwrap_or(0);
             let safety = dev_get_u32(dev, kAudioDevicePropertySafetyOffset, lscope).unwrap_or(0);
             // BufferFrameSize/Latency/SafetyOffset are reported in frames at the DEVICE's

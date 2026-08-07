@@ -190,6 +190,21 @@ impl Shared {
     pub fn out_flush_gen(&self) -> u32 {
         self.out_flush.load(Ordering::Acquire)
     }
+
+    // Plan-basis reads for the streaming feeders (crate::feed): a change in
+    // any of these is a plan discontinuity.
+    pub fn is_playing(&self) -> bool {
+        self.playing.load(Ordering::Acquire)
+    }
+    pub fn loop_enabled(&self) -> bool {
+        self.loop_enabled.load(Ordering::Acquire)
+    }
+    pub fn loop_start(&self) -> i64 {
+        self.loop_start.load(Ordering::Relaxed)
+    }
+    pub fn loop_end(&self) -> i64 {
+        self.loop_end.load(Ordering::Relaxed)
+    }
 }
 
 /// Audio-thread half. Owns the graph cell (shared), the command consumer, and the transport
@@ -331,8 +346,9 @@ impl RtProcessor {
     /// the input stream is closed, so this is cheap when monitoring is off.
     #[inline]
     fn mix_monitor(&mut self, out: &mut [Smp], frames: usize) {
-        self.mon_gain
-            .set_target(f32::from_bits(self.shared.mon_target.load(Ordering::Relaxed)));
+        self.mon_gain.set_target(f32::from_bits(
+            self.shared.mon_target.load(Ordering::Relaxed),
+        ));
 
         // Drain the mic ring into the monitor input buffer.
         for i in 0..frames {
@@ -342,12 +358,18 @@ impl RtProcessor {
         }
 
         // Live monitor reverb (dry voice + wet tail). Params are pushed from the control thread.
-        self.mon_reverb
-            .set_param(rparam::ROOM_SIZE, f32::from_bits(self.shared.mon_rev_room.load(Ordering::Relaxed)));
-        self.mon_reverb
-            .set_param(rparam::DAMPING, f32::from_bits(self.shared.mon_rev_damping.load(Ordering::Relaxed)));
-        self.mon_reverb
-            .set_param(rparam::WET, f32::from_bits(self.shared.mon_rev_wet.load(Ordering::Relaxed)));
+        self.mon_reverb.set_param(
+            rparam::ROOM_SIZE,
+            f32::from_bits(self.shared.mon_rev_room.load(Ordering::Relaxed)),
+        );
+        self.mon_reverb.set_param(
+            rparam::DAMPING,
+            f32::from_bits(self.shared.mon_rev_damping.load(Ordering::Relaxed)),
+        );
+        self.mon_reverb.set_param(
+            rparam::WET,
+            f32::from_bits(self.shared.mon_rev_wet.load(Ordering::Relaxed)),
+        );
         let n = frames * CHANNELS;
         {
             let inputs: [&[Smp]; 1] = [&self.mon_in[..n]];
@@ -456,6 +478,11 @@ pub struct EngineHandle {
 }
 
 impl EngineHandle {
+    /// The transport atomics (plan basis for the streaming feeders).
+    pub fn transport(&self) -> &Shared {
+        &self.shared
+    }
+
     pub fn play(&self) {
         // IDEMPOTENT: only a genuine stopped→playing transition acts. A repeated play()
         // while already playing would run the flush below against LIVE audio sitting in

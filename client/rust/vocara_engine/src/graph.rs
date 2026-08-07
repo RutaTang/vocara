@@ -105,10 +105,7 @@ impl GraphDesc {
 
         let mut taken: Vec<Option<Box<dyn Node>>> =
             nodes.into_iter().map(|e| Some(e.node)).collect();
-        let num_in: Vec<usize> = taken
-            .iter()
-            .map(|o| o.as_ref().unwrap().num_in())
-            .collect();
+        let num_in: Vec<usize> = taken.iter().map(|o| o.as_ref().unwrap().num_in()).collect();
         for (pos, o) in taken.iter().enumerate() {
             if o.as_ref().unwrap().num_out() != 1 {
                 return Err(CompileError::MultiOutput(ids[pos]));
@@ -153,10 +150,8 @@ impl GraphDesc {
         }
 
         // Per scheduled node, the summed input edges by destination port.
-        let mut in_edges_by_sched: Vec<Vec<Vec<(usize, usize)>>> = order
-            .iter()
-            .map(|&p| vec![Vec::new(); num_in[p]])
-            .collect();
+        let mut in_edges_by_sched: Vec<Vec<Vec<(usize, usize)>>> =
+            order.iter().map(|&p| vec![Vec::new(); num_in[p]]).collect();
         for e in &edges {
             let fp = id_to_pos[&e.from];
             let tp = id_to_pos[&e.to];
@@ -184,8 +179,11 @@ impl GraphDesc {
             });
         }
 
-        let index: HashMap<NodeId, usize> =
-            schedule.iter().enumerate().map(|(i, s)| (s.id, i)).collect();
+        let index: HashMap<NodeId, usize> = schedule
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s.id, i))
+            .collect();
         let master_idx = sched_of_pos[id_to_pos[&master]];
 
         Ok(Graph {

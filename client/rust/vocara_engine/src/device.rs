@@ -297,9 +297,7 @@ impl OutResampler {
             // counter's coordinate space (their content re-renders after the
             // transport's clock rewind; the cursor must not wait for frames
             // that no longer exist).
-            self.rt
-                .transport()
-                .advance_consumed(self.fifo.len() as u64);
+            self.rt.transport().advance_consumed(self.fifo.len() as u64);
             self.fifo.clear();
             self.pos = 0.0;
         }
@@ -1024,169 +1022,167 @@ fn audio_host_run(
         // their grace epoch, exactly the pre-gate behavior.
         set_gate(true);
         match cmd {
-                HostCmd::SetOutput { uid, reply } => {
-                    // While duplex VPIO owns the output (mic active), do NOT bring up a competing cpal
-                    // output — two renderers of RtCell would violate the single-accessor invariant.
-                    if VPIO_DUPLEX_AEC && in_stream.is_some() {
-                        // Record the request so StopInput restores THIS device (not the system
-                        // default) when the mic stops, and report the deferred success.
-                        cur_out_uid = Some(uid);
-                        let _ = reply.send(0);
-                    } else {
-                        // Drop the old stream FIRST (joins its callback) so only one stream ever touches
-                        // the shared RtCell, then build the new one. Fall back to default if the
-                        // requested device can't be opened.
-                        out_stream = None;
-                        let built = build_output(Some(&uid), &rt, &event)
-                            .or_else(|_| build_output(None, &rt, &event));
-                        match built {
-                            Ok((handle, _)) => {
-                                out_stream = Some(handle);
-                                cur_out_uid = Some(uid);
-                                let _ = reply.send(0);
-                            }
-                            Err(_) => {
-                                event.fetch_or(EVENT_OUTPUT_LOST, Ordering::Release);
-                                let _ = reply.send(-1);
-                            }
-                        }
-                    }
-                }
-                HostCmd::SyncInput { reply } => {
-                    // LINEARIZED desired-state convergence: act on what the cell says NOW,
-                    // never on what the state was when this nudge was queued. A stale
-                    // teardown can no longer execute after the arm that superseded it —
-                    // "monitoring off, then REC" reads want=on here and keeps (or opens)
-                    // the stream; the old imperative Start/Stop commands executed history
-                    // instead. Idempotent, so any number of queued nudges converge to the
-                    // same state.
-                    let intent = input_intent.load(Ordering::Acquire);
-                    let want = intent & 1 == 1;
-                    // Whether this convergence actually REACHED the desired state — the
-                    // applied watermark below is published only then, so a consumer can
-                    // never read "applied >= my arm" off a convergence that FAILED (the
-                    // reviewed splice: old warm frames + a failed reopen still advanced
-                    // applied, and two true-but-unrelated conditions assembled a false
-                    // ready).
-                    let mut converged = true;
-                    if want && in_stream.is_none() {
-                        // Duplex VPIO renders the engine through its own output element, so
-                        // drop the cpal output FIRST (only one path may touch RtCell). Fall
-                        // back to the default input if the selected device can't be opened.
-                        if VPIO_DUPLEX_AEC {
-                            out_stream = None;
-                        }
-                        let built = open_mic(cur_in_uid.as_deref(), &rt, &input_cell, &event)
-                            .or_else(|_| open_mic(None, &rt, &input_cell, &event));
-                        match built {
-                            Ok(handle) => {
-                                in_stream = Some(handle);
-                                input_started(&input_state);
-                            }
-                            Err(_) => {
-                                converged = false;
-                                input_stopped(&input_state);
-                                // Mic failed to come up → restore cpal output so playback
-                                // survives. Restore the user's chosen output (not the system
-                                // default); fall back to default only if it can't open.
-                                if VPIO_DUPLEX_AEC && out_stream.is_none() {
-                                    out_stream = build_output(cur_out_uid.as_deref(), &rt, &event)
-                                        .or_else(|_| build_output(None, &rt, &event))
-                                        .ok()
-                                        .map(|(h, _)| h);
-                                }
-                                event.fetch_or(EVENT_INPUT_LOST, Ordering::Release);
-                            }
-                        }
-                    } else if !want && in_stream.is_some() {
-                        // Clear the running bit BEFORE the drop joins the dying callback: a
-                        // consumer snapshotting the state word must never count the old
-                        // stream's final frames as evidence that a NEW stream is delivering.
-                        input_stopped(&input_state);
-                        in_stream = None;
-                        // VPIO was rendering the output in duplex; hand playback back to
-                        // cpal, restoring the user's last chosen output device (a SetOutput
-                        // during duplex deferred it), falling back to the system default
-                        // only if that device can't be opened.
-                        if VPIO_DUPLEX_AEC && out_stream.is_none() {
-                            out_stream = build_output(cur_out_uid.as_deref(), &rt, &event)
-                                .or_else(|_| build_output(None, &rt, &event))
-                                .ok()
-                                .map(|(h, _)| h);
-                        }
-                    }
-                    // Publish AFTER converging, ONLY on success, and PAIRED with the input
-                    // generation the convergence left behind: (seq << 24) | generation. The
-                    // consumer requires the applied pair's generation to equal the CURRENT
-                    // state word's generation with the running bit set — all three ready
-                    // facts (progress, running, applied) are then anchored to one stream
-                    // instance, and evidence from two different generations can no longer
-                    // be spliced into a false ready. Generations are never reused, so the
-                    // 24-bit field wraps after ~16M stream starts — beyond any session.
-                    if converged {
-                        let generation = input_state.load(Ordering::Acquire) >> 1;
-                        input_applied.store(
-                            ((intent >> 1) << 24) | (generation & 0xFF_FFFF),
-                            Ordering::Release,
-                        );
-                    }
+            HostCmd::SetOutput { uid, reply } => {
+                // While duplex VPIO owns the output (mic active), do NOT bring up a competing cpal
+                // output — two renderers of RtCell would violate the single-accessor invariant.
+                if VPIO_DUPLEX_AEC && in_stream.is_some() {
+                    // Record the request so StopInput restores THIS device (not the system
+                    // default) when the mic stops, and report the deferred success.
+                    cur_out_uid = Some(uid);
                     let _ = reply.send(0);
-                }
-                HostCmd::SetInput { uid, reply } => {
-                    cur_in_uid = Some(uid.clone());
-                    if in_stream.is_some() {
-                        // Reopen on the new device (drop old first → single-accessor; cpal output is
-                        // already off in duplex). Not-running for the whole swap window (see
-                        // StopInput on why the store precedes the drop).
-                        input_stopped(&input_state);
-                        in_stream = None;
-                        match open_mic(Some(&uid), &rt, &input_cell, &event)
-                            .or_else(|_| open_mic(None, &rt, &input_cell, &event))
-                        {
-                            Ok(handle) => {
-                                in_stream = Some(handle);
-                                input_started(&input_state);
-                                // The reopen minted a NEW stream generation while the applied
-                                // pair still carried the old one, so a recorder arming right
-                                // after a device switch waited on a convergence that had in
-                                // fact already happened — until some unrelated input intent
-                                // nudged the host. Re-attest the SAME applied seq under the
-                                // new generation: the desired state (input running) is
-                                // satisfied by the stream just opened, which is exactly what
-                                // "applied" means. Failure republishes nothing — the state
-                                // word is not running and EVENT_INPUT_LOST fires.
-                                let seq = input_applied.load(Ordering::Acquire) >> 24;
-                                let generation = input_state.load(Ordering::Acquire) >> 1;
-                                input_applied.store(
-                                    (seq << 24) | (generation & 0xFF_FFFF),
-                                    Ordering::Release,
-                                );
-                                let _ = reply.send(0);
-                            }
-                            Err(_) => {
-                                if VPIO_DUPLEX_AEC && out_stream.is_none() {
-                                    // Restore the user's chosen output (not the system default),
-                                    // matching StopInput; fall back to default only if it can't open.
-                                    out_stream = build_output(cur_out_uid.as_deref(), &rt, &event)
-                                        .or_else(|_| build_output(None, &rt, &event))
-                                        .ok()
-                                        .map(|(h, _)| h);
-                                }
-                                event.fetch_or(EVENT_INPUT_LOST, Ordering::Release);
-                                let _ = reply.send(-1);
-                            }
-                        }
-                    } else {
-                        let _ = reply.send(0);
-                    }
-                }
-                HostCmd::Shutdown => {
-                    input_stopped(&input_state);
-                    in_stream = None;
+                } else {
+                    // Drop the old stream FIRST (joins its callback) so only one stream ever touches
+                    // the shared RtCell, then build the new one. Fall back to default if the
+                    // requested device can't be opened.
                     out_stream = None;
-                    break;
+                    let built = build_output(Some(&uid), &rt, &event)
+                        .or_else(|_| build_output(None, &rt, &event));
+                    match built {
+                        Ok((handle, _)) => {
+                            out_stream = Some(handle);
+                            cur_out_uid = Some(uid);
+                            let _ = reply.send(0);
+                        }
+                        Err(_) => {
+                            event.fetch_or(EVENT_OUTPUT_LOST, Ordering::Release);
+                            let _ = reply.send(-1);
+                        }
+                    }
                 }
             }
+            HostCmd::SyncInput { reply } => {
+                // LINEARIZED desired-state convergence: act on what the cell says NOW,
+                // never on what the state was when this nudge was queued. A stale
+                // teardown can no longer execute after the arm that superseded it —
+                // "monitoring off, then REC" reads want=on here and keeps (or opens)
+                // the stream; the old imperative Start/Stop commands executed history
+                // instead. Idempotent, so any number of queued nudges converge to the
+                // same state.
+                let intent = input_intent.load(Ordering::Acquire);
+                let want = intent & 1 == 1;
+                // Whether this convergence actually REACHED the desired state — the
+                // applied watermark below is published only then, so a consumer can
+                // never read "applied >= my arm" off a convergence that FAILED (the
+                // reviewed splice: old warm frames + a failed reopen still advanced
+                // applied, and two true-but-unrelated conditions assembled a false
+                // ready).
+                let mut converged = true;
+                if want && in_stream.is_none() {
+                    // Duplex VPIO renders the engine through its own output element, so
+                    // drop the cpal output FIRST (only one path may touch RtCell). Fall
+                    // back to the default input if the selected device can't be opened.
+                    if VPIO_DUPLEX_AEC {
+                        out_stream = None;
+                    }
+                    let built = open_mic(cur_in_uid.as_deref(), &rt, &input_cell, &event)
+                        .or_else(|_| open_mic(None, &rt, &input_cell, &event));
+                    match built {
+                        Ok(handle) => {
+                            in_stream = Some(handle);
+                            input_started(&input_state);
+                        }
+                        Err(_) => {
+                            converged = false;
+                            input_stopped(&input_state);
+                            // Mic failed to come up → restore cpal output so playback
+                            // survives. Restore the user's chosen output (not the system
+                            // default); fall back to default only if it can't open.
+                            if VPIO_DUPLEX_AEC && out_stream.is_none() {
+                                out_stream = build_output(cur_out_uid.as_deref(), &rt, &event)
+                                    .or_else(|_| build_output(None, &rt, &event))
+                                    .ok()
+                                    .map(|(h, _)| h);
+                            }
+                            event.fetch_or(EVENT_INPUT_LOST, Ordering::Release);
+                        }
+                    }
+                } else if !want && in_stream.is_some() {
+                    // Clear the running bit BEFORE the drop joins the dying callback: a
+                    // consumer snapshotting the state word must never count the old
+                    // stream's final frames as evidence that a NEW stream is delivering.
+                    input_stopped(&input_state);
+                    in_stream = None;
+                    // VPIO was rendering the output in duplex; hand playback back to
+                    // cpal, restoring the user's last chosen output device (a SetOutput
+                    // during duplex deferred it), falling back to the system default
+                    // only if that device can't be opened.
+                    if VPIO_DUPLEX_AEC && out_stream.is_none() {
+                        out_stream = build_output(cur_out_uid.as_deref(), &rt, &event)
+                            .or_else(|_| build_output(None, &rt, &event))
+                            .ok()
+                            .map(|(h, _)| h);
+                    }
+                }
+                // Publish AFTER converging, ONLY on success, and PAIRED with the input
+                // generation the convergence left behind: (seq << 24) | generation. The
+                // consumer requires the applied pair's generation to equal the CURRENT
+                // state word's generation with the running bit set — all three ready
+                // facts (progress, running, applied) are then anchored to one stream
+                // instance, and evidence from two different generations can no longer
+                // be spliced into a false ready. Generations are never reused, so the
+                // 24-bit field wraps after ~16M stream starts — beyond any session.
+                if converged {
+                    let generation = input_state.load(Ordering::Acquire) >> 1;
+                    input_applied.store(
+                        ((intent >> 1) << 24) | (generation & 0xFF_FFFF),
+                        Ordering::Release,
+                    );
+                }
+                let _ = reply.send(0);
+            }
+            HostCmd::SetInput { uid, reply } => {
+                cur_in_uid = Some(uid.clone());
+                if in_stream.is_some() {
+                    // Reopen on the new device (drop old first → single-accessor; cpal output is
+                    // already off in duplex). Not-running for the whole swap window (see
+                    // StopInput on why the store precedes the drop).
+                    input_stopped(&input_state);
+                    in_stream = None;
+                    match open_mic(Some(&uid), &rt, &input_cell, &event)
+                        .or_else(|_| open_mic(None, &rt, &input_cell, &event))
+                    {
+                        Ok(handle) => {
+                            in_stream = Some(handle);
+                            input_started(&input_state);
+                            // The reopen minted a NEW stream generation while the applied
+                            // pair still carried the old one, so a recorder arming right
+                            // after a device switch waited on a convergence that had in
+                            // fact already happened — until some unrelated input intent
+                            // nudged the host. Re-attest the SAME applied seq under the
+                            // new generation: the desired state (input running) is
+                            // satisfied by the stream just opened, which is exactly what
+                            // "applied" means. Failure republishes nothing — the state
+                            // word is not running and EVENT_INPUT_LOST fires.
+                            let seq = input_applied.load(Ordering::Acquire) >> 24;
+                            let generation = input_state.load(Ordering::Acquire) >> 1;
+                            input_applied
+                                .store((seq << 24) | (generation & 0xFF_FFFF), Ordering::Release);
+                            let _ = reply.send(0);
+                        }
+                        Err(_) => {
+                            if VPIO_DUPLEX_AEC && out_stream.is_none() {
+                                // Restore the user's chosen output (not the system default),
+                                // matching StopInput; fall back to default only if it can't open.
+                                out_stream = build_output(cur_out_uid.as_deref(), &rt, &event)
+                                    .or_else(|_| build_output(None, &rt, &event))
+                                    .ok()
+                                    .map(|(h, _)| h);
+                            }
+                            event.fetch_or(EVENT_INPUT_LOST, Ordering::Release);
+                            let _ = reply.send(-1);
+                        }
+                    }
+                } else {
+                    let _ = reply.send(0);
+                }
+            }
+            HostCmd::Shutdown => {
+                input_stopped(&input_state);
+                in_stream = None;
+                out_stream = None;
+                break;
+            }
+        }
         set_gate(out_stream.is_some() || in_stream.is_some());
     }
     // Both streams (and this thread's `rt`/`input_cell` clones) drop here, on the host thread.
@@ -1485,7 +1481,11 @@ pub fn decode_file(
             // Amortized geometric growth, capped at the budget so capacity can never
             // exceed what the budget promised the caller.
             let cap_limit = max_frames.min(usize::MAX as u64) as usize;
-            let target = out.capacity().max(4096).saturating_mul(2).clamp(needed, cap_limit);
+            let target = out
+                .capacity()
+                .max(4096)
+                .saturating_mul(2)
+                .clamp(needed, cap_limit);
             out.reserve_exact(target - out.len());
         }
         for frame in sbuf.samples().chunks(ch.max(1)) {
@@ -1583,8 +1583,8 @@ pub fn resample_sinc(
 ) -> Result<Vec<[Smp; CHANNELS]>, String> {
     use rubato::audioadapter_buffers::direct::InterleavedSlice;
     use rubato::{
-        Async, FixedAsync, Indexing, Resampler, SincInterpolationParameters,
-        SincInterpolationType, WindowFunction,
+        Async, FixedAsync, Indexing, Resampler, SincInterpolationParameters, SincInterpolationType,
+        WindowFunction,
     };
 
     if from == to || frames.is_empty() {
@@ -1787,9 +1787,15 @@ mod decode_tests {
         // (24 dB over full scale), which no convolution with unit-gain kernels can
         // overflow.
         let p = temp_wav("huge");
-        f32_wav_at_rate(&p, 44_100, &[f32::MAX, f32::MAX, -f32::MAX, -f32::MAX, 0.5, 0.5]);
+        f32_wav_at_rate(
+            &p,
+            44_100,
+            &[f32::MAX, f32::MAX, -f32::MAX, -f32::MAX, 0.5, 0.5],
+        );
         let (frames, rate) = super::decode_file(p.to_str().unwrap(), 0.0, 0, 0).unwrap();
-        assert!(frames.iter().all(|f| f[0].abs() <= 16.0 && f[1].abs() <= 16.0));
+        assert!(frames
+            .iter()
+            .all(|f| f[0].abs() <= 16.0 && f[1].abs() <= 16.0));
         assert_eq!(frames[2], [0.5, 0.5], "sane samples pass through unclamped");
 
         let out = super::resample_sinc(frames, rate, 48_000).unwrap();
@@ -1922,8 +1928,8 @@ mod decode_tests {
         let path = temp_wav("under_cap");
         let samples: Vec<f32> = vec![0.1; 200]; // 100 stereo frames ≈ 2.08 ms @ 48k
         crate::wav::write_wav_f32(&path, &samples, 2, 48_000).unwrap();
-        let (frames, rate) =
-            super::decode_file(path.to_str().unwrap(), 1.0, 0, 0).expect("under-budget file decodes");
+        let (frames, rate) = super::decode_file(path.to_str().unwrap(), 1.0, 0, 0)
+            .expect("under-budget file decodes");
         assert_eq!(rate, 48_000);
         assert_eq!(frames.len(), 100);
         let _ = std::fs::remove_file(&path);
@@ -2204,12 +2210,12 @@ mod resample_sinc_tests {
         let mut long = vec![[0.0f32; CHANNELS]; 20_000];
         long[0] = [1.0, 1.0];
         let out = resample_sinc(long, 44_100, 48_000).unwrap();
-        assert!(peak_index(&out) <= 1, "frame-0 impulse must stay at the head");
+        assert!(
+            peak_index(&out) <= 1,
+            "frame-0 impulse must stay at the head"
+        );
         // No duplicate: outside the head lobe the signal is tiny everywhere.
-        let stray = out[200..]
-            .iter()
-            .map(|f| f[0].abs())
-            .fold(0.0f32, f32::max);
+        let stray = out[200..].iter().map(|f| f[0].abs()).fold(0.0f32, f32::max);
         assert!(stray < 0.01, "stray energy {stray} — a duplicated impulse?");
 
         // Frame 0, SHORT clip (under one 1024-frame chunk).

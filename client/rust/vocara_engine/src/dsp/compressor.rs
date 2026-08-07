@@ -41,7 +41,14 @@ pub struct CompressorNode {
 }
 
 impl CompressorNode {
-    pub fn new(threshold_db: f32, ratio: f32, knee_db: f32, attack_ms: f32, release_ms: f32, makeup_db: f32) -> Self {
+    pub fn new(
+        threshold_db: f32,
+        ratio: f32,
+        knee_db: f32,
+        attack_ms: f32,
+        release_ms: f32,
+        makeup_db: f32,
+    ) -> Self {
         let mut c = CompressorNode {
             threshold: Smoothed::new(threshold_db),
             ratio: Smoothed::new(ratio.max(1.0)),

@@ -84,7 +84,12 @@ fn multitone_far(total: usize, sr: f32) -> Vec<f32> {
     let bin_hz = sr / FFT_N as f32;
     let mut rng = Rng::new(0xBEEF);
     let tones: Vec<(f32, f32)> = (1..=20)
-        .map(|i| (bin_hz * (i * 3) as f32, rng.next_f32() * std::f32::consts::PI))
+        .map(|i| {
+            (
+                bin_hz * (i * 3) as f32,
+                rng.next_f32() * std::f32::consts::PI,
+            )
+        })
         .collect();
     (0..total)
         .map(|n| {
@@ -145,7 +150,13 @@ fn run_path_jump(power_jump: f32, max_frozen_erle_db: f64) {
     // gxx model then under-predicts by ~power_jump, the shaped near-end test pins the
     // hangover, and only the breaker can recover.
     let mic: Vec<f32> = (0..total)
-        .map(|n| if n < conv_len { echo[n] } else { amp_jump * echo[n] })
+        .map(|n| {
+            if n < conv_len {
+                echo[n]
+            } else {
+                amp_jump * echo[n]
+            }
+        })
         .collect();
 
     let mut out = vec![0.0f32; total];

@@ -10,6 +10,7 @@ pub mod aec;
 pub mod build;
 pub mod command;
 pub mod engine;
+pub mod feed;
 pub mod graph;
 pub mod graph_cell;
 pub mod live;

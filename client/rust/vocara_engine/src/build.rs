@@ -313,7 +313,10 @@ pub fn build(spec: ProjectSpec) -> GraphDesc {
         let gain = bus_gain_id(b.id);
         let pan = bus_pan_id(b.id);
         nodes.push(NodeEntry::new(sum, Box::new(MasterNode::new(1.0, false))));
-        nodes.push(NodeEntry::new(gain, Box::new(MasterNode::new(b.gain, false))));
+        nodes.push(NodeEntry::new(
+            gain,
+            Box::new(MasterNode::new(b.gain, false)),
+        ));
         nodes.push(NodeEntry::new(pan, Box::new(PanNode::new(0.0))));
         // Insert chain in configured order: sum → inserts → gain.
         let mut prev = sum;
@@ -326,8 +329,8 @@ pub fn build(spec: ProjectSpec) -> GraphDesc {
         edges.push(Edge::simple(prev, gain));
         edges.push(Edge::simple(gain, pan));
         edges.push(Edge::simple(pan, output_target(b.output))); // bus out → master / bus
-        // Shared reverb send: a post-fader tap of the bus fader into the one reverb bus.
-        // Always created (even at -120 dB "off") so the control plane can address it.
+                                                                // Shared reverb send: a post-fader tap of the bus fader into the one reverb bus.
+                                                                // Always created (even at -120 dB "off") so the control plane can address it.
         let bus_send = bus_send_id(b.id);
         nodes.push(NodeEntry::new(
             bus_send,
@@ -351,7 +354,10 @@ pub fn build(spec: ProjectSpec) -> GraphDesc {
         let pan = pan_id(tid);
 
         nodes.push(NodeEntry::new(src, t.source));
-        nodes.push(NodeEntry::new(gain, Box::new(MasterNode::new(t.gain, false))));
+        nodes.push(NodeEntry::new(
+            gain,
+            Box::new(MasterNode::new(t.gain, false)),
+        ));
         nodes.push(NodeEntry::new(pan, Box::new(PanNode::new(t.pan))));
         edges.push(Edge::simple(pan, output_target(t.bus))); // dry → master / bus
 

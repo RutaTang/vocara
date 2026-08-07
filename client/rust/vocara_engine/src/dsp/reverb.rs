@@ -99,7 +99,10 @@ impl Channel {
         let len = |base: usize| ((base + spread) as f64 * scale).round() as usize;
         Channel {
             combs: COMB_TUNING.iter().map(|&b| Comb::new(len(b))).collect(),
-            allpasses: ALLPASS_TUNING.iter().map(|&b| Allpass::new(len(b))).collect(),
+            allpasses: ALLPASS_TUNING
+                .iter()
+                .map(|&b| Allpass::new(len(b)))
+                .collect(),
         }
     }
     #[inline]

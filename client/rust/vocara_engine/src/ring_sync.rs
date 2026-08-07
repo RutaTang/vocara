@@ -166,7 +166,10 @@ mod tests {
 
     impl Model {
         fn new(max_baseline: usize) -> Model {
-            Model { sync: RefRingSync::new(max_baseline), depth: 0 }
+            Model {
+                sync: RefRingSync::new(max_baseline),
+                depth: 0,
+            }
         }
 
         /// One duplex cycle where the input callback runs and captures normally.
@@ -199,7 +202,10 @@ mod tests {
         for _ in 0..100 {
             m.cycle_ok(F);
         }
-        assert_eq!(m.depth, 512, "steady 1:1 flow must keep the baseline depth untouched");
+        assert_eq!(
+            m.depth, 512,
+            "steady 1:1 flow must keep the baseline depth untouched"
+        );
     }
 
     #[test]
@@ -211,7 +217,10 @@ mod tests {
             m.cycle_failed(F); // render failure: discard keeps the flow 1:1
         }
         m.cycle_ok(F);
-        assert_eq!(m.depth, 512, "failure-with-callback must not accumulate backlog");
+        assert_eq!(
+            m.depth, 512,
+            "failure-with-callback must not accumulate backlog"
+        );
     }
 
     #[test]
@@ -226,7 +235,10 @@ mod tests {
         m.cycle_failed(F);
         assert!(m.depth > 512, "the silent cycles left a backlog");
         m.cycle_ok(F); // recovery: trims straight back to the baseline
-        assert_eq!(m.depth, 512, "recovery from a failure streak must restore the baseline");
+        assert_eq!(
+            m.depth, 512,
+            "recovery from a failure streak must restore the baseline"
+        );
     }
 
     #[test]
@@ -241,7 +253,10 @@ mod tests {
         for _ in 0..(GAP_WINDOW as usize + 1) {
             m.cycle_ok(F);
         }
-        assert_eq!(m.depth, 512, "a persistent backlog must be trimmed back to the baseline");
+        assert_eq!(
+            m.depth, 512,
+            "a persistent backlog must be trimmed back to the baseline"
+        );
     }
 
     #[test]
@@ -273,7 +288,10 @@ mod tests {
             m.cycle_gap(F);
         }
         m.cycle_ok(F);
-        assert_eq!(m.depth, cap, "the startup backlog must be capped at the causal bound");
+        assert_eq!(
+            m.depth, cap,
+            "the startup backlog must be capped at the causal bound"
+        );
         assert!(
             (m.depth as u32) < io_round_trip,
             "the enshrined baseline must leave the echo causal: depth {} >= round trip {}",
@@ -283,13 +301,20 @@ mod tests {
         for _ in 0..200 {
             m.cycle_ok(F);
         }
-        assert_eq!(m.depth, cap, "and the capped depth is the stable baseline afterwards");
+        assert_eq!(
+            m.depth, cap,
+            "and the capped depth is the stable baseline afterwards"
+        );
     }
 
     #[test]
     fn baseline_cap_leaves_causal_margin_and_bounds_degenerate_round_trips() {
         assert_eq!(baseline_cap(1024, 4096), 512, "half the round trip");
-        assert_eq!(baseline_cap(0, 4096), 0, "no round trip, no admissible backlog");
+        assert_eq!(
+            baseline_cap(0, 4096),
+            0,
+            "no round trip, no admissible backlog"
+        );
         // An 8 kHz HFP route scales its buffer legs to tens of thousands of engine frames;
         // the hard ceiling keeps the baseline inside the provisioned scratch either way.
         assert_eq!(baseline_cap(60_000, 4096), 4096);
@@ -317,7 +342,11 @@ mod tests {
                 zeros += F - got;
                 *depth -= got;
                 *depth += racing; // head of the NEXT push, racing the measurement
-                let measured = if entry_snapshot { entry.saturating_sub(F) } else { *depth };
+                let measured = if entry_snapshot {
+                    entry.saturating_sub(F)
+                } else {
+                    *depth
+                };
                 let trim = sync.on_success(measured);
                 trims += trim;
                 *depth -= trim.min(*depth);
@@ -349,11 +378,17 @@ mod tests {
     fn duplex_rate_classification() {
         use DuplexRateCheck::*;
         assert_eq!(classify_duplex_rates(48_000.0, 48_000.0, 48_000.0), AecOn);
-        assert_eq!(classify_duplex_rates(48_000.0000001, 48_000.0, 48_000.0), AecOn);
+        assert_eq!(
+            classify_duplex_rates(48_000.0000001, 48_000.0, 48_000.0),
+            AecOn
+        );
         // VPIO occasionally negotiates its internal voice rate on the mic element: capture
         // still works (InputCell resamples any rate), so the duplex must run with the AEC
         // bypassed — never trade a working mic (echo bleed) for no mic at all.
-        assert_eq!(classify_duplex_rates(24_000.0, 48_000.0, 48_000.0), BypassAec);
+        assert_eq!(
+            classify_duplex_rates(24_000.0, 48_000.0, 48_000.0),
+            BypassAec
+        );
         // A mismatched OUTPUT element corrupts playback itself (output_cb writes engine-rate
         // samples without resampling): refuse, the caller falls back to a cpal output.
         assert_eq!(classify_duplex_rates(48_000.0, 44_100.0, 48_000.0), Refuse);

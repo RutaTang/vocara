@@ -24,8 +24,8 @@ use crate::graph::NodeId;
 use crate::live::{spawn, EngineHandle, RtCell};
 use crate::ring::{spsc, Consumer};
 use crate::sample::{Smp, CHANNELS, ENGINE_SR};
-use std::os::raw::c_float;
 use crate::source::{BufferSource, RingSource};
+use std::os::raw::c_float;
 
 /// (size, mtime) of a cache entry's source file, captured when the PCM was stored. Size+mtime
 /// is the standard freshness heuristic: a same-size rewrite inside one mtime tick can evade it,
@@ -237,9 +237,9 @@ fn cache_lookup_fresh(
 ) -> Option<Arc<[Smp]>> {
     let c = cache.get_mut(path)?;
     match (c.stamp, file_stamp(path)) {
-        (_, None) => {}                              // source gone: keep serving the cache
+        (_, None) => {} // source gone: keep serving the cache
         (Some(stored), Some(now)) if stored == now => {} // verified fresh
-        _ => return None,                            // changed on disk (or unverifiable): miss
+        _ => return None, // changed on disk (or unverifiable): miss
     }
     c.staged_seq = seq;
     Some(c.pcm.clone())
@@ -1274,31 +1274,27 @@ pub extern "C" fn ve_decode(
         // source rate before any resample). 4x covers every real recording/media rate an
         // analysis at 44.1/48 kHz meets (up to 176.4/192 kHz); beyond that is refused as
         // too big for this caller's budget.
-        let (frames, src_rate) = match device::decode_file(
-            path,
-            max_secs,
-            rate.saturating_mul(4),
-            max_src_frames,
-        ) {
-            Ok(v) => v,
-            Err(device::DecodeError::TooLong) => {
-                set_status(VE_DECODE_TOO_LONG);
-                return VePcm::empty();
-            }
-            Err(device::DecodeError::TooBig) => {
-                set_status(VE_DECODE_TOO_BIG);
-                return VePcm::empty();
-            }
-            Err(device::DecodeError::RateUnsupported) => {
-                set_status(VE_DECODE_RATE_UNSUPPORTED);
-                return VePcm::empty();
-            }
-            Err(device::DecodeError::Io(_)) => {
-                set_status(VE_DECODE_IO);
-                return VePcm::empty();
-            }
-            Err(device::DecodeError::Other(_)) => return VePcm::empty(),
-        };
+        let (frames, src_rate) =
+            match device::decode_file(path, max_secs, rate.saturating_mul(4), max_src_frames) {
+                Ok(v) => v,
+                Err(device::DecodeError::TooLong) => {
+                    set_status(VE_DECODE_TOO_LONG);
+                    return VePcm::empty();
+                }
+                Err(device::DecodeError::TooBig) => {
+                    set_status(VE_DECODE_TOO_BIG);
+                    return VePcm::empty();
+                }
+                Err(device::DecodeError::RateUnsupported) => {
+                    set_status(VE_DECODE_RATE_UNSUPPORTED);
+                    return VePcm::empty();
+                }
+                Err(device::DecodeError::Io(_)) => {
+                    set_status(VE_DECODE_IO);
+                    return VePcm::empty();
+                }
+                Err(device::DecodeError::Other(_)) => return VePcm::empty(),
+            };
         // Consuming resample: the identity case moves the buffer through un-copied, so the
         // peak here is 2 full-track buffers when resampling and 1 otherwise (down from 3).
         let resampled = match device::resample_sinc(frames, src_rate, rate) {
@@ -1431,8 +1427,7 @@ pub extern "C" fn ve_punch_wav(
             // so they get the same generous ceiling as the playback path (the Dart side's
             // maxPlaybackDuration, 60 min) instead of an unbounded decode.
             let (frames, src_rate) =
-                device::decode_file(p, MAX_PLAYBACK_SECS, 192_000, MAX_SPLICE_SRC_FRAMES)
-                    .ok()?;
+                device::decode_file(p, MAX_PLAYBACK_SECS, 192_000, MAX_SPLICE_SRC_FRAMES).ok()?;
             device::resample_sinc(frames, src_rate, rate).ok()
         };
         // Checked before any decode: the old `as usize` cast of the i128 split TRUNCATED a
@@ -1601,7 +1596,8 @@ pub extern "C" fn ve_set_track_volume(
             None => return -1,
         };
         let g = if muted != 0 { 0.0 } else { gain };
-        eng.handle.set_param(node, crate::dsp::master::param::GAIN, g);
+        eng.handle
+            .set_param(node, crate::dsp::master::param::GAIN, g);
         eng.handle.flush();
         0
     })
@@ -1723,7 +1719,8 @@ pub extern "C" fn ve_set_send(e: *mut VeEngine, track: c_int, send_db: f32) -> c
     with_engine(e, -1, |eng| {
         let node = build::send_id((track + 1) as u32); // the send is a scalar gain node
         let g = crate::sample::db_to_lin(send_db);
-        eng.handle.set_param(node, crate::dsp::master::param::GAIN, g);
+        eng.handle
+            .set_param(node, crate::dsp::master::param::GAIN, g);
         eng.handle.flush();
         0
     })
@@ -1791,7 +1788,8 @@ pub extern "C" fn ve_set_bus_send(e: *mut VeEngine, bus: c_int, send_db: f32) ->
     with_engine(e, -1, |eng| {
         let node = build::bus_send_id(bus as u32);
         let g = crate::sample::db_to_lin(send_db);
-        eng.handle.set_param(node, crate::dsp::master::param::GAIN, g);
+        eng.handle
+            .set_param(node, crate::dsp::master::param::GAIN, g);
         eng.handle.flush();
         0
     })
@@ -1820,7 +1818,8 @@ pub extern "C" fn ve_set_bus_volume(
     with_engine(e, -1, |eng| {
         let node = build::bus_gain_id(bus as u32);
         let g = if muted != 0 { 0.0 } else { gain };
-        eng.handle.set_param(node, crate::dsp::master::param::GAIN, g);
+        eng.handle
+            .set_param(node, crate::dsp::master::param::GAIN, g);
         eng.handle.flush();
         0
     })
@@ -2215,7 +2214,10 @@ mod cache_tests {
         let live: HashSet<&str> = ["a"].into_iter().collect();
         cache_retain(&mut cache, &live, 0);
         assert!(cache.contains_key("a"), "live entry must never be evicted");
-        assert!(!cache.contains_key("b"), "non-live entry over budget must go");
+        assert!(
+            !cache.contains_key("b"),
+            "non-live entry over budget must go"
+        );
     }
 
     #[test]
@@ -2263,9 +2265,17 @@ mod cache_tests {
         let old = cache_store_pcm(&mut cache, "take.wav", &[0.1, 0.1, 0.2, 0.2], 1);
         assert_eq!(&old[..], &[0.1, 0.1, 0.2, 0.2]);
         let new = cache_store_pcm(&mut cache, "take.wav", &[0.9, 0.9], 2);
-        assert_eq!(&new[..], &[0.9, 0.9], "the staged Arc must be the fresh samples");
+        assert_eq!(
+            &new[..],
+            &[0.9, 0.9],
+            "the staged Arc must be the fresh samples"
+        );
         let cached = cache.get("take.wav").expect("path stays cached");
-        assert_eq!(&cached.pcm[..], &[0.9, 0.9], "the cache must hold the fresh samples");
+        assert_eq!(
+            &cached.pcm[..],
+            &[0.9, 0.9],
+            "the cache must hold the fresh samples"
+        );
         assert_eq!(cached.staged_seq, 2, "the LRU stamp follows the re-stage");
     }
 
@@ -2283,7 +2293,11 @@ mod cache_tests {
         cache_store_pcm(&mut cache, p, &[0.1, 0.1], 1);
         let hit = cache_lookup_fresh(&mut cache, p, 2).expect("unchanged file must hit");
         assert_eq!(&hit[..], &[0.1, 0.1]);
-        assert_eq!(cache.get(p).unwrap().staged_seq, 2, "a hit bumps the LRU stamp");
+        assert_eq!(
+            cache.get(p).unwrap().staged_seq,
+            2,
+            "a hit bumps the LRU stamp"
+        );
         // Overwrite with a different SIZE so the check cannot depend on mtime granularity.
         std::fs::write(&path, [0u8; 16]).unwrap();
         assert!(
@@ -2344,7 +2358,13 @@ mod punch_tests {
         );
 
         // An absurd output rate is refused before any arithmetic uses it.
-        let frames = super::ve_punch_wav(c_old.as_ptr(), c_new.as_ptr(), 1, 10_000_000, c_out.as_ptr());
+        let frames = super::ve_punch_wav(
+            c_old.as_ptr(),
+            c_new.as_ptr(),
+            1,
+            10_000_000,
+            c_out.as_ptr(),
+        );
         assert_eq!(frames, -1, "an over-ceiling rate must be refused");
 
         // A sane splice is unaffected: old's first 1 ms (48 frames) ++ new's 48 frames —
@@ -2376,8 +2396,7 @@ mod punch_tests {
         let c = |p: &std::path::Path| CString::new(p.to_str().unwrap()).unwrap();
         let (c_old, c_new) = (c(&old), c(&new));
 
-        let frames =
-            super::ve_punch_wav(c_old.as_ptr(), c_new.as_ptr(), 1, 48_000, c_old.as_ptr());
+        let frames = super::ve_punch_wav(c_old.as_ptr(), c_new.as_ptr(), 1, 48_000, c_old.as_ptr());
         assert_eq!(frames, -1, "an in-place splice must be refused");
         assert_eq!(
             std::fs::metadata(&old).unwrap().len(),
@@ -2386,10 +2405,10 @@ mod punch_tests {
         );
 
         // The same file addressed through a ./ alias must also be caught.
-        let aliased = old.parent().unwrap().join(format!(
-            "./{}",
-            old.file_name().unwrap().to_str().unwrap()
-        ));
+        let aliased = old
+            .parent()
+            .unwrap()
+            .join(format!("./{}", old.file_name().unwrap().to_str().unwrap()));
         let c_alias = CString::new(aliased.to_str().unwrap()).unwrap();
         let frames =
             super::ve_punch_wav(c_old.as_ptr(), c_new.as_ptr(), 1, 48_000, c_alias.as_ptr());
@@ -2469,7 +2488,10 @@ mod punch_tests {
         let (c_old, c_new, c_out) = (c(&old), c(&new), c(&out));
 
         let frames = super::ve_punch_wav(c_old.as_ptr(), c_new.as_ptr(), 0, 48_000, c_out.as_ptr());
-        assert_eq!(frames, 48, "output is exactly new; old's length is irrelevant");
+        assert_eq!(
+            frames, 48,
+            "output is exactly new; old's length is irrelevant"
+        );
 
         let _ = std::fs::remove_file(&old);
         let _ = std::fs::remove_file(&new);

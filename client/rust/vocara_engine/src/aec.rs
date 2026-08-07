@@ -126,7 +126,10 @@ struct Fft {
 
 impl Fft {
     fn new(n: usize) -> Fft {
-        assert!(n.is_power_of_two() && n >= 2, "FFT size must be a power of two >= 2");
+        assert!(
+            n.is_power_of_two() && n >= 2,
+            "FFT size must be a power of two >= 2"
+        );
         let log2n = n.trailing_zeros();
 
         // Bit-reversal table.
@@ -465,14 +468,14 @@ pub struct Aec {
     mic_prev: Box<[f32]>, // length B
 
     // ---- pre-allocated scratch (reused every block; never resized) ----
-    fr_re: Box<[f32]>, // length N: generic FFT working frame (real)
-    fr_im: Box<[f32]>, // length N
-    y_re: Box<[f32]>,  // length N: echo-estimate spectrum (expanded to full N for ifft)
-    y_im: Box<[f32]>,  // length N
-    e_re: Box<[f32]>,  // length N: error spectrum
-    e_im: Box<[f32]>,  // length N
-    g_re: Box<[f32]>,  // length N: per-partition gradient scratch (time<->freq for constraint)
-    g_im: Box<[f32]>,  // length N
+    fr_re: Box<[f32]>,   // length N: generic FFT working frame (real)
+    fr_im: Box<[f32]>,   // length N
+    y_re: Box<[f32]>,    // length N: echo-estimate spectrum (expanded to full N for ifft)
+    y_im: Box<[f32]>,    // length N
+    e_re: Box<[f32]>,    // length N: error spectrum
+    e_im: Box<[f32]>,    // length N
+    g_re: Box<[f32]>,    // length N: per-partition gradient scratch (time<->freq for constraint)
+    g_im: Box<[f32]>,    // length N
     eblk_fg: Box<[f32]>, // length B: foreground residual (the output candidate)
     eblk_bg: Box<[f32]>, // length B: background residual (for the copy decision)
 
@@ -515,11 +518,11 @@ pub struct Aec {
     prime: usize,
 
     // ---- DTD + statistics state (scalars, leaky) ----
-    p_mic: f32,  // smoothed mic power
-    p_far: f32,  // smoothed far-end INPUT power (drives far-end activity + Geigel)
-    p_echo: f32, // smoothed foreground echo-estimate power
-    p_err: f32,  // smoothed foreground residual power
-    p_de: f32,   // smoothed cross power <mic, echo>
+    p_mic: f32,    // smoothed mic power
+    p_far: f32,    // smoothed far-end INPUT power (drives far-end activity + Geigel)
+    p_echo: f32,   // smoothed foreground echo-estimate power
+    p_err: f32,    // smoothed foreground residual power
+    p_de: f32,     // smoothed cross power <mic, echo>
     p_err_fg: f32, // residual power of the foreground filter (copy decision)
     p_err_bg: f32, // residual power of the background filter (copy decision)
     /// Running estimate of the linear echo gain (||echo||/||far||), used by the Geigel test so
@@ -528,8 +531,8 @@ pub struct Aec {
     /// True once the filter has demonstrably started cancelling; gates the strict (coherence /
     /// rho) double-talk tests in so they don't deadlock the cold start.
     converged: bool,
-    g_adapt: f32, // current smoothed adaptation gate in [0,1]
-    hang: u32,    // double-talk hangover countdown
+    g_adapt: f32,   // current smoothed adaptation gate in [0,1]
+    hang: u32,      // double-talk hangover countdown
     div_count: u32, // consecutive diverging blocks
     /// Accumulated evidence (blocks; drained on misses, see PATH_CHANGE_HOLD) of the
     /// echo-path-gain-INCREASE deadlock signature: the double-talk hangover held armed while the
@@ -948,8 +951,7 @@ impl Aec {
         // echo model already explains nearly all the mic), and NOT in hangover (a recent voiced
         // block must not feed the gain). This guarantees voice-contaminated blocks can never
         // inflate `echo_gain` and thereby desensitize the Geigel double-talk test.
-        let far_only_evidence =
-            far_active && self.hang == 0 && coh > COH_GAIN && rho < RHO_LO;
+        let far_only_evidence = far_active && self.hang == 0 && coh > COH_GAIN && rho < RHO_LO;
         if far_only_evidence {
             let inst_gain = (self.p_mic / (self.p_far + EPS)).sqrt();
             // Track upward quickly (a louder true echo must not look like near-end) and decay
@@ -1157,7 +1159,11 @@ impl Aec {
         // (coherence still climbing out of cold) must not fully stall the cold start, yet a real
         // voice-first opening is still limited to the same bounded trickle that protects the voice.
         let g_target = if self.hang > 0 {
-            if self.converged { 0.0 } else { BOOTSTRAP_IGNITE }
+            if self.converged {
+                0.0
+            } else {
+                BOOTSTRAP_IGNITE
+            }
         } else {
             g_raw
         };
@@ -1384,12 +1390,11 @@ impl Aec {
             let d_pow = self.d_pow[k] + EPS;
             let ref_echo_pow = self.gxx[k] * self.x_pow_now[k]; // shaped path * |X_now|^2
             let echo_pow = ref_echo_pow.max(self.yh_pow[k]); // ∪ the filter's own estimate
-            // clamp01 maps NaN→0 (f32::clamp would propagate NaN into sup_gain).
+                                                             // clamp01 maps NaN→0 (f32::clamp would propagate NaN into sup_gain).
             let ratio = clamp01(SUPPRESS_OVER * echo_pow / d_pow);
             let raw_gain = (1.0 - ratio).max(SUPPRESS_FLOOR);
-            self.sup_gain[k] = sanitize(
-                SUPPRESS_SMOOTH * self.sup_gain[k] + (1.0 - SUPPRESS_SMOOTH) * raw_gain,
-            );
+            self.sup_gain[k] =
+                sanitize(SUPPRESS_SMOOTH * self.sup_gain[k] + (1.0 - SUPPRESS_SMOOTH) * raw_gain);
             self.e_re[k] *= self.sup_gain[k];
             self.e_im[k] *= self.sup_gain[k];
         }
@@ -1682,7 +1687,10 @@ mod tests {
 
         // And the output must stay finite/bounded (no divergence under double-talk).
         for &v in &out2 {
-            assert!(v.is_finite() && v.abs() < 10.0, "double-talk output blew up: {v}");
+            assert!(
+                v.is_finite() && v.abs() < 10.0,
+                "double-talk output blew up: {v}"
+            );
         }
     }
 
@@ -1799,8 +1807,7 @@ mod tests {
         let midi_to_hz = |m: f32| 440.0f32 * 2f32.powf((m - 69.0) / 12.0);
         let roots = [48.0f32, 55.0, 57.0, 53.0]; // C3, G3, A3, F3
         let region_len = BLOCK * 40; // ~0.21 s per chord, across the entire render
-        let backing_root_hz =
-            |n: usize| midi_to_hz(roots[(n / region_len) % roots.len()]);
+        let backing_root_hz = |n: usize| midi_to_hz(roots[(n / region_len) % roots.len()]);
         let saw = |f: f32, t: f32| {
             let mut s = 0.0f32;
             for h in 1..=6 {
