@@ -149,27 +149,6 @@ bool _compatibleForMerge(_WavLayout a, _WavLayout b) {
   return true;
 }
 
-/// Re-emits a WAV from a preserved `fmt ` chunk body and raw PCM [data] bytes.
-Uint8List _buildWav(Uint8List fmt, Uint8List data) {
-  final b = BytesBuilder();
-  void str(String s) => b.add(s.codeUnits);
-  void u32(int v) =>
-      b.add((ByteData(4)..setUint32(0, v, Endian.little)).buffer.asUint8List());
-  final pad = data.length.isOdd ? 1 : 0;
-  final riffSize = 4 + (8 + fmt.length) + (8 + data.length + pad);
-  str('RIFF');
-  u32(riffSize);
-  str('WAVE');
-  str('fmt ');
-  u32(fmt.length);
-  b.add(fmt);
-  str('data');
-  u32(data.length);
-  b.add(data);
-  if (pad == 1) b.addByte(0);
-  return b.toBytes();
-}
-
 /// Cuts the first [trimMs] of audio out of the uncompressed WAV at [path],
 /// IN PLACE (temp file + atomic rename, so a crash mid-write leaves either the
 /// old file or the new one — never a torn WAV). Frame-quantized; preserves the
@@ -283,6 +262,111 @@ void _trimWavHeadSync(String path, int trimMs) {
   }
 }
 
+/// Streamed-parse of a WAV's header from an open [raf]: the same admission
+/// rules as [_parseWav], without loading the file (whole-file reads made a
+/// long take cost gigabytes across split/concat buffers). [dataLen] is
+/// clamped to what the file physically holds, like [_parseWav].
+_WavLayout? _parseWavFromRaf(RandomAccessFile raf) {
+  final fileLen = raf.lengthSync();
+  raf.setPositionSync(0);
+  final head = raf.readSync(12);
+  String tag(Uint8List b, int o) => String.fromCharCodes(b, o, o + 4);
+  if (head.length < 12 || tag(head, 0) != 'RIFF' || tag(head, 8) != 'WAVE') {
+    return null;
+  }
+  Uint8List? fmt;
+  var dataStart = -1, dataLen = 0;
+  var offset = 12;
+  // Bounded walk, mirroring _parseWav's chunk tolerance.
+  for (var i = 0; i < 64 && dataStart < 0; i++) {
+    raf.setPositionSync(offset);
+    final ch = raf.readSync(8);
+    if (ch.length < 8) break;
+    final id = tag(ch, 0);
+    final size = ByteData.sublistView(ch).getUint32(4, Endian.little);
+    if (id == 'fmt ' && size >= 16 && size <= 1024) {
+      fmt = raf.readSync(size);
+    } else if (id == 'data') {
+      dataStart = offset + 8;
+      dataLen = math.min(size, fileLen - dataStart);
+    }
+    offset += 8 + size + (size & 1); // chunks are word-aligned
+  }
+  final f = fmt;
+  if (f == null || f.length < 16 || dataStart < 0 || dataLen < 0) return null;
+  final bd = ByteData.sublistView(f);
+  final sampleRate = bd.getUint32(4, Endian.little);
+  final blockAlign = bd.getUint16(12, Endian.little);
+  final eff = _effFmt(f);
+  final channels = _fmtU16(f, 2);
+  final bits = _fmtU16(f, 14);
+  if ((eff != 1 && eff != 3) ||
+      sampleRate <= 0 ||
+      channels <= 0 ||
+      bits <= 0 ||
+      blockAlign != channels * ((bits + 7) ~/ 8)) {
+    return null;
+  }
+  return _WavLayout(f, sampleRate, blockAlign, dataStart, dataLen);
+}
+
+/// [_parseWavFromRaf] on a path: opens, parses the header, closes. Cheap
+/// (a handful of small reads), so callers may run it on any isolate.
+_WavLayout? _parseWavAtPath(String path) {
+  final RandomAccessFile raf;
+  try {
+    raf = File(path).openSync();
+  } on FileSystemException {
+    return null;
+  }
+  try {
+    return _parseWavFromRaf(raf);
+  } finally {
+    raf.closeSync();
+  }
+}
+
+/// Writes a WAV header (RIFF + preserved fmt + data size) to [out].
+void _writeWavHeaderSync(RandomAccessFile out, Uint8List fmt, int dataLen) {
+  final b = BytesBuilder();
+  void str(String s) => b.add(s.codeUnits);
+  void u32(int v) =>
+      b.add((ByteData(4)..setUint32(0, v, Endian.little)).buffer.asUint8List());
+  final pad = dataLen.isOdd ? 1 : 0;
+  str('RIFF');
+  u32(4 + (8 + fmt.length) + (8 + dataLen + pad));
+  str('WAVE');
+  str('fmt ');
+  u32(fmt.length);
+  b.add(fmt);
+  str('data');
+  u32(dataLen);
+  out.writeFromSync(b.toBytes());
+}
+
+/// Chunked byte-range copy (4 MiB at a time): the peak stays bounded no
+/// matter how long the take is. Returns the bytes actually copied (a
+/// truncated-on-disk source yields fewer; callers keep what exists, the same
+/// tolerance the whole-file path had).
+int _copyRangeSync(
+  RandomAccessFile src,
+  int start,
+  int len,
+  RandomAccessFile out,
+) {
+  src.setPositionSync(start);
+  var remaining = len;
+  var copied = 0;
+  while (remaining > 0) {
+    final chunk = src.readSync(math.min(remaining, 4 << 20));
+    if (chunk.isEmpty) break;
+    out.writeFromSync(chunk);
+    copied += chunk.length;
+    remaining -= chunk.length;
+  }
+  return copied;
+}
+
 /// Non-destructive clip edits on WAV files. Split/merge slice and join the raw
 /// PCM **bytes** (preserving the source's exact sample format — 16/24/32-bit,
 /// integer or float, plain or WAVE_FORMAT_EXTENSIBLE), so any uncompressed WAV
@@ -322,8 +406,10 @@ class AudioEditService {
     required String sourcePath,
     required int splitFileMs,
   }) async {
-    final bytes = await File(sourcePath).readAsBytes();
-    final w = _parseWav(bytes);
+    // Header-only parse: the whole-file read held a full copy of a long take
+    // (plus both slices and both outputs — gigabytes for a legal file); the
+    // split is a byte-range operation and streams as one.
+    final w = _parseWavAtPath(sourcePath);
     if (w == null) {
       throw const FormatException(
         'This take is compressed audio (e.g. mp3/m4a). Only recordings and '
@@ -341,20 +427,29 @@ class AudioEditService {
       w.blockAlign,
       w.dataLen - w.blockAlign,
     );
-    final data = Uint8List.sublistView(
-      bytes,
-      w.dataStart,
-      w.dataStart + w.dataLen,
-    );
 
     final firstPath = await _newEditPath(practiceId: practiceId);
     final secondPath = await _newEditPath(practiceId: practiceId);
-    await File(
-      firstPath,
-    ).writeAsBytes(_buildWav(w.fmt, Uint8List.sublistView(data, 0, cut)));
-    await File(
-      secondPath,
-    ).writeAsBytes(_buildWav(w.fmt, Uint8List.sublistView(data, cut)));
+    await Isolate.run(() {
+      final src = File(sourcePath).openSync();
+      try {
+        for (final (path, start, len) in [
+          (firstPath, w.dataStart, cut),
+          (secondPath, w.dataStart + cut, w.dataLen - cut),
+        ]) {
+          final out = File(path).openSync(mode: FileMode.write);
+          try {
+            _writeWavHeaderSync(out, w.fmt, len);
+            _copyRangeSync(src, start, len, out);
+            if (len.isOdd) out.writeByteSync(0);
+          } finally {
+            out.closeSync();
+          }
+        }
+      } finally {
+        src.closeSync();
+      }
+    });
     return (firstPath: firstPath, secondPath: secondPath);
   }
 
@@ -365,10 +460,10 @@ class AudioEditService {
     required String firstPath,
     required String secondPath,
   }) async {
-    final ab = await File(firstPath).readAsBytes();
-    final bb = await File(secondPath).readAsBytes();
-    final wa = _parseWav(ab);
-    final wb = _parseWav(bb);
+    // Header-only parses; the join itself streams below (the whole-file
+    // reads held both takes, both slices, and the merged buffer at once).
+    final wa = _parseWavAtPath(firstPath);
+    final wb = _parseWavAtPath(secondPath);
     if (wa == null || wb == null) {
       throw const FormatException(
         'These takes are compressed audio. Only recordings and WAV files '
@@ -417,17 +512,31 @@ class AudioEditService {
     // or malformed source can report a dataLen that isn't block-aligned, which would
     // make the second half begin mid-frame (channel swap + one-sample skew for its
     // entire span). A correctly-finalized WAV is always frame-aligned, so this is a
-    // no-op for every well-formed file. blockAlign > 0 is guaranteed by _parseWav.
+    // no-op for every well-formed file. blockAlign > 0 is guaranteed by the parse.
     final aLen = (wa.dataLen ~/ wa.blockAlign) * wa.blockAlign;
     final bLen = (wb.dataLen ~/ wb.blockAlign) * wb.blockAlign;
-    final da = Uint8List.sublistView(ab, wa.dataStart, wa.dataStart + aLen);
-    final db = Uint8List.sublistView(bb, wb.dataStart, wb.dataStart + bLen);
-    final merged = Uint8List(da.length + db.length)
-      ..setRange(0, da.length, da)
-      ..setRange(da.length, da.length + db.length, db);
 
     final path = await _newEditPath(practiceId: practiceId);
-    await File(path).writeAsBytes(_buildWav(wa.fmt, merged));
+    await Isolate.run(() {
+      final out = File(path).openSync(mode: FileMode.write);
+      try {
+        _writeWavHeaderSync(out, wa.fmt, aLen + bLen);
+        for (final (src, start, len) in [
+          (firstPath, wa.dataStart, aLen),
+          (secondPath, wb.dataStart, bLen),
+        ]) {
+          final raf = File(src).openSync();
+          try {
+            _copyRangeSync(raf, start, len, out);
+          } finally {
+            raf.closeSync();
+          }
+        }
+        if ((aLen + bLen).isOdd) out.writeByteSync(0);
+      } finally {
+        out.closeSync();
+      }
+    });
     return path;
   }
 
