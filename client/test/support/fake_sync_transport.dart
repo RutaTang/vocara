@@ -173,6 +173,9 @@ class FakeSyncTransport implements SyncTransport {
     return ack;
   }
 
+  /// Records to report as undecodable on the NEXT page (drained when served).
+  final List<RejectedRecord> pendingRejects = [];
+
   @override
   Future<FetchPage> fetchChanges(String? sinceToken) {
     fetchCalls++;
@@ -197,10 +200,17 @@ class FakeSyncTransport implements SyncTransport {
       if (slice.length >= pageSize) break;
     }
     final lastSeq = slice.isEmpty ? from : slice.last.seq;
+    // Copy BEFORE clearing: a `[...list..clear()]` cascade clears first and
+    // spreads the emptied list.
+    final served = List<RejectedRecord>.of(pendingRejects);
+    pendingRejects.clear();
     final page = FetchPage(
       rows: [for (final e in slice) e.row],
       nextToken: '$lastSeq',
       hasMore: lastSeq < cloud.latestSeq,
+      // A real transport decodes per record and reports the failures here; the
+      // fake serves whatever a test staged for the next page.
+      rejects: served,
     );
     _lastServedPage = page;
     return Future.value(page);

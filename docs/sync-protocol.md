@@ -191,6 +191,18 @@ use binary collation, never a locale collation (which may ignore or reorder
 punctuation). The reference server pins `COLLATE BINARY` / bytewise
 comparison on every `hlc_packed` touch.
 
+## Undecodable records on a fetch page
+
+A record the client cannot DECODE into a `SyncRow` has no id, table or stamp
+to route by, so the applier's per-record quarantine cannot reach it. A
+transport MUST therefore decode per record and report the failures alongside
+the page's rows (`FetchPage.rejects`, carrying the raw payload and the
+reason) rather than choosing between the two silent failures: failing the
+whole page (one bad record bricks sync for that device) or dropping the
+record while the change token advances past it (the server never
+re-delivers `seq <= token`, so it is gone). The client parks each as a dead
+letter inside the page's own transaction, so it is atomic with the token.
+
 ## Known design gap (register)
 
 **Entity-level LWW loses concurrent field edits on one row.** Full-row

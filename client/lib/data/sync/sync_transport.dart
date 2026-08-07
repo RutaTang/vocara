@@ -80,18 +80,42 @@ class PushAck {
   Iterable<PushRowResult> get conflicts => results.where((r) => !r.accepted);
 }
 
+/// A record of this page that could not be DECODED into a [SyncRow] — its
+/// raw payload plus why. Kept separate from [FetchPage.rows] because such a
+/// record has no id, table or stamp to route by: it never became a row.
+class RejectedRecord {
+  const RejectedRecord({required this.payload, required this.reason});
+
+  /// The record exactly as it arrived, so the parking lot holds the evidence.
+  final String payload;
+
+  /// Why decoding refused it (a [FormatException] message).
+  final String reason;
+}
+
 /// One page of remote changes from [SyncTransport.fetchChanges].
 class FetchPage {
   FetchPage({
     required List<SyncRow> rows,
     required this.nextToken,
     required this.hasMore,
-  }) : rows = List.unmodifiable(rows);
+    List<RejectedRecord> rejects = const [],
+  }) : rows = List.unmodifiable(rows),
+       rejects = List.unmodifiable(rejects);
 
   /// The changed rows in SERVER order (a parent row is always uploaded before
   /// its children by the pushing device, so server order preserves
   /// parent-before-child across page boundaries).
   final List<SyncRow> rows;
+
+  /// Records of this page that failed to DECODE. A transport decodes per
+  /// record and puts the failures here rather than choosing between failing
+  /// the whole page (one bad record bricks sync, the exact outcome the
+  /// applier's per-record quarantine exists to prevent) and dropping them
+  /// silently (the change token advances past a record nothing recorded).
+  /// The engine parks them as dead letters — unreplayable by construction,
+  /// but reviewable, and accounted for.
+  final List<RejectedRecord> rejects;
 
   /// The opaque token to persist ATOMICALLY with applying [rows]; passing it
   /// to the next [SyncTransport.fetchChanges] resumes after this page.

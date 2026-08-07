@@ -7,6 +7,7 @@ import '../db/app_database.dart';
 import 'hlc.dart';
 import 'quarantine_store.dart';
 import 'sync_row.dart';
+import 'sync_transport.dart';
 
 /// A row pulled from the cloud, ready to apply: the table name plus every synced
 /// column (including the HLC quad, deleted_at and schema_v) as a value map.
@@ -148,9 +149,15 @@ class SyncApplier {
   /// A throwing hook rolls the WHOLE batch back ([ApplyResult.committed]
   /// false) — deliberately, since applying records whose token write failed
   /// would re-apply the page forever.
+  /// [rejects] are records of the same page that never DECODED into a row
+  /// (see [RejectedRecord]). They are parked as dead letters inside this
+  /// batch's transaction, which is what makes them atomic with the caller's
+  /// change-token write: parking them afterwards would lose them to a crash
+  /// in between, and the server never re-delivers a record the token passed.
   Future<ApplyResult> apply(
     List<SyncRow> records, {
     Future<void> Function()? beforeCommit,
+    List<RejectedRecord> rejects = const [],
   }) async {
     final result = ApplyResult();
     // (table, id) pairs INSERTED by this batch — the only rows the FK sweep is
@@ -454,6 +461,10 @@ class SyncApplier {
             await _quarantine(rec, 'apply-failed: $e');
           }
         }
+        for (final reject in rejects) {
+          result.failed++;
+          await _parkUndecodable(reject);
+        }
         await _sweepFkOrphans(
           result,
           insertedThisBatch,
@@ -557,6 +568,39 @@ class SyncApplier {
         schemaV: schemaV is int ? schemaV : 0,
         payload: payload,
         reason: parkReason,
+        quarantinedAt: DateTime.now().millisecondsSinceEpoch,
+      );
+    } catch (e) {
+      throw _QuarantinePutException(e);
+    }
+  }
+
+  /// The sentinel table undecodable payloads park under. Not a real synced
+  /// table on purpose: the record never told us which table it belonged to,
+  /// and inventing one would put a review artifact in a live table's space.
+  static const String _deadLetterTable = '!undecoded';
+
+  /// Parks a record that never decoded into a row. It has no table, id or
+  /// stamp to route by, so it goes to the same dead-letter space as an
+  /// unparkable record: content-keyed, deliberately not a valid [SyncRow]
+  /// envelope, so the replay's decode refuses it and it stays for review.
+  Future<void> _parkUndecodable(RejectedRecord reject) async {
+    final store = quarantine;
+    if (store == null) return;
+    final payload = jsonEncode({
+      'deadLetter': true,
+      'undecodable': true,
+      'raw': reject.payload,
+    });
+    final digest = sha256.convert(utf8.encode(payload)).toString();
+    try {
+      await store.put(
+        table: _deadLetterTable,
+        id: 'deadletter${digest.substring(0, 32)}',
+        hlcPacked: '',
+        schemaV: 0,
+        payload: payload,
+        reason: 'dead-letter(undecodable: ${reject.reason})',
         quarantinedAt: DateTime.now().millisecondsSinceEpoch,
       );
     } catch (e) {

@@ -733,7 +733,7 @@ class SyncEngine {
           token = null;
           continue;
         }
-        if (page.rows.isEmpty) {
+        if (page.rows.isEmpty && page.rejects.isEmpty) {
           // Caught up. Persist a moved empty-page token (a server may advance
           // the token without changes); there is no batch to be atomic with.
           if (page.nextToken != token) {
@@ -746,6 +746,11 @@ class SyncEngine {
         }
         final result = await _applier.apply(
           page.rows,
+          // Parked inside the page's own transaction, so a record that never
+          // decoded is atomic with the token that moves past it — the server
+          // only re-delivers seq > token, so anything the token passes and
+          // nothing recorded is gone for good.
+          rejects: page.rejects,
           beforeCommit: () async {
             await _state.setChangeToken(page.nextToken);
             final hook = _debugBeforePageCommit;

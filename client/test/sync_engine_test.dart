@@ -1306,4 +1306,29 @@ void main() {
       expect(await oplogCount(), 0);
     });
   });
+
+  group('undecodable records', () {
+    test('a record that never DECODED is parked as a dead letter and the '
+        'page still applies and advances', () async {
+      // Such a record has no id, table or stamp to route by, so the applier's
+      // per-record quarantine cannot reach it: a transport was left choosing
+      // between failing the whole page (one bad record bricks sync) and
+      // dropping it silently while the token advanced past it.
+      cloud.accept(remotePractice('GOOD', 'kept', remoteHlc(t0)));
+      transport.pendingRejects.add(
+        const RejectedRecord(payload: '{"not":"a row"}', reason: 'missing id'),
+      );
+
+      final run = await engine.pumpPull();
+
+      expect(run.applied, 1, reason: 'the good record still lands');
+      expect(run.failedRecords, 1);
+      expect(await state.changeToken(), isNotNull, reason: 'not stalled');
+      final parked = (await quarantine.list()).single;
+      expect(parked.reason, contains('undecodable'));
+      expect(parked.payload, contains('not'));
+      // Never re-applied: the payload is deliberately not a SyncRow envelope.
+      expect(() => SyncRow.decode(parked.payload), throwsFormatException);
+    });
+  });
 }
