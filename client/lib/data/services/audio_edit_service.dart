@@ -224,8 +224,14 @@ void _trimWavHeadSync(String path, int trimMs) {
     );
     final newLen = wholeLen - cut;
 
-    final tmpPath = '$path.trim';
-    final out = File(tmpPath).openSync(mode: FileMode.write);
+    // Unique temp name (pid + wall clock): the old fixed '$path.trim' was
+    // predictable, so a pre-placed entry at that exact name could redirect or
+    // tear a concurrent/re-entrant trim. Failed attempts are deleted below.
+    final tmpPath =
+        '$path.trim.$pid.${DateTime.now().microsecondsSinceEpoch}.tmp';
+    final tmp = File(tmpPath);
+    final out = tmp.openSync(mode: FileMode.write);
+    var ok = false;
     try {
       final header = BytesBuilder();
       void str(String s) => header.add(s.codeUnits);
@@ -252,11 +258,40 @@ void _trimWavHeadSync(String path, int trimMs) {
         out.writeFromSync(chunk);
         remaining -= chunk.length;
       }
-      if (pad == 1) out.writeByteSync(0);
+      if (remaining == 0) {
+        if (pad == 1) out.writeByteSync(0);
+      } else {
+        // The source was truncated under us: keep whole frames and patch
+        // both size fields so the header never claims bytes the file does
+        // not hold (a header written up front describes the EXPECTED length).
+        final actual = ((newLen - remaining) ~/ blockAlign) * blockAlign;
+        out.truncateSync(28 + f.length + actual);
+        if (actual.isOdd) {
+          out.setPositionSync(28 + f.length + actual);
+          out.writeByteSync(0);
+        }
+        void u32At(int off, int v) {
+          out.setPositionSync(off);
+          out.writeFromSync(
+            (ByteData(4)..setUint32(0, v, Endian.little)).buffer.asUint8List(),
+          );
+        }
+
+        u32At(4, 4 + (8 + f.length) + (8 + actual + (actual.isOdd ? 1 : 0)));
+        u32At(24 + f.length, actual);
+      }
+      ok = true;
     } finally {
       out.closeSync();
+      // A failed attempt must not linger: the .tmp suffix is outside every
+      // recovery scan, but disk space and confusion are still real.
+      if (!ok) {
+        try {
+          tmp.deleteSync();
+        } catch (_) {}
+      }
     }
-    File(tmpPath).renameSync(path);
+    tmp.renameSync(path);
   } finally {
     raf.closeSync();
   }

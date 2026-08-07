@@ -1579,10 +1579,20 @@ pub extern "C" fn ve_punch_wav(
         // over `out_p` only after finalize succeeds. Any failure (or a crash) leaves the
         // destination untouched — the old shape truncated the final path up front, so a
         // failed splice destroyed whatever lived there, and a partial write masqueraded
-        // as a take.
-        let tmp_path = format!("{out_p}.punch{}.tmp", std::process::id());
+        // as a take. The temp name carries pid + a process-wide sequence (two concurrent
+        // splices to one output must not share it), and create_new (O_EXCL, no symlink
+        // follow) refuses a pre-placed entry outright — a symlink planted at the old
+        // pid-only name redirected the create onto the splice's own input and truncated
+        // it before it was read.
+        static PUNCH_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let tmp_path = format!(
+            "{out_p}.punch{}-{}.tmp",
+            std::process::id(),
+            PUNCH_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
         let written = (|| -> Option<usize> {
-            let mut wav = crate::wav::WavStream::create(&tmp_path, CHANNELS as u16, rate).ok()?;
+            let mut wav =
+                crate::wav::WavStream::create_new(&tmp_path, CHANNELS as u16, rate).ok()?;
             let write_frame = |wav: &mut crate::wav::WavStream, f: [Smp; CHANNELS]| -> bool {
                 wav.write_sample(f[0]).is_ok() && wav.write_sample(f[1]).is_ok()
             };
@@ -1626,6 +1636,12 @@ pub extern "C" fn ve_punch_wav(
             drop(new_frames);
 
             wav.finalize().ok()?;
+            // Durability before the atomic publish: rename must never expose a
+            // name whose bytes the OS hasn't accepted yet (a crash right after
+            // the rename would otherwise leave a complete-looking empty file).
+            std::fs::File::open(&tmp_path)
+                .and_then(|f| f.sync_all())
+                .ok()?;
             Some(total)
         })();
 
@@ -1635,6 +1651,12 @@ pub extern "C" fn ve_punch_wav(
                 if std::fs::rename(&tmp_path, out_p).is_err() {
                     let _ = std::fs::remove_file(&tmp_path);
                     return -1;
+                }
+                // Best-effort directory entry durability for the new name.
+                if let Some(parent) = std::path::Path::new(out_p).parent() {
+                    if let Ok(d) = std::fs::File::open(parent) {
+                        let _ = d.sync_all();
+                    }
                 }
                 n as i64
             }

@@ -76,7 +76,28 @@ pub struct WavStream {
 
 impl WavStream {
     pub fn create<P: AsRef<Path>>(path: P, channels: u16, sample_rate: u32) -> io::Result<Self> {
-        let mut w = BufWriter::new(File::create(path)?);
+        Self::from_file(File::create(path)?, channels, sample_rate)
+    }
+
+    /// Like [`create`], but O_EXCL: fails when the path already exists and
+    /// never follows a pre-placed symlink. The transactional temp-file writers
+    /// use this — a symlink planted at a predictable temp name once redirected
+    /// the create onto the splice's own INPUT, truncating it to a 44-byte
+    /// header before it was read.
+    pub fn create_new<P: AsRef<Path>>(
+        path: P,
+        channels: u16,
+        sample_rate: u32,
+    ) -> io::Result<Self> {
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)?;
+        Self::from_file(f, channels, sample_rate)
+    }
+
+    fn from_file(f: File, channels: u16, sample_rate: u32) -> io::Result<Self> {
+        let mut w = BufWriter::new(f);
         write_header(&mut w, FMT_IEEE_FLOAT, 32, channels, sample_rate, 0)?;
         // Hand the placeholder header to the OS right away: from creation on, the file
         // parses as a (so far empty) WAV even if the process is hard-killed before the
@@ -198,4 +219,40 @@ pub fn write_wav_i16<P: AsRef<Path>>(
         w.write_all(&v.to_le_bytes())?;
     }
     w.flush()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_new_refuses_a_pre_placed_symlink_and_leaves_its_target_intact() {
+        // The transactional temp writers rely on this: a symlink planted at a
+        // predictable temp name once redirected the create onto the splice's
+        // own input, truncating a real take to a 44-byte header before it was
+        // read. O_EXCL fails on ANY existing entry, symlink included, without
+        // following it.
+        let dir = std::env::temp_dir();
+        let pid = std::process::id();
+        let target = dir.join(format!("vocara_wav_symlink_target_{pid}.wav"));
+        let link = dir.join(format!("vocara_wav_symlink_link_{pid}.tmp"));
+        let _ = std::fs::remove_file(&target);
+        let _ = std::fs::remove_file(&link);
+        write_wav_f32(&target, &[0.1; 96], 2, 48_000).unwrap();
+        let before = std::fs::metadata(&target).unwrap().len();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        assert!(
+            WavStream::create_new(&link, 2, 48_000).is_err(),
+            "create_new must refuse a pre-existing (symlink) entry"
+        );
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().len(),
+            before,
+            "the symlink's target must be byte-identical after the refusal"
+        );
+
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_file(&target);
+    }
 }
