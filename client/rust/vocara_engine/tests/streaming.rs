@@ -302,3 +302,40 @@ fn reader_admission_mirrors_the_dart_import_gate() {
         let _ = std::fs::remove_file(p);
     }
 }
+
+#[test]
+fn a_loop_outside_the_track_span_neither_floods_the_ring_nor_wedges_reentry() {
+    use std::sync::atomic::Ordering;
+    let frames = 2048;
+    let path = write_track(frames);
+    let (h, rt, mut feeder) = streamed_pair(&path, 0, 4096);
+    // Loop entirely past the track's [0, 2048) span. The old wrap logic
+    // pushed one fence pair per simulated wrap until the ring was full
+    // (gen climbed by thousands per pump); with the ring wedged, the next
+    // replan could not land its fence and re-entering the track began with
+    // a silent block.
+    h.set_loop(true, 10_000, 20_000);
+    h.seek(10_000);
+    h.play();
+    let _ = render_streamed(&h, &rt, &mut feeder, 8);
+    let gen_before = feeder.ctrl.gen.load(Ordering::Acquire);
+    for _ in 0..100 {
+        feeder.pump(h.transport()).unwrap();
+    }
+    let gen_after = feeder.ctrl.gen.load(Ordering::Acquire);
+    assert!(
+        gen_after.wrapping_sub(gen_before) <= 1,
+        "an out-of-span loop must not mint a generation per wrap \
+         (got {gen_before} -> {gen_after})"
+    );
+
+    // Move the loop back onto the track: the replan fence must land at once
+    // and audio must flow again within the pumped blocks.
+    h.set_loop(true, 0, 1024);
+    h.seek(0);
+    let out = render_streamed(&h, &rt, &mut feeder, 8);
+    assert!(
+        out.iter().any(|&s| s != 0.0),
+        "audio must resume once the loop covers the track again"
+    );
+}

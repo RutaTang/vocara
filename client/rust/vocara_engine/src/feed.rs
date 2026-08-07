@@ -314,6 +314,18 @@ impl TrackFeeder {
         }
         loop {
             if self.next_tl >= self.run_end {
+                // A wrap whose ENTIRE next run misses the track's span must
+                // not push a fence: the node renders out-of-span silence
+                // without popping, so the fence would sit in the ring forever
+                // — and looping here once per simulated wrap used to fill the
+                // whole ring with back-to-back fences, which then wedged the
+                // replan (its own fence needs 2 free slots) the moment the
+                // loop moved back onto the track. Nothing more to feed under
+                // this plan: hold until the basis changes.
+                let span_end = self.start_frame + self.len_frames;
+                if basis.le <= self.start_frame || basis.ls >= span_end {
+                    return Ok(());
+                }
                 // Loop wrap: a NEW contiguous run from loop_start, adopted
                 // by the node IN BAND (no flush_seq bump — the pre-wrap tail
                 // still has to play out of the ring first).
