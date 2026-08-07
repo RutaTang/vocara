@@ -118,7 +118,14 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   final Future<void> Function(Duration) _seek;
 
   /// Set in [dispose]. Guards async cache computes resolving after the view
-  /// model (and this cache) are gone.
+  /// model (and this cache) are gone: every compute helper refuses to START
+  /// once it is set, and re-checks after its await before touching a cache.
+  /// What that buys is not the wasted writes — heavy computes queue through
+  /// the app-wide analysis gate's two slots, so a multi-clip aggregate that
+  /// kept feeding clips into it after its screen closed made the NEXT
+  /// screen's analysis wait behind results no one would read. An
+  /// already-admitted compute cannot be recalled (Isolate.run has no
+  /// cancellation); the guarantee is that no FURTHER one is admitted.
   bool _disposed = false;
 
   @override
@@ -198,6 +205,11 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     _aggLtasCache.remove(key);
     _aggRegisterCache.remove(key);
   }
+
+  /// Bytes this screen's caches currently charge to the shared analysis
+  /// budget, for tests pinning that a disposed screen stops charging it.
+  @visibleForTesting
+  int get budgetBytes => _spectrogramCache.budget.bytes;
 
   /// Memoized derived results currently held, for tests pinning that derived
   /// state never outlives its source entry.
@@ -636,7 +648,8 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   /// WAV-only). Keyed by [path] so a clip's result is shared by the per-clip
   /// inspector, the aggregate merge, and the dock.
   Future<void> _ensureMetricsForPath(String path) async {
-    if (path.isEmpty ||
+    if (_disposed ||
+        path.isEmpty ||
         _metricsCache.containsKey(path) ||
         _metricsLoading.contains(path) ||
         _metricsUnavailable.contains(path)) {
@@ -646,6 +659,8 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     notifyListeners();
     try {
       final m = await _spectrograms.computeMetricsFromFile(path);
+      // See [_disposed]: no reader is left for this cache.
+      if (_disposed) return;
       if (m != null) {
         _metricsCache[path] = m;
       } else {
@@ -673,7 +688,8 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   /// Computes + caches the spectrogram for one audio file (lazy). Keyed by
   /// [path], like [_ensureMetricsForPath].
   Future<void> _ensureSpectrogramForPath(String path) async {
-    if (path.isEmpty ||
+    if (_disposed ||
+        path.isEmpty ||
         _spectrogramCache.containsKey(path) ||
         _spectrogramLoading.contains(path) ||
         _spectrogramUnavailable.contains(path)) {
@@ -683,6 +699,7 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     notifyListeners();
     try {
       final spec = await _spectrograms.computeFromFile(path);
+      if (_disposed) return;
       if (spec != null) {
         _spectrogramCache[path] = spec;
       } else {
@@ -707,7 +724,7 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   /// byte-budgeted, so a later clip's insert can evict this one before the
   /// caller reads it back.
   Future<TakeAnalysis> _ensureClipAnalysis(String path) async {
-    if (path.isEmpty) return (spectrogram: null, metrics: null);
+    if (_disposed || path.isEmpty) return (spectrogram: null, metrics: null);
     final needSpec =
         !_spectrogramCache.containsKey(path) &&
         !_spectrogramLoading.contains(path) &&
@@ -728,6 +745,7 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     notifyListeners();
     try {
       final both = await _spectrograms.computeBothFromFile(path);
+      if (_disposed) return _clipAnalysis(path);
       final spec = both?.spectrogram;
       final m = both?.metrics;
       if (spec != null) {
@@ -787,7 +805,8 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
 
   /// Computes + caches the wide-range display spectrogram for one clip file.
   Future<void> _ensureEqSpectrogramForPath(String path) async {
-    if (path.isEmpty ||
+    if (_disposed ||
+        path.isEmpty ||
         _eqSpectroCache.containsKey(path) ||
         _eqSpectroLoading.contains(path) ||
         _eqSpectroUnavailable.contains(path)) {
@@ -799,6 +818,7 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
         path,
         maxHz: _eqDisplayMaxHz,
       );
+      if (_disposed) return;
       if (spec != null) {
         _eqSpectroCache[path] = spec;
       } else {
@@ -820,7 +840,8 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   /// simply skipped; the aggregate is built from whatever analyzed.
   Future<void> _ensureAggregateAnalysis(AudioTrack track) async {
     final key = aggregateKeyFor(track);
-    if (_aggAnalysisCache.containsKey(key) ||
+    if (_disposed ||
+        _aggAnalysisCache.containsKey(key) ||
         _aggLoading.contains(key) ||
         _aggUnavailable.contains(key)) {
       return;
@@ -842,6 +863,10 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
       final parts = <String, TakeAnalysis>{};
       for (final c in track.clips) {
         parts[c.audioFilePath] = await _ensureClipAnalysis(c.audioFilePath);
+        // Between clips is the only place this loop can be abandoned: every
+        // further clip claims an analysis-gate slot, and the merge below
+        // allocates a lane-length result, for a cache with no reader left.
+        if (_disposed) return;
       }
       // Offsets are relative to the lane's span start (min over ALL clips, even
       // ones whose analysis failed), so the merged frames line up with the lane

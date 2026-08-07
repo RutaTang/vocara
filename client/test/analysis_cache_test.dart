@@ -628,4 +628,61 @@ void main() {
       expect(budget.memberCount, 0);
     });
   });
+
+  group('dispose abandons in-flight analysis', () {
+    test('a disposed cache admits no further clip computes', () async {
+      // Heavy computes queue through the app-wide analysis gate's two slots,
+      // so an aggregate that keeps feeding clips in after its screen closed
+      // makes the NEXT screen wait behind results no one will read.
+      final track = _lane([
+        _clip('c1', 0),
+        _clip('c2', 2000),
+        _clip('c3', 4000),
+      ]);
+      late final AnalysisCache cache;
+      final stub = _StubSpectrograms(
+        metricsByPath: {
+          for (final p in ['c1.wav', 'c2.wav', 'c3.wav']) p: _metrics(10),
+        },
+        specsByPath: {
+          for (final p in ['c1.wav', 'c2.wav', 'c3.wav']) p: _spec(10),
+        },
+      );
+      cache = _cache(spectrograms: stub, selectedTrack: () => track);
+      // Dispose the moment the FIRST clip's compute is admitted.
+      stub.onCompute = (path) {
+        if (path == 'c1.wav') cache.dispose();
+      };
+
+      await cache.ensureSelectedSpectrogram();
+
+      expect(
+        stub.bothCalls,
+        1,
+        reason: 'clips after the dispose must never be admitted',
+      );
+    });
+
+    test(
+      'a compute already in flight does not write into a disposed cache',
+      () async {
+        final track = _lane([_clip('c1', 0)]);
+        late final AnalysisCache cache;
+        final stub = _StubSpectrograms(
+          metricsByPath: {'c1.wav': _metrics(10)},
+          specsByPath: {'c1.wav': _spec(10)},
+        );
+        cache = _cache(spectrograms: stub, selectedTrack: () => track);
+        stub.onCompute = (_) => cache.dispose();
+
+        await cache.ensureSelectedSpectrogram();
+
+        expect(
+          cache.budgetBytes,
+          0,
+          reason: 'nothing was cached after dispose',
+        );
+      },
+    );
+  });
 }
