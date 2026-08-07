@@ -1282,7 +1282,7 @@ void main() {
       expect(parked.single.reason, startsWith('unknown-table'));
     });
 
-    test('a mistyped HLC quad is parked with reason apply-failed (any '
+    test('a mistyped HLC quad is parked with reason invalid-value (any '
         'per-record throw quarantines that record alone)', () async {
       final res = await applier.apply([
         RemoteRecord(
@@ -1296,7 +1296,31 @@ void main() {
       expect(res.failed, 1);
       final parked = await store.list();
       expect(parked, hasLength(1));
-      expect(parked.single.reason, startsWith('apply-failed'));
+      // The column gate names the offending column at the door, instead of
+      // letting the mistyped value fail deep inside apply as a generic
+      // 'apply-failed' with nothing to act on.
+      expect(parked.single.reason, startsWith('invalid-value'));
+    });
+
+    test('a value that could not BIND to its column is parked with the '
+        'column named, not left to fail during hydration', () async {
+      // SQLite's dynamic typing takes a string into an INTEGER column without
+      // complaint, so the failure used to surface far away — drift hydrating
+      // the row and throwing inside a view model — with nothing to act on.
+      final res = await applier.apply([
+        RemoteRecord(
+          table: 'practices',
+          columns: {
+            ...practice('BAD', 'x', hlc(910)).columns,
+            'timeline_duration_ms': 'not a number',
+          },
+        ),
+      ]);
+
+      expect(res.failed, 1);
+      expect(await row('BAD'), isNull);
+      final parked = (await store.list()).single;
+      expect(parked.reason, contains('timeline_duration_ms'));
     });
 
     test('re-quarantining the same row keeps only the latest state', () async {

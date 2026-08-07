@@ -863,7 +863,10 @@ void main() {
       final parked = await quarantine.list();
       expect(parked, hasLength(1));
       expect(parked.single.id, _id('BAD'));
-      expect(parked.single.reason, startsWith('apply-failed'));
+      // The column gate names the offending column at the door, instead of
+      // letting the mistyped value fail deep inside apply as a generic
+      // 'apply-failed' with nothing to act on.
+      expect(parked.single.reason, startsWith('invalid-value'));
     });
 
     test('a record claiming a BELOW-RANGE schema_v (0 or negative) is '

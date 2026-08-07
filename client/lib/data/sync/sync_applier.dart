@@ -325,6 +325,20 @@ class SyncApplier {
                 continue;
               }
             }
+            // Every value must BIND to its column. SQLite's dynamic typing
+            // would take a string into an INTEGER column without complaint,
+            // and the failure then surfaced far away — drift hydrating the row
+            // and throwing inside a view model — instead of here, where the
+            // record can still be parked with its evidence. Outside the
+            // schema_v == current branch on purpose: an older peer's columns
+            // must bind too.
+            try {
+              checkColumnTypes(_tables[rec.table]!, rec.fields);
+            } on FormatException catch (e) {
+              result.failed++;
+              await _quarantine(rec, 'invalid-value: ${e.message}');
+              continue;
+            }
             try {
               // Check-only: the drift gate must not advance the clock, or a
               // record that then fails/quarantines inside its savepoint would

@@ -353,6 +353,53 @@ Map<String, TableInfo<Table, dynamic>> syncedTableRegistry(AppDatabase db) => {
       t.actualTableName: t,
 };
 
+/// Rejects any wire value that would not BIND to its column, using the live
+/// drift schema as the single source of what each column holds. Throws
+/// [FormatException] on the first mismatch.
+///
+/// SQLite's dynamic typing accepts a string into an INTEGER column without
+/// complaint, so the failure surfaced far away — when drift hydrated the row
+/// and threw inside a view model — rather than at the door where the record
+/// could still be quarantined with its evidence. `*_json` columns are parsed
+/// too: a malformed body is only detectable there, and it fails the same way.
+///
+/// Blob and datetime columns are refused outright: the v1 wire format encodes
+/// scalars only ([SyncRow.fromJson]), so a synced table gaining such a column
+/// is a protocol change that must be designed, not silently admitted through
+/// whatever JSON happened to arrive.
+void checkColumnTypes(
+  TableInfo<Table, dynamic> table,
+  Map<String, Object?> fields,
+) {
+  for (final column in table.$columns) {
+    if (!fields.containsKey(column.name)) continue;
+    final value = fields[column.name];
+    if (value == null) continue; // nullability is the database's own gate
+    final ok = switch (column.type) {
+      DriftSqlType.int || DriftSqlType.bigInt => value is int,
+      DriftSqlType.bool => value is bool || value is int,
+      DriftSqlType.double => value is num,
+      DriftSqlType.string => value is String,
+      _ => false,
+    };
+    if (!ok) {
+      throw FormatException(
+        'SyncRow: "${table.actualTableName}.${column.name}" cannot hold a '
+        '${value.runtimeType}',
+      );
+    }
+    if (column.name.endsWith('_json') && value is String) {
+      try {
+        jsonDecode(value);
+      } on FormatException {
+        throw FormatException(
+          'SyncRow: "${table.actualTableName}.${column.name}" is not JSON',
+        );
+      }
+    }
+  }
+}
+
 /// Reads current rows generically (via the drift [TableInfo] registry) and
 /// projects them into the wire format. Every column of a synced table is
 /// synced by design, so the projection is "all columns" minus the few
