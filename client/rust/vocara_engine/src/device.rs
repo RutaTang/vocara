@@ -1780,7 +1780,12 @@ pub fn decode_file(
     // standard symphonia discipline — one damaged frame must not kill a
     // recovering take), but a mid-file READ error is a failing disk, not an
     // end of stream — returning the partial audio as a clean success would
-    // silently truncate the user's media.
+    // silently truncate the user's media. ResetRequired is not an end of
+    // stream either: the reader changed its track list mid-file (chained
+    // streams); treating it as EOF silently truncated everything after the
+    // first chain link.
+    let mut track_id = track_id;
+    let mut skipped_packets: u64 = 0;
     loop {
         let packet = match format.next_packet() {
             Ok(p) => p,
@@ -1789,7 +1794,24 @@ pub fn decode_file(
             {
                 break; // normal end of stream
             }
-            Err(symphonia::core::errors::Error::ResetRequired) => break,
+            Err(symphonia::core::errors::Error::ResetRequired) => {
+                // Rebuild the decoder against the new default track and keep
+                // going. A mid-stream sample-rate change is refused honestly:
+                // this single-rate output cannot represent it.
+                let track = format
+                    .default_track()
+                    .ok_or_else(|| err("reset: no default track".to_string()))?;
+                if track.codec_params.sample_rate.unwrap_or(src_rate) != src_rate {
+                    return Err(err(format!(
+                        "mid-stream sample-rate change in {path} is unsupported"
+                    )));
+                }
+                track_id = track.id;
+                decoder = symphonia::default::get_codecs()
+                    .make(&track.codec_params, &DecoderOptions::default())
+                    .map_err(|e| err(format!("make decoder after reset: {e}")))?;
+                continue;
+            }
             Err(symphonia::core::errors::Error::IoError(e)) => {
                 return Err(DecodeError::Io(format!("read {path}: {e}")));
             }
@@ -1800,7 +1822,23 @@ pub fn decode_file(
         }
         let decoded = match decoder.decode(&packet) {
             Ok(d) => d,
-            Err(_) => continue, // one corrupt frame is skipped, not fatal
+            // Corrupt DATA is skipped (one damaged frame must not kill a
+            // recovering take) but counted, so a file that decodes to
+            // nothing reports how much was thrown away. Anything else —
+            // an unsupported codec feature, an IO failure surfacing through
+            // the decoder — would fail every remaining packet too; burning
+            // through the whole file for a generic "decoded no audio" at the
+            // end hides the reason, so fail fast with it instead.
+            Err(symphonia::core::errors::Error::DecodeError(_)) => {
+                skipped_packets += 1;
+                continue;
+            }
+            Err(symphonia::core::errors::Error::ResetRequired) => {
+                decoder.reset();
+                skipped_packets += 1;
+                continue;
+            }
+            Err(e) => return Err(err(format!("decode: {e}"))),
         };
         let spec = *decoded.spec();
         let ch = spec.channels.count();
@@ -1840,7 +1878,9 @@ pub fn decode_file(
         }
     }
     if out.is_empty() {
-        return Err(err(format!("decoded no audio from {path}")));
+        return Err(err(format!(
+            "decoded no audio from {path} ({skipped_packets} corrupt packets skipped)"
+        )));
     }
     Ok((out, src_rate))
 }
@@ -1996,16 +2036,35 @@ pub fn resample_sinc(
     }
 
     // The valid output is exactly [delay, delay + exact): group delay off the head, the
-    // deterministic round(n * ratio) duration contract on the length.
-    let start = delay * CHANNELS;
-    let mut framed = Vec::with_capacity(exact);
-    for chunk in outbuf[start..start + exact * CHANNELS].chunks_exact(CHANNELS) {
+    // deterministic round(n * ratio) duration contract on the length. Cut the window out
+    // IN PLACE — a copy into a second Vec held two full-length outputs alive at peak,
+    // doubling this path's high-water mark on hour-long tracks.
+    outbuf.truncate((delay + exact) * CHANNELS);
+    outbuf.drain(..delay * CHANNELS);
+    for v in outbuf.iter_mut() {
         // Second scrub line: the convolution of large-but-finite inputs can overflow to
         // NaN/Inf even though the decode root sanitized its samples (and callers may feed
         // this converter PCM that never went through decode_file at all).
-        framed.push([scrub_sample(chunk[0]), scrub_sample(chunk[1])]);
+        *v = scrub_sample(*v);
     }
-    Ok(framed)
+    Ok(frames_from_flat(outbuf))
+}
+
+/// Reinterpret a flat interleaved stereo Vec as stereo frames WITHOUT copying — the
+/// inverse of the FFI layer's `flatten_stereo`. Sound only when both the length and the
+/// allocated capacity are whole frames; `vec![0.0; n * CHANNELS]` allocates exactly its
+/// length, and truncate/drain never change capacity, so `resample_sinc` upholds both.
+fn frames_from_flat(mut v: Vec<Smp>) -> Vec<[Smp; CHANNELS]> {
+    debug_assert_eq!(v.len() % CHANNELS, 0);
+    debug_assert_eq!(v.capacity() % CHANNELS, 0);
+    let ptr = v.as_mut_ptr() as *mut [Smp; CHANNELS];
+    let len = v.len() / CHANNELS;
+    let cap = v.capacity() / CHANNELS;
+    std::mem::forget(v);
+    // SAFETY: same allocation; [Smp; CHANNELS] and CHANNELS consecutive Smp share size
+    // and alignment, len/cap are exact multiples (asserted above), and the original Vec
+    // is forgotten so ownership transfers exactly once.
+    unsafe { Vec::from_raw_parts(ptr, len, cap) }
 }
 
 #[cfg(test)]
