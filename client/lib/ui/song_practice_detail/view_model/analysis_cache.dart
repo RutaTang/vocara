@@ -57,8 +57,23 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     required AudioTrack? Function(String) trackById,
     required ValueListenable<Duration> position,
     required Future<void> Function(Duration) seek,
-    @visibleForTesting int aggregateCacheBytes = _aggregateCacheBytes,
-  }) : _aggAnalysisCache = LruBytesCache(aggregateCacheBytes, _aggBytes),
+    @visibleForTesting LruBytesBudget? cacheBudget,
+  }) : _aggAnalysisCache = LruBytesCache.shared(
+         cacheBudget ?? analysisCacheBudget,
+         _aggBytes,
+       ),
+       _spectrogramCache = LruBytesCache.shared(
+         cacheBudget ?? analysisCacheBudget,
+         _specBytes,
+       ),
+       _metricsCache = LruBytesCache.shared(
+         cacheBudget ?? analysisCacheBudget,
+         _metricsBytes,
+       ),
+       _eqSpectroCache = LruBytesCache.shared(
+         cacheBudget ?? analysisCacheBudget,
+         _specBytes,
+       ),
        _spectrograms = spectrograms,
        _monitor = monitor,
        _graphEngine = graphEngine,
@@ -69,7 +84,15 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
        _selectedClipId = selectedClipId,
        _trackById = trackById,
        _position = position,
-       _seek = seek;
+       _seek = seek {
+    // Derived results are memoized under the SAME key as the entry they came
+    // from, so the budget dropping a source leaves them with no owner. Wiring
+    // the hooks here (rather than at construction) is what lets them close
+    // over this cache.
+    _spectrogramCache.onEvict = _dropDerived;
+    _metricsCache.onEvict = _dropDerived;
+    _aggAnalysisCache.onEvict = _dropAggDerived;
+  }
 
   final SpectrogramService _spectrograms;
   final MonitorService _monitor;
@@ -118,16 +141,13 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   static const int _registerScoreBytesPerFrame = 4;
   static int _metricsBytes(VoiceMetrics m) =>
       m.frames * (VoiceMetrics.bytesPerFrame + _registerScoreBytesPerFrame);
-  final LruBytesCache<Spectrogram> _spectrogramCache = LruBytesCache(
-    192 * 1000 * 1000,
-    _specBytes,
-  );
-  final LruBytesCache<VoiceMetrics> _metricsCache = LruBytesCache(
-    64 * 1000 * 1000,
-    _metricsBytes,
-  );
+  final LruBytesCache<Spectrogram> _spectrogramCache;
+  final LruBytesCache<VoiceMetrics> _metricsCache;
   // Derived voice profile (range/passaggio/dynamics) per take path, memoized so
-  // it isn't recomputed on every unrelated rebuild.
+  // it isn't recomputed on every unrelated rebuild. Their lifetime is the
+  // SOURCE entry's — [_dropDerived] is wired as the metrics/spectrogram
+  // caches' eviction hook, because the budget can drop a source on any insert
+  // and a derived value keyed off a gone source has no owner left to drop it.
   final Map<String, VoiceProfile> _profileCache = {};
   // Long-term average spectrum + register map per take path, memoized likewise.
   final Map<String, Ltas> _ltasCache = {};
@@ -149,10 +169,8 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   // 41, so any split budget drops the spectrogram first and leaves behind a
   // half that still answers `containsKey` — which the ready latch reads as
   // "done", so the missing half was never recomputed and the view stayed
-  // empty without even a loading state. The budget is what the two halves are
-  // worth together, and [LruBytesCache] keeps a lone oversized entry — for a
-  // pair that means both halves stay, never one of them.
-  static const int _aggregateCacheBytes = 256 * 1000 * 1000;
+  // empty without even a loading state. [LruBytesCache] keeps a lone
+  // oversized entry — for a pair that means both halves stay, never one.
   static int _aggBytes(TakeAnalysis a) {
     final s = a.spectrogram;
     final m = a.metrics;
@@ -165,14 +183,37 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   final Map<String, RegisterMap> _aggRegisterCache = {};
   final Set<String> _aggLoading = {};
   final Set<String> _aggUnavailable = {};
+
+  /// Everything memoized FROM a per-path analysis: the profile and register
+  /// map derive from the metrics, the LTAS from the spectrogram and metrics.
+  void _dropDerived(String key) {
+    _profileCache.remove(key);
+    _ltasCache.remove(key);
+    _registerCache.remove(key);
+  }
+
+  /// [_dropDerived] for the whole-lane aggregate family.
+  void _dropAggDerived(String key) {
+    _aggProfileCache.remove(key);
+    _aggLtasCache.remove(key);
+    _aggRegisterCache.remove(key);
+  }
+
+  /// Memoized derived results currently held, for tests pinning that derived
+  /// state never outlives its source entry.
+  @visibleForTesting
+  int get derivedEntries =>
+      _profileCache.length +
+      _ltasCache.length +
+      _registerCache.length +
+      _aggProfileCache.length +
+      _aggLtasCache.length +
+      _aggRegisterCache.length;
   // Full-range (to ~18 kHz) display spectrogram per clip file, for the FX EQ's
   // input/output spectrum analyzer. Kept separate from the 5 kHz analysis
   // spectrogram, which is tuned for voice metrics rather than a wide display.
   static const double _eqDisplayMaxHz = 18000;
-  final LruBytesCache<Spectrogram> _eqSpectroCache = LruBytesCache(
-    128 * 1000 * 1000,
-    _specBytes,
-  );
+  final LruBytesCache<Spectrogram> _eqSpectroCache;
   final Set<String> _eqSpectroLoading = {};
   final Set<String> _eqSpectroUnavailable = {};
   // Inline analysis sub-lanes (view state, not persisted): which tracks are
@@ -868,11 +909,9 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   /// Drops the cached spectrogram + voice metrics for an audio [path] that no
   /// longer exists (split/merge/re-analyze replace a take's file).
   void evictAnalysis(String path) {
+    // remove fires the eviction hook, which drops the derived memos with it.
     _spectrogramCache.remove(path);
     _metricsCache.remove(path);
-    _profileCache.remove(path);
-    _ltasCache.remove(path);
-    _registerCache.remove(path);
     // Clear the "unavailable" latches so the replacement file can re-analyze.
     _spectrogramUnavailable.remove(path);
     _metricsUnavailable.remove(path);
@@ -888,10 +927,8 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   /// its id intact (re-analyze), so any file mutation clears them outright.
   void _evictAggregates() {
     if (_aggAnalysisCache.isEmpty && _aggUnavailable.isEmpty) return;
+    // clear fires the eviction hook per key, which drops the derived memos.
     _aggAnalysisCache.clear();
-    _aggProfileCache.clear();
-    _aggLtasCache.clear();
-    _aggRegisterCache.clear();
     _aggUnavailable.clear();
   }
 
@@ -964,6 +1001,13 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     // Stop the engine's capture if the live view was on; the owner disposes
     // the engine right after, this just closes the pump's source first.
     if (_liveMonitor) _graphEngine()?.stopCapture();
+    // The shared budget outlives this screen, so a cache that does not LEAVE
+    // it keeps this practice's whole analysis payload resident for the life
+    // of the process.
+    _spectrogramCache.dispose();
+    _metricsCache.dispose();
+    _aggAnalysisCache.dispose();
+    _eqSpectroCache.dispose();
     // Deliberately no _monitor.stop()/dispose(): the view model owns the
     // MonitorService and disposes it after the controllers; stop()'s
     // notifyListeners must not fire into a half-torn-down widget tree.

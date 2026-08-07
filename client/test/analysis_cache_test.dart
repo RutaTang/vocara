@@ -9,6 +9,7 @@ import 'package:vocara/domain/models/audio_track.dart';
 import 'package:vocara/domain/models/spectrogram.dart';
 import 'package:vocara/domain/models/voice_metrics.dart';
 import 'package:vocara/ui/song_practice_detail/view_model/analysis_cache.dart';
+import 'package:vocara/utils/lru_bytes_cache.dart';
 
 class _FakeSpectrograms extends Fake implements SpectrogramService {}
 
@@ -91,7 +92,7 @@ AnalysisCache _cache({
   Future<void> Function()? pausePlayback,
   bool Function()? isPlaying,
   bool Function()? isRecording,
-  int aggregateCacheBytes = 1 << 30,
+  LruBytesBudget? cacheBudget,
 }) => AnalysisCache(
   spectrograms: spectrograms ?? _FakeSpectrograms(),
   monitor: monitor ?? _FakeMonitor(),
@@ -104,7 +105,9 @@ AnalysisCache _cache({
   trackById: (_) => null,
   position: ValueNotifier(Duration.zero),
   seek: (_) async {},
-  aggregateCacheBytes: aggregateCacheBytes,
+  // A private budget by default so tests never evict each other's entries
+  // through the app-wide one.
+  cacheBudget: cacheBudget ?? LruBytesBudget(1 << 30),
 );
 
 AudioTrack _lane(List<AudioClip> clips, {String id = 'lane'}) => AudioTrack(
@@ -514,7 +517,7 @@ void main() {
       final cache = _cache(
         spectrograms: stub,
         selectedTrack: () => track,
-        aggregateCacheBytes: 4000,
+        cacheBudget: LruBytesBudget(4000),
       );
 
       await cache.ensureSelectedSpectrogram();
@@ -566,6 +569,63 @@ void main() {
         reason: 'a settled pair is not recomputed on the next read',
       );
       cache.dispose();
+    });
+  });
+
+  group('shared analysis budget', () {
+    test(
+      'derived results never outlive the source entry they came from',
+      () async {
+        // profile / LTAS / register are memoized under the SAME key as the
+        // analysis they derive from, in plain maps. A budget eviction can drop
+        // that source on any insert, and the derived value keyed off it then
+        // had no owner left to drop it.
+        final track = _lane([_clip('c1', 0)]);
+        final stub = _StubSpectrograms(
+          metricsByPath: {'c1.wav': _metrics(10)},
+          specsByPath: {'c1.wav': _spec(10)},
+        );
+        final cache = _cache(spectrograms: stub, selectedTrack: () => track);
+
+        await cache.ensureSelectedSpectrogram();
+        // Materialize the derived memos.
+        cache.selectedProfile;
+        cache.selectedLtas;
+        cache.selectedRegister;
+        expect(cache.derivedEntries, greaterThan(0));
+
+        cache.evictAnalysis('c1.wav');
+
+        expect(
+          cache.derivedEntries,
+          0,
+          reason: 'the derived memos go with their source',
+        );
+        cache.dispose();
+      },
+    );
+
+    test('a disposed screen stops charging the shared budget', () async {
+      // The budget outlives any one screen, so a cache that does not leave it
+      // keeps that screen's whole payload resident for the process's life.
+      final budget = LruBytesBudget(1 << 30);
+      final track = _lane([_clip('c1', 0)]);
+      final cache = _cache(
+        spectrograms: _StubSpectrograms(
+          metricsByPath: {'c1.wav': _metrics(10)},
+          specsByPath: {'c1.wav': _spec(10)},
+        ),
+        selectedTrack: () => track,
+        cacheBudget: budget,
+      );
+
+      await cache.ensureSelectedSpectrogram();
+      expect(budget.bytes, greaterThan(0));
+
+      cache.dispose();
+
+      expect(budget.bytes, 0);
+      expect(budget.memberCount, 0);
     });
   });
 }

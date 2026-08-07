@@ -21,6 +21,7 @@ import '../../../domain/models/technique_media.dart';
 import '../../../domain/models/voice_metrics.dart';
 import '../../../utils/command.dart';
 import '../../../utils/id.dart';
+import '../../../utils/lru_bytes_cache.dart';
 import '../../../utils/result.dart';
 import '../../song_practice_detail/view_model/analysis_source.dart';
 
@@ -349,7 +350,22 @@ class TechniqueDetailViewModel extends ChangeNotifier
 
   /// Cached analysis per example path, so switching back to an example is
   /// instant and a changed reference recomputes while an unchanged one doesn't.
-  final Map<String, TechniqueAnalysis> _refCache = {};
+  ///
+  /// Byte-budgeted against the app-wide analysis budget, and disposed with
+  /// this view model: each entry carries a whole spectrogram (a 10-minute
+  /// reference is ~44 MB of it), so an unbounded map pinned every example the
+  /// user opened for as long as the screen lived, on top of whatever the
+  /// practice screen was holding.
+  final LruBytesCache<TechniqueAnalysis> _refCache = LruBytesCache.shared(
+    analysisCacheBudget,
+    _analysisBytes,
+  );
+
+  /// Resident payload of one reference analysis: the two typed-data members
+  /// dominate; the LTAS, profile and register map are bounded summaries.
+  static int _analysisBytes(TechniqueAnalysis a) =>
+      a.spectrogram.db.length * 4 +
+      a.metrics.frames * VoiceMetrics.bytesPerFrame;
 
   /// Paths whose analysis was attempted but produced nothing (undecodable file).
   final Set<String> _refFailed = {};
@@ -1015,6 +1031,9 @@ class TechniqueDetailViewModel extends ChangeNotifier
     // start is invalidated and arms nothing), unregisters the quit finalizer,
     // and disposes the level notifier.
     _recorder.dispose();
+    // The analysis budget is app-wide, so a cache that never leaves it keeps
+    // this technique's references resident for the life of the process.
+    _refCache.dispose();
     // Clean up any abandoned recording (Stop never pressed before leaving).
     unawaited(deleteTempRecordingDir(_practiceTempPath));
     unawaited(deleteTempRecordingDir(_exampleTempPath));
