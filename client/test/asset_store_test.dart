@@ -131,7 +131,7 @@ void main() {
     expect(await db.select(db.assets).get(), hasLength(1));
     final abs = await store.resolve(ids.first);
     expect(abs, isNotNull);
-    expect((await File(abs!).length()), 256 * 1024);
+    expect(await File(abs!).length(), 256 * 1024);
     // No staging leftovers: every .part was promoted or cleaned up.
     final staging = Directory(p.join(tmp.path, 'assets', '.staging'));
     if (await staging.exists()) {
