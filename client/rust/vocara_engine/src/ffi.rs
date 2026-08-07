@@ -162,15 +162,72 @@ pub struct VeEngine {
     // Per committed FX bus: the bus compressor's gain-reduction meter.
     bus_gr_meters: Vec<Option<Arc<AtomicU32>>>,
     /// Streaming-track feeders for the LIVE graph (swapped whole on commit).
-    /// Pumped by [`VeEngine::ensure_feeder_thread`]'s thread every ~10 ms;
-    /// a pump error (unreadable file) drops that feeder — its track
-    /// degrades to counted-underrun silence, never corruption.
-    feeders: Arc<std::sync::Mutex<Vec<crate::feed::TrackFeeder>>>,
+    /// Pumped by [`VeEngine::ensure_feeder_thread`]'s thread every ~10 ms.
+    /// Each feeder sits behind its own mutex so one slow disk read (an
+    /// iCloud-evicted file, a spun-down USB volume) blocks only its own
+    /// track — the old single Vec ran every track's I/O under one lock,
+    /// which the commit path and the xruns getter also contended on. A pump
+    /// error is retried with a reopened handle for [`MAX_FEEDER_FAILS`]
+    /// consecutive pumps before the feeder is dropped (one transient EIO
+    /// used to permanently silence the track).
+    feeders: Arc<std::sync::Mutex<Vec<Arc<std::sync::Mutex<FeederSlot>>>>>,
+    /// The live graph's stream control blocks, kept SEPARATE from the
+    /// feeders: `ve_stream_xruns` sums these, so a dropped feeder's
+    /// underruns stay in the total — removal used to make the aggregate
+    /// DECREASE, which the Dart watch's monotonic compare read as healthy.
+    stream_ctrls: Vec<Arc<crate::feed::StreamCtrl>>,
     feeder_stop: Arc<std::sync::atomic::AtomicBool>,
     feeder_join: Option<std::thread::JoinHandle<()>>,
     /// Input-vs-output clock-drift estimator, ticked by the Dart device
     /// watch's 1 s poll (ve_poll_device_event — the process's one poller).
     drift: device::DriftEstimator,
+}
+
+/// One streaming feeder plus its retry state (see the `feeders` field docs).
+struct FeederSlot {
+    feeder: crate::feed::TrackFeeder,
+    fail_streak: u32,
+    dead: bool,
+}
+
+/// Consecutive failed pumps (10 ms apart, ~5 s) before a feeder is dropped.
+const MAX_FEEDER_FAILS: u32 = 500;
+
+impl FeederSlot {
+    fn new(feeder: crate::feed::TrackFeeder) -> Self {
+        FeederSlot {
+            feeder,
+            fail_streak: 0,
+            dead: false,
+        }
+    }
+
+    /// Fold one pump outcome into the retry state; returns whether the slot
+    /// just died. A single transient error (an EIO on a network volume, an
+    /// iCloud eviction mid-read) used to remove the feeder permanently and
+    /// silence the track for the rest of the session — so a failure instead
+    /// refreshes the file handle (a stale fd on a recovered volume keeps
+    /// failing where a fresh open succeeds) and the feeder survives until
+    /// [`MAX_FEEDER_FAILS`] CONSECUTIVE failures. Any success resets the
+    /// streak; the track renders counted-underrun silence meanwhile and
+    /// self-heals on the first good read.
+    fn record_pump(&mut self, result: Result<(), String>) -> bool {
+        match result {
+            Ok(()) => {
+                self.fail_streak = 0;
+                false
+            }
+            Err(_) => {
+                self.fail_streak += 1;
+                let _ = self.feeder.reopen_reader();
+                if self.fail_streak >= MAX_FEEDER_FAILS && !self.dead {
+                    self.dead = true;
+                    return true;
+                }
+                false
+            }
+        }
+    }
 }
 
 impl VeEngine {
@@ -186,9 +243,27 @@ impl VeEngine {
         let transport = Arc::clone(self.handle.shared_arc());
         self.feeder_join = Some(std::thread::spawn(move || {
             while !stop.load(std::sync::atomic::Ordering::Acquire) {
-                {
-                    let mut set = feeders.lock().unwrap();
-                    set.retain_mut(|f| f.pump(&transport).is_ok());
+                // Snapshot the slot list, then pump OUTSIDE the outer lock:
+                // each track's disk I/O contends only with itself.
+                let slots: Vec<_> = match feeders.lock() {
+                    Ok(set) => set.clone(),
+                    Err(_) => break,
+                };
+                let mut any_dead = false;
+                for slot_arc in &slots {
+                    let Ok(mut slot) = slot_arc.lock() else {
+                        continue;
+                    };
+                    if slot.dead {
+                        continue;
+                    }
+                    let result = slot.feeder.pump(&transport);
+                    any_dead |= slot.record_pump(result);
+                }
+                if any_dead {
+                    if let Ok(mut set) = feeders.lock() {
+                        set.retain(|s| s.lock().map(|g| !g.dead).unwrap_or(false));
+                    }
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
@@ -393,6 +468,7 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
             gr_meters: Vec::new(),
             bus_gr_meters: Vec::new(),
             feeders: Arc::new(std::sync::Mutex::new(Vec::new())),
+            stream_ctrls: Vec::new(),
             feeder_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             feeder_join: None,
             drift: device::DriftEstimator::new(drift_ratio),
@@ -1206,6 +1282,7 @@ pub extern "C" fn ve_tracks_commit(e: *mut VeEngine) -> c_int {
     with_engine(e, -1, |eng| {
         let rate = eng.handle.sample_rate();
         let mut new_feeders: Vec<crate::feed::TrackFeeder> = Vec::new();
+        let mut new_ctrls: Vec<Arc<crate::feed::StreamCtrl>> = Vec::new();
 
         // FX buses first, so a track can route into one by index. Each bus gets a
         // gain-reduction meter; effect params are pushed after commit.
@@ -1289,6 +1366,7 @@ pub extern "C" fn ve_tracks_commit(e: *mut VeEngine) -> c_int {
                         let ctrl = crate::feed::StreamCtrl::new();
                         let (prod, cons) = crate::ring::spsc::<[Smp; CHANNELS]>(16384);
                         let len = reader.frames;
+                        new_ctrls.push(Arc::clone(&ctrl));
                         new_feeders.push(crate::feed::TrackFeeder::new(
                             Arc::clone(&ctrl),
                             prod,
@@ -1335,10 +1413,17 @@ pub extern "C" fn ve_tracks_commit(e: *mut VeEngine) -> c_int {
             let _ = f.pump(&transport);
         }
         eng.handle.publish_graph(graph);
-        // Swap the feeder set; the pump thread exists only while needed.
+        // Swap the feeder set; the pump thread exists only while needed. The
+        // control blocks are recorded separately so ve_stream_xruns keeps
+        // counting a track whose feeder is later dropped.
+        eng.stream_ctrls = new_ctrls;
         {
+            let slots: Vec<_> = new_feeders
+                .into_iter()
+                .map(|f| Arc::new(std::sync::Mutex::new(FeederSlot::new(f))))
+                .collect();
             let mut feeders = eng.feeders.lock().unwrap();
-            *feeders = new_feeders;
+            *feeders = slots;
             let active = !feeders.is_empty();
             drop(feeders);
             if active {
@@ -1790,14 +1875,14 @@ pub extern "C" fn ve_tracks_add_pcm(
 #[no_mangle]
 pub extern "C" fn ve_stream_xruns(e: *mut VeEngine) -> u64 {
     with_engine(e, 0, |eng| {
-        eng.feeders
-            .lock()
-            .map(|set| {
-                set.iter()
-                    .map(|f| f.ctrl.xruns.load(std::sync::atomic::Ordering::Relaxed))
-                    .sum()
-            })
-            .unwrap_or(0)
+        // Summed over the LIVE GRAPH's control blocks, not the feeder set: a
+        // feeder dropped after persistent I/O failure must keep contributing
+        // its (still-growing) underruns, or the aggregate DECREASES and the
+        // Dart watch's monotonic compare reads the dead track as healthy.
+        eng.stream_ctrls
+            .iter()
+            .map(|c| c.xruns.load(std::sync::atomic::Ordering::Relaxed))
+            .sum()
     })
 }
 
@@ -2415,6 +2500,66 @@ pub extern "C" fn ve_track_gr(e: *mut VeEngine, track: c_int) -> f32 {
         Some(Some(m)) => f32::from_bits(m.load(Ordering::Relaxed)),
         _ => 0.0,
     })
+}
+
+#[cfg(test)]
+mod feeder_slot_tests {
+    //! The pump thread's transient-failure policy. A single I/O error used to
+    //! remove the feeder for good — one EIO on a network volume, and that
+    //! track was silent for the rest of the session with its underruns
+    //! vanishing from the health aggregate too.
+
+    use super::{FeederSlot, MAX_FEEDER_FAILS};
+    use crate::feed::{StreamCtrl, TrackFeeder, WavTrackReader};
+    use crate::ring::spsc;
+    use crate::sample::{Smp, CHANNELS};
+
+    fn slot(name: &str) -> (FeederSlot, std::path::PathBuf) {
+        let path = std::env::temp_dir().join(format!(
+            "vocara_feeder_slot_{}_{}.wav",
+            std::process::id(),
+            name
+        ));
+        crate::wav::write_wav_f32(&path, &[0.25 as Smp; 256], CHANNELS as u16, 48_000).unwrap();
+        let (prod, _cons) = spsc::<[Smp; CHANNELS]>(1024);
+        let reader = WavTrackReader::open(path.to_str().unwrap()).unwrap();
+        let feeder = TrackFeeder::new(StreamCtrl::new(), prod, reader, 0);
+        (FeederSlot::new(feeder), path)
+    }
+
+    #[test]
+    fn a_transient_failure_is_retried_and_a_later_success_resets_the_streak() {
+        let (mut s, path) = slot("transient");
+        for i in 1..MAX_FEEDER_FAILS {
+            assert!(
+                !s.record_pump(Err("EIO".into())),
+                "failure {i} of {MAX_FEEDER_FAILS} must not kill the feeder"
+            );
+        }
+        assert_eq!(s.fail_streak, MAX_FEEDER_FAILS - 1);
+        // The volume came back: one good pump wipes the streak, so the next
+        // isolated error starts counting from zero again.
+        assert!(!s.record_pump(Ok(())));
+        assert_eq!(s.fail_streak, 0, "a success must reset the streak");
+        assert!(!s.dead);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn only_a_persistent_failure_streak_drops_the_feeder() {
+        let (mut s, path) = slot("persistent");
+        for _ in 1..MAX_FEEDER_FAILS {
+            assert!(!s.record_pump(Err("EIO".into())));
+        }
+        assert!(
+            s.record_pump(Err("EIO".into())),
+            "the {MAX_FEEDER_FAILS}th consecutive failure retires the feeder"
+        );
+        assert!(s.dead);
+        // Reported dead exactly once, so the sweep runs once.
+        assert!(!s.record_pump(Err("EIO".into())));
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 #[cfg(test)]

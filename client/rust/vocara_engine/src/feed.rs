@@ -89,12 +89,16 @@ pub fn fence_base_tl(f: [Smp; CHANNELS]) -> i64 {
 /// frames. Non-RT — lives on the feeder side only.
 pub struct WavTrackReader {
     file: File,
+    path: String,
     data_start: u64,
     /// Frames physically present.
     pub frames: i64,
     /// True: float32 samples; false: PCM16 (legacy takes).
     is_f32: bool,
     channels: u16,
+    /// Reusable read buffer — `read_at` runs every ~10 ms per streamed track
+    /// and used to allocate a fresh Vec per call.
+    scratch: Vec<u8>,
 }
 
 impl WavTrackReader {
@@ -131,11 +135,22 @@ impl WavTrackReader {
         let frames = (declared.min(avail) / bytes_per_frame) as i64;
         Ok(WavTrackReader {
             file,
+            path: path.to_string(),
             data_start: 44,
             frames,
             is_f32,
             channels,
+            scratch: Vec::new(),
         })
+    }
+
+    /// Refresh the underlying file handle (transient-error recovery: a stale
+    /// handle on a network/USB volume can keep failing after the volume
+    /// recovers, while a fresh open succeeds). The committed geometry
+    /// (frames, format) is intentionally kept — the graph was built for it.
+    pub fn reopen(&mut self) -> Result<(), String> {
+        self.file = File::open(&self.path).map_err(|e| format!("reopen {}: {e}", self.path))?;
+        Ok(())
     }
 
     /// Reads up to `out.len()` frames starting at track-local frame `at`
@@ -153,7 +168,8 @@ impl WavTrackReader {
                 self.data_start + at as u64 * frame_bytes as u64,
             ))
             .map_err(|e| e.to_string())?;
-        let mut buf = vec![0u8; want * frame_bytes];
+        self.scratch.resize(want * frame_bytes, 0);
+        let buf = &mut self.scratch[..want * frame_bytes];
         let mut read = 0;
         while read < buf.len() {
             match self.file.read(&mut buf[read..]) {
@@ -163,6 +179,7 @@ impl WavTrackReader {
             }
         }
         let got = read / frame_bytes;
+        let buf = &self.scratch[..want * frame_bytes];
         for (i, frame) in out.iter_mut().enumerate().take(got) {
             let base = i * frame_bytes;
             let sample = |c: usize| -> Smp {
@@ -238,6 +255,12 @@ impl TrackFeeder {
             basis: None,
             scratch: vec![[0.0; CHANNELS]; 1024],
         }
+    }
+
+    /// Refresh the reader's file handle (see [`WavTrackReader::reopen`]);
+    /// used by the pump thread's transient-error retry.
+    pub fn reopen_reader(&mut self) -> Result<(), String> {
+        self.reader.reopen()
     }
 
     /// Pushes a two-frame fence when the ring has room for both; on success

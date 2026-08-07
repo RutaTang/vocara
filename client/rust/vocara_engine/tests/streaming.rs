@@ -339,3 +339,32 @@ fn a_loop_outside_the_track_span_neither_floods_the_ring_nor_wedges_reentry() {
         "audio must resume once the loop covers the track again"
     );
 }
+
+#[test]
+fn a_failed_reopen_leaves_the_working_handle_intact() {
+    // The pump thread refreshes the reader's file handle after an I/O error
+    // (a stale fd on a recovered volume keeps failing where a fresh open
+    // succeeds). That refresh must never COST the caller its working handle:
+    // if the reopen fails, reads keep flowing through the old one — which is
+    // exactly the case on a briefly-unreachable network volume.
+    let path = write_track(512);
+    let mut reader = WavTrackReader::open(path.to_str().unwrap()).unwrap();
+    let mut out = vec![[0.0 as Smp; CHANNELS]; 64];
+    let before = reader.read_at(0, &mut out).unwrap();
+    assert_eq!(before, 64);
+    let reference = out.clone();
+
+    // A successful reopen keeps reading the same bytes.
+    reader.reopen().unwrap();
+    let mut after = vec![[0.0 as Smp; CHANNELS]; 64];
+    assert_eq!(reader.read_at(0, &mut after).unwrap(), 64);
+    assert_eq!(after, reference, "a reopened handle reads identical bytes");
+
+    // A FAILED reopen (file gone) must not clobber the live handle: POSIX
+    // keeps the unlinked inode alive for the open fd.
+    std::fs::remove_file(&path).unwrap();
+    assert!(reader.reopen().is_err(), "reopen of a missing file fails");
+    let mut still = vec![[0.0 as Smp; CHANNELS]; 64];
+    assert_eq!(reader.read_at(0, &mut still).unwrap(), 64);
+    assert_eq!(still, reference, "the surviving handle still reads");
+}
