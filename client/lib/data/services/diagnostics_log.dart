@@ -226,8 +226,8 @@ class DiagnosticsLog {
   }
 
   static final RegExp _absolutePath = RegExp(
-    "/(?:Users|private|var|tmp|Volumes|Library|Applications|home|etc|opt)"
-    "(?:/[^'\"\\n]+)+",
+    '/(?:Users|private|var|tmp|Volumes|Library|Applications|home|etc|opt)'
+    '(?:/[^\'"\\n]+)+',
   );
   static final RegExp _extensionInside = RegExp(
     r'\.[A-Za-z0-9]{1,8}(?=[\s.,;:)\]}]|$)',

@@ -115,10 +115,10 @@ void main() {
     test('strips absolute user-space paths, keeping only the extension', () {
       expect(
         DiagnosticsLog.scrubPaths(
-          "FileSystemException: Cannot open file, path = "
+          'FileSystemException: Cannot open file, path = '
           "'/Users/ruta/Music/My Song Title.wav' (OS Error: No such file)",
         ),
-        "FileSystemException: Cannot open file, path = "
+        'FileSystemException: Cannot open file, path = '
         "'<path>.wav' (OS Error: No such file)",
       );
       expect(
