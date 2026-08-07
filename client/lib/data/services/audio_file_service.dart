@@ -59,7 +59,8 @@ class AudioFileService {
 
   /// Copies [sourcePath] into the practice's audio directory and returns the
   /// new sandbox path. Throws [FormatException] when the source exceeds
-  /// [maxImportBytes] — judged from a stat, before any bytes move.
+  /// [maxImportBytes] — judged from a stat before any bytes move, and
+  /// re-enforced during the copy itself (see [copyBounded]).
   Future<String> importAudio({
     required String practiceId,
     required String sourcePath,
@@ -76,8 +77,53 @@ class AudioFileService {
     final dir = await _audioDir(practiceId);
     final ext = p.extension(sourcePath);
     final dest = p.join(dir.path, '${newId()}$ext');
-    await File(sourcePath).copy(dest);
+    await copyBounded(sourcePath, dest);
     return dest;
+  }
+
+  /// Streams [sourcePath] to [destPath] with [maxBytes] enforced DURING the
+  /// copy — the pre-copy stat is advisory only, since a source still being
+  /// written (a download, an export in progress) can grow past it after the
+  /// check. The bytes land in a uniquely named sibling temp first and reach
+  /// [destPath] only by rename, so no failure mode leaves a half file at the
+  /// final path: in `audio/<practiceId>/` a half-copied canonical WAV is
+  /// exactly what boot recovery would resurrect as a phantom take.
+  static Future<void> copyBounded(
+    String sourcePath,
+    String destPath, {
+    int maxBytes = maxImportBytes,
+  }) async {
+    final tmp = File(
+      '$destPath.import.$pid.${DateTime.now().microsecondsSinceEpoch}.tmp',
+    );
+    final sink = tmp.openWrite();
+    var copied = 0;
+    try {
+      // addStream applies backpressure and forwards a mid-stream throw, so
+      // the ceiling cuts the copy off promptly with a bounded footprint.
+      await sink.addStream(
+        File(sourcePath).openRead().map((chunk) {
+          copied += chunk.length;
+          if (copied > maxBytes) {
+            throw const FormatException(
+              'This file is too large to import. Media longer than an hour '
+              'is not supported.',
+            );
+          }
+          return chunk;
+        }),
+      );
+      await sink.close();
+      await tmp.rename(destPath);
+    } catch (_) {
+      try {
+        await sink.close();
+      } catch (_) {}
+      try {
+        if (await tmp.exists()) await tmp.delete();
+      } catch (_) {}
+      rethrow;
+    }
   }
 
   /// Returns a fresh path inside the sandbox for a new recording. The recorder

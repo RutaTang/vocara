@@ -80,6 +80,23 @@ void main() {
     );
   });
 
+  test('copyBounded cuts off a source that outgrows the cap mid-copy and '
+      'leaves neither a half file nor temp litter', () async {
+    final src = File(p.join(tmp.path, 'growing.bin'));
+    await src.writeAsBytes(List.filled(64 * 1024, 1));
+    final dest = p.join(tmp.path, 'dest.bin');
+    await expectLater(
+      AudioFileService.copyBounded(src.path, dest, maxBytes: 16 * 1024),
+      throwsFormatException,
+    );
+    expect(File(dest).existsSync(), isFalse, reason: 'no half file');
+    final litter = tmp
+        .listSync()
+        .where((e) => p.basename(e.path).startsWith('dest.bin'))
+        .toList();
+    expect(litter, isEmpty, reason: 'no temp litter');
+  });
+
   test('a normal-sized source still imports', () async {
     final files = AudioFileService(storage: _TempStorage(tmp));
     final src = File(p.join(tmp.path, 'small.wav'));

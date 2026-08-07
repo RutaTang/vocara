@@ -57,7 +57,10 @@ class TechniqueMediaService {
     final dir = await _mediaDir(techniqueId);
     final ext = p.extension(sourcePath);
     final dest = p.join(dir.path, '${newId()}$ext');
-    await File(sourcePath).copy(dest);
+    // Bounded streaming copy via temp + rename: the stat above is advisory
+    // (a still-growing source can pass it), and a half file must never sit
+    // at the final path. See AudioFileService.copyBounded.
+    await AudioFileService.copyBounded(sourcePath, dest);
     return dest;
   }
 
