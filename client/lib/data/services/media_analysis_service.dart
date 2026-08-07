@@ -18,18 +18,24 @@ class MediaAnalysisService {
   /// Longest media the analysis path will decode. The whole file materializes
   /// as Float32 PCM and is copied again across the isolate boundaries (see
   /// [decodeMediaToMono]), so an unbounded input could exhaust memory.
-  /// 10 minutes: takes and technique references are minutes long. MEASURED
-  /// (test/measure_analysis_peak_test.dart, RSS delta while computeBoth runs
-  /// on the max legal 10-minute 48 kHz float WAV): ≈ 86 MB — the WINDOWED
-  /// streaming pipeline (StreamingTakeAnalyzer) holds a few analysis windows
-  /// beside the RESULTS (spectrogram columns, per-metric arrays, the
-  /// cross-isolate return copy); the whole-track sample buffer and the full
-  /// decimated copies no longer exist. Down from ≈ 400 MB (Float32 batch)
-  /// and ≈ 700 MB (the original Float64 batch). The arbitrary-media path
-  /// through the NATIVE decoder still materializes full PCM on its own side
-  /// (unmeasurable in VM tests, which cannot load the engine framework);
-  /// this cap bounds it. The previous 30-minute value predated any memory
-  /// budgeting.
+  /// 10 minutes: takes and technique references are minutes long.
+  ///
+  /// The ≈ 86 MB figure measured in test/measure_analysis_peak_test.dart is
+  /// the WAV path's (SpectrogramService's windowed StreamingTakeAnalyzer,
+  /// which never materializes the track) — NOT this one. THIS path decodes
+  /// through the native engine, which holds the whole track, and then runs
+  /// BATCH DSP over it, so its peak is dominated by the track itself: ~4 bytes
+  /// per frame native (the downmix happens inside that buffer, so stereo and
+  /// mono never coexist), the same again for the Dart copy the isolate hop
+  /// needs, plus the results. A VM test cannot load the engine framework, so
+  /// this stays a derivation; the duration cap is what bounds it, and the
+  /// global analysis gate's two slots bound how many can stack.
+  ///
+  /// Routing this path through the same windowed analyzer — a chunked native
+  /// decode feeding StreamingTakeAnalyzer — is what would remove the
+  /// whole-track term; the per-frame math is already pinned bit-identical to
+  /// the batch functions (test/voice_metrics_test.dart), so the analyzer is
+  /// not the obstacle, the decode's shape is.
   static const Duration maxAnalysisDuration = Duration(minutes: 10);
 
   /// Decodes [path] and runs the complete analysis suite. Returns null when the

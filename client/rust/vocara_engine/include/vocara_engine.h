@@ -199,6 +199,13 @@ int ve_set_bus_send_level(VeEngine *e, int bus, int slot, float level_db);
 VePcm ve_decode(const char *path, uint32_t rate, uint64_t max_frames, uint64_t max_src_frames,
                 int *status);
 void ve_free_decoded(float *ptr, size_t frames);
+/* Like ve_decode, but the returned buffer is MONO: `frames` floats, not frames*2. The
+ * analysis path wants mono, and building it Dart-side from an interleaved stereo buffer
+ * kept both alive at once; the downmix here reuses the stereo allocation in place. Free
+ * with ve_free_decoded_mono — the length it reconstructs must match what was allocated. */
+VePcm ve_decode_mono(const char *path, uint32_t rate, uint64_t max_frames,
+                     uint64_t max_src_frames, int *status);
+void ve_free_decoded_mono(float *ptr, size_t frames);
 /* Declared duration of a media file in ms WITHOUT decoding (container probe only) — the
  * import gate's cheap pre-check. -1 = container declares no length; -2 = unreadable. */
 int64_t ve_probe_duration_ms(const char *path);

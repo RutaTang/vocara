@@ -29,35 +29,38 @@ void main() {
     expect(ran, 1, reason: 'the wedged callback must not starve the next one');
   });
 
-  test('the total budget stops handing out fresh per-finalizer budgets', () async {
-    final finalizer = RecordingFinalizer.forTesting(
-      perFinalizerBudget: const Duration(milliseconds: 40),
-      totalBudget: const Duration(milliseconds: 60),
-    );
-    final parked = <Completer<void>>[];
-    addTearDown(() {
-      for (final c in parked) {
-        if (!c.isCompleted) c.complete();
-      }
-    });
-    var entered = 0;
-    for (var i = 0; i < 5; i++) {
-      finalizer.register(() {
-        entered++;
-        final c = Completer<void>();
-        parked.add(c);
-        return c.future;
+  test(
+    'the total budget stops handing out fresh per-finalizer budgets',
+    () async {
+      final finalizer = RecordingFinalizer.forTesting(
+        perFinalizerBudget: const Duration(milliseconds: 40),
+        totalBudget: const Duration(milliseconds: 60),
+      );
+      final parked = <Completer<void>>[];
+      addTearDown(() {
+        for (final c in parked) {
+          if (!c.isCompleted) c.complete();
+        }
       });
-    }
+      var entered = 0;
+      for (var i = 0; i < 5; i++) {
+        finalizer.register(() {
+          entered++;
+          final c = Completer<void>();
+          parked.add(c);
+          return c.future;
+        });
+      }
 
-    await finalizer.finalizeAll().timeout(const Duration(seconds: 2));
+      await finalizer.finalizeAll().timeout(const Duration(seconds: 2));
 
-    // Asserting on how many callbacks were ENTERED (not on elapsed wall
-    // clock) keeps this deterministic: five 40 ms budgets would be 200 ms,
-    // well past the 60 ms total.
-    expect(entered, greaterThanOrEqualTo(1));
-    expect(entered, lessThan(5));
-  });
+      // Asserting on how many callbacks were ENTERED (not on elapsed wall
+      // clock) keeps this deterministic: five 40 ms budgets would be 200 ms,
+      // well past the 60 ms total.
+      expect(entered, greaterThanOrEqualTo(1));
+      expect(entered, lessThan(5));
+    },
+  );
 
   test('the normal path still runs every finalizer to completion', () async {
     final finalizer = RecordingFinalizer.forTesting();

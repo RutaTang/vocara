@@ -1544,6 +1544,36 @@ pub extern "C" fn ve_decode(
     max_src_frames: u64,
     status: *mut c_int,
 ) -> VePcm {
+    decode_export(path, rate, max_frames, max_src_frames, status, false)
+}
+
+/// Like [`ve_decode`], but the returned buffer is MONO — `frames` floats, not
+/// `frames * 2`. Free it with [`ve_free_decoded_mono`].
+///
+/// The analysis path wants mono, and building it in Dart from an interleaved
+/// stereo buffer meant both were alive at once (12 bytes per frame at peak,
+/// on top of everything the analysis itself holds). Downmixing here reuses
+/// the stereo allocation in place, so the stereo layout never coexists with
+/// its mono reduction.
+#[no_mangle]
+pub extern "C" fn ve_decode_mono(
+    path: *const c_char,
+    rate: u32,
+    max_frames: u64,
+    max_src_frames: u64,
+    status: *mut c_int,
+) -> VePcm {
+    decode_export(path, rate, max_frames, max_src_frames, status, true)
+}
+
+fn decode_export(
+    path: *const c_char,
+    rate: u32,
+    max_frames: u64,
+    max_src_frames: u64,
+    status: *mut c_int,
+    mono: bool,
+) -> VePcm {
     let set_status = |code: c_int| {
         if !status.is_null() {
             unsafe { *status = code };
@@ -1604,10 +1634,19 @@ pub extern "C" fn ve_decode(
             set_status(VE_DECODE_TOO_LONG);
             return VePcm::empty();
         }
-        let flat = flatten_stereo(resampled);
-        // into_boxed_slice guarantees len == capacity, which ve_free_decoded relies on. It
+        let mut flat = flatten_stereo(resampled);
+        if mono {
+            // In place, front to back: destination i is always at or behind
+            // source 2i, so the reduction never reads a slot it has written.
+            for i in 0..n {
+                flat[i] = (flat[2 * i] + flat[2 * i + 1]) * 0.5;
+            }
+            flat.truncate(n);
+        }
+        // into_boxed_slice guarantees len == capacity, which the matching free relies on. It
         // only realloc-copies when capacity overshoots len (growth-by-push decode with no
-        // declared frame count); the exact-capacity paths shrink for free.
+        // declared frame count, and the mono truncate above); the exact-capacity paths
+        // shrink for free.
         let mut boxed = flat.into_boxed_slice();
         let ptr = boxed.as_mut_ptr();
         std::mem::forget(boxed);
@@ -1653,6 +1692,20 @@ pub extern "C" fn ve_free_decoded(ptr: *mut f32, frames: usize) {
     let _ = catch_unwind(AssertUnwindSafe(|| unsafe {
         let len = frames * CHANNELS;
         drop(Vec::from_raw_parts(ptr, len, len));
+    }));
+}
+
+/// Frees a [`ve_decode_mono`] buffer. Separate from [`ve_free_decoded`]
+/// because the length it reconstructs must match what was allocated, and a
+/// mono buffer holds one float per frame rather than two — reconstructing the
+/// wrong length is undefined behavior, not a leak.
+#[no_mangle]
+pub extern "C" fn ve_free_decoded_mono(ptr: *mut f32, frames: usize) {
+    if ptr.is_null() {
+        return;
+    }
+    let _ = catch_unwind(AssertUnwindSafe(|| unsafe {
+        drop(Vec::from_raw_parts(ptr, frames, frames));
     }));
 }
 

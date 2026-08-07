@@ -941,6 +941,54 @@ class VocaraEngineBindings {
   late final _ve_free_decoded = _ve_free_decodedPtr
       .asFunction<void Function(ffi.Pointer<ffi.Float>, int)>();
 
+  /// Like ve_decode, but the returned buffer is MONO: `frames` floats, not frames*2. The
+  /// analysis path wants mono, and building it Dart-side from an interleaved stereo buffer
+  /// kept both alive at once; the downmix here reuses the stereo allocation in place. Free
+  /// with ve_free_decoded_mono — the length it reconstructs must match what was allocated.
+  VePcm ve_decode_mono(
+    ffi.Pointer<ffi.Char> path,
+    int rate,
+    int max_frames,
+    int max_src_frames,
+    ffi.Pointer<ffi.Int> status,
+  ) {
+    return _ve_decode_mono(path, rate, max_frames, max_src_frames, status);
+  }
+
+  late final _ve_decode_monoPtr =
+      _lookup<
+        ffi.NativeFunction<
+          VePcm Function(
+            ffi.Pointer<ffi.Char>,
+            ffi.Uint32,
+            ffi.Uint64,
+            ffi.Uint64,
+            ffi.Pointer<ffi.Int>,
+          )
+        >
+      >('ve_decode_mono');
+  late final _ve_decode_mono = _ve_decode_monoPtr
+      .asFunction<
+        VePcm Function(
+          ffi.Pointer<ffi.Char>,
+          int,
+          int,
+          int,
+          ffi.Pointer<ffi.Int>,
+        )
+      >();
+
+  void ve_free_decoded_mono(ffi.Pointer<ffi.Float> ptr, int frames) {
+    return _ve_free_decoded_mono(ptr, frames);
+  }
+
+  late final _ve_free_decoded_monoPtr =
+      _lookup<
+        ffi.NativeFunction<ffi.Void Function(ffi.Pointer<ffi.Float>, ffi.Size)>
+      >('ve_free_decoded_mono');
+  late final _ve_free_decoded_mono = _ve_free_decoded_monoPtr
+      .asFunction<void Function(ffi.Pointer<ffi.Float>, int)>();
+
   /// Declared duration of a media file in ms WITHOUT decoding (container probe only) — the
   /// import gate's cheap pre-check. -1 = container declares no length; -2 = unreadable.
   int ve_probe_duration_ms(ffi.Pointer<ffi.Char> path) {

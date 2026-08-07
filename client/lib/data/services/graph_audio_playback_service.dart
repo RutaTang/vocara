@@ -250,7 +250,11 @@ Future<PcmAudio?> decodeMediaToMono(
     final status = malloc<ffi.Int>();
     final cap = maxDuration ?? maxPlaybackDuration;
     final maxFrames = cap.inMilliseconds * rate ~/ 1000;
-    final pcm = bindings.ve_decode(
+    // The MONO entry point: the downmix happens inside the native buffer, so
+    // an interleaved stereo track and its mono reduction are never alive at
+    // the same time (which cost 12 bytes per frame at peak, on top of
+    // everything the analysis itself holds).
+    final pcm = bindings.ve_decode_mono(
       cpath.cast(),
       rate,
       maxFrames,
@@ -270,15 +274,10 @@ Future<PcmAudio?> decodeMediaToMono(
       if (exceedsDecodeCap(frames, pcm.rate, cap)) {
         throw MediaTooLongException(cap);
       }
-      final inter = ptr.asTypedList(frames * 2);
-      final mono = Float32List(frames);
-      for (var i = 0; i < frames; i++) {
-        mono[i] = (inter[i * 2] + inter[i * 2 + 1]) * 0.5;
-      }
-      return PcmAudio(mono, pcm.rate);
+      return PcmAudio(Float32List.fromList(ptr.asTypedList(frames)), pcm.rate);
     } finally {
       malloc.free(cpath);
-      if (ptr.address != 0) bindings.ve_free_decoded(ptr, frames);
+      if (ptr.address != 0) bindings.ve_free_decoded_mono(ptr, frames);
     }
   });
 }

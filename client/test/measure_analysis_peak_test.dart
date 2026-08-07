@@ -7,9 +7,15 @@ import 'package:vocara/data/services/spectrogram_service.dart';
 /// MANUAL measurement, not a CI assertion: run with
 ///   VOCARA_MEASURE=1 flutter test test/measure_analysis_peak_test.dart
 /// It generates the largest legal analysis WAV (10 min, 48 kHz, mono f32),
-/// runs computeBothFromFile, and reports the process RSS delta — the honest
-/// number for MediaAnalysisService's peak-memory doc, which was previously a
-/// paper derivation (and wrong by review).
+/// runs computeBothFromFile, and reports the process RSS delta.
+///
+/// SCOPE: this measures the WAV path only — SpectrogramService's windowed
+/// StreamingTakeAnalyzer, which never materializes the track. It is NOT the
+/// arbitrary-media path (MediaAnalysisService), which decodes through the
+/// native engine and holds a full-track buffer on its own side; a VM test
+/// cannot load the engine framework, so that path stays a derivation rather
+/// than a measurement. Quoting this number for it would understate it by the
+/// whole track.
 void main() {
   test(
     'measure computeBothFromFile peak RSS (manual)',
