@@ -128,6 +128,87 @@ PcmAudio? readWavMono(Uint8List bytes) {
   return PcmAudio(out, sampleRate);
 }
 
+/// Incremental spectrogram builder with EXACTLY [computeSpectrogram]'s
+/// column math (same fftea STFT windowing — `stream`/`flush` share `run`'s
+/// pipeline — same dB conversion, same assembly), fed in chunks so the
+/// full-track sample buffer never has to exist. Pinned equal to the batch
+/// path by test.
+class StreamingSpectrogramBuilder {
+  StreamingSpectrogramBuilder(
+    this.sampleRate, {
+    this.fftSize = 2048,
+    this.hop = 512,
+    this.maxHz = 5000,
+  }) : maxBin = math.min(
+         fftSize ~/ 2 + 1,
+         (maxHz * fftSize / sampleRate).ceil() + 1,
+       ),
+       _stft = STFT(fftSize, Window.hanning(fftSize));
+
+  final int sampleRate;
+  final int fftSize;
+  final int hop;
+  final double maxHz;
+  final int maxBin;
+  final STFT _stft;
+  final List<Float32List> _columns = [];
+  bool _any = false;
+
+  static const double _ln10 = 2.302585092994046;
+
+  void _column(Float64x2List freq) {
+    final mags = freq.discardConjugates().magnitudes();
+    final col = Float32List(maxBin);
+    for (var b = 0; b < maxBin; b++) {
+      col[b] = 20.0 * (math.log(mags[b] + 1e-9) / _ln10);
+    }
+    _columns.add(col);
+  }
+
+  /// Feeds the next chunk of mono samples.
+  void add(Float32List chunk) {
+    if (chunk.isEmpty) return;
+    _any = true;
+    _stft.stream(chunk, _column, hop);
+  }
+
+  /// Flushes the trailing partial frame and assembles the [Spectrogram].
+  /// Matches [computeSpectrogram] on empty input too: zero frames, never a
+  /// lone zero-padded one.
+  Spectrogram finish() {
+    if (_any) _stft.flush(_column);
+    final frames = _columns.length;
+    final db = Float32List(frames * maxBin);
+    var minDb = double.infinity;
+    var maxDb = -double.infinity;
+    for (var f = 0; f < frames; f++) {
+      final col = _columns[f];
+      final base = f * maxBin;
+      for (var b = 0; b < maxBin; b++) {
+        final v = col[b];
+        db[base + b] = v;
+        if (v < minDb) minDb = v;
+        if (v > maxDb) maxDb = v;
+      }
+    }
+    if (frames == 0) {
+      minDb = -90;
+      maxDb = 0;
+    }
+    return Spectrogram(
+      frames: frames,
+      bins: maxBin,
+      maxHz: maxHz,
+      sampleRate: sampleRate,
+      fftSize: fftSize,
+      hop: hop,
+      db: db,
+      minDb: minDb,
+      maxDb: maxDb,
+    );
+  }
+}
+
 /// Computes a [Spectrogram] from mono [samples]. Pure + isolate-safe.
 Spectrogram computeSpectrogram(
   Float32List samples,

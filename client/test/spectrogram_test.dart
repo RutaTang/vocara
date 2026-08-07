@@ -5,6 +5,44 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:vocara/data/services/audio_dsp.dart';
 
 void main() {
+  test('StreamingSpectrogramBuilder equals computeSpectrogram exactly, over '
+      'awkward chunk boundaries', () {
+    // The builder must be COLUMN-EXACT with the batch path (same fftea
+    // pipeline; stream+flush share run's implementation) — including the
+    // trailing zero-padded partial frame and the empty-input case.
+    final n = 10000; // not a multiple of fftSize or hop
+    final samples = Float32List(n);
+    for (var i = 0; i < n; i++) {
+      samples[i] = (sin(i / 9.0) * 0.4 + sin(i / 51.0) * 0.2).toDouble();
+    }
+    final batch = computeSpectrogram(samples, 44100);
+
+    for (final chunks in [
+      [n], // one shot
+      [1, 999, 2048, n - 1 - 999 - 2048], // ragged
+      List.filled(n ~/ 500, 500) + [n % 500], // uniform + remainder
+    ]) {
+      final b = StreamingSpectrogramBuilder(44100);
+      var at = 0;
+      for (final c in chunks) {
+        if (c == 0) continue;
+        b.add(Float32List.sublistView(samples, at, at + c));
+        at += c;
+      }
+      expect(at, n, reason: 'fixture sanity');
+      final streamed = b.finish();
+      expect(streamed.frames, batch.frames);
+      expect(streamed.bins, batch.bins);
+      expect(streamed.db, batch.db, reason: 'columns must be bit-identical');
+      expect(streamed.minDb, batch.minDb);
+      expect(streamed.maxDb, batch.maxDb);
+    }
+
+    // Empty input: zero frames on both paths, never a lone padded frame.
+    expect(StreamingSpectrogramBuilder(44100).finish().frames, 0);
+    expect(computeSpectrogram(Float32List(0), 44100).frames, 0);
+  });
+
   test(
     'computeSpectrogram concentrates energy at the input tone frequencies',
     () {

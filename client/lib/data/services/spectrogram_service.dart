@@ -179,9 +179,33 @@ class SpectrogramService {
   /// ~691 MB of samples — the peak is now the analysis buffer plus one chunk.
   @visibleForTesting
   static PcmAudio? readWavMonoStreaming(String path, WavAdmission a) {
+    final out = Float32List(a.frames);
+    var frame = 0;
+    readWavMonoChunked(path, a, (chunk) {
+      out.setRange(frame, frame + chunk.length, chunk);
+      frame += chunk.length;
+    });
+    if (frame == 0) return null;
+    // A truncated file yields a shorter buffer; keep the honest length.
+    return PcmAudio(
+      frame == a.frames ? out : Float32List.sublistView(out, 0, frame),
+      a.sampleRate,
+    );
+  }
+
+  /// The single decode loop behind every analysis read: streams the admitted
+  /// PCM as bounded mono Float32 chunks (4 MiB of file bytes each) so a
+  /// consumer that never needs the whole track (the streaming spectrogram)
+  /// pays only one chunk of memory. [readWavMonoStreaming] is this plus a
+  /// collecting buffer — one decode path, so the two can never diverge.
+  @visibleForTesting
+  static void readWavMonoChunked(
+    String path,
+    WavAdmission a,
+    void Function(Float32List chunk) onChunk,
+  ) {
     final sampleBytes = (a.bits + 7) ~/ 8;
     final frameBytes = a.channels * sampleBytes;
-    final out = Float32List(a.frames);
     final raf = File(path).openSync();
     try {
       raf.setPositionSync(a.dataStart);
@@ -195,6 +219,7 @@ class SpectrogramService {
         final got = bytes.length ~/ frameBytes;
         if (got == 0) break; // truncated on disk: keep what exists
         final bd = ByteData.sublistView(bytes);
+        final out = Float32List(got);
         for (var f = 0; f < got; f++) {
           var acc = 0.0;
           final base = f * frameBytes;
@@ -217,20 +242,15 @@ class SpectrogramService {
               _ => 0.0, // unreachable: the gate admitted the format
             };
           }
-          out[frame + f] = acc * inv;
+          out[f] = acc * inv;
           // Judge finiteness on the NARROWED value: a float64 WAV can carry
           // 1e300 — finite in the double above, Infinity once stored into
           // Float32 — and one Inf poisons every FFT and metric downstream.
-          if (!out[frame + f].isFinite) out[frame + f] = 0.0;
+          if (!out[f].isFinite) out[f] = 0.0;
         }
+        onChunk(out);
         frame += got;
       }
-      if (frame == 0) return null;
-      // A truncated file yields a shorter buffer; keep the honest length.
-      return PcmAudio(
-        frame == a.frames ? out : Float32List.sublistView(out, 0, frame),
-        a.sampleRate,
-      );
     } finally {
       raf.closeSync();
     }
@@ -246,20 +266,26 @@ class SpectrogramService {
     if (!await file.exists()) return null;
     final admission = await admitForAnalysis(file);
     if (admission == null) return null;
-    // STFT is heavy — run it in a background isolate (which also streams the
-    // decode, so raw bytes never materialize whole). Gated: heavy analyses
-    // queue behind the app-wide AnalysisGate instead of stacking peaks.
+    // STFT is heavy — run it in a background isolate. FULLY windowed: decode
+    // chunks feed the incremental STFT directly, so the whole-track sample
+    // buffer never exists (a 10-minute take's ~115 MB master buffer becomes
+    // one 4 MiB chunk beside the columns). Gated: heavy analyses queue
+    // behind the app-wide AnalysisGate instead of stacking peaks.
     return analysisGate.run(
       () => Isolate.run(() {
-        final pcm = readWavMonoStreaming(path, admission);
-        if (pcm == null) return null;
-        return computeSpectrogram(
-          pcm.samples,
-          pcm.sampleRate,
+        final builder = StreamingSpectrogramBuilder(
+          admission.sampleRate,
           fftSize: fftSize,
           hop: hop,
           maxHz: maxHz,
         );
+        var any = false;
+        readWavMonoChunked(path, admission, (chunk) {
+          any = true;
+          builder.add(chunk);
+        });
+        if (!any) return null;
+        return builder.finish();
       }),
     );
   }
