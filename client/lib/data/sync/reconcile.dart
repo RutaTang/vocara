@@ -24,7 +24,14 @@ class ReconcileResult {
 ///   * BASE  — [baseHashes]\[id\]: the row's content hash when this editor
 ///     LOADED the aggregate (null = the editor never held the row). The map
 ///     may be a flat superset covering the whole aggregate: ids are globally
-///     unique ULIDs, so lookups never cross-contaminate between collections.
+///     unique ULIDs — plus the legacy `<trackId>-c0` clip shape, which carries
+///     a '-' no ULID contains — so lookups never cross-contaminate between
+///     collections. That is a constraint on how ids are MINTED, not a property
+///     of this map, and it is load-bearing: a shared id would let one table's
+///     base hash answer for another's row, which decides the rules below and
+///     can send an UPDATE down the tombstone branch. A structural test
+///     (sync_hashes_test.dart) fails if any two synced tables ever hold the
+///     same id.
 ///   * MINE  — [hashOf](item) for id in [desired]: what the editor wants now.
 ///   * DB    — [currentHashes]\[id\]: the row's hash as persisted at save time
 ///     (LIVE rows in this collection's scope only; null = tombstoned or never

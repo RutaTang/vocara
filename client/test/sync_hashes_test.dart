@@ -12,6 +12,7 @@ import 'package:vocara/data/repositories/song_practice_repository_drift.dart';
 import 'package:vocara/data/repositories/technique_repository_drift.dart';
 import 'package:vocara/data/sync/hlc.dart';
 import 'package:vocara/data/sync/sync_hashes.dart';
+import 'package:vocara/data/sync/sync_row.dart';
 import 'package:vocara/data/sync/sync_writer.dart';
 import 'package:vocara/domain/models/audio_fx.dart';
 import 'package:vocara/domain/models/audio_track.dart';
@@ -342,6 +343,33 @@ void main() {
       isTrue,
       reason: 'an untouched graph must round-trip to identical base hashes',
     );
+  });
+
+  test('a flat baseHashes map is sound: no two synced tables can hold the '
+      'same row id', () async {
+    // reconcile keys BASE by bare row id across the whole aggregate, so two
+    // tables sharing an id would cross-contaminate — a track's base hash
+    // answering for a clip, which decides the three-way rules and can send an
+    // UPDATE down the tombstone branch. That is safe only because of how ids
+    // are minted: ULIDs everywhere, plus the legacy `<trackId>-c0` clip shape,
+    // which carries a '-' no ULID contains. This test is the tripwire against
+    // a future id grammar that breaks the assumption silently.
+    await seedFullGraph();
+    final seen = <String, String>{};
+    for (final entry in syncedTableRegistry(db).entries) {
+      final rows = await db.customSelect('SELECT id FROM "${entry.key}"').get();
+      for (final r in rows) {
+        final id = r.read<String>('id');
+        final owner = seen[id];
+        expect(
+          owner,
+          isNull,
+          reason: 'id "$id" is in both "$owner" and "${entry.key}"',
+        );
+        seen[id] = entry.key;
+      }
+    }
+    expect(seen, isNotEmpty, reason: 'the seeded graph must have rows');
   });
 
   test('technique + media: base hashes equal recomputed save-side hashes, and '
