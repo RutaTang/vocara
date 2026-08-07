@@ -131,9 +131,9 @@ class RecordingPathStrategy {
 ///    raw engine peak once per 50 ms level tick (the song VM's existing record
 ///    interval), while [level] keeps the plain clamped level for simple meters;
 ///  * device-loss handling — [onInputDeviceLost] makes the level tick poll and
-///    react to input loss (the technique screen's only device-event consumer);
-///    the song VM can instead pass null and keep its own device watch, since
-///    `pollDeviceEvents` clears on read and must have exactly one poller;
+///    react to input loss ([onDeviceNotice] adds the non-fatal degradations);
+///    the song VM can instead pass null and keep its own device watch — the
+///    poll claims only the masked bits, so two watchers can coexist;
 ///  * quit finalization — [onQuitFinalize] is registered for exactly the
 ///    armed window, replacing each VM's constructor-lifetime registration.
 class MicRecordingController {
@@ -142,6 +142,7 @@ class MicRecordingController {
     MonitorService? monitor,
     Future<void> Function()? onQuitFinalize,
     this.onInputDeviceLost,
+    this.onDeviceNotice,
     this.onLevelTick,
     Future<bool> Function() requestPermission = MicPermission.request,
     RecordingFinalizer? finalizer,
@@ -186,9 +187,16 @@ class MicRecordingController {
   /// lost (poll bit 2) — the owner should stop the take gracefully (finalizing
   /// KEEPS what was captured) and surface its own notice. The tick observing
   /// the loss skips its level update. When null the controller does not poll
-  /// device events at all (they clear on read, so an owner with its own
-  /// device watch must remain the only poller).
+  /// device events at all (an owner with its own device watch keeps polling
+  /// the input bits itself; the poll claims only the masked bits, so two
+  /// watchers no longer steal each other's events).
   final void Function()? onInputDeviceLost;
+
+  /// Called with a user-facing message when the input degrades without being
+  /// lost: echo cancellation unavailable (playback can bleed into the take)
+  /// or the selected microphone fell back to the system default. Only polled
+  /// alongside [onInputDeviceLost]; when null the notices are dropped.
+  final void Function(String message)? onDeviceNotice;
 
   /// Called once per level tick with the raw engine input peak (linear 0..1,
   /// unclamped), for owners that derive their own meter scale, live waveform
@@ -422,11 +430,35 @@ class MicRecordingController {
           if (_disposed) return;
           // Input loss must stop the take gracefully — finalizing KEEPS what
           // was captured — instead of letting capture die silently. Poll only
-          // when the owner handles it here (see [onInputDeviceLost]).
+          // when the owner handles it here (see [onInputDeviceLost]). The
+          // poll claims ONLY its own bits, and it also surfaces the two
+          // degradations this recording cares about: no echo cancellation
+          // (playback bleeds into the take) and a selected-mic fallback
+          // (the take records from the system default, not the shown mic) —
+          // both were silently discarded by the old clear-everything poll.
           final onLost = onInputDeviceLost;
-          if (onLost != null && engine.pollDeviceEvents() & 2 != 0) {
-            onLost();
-            return;
+          if (onLost != null) {
+            final events = engine.pollDeviceEvents(
+              GraphAudioPlaybackService.eventInputLost |
+                  GraphAudioPlaybackService.eventAecBypassed |
+                  GraphAudioPlaybackService.eventInputFellBack,
+            );
+            if (events & GraphAudioPlaybackService.eventAecBypassed != 0) {
+              onDeviceNotice?.call(
+                'Echo cancellation is unavailable for this microphone. '
+                'Use headphones to keep playback out of the recording.',
+              );
+            }
+            if (events & GraphAudioPlaybackService.eventInputFellBack != 0) {
+              onDeviceNotice?.call(
+                'Your selected microphone is unavailable. '
+                'Recording from the system default microphone instead.',
+              );
+            }
+            if (events & GraphAudioPlaybackService.eventInputLost != 0) {
+              onLost();
+              return;
+            }
           }
           final peak = engine.inputLevel();
           level.value = peak.clamp(0.0, 1.0);

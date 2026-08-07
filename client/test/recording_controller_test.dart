@@ -103,7 +103,7 @@ class _FakeGraph extends Fake implements GraphAudioPlaybackService {
   bool get isAvailable => true;
 
   @override
-  int pollDeviceEvents() => 0;
+  int pollDeviceEvents(int mask) => 0;
 
   @override
   int inputFramesReceived() => 0;

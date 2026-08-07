@@ -15,7 +15,7 @@ fn phase(e: *mut VeEngine, name: &str, secs: u64) {
     let mut last = start_pos;
     for s in 1..=secs {
         std::thread::sleep(Duration::from_secs(1));
-        let _ = ve_poll_device_event(e);
+        let _ = ve_poll_device_event(e, u32::MAX);
         let pos = ve_frame_pos(e);
         println!("[{name}] t={s:>2}s  pos={pos:>8}  d={:>6}/s", pos - last);
         last = pos;

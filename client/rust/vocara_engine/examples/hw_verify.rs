@@ -74,7 +74,7 @@ fn main() {
     let mut last_report = 0u64;
     while t0.elapsed() < Duration::from_secs(PLAY_SECS) {
         std::thread::sleep(Duration::from_secs(1));
-        events |= ve_poll_device_event(e); // also ticks the drift estimator
+        events |= ve_poll_device_event(e, u32::MAX); // also ticks the drift estimator
         let s = t0.elapsed().as_secs();
         if s / 10 > last_report {
             last_report = s / 10;
@@ -102,12 +102,12 @@ fn main() {
     // second of mic frames; the freeze baseline is taken after it settles.
     for _ in 0..3 {
         std::thread::sleep(Duration::from_secs(1));
-        events |= ve_poll_device_event(e);
+        events |= ve_poll_device_event(e, u32::MAX);
     }
     let ppm_frozen_base = ve_drift_ppm(e);
     for _ in 0..PAUSE_SECS {
         std::thread::sleep(Duration::from_secs(1));
-        events |= ve_poll_device_event(e);
+        events |= ve_poll_device_event(e, u32::MAX);
     }
     let ppm_paused = ve_drift_ppm(e);
 

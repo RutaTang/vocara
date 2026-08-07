@@ -646,13 +646,28 @@ class RecordingController extends ChangeNotifier {
   void _startDeviceWatch() {
     final engine = _graphEngine();
     if (engine == null) return;
-    // This is the ONLY consumer of pollDeviceEvents (it clears on read), so both
-    // the output- and input-lost bits must be handled here.
+    // Per-bit claims: the poll clears only the masked bits, so this watch and
+    // the technique page's level tick each consume their own events instead
+    // of the fragile whole-process single-poller convention.
     _deviceWatch = Timer.periodic(const Duration(seconds: 1), (_) {
-      final events = engine.pollDeviceEvents();
+      final events = engine.pollDeviceEvents(
+        GraphAudioPlaybackService.eventOutputLost |
+            GraphAudioPlaybackService.eventInputLost |
+            GraphAudioPlaybackService.eventAecBypassed |
+            GraphAudioPlaybackService.eventInputFellBack,
+      );
       if (events & 1 != 0) {
         // Output lost: re-open the current output so transport doesn't freeze.
         engine.setOutputDevice(engine.currentOutputDevice());
+      }
+      if (events & 8 != 0) {
+        // The selected microphone could not be opened; capture fell back to
+        // the system default. The device label in Settings is now wrong for
+        // this stream — silent misattribution is worse than the notice.
+        _toast(
+          'Your selected microphone is unavailable. '
+          'Recording from the system default microphone instead.',
+        );
       }
       // Streaming health: log underrun growth (never toast — brief silence
       // already told the user; the log is for diagnosing feeder timing on

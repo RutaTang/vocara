@@ -102,18 +102,23 @@ class VocaraEngineBindings {
         int Function(ffi.Pointer<VeEngine>, ffi.Pointer<ffi.Char>, int)
       >();
 
-  /// Poll + clear pending device events (bit 1 = output lost, bit 2 = input lost,
-  /// bit 4 = mic opened WITHOUT echo cancellation). 0 = none.
-  int ve_poll_device_event(ffi.Pointer<VeEngine> e) {
-    return _ve_poll_device_event(e);
+  /// Poll + clear the pending device events selected by `mask` (bit 1 = output
+  /// lost, bit 2 = input lost, bit 4 = mic opened WITHOUT echo cancellation,
+  /// bit 8 = selected input unavailable, fell back to the system default).
+  /// Returns the claimed bits; bits outside the mask stay pending for their own
+  /// consumer. 0 = none.
+  int ve_poll_device_event(ffi.Pointer<VeEngine> e, int mask) {
+    return _ve_poll_device_event(e, mask);
   }
 
   late final _ve_poll_device_eventPtr =
-      _lookup<ffi.NativeFunction<ffi.Uint32 Function(ffi.Pointer<VeEngine>)>>(
-        've_poll_device_event',
-      );
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Uint32 Function(ffi.Pointer<VeEngine>, ffi.Uint32)
+        >
+      >('ve_poll_device_event');
   late final _ve_poll_device_event = _ve_poll_device_eventPtr
-      .asFunction<int Function(ffi.Pointer<VeEngine>)>();
+      .asFunction<int Function(ffi.Pointer<VeEngine>, int)>();
 
   /// Total streaming-source underruns (frames rendered silent because a track ring was
   /// empty). 0 is healthy; growth on hardware means the feeder pump lags the callback.
@@ -127,6 +132,19 @@ class VocaraEngineBindings {
       );
   late final _ve_stream_xruns = _ve_stream_xrunsPtr
       .asFunction<int Function(ffi.Pointer<VeEngine>)>();
+
+  /// Clock-drift estimator's published input correction in parts-per-million
+  /// (0.0 = identity / deadband / frozen). Diagnostics only.
+  double ve_drift_ppm(ffi.Pointer<VeEngine> e) {
+    return _ve_drift_ppm(e);
+  }
+
+  late final _ve_drift_ppmPtr =
+      _lookup<ffi.NativeFunction<ffi.Double Function(ffi.Pointer<VeEngine>)>>(
+        've_drift_ppm',
+      );
+  late final _ve_drift_ppm = _ve_drift_ppmPtr
+      .asFunction<double Function(ffi.Pointer<VeEngine>)>();
 
   /// Live input + monitoring. The input stream is opened only while monitoring/recording. */
   /// /* Fill up to `cap` input devices into `out`; returns the total input device count.
@@ -177,6 +195,32 @@ class VocaraEngineBindings {
         >
       >('ve_current_input_device');
   late final _ve_current_input_device = _ve_current_input_devicePtr
+      .asFunction<
+        int Function(ffi.Pointer<VeEngine>, ffi.Pointer<ffi.Char>, int)
+      >();
+
+  /// Write the UID the OPEN input stream is ACTUALLY bound to (empty = closed or
+  /// system default; selection is fire-and-forget, so compare against
+  /// ve_current_input_device to detect a fallback). Returns the byte length.
+  int ve_actual_input_device(
+    ffi.Pointer<VeEngine> e,
+    ffi.Pointer<ffi.Char> buf,
+    int cap,
+  ) {
+    return _ve_actual_input_device(e, buf, cap);
+  }
+
+  late final _ve_actual_input_devicePtr =
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Size Function(
+            ffi.Pointer<VeEngine>,
+            ffi.Pointer<ffi.Char>,
+            ffi.Size,
+          )
+        >
+      >('ve_actual_input_device');
+  late final _ve_actual_input_device = _ve_actual_input_devicePtr
       .asFunction<
         int Function(ffi.Pointer<VeEngine>, ffi.Pointer<ffi.Char>, int)
       >();

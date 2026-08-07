@@ -124,9 +124,7 @@ void main() {
       // Big enough that the streaming copies genuinely interleave.
       sources.add(await makeSrc('c$i.wav', List.filled(256 * 1024, 7)));
     }
-    final ids = await Future.wait(
-      sources.map((s) => store.importFile(s.path)),
-    );
+    final ids = await Future.wait(sources.map((s) => store.importFile(s.path)));
     expect(ids.toSet(), hasLength(1));
     expect(await db.select(db.assets).get(), hasLength(1));
     final abs = await store.resolve(ids.first);
@@ -139,16 +137,23 @@ void main() {
     }
   });
 
-  test('a truncated pool file left by a crash is replaced, not trusted', () async {
-    final src = await makeSrc('src.wav', [1, 2, 3, 4, 5, 6, 7, 8]);
-    final id = await store.importFile(src.path);
-    final abs = (await store.resolve(id))!;
-    // Simulate a crash leftover: the pool path exists but holds fewer bytes.
-    await File(abs).writeAsBytes([1, 2, 3]);
-    final id2 = await store.importFile(src.path);
-    expect(id2, id);
-    expect(await File(abs).length(), 8, reason: 'existence alone must not win');
-  });
+  test(
+    'a truncated pool file left by a crash is replaced, not trusted',
+    () async {
+      final src = await makeSrc('src.wav', [1, 2, 3, 4, 5, 6, 7, 8]);
+      final id = await store.importFile(src.path);
+      final abs = (await store.resolve(id))!;
+      // Simulate a crash leftover: the pool path exists but holds fewer bytes.
+      await File(abs).writeAsBytes([1, 2, 3]);
+      final id2 = await store.importFile(src.path);
+      expect(id2, id);
+      expect(
+        await File(abs).length(),
+        8,
+        reason: 'existence alone must not win',
+      );
+    },
+  );
 
   test(
     'sweepStaging clears audio/ and technique_media/ but never the pool',

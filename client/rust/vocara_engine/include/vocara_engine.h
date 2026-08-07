@@ -50,9 +50,12 @@ size_t ve_enum_output_devices(VeDeviceInfo *out, size_t cap);
 int ve_set_output_device(VeEngine *e, const char *uid);
 /* Write the active output UID into `buf` (<= cap, NUL-terminated); returns its byte length. */
 size_t ve_current_output_device(VeEngine *e, char *buf, size_t cap);
-/* Poll + clear pending device events (bit 1 = output lost, bit 2 = input lost,
- * bit 4 = mic opened WITHOUT echo cancellation). 0 = none. */
-uint32_t ve_poll_device_event(VeEngine *e);
+/* Poll + clear the pending device events selected by `mask` (bit 1 = output
+ * lost, bit 2 = input lost, bit 4 = mic opened WITHOUT echo cancellation,
+ * bit 8 = selected input unavailable, fell back to the system default).
+ * Returns the claimed bits; bits outside the mask stay pending for their own
+ * consumer. 0 = none. */
+uint32_t ve_poll_device_event(VeEngine *e, uint32_t mask);
 /* Total streaming-source underruns (frames rendered silent because a track ring was
  * empty). 0 is healthy; growth on hardware means the feeder pump lags the callback. */
 uint64_t ve_stream_xruns(VeEngine *e);
@@ -67,6 +70,10 @@ size_t ve_enum_input_devices(VeDeviceInfo *out, size_t cap);
 int ve_set_input_device(VeEngine *e, const char *uid);
 /* Write the selected input UID into `buf` (<= cap, NUL-terminated); returns its byte length. */
 size_t ve_current_input_device(VeEngine *e, char *buf, size_t cap);
+/* Write the UID the OPEN input stream is ACTUALLY bound to (empty = closed or
+ * system default; selection is fire-and-forget, so compare against
+ * ve_current_input_device to detect a fallback). Returns the byte length. */
+size_t ve_actual_input_device(VeEngine *e, char *buf, size_t cap);
 /* Start monitoring: open the input stream + ramp the monitor in. 0 = ok. */
 int ve_start_monitor(VeEngine *e);
 /* Stop monitoring: ramp the monitor out + close the input stream. 0 = ok. */

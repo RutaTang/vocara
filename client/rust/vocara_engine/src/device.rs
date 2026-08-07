@@ -28,6 +28,12 @@ pub const EVENT_INPUT_LOST: u32 = 2;
 /// no mic). Raised so the UI can tell the user speaker playback may bleed into
 /// the take instead of leaving the degradation silent (stderr is not a UI).
 pub const EVENT_AEC_BYPASSED: u32 = 4;
+/// The SELECTED input device could not be opened and the host fell back to the
+/// system default: capture works, but not from the microphone the UI shows.
+/// SetInput is fire-and-forget (a blocking reply froze the UI on slow VPIO
+/// setups), so this event — plus `ve_actual_input_device` — is how the truth
+/// reaches the user instead of a silently wrong device label.
+pub const EVENT_INPUT_FELL_BACK: u32 = 8;
 
 /// Latched when a stream teardown failed to synchronously stop its callback (a cpal `pause()`
 /// error, or `AudioOutputUnitStop` failing in `vpio`). The renderer gate's `false` state means
@@ -1403,9 +1409,20 @@ fn audio_host_run(
     input_state: Arc<AtomicU64>,
     input_intent: Arc<AtomicU64>,
     input_applied: Arc<AtomicU64>,
+    actual_input_uid: Arc<Mutex<String>>,
     rx: mpsc::Receiver<HostCmd>,
     ready_tx: mpsc::Sender<Result<String, String>>,
 ) {
+    // The UID the OPEN input stream is actually bound to; empty = input
+    // closed, or bound to the system default (either chosen or via
+    // fallback — EVENT_INPUT_FELL_BACK distinguishes the latter). Written
+    // ONLY here on the host thread, read by ve_actual_input_device.
+    let set_actual = |v: &str| {
+        if let Ok(mut a) = actual_input_uid.lock() {
+            a.clear();
+            a.push_str(v);
+        }
+    };
     // Input-stream state word: (generation << 1) | running. One atomic so a consumer can
     // SNAPSHOT "which stream, and is it up" in a single read: the ready handshake reads it,
     // verifies the frame counter advanced, then reads it AGAIN — an unchanged word with the
@@ -1509,18 +1526,35 @@ fn audio_host_run(
                 if want && in_stream.is_none() {
                     // Duplex VPIO renders the engine through its own output element, so
                     // drop the cpal output FIRST (only one path may touch RtCell). Fall
-                    // back to the default input if the selected device can't be opened.
+                    // back to the default input if the selected device can't be opened —
+                    // but SAY so: the UI otherwise keeps showing the selected mic while
+                    // the take records from the default one.
                     if VPIO_DUPLEX_AEC {
                         out_stream = None;
                     }
-                    let built = open_mic(cur_in_uid.as_deref(), &rt, &input_cell, &event)
-                        .or_else(|_| open_mic(None, &rt, &input_cell, &event));
+                    let mut fell_back = false;
+                    let built =
+                        open_mic(cur_in_uid.as_deref(), &rt, &input_cell, &event).or_else(|e| {
+                            if cur_in_uid.is_some() {
+                                fell_back = true;
+                                open_mic(None, &rt, &input_cell, &event)
+                            } else {
+                                Err(e)
+                            }
+                        });
                     match built {
                         Ok(handle) => {
                             in_stream = Some(handle);
                             input_started(&input_state);
+                            if fell_back {
+                                set_actual("");
+                                event.fetch_or(EVENT_INPUT_FELL_BACK, Ordering::Release);
+                            } else {
+                                set_actual(cur_in_uid.as_deref().unwrap_or(""));
+                            }
                         }
                         Err(_) => {
+                            set_actual("");
                             converged = false;
                             input_stopped(&input_state);
                             // Mic failed to come up → restore cpal output so playback
@@ -1541,6 +1575,7 @@ fn audio_host_run(
                     // stream's final frames as evidence that a NEW stream is delivering.
                     input_stopped(&input_state);
                     in_stream = None;
+                    set_actual("");
                     // VPIO was rendering the output in duplex; hand playback back to
                     // cpal, restoring the user's last chosen output device (a SetOutput
                     // during duplex deferred it), falling back to the system default
@@ -1577,12 +1612,20 @@ fn audio_host_run(
                     // StopInput on why the store precedes the drop).
                     input_stopped(&input_state);
                     in_stream = None;
-                    match open_mic(Some(&uid), &rt, &input_cell, &event)
-                        .or_else(|_| open_mic(None, &rt, &input_cell, &event))
-                    {
+                    let mut fell_back = false;
+                    match open_mic(Some(&uid), &rt, &input_cell, &event).or_else(|_| {
+                        fell_back = true;
+                        open_mic(None, &rt, &input_cell, &event)
+                    }) {
                         Ok(handle) => {
                             in_stream = Some(handle);
                             input_started(&input_state);
+                            if fell_back {
+                                set_actual("");
+                                event.fetch_or(EVENT_INPUT_FELL_BACK, Ordering::Release);
+                            } else {
+                                set_actual(&uid);
+                            }
                             // The reopen minted a NEW stream generation while the applied
                             // pair still carried the old one, so a recorder arming right
                             // after a device switch waited on a convergence that had in
@@ -1599,6 +1642,7 @@ fn audio_host_run(
                             let _ = reply.send(0);
                         }
                         Err(_) => {
+                            set_actual("");
                             if VPIO_DUPLEX_AEC && out_stream.is_none() {
                                 // Restore the user's chosen output (not the system default),
                                 // matching StopInput; fall back to default only if it can't open.
@@ -1618,6 +1662,7 @@ fn audio_host_run(
             HostCmd::Shutdown => {
                 input_stopped(&input_state);
                 in_stream = None;
+                set_actual("");
                 out_stream = None;
                 break;
             }
@@ -1634,6 +1679,7 @@ fn audio_host_run(
 /// the initial stream is up (or fails). Returns the host handle plus the opened device's UID.
 /// `renderer_gate` (from [`crate::live::EngineHandle::renderer_gate`]) tracks whether any stream
 /// callback may be running, so the control thread can free retired graphs when none is.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_audio_host(
     rt: Arc<RtCell>,
     input_cell: Arc<InputCell>,
@@ -1642,6 +1688,7 @@ pub fn spawn_audio_host(
     input_state: Arc<AtomicU64>,
     input_intent: Arc<AtomicU64>,
     input_applied: Arc<AtomicU64>,
+    actual_input_uid: Arc<Mutex<String>>,
 ) -> Result<(AudioHost, String), String> {
     let (tx, rx) = mpsc::channel::<HostCmd>();
     let (ready_tx, ready_rx) = mpsc::channel::<Result<String, String>>();
@@ -1656,6 +1703,7 @@ pub fn spawn_audio_host(
                 input_state,
                 input_intent,
                 input_applied,
+                actual_input_uid,
                 rx,
                 ready_tx,
             )

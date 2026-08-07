@@ -96,6 +96,10 @@ pub struct VeEngine {
     current_output_uid: String,
     /// UID of the selected input device ('' = system default), set on a successful switch.
     current_input_uid: String,
+    /// The UID the OPEN input stream is actually bound to (host-thread
+    /// written; empty = closed or system default). The selection call is
+    /// fire-and-forget, so this — not `current_input_uid` — is the truth.
+    actual_input_uid: Arc<std::sync::Mutex<String>>,
     /// Live-input peak level (f32 bits), written by the input callback; read by `ve_input_level`.
     input_level: Arc<AtomicU32>,
     /// Total input frames received (diagnostic for whether the mic is actually delivering data).
@@ -349,6 +353,7 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
         let input_state = Arc::new(AtomicU64::new(0));
         let input_intent = Arc::new(AtomicU64::new(0));
         let input_applied = Arc::new(AtomicU64::new(0));
+        let actual_input_uid = Arc::new(std::sync::Mutex::new(String::new()));
         let (host, current_output_uid) = device::spawn_audio_host(
             rt_cell,
             input_cell,
@@ -357,6 +362,7 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
             Arc::clone(&input_state),
             Arc::clone(&input_intent),
             Arc::clone(&input_applied),
+            Arc::clone(&actual_input_uid),
         )?;
         Ok(Box::into_raw(Box::new(VeEngine {
             host,
@@ -364,6 +370,7 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
             device_event,
             current_output_uid,
             current_input_uid: String::new(),
+            actual_input_uid,
             input_level,
             input_frames_in,
             input_nominal_frames,
@@ -523,21 +530,28 @@ pub extern "C" fn ve_current_output_device(
     })
 }
 
-/// Poll and clear pending device events (bitmask; see `device::EVENT_*`). 0 = none.
+/// Poll and clear the pending device events selected by `mask` (bitmask; see
+/// `device::EVENT_*`). Returns the claimed bits; bits OUTSIDE the mask stay
+/// pending for their own consumer. The old clear-everything shape forced a
+/// fragile whole-process single-poller convention — the technique page's
+/// 50 ms level tick read (and threw away) the AEC-bypass bit the song page's
+/// 1 s watch was supposed to toast.
 #[no_mangle]
-pub extern "C" fn ve_poll_device_event(e: *mut VeEngine) -> u32 {
+pub extern "C" fn ve_poll_device_event(e: *mut VeEngine, mask: u32) -> u32 {
     with_engine(e, 0, |eng| {
-        // Piggyback the ~1 s clock-drift tick on the process's single poller:
+        // Piggyback the ~1 s clock-drift tick on the event pollers:
         // it compares the input's NOMINAL emission counter (correction-free —
         // feeding the corrected counter closed the loop on itself and only
         // half the drift was ever compensated) against the output's consumed
         // cursor and publishes the input resampler's correction ratio.
         // Self-gating — a closed mic or a paused transport advances one
-        // counter only, and the estimator freezes.
+        // counter only, and the estimator freezes. Ticking from more than
+        // one poller is fine: the estimator accumulates deltas until the
+        // ~100 ms MIN_DELTA and normalizes its alpha to the measured span.
         let nominal_in = eng.input_nominal_frames.load(Ordering::Acquire);
         let consumed = eng.handle.transport().consumed_frames();
         eng.drift.tick(nominal_in, consumed);
-        eng.device_event.swap(0, Ordering::AcqRel)
+        eng.device_event.fetch_and(!mask, Ordering::AcqRel) & mask
     })
 }
 
@@ -570,6 +584,28 @@ pub extern "C" fn ve_current_input_device(e: *mut VeEngine, buf: *mut c_char, ca
             copy_cstr(dst, &eng.current_input_uid);
         }
         eng.current_input_uid.len()
+    })
+}
+
+/// Write the UID the OPEN input stream is ACTUALLY bound to into `buf` (up to
+/// `cap`); empty = input closed, or bound to the system default (chosen, or
+/// via fallback — `EVENT_INPUT_FELL_BACK` reported the latter). Selection is
+/// fire-and-forget and always reported success, so comparing this against
+/// `ve_current_input_device` is how a UI detects it is showing one microphone
+/// while the take records from another. Returns the byte length.
+#[no_mangle]
+pub extern "C" fn ve_actual_input_device(e: *mut VeEngine, buf: *mut c_char, cap: usize) -> usize {
+    with_engine(e, 0, |eng| {
+        let uid = eng
+            .actual_input_uid
+            .lock()
+            .map(|a| a.clone())
+            .unwrap_or_default();
+        if !buf.is_null() && cap > 0 {
+            let dst = unsafe { std::slice::from_raw_parts_mut(buf, cap) };
+            copy_cstr(dst, &uid);
+        }
+        uid.len()
     })
 }
 

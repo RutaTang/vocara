@@ -62,9 +62,9 @@ class _FakeEngine implements GraphAudioPlaybackService {
   }
 
   @override
-  int pollDeviceEvents() {
-    final events = deviceEvents;
-    deviceEvents = 0; // clears on read, like the native poll
+  int pollDeviceEvents(int mask) {
+    final events = deviceEvents & mask;
+    deviceEvents &= ~mask; // per-bit claim, like the native poll
     return events;
   }
 
@@ -388,6 +388,36 @@ void main() {
     expect(engine.inputLevelCalls, 0);
     expect(controller.level.value, 0);
     controller.dispose();
+  });
+
+  testWidgets('AEC-bypass and input-fallback events surface as notices while '
+      'the take keeps recording (they were silently discarded before)', (
+    tester,
+  ) async {
+    final engine = _FakeEngine();
+    final dest = _FakeDestination();
+    final notices = <String>[];
+    var lost = 0;
+    final controller = MicRecordingController(
+      acquireEngine: () => engine,
+      requestPermission: () async => true,
+      onInputDeviceLost: () => lost++,
+      onDeviceNotice: notices.add,
+    );
+    addTearDown(controller.dispose);
+
+    await controller.start(dest.strategy);
+    engine.deviceEvents = 4; // AEC bypassed
+    await tester.pump(const Duration(milliseconds: 50));
+    engine.deviceEvents = 8; // selected mic fell back to the default
+    await tester.pump(const Duration(milliseconds: 50));
+
+    expect(notices, hasLength(2));
+    expect(notices.first, contains('Echo cancellation'));
+    expect(notices.last, contains('system default'));
+    expect(lost, 0, reason: 'non-fatal degradations must not stop the take');
+    expect(controller.isRecording, isTrue);
+    controller.stop();
   });
 
   testWidgets('abort stops the hardware and discards the take file', (

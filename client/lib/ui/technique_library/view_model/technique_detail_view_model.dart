@@ -477,6 +477,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
         monitor: _monitor,
         onQuitFinalize: _quitFinalize,
         onInputDeviceLost: _onInputDeviceLost,
+        onDeviceNotice: _onDeviceNotice,
       );
 
   /// True during the example/practice record START window — after the user tapped
@@ -513,6 +514,14 @@ class TechniqueDetailViewModel extends ChangeNotifier
     } else {
       unawaited(stopPractice());
     }
+  }
+
+  /// A non-fatal input degradation (echo cancellation unavailable, or the
+  /// selected mic fell back to the system default): recording continues, but
+  /// the user must know — both were silently dropped before.
+  void _onDeviceNotice(String message) {
+    _recordingNotice = message;
+    notifyListeners();
   }
 
   /// The message the screen toasts for a failed recording start.

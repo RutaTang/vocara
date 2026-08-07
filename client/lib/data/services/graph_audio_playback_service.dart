@@ -351,10 +351,21 @@ class GraphAudioPlaybackService implements PlaybackEngine {
     }
   }
 
-  /// Poll + clear pending device events (bitmask; bit 1 = output lost,
-  /// bit 2 = input lost, bit 4 = mic opened without echo cancellation).
-  int pollDeviceEvents() =>
-      _available ? _bindings.ve_poll_device_event(_engine) : 0;
+  /// Device-event bits for [pollDeviceEvents] masks.
+  static const int eventOutputLost = 1;
+  static const int eventInputLost = 2;
+  static const int eventAecBypassed = 4;
+  static const int eventInputFellBack = 8;
+
+  /// Poll + clear the pending device events selected by [mask] (bit 1 =
+  /// output lost, bit 2 = input lost, bit 4 = mic opened without echo
+  /// cancellation, bit 8 = selected input unavailable — fell back to the
+  /// system default). Only the claimed bits are cleared; bits outside the
+  /// mask stay pending for their own consumer, so the song page's 1 s watch
+  /// and the technique page's 50 ms level tick no longer steal each other's
+  /// events.
+  int pollDeviceEvents(int mask) =>
+      _available ? _bindings.ve_poll_device_event(_engine, mask) : 0;
 
   /// Total streaming-source underruns (frames a disk-streamed track rendered
   /// silent because its ring was empty). 0 is the healthy steady state; the
@@ -381,6 +392,22 @@ class GraphAudioPlaybackService implements PlaybackEngine {
     final buf = malloc<ffi.Char>(cap);
     try {
       _bindings.ve_current_input_device(_engine, buf, cap);
+      return buf.cast<Utf8>().toDartString();
+    } finally {
+      malloc.free(buf);
+    }
+  }
+
+  /// The UID the OPEN input stream is ACTUALLY bound to ('' = input closed,
+  /// or bound to the system default). Selection is fire-and-forget inside
+  /// the engine, so this — not [currentInputDevice] — is what the take
+  /// really records from.
+  String actualInputDevice() {
+    if (!_available) return '';
+    const cap = 256;
+    final buf = malloc<ffi.Char>(cap);
+    try {
+      _bindings.ve_actual_input_device(_engine, buf, cap);
       return buf.cast<Utf8>().toDartString();
     } finally {
       malloc.free(buf);
