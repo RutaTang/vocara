@@ -1734,6 +1734,14 @@ pub extern "C" fn ve_stream_xruns(e: *mut VeEngine) -> u64 {
     })
 }
 
+/// The clock-drift estimator's published input correction in parts-per-million
+/// (0.0 = identity: healthy same-clock chain, deadband, or estimator frozen).
+/// Diagnostics only.
+#[no_mangle]
+pub extern "C" fn ve_drift_ppm(e: *mut VeEngine) -> f64 {
+    with_engine(e, 0.0, |eng| eng.drift.published_ppm())
+}
+
 /// Live volume/mute for a committed track (no rebuild) — A/B toggle, mute/solo, sliders.
 #[no_mangle]
 pub extern "C" fn ve_set_track_volume(

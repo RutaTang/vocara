@@ -23,6 +23,17 @@ device = [
     "dep:rubato",
 ]
 
+[[example]]
+# Hardware-in-the-loop verification (real CoreAudio streams, real mic):
+# `cargo run --example hw_verify --features device`. Interactive/manual only —
+# never part of `cargo test`.
+name = "hw_verify"
+required-features = ["device"]
+
+[[example]]
+name = "hw_probe"
+required-features = ["device"]
+
 [dependencies]
 cpal = { version = "0.18", optional = true }
 # Pinned to the mature 0.5 line (0.6 is a 2026 ground-up API rewrite); decode targets 0.5.

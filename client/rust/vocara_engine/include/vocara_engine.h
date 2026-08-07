@@ -56,6 +56,9 @@ uint32_t ve_poll_device_event(VeEngine *e);
 /* Total streaming-source underruns (frames rendered silent because a track ring was
  * empty). 0 is healthy; growth on hardware means the feeder pump lags the callback. */
 uint64_t ve_stream_xruns(VeEngine *e);
+/* Clock-drift estimator's published input correction in parts-per-million
+ * (0.0 = identity / deadband / frozen). Diagnostics only. */
+double ve_drift_ppm(VeEngine *e);
 
 /* Live input + monitoring. The input stream is opened only while monitoring/recording. */
 /* Fill up to `cap` input devices into `out`; returns the total input device count. */

@@ -715,7 +715,10 @@ impl InputCell {
 ///
 /// Robustness over reactivity, deliberately:
 ///  * a tick only measures when BOTH counters advanced ≥ [`MIN_DELTA`]
-///    (mic closed or transport paused → the estimate FREEZES, never decays);
+///    (a stopped stream — mic closed, output device gone — FREEZES the
+///    estimate, never decays it; a mere transport PAUSE keeps measuring,
+///    because the output still delivers silence and both clocks keep
+///    ticking — verified on hardware);
 ///  * instantaneous ratios beyond ±5000 ppm are glitches (a stall, a stream
 ///    rebuild) and are discarded, not averaged;
 ///  * an EMA (α = 0.05 per tick, ~20 s time constant) smooths the estimate,
@@ -756,8 +759,8 @@ impl DriftEstimator {
         let din = frames_in.wrapping_sub(self.last_in);
         let dout = frames_out.wrapping_sub(self.last_out);
         // Prime on first observation; measure only when both sides moved
-        // enough to mean something (a paused transport or a closed mic
-        // freezes the estimate rather than corrupting it).
+        // enough to mean something (a stopped stream — closed mic, lost
+        // output device — freezes the estimate rather than corrupting it).
         if !self.primed {
             self.primed = true;
             self.last_in = frames_in;
@@ -786,6 +789,13 @@ impl DriftEstimator {
 
     fn published(&self) -> f64 {
         f64::from_bits(self.ratio_bits.load(Ordering::Relaxed))
+    }
+
+    /// The published correction as parts-per-million (0.0 = identity /
+    /// deadband). Diagnostics only — hardware verification and the
+    /// diagnostics export read it; nothing decides on it.
+    pub fn published_ppm(&self) -> f64 {
+        (self.published() - 1.0) * 1e6
     }
 }
 
@@ -830,13 +840,13 @@ mod drift_tests {
     }
 
     #[test]
-    fn a_paused_output_or_closed_mic_freezes_the_estimate() {
+    fn a_stopped_stream_freezes_the_estimate() {
         let bits = Arc::new(AtomicU64::new(0));
         let mut est = DriftEstimator::new(Arc::clone(&bits));
         let before = run_ticks(&mut est, 30.0, 120);
-        // Output stops (transport paused): the input keeps counting, the
-        // estimate must HOLD — decaying toward 1.0 would re-drift the next
-        // take, and averaging the stall would corrupt it.
+        // The output stream stops delivering (device gone): the input keeps
+        // counting, the estimate must HOLD — decaying toward 1.0 would
+        // re-drift the next take, and averaging the stall would corrupt it.
         let (inn0, out0) = (300 * 48_000, 120 * 48_000);
         for s in 0..60u64 {
             est.tick(inn0 + s * 48_100, out0); // out frozen
