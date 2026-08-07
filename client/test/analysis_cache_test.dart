@@ -35,13 +35,20 @@ class _StubSpectrograms extends Fake implements SpectrogramService {
     int hop = 512,
   }) async => metricsByPath[path];
 
+  /// Fired just before each path's pair is returned, so a test can model
+  /// something landing mid-loop — a budget eviction of an earlier clip.
+  void Function(String path)? onCompute;
+
   @override
   Future<TakeAnalysis?> computeBothFromFile(
     String path, {
     int fftSize = 2048,
     int hop = 512,
     double maxHz = 5000,
-  }) async => (spectrogram: specsByPath[path], metrics: metricsByPath[path]);
+  }) async {
+    onCompute?.call(path);
+    return (spectrogram: specsByPath[path], metrics: metricsByPath[path]);
+  }
 }
 
 class _FakeMonitor extends Fake implements MonitorService {
@@ -249,6 +256,37 @@ void main() {
       // The aggregate spans the whole lane (5000 ms → 50 frames at 100 ms),
       // matching the lane-span axis the getters report.
       expect(merged!.frames, 50);
+      cache.dispose();
+    });
+
+    test('a clip evicted while a LATER clip computes is not baked into the '
+        'lane aggregate as silence', () async {
+      // The per-clip caches are byte-budgeted, so analyzing clip N can evict
+      // clip 1 before the merge reads it back — and the merge treats a
+      // missing part as SILENCE, under a key only a clip-set change can
+      // invalidate. Evicting c1 exactly while c2 computes reproduces that
+      // window deterministically.
+      final track = _lane([_clip('c1', 1000), _clip('c2', 5000)]);
+      final stub = _StubSpectrograms(
+        metricsByPath: {'c1.wav': _metrics(10), 'c2.wav': _metrics(10)},
+        specsByPath: {'c1.wav': _spec(10), 'c2.wav': _spec(10)},
+      );
+      late final AnalysisCache cache;
+      cache = _cache(spectrograms: stub, selectedTrack: () => track);
+      stub.onCompute = (path) {
+        if (path == 'c2.wav') cache.evictAnalysis('c1.wav');
+      };
+
+      await cache.ensureSelectedSpectrogram();
+
+      // c1's frames survived the eviction because the loop held them, so the
+      // lane still spans both clips (5000 ms -> 50 frames at 100 ms/frame).
+      final merged = cache.selectedMetrics;
+      expect(merged, isNotNull);
+      expect(merged!.frames, 50);
+      // And c1's own frames carry real analysis rather than the merge's
+      // silence fill.
+      expect(merged.active.take(10).where((a) => a != 0), isNotEmpty);
       cache.dispose();
     });
 

@@ -632,8 +632,11 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   /// that each read and decoded the same file, doubling peak memory for the
   /// whole compute. Falls back to the individual paths when only one side is
   /// missing (its twin stays cached).
-  Future<void> _ensureClipAnalysis(String path) async {
-    if (path.isEmpty) return;
+  /// Returns the clip's pair so a caller can HOLD it: the per-path caches are
+  /// byte-budgeted, so a later clip's insert can evict this one before the
+  /// caller reads it back.
+  Future<TakeAnalysis> _ensureClipAnalysis(String path) async {
+    if (path.isEmpty) return (spectrogram: null, metrics: null);
     final needSpec =
         !_spectrogramCache.containsKey(path) &&
         !_spectrogramLoading.contains(path) &&
@@ -647,7 +650,7 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
         _ensureSpectrogramForPath(path),
         _ensureMetricsForPath(path),
       ]);
-      return;
+      return _clipAnalysis(path);
     }
     _spectrogramLoading.add(path);
     _metricsLoading.add(path);
@@ -676,7 +679,13 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
       _metricsLoading.remove(path);
       notifyListeners();
     }
+    return _clipAnalysis(path);
   }
+
+  /// Reads a clip's cached pair, refreshing its recency — a part just handed
+  /// to the aggregate merge is the newest, not the next eviction victim.
+  TakeAnalysis _clipAnalysis(String path) =>
+      (spectrogram: _spectrogramCache[path], metrics: _metricsCache[path]);
 
   /// The pre-EQ input spectrum column at the playhead for [trackId]'s currently
   /// sounding clip, plus its bin width (Hz) — drives the FX EQ analyzer. Null
@@ -753,8 +762,15 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
       // concurrent full-file copies with no upper bound. One at a time keeps
       // the peak at a single clip; the per-path caches make later clips warm
       // for every other consumer either way.
+      //
+      // Each clip's parts are HELD as the loop produces them. The per-path
+      // caches are byte-budgeted, so a later clip's insert can evict an
+      // earlier one before the merge below reads it — and a merge treats a
+      // missing part as SILENCE, which would bake a lane analysis quietly
+      // missing a clip under a key only a clip-set change can invalidate.
+      final parts = <String, TakeAnalysis>{};
       for (final c in track.clips) {
-        await _ensureClipAnalysis(c.audioFilePath);
+        parts[c.audioFilePath] = await _ensureClipAnalysis(c.audioFilePath);
       }
       // Offsets are relative to the lane's span start (min over ALL clips, even
       // ones whose analysis failed), so the merged frames line up with the lane
@@ -762,9 +778,14 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
       final laneStartMs = track.startMs;
       final metrics = <({int offsetMs, VoiceMetrics metrics})>[];
       final specs = <({int offsetMs, Spectrogram spectrogram})>[];
+      var complete = true;
       for (final c in track.clips) {
-        final m = _metricsCache[c.audioFilePath];
-        final spec = _spectrogramCache[c.audioFilePath];
+        final part = parts[c.audioFilePath];
+        // The cached re-read still covers a clip whose compute was already in
+        // flight for another consumer when the loop reached it: that path
+        // returns before the result lands.
+        final m = part?.metrics ?? _metricsCache[c.audioFilePath];
+        final spec = part?.spectrogram ?? _spectrogramCache[c.audioFilePath];
         // Fold a clip in only when BOTH analyses are present and non-empty, kept
         // as a pair — an empty/degenerate clip yields spec.frames=1 but
         // metrics.frames=0, which would desync the two merged framings (the
@@ -773,14 +794,26 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
           final offsetMs = c.startMs - laneStartMs;
           metrics.add((offsetMs: offsetMs, metrics: m));
           specs.add((offsetMs: offsetMs, spectrogram: spec));
+        } else if (!_spectrogramUnavailable.contains(c.audioFilePath) &&
+            !_metricsUnavailable.contains(c.audioFilePath)) {
+          // A clip that could not analyze at all is a permanent, honest gap;
+          // one merely absent here is a transient miss the merge must not
+          // freeze into the lane result.
+          complete = false;
         }
       }
       final mergedMetrics = mergeVoiceMetrics(metrics);
       final mergedSpec = mergeSpectrograms(specs);
-      if (mergedMetrics != null) _aggMetricsCache[key] = mergedMetrics;
-      if (mergedSpec != null) _aggSpectrogramCache[key] = mergedSpec;
-      if (mergedMetrics == null && mergedSpec == null) {
-        _aggUnavailable.add(key);
+      // A lane whose parts did not all land is not cached: leaving the key
+      // absent makes the next ensure recompute against now-warm per-clip
+      // caches, where a cached partial would be permanent (the key only
+      // changes with the clip set).
+      if (complete) {
+        if (mergedMetrics != null) _aggMetricsCache[key] = mergedMetrics;
+        if (mergedSpec != null) _aggSpectrogramCache[key] = mergedSpec;
+        if (mergedMetrics == null && mergedSpec == null) {
+          _aggUnavailable.add(key);
+        }
       }
     } catch (_) {
       _aggUnavailable.add(key);
