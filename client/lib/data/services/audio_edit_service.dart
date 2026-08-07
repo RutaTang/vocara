@@ -594,7 +594,10 @@ class AudioEditService {
     final bLen = (wb.dataLen ~/ wb.blockAlign) * wb.blockAlign;
     // Classic RIFF sizes are u32: refuse a merge whose header could not cover
     // its own payload instead of writing one that silently lies past 4 GiB.
-    if (aLen + bLen > 0xFFFFFFFF - 20 - wa.fmt.length) {
+    // The budget counts the word-alignment pad too, since the RIFF size the
+    // header carries is 20 + fmt + data + pad.
+    if (aLen + bLen + ((aLen + bLen).isOdd ? 1 : 0) >
+        0xFFFFFFFF - 20 - wa.fmt.length) {
       throw const FormatException(
         'These takes are too long to merge into a single WAV file.',
       );
