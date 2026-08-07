@@ -20,13 +20,14 @@ void main() {
     String id, {
     String hlcPacked = '0000000001000-000000-N',
     String reason = 'hlc-drift',
+    String payload = '{"stub":true}',
     int at = 1000,
   }) => store.put(
     table: table,
     id: _id(id),
     hlcPacked: hlcPacked,
     schemaV: 1,
-    payload: '{"stub":true}',
+    payload: payload,
     reason: reason,
     quarantinedAt: at,
   );
@@ -125,24 +126,56 @@ void main() {
     expect(await store.list(), isEmpty);
   });
 
-  test('deleteIfStamp settles only the exact replayed state, never a newer '
-      'one parked meanwhile (replay TOCTOU)', () async {
+  test('deleteIfUnchanged settles only the exact replayed state, never a '
+      'newer one parked meanwhile (replay TOCTOU)', () async {
     // The replay lists Q@100, applies it, then deletes. If Q@200 was parked
     // during the apply (a concurrent pull page), the unconditional delete
     // dropped Q@200 unreplayed. The conditional delete leaves it for the
     // next cycle.
-    await put('practices', 'P', hlcPacked: '0000000000100-000000-N');
-    await store.deleteIfStamp('practices', _id('P'), '0000000000100-000000-N');
-    expect(await store.list(), isEmpty, reason: 'exact stamp settles');
+    const old = '0000000000100-000000-N';
+    await put('practices', 'P', hlcPacked: old);
+    await store.deleteIfUnchanged(
+      'practices',
+      _id('P'),
+      hlcPacked: old,
+      payload: '{"stub":true}',
+    );
+    expect(await store.list(), isEmpty, reason: 'the exact state settles');
 
-    await put('practices', 'P', hlcPacked: '0000000000100-000000-N');
+    await put('practices', 'P', hlcPacked: old);
     // The LWW put replaces the entry with a NEWER state mid-replay…
     await put('practices', 'P', hlcPacked: '0000000000200-000000-N');
     // …and the settle of the OLD stamp must not touch it.
-    await store.deleteIfStamp('practices', _id('P'), '0000000000100-000000-N');
+    await store.deleteIfUnchanged(
+      'practices',
+      _id('P'),
+      hlcPacked: old,
+      payload: '{"stub":true}',
+    );
     final left = await store.list();
     expect(left, hasLength(1));
     expect(left.single.remoteHlcPacked, '0000000000200-000000-N');
+  });
+
+  test('an EQUAL stamp with a refreshed payload also survives the settle '
+      '(the stamp alone is not proof of identity)', () async {
+    // put deliberately lets an equal stamp replace the stored entry with a
+    // fresh reason/payload — the FK-orphan re-park cycle depends on it — so a
+    // stamp match cannot prove the entry is still the one that was replayed.
+    const stamp = '0000000000100-000000-N';
+    await put('practices', 'P', hlcPacked: stamp, payload: '{"v":1}');
+    await put('practices', 'P', hlcPacked: stamp, payload: '{"v":2}');
+
+    await store.deleteIfUnchanged(
+      'practices',
+      _id('P'),
+      hlcPacked: stamp,
+      payload: '{"v":1}',
+    );
+
+    final left = await store.list();
+    expect(left, hasLength(1), reason: 'the re-parked payload must survive');
+    expect(left.single.payload, '{"v":2}');
   });
 
   test('CLOCK-POISON GUARD: sync_quarantine must never carry a column named '

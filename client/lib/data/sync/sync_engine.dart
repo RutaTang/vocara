@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:drift/drift.dart';
 
 import '../db/app_database.dart';
+import '../services/diagnostics_log.dart';
 import 'integrity_checker.dart';
 import 'oplog_drain.dart';
 import 'sync_applier.dart';
@@ -832,6 +833,9 @@ class SyncEngine {
   ///    as another clean skip next run.)
   ///  * quarantined / failed — still rejected; the applier itself re-parked
   ///    the latest state, so the entry stays for a later cycle.
+  ///  * settled but unremovable — the apply committed and only the bookkeeping
+  ///    delete failed; the entry stays parked and the run continues, because
+  ///    the replay is idempotent and next cycle settles it as a clean skip.
   /// An undecodable payload is kept parked for manual review (it can never
   /// re-apply, but dropping it silently is exactly what quarantine exists to
   /// prevent).
@@ -863,10 +867,33 @@ class SyncEngine {
       final result = await _applier.apply([row]);
       if (!result.committed) break; // storage trouble — retry next run
       if (result.applied > 0 || result.skipped > 0) {
-        // Conditional on the stamp we REPLAYED: a newer state for this
-        // (table, id) can be parked while the apply above ran, and an
+        // Conditional on the exact state we REPLAYED: a different state for
+        // this (table, id) can be parked while the apply above ran, and an
         // unconditional delete would drop it unreplayed (TOCTOU).
-        await store.deleteIfStamp(q.tbl, q.id, q.remoteHlcPacked);
+        //
+        // A failure here is deliberately swallowed. The apply has already
+        // committed, so the settle is pure bookkeeping: leaving the entry
+        // parked costs one more clean LWW skip next cycle. Letting it escape
+        // would abort the pull run BEFORE the change token is even fetched —
+        // this replay runs first — so a single undeletable row would stall
+        // every future pull, and the rows that DID land would lose their
+        // announcement with it. The opposite of the applier's own park
+        // failure, which must fail its batch: there a dropped write LOSES a
+        // record, here it only delays one.
+        try {
+          await store.deleteIfUnchanged(
+            q.tbl,
+            q.id,
+            hlcPacked: q.remoteHlcPacked,
+            payload: q.payload,
+          );
+        } catch (e) {
+          DiagnosticsLog.instance.log(
+            'sync',
+            'quarantine settle failed (${e.runtimeType}); '
+                'the entry replays next cycle',
+          );
+        }
         applied += result.applied;
         if (result.applied > 0) landed.add(row);
       }

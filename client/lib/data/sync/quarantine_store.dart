@@ -83,19 +83,31 @@ class QuarantineStore {
     _db.syncQuarantine,
   )..where((q) => q.tbl.equals(table) & q.id.equals(id))).go();
 
-  /// Removes one parked row ONLY while it still holds [hlcPacked] — the
-  /// settle-then-delete used by the quarantine replay. The replay lists,
-  /// applies, then deletes; a NEWER state for the same (table, id) can be
-  /// parked between the apply and the delete (a concurrent pull page), and
-  /// the unconditional delete threw that newer state away with the settled
-  /// one. Conditioning on the stamp closes the TOCTOU: the newer entry
-  /// simply survives for the next replay cycle.
-  Future<void> deleteIfStamp(String table, String id, String hlcPacked) =>
+  /// Removes one parked row ONLY while it still holds EXACTLY the state that
+  /// was replayed — the settle-then-delete used by the quarantine replay,
+  /// which lists, applies, then deletes. A different state for the same
+  /// (table, id) can be parked between the apply and the delete (a concurrent
+  /// pull page), and an unconditional delete threw that state away unreplayed.
+  ///
+  /// The condition is the stamp AND the payload, never the stamp alone: [put]
+  /// deliberately lets an EQUAL stamp replace the stored entry with a
+  /// refreshed reason and payload (the FK-orphan re-park cycle depends on
+  /// that), so a stamp match does not prove the entry is still the one that
+  /// settled. Both together make this a true compare-and-swap — anything
+  /// parked in the window survives for the next replay cycle, where it
+  /// settles on its own terms.
+  Future<void> deleteIfUnchanged(
+    String table,
+    String id, {
+    required String hlcPacked,
+    required String payload,
+  }) =>
       (_db.delete(_db.syncQuarantine)..where(
             (q) =>
                 q.tbl.equals(table) &
                 q.id.equals(id) &
-                q.remoteHlcPacked.equals(hlcPacked),
+                q.remoteHlcPacked.equals(hlcPacked) &
+                q.payload.equals(payload),
           ))
           .go();
 }
