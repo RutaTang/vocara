@@ -105,6 +105,11 @@ class _FakeGraph extends Fake implements GraphAudioPlaybackService {
   @override
   int pollDeviceEvents(int mask) => 0;
 
+  // The 1 s device watch reads this on every tick; a Fake without it throws
+  // from inside the timer callback once a test pumps past one second.
+  @override
+  int streamXruns() => 0;
+
   @override
   int inputFramesReceived() => 0;
 

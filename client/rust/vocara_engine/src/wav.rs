@@ -24,6 +24,28 @@ const FMT_IEEE_FLOAT: u16 = 3;
 /// Bytes per stored sample in the streaming (f32) format.
 const F32_BYTES: u64 = 4;
 
+/// The most samples of `bytes_per_sample` bytes a canonical RIFF/WAVE header can
+/// ADDRESS: the `data` size and the 36-byte-larger RIFF size are both u32, and a
+/// sample must not straddle that boundary. Appending past it does not fail — it
+/// produces a file whose header stops covering its own tail, invisible to every
+/// reader — so the writers here refuse instead.
+///
+/// RF64 is the format's own answer and is deliberately not taken: the 44-byte
+/// canonical layout is a READ-side contract (`feed::WavTrackReader::open` and
+/// the Dart `probeWav` both require a 16-byte `fmt ` immediately followed by
+/// `data`), so a `ds64`/`JUNK` chunk would drop every take out of the
+/// disk-streaming path to fix a case no singer reaches.
+const fn max_addressable_samples(bytes_per_sample: u64) -> u64 {
+    (u32::MAX as u64 - 36) / bytes_per_sample
+}
+
+/// Sample ceiling for the 32-bit float take format: 1_073_741_814 samples, i.e.
+/// about 6 h 12 min of the mono 48 kHz recording format (a 4.0 GiB file).
+pub const MAX_F32_SAMPLES: u64 = max_addressable_samples(F32_BYTES);
+
+/// Sample ceiling for the 16-bit PCM writer (the offline render harness).
+const MAX_I16_SAMPLES: u64 = max_addressable_samples(2);
+
 /// Write a canonical 44-byte WAV header (16-byte `fmt ` immediately followed by `data`).
 /// `data_bytes` may be a placeholder (patched on finalize). The same canonical layout is used
 /// for both PCM16 and float32 — readers that require a `fact` chunk for non-PCM are not among
@@ -114,18 +136,29 @@ impl WavStream {
     /// Append one f32 sample as 32-bit float. NOT clamped: float storage keeps levels past
     /// 0 dBFS losslessly (the whole point of the format). Non-finite values are stored as 0 so
     /// one bad sample can never poison downstream decoders/analyses.
+    ///
+    /// `Ok(false)` means the stream already holds every sample a canonical header can address
+    /// ([`MAX_F32_SAMPLES`]) and the sample was NOT stored: a payload the RIFF/`data` sizes
+    /// cannot describe is unreachable for every reader, so a short honest file beats a long
+    /// unreadable one. Distinct from `Err`, which means the DISK failed — a refusal leaves the
+    /// file valid and complete, and callers must not treat it as damage.
     #[inline]
-    pub fn write_sample(&mut self, s: f32) -> io::Result<()> {
+    pub fn write_sample(&mut self, s: f32) -> io::Result<bool> {
+        if self.samples >= MAX_F32_SAMPLES {
+            return Ok(false);
+        }
         let v = if s.is_finite() { s } else { 0.0 };
         self.w.write_all(&v.to_le_bytes())?;
         self.samples += 1;
-        Ok(())
+        Ok(true)
     }
 
     /// The (riff_size, data_size) header fields covering `samples` float samples.
-    /// 4 bytes per sample. The counter is u64 (no overflow); the WAV header fields
-    /// are u32, so clamp to u32::MAX — a >4 GB stream isn't representable in plain
-    /// RIFF/WAVE (it would need RF64), but the header still agrees with the bytes up to 4 GB.
+    /// 4 bytes per sample. [`write_sample`](Self::write_sample) refuses past
+    /// [`MAX_F32_SAMPLES`], so both fields describe the payload EXACTLY on every reachable
+    /// input; the `min` is a last-resort backstop that keeps a field inside its type instead
+    /// of letting an `as u32` truncation publish a size describing neither the payload nor a
+    /// whole number of samples.
     fn header_sizes(samples: u64) -> (u32, u32) {
         let data_bytes = samples.saturating_mul(F32_BYTES);
         let data_size = data_bytes.min(u32::MAX as u64) as u32;
@@ -186,15 +219,22 @@ pub fn write_wav_f32<P: AsRef<Path>>(
     channels: u16,
     sample_rate: u32,
 ) -> io::Result<()> {
+    if samples.len() as u64 > MAX_F32_SAMPLES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "payload exceeds what a canonical RIFF header can address",
+        ));
+    }
     let mut w = BufWriter::new(File::create(path)?);
-    let data_bytes = (samples.len() as u64).saturating_mul(F32_BYTES);
+    // Exact: the guard above already refused anything a u32 could not hold.
+    let data_bytes = (samples.len() as u64) * F32_BYTES;
     write_header(
         &mut w,
         FMT_IEEE_FLOAT,
         32,
         channels,
         sample_rate,
-        data_bytes.min(u32::MAX as u64) as u32,
+        data_bytes as u32,
     )?;
     for &s in samples {
         let v = if s.is_finite() { s } else { 0.0 };
@@ -211,8 +251,14 @@ pub fn write_wav_i16<P: AsRef<Path>>(
     channels: u16,
     sample_rate: u32,
 ) -> io::Result<()> {
+    if samples.len() as u64 > MAX_I16_SAMPLES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "payload exceeds what a canonical RIFF header can address",
+        ));
+    }
     let mut w = BufWriter::new(File::create(path)?);
-    let data_bytes = (samples.len() * 2) as u32;
+    let data_bytes = ((samples.len() as u64) * 2) as u32;
     write_header(&mut w, FMT_PCM, 16, channels, sample_rate, data_bytes)?;
     for &s in samples {
         let v = (s.clamp(-1.0, 1.0) * 32767.0).round() as i16;

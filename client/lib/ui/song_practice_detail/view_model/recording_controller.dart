@@ -654,7 +654,8 @@ class RecordingController extends ChangeNotifier {
         GraphAudioPlaybackService.eventOutputLost |
             GraphAudioPlaybackService.eventInputLost |
             GraphAudioPlaybackService.eventAecBypassed |
-            GraphAudioPlaybackService.eventInputFellBack,
+            GraphAudioPlaybackService.eventInputFellBack |
+            GraphAudioPlaybackService.eventRecordLimit,
       );
       if (events & 1 != 0) {
         // Output lost: re-open the current output so transport doesn't freeze.
@@ -688,6 +689,18 @@ class RecordingController extends ChangeNotifier {
           'Echo cancellation is unavailable for this microphone. '
           'Use headphones to keep playback out of the recording.',
         );
+      }
+      if (events & GraphAudioPlaybackService.eventRecordLimit != 0 &&
+          isRecording) {
+        // The take reached the longest recording a WAV header can describe, so
+        // the engine stopped feeding the writer. Finalize now: the file on disk
+        // is valid and complete up to the limit, and the recording clock would
+        // otherwise keep running over audio nothing is storing.
+        _toast(
+          'Recording reached the six-hour maximum length. '
+          'The take was saved up to that point.',
+        );
+        unawaited(stopRecording());
       }
       if (events & 2 != 0) {
         _onInputDeviceLost();

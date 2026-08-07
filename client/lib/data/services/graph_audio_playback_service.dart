@@ -356,14 +356,16 @@ class GraphAudioPlaybackService implements PlaybackEngine {
   static const int eventInputLost = 2;
   static const int eventAecBypassed = 4;
   static const int eventInputFellBack = 8;
+  static const int eventRecordLimit = 16;
 
   /// Poll + clear the pending device events selected by [mask] (bit 1 =
   /// output lost, bit 2 = input lost, bit 4 = mic opened without echo
   /// cancellation, bit 8 = selected input unavailable — fell back to the
-  /// system default). Only the claimed bits are cleared; bits outside the
-  /// mask stay pending for their own consumer, so the song page's 1 s watch
-  /// and the technique page's 50 ms level tick no longer steal each other's
-  /// events.
+  /// system default, bit 16 = the take reached the longest recording a WAV
+  /// header can describe, so capture past it is refused and the owner must
+  /// finalize). Only the claimed bits are cleared; bits outside the mask stay
+  /// pending for their own consumer, so the song page's 1 s watch and the
+  /// technique page's 50 ms level tick no longer steal each other's events.
   int pollDeviceEvents(int mask) =>
       _available ? _bindings.ve_poll_device_event(_engine, mask) : 0;
 

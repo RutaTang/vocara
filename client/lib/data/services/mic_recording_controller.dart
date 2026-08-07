@@ -143,6 +143,7 @@ class MicRecordingController {
     Future<void> Function()? onQuitFinalize,
     this.onInputDeviceLost,
     this.onDeviceNotice,
+    this.onRecordLimitReached,
     this.onLevelTick,
     Future<bool> Function() requestPermission = MicPermission.request,
     RecordingFinalizer? finalizer,
@@ -191,6 +192,14 @@ class MicRecordingController {
   /// the input bits itself; the poll claims only the masked bits, so two
   /// watchers no longer steal each other's events).
   final void Function()? onInputDeviceLost;
+
+  /// Called from the level tick when the take reached the longest recording a
+  /// WAV header can describe (poll bit 16) — the owner should stop the take,
+  /// which KEEPS everything captured up to the limit. Nothing more is being
+  /// recorded from that moment, so a notice alone would leave the clock
+  /// running over audio no one is storing. Only polled alongside
+  /// [onInputDeviceLost], like [onDeviceNotice].
+  final void Function()? onRecordLimitReached;
 
   /// Called with a user-facing message when the input degrades without being
   /// lost: echo cancellation unavailable (playback can bleed into the take)
@@ -441,7 +450,8 @@ class MicRecordingController {
             final events = engine.pollDeviceEvents(
               GraphAudioPlaybackService.eventInputLost |
                   GraphAudioPlaybackService.eventAecBypassed |
-                  GraphAudioPlaybackService.eventInputFellBack,
+                  GraphAudioPlaybackService.eventInputFellBack |
+                  GraphAudioPlaybackService.eventRecordLimit,
             );
             if (events & GraphAudioPlaybackService.eventAecBypassed != 0) {
               onDeviceNotice?.call(
@@ -454,6 +464,10 @@ class MicRecordingController {
                 'Your selected microphone is unavailable. '
                 'Recording from the system default microphone instead.',
               );
+            }
+            if (events & GraphAudioPlaybackService.eventRecordLimit != 0) {
+              onRecordLimitReached?.call();
+              return;
             }
             if (events & GraphAudioPlaybackService.eventInputLost != 0) {
               onLost();

@@ -34,6 +34,13 @@ pub const EVENT_AEC_BYPASSED: u32 = 4;
 /// setups), so this event — plus `ve_actual_input_device` — is how the truth
 /// reaches the user instead of a silently wrong device label.
 pub const EVENT_INPUT_FELL_BACK: u32 = 8;
+/// The active recording reached the longest take a canonical WAV header can
+/// describe ([`crate::wav::MAX_F32_SAMPLES`], about 6 h 12 min of the mono
+/// 48 kHz take format). Capture past that point is refused rather than written
+/// where no reader could address it, so the UI must finalize the take —
+/// without this the recording clock would keep running over audio nothing is
+/// storing.
+pub const EVENT_RECORD_LIMIT: u32 = 16;
 
 /// Latched when a stream teardown failed to synchronously stop its callback (a cpal `pause()`
 /// error, or `AudioOutputUnitStop` failing in `vpio`). The renderer gate's `false` state means
@@ -568,6 +575,11 @@ struct InputState {
     /// count frames that aren't in the WAV. The ready handshake and the pre-roll
     /// measurement both read it.
     rec_written: Arc<AtomicU64>,
+    /// Shared device-event flags (`ve_poll_device_event`). The fan-out raises
+    /// [`EVENT_RECORD_LIMIT`] here when a take reaches the length its WAV
+    /// header can describe — the same latched-bit channel the input paths use
+    /// for device loss, and the only way an RT callback can reach the UI.
+    event: Arc<AtomicU32>,
     /// Engine-rate frames this input WOULD have emitted at ratio 1.0 — the
     /// drift estimator's input signal. It must NOT include the correction:
     /// measuring the corrected emission fed the published ratio back into
@@ -590,7 +602,17 @@ impl InputState {
             self.cap.push(f);
         }
         if rec {
-            if self.rec.push(f) {
+            // The take is a canonical RIFF file whose `data`/RIFF sizes are u32: a sample
+            // past wav::MAX_F32_SAMPLES can be appended but never ADDRESSED, so recording
+            // stops at that count and says so instead of growing an invisible tail. The
+            // comparison is on rec_written because the take is MONO — one recorded frame is
+            // exactly one stored sample — which is what keeps this gate and the writer
+            // thread's own refusal describing the same boundary. Checked per frame, not per
+            // callback, so the stop lands exactly on the limit. NOT a drop: a drop is a hole
+            // inside an otherwise complete take, and this take is complete, just at its end.
+            if self.rec_written.load(Ordering::Relaxed) >= crate::wav::MAX_F32_SAMPLES {
+                self.event.fetch_or(EVENT_RECORD_LIMIT, Ordering::Release);
+            } else if self.rec.push(f) {
                 self.rec_written.fetch_add(1, Ordering::Relaxed);
             } else {
                 self.rec_dropped.fetch_add(1, Ordering::Relaxed);
@@ -615,6 +637,7 @@ impl InputCell {
         rec_written: Arc<AtomicU64>,
         drift_ratio_bits: Arc<AtomicU64>,
         nominal_frames_in: Arc<AtomicU64>,
+        event: Arc<AtomicU32>,
     ) -> Arc<InputCell> {
         Arc::new(InputCell(UnsafeCell::new(InputState {
             mic,
@@ -634,6 +657,7 @@ impl InputCell {
             rec_written,
             nominal_frames_in,
             nominal_acc: 0.0,
+            event,
         })))
     }
 
@@ -956,6 +980,7 @@ mod drift_tests {
             Arc::new(AtomicU64::new(0)),
             Arc::clone(&ratio),
             Arc::clone(&nominal),
+            Arc::new(std::sync::atomic::AtomicU32::new(0)),
         );
         cell.reconfigure(crate::sample::ENGINE_SR, 1);
         let mut est = DriftEstimator::new(Arc::clone(&ratio));
@@ -1017,6 +1042,7 @@ mod drift_tests {
             Arc::new(AtomicU64::new(0)),
             Arc::clone(&ratio),
             Arc::new(AtomicU64::new(0)),
+            Arc::new(std::sync::atomic::AtomicU32::new(0)),
         );
         cell.reconfigure(crate::sample::ENGINE_SR, 1);
         let block = vec![0.25f32; 4800];
@@ -3185,6 +3211,7 @@ mod input_cell_tests {
         frames_in: Arc<AtomicU64>,
         rec_dropped: Arc<AtomicU64>,
         rec_written: Arc<AtomicU64>,
+        event: Arc<AtomicU32>,
     }
 
     fn cell_with_rec_capacity(rec_cap: usize) -> RecCell {
@@ -3195,6 +3222,7 @@ mod input_cell_tests {
         let frames_in = Arc::new(AtomicU64::new(0));
         let rec_dropped = Arc::new(AtomicU64::new(0));
         let rec_written = Arc::new(AtomicU64::new(0));
+        let event = Arc::new(AtomicU32::new(0));
         let cell = InputCell::new(
             mic_prod,
             cap_prod,
@@ -3207,6 +3235,7 @@ mod input_cell_tests {
             Arc::clone(&rec_written),
             Arc::new(AtomicU64::new(1.0f64.to_bits())),
             Arc::new(AtomicU64::new(0)),
+            Arc::clone(&event),
         );
         // Identity resample path (input already at ENGINE_SR), mono input.
         cell.reconfigure(crate::sample::ENGINE_SR, 1);
@@ -3216,7 +3245,39 @@ mod input_cell_tests {
             frames_in,
             rec_dropped,
             rec_written,
+            event,
         }
+    }
+
+    #[test]
+    fn a_take_at_the_wav_addressing_ceiling_stops_and_raises_the_event() {
+        // A canonical RIFF header addresses at most MAX_F32_SAMPLES; appending
+        // past it does not fail, it produces a file whose header stops covering
+        // its own tail — hours of audio no reader can reach, behind a clean
+        // stop code and rec_dropped == 0. The fan-out refuses instead, and
+        // says so on the one channel an RT callback can reach the UI through.
+        let c = cell_with_rec_capacity(1 << 10);
+        // Start one frame below the ceiling so this callback straddles it.
+        c.rec_written
+            .store(crate::wav::MAX_F32_SAMPLES - 1, Ordering::Relaxed);
+        let block = [0.25f32; 2];
+        unsafe { c.cell.feed(&block) };
+
+        assert_eq!(
+            c.rec_written.load(Ordering::Relaxed),
+            crate::wav::MAX_F32_SAMPLES,
+            "recording stops exactly at the addressable ceiling"
+        );
+        assert_eq!(
+            c.rec_dropped.load(Ordering::Relaxed),
+            0,
+            "a take at its limit is COMPLETE, not holed — that is what dropped means"
+        );
+        assert_ne!(
+            c.event.load(Ordering::Relaxed) & super::EVENT_RECORD_LIMIT,
+            0,
+            "the UI must learn to finalize; the clock would otherwise keep running"
+        );
     }
 
     #[test]

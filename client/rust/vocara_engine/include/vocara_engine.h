@@ -52,7 +52,8 @@ int ve_set_output_device(VeEngine *e, const char *uid);
 size_t ve_current_output_device(VeEngine *e, char *buf, size_t cap);
 /* Poll + clear the pending device events selected by `mask` (bit 1 = output
  * lost, bit 2 = input lost, bit 4 = mic opened WITHOUT echo cancellation,
- * bit 8 = selected input unavailable, fell back to the system default).
+ * bit 8 = selected input unavailable, fell back to the system default,
+ * bit 16 = the take reached the longest recording a WAV header can describe).
  * Returns the claimed bits; bits outside the mask stay pending for their own
  * consumer. 0 = none. */
 uint32_t ve_poll_device_event(VeEngine *e, uint32_t mask);

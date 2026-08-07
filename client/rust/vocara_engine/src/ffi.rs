@@ -420,6 +420,7 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
             Arc::clone(&rec_written),
             Arc::clone(&drift_ratio),
             Arc::clone(&input_nominal_frames),
+            Arc::clone(&device_event),
         );
         let writer = RecordWriter::spawn(rec_cons);
         // The host maintains the handle's renderer gate (stream up/down), so the control
@@ -1724,7 +1725,12 @@ pub extern "C" fn ve_punch_wav(
             let mut wav =
                 crate::wav::WavStream::create_new(&tmp_path, CHANNELS as u16, rate).ok()?;
             let write_frame = |wav: &mut crate::wav::WavStream, f: [Smp; CHANNELS]| -> bool {
-                wav.write_sample(f[0]).is_ok() && wav.write_sample(f[1]).is_ok()
+                // Ok(false) is a REFUSAL at the header's addressing ceiling, not an IO
+                // error: the frame ceiling above already rules it out, and a truncated
+                // splice must abort (dropping the temp file) rather than publish a short
+                // result as success.
+                matches!(wav.write_sample(f[0]), Ok(true))
+                    && matches!(wav.write_sample(f[1]), Ok(true))
             };
 
             // Phase 1 — old's keep prefix + silence pad. A split of 0 keeps NOTHING of

@@ -494,6 +494,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
         onQuitFinalize: _quitFinalize,
         onInputDeviceLost: _onInputDeviceLost,
         onDeviceNotice: _onDeviceNotice,
+        onRecordLimitReached: _onRecordLimitReached,
       );
 
   /// True during the example/practice record START window — after the user tapped
@@ -525,6 +526,20 @@ class TechniqueDetailViewModel extends ChangeNotifier
   /// on the technique screen, so the controller polls while recording.
   void _onInputDeviceLost() {
     _recordingNotice = 'Recording stopped: the input device was disconnected.';
+    if (_recordingExample) {
+      unawaited(stopExampleRecording());
+    } else {
+      unawaited(stopPractice());
+    }
+  }
+
+  /// The take reached the longest recording a WAV header can describe: stop it
+  /// so everything captured up to the limit is saved, instead of leaving a take
+  /// that looks like it is still recording while nothing more is stored.
+  void _onRecordLimitReached() {
+    _recordingNotice =
+        'Recording stopped at the six-hour maximum length. '
+        'Everything up to that point was saved.';
     if (_recordingExample) {
       unawaited(stopExampleRecording());
     } else {
