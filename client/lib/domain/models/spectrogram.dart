@@ -47,6 +47,31 @@ class Spectrogram {
   }
 }
 
+/// The frame a part starting [offsetMs] after the lane's span start occupies
+/// on the merged grid, for a [sampleRate]/[hop] framing. The spectrogram and
+/// voice-metrics merges of one take must round this identically: their outputs
+/// are read against a single lane axis, so a one-frame disagreement slides the
+/// pitch/formant overlays off the columns they annotate.
+int mergeFrameOf(int offsetMs, int sampleRate, int hop) =>
+    (offsetMs / 1000 * sampleRate / hop).round();
+
+/// The longest lane span a merged analysis may materialize, in frames. A merge
+/// is sized by the lane SPAN, not by the audio in it, so two short clips placed
+/// hours apart — or an offset that arrived corrupt from persistence or a sync
+/// peer — would allocate the whole gap. At 48 kHz with hop 512 this admits
+/// 53 minutes of lane, far past the 10-minute per-clip analysis ceiling that
+/// bounds any legal take, and costs ~11 MB of voice-metrics curves or ~257 MB
+/// of 214-bin spectrogram.
+const int maxMergedLaneFrames = 300 * 1000;
+
+/// Whether a merged lane span of [frames] frames may be materialized. BOTH
+/// lane merges ask before they allocate, so an illegal span cannot be admitted
+/// by whichever merge a caller happens to run first. Non-positive spans are
+/// illegal too: they only arise from offsets that overflowed the frame
+/// conversion, and a merge must refuse rather than index by them.
+bool mergedSpanIsLegal(int frames) =>
+    frames > 0 && frames <= maxMergedLaneFrames;
+
 /// Merges several clips' [Spectrogram]s into one lane-spanning analysis for a
 /// multi-clip take. Each part carries [offsetMs] — the clip's start relative to
 /// the LANE's span start (clip.startMs − track.startMs, so ≥ 0) — and its
@@ -57,8 +82,9 @@ class Spectrogram {
 ///
 /// Parts must share [bins], [fftSize], [sampleRate] and [hop]; any part whose
 /// framing differs from the first is skipped, as are frameless parts. Returns
-/// null when nothing survives, and a lone survivor starting at the lane origin
-/// unchanged. Pure.
+/// null when nothing survives or when two or more parts span past
+/// [maxMergedLaneFrames] (or past the cell budget), and a lone survivor
+/// starting at the lane origin unchanged. Pure.
 Spectrogram? mergeSpectrograms(
   List<({int offsetMs, Spectrogram spectrogram})> parts,
 ) {
@@ -82,7 +108,7 @@ Spectrogram? mergeSpectrograms(
       .toList();
   if (kept.isEmpty) return null;
   int frameOf(int offsetMs) =>
-      (offsetMs / 1000 * first.sampleRate / first.hop).round();
+      mergeFrameOf(offsetMs, first.sampleRate, first.hop);
   // A lone part at the lane origin IS the whole lane's analysis — unchanged.
   if (kept.length == 1 && frameOf(kept.single.offsetMs) == 0) {
     return kept.single.spectrogram;
@@ -107,12 +133,15 @@ Spectrogram? mergeSpectrograms(
     if (p.spectrogram.maxDb > maxDb) maxDb = p.spectrogram.maxDb;
   }
   // The merged array is sized by the lane SPAN, not the audio in it: two
-  // short clips hours apart would allocate gigabytes of gap columns. Cap the
-  // span-derived allocation and fail soft (no merged view) beyond it — at
-  // ~214 bins that admits roughly 50 minutes of lane, far past any legal
-  // per-clip analysis (10 min) while refusing corrupt/hostile offsets.
+  // short clips hours apart would allocate gigabytes of gap columns. Two
+  // fail-soft bounds (no merged view rather than an OOM): the shared span
+  // budget, which the voice-metrics merge of the same lane applies
+  // identically so neither merge can admit a lane the other refuses, and a
+  // cell budget for the WIDTH — a wide-bin display merge reaches 256 MB well
+  // inside a legal span. Span first, so a saturated frame count cannot wrap
+  // `total * bins` negative and sail past the cell budget.
   const maxMergedCells = 64 * 1000 * 1000; // Float32 cells ≈ 256 MB
-  if (total * bins > maxMergedCells) return null;
+  if (!mergedSpanIsLegal(total) || total * bins > maxMergedCells) return null;
   final floorDb = minDb.isFinite ? minDb : 0.0;
 
   // Pre-fill with the merged floor so gap columns read as silence (the darkest

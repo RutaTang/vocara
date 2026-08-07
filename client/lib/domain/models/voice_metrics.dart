@@ -30,6 +30,12 @@ class VoiceMetrics {
     this.snrDb = double.nan,
   });
 
+  /// Resident bytes one frame costs: the nine Float32 curves below plus the
+  /// one-byte [active] mask. Everything that budgets metrics by size measures
+  /// with this, so adding a curve here is what moves those budgets — there is
+  /// no second copy of the number to forget.
+  static const int bytesPerFrame = 9 * 4 + 1;
+
   final int frames;
   final int hop;
   final int sampleRate;
@@ -120,7 +126,8 @@ class VoiceMetrics {
 /// Parts must share [hop] and [sampleRate] — they do when computed by the same
 /// SpectrogramService defaults — and any part whose framing differs from the
 /// first is skipped, as are frameless parts. Returns null when nothing
-/// survives, and a lone survivor starting at the lane origin unchanged.
+/// survives or when two or more parts span past [maxMergedLaneFrames], and a
+/// lone survivor starting at the lane origin unchanged.
 /// [ringAvg]/[tiltAvg]/[cppAvg] are recomputed over the placed voiced frames
 /// and the input-quality gate keeps the worst clip's values. Pure.
 VoiceMetrics? mergeVoiceMetrics(
@@ -144,7 +151,7 @@ VoiceMetrics? mergeVoiceMetrics(
       .toList();
   if (kept.isEmpty) return null;
   int frameOf(int offsetMs) =>
-      (offsetMs / 1000 * first.sampleRate / first.hop).round();
+      mergeFrameOf(offsetMs, first.sampleRate, first.hop);
   // A lone part at the lane origin IS the whole lane's analysis — unchanged.
   if (kept.length == 1 && frameOf(kept.single.offsetMs) == 0) {
     return kept.single.metrics;
@@ -163,6 +170,14 @@ VoiceMetrics? mergeVoiceMetrics(
     final end = frameOf(p.offsetMs) + p.metrics.frames;
     if (end > total) total = end;
   }
+
+  // Nine span-sized Float32 curves plus the active mask follow, so the same
+  // span budget the spectrogram merge of this lane honors has to be paid here
+  // FIRST — this is the merge that allocates first, which is what let a
+  // corrupt or hostile offset size an allocation the sibling merge would have
+  // refused. Past it there is no merged view; the caller shows the aggregate
+  // as unavailable.
+  if (!mergedSpanIsLegal(total)) return null;
 
   // Pre-fill the curves with NaN (and leave `active` 0) so the frames no clip
   // covers read as gaps, exactly like unvoiced silence within a clip.

@@ -303,4 +303,83 @@ void main() {
       expect(ok, isNotNull);
     });
   });
+
+  group('shared lane-span budget', () {
+    test('a lane span past maxMergedLaneFrames is refused by BOTH merges, '
+        'not just the spectrogram one', () async {
+      // Both merges are sized by the lane SPAN, not by the audio in it. The
+      // metrics merge allocates nine span-sized Float32 curves and runs
+      // FIRST, so a corrupt or hostile offset used to size that allocation
+      // behind a release-stripped assert while the sibling merge's cap never
+      // got a say.
+      final offsetMs =
+          (maxMergedLaneFrames + 10) * 1000 * _hop ~/ _sr; // past the budget
+
+      expect(
+        mergeVoiceMetrics([
+          (offsetMs: 0, metrics: _metrics(ring: [1, 2], active: [1, 1])),
+          (offsetMs: offsetMs, metrics: _metrics(ring: [1, 2], active: [1, 1])),
+        ]),
+        isNull,
+      );
+      expect(
+        mergeSpectrograms([
+          (
+            offsetMs: 0,
+            spectrogram: _spec(
+              db: [0, 0, 0, 0],
+              frames: 2,
+              minDb: -60,
+              maxDb: 0,
+            ),
+          ),
+          (
+            offsetMs: offsetMs,
+            spectrogram: _spec(
+              db: [0, 0, 0, 0],
+              frames: 2,
+              minDb: -60,
+              maxDb: 0,
+            ),
+          ),
+        ]),
+        isNull,
+      );
+    });
+
+    test('a span exactly at the budget still merges', () {
+      // The bound is inclusive, so the admissible lane is not one frame
+      // shorter than the constant advertises.
+      final offsetMs = (maxMergedLaneFrames - 2) * 1000 * _hop ~/ _sr;
+      final merged = mergeVoiceMetrics([
+        (offsetMs: 0, metrics: _metrics(ring: [1, 2], active: [1, 1])),
+        (offsetMs: offsetMs, metrics: _metrics(ring: [1, 2], active: [1, 1])),
+      ]);
+      expect(merged, isNotNull);
+      expect(merged!.frames, maxMergedLaneFrames);
+    });
+
+    test('both merges convert an offset to the same frame', () {
+      // The two outputs are read against ONE lane axis, so a one-frame
+      // disagreement slides the pitch/formant overlays off the columns they
+      // annotate.
+      for (final offsetMs in [0, 49, 50, 51, 150, 12345]) {
+        final m = mergeVoiceMetrics([
+          (offsetMs: 0, metrics: _metrics(ring: [1], active: [1])),
+          (offsetMs: offsetMs, metrics: _metrics(ring: [1], active: [1])),
+        ]);
+        final s = mergeSpectrograms([
+          (
+            offsetMs: 0,
+            spectrogram: _spec(db: [0, 0], frames: 1, minDb: -60, maxDb: 0),
+          ),
+          (
+            offsetMs: offsetMs,
+            spectrogram: _spec(db: [0, 0], frames: 1, minDb: -60, maxDb: 0),
+          ),
+        ]);
+        expect(m!.frames, s!.frames, reason: 'offset $offsetMs');
+      }
+    });
+  });
 }

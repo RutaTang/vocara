@@ -109,9 +109,13 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   // so the on-screen subject is never the eviction victim. Sizes are the
   // typed-data payloads (the dominant term).
   static int _specBytes(Spectrogram s) => s.db.length * 4;
+  // Budgeted per frame: the metrics payload plus the score curve its memoized
+  // RegisterMap keeps alive beside it — that curve outlives eviction in the
+  // plain derived map, so a budget that ignored it would understate what an
+  // entry actually costs the process.
+  static const int _registerScoreBytesPerFrame = 4;
   static int _metricsBytes(VoiceMetrics m) =>
-      // Eleven Float32 curves plus two byte masks per frame.
-      m.frames * (11 * 4 + 2);
+      m.frames * (VoiceMetrics.bytesPerFrame + _registerScoreBytesPerFrame);
   final LruBytesCache<Spectrogram> _spectrogramCache = LruBytesCache(
     192 * 1000 * 1000,
     _specBytes,
