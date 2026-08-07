@@ -1,5 +1,9 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
+
+import 'diagnostics_log.dart';
+
 /// Process-wide registry of in-flight recordings so the app can FINALIZE them
 /// (stop + analyze + save the captured take) before the process is torn down
 /// on quit. Without this, quitting mid-record loses the take as a 0-length
@@ -22,10 +26,34 @@ import 'dart:async';
 /// A recording view model registers a callback when it starts and removes it
 /// when it stops or is disposed.
 class RecordingFinalizer {
-  RecordingFinalizer._();
+  RecordingFinalizer._()
+    : perFinalizerBudget = _defaultPerFinalizer,
+      totalBudget = _defaultTotal;
+
+  /// An isolated instance for tests, with budgets small enough to drive the
+  /// expiry paths in real time.
+  @visibleForTesting
+  RecordingFinalizer.forTesting({
+    this.perFinalizerBudget = _defaultPerFinalizer,
+    this.totalBudget = _defaultTotal,
+  });
 
   /// The single app-wide instance (recordings are bound to the one main window).
   static final RecordingFinalizer instance = RecordingFinalizer._();
+
+  /// How long ONE finalizer may hold the quit. A legitimate finalize is a
+  /// hardware stop, one waveform extraction and one database write — a second
+  /// or two even for a long take on a busy disk. Past that it is wedged, which
+  /// is reachable without any bug: a save retries behind the busy gate for as
+  /// long as it takes, because dropping it would be worse.
+  static const Duration _defaultPerFinalizer = Duration(seconds: 5);
+
+  /// Ceiling across ALL registered finalizers, so several wedged recordings
+  /// cannot serialize their budgets into a quit macOS ends on its own terms.
+  static const Duration _defaultTotal = Duration(seconds: 8);
+
+  final Duration perFinalizerBudget;
+  final Duration totalBudget;
 
   final _pending = <Future<void> Function()>{};
 
@@ -45,14 +73,46 @@ class RecordingFinalizer {
   /// itself mid-run is safe. Concurrent calls (e.g. a close click racing a
   /// Cmd+Q exit request) await the SAME in-flight run instead of double-running
   /// finalizers; once a run completes, a later call starts a fresh one.
+  ///
+  /// BOUNDED: each finalizer gets [perFinalizerBudget] and the whole run
+  /// [totalBudget]. Both quit paths gate the app's exit on this future, and an
+  /// exit macOS ends on its own terms is worse than a skipped save — a take
+  /// left behind is recovered on the next boot, a force-killed process
+  /// finalizes nothing at all.
   Future<void> finalizeAll() =>
       _inFlight ??= _finalizeAll().whenComplete(() => _inFlight = null);
 
   Future<void> _finalizeAll() async {
-    for (final finalize in _pending.toList()) {
+    final pending = _pending.toList();
+    final spent = Stopwatch()..start();
+    for (var i = 0; i < pending.length; i++) {
+      final left = totalBudget - spent.elapsed;
+      if (left <= Duration.zero) {
+        DiagnosticsLog.instance.log(
+          'quit',
+          'finalize budget spent; ${pending.length - i} not run',
+        );
+        return;
+      }
+      final budget = left < perFinalizerBudget ? left : perFinalizerBudget;
       try {
-        await finalize();
-      } catch (_) {}
+        await pending[i]().timeout(budget);
+      } on TimeoutException {
+        // Quitting past a wedged finalize loses strictly LESS than being
+        // force-killed while still waiting: the streaming WAV's header is
+        // patched in place about once a second, so the staged take is
+        // recovered on the next boot either way (see the force-quit note
+        // above). Future.timeout also absorbs a late failure from the
+        // abandoned callback, so no unhandled async error escapes into the
+        // exiting process.
+        DiagnosticsLog.instance.log(
+          'quit',
+          'finalizer ${i + 1}/${pending.length} exceeded '
+              '${budget.inMilliseconds} ms; left for boot recovery',
+        );
+      } catch (_) {
+        // Best-effort by contract: one failure never blocks the rest.
+      }
     }
   }
 }

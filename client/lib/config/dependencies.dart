@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:provider/provider.dart';
 import 'package:provider/single_child_widget.dart';
 
@@ -6,6 +8,7 @@ import '../data/repositories/song_practice_repository.dart';
 import '../data/repositories/technique_repository.dart';
 import '../data/services/app_settings_service.dart';
 import '../data/services/audio_file_service.dart';
+import '../data/services/diagnostics_log.dart';
 import '../data/services/local_storage_service.dart';
 import '../data/services/source_separation_service.dart';
 import '../data/services/spectrogram_service.dart';
@@ -30,9 +33,24 @@ List<SingleChildWidget> buildProviders(
 }) => [
   Provider<LocalStorageService>(create: (_) => LocalStorageService()),
   ChangeNotifierProvider<AppSettingsService>(
-    create: (context) =>
-        AppSettingsService(storage: context.read<LocalStorageService>())
-          ..load(),
+    create: (context) {
+      final settings = AppSettingsService(
+        storage: context.read<LocalStorageService>(),
+      );
+      // Deliberately not awaited: the first frame must not wait on a settings
+      // read, and load() adopts only fields the user has not already set. The
+      // discarded future still needs a handler — an unhandled async error here
+      // surfaces in the root zone as a spurious crash report.
+      unawaited(
+        settings.load().catchError((Object e) {
+          DiagnosticsLog.instance.log(
+            'settings',
+            'load failed: ${e.runtimeType}',
+          );
+        }),
+      );
+      return settings;
+    },
   ),
   Provider<SongPracticeRepository>.value(value: persistence.songRepo),
   Provider<TechniqueRepository>.value(value: persistence.techRepo),

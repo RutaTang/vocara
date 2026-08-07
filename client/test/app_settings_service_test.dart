@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -15,8 +16,16 @@ class _FakeStorage implements LocalStorageService {
   /// When true every write fails, like a full/read-only disk.
   bool failWrites = false;
 
+  /// When set, `read` parks on this until the test completes it — the window
+  /// in which a user choice can race the fire-and-forget load().
+  Completer<void>? readGate;
+
   @override
-  Future<Map<String, dynamic>?> read(String collection, String id) async => doc;
+  Future<Map<String, dynamic>?> read(String collection, String id) async {
+    final gate = readGate;
+    if (gate != null) await gate.future;
+    return doc;
+  }
 
   @override
   Future<void> write(String collection, String id, Map<String, dynamic> json) {
@@ -257,6 +266,82 @@ void main() {
       await Future<void>.delayed(Duration.zero);
       // The in-memory rename still took effect; only persistence degraded.
       expect(service.outputDeviceName, _headphones.name);
+    });
+  });
+
+  group('load racing a live user choice', () {
+    test('a choice made while load() is in flight survives it', () async {
+      // load() is started and its future dropped by the provider graph, so it
+      // can resolve after the singer has already picked a device or moved a
+      // fader. Adopting the document wholesale reverted the choice on screen,
+      // re-pushed the stale value to the engine, and then persisted it back.
+      storage.doc = {
+        'inputDeviceUid': 'stale-mic',
+        'inputDeviceName': 'Stale Mic',
+        'monitorGain': 0.9,
+        'recordGainDb': 3.0,
+      };
+      final gate = Completer<void>();
+      storage.readGate = gate;
+      final engine = _FakeEngine();
+      service.attachEngine(engine);
+
+      final loading = service.load(); // parked inside read()
+      await service.setInputDevice(_builtInMic.uid);
+      service.setMonitorGainLive(0.25);
+      gate.complete();
+      await loading;
+
+      expect(service.inputDeviceUid, _builtInMic.uid);
+      expect(service.inputDeviceName, _builtInMic.name);
+      expect(service.monitorGain, 0.25);
+      // Untouched fields still adopt the document.
+      expect(service.recordGainDb, 3.0);
+      // And the user's value is what gets persisted next, not the document's.
+      await service.commitAudioGains();
+      expect(storage.lastWrite!['monitorGain'], 0.25);
+      expect(storage.lastWrite!['inputDeviceUid'], _builtInMic.uid);
+    });
+
+    test('one wrong-typed field costs only that field, not the engine '
+        'apply', () async {
+      // The reads used to sit outside the try, so a single bad entry threw a
+      // TypeError past the fire-and-forget future: the device list stayed
+      // empty and monitoring was permanently unavailable with nothing on
+      // screen to say why.
+      storage.doc = {
+        'outputDeviceUid': 42, // wrong type
+        'inputDeviceUid': _builtInMic.uid,
+        'monitorGain': 'loud', // wrong type
+        'recordGainDb': 7.0,
+      };
+      final engine = _FakeEngine();
+      service.attachEngine(engine);
+      engine.inputCalls.clear();
+
+      await service.load();
+
+      expect(service.outputDeviceUid, isNull, reason: 'bad field -> default');
+      expect(service.monitorGain, 0.0, reason: 'bad field -> default');
+      expect(service.inputDeviceUid, _builtInMic.uid, reason: 'good field');
+      expect(service.recordGainDb, 7.0, reason: 'good field');
+      // The apply still ran: the engine received the loaded input device.
+      expect(engine.inputCalls, contains(_builtInMic.uid));
+      expect(service.inputDevices, isNotEmpty, reason: 'refreshDevices ran');
+    });
+
+    test('a non-finite stored gain falls back instead of clamping to the '
+        'maximum', () async {
+      // num.clamp resolves NaN/Infinity through compareTo and returns the
+      // range MAXIMUM, so a corrupt value would arrive as full-scale gain.
+      storage.doc = {
+        'recordGainDb': double.infinity,
+        'monitorGain': double.nan,
+      };
+      await service.load();
+
+      expect(service.recordGainDb, 12.0);
+      expect(service.monitorGain, 0.0);
     });
   });
 }

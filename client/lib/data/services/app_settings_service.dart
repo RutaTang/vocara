@@ -63,6 +63,16 @@ class AppSettingsService extends ChangeNotifier {
   List<AudioDevice> _inputDevices = const [];
   GraphAudioPlaybackService? _engine;
 
+  /// The persisted keys the user has already chosen this session. [load] is
+  /// fire-and-forget (the provider graph starts it and drops the future), so
+  /// it can resolve at ANY moment — including after the singer has moved a
+  /// fader. A field the user set is never adopted from the document:
+  /// otherwise the change is reverted on screen, re-pushed to the engine, and
+  /// then written back as the old value by the next [_persist], which
+  /// serializes all seven fields at once. Keyed by the same `_kXxx` constants
+  /// the document uses, so a setter and its load guard cannot drift apart.
+  final Set<String> _userChosen = {};
+
   /// The persisted output device UID, or null = system default.
   String? get outputDeviceUid => _outputDeviceUid;
 
@@ -164,7 +174,25 @@ class AppSettingsService extends ChangeNotifier {
   void _applyMonitorGain() =>
       _engine?.setMonitorGain(monitorAllowed ? _monitorGain : 0.0);
 
+  static String? _loadedString(Object? v) => v is String ? v : null;
+
+  /// Non-finite is not a preference: `num.clamp` resolves NaN/Infinity through
+  /// compareTo and returns the range MAXIMUM, so a corrupt `1e400` would arrive
+  /// as 40 dB of input gain or a fully-open monitor rather than the default.
+  static double _loadedDouble(Object? v, double fallback) =>
+      v is num && v.toDouble().isFinite ? v.toDouble() : fallback;
+
   /// Load persisted settings and enumerate devices. Safe to call at startup.
+  ///
+  /// The caller starts this and drops the future, so it resolves at an
+  /// arbitrary point in the session. Two consequences shape the body:
+  /// adoption is PER FIELD (a value the user already chose is skipped — see
+  /// [_userChosen]), and every field is parsed tolerantly, because one
+  /// wrong-typed entry in an otherwise valid document must not cost
+  /// [_applyAllToEngine] — the only call that pushes persisted devices and
+  /// gains to an engine attached before the read resolved. A strict cast here
+  /// left the device panel permanently empty with nothing on screen to say
+  /// why.
   Future<void> load() async {
     Map<String, dynamic>? doc;
     try {
@@ -173,30 +201,41 @@ class AppSettingsService extends ChangeNotifier {
       doc =
           null; // never let a read failure abort startup; fall back to defaults
     }
-    _outputDeviceUid = doc?[_kOutputUid] as String?;
-    _inputDeviceUid = doc?[_kInputUid] as String?;
-    _outputDeviceName = doc?[_kOutputName] as String?;
-    _inputDeviceName = doc?[_kInputName] as String?;
+    // A uid and its last-known display name are ONE choice — adopt or skip
+    // them together, or an adopted name would label the user's new device.
+    if (!_userChosen.contains(_kOutputUid)) {
+      _outputDeviceUid = _loadedString(doc?[_kOutputUid]);
+      _outputDeviceName = _loadedString(doc?[_kOutputName]);
+    }
+    if (!_userChosen.contains(_kInputUid)) {
+      _inputDeviceUid = _loadedString(doc?[_kInputUid]);
+      _inputDeviceName = _loadedString(doc?[_kInputName]);
+    }
     // Clamp every loaded value to the same range the live setters enforce — a
     // tampered / out-of-range stored value must not reach the engine verbatim
     // (e.g. a huge recordGainDb → enormous input gain, monitorGain > 1 → howling
     // feedback) and must keep the mixer fader math valid.
-    _monitorReverbWet = ((doc?[_kReverbWet] as num?)?.toDouble() ?? 0.2).clamp(
-      0.0,
-      1.0,
-    );
-    _recordGainDb = ((doc?[_kRecordGainDb] as num?)?.toDouble() ?? 12.0).clamp(
-      recordGainMinDb,
-      recordGainMaxDb,
-    );
-    _monitorGain = ((doc?[_kMonitorGain] as num?)?.toDouble() ?? 0.0).clamp(
-      0.0,
-      1.0,
-    );
+    if (!_userChosen.contains(_kReverbWet)) {
+      _monitorReverbWet = _loadedDouble(doc?[_kReverbWet], 0.2).clamp(0.0, 1.0);
+    }
+    if (!_userChosen.contains(_kRecordGainDb)) {
+      _recordGainDb = _loadedDouble(
+        doc?[_kRecordGainDb],
+        12.0,
+      ).clamp(recordGainMinDb, recordGainMaxDb);
+    }
+    if (!_userChosen.contains(_kMonitorGain)) {
+      _monitorGain = _loadedDouble(doc?[_kMonitorGain], 0.0).clamp(0.0, 1.0);
+    }
     // If a screen attached the engine before this load() resolved, it adopted
     // constructor defaults — re-push the now-loaded values to it.
     _applyAllToEngine();
     refreshDevices();
+    // refreshDevices only notifies when a device SET changed, and by now it
+    // usually has not (attachEngine enumerates first). The loaded gains still
+    // have to reach the panel, so notify unconditionally — always past an
+    // await here, never inside the build that created the service.
+    notifyListeners();
   }
 
   /// Re-query the available output + input devices (static; no engine required). Only notifies
@@ -307,6 +346,9 @@ class AppSettingsService extends ChangeNotifier {
   /// Select an output device by UID (or null = system default). Applies it live to the active
   /// engine and persists it for the next one.
   Future<void> setOutputDevice(String? uid) async {
+    // Mark synchronously with the field write, before any await: the race a
+    // late load() would otherwise win is closed on the user's side.
+    _userChosen.add(_kOutputUid);
     _outputDeviceUid = uid;
     _outputDeviceName = _byUid(_outputDevices, uid)?.name;
     // Drive the engine toward the resolved device even for a null/empty (System Default)
@@ -324,6 +366,7 @@ class AppSettingsService extends ChangeNotifier {
 
   /// Select an input device by UID (or null = system default).
   Future<void> setInputDevice(String? uid) async {
+    _userChosen.add(_kInputUid);
     _inputDeviceUid = uid;
     _inputDeviceName = _byUid(_inputDevices, uid)?.name;
     // Also drive the engine on a null/empty selection: '' makes the native side fall back to the
@@ -336,6 +379,7 @@ class AppSettingsService extends ChangeNotifier {
 
   /// Set the monitor reverb amount (0..1) and apply it live.
   Future<void> setMonitorReverb(double wet) async {
+    _userChosen.add(_kReverbWet);
     _monitorReverbWet = wet.clamp(0.0, 1.0);
     _engine?.setMonitorReverb(
       _monitorReverbRoom,
@@ -349,6 +393,7 @@ class AppSettingsService extends ChangeNotifier {
   /// Set the record/input gain in dB and apply it live (no persist — call [commitAudioGains] on
   /// the fader's release). Use for continuous fader drags.
   void setRecordGainDbLive(double db) {
+    _userChosen.add(_kRecordGainDb);
     _recordGainDb = db.clamp(recordGainMinDb, recordGainMaxDb);
     _engine?.setInputGain(_dbToLinear(_recordGainDb));
     notifyListeners();
@@ -357,6 +402,7 @@ class AppSettingsService extends ChangeNotifier {
   /// Set the monitor (hear-yourself) gain (linear 0..1) and apply it live (no persist). Forced to 0
   /// at the engine on a speaker output (see [monitorAllowed]).
   void setMonitorGainLive(double gain) {
+    _userChosen.add(_kMonitorGain);
     _monitorGain = gain.clamp(0.0, 1.0);
     _applyMonitorGain();
     notifyListeners();
