@@ -267,6 +267,28 @@ void main() {
     expect(wavCompatibleForMerge(maskFront, maskFront), isTrue);
   });
 
+  test('ensureStreamableWav passes an uncompressed WAV through untouched '
+      '(no re-encode, no copy)', () async {
+    final dir = await Directory.systemTemp.createTemp('vocara_streamable');
+    addTearDown(() => dir.delete(recursive: true));
+    final tone = Float64List.fromList([
+      for (var i = 0; i < 400; i++) (i % 50) / 50 - 0.5,
+    ]);
+    final src = '${dir.path}/take.wav';
+    await File(src).writeAsBytes(writeWavMono(tone, 44100));
+    final before = await File(src).length();
+
+    final edit = AudioEditService(files: _TempFiles(dir));
+    final out = await edit.ensureStreamableWav(
+      practiceId: 'P0000000000000000000000000',
+      path: src,
+    );
+    expect(out, src, reason: 'a WAV is already streamable');
+    expect(await File(src).length(), before, reason: 'byte-identical');
+    // The transcode branch itself needs the native engine (integration
+    // coverage); the WAV passthrough is the decision this test pins.
+  });
+
   test('splitWav/concatWav reject a compressed (ADPCM) WAV instead of '
       'byte-splicing it with PCM frame math', () async {
     // A structurally valid RIFF/WAVE whose fmt tag is MS ADPCM (2): its

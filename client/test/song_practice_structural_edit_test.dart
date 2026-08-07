@@ -93,6 +93,16 @@ class _ThrowingWaveforms extends Fake implements WaveformService {
   }) async => throw StateError('injected analyze failure');
 }
 
+/// Edits fake whose transcode always fails — the injected failure for the
+/// transcode-rollback test.
+class _ThrowingEdits extends _FakeEdits {
+  @override
+  Future<String> ensureStreamableWav({
+    required String practiceId,
+    required String path,
+  }) async => throw const FormatException('injected transcode failure');
+}
+
 class _FakeWaveforms extends Fake implements WaveformService {
   @override
   Future<WaveformResult> analyze(
@@ -102,6 +112,22 @@ class _FakeWaveforms extends Fake implements WaveformService {
 }
 
 class _FakeEdits extends Fake implements AudioEditService {
+  /// Paths handed to [ensureStreamableWav], for transcode-call assertions.
+  final List<String> streamableCalls = [];
+
+  /// When set, [ensureStreamableWav] reports this path as the transcoded
+  /// WAV (modelling a compressed import); null = passthrough (already WAV).
+  String? transcodeTo;
+
+  @override
+  Future<String> ensureStreamableWav({
+    required String practiceId,
+    required String path,
+  }) async {
+    streamableCalls.add(path);
+    return transcodeTo ?? path;
+  }
+
   @override
   Future<({String firstPath, String secondPath})> splitWav({
     required String practiceId,
@@ -243,6 +269,7 @@ void main() {
     List<AudioTrack>? vocalTracks,
     Duration? Function(String path)? probeDuration,
     WaveformService? waveforms,
+    _FakeEdits? edits,
   }) async {
     events = <String>[];
     repo = _FakeRepo(_seedPractice(vocalTracks: vocalTracks), events);
@@ -258,7 +285,7 @@ void main() {
       appSettings: AppSettingsService(storage: storage),
       practiceId: 'p1',
       playbackEngine: _FakeEngine(),
-      editService: _FakeEdits(),
+      editService: edits ?? _FakeEdits(),
       probeDuration: probeDuration,
     );
     addTearDown(vm.dispose);
@@ -269,6 +296,50 @@ void main() {
     events.clear();
     return vm;
   }
+
+  group('import transcode (P0 of the disk-streaming migration)', () {
+    test('a compressed import is transcoded ONCE to a streamable WAV and the '
+        'compressed copy is deleted', () async {
+      final edits = _FakeEdits()..transcodeTo = '/edit/transcoded.wav';
+      final vm = await pumpVm(edits: edits);
+
+      await vm.addVocalTake('/src/song.mp3');
+      expect(edits.streamableCalls, ['/import/0.wav']);
+      expect(
+        events,
+        contains('delete:/import/0.wav'),
+        reason: 'the compressed copy is redundant once the WAV is the track',
+      );
+      final added = vm.practice!.vocalTracks.last;
+      expect(added.clips.single.audioFilePath, '/edit/transcoded.wav');
+    });
+
+    test('an already-WAV import passes through untouched (no re-encode, no '
+        'delete)', () async {
+      final edits = _FakeEdits();
+      final vm = await pumpVm(edits: edits);
+
+      await vm.addVocalTake('/src/take.wav');
+      expect(edits.streamableCalls, ['/import/0.wav']);
+      expect(events.where((e) => e.startsWith('delete:')), isEmpty);
+      final added = vm.practice!.vocalTracks.last;
+      expect(added.clips.single.audioFilePath, '/import/0.wav');
+    });
+
+    test(
+      'a failed transcode rolls the import back like any failed step',
+      () async {
+        final edits = _ThrowingEdits();
+        final vm = await pumpVm(edits: edits);
+        final before = vm.practice!.vocalTracks.length;
+
+        await vm.addVocalTake('/src/song.mp3');
+        expect(events, contains('delete:/import/0.wav'));
+        expect(vm.practice!.vocalTracks.length, before);
+        expect(vm.errorMessage, isNotNull);
+      },
+    );
+  });
 
   group('import rollback', () {
     test('a failed step AFTER the import deletes the sandbox copy instead of '

@@ -540,6 +540,38 @@ class AudioEditService {
     return path;
   }
 
+  /// Industry-standard import discipline: media becomes an engine-streamable
+  /// WAV ONCE, at import — never decoded-in-full again at every project open.
+  /// Returns [path] unchanged when it is already an uncompressed WAV;
+  /// otherwise transcodes it to an engine-rate float WAV (via the punch
+  /// engine's streamed, transactional split-0 path — output streams to disk,
+  /// lands atomically, and the decode budgets apply) and returns the NEW
+  /// path. The caller owns deleting the original compressed copy.
+  ///
+  /// This is P0 of the disk-streaming migration (docs/audio-streaming-plan):
+  /// once every track is engine-rate WAV, playback can move from full-RAM
+  /// Arcs to file-backed feeders without a decoder in the loop.
+  Future<String> ensureStreamableWav({
+    required String practiceId,
+    required String path,
+  }) async {
+    if (_parseWavAtPath(path) != null) return path;
+    final out = await punchIn(
+      practiceId: practiceId,
+      // split == 0 keeps nothing of old and never reads it (pinned by test);
+      // the source rides in as `new`.
+      oldPath: path,
+      newPath: path,
+      splitMs: 0,
+    );
+    if (out == null) {
+      throw const FormatException(
+        'This file could not be converted for playback.',
+      );
+    }
+    return out;
+  }
+
   /// Punch-in splice: produces a new WAV = `old[0..splitMs] ++ new`, where
   /// [splitMs] is the cursor offset from the START of [oldPath]'s audio. If the
   /// cursor lands past old's end the gap is silence-padded so [newPath] keeps

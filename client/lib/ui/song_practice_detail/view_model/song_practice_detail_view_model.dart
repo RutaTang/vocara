@@ -845,24 +845,37 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     return true;
   }
 
-  /// Imports [sourcePath] into the sandbox and runs [body] with the copy.
-  /// When any later step throws (waveform analysis, persistence), the copy
-  /// is deleted before the error propagates — a failed import must not
-  /// strand bytes in the official audio directory (repeat attempts used to
-  /// pile orphans until the trash sweep).
+  /// Imports [sourcePath] into the sandbox, TRANSCODES compressed media to an
+  /// engine-streamable WAV once (the industry import discipline — decode at
+  /// import, never in full at every open; see ensureStreamableWav), and runs
+  /// [body] with the playable copy. When any later step throws (transcode,
+  /// waveform analysis, persistence), every file this call created is
+  /// deleted before the error propagates — a failed import must not strand
+  /// bytes in the official audio directory (repeat attempts used to pile
+  /// orphans until the trash sweep).
   Future<void> _withImportedAudio(
     String sourcePath,
     Future<void> Function(String dest) body,
   ) async {
-    final dest = await _audioFiles.importAudio(
+    final imported = await _audioFiles.importAudio(
       practiceId: _practiceId,
       sourcePath: sourcePath,
     );
+    var dest = imported;
     try {
+      dest = await _edits.ensureStreamableWav(
+        practiceId: _practiceId,
+        path: imported,
+      );
+      if (dest != imported) {
+        // The compressed original is now redundant: the WAV is the track.
+        await _audioFiles.deleteAudio(imported);
+      }
       await body(dest);
     } catch (_) {
       try {
         await _audioFiles.deleteAudio(dest);
+        if (dest != imported) await _audioFiles.deleteAudio(imported);
       } catch (_) {
         // Best-effort: the orphan sweep remains the backstop.
       }
