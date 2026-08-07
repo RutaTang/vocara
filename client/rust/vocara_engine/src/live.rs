@@ -21,6 +21,24 @@ use crate::sample::{Smp, CHANNELS, ENGINE_SR};
 /// Max parameter commands applied per audio block (bounds RT work).
 const MAX_CMDS_PER_BLOCK: usize = 64;
 
+/// One contiguous PLAYING render span, mapping a range of the rendered-frame
+/// counter to its END position on the timeline (seqlock-published by the
+/// audio thread, read by the control thread). Silence spans (stopped
+/// transport) are GAPS in rendered-counter space — no segment is written.
+struct RenderSegment {
+    /// Seqlock version: odd while the audio thread is writing.
+    ver: AtomicU32,
+    r_start: AtomicU64,
+    r_end: AtomicU64,
+    tl_end: AtomicI64,
+}
+
+/// Segment-ring capacity. The consumed cursor only ever lags the render
+/// counter by the output FIFO (a handful of render blocks), so the mapping
+/// scans recent slots only; 64 covers the deepest in-flight window (an 8 kHz
+/// device, step 6) with an order of magnitude to spare.
+const SEG_RING: usize = 64;
+
 /// Transport state shared between the control and audio threads.
 pub struct Shared {
     frame: AtomicI64,
@@ -36,11 +54,26 @@ pub struct Shared {
     mon_rev_room: AtomicU32,
     mon_rev_damping: AtomicU32,
     mon_rev_wet: AtomicU32,
-    /// Engine-rate frames rendered ahead of what the device has played (the output-boundary
-    /// resampler's FIFO depth; 0 on the identity 48 kHz path). `frame` advances at RENDER
-    /// time, so the audible playhead trails it by this much — [`EngineHandle::frame`]
-    /// subtracts it so reported positions match what the listener hears.
-    out_backlog: AtomicU32,
+    /// CONSUMED-FRAMES CURSOR (the transport-honesty redesign). Three pieces:
+    ///
+    ///  * `rendered_total` — every engine frame the audio thread has rendered,
+    ///    playing or not (silence included), advanced at render time;
+    ///  * `consumed_total` — every rendered frame actually DELIVERED to the
+    ///    device: equal to `rendered_total` on the identity 48 kHz path (the
+    ///    callback renders straight into the device buffer), advanced by the
+    ///    resampler as it drains its FIFO otherwise — and advanced OVER frames
+    ///    a flush discards, so the two counters share one coordinate space;
+    ///  * the segment ring — playing spans of `rendered_total` mapped to
+    ///    timeline positions.
+    ///
+    /// The audible playhead is then map(consumed_total): exact through loop
+    /// wraps (pre-wrap frames map to pre-wrap timeline — the old
+    /// backlog-subtraction needed a clamp that misreported the position) and
+    /// exact at pause (the fold reads the mapping, not a depth estimate).
+    rendered_total: AtomicU64,
+    consumed_total: AtomicU64,
+    seg_head: AtomicU32,
+    segments: [RenderSegment; SEG_RING],
     /// Bumped by seek/pause: the resampler's FIFO still holds pre-seek/pre-pause audio, which
     /// must be dropped (not played out) for the transport to respond within one callback.
     out_flush: AtomicU32,
@@ -60,16 +93,97 @@ impl Shared {
             mon_rev_room: AtomicU32::new(0.6f32.to_bits()),
             mon_rev_damping: AtomicU32::new(0.5f32.to_bits()),
             mon_rev_wet: AtomicU32::new(0.2f32.to_bits()),
-            out_backlog: AtomicU32::new(0),
+            rendered_total: AtomicU64::new(0),
+            consumed_total: AtomicU64::new(0),
+            seg_head: AtomicU32::new(0),
+            segments: std::array::from_fn(|_| RenderSegment {
+                ver: AtomicU32::new(0),
+                r_start: AtomicU64::new(0),
+                r_end: AtomicU64::new(0),
+                tl_end: AtomicI64::new(0),
+            }),
             out_flush: AtomicU32::new(0),
         }
+    }
+
+    /// Audio-thread only: record one contiguous PLAYING span. Seqlock write —
+    /// version odd while the fields are torn.
+    fn push_segment(&self, r_start: u64, r_end: u64, tl_end: i64) {
+        let slot = (self.seg_head.load(Ordering::Relaxed) as usize) % SEG_RING;
+        let seg = &self.segments[slot];
+        seg.ver.fetch_add(1, Ordering::Release); // odd: write in progress
+        seg.r_start.store(r_start, Ordering::Relaxed);
+        seg.r_end.store(r_end, Ordering::Relaxed);
+        seg.tl_end.store(tl_end, Ordering::Relaxed);
+        seg.ver.fetch_add(1, Ordering::Release); // even: consistent
+        self.seg_head.fetch_add(1, Ordering::Release);
+    }
+
+    /// Control-thread: the timeline position of the last consumed frame —
+    /// map(consumed_total) over the segment ring. A cursor inside a playing
+    /// span maps linearly; a cursor in a silence gap (or past the newest
+    /// span, e.g. paused refill) holds at the last span it passed. None when
+    /// nothing has ever both rendered-playing and reached the device.
+    fn map_consumed(&self) -> Option<i64> {
+        let consumed = self.consumed_total.load(Ordering::Acquire);
+        let mut best: Option<(u64, i64)> = None; // (r_end of span, mapped tl)
+        for seg in &self.segments {
+            // Seqlock read: retry a torn slot a few times, then skip it (the
+            // cursor lives in RECENT slots; an old slot mid-overwrite is by
+            // definition not the one being mapped).
+            for _ in 0..3 {
+                let v1 = seg.ver.load(Ordering::Acquire);
+                if v1 % 2 != 0 {
+                    continue;
+                }
+                let r_start = seg.r_start.load(Ordering::Relaxed);
+                let r_end = seg.r_end.load(Ordering::Relaxed);
+                let tl_end = seg.tl_end.load(Ordering::Relaxed);
+                let v2 = seg.ver.load(Ordering::Acquire);
+                if v1 != v2 {
+                    continue;
+                }
+                if r_end == r_start {
+                    break; // never-written slot
+                }
+                if consumed >= r_end {
+                    // Fully consumed span: candidate "hold" position.
+                    if best.is_none_or(|(e, _)| r_end > e) {
+                        best = Some((r_end, tl_end));
+                    }
+                } else if consumed > r_start {
+                    // Cursor inside this span: exact linear map — this is the
+                    // newest span the cursor has reached, and spans are
+                    // disjoint in rendered space, so it wins outright.
+                    return Some(tl_end - (r_end - consumed) as i64);
+                }
+                break;
+            }
+        }
+        best.map(|(_, tl)| tl)
     }
 
     /// Publish the output resampler's un-played FIFO depth (engine-rate frames). Called by
     /// the stream callback after each device buffer (the device module; public so the
     /// dependency-free build doesn't flag it dead).
-    pub fn set_out_backlog(&self, frames: u32) {
-        self.out_backlog.store(frames, Ordering::Release);
+    /// Stream-callback only: [n] more rendered frames reached the device (or
+    /// were flush-DISCARDED and skipped over — either way the cursor moves
+    /// forward through rendered-counter space, never through content that
+    /// will re-render after the flush's clock rewind).
+    pub fn advance_consumed(&self, n: u64) {
+        if n > 0 {
+            self.consumed_total.fetch_add(n, Ordering::Release);
+        }
+    }
+
+    /// Identity-path (48 kHz) stream callback: the render IS the delivery, so
+    /// after rendering straight into the device buffer the cursor equals the
+    /// render counter exactly.
+    pub fn sync_consumed_to_rendered(&self) {
+        self.consumed_total.store(
+            self.rendered_total.load(Ordering::Acquire),
+            Ordering::Release,
+        );
     }
 
     /// The current flush generation; the resampler drops its FIFO when this changes.
@@ -137,6 +251,7 @@ impl RtProcessor {
             let ls = self.shared.loop_start.load(Ordering::Relaxed);
             let le = self.shared.loop_end.load(Ordering::Relaxed);
             let mut frame = self.shared.frame.load(Ordering::Relaxed);
+            let mut rendered = self.shared.rendered_total.load(Ordering::Relaxed);
 
             let mut done = 0;
             while done < frames {
@@ -150,6 +265,10 @@ impl RtProcessor {
                         for s in &mut out[done * CHANNELS..total] {
                             *s = 0.0;
                         }
+                        // Trailing silence still reaches the device: count it
+                        // (a GAP in segment space) so the consumed cursor and
+                        // the render counter share one coordinate system.
+                        rendered += (frames - done) as u64;
                         break;
                     }
                     chunk = chunk.min(to_end);
@@ -158,14 +277,31 @@ impl RtProcessor {
                 let e = (done + chunk) * CHANNELS;
                 g.render(chunk, frame, &mut out[s..e]);
                 frame += chunk as i64;
+                // One PLAYING span per contiguous sub-chunk: loop wraps split
+                // chunks here, so every segment is wrap-free and the consumed
+                // mapping is exact THROUGH a wrap (pre-wrap frames map to
+                // pre-wrap timeline; the old backlog subtraction could not
+                // express that and needed a clamp that misreported).
+                self.shared
+                    .push_segment(rendered, rendered + chunk as u64, frame);
+                rendered += chunk as u64;
                 done += chunk;
             }
             self.shared.frame.store(frame, Ordering::Release);
+            self.shared
+                .rendered_total
+                .store(rendered, Ordering::Release);
         } else {
             // Stopped transport: silence the playback bed, but still let the monitor through.
             for s in &mut out[..total] {
                 *s = 0.0;
             }
+            // Silence frames delivered while stopped are rendered frames too
+            // — a gap between segments, so a consumed cursor that reaches
+            // them HOLDS at the last playing span instead of drifting.
+            self.shared
+                .rendered_total
+                .fetch_add(frames as u64, Ordering::Release);
         }
 
         if monitor {
@@ -337,36 +473,21 @@ impl EngineHandle {
         self.shared.playing.store(true, Ordering::Release);
     }
     pub fn pause(&self) {
-        // IDEMPOTENT: swap-and-check so only the playing→paused transition folds. A second
-        // pause() would otherwise fold the SILENCE the paused callback has since parked in
-        // the FIFO (whose depth it dutifully republishes) into the clock — rewinding the
-        // reported position though nothing played.
+        // IDEMPOTENT: swap-and-check so only the playing→paused transition folds.
         if !self.shared.playing.swap(false, Ordering::AcqRel) {
             return;
         }
-        // Fold the un-played backlog into the clock ONCE: the paused position must be what
-        // the listener actually heard, not the render clock (which ran up to a block ahead
-        // on a non-48 kHz device). Rewinding also means resume re-renders exactly the frames
-        // that never reached the ears — no gap, no repeat. A callback already in flight when
-        // `playing` flipped can still advance `frame` after this subtraction (its audio was
-        // partially delivered anyway); that race is bounded by one device buffer and only
-        // costs precision, never correctness of the transport state.
-        let backlog = self.shared.out_backlog.swap(0, Ordering::AcqRel) as i64;
-        if backlog > 0 {
-            // Fold floor: right after a loop wrap the FIFO's backlog spans the wrap, so a
-            // raw subtraction from the just-wrapped clock would park the transport BEFORE
-            // loop_start — outside the loop region, a state error rather than lost
-            // precision. Clamp to loop_start whenever the clock sits inside an active loop.
-            let loop_en = self.shared.loop_enabled.load(Ordering::Acquire);
-            let ls = self.shared.loop_start.load(Ordering::Relaxed);
-            let le = self.shared.loop_end.load(Ordering::Relaxed);
-            let _ = self
-                .shared
-                .frame
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |f| {
-                    let floor = if loop_en && le > ls && f >= ls { ls } else { 0 };
-                    Some((f - backlog).max(floor))
-                });
+        // Fold the clock back to what the listener actually HEARD, read from
+        // the consumed-frames cursor: map(consumed_total) is exact — through
+        // loop wraps too, where the old backlog-depth subtraction could land
+        // before loop_start and had to clamp (misreporting the position).
+        // Rewinding means resume re-renders exactly the frames that never
+        // reached the ears — no gap, no repeat. A callback already in flight
+        // when `playing` flipped can still deliver up to one device buffer
+        // after this read; that race is physical (the listener heard those
+        // frames) and only costs the same bounded precision it always did.
+        if let Some(heard) = self.shared.map_consumed() {
+            self.shared.frame.store(heard, Ordering::Release);
         }
         // Drop the FIFO's pre-pause audio so the output falls silent within one callback.
         self.shared.out_flush.fetch_add(1, Ordering::Release);
@@ -381,10 +502,11 @@ impl EngineHandle {
     }
 
     /// Drop the output resampler's pre-rendered FIFO (it holds pre-seek/pre-pause audio the
-    /// listener must not hear) and zero the reported backlog until the callback republishes.
+    /// listener must not hear). The callback advances the consumed cursor
+    /// OVER the discarded frames when it processes the flush, keeping the
+    /// cursor and the render counter in one coordinate space.
     fn flush_out_boundary(&self) {
         self.shared.out_flush.fetch_add(1, Ordering::Release);
-        self.shared.out_backlog.store(0, Ordering::Release);
     }
     pub fn set_loop(&self, enabled: bool, start: i64, end: i64) {
         self.shared
@@ -413,31 +535,25 @@ impl EngineHandle {
             .mon_rev_wet
             .store(wet.clamp(0.0, 1.0).to_bits(), Ordering::Release);
     }
-    /// Current playhead in samples (atomic read). `frame` advances when a block RENDERS; on a
-    /// non-48 kHz device the output resampler holds up to one render block of that audio in
-    /// its FIFO before the listener hears it, so the audible playhead is `frame` minus that
-    /// backlog (0 on the identity path — no change there). Only while playing: a paused
-    /// engine's FIFO refills with silence, whose depth says nothing about position.
+    /// Current playhead in samples: the CONSUMED-frames cursor mapped back to
+    /// the timeline — what the listener is hearing, exactly, including
+    /// through loop wraps (pre-wrap frames map to pre-wrap timeline; the old
+    /// render-clock-minus-backlog arithmetic could not express a wrap and
+    /// clamped). A pending seek reports its target (the audio itself reaches
+    /// the device within the same one callback that applies it). Paused, the
+    /// clock holds the fold pause() latched. Before anything has ever been
+    /// delivered, the render clock is the only truth there is.
     pub fn frame(&self) -> i64 {
-        let rendered = self.shared.frame.load(Ordering::Acquire);
+        let seek = self.shared.seek_req.load(Ordering::Acquire);
+        if seek >= 0 {
+            return seek;
+        }
         if !self.shared.playing.load(Ordering::Acquire) {
-            // Paused: pause() already folded the backlog into the clock, and whatever the
-            // FIFO refills with afterwards is silence — its depth says nothing.
-            return rendered;
+            return self.shared.frame.load(Ordering::Acquire);
         }
-        let backlog = self.shared.out_backlog.load(Ordering::Acquire) as i64;
-        let compensated = (rendered - backlog).max(0);
-        // Loop wrap: right after the render clock wraps to loop_start, the FIFO still holds
-        // the PRE-wrap tail, so raw subtraction would report a position before the loop
-        // region. Clamping to loop_start trades a brief plateau for a false back-jump.
-        if self.shared.loop_enabled.load(Ordering::Acquire) {
-            let ls = self.shared.loop_start.load(Ordering::Relaxed);
-            let le = self.shared.loop_end.load(Ordering::Relaxed);
-            if le > ls && rendered >= ls && compensated < ls {
-                return ls;
-            }
-        }
-        compensated
+        self.shared
+            .map_consumed()
+            .unwrap_or_else(|| self.shared.frame.load(Ordering::Acquire))
     }
     pub fn sample_rate(&self) -> f64 {
         self.sr

@@ -543,10 +543,17 @@ moves.
 
 ## 7. Transport fidelity boundaries (as shipped)
 
-The output-boundary resampler (non-48 kHz devices) reports the playhead as
-`rendered − un-played FIFO backlog`, pause folds that backlog into the clock, seek/pause/
-play flush the FIFO, and stream rebuilds clear the shared backlog. Three boundaries are
-**deliberate** and documented rather than open bugs:
+The transport position is a **consumed-frames cursor** (implemented): every output path
+(identity cpal, the boundary resampler, VPIO) publishes the absolute engine-frame count
+actually DELIVERED to the device (`consumed_total`), the render loop publishes playing
+spans of the render counter mapped to timeline positions (a seqlock segment ring, one
+wrap-free segment per contiguous sub-chunk), and `frame()` / the pause fold read
+`map(consumed_total)` — exact through loop wraps (pre-wrap frames map to pre-wrap
+timeline; the old `rendered − backlog` arithmetic could not express a wrap and clamped)
+and exact at pause (a mapping, not a depth estimate). A flush advances the cursor OVER
+the discarded frames so it stays in the render counter's coordinate space; the ±1-frame
+interpolation lookahead is the only sub-frame ambiguity (pinned by test). Two boundaries
+remain **deliberate** and documented rather than open bugs:
 
 * **Pause fold vs. an in-flight callback.** `pause()` runs on the control thread; a device
   callback already inside `render_block` when `playing` flips can still advance the render
@@ -558,17 +565,9 @@ play flush the FIFO, and stream rebuilds clear the shared backlog. Three boundar
   behavior; snapshotting the whole graph's DSP state per pause is out of proportion to a
   ≤ one-block artifact.
 * **A device switch drops the old stream's un-played FIFO tail.** The old stream is gone;
-  its ≤ one render block of in-flight audio has no device to reach. Transferring FIFO
-  contents across stream generations is not worth the coupling.
-* **Loop wrap on a non-48 kHz device reports loop_start while the pre-wrap tail plays.**
-  `rendered − backlog` is ambiguous across the wrap (the FIFO's remaining frames belong to
-  the pre-wrap segment, whose true position is near loop_end); the playhead clamps to
-  loop_start for that ≤ one render block instead of jumping backwards. This is a KNOWN
-  SEMANTIC BOUNDARY, not a precision bound — only the consumed-frames cursor below removes
-  the ambiguity, because it tracks delivery, not rendering.
+  its ≤ one render block of in-flight audio has no device to reach. The cursor syncs over
+  the dropped tail at the next stream open, so the position stays consistent; transferring
+  FIFO contents across stream generations is still not worth the coupling.
 
-The clean long-term shape — noted for the next engine iteration — is a **consumed-frames
-cursor**: the output path (identity, resampler, VPIO) publishes the absolute engine-frame
-count actually delivered to the device, and `frame()` reads that cursor directly instead
-of reconstructing it as `rendered − backlog`. Pause, loop wrap, and stream switches then
-fall out for free.
+(The former loop-wrap clamp boundary is GONE: the consumed cursor maps positions exactly
+through a wrap. Its regression tests now pin exactness instead of the clamp.)

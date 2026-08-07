@@ -292,6 +292,14 @@ impl OutResampler {
         let gen = self.rt.transport().out_flush_gen();
         if gen != self.flush_gen {
             self.flush_gen = gen;
+            // The discarded frames were rendered but will never be heard —
+            // the consumed cursor SKIPS them so it stays in the render
+            // counter's coordinate space (their content re-renders after the
+            // transport's clock rewind; the cursor must not wait for frames
+            // that no longer exist).
+            self.rt
+                .transport()
+                .advance_consumed(self.fifo.len() as u64);
             self.fifo.clear();
             self.pos = 0.0;
         }
@@ -330,13 +338,13 @@ impl OutResampler {
                 let drop = consumed.min(self.fifo.len());
                 self.fifo.drain(0..drop);
                 self.pos -= drop as f64;
+                // These frames just reached the device: advance the consumed
+                // cursor, which the control side maps back to the timeline
+                // for the audible playhead (EngineHandle::frame).
+                self.rt.transport().advance_consumed(drop as u64);
             }
             done += chunk;
         }
-        // Publish the rendered-but-unheard depth so the control side can subtract it from
-        // the reported playhead (EngineHandle::frame) — without this, position/seek/pause
-        // on a non-48 kHz device read up to a render block (~21 ms) ahead of the sound.
-        self.rt.transport().set_out_backlog(self.fifo.len() as u32);
     }
 }
 
@@ -354,11 +362,11 @@ fn build_stream(
 ) -> Result<DeviceHandle, String> {
     let channels = config.channels as usize;
     let device_rate = config.sample_rate as f64;
-    // A previous non-48 kHz stream's resampler published its FIFO depth into the shared
-    // backlog; this stream starts with an empty (or no) FIFO, so a stale value would make
-    // the reported playhead permanently lag. Reset before any callback can run — the
-    // identity path never publishes, so this is its only corrector.
-    rt.transport().set_out_backlog(0);
+    // A previous non-48 kHz stream's resampler died with frames still in its
+    // FIFO: the consumed cursor would lag the render counter forever. This
+    // stream starts with an empty (or no) FIFO, so the cursor equals the
+    // render counter — sync before any callback can run.
+    rt.transport().sync_consumed_to_rendered();
     let err_cb = move |err| {
         // No logging/alloc on the error path: flag the loss for the host's device-event poll.
         let _ = err;
@@ -373,6 +381,8 @@ fn build_stream(
                 let frames = data.len() / channels;
                 // SAFETY: exactly one active stream callback dereferences the cell (see RtCell).
                 unsafe { rt.render(data, frames) };
+                // Identity path: the render IS the delivery.
+                rt.transport().sync_consumed_to_rendered();
             },
             err_cb,
             None,
@@ -922,9 +932,10 @@ fn open_mic(
     // Safe default; `Vpio::start` re-reconfigures the input cell from VPIO's *negotiated* format
     // (mono/stereo, native rate) after the unit initializes, which is what actually governs feed.
     input_cell.reconfigure(ENGINE_SR, CHANNELS);
-    // VPIO renders playback at 48 kHz with no boundary resampler: clear any backlog a
-    // non-48 kHz cpal stream left behind (see build_stream).
-    rt.transport().set_out_backlog(0);
+    // VPIO renders playback at 48 kHz with no boundary resampler: sync the
+    // consumed cursor over anything a dying non-48 kHz cpal stream left in
+    // its FIFO (see build_stream).
+    rt.transport().sync_consumed_to_rendered();
     crate::vpio::Vpio::start(
         uid,
         Arc::clone(input_cell),
@@ -2409,14 +2420,13 @@ mod out_resampler_tests {
     }
 
     #[test]
-    fn pause_right_after_a_loop_wrap_never_folds_before_loop_start() {
+    fn pause_right_after_a_loop_wrap_reports_the_exact_heard_position() {
         let (h, mut res) = ramp_engine();
-        // Loop [200, 700), region 500: the device consumes 480 (no wrap HEARD) but the
-        // renderer runs ahead in 128-frame blocks to 512, crossing the wrap — clock lands
-        // at 200 + 12, backlog is 32. An unclamped fold computes 212 − 32 = 180, BELOW
-        // loop_start: the violation needs region > consumed (the renderer's overshoot past
-        // the wrap smaller than the backlog), which the earlier fixtures never produced —
-        // remove the clamp and this test fails at 180.
+        // Loop [200, 700): the device consumes 480 engine frames from the seek target
+        // (no wrap HEARD yet) while the renderer runs ahead in 128-frame blocks ACROSS
+        // the wrap. The old render-clock-minus-backlog fold computed a position BEFORE
+        // loop_start here and clamped to 200 — inside the region, but wrong by 480
+        // frames. The consumed-cursor mapping reports the heard position EXACTLY.
         h.set_loop(true, 200, 700);
         h.seek(200);
         h.play();
@@ -2424,9 +2434,39 @@ mod out_resampler_tests {
         res.process(&mut out, 441);
         h.pause();
         let paused_at = h.frame();
+        // The interpolator holds ONE lookahead frame (out[i] needs fifo[i+1]),
+        // so the cursor sits at engine frame 479.<fraction> — exact to within
+        // the sub-frame the listener is mid-way through hearing.
         assert!(
-            (200..=700).contains(&paused_at),
-            "the pause fold must clamp inside the loop region, got {paused_at}"
+            (679..=680).contains(&paused_at),
+            "paused position must be the exact heard frame (~200 + 480), got {paused_at}"
+        );
+    }
+
+    #[test]
+    fn the_playhead_maps_exactly_through_a_loop_wrap() {
+        let (h, mut res) = ramp_engine();
+        // Loop [200, 700), seek to 200. Two device buffers consume 960 engine frames:
+        // 500 reach the wrap (timeline 200..700), the next 460 are post-wrap
+        // (timeline 200..660). The old arithmetic sat in its clamp plateau at 200
+        // through this window; the segment mapping reports 660 exactly — and never a
+        // false back-jump below loop_start on the way.
+        h.set_loop(true, 200, 700);
+        h.seek(200);
+        h.play();
+        let mut out = vec![0.0; 441 * CHANNELS];
+        res.process(&mut out, 441);
+        let pre_wrap = h.frame();
+        assert!(
+            (679..=680).contains(&pre_wrap),
+            "pre-wrap position is exact (~680, one interpolation lookahead), got {pre_wrap}"
+        );
+        res.process(&mut out, 441);
+        let after_wrap = h.frame();
+        assert!(
+            (659..=660).contains(&after_wrap),
+            "post-wrap position must map into the loop region exactly \
+             (~960 consumed = 500 to the wrap + ~460 after it), got {after_wrap}"
         );
     }
 

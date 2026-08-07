@@ -755,6 +755,9 @@ unsafe extern "C-unwind" fn output_cb(
         // Playback only: the VPIO output is the AEC reference, which must equal the backing track
         // (no monitored voice) or echo cancellation breaks down.
         ctx.rt.render_playback(scratch, frames);
+        // Identity delivery (VPIO renders at the engine rate straight into the
+        // element buffer): the consumed cursor equals the render counter.
+        ctx.rt.transport().sync_consumed_to_rendered();
         // The backing plays at its mixer level during recording (no auto-duck) — the singer lowers
         // it themselves if they want less bleed. The ref ring + speaker see the same signal, so the
         // AEC stays consistent (it cancels whatever the speaker actually plays).
