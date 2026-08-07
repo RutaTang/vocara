@@ -56,57 +56,87 @@ class AssetStore {
       gate.shared(() => _importFile(sourcePath, kind: kind));
 
   Future<String> _importFile(String sourcePath, {required String kind}) async {
-    final src = File(sourcePath);
-    final size = await src.length();
-    final hash = await _hashFile(src);
     final ext = p.extension(sourcePath).replaceFirst('.', '');
+    // ONE streaming pass produces the staged bytes, the hash AND the byte
+    // count together, so all three provably describe the same content. The
+    // old stat -> hash -> copy sequence opened the source three times with
+    // awaits between them: a source modified mid-import could put one file's
+    // bytes under another file's hash with a third file's recorded size.
+    final staged = await _stageToPool(File(sourcePath));
+    try {
+      // Promote BEFORE the row work: idempotent by content address, and it
+      // replaces a truncated crash leftover with the verified bytes whichever
+      // branch below wins.
+      final rel = await _promoteStaged(staged, ext);
+      // Dedup lookup and insert share ONE transaction so concurrent imports
+      // of the same bytes serialize at the database: check-then-insert across
+      // interleaved async flows minted one asset row per caller.
+      return await db.transaction<String>(() async {
+        // content_hash is intentionally NON-unique: identical bytes under two
+        // asset ULIDs across devices is the normal content-addressed steady
+        // state, so there can be MORE THAN ONE live row for a hash. Take the
+        // first deterministically (getSingleOrNull would throw on >1 match).
+        final existing =
+            await (db.select(db.assets)
+                  ..where(
+                    (a) =>
+                        a.contentHash.equals(staged.hash) &
+                        a.deletedAt.isNull(),
+                  )
+                  ..orderBy([(a) => OrderingTerm(expression: a.hlcPacked)])
+                  ..limit(1))
+                .getSingleOrNull();
+        if (existing != null) {
+          // Deduped: re-point the (per-device) path if this row's bytes went
+          // missing locally — the promote above already re-placed them.
+          final existingRel = existing.localRelPath;
+          final present =
+              existingRel != null &&
+              await File(p.join(root.path, existingRel)).exists();
+          if (!present) {
+            await (db.update(db.assets)..where((a) => a.id.equals(existing.id)))
+                .write(AssetsCompanion(localRelPath: Value(rel)));
+          }
+          return existing.id;
+        }
 
-    // content_hash is intentionally NON-unique: identical bytes under two asset
-    // ULIDs across devices is the normal content-addressed steady state, so
-    // there can be MORE THAN ONE live row for a hash. Take the first
-    // deterministically (getSingleOrNull would throw StateError on >1 match).
-    final existing =
-        await (db.select(db.assets)
-              ..where((a) => a.contentHash.equals(hash) & a.deletedAt.isNull())
-              ..orderBy([(a) => OrderingTerm(expression: a.hlcPacked)])
-              ..limit(1))
-            .getSingleOrNull();
-    if (existing != null) {
-      await _ensureMaterialized(existing, src, hash, ext);
-      return existing.id;
+        final id = newId();
+        final stamp = writer.stamp();
+        await db
+            .into(db.assets)
+            .insert(
+              AssetsCompanion.insert(
+                id: id,
+                contentHash: staged.hash,
+                byteSize: staged.size,
+                ext: Value(ext),
+                kind: Value(kind),
+                localRelPath: Value(rel),
+                createdAt: stamp.at,
+                updatedAt: stamp.at,
+                hlcWall: stamp.hlc.wallMs,
+                hlcCtr: stamp.hlc.counter,
+                hlcNode: stamp.hlc.node,
+                hlcPacked: stamp.hlc.packed,
+              ),
+            );
+        await writer.journal(
+          table: 'assets',
+          id: id,
+          op: 'insert',
+          hlc: stamp.hlc,
+          payloadHash: staged.hash,
+        );
+        return id;
+      });
+    } finally {
+      // The promote path renames the staging file away; on every other exit
+      // (dedup hit, promote failure, DB failure) it must not linger.
+      final tmp = File(staged.tmpPath);
+      try {
+        if (await tmp.exists()) await tmp.delete();
+      } catch (_) {}
     }
-
-    final rel = await _placeFile(src, hash, ext);
-    final id = newId();
-    final stamp = writer.stamp();
-    await db.transaction(() async {
-      await db
-          .into(db.assets)
-          .insert(
-            AssetsCompanion.insert(
-              id: id,
-              contentHash: hash,
-              byteSize: size,
-              ext: Value(ext),
-              kind: Value(kind),
-              localRelPath: Value(rel),
-              createdAt: stamp.at,
-              updatedAt: stamp.at,
-              hlcWall: stamp.hlc.wallMs,
-              hlcCtr: stamp.hlc.counter,
-              hlcNode: stamp.hlc.node,
-              hlcPacked: stamp.hlc.packed,
-            ),
-          );
-      await writer.journal(
-        table: 'assets',
-        id: id,
-        op: 'insert',
-        hlc: stamp.hlc,
-        payloadHash: hash,
-      );
-    });
-    return id;
   }
 
   /// A stable reference to an asset whose BYTES aren't present locally, encoded
@@ -146,52 +176,70 @@ class AssetStore {
     return p.join('assets', hash.substring(0, 2), hash.substring(2, 4), name);
   }
 
-  Future<String> _placeFile(File src, String hash, String ext) async {
-    final rel = relPathFor(hash, ext);
-    final dest = File(p.join(root.path, rel));
-    if (await dest.exists()) return rel; // identical bytes already pooled
-    await dest.parent.create(recursive: true);
-    final part = File('${dest.path}.part');
+  /// One streaming pass over [src]: the bytes land in a uniquely named
+  /// staging file inside the pool tree while the sha256 and byte count
+  /// accumulate over exactly the bytes written. The staging name is a fresh
+  /// ULID — concurrent imports of the same content each stage privately and
+  /// converge only at the (idempotent) promote rename, where the old shared
+  /// `<hash>.part` name made them tear each other's copy apart.
+  Future<_StagedImport> _stageToPool(File src) async {
+    final stagingDir = Directory(p.join(root.path, 'assets', '.staging'));
+    await stagingDir.create(recursive: true);
+    final tmp = File(p.join(stagingDir.path, '${newId()}.part'));
+    final sink = tmp.openWrite();
+    Digest? digest;
+    final hasher = sha256.startChunkedConversion(
+      ChunkedConversionSink<Digest>.withCallback((ds) => digest = ds.single),
+    );
+    var size = 0;
     try {
-      await src.copy(part.path);
-      await fs.fsyncFile(part.path);
-      // A concurrent import of the same hash may have placed it first; rename is
-      // idempotent enough (overwrites with identical bytes).
-      await fs.atomicRename(part.path, dest.path);
-      await fs.fsyncDir(dest.parent.path);
+      // addStream applies backpressure (the source pauses while a chunk is
+      // being written), so memory stays flat on multi-gigabyte imports.
+      await sink.addStream(
+        src.openRead().map((chunk) {
+          hasher.add(chunk);
+          size += chunk.length;
+          return chunk;
+        }),
+      );
+      await sink.close();
+      hasher.close();
     } catch (_) {
-      // Don't leave a partial .part on a failed/disk-full copy; surface the
-      // error so the save fails loudly instead of silently dropping the take.
-      if (await part.exists()) {
-        try {
-          await part.delete();
-        } catch (_) {}
-      }
+      // Don't leave a partial staging file on a failed/disk-full copy;
+      // surface the error so the save fails loudly instead of silently
+      // dropping the take.
+      try {
+        await sink.close();
+      } catch (_) {}
+      try {
+        if (await tmp.exists()) await tmp.delete();
+      } catch (_) {}
       rethrow;
     }
-    return rel;
-  }
-
-  /// If a deduped asset's file went missing locally (GC'd, or never downloaded),
-  /// re-place it and repoint its (local-only) path — no oplog, it's per-device.
-  Future<void> _ensureMaterialized(
-    AssetRow existing,
-    File src,
-    String hash,
-    String ext,
-  ) async {
-    final rel = existing.localRelPath;
-    final present = rel != null && await File(p.join(root.path, rel)).exists();
-    if (present) return;
-    final newRel = await _placeFile(src, hash, ext);
-    await (db.update(db.assets)..where((a) => a.id.equals(existing.id))).write(
-      AssetsCompanion(localRelPath: Value(newRel)),
+    return _StagedImport(
+      hash: digest!.toString(),
+      size: size,
+      tmpPath: tmp.path,
     );
   }
 
-  Future<String> _hashFile(File f) async {
-    final digest = await sha256.bind(f.openRead()).first;
-    return digest.toString();
+  /// Moves a staged file to its content address. An already-present pool file
+  /// is reused only when its length matches the staged byte count — a
+  /// truncated crash leftover is replaced by the fresh, verified bytes
+  /// instead of being trusted on existence alone.
+  Future<String> _promoteStaged(_StagedImport staged, String ext) async {
+    final rel = relPathFor(staged.hash, ext);
+    final dest = File(p.join(root.path, rel));
+    if (await dest.exists() && await dest.length() == staged.size) {
+      return rel; // identical bytes already pooled
+    }
+    await dest.parent.create(recursive: true);
+    await fs.fsyncFile(staged.tmpPath);
+    // A concurrent import of the same hash may have placed it first; rename
+    // is idempotent enough (overwrites with identical bytes).
+    await fs.atomicRename(staged.tmpPath, dest.path);
+    await fs.fsyncDir(dest.parent.path);
+    return rel;
   }
 
   /// Clears the transient staging trees (`audio/`, `technique_media/`) where
@@ -541,8 +589,8 @@ class AssetStore {
 
   /// Reclaims pool files that no LIVE asset references — by moving them into
   /// [trashDir] (recoverable until [pruneTrash] ages them out). Two cases:
-  ///  - a crash between the pool write in [_placeFile] and the asset-row transaction
-  ///    in [importFile] leaves a file with NO row at all; and
+  ///  - a crash between the pool write in [_promoteStaged] and the asset-row
+  ///    transaction in [importFile] leaves a file with NO row at all; and
   ///  - a crash between the tombstone commit and the file reclaim in [sweepUnreferenced]
   ///    leaves a file whose only rows are tombstoned (which [sweepUnreferenced] never
   ///    revisits, since it iterates only live rows).
@@ -665,4 +713,18 @@ class AssetStore {
     }
     return removed;
   }
+}
+
+/// The outcome of [AssetStore._stageToPool]: hash and byte count measured
+/// over exactly the bytes staged at [tmpPath] — one pass, one truth.
+class _StagedImport {
+  const _StagedImport({
+    required this.hash,
+    required this.size,
+    required this.tmpPath,
+  });
+
+  final String hash;
+  final int size;
+  final String tmpPath;
 }
