@@ -50,23 +50,26 @@ void main() {
       );
     });
 
-    test(
-      'rejects non-http(s) URLs so a manifest cannot open anything else',
-      () {
-        expect(
-          UpdateCheckService.parseManifest(
-            '{"latest": "9.0.0", "url": "file:///Applications"}',
-          ),
-          isNull,
-        );
-        expect(
-          UpdateCheckService.parseManifest(
-            '{"latest": "9.0.0", "url": "/usr/bin/say"}',
-          ),
-          isNull,
-        );
-      },
-    );
+    test('rejects non-https URLs so a manifest cannot open anything else', () {
+      expect(
+        UpdateCheckService.parseManifest(
+          '{"latest": "9.0.0", "url": "file:///Applications"}',
+        ),
+        isNull,
+      );
+      expect(
+        UpdateCheckService.parseManifest(
+          '{"latest": "9.0.0", "url": "/usr/bin/say"}',
+        ),
+        isNull,
+      );
+      expect(
+        UpdateCheckService.parseManifest(
+          '{"latest": "9.0.0", "url": "http://example.com/dl"}',
+        ),
+        isNull,
+      );
+    });
   });
 
   group('isNewer', () {

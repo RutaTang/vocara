@@ -73,10 +73,13 @@ class UpdateCheckService extends ChangeNotifier {
   /// The running app's version. Keep in sync with pubspec.yaml `version:`
   /// (the part before `+`). Vocara does not depend on package_info_plus
   /// directly, so this const is the single source the check compares against.
+  /// A unit test (`update_check_version_sync_test.dart`) pins it to
+  /// pubspec.yaml, so a release with a stale constant fails CI's test gate
+  /// instead of shipping an app that mis-identifies its own version.
   static const String appVersion = '0.1.0';
 
   /// The running app's build number. Keep in sync with pubspec.yaml
-  /// `version:` (the part after `+`).
+  /// `version:` (the part after `+`); pinned by the same unit test.
   static const String appBuildNumber = '1';
 
   final UpdateFetcher _fetch;
@@ -160,7 +163,8 @@ class UpdateCheckService extends ChangeNotifier {
   /// Parses a manifest body into an [UpdateInfo], or null when it isn't one.
   /// Accepts the plain `{latest, url, notes}` shape and GitHub's
   /// releases/latest shape (`tag_name` / `html_url` / `body`). The URL must
-  /// be http(s) — a manifest can't make the app open anything else.
+  /// be https — a tampered or downgraded manifest must not be able to point
+  /// users at a plaintext download page, let alone a non-web URL.
   @visibleForTesting
   static UpdateInfo? parseManifest(String body) {
     try {
@@ -172,7 +176,7 @@ class UpdateCheckService extends ChangeNotifier {
       if (version is! String || version.trim().isEmpty) return null;
       if (url is! String) return null;
       final uri = Uri.tryParse(url.trim());
-      if (uri == null || (uri.scheme != 'https' && uri.scheme != 'http')) {
+      if (uri == null || uri.scheme != 'https') {
         return null;
       }
       return UpdateInfo(
