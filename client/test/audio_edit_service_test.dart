@@ -96,7 +96,76 @@ Uint8List _wavWithFmt({
   return b.toBytes();
 }
 
+/// The `data` chunk payload of a canonical (RIFF + fmt + data) WAV.
+Uint8List _dataChunk(Uint8List wav) {
+  final dv = ByteData.sublistView(wav);
+  var at = 12;
+  while (at + 8 <= wav.length) {
+    final id = String.fromCharCodes(wav, at, at + 4);
+    final size = dv.getUint32(at + 4, Endian.little);
+    if (id == 'data') return Uint8List.sublistView(wav, at + 8, at + 8 + size);
+    at += 8 + size + (size.isOdd ? 1 : 0);
+  }
+  throw StateError('no data chunk');
+}
+
 void main() {
+  // Regression guard: the split point was clamped against the RAW data length,
+  // so a data chunk that isn't a whole number of frames could put the cut
+  // INSIDE a frame — the second half then starts on the wrong channel and
+  // plays with the stereo image swapped for its whole length.
+  test('splitWav cuts on a frame boundary even when the data chunk is '
+      'a partial frame long', () async {
+    final dir = await Directory.systemTemp.createTemp('vocara_edit');
+    addTearDown(() => dir.delete(recursive: true));
+
+    const blockAlign = 4; // stereo, 16-bit
+    const frames = 100;
+    // 100 whole frames plus a stray half frame, as a write cut short leaves.
+    final data = Uint8List(frames * blockAlign + 2);
+    for (var i = 0; i < data.length; i++) {
+      data[i] = i & 0xFF;
+    }
+    final srcPath = '${dir.path}/ragged.wav';
+    await File(srcPath).writeAsBytes(
+      _wavWithFmt(
+        formatTag: 1,
+        channels: 2,
+        sampleRate: 8000,
+        blockAlign: blockAlign,
+        bits: 16,
+        data: data,
+      ),
+    );
+
+    final edit = AudioEditService(files: _TempFiles(dir));
+    // Far past the end, so the cut clamps to the last legal frame boundary —
+    // the case that used to land on the ragged tail.
+    final parts = await edit.splitWav(
+      practiceId: 'P0000000000000000000000000',
+      sourcePath: srcPath,
+      splitFileMs: 60000,
+    );
+
+    final first = _dataChunk(await File(parts.firstPath).readAsBytes());
+    final second = _dataChunk(await File(parts.secondPath).readAsBytes());
+    expect(
+      first.length % blockAlign,
+      0,
+      reason: 'the cut must not split a frame',
+    );
+    expect(second.length % blockAlign, 0);
+    expect(
+      first.length + second.length,
+      frames * blockAlign,
+      reason: 'the trailing partial frame is dropped, never duplicated',
+    );
+    // Byte-for-byte continuous: the second half resumes exactly where the
+    // first ended (a mid-frame cut would offset it by two bytes).
+    expect(first, data.sublist(0, first.length));
+    expect(second, data.sublist(first.length, first.length + second.length));
+  });
+
   test(
     'splitWav cuts a take into two parts that rejoin to the original',
     () async {

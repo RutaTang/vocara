@@ -469,16 +469,21 @@ class AudioEditService {
         'WAV files can be split.',
       );
     }
+    // Work in WHOLE frames: a data chunk that isn't a frame multiple (a header
+    // from a write cut short) would otherwise let the clamp below land the cut
+    // INSIDE a frame, and the second half would then start on the wrong channel
+    // — swapped stereo for the rest of the take.
+    final usable = (w.dataLen ~/ w.blockAlign) * w.blockAlign;
     // Need at least one frame on each side. A 0-length / sub-2-frame take (e.g. a
     // recording quit mid-capture) would otherwise give clamp bounds where lower >
     // upper, and num.clamp throws an opaque ArgumentError instead of this message.
-    if (w.dataLen < 2 * w.blockAlign) {
+    if (usable < 2 * w.blockAlign) {
       throw const FormatException('This take is too short to split.');
     }
     final frame = (splitFileMs / 1000 * w.sampleRate).round();
     final cut = (frame * w.blockAlign).clamp(
       w.blockAlign,
-      w.dataLen - w.blockAlign,
+      usable - w.blockAlign,
     );
 
     final firstPath = await _newEditPath(practiceId: practiceId);
@@ -496,7 +501,9 @@ class AudioEditService {
         try {
           for (final (tmpPath, start, len) in [
             (tmpFirst, w.dataStart, cut),
-            (tmpSecond, w.dataStart + cut, w.dataLen - cut),
+            // `usable`, not dataLen: a trailing partial frame is dropped, not
+            // carried into the second half as a half-frame of noise.
+            (tmpSecond, w.dataStart + cut, usable - cut),
           ]) {
             final out = File(tmpPath).openSync(mode: FileMode.write);
             try {
