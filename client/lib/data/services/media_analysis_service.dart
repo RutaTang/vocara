@@ -61,6 +61,15 @@ class MediaAnalysisService {
 
   static TechniqueAnalysis? _analyze(Float32List samples, int sampleRate) {
     if (samples.isEmpty || sampleRate <= 0) return null;
+    // Drop non-finite samples before any DSP touches them, exactly as the WAV
+    // path does when it narrows to Float32 (see SpectrogramService's chunked
+    // reader): one NaN or Inf poisons the FFT, every aggregate derived from
+    // it, and — because the spectrogram's peak goes with it — the whole heat
+    // image. This path decodes ARBITRARY media through the native engine, so
+    // it has strictly more ways to produce one than the WAV path does.
+    for (var i = 0; i < samples.length; i++) {
+      if (!samples[i].isFinite) samples[i] = 0.0;
+    }
     final metrics = computeVoiceMetrics(samples, sampleRate);
     final spectrogram = computeSpectrogram(samples, sampleRate);
     return TechniqueAnalysis(

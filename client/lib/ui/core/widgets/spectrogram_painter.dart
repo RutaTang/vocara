@@ -36,7 +36,12 @@ const _stops = <List<int>>[
 
 void _heat(double t, Uint8List px, int idx) {
   final n = _stops.length - 1;
-  final scaled = (t < 0 ? 0.0 : (t > 1 ? 1.0 : t)) * n;
+  // A NON-FINITE t fails BOTH comparisons of the clamp and would reach
+  // `floor()` as NaN, which throws UnsupportedError and takes the whole dock
+  // down. Map it to the bottom of the scale — the "nothing measurable here"
+  // colour, which is what an unusable bin should look like.
+  final clamped = t.isFinite ? (t < 0 ? 0.0 : (t > 1 ? 1.0 : t)) : 0.0;
+  final scaled = clamped * n;
   var i = scaled.floor();
   if (i >= n) i = n - 1;
   final f = scaled - i;
@@ -71,7 +76,10 @@ Future<ui.Image> renderSpectrogramImage(
     return blank.future;
   }
   final pixels = Uint8List(w * h * 4);
-  final ceil = s.maxDb < _minCeilDb ? _minCeilDb : s.maxDb;
+  // A non-finite peak would make ceil, floor and range all NaN, so every bin
+  // would come out non-finite rather than just the offending ones.
+  final peak = s.maxDb.isFinite ? s.maxDb : _minCeilDb;
+  final ceil = peak < _minCeilDb ? _minCeilDb : peak;
   final floor = ceil - dynamicRangeDb;
   final range = (ceil - floor) <= 0 ? 1.0 : (ceil - floor);
 
