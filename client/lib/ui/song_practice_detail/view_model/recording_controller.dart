@@ -303,8 +303,8 @@ class RecordingController extends ChangeNotifier {
     inputLevel.value = _meterFromPeak(peak);
     _recPeaks.add(peak);
     recordingPeaks.value = UnmodifiableListView(_recPeaks);
-    _playback.position.value = Duration(
-      milliseconds: _recordingStartMs + recordingDurationMs,
+    _playback.setRecordingPosition(
+      Duration(milliseconds: _recordingStartMs + recordingDurationMs),
     );
   }
 
@@ -387,7 +387,7 @@ class RecordingController extends ChangeNotifier {
       _playback.engine.setLoop(false, 0, 0);
       await _playback.engine.seek(Duration(milliseconds: _recordingStartMs));
       if (stopped()) return;
-      _playback.position.value = Duration(milliseconds: _recordingStartMs);
+      _playback.setRecordingPosition(Duration(milliseconds: _recordingStartMs));
       await _playback.engine.play();
       if (stopped()) {
         // A stop landed between the check above and play(): its own pause may

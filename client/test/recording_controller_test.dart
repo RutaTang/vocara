@@ -46,6 +46,11 @@ class _FakePlayback extends Fake implements PlaybackController {
 
   @override
   final ValueNotifier<Duration> position = ValueNotifier(Duration.zero);
+
+  /// The record clock's playhead write (it also follows the viewport on the
+  /// real controller; here only the value matters).
+  @override
+  void setRecordingPosition(Duration to) => position.value = to;
 }
 
 /// resyncPlayback parks each call on its own completer, so a take's

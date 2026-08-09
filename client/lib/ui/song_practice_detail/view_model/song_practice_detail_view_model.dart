@@ -689,12 +689,15 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     }
   }
 
-  /// Applies text saved from the editor: parsed as `.lrc` if it carries time
-  /// tags (so pasting LRC just works), otherwise as plain text (keeping times).
+  /// Applies text saved from the editor: parsed as `.lrc` when the WHOLE text
+  /// reads as an LRC document (so pasting LRC just works), otherwise as plain
+  /// text (keeping times). The whole-document test matters here and not on the
+  /// import path: `parseLrc` drops untimed lines by design, so routing on a
+  /// single stray `[04:33]` would delete every other line the user typed.
   /// Returns whether it persisted — a failed write reverts the model to what's
   /// on disk, so the editor must stay open on false or the draft is lost.
   Future<bool> applyEditedLyrics(String text) {
-    if (looksLikeLrc(text)) {
+    if (isLrcDocument(text)) {
       return importLyrics(text);
     }
     return setLyricsText(text);
@@ -1091,10 +1094,6 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     // lanes, so the primary clip's file IS the original recording.
     final original = practice.reference ?? source;
     final originalPath = original.primaryClip?.audioFilePath ?? '';
-    final baseName = original.displayName.replaceAll(
-      RegExp(r'\s*\(Instrumental\)$'),
-      '',
-    );
 
     _separationProgress = 0;
     notifyListeners();
@@ -1125,6 +1124,37 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         var saved = false;
         try {
           final instAnalysis = await _waveforms.analyze(instDest);
+          // Re-read the LIVE practice: notes / lyrics / interpretations may have been
+          // edited (and persisted) during the minutes-long separation. Build on the
+          // current state so those edits are not clobbered by the pre-await snapshot
+          // (mirrors addAccompaniment / addReference).
+          final cur = _practice;
+          if (cur == null) {
+            await _audioFiles.deleteAudio(instDest);
+            return;
+          }
+          // The ORIGINAL lane is re-read too, not just the practice around it.
+          // Renames and note/marker edits are NOT busy-gated, and separation is
+          // the longest operation in the app — folding the pre-await snapshot
+          // back in would overwrite everything the user added to that lane
+          // while it ran (and the save tombstones the notes).
+          final liveOriginal = cur.reference?.id == original.id
+              ? cur.reference
+              : (cur.accompaniment?.id == original.id
+                    ? cur.accompaniment
+                    : null);
+          if (liveOriginal == null ||
+              liveOriginal.primaryClip?.audioFilePath != originalPath) {
+            // The lane was replaced or removed while separating: the stems
+            // describe audio this project no longer has.
+            await _audioFiles.deleteAudio(instDest);
+            _toast('The original changed while separating. Try again.');
+            return;
+          }
+          final baseName = liveOriginal.displayName.replaceAll(
+            RegExp(r'\s*\(Instrumental\)$'),
+            '',
+          );
           final instrumental = AudioTrack(
             id: newId(),
             kind: AudioTrackKind.accompaniment,
@@ -1137,29 +1167,20 @@ class SongPracticeDetailViewModel extends ChangeNotifier
           // Keep the original as the Reference track. If it isn't already the
           // reference (e.g. it was dropped into the accompaniment slot), recreate
           // it with the reference kind so the Original stays available.
-          final referenceTrack = original.isReference
-              ? original
+          final referenceTrack = liveOriginal.isReference
+              ? liveOriginal
               : AudioTrack(
-                  id: original.id,
+                  id: liveOriginal.id,
                   kind: AudioTrackKind.reference,
-                  displayName: original.displayName,
-                  clips: original.clips,
-                  notes: original.notes,
-                  techniqueMarkers: original.techniqueMarkers,
-                  colorValue: original.colorValue,
-                  volume: original.volume,
-                  createdAt: original.createdAt,
+                  displayName: liveOriginal.displayName,
+                  clips: liveOriginal.clips,
+                  notes: liveOriginal.notes,
+                  techniqueMarkers: liveOriginal.techniqueMarkers,
+                  colorValue: liveOriginal.colorValue,
+                  volume: liveOriginal.volume,
+                  createdAt: liveOriginal.createdAt,
                 );
 
-          // Re-read the LIVE practice: notes / lyrics / interpretations may have been
-          // edited (and persisted) during the minutes-long separation. Build on the
-          // current state so those edits are not clobbered by the pre-await snapshot
-          // (mirrors addAccompaniment / addReference).
-          final cur = _practice;
-          if (cur == null) {
-            await _audioFiles.deleteAudio(instDest);
-            return;
-          }
           oldAccompaniment = cur.accompaniment;
           oldReference = cur.reference;
           final prevPlayRef = mixer.playReference;
