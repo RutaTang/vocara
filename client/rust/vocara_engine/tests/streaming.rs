@@ -73,7 +73,7 @@ fn render_streamed(
         feeder.pump(h.transport()).unwrap();
         let s = b * BLOCK * CHANNELS;
         let e = s + BLOCK * CHANNELS;
-        unsafe { rt.render(&mut out[s..e], BLOCK) };
+        rt.render_offline(&mut out[s..e], BLOCK);
         rt.transport().sync_consumed_to_rendered();
     }
     out
@@ -84,7 +84,7 @@ fn render_arc(_h: &EngineHandle, rt: &Arc<RtCell>, blocks: usize) -> Vec<Smp> {
     for b in 0..blocks {
         let s = b * BLOCK * CHANNELS;
         let e = s + BLOCK * CHANNELS;
-        unsafe { rt.render(&mut out[s..e], BLOCK) };
+        rt.render_offline(&mut out[s..e], BLOCK);
         rt.transport().sync_consumed_to_rendered();
     }
     out
@@ -226,7 +226,7 @@ fn starvation_produces_counted_silence_and_self_heals() {
     // the tail of the window starves.
     feeder.pump(h.transport()).unwrap();
     let mut out = vec![0.0; 30 * BLOCK * CHANNELS];
-    unsafe { rt.render(&mut out, 30 * BLOCK) };
+    rt.render_offline(&mut out, 30 * BLOCK);
     rt.transport().sync_consumed_to_rendered();
     let starved_tail = &out[(29 * BLOCK) * CHANNELS..];
     assert!(
@@ -239,7 +239,7 @@ fn starvation_produces_counted_silence_and_self_heals() {
     let (h2, rt2) = engine_with(Box::new(BufferSource::new(ramp_pcm(frames), 0)));
     h2.play();
     let mut skip = vec![0.0; 30 * BLOCK * CHANNELS];
-    unsafe { rt2.render(&mut skip, 30 * BLOCK) };
+    rt2.render_offline(&mut skip, 30 * BLOCK);
     rt2.transport().sync_consumed_to_rendered();
     let healed_arc = render_arc(&h2, &rt2, 4);
     assert_eq!(

@@ -177,3 +177,91 @@ fn set_param_reaches_node() {
         rms(&out)
     );
 }
+
+/// A node with two DISTINCT input ports: it writes `in0 - in1`, so a renderer
+/// that fed port 1 the same buffer as port 0 (or nothing at all) is visible in
+/// the output rather than merely suspected.
+struct DifferenceNode {
+    ports: usize,
+}
+
+impl vocara_engine::node::Node for DifferenceNode {
+    fn prepare(&mut self, _sample_rate: f64, _max_block: usize) {}
+
+    fn process(&mut self, io: &mut vocara_engine::node::ProcessIo) {
+        let n = io.frames * CHANNELS;
+        let a = io.inputs[0];
+        let b = io.inputs[1];
+        let out = &mut io.outputs[0];
+        for i in 0..n {
+            out[i] = a[i] - b[i];
+        }
+    }
+
+    fn num_in(&self) -> usize {
+        self.ports
+    }
+}
+
+#[test]
+fn every_declared_input_port_reaches_the_node() {
+    // src1(0.5) -> port 0, src2(0.3) -> port 1 of a 2-input node -> master.
+    // The renderer used to build a one-element input array and truncate the
+    // slice to it, so port 1 silently never arrived: this rendered 0.5, not
+    // the 0.2 the node's own contract asks for.
+    let desc = GraphDesc {
+        nodes: vec![
+            NodeEntry::new(1, Box::new(BufferSource::new(dc(0.5, 500), 0))),
+            NodeEntry::new(2, Box::new(BufferSource::new(dc(0.3, 500), 0))),
+            NodeEntry::new(3, Box::new(DifferenceNode { ports: 2 })),
+            NodeEntry::new(4, Box::new(MasterNode::unity())),
+        ],
+        edges: vec![
+            Edge {
+                from: 1,
+                from_port: 0,
+                to: 3,
+                to_port: 0,
+            },
+            Edge {
+                from: 2,
+                from_port: 0,
+                to: 3,
+                to_port: 1,
+            },
+            Edge::simple(3, 4),
+        ],
+        master: 4,
+    };
+    let mut g = desc.compile(SR, BLOCK).unwrap();
+    let mut out = vec![0.0; 128 * CHANNELS];
+    g.render(128, 0, &mut out);
+    for &s in &out {
+        assert!(
+            (s - 0.2).abs() < 1e-4,
+            "port 1 must reach the node: expected 0.2, got {s}"
+        );
+    }
+}
+
+#[test]
+fn more_input_ports_than_the_renderer_can_hand_over_is_rejected() {
+    // The bound exists because the renderer's port array is on the stack (the
+    // audio thread allocates nothing per block). Exceeding it must fail at
+    // compile, where the old graph keeps playing — never at render, and never
+    // by quietly dropping the extra ports.
+    let desc = GraphDesc {
+        nodes: vec![NodeEntry::new(
+            7,
+            Box::new(DifferenceNode {
+                ports: vocara_engine::graph::MAX_IN + 1,
+            }),
+        )],
+        edges: vec![],
+        master: 7,
+    };
+    assert_eq!(
+        desc.compile(SR, BLOCK).err(),
+        Some(CompileError::TooManyInputs(7))
+    );
+}

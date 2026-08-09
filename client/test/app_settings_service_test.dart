@@ -50,9 +50,17 @@ class _FakeStorage implements LocalStorageService {
 class _FakeEngine extends Fake implements GraphAudioPlaybackService {
   final outputCalls = <String>[];
   final inputCalls = <String>[];
+  final monitorGains = <double>[];
+
+  /// What the engine reports it is RENDERING to — which is not the selection while the duplex
+  /// mic unit owns the output. '' = nothing open / unknown.
+  String actualOutput = '';
 
   @override
   double get sampleRate => 48000.0;
+
+  @override
+  String actualOutputDevice() => actualOutput;
 
   @override
   bool setOutputDevice(String uid) {
@@ -67,7 +75,7 @@ class _FakeEngine extends Fake implements GraphAudioPlaybackService {
   }
 
   @override
-  void setMonitorGain(double gain) {}
+  void setMonitorGain(double gain) => monitorGains.add(gain);
 
   @override
   void setInputGain(double gain) {}
@@ -145,6 +153,49 @@ void main() {
         outs = [_builtInOut, _headphones];
         service.refreshDevices();
         // Back on the (headphone-named) pick, the monitor is allowed again.
+        expect(service.monitorAllowed, isTrue);
+      },
+    );
+
+    test(
+      'monitorAllowed follows what the engine RENDERS to, not the pick',
+      () async {
+        // The scenario the selection-based test cannot see: headphones are selected and present,
+        // but opening the mic hands the output to the duplex unit, which renders through the
+        // microphone's endpoint or the system default — here, the built-in speakers. Judging the
+        // selection would leave the monitor up and howling into them.
+        outs = [_builtInOut, _headphones];
+        storage.doc = {'outputDeviceUid': _headphones.uid};
+        await service.load();
+        final engine = _FakeEngine();
+        service.attachEngine(engine);
+        expect(service.monitorAllowed, isTrue, reason: 'on the chosen device');
+
+        engine.actualOutput = _builtInOut.uid;
+        engine.monitorGains.clear();
+        service.reconcileMonitorSafety();
+        expect(service.monitorAllowed, isFalse);
+        expect(engine.monitorGains, [0.0]);
+
+        // Back on the chosen device, the fader is honoured again.
+        engine.actualOutput = _headphones.uid;
+        service.reconcileMonitorSafety();
+        expect(service.monitorAllowed, isTrue);
+      },
+    );
+
+    test(
+      'an unenumerable rendering device falls back to judging the selection',
+      () async {
+        // Aggregate/virtual devices and uid-format drift can name something the panel never
+        // enumerates. Refusing to judge at all would mute a legitimate headphone monitor with
+        // nothing on screen to explain it, so this degrades to the pre-existing behaviour.
+        outs = [_builtInOut, _headphones];
+        storage.doc = {'outputDeviceUid': _headphones.uid};
+        await service.load();
+        final engine = _FakeEngine()..actualOutput = 'aggregate-42';
+        service.attachEngine(engine);
+        service.reconcileMonitorSafety();
         expect(service.monitorAllowed, isTrue);
       },
     );
@@ -266,6 +317,44 @@ void main() {
       await Future<void>.delayed(Duration.zero);
       // The in-memory rename still took effect; only persistence degraded.
       expect(service.outputDeviceName, _headphones.name);
+    });
+  });
+
+  group('a write the disk refuses', () {
+    // Every setter is wired into the panel as a `void` callback, so the Future
+    // it returns is discarded by the UI. The failure therefore has to live in
+    // observable state, not in that Future: otherwise it lands in the root
+    // zone as a spurious crash report while the panel shows a value the disk
+    // never took.
+    test(
+      'an awaited setter neither throws nor leaks, and reports the failure',
+      () async {
+        storage.failWrites = true;
+        var notified = 0;
+        service.addListener(() => notified++);
+
+        // Called exactly as the panel calls it: through a void-typed callback,
+        // so the Future it returns is dropped on the floor.
+        final void Function(String?) callback = service.setOutputDevice;
+        callback(_headphones.uid);
+        await Future<void>.delayed(Duration.zero);
+
+        expect(service.persistFailed, isTrue);
+        expect(notified, greaterThan(0)); // the panel gets to render the banner
+        // The choice is live regardless — only its durability degraded.
+        expect(service.outputDeviceUid, _headphones.uid);
+      },
+    );
+
+    test('the failure flag clears once a write lands again', () async {
+      storage.failWrites = true;
+      await service.setInputDevice(_builtInMic.uid);
+      expect(service.persistFailed, isTrue);
+
+      storage.failWrites = false;
+      await service.commitAudioGains();
+      expect(service.persistFailed, isFalse);
+      expect(storage.lastWrite?['inputDeviceUid'], _builtInMic.uid);
     });
   });
 

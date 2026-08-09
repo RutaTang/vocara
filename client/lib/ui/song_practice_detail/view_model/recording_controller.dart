@@ -655,11 +655,29 @@ class RecordingController extends ChangeNotifier {
             GraphAudioPlaybackService.eventInputLost |
             GraphAudioPlaybackService.eventAecBypassed |
             GraphAudioPlaybackService.eventInputFellBack |
-            GraphAudioPlaybackService.eventRecordLimit,
+            GraphAudioPlaybackService.eventRecordLimit |
+            GraphAudioPlaybackService.eventOutputRerouted,
       );
+      // Opening the mic hands the output to the duplex unit, which can move playback off the
+      // selected device without any device SET changing — so monitor safety has to be re-derived
+      // on the tick, not only when refreshDevices sees a difference.
+      _appSettings.reconcileMonitorSafety();
       if (events & 1 != 0) {
-        // Output lost: re-open the current output so transport doesn't freeze.
+        // Output lost: re-open the current output so transport doesn't freeze. Deliberately the
+        // REQUESTED device, not the one currently rendering: re-asking for the user's pick
+        // re-attaches it if it came back, where re-asking for a fallback would strand them there.
         engine.setOutputDevice(engine.currentOutputDevice());
+      }
+      if (events & GraphAudioPlaybackService.eventOutputRerouted != 0) {
+        // Playback is not on the device the user chose. Most often this is the mic opening: the
+        // duplex unit renders through the microphone's endpoint or the system default, so the
+        // backing track moves too — it is not only the monitor that is affected, and saying so is
+        // the difference between "my headphones went quiet" and a mystery.
+        _toast(
+          'Playback moved off your selected output device while the '
+          'microphone is open. Hear-yourself monitoring is muted until it '
+          'returns.',
+        );
       }
       if (events & 8 != 0) {
         // The selected microphone could not be opened; capture fell back to

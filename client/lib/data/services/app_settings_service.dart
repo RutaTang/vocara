@@ -156,17 +156,62 @@ class AppSettingsService extends ChangeNotifier {
     return out.uid == inp.uid && (out.isBluetooth || inp.isBluetooth);
   }
 
-  /// Whether the audible monitor (hear-yourself) is allowed: only when the effective output is
-  /// HEADPHONES (no acoustic path back to the mic). On a built-in/external SPEAKER the mic
-  /// re-captures the monitored voice → howling feedback, so the monitor is locked off there.
-  bool get monitorAllowed {
-    final out = _effective(_outputDevices, _outputDeviceUid);
+  /// Whether the audible monitor (hear-yourself) is allowed: only when the device actually
+  /// RENDERING is headphones (no acoustic path back to the mic). On a built-in/external SPEAKER
+  /// the mic re-captures the monitored voice → howling feedback, so the monitor is locked off.
+  ///
+  /// Judged from what the engine is playing through, not from the selection: while the duplex mic
+  /// unit owns the output, playback follows the microphone's endpoint or the system default, so
+  /// "the user picked AirPods" can be true while the sound is coming out of the built-in speakers.
+  /// The engine hard-mutes the monitor in that case anyway (its `EVENT_OUTPUT_REROUTED`); this
+  /// keeps the fader honest about it. Falls back to the selection when the engine reports nothing
+  /// or names a device the panel cannot enumerate — never worse than judging the selection alone.
+  bool get monitorAllowed => _isHeadphoneLike(_renderingDevice);
+
+  /// The device to judge feedback safety on: what the engine is actually rendering to, else the
+  /// effective selection.
+  AudioDevice? get _renderingDevice {
+    if (_actualOutputUid.isNotEmpty) {
+      final d = _byUid(_outputDevices, _actualOutputUid);
+      if (d != null) return d;
+    }
+    return _effective(_outputDevices, _outputDeviceUid);
+  }
+
+  /// Last uid the engine reported rendering to. CACHED, not read per access: [monitorAllowed] is
+  /// read from widget builds (the MON fader's enabled state), and resolving it natively walks the
+  /// device list. Refreshed wherever the routing can have moved — which is also why the ENGINE
+  /// owns the hard mute rather than trusting this: a stale value here is bounded by one tick,
+  /// and the engine's own reroute check has no such window.
+  String _actualOutputUid = '';
+
+  static bool _isHeadphoneLike(AudioDevice? out) {
     if (out == null) return false; // unknown → safe default: off
     if (out.isBluetooth) return true; // Bluetooth ≈ headphones
     final n = out.name.toLowerCase();
     return n.contains('headphone') ||
         n.contains('earphone') ||
         n.contains('airpod');
+  }
+
+  /// Re-evaluate monitor feedback safety against the device the engine is CURRENTLY rendering to
+  /// and push the resulting gain. Cheap; call it from any tick that could have seen the output
+  /// move — opening the mic hands the output to the duplex unit, which can reroute playback
+  /// without any device set changing, so [refreshDevices] alone would not notice.
+  void reconcileMonitorSafety() {
+    final changed = _refreshActualOutput();
+    _applyMonitorGain();
+    // The MON fader's enabled state is derived from this, so a change has to reach the panel.
+    if (changed) notifyListeners();
+  }
+
+  // Re-read the engine's rendering device into [_actualOutputUid]; true when it moved. Never
+  // notifies — callers that already run outside a build own that.
+  bool _refreshActualOutput() {
+    final actual = _engine?.actualOutputDevice() ?? '';
+    if (actual == _actualOutputUid) return false;
+    _actualOutputUid = actual;
+    return true;
   }
 
   // The monitor gain actually sent to the engine: the fader value on headphones, forced to 0 on a
@@ -260,6 +305,7 @@ class AppSettingsService extends ChangeNotifier {
       // monitor gain whenever it changes — the initial attach can run before the
       // (microtask-deferred) device list is populated and force the gain to 0;
       // without this re-apply the MON fader reads up but the engine stays muted.
+      _refreshActualOutput();
       _applyMonitorGain();
       notifyListeners();
     }
@@ -293,19 +339,9 @@ class AppSettingsService extends ChangeNotifier {
       dirty = true;
     }
     // Fire-and-forget: a failed name persist only degrades the offline label.
-    // The write can throw (LocalStorageService.write rethrows I/O failures),
-    // so swallow-and-log here — an unhandled async error in a discarded
-    // future would otherwise hit the root zone as a spurious crash report.
-    if (dirty) {
-      unawaited(
-        _persist().catchError((Object e) {
-          DiagnosticsLog.instance.log(
-            'settings',
-            'device-name persist failed: ${e.runtimeType}',
-          );
-        }),
-      );
-    }
+    // [_persist] absorbs the failure itself, so nothing escapes into the root
+    // zone as a spurious crash report.
+    if (dirty) unawaited(_persist());
   }
 
   /// Attach the active engine. Applies the persisted devices immediately so a freshly-created
@@ -335,6 +371,7 @@ class AppSettingsService extends ChangeNotifier {
       _monitorReverbWet,
     );
     engine.setInputGain(_dbToLinear(_recordGainDb));
+    _refreshActualOutput();
     _applyMonitorGain();
   }
 
@@ -355,10 +392,14 @@ class AppSettingsService extends ChangeNotifier {
     // selection: passing '' makes the native side fall back to the default output. Without this
     // the engine would keep the previously-selected device while monitorAllowed is recomputed from
     // the OS default — which could un-mute the hear-yourself monitor into a speaker (feedback).
-    // set_output_device blocks for the host reply, so the engine is on the resulting device before
-    // we re-evaluate monitor safety below.
+    // set_output_device blocks for the host reply, so the engine has finished ACTING on the
+    // request before monitor safety is re-evaluated below. That is not the same as being on the
+    // requested device: while the mic is open the duplex unit owns the output and the host only
+    // RECORDS the pick for later, and a device that fails to open falls back to the default. So
+    // the re-evaluation below reads what the engine says it is rendering to, not this uid.
     _engine?.setOutputDevice(uid ?? '');
     // Re-evaluate monitor safety for the new output (speaker → force the monitor off).
+    _refreshActualOutput();
     _applyMonitorGain();
     notifyListeners();
     await _persist();
@@ -411,13 +452,46 @@ class AppSettingsService extends ChangeNotifier {
   /// Persist the record + monitor gains (call on a fader's release).
   Future<void> commitAudioGains() => _persist();
 
-  Future<void> _persist() => _storage.write(_collection, _docId, {
-    _kOutputUid: _outputDeviceUid,
-    _kInputUid: _inputDeviceUid,
-    _kOutputName: _outputDeviceName,
-    _kInputName: _inputDeviceName,
-    _kReverbWet: _monitorReverbWet,
-    _kRecordGainDb: _recordGainDb,
-    _kMonitorGain: _monitorGain,
-  });
+  /// True when the last settings write did NOT reach disk (a full or
+  /// read-only disk, revoked permissions). The panel keeps showing what the
+  /// user picked — the engine really is on it — but a restart reads the older
+  /// document back, so the UI has to say so instead of quietly lying.
+  bool get persistFailed => _persistFailed;
+  bool _persistFailed = false;
+
+  /// Writes the whole settings document.
+  ///
+  /// NEVER throws. Every caller is a UI callback typed `void` (a device row's
+  /// onSelect, a fader's onEnd), and Dart happily discards the Future those
+  /// callbacks return: a rethrown I/O failure became an unhandled async error
+  /// in the root zone — a spurious crash report — while the panel went on
+  /// showing a value the disk had refused. The outcome belongs in state that
+  /// the UI can render, not in a Future no call site can hold.
+  Future<void> _persist() async {
+    try {
+      await _storage.write(_collection, _docId, {
+        _kOutputUid: _outputDeviceUid,
+        _kInputUid: _inputDeviceUid,
+        _kOutputName: _outputDeviceName,
+        _kInputName: _inputDeviceName,
+        _kReverbWet: _monitorReverbWet,
+        _kRecordGainDb: _recordGainDb,
+        _kMonitorGain: _monitorGain,
+      });
+      _setPersistFailed(false);
+    } catch (e) {
+      DiagnosticsLog.instance.log(
+        'settings',
+        'settings persist failed (${e.runtimeType}); the choice is live but '
+            'will not survive a restart',
+      );
+      _setPersistFailed(true);
+    }
+  }
+
+  void _setPersistFailed(bool failed) {
+    if (_persistFailed == failed) return;
+    _persistFailed = failed;
+    notifyListeners();
+  }
 }

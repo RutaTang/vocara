@@ -50,10 +50,18 @@ size_t ve_enum_output_devices(VeDeviceInfo *out, size_t cap);
 int ve_set_output_device(VeEngine *e, const char *uid);
 /* Write the active output UID into `buf` (<= cap, NUL-terminated); returns its byte length. */
 size_t ve_current_output_device(VeEngine *e, char *buf, size_t cap);
+/* Write the UID the engine is ACTUALLY rendering to (empty = nothing open). Differs from
+ * ve_current_output_device, which reports what was REQUESTED: they diverge when the requested
+ * device could not be opened, and for as long as the duplex VPIO unit owns the output, where
+ * playback follows the microphone's endpoint or the system default. Judge monitor-feedback
+ * safety from this one. Returns its byte length. */
+size_t ve_actual_output_device(VeEngine *e, char *buf, size_t cap);
 /* Poll + clear the pending device events selected by `mask` (bit 1 = output
  * lost, bit 2 = input lost, bit 4 = mic opened WITHOUT echo cancellation,
  * bit 8 = selected input unavailable, fell back to the system default,
- * bit 16 = the take reached the longest recording a WAV header can describe).
+ * bit 16 = the take reached the longest recording a WAV header can describe,
+ * bit 32 = playback is not on the selected output device — the monitor is
+ * muted while that holds).
  * Returns the claimed bits; bits outside the mask stay pending for their own
  * consumer. 0 = none. */
 uint32_t ve_poll_device_event(VeEngine *e, uint32_t mask);

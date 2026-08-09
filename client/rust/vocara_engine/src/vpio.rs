@@ -168,6 +168,10 @@ fn zero_buffer() -> AudioBuffer {
 /// `InputCell` as interleaved f32. Owns the lent descriptor + an interleave scratch (no RT alloc).
 struct InCtx {
     input: Arc<InputCell>,
+    /// The input-stream generation this unit was built with. The cell denies a feed once a newer
+    /// stream has claimed it, which is how a callback surviving a failed `AudioOutputUnitStop`
+    /// stops racing its replacement (see [`crate::live::RtCell`]).
+    epoch: u64,
     unit: AudioUnit,
     abl: AblN,
     /// Buffer we SUPPLY to `AudioUnitRender` (VPIO copies the captured mic into it). Supplying our
@@ -214,6 +218,8 @@ unsafe impl Send for InCtx {}
 /// AEC reference). Owns an interleaved render scratch it then writes into VPIO's real layout.
 struct OutCtx {
     rt: Arc<RtCell>,
+    /// The output-stream generation this unit was built with; see [`InCtx::epoch`].
+    epoch: u64,
     /// Interleaved stereo render scratch (`MAX_FRAMES * CHANNELS`).
     scratch: Vec<f32>,
     /// Mono downmix of the rendered backing, pushed to the AEC far-end ring (the echo reference).
@@ -232,7 +238,10 @@ unsafe impl Send for OutCtx {}
 /// A live VoiceProcessingIO unit. Drop stops + disposes it (RAII), mirroring `DeviceHandle`.
 pub struct Vpio {
     unit: AudioUnit,
-    _in: Box<InCtx>,
+    /// Callback refcons: the callbacks hold their raw addresses, so these must outlive the
+    /// unit. `Option` so a failed stop can leak them instead of freeing memory a surviving
+    /// callback still dereferences (see [`Drop`]).
+    _in: Option<Box<InCtx>>,
     _out: Option<Box<OutCtx>>,
     started: bool,
 }
@@ -243,7 +252,9 @@ unsafe impl Send for Vpio {}
 impl Vpio {
     /// Create + initialize + start a VPIO unit feeding `input` (mic) and, when `with_output`,
     /// rendering `rt` to the speaker through element 0 (enables AEC). `device_uid` selects the
-    /// input device (None / unresolvable → system default). MUST run on the AudioHost thread.
+    /// input device: None = system default; a UID that cannot be resolved or bound is an ERROR,
+    /// not a silent fallback — the caller (`device.rs::open_mic`) owns retrying on the default and
+    /// telling the user. MUST run on the AudioHost thread.
     pub fn start(
         device_uid: Option<&str>,
         input: Arc<InputCell>,
@@ -251,6 +262,19 @@ impl Vpio {
         with_output: bool,
         event: Arc<AtomicU32>,
     ) -> Result<Vpio, String> {
+        // Resolve the selected input device BEFORE building anything. An unresolvable UID must
+        // FAIL the open: the host only learns of a fallback when `start` returns Err (device.rs
+        // `open_mic` → `or_else`), and only then does it publish an empty actual-device and raise
+        // `EVENT_INPUT_FELL_BACK`. Proceeding on the system default instead would record the wrong
+        // mic while the UI still names the selected one. Matches the non-Apple path, which already
+        // errors with "input device {uid} not found".
+        let bound_dev = match device_uid {
+            Some(uid) => match device_id_for_uid(uid) {
+                Some(id) => Some(id),
+                None => return Err(format!("input device {uid} not found")),
+            },
+            None => None,
+        };
         unsafe {
             let mut desc = AudioComponentDescription {
                 componentType: kAudioUnitType_Output,
@@ -308,16 +332,20 @@ impl Vpio {
                 return bail(unit, e);
             }
 
-            // Bind the selected input device (best-effort; default device on failure).
-            if let Some(uid) = device_uid {
-                if let Some(dev_id) = device_id_for_uid(uid) {
-                    let _ = set_u32(
-                        unit,
-                        kAudioOutputUnitProperty_CurrentDevice,
-                        kAudioUnitScope_Global,
-                        0,
-                        dev_id,
-                    );
+            // Bind the selected input device. A REJECTED bind fails the open for the same reason
+            // an unresolvable UID does (see `bound_dev` above): the caller owns the default-device
+            // fallback and the user-facing notice, and a swallowed failure here captures from
+            // another device entirely with nothing anywhere reporting it. Kept AFTER EnableIO and
+            // BEFORE the `set_asbd` calls — setting CurrentDevice resets the stream formats.
+            if let Some(dev_id) = bound_dev {
+                if let Err(e) = set_u32(
+                    unit,
+                    kAudioOutputUnitProperty_CurrentDevice,
+                    kAudioUnitScope_Global,
+                    0,
+                    dev_id,
+                ) {
+                    return bail(unit, e);
                 }
             }
 
@@ -362,8 +390,12 @@ impl Vpio {
                 channels: REQ_CH as usize,
                 rate: VPIO_RATE,
             };
+            // Retire every older callback before this unit can deliver or render a frame.
+            let in_epoch = input.claim();
+            let out_epoch = rt.claim();
             let mut in_ctx = Box::new(InCtx {
                 input,
+                epoch: in_epoch,
                 unit,
                 abl: AblN {
                     m_number_buffers: 1,
@@ -388,6 +420,7 @@ impl Vpio {
             let mut out_ctx = if with_output {
                 Some(Box::new(OutCtx {
                     rt,
+                    epoch: out_epoch,
                     scratch: vec![0.0; MAX_FRAMES * CHANNELS],
                     ref_prod,
                     push_ref: true,
@@ -502,7 +535,7 @@ impl Vpio {
 
             Ok(Vpio {
                 unit,
-                _in: in_ctx,
+                _in: Some(in_ctx),
                 _out: out_ctx,
                 started: true,
             })
@@ -510,7 +543,10 @@ impl Vpio {
     }
 
     /// Stop + uninitialize + dispose. Idempotent. MUST run on the AudioHost thread.
-    fn stop(&mut self) {
+    ///
+    /// Returns false when the stop FAILED, i.e. the unit may still be running its callbacks. The
+    /// unit is then deliberately left alive (not uninitialized, not disposed) — see [`Drop`].
+    fn stop(&mut self) -> bool {
         unsafe {
             if !self.unit.is_null() {
                 if self.started {
@@ -523,6 +559,14 @@ impl Vpio {
                         // grace epoch (the pre-gate behavior) instead of being freed under a
                         // possibly-live callback.
                         crate::device::note_stream_teardown_failure();
+                        // Leave the unit initialized and undisposed: uninitializing or disposing
+                        // it while a callback may be inside frees the refcon contexts out from
+                        // under it, which is a use-after-free, not merely a data race. The
+                        // callbacks themselves are already harmless — the cells retire them by
+                        // epoch — so a leaked, silently-rendering unit is the cheap outcome. It
+                        // is also bounded: this needs CoreAudio's stop to fail, which is not a
+                        // path a session takes repeatedly.
+                        return false;
                     }
                     AudioUnitUninitialize(self.unit);
                     self.started = false;
@@ -530,6 +574,7 @@ impl Vpio {
                 AudioComponentInstanceDispose(self.unit);
                 self.unit = std::ptr::null_mut();
             }
+            true
         }
     }
 }
@@ -537,7 +582,18 @@ impl Vpio {
 impl Drop for Vpio {
     fn drop(&mut self) {
         // Stop (joins the RT callback) BEFORE the contexts are freed: no callback runs afterward.
-        self.stop();
+        if !self.stop() {
+            // The stop failed, so a callback may still be inside. Its refcons are the addresses
+            // of `_in` / `_out`, which this drop is about to free — leak them instead. `stop`
+            // left the unit alive for the same reason, and both cells have already retired this
+            // generation, so what leaks renders silence and feeds nothing.
+            if let Some(inp) = self._in.take() {
+                std::mem::forget(inp);
+            }
+            if let Some(out) = self._out.take() {
+                std::mem::forget(out);
+            }
+        }
     }
 }
 
@@ -784,7 +840,9 @@ unsafe extern "C-unwind" fn input_cb(
             ctx.scratch[2 * i] = s;
             ctx.scratch[2 * i + 1] = s;
         }
-        ctx.input.feed_rt(&ctx.scratch[..n * CHANNELS]);
+        // A denied feed drops the block rather than racing a second producer into rings that
+        // have exactly one producer by construction.
+        ctx.input.try_feed(ctx.epoch, &ctx.scratch[..n * CHANNELS]);
         0
     }));
     res.unwrap_or(-1)
@@ -820,28 +878,37 @@ unsafe extern "C-unwind" fn output_cb(
         let scratch = &mut ctx.scratch[..need];
         // Playback only: the VPIO output is the AEC reference, which must equal the backing track
         // (no monitored voice) or echo cancellation breaks down.
-        ctx.rt.render_playback(scratch, frames);
-        // Identity delivery (VPIO renders at the engine rate straight into the
-        // element buffer): the consumed cursor equals the render counter.
-        ctx.rt.transport().sync_consumed_to_rendered();
-        // The backing plays at its mixer level during recording (no auto-duck) — the singer lowers
-        // it themselves if they want less bleed. The ref ring + speaker see the same signal, so the
-        // AEC stays consistent (it cancels whatever the speaker actually plays).
-        // Publish the mono backing to the AEC far-end ring (the echo reference for input_cb). Drops
-        // on a full ring (back-pressure; input_cb keeps it drained 1:1 every duplex cycle).
-        // Skipped when the AEC is bypassed (mismatched element rates): the input side never
-        // pops then, so pushing would only fill the ring to capacity for nothing.
-        if ctx.push_ref {
-            for i in 0..frames {
-                let _ = ctx
-                    .ref_prod
-                    .push(0.5 * (scratch[2 * i] + scratch[2 * i + 1]));
+        // A denial means this callback was retired by a newer output stream (or a zombie is
+        // still inside the processor). Everything downstream is then skipped, not just the
+        // render: silence goes to the device, the consumed cursor is NOT stamped (it would move
+        // the playhead over audio nobody produced), and no silence is pushed into the AEC
+        // reference ring, which input_cb pairs 1:1 with real far-end audio.
+        if ctx.rt.try_render_playback(ctx.epoch, scratch, frames) {
+            // Identity delivery (VPIO renders at the engine rate straight into the
+            // element buffer): the consumed cursor equals the render counter.
+            ctx.rt.transport().sync_consumed_to_rendered();
+            // The backing plays at its mixer level during recording (no auto-duck) — the singer
+            // lowers it themselves if they want less bleed. The ref ring + speaker see the same
+            // signal, so the AEC stays consistent (it cancels whatever the speaker actually
+            // plays). Publish the mono backing to the AEC far-end ring (the echo reference for
+            // input_cb). Drops on a full ring (back-pressure; input_cb keeps it drained 1:1
+            // every duplex cycle). Skipped when the AEC is bypassed (mismatched element rates):
+            // the input side never pops then, so pushing would only fill the ring for nothing.
+            if ctx.push_ref {
+                for i in 0..frames {
+                    let _ = ctx
+                        .ref_prod
+                        .push(0.5 * (scratch[2 * i] + scratch[2 * i + 1]));
+                }
             }
+            // Self-monitor: add the singer's voice to the OUTPUT (headphones) — AFTER the
+            // reference is captured, so the voice never enters the AEC reference. Silent at
+            // monitor gain 0 (the default, e.g. on a speaker where it would feed back); the
+            // mixer's monitor fader raises it.
+            ctx.rt.try_mix_monitor(ctx.epoch, scratch, frames);
+        } else {
+            scratch.fill(0.0);
         }
-        // Self-monitor: add the singer's voice to the OUTPUT (headphones) — AFTER the reference is
-        // captured, so the voice never enters the AEC reference. Silent at monitor gain 0 (the
-        // default, e.g. on a speaker where it would feed back); the mixer's monitor fader raises it.
-        ctx.rt.mix_monitor(scratch, frames);
 
         let bufs = std::slice::from_raw_parts_mut(abl.mBuffers.as_mut_ptr(), nbuf);
         if nbuf == 1 {
@@ -1101,8 +1168,9 @@ fn tune_io_and_round_trip(device_uid: Option<&str>) -> u32 {
 
 // ---- UID → AudioDeviceID via the HAL ----------------------------------------------------------
 
-/// Resolve a CoreAudio device UID to an `AudioDeviceID`. `None` on any failure (caller falls back
-/// to the unit's default device). Not RT — called only during `start`.
+/// Resolve a CoreAudio device UID to an `AudioDeviceID`. `None` on any failure, including the
+/// ordinary "the device is gone" case. `start` treats that as an error rather than binding the
+/// default behind the user's back. Not RT — called only during `start`.
 fn device_id_for_uid(uid: &str) -> Option<u32> {
     use objc2_core_audio::{
         kAudioHardwarePropertyTranslateUIDToDevice, kAudioObjectPropertyElementMain,
@@ -1135,5 +1203,64 @@ fn device_id_for_uid(uid: &str) -> Option<u32> {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dsp::master::MasterNode;
+    use crate::graph::{Edge, GraphDesc, NodeEntry};
+    use crate::live::spawn;
+    use crate::sample::Smp;
+    use std::collections::HashMap;
+    use std::sync::atomic::AtomicU64;
+
+    const BLOCK: usize = 128;
+
+    /// The minimum shared state `Vpio::start` needs. No audio hardware is touched: the device
+    /// resolution this test exercises happens before any AudioUnit is created.
+    fn cells() -> (Arc<InputCell>, Arc<RtCell>, Arc<AtomicU32>) {
+        let desc = GraphDesc {
+            nodes: vec![NodeEntry::new(1, Box::new(MasterNode::unity()))],
+            edges: Vec::<Edge>::new(),
+            master: 1,
+        };
+        let g = desc.compile(ENGINE_SR, BLOCK).unwrap();
+        let (_mic_prod, mic_cons) = spsc::<[Smp; CHANNELS]>(256);
+        let (_h, rt) = spawn(g, HashMap::new(), mic_cons, 256);
+        let (mic_prod, _mic_rx) = spsc::<[Smp; CHANNELS]>(256);
+        let (cap_prod, _cap_rx) = spsc::<[Smp; CHANNELS]>(8);
+        let (rec_prod, _rec_rx) = spsc::<[Smp; CHANNELS]>(8);
+        let event = Arc::new(AtomicU32::new(0));
+        let input = InputCell::new(
+            mic_prod,
+            cap_prod,
+            rec_prod,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(1.0f64.to_bits())),
+            Arc::new(AtomicU64::new(0)),
+            Arc::clone(&event),
+        );
+        (input, RtCell::new(rt), event)
+    }
+
+    /// The whole point of failing here: the host learns a mic fell back ONLY from an `Err` out of
+    /// `start` (device.rs `open_mic` → `or_else`), and only then publishes an empty actual-device
+    /// and raises EVENT_INPUT_FELL_BACK. A best-effort bind captured from the system default while
+    /// the UI kept naming the selected mic. Asserting the exact message keeps the test honest on a
+    /// machine with no mic, where a regressed `start` would fail later for an unrelated reason.
+    #[test]
+    fn an_unresolvable_input_uid_fails_the_open_instead_of_binding_the_default() {
+        let (input, rt, event) = cells();
+        let err = Vpio::start(Some("vocara-no-such-device"), input, rt, false, event)
+            .err()
+            .expect("an unresolvable UID must not open on the system default");
+        assert_eq!(err, "input device vocara-no-such-device not found");
     }
 }

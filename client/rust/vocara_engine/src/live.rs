@@ -63,6 +63,13 @@ pub struct Shared {
     seek_req: AtomicI64, // >= 0: pending seek target; -1: none
     /// Live-input monitor gain target (f32 bits). 0 = muted; the audio thread ramps to it.
     mon_target: AtomicU32,
+    /// Hard safety mute for the monitor, owned by the audio host — NOT by the UI. Raised while
+    /// playback has left the output device the user selected (see `device::OutputBinding`), where
+    /// the "these are headphones, monitoring is safe" judgement made from the SELECTION no longer
+    /// describes what is actually making sound. Deliberately a separate flag from [`Self::
+    /// mon_target`]: the fader writes that one continuously, so a safety decision stored there
+    /// would be stomped by the next drag.
+    mon_muted: AtomicBool,
     /// Monitor reverb params (f32 bits): room size, damping, wet amount.
     mon_rev_room: AtomicU32,
     mon_rev_damping: AtomicU32,
@@ -103,6 +110,7 @@ impl Shared {
             loop_end: AtomicI64::new(0),
             seek_req: AtomicI64::new(-1),
             mon_target: AtomicU32::new(0), // 0.0f32 bits
+            mon_muted: AtomicBool::new(false),
             mon_rev_room: AtomicU32::new(0.6f32.to_bits()),
             mon_rev_damping: AtomicU32::new(0.5f32.to_bits()),
             mon_rev_wet: AtomicU32::new(0.2f32.to_bits()),
@@ -225,6 +233,25 @@ impl Shared {
     /// estimator compares the input counter against.
     pub fn consumed_frames(&self) -> u64 {
         self.consumed_total.load(Ordering::Acquire)
+    }
+
+    /// Engine frames PRODUCED so far. Delivery can never outrun production, which is the
+    /// invariant a retired callback pushing un-rendered frames into a FIFO would break.
+    #[cfg(test)]
+    pub(crate) fn rendered_frames_for_test(&self) -> u64 {
+        self.rendered_total.load(Ordering::Acquire)
+    }
+
+    /// Raise/clear the host's monitor safety mute (see [`Shared::mon_muted`]). Owned by
+    /// `device::reconcile_output_safety`; idempotent, and it clears itself once playback is back
+    /// on the user's chosen output, so no other caller has to remember to lift it.
+    pub fn set_monitor_muted(&self, muted: bool) {
+        self.mon_muted.store(muted, Ordering::Release);
+    }
+
+    /// Whether the host's monitor safety mute is engaged.
+    pub fn monitor_muted(&self) -> bool {
+        self.mon_muted.load(Ordering::Acquire)
     }
 
     // Plan-basis reads for the streaming feeders (crate::feed): a change in
@@ -382,9 +409,14 @@ impl RtProcessor {
     /// the input stream is closed, so this is cheap when monitoring is off.
     #[inline]
     fn mix_monitor(&mut self, out: &mut [Smp], frames: usize) {
-        self.mon_gain.set_target(f32::from_bits(
-            self.shared.mon_target.load(Ordering::Relaxed),
-        ));
+        // The host's safety mute wins over the fader (see `Shared::mon_muted`), and goes through
+        // the same smoother, so engaging it ducks over the 10 ms ramp instead of clicking.
+        let target = if self.shared.mon_muted.load(Ordering::Relaxed) {
+            0.0
+        } else {
+            f32::from_bits(self.shared.mon_target.load(Ordering::Relaxed))
+        };
+        self.mon_gain.set_target(target);
 
         // Drain the mic ring into the monitor input buffer.
         for i in 0..frames {
@@ -432,21 +464,52 @@ impl RtProcessor {
 /// Shared cell holding the audio-thread [`RtProcessor`] so the active cpal stream's callback
 /// can render it while a device switch rebuilds the stream around it.
 ///
-/// SAFETY: only the single *currently active* stream callback ever dereferences the cell, and
-/// the audio-host thread builds a new stream strictly after dropping (which joins) the old one
-/// — so there is never concurrent access. This mirrors the single-accessor discipline already
-/// used by [`GraphCell`]. The `cmd_rx` therefore lives here for the engine's whole lifetime and
-/// is never moved or recreated across device switches.
+/// There is exactly ONE of these for the engine's whole life, and every output path — the cpal
+/// identity callback, the output resampler, the VPIO output element — holds a clone of the same
+/// `Arc`. The host thread's discipline (drop the old stream, which joins its callback, before
+/// building the new one) is what used to make that safe, and it rests on a teardown that CAN
+/// fail: `DeviceHandle::drop` and `Vpio::stop` both note a failed stop and carry on, after which
+/// the replacement stream's callback and a surviving zombie would take `&mut RtProcessor`
+/// concurrently — undefined behaviour, and a data race on the mic ring's consumer cursor.
+///
+/// So the cell excludes them itself, with two mechanisms that cover different halves:
+///
+///  * `owner` — the stream generation entitled to render. The host [`RtCell::claim`]s a new one
+///    before each build and the callback stamps it, so a zombie retires PERMANENTLY instead of
+///    winning alternate callbacks forever (which a bare mutual-exclusion flag would allow, and
+///    which would be a worse, deterministic regression).
+///  * `busy` — one RT-safe compare-exchange, covering the zombie that is already INSIDE
+///    `process` when the new stream starts, which no epoch check can catch.
+///
+/// A callback denied by either must write silence and touch nothing else — in particular not the
+/// transport cursors, or the playhead would advance over audio nobody rendered.
 pub struct RtCell {
     inner: UnsafeCell<RtProcessor>,
     /// The transport atomics, cloned out at construction so boundary code (the output
     /// resampler) can reach them WITHOUT dereferencing the single-accessor cell.
     shared: Arc<Shared>,
+    /// Generation entitled to the cell; see the type doc. Bumped only on the host thread.
+    owner: AtomicU64,
+    /// Whether a callback is inside the processor right now; see the type doc.
+    busy: AtomicBool,
 }
 
-// SAFETY: see the type doc — exactly one stream callback accesses the inner processor at a time.
+// SAFETY: see the type doc — the owner epoch plus the `busy` compare-exchange admit at most one
+// caller into the inner processor at a time, without blocking the RT thread.
 unsafe impl Send for RtCell {}
 unsafe impl Sync for RtCell {}
+
+/// Proof that the holder is the cell's single current accessor. Releases on drop.
+struct RtGuard<'a> {
+    cell: &'a RtCell,
+}
+
+impl Drop for RtGuard<'_> {
+    #[inline]
+    fn drop(&mut self) {
+        self.cell.busy.store(false, Ordering::Release);
+    }
+}
 
 impl RtCell {
     pub fn new(rt: RtProcessor) -> Arc<RtCell> {
@@ -454,7 +517,18 @@ impl RtCell {
         Arc::new(RtCell {
             inner: UnsafeCell::new(rt),
             shared,
+            // 0 is reserved as "no stream has claimed the cell", so the first claim is 1 and no
+            // callback can be built holding an epoch that matches by accident.
+            owner: AtomicU64::new(0),
+            busy: AtomicBool::new(false),
         })
+    }
+
+    /// Take the next stream generation. Call on the AUDIO-HOST THREAD, immediately before
+    /// building a stream; the returned epoch goes into that stream's callback, and taking it
+    /// retires every older callback whether or not its teardown actually joined.
+    pub fn claim(&self) -> u64 {
+        self.owner.fetch_add(1, Ordering::AcqRel) + 1
     }
 
     /// The transport atomics (safe — never touches the processor cell).
@@ -462,35 +536,78 @@ impl RtCell {
         &self.shared
     }
 
-    /// Render one device callback's worth of audio.
-    ///
-    /// # Safety
-    /// The caller must be the only stream callback active for the duration of this call (the
-    /// host thread guarantees this by dropping the old stream before building a new one).
+    /// Whether `epoch` is still the generation entitled to the cell. For callbacks that do work
+    /// AROUND the render (FIFO bookkeeping, transport cursors) and must abandon all of it once
+    /// retired — not just the render itself.
     #[inline]
-    pub unsafe fn render(&self, out: &mut [Smp], frames: usize) {
-        (*self.inner.get()).process(out, frames);
+    pub fn is_current(&self, epoch: u64) -> bool {
+        self.owner.load(Ordering::Acquire) == epoch
+    }
+
+    /// Enter the processor as `epoch`, or `None` when a newer stream owns the cell (this
+    /// callback is a zombie and must retire) or another accessor is inside right now.
+    #[inline]
+    fn try_enter(&self, epoch: u64) -> Option<RtGuard<'_>> {
+        if self.owner.load(Ordering::Acquire) != epoch {
+            return None;
+        }
+        self.busy
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .ok()?;
+        Some(RtGuard { cell: self })
+    }
+
+    /// Render one device callback's worth of audio as `epoch`. `false` = denied; `out` is
+    /// untouched and the caller must emit silence WITHOUT advancing any transport counter.
+    #[inline]
+    pub fn try_render(&self, epoch: u64, out: &mut [Smp], frames: usize) -> bool {
+        let Some(_g) = self.try_enter(epoch) else {
+            return false;
+        };
+        // SAFETY: the guard is the cell's single-accessor proof for this call.
+        unsafe { (*self.inner.get()).process(out, frames) };
+        true
+    }
+
+    /// Render with no device stream around the cell — the offline harness the rlib exists for
+    /// (tests, benches). Claims the cell on first use so the same admission path a real callback
+    /// takes is exercised, and panics rather than silently producing silence if a live stream
+    /// already owns it: offline rendering and a stream must never share one processor.
+    pub fn render_offline(&self, out: &mut [Smp], frames: usize) {
+        let mut epoch = self.owner.load(Ordering::Acquire);
+        if epoch == 0 {
+            epoch = self.claim();
+        }
+        assert!(
+            self.try_render(epoch, out, frames),
+            "offline render must own the cell"
+        );
     }
 
     /// Render playback only (no monitor) — for the VPIO output / AEC reference. See
-    /// [`RtProcessor::process_playback`].
-    ///
-    /// # Safety
-    /// Same single-accessor contract as [`RtCell::render`].
+    /// [`RtProcessor::process_playback`]. Denial rules as [`RtCell::try_render`].
     #[inline]
-    pub unsafe fn render_playback(&self, out: &mut [Smp], frames: usize) {
-        (*self.inner.get()).process_playback(out, frames);
+    pub fn try_render_playback(&self, epoch: u64, out: &mut [Smp], frames: usize) -> bool {
+        let Some(_g) = self.try_enter(epoch) else {
+            return false;
+        };
+        // SAFETY: the guard is the cell's single-accessor proof for this call.
+        unsafe { (*self.inner.get()).process_playback(out, frames) };
+        true
     }
 
     /// Add the live-input monitor (mic → reverb → smoothed gain) on top of `out`. For the VPIO
     /// output to route self-monitoring to the speaker/headphones WITHOUT putting the voice into the
     /// AEC reference (which is captured before this is called). Silent when the monitor gain is 0.
-    ///
-    /// # Safety
-    /// Same single-accessor contract as [`RtCell::render`].
+    /// Denial rules as [`RtCell::try_render`] — a denied call simply adds nothing.
     #[inline]
-    pub unsafe fn mix_monitor(&self, out: &mut [Smp], frames: usize) {
-        (*self.inner.get()).add_monitor(out, frames);
+    pub fn try_mix_monitor(&self, epoch: u64, out: &mut [Smp], frames: usize) -> bool {
+        let Some(_g) = self.try_enter(epoch) else {
+            return false;
+        };
+        // SAFETY: the guard is the cell's single-accessor proof for this call.
+        unsafe { (*self.inner.get()).add_monitor(out, frames) };
+        true
     }
 }
 
@@ -590,7 +707,9 @@ impl EngineHandle {
         self.shared.loop_enabled.store(enabled, Ordering::Release);
     }
 
-    /// Set the live-input monitor gain (linear; 0 = muted). The audio thread ramps to it.
+    /// Set the live-input monitor gain (linear; 0 = muted). The audio thread ramps to it. This is
+    /// the FADER's value; it does not override the host's safety mute (see
+    /// [`Shared::set_monitor_muted`]).
     pub fn set_monitor_gain(&self, gain: f32) {
         self.shared
             .mon_target
@@ -770,4 +889,100 @@ pub fn spawn(
         mon_out: vec![0.0; max_block * CHANNELS],
     };
     (handle, rt)
+}
+
+#[cfg(test)]
+mod rt_cell_guard_tests {
+    //! The cell's own exclusion, which replaces "the host dropped the old stream first" — a
+    //! guarantee that rests on a teardown the code already knows can fail.
+
+    use super::*;
+    use crate::dsp::master::MasterNode;
+    use crate::graph::{Edge, GraphDesc, NodeEntry};
+    use crate::ring::spsc;
+    use crate::sample::{Smp, CHANNELS, ENGINE_SR};
+    use std::collections::HashMap;
+
+    const BLOCK: usize = 128;
+
+    fn cell() -> Arc<RtCell> {
+        let desc = GraphDesc {
+            nodes: vec![NodeEntry::new(1, Box::new(MasterNode::unity()))],
+            edges: Vec::<Edge>::new(),
+            master: 1,
+        };
+        let g = desc.compile(ENGINE_SR, BLOCK).unwrap();
+        let (_mic_prod, mic_cons) = spsc::<[Smp; CHANNELS]>(256);
+        let (h, rt) = spawn(g, HashMap::new(), mic_cons, 256);
+        std::mem::forget(h); // the handle's drop would join the engine; the cell is the subject
+        RtCell::new(rt)
+    }
+
+    /// Claiming for a replacement stream retires the previous one PERMANENTLY. A bare
+    /// mutual-exclusion flag would let a zombie keep winning callbacks — output stuttering
+    /// between two renderers forever, which is worse than the race it replaced.
+    #[test]
+    fn a_new_claim_retires_the_previous_generation_for_good() {
+        let c = cell();
+        let old = c.claim();
+        let new = c.claim();
+        assert_ne!(old, new);
+
+        let mut out = vec![0.0; BLOCK * CHANNELS];
+        assert!(c.try_render(new, &mut out, BLOCK));
+        for _ in 0..4 {
+            assert!(
+                !c.try_render(old, &mut out, BLOCK),
+                "a retired callback must never win a later round either"
+            );
+        }
+        assert!(!c.is_current(old));
+        assert!(c.is_current(new));
+    }
+
+    /// The epoch cannot cover a zombie that is ALREADY inside `process` when the replacement
+    /// starts; the busy flag is what makes that window safe.
+    #[test]
+    fn two_callers_of_the_same_generation_never_overlap() {
+        let c = cell();
+        let epoch = c.claim();
+        let inside = c.try_enter(epoch).expect("first caller is admitted");
+        let mut out = vec![1.0; BLOCK * CHANNELS];
+        assert!(
+            !c.try_render(epoch, &mut out, BLOCK),
+            "a second accessor must be refused while one is inside"
+        );
+        assert_eq!(out[0], 1.0, "a refused render leaves the buffer untouched");
+        drop(inside);
+        assert!(
+            c.try_render(epoch, &mut out, BLOCK),
+            "the guard releases on drop"
+        );
+    }
+
+    /// A denied caller must not move the transport: the atomics are race-free, but a zombie
+    /// stamping them reports a playhead over audio nobody rendered.
+    #[test]
+    fn a_denied_render_advances_no_transport_counter() {
+        let c = cell();
+        let live = c.claim();
+        let stale = live - 1;
+        let mut out = vec![0.0; BLOCK * CHANNELS];
+        assert!(c.try_render(live, &mut out, BLOCK));
+        c.transport().sync_consumed_to_rendered();
+        let consumed = c.transport().consumed_frames();
+        let blocks = c.transport().blocks.load(Ordering::Acquire);
+
+        assert!(!c.try_render(stale, &mut out, BLOCK));
+        assert_eq!(
+            c.transport().consumed_frames(),
+            consumed,
+            "a retired callback must not deliver frames it never rendered"
+        );
+        assert_eq!(
+            c.transport().blocks.load(Ordering::Acquire),
+            blocks,
+            "and must not have entered the processor at all"
+        );
+    }
 }

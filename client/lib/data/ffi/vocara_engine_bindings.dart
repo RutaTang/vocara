@@ -102,10 +102,40 @@ class VocaraEngineBindings {
         int Function(ffi.Pointer<VeEngine>, ffi.Pointer<ffi.Char>, int)
       >();
 
+  /// Write the UID the engine is ACTUALLY rendering to (empty = nothing open). Differs from
+  /// ve_current_output_device, which reports what was REQUESTED: they diverge when the requested
+  /// device could not be opened, and for as long as the duplex VPIO unit owns the output, where
+  /// playback follows the microphone's endpoint or the system default. Judge monitor-feedback
+  /// safety from this one. Returns its byte length.
+  int ve_actual_output_device(
+    ffi.Pointer<VeEngine> e,
+    ffi.Pointer<ffi.Char> buf,
+    int cap,
+  ) {
+    return _ve_actual_output_device(e, buf, cap);
+  }
+
+  late final _ve_actual_output_devicePtr =
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Size Function(
+            ffi.Pointer<VeEngine>,
+            ffi.Pointer<ffi.Char>,
+            ffi.Size,
+          )
+        >
+      >('ve_actual_output_device');
+  late final _ve_actual_output_device = _ve_actual_output_devicePtr
+      .asFunction<
+        int Function(ffi.Pointer<VeEngine>, ffi.Pointer<ffi.Char>, int)
+      >();
+
   /// Poll + clear the pending device events selected by `mask` (bit 1 = output
   /// lost, bit 2 = input lost, bit 4 = mic opened WITHOUT echo cancellation,
   /// bit 8 = selected input unavailable, fell back to the system default,
-  /// bit 16 = the take reached the longest recording a WAV header can describe).
+  /// bit 16 = the take reached the longest recording a WAV header can describe,
+  /// bit 32 = playback is not on the selected output device — the monitor is
+  /// muted while that holds).
   /// Returns the claimed bits; bits outside the mask stay pending for their own
   /// consumer. 0 = none.
   int ve_poll_device_event(ffi.Pointer<VeEngine> e, int mask) {

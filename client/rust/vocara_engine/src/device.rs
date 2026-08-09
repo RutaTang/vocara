@@ -15,7 +15,7 @@ use std::thread::JoinHandle;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-use crate::live::RtCell;
+use crate::live::{RtCell, Shared};
 use crate::ring::{Consumer, Producer};
 use crate::sample::{Smp, CHANNELS, ENGINE_SR};
 
@@ -41,6 +41,17 @@ pub const EVENT_INPUT_FELL_BACK: u32 = 8;
 /// without this the recording clock would keep running over audio nothing is
 /// storing.
 pub const EVENT_RECORD_LIMIT: u32 = 16;
+/// Playback is NOT coming out of the device the user selected. Raised on the
+/// transition into that state, so the UI can say so once rather than every tick.
+/// Two ways in: a requested output device that could not be opened (the host
+/// fell back to the system default), and — the one no UI could otherwise see —
+/// duplex VPIO taking over the output while the mic is open. VPIO is a single
+/// communication endpoint bound to the MIC, so it renders to that device (when
+/// it has output streams) or to the system default, and never consults the
+/// app-selected output at all. The engine mutes the hear-yourself monitor for as
+/// long as this holds (see [`OutputBinding`]): "headphones are selected" stops
+/// being evidence that the monitor is safe once playback has moved elsewhere.
+pub const EVENT_OUTPUT_REROUTED: u32 = 32;
 
 /// Latched when a stream teardown failed to synchronously stop its callback (a cpal `pause()`
 /// error, or `AudioOutputUnitStop` failing in `vpio`). The renderer gate's `false` state means
@@ -257,6 +268,10 @@ pub fn enum_input_devices() -> Vec<DeviceDesc> {
 /// margin are dropped.
 struct OutResampler {
     rt: Arc<RtCell>,
+    /// The stream generation this resampler's callback was built with. The cell denies it once
+    /// a newer stream has claimed the cell, which is how a zombie callback surviving a failed
+    /// teardown stops racing its replacement (see [`RtCell`]).
+    epoch: u64,
     /// Engine input frames advanced per device output frame (`ENGINE_SR / device_rate`).
     step: f64,
     /// Read position in CONTENT frames (monotone within a flush generation).
@@ -327,7 +342,7 @@ fn build_sinc_table(step: f64) -> Vec<f32> {
 }
 
 impl OutResampler {
-    fn new(device_rate: f64, max_block: usize, rt: Arc<RtCell>) -> Self {
+    fn new(device_rate: f64, max_block: usize, rt: Arc<RtCell>, epoch: u64) -> Self {
         let step = ENGINE_SR / device_rate;
         let flush_gen = rt.transport().out_flush_gen();
         // Peak FIFO occupancy in a sub-chunk: history (TAPS) + the span the chunk's read
@@ -336,6 +351,7 @@ impl OutResampler {
         let cap = (max_block as f64 * step).ceil() as usize + max_block + SINC_TAPS + 4;
         let mut r = OutResampler {
             rt,
+            epoch,
             step,
             pos: 0.0,
             origin: 0,
@@ -362,19 +378,35 @@ impl OutResampler {
         self.consumed_floor = 0;
     }
 
+    /// Renders one engine block into the FIFO. `false` = the cell denied this callback, and the
+    /// FIFO was NOT extended — the caller must abandon the whole callback rather than pushing
+    /// silence, because the consumed cursor is advanced from FIFO read progress: frames the
+    /// processor never rendered would push `consumed_total` past `rendered_total` and jump the
+    /// reported playhead.
     #[inline]
-    fn render_block(&mut self) {
+    #[must_use]
+    fn render_block(&mut self) -> bool {
         let frames = self.max_block;
         let n = frames * CHANNELS;
-        // SAFETY: this resampler is owned by the single active stream callback (see RtCell).
-        unsafe { self.rt.render(&mut self.scratch[..n], frames) };
+        if !self.rt.try_render(self.epoch, &mut self.scratch[..n], frames) {
+            return false;
+        }
         for f in 0..frames {
             self.fifo
                 .push([self.scratch[f * CHANNELS], self.scratch[f * CHANNELS + 1]]);
         }
+        true
     }
 
     fn process(&mut self, out: &mut [Smp], out_frames: usize) {
+        // Retired by a newer stream: own NOTHING from here on — not the FIFO, not `pos`, not
+        // `consumed_floor`, and above all not the transport cursors. A zombie stamping those
+        // produces a visibly wrong playhead even though the atomics themselves are race-free.
+        // Checked before anything is read or advanced; silence is the honest output.
+        if !self.rt.is_current(self.epoch) {
+            out[..out_frames * CHANNELS].fill(0.0);
+            return;
+        }
         // A seek/pause happened since the last callback: everything pre-rendered into the
         // FIFO belongs to the OLD transport position and must not reach the listener —
         // dropping it makes the transport respond within one callback instead of playing out
@@ -402,7 +434,12 @@ impl OutResampler {
             // The FIFO is sized in `new` so reaching `need_len` never reallocates.
             debug_assert!(need_len + self.max_block <= self.fifo.capacity());
             while self.fifo.len() < need_len {
-                self.render_block();
+                if !self.render_block() {
+                    // Denied mid-callback (retired, or a zombie is still inside). Frames already
+                    // written are real; the rest is silence, and nothing further is advanced.
+                    out[done * CHANNELS..out_frames * CHANNELS].fill(0.0);
+                    return;
+                }
             }
             for k in 0..chunk {
                 let ip = self.pos.floor();
@@ -475,6 +512,9 @@ fn build_stream(
         let _ = err;
         event.fetch_or(EVENT_OUTPUT_LOST, Ordering::Release);
     };
+    // Retire every older output callback before this stream can produce a sample: a teardown
+    // that failed to stop its predecessor no longer means two callbacks racing the cell.
+    let epoch = rt.claim();
     let stream = if device_rate == ENGINE_SR {
         let rt = Arc::clone(&rt);
         device.build_output_stream(
@@ -482,8 +522,12 @@ fn build_stream(
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                 // Forced stereo: interleaved frames = len / 2. process() chunks to max_block.
                 let frames = data.len() / channels;
-                // SAFETY: exactly one active stream callback dereferences the cell (see RtCell).
-                unsafe { rt.render(data, frames) };
+                if !rt.try_render(epoch, data, frames) {
+                    // Retired (or a zombie is still inside): silence, and DO NOT sync the
+                    // consumed cursor — nothing was rendered to deliver.
+                    data.fill(0.0);
+                    return;
+                }
                 // Identity path: the render IS the delivery.
                 rt.transport().sync_consumed_to_rendered();
             },
@@ -491,7 +535,7 @@ fn build_stream(
             None,
         )
     } else {
-        let mut res = OutResampler::new(device_rate, RESAMPLE_BLOCK, rt);
+        let mut res = OutResampler::new(device_rate, RESAMPLE_BLOCK, rt, epoch);
         device.build_output_stream(
             *config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
@@ -523,16 +567,131 @@ fn build_output(
     Ok((stream, resolved))
 }
 
+/// What the engine's output is bound to right now, as the raw facts the audio-host thread owns.
+/// The device actually rendering is DERIVED from these on demand ([`OutputBinding::actual_uid`])
+/// rather than cached: while duplex VPIO owns the output and its bound mic has no output streams,
+/// playback follows the SYSTEM DEFAULT output for the rest of the session, so a value resolved
+/// once at mic-open time goes stale the moment the user changes the default in Sound preferences.
+#[derive(Default)]
+pub struct OutputBinding {
+    /// The user's explicit output pick; empty = follow the system default.
+    requested: String,
+    /// The resolved uid of the open cpal output stream; empty = no cpal output.
+    cpal_uid: String,
+    /// `Some(mic_uid)` while duplex VPIO renders the output in cpal's place; the string is the
+    /// bound mic's uid, empty for the system-default mic (VPIO then binds no device at all).
+    vpio_mic: Option<String>,
+    /// Whether [`Self::rerouted`] was true the last time safety was reconciled. Kept so the
+    /// event fires on the transition instead of on every poll.
+    was_rerouted: bool,
+}
+
+impl OutputBinding {
+    /// The device the engine is ACTUALLY rendering to; empty = nothing open (or unknowable).
+    pub fn actual_uid(&self) -> String {
+        match &self.vpio_mic {
+            // VPIO is ONE communication endpoint bound (via CurrentDevice) to the mic: when that
+            // device also has output streams it serves both legs, and otherwise — including the
+            // system-default mic, where no device is bound at all — playback goes to the system
+            // default output. The app-selected output device is not part of this path.
+            Some(mic) => {
+                if !mic.is_empty() && output_device_by_uid(mic).is_some() {
+                    return mic.clone();
+                }
+                system_default_output_uid()
+            }
+            None => self.cpal_uid.clone(),
+        }
+    }
+
+    /// The device the user asked for, resolved (an empty pick means the system default).
+    fn requested_uid(&self) -> String {
+        if self.requested.is_empty() {
+            system_default_output_uid()
+        } else {
+            self.requested.clone()
+        }
+    }
+
+    /// Playback is open but not on the device the user asked for. Nothing open is not a reroute:
+    /// there is no sound to come out of the wrong speaker.
+    pub fn rerouted(&self) -> bool {
+        let actual = self.actual_uid();
+        !actual.is_empty() && actual != self.requested_uid()
+    }
+}
+
+/// The system default output device's uid, or empty when it cannot be resolved.
+fn system_default_output_uid() -> String {
+    default_output_device()
+        .and_then(|d| device_uid(&d))
+        .unwrap_or_default()
+}
+
+/// Re-derive whether playback has left the user's chosen output and apply the consequence:
+/// the hear-yourself monitor is HARD-MUTED for as long as it has. `monitorAllowed` in Dart judges
+/// feedback safety from the device the user picked, which stops being evidence the moment the
+/// engine renders somewhere else — most sharply when duplex VPIO takes the output while the mic
+/// opens, which moves the backing track AND the (uncancelled) monitor onto the mic's device or
+/// the system default, typically the built-in speakers.
+///
+/// The mute is a separate flag from the UI's monitor gain so a `set_monitor_gain` from the fader
+/// cannot lift it. It clears itself as soon as playback is back on the chosen device, so no other
+/// thread has to know about it.
+///
+/// Callable from the host thread (after any command that can move the binding) and from the FFI
+/// poll (so a mid-session change of the SYSTEM default is caught within a tick). The event fires
+/// only on the transition into the rerouted state.
+pub fn reconcile_output_safety(
+    transport: &Shared,
+    binding: &Mutex<OutputBinding>,
+    event: &AtomicU32,
+) -> bool {
+    let Ok(mut b) = binding.lock() else {
+        return false;
+    };
+    let rerouted = b.rerouted();
+    transport.set_monitor_muted(rerouted);
+    if rerouted && !b.was_rerouted {
+        event.fetch_or(EVENT_OUTPUT_REROUTED, Ordering::Release);
+    }
+    b.was_rerouted = rerouted;
+    rerouted
+}
+
 /// Input-side shared cell: the active input stream's callback feeds mic PCM through it
 /// (downmix to stereo + resample to `ENGINE_SR`) into the mic ring whose consumer lives in the
-/// `RtProcessor`. Mirrors [`RtCell`]'s single-accessor rule — only the one active input callback
-/// touches it, and the host thread reconfigures it only while no input stream is running. It
-/// persists across input-device changes so the mic ring is created exactly once.
-pub struct InputCell(UnsafeCell<InputState>);
+/// `RtProcessor`. Only the one active input callback touches it, and the host thread reconfigures
+/// it only while no input stream is running. It persists across input-device changes so the mic
+/// ring is created exactly once.
+///
+/// The single-accessor rule is enforced the same way [`RtCell`]'s is, and for the same reason: a
+/// failed stream teardown can leave a zombie callback running past the handle that owned it, and
+/// two input callbacks would be two `&mut InputState` AND two producers on rings that are
+/// single-producer by construction — corruption, not merely UB-by-contract. See [`RtCell`] for
+/// what the epoch and the busy flag each cover.
+pub struct InputCell {
+    state: UnsafeCell<InputState>,
+    owner: AtomicU64,
+    busy: AtomicBool,
+}
 
-// SAFETY: see the type doc — exactly one input callback accesses the inner state at a time.
+// SAFETY: see the type doc — the owner epoch plus the `busy` compare-exchange admit at most one
+// caller into the inner state at a time.
 unsafe impl Send for InputCell {}
 unsafe impl Sync for InputCell {}
+
+/// Proof that the holder is the input cell's single current accessor. Releases on drop.
+struct InputGuard<'a> {
+    cell: &'a InputCell,
+}
+
+impl Drop for InputGuard<'_> {
+    #[inline]
+    fn drop(&mut self) {
+        self.cell.busy.store(false, Ordering::Release);
+    }
+}
 
 struct InputState {
     /// Mic ring → RtProcessor (monitor). Always fed while the input stream is open.
@@ -639,42 +798,71 @@ impl InputCell {
         nominal_frames_in: Arc<AtomicU64>,
         event: Arc<AtomicU32>,
     ) -> Arc<InputCell> {
-        Arc::new(InputCell(UnsafeCell::new(InputState {
-            mic,
-            cap,
-            rec,
-            cap_active,
-            rec_active,
-            in_channels: 1,
-            step: 1.0,
-            drift_ratio_bits,
-            pos: 0.0,
-            prev: [0.0, 0.0],
-            primed: false,
-            level,
-            frames_in,
-            rec_dropped,
-            rec_written,
-            nominal_frames_in,
-            nominal_acc: 0.0,
-            event,
-        })))
+        Arc::new(InputCell {
+            state: UnsafeCell::new(InputState {
+                mic,
+                cap,
+                rec,
+                cap_active,
+                rec_active,
+                in_channels: 1,
+                step: 1.0,
+                drift_ratio_bits,
+                pos: 0.0,
+                prev: [0.0, 0.0],
+                primed: false,
+                level,
+                frames_in,
+                rec_dropped,
+                rec_written,
+                nominal_frames_in,
+                nominal_acc: 0.0,
+                event,
+            }),
+            // 0 = unclaimed; the first claim is 1, so no callback can hold a matching epoch by
+            // accident. See [`RtCell`].
+            owner: AtomicU64::new(0),
+            busy: AtomicBool::new(false),
+        })
     }
 
-    /// RT-safe entry for the VPIO input callback (vpio.rs): forward interleaved f32 to the
-    /// existing downmix/resample/fan-out path. Single-accessor (only the active input callback).
-    #[cfg(target_vendor = "apple")]
+    /// Take the next input-stream generation. Call on the AUDIO-HOST THREAD, immediately before
+    /// building an input stream; taking it retires every older input callback.
+    pub fn claim(&self) -> u64 {
+        self.owner.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    /// Enter the state as `epoch`, or `None` when a newer input stream owns the cell or another
+    /// accessor is inside right now.
     #[inline]
-    pub fn feed_rt(&self, data: &[f32]) {
-        // SAFETY: exactly one active input callback dereferences the cell (see InputCell docs).
-        unsafe { self.feed(data) }
+    fn try_enter(&self, epoch: u64) -> Option<InputGuard<'_>> {
+        if self.owner.load(Ordering::Acquire) != epoch {
+            return None;
+        }
+        self.busy
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .ok()?;
+        Some(InputGuard { cell: self })
+    }
+
+    /// Feed one input callback's samples as `epoch`. `false` = denied (a retired callback, or a
+    /// zombie still inside): the samples are DROPPED rather than raced into rings that have one
+    /// producer by construction.
+    #[inline]
+    pub fn try_feed(&self, epoch: u64, data: &[f32]) -> bool {
+        let Some(_g) = self.try_enter(epoch) else {
+            return false;
+        };
+        // SAFETY: the guard is the cell's single-accessor proof for this call.
+        unsafe { self.feed(data) };
+        true
     }
 
     /// Reconfigure for a new input stream (native rate + channels). Only call with no active
     /// input callback (the host thread, between dropping the old stream and building the new).
     pub fn reconfigure(&self, in_rate: f64, in_channels: usize) {
         // SAFETY: no input callback runs during reconfigure (host-thread invariant).
-        let st = unsafe { &mut *self.0.get() };
+        let st = unsafe { &mut *self.state.get() };
         st.in_channels = in_channels.max(1);
         st.step = in_rate / ENGINE_SR;
         st.pos = 0.0;
@@ -683,13 +871,28 @@ impl InputCell {
         st.nominal_acc = 0.0;
     }
 
+    /// Test-only direct feed. Tests drive the cell with no stream around it, so claim the first
+    /// generation on first use and then feed as it — exercising the same admission path a real
+    /// callback takes rather than side-stepping it.
+    #[cfg(test)]
+    pub(crate) fn feed_test(&self, data: &[f32]) {
+        let mut epoch = self.owner.load(Ordering::Acquire);
+        if epoch == 0 {
+            epoch = self.claim();
+        }
+        assert!(
+            self.try_feed(epoch, data),
+            "the cell must admit its only accessor"
+        );
+    }
+
     /// Feed one input callback's interleaved samples: downmix to stereo, resample to `ENGINE_SR`,
     /// fan out to the mic / capture / recording rings, and update the peak meter.
     ///
     /// # Safety
     /// Only the single active input callback may call this.
     unsafe fn feed(&self, data: &[f32]) {
-        let st = &mut *self.0.get();
+        let st = &mut *self.state.get();
         let ch = st.in_channels;
         if ch == 0 {
             return;
@@ -718,6 +921,23 @@ impl InputCell {
             if identity {
                 st.emit([l, r], cap, rec);
                 emitted += 1;
+                // Keep the resampler's state coherent while the fast path owns
+                // the stream. The drift estimator publishes EXACTLY 1.0 inside
+                // its ±2 ppm deadband, so a chain hovering near that edge
+                // crosses back and forth; leaving `prev` behind meant the first
+                // interpolation after a crossing blended the current sample
+                // with one from an arbitrarily older callback — a single-sample
+                // step out of nowhere, i.e. a click.
+                //
+                // The phase left behind is 1.0, not 0.0: positions in the
+                // interpolating branch are measured from `prev`, this sample
+                // has just been emitted in full, and the next output is due one
+                // whole input later — exactly `prev + 1`. Leaving 0.0 would
+                // re-emit the sample identity just sent (a duplicate), and the
+                // stale value left before this fix was worse still.
+                st.prev = [l, r];
+                st.primed = true;
+                st.pos = 1.0;
             } else {
                 if !st.primed {
                     st.prev = [l, r];
@@ -997,7 +1217,7 @@ mod drift_tests {
             let block = vec![0.25f32; 480];
             while n > 0 {
                 let take = n.min(480);
-                cell.feed_rt(&block[..take]);
+                cell.feed_test(&block[..take]);
                 n -= take;
             }
             while mic_cons.pop().is_some() {}
@@ -1047,7 +1267,7 @@ mod drift_tests {
         cell.reconfigure(crate::sample::ENGINE_SR, 1);
         let block = vec![0.25f32; 4800];
         for _ in 0..10 {
-            cell.feed_rt(&block);
+            cell.feed_test(&block);
         }
         let emitted = frames_in.load(Ordering::Relaxed);
         let expected = (48_000.0 / (1.0 + 1000e-6)) as u64;
@@ -1062,6 +1282,60 @@ mod drift_tests {
             n += 1;
         }
         assert_eq!(n as u64, emitted);
+    }
+
+    #[test]
+    fn crossing_the_deadband_does_not_resume_from_a_stale_sample() {
+        // The estimator publishes EXACTLY 1.0 inside its ±2 ppm deadband, so a
+        // chain that hovers near that edge alternates between the identity fast
+        // path and the interpolating one. The fast path must still carry the
+        // resampler's state forward: when it did not, the first interpolation
+        // after a crossing blended the current input with `prev` from BEFORE
+        // the identity stretch — a sample out of nowhere, i.e. a click.
+        use crate::ring::spsc;
+        use crate::sample::{Smp, CHANNELS};
+        let (mic_prod, mut mic_cons) = spsc::<[Smp; CHANNELS]>(1 << 17);
+        let (cap_prod, _cap_cons) = spsc::<[Smp; CHANNELS]>(8);
+        let (rec_prod, _rec_cons) = spsc::<[Smp; CHANNELS]>(8);
+        let ratio = Arc::new(AtomicU64::new((1.0f64 + 1000e-6).to_bits()));
+        let cell = super::InputCell::new(
+            mic_prod,
+            cap_prod,
+            rec_prod,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::clone(&ratio),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        );
+        cell.reconfigure(crate::sample::ENGINE_SR, 1);
+
+        // Correcting: primes `prev` with the loud pre-deadband signal.
+        cell.feed_test(&vec![0.9f32; 512]);
+        // Inside the deadband: the identity path owns the stream for a while.
+        ratio.store(1.0f64.to_bits(), Ordering::Relaxed);
+        cell.feed_test(&vec![0.5f32; 512]);
+        while mic_cons.pop().is_some() {}
+
+        // Back out of the deadband, on a signal nowhere near either of those.
+        ratio.store((1.0f64 + 1000e-6).to_bits(), Ordering::Relaxed);
+        cell.feed_test(&vec![-1.0f32; 512]);
+
+        let first = mic_cons.pop().expect("the crossing must still emit");
+        assert!(
+            (first[0] + 1.0).abs() < 1e-6,
+            "first sample after the crossing is {}, expected -1.0 — the \
+             resampler resumed from a sample the identity path left stale",
+            first[0]
+        );
+        // ...and nothing else in the block carries the old level either.
+        while let Some(f) = mic_cons.pop() {
+            assert!((f[0] + 1.0).abs() < 1e-6, "later sample {} != -1.0", f[0]);
+        }
     }
 }
 
@@ -1251,12 +1525,14 @@ fn build_input_stream(
         let _ = err;
         event.fetch_or(EVENT_INPUT_LOST, Ordering::Release);
     };
+    // Retire every older input callback before this stream can deliver a frame; a denied feed
+    // drops its samples rather than racing a second producer into single-producer rings.
+    let epoch = cell.claim();
     let stream = device
         .build_input_stream(
             *config,
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                // SAFETY: exactly one active input callback dereferences the cell (see InputCell).
-                unsafe { cell.feed(data) };
+                cell.try_feed(epoch, data);
             },
             err_cb,
             None,
@@ -1436,6 +1712,7 @@ fn audio_host_run(
     input_intent: Arc<AtomicU64>,
     input_applied: Arc<AtomicU64>,
     actual_input_uid: Arc<Mutex<String>>,
+    output_binding: Arc<Mutex<OutputBinding>>,
     rx: mpsc::Receiver<HostCmd>,
     ready_tx: mpsc::Sender<Result<String, String>>,
 ) {
@@ -1448,6 +1725,16 @@ fn audio_host_run(
             a.clear();
             a.push_str(v);
         }
+    };
+    // Publish where playback is bound (see `OutputBinding`), then re-derive the monitor safety
+    // mute from it. Called after EVERY command that can move the binding — including the ones
+    // that only defer a request — because "the user picked headphones" is only evidence that
+    // monitoring is safe while the engine is actually rendering to them.
+    let rebind_output = |mutate: &dyn Fn(&mut OutputBinding)| {
+        if let Ok(mut b) = output_binding.lock() {
+            mutate(&mut b);
+        }
+        reconcile_output_safety(rt.transport(), &output_binding, &event);
     };
     // Input-stream state word: (generation << 1) | running. One atomic so a consumer can
     // SNAPSHOT "which stream, and is it up" in a single read: the ready handshake reads it,
@@ -1480,6 +1767,11 @@ fn audio_host_run(
     // Open the default output before serving commands; report success/failure.
     let mut out_stream = match build_output(None, &rt, &event) {
         Ok((handle, uid)) => {
+            rebind_output(&|b| {
+                b.requested.clear();
+                b.cpal_uid = uid.clone();
+                b.vpio_mic = None;
+            });
             let _ = ready_tx.send(Ok(uid));
             Some(handle)
         }
@@ -1509,8 +1801,12 @@ fn audio_host_run(
                 // output — two renderers of RtCell would violate the single-accessor invariant.
                 if VPIO_DUPLEX_AEC && in_stream.is_some() {
                     // Record the request so StopInput restores THIS device (not the system
-                    // default) when the mic stops, and report the deferred success.
-                    cur_out_uid = Some(uid);
+                    // default) when the mic stops, and report the deferred success. NOTHING is
+                    // opened here, so the reply's 0 means "accepted", not "you are on it now" —
+                    // re-derive safety so switching output mid-monitor cannot un-mute the
+                    // monitor into the device VPIO is still physically rendering to.
+                    cur_out_uid = Some(uid.clone());
+                    rebind_output(&|b| b.requested = uid.clone());
                     let _ = reply.send(0);
                 } else {
                     // Drop the old stream FIRST (joins its callback) so only one stream ever touches
@@ -1520,12 +1816,27 @@ fn audio_host_run(
                     let built = build_output(Some(&uid), &rt, &event)
                         .or_else(|_| build_output(None, &rt, &event));
                     match built {
-                        Ok((handle, _)) => {
+                        // `cur_out_uid` keeps the REQUESTED device even when the fallback opened
+                        // the default: it is the user's intent, and both the restore-after-mic
+                        // paths and the device-returned self-heal must keep aiming at it. The
+                        // RESOLVED uid goes to the binding instead, so the reroute test compares
+                        // what is playing against what was asked for.
+                        Ok((handle, resolved)) => {
                             out_stream = Some(handle);
-                            cur_out_uid = Some(uid);
+                            cur_out_uid = Some(uid.clone());
+                            rebind_output(&|b| {
+                                b.requested = uid.clone();
+                                b.cpal_uid = resolved.clone();
+                                b.vpio_mic = None;
+                            });
                             let _ = reply.send(0);
                         }
                         Err(_) => {
+                            rebind_output(&|b| {
+                                b.requested = uid.clone();
+                                b.cpal_uid.clear();
+                                b.vpio_mic = None;
+                            });
                             event.fetch_or(EVENT_OUTPUT_LOST, Ordering::Release);
                             let _ = reply.send(-1);
                         }
@@ -1572,11 +1883,24 @@ fn audio_host_run(
                         Ok(handle) => {
                             in_stream = Some(handle);
                             input_started(&input_state);
-                            if fell_back {
+                            let bound = if fell_back {
                                 set_actual("");
                                 event.fetch_or(EVENT_INPUT_FELL_BACK, Ordering::Release);
+                                String::new()
                             } else {
-                                set_actual(cur_in_uid.as_deref().unwrap_or(""));
+                                let u = cur_in_uid.clone().unwrap_or_default();
+                                set_actual(&u);
+                                u
+                            };
+                            // In duplex, VPIO now OWNS the output: playback follows the mic's
+                            // endpoint, not the app-selected device. Publishing that is what
+                            // lets the monitor be muted before a single block renders into
+                            // whatever speaker VPIO landed on.
+                            if VPIO_DUPLEX_AEC {
+                                rebind_output(&|b| {
+                                    b.cpal_uid.clear();
+                                    b.vpio_mic = Some(bound.clone());
+                                });
                             }
                         }
                         Err(_) => {
@@ -1587,10 +1911,16 @@ fn audio_host_run(
                             // survives. Restore the user's chosen output (not the system
                             // default); fall back to default only if it can't open.
                             if VPIO_DUPLEX_AEC && out_stream.is_none() {
-                                out_stream = build_output(cur_out_uid.as_deref(), &rt, &event)
+                                let built = build_output(cur_out_uid.as_deref(), &rt, &event)
                                     .or_else(|_| build_output(None, &rt, &event))
-                                    .ok()
-                                    .map(|(h, _)| h);
+                                    .ok();
+                                let resolved =
+                                    built.as_ref().map(|(_, u)| u.clone()).unwrap_or_default();
+                                out_stream = built.map(|(h, _)| h);
+                                rebind_output(&|b| {
+                                    b.cpal_uid = resolved.clone();
+                                    b.vpio_mic = None;
+                                });
                             }
                             event.fetch_or(EVENT_INPUT_LOST, Ordering::Release);
                         }
@@ -1607,10 +1937,17 @@ fn audio_host_run(
                     // during duplex deferred it), falling back to the system default
                     // only if that device can't be opened.
                     if VPIO_DUPLEX_AEC && out_stream.is_none() {
-                        out_stream = build_output(cur_out_uid.as_deref(), &rt, &event)
+                        let built = build_output(cur_out_uid.as_deref(), &rt, &event)
                             .or_else(|_| build_output(None, &rt, &event))
-                            .ok()
-                            .map(|(h, _)| h);
+                            .ok();
+                        let resolved = built.as_ref().map(|(_, u)| u.clone()).unwrap_or_default();
+                        out_stream = built.map(|(h, _)| h);
+                        // Playback is back on the user's device, so the safety mute clears
+                        // itself here — nobody else has to remember to lift it.
+                        rebind_output(&|b| {
+                            b.cpal_uid = resolved.clone();
+                            b.vpio_mic = None;
+                        });
                     }
                 }
                 // Publish AFTER converging, ONLY on success, and PAIRED with the input
@@ -1646,11 +1983,22 @@ fn audio_host_run(
                         Ok(handle) => {
                             in_stream = Some(handle);
                             input_started(&input_state);
-                            if fell_back {
+                            let bound = if fell_back {
                                 set_actual("");
                                 event.fetch_or(EVENT_INPUT_FELL_BACK, Ordering::Release);
+                                String::new()
                             } else {
                                 set_actual(&uid);
+                                uid.clone()
+                            };
+                            // The mic device moved, and in duplex the OUTPUT moves with it
+                            // (VPIO renders through the mic's endpoint) — re-derive which
+                            // speaker is live before the monitor rides on the old answer.
+                            if VPIO_DUPLEX_AEC {
+                                rebind_output(&|b| {
+                                    b.cpal_uid.clear();
+                                    b.vpio_mic = Some(bound.clone());
+                                });
                             }
                             // The reopen minted a NEW stream generation while the applied
                             // pair still carried the old one, so a recorder arming right
@@ -1672,10 +2020,16 @@ fn audio_host_run(
                             if VPIO_DUPLEX_AEC && out_stream.is_none() {
                                 // Restore the user's chosen output (not the system default),
                                 // matching StopInput; fall back to default only if it can't open.
-                                out_stream = build_output(cur_out_uid.as_deref(), &rt, &event)
+                                let built = build_output(cur_out_uid.as_deref(), &rt, &event)
                                     .or_else(|_| build_output(None, &rt, &event))
-                                    .ok()
-                                    .map(|(h, _)| h);
+                                    .ok();
+                                let resolved =
+                                    built.as_ref().map(|(_, u)| u.clone()).unwrap_or_default();
+                                out_stream = built.map(|(h, _)| h);
+                                rebind_output(&|b| {
+                                    b.cpal_uid = resolved.clone();
+                                    b.vpio_mic = None;
+                                });
                             }
                             event.fetch_or(EVENT_INPUT_LOST, Ordering::Release);
                             let _ = reply.send(-1);
@@ -1690,6 +2044,10 @@ fn audio_host_run(
                 in_stream = None;
                 set_actual("");
                 out_stream = None;
+                rebind_output(&|b| {
+                    b.cpal_uid.clear();
+                    b.vpio_mic = None;
+                });
                 break;
             }
         }
@@ -1715,6 +2073,7 @@ pub fn spawn_audio_host(
     input_intent: Arc<AtomicU64>,
     input_applied: Arc<AtomicU64>,
     actual_input_uid: Arc<Mutex<String>>,
+    output_binding: Arc<Mutex<OutputBinding>>,
 ) -> Result<(AudioHost, String), String> {
     let (tx, rx) = mpsc::channel::<HostCmd>();
     let (ready_tx, ready_rx) = mpsc::channel::<Result<String, String>>();
@@ -1730,6 +2089,7 @@ pub fn spawn_audio_host(
                 input_intent,
                 input_applied,
                 actual_input_uid,
+                output_binding,
                 rx,
                 ready_tx,
             )
@@ -2909,7 +3269,7 @@ mod out_resampler_tests {
         let (_mic_prod, mic_cons) = spsc::<[Smp; CHANNELS]>(256);
         let (h, rt) = spawn(g, HashMap::new(), mic_cons, 256);
         let cell = RtCell::new(rt);
-        let res = OutResampler::new(device_rate, BLOCK, Arc::clone(&cell));
+        let res = OutResampler::new(device_rate, BLOCK, Arc::clone(&cell), cell.claim());
         (h, res)
     }
 
@@ -2988,7 +3348,7 @@ mod out_resampler_tests {
         let (_mic_prod, mic_cons) = spsc::<[Smp; CHANNELS]>(256);
         let (h, rt) = spawn(g, HashMap::new(), mic_cons, 256);
         let cell = RtCell::new(rt);
-        let res = OutResampler::new(44_100.0, BLOCK, Arc::clone(&cell));
+        let res = OutResampler::new(44_100.0, BLOCK, Arc::clone(&cell), cell.claim());
         (h, res)
     }
 
@@ -3261,7 +3621,7 @@ mod input_cell_tests {
         c.rec_written
             .store(crate::wav::MAX_F32_SAMPLES - 1, Ordering::Relaxed);
         let block = [0.25f32; 2];
-        unsafe { c.cell.feed(&block) };
+        c.cell.feed_test(&block);
 
         assert_eq!(
             c.rec_written.load(Ordering::Relaxed),
@@ -3286,7 +3646,7 @@ mod input_cell_tests {
         // 12 mono frames into a 4-slot recording ring: 4 fit (written), 8 dropped.
         let data = [0.5f32; 12];
         // SAFETY: no input callback exists in this test; we are the single accessor.
-        unsafe { c.cell.feed(&data) };
+        c.cell.feed_test(&data);
         assert_eq!(c.frames_in.load(Ordering::Relaxed), 12);
         assert_eq!(
             c.rec_dropped.load(Ordering::Relaxed),
@@ -3305,16 +3665,240 @@ mod input_cell_tests {
         let c = cell_with_rec_capacity(64);
         let data = [0.25f32; 32];
         // SAFETY: single accessor (see above).
-        unsafe { c.cell.feed(&data) };
+        c.cell.feed_test(&data);
         assert_eq!(c.rec_dropped.load(Ordering::Relaxed), 0);
         assert_eq!(c.rec_written.load(Ordering::Relaxed), 32);
         // Frames emitted while recording is DISARMED never touch the ring or either
         // counter — this is exactly why rec_written is the per-take proof the global
         // frame counter cannot be: a pre-arm callback advances frames_in but not this.
         c.rec_active.store(false, Ordering::Release);
-        unsafe { c.cell.feed(&data) };
+        c.cell.feed_test(&data);
         assert_eq!(c.rec_dropped.load(Ordering::Relaxed), 0);
         assert_eq!(c.rec_written.load(Ordering::Relaxed), 32);
         assert_eq!(c.frames_in.load(Ordering::Relaxed), 64);
+    }
+}
+
+#[cfg(test)]
+mod output_safety_tests {
+    //! What the engine renders to is not what the UI asked for, and the hear-yourself monitor's
+    //! feedback judgement has to follow the former. These pin the decision itself; the two device
+    //! lookups it wraps need real CoreAudio, so every case here fixes both uids explicitly.
+
+    use super::{reconcile_output_safety, OutputBinding, EVENT_OUTPUT_REROUTED};
+    use crate::dsp::master::MasterNode;
+    use crate::graph::{Edge, GraphDesc, NodeEntry};
+    use crate::live::{spawn, EngineHandle};
+    use crate::ring::spsc;
+    use crate::sample::{Smp, CHANNELS, ENGINE_SR};
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Mutex;
+
+    fn engine() -> EngineHandle {
+        let desc = GraphDesc {
+            nodes: vec![NodeEntry::new(1, Box::new(MasterNode::unity()))],
+            edges: Vec::<Edge>::new(),
+            master: 1,
+        };
+        let g = desc.compile(ENGINE_SR, 128).unwrap();
+        let (_mic_prod, mic_cons) = spsc::<[Smp; CHANNELS]>(256);
+        let (h, _rt) = spawn(g, HashMap::new(), mic_cons, 256);
+        h
+    }
+
+    /// A cpal output on the requested device is the ordinary case: nothing is rerouted, so the
+    /// monitor is left to the fader.
+    #[test]
+    fn playback_on_the_requested_device_leaves_the_monitor_alone() {
+        let h = engine();
+        let event = AtomicU32::new(0);
+        let b = Mutex::new(OutputBinding {
+            requested: "dev-A".into(),
+            cpal_uid: "dev-A".into(),
+            vpio_mic: None,
+            was_rerouted: false,
+        });
+        assert!(!reconcile_output_safety(h.transport(), &b, &event));
+        assert!(!h.transport().monitor_muted());
+        assert_eq!(event.load(Ordering::Relaxed) & EVENT_OUTPUT_REROUTED, 0);
+    }
+
+    /// The requested device could not be opened and the fallback took the default: the UI still
+    /// shows (and judges feedback safety from) the device the user picked, which is no longer the
+    /// one making sound.
+    #[test]
+    fn a_fallback_output_mutes_the_monitor_and_reports_once() {
+        let h = engine();
+        let event = AtomicU32::new(0);
+        let b = Mutex::new(OutputBinding {
+            requested: "dev-A".into(),
+            cpal_uid: "dev-B".into(),
+            vpio_mic: None,
+            was_rerouted: false,
+        });
+        assert!(reconcile_output_safety(h.transport(), &b, &event));
+        assert!(h.transport().monitor_muted());
+        assert_eq!(
+            event.load(Ordering::Relaxed) & EVENT_OUTPUT_REROUTED,
+            EVENT_OUTPUT_REROUTED
+        );
+        // Edge-triggered: the poller reconciles about once a second, and a level-triggered event
+        // would re-toast for as long as the reroute lasts.
+        event.store(0, Ordering::Relaxed);
+        assert!(reconcile_output_safety(h.transport(), &b, &event));
+        assert_eq!(event.load(Ordering::Relaxed) & EVENT_OUTPUT_REROUTED, 0);
+    }
+
+    /// Nothing open is not a reroute — there is no sound to come out of the wrong speaker, and
+    /// muting here would leave the monitor down after the stream is rebuilt.
+    #[test]
+    fn a_closed_output_is_not_a_reroute() {
+        let h = engine();
+        let event = AtomicU32::new(0);
+        let b = Mutex::new(OutputBinding {
+            requested: "dev-A".into(),
+            cpal_uid: String::new(),
+            vpio_mic: None,
+            was_rerouted: false,
+        });
+        assert!(!reconcile_output_safety(h.transport(), &b, &event));
+        assert!(!h.transport().monitor_muted());
+    }
+
+    /// The mute is not a latch: once playback is back on the chosen device it lifts itself, so no
+    /// other thread has to remember to clear it.
+    #[test]
+    fn restoring_the_chosen_output_clears_the_mute() {
+        let h = engine();
+        let event = AtomicU32::new(0);
+        let b = Mutex::new(OutputBinding {
+            requested: "dev-A".into(),
+            cpal_uid: "dev-B".into(),
+            vpio_mic: None,
+            was_rerouted: false,
+        });
+        reconcile_output_safety(h.transport(), &b, &event);
+        assert!(h.transport().monitor_muted());
+        b.lock().unwrap().cpal_uid = "dev-A".into();
+        assert!(!reconcile_output_safety(h.transport(), &b, &event));
+        assert!(!h.transport().monitor_muted());
+    }
+}
+
+#[cfg(test)]
+mod cell_exclusion_tests {
+    //! The input cell's exclusion, and the output resampler's behaviour once the cell retires it
+    //! mid-callback. Both close the same hole: a stream teardown that failed to stop its
+    //! callback, which the code has always known can happen.
+
+    use super::{InputCell, OutResampler};
+    use crate::dsp::master::MasterNode;
+    use crate::graph::{Edge, GraphDesc, NodeEntry};
+    use crate::live::{spawn, RtCell};
+    use crate::ring::spsc;
+    use crate::sample::{Smp, CHANNELS, ENGINE_SR};
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
+    use std::sync::Arc;
+
+    const BLOCK: usize = 128;
+
+    fn input_cell() -> (Arc<InputCell>, crate::ring::Consumer<[Smp; CHANNELS]>) {
+        let (mic_prod, mic_cons) = spsc::<[Smp; CHANNELS]>(1 << 12);
+        let (cap_prod, _c) = spsc::<[Smp; CHANNELS]>(8);
+        let (rec_prod, _r) = spsc::<[Smp; CHANNELS]>(8);
+        let cell = InputCell::new(
+            mic_prod,
+            cap_prod,
+            rec_prod,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(1.0f64.to_bits())),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU32::new(0)),
+        );
+        cell.reconfigure(ENGINE_SR, 1);
+        (cell, mic_cons)
+    }
+
+    /// Two input callbacks would be two producers on rings that are single-producer by
+    /// construction — corruption, not merely UB-by-contract. A retired one drops its samples.
+    #[test]
+    fn a_retired_input_callback_feeds_nothing() {
+        let (cell, mut mic) = input_cell();
+        let old = cell.claim();
+        let new = cell.claim();
+
+        assert!(!cell.try_feed(old, &vec![0.5f32; 256]));
+        assert!(mic.pop().is_none(), "a retired callback must feed nothing");
+
+        assert!(cell.try_feed(new, &vec![0.5f32; 256]));
+        assert!(mic.pop().is_some());
+    }
+
+    fn tone_resampler(device_rate: f64) -> (OutResampler, Arc<RtCell>) {
+        let desc = GraphDesc {
+            nodes: vec![NodeEntry::new(1, Box::new(MasterNode::unity()))],
+            edges: Vec::<Edge>::new(),
+            master: 1,
+        };
+        let g = desc.compile(ENGINE_SR, BLOCK).unwrap();
+        let (_mic_prod, mic_cons) = spsc::<[Smp; CHANNELS]>(256);
+        let (h, rt) = spawn(g, HashMap::new(), mic_cons, 256);
+        std::mem::forget(h);
+        let cell = RtCell::new(rt);
+        let epoch = cell.claim();
+        (
+            OutResampler::new(device_rate, BLOCK, Arc::clone(&cell), epoch),
+            cell,
+        )
+    }
+
+    /// The consumed cursor is advanced from FIFO read progress, so a retired resampler pushing
+    /// silence into the FIFO would drive `consumed_total` past `rendered_total` and jump the
+    /// reported playhead. It must abandon the callback whole instead.
+    #[test]
+    fn a_retired_resampler_outputs_silence_without_moving_the_cursor() {
+        let (mut res, cell) = tone_resampler(44_100.0);
+        let frames = 512;
+        let mut out = vec![0.0; frames * CHANNELS];
+        res.process(&mut out, frames);
+        let consumed = cell.transport().consumed_frames();
+
+        // A replacement stream claims the cell; this resampler is now a zombie.
+        let _new = cell.claim();
+        let mut out2 = vec![1.0; frames * CHANNELS];
+        res.process(&mut out2, frames);
+
+        assert!(
+            out2.iter().all(|&s| s == 0.0),
+            "a retired callback must output silence, not stale FIFO content"
+        );
+        assert_eq!(
+            cell.transport().consumed_frames(),
+            consumed,
+            "and must not advance the consumed cursor"
+        );
+    }
+
+    /// The healthy path is untouched: the owner renders and the cursor tracks delivery.
+    #[test]
+    fn the_current_resampler_still_renders_and_advances() {
+        let (mut res, cell) = tone_resampler(44_100.0);
+        let frames = 512;
+        let mut out = vec![0.0; frames * CHANNELS];
+        res.process(&mut out, frames);
+        assert!(cell.transport().consumed_frames() > 0);
+        // Delivery can never outrun production; the resampler holds a FIFO between them.
+        assert!(
+            cell.transport().consumed_frames()
+                <= cell.transport().rendered_frames_for_test(),
+            "consumed must never outrun rendered"
+        );
     }
 }

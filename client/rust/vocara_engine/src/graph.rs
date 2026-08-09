@@ -12,6 +12,15 @@ use crate::sample::{add_into, clear, Smp, CHANNELS};
 
 pub type NodeId = u32;
 
+/// How many input ports one node may declare.
+///
+/// The renderer hands `process` a STACK array of port slices — the audio thread
+/// allocates nothing per block — so the port count has to be bounded somewhere.
+/// It is bounded here and checked at compile time: the renderer used to build a
+/// one-element array and truncate `inputs` to it, which silently starved every
+/// port but the first of a node the [`Node`] contract promises N ports to.
+pub const MAX_IN: usize = 4;
+
 /// One node plus its stable id.
 pub struct NodeEntry {
     pub id: NodeId,
@@ -62,6 +71,8 @@ pub enum CompileError {
     BadEdge,
     /// A node has more than one output port (unsupported; fan-out is done via edges).
     MultiOutput(NodeId),
+    /// A node declares more input ports than [`MAX_IN`].
+    TooManyInputs(NodeId),
 }
 
 struct ScheduledNode {
@@ -109,6 +120,9 @@ impl GraphDesc {
         for (pos, o) in taken.iter().enumerate() {
             if o.as_ref().unwrap().num_out() != 1 {
                 return Err(CompileError::MultiOutput(ids[pos]));
+            }
+            if num_in[pos] > MAX_IN {
+                return Err(CompileError::TooManyInputs(ids[pos]));
             }
         }
 
@@ -223,13 +237,16 @@ impl Graph {
                 }
             }
 
+            // Every declared port is handed over, not just port 0: `in_scratch`
+            // has one buffer per port (compile sized it from `num_in`, bounded
+            // by MAX_IN), so the node sees exactly the contract it declared.
             let num_in = in_edges.len();
-            let inputs_storage: [&[Smp]; 1] = if num_in >= 1 {
-                [&in_scratch[0][..]]
-            } else {
-                [&[][..]]
-            };
-            let inputs: &[&[Smp]] = &inputs_storage[..num_in.min(1)];
+            debug_assert!(num_in <= MAX_IN);
+            let mut inputs_storage: [&[Smp]; MAX_IN] = [&[][..]; MAX_IN];
+            for (port, scratch) in in_scratch.iter().enumerate().take(MAX_IN) {
+                inputs_storage[port] = &scratch[..];
+            }
+            let inputs: &[&[Smp]] = &inputs_storage[..num_in.min(MAX_IN)];
             let mut out_storage: [&mut [Smp]; 1] = [&mut output[..]];
             let mut io = ProcessIo {
                 inputs,

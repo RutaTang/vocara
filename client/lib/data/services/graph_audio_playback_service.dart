@@ -31,6 +31,28 @@ ffi.DynamicLibrary _openVocaraLibrary() {
   return ffi.DynamicLibrary.process();
 }
 
+/// Serializes graph syncs: two rebuilds must never interleave over one engine,
+/// because a rebuild's file decodes are async and the second would stage into
+/// the index maps the first is still swapping.
+///
+/// It also has to accept a job ENQUEUED FROM INSIDE a running job — that is how
+/// a degraded commit queues its one rebuild. That works because [add] captures
+/// and replaces the tail SYNCHRONOUSLY, before the job it wraps ever runs: an
+/// inner `add` therefore chains onto the outer job's own future and lands
+/// after it, instead of awaiting a link that is waiting on the caller.
+class SyncChain {
+  Future<void> _tail = Future<void>.value();
+
+  /// Runs [job] once everything already queued has settled. The returned
+  /// future carries [job]'s own outcome; the chain absorbs failures so one
+  /// failed sync never blocks the ones behind it.
+  Future<void> add(Future<void> Function() job) {
+    final next = _tail.then((_) => job());
+    _tail = next.catchError((_) {});
+    return next;
+  }
+}
+
 /// Max devices read in one `ve_enum_output_devices` call (generous; real systems have < 16).
 const int _kDeviceEnumCap = 32;
 
@@ -334,7 +356,7 @@ class GraphAudioPlaybackService implements PlaybackEngine {
   // The master bus gain, re-applied after every graph rebuild (a rebuild resets nodes).
   double _masterGain = 1.0;
   // Serializes sync() calls so a rebuild's async decode can't interleave with another sync.
-  Future<void> _syncChain = Future.value();
+  final SyncChain _syncChain = SyncChain();
 
   /// Whether the native engine started (a device was opened). If false, every call no-ops.
   bool get isAvailable => _available;
@@ -365,21 +387,42 @@ class GraphAudioPlaybackService implements PlaybackEngine {
     }
   }
 
+  /// The UID the engine is ACTUALLY rendering to ('' = nothing open). Differs
+  /// from [currentOutputDevice], which reports what was REQUESTED: they
+  /// diverge when the requested device could not be opened, and for as long as
+  /// the duplex mic unit owns the output, where playback follows the
+  /// microphone's endpoint or the system default and the app-selected device
+  /// is not consulted at all. Feedback safety must be judged from this one.
+  String actualOutputDevice() {
+    if (!_available) return '';
+    const cap = 256;
+    final buf = malloc<ffi.Char>(cap);
+    try {
+      _bindings.ve_actual_output_device(_engine, buf, cap);
+      return buf.cast<Utf8>().toDartString();
+    } finally {
+      malloc.free(buf);
+    }
+  }
+
   /// Device-event bits for [pollDeviceEvents] masks.
   static const int eventOutputLost = 1;
   static const int eventInputLost = 2;
   static const int eventAecBypassed = 4;
   static const int eventInputFellBack = 8;
   static const int eventRecordLimit = 16;
+  static const int eventOutputRerouted = 32;
 
   /// Poll + clear the pending device events selected by [mask] (bit 1 =
   /// output lost, bit 2 = input lost, bit 4 = mic opened without echo
   /// cancellation, bit 8 = selected input unavailable — fell back to the
   /// system default, bit 16 = the take reached the longest recording a WAV
   /// header can describe, so capture past it is refused and the owner must
-  /// finalize). Only the claimed bits are cleared; bits outside the mask stay
-  /// pending for their own consumer, so the song page's 1 s watch and the
-  /// technique page's 50 ms level tick no longer steal each other's events.
+  /// finalize, bit 32 = playback is not on the selected output device and the
+  /// engine has muted the monitor for as long as that holds). Only the claimed
+  /// bits are cleared; bits outside the mask stay pending for their own
+  /// consumer, so the song page's 1 s watch and the technique page's 50 ms
+  /// level tick no longer steal each other's events.
   int pollDeviceEvents(int mask) =>
       _available ? _bindings.ve_poll_device_event(_engine, mask) : 0;
 
@@ -585,10 +628,22 @@ class GraphAudioPlaybackService implements PlaybackEngine {
       : Duration.zero;
 
   @override
-  Future<void> sync(List<TrackPlayback> tracks, List<BusPlayback> buses) {
-    final next = _syncChain.then((_) => _doSync(tracks, buses));
-    _syncChain = next.catchError((_) {});
-    return next;
+  Future<void> sync(List<TrackPlayback> tracks, List<BusPlayback> buses) =>
+      _syncChain.add(() => _doSync(tracks, buses));
+
+  /// Queues the single rebuild a degraded commit needs.
+  ///
+  /// Called from inside the running [_doSync], so it must APPEND to the sync
+  /// chain and never await: [sync] already replaced `_syncChain` with the
+  /// in-flight link before `_doSync` started, so this lands right after it.
+  /// A failing retry is swallowed like any other chain failure — the withheld
+  /// signature means the next real sync rebuilds anyway. Disposal makes the
+  /// queued run a no-op (`_available` is false by then).
+  void _scheduleDegradedRebuild(
+    List<TrackPlayback> tracks,
+    List<BusPlayback> buses,
+  ) {
+    unawaited(sync(tracks, buses).catchError((_) {}));
   }
 
   /// The graph topology that forces a rebuild: each track's file + output routing,
@@ -770,11 +825,15 @@ class GraphAudioPlaybackService implements PlaybackEngine {
     // and meters — and renders silence forever, while the commit returns
     // success and the track contributes no underruns. Recording the signature
     // over that would make it permanent for the session, so the signature is
-    // withheld once, which makes the very next sync rebuild. That rebuild
-    // re-probes on a fresh open: if the file came back non-canonical it is
-    // decoded and staged as PCM instead (it plays), and if it is truly gone
-    // the stage MISSES and the track is left out — neither of which can
-    // degrade again, so one retry is enough and there is no rebuild loop.
+    // withheld and the rebuild is QUEUED HERE. Withholding alone was not
+    // enough: the only caller syncs on structural mix edits, and nothing in
+    // play / seek / a fader move ever calls it, so a "retry on the next sync"
+    // could wait for the rest of the session while the take sat silent.
+    // The retry re-probes on a fresh open: if the file came back
+    // non-canonical it is decoded and staged as PCM instead (it plays), and if
+    // it is truly gone the stage MISSES and the track is left out — neither of
+    // which can degrade again, so one retry is enough and there is no rebuild
+    // loop (_retryingDegradedCommit bounds it either way).
     final degraded = _bindings.ve_commit_degraded_mask(_engine);
     if (degraded != 0 && !_retryingDegradedCommit) {
       _retryingDegradedCommit = true;
@@ -784,6 +843,9 @@ class GraphAudioPlaybackService implements PlaybackEngine {
             'rebuilding once from a fresh probe',
       );
       _committedSig = '';
+      // Appended to the sync chain rather than awaited: this call IS the
+      // chain's current link, so awaiting its successor here would deadlock.
+      _scheduleDegradedRebuild(tracks, buses);
     } else {
       _retryingDegradedCommit = false;
       _committedSig = sig;

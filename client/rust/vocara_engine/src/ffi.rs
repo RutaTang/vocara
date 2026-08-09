@@ -100,6 +100,10 @@ pub struct VeEngine {
     /// written; empty = closed or system default). The selection call is
     /// fire-and-forget, so this — not `current_input_uid` — is the truth.
     actual_input_uid: Arc<std::sync::Mutex<String>>,
+    /// Where playback is bound (host-thread written). `current_output_uid` is what the UI ASKED
+    /// for; this resolves to what is actually making sound — they diverge when a requested device
+    /// could not be opened, and, invisibly to any UI, while duplex VPIO owns the output.
+    output_binding: Arc<std::sync::Mutex<device::OutputBinding>>,
     /// Live-input peak level (f32 bits), written by the input callback; read by `ve_input_level`.
     input_level: Arc<AtomicU32>,
     /// Total input frames received (diagnostic for whether the mic is actually delivering data).
@@ -451,6 +455,7 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
         let input_intent = Arc::new(AtomicU64::new(0));
         let input_applied = Arc::new(AtomicU64::new(0));
         let actual_input_uid = Arc::new(std::sync::Mutex::new(String::new()));
+        let output_binding = Arc::new(std::sync::Mutex::new(device::OutputBinding::default()));
         let (host, current_output_uid) = device::spawn_audio_host(
             rt_cell,
             input_cell,
@@ -460,6 +465,7 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
             Arc::clone(&input_intent),
             Arc::clone(&input_applied),
             Arc::clone(&actual_input_uid),
+            Arc::clone(&output_binding),
         )?;
         Ok(Box::into_raw(Box::new(VeEngine {
             host,
@@ -468,6 +474,7 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
             current_output_uid,
             current_input_uid: String::new(),
             actual_input_uid,
+            output_binding,
             input_level,
             input_frames_in,
             input_nominal_frames,
@@ -612,6 +619,35 @@ pub extern "C" fn ve_set_output_device(e: *mut VeEngine, uid: *const c_char) -> 
     })
 }
 
+/// Write the UID of the device the engine is ACTUALLY rendering to into `buf` (up to `cap`);
+/// empty = nothing open, or unresolvable. Differs from [`ve_current_output_device`], which reports
+/// the device that was REQUESTED: the two diverge when the requested device could not be opened,
+/// and — invisibly to any UI before this existed — for the whole time duplex VPIO owns the output,
+/// where playback follows the microphone's endpoint or the system default instead.
+///
+/// Resolved on every call rather than cached, because with no device bound VPIO tracks the system
+/// default output for the life of the session. Judge monitor-feedback safety from THIS, not from
+/// the selection. Returns the byte length.
+#[no_mangle]
+pub extern "C" fn ve_actual_output_device(
+    e: *mut VeEngine,
+    buf: *mut c_char,
+    cap: usize,
+) -> usize {
+    with_engine(e, 0, |eng| {
+        let uid = eng
+            .output_binding
+            .lock()
+            .map(|b| b.actual_uid())
+            .unwrap_or_default();
+        if !buf.is_null() && cap > 0 {
+            let dst = unsafe { std::slice::from_raw_parts_mut(buf, cap) };
+            copy_cstr(dst, &uid);
+        }
+        uid.len()
+    })
+}
+
 /// Write the active output device's UID into `buf` (up to `cap`), NUL-terminated. Returns the
 /// UID byte length (excluding the NUL).
 #[no_mangle]
@@ -650,6 +686,17 @@ pub extern "C" fn ve_poll_device_event(e: *mut VeEngine, mask: u32) -> u32 {
         let nominal_in = eng.input_nominal_frames.load(Ordering::Acquire);
         let consumed = eng.handle.transport().consumed_frames();
         eng.drift.tick(nominal_in, consumed);
+        // Re-derive the monitor safety mute on the same tick. The host thread reconciles on every
+        // command that moves the binding, which covers the sharp edge (the mic opening and taking
+        // the output with it), but nothing wakes it when the SYSTEM default output changes under
+        // a VPIO unit that has no device bound — from the engine's side that is a silent reroute.
+        // Ticking it here bounds the exposure to one poll interval. Runs BEFORE the claim below so
+        // a reroute detected now is delivered to this caller rather than waiting a further tick.
+        device::reconcile_output_safety(
+            eng.handle.transport(),
+            &eng.output_binding,
+            &eng.device_event,
+        );
         eng.device_event.fetch_and(!mask, Ordering::AcqRel) & mask
     })
 }
