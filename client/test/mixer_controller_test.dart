@@ -327,6 +327,41 @@ void main() {
     });
   });
 
+  group('duplicateBus', () {
+    test('the copy carries every mix setting, solo included', () async {
+      // A copy that is not in the solo group is inaudible the moment you make
+      // it — which is exactly when a solo is active. duplicateTrack carries
+      // solo (it goes through copyWith); this path spells the constructor out.
+      final host = _Host(
+        _practice(
+          buses: [
+            FxBus(
+              id: 'busA',
+              name: 'Lead',
+              fx: TrackFx.flat().copyWith(eqOn: true),
+              colorValue: 0xFF010203,
+              volume: 0.33,
+              muted: true,
+              soloed: true,
+              pan: -0.25,
+            ),
+          ],
+        ),
+      );
+
+      await host.mixer.duplicateBus('busA');
+
+      final copy = host.practice!.fxBuses.firstWhere((b) => b.id != 'busA');
+      expect(copy.name, 'Lead copy');
+      expect(copy.volume, closeTo(0.33, 1e-9));
+      expect(copy.pan, closeTo(-0.25, 1e-9));
+      expect(copy.muted, isTrue);
+      expect(copy.soloed, isTrue);
+      expect(copy.colorValue, 0xFF010203);
+      expect(copy.fx.eqOn, isTrue);
+    });
+  });
+
   group('send retargeting', () {
     test('retargeting a slot onto a bus another slot already feeds is '
         'refused', () async {

@@ -1177,8 +1177,15 @@ class SongPracticeDetailViewModel extends ChangeNotifier
             createdAt: DateTime.now(),
           );
           // Keep the original as the Reference track. If it isn't already the
-          // reference (e.g. it was dropped into the accompaniment slot), recreate
-          // it with the reference kind so the Original stays available.
+          // reference (e.g. it was dropped into the accompaniment slot — the
+          // ordinary first separation), recreate it with the reference kind so
+          // the Original stays available.
+          //
+          // Only the KIND changes: this is the same lane, so it carries every
+          // field over. `copyWith` deliberately cannot change kind, so the
+          // constructor is spelled out — which is exactly how pan, mute, solo
+          // and the insert chain came to be dropped here while volume and the
+          // colour tint were kept.
           final referenceTrack = liveOriginal.isReference
               ? liveOriginal
               : AudioTrack(
@@ -1189,7 +1196,14 @@ class SongPracticeDetailViewModel extends ChangeNotifier
                   notes: liveOriginal.notes,
                   techniqueMarkers: liveOriginal.techniqueMarkers,
                   colorValue: liveOriginal.colorValue,
+                  muted: liveOriginal.muted,
+                  soloed: liveOriginal.soloed,
                   volume: liveOriginal.volume,
+                  pan: liveOriginal.pan,
+                  versionId: liveOriginal.versionId,
+                  fx: liveOriginal.fx,
+                  busId: liveOriginal.busId,
+                  sends: liveOriginal.sends,
                   createdAt: liveOriginal.createdAt,
                 );
 

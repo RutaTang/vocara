@@ -689,6 +689,41 @@ void main() {
       },
     );
 
+    test('separating a backing that is NOT yet the reference keeps the '
+        'lane\'s mixer state', () async {
+      // The ordinary first separation: the full mix sits in the ACCOMPANIMENT
+      // slot, so the swap has to rebuild it under the reference kind. Only the
+      // kind changes — it is the same lane, and everything the user set on it
+      // has to survive. Volume and the colour tint were carried; pan, mute,
+      // solo and the insert chain were silently reset.
+      final separation = _GatedSeparation();
+      final vm = await pumpVm(separation: separation);
+      for (var i = 0; i < 400 && !vm.separationAvailable; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+      await vm.addAccompaniment('/src/full-mix.wav');
+      final backingId = vm.practice!.accompaniment!.id;
+
+      vm.mixer.setTrackVolumeLive(backingId, 0.42);
+      vm.mixer.setTrackPanLive(backingId, -0.6);
+      await vm.mixer.toggleMute(backingId);
+      vm.mixer.setTrackFxLive(backingId, TrackFx.flat().copyWith(eqOn: true));
+      await vm.setTrackColor(backingId, 0xFF00FF00);
+
+      final run = vm.separateBacking(backingId);
+      await Future<void>.delayed(Duration.zero);
+      separation.gate.complete();
+      await run;
+
+      final ref = vm.practice!.reference!;
+      expect(ref.id, backingId, reason: 'the same lane, re-kinded');
+      expect(ref.volume, closeTo(0.42, 1e-9));
+      expect(ref.pan, closeTo(-0.6, 1e-9));
+      expect(ref.muted, isTrue);
+      expect(ref.fx?.eqOn, isTrue);
+      expect(ref.colorValue, 0xFF00FF00);
+    });
+
     test('addVocalTake on a FAILED save deletes the imported file', () async {
       final vm = await pumpVm();
       repo.failSaves = true;

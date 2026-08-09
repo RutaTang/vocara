@@ -824,6 +824,10 @@ class MixerController extends ChangeNotifier {
     final practice = _practiceOf();
     final src = practice?.busById(busId);
     if (practice == null || src == null) return;
+    // Every field but the id and the name: a duplicate the user cannot hear is
+    // not a duplicate. `soloed` was the one left out, so duplicating a bus
+    // WHILE it was soloed produced a copy muted by the solo it did not join —
+    // and duplicateTrack (which goes through copyWith) has always carried it.
     final copy = FxBus(
       id: newId(),
       name: '${src.name} copy',
@@ -831,6 +835,7 @@ class MixerController extends ChangeNotifier {
       colorValue: src.colorValue,
       volume: src.volume,
       muted: src.muted,
+      soloed: src.soloed,
       pan: src.pan,
       outputBusId: src.outputBusId,
       sends: src.sends,
