@@ -65,6 +65,145 @@ void main() {
     expect(pr.activeVersionId, pr.versions.single.id);
   });
 
+  test('EVERY editable field round-trips (no column silently dropped)', () async {
+    // The narrower round-trip above pins a representative subset. This one sets
+    // every user-editable field on every row type to a distinct non-default
+    // value, so a column the writer forgets — or the hydrator never reads —
+    // shows up as a lost edit here instead of as "my pan reset itself".
+    final base = ok(await repo.createPractice('Everything'));
+    final versionId = base.versions.single.id;
+    final busA = newId();
+    final busB = newId();
+    final originalMix = File(p.join(tmp.path, 'original-mix.wav'));
+    await originalMix.writeAsBytes([4, 2]);
+
+    final fx = TrackFx.flat().copyWith(
+      eqOn: true,
+      compOn: true,
+      deEsserOn: true,
+      sendDb: -6,
+      comp: const CompSettings(thresholdDb: -18, ratio: 3.5, makeupDb: 2),
+    );
+    final vocal = AudioTrack(
+      id: newId(),
+      kind: AudioTrackKind.vocal,
+      displayName: 'Everything Take',
+      createdAt: DateTime(2026),
+      versionId: versionId,
+      volume: 0.63,
+      pan: -0.42,
+      muted: true,
+      soloed: true,
+      colorValue: 0xFF123456,
+      busId: busA,
+      fx: fx,
+      sends: [TrackSend(busId: busB, levelDb: -9)],
+      clips: [
+        (await clip('a.wav', [1], peaks: [0.25])).copyWith(startMs: 250),
+        (await clip('b.wav', [2], peaks: [0.5])).copyWith(startMs: 9000),
+      ],
+      notes: [
+        PracticeNote(
+          id: newId(),
+          positionMs: 300,
+          endMs: 1300,
+          content: 'ranged note',
+          createdAt: DateTime(2026),
+          updatedAt: DateTime(2026),
+        ),
+      ],
+      techniqueMarkers: [
+        TechniqueMarker(
+          id: newId(),
+          positionMs: 400,
+          endMs: 1400,
+          techniqueId: 'tech-9',
+          techniqueName: 'Belt',
+          createdAt: DateTime(2026),
+          updatedAt: DateTime(2026),
+        ),
+      ],
+    );
+
+    final res = await repo.savePractice(
+      SongPractice(
+        id: base.id,
+        title: base.title,
+        createdAt: base.createdAt,
+        updatedAt: base.updatedAt,
+        vocalTracks: [vocal],
+        versions: base.versions,
+        activeVersionId: versionId,
+        timelineDurationMs: 44000,
+        masterVolume: 0.71,
+        separationSource: originalMix.path,
+        reverb: const ReverbSettings(
+          roomSize: 0.81,
+          damping: 0.22,
+          wet: 0.33,
+          width: 0.44,
+        ),
+        fxBuses: [
+          FxBus(
+            id: busA,
+            name: 'Lead',
+            fx: fx,
+            colorValue: 0xFF654321,
+            volume: 0.55,
+            muted: true,
+            soloed: true,
+            pan: 0.37,
+            outputBusId: busB,
+            sends: [TrackSend(busId: busB, levelDb: -12)],
+          ),
+          FxBus(id: busB, name: 'Verb', fx: TrackFx.flat()),
+        ],
+      ),
+    );
+    final saved = ok(res);
+    expect(saved.id, base.id);
+
+    final l = ok(await repo.getPractice(base.id));
+    expect(l.masterVolume, closeTo(0.71, 1e-9));
+    expect(l.timelineDurationMs, 44000);
+    expect(l.separationSource, isNotNull);
+    expect(await File(l.separationSource!).readAsBytes(), [4, 2]);
+    expect(l.reverb?.roomSize, closeTo(0.81, 1e-9));
+    expect(l.reverb?.damping, closeTo(0.22, 1e-9));
+    expect(l.reverb?.wet, closeTo(0.33, 1e-9));
+    expect(l.reverb?.width, closeTo(0.44, 1e-9));
+
+    final v = l.vocalTracks.single;
+    expect(v.volume, closeTo(0.63, 1e-9));
+    expect(v.pan, closeTo(-0.42, 1e-9));
+    expect(v.muted, isTrue);
+    expect(v.soloed, isTrue);
+    expect(v.colorValue, 0xFF123456);
+    expect(v.busId, busA);
+    expect(v.sends.single.busId, busB);
+    expect(v.sends.single.levelDb, closeTo(-9, 1e-9));
+    expect(v.fx?.eqOn, isTrue);
+    expect(v.fx?.compOn, isTrue);
+    expect(v.fx?.deEsserOn, isTrue);
+    expect(v.fx?.sendDb, closeTo(-6, 1e-9));
+    expect(v.fx?.comp.thresholdDb, closeTo(-18, 1e-9));
+    expect(v.clips.map((c) => c.startMs), [250, 9000]);
+    expect(v.notes.single.endMs, 1300);
+    expect(v.techniqueMarkers.single.endMs, 1400);
+
+    final a = l.fxBuses.firstWhere((b) => b.id == busA);
+    expect(a.name, 'Lead');
+    expect(a.colorValue, 0xFF654321);
+    expect(a.volume, closeTo(0.55, 1e-9));
+    expect(a.muted, isTrue);
+    expect(a.soloed, isTrue);
+    expect(a.pan, closeTo(0.37, 1e-9));
+    expect(a.outputBusId, busB);
+    expect(a.sends.single.busId, busB);
+    expect(a.sends.single.levelDb, closeTo(-12, 1e-9));
+    expect(a.fx.eqOn, isTrue);
+  });
+
   test('full graph round-trips through save -> load', () async {
     final base = ok(await repo.createPractice('Hai Kuo'));
     final versionId = base.versions.single.id;

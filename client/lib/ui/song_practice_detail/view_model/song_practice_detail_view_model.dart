@@ -1614,7 +1614,12 @@ class SongPracticeDetailViewModel extends ChangeNotifier
           );
         }
       } catch (_) {
-        await discardCopies();
+        // Never let a cleanup failure replace the failure that caused it: the
+        // copy error is what the user needs to see (disk full), a delete that
+        // also failed only leaks a file the boot sweep collects.
+        try {
+          await discardCopies();
+        } catch (_) {}
         rethrow; // the busy gate reports it; the model was never touched
       }
       final copy = src.copyWith(
