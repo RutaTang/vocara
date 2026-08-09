@@ -128,6 +128,28 @@ class _GatedWaveforms extends Fake implements WaveformService {
   }
 }
 
+/// Separation that parks until the test releases it — the minutes-long window
+/// during which the rest of the screen stays interactive.
+class _GatedSeparation implements SourceSeparationService {
+  final Completer<void> gate = Completer<void>();
+
+  @override
+  Future<bool> isAvailable() async => true;
+
+  @override
+  void cancel() {}
+
+  @override
+  Future<SeparationResult> separate(
+    String sourcePath, {
+    void Function(double progress)? onProgress,
+  }) async {
+    onProgress?.call(0.2);
+    await gate.future;
+    return (instrumentalPath: '/stems/inst.wav', vocalPath: '/stems/voc.wav');
+  }
+}
+
 class _FakeEdits extends Fake implements AudioEditService {
   /// Paths handed to [ensureStreamableWav], for transcode-call assertions.
   final List<String> streamableCalls = [];
@@ -226,11 +248,15 @@ class _FakeEngine extends Fake implements PlaybackEngine {
   Future<void> dispose() async {}
 }
 
-SongPractice _seedPractice({List<AudioTrack>? vocalTracks}) => SongPractice(
+SongPractice _seedPractice({
+  List<AudioTrack>? vocalTracks,
+  AudioTrack? reference,
+}) => SongPractice(
   id: 'p1',
   title: 'Song',
   createdAt: DateTime(2026),
   updatedAt: DateTime(2026),
+  reference: reference,
   lyrics: const [LyricLine(text: 'la la la')],
   vocalTracks:
       vocalTracks ??
@@ -295,9 +321,14 @@ void main() {
     Duration? Function(String path)? probeDuration,
     WaveformService? waveforms,
     _FakeEdits? edits,
+    SourceSeparationService? separation,
+    AudioTrack? reference,
   }) async {
     events = <String>[];
-    repo = _FakeRepo(_seedPractice(vocalTracks: vocalTracks), events);
+    repo = _FakeRepo(
+      _seedPractice(vocalTracks: vocalTracks, reference: reference),
+      events,
+    );
     files = _FakeFiles(events);
     final storage = LocalStorageService();
     final vm = SongPracticeDetailViewModel(
@@ -306,7 +337,8 @@ void main() {
       audioFileService: files,
       waveformService: waveforms ?? _FakeWaveforms(),
       spectrogramService: const SpectrogramService(),
-      separationService: FakeSourceSeparationService(available: false),
+      separationService:
+          separation ?? FakeSourceSeparationService(available: false),
       appSettings: AppSettingsService(storage: storage),
       practiceId: 'p1',
       playbackEngine: _FakeEngine(),
@@ -594,6 +626,55 @@ void main() {
       // after the 1000 ms top take.
       expect(merged.notes.single.positionMs, 1200);
     });
+
+    // Regression guard: separation is the longest operation in the app, and
+    // the swap rebuilt the Reference lane from the snapshot taken before it
+    // started — so a rename or a note added to that lane while it ran was
+    // overwritten (and the note tombstoned) the moment the stems landed.
+    test(
+      'a rename and a note landing DURING a separation survive it',
+      () async {
+        final separation = _GatedSeparation();
+        final reference = AudioTrack(
+          id: 'ref',
+          kind: AudioTrackKind.reference,
+          displayName: 'Original',
+          audioFilePath: '/pool/original.wav',
+          durationMs: 1000,
+          createdAt: DateTime(2026),
+        );
+        final vm = await pumpVm(separation: separation, reference: reference);
+        for (var i = 0; i < 400 && !vm.separationAvailable; i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 5));
+        }
+
+        final run = vm.separateBacking('ref');
+        await Future<void>.delayed(
+          Duration.zero,
+        ); // reach the parked separation
+        await vm.renameTrack('ref', 'Original renamed');
+        await vm.addNote('ref', 100, null, 'note during separation');
+        separation.gate.complete();
+        await run;
+
+        final ref = vm.practice!.reference!;
+        expect(
+          ref.displayName,
+          'Original renamed',
+          reason: 'the rename must not be overwritten by the swap',
+        );
+        expect(
+          ref.notes.map((n) => n.content),
+          ['note during separation'],
+          reason: 'a note added mid-separation must not be dropped',
+        );
+        // The instrumental is named from the lane's CURRENT name.
+        expect(
+          vm.practice!.accompaniment!.displayName,
+          'Original renamed (Instrumental)',
+        );
+      },
+    );
 
     test('addVocalTake on a FAILED save deletes the imported file', () async {
       final vm = await pumpVm();
