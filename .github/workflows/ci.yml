@@ -70,3 +70,13 @@ jobs:
       - run: flutter test integration_test/detail_arrange_journey_test.dart -d macos --flavor test --dart-define=START=/song/E2EPRACTICESEED00000000000
       - run: flutter test integration_test/technique_detail_journey_test.dart -d macos --flavor test --dart-define=START=/techniques/E2ETECHNIQUESEED0000000000
       - run: flutter test integration_test/settings_journey_test.dart -d macos --flavor test --dart-define=START=/settings
+      # The non-UI integration suites (native engine, real drift store, no
+      # widget tree). Listed here for the same reason they are in `just e2e`:
+      # a suite nothing runs is a suite that rots.
+      - run: flutter test integration_test/audio_pipeline_test.dart -d macos --flavor test
+      - run: flutter test integration_test/analysis_pipeline_test.dart -d macos --flavor test
+      - run: flutter test integration_test/persistence_roundtrip_test.dart -d macos --flavor test
+      - run: flutter test integration_test/sync_roundtrip_test.dart -d macos --flavor test
+      - run: flutter test integration_test/source_separation_test.dart -d macos --flavor test
+      - run: flutter test integration_test/technique_library_test.dart -d macos --flavor test
+      - run: flutter test integration_test/ui_journey_test.dart -d macos --flavor test

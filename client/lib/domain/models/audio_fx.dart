@@ -68,11 +68,17 @@ class EqBand {
     };
     return EqBand(
       kind: kind,
-      freq: (j['freq'] as num?)?.toDouble() ?? defaultFreq,
-      // Clamp on load (see ReverbSettings): q to the EQ graph's scroll-edit
-      // range (0.3..14 in fx_panel.dart) and gainDb to the graph's editable
-      // ±15 dB (_eqMaxDb) — a shelf amplitude of 10^(gainDb/40) with an absurd
-      // stored gain would otherwise blow the engine's filter up.
+      // Clamp on load (see ReverbSettings): freq to the audible band the graph
+      // edits (the engine clamps again to its own Nyquist, and the panel clamps
+      // for drawing — this keeps the MODEL from carrying a value neither of
+      // them would agree to), q to the EQ graph's scroll-edit range (0.3..14 in
+      // fx_panel.dart) and gainDb to the graph's editable ±15 dB (_eqMaxDb) —
+      // a shelf amplitude of 10^(gainDb/40) with an absurd stored gain would
+      // otherwise blow the engine's filter up.
+      freq: ((j['freq'] as num?)?.toDouble() ?? defaultFreq).clamp(
+        10.0,
+        24000.0,
+      ),
       q: ((j['q'] as num?)?.toDouble() ?? 1.0).clamp(0.3, 14.0),
       gainDb: ((j['gainDb'] as num?)?.toDouble() ?? 0.0).clamp(-15.0, 15.0),
       enabled: j['enabled'] as bool? ?? true,

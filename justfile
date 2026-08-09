@@ -4,8 +4,9 @@
 default:
     @just --list
 
-# Run the DEV flavor on macOS with hot-reload on lib/ changes (fswatch pipes "r"
-# to flutter run). The build is flavor-only, so a flavor is always required.
+# The build is flavor-only, so a flavor is always required. fswatch pipes "r"
+# to flutter run for hot reload on lib/ changes.
+# Run the DEV flavor on macOS with hot-reload.
 dev:
     #!/bin/bash
     cd client
@@ -23,10 +24,10 @@ analyze:
 test:
     cd client && flutter test
 
-# Run all UI-driven end-to-end (integration) suites on macOS. These run on the
-# TEST flavor so automated runs use an isolated sandbox store, never touching
-# dev or prod data.
-e2e: e2e-home e2e-library e2e-detail e2e-technique e2e-settings
+# All run on the TEST flavor, so automated runs use an isolated sandbox store
+# and never touch dev or prod data.
+# Every integration suite: UI journeys plus service-level pipelines.
+e2e: e2e-home e2e-library e2e-detail e2e-technique e2e-settings e2e-pipelines
 
 # Home / settings / library navigation — boots on Home, no deep-link.
 e2e-home:
@@ -36,8 +37,8 @@ e2e-home:
 e2e-library:
     cd client && flutter test integration_test/technique_library_journey_test.dart -d macos --flavor test --dart-define=START=/techniques
 
-# Song-practice detail arrange surface — deep-links into the seeded practice.
 # START must match the seed id the suite inserts (kSeedPracticeId).
+# Song-practice detail arrange surface.
 e2e-detail:
     cd client && flutter test integration_test/detail_arrange_journey_test.dart -d macos --flavor test --dart-define=START=/song/E2EPRACTICESEED00000000000
 
@@ -48,6 +49,42 @@ e2e-technique:
 # Settings screen interactions (reverb slider) — deep-links to /settings.
 e2e-settings:
     cd client && flutter test integration_test/settings_journey_test.dart -d macos --flavor test --dart-define=START=/settings
+
+# These need the real embedder (native engine decode/playback, path_provider, a
+# real drift file) but drive services and repositories directly rather than the
+# widget tree. Kept inside `just e2e` because an integration suite nothing runs
+# is an integration suite that rots — these sat unwired long enough for one of
+# them to go stale against an API that had moved on.
+# The service-level integration suites (no widget tree).
+e2e-pipelines: e2e-audio e2e-analysis e2e-persistence e2e-sync e2e-separation e2e-techlib e2e-ui
+
+# Import → waveform analysis → multi-track playback, through the native engine.
+e2e-audio:
+    cd client && flutter test integration_test/audio_pipeline_test.dart -d macos --flavor test
+
+# DSP + spectrogram + MediaAnalysisService against generated tones.
+e2e-analysis:
+    cd client && flutter test integration_test/analysis_pipeline_test.dart -d macos --flavor test
+
+# View-model → drift → reload round-trips, asset dedup and the GC sweep.
+e2e-persistence:
+    cd client && flutter test integration_test/persistence_roundtrip_test.dart -d macos --flavor test
+
+# Sync applier / row builder against a real drift store.
+e2e-sync:
+    cd client && flutter test integration_test/sync_roundtrip_test.dart -d macos --flavor test
+
+# Stem separation service (skips itself when the Python sidecar is absent).
+e2e-separation:
+    cd client && flutter test integration_test/source_separation_test.dart -d macos --flavor test
+
+# Technique library + media draft + ground-truth analysis, service level.
+e2e-techlib:
+    cd client && flutter test integration_test/technique_library_test.dart -d macos --flavor test
+
+# Home → new practice → detail → back, on the real app tree.
+e2e-ui:
+    cd client && flutter test integration_test/ui_journey_test.dart -d macos --flavor test
 
 # Format code
 fmt:

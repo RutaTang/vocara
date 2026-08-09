@@ -456,7 +456,10 @@ void main() {
     expect(await File(orphanPath).exists(), isTrue);
 
     // Sweep reclaims the orphan only; the referenced asset survives.
-    expect(await assets.sweepUnreferenced(), 1);
+    // minAge: Duration.zero because everything here was created milliseconds
+    // ago — the production default holds a young unreferenced row back, on the
+    // grounds that it is far more likely an in-flight save than garbage.
+    expect(await assets.sweepUnreferenced(minAge: Duration.zero), 1);
     expect(await assets.resolve(orphanId), isNull);
     expect(await File(orphanPath).exists(), isFalse);
     expect(
@@ -478,7 +481,7 @@ void main() {
         activeVersionId: base.versions.single.id,
       ),
     );
-    expect(await assets.sweepUnreferenced(), 1);
+    expect(await assets.sweepUnreferenced(minAge: Duration.zero), 1);
     expect(await assets.resolve(idA), isNull);
     expect(await File(keptPath).exists(), isFalse);
   });
