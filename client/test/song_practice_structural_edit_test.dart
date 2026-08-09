@@ -11,6 +11,7 @@ import 'package:vocara/data/services/playback_engine.dart';
 import 'package:vocara/data/services/source_separation_service.dart';
 import 'package:vocara/data/services/spectrogram_service.dart';
 import 'package:vocara/data/services/waveform_service.dart';
+import 'package:vocara/data/sync/sync_engine.dart';
 import 'package:vocara/data/sync/sync_hashes.dart';
 import 'package:vocara/domain/models/audio_fx.dart';
 import 'package:vocara/domain/models/audio_track.dart';
@@ -333,6 +334,7 @@ void main() {
     _FakeEdits? edits,
     SourceSeparationService? separation,
     AudioTrack? reference,
+    Stream<RemoteApplied>? remoteApplied,
   }) async {
     events = <String>[];
     repo = _FakeRepo(
@@ -354,6 +356,7 @@ void main() {
       playbackEngine: _FakeEngine(),
       editService: edits ?? _FakeEdits(),
       probeDuration: probeDuration,
+      remoteApplied: remoteApplied,
     );
     addTearDown(vm.dispose);
     for (var i = 0; i < 400 && vm.practice == null; i++) {
@@ -752,6 +755,55 @@ void main() {
 
       expect(events, contains('delete:/edit/dup0.wav'));
       expect(vm.practice!.vocalTracks.map((t) => t.id), ['single', 'multi']);
+    });
+  });
+
+  group('remote-applied reload', () {
+    test('a take that arrived from another device is inside the timeline and '
+        'refreshes the analysis subject', () async {
+      // The reload replaces the aggregate wholesale, exactly like the initial
+      // load — so it owes the model the same normalizations. It used to skip
+      // _ensureTimeline, leaving a remotely-added take sitting past the end of
+      // the local timeline: invisible on the ruler and unreachable by the
+      // transport until the next save happened to re-grow it.
+      final remote = StreamController<RemoteApplied>.broadcast();
+      addTearDown(remote.close);
+      final vm = await pumpVm(remoteApplied: remote.stream);
+      final localTimeline = vm.practice!.timelineDurationMs;
+      expect(localTimeline, greaterThan(0));
+
+      repo.stored = repo.stored.copyWith(
+        vocalTracks: [
+          ...repo.stored.vocalTracks,
+          AudioTrack(
+            id: 'from-peer',
+            kind: AudioTrackKind.vocal,
+            displayName: 'Peer take',
+            audioFilePath: '/pool/peer.wav',
+            durationMs: 5000,
+            startMs: localTimeline + 60000,
+            createdAt: DateTime(2026),
+          ),
+        ],
+      );
+      remote.add(
+        RemoteApplied(
+          rows: const [],
+          practiceIds: const {'p1'},
+          techniqueIds: const {},
+        ),
+      );
+      for (var i = 0; i < 400 && vm.practice!.vocalTracks.length < 3; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+
+      final p = vm.practice!;
+      expect(p.vocalTracks.map((t) => t.id), contains('from-peer'));
+      expect(
+        p.timelineDurationMs,
+        greaterThanOrEqualTo(p.contentEndMs),
+        reason: 'the timeline must still cover every lane',
+      );
     });
   });
 

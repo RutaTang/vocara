@@ -387,10 +387,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       // remote-delete is deliberately out of scope here.
       return;
     }
-    _practice = loaded.value.aggregate;
-    _baseHashes = loaded.value.baseHashes;
-    _ensureSelection();
-    playback.ensureLoopRange();
+    _adoptLoaded(loaded.value);
     await mixer.resyncPlayback();
     notifyListeners();
   }
@@ -827,22 +824,37 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       return Result.error((loaded as Error<Loaded<SongPractice>>).error);
     }
     final practice = loaded.value.aggregate;
-    _practice = practice;
-    _baseHashes = loaded.value.baseHashes;
-    _ensureSelection();
-    _ensureTimeline();
-    playback.ensureLoopRange();
+    _adoptLoaded(loaded.value);
     // Render the workspace as soon as the project DATA is ready (tracks + cached waveforms), so
     // there is no blank loading screen; the audio engine sync below continues in the background.
     notifyListeners();
-    if (analysis.dockOpen && analysis.dockShowsTake) {
-      unawaited(analysis.ensureSelectedSpectrogram());
-    }
     // Compile-time demo/screenshot hooks (see AppConfig).
     analysis.applyDemoHooks(practice.vocalTracks);
     await mixer.resyncPlayback();
     notifyListeners();
     return Result.ok(practice);
+  }
+
+  /// Adopts a freshly-read aggregate as the live model: the base hashes the
+  /// next save merges against, plus every normalization the model needs before
+  /// anything reads it.
+  ///
+  /// Shared by [_load] and the remote-applied reload precisely so the two can't
+  /// drift. They HAD drifted: the reload skipped [_ensureTimeline] (a take that
+  /// arrived from another device could sit past the end of the local timeline —
+  /// invisible and unplayable until the next save re-grew it) and skipped the
+  /// analysis refresh (the dock is push-based, so it kept painting the previous
+  /// subject's spectrogram, or nothing at all when [_ensureSelection] moved the
+  /// selection because the selected take was deleted remotely).
+  void _adoptLoaded(Loaded<SongPractice> loaded) {
+    _practice = loaded.aggregate;
+    _baseHashes = loaded.baseHashes;
+    _ensureSelection();
+    _ensureTimeline();
+    playback.ensureLoopRange();
+    if ((analysis.dockOpen && analysis.dockShowsTake) || _inspectorOpen) {
+      unawaited(analysis.ensureSelectedSpectrogram());
+    }
   }
 
   // --- Importing audio -----------------------------------------------------

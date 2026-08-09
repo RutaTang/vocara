@@ -22,6 +22,18 @@ class HomeViewModel extends ChangeNotifier {
 
   final SongPracticeRepository _repository;
 
+  /// Set in [dispose]. Every command below notifies AFTER an await, so the
+  /// route can be gone by then (leaving home while the first list read — or a
+  /// remote-applied reload — is still in flight). Same guard every other view
+  /// model in the app carries.
+  bool _disposed = false;
+
+  @override
+  void notifyListeners() {
+    if (_disposed) return;
+    super.notifyListeners();
+  }
+
   /// Loads the practice list (runs once on creation).
   late final Command0<List<SongPractice>> load;
 
@@ -75,6 +87,7 @@ class HomeViewModel extends ChangeNotifier {
 
   @override
   void dispose() {
+    _disposed = true;
     unawaited(_remoteSub?.cancel());
     super.dispose();
   }
