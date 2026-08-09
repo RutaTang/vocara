@@ -136,31 +136,77 @@ class TechniqueDetailViewModel extends ChangeNotifier
   /// reload's result is discarded (stale-read-completes-last race).
   int _reloadEpoch = 0;
 
+  /// True for the lifetime of the editor's form — from [beginEdit] until the
+  /// controllers are torn down. The reload must not advance past the snapshot
+  /// those controllers were seeded from; see [_onRemoteApplied].
+  bool _editing = false;
+
+  /// A remote change arrived while the reload was skipped, so it has to be
+  /// replayed once the edit session ends or the read view keeps showing
+  /// pre-remote content with nothing pending to correct it.
+  bool _missedRemote = false;
+
+  /// Open an edit session. Pairs with [endEdit]; the screen calls this when it
+  /// seeds the form's controllers, so the flag's lifetime is exactly theirs.
+  void beginEdit() {
+    _editing = true;
+    _missedRemote = false;
+  }
+
+  /// Close the edit session (cancel, successful save, or the screen going
+  /// away). Idempotent. Replays a reload the session had to skip.
+  void endEdit() {
+    if (!_editing) return;
+    _editing = false;
+    if (_missedRemote) {
+      _missedRemote = false;
+      unawaited(_reloadFromRemote());
+    }
+  }
+
   /// Freshness-only reload when sync applied remote rows of THIS technique.
   /// Skipped whenever an edit session holds state this reload would talk over
   /// (a media draft, an import, a recording, a save in flight) — skipping is
   /// always SAFE: the next save three-way merges against [_baseHashes], so a
   /// missed reload can never revert the synced-in change.
+  ///
+  /// An open EDIT SESSION skips it too, and that one is not merely safe but
+  /// REQUIRED. The screen seeds its text controllers once, at [beginEdit], and
+  /// never re-seeds them; a save then submits all eight fields from those
+  /// controllers. Advancing [_baseHashes] to the remote row while the form
+  /// still holds pre-remote text makes `desired != base` even though the user
+  /// typed nothing, which is exactly the condition the repository's
+  /// keep-theirs branch requires to be FALSE — so a later save (a media-only
+  /// one, most plausibly) rewrites the stale text over the remote change under
+  /// a fresh stamp, and wins downstream too. Re-seeding the controllers
+  /// instead would fight the caret and discard typed text.
   Future<void> _onRemoteApplied(RemoteApplied event) async {
-    if (_disposed || _technique == null || load.running) return;
     if (!event.techniqueIds.contains(techniqueId)) return;
-    if (_saving ||
+    await _reloadFromRemote();
+  }
+
+  /// Whether a reload would talk over state the user is holding. Records the
+  /// skip in [_missedRemote] so [endEdit] can replay it.
+  bool _holdsEditorState() {
+    final holds =
+        _saving ||
+        _editing ||
         importingMedia ||
         savingExample ||
         hasMediaDraft ||
-        _recorder.isRecording) {
-      return;
-    }
+        _recorder.isRecording;
+    if (holds) _missedRemote = true;
+    return holds;
+  }
+
+  /// The reload body: shared by the sync event and by [endEdit]'s replay.
+  Future<void> _reloadFromRemote() async {
+    if (_disposed || _technique == null || load.running) return;
+    if (_holdsEditorState()) return;
     final epoch = ++_reloadEpoch;
     final result = await _repository.loadTechnique(techniqueId);
     if (_disposed || epoch != _reloadEpoch) return;
-    if (_saving ||
-        importingMedia ||
-        savingExample ||
-        hasMediaDraft ||
-        _recorder.isRecording) {
-      return;
-    }
+    if (_holdsEditorState()) return;
     if (result is! Ok<Loaded<Technique>>) return; // e.g. deleted remotely
     _technique = result.value.aggregate;
     _baseHashes = result.value.baseHashes;
@@ -422,6 +468,11 @@ class TechniqueDetailViewModel extends ChangeNotifier
     // retry. Always clear the loading flag and latch failure.
     try {
       final result = await _analysis.analyze(path);
+      // The screen can be gone by now (analysis outlives a quick back-out);
+      // its cache has left the shared analysis budget and nothing will read
+      // these latches again. The cache drops the write on its own, so this is
+      // about not doing pointless work, not about correctness.
+      if (_disposed) return;
       if (result != null) {
         _refCache[path] = result;
       } else {

@@ -79,6 +79,10 @@ class _TechniqueDetailScreenState extends State<TechniqueDetailScreen> {
     _description = _cues = _exercises = _acoustic = null;
     _editBase = null;
     _editorDirty = false;
+    // The single point BOTH exits funnel through (cancel, successful save) and
+    // also the screen's own dispose — so the VM's edit flag has exactly the
+    // controllers' lifetime, which is the invariant it protects.
+    _vm?.endEdit();
   }
 
   void _recomputeDirty() {
@@ -98,8 +102,17 @@ class _TechniqueDetailScreenState extends State<TechniqueDetailScreen> {
 
   bool get _isDirtyEditing => _editing && _editorDirty;
 
+  /// The VM the edit session belongs to, held so [_disposeForm] can close that
+  /// session from `dispose()` too, where a `context.read` is not allowed.
+  TechniqueDetailViewModel? _vm;
+
   void _enterEdit(TechniqueDetailViewModel vm, Technique t) {
+    _vm = vm;
     vm.beginMediaDraft();
+    // Tell the VM the form is open BEFORE seeding it: from here until
+    // _disposeForm, the base hashes must stay pinned to this snapshot, or a
+    // remote change landing mid-edit disarms the save's keep-theirs branch.
+    vm.beginEdit();
     _seedForm(t);
     setState(() => _editing = true);
   }
