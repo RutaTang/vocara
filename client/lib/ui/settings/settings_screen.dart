@@ -45,6 +45,41 @@ class SettingsScreen extends StatefulWidget {
   State<SettingsScreen> createState() => _SettingsScreenState();
 }
 
+/// The repair result as one plain sentence with the report's numbers.
+///
+/// Top-level and testable because the three counts are checked INDEPENDENTLY —
+/// integrity, the asset sweep, and the pool's byte-level verification — so
+/// combinations the widget test cannot easily stage (a clean database holding a
+/// bit-rotted audio file) still have to read as one coherent sentence.
+@visibleForTesting
+String repairSummary(RepairReport report) {
+  // Damaged audio is named on its own, never folded into a count of things
+  // that were fixed: nothing was done about those files, and the sentence
+  // has to say so.
+  final damaged = report.corruptPoolFiles > 0
+      ? ' ${_count(report.corruptPoolFiles, 'audio file')} '
+            '${report.corruptPoolFiles == 1 ? 'looks' : 'look'} damaged and '
+            'may not play correctly; nothing was changed.'
+      : '';
+  if (report.violationsFound == 0 && report.assetsSwept == 0) {
+    // Nothing to fix and a damaged file are both true at once, and the
+    // all-clear head then contradicts the very next sentence. Say what the
+    // repair DID instead of vouching for a library it just reported damage in.
+    final head = report.corruptPoolFiles > 0
+        ? 'Repair finished. Nothing needed fixing.'
+        : 'Repair finished. Everything looks consistent.';
+    return '$head$damaged';
+  }
+  final parts = <String>[
+    'found ${_count(report.violationsFound, 'issue')}',
+    if (report.violationsFound > 0) 'repaired ${report.violationsRepaired}',
+    'reclaimed ${_count(report.assetsSwept, 'unused file')}',
+  ];
+  return 'Repair finished: ${parts.join(', ')}.$damaged';
+}
+
+String _count(int n, String noun) => n == 1 ? '$n $noun' : '$n ${noun}s';
+
 class _SettingsScreenState extends State<SettingsScreen> {
   Timer? _poll;
 
@@ -86,6 +121,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
             child: ListView(
               padding: const EdgeInsets.fromLTRB(24, 20, 24, 24),
               children: [
+                if (settings.persistFailed) ...[
+                  const _WarningBanner(
+                    'Your settings could not be saved to disk. They are in '
+                    'effect now, but the app will start with the previous '
+                    'ones. Check that the disk is not full or locked.',
+                  ),
+                  const SizedBox(height: 20),
+                ],
                 const _SectionLabel('Audio Output'),
                 const SizedBox(height: 10),
                 _DeviceCard(
@@ -243,7 +286,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     try {
       final report = await persistence.repairLibrary();
       if (!mounted) return;
-      _showToast(_repairSummary(report));
+      _showToast(repairSummary(report));
     } catch (_) {
       if (!mounted) return;
       _showToast('The repair did not finish. It is safe to try again later.');
@@ -251,22 +294,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
       if (mounted) setState(() => _repairing = false);
     }
   }
-
-  /// The repair result as one plain sentence with the report's numbers.
-  static String _repairSummary(RepairReport report) {
-    if (report.violationsFound == 0 && report.assetsSwept == 0) {
-      return 'Repair finished. Everything looks consistent.';
-    }
-    final parts = <String>[
-      'found ${_count(report.violationsFound, 'issue')}',
-      if (report.violationsFound > 0) 'repaired ${report.violationsRepaired}',
-      'reclaimed ${_count(report.assetsSwept, 'unused file')}',
-    ];
-    return 'Repair finished: ${parts.join(', ')}.';
-  }
-
-  static String _count(int n, String noun) =>
-      n == 1 ? '$n $noun' : '$n ${noun}s';
 
   Future<void> _exportDiagnostics() async {
     final pick = widget.pickSavePath ?? _saveLocationPath;

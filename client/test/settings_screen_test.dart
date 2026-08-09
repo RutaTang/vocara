@@ -197,6 +197,54 @@ void main() {
     await _teardown(tester, persistence);
   });
 
+  group('repairSummary', () {
+    test('a damaged file is not reported as an all-clear', () {
+      // A clean database can still hold a bit-rotted pool file: the integrity
+      // check and verifyPoolIntegrity are independent, so this triple is
+      // reachable — and used to read "Everything looks consistent. 1 audio
+      // file looks damaged", which contradicts itself.
+      final s = repairSummary(
+        const RepairReport(
+          violationsFound: 0,
+          violationsRepaired: 0,
+          assetsSwept: 0,
+          corruptPoolFiles: 1,
+        ),
+      );
+      expect(s, isNot(contains('Everything looks consistent')));
+      expect(s, contains('Nothing needed fixing.'));
+      expect(s, contains('1 audio file looks damaged'));
+    });
+
+    test('the all-clear survives when nothing is damaged', () {
+      expect(
+        repairSummary(
+          const RepairReport(
+            violationsFound: 0,
+            violationsRepaired: 0,
+            assetsSwept: 0,
+            corruptPoolFiles: 0,
+          ),
+        ),
+        'Repair finished. Everything looks consistent.',
+      );
+    });
+
+    test('more than one damaged file reads as plural', () {
+      expect(
+        repairSummary(
+          const RepairReport(
+            violationsFound: 0,
+            violationsRepaired: 0,
+            assetsSwept: 0,
+            corruptPoolFiles: 2,
+          ),
+        ),
+        contains('2 audio files look damaged'),
+      );
+    });
+  });
+
   testWidgets('Repair library cancel runs nothing', (tester) async {
     final persistence = await _pumpSettings(tester);
 
