@@ -428,6 +428,13 @@ class MixerController extends ChangeNotifier {
   ) async {
     final track = _trackById(trackId);
     if (track == null || slot < 0 || slot >= track.sends.length) return;
+    // Two slots pointing at one bus feed it twice, so the bus hears the sum of
+    // both faders and neither one reads what you hear. [addTrackSend] refuses
+    // it; the menu hides an already-used bus. This is the backstop for the
+    // window where the menu's options were computed from a `sends` the save
+    // behind a previous retarget has not rebuilt yet.
+    if (track.sends[slot].busId == busId) return;
+    if (track.sends.any((s) => s.busId == busId)) return;
     final next = [...track.sends];
     next[slot] = next[slot].copyWith(busId: busId);
     _updateTrack(trackId, (t) => t.copyWith(sends: next));
@@ -519,6 +526,9 @@ class MixerController extends ChangeNotifier {
         slot >= bus.sends.length) {
       return;
     }
+    // Same duplicate-target backstop as [setTrackSendTarget].
+    if (bus.sends[slot].busId == targetBusId) return;
+    if (bus.sends.any((s) => s.busId == targetBusId)) return;
     if (_busRouteWouldCycle(busId, targetBusId)) {
       _toast("Can't send there — it would create a feedback loop.");
       return;

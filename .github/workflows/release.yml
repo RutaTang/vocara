@@ -166,10 +166,10 @@ jobs:
         run: flutter test integration_test/technique_library_journey_test.dart -d macos --flavor test --dart-define=START=/techniques
 
       - name: Song practice detail
-        run: flutter test integration_test/detail_arrange_journey_test.dart -d macos --flavor test --dart-define=START=/song/E2EPRACTICESEED0000000000001
+        run: flutter test integration_test/detail_arrange_journey_test.dart -d macos --flavor test --dart-define=START=/song/E2EPRACTICESEED00000000000
 
       - name: Technique detail editor
-        run: flutter test integration_test/technique_detail_journey_test.dart -d macos --flavor test --dart-define=START=/techniques/E2ETECHNIQUESEED000000000001
+        run: flutter test integration_test/technique_detail_journey_test.dart -d macos --flavor test --dart-define=START=/techniques/E2ETECHNIQUESEED0000000000
 
       - name: Settings interactions
         run: flutter test integration_test/settings_journey_test.dart -d macos --flavor test --dart-define=START=/settings

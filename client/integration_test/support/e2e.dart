@@ -31,13 +31,36 @@ import 'package:vocara/domain/models/audio_track.dart';
 import 'package:vocara/domain/models/song_practice.dart';
 import 'package:vocara/domain/models/take_version.dart';
 import 'package:vocara/domain/models/technique.dart';
+import 'package:vocara/utils/id.dart';
 import 'package:vocara/utils/result.dart';
 
 /// Fixed ids so a suite can deep-link via `--dart-define=START=/song/<id>` and
-/// seed the same id in setUp. (Any string is a valid PK; these are ULID-shaped.)
-const kSeedPracticeId = 'E2EPRACTICESEED0000000000001';
-const kSeedVersionId = 'E2EVERSIONSEED00000000000001';
-const kSeedTechniqueId = 'E2ETECHNIQUESEED000000000001';
+/// seed the same id in setUp.
+///
+/// These are NOT free-form. A practice/technique id becomes a directory name
+/// under the asset root, and the media services reject anything that is not
+/// exactly the 26-character `[0-9A-Z]` shape [isPathComponentId] admits. A seed
+/// of the wrong LENGTH still seeds and still deep-links; it only fails much
+/// later, as an ArgumentError thrown from inside a drop handler at the first
+/// import — which is how three of these sat two characters too long without
+/// anyone reading it as an id problem. [assertSeedIdsAreLegal] turns that into
+/// a failure at setUp, next to the constants.
+const kSeedPracticeId = 'E2EPRACTICESEED00000000000';
+const kSeedVersionId = 'E2EVERSIONSEED000000000000';
+const kSeedTechniqueId = 'E2ETECHNIQUESEED0000000000';
+
+/// Throws unless every seed id above is a legal asset-path component.
+void assertSeedIdsAreLegal() {
+  for (final id in const [kSeedPracticeId, kSeedVersionId, kSeedTechniqueId]) {
+    if (!isPathComponentId(id)) {
+      throw StateError(
+        'e2e seed id "$id" (${id.length} chars) is not a legal path '
+        'component: media imports for it will throw. Ids must match '
+        '^[0-9A-Z]{26}\$.',
+      );
+    }
+  }
+}
 
 /// Deep-link START values for the suites that boot straight into an entity.
 String startSong([String id = kSeedPracticeId]) => '/song/$id';
@@ -57,6 +80,8 @@ const _mockedChannels = <String>[
 /// window_manager queries return safe defaults. `desktop_drop` is NOT mocked —
 /// [simulateFileDrop] pushes events to the package's own handler.
 void installE2eChannelMocks(Directory tmpDir) {
+  // Every suite starts here, so this is where a malformed seed id gets caught.
+  assertSeedIdsAreLegal();
   final messenger =
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
   void mock(String name, Future<Object?>? Function(MethodCall) handler) =>

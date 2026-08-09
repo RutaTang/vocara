@@ -22,7 +22,7 @@ import 'support/e2e.dart';
 ///
 /// MUST be run with the matching START deep-link:
 ///   flutter test integration_test/technique_detail_journey_test.dart -d macos \
-///       --dart-define=START=/techniques/E2ETECHNIQUESEED000000000001
+///       --dart-define=START=/techniques/E2ETECHNIQUESEED0000000000
 ///
 /// Without that define the app boots Home and `bootTechnique` fails fast. The
 /// editor's analysis panels carry indefinite painters, so we NEVER

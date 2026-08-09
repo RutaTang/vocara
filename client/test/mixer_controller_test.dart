@@ -74,6 +74,12 @@ class _Host {
   int recDurationMs = 0;
   final position = ValueNotifier<Duration>(Duration.zero);
 
+  /// The send targets of a vocal lane, in slot order.
+  List<String> host2Sends(String id) =>
+      (trackById(id)?.sends ?? const <TrackSend>[])
+          .map((s) => s.busId)
+          .toList();
+
   AudioTrack? trackById(String id) {
     final p = practice;
     if (p == null) return null;
@@ -318,6 +324,78 @@ void main() {
       expect(host.saves, 1);
       expect(host.engine.lastBuses, isNotNull);
       expect(host.toasts, isEmpty);
+    });
+  });
+
+  group('send retargeting', () {
+    test('retargeting a slot onto a bus another slot already feeds is '
+        'refused', () async {
+      // Two slots into one bus feed it twice, so the bus hears the sum and
+      // neither fader reads what you hear. addTrackSend refuses it and the
+      // menu hides an already-used bus; the view model has to hold the line
+      // too, for the window where the menu's options came from a `sends` the
+      // previous retarget's save has not rebuilt yet.
+      final host = _Host(
+        _practice(
+          vocals: [
+            _vocal(
+              't1',
+              sends: const [
+                TrackSend(busId: 'busA'),
+                TrackSend(busId: 'busB'),
+              ],
+            ),
+          ],
+          buses: [_bus('busA'), _bus('busB')],
+        ),
+      );
+
+      await host.mixer.setTrackSendTarget('t1', 1, 'busA');
+
+      expect(host.host2Sends('t1'), ['busA', 'busB']);
+      expect(host.saves, 0);
+    });
+
+    test('retargeting a BUS send onto an already-fed bus is refused', () async {
+      final host = _Host(
+        _practice(
+          buses: [
+            _bus(
+              'busA',
+              sends: const [
+                TrackSend(busId: 'busB'),
+                TrackSend(busId: 'busC'),
+              ],
+            ),
+            _bus('busB'),
+            _bus('busC'),
+          ],
+        ),
+      );
+
+      await host.mixer.setBusSendTarget('busA', 1, 'busB');
+
+      expect(host.practice!.busById('busA')!.sends.map((s) => s.busId), [
+        'busB',
+        'busC',
+      ]);
+      expect(host.saves, 0);
+    });
+
+    test('a genuine retarget still applies and rebuilds', () async {
+      final host = _Host(
+        _practice(
+          vocals: [
+            _vocal('t1', sends: const [TrackSend(busId: 'busA')]),
+          ],
+          buses: [_bus('busA'), _bus('busB')],
+        ),
+      );
+
+      await host.mixer.setTrackSendTarget('t1', 0, 'busB');
+
+      expect(host.host2Sends('t1'), ['busB']);
+      expect(host.saves, 1);
     });
   });
 

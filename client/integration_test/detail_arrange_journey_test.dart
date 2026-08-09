@@ -24,7 +24,7 @@ import 'support/e2e.dart';
 /// MUST be run with the matching START deep-link (the seed id the suite inserts
 /// in setUp):
 ///   flutter test integration_test/detail_arrange_journey_test.dart -d macos \
-///       --dart-define=START=/song/E2EPRACTICESEED0000000000001
+///       --dart-define=START=/song/E2EPRACTICESEED00000000000
 ///
 /// Without that define the app boots Home and `bootDetail` fails fast with a
 /// clear reason rather than hanging. The detail screen carries indefinite

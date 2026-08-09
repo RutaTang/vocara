@@ -39,11 +39,11 @@ e2e-library:
 # Song-practice detail arrange surface — deep-links into the seeded practice.
 # START must match the seed id the suite inserts (kSeedPracticeId).
 e2e-detail:
-    cd client && flutter test integration_test/detail_arrange_journey_test.dart -d macos --flavor test --dart-define=START=/song/E2EPRACTICESEED0000000000001
+    cd client && flutter test integration_test/detail_arrange_journey_test.dart -d macos --flavor test --dart-define=START=/song/E2EPRACTICESEED00000000000
 
 # Technique detail editor — deep-links into the seeded technique (kSeedTechniqueId).
 e2e-technique:
-    cd client && flutter test integration_test/technique_detail_journey_test.dart -d macos --flavor test --dart-define=START=/techniques/E2ETECHNIQUESEED000000000001
+    cd client && flutter test integration_test/technique_detail_journey_test.dart -d macos --flavor test --dart-define=START=/techniques/E2ETECHNIQUESEED0000000000
 
 # Settings screen interactions (reverb slider) — deep-links to /settings.
 e2e-settings:

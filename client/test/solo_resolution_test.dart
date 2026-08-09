@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vocara/domain/models/audio_fx.dart';
 import 'package:vocara/domain/models/audio_track.dart';
@@ -204,5 +206,108 @@ void main() {
       expect(FxBus.fromJson(legacy).soloed, isFalse);
       expect(bus.copyWith(soloed: false).soloed, isFalse);
     });
+  });
+
+  // Hand-written cases pin the shapes we reasoned about. This one generates
+  // routing graphs — including ones a single device cannot build, since a merge
+  // can — and checks the two properties the feature actually promises, on every
+  // one of them.
+  group('resolveSolo invariants over random graphs', () {
+    /// Every bus a source reaches, following main outputs and aux sends.
+    Set<String> routeOf(
+      String? busId,
+      List<TrackSend> sends,
+      Map<String, FxBus> byId,
+    ) {
+      final seen = <String>{};
+      final queue = <String>[];
+      void push(String? id) {
+        if (id != null && byId.containsKey(id) && seen.add(id)) queue.add(id);
+      }
+
+      push(busId);
+      for (final s in sends) {
+        push(s.busId);
+      }
+      while (queue.isNotEmpty) {
+        final b = byId[queue.removeLast()]!;
+        push(b.outputBusId);
+        for (final s in b.sends) {
+          push(s.busId);
+        }
+      }
+      return seen;
+    }
+
+    for (var seed = 0; seed < 200; seed++) {
+      test('seed $seed', () {
+        final rnd = math.Random(seed);
+        final busCount = 1 + rnd.nextInt(4);
+        final ids = [for (var i = 0; i < busCount; i++) 'b$i'];
+        String? maybeBus() =>
+            rnd.nextInt(3) == 0 ? null : ids[rnd.nextInt(busCount)];
+        List<TrackSend> someSends() => [
+          for (var i = 0; i < rnd.nextInt(3); i++)
+            TrackSend(busId: ids[rnd.nextInt(busCount)]),
+        ];
+
+        final buses = [
+          for (final id in ids)
+            _bus(
+              id,
+              soloed: rnd.nextInt(5) == 0,
+              // Deliberately unconstrained: self-routes and cycles included.
+              outputBusId: maybeBus(),
+              sends: someSends(),
+            ),
+        ];
+        final tracks = [
+          for (var i = 0; i < 1 + rnd.nextInt(4); i++)
+            _track(
+              't$i',
+              soloed: rnd.nextInt(4) == 0,
+              busId: maybeBus(),
+              sends: someSends(),
+            ),
+        ];
+
+        final byId = {for (final b in buses) b.id: b};
+        final r = resolveSolo(tracks, buses);
+        final anySolo =
+            tracks.any((t) => t.soloed) || buses.any((b) => b.soloed);
+        if (!anySolo) return; // the all-audible short circuit
+
+        for (final t in tracks) {
+          if (t.soloed) {
+            expect(
+              r.trackInSolo(t.id),
+              isTrue,
+              reason: 'a soloed take must be audible',
+            );
+          }
+          if (!r.trackInSolo(t.id)) continue;
+          // The promise that makes solo useful: an audible take is actually
+          // HEARD, so every bus carrying it to the master stays audible too.
+          for (final busId in routeOf(t.busId, t.sends, byId)) {
+            expect(
+              r.busInSolo(busId),
+              isTrue,
+              reason:
+                  'take ${t.id} is audible but its route through $busId '
+                  'is muted, so nothing comes out',
+            );
+          }
+        }
+        for (final b in buses) {
+          if (b.soloed) {
+            expect(
+              r.busInSolo(b.id),
+              isTrue,
+              reason: 'a soloed bus must be audible',
+            );
+          }
+        }
+      });
+    }
   });
 }
