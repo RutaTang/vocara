@@ -1005,7 +1005,16 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
     final interpRows =
         await (db.select(db.interpretations)
               ..where((i) => i.practiceId.equals(row.id) & i.deletedAt.isNull())
-              ..orderBy([(i) => OrderingTerm(expression: i.orderIndex)]))
+              ..orderBy([
+                (i) => OrderingTerm(expression: i.orderIndex),
+                // Ties are possible (two devices inserting offline pick the same
+                // index); without a second key SQLite is free to order them
+                // differently on each device, and the next save writes each
+                // machine's accidental order back as real indices. The id is a
+                // ULID, so it breaks ties by creation time and every replica
+                // lands on the same list.
+                (i) => OrderingTerm(expression: i.id),
+              ]))
             .get();
     final versions = [
       for (final i in interpRows)
@@ -1020,7 +1029,12 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
     final trackRows =
         await (db.select(db.tracks)
               ..where((t) => t.practiceId.equals(row.id) & t.deletedAt.isNull())
-              ..orderBy([(t) => OrderingTerm(expression: t.orderIndex)]))
+              ..orderBy([
+                (t) => OrderingTerm(expression: t.orderIndex),
+                (t) => OrderingTerm(
+                  expression: t.id,
+                ), // stable tie-break; see interpretations
+              ]))
             .get();
     AudioTrack? accompaniment;
     AudioTrack? reference;
@@ -1041,7 +1055,12 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
     final busRows =
         await (db.select(db.fxBuses)
               ..where((b) => b.practiceId.equals(row.id) & b.deletedAt.isNull())
-              ..orderBy([(b) => OrderingTerm(expression: b.orderIndex)]))
+              ..orderBy([
+                (b) => OrderingTerm(expression: b.orderIndex),
+                (b) => OrderingTerm(
+                  expression: b.id,
+                ), // stable tie-break; see interpretations
+              ]))
             .get();
     if (baseHashes != null) {
       for (final b in busRows) {
@@ -1099,7 +1118,12 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
     final clipRows =
         await (db.select(db.clips)
               ..where((c) => c.trackId.equals(tr.id) & c.deletedAt.isNull())
-              ..orderBy([(c) => OrderingTerm(expression: c.orderIndex)]))
+              ..orderBy([
+                (c) => OrderingTerm(expression: c.orderIndex),
+                (c) => OrderingTerm(
+                  expression: c.id,
+                ), // stable tie-break; see interpretations
+              ]))
             .get();
     final clips = <AudioClip>[];
     for (final c in clipRows) {

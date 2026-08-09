@@ -173,6 +173,16 @@ class IntegrityChecker {
       ),
     );
 
+    // 2b. Bus routing must stay ACYCLIC. Every device refuses to create a cycle
+    //     locally, but a merge can still synthesise one out of two individually
+    //     legal edits: A→B on one device and B→A on another, offline, both
+    //     applied. Nothing above catches it — each edge points at a live bus of
+    //     the same practice, so `bus-output` is satisfied — and the native
+    //     engine then REJECTS the whole graph, which means the database and the
+    //     UI show the merged routing while playback keeps running the last
+    //     accepted graph (or, on a fresh open, has no graph at all).
+    out.addAll(await _busCycles(repair: repair));
+
     // 3. Single-slot LWW: at most one live accompaniment / reference per
     //    practice. Keep the highest HLC, tombstone the losers.
     final dupes = await db
@@ -225,29 +235,90 @@ class IntegrityChecker {
       final id = r.read<String>('id');
       out.add(IntegrityViolation(invariant, table, id, '$column dangling'));
       if (repair) {
-        final s = _repairStamp(r.read<String>('h'));
-        await db.customUpdate(
-          'UPDATE $table SET $column = NULL, updated_at = ?, hlc_wall = ?, '
-          'hlc_ctr = ?, hlc_node = ?, hlc_packed = ? WHERE id = ?',
-          variables: [
-            Variable.withInt(s.at),
-            Variable.withInt(s.hlc.wallMs),
-            Variable.withInt(s.hlc.counter),
-            Variable.withString(s.hlc.node),
-            Variable.withString(s.hlc.packed),
-            Variable.withString(id),
-          ],
-        );
-        await writer.journal(
-          table: table,
-          id: id,
-          op: 'update',
-          hlc: s.hlc,
-          payloadHash: 'integrity:$column',
-        );
+        await _nullColumn(table, column, id, r.read<String>('h'));
       }
     }
     return out;
+  }
+
+  /// Buses whose `output_bus_id` chain reaches themselves. `UNION` (not `UNION
+  /// ALL`) dedupes the frontier, so the walk terminates ON a cycle instead of
+  /// spinning in it.
+  ///
+  /// Repair breaks each cycle at ONE edge — the member with the lowest
+  /// (hlc, id) drops its route — rather than clearing every route on the ring:
+  /// the loser is the older of the two edits that collided, which matches the
+  /// LWW rule the rest of the merge uses, and the newer edit survives. The
+  /// outer [repair] fixpoint loop comes back for any further cycle. Every
+  /// replica sees the same rows here, so every replica picks the same victim.
+  Future<List<IntegrityViolation>> _busCycles({required bool repair}) async {
+    final rows = await db
+        .customSelect(
+          'WITH RECURSIVE edge(src, dst) AS ('
+          '  SELECT b.id, b.output_bus_id FROM fx_buses b '
+          '  WHERE b.deleted_at IS NULL AND b.output_bus_id IS NOT NULL '
+          '    AND EXISTS (SELECT 1 FROM fx_buses o WHERE o.id = b.output_bus_id '
+          '      AND o.deleted_at IS NULL AND o.practice_id = b.practice_id)'
+          '), reach(start, node) AS ('
+          '  SELECT src, dst FROM edge '
+          '  UNION '
+          '  SELECT r.start, e.dst FROM reach r JOIN edge e ON e.src = r.node'
+          ') '
+          'SELECT b.id AS id, b.hlc_packed AS h FROM fx_buses b '
+          'WHERE EXISTS (SELECT 1 FROM reach r WHERE r.start = b.id AND r.node = b.id) '
+          'ORDER BY b.hlc_packed ASC, b.id ASC',
+        )
+        .get();
+    if (rows.isEmpty) return const [];
+    final out = [
+      for (final r in rows)
+        IntegrityViolation(
+          'bus-cycle',
+          'fx_buses',
+          r.read<String>('id'),
+          'output_bus_id chain returns to itself',
+        ),
+    ];
+    if (repair) {
+      final victim = rows.first;
+      await _nullColumn(
+        'fx_buses',
+        'output_bus_id',
+        victim.read<String>('id'),
+        victim.read<String>('h'),
+      );
+    }
+    return out;
+  }
+
+  /// Nulls one column on one row as a repair: derived stamp, journalled like
+  /// any other edit so peers converge on the same fix.
+  Future<void> _nullColumn(
+    String table,
+    String column,
+    String id,
+    String rowHlcPacked,
+  ) async {
+    final s = _repairStamp(rowHlcPacked);
+    await db.customUpdate(
+      'UPDATE $table SET $column = NULL, updated_at = ?, hlc_wall = ?, '
+      'hlc_ctr = ?, hlc_node = ?, hlc_packed = ? WHERE id = ?',
+      variables: [
+        Variable.withInt(s.at),
+        Variable.withInt(s.hlc.wallMs),
+        Variable.withInt(s.hlc.counter),
+        Variable.withString(s.hlc.node),
+        Variable.withString(s.hlc.packed),
+        Variable.withString(id),
+      ],
+    );
+    await writer.journal(
+      table: table,
+      id: id,
+      op: 'update',
+      hlc: s.hlc,
+      payloadHash: 'integrity:$column',
+    );
   }
 
   Future<void> _tombstone(String table, String id, String rowHlcPacked) async {

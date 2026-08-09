@@ -136,7 +136,8 @@ void main() {
     expect(
       repo.savedWithBase.single['t1'],
       'BASE-HASH',
-      reason: 'the save must merge against the snapshot the form was seeded '
+      reason:
+          'the save must merge against the snapshot the form was seeded '
           'from, or keep-theirs can never fire',
     );
   });

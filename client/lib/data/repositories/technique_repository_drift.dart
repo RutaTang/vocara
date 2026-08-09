@@ -439,7 +439,12 @@ class TechniqueRepositoryDrift implements TechniqueRepository {
               ..where(
                 (m) => m.techniqueId.equals(row.id) & m.deletedAt.isNull(),
               )
-              ..orderBy([(m) => OrderingTerm(expression: m.orderIndex)]))
+              ..orderBy([
+                (m) => OrderingTerm(expression: m.orderIndex),
+                // Stable tie-break for equal indices (concurrent offline inserts):
+                // ULID ids order by creation time, so every replica agrees.
+                (m) => OrderingTerm(expression: m.id),
+              ]))
             .get();
     final media = <TechniqueMedia>[];
     for (final m in mediaRows) {

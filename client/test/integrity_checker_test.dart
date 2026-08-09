@@ -10,7 +10,9 @@ import 'package:vocara/data/repositories/song_practice_repository_drift.dart';
 import 'package:vocara/data/sync/hlc.dart';
 import 'package:vocara/data/sync/integrity_checker.dart';
 import 'package:vocara/data/sync/sync_writer.dart';
+import 'package:vocara/domain/models/audio_fx.dart';
 import 'package:vocara/domain/models/audio_track.dart';
+import 'package:vocara/domain/models/fx_bus.dart';
 import 'package:vocara/domain/models/song_practice.dart';
 import 'package:vocara/utils/id.dart';
 import 'package:vocara/utils/result.dart';
@@ -124,6 +126,70 @@ void main() {
     expect(
       (await checker.check()).map((v) => v.invariant),
       contains('clip-asset'),
+    );
+    expect(await checker.repair(), isEmpty);
+  });
+
+  test('a bus routing cycle synthesised by a merge is detected and broken '
+      'at its oldest edge', () async {
+    // Neither edit is illegal on its own — every device refuses to create a
+    // cycle locally — but A→B applied offline on one device and B→A on
+    // another merge into a ring. The raw UPDATEs stand in for that merge.
+    final base = await seed();
+    final a = FxBus(id: newId(), name: 'A', fx: TrackFx.flat());
+    final b = FxBus(id: newId(), name: 'B', fx: TrackFx.flat());
+    await repo.savePractice(base.copyWith(fxBuses: [a, b]));
+
+    // A is the older edit (lower HLC), so it is the one that must lose its
+    // route: the newer B→A survives, matching the LWW rule everywhere else.
+    const node = 'PEER';
+    String stamp(int wall) =>
+        Hlc(wallMs: wall, counter: 0, node: node.padRight(26, '0')).packed;
+    await db.customUpdate(
+      'UPDATE fx_buses SET output_bus_id = ?, hlc_packed = ? WHERE id = ?',
+      variables: [
+        Variable.withString(b.id),
+        Variable.withString(stamp(1000)),
+        Variable.withString(a.id),
+      ],
+    );
+    await db.customUpdate(
+      'UPDATE fx_buses SET output_bus_id = ?, hlc_packed = ? WHERE id = ?',
+      variables: [
+        Variable.withString(a.id),
+        Variable.withString(stamp(2000)),
+        Variable.withString(b.id),
+      ],
+    );
+
+    final found = await checker.check();
+    expect(found.map((v) => v.invariant), everyElement('bus-cycle'));
+    expect(found.map((v) => v.id).toSet(), {a.id, b.id});
+
+    expect(await checker.repair(), isEmpty);
+    final rows = await db
+        .customSelect('SELECT id, output_bus_id FROM fx_buses')
+        .get();
+    final routes = {
+      for (final r in rows)
+        r.read<String>('id'): r.read<String?>('output_bus_id'),
+    };
+    expect(routes[a.id], isNull, reason: 'the older edge is dropped');
+    expect(routes[b.id], a.id, reason: 'the newer edge survives');
+  });
+
+  test('a self-route is a cycle of one and is repaired', () async {
+    final base = await seed();
+    final a = FxBus(id: newId(), name: 'A', fx: TrackFx.flat());
+    await repo.savePractice(base.copyWith(fxBuses: [a]));
+    await db.customUpdate(
+      'UPDATE fx_buses SET output_bus_id = id WHERE id = ?',
+      variables: [Variable.withString(a.id)],
+    );
+
+    expect(
+      (await checker.check()).map((v) => v.invariant),
+      contains('bus-cycle'),
     );
     expect(await checker.repair(), isEmpty);
   });

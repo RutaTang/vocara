@@ -183,11 +183,21 @@ class _FakeEdits extends Fake implements AudioEditService {
 
   int _dups = 0;
 
+  /// When set, the duplicate call at this 0-based index throws — a copy that
+  /// fails PART WAY through a multi-clip lane.
+  int? failDuplicateAt;
+
   @override
   Future<String> duplicate({
     required String practiceId,
     required String sourcePath,
-  }) async => '/edit/dup${_dups++}.wav';
+  }) async {
+    final n = _dups++;
+    if (n == failDuplicateAt) {
+      throw StateError('injected duplicate failure (disk full)');
+    }
+    return '/edit/dup$n.wav';
+  }
 }
 
 /// A do-nothing engine (mirrors export_take_test's fake): just enough surface
@@ -724,6 +734,21 @@ void main() {
       repo.failSaves = true;
 
       await vm.duplicateTrack('single');
+
+      expect(events, contains('delete:/edit/dup0.wav'));
+      expect(vm.practice!.vocalTracks.map((t) => t.id), ['single', 'multi']);
+    });
+
+    test('duplicateTrack that fails PART WAY through a multi-clip lane '
+        'deletes the copies that already landed', () async {
+      // The cleanup path used to be declared only after the copy loop, so a
+      // throw on the second clip (disk full) left the first copy orphaned in
+      // edits/ with nothing referencing it until the next healthy boot swept
+      // it up.
+      final edits = _FakeEdits()..failDuplicateAt = 1;
+      final vm = await pumpVm(edits: edits);
+
+      await vm.duplicateTrack('multi');
 
       expect(events, contains('delete:/edit/dup0.wav'));
       expect(vm.practice!.vocalTracks.map((t) => t.id), ['single', 'multi']);

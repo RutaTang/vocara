@@ -1575,20 +1575,35 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       // source (or the copy) must never touch the other's audio, and reused clip
       // PKs would collide on insert and roll the whole save back.
       final newClips = <AudioClip>[];
-      for (final c in src.clips) {
-        final dest = await _edits.duplicate(
-          practiceId: _practiceId,
-          sourcePath: c.audioFilePath,
-        );
-        newClips.add(
-          AudioClip(
-            id: newId(),
-            audioFilePath: dest,
-            durationMs: c.durationMs,
-            startMs: c.startMs,
-            waveformPeaks: c.waveformPeaks,
-          ),
-        );
+      // Declared BEFORE the copies, not after: a multi-clip lane can fail part way through
+      // (disk full on the second file), and the copies that already landed are then orphaned
+      // in edits/ with nothing referencing them. Undo them on the way out instead of leaving
+      // them for the next healthy boot's sweep.
+      Future<void> discardCopies() async {
+        for (final c in newClips) {
+          await _audioFiles.deleteAudio(c.audioFilePath);
+        }
+      }
+
+      try {
+        for (final c in src.clips) {
+          final dest = await _edits.duplicate(
+            practiceId: _practiceId,
+            sourcePath: c.audioFilePath,
+          );
+          newClips.add(
+            AudioClip(
+              id: newId(),
+              audioFilePath: dest,
+              durationMs: c.durationMs,
+              startMs: c.startMs,
+              waveformPeaks: c.waveformPeaks,
+            ),
+          );
+        }
+      } catch (_) {
+        await discardCopies();
+        rethrow; // the busy gate reports it; the model was never touched
       }
       final copy = src.copyWith(
         id: newId(),
@@ -1606,12 +1621,6 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       );
       // Re-read the LIVE practice after the file copies so a take recorded/
       // imported meanwhile isn't dropped by a stale-snapshot rebuild.
-      Future<void> discardCopies() async {
-        for (final c in newClips) {
-          await _audioFiles.deleteAudio(c.audioFilePath);
-        }
-      }
-
       final cur = _practice;
       if (cur == null) return discardCopies();
       final list = [...cur.vocalTracks];

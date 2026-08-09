@@ -92,17 +92,20 @@ pub struct VeEngine {
     handle: EngineHandle,
     /// Device-event flags (e.g. output lost), set by the stream error callback; polled by Dart.
     device_event: Arc<AtomicU32>,
-    /// UID of the active output device (system default at startup; updated on a successful switch).
-    current_output_uid: String,
     /// UID of the selected input device ('' = system default), set on a successful switch.
     current_input_uid: String,
     /// The UID the OPEN input stream is actually bound to (host-thread
     /// written; empty = closed or system default). The selection call is
     /// fire-and-forget, so this — not `current_input_uid` — is the truth.
     actual_input_uid: Arc<std::sync::Mutex<String>>,
-    /// Where playback is bound (host-thread written). `current_output_uid` is what the UI ASKED
-    /// for; this resolves to what is actually making sound — they diverge when a requested device
-    /// could not be opened, and, invisibly to any UI, while duplex VPIO owns the output.
+    /// Where playback is bound (host-thread written). Holds BOTH halves of the output story: what
+    /// the UI asked for ([`device::OutputBinding::requested_pick`], '' = follow the system default)
+    /// and what is actually making sound ([`device::OutputBinding::actual_uid`]). They diverge when
+    /// a requested device could not be opened, and, invisibly to any UI, while duplex VPIO owns the
+    /// output. Deliberately the ONE copy of the pick: an ffi-side cache of it went stale on a
+    /// FAILED switch, and was seeded at startup with the system default's RESOLVED uid — which
+    /// turned "follow the default" into an explicit pick of whatever device happened to be default,
+    /// so losing that device left the engine permanently "rerouted" (monitor hard-muted).
     output_binding: Arc<std::sync::Mutex<device::OutputBinding>>,
     /// Live-input peak level (f32 bits), written by the input callback; read by `ve_input_level`.
     input_level: Arc<AtomicU32>,
@@ -456,7 +459,9 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
         let input_applied = Arc::new(AtomicU64::new(0));
         let actual_input_uid = Arc::new(std::sync::Mutex::new(String::new()));
         let output_binding = Arc::new(std::sync::Mutex::new(device::OutputBinding::default()));
-        let (host, current_output_uid) = device::spawn_audio_host(
+        // The handshake's uid proves an output opened; it is NOT stored as the user's pick. The
+        // pick starts empty ("follow the system default") and lives only in `output_binding`.
+        let (host, _opened_output_uid) = device::spawn_audio_host(
             rt_cell,
             input_cell,
             Arc::clone(&device_event),
@@ -471,7 +476,6 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
             host,
             handle,
             device_event,
-            current_output_uid,
             current_input_uid: String::new(),
             actual_input_uid,
             output_binding,
@@ -611,11 +615,9 @@ pub extern "C" fn ve_set_output_device(e: *mut VeEngine, uid: *const c_char) -> 
             Ok(s) => s,
             Err(_) => return -1,
         };
-        let code = eng.host.set_output_device(s);
-        if code == 0 {
-            eng.current_output_uid = s.to_string();
-        }
-        code
+        // The host records the pick itself (in `output_binding`, on every branch including a
+        // failed open), so there is nothing to cache here — see [`VeEngine::output_binding`].
+        eng.host.set_output_device(s)
     })
 }
 
@@ -648,8 +650,15 @@ pub extern "C" fn ve_actual_output_device(
     })
 }
 
-/// Write the active output device's UID into `buf` (up to `cap`), NUL-terminated. Returns the
+/// Write the REQUESTED output device's UID into `buf` (up to `cap`), NUL-terminated. Returns the
 /// UID byte length (excluding the NUL).
+///
+/// EMPTY means "follow the system default" — the startup state, and what an explicit System
+/// Default pick sets. Resubmitting this value (the output-lost self-heal does exactly that) must
+/// therefore re-assert the INTENT, not a device: reporting the default's resolved uid instead
+/// would silently promote it to an explicit pick, and losing that device would then leave the
+/// engine permanently off "the chosen output" — [`device::OutputBinding::rerouted`] latching true
+/// and hard-muting the monitor for a user who never picked anything.
 #[no_mangle]
 pub extern "C" fn ve_current_output_device(
     e: *mut VeEngine,
@@ -657,11 +666,16 @@ pub extern "C" fn ve_current_output_device(
     cap: usize,
 ) -> usize {
     with_engine(e, 0, |eng| {
+        let uid = eng
+            .output_binding
+            .lock()
+            .map(|b| b.requested_pick())
+            .unwrap_or_default();
         if !buf.is_null() && cap > 0 {
             let dst = unsafe { std::slice::from_raw_parts_mut(buf, cap) };
-            copy_cstr(dst, &eng.current_output_uid);
+            copy_cstr(dst, &uid);
         }
-        eng.current_output_uid.len()
+        uid.len()
     })
 }
 

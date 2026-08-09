@@ -49,7 +49,10 @@ void main() {
   test('isLrcDocument only accepts text that is LRC all the way down', () {
     // The editor routes on this: parseLrc drops untimed lines, so plain lyrics
     // carrying one bracketed timestamp must NOT be treated as a document.
-    expect(isLrcDocument('[ti:Song]\n[00:12.50]hello\n[01:03.25]world'), isTrue);
+    expect(
+      isLrcDocument('[ti:Song]\n[00:12.50]hello\n[01:03.25]world'),
+      isTrue,
+    );
     expect(isLrcDocument('[00:12.50]hello\n\n[01:03.25]world'), isTrue);
     expect(
       isLrcDocument('I waited [04:33] for you\nand you came'),

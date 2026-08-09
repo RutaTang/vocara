@@ -163,6 +163,29 @@ void main() {
     expect((await reload(practice.id)).vocalTracks, hasLength(1));
   });
 
+  test('two byte-identical staging files recover as ONE take in the same '
+      'boot', () async {
+    // The referenced-hash set is read once, before the scan. Without adding
+    // each recovery's own hash to it, the second file still looked like bytes
+    // nothing had ever saved and became a second "(recovered)" take of the
+    // same audio — only the NEXT boot's re-read of the set closed it. Two
+    // silent takes of equal length (a muted or unplugged input) produce
+    // exactly these bytes.
+    final practice = await createPractice();
+    final bytes = monoWav(4800);
+    final first = await stageOrphan(practice.id, bytes);
+    final second = await stageOrphan(practice.id, bytes);
+
+    expect(await persistence.recoverStagedRecordings(analyze: fakeAnalyze), 1);
+    expect((await reload(practice.id)).vocalTracks, hasLength(1));
+
+    // The recovered one was deleted; the duplicate is left to the sweep.
+    expect(await first.exists() && await second.exists(), isFalse);
+    await persistence.assets.sweepStaging();
+    expect(await first.exists(), isFalse);
+    expect(await second.exists(), isFalse);
+  });
+
   test('a crash between the row commit and the file delete cannot duplicate '
       'the take on the next boot', () async {
     final practice = await createPractice();

@@ -604,6 +604,14 @@ impl OutputBinding {
         }
     }
 
+    /// The user's pick VERBATIM — empty = "follow the system default", never resolved to whatever
+    /// device that is right now. This is what the UI reads back and what the output-lost self-heal
+    /// resubmits, so resolving it here would turn following the default into an explicit pick of
+    /// one device and make its disappearance look like a reroute forever.
+    pub fn requested_pick(&self) -> String {
+        self.requested.clone()
+    }
+
     /// The device the user asked for, resolved (an empty pick means the system default).
     fn requested_uid(&self) -> String {
         if self.requested.is_empty() {
@@ -858,10 +866,30 @@ impl InputCell {
         true
     }
 
-    /// Reconfigure for a new input stream (native rate + channels). Only call with no active
-    /// input callback (the host thread, between dropping the old stream and building the new).
+    /// Take the cell's single-accessor flag, SPINNING until it is free. HOST THREAD ONLY: an
+    /// audio callback must never block on this (it uses [`try_enter`](Self::try_enter) and drops
+    /// its samples instead), and the only contention is a zombie callback finishing one buffer.
+    fn enter_blocking(&self) -> InputGuard<'_> {
+        while self
+            .busy
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            std::hint::spin_loop();
+        }
+        InputGuard { cell: self }
+    }
+
+    /// Reconfigure for a new input stream (native rate + channels). Call on the HOST THREAD,
+    /// between retiring the old stream and starting the new one.
     pub fn reconfigure(&self, in_rate: f64, in_channels: usize) {
-        // SAFETY: no input callback runs during reconfigure (host-thread invariant).
+        // Take the SAME single-accessor flag a feed takes. `claim` retires older callbacks, but it
+        // cannot evict one already inside `feed` — and a teardown whose stop failed leaves exactly
+        // that: a zombie callback still running against a leaked unit (see `vpio::Vpio::stop`).
+        // Writing the state under it would be two live `&mut InputState`, so wait it out; the wait
+        // is one callback's feed (microseconds) and only on that failed-teardown path.
+        let _g = self.enter_blocking();
+        // SAFETY: the guard is the cell's single-accessor proof for this call.
         let st = unsafe { &mut *self.state.get() };
         st.in_channels = in_channels.max(1);
         st.step = in_rate / ENGINE_SR;
@@ -3766,6 +3794,33 @@ mod output_safety_tests {
         assert!(!h.transport().monitor_muted());
     }
 
+    /// The pick reported back to the UI is VERBATIM, never resolved. `ve_current_output_device`
+    /// returns this, and the output-lost self-heal resubmits whatever it returns — so an empty
+    /// pick has to stay empty. Reporting the system default's resolved uid instead promoted
+    /// "follow the default" to an explicit pick of that one device, and unplugging it then left
+    /// `rerouted` true forever (monitor hard-muted, reroute toast) for a user who never chose an
+    /// output at all.
+    #[test]
+    fn the_reported_pick_is_verbatim_not_resolved() {
+        let following_default = OutputBinding {
+            requested: String::new(),
+            cpal_uid: "whatever-the-default-resolved-to".into(),
+            vpio_mic: None,
+            was_rerouted: false,
+        };
+        assert_eq!(following_default.requested_pick(), "");
+
+        let explicit = OutputBinding {
+            requested: "dev-A".into(),
+            // A failed open left the fallback playing: the PICK is still dev-A, so resubmitting it
+            // re-attaches that device when it comes back.
+            cpal_uid: "dev-B".into(),
+            vpio_mic: None,
+            was_rerouted: false,
+        };
+        assert_eq!(explicit.requested_pick(), "dev-A");
+    }
+
     /// The mute is not a latch: once playback is back on the chosen device it lifts itself, so no
     /// other thread has to remember to clear it.
     #[test]
@@ -3839,6 +3894,43 @@ mod cell_exclusion_tests {
 
         assert!(cell.try_feed(new, &vec![0.5f32; 256]));
         assert!(mic.pop().is_some());
+    }
+
+    /// `claim` retires older callbacks but cannot evict one already INSIDE `feed`, and a teardown
+    /// whose stop failed leaves exactly that zombie running. `reconfigure` therefore has to take
+    /// the same single-accessor flag rather than trust a host-thread invariant that a failed stop
+    /// has already broken — otherwise it writes `&mut InputState` alongside the feed.
+    #[test]
+    fn reconfigure_waits_for_a_callback_still_inside_the_cell() {
+        use std::sync::atomic::Ordering;
+        let (cell, _mic) = input_cell();
+        // Stand in for a zombie callback mid-`feed`: it holds the flag, nothing else may enter.
+        let held = cell.enter_blocking();
+        assert!(
+            !cell.try_feed(cell.claim(), &vec![0.5f32; 256]),
+            "an occupied cell must deny even a current-epoch feed"
+        );
+
+        let done = Arc::new(AtomicBool::new(false));
+        let (c2, d2) = (Arc::clone(&cell), Arc::clone(&done));
+        let host = std::thread::spawn(move || {
+            c2.reconfigure(44_100.0, 2);
+            d2.store(true, Ordering::Release);
+        });
+        // Give the host thread room to run: it must still be spinning, not through.
+        for _ in 0..1000 {
+            std::hint::spin_loop();
+        }
+        assert!(
+            !done.load(Ordering::Acquire),
+            "reconfigure must not write the state under an in-flight feed"
+        );
+
+        drop(held);
+        host.join().unwrap();
+        assert!(done.load(Ordering::Acquire));
+        // And it left the cell usable rather than holding the flag.
+        assert!(cell.try_feed(cell.claim(), &vec![0.5f32; 256]));
     }
 
     fn tone_resampler(device_rate: f64) -> (OutResampler, Arc<RtCell>) {

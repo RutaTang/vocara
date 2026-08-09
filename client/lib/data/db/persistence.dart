@@ -485,6 +485,9 @@ class Persistence {
     // asset row alone (a crash between the pool import and the row commit)
     // does not mark its file as saved, so that take is still recovered on the
     // retry.
+    //
+    // GROWS as this pass runs: each recovery adds its own hash, so two staging
+    // files with identical bytes cannot both become takes in one boot.
     final referenced = await _referencedContentHashes();
 
     var recovered = 0;
@@ -632,6 +635,14 @@ class Persistence {
       practice.copyWith(vocalTracks: [...practice.vocalTracks, track]),
     );
     if (saved is! Ok<SongPractice>) return _RecoveryOutcome.failed;
+
+    // These bytes are now referenced by a committed clip row, so the SAME BOOT
+    // must treat a second file carrying them as an already-saved leftover — the
+    // set was read once before the scan and would otherwise still say "never
+    // saved". Two byte-identical staging WAVs (two silent takes of equal
+    // length, or the same file left in two practice folders) each became their
+    // own "(recovered)" take. Only the next boot's re-read closed it.
+    referencedHashes.add(hash);
 
     // The bytes are pooled and the rows are committed: the staging copy is now
     // an ordinary leftover. Delete it here; if the delete fails the sweep

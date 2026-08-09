@@ -743,26 +743,15 @@ class GraphAudioPlaybackService implements PlaybackEngine {
     if (!_available) return;
     final sig = _topologySig(tracks, buses);
     if (sig == _committedSig) {
-      // No structural change → push live volumes/mutes for tracks + buses only.
-      for (final t in tracks) {
-        final idx = _trackIndex[t.id];
-        if (idx != null) {
-          _bindings.ve_set_track_volume(
-            _engine,
-            idx,
-            t.volume,
-            t.muted ? 1 : 0,
-          );
-        }
-      }
-      for (var i = 0; i < buses.length; i++) {
-        _bindings.ve_set_bus_volume(
-          _engine,
-          i,
-          buses[i].volume,
-          buses[i].muted ? 1 : 0,
-        );
-      }
+      // No structural change → re-push every live parameter. Pushing only volume/mute here was
+      // a silent divergence: the signature deliberately excludes pan, FX settings and send
+      // levels (a knob tick must not rebuild the graph), and each of those has its own live
+      // setter that the mixer calls on every tick — so this branch is the ONLY thing that
+      // carries them when the model changed by some other route. A failed save reverting the
+      // aggregate, and a remote sync applying someone else's edit, both land exactly here: the
+      // UI showed the new value while the engine kept playing the old one until the next
+      // structural edit or reopen.
+      _pushLiveParams(tracks, buses);
       return;
     }
 
@@ -852,21 +841,37 @@ class GraphAudioPlaybackService implements PlaybackEngine {
     }
 
     // The rebuild reset every node to defaults — re-apply persisted effects + levels.
+    _pushLiveParams(tracks, buses);
+  }
+
+  /// Pushes every parameter the engine can change WITHOUT rebuilding the graph: track and bus
+  /// volume, mute, pan, insert-FX settings, aux send levels, the shared reverb and the master
+  /// gain. Idempotent, and deliberately the single definition of "what a live parameter is" —
+  /// both the post-commit re-apply (a rebuild resets nodes to defaults) and the
+  /// no-topology-change fast path call it, so the two can never drift apart again.
+  ///
+  /// Indices come from the committed maps, so a track that failed to stage is simply skipped.
+  void _pushLiveParams(List<TrackPlayback> tracks, List<BusPlayback> buses) {
     for (final t in tracks) {
-      final idx = newIndex[t.id];
+      final idx = _trackIndex[t.id];
       if (idx == null) continue;
+      _bindings.ve_set_track_volume(_engine, idx, t.volume, t.muted ? 1 : 0);
       _bindings.ve_set_pan(_engine, idx, t.pan);
-      if (t.fx != null) _applyFxToIndex(idx, t.fx!);
+      final fx = t.fx;
+      if (fx != null) _applyFxToIndex(idx, fx);
+      for (var s = 0; s < t.sends.length; s++) {
+        _bindings.ve_set_send_level(_engine, idx, s, t.sends[s].levelDb);
+      }
     }
-    for (var i = 0; i < buses.length; i++) {
-      _applyBusFx(i, buses[i].fx);
-      _bindings.ve_set_bus_volume(
-        _engine,
-        i,
-        buses[i].volume,
-        buses[i].muted ? 1 : 0,
-      );
-      _bindings.ve_set_bus_pan(_engine, i, buses[i].pan);
+    for (final b in buses) {
+      final idx = _busIndex[b.id];
+      if (idx == null) continue;
+      _bindings.ve_set_bus_volume(_engine, idx, b.volume, b.muted ? 1 : 0);
+      _bindings.ve_set_bus_pan(_engine, idx, b.pan);
+      _applyBusFx(idx, b.fx);
+      for (var s = 0; s < b.sends.length; s++) {
+        _bindings.ve_set_bus_send_level(_engine, idx, s, b.sends[s].levelDb);
+      }
     }
     final r = _reverb;
     if (r != null) _applyReverb(r);

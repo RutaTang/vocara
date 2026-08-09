@@ -157,32 +157,29 @@ void main() {
       },
     );
 
-    test(
-      'monitorAllowed follows what the engine RENDERS to, not the pick',
-      () async {
-        // The scenario the selection-based test cannot see: headphones are selected and present,
-        // but opening the mic hands the output to the duplex unit, which renders through the
-        // microphone's endpoint or the system default — here, the built-in speakers. Judging the
-        // selection would leave the monitor up and howling into them.
-        outs = [_builtInOut, _headphones];
-        storage.doc = {'outputDeviceUid': _headphones.uid};
-        await service.load();
-        final engine = _FakeEngine();
-        service.attachEngine(engine);
-        expect(service.monitorAllowed, isTrue, reason: 'on the chosen device');
+    test('monitorAllowed follows what the engine RENDERS to, not the pick', () async {
+      // The scenario the selection-based test cannot see: headphones are selected and present,
+      // but opening the mic hands the output to the duplex unit, which renders through the
+      // microphone's endpoint or the system default — here, the built-in speakers. Judging the
+      // selection would leave the monitor up and howling into them.
+      outs = [_builtInOut, _headphones];
+      storage.doc = {'outputDeviceUid': _headphones.uid};
+      await service.load();
+      final engine = _FakeEngine();
+      service.attachEngine(engine);
+      expect(service.monitorAllowed, isTrue, reason: 'on the chosen device');
 
-        engine.actualOutput = _builtInOut.uid;
-        engine.monitorGains.clear();
-        service.reconcileMonitorSafety();
-        expect(service.monitorAllowed, isFalse);
-        expect(engine.monitorGains, [0.0]);
+      engine.actualOutput = _builtInOut.uid;
+      engine.monitorGains.clear();
+      service.reconcileMonitorSafety();
+      expect(service.monitorAllowed, isFalse);
+      expect(engine.monitorGains, [0.0]);
 
-        // Back on the chosen device, the fader is honoured again.
-        engine.actualOutput = _headphones.uid;
-        service.reconcileMonitorSafety();
-        expect(service.monitorAllowed, isTrue);
-      },
-    );
+      // Back on the chosen device, the fader is honoured again.
+      engine.actualOutput = _headphones.uid;
+      service.reconcileMonitorSafety();
+      expect(service.monitorAllowed, isTrue);
+    });
 
     test(
       'an unenumerable rendering device falls back to judging the selection',
