@@ -198,7 +198,14 @@ impl Node for StreamingSource {
         if flush != self.cur_flush {
             let want = self.ctrl.gen.load(Ordering::Acquire);
             self.armed = false;
-            self.pending_fence = None;
+            // KEEP a fence already parked at `want`: its generation frame is
+            // consumed, so dropping it here strands the base frame as one more
+            // discarded frame and leaves the drain below hunting a fence that
+            // will never be pushed again — every later block would drain the
+            // ring to silence until the next replan.
+            if self.pending_fence != Some(want) {
+                self.pending_fence = None;
+            }
             loop {
                 if self.cur_gen == want && self.armed {
                     break;
@@ -227,6 +234,14 @@ impl Node for StreamingSource {
             }
         }
         for i in 0..io.frames {
+            // Complete a fence parked by an earlier pop (its base frame was
+            // not visible yet — the two pushes publish separately). Every
+            // arming path below is gated on `armed`, which a parked fence
+            // clears, so without this retry nothing would ever finish the
+            // adoption and the source would sit silent until the next flush.
+            if let Some(g) = self.pending_fence {
+                self.adopt_fence(g);
+            }
             let out = &mut *io.outputs[0];
             let o = CHANNELS * i;
             let tl = io.tl + i as i64;
