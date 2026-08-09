@@ -374,18 +374,36 @@ class GraphAudioPlaybackService implements PlaybackEngine {
     }
   }
 
-  /// The active output device's UID ('' if unavailable).
-  String currentOutputDevice() {
+  /// Reads a NUL-terminated UID the engine wrote into a caller-owned buffer.
+  ///
+  /// Decodes with `allowMalformed` for the same reason [_charArrayToString]
+  /// does: the engine truncates to the buffer at a BYTE boundary, and a device
+  /// uid is not guaranteed ASCII (an aggregate device carries its user-chosen
+  /// name). A cut through a multi-byte sequence would otherwise throw a
+  /// FormatException — out of a one-second device-watch timer, where it lands
+  /// as an unhandled async error rather than a wrong label.
+  String _readUid(
+    int Function(ffi.Pointer<VeEngine>, ffi.Pointer<ffi.Char>, int) read,
+  ) {
     if (!_available) return '';
     const cap = 256;
     final buf = malloc<ffi.Char>(cap);
     try {
-      _bindings.ve_current_output_device(_engine, buf, cap);
-      return buf.cast<Utf8>().toDartString();
+      read(_engine, buf, cap);
+      final bytes = <int>[];
+      for (var i = 0; i < cap; i++) {
+        final c = buf[i];
+        if (c == 0) break;
+        bytes.add(c & 0xff);
+      }
+      return utf8.decode(bytes, allowMalformed: true);
     } finally {
       malloc.free(buf);
     }
   }
+
+  /// The active output device's UID ('' if unavailable).
+  String currentOutputDevice() => _readUid(_bindings.ve_current_output_device);
 
   /// The UID the engine is ACTUALLY rendering to ('' = nothing open). Differs
   /// from [currentOutputDevice], which reports what was REQUESTED: they
@@ -393,17 +411,7 @@ class GraphAudioPlaybackService implements PlaybackEngine {
   /// the duplex mic unit owns the output, where playback follows the
   /// microphone's endpoint or the system default and the app-selected device
   /// is not consulted at all. Feedback safety must be judged from this one.
-  String actualOutputDevice() {
-    if (!_available) return '';
-    const cap = 256;
-    final buf = malloc<ffi.Char>(cap);
-    try {
-      _bindings.ve_actual_output_device(_engine, buf, cap);
-      return buf.cast<Utf8>().toDartString();
-    } finally {
-      malloc.free(buf);
-    }
-  }
+  String actualOutputDevice() => _readUid(_bindings.ve_actual_output_device);
 
   /// Device-event bits for [pollDeviceEvents] masks.
   static const int eventOutputLost = 1;
@@ -445,33 +453,13 @@ class GraphAudioPlaybackService implements PlaybackEngine {
   }
 
   /// The selected input device's UID ('' if unavailable / system default).
-  String currentInputDevice() {
-    if (!_available) return '';
-    const cap = 256;
-    final buf = malloc<ffi.Char>(cap);
-    try {
-      _bindings.ve_current_input_device(_engine, buf, cap);
-      return buf.cast<Utf8>().toDartString();
-    } finally {
-      malloc.free(buf);
-    }
-  }
+  String currentInputDevice() => _readUid(_bindings.ve_current_input_device);
 
   /// The UID the OPEN input stream is ACTUALLY bound to ('' = input closed,
   /// or bound to the system default). Selection is fire-and-forget inside
   /// the engine, so this — not [currentInputDevice] — is what the take
   /// really records from.
-  String actualInputDevice() {
-    if (!_available) return '';
-    const cap = 256;
-    final buf = malloc<ffi.Char>(cap);
-    try {
-      _bindings.ve_actual_input_device(_engine, buf, cap);
-      return buf.cast<Utf8>().toDartString();
-    } finally {
-      malloc.free(buf);
-    }
-  }
+  String actualInputDevice() => _readUid(_bindings.ve_actual_input_device);
 
   /// Start live-input monitoring (open the mic stream + ramp the monitor in).
   void startMonitor() {
