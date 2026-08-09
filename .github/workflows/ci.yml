@@ -27,7 +27,9 @@ jobs:
           flutter-version: 3.38.5
           cache: true
       - run: flutter pub get
-      - run: dart format --set-exit-if-changed lib test
+      # integration_test too: analyze already covers it, and a directory the
+      # format gate skips is a directory that drifts.
+      - run: dart format --set-exit-if-changed lib test integration_test
       - run: flutter analyze
       - run: flutter test
 
@@ -42,9 +44,23 @@ jobs:
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable branch
         with:
           toolchain: stable
+          # Requested explicitly: the action installs the minimal profile, so
+          # the fmt/clippy steps below would otherwise depend on whatever the
+          # runner image happens to ship.
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: client/rust/vocara_engine
+      # Symmetric with the dart job's format + analyze + test: the rust side
+      # had only `test`, so a formatting drift or a new clippy lint could land
+      # unnoticed.
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo clippy --locked --all-targets --features device -- -D warnings
+      # Both modes, like the release gate: plain `cargo test` skips the
+      # feature-gated ffi/vpio/device modules, so only the device run
+      # compiles the FFI surface.
+      - run: cargo test --locked
       - run: cargo test --locked --features device
 
   # The UI-driven e2e suites boot the full macOS app (TEST flavor, seeded

@@ -119,11 +119,17 @@ fn main() {
     let pos_ok = (pos - expect_pos).abs() < ENGINE_SR as i64 * 2;
     let mic_ok = mic > (PLAY_SECS - 5) * ENGINE_SR as u64;
     let freeze_ok = ppm_paused.to_bits() == ppm_frozen_base.to_bits();
-    println!("playback advance : pos={pos} (expected ≈{expect_pos})  {}", ok(pos_ok));
+    println!(
+        "playback advance : pos={pos} (expected ≈{expect_pos})  {}",
+        ok(pos_ok)
+    );
     println!("stream underruns : {xruns}  {}", ok(xruns == 0));
     println!("mic delivery     : {mic} engine frames  {}", ok(mic_ok));
     println!("drift (playing)  : {ppm_playing:+.3} ppm (deadband = 0.0 on a shared codec)");
-    println!("drift (mic off)  : {ppm_paused:+.3} ppm  freeze {}", ok(freeze_ok));
+    println!(
+        "drift (mic off)  : {ppm_paused:+.3} ppm  freeze {}",
+        ok(freeze_ok)
+    );
     println!("device events    : {events:#b}");
     let pass = pos_ok && xruns == 0 && mic_ok && freeze_ok;
     println!("overall          : {}", if pass { "PASS" } else { "FAIL" });

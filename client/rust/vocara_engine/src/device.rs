@@ -388,7 +388,10 @@ impl OutResampler {
     fn render_block(&mut self) -> bool {
         let frames = self.max_block;
         let n = frames * CHANNELS;
-        if !self.rt.try_render(self.epoch, &mut self.scratch[..n], frames) {
+        if !self
+            .rt
+            .try_render(self.epoch, &mut self.scratch[..n], frames)
+        {
             return false;
         }
         for f in 0..frames {
@@ -1092,7 +1095,8 @@ impl DriftEstimator {
         } else {
             1.0 + err.clamp(-500e-6, 500e-6)
         };
-        self.ratio_bits.store(corrected.to_bits(), Ordering::Relaxed);
+        self.ratio_bits
+            .store(corrected.to_bits(), Ordering::Relaxed);
         corrected
     }
 
@@ -3988,8 +3992,7 @@ mod cell_exclusion_tests {
         assert!(cell.transport().consumed_frames() > 0);
         // Delivery can never outrun production; the resampler holds a FIFO between them.
         assert!(
-            cell.transport().consumed_frames()
-                <= cell.transport().rendered_frames_for_test(),
+            cell.transport().consumed_frames() <= cell.transport().rendered_frames_for_test(),
             "consumed must never outrun rendered"
         );
     }

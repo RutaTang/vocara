@@ -631,11 +631,7 @@ pub extern "C" fn ve_set_output_device(e: *mut VeEngine, uid: *const c_char) -> 
 /// default output for the life of the session. Judge monitor-feedback safety from THIS, not from
 /// the selection. Returns the byte length.
 #[no_mangle]
-pub extern "C" fn ve_actual_output_device(
-    e: *mut VeEngine,
-    buf: *mut c_char,
-    cap: usize,
-) -> usize {
+pub extern "C" fn ve_actual_output_device(e: *mut VeEngine, buf: *mut c_char, cap: usize) -> usize {
     with_engine(e, 0, |eng| {
         let uid = eng
             .output_binding

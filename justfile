@@ -88,7 +88,7 @@ e2e-ui:
 
 # Format code
 fmt:
-    cd client && dart format lib test
+    cd client && dart format lib test integration_test
 
 # Fetch dependencies
 get:
