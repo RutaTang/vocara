@@ -177,6 +177,21 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   static void _forgetInFlight(Map<String, Future<void>> m, String path) {
     m.remove(path);
   }
+
+  /// Bumped by [evictAnalysis] per path (and by [_evictAggregates] for the
+  /// whole aggregate family). A compute captures the generation it started
+  /// under and, if it changed by the time the result lands, that result
+  /// describes bytes the eviction has already declared stale: it must not be
+  /// cached, and must not latch "unavailable" over the new file. Re-analyze is
+  /// exactly this window — it evicts each clip while the dock may still be
+  /// computing it — and without the check the stale result was written back
+  /// under a key nothing invalidates again, so the take showed the OLD audio's
+  /// analysis (or a permanent "unavailable") for the rest of the session.
+  final Map<String, int> _pathGeneration = {};
+  int _generationOf(String path) => _pathGeneration[path] ?? 0;
+  void _bumpGeneration(String path) =>
+      _pathGeneration[path] = _generationOf(path) + 1;
+  int _aggGeneration = 0;
   // Paths whose compute finished but produced nothing (non-WAV imports, missing
   // or truncated files). Latched so a null result is never retried — otherwise
   // the always-on inspector would re-launch the read + isolate every rebuild.
@@ -676,13 +691,21 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     final pending = _metricsInFlight[path];
     if (pending != null) return pending;
     final done = Completer<void>();
+    final generation = _generationOf(path);
     _metricsInFlight[path] = done.future;
     _metricsLoading.add(path);
     notifyListeners();
+    var stale = false;
     try {
       final m = await _spectrograms.computeMetricsFromFile(path);
       // See [_disposed]: no reader is left for this cache.
       if (_disposed) return;
+      // See [_pathGeneration]: evicted mid-compute, so this describes bytes
+      // that are already gone.
+      if (generation != _generationOf(path)) {
+        stale = true;
+        return;
+      }
       if (m != null) {
         _metricsCache[path] = m;
       } else {
@@ -690,7 +713,7 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
       }
     } catch (_) {
       // Compute failed; latch so it isn't retried. The lane shows unavailable.
-      _metricsUnavailable.add(path);
+      if (generation == _generationOf(path)) _metricsUnavailable.add(path);
     } finally {
       // Removed in the SAME place the loading flag is, so a failed or disposed
       // compute can never leave a future nobody will complete.
@@ -698,6 +721,9 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
       _forgetInFlight(_metricsInFlight, path);
       done.complete();
       notifyListeners();
+      // Redo the discarded work against the current file, now that the
+      // in-flight slot is free (a joiner of the dropped compute got nothing).
+      if (stale) unawaited(_ensureMetricsForPath(path));
     }
   }
 
@@ -725,12 +751,19 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     final pending = _spectrogramInFlight[path];
     if (pending != null) return pending;
     final done = Completer<void>();
+    final generation = _generationOf(path);
     _spectrogramInFlight[path] = done.future;
     _spectrogramLoading.add(path);
     notifyListeners();
+    var stale = false;
     try {
       final spec = await _spectrograms.computeFromFile(path);
       if (_disposed) return;
+      // See [_pathGeneration]: evicted mid-compute.
+      if (generation != _generationOf(path)) {
+        stale = true;
+        return;
+      }
       if (spec != null) {
         _spectrogramCache[path] = spec;
       } else {
@@ -738,12 +771,13 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
       }
     } catch (_) {
       // Compute failed; latch so it isn't retried. The lane shows unavailable.
-      _spectrogramUnavailable.add(path);
+      if (generation == _generationOf(path)) _spectrogramUnavailable.add(path);
     } finally {
       _spectrogramLoading.remove(path);
       _forgetInFlight(_spectrogramInFlight, path);
       done.complete();
       notifyListeners();
+      if (stale) unawaited(_ensureSpectrogramForPath(path));
     }
   }
 
@@ -777,14 +811,22 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     // a later caller asks for, it joins this work instead of starting its own
     // or giving up.
     final done = Completer<void>();
+    final generation = _generationOf(path);
     _spectrogramInFlight[path] = done.future;
     _metricsInFlight[path] = done.future;
     _spectrogramLoading.add(path);
     _metricsLoading.add(path);
     notifyListeners();
+    var stale = false;
     try {
       final both = await _spectrograms.computeBothFromFile(path);
       if (_disposed) return _clipAnalysis(path);
+      // See [_pathGeneration]: evicted mid-compute, so this pair describes
+      // bytes the eviction already declared stale.
+      if (generation != _generationOf(path)) {
+        stale = true;
+        return (spectrogram: null, metrics: null);
+      }
       final spec = both?.spectrogram;
       final m = both?.metrics;
       if (spec != null) {
@@ -800,8 +842,10 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     } catch (_) {
       // Compute failed; latch both so neither is retried (matching the
       // individual paths' latch discipline).
-      _spectrogramUnavailable.add(path);
-      _metricsUnavailable.add(path);
+      if (generation == _generationOf(path)) {
+        _spectrogramUnavailable.add(path);
+        _metricsUnavailable.add(path);
+      }
     } finally {
       _spectrogramLoading.remove(path);
       _metricsLoading.remove(path);
@@ -809,6 +853,7 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
       _forgetInFlight(_metricsInFlight, path);
       done.complete();
       notifyListeners();
+      if (stale) unawaited(_ensureClipAnalysis(path));
     }
     return _clipAnalysis(path);
   }
@@ -854,20 +899,24 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
         _eqSpectroUnavailable.contains(path)) {
       return;
     }
+    final generation = _generationOf(path);
     _eqSpectroLoading.add(path);
     try {
       final spec = await _spectrograms.computeFromFile(
         path,
         maxHz: _eqDisplayMaxHz,
       );
-      if (_disposed) return;
+      // See [_pathGeneration]. No retry is scheduled here: [eqInputColumn]
+      // re-asks on the next frame it is painted, which starts a fresh compute
+      // once the loading flag clears below.
+      if (_disposed || generation != _generationOf(path)) return;
       if (spec != null) {
         _eqSpectroCache[path] = spec;
       } else {
         _eqSpectroUnavailable.add(path);
       }
     } catch (_) {
-      _eqSpectroUnavailable.add(path);
+      if (generation == _generationOf(path)) _eqSpectroUnavailable.add(path);
     } finally {
       _eqSpectroLoading.remove(path);
       notifyListeners();
@@ -888,6 +937,7 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
         _aggUnavailable.contains(key)) {
       return;
     }
+    final generation = _aggGeneration;
     _aggLoading.add(key);
     notifyListeners();
     try {
@@ -947,7 +997,9 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
       // absent makes the next ensure recompute against now-warm per-clip
       // caches, where a cached partial would be permanent (the key only
       // changes with the clip set).
-      if (complete) {
+      // See [_pathGeneration]: an eviction landed while the clips were being
+      // analyzed, so this merge folds bytes that are already stale.
+      if (complete && generation == _aggGeneration) {
         // Stored as ONE entry: both merges describe the same clips at the same
         // offsets, every derived view (LTAS, profile, register) is only sound
         // against that exact pair, and the guard above takes a cached entry to
@@ -965,7 +1017,7 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
         }
       }
     } catch (_) {
-      _aggUnavailable.add(key);
+      if (generation == _aggGeneration) _aggUnavailable.add(key);
     } finally {
       _aggLoading.remove(key);
       notifyListeners();
@@ -977,6 +1029,10 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   /// Drops the cached spectrogram + voice metrics for an audio [path] that no
   /// longer exists (split/merge/re-analyze replace a take's file).
   void evictAnalysis(String path) {
+    // Disown any compute still in flight for this path: it read the file
+    // BEFORE this eviction, so its result (or its "unavailable" latch) must
+    // not land on top of the replacement. See [_pathGeneration].
+    _bumpGeneration(path);
     // remove fires the eviction hook, which drops the derived memos with it.
     _spectrogramCache.remove(path);
     _metricsCache.remove(path);
@@ -994,6 +1050,9 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   /// so a changed clip set self-invalidates, but a clip's *file* can change with
   /// its id intact (re-analyze), so any file mutation clears them outright.
   void _evictAggregates() {
+    // Disown in-flight merges too (see [_pathGeneration]); unconditional,
+    // because a merge in flight leaves both collections below empty.
+    _aggGeneration++;
     if (_aggAnalysisCache.isEmpty && _aggUnavailable.isEmpty) return;
     // clear fires the eviction hook per key, which drops the derived memos.
     _aggAnalysisCache.clear();

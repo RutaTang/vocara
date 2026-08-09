@@ -56,9 +56,16 @@ class _StubSpectrograms extends Fake implements SpectrogramService {
     double maxHz = 5000,
   }) async {
     bothCalls++;
+    // Snapshot at CALL time, like a real read of the file: a compute parked on
+    // [hold] carries the bytes it started with, so a test can replace a path's
+    // content mid-flight and have the parked compute still return the old one.
+    final result = (
+      spectrogram: specsByPath[path],
+      metrics: metricsByPath[path],
+    );
     await hold[path]?.future;
     onCompute?.call(path);
-    return (spectrogram: specsByPath[path], metrics: metricsByPath[path]);
+    return result;
   }
 }
 
@@ -279,18 +286,19 @@ void main() {
       // The per-clip caches are byte-budgeted, so analyzing clip N can evict
       // clip 1 before the merge reads it back — and the merge treats a
       // missing part as SILENCE, under a key only a clip-set change can
-      // invalidate. Evicting c1 exactly while c2 computes reproduces that
-      // window deterministically.
+      // invalidate. A budget that fits ONE clip's pair (10 frames: 410 B of
+      // metrics + 80 B of spectrogram) makes c2's analysis push c1 out at
+      // exactly that point.
       final track = _lane([_clip('c1', 1000), _clip('c2', 5000)]);
       final stub = _StubSpectrograms(
         metricsByPath: {'c1.wav': _metrics(10), 'c2.wav': _metrics(10)},
         specsByPath: {'c1.wav': _spec(10), 'c2.wav': _spec(10)},
       );
-      late final AnalysisCache cache;
-      cache = _cache(spectrograms: stub, selectedTrack: () => track);
-      stub.onCompute = (path) {
-        if (path == 'c2.wav') cache.evictAnalysis('c1.wav');
-      };
+      final cache = _cache(
+        spectrograms: stub,
+        selectedTrack: () => track,
+        cacheBudget: LruBytesBudget(490),
+      );
 
       await cache.ensureSelectedSpectrogram();
 
@@ -344,6 +352,65 @@ void main() {
       expect(merged!.frames, 50);
       // The joiner reused c1's work rather than launching a second decode.
       expect(stub.bothCalls, 2);
+      cache.dispose();
+    });
+
+    test('a clip evicted MID-COMPUTE is re-analyzed, not answered with the '
+        'pre-eviction result', () async {
+      // Re-analyze exists for a file that changed underneath, and it evicts
+      // each clip while the dock may still be computing it. That compute read
+      // the OLD bytes: writing its result back leaves the take showing the
+      // superseded analysis under a key nothing invalidates again.
+      final track = _lane([_clip('c1', 0)]);
+      final stub = _StubSpectrograms(
+        metricsByPath: {'c1.wav': _metrics(10)},
+        specsByPath: {'c1.wav': _spec(10)},
+      );
+      stub.hold['c1.wav'] = Completer<void>();
+      final cache = _cache(spectrograms: stub, selectedTrack: () => track);
+
+      final first = cache.ensureSelectedSpectrogram();
+      await pumpEventQueue();
+
+      // The file is replaced on disk and the take re-analyzed.
+      cache.evictAnalysis('c1.wav');
+      stub.metricsByPath['c1.wav'] = _metrics(20);
+      stub.specsByPath['c1.wav'] = _spec(20);
+      stub.hold.remove('c1.wav')!.complete();
+      await first;
+      await pumpEventQueue();
+
+      expect(
+        cache.selectedMetrics?.frames,
+        20,
+        reason: 'the evicted analysis must not be served as the new one',
+      );
+      expect(stub.bothCalls, 2, reason: 'the discarded work must be redone');
+      cache.dispose();
+    });
+
+    test('an eviction mid-compute clears a stale "unavailable" latch instead '
+        'of re-latching it over the new file', () async {
+      // Same window, failure side: the pre-eviction read found nothing (the
+      // file was mid-write), and re-latching after the evict made the take
+      // permanently "no analysis" even though the replacement is fine.
+      final track = _lane([_clip('c1', 0)]);
+      final stub = _StubSpectrograms(metricsByPath: {}, specsByPath: {});
+      stub.hold['c1.wav'] = Completer<void>();
+      final cache = _cache(spectrograms: stub, selectedTrack: () => track);
+
+      final first = cache.ensureSelectedSpectrogram();
+      await pumpEventQueue();
+
+      cache.evictAnalysis('c1.wav');
+      stub.metricsByPath['c1.wav'] = _metrics(10);
+      stub.specsByPath['c1.wav'] = _spec(10);
+      stub.hold.remove('c1.wav')!.complete();
+      await first;
+      await pumpEventQueue();
+
+      expect(cache.selectedMetricsUnavailable, isFalse);
+      expect(cache.selectedMetrics?.frames, 10);
       cache.dispose();
     });
 
