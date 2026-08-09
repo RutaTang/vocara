@@ -217,9 +217,13 @@ void main() {
   ) async {
     await bootDetail(tester);
 
-    const zoneText = 'Drag a backing track here';
+    // textContaining, not text: the zone's copy gained ", or click to browse"
+    // when click-to-upload landed, and an exact-match finder simply stopped
+    // matching — the assertion below then failed for a reason that had nothing
+    // to do with dropping a file.
+    final zone = find.textContaining('Drag a backing track here');
     expect(
-      await pumpUntil(tester, () => present(find.text(zoneText))),
+      await pumpUntil(tester, () => present(zone)),
       isTrue,
       reason: 'with no accompaniment seeded, the backing drop zone shows',
     );
@@ -228,12 +232,10 @@ void main() {
       '${tmpDir.path}/backing_drop.wav',
       freq: 110,
     );
-    await simulateFileDrop(tester, [
-      wav,
-    ], at: tester.getCenter(find.text(zoneText)));
+    await simulateFileDrop(tester, [wav], at: tester.getCenter(zone));
 
     expect(
-      await pumpUntil(tester, () => !present(find.text(zoneText))),
+      await pumpUntil(tester, () => !present(zone)),
       isTrue,
       reason:
           'a dropped audio file is imported as the backing track, replacing '
