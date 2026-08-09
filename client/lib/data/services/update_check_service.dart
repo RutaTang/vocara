@@ -165,13 +165,19 @@ class UpdateCheckService extends ChangeNotifier {
   /// releases/latest shape (`tag_name` / `html_url` / `body`). The URL must
   /// be https — a tampered or downgraded manifest must not be able to point
   /// users at a plaintext download page, let alone a non-web URL.
+  ///
+  /// `html_url` WINS over `url` when both are present: a real GitHub release
+  /// object carries both, and its `url` is the api.github.com resource
+  /// endpoint — opening that from "Open Download Page" lands the user on raw
+  /// JSON with no installer in sight. A hand-hosted manifest has no
+  /// `html_url`, so it still falls through to `url`.
   @visibleForTesting
   static UpdateInfo? parseManifest(String body) {
     try {
       final decoded = jsonDecode(body);
       if (decoded is! Map<String, dynamic>) return null;
       final Object? version = decoded['latest'] ?? decoded['tag_name'];
-      final Object? url = decoded['url'] ?? decoded['html_url'];
+      final Object? url = decoded['html_url'] ?? decoded['url'];
       final Object? notes = decoded['notes'] ?? decoded['body'];
       if (version is! String || version.trim().isEmpty) return null;
       if (url is! String) return null;

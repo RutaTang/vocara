@@ -32,6 +32,23 @@ void main() {
       expect(info.notes, 'Release notes');
     });
 
+    test('a real GitHub release carries BOTH urls; the human page wins', () {
+      // The shape the shipping manifestUrl actually returns. `url` is the
+      // api.github.com resource endpoint, and the banner's button opens
+      // whatever lands here — preferring it showed the user raw JSON.
+      final info = UpdateCheckService.parseManifest(
+        '{"tag_name": "v1.2.0", '
+        '"url": "https://api.github.com/repos/RutaTang/vocara/releases/123", '
+        '"html_url": "https://github.com/RutaTang/vocara/releases/tag/v1.2.0",'
+        ' "body": "Release notes"}',
+      );
+      expect(
+        info!.url,
+        'https://github.com/RutaTang/vocara/releases/tag/v1.2.0',
+      );
+      expect(info.url, isNot(contains('api.github.com')));
+    });
+
     test('missing notes default to empty', () {
       final info = UpdateCheckService.parseManifest(
         '{"latest": "1.2.0", "url": "https://example.com"}',
