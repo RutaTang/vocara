@@ -442,10 +442,11 @@ class _AddZoneState extends State<_AddZone> {
       onDragDone: (detail) {
         setState(() => _dragging = false);
         if (!widget.enabled) return;
-        final paths = detail.files
-            .map((f) => f.path)
-            .where(TechniqueMedia.isSupportedMedia)
-            .toList();
+        // Hand over EVERY dropped path: the view model filters, and it needs
+        // the unsupported ones to report them. Filtering here made a drop of
+        // only unsupported files do nothing at all — no import, no notice —
+        // and under-counted the skips in a mixed drop.
+        final paths = detail.files.map((f) => f.path).toList();
         if (paths.isNotEmpty) widget.onDropPaths(paths);
       },
       child: MouseRegion(
