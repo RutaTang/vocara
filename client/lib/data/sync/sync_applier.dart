@@ -7,6 +7,7 @@ import '../db/app_database.dart';
 import 'hlc.dart';
 import 'quarantine_store.dart';
 import 'sync_row.dart';
+import 'sync_state_store.dart';
 import 'sync_transport.dart';
 
 /// A row pulled from the cloud, ready to apply: the table name plus every synced
@@ -91,10 +92,16 @@ class ApplyResult {
 /// commit failure degrades to a failed batch instead of throwing out of
 /// apply().
 class SyncApplier {
-  SyncApplier(this.db, this.clock, {required this.builder, this.quarantine});
+  SyncApplier(this.db, this.clock, {required this.builder, this.quarantine})
+    : _state = SyncStateStore(db);
 
   final AppDatabase db;
   final HlcClock clock;
+
+  /// Where the durable HLC high-water mark is kept. Written inside the apply
+  /// transaction so a restart can restore the monotonicity the in-memory
+  /// clock gained from stamps whose records never became rows.
+  final SyncStateStore _state;
 
   /// Projects a row back into its full wire snapshot so the FK sweep can
   /// PARK an orphan instead of losing it, and so [apply] can capture the
@@ -471,6 +478,19 @@ class SyncApplier {
           updatedThisBatch,
           slotResolutions,
         );
+        // Durably record what the in-memory clock is about to merge, inside
+        // this transaction so the mark can never claim stamps a rollback threw
+        // away. The advance itself still happens only post-commit; this is the
+        // part that has to survive a restart, because a stamp whose record the
+        // FK sweep parked leaves no hlc_packed anywhere for the boot seed to
+        // find (see SyncStateStore.hlcHighWaterKey).
+        if (settledHlcs.isNotEmpty) {
+          await _state.raiseHlcHighWater(
+            settledHlcs
+                .map((h) => h.packed)
+                .reduce((a, b) => a.compareTo(b) >= 0 ? a : b),
+          );
+        }
         if (beforeCommit != null) await beforeCommit();
       });
     } catch (_) {

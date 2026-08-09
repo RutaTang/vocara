@@ -2,6 +2,8 @@ import 'dart:convert';
 
 import 'package:drift/drift.dart';
 
+import '../../domain/models/audio_fx.dart';
+import '../../domain/models/lyric_line.dart';
 import '../../utils/id.dart';
 import '../db/app_database.dart';
 import 'hlc.dart';
@@ -353,6 +355,50 @@ Map<String, TableInfo<Table, dynamic>> syncedTableRegistry(AppDatabase db) => {
       t.actualTableName: t,
 };
 
+/// Decodes one `*_json` column body the way the REPOSITORY that hydrates it
+/// does, throwing if the body is not that shape. Keyed by column name (the
+/// name carries the shape: `fx_json` is a [TrackFx] object in every table that
+/// has one), and exhaustive over the schema — a schema-derived test fails if a
+/// synced table gains a `*_json` column with no entry here.
+///
+/// Parseable JSON is not enough. `lyrics_json = '{}'` is valid JSON that binds
+/// to a TEXT column and commits happily, and then the hydrator's
+/// `jsonDecode(...) as List` throws — inside a view model, long after the
+/// record could have been parked with its evidence, leaving a practice that
+/// has vanished from the list and cannot be opened. Running the real decoder
+/// at the door makes the gate exactly as strict as the reader, by
+/// construction: anything that survives here hydrates.
+const Map<String, void Function(Object?)> jsonColumnDecoders = {
+  'reverb_json': _decodeReverb,
+  'lyrics_json': _decodeLyrics,
+  'fx_json': _decodeFx,
+  'sends_json': _decodeSends,
+  'aliases_json': _decodeStringList,
+  'tags_json': _decodeStringList,
+};
+
+void _decodeReverb(Object? body) =>
+    ReverbSettings.fromJson(body! as Map<String, dynamic>);
+
+void _decodeFx(Object? body) => TrackFx.fromJson(body! as Map<String, dynamic>);
+
+void _decodeLyrics(Object? body) {
+  for (final e in body! as List) {
+    LyricLine.fromJson(e as Map<String, dynamic>);
+  }
+}
+
+void _decodeSends(Object? body) {
+  for (final e in body! as List) {
+    TrackSend.fromJson(e as Map<String, dynamic>);
+  }
+}
+
+// Stricter than the hydrator's lazy `.cast<String>()` on purpose: a cast that
+// only throws when the UI later iterates it is the same "fails far away"
+// problem this gate exists to end.
+void _decodeStringList(Object? body) => List<String>.from(body! as List);
+
 /// Rejects any wire value that would not BIND to its column, using the live
 /// drift schema as the single source of what each column holds. Throws
 /// [FormatException] on the first mismatch.
@@ -389,11 +435,36 @@ void checkColumnTypes(
       );
     }
     if (column.name.endsWith('_json') && value is String) {
+      final Object? body;
       try {
-        jsonDecode(value);
+        body = jsonDecode(value);
       } on FormatException {
         throw FormatException(
           'SyncRow: "${table.actualTableName}.${column.name}" is not JSON',
+        );
+      }
+      final decode = jsonColumnDecoders[column.name];
+      if (decode == null) {
+        // A synced table gained a JSON column and nobody said what it holds.
+        // Refusing it is the same stance the blob/datetime branch takes: an
+        // undesigned wire shape is quarantined, never admitted on the strength
+        // of "it parsed". The schema-derived test makes this unreachable in a
+        // build that ships.
+        throw FormatException(
+          'SyncRow: "${table.actualTableName}.${column.name}" has no '
+          'registered JSON body shape',
+        );
+      }
+      try {
+        decode(body);
+      } on FormatException {
+        rethrow;
+      } catch (e) {
+        // Every decoder failure must leave here as a FormatException: that is
+        // what the applier catches to park the record with its evidence.
+        throw FormatException(
+          'SyncRow: "${table.actualTableName}.${column.name}" is JSON but not '
+          'the shape that column holds (${e.runtimeType})',
         );
       }
     }

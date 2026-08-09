@@ -33,6 +33,41 @@ class SyncStateStore {
   /// that still claims it never had a transport.
   Future<void> markTransportSeen() => set(transportSeenKey, '1');
 
+  /// The highest packed HLC this device has ever ACCEPTED from a peer —
+  /// including stamps whose record never became a row.
+  ///
+  /// [Persistence.seedClock] restores boot monotonicity from the max
+  /// hlc_packed held in the tables, which covers every stamp that landed as
+  /// data. It does not cover a stamp the device verified and merged into its
+  /// live clock but whose record was then parked: an FK-orphan's snapshot
+  /// lives on in `sync_quarantine`, whose stamp column is deliberately NOT
+  /// named hlc_packed (a quarantine also holds implausibly-future stamps that
+  /// must never seed a clock — see tables.dart). So the one legitimate
+  /// high-water mark those parks contribute survived only in memory, and a
+  /// restart lost it: a local edit could then take a LOWER stamp than the
+  /// parked record's, and the quarantine replay would silently overwrite the
+  /// user's newer edit under LWW. Recording the mark here — from stamps that
+  /// already passed the plausibility gate, and only ever upward — closes that
+  /// window without letting a suspect stamp anywhere near the clock.
+  static const String hlcHighWaterKey = 'hlc_high_water';
+
+  /// Raises the durable high-water mark to [packed] if it is higher.
+  ///
+  /// Composes into the caller's transaction like everything else here, and
+  /// the guard lives in the SQL so concurrent writers cannot lose an update
+  /// through a read-modify-write gap. Packed HLCs are fixed-width and
+  /// lexicographically ordered, so a string comparison IS the HLC ordering.
+  Future<void> raiseHlcHighWater(String packed) => _db.customStatement(
+    'INSERT INTO sync_state (key, value) VALUES (?, ?) '
+    'ON CONFLICT(key) DO UPDATE SET value = excluded.value '
+    'WHERE excluded.value > sync_state.value',
+    [hlcHighWaterKey, packed],
+  );
+
+  /// The durable high-water mark, or null before any remote stamp was
+  /// accepted (see [hlcHighWaterKey]).
+  Future<String?> hlcHighWater() => get(hlcHighWaterKey);
+
   /// Generic get: null when the key was never set.
   Future<String?> get(String key) async {
     final row = await (_db.select(

@@ -144,8 +144,13 @@ bool _compatibleForMerge(_WavLayout a, _WavLayout b) {
   int mask(_WavLayout w) =>
       w.fmt.length >= 40 ? _fmtU16(w.fmt, 20) | (_fmtU16(w.fmt, 22) << 16) : 0;
   if (validBits(a) != validBits(b)) return false;
-  final bothExtensible = a.fmt.length >= 40 && b.fmt.length >= 40;
-  if (bothExtensible && mask(a) != mask(b)) return false;
+  // The mask is compared unconditionally, in both directions. `mask()` already
+  // answers 0 for a plain fmt, which is exactly the spec's "speaker positions
+  // unspecified" — so a plain stereo and an EXTENSIBLE stereo carrying, say,
+  // Left+Centre are genuinely different claims about the same bytes, and the
+  // splice would stamp A's claim over B's half. Only comparing when BOTH sides
+  // were EXTENSIBLE let that through either way round.
+  if (mask(a) != mask(b)) return false;
   return true;
 }
 
@@ -702,7 +707,16 @@ class AudioEditService {
   /// of the streaming migration's benefit. Pinned by mirrored test vectors
   /// here and in the engine's feed tests.
   static Future<bool> isEngineStreamableWav(String path) async {
-    final probe = await AudioFileService.probeWav(File(path));
+    final WavProbe? probe;
+    try {
+      probe = await AudioFileService.probeWav(File(path));
+    } on FileSystemException {
+      // probeWav throws on an unreadable file so the recovery path can hold a
+      // crashed take back rather than trash it. Here the question is only
+      // "can the feeder stream this?", and "we cannot read it" answers no —
+      // the caller's transcode path reports a proper failure of its own.
+      return false;
+    }
     if (probe == null) return false;
     return probe.sampleRate == _engineRate &&
         probe.channels >= 1 &&

@@ -221,6 +221,26 @@ void main() {
         'assets',
       });
     });
+
+    test('every *_json column of a synced table has a registered decoder', () {
+      // Derive the JSON columns STRUCTURALLY from the live schema. A new
+      // `*_json` column that ships without an entry in jsonColumnDecoders is
+      // refused wholesale at the door (every record of that table would
+      // quarantine), so this must fail here rather than in the field.
+      final fromSchema = <String>{
+        for (final table in syncedTableRegistry(db).values)
+          for (final column in table.$columns)
+            if (column.name.endsWith('_json')) column.name,
+      };
+      expect(fromSchema, isNotEmpty); // the derivation itself must keep working
+      expect(
+        fromSchema.difference(jsonColumnDecoders.keys.toSet()),
+        isEmpty,
+        reason:
+            'jsonColumnDecoders must say what each *_json column holds: the '
+            'gate runs the real decoder so that what commits can hydrate.',
+      );
+    });
   });
 
   group('SyncRowBuilder', () {

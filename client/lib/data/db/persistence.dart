@@ -68,6 +68,7 @@ class RepairReport {
     required this.violationsFound,
     required this.violationsRepaired,
     required this.assetsSwept,
+    this.corruptPoolFiles = 0,
   });
 
   /// Cross-row integrity violations detected before repairing.
@@ -79,10 +80,32 @@ class RepairReport {
   /// Unreferenced assets tombstoned plus orphaned pool files reclaimed.
   final int assetsSwept;
 
+  /// Pooled files whose bytes no longer hash to the address they are stored
+  /// under (see [AssetStore.verifyPoolIntegrity]). Reported, never touched:
+  /// the file is still the user's recording.
+  final int corruptPoolFiles;
+
   @override
   String toString() =>
       'RepairReport(found: $violationsFound, repaired: $violationsRepaired, '
-      'assetsSwept: $assetsSwept)';
+      'assetsSwept: $assetsSwept, corruptPoolFiles: $corruptPoolFiles)';
+}
+
+/// How one staged WAV's boot recovery ended. [junk] and [failed] are both
+/// "not recovered", but only [junk] lets the staging sweep take the file:
+/// nothing may trash the only copy of a take on the strength of a failure the
+/// environment caused.
+enum _RecoveryOutcome {
+  /// Attached to its practice as a new take; the staging copy is a leftover.
+  recovered,
+
+  /// Provably not a recoverable take: not the shape the recorder writes, bytes
+  /// that some save already committed, or a practice that no longer exists.
+  junk,
+
+  /// The attempt could not complete — an unreadable file, a decoder failure, a
+  /// store that reported an error. Held back for the next boot to retry.
+  failed,
 }
 
 /// The wired-up persistence layer: one drift database, the write chokepoint, the
@@ -349,10 +372,20 @@ class Persistence {
     final repaired = (found.length - unrepaired.length).clamp(0, found.length);
     final tombstoned = await assets.sweepUnreferenced();
     final orphaned = await assets.sweepOrphanPoolFiles();
+    // After the sweeps, so files on their way out are not re-hashed. Reports
+    // only — see AssetStore.verifyPoolIntegrity for why nothing is touched.
+    final corrupt = await assets.verifyPoolIntegrity();
+    for (final path in corrupt) {
+      DiagnosticsLog.instance.log(
+        'persistence',
+        'pooled file does not match its content address: $path',
+      );
+    }
     final report = RepairReport(
       violationsFound: found.length,
       violationsRepaired: repaired,
       assetsSwept: tombstoned + orphaned,
+      corruptPoolFiles: corrupt.length,
     );
     DiagnosticsLog.instance.log('persistence', 'repairLibrary: $report');
     return report;
@@ -372,6 +405,14 @@ class Persistence {
   ///    depends_on_asset_id across a row's entries (a content-only update
   ///    must not shed its insert's dependency), so before deleting we carry
   ///    that value onto the surviving row in the same transaction.
+  ///    [OplogDrain.ack] carries it the same way for the same reason — any
+  ///    deletion of oplog history owes the survivors that inheritance. Not to
+  ///    a TOMBSTONE though: a delete references no bytes, and gating one on a
+  ///    since-collected asset holds it — and, through the ack watermark, the
+  ///    whole ledger behind it — forever. The subquery needs no upper seq
+  ///    bound here because the target is already each entity's MAX(seq), so
+  ///    nothing can follow it (unlike [OplogDrain.ack], which repairs rows
+  ///    that still have newer entries above them).
   ///  * synced = true rows cannot exist: nothing ever sets the flag — the ack
   ///    path hard-DELETES instead (see [OplogDrain.ack]) — so the SQL needs
   ///    no synced filter; keep-latest-per-entity alone is exact. If a future
@@ -388,7 +429,8 @@ class Persistence {
       'AND o.entity_id = oplog.entity_id '
       'AND o.depends_on_asset_id IS NOT NULL '
       'ORDER BY o.seq DESC LIMIT 1'
-      ') WHERE depends_on_asset_id IS NULL AND seq IN ('
+      ') WHERE depends_on_asset_id IS NULL AND op <> \'tombstone\' '
+      'AND seq IN ('
       'SELECT MAX(seq) FROM oplog GROUP BY entity_table, entity_id)',
     );
     return db.customUpdate(
@@ -454,38 +496,53 @@ class Persistence {
           continue;
         }
         try {
-          if (await _recoverOrphanTake(f, practiceId, referenced, analyze)) {
-            recovered++;
+          switch (await _recoverOrphanTake(
+            f,
+            practiceId,
+            referenced,
+            analyze,
+          )) {
+            case _RecoveryOutcome.recovered:
+              recovered++;
+            case _RecoveryOutcome.junk:
+              break; // provably not a recoverable take: leave it to the sweep
+            case _RecoveryOutcome.failed:
+              await _holdBackForRetry(f, 'the store reported a failure');
           }
         } catch (e) {
-          // Best-effort per file: a failed recovery never blocks the other
-          // orphans or the launch. But a THROWN attempt (decode error, disk
-          // error) is an environmental failure, not proof the file is junk —
-          // a systemic analyzer breakage would otherwise funnel EVERY orphan
-          // to trash this boot, with staging empty next boot so recovery
-          // never retries. Exempt the file from this boot's staging sweep so
-          // the next boot tries again, bounded by age: a file that has kept
-          // failing for over 7 days goes to the sweep after all (the trash
-          // then still holds it for 30 days).
-          if (await _youngEnoughToRetry(f)) {
-            _recoveryRetryPaths.add(f.path);
-          }
-          DiagnosticsLog.instance.log(
-            'persistence',
-            'one staged recording failed to recover (${e.runtimeType}); '
-                'exempted from this boot\'s sweep if young enough to retry',
-          );
+          await _holdBackForRetry(f, 'the attempt threw (${e.runtimeType})');
         }
       }
     }
     return recovered;
   }
 
-  /// Staging files whose recovery attempt THREW this boot — exempted from the
+  /// Staging files whose recovery attempt FAILED this boot — exempted from the
   /// boot staging sweep so the next boot's recovery retries them. Repopulated
   /// by every [recoverStagedRecordings] run.
   Set<String> get recoveryRetryPaths => Set.unmodifiable(_recoveryRetryPaths);
   final Set<String> _recoveryRetryPaths = <String>{};
+
+  /// Exempts [f] from this boot's staging sweep so the next boot's recovery
+  /// tries again.
+  ///
+  /// A failed recovery never blocks the other orphans or the launch, but a
+  /// failure is an environmental symptom (decode error, disk error, a store
+  /// that could not commit), not proof the file is junk — one systemic
+  /// breakage would otherwise funnel EVERY orphan to trash this boot, with
+  /// staging empty next boot so recovery never retries. Bounded by age: a
+  /// file that has kept failing for over 7 days goes to the sweep after all
+  /// (the trash then still holds it for 30 days).
+  Future<void> _holdBackForRetry(File f, String why) async {
+    if (await _youngEnoughToRetry(f)) {
+      _recoveryRetryPaths.add(f.path);
+    }
+    DiagnosticsLog.instance.log(
+      'persistence',
+      'one staged recording failed to recover ($why); exempted from this '
+          'boot\'s sweep if young enough to retry',
+    );
+  }
 
   /// How long a repeatedly-failing staged recording is protected from the
   /// boot sweep before it is released to it (trash retention then still
@@ -503,10 +560,16 @@ class Persistence {
     }
   }
 
-  /// Recovers one staged WAV as a new vocal take of [practiceId]. False means
-  /// "not recovered" — the file is left in place for the staging sweep to
-  /// delete, exactly like before recovery existed.
-  Future<bool> _recoverOrphanTake(
+  /// Recovers one staged WAV as a new vocal take of [practiceId].
+  ///
+  /// The two non-recovered outcomes are deliberately NOT the same answer: only
+  /// [_RecoveryOutcome.junk] releases the file to the staging sweep. Every
+  /// store call below reports failure as a [Result], not a throw (see
+  /// [SongPracticeRepositoryDrift]), so a disk-full or unreadable-database
+  /// boot would otherwise look exactly like "this file is not a take" and
+  /// trash the only copy of a recording — the very case the retry hold-back
+  /// exists for.
+  Future<_RecoveryOutcome> _recoverOrphanTake(
     File file,
     String practiceId,
     Set<String> referencedHashes,
@@ -518,24 +581,35 @@ class Persistence {
     // misreviving an import as a "take" would be worse than sweeping it. An
     // empty payload (killed before the first ~1 s header patch) carries no
     // audio worth keeping.
+    // An UNREADABLE file is not junk. `probeWav` answers null only for shape
+    // (too short / wrong layout / not PCM / gone) and THROWS on any other I/O
+    // failure, so a permission denial or a hardware fault leaves here as an
+    // exception into the caller's retry hold-back. Answering "not a recording"
+    // on the strength of a read that never happened would sweep the only copy
+    // of a crashed take into the trash, where the 30-day prune eventually
+    // deletes it — and no later boot rescans the trash.
     final probe = await AudioFileService.probeWav(file);
     if (probe == null ||
         probe.channels != 1 ||
         (probe.bitsPerSample != 16 && probe.bitsPerSample != 32) ||
         probe.dataBytes <= 0) {
-      return false;
+      return _RecoveryOutcome.junk;
     }
 
     // Bytes already referenced by a completed save → a normal leftover, not an
     // orphaned take (this is also what makes a re-run after a mid-recovery
     // crash a no-op instead of a duplicate take).
     final hash = (await sha256.bind(file.openRead()).first).toString();
-    if (referencedHashes.contains(hash)) return false;
+    if (referencedHashes.contains(hash)) return _RecoveryOutcome.junk;
 
-    // The practice must still exist and be live (getPractice filters
-    // tombstones); an underivable id lands here too and the file is swept.
+    // The practice must still exist and be live (tombstones filtered); an
+    // underivable id lands here too and the file is swept. Asked as its own
+    // query first BECAUSE getPractice collapses "gone" and "the read failed"
+    // into one Result.error, and only the former is proof the file is junk —
+    // this select throws on a database failure and holds the file back.
+    if (!await _practiceIsLive(practiceId)) return _RecoveryOutcome.junk;
     final res = await songRepo.getPractice(practiceId);
-    if (res is! Ok<SongPractice>) return false;
+    if (res is! Ok<SongPractice>) return _RecoveryOutcome.failed;
     final practice = res.value;
 
     // Same take construction as a graceful stop with nothing armed: analyze
@@ -557,7 +631,7 @@ class Persistence {
     final saved = await songRepo.savePractice(
       practice.copyWith(vocalTracks: [...practice.vocalTracks, track]),
     );
-    if (saved is! Ok<SongPractice>) return false;
+    if (saved is! Ok<SongPractice>) return _RecoveryOutcome.failed;
 
     // The bytes are pooled and the rows are committed: the staging copy is now
     // an ordinary leftover. Delete it here; if the delete fails the sweep
@@ -571,7 +645,17 @@ class Persistence {
             'the sweep covers it',
       );
     }
-    return true;
+    return _RecoveryOutcome.recovered;
+  }
+
+  /// Whether a LIVE (non-tombstoned) practice row with [id] exists. Throws on
+  /// a database failure — the caller depends on that to tell "gone" apart
+  /// from "could not be read".
+  Future<bool> _practiceIsLive(String id) async {
+    final row = await (db.select(
+      db.practices,
+    )..where((p) => p.id.equals(id))).getSingleOrNull();
+    return row != null && row.deletedAt == null;
   }
 
   /// One past the highest existing "Take N" / "Take N (recovered)" label in
@@ -665,6 +749,11 @@ class Persistence {
   /// closes the gap: every synced row (and the oplog) carries hlc_packed — the
   /// fixed-width, lexicographically ordered LWW key — so the global MAX is the
   /// greatest stamp this install ever produced or adopted from a peer.
+  ///
+  /// The tables are not the whole story, which is why the applier's durable
+  /// high-water mark ([SyncStateStore.hlcHighWaterKey]) is folded in as well: a
+  /// verified remote stamp whose record the FK sweep parked advanced the live
+  /// clock but left no row behind to be found here.
   static Future<HlcClock> _seedClock(AppDatabase db, String node) async {
     Hlc? max;
     // Seeding is a monotonicity safety net, not a launch precondition: one
@@ -702,6 +791,20 @@ class Persistence {
         'persistence',
         'seedClock table enumeration failed (${e.runtimeType}); '
             'clock seeded from a partial max',
+      );
+    }
+    // The stamps that never became rows (see the doc above). Same best-effort
+    // stance: a malformed or unreadable mark only costs its own contribution.
+    try {
+      final packed = await SyncStateStore(db).hlcHighWater();
+      if (packed != null) {
+        final hlc = Hlc.parse(packed);
+        if (max == null || hlc > max) max = hlc;
+      }
+    } catch (e) {
+      DiagnosticsLog.instance.log(
+        'persistence',
+        'seedClock skipped the durable high-water mark (${e.runtimeType})',
       );
     }
     return HlcClock(node: node, initial: max);

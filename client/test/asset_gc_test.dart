@@ -558,4 +558,49 @@ void main() {
       expect(remaining, isEmpty);
     },
   );
+
+  group('pool content verification', () {
+    test('a pooled file whose bytes changed under its content address is '
+        'reported, and left alone', () async {
+      final id = await assets.importFile(await makeSrc('take.wav', [1, 2, 3]));
+      final pooled = (await assets.resolve(id))!;
+      expect(await assets.verifyPoolIntegrity(), isEmpty);
+
+      // Same length, different bytes: exactly what the import path's length
+      // check cannot see (and what it would never create — this is rot or an
+      // outside edit), so the content check has to be the one that finds it.
+      await File(pooled).writeAsBytes([1, 2, 4], flush: true);
+
+      expect(await assets.verifyPoolIntegrity(), [pooled]);
+      // Reported, never touched: it is still the user's recording.
+      expect(await File(pooled).exists(), isTrue);
+      expect(await File(pooled).readAsBytes(), [1, 2, 4]);
+    });
+
+    test('a truncated pool file is caught by the IMPORT path, before the '
+        'verification pass is ever needed', () async {
+      final src = await makeSrc('take.wav', [1, 2, 3]);
+      final id = await assets.importFile(src);
+      final pooled = (await assets.resolve(id))!;
+      await File(pooled).writeAsBytes([1, 2], flush: true); // crash leftover
+
+      // Re-importing the same source replaces the short file with the fresh,
+      // verified bytes (the length guard's actual job).
+      expect(await assets.importFile(src), id);
+      expect(await File(pooled).readAsBytes(), [1, 2, 3]);
+      expect(await assets.verifyPoolIntegrity(), isEmpty);
+    });
+
+    test(
+      'an in-flight .part copy is not mistaken for a damaged pool file',
+      () async {
+        final staging = Directory(p.join(tmp.path, 'assets', '.staging'));
+        await staging.create(recursive: true);
+        await File(
+          p.join(staging.path, 'ABC.part'),
+        ).writeAsBytes([9, 9], flush: true);
+        expect(await assets.verifyPoolIntegrity(), isEmpty);
+      },
+    );
+  });
 }

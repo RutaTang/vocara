@@ -15,11 +15,63 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:vocara/data/db/persistence.dart';
 import 'package:vocara/data/services/audio_dsp.dart';
+import 'package:vocara/data/services/audio_file_service.dart';
 import 'package:vocara/data/services/waveform_service.dart';
 import 'package:vocara/domain/models/audio_track.dart';
 import 'package:vocara/domain/models/song_practice.dart';
 import 'package:vocara/utils/id.dart';
 import 'package:vocara/utils/result.dart';
+
+/// A real file whose `length()` (stat) fails — the hardware-fault shape no
+/// permission bit can produce, and the one `probeWav` used to answer "null,
+/// so: not a recording" for.
+class _StatFails implements File {
+  _StatFails(this._real);
+  final File _real;
+
+  @override
+  Future<int> length() =>
+      throw const FileSystemException('simulated I/O error', 'length');
+
+  @override
+  Future<RandomAccessFile> open({FileMode mode = FileMode.read}) =>
+      _real.open(mode: mode);
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+/// A real file whose header READ fails after a successful stat and open — the
+/// other step that used to swallow its error.
+class _ReadFails implements File {
+  _ReadFails(this._real);
+  final File _real;
+
+  @override
+  Future<int> length() => _real.length();
+
+  @override
+  Future<RandomAccessFile> open({FileMode mode = FileMode.read}) async =>
+      _FailingRead(await _real.open(mode: mode));
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _FailingRead implements RandomAccessFile {
+  _FailingRead(this._real);
+  final RandomAccessFile _real;
+
+  @override
+  Future<Uint8List> read(int count) =>
+      throw const FileSystemException('simulated I/O error', 'read');
+
+  @override
+  Future<void> close() => _real.close();
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
 
 void main() {
   late Persistence persistence;
@@ -268,6 +320,126 @@ void main() {
     expect(await persistence.recoverStagedRecordings(analyze: fakeAnalyze), 1);
     expect((await reload(practice.id)).vocalTracks, hasLength(1));
   });
+
+  test(
+    'probeWav THROWS on an unreadable file instead of answering null',
+    () async {
+      // The contract the recovery classification rests on: null means "provably
+      // not the recorder's shape", and only the shape checks may produce it. If
+      // an I/O failure could answer null, a take that merely could not be read
+      // would be classified as junk and swept. Reachable here through the
+      // permission case; a hardware fault on the stat or the header read takes
+      // the same route by construction, now that nothing in probeWav swallows
+      // an IOException.
+      final f = File(p.join(root.path, 'unreadable.wav'));
+      await f.parent.create(recursive: true);
+      await f.writeAsBytes(monoWav(4800), flush: true);
+      await Process.run('chmod', ['000', f.path]);
+      addTearDown(() => Process.run('chmod', ['644', f.path]));
+
+      await expectLater(
+        AudioFileService.probeWav(f),
+        throwsA(isA<FileSystemException>()),
+      );
+
+      // The permission case above fails at open(). The stat and the header read
+      // are the two steps that used to swallow their errors, and no permission
+      // bit reaches them — only a real fault does (EIO, a bad sector, a volume
+      // pulled between the directory listing and the probe). Inject each.
+      final good = File(p.join(root.path, 'good.wav'));
+      await good.writeAsBytes(monoWav(4800), flush: true);
+      await expectLater(
+        AudioFileService.probeWav(_StatFails(good)),
+        throwsA(isA<FileSystemException>()),
+        reason: 'a failing stat is not evidence that this is not a recording',
+      );
+      await expectLater(
+        AudioFileService.probeWav(_ReadFails(good)),
+        throwsA(isA<FileSystemException>()),
+        reason: 'nor is a failing header read',
+      );
+
+      // A file that is merely GONE is still a plain null: nothing to recover,
+      // and nothing to hold back for.
+      expect(
+        await AudioFileService.probeWav(File(p.join(root.path, 'gone.wav'))),
+        isNull,
+      );
+    },
+  );
+
+  test(
+    'an UNREADABLE take is held back for retry, not classified as junk',
+    () async {
+      // probeWav answers null for SHAPE only. When it could not read the file at
+      // all, answering "not a recording" would sweep the only copy of a crashed
+      // take into the trash on the strength of a read that never happened — and
+      // the trash is never rescanned, so the 30-day prune finishes the job.
+      final practice = await createPractice();
+      final unreadable = await stageOrphan(practice.id, monoWav(4800));
+      await Process.run('chmod', ['000', unreadable.path]);
+      addTearDown(() => Process.run('chmod', ['644', unreadable.path]));
+
+      expect(
+        await persistence.recoverStagedRecordings(analyze: fakeAnalyze),
+        0,
+      );
+      expect(
+        persistence.recoveryRetryPaths,
+        {unreadable.path},
+        reason: 'an I/O failure is an environmental failure, not junk',
+      );
+
+      await persistence.assets.sweepStaging(
+        keep: persistence.recoveryRetryPaths,
+      );
+      expect(await unreadable.exists(), isTrue, reason: 'spared by the sweep');
+
+      // Readable again next boot: recovered normally.
+      await Process.run('chmod', ['644', unreadable.path]);
+      expect(
+        await persistence.recoverStagedRecordings(analyze: fakeAnalyze),
+        1,
+      );
+      expect((await reload(practice.id)).vocalTracks, hasLength(1));
+    },
+  );
+
+  test(
+    'a recovery whose SAVE failed is exempted too, not just a thrown one',
+    () async {
+      final practice = await createPractice();
+      final failing = await stageOrphan(practice.id, monoWav(4800));
+
+      // The store reports failure as a Result, never a throw: block the pool
+      // tree (a regular file where the `assets/` directory must be) so the
+      // save's asset import cannot land. Without this case being treated as an
+      // environmental failure, the only copy of the take goes to the sweep and
+      // no later boot ever retries it.
+      final blocker = File(p.join(root.path, 'assets'));
+      await blocker.parent.create(recursive: true);
+      await blocker.writeAsString('not a directory', flush: true);
+
+      expect(
+        await persistence.recoverStagedRecordings(analyze: fakeAnalyze),
+        0,
+      );
+      expect(persistence.recoveryRetryPaths, {failing.path});
+
+      await persistence.assets.sweepStaging(
+        keep: persistence.recoveryRetryPaths,
+      );
+      expect(await failing.exists(), isTrue);
+
+      // Next boot, healthy disk: the exempted take is recovered normally.
+      await blocker.delete();
+      expect(
+        await persistence.recoverStagedRecordings(analyze: fakeAnalyze),
+        1,
+      );
+      expect((await reload(practice.id)).vocalTracks, hasLength(1));
+    },
+  );
 
   test('a staged file that has kept failing for over 7 days is released to '
       'the sweep after all', () async {

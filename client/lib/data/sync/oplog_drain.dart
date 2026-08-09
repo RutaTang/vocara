@@ -36,6 +36,13 @@ class PendingOplogEntry {
   /// are uploaded. Collapsing keeps the latest NON-null value seen for the row
   /// (a later content-only update must not shed the insert's dependency and
   /// let the row race ahead of its bytes).
+  ///
+  /// A TOMBSTONE is exempt from that inheritance: a delete carries no payload
+  /// and references no bytes, so gating it on the asset an earlier insert
+  /// needed holds it forever once that asset is collected — and because the
+  /// pusher acks only up to the entry before the first gated one, one such
+  /// tombstone freezes the ack watermark for the WHOLE ledger. An explicitly
+  /// journaled dependency on a tombstone is still honoured.
   final String? dependsOnAssetId;
 }
 
@@ -103,8 +110,11 @@ class OplogDrain {
         op: row.op,
         hlcPacked: row.hlcPacked,
         payloadHash: row.payloadHash,
-        // Keep the latest non-null dependency (see PendingOplogEntry docs).
-        dependsOnAssetId: row.dependsOnAssetId ?? prev?.dependsOnAssetId,
+        // Keep the latest non-null dependency, except on a tombstone, which
+        // inherits nothing (see PendingOplogEntry docs).
+        dependsOnAssetId: row.op == 'tombstone'
+            ? row.dependsOnAssetId
+            : row.dependsOnAssetId ?? prev?.dependsOnAssetId,
       );
     }
     final entries = latest.values.toList()
@@ -113,15 +123,55 @@ class OplogDrain {
   }
 
   /// Deletes every oplog entry with seq <= [uptoSeq], in one transaction.
-  /// Call ONLY with a [OplogDrainBatch.maxSeq] whose entries were durably
-  /// pushed: sequences are monotonic (AUTOINCREMENT), so entries journaled
-  /// after the read carry higher sequences and are untouched. Returns the
-  /// number of entries deleted.
+  /// Call ONLY with a sequence whose entries were durably pushed (or
+  /// deliberately dropped): sequences are monotonic (AUTOINCREMENT), so
+  /// entries journaled after the read carry higher sequences and are
+  /// untouched. Returns the number of entries deleted.
+  ///
+  /// The asset gate survives a PARTIAL ack. The pusher acks up to the entry
+  /// before the first gated one, so a row can keep entries on both sides of
+  /// the cut — and the dependency that gates it may live on the deleted side
+  /// (an insert carrying depends_on_asset_id, then a content-only update that
+  /// does not). [readPending] collapses to the latest non-null dependency, so
+  /// the gate held the row on evidence this delete was about to destroy: the
+  /// next drain would see only the bare later entry, and push a row
+  /// REFERENCING BYTES THE SERVER HAS NEVER RECEIVED. Carrying the dependency
+  /// onto the surviving entries first is the same repair
+  /// [Persistence.compactOplog] performs before it collapses history, for the
+  /// same reason. Re-attaching an already-satisfied dependency is harmless:
+  /// the gate re-checks the upload marker and lets the row straight through.
+  ///
+  /// The source entry is bounded by the TARGET ROW's own sequence
+  /// (`o.seq <= oplog.seq`), not by the ack watermark. Bounding by the
+  /// watermark takes the newest dependency from the DELETED prefix and stamps
+  /// it on every surviving null entry — including ones that sit ABOVE a newer
+  /// dependency, whose higher sequence then wins [readPending]'s collapse.
+  /// The row would resolve to the OLD asset and be pushed while the NEW one's
+  /// bytes are still missing, which is the exact failure this repair exists to
+  /// prevent. Correlating on the target row makes each surviving entry inherit
+  /// the newest dependency that precedes IT — the semantics
+  /// [Persistence.compactOplog] already has, since it runs without a bound.
+  ///
+  /// Tombstones are excluded: they reference no bytes (see
+  /// [PendingOplogEntry.dependsOnAssetId]), so a stale value must never be
+  /// persisted onto one.
   Future<int> ack(int uptoSeq) {
-    return _db.transaction(
-      () => (_db.delete(
+    return _db.transaction(() async {
+      await _db.customStatement(
+        'UPDATE oplog SET depends_on_asset_id = ('
+        'SELECT o.depends_on_asset_id FROM oplog o '
+        'WHERE o.entity_table = oplog.entity_table '
+        'AND o.entity_id = oplog.entity_id '
+        'AND o.depends_on_asset_id IS NOT NULL '
+        'AND o.seq <= oplog.seq '
+        'ORDER BY o.seq DESC LIMIT 1'
+        ') WHERE depends_on_asset_id IS NULL AND op <> \'tombstone\' '
+        'AND seq > ?',
+        [uptoSeq],
+      );
+      return (_db.delete(
         _db.oplog,
-      )..where((o) => o.seq.isSmallerOrEqualValue(uptoSeq))).go(),
-    );
+      )..where((o) => o.seq.isSmallerOrEqualValue(uptoSeq))).go();
+    });
   }
 }

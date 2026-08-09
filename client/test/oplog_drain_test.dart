@@ -142,6 +142,131 @@ void main() {
     expect(second.entries.single.hlcPacked, v2.packed);
   });
 
+  test('a PARTIAL ack leaves the surviving entry still gated by the asset '
+      'its deleted history carried', () async {
+    // The push loop acks up to the entry before the first gated one, so a
+    // row's own history can straddle that cut: the insert carries the asset
+    // dependency, a later content-only update does not. Deleting the insert
+    // without carrying its dependency forward left the next drain with a bare
+    // update — and the pusher would send a row referencing bytes the server
+    // has never received.
+    // An unrelated row pushed in the same round, acked away with the cut.
+    await journal('practices', 'P1', 'insert');
+    await journal('clips', 'GATED', 'insert', dependsOnAssetId: _id('ASSET'));
+    await journal('clips', 'GATED', 'update', payloadHash: 'moved');
+
+    final batch = await drain.readPending();
+    final gated = batch.entries.firstWhere((e) => e.id == _id('GATED'));
+    expect(gated.dependsOnAssetId, _id('ASSET'));
+    // Everything strictly before the gated row's surviving entry is acked.
+    await drain.ack(gated.seq - 1);
+
+    final next = await drain.readPending();
+    expect(
+      next.entries.single.id,
+      _id('GATED'),
+      reason: 'only the held row is left',
+    );
+    expect(
+      next.entries.single.dependsOnAssetId,
+      _id('ASSET'),
+      reason: 'the gate must outlive the history that recorded it',
+    );
+  });
+
+  test('a partial ack must not stamp an OLD dependency over a NEWER one that '
+      'still lives above the cut', () async {
+    // The repair carries a dependency from the deleted prefix onto surviving
+    // null entries. Bounded by the ACK WATERMARK it takes the newest one from
+    // the deleted side and stamps it on every survivor — including entries
+    // that sit ABOVE a newer dependency, whose higher seq then wins the
+    // collapse. The row resolves to OLD and gets pushed while NEW's bytes are
+    // still missing: exactly what the repair exists to prevent.
+    //
+    // The cut has to fall between the row's two dependency entries, which
+    // needs a DIFFERENT row to be the first gated one.
+    await journal('clips', 'C1', 'insert', dependsOnAssetId: _id('OLD'));
+    await journal('clips', 'OTHER', 'insert', dependsOnAssetId: _id('GATE'));
+    await journal('clips', 'C1', 'update', dependsOnAssetId: _id('NEW'));
+    await journal('clips', 'C1', 'update', payloadHash: 'renamed');
+
+    final batch = await drain.readPending();
+    final other = batch.entries.firstWhere((e) => e.id == _id('OTHER'));
+    expect(
+      batch.entries.firstWhere((e) => e.id == _id('C1')).dependsOnAssetId,
+      _id('NEW'),
+    );
+    // Ack everything before the gated row, as the push loop does.
+    await drain.ack(other.seq - 1);
+
+    final next = await drain.readPending();
+    expect(
+      next.entries.firstWhere((e) => e.id == _id('C1')).dependsOnAssetId,
+      _id('NEW'),
+      reason:
+          'the surviving entry inherits the newest dependency that '
+          'precedes IT, not the newest one below the ack watermark',
+    );
+  });
+
+  test('a tombstone inherits no asset dependency: a delete references no '
+      'bytes, and gating one stalls the whole ledger', () async {
+    // The asset an insert needed can be collected once the row is deleted, so
+    // a tombstone that inherited it would wait on an upload that will never
+    // happen — and because the push loop acks only up to the entry before the
+    // first gated one, that one tombstone freezes the ack watermark for
+    // everything behind it.
+    await journal('clips', 'C1', 'insert', dependsOnAssetId: _id('ASSET'));
+    await journal('clips', 'C1', 'tombstone');
+
+    final batch = await drain.readPending();
+    expect(batch.entries.single.op, 'tombstone');
+    expect(batch.entries.single.dependsOnAssetId, isNull);
+  });
+
+  test('a partial ack does not persist an inherited dependency onto a '
+      'tombstone either', () async {
+    await journal('clips', 'C1', 'insert', dependsOnAssetId: _id('ASSET'));
+    await journal('clips', 'OTHER', 'insert', dependsOnAssetId: _id('GATE'));
+    await journal('clips', 'C1', 'tombstone');
+
+    final batch = await drain.readPending();
+    final other = batch.entries.firstWhere((e) => e.id == _id('OTHER'));
+    await drain.ack(other.seq - 1);
+
+    final next = await drain.readPending();
+    expect(
+      next.entries.firstWhere((e) => e.id == _id('C1')).dependsOnAssetId,
+      isNull,
+    );
+  });
+
+  test(
+    'an explicit dependency journaled ON a tombstone is still honoured',
+    () async {
+      // The carve-out is about INHERITANCE. A caller that deliberately gates a
+      // delete keeps that gate.
+      await journal('clips', 'C1', 'insert');
+      await journal('clips', 'C1', 'tombstone', dependsOnAssetId: _id('ASSET'));
+
+      final batch = await drain.readPending();
+      expect(batch.entries.single.dependsOnAssetId, _id('ASSET'));
+    },
+  );
+
+  test('a fully-acked row that is edited again inherits the dependency, and '
+      'the gate simply re-checks the upload', () async {
+    await journal('clips', 'C1', 'insert', dependsOnAssetId: _id('ASSET'));
+    final first = await drain.readPending();
+    await drain.ack(first.maxSeq);
+    expect(await oplogCount(), 0);
+
+    // A later edit of the same row journals no dependency of its own.
+    await journal('clips', 'C1', 'update', payloadHash: 'renamed');
+    final second = await drain.readPending();
+    expect(second.entries.single.dependsOnAssetId, isNull);
+  });
+
   test('a non-positive limit reads nothing', () async {
     await journal('practices', 'P1', 'insert');
     final batch = await drain.readPending(limit: 0);

@@ -344,6 +344,105 @@ void main() {
       },
     );
 
+    test('deleting a gated row does not strand the ack watermark: a tombstone '
+        'references no bytes', () async {
+      // A delete inheriting its insert's dependency waits on an upload that
+      // may never come (the asset is collectable once nothing references it)
+      // — and since the push loop acks only up to the entry before the first
+      // gated one, that one tombstone freezes the watermark for the entire
+      // ledger: everything behind it is re-pushed on every run, forever.
+      final s = writer.stamp();
+      await db
+          .into(db.assets)
+          .insert(
+            AssetsCompanion.insert(
+              id: _id('AX'),
+              contentHash: 'HASH_X',
+              byteSize: 3,
+              createdAt: s.at,
+              updatedAt: s.at,
+              hlcWall: s.hlc.wallMs,
+              hlcCtr: s.hlc.counter,
+              hlcNode: s.hlc.node,
+              hlcPacked: s.hlc.packed,
+            ),
+          );
+      await savePractice('G', 'gated', dependsOnAssetId: _id('AX'));
+      // The row is deleted before its bytes were ever uploaded.
+      nowMs += 1000;
+      final t = writer.stamp();
+      await db.transaction(() async {
+        await db.customStatement(
+          'UPDATE practices SET deleted_at = ? WHERE id = ?',
+          [t.at, _id('G')],
+        );
+        await writer.journal(
+          table: 'practices',
+          id: _id('G'),
+          op: 'tombstone',
+          hlc: t.hlc,
+          payloadHash: '',
+        );
+      });
+      await savePractice('AFTER', 'behind the tombstone');
+
+      final run = await engine.pumpPush();
+      expect(run.failed, isFalse);
+      expect(run.heldBack, 0, reason: 'a delete needs no bytes');
+      expect(await oplogCount(), 0, reason: 'the whole ledger acked');
+      expect(cloud.serverRowFor('practices', _id('AFTER')), isNotNull);
+    });
+
+    test('a gated row edited again STAYS gated across pumps: the partial ack '
+        'must not delete the entry that recorded its dependency', () async {
+      // The insert carries the dependency; a later content-only edit does
+      // not. The drain collapses them to the newest entry (keeping the
+      // dependency), so the ack cut falls BELOW the insert — which used to
+      // delete the only journaled record of the gate. The next pump then saw
+      // a bare update and pushed a row referencing bytes the server had
+      // never received.
+      final s = writer.stamp();
+      await db
+          .into(db.assets)
+          .insert(
+            AssetsCompanion.insert(
+              id: _id('AX'),
+              contentHash: 'HASH_X',
+              byteSize: 3,
+              createdAt: s.at,
+              updatedAt: s.at,
+              hlcWall: s.hlc.wallMs,
+              hlcCtr: s.hlc.counter,
+              hlcNode: s.hlc.node,
+              hlcPacked: s.hlc.packed,
+            ),
+          );
+      await savePractice('B1', 'before');
+      await savePractice('G', 'gated', dependsOnAssetId: _id('AX'));
+      await savePractice('G', 'gated, renamed'); // no dependency of its own
+
+      final first = await engine.pumpPush();
+      expect(first.heldBack, 1);
+      expect(cloud.serverRowFor('practices', _id('G')), isNull);
+
+      final second = await engine.pumpPush();
+      expect(second.heldBack, 1, reason: 'the bytes are still not uploaded');
+      expect(
+        cloud.serverRowFor('practices', _id('G')),
+        isNull,
+        reason: 'a row must never reach the server before its bytes',
+      );
+
+      // Once the uploader posts the marker the row goes, as always.
+      await db
+          .into(db.assetSync)
+          .insert(AssetSyncCompanion.insert(hash: 'HASH_X', uploadedAt: 1));
+      final third = await engine.pumpPush();
+      expect(third.heldBack, 0);
+      expect(cloud.serverRowFor('practices', _id('G')), isNotNull);
+      expect(await oplogCount(), 0);
+    });
+
     test('a CAS check against an OLDER server row never conflicts: the '
         'conforming server accepts the newer push outright', () async {
       // The server holds an older version of P (another device's push); a

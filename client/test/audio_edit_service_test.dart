@@ -265,6 +265,14 @@ void main() {
     final maskBack = Uint8List.fromList(ext)..[40] = 4;
     expect(wavCompatibleForMerge(maskFront, maskBack), isFalse);
     expect(wavCompatibleForMerge(maskFront, maskFront), isTrue);
+
+    // A plain fmt makes no speaker-position claim (mask 0), so it does not
+    // match one that does — in EITHER order. The splice keeps the FIRST file's
+    // header, so letting this through would stamp one half's channel layout
+    // over the other's. The `ext` baseline above still passes because its mask
+    // is 0 too.
+    expect(wavCompatibleForMerge(plain, maskFront), isFalse);
+    expect(wavCompatibleForMerge(maskFront, plain), isFalse);
   });
 
   test('ensureStreamableWav passes an ENGINE-RATE canonical WAV through '

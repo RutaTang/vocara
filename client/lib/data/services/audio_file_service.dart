@@ -156,26 +156,39 @@ class AudioFileService {
 
   /// Parses the header of [file] as a canonical uncompressed-PCM WAV (`RIFF` /
   /// `WAVE` / 16-byte `fmt ` / `data`, the exact layout the recording engine
-  /// writes). Returns null when the file is too short, not that layout, or not
-  /// plain PCM — the boot-time orphan recovery uses null as "not a recording,
-  /// leave it for the sweep". Reads only the header, never the payload, so it
-  /// is cheap even on an hours-long take.
+  /// writes). Reads only the header, never the payload, so it is cheap even on
+  /// an hours-long take.
+  ///
+  /// Null answers ONE question — "is this the recorder's shape?" — and means
+  /// too short, not that layout, not plain PCM, or gone. An unreadable file
+  /// THROWS instead, and that distinction is load-bearing: the boot-time orphan
+  /// recovery treats null as "provably not a recording, leave it for the
+  /// sweep", which trashes the file. A hardware or filesystem fault must not
+  /// be able to answer that question, or the only copy of a crashed take is
+  /// swept away on the strength of a read that never happened. A thrown probe
+  /// lands in the recovery's retry hold-back instead, and the take survives to
+  /// the next boot.
   static Future<WavProbe?> probeWav(File file) async {
     const headerLen = 44;
     final int length;
     try {
       length = await file.length();
-    } catch (_) {
+    } on PathNotFoundException {
+      // Vanished between the directory listing and here: nothing to recover,
+      // and nothing to hold back for. Every other IO failure propagates.
       return null;
     }
     if (length < headerLen) return null;
 
     final Uint8List head;
-    final raf = await file.open();
+    final RandomAccessFile raf;
+    try {
+      raf = await file.open();
+    } on PathNotFoundException {
+      return null;
+    }
     try {
       head = await raf.read(headerLen);
-    } catch (_) {
-      return null;
     } finally {
       await raf.close();
     }

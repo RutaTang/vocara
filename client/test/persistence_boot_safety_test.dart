@@ -21,6 +21,7 @@ import 'package:vocara/data/services/audio_dsp.dart';
 import 'package:vocara/data/services/waveform_service.dart';
 import 'package:vocara/data/sync/hlc.dart';
 import 'package:vocara/data/sync/oplog_drain.dart';
+import 'package:vocara/data/sync/sync_state_store.dart';
 import 'package:vocara/domain/models/song_practice.dart';
 import 'package:vocara/utils/result.dart';
 
@@ -448,6 +449,56 @@ void main() {
           .getSingle();
       expect(after.read<int>('n'), 1);
       expect(after.read<String>('op'), 'update', reason: 'the LATEST op won');
+    });
+  });
+
+  group('boot clock seed', () {
+    /// A stamp from a peer, ahead of this device's wall clock but well inside
+    /// the plausibility window the applier's drift gate allows.
+    Hlc peerStamp(int aheadMs) => Hlc(
+      wallMs: DateTime.now().millisecondsSinceEpoch + aheadMs,
+      counter: 0,
+      node: 'REMOTE'.padRight(26, '0'),
+    );
+
+    test('a verified remote stamp whose record was PARKED still seeds the '
+        'clock after a restart', () async {
+      // The applier merges the stamps of records the FK sweep parks — HLC
+      // semantics advance on any received message — but a parked record
+      // leaves no row behind, and sync_quarantine's stamp column is
+      // deliberately not named hlc_packed (it also holds suspect far-future
+      // stamps, which must never seed a clock). So that legitimate high-water
+      // mark used to live only in memory: after a restart a local edit could
+      // take a LOWER stamp, and the quarantine replay would then win LWW and
+      // silently overwrite the user's newer edit.
+      final first = await boot();
+      final parked = peerStamp(120000);
+      await SyncStateStore(first.db).raiseHlcHighWater(parked.packed);
+      // Nothing in the tables carries that stamp — the seed's other source.
+      await first.db.close();
+
+      final second = await boot();
+      addTearDown(second.db.close);
+      final local = second.writer.stamp().hlc;
+      expect(
+        local > parked,
+        isTrue,
+        reason:
+            'a local edit after the restart must out-stamp what this '
+            'device already accepted: got ${local.packed} vs ${parked.packed}',
+      );
+    });
+
+    test('the durable mark only ever moves up', () async {
+      final persistence = await boot();
+      addTearDown(persistence.db.close);
+      final state = SyncStateStore(persistence.db);
+      final high = peerStamp(120000);
+      final low = peerStamp(1000);
+
+      await state.raiseHlcHighWater(high.packed);
+      await state.raiseHlcHighWater(low.packed);
+      expect(await state.hlcHighWater(), high.packed);
     });
   });
 }

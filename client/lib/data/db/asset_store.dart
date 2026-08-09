@@ -227,6 +227,14 @@ class AssetStore {
   /// is reused only when its length matches the staged byte count — a
   /// truncated crash leftover is replaced by the fresh, verified bytes
   /// instead of being trusted on existence alone.
+  ///
+  /// Length is deliberately the whole test HERE. It is exact against what this
+  /// path can produce (an interrupted copy is short, and a file already at
+  /// this hash's address came from the same bytes), and a real content check
+  /// would re-read the entire file on every save — a practice save re-imports
+  /// every clip's audio. Content is verified in [verifyPoolIntegrity] instead,
+  /// which the repair pass runs once and which also covers what no import
+  /// check could: bytes that changed after they were pooled.
   Future<String> _promoteStaged(_StagedImport staged, String ext) async {
     final rel = relPathFor(staged.hash, ext);
     final dest = File(p.join(root.path, rel));
@@ -585,6 +593,46 @@ class AssetStore {
         await _moveToTrash(e);
       }
     }
+  }
+
+  /// Re-hashes every pooled file and returns the paths whose CONTENT no longer
+  /// matches the content address they are stored under.
+  ///
+  /// Nothing on the import path can find these. [_promoteStaged] reuses an
+  /// already-present pool file whose LENGTH matches the freshly staged bytes,
+  /// which is the right guard for what import can actually create — a
+  /// truncated crash leftover — but it is not a content check, and paying for
+  /// one there would re-read the whole file on every save (a practice save
+  /// re-imports each clip's audio). So the content check lives here instead,
+  /// in the user-invoked repair pass, where reading the pool once is
+  /// affordable — and where it also catches the case import never could:
+  /// bytes that rot or are edited AFTER they were pooled.
+  ///
+  /// REPORTS ONLY. A mismatched file is still the user's recording, most
+  /// likely playable; trashing it (or hiding it behind a bytes-missing row)
+  /// on the strength of a checksum would take a take away from them to fix an
+  /// accounting problem. The count goes in the repair report and the paths go
+  /// to the diagnostics log, and what to do about it stays the user's call.
+  Future<List<String>> verifyPoolIntegrity() async {
+    final pool = Directory(p.join(root.path, 'assets'));
+    if (!await pool.exists()) return const [];
+    final bad = <String>[];
+    await for (final e in pool.list(recursive: true)) {
+      if (e is! File) continue;
+      final name = p.basename(e.path);
+      if (name.endsWith('.part')) continue; // in-flight/crashed import copy
+      final dot = name.indexOf('.');
+      final hash = dot < 0 ? name : name.substring(0, dot);
+      if (hash.length != 64) continue; // not a content-addressed pool file
+      try {
+        final actual = (await sha256.bind(e.openRead()).first).toString();
+        if (actual != hash) bad.add(e.path);
+      } catch (_) {
+        // Unreadable right now: that is a different failure (and one the
+        // caller will meet again on playback). Not evidence of wrong content.
+      }
+    }
+    return bad;
   }
 
   /// Reclaims pool files that no LIVE asset references — by moving them into

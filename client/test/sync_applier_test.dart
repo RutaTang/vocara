@@ -1323,6 +1323,61 @@ void main() {
       expect(parked.reason, contains('timeline_duration_ms'));
     });
 
+    test('valid JSON of the WRONG shape is parked at the door, not left to '
+        'break the practice when it is opened', () async {
+      // '{}' parses, binds to a TEXT column and commits — and then the
+      // hydrator's `jsonDecode(...) as List` throws inside a view model: the
+      // practice disappears from the list and cannot be opened, with nothing
+      // parked to act on. The door runs the real decoder, so what commits
+      // hydrates.
+      final res = await applier.apply([
+        RemoteRecord(
+          table: 'practices',
+          columns: {
+            ...practice('BAD', 'x', hlc(910)).columns,
+            'lyrics_json': '{}',
+          },
+        ),
+      ]);
+
+      expect(res.failed, 1);
+      expect(await row('BAD'), isNull);
+      final parked = (await store.list()).single;
+      expect(parked.reason, startsWith('invalid-value'));
+      expect(parked.reason, contains('lyrics_json'));
+    });
+
+    test('a well-formed JSON body still applies', () async {
+      final res = await applier.apply([
+        RemoteRecord(
+          table: 'practices',
+          columns: {
+            ...practice('GOOD', 'x', hlc(910)).columns,
+            'lyrics_json': '[{"text":"line one","timeMs":120}]',
+            'reverb_json':
+                '{"roomSize":0.4,"damping":0.5,"wet":0.2,'
+                '"width":1.0}',
+          },
+        ),
+      ]);
+      expect(res.applied, 1);
+      expect(await store.list(), isEmpty);
+    });
+
+    test('a JSON array whose ELEMENTS are wrong is parked too', () async {
+      final res = await applier.apply([
+        RemoteRecord(
+          table: 'practices',
+          columns: {
+            ...practice('BAD2', 'x', hlc(910)).columns,
+            'lyrics_json': '["just a string"]',
+          },
+        ),
+      ]);
+      expect(res.failed, 1);
+      expect((await store.list()).single.reason, contains('lyrics_json'));
+    });
+
     test('re-quarantining the same row keeps only the latest state', () async {
       final drift1 = hlc(1000 + 6 * 60 * 1000);
       final drift2 = hlc(1000 + 7 * 60 * 1000);
