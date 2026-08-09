@@ -658,7 +658,19 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
     // tombstoning its children) and the local editor's track-level edit
     // revives the track row, only children the editor ALSO edited are revived
     // here — untouched children accept the remote delete (rule 5), row by row.
+    //
+    // A track whose delete was ACCEPTED (rule 5's untouched side: remotely
+    // deleted, unedited here) is NOT live after the pass above, and its
+    // children must go with it. Reconciling them anyway would revive every
+    // child the editor edited — and insert every child it added — as a LIVE
+    // row hanging off a tombstoned parent: invisible locally, yet synced out
+    // as an orphan. Re-read the live set rather than infer it.
+    final liveTrackIds = {
+      for (final r in await _live(db.tracks, (x) => x.practiceId.equals(p.id)))
+        r.id,
+    };
     for (final t in tracks) {
+      if (!liveTrackIds.contains(t.id)) continue;
       changed += await _reconcileClips(t, clipAsset, now, base);
       changed += await _reconcileNotes(t, now, base);
       changed += await _reconcileMarkers(t, now, base);
