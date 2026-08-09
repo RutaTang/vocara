@@ -956,8 +956,12 @@ class _LyricsEditorState extends State<_LyricsEditor> {
                 label: 'Save',
                 variant: StudioButtonVariant.accent,
                 onTap: () async {
-                  await vm.applyEditedLyrics(_c.text);
-                  vm.setLyricsMode(LyricsMode.read);
+                  // Leave edit mode only once the text is on disk: a failed
+                  // write reverts the model, so closing regardless would drop
+                  // the draft with nothing but a toast to show for it.
+                  if (await vm.applyEditedLyrics(_c.text)) {
+                    vm.setLyricsMode(LyricsMode.read);
+                  }
                 },
               ),
             ],

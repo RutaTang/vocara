@@ -12,6 +12,9 @@ class _FakeVm extends Fake implements SongPracticeDetailViewModel {
   final List<String> imported = [];
   String? applied;
 
+  /// False makes the persist fail, as a full disk / lost DB would.
+  bool saveSucceeds = true;
+
   @override
   bool get lyricsOpen => true;
 
@@ -45,9 +48,11 @@ class _FakeVm extends Fake implements SongPracticeDetailViewModel {
   }
 
   @override
-  Future<void> applyEditedLyrics(String t) async {
+  Future<bool> applyEditedLyrics(String t) async {
     applied = t;
+    if (!saveSucceeds) return false;
     text = t;
+    return true;
   }
 }
 
@@ -124,6 +129,34 @@ void main() {
     await tester.tap(find.text('Save'));
     await tester.pump();
     expect(vm.applied, 'dropped line one\ndropped line two');
+    expect(tester.takeException(), isNull);
+  });
+
+  // Regression guard: Save used to leave edit mode unconditionally, so a write
+  // that failed (and reverted the model to disk) took the draft with it,
+  // leaving only a toast behind.
+  testWidgets('a failed save keeps the editor open on the draft', (
+    tester,
+  ) async {
+    final vm = _FakeVm()..saveSucceeds = false;
+    await _pumpPanel(tester, vm);
+
+    await tester.enterText(find.byType(TextField), 'user typed draft');
+    await tester.tap(find.text('Save'));
+    await tester.pump();
+    await tester.pump();
+
+    expect(vm.applied, 'user typed draft');
+    expect(
+      vm.mode,
+      LyricsMode.edit,
+      reason: "a write that didn't land must not close the editor",
+    );
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      'user typed draft',
+      reason: 'the unsaved draft must survive for a retry',
+    );
     expect(tester.takeException(), isNull);
   });
 
