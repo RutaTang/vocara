@@ -76,6 +76,16 @@ class PlaybackController extends ChangeNotifier {
 
   Future<void> seek(Duration to) => _engine.seek(to);
 
+  /// The recording clock's playhead write. While a take is armed the engine's
+  /// position stream is ignored (the record tick owns the playhead), so the
+  /// viewport has to be followed from here — otherwise auto-scroll silently
+  /// stops exactly when it matters most, and the record head (and the live
+  /// waveform being drawn under it) runs off the right edge of the window.
+  void setRecordingPosition(Duration to) {
+    position.value = to;
+    _maybeFollowCursor(to.inMilliseconds);
+  }
+
   /// Stops playback and returns the playhead to the start of the play range.
   Future<void> stop() async {
     await _engine.pause();
