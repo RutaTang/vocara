@@ -159,8 +159,17 @@ AudioTrack _vocal(
   muted: muted,
 );
 
-FxBus _bus(String id, {String? outputBusId}) =>
-    FxBus(id: id, name: id, fx: TrackFx.flat(), outputBusId: outputBusId);
+FxBus _bus(
+  String id, {
+  String? outputBusId,
+  List<TrackSend> sends = const [],
+}) => FxBus(
+  id: id,
+  name: id,
+  fx: TrackFx.flat(),
+  outputBusId: outputBusId,
+  sends: sends,
+);
 
 SongPractice _practice({
   List<AudioTrack> vocals = const [],
@@ -446,6 +455,80 @@ void main() {
       expect(host.mixer.busWaveformPeaks('busA')[500], closeTo(0.8, 1e-9));
       expect(host.mixer.busWaveformPeaks('busB')[500], closeTo(0.8, 1e-9));
       expect(host.mixer.busWaveformPeaks('busA').any((v) => v == 0.6), isFalse);
+    });
+
+    test('busWaveformPeaks follows aux sends, scaled by the send level', () {
+      // The ordinary reverb return: the take stays on the master and only
+      // FEEDS the bus. Following the main output alone drew a flat line for a
+      // bus that was plainly audible, because resyncPlayback does pass sends
+      // to the engine.
+      final host = _Host(
+        _practice(
+          vocals: [
+            _vocal(
+              'v1',
+              peaks: [0.8],
+              sends: const [TrackSend(busId: 'rev')],
+            ),
+          ],
+          buses: [_bus('rev')],
+        ),
+      );
+      expect(host.mixer.busWaveformPeaks('rev')[500], closeTo(0.8, 1e-9));
+    });
+
+    test(
+      'a send level scales the envelope; an off send contributes nothing',
+      () {
+        SongPractice at(double db) => _practice(
+          vocals: [
+            _vocal(
+              'v1',
+              peaks: [0.8],
+              sends: [TrackSend(busId: 'rev', levelDb: db)],
+            ),
+          ],
+          buses: [_bus('rev')],
+        );
+        expect(
+          _Host(at(-6.0)).mixer.busWaveformPeaks('rev')[500],
+          closeTo(0.8 * 0.501187, 1e-5),
+        );
+        expect(_Host(at(kSendOffDb)).mixer.busWaveformPeaks('rev')[500], 0.0);
+      },
+    );
+
+    test('a bus-to-bus send carries the envelope onward too', () {
+      final host = _Host(
+        _practice(
+          vocals: [
+            _vocal('v1', peaks: [0.8], busId: 'busB'),
+          ],
+          buses: [
+            _bus('busA'),
+            _bus('busB', sends: const [TrackSend(busId: 'busA')]),
+          ],
+        ),
+      );
+      // v1 reaches busA only through busB's send, not its main output.
+      expect(host.mixer.busWaveformPeaks('busA')[500], closeTo(0.8, 1e-9));
+    });
+
+    test('a take reaching a bus two ways takes the LOUDER route', () {
+      final host = _Host(
+        _practice(
+          vocals: [
+            _vocal(
+              'v1',
+              peaks: [0.8],
+              busId: 'rev', // unity
+              sends: const [TrackSend(busId: 'rev', levelDb: -12.0)],
+            ),
+          ],
+          buses: [_bus('rev')],
+        ),
+      );
+      expect(host.mixer.busWaveformPeaks('rev')[500], closeTo(0.8, 1e-9));
     });
   });
 }

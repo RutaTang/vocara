@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 
@@ -839,35 +840,68 @@ class MixerController extends ChangeNotifier {
 
   // --- Composite display waveforms -----------------------------------------
 
-  /// Every bus id that flows into [busId] (itself plus any bus that transitively
-  /// routes its output into it) — so a take feeding an upstream bus still counts
-  /// toward this bus's composite waveform.
-  Set<String> _busFeeders(String busId) {
-    final result = <String>{busId};
-    var changed = true;
-    while (changed) {
-      changed = false;
-      for (final b in fxBuses) {
-        if (!result.contains(b.id) &&
-            b.outputBusId != null &&
-            result.contains(b.outputBusId)) {
-          result.add(b.id);
-          changed = true;
-        }
+  /// The strongest gain with which a source routed to [startBusId] and carrying
+  /// [sends] reaches [targetBusId] — 0 when it never does.
+  ///
+  /// Follows BOTH edge kinds, like [resolveSolo]'s `reachableBuses`: a main
+  /// output contributes unity, an aux send contributes its level. Following only
+  /// the main output left a bus fed purely by sends (the ordinary reverb return)
+  /// drawing a flat line while it was plainly audible, because the real graph
+  /// does pass sends to the engine.
+  ///
+  /// Relaxation, not plain reachability: a bus keeps the best gain seen so far
+  /// and is re-visited only when that improves. Every edge gain is <= 1, so the
+  /// values decrease monotonically and this terminates even on a routing cycle
+  /// (which `addBusSend`/`setBusSendTarget` already reject — this is belt and
+  /// braces).
+  double _routeGainToBus(
+    String targetBusId,
+    String? startBusId,
+    List<TrackSend> sends,
+  ) {
+    final busById = {for (final b in fxBuses) b.id: b};
+    final best = <String, double>{};
+    final queue = <String>[];
+
+    void relax(String? id, double gain) {
+      if (id == null || gain <= 0 || !busById.containsKey(id)) return;
+      final prev = best[id];
+      if (prev != null && prev >= gain) return;
+      best[id] = gain;
+      queue.add(id);
+    }
+
+    double sendGain(TrackSend s) =>
+        s.levelDb <= kSendOffDb ? 0.0 : math.pow(10, s.levelDb / 20).toDouble();
+
+    relax(startBusId, 1.0);
+    for (final s in sends) {
+      relax(s.busId, sendGain(s));
+    }
+    while (queue.isNotEmpty) {
+      final id = queue.removeLast();
+      final g = best[id]!;
+      final b = busById[id]!;
+      relax(b.outputBusId, g);
+      for (final s in b.sends) {
+        relax(s.busId, g * sendGain(s));
       }
     }
-    return result;
+    return best[targetBusId] ?? 0.0;
   }
 
   /// A composite waveform for an FX bus lane: the max-envelope of every audible
-  /// take routed (directly or via an upstream bus) into [busId], scaled by each
-  /// take's volume. Mirrors [masterWaveformPeaks] but filtered to the bus.
+  /// take that reaches [busId] — by main output or by aux send, directly or
+  /// through another bus — scaled by the take's volume and the gain of the route
+  /// it took. Mirrors [masterWaveformPeaks] but filtered to the bus.
+  ///
+  /// Like the master lane this is the DRY source envelope, not the bus's wet
+  /// output: bus effects, volume and pan are not modelled here either.
   List<double> busWaveformPeaks(String busId) {
     final tl = _practiceOf()?.timelineDurationMs ?? 0;
     if (tl <= 0) return const [];
     const n = 1000;
     final out = List<double>.filled(n, 0.0);
-    final feeders = _busFeeders(busId);
     final solo = _resolveSolo();
 
     void fold(List<double> peaks, int startMs, int durationMs, double vol) {
@@ -881,11 +915,13 @@ class MixerController extends ChangeNotifier {
     }
 
     for (final t in _allTracksOf()) {
+      // Backing lanes send nothing to the engine either (see resyncPlayback).
       if (t.isBacking || !t.hasClip) continue;
-      if (t.busId == null || !feeders.contains(t.busId)) continue;
+      final gain = _routeGainToBus(busId, t.busId, t.sends);
+      if (gain <= 0) continue;
       if (!_audibleTrack(t, solo)) continue;
       for (final c in t.clips) {
-        fold(c.waveformPeaks, c.startMs, c.durationMs, t.volume);
+        fold(c.waveformPeaks, c.startMs, c.durationMs, t.volume * gain);
       }
     }
     return out;
