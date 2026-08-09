@@ -135,6 +135,61 @@ void main() {
     },
   );
 
+  test(
+    'EVERY technique field round-trips (no column silently dropped)',
+    () async {
+      // The counterpart of the practice repository's field-by-field round-trip:
+      // every user-editable field on the technique and on each media row set to a
+      // distinct non-default value, so a column the writer forgets — or the
+      // hydrator never reads — surfaces here instead of as a lost edit.
+      final a = await media('a.wav', [1, 2, 3]);
+      final b = await media('b.wav', [4, 5, 6]);
+      final t = Technique(
+        id: newId(),
+        name: 'Belt',
+        aliases: const ['Chest mix', 'Yell'],
+        tags: const ['CVT', 'EVT', 'loud'],
+        summary: 'a summary',
+        description: 'a description',
+        cues: 'some cues',
+        exercises: 'some exercises',
+        acousticSignature: 'high SPL, strong 2-4 kHz',
+        media: [
+          a.copyWith(label: 'first label'),
+          TechniqueMedia(
+            id: b.id,
+            path: b.path,
+            kind: TechniqueMediaKind.video,
+            label: 'second label',
+            addedAt: b.addedAt,
+          ),
+        ],
+        createdAt: DateTime(2026, 1, 2),
+        updatedAt: DateTime(2026, 3, 4),
+      );
+      expect(await repo.saveTechnique(t), isA<Ok<Technique>>());
+
+      final l = ((await repo.getTechnique(t.id)) as Ok<Technique>).value;
+      expect(l.name, 'Belt');
+      expect(l.aliases, ['Chest mix', 'Yell']);
+      expect(l.tags, ['CVT', 'EVT', 'loud']);
+      expect(l.summary, 'a summary');
+      expect(l.description, 'a description');
+      expect(l.cues, 'some cues');
+      expect(l.exercises, 'some exercises');
+      expect(l.acousticSignature, 'high SPL, strong 2-4 kHz');
+      expect(l.media.map((m) => m.label), ['first label', 'second label']);
+      expect(l.media.map((m) => m.kind), [
+        TechniqueMediaKind.audio,
+        TechniqueMediaKind.video,
+      ]);
+      // The order the user arranged them in is part of the content.
+      expect(l.media.map((m) => m.id), [t.media[0].id, t.media[1].id]);
+      expect(await File(l.media.first.path).readAsBytes(), [1, 2, 3]);
+      expect(await File(l.media.last.path).readAsBytes(), [4, 5, 6]);
+    },
+  );
+
   test('list + delete (tombstone)', () async {
     final a =
         (await repo.saveTechnique(technique(name: 'A')) as Ok<Technique>).value;

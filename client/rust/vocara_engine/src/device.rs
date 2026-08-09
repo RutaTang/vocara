@@ -3937,6 +3937,70 @@ mod cell_exclusion_tests {
         assert!(cell.try_feed(cell.claim(), &vec![0.5f32; 256]));
     }
 
+    /// The exclusion under contention, not just in a staged two-thread window: a zombie
+    /// callback feeding as fast as it can while the host claims and reconfigures over and
+    /// over. Any admitted feed must have exclusive `&mut InputState`, so a `reconfigure`
+    /// that wrote alongside one would show up here as a torn `step`/`in_channels` pair (or,
+    /// under a sanitizer, as the data race it is).
+    #[test]
+    fn feeds_and_reconfigures_never_overlap_under_contention() {
+        use std::sync::atomic::Ordering;
+        let (cell, _mic) = input_cell();
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let feeders: Vec<_> = (0..3)
+            .map(|_| {
+                let c = Arc::clone(&cell);
+                let s = Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    let buf = vec![0.25f32; 128];
+                    let mut admitted = 0u64;
+                    while !s.load(Ordering::Relaxed) {
+                        // Whatever generation is current right now — a real callback holds a
+                        // fixed one, but this way some calls are admitted and some retired,
+                        // which is the interleaving that matters.
+                        let epoch = c.owner.load(Ordering::Acquire);
+                        if epoch != 0 && c.try_feed(epoch, &buf) {
+                            admitted += 1;
+                        }
+                    }
+                    admitted
+                })
+            })
+            .collect();
+
+        for i in 0..2_000 {
+            let epoch = cell.claim();
+            assert!(epoch > 0);
+            // Alternate the layout so a torn write would leave an impossible pair.
+            let (rate, ch) = if i % 2 == 0 {
+                (44_100.0, 1)
+            } else {
+                (96_000.0, 2)
+            };
+            cell.reconfigure(rate, ch);
+            // SAFETY: the host thread is the only reconfigurer, and it is between claims —
+            // reading the two fields it just wrote is the assertion, not a second accessor.
+            let g = cell.enter_blocking();
+            let st = unsafe { &*cell.state.get() };
+            let expect_step = rate / crate::sample::ENGINE_SR;
+            assert_eq!(st.in_channels, ch, "channels torn at iteration {i}");
+            assert!(
+                (st.step - expect_step).abs() < 1e-12,
+                "step torn at iteration {i}: {} vs {expect_step}",
+                st.step
+            );
+            drop(g);
+        }
+
+        stop.store(true, Ordering::Relaxed);
+        for f in feeders {
+            f.join().unwrap();
+        }
+        // And the cell is still usable, not left with the flag held.
+        assert!(cell.try_feed(cell.claim(), &vec![0.5f32; 128]));
+    }
+
     fn tone_resampler(device_rate: f64) -> (OutResampler, Arc<RtCell>) {
         let desc = GraphDesc {
             nodes: vec![NodeEntry::new(1, Box::new(MasterNode::unity()))],
