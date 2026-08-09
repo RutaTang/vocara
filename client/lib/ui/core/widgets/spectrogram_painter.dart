@@ -119,6 +119,23 @@ Future<ui.Image> renderColumnsImage(
   List<int>? active,
 }) {
   final w = columns.length;
+  // Same zero-size guard as renderSpectrogramImage, for the same reason: a
+  // zero-size buffer makes decodeImageFromPixels never complete, and the only
+  // caller AWAITS this — so the live view would freeze on its last image with
+  // nothing to say why. Not reachable today (the caller returns early on no
+  // columns, and bins is a positive constant of the analyser's FFT size); it
+  // is here so the two renderers cannot disagree about it.
+  if (w == 0 || bins <= 0) {
+    final blank = Completer<ui.Image>();
+    ui.decodeImageFromPixels(
+      Uint8List(4),
+      1,
+      1,
+      ui.PixelFormat.rgba8888,
+      blank.complete,
+    );
+    return blank.future;
+  }
   final pixels = Uint8List(w * bins * 4);
 
   var ceil = -1e9;

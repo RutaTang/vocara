@@ -74,18 +74,33 @@ class _Source extends ChangeNotifier implements AnalysisSource {
   @override
   bool get spectrogramLoading => loading;
 
+  /// Set with [live], which also supplies the monitor.
+  MonitorService? _monitor;
+
   @override
-  bool get liveMonitor => false;
+  bool get liveMonitor => _monitor != null;
 
   @override
   MonitorService get monitor =>
-      throw StateError('a non-live source must never reach the monitor');
+      _monitor ??
+      (throw StateError('a non-live source must never reach the monitor'));
 
   @override
   final ValueNotifier<Duration> position = ValueNotifier(Duration.zero);
 
   @override
   Future<void> seek(Duration to) async => position.value = to;
+}
+
+/// A live source whose monitor has already been fed [samples] from the mic.
+_Source _live(Float32List samples) {
+  final monitor = MonitorService()..start();
+  // In chunks, the way the engine delivers them.
+  for (var i = 0; i < samples.length; i += 512) {
+    final end = math.min(i + 512, samples.length);
+    monitor.feedSamples(Float32List.sublistView(samples, i, end));
+  }
+  return _Source().._monitor = monitor;
 }
 
 Float32List _sine(int n, double f, int sr) {
@@ -231,5 +246,31 @@ void main() {
         durationMs: 0,
       ),
     );
+  });
+
+  group('the LIVE monitor path', () {
+    // The views the mic drives: a rolling spectrogram, the tuner, the live
+    // spectrum strip and the live dynamics panel. MonitorService.feedSamples
+    // takes raw mic samples with no finiteness filter of its own, so what a
+    // misbehaving driver delivers reaches these views intact.
+    testWidgets('renders a fed monitor', (tester) async {
+      await pumpTabs(tester, _live(_sine(24000, 220, 48000)));
+    });
+
+    testWidgets('renders a monitor fed silence', (tester) async {
+      await pumpTabs(tester, _live(Float32List(24000)));
+    });
+
+    testWidgets('renders a monitor fed NON-FINITE samples', (tester) async {
+      final data = _sine(24000, 220, 48000);
+      data[100] = double.nan;
+      data[200] = double.infinity;
+      data[300] = double.negativeInfinity;
+      await pumpTabs(tester, _live(data));
+    });
+
+    testWidgets('renders a monitor started but never fed', (tester) async {
+      await pumpTabs(tester, _Source().._monitor = (MonitorService()..start()));
+    });
   });
 }
