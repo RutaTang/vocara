@@ -8,6 +8,7 @@ import 'package:vocara/data/db/app_database.dart';
 import 'package:vocara/data/db/asset_store.dart';
 import 'package:vocara/data/repositories/song_practice_repository_drift.dart';
 import 'package:vocara/data/sync/hlc.dart';
+import 'package:vocara/data/sync/sync_hashes.dart';
 import 'package:vocara/data/sync/sync_writer.dart';
 import 'package:vocara/domain/models/audio_fx.dart';
 import 'package:vocara/domain/models/audio_track.dart';
@@ -440,6 +441,81 @@ void main() {
             .read<int>('n');
     expect(clipOps, 1);
   });
+
+  // Regression guard: children were reconciled for EVERY desired track, even
+  // one whose remote delete the three-way merge had just accepted. A child the
+  // stale editor had edited was then revived (rule 5's edited side) as a live
+  // row under a tombstoned parent — invisible on this device, but synced out
+  // as an orphan.
+  test(
+    'a track whose remote delete is accepted takes its children with it',
+    () async {
+      final base = ok(await repo.createPractice('S'));
+      final vocal = AudioTrack(
+        id: newId(),
+        kind: AudioTrackKind.vocal,
+        displayName: 'Take',
+        createdAt: DateTime(2026),
+        versionId: base.versions.single.id,
+        clips: [
+          await clip('t.wav', [1]),
+        ],
+        notes: [
+          PracticeNote(
+            id: newId(),
+            positionMs: 0,
+            content: 'x',
+            createdAt: DateTime(2026),
+            updatedAt: DateTime(2026),
+          ),
+        ],
+      );
+      SongPractice practiceWith(List<AudioTrack> tracks) => SongPractice(
+        id: base.id,
+        title: base.title,
+        createdAt: base.createdAt,
+        updatedAt: base.updatedAt,
+        vocalTracks: tracks,
+        versions: base.versions,
+        activeVersionId: base.activeVersionId,
+      );
+      ok(await repo.savePractice(practiceWith([vocal])));
+
+      // An editor opens the practice: these hashes are its merge base.
+      final loaded =
+          (await repo.loadPractice(base.id) as Ok<Loaded<SongPractice>>).value;
+
+      // The track is deleted elsewhere and syncs in, cascading to its children.
+      ok(await repo.savePractice(practiceWith(const [])));
+      expect(await _liveCount(db, db.tracks), 0);
+
+      // The stale editor saves: it never touched the TRACK (so the delete is
+      // accepted) but it did edit a note underneath it.
+      final held = loaded.aggregate.vocalTracks.single;
+      final saved = await repo.savePracticeWithBase(
+        practiceWith([
+          held.copyWith(
+            notes: [
+              held.notes.single.copyWith(content: 'edited while deleted'),
+            ],
+          ),
+        ]),
+        baseHashes: loaded.baseHashes,
+      );
+      expect(saved, isA<Ok<Loaded<SongPractice>>>());
+      expect(
+        await _liveCount(db, db.tracks),
+        0,
+        reason: 'the accepted delete must stand',
+      );
+      expect(
+        await _liveCount(db, db.practiceNotes),
+        0,
+        reason: 'a live note under a tombstoned track is an orphan',
+      );
+      expect(await _liveCount(db, db.clips), 0);
+    },
+  );
 }
 
 Future<int> _liveCount(AppDatabase db, TableInfo<Table, dynamic> table) async {

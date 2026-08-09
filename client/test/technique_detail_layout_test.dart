@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:desktop_drop/desktop_drop.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:forui/forui.dart';
@@ -93,7 +94,10 @@ Technique _technique({
   );
 }
 
-Future<void> _pump(WidgetTester tester, Technique technique) async {
+Future<TechniqueDetailViewModel> _pump(
+  WidgetTester tester,
+  Technique technique,
+) async {
   final vm = TechniqueDetailViewModel(
     repository: _FakeRepo(technique),
     mediaService: TechniqueMediaService(storage: LocalStorageService()),
@@ -109,6 +113,7 @@ Future<void> _pump(WidgetTester tester, Technique technique) async {
   );
   await tester.pump(); // let the load command resolve
   await tester.pump();
+  return vm;
 }
 
 void main() {
@@ -174,6 +179,41 @@ void main() {
     expect(find.text('Save'), findsOneWidget);
     // Media is addable while editing too.
     expect(find.text('EXAMPLES'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  // Regression guard: the drop zone used to filter unsupported files out
+  // BEFORE calling the view model, so a drop of only unsupported files did
+  // nothing at all — no import, and the notice the VM already had for exactly
+  // this case was unreachable.
+  testWidgets('dropping only unsupported files reports the skip', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1200, 2600);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+
+    final vm = await _pump(tester, _technique(body: false));
+    await tester.tap(find.text('Edit').first);
+    await tester.pump();
+
+    final target = tester.widget<DropTarget>(find.byType(DropTarget));
+    target.onDragDone!(
+      DropDoneDetails(
+        files: [DropItemFile('/tmp/notes.pdf')],
+        localPosition: Offset.zero,
+        globalPosition: Offset.zero,
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    expect(vm.effectiveMedia, isEmpty);
+    expect(
+      find.text('No supported audio or video files in the drop.'),
+      findsOneWidget,
+      reason: 'a drop that imports nothing must say so',
+    );
     expect(tester.takeException(), isNull);
   });
 

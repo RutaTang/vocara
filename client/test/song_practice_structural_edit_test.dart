@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vocara/data/repositories/song_practice_repository.dart';
 import 'package:vocara/data/repositories/technique_repository.dart';
@@ -109,6 +111,21 @@ class _FakeWaveforms extends Fake implements WaveformService {
     String audioFilePath, {
     int targetBuckets = 1000,
   }) async => (peaks: const <double>[], durationMs: 1000);
+}
+
+/// Waveform analysis that parks until the test releases it — a stand-in for
+/// the seconds a real analyze takes, during which the UI stays interactive.
+class _GatedWaveforms extends Fake implements WaveformService {
+  final Completer<void> gate = Completer<void>();
+
+  @override
+  Future<WaveformResult> analyze(
+    String audioFilePath, {
+    int targetBuckets = 1000,
+  }) async {
+    await gate.future;
+    return (peaks: const <double>[], durationMs: 1000);
+  }
 }
 
 class _FakeEdits extends Fake implements AudioEditService {
@@ -512,6 +529,72 @@ void main() {
       expect(vm.practice!.vocalTracks.map((t) => t.id), ['top', 'bottom']);
     });
 
+    // Regression guard: split/merge rebuilt their lanes from the snapshot
+    // taken BEFORE the analyze awaits. Renames and note edits are not
+    // busy-gated, so one landing during those seconds was overwritten — and a
+    // note added meanwhile, missing from the rebuilt lane, was tombstoned by
+    // the save.
+    test('a rename and a note landing DURING a split survive it', () async {
+      final waveforms = _GatedWaveforms();
+      final vm = await pumpVm(waveforms: waveforms);
+      vm.playback.position.value = const Duration(milliseconds: 500);
+
+      final split = vm.splitTrackAtPlayhead('single');
+      await Future<void>.delayed(Duration.zero); // reach the gated analyze
+      await vm.renameTrack('single', 'Renamed mid-split');
+      await vm.addNote('single', 100, null, 'note added mid-split');
+      waveforms.gate.complete();
+      await split;
+
+      final tracks = vm.practice!.vocalTracks;
+      final first = tracks.firstWhere((t) => t.id == 'single');
+      expect(
+        first.displayName,
+        'Renamed mid-split',
+        reason: 'the rename must not be overwritten by the split',
+      );
+      expect(
+        first.notes.map((n) => n.content),
+        ['note added mid-split'],
+        reason: 'a note added mid-split must not be dropped (and tombstoned)',
+      );
+      // The new half is still derived from the same lane.
+      expect(
+        tracks.map((t) => t.displayName),
+        contains('Renamed mid-split (2)'),
+      );
+    });
+
+    test('a rename and a note landing DURING a merge survive it', () async {
+      final waveforms = _GatedWaveforms();
+      final vm = await pumpVm(
+        vocalTracks: _mergeableTakes(),
+        waveforms: waveforms,
+      );
+
+      final merge = vm.mergeTrackDown('top');
+      await Future<void>.delayed(Duration.zero); // reach the gated analyze
+      await vm.renameTrack('top', 'Renamed mid-merge');
+      await vm.addNote('bottom', 200, null, 'note on the absorbed take');
+      waveforms.gate.complete();
+      await merge;
+
+      final merged = vm.practice!.vocalTracks.single;
+      expect(
+        merged.displayName,
+        'Renamed mid-merge',
+        reason: 'the rename must not be overwritten by the merge',
+      );
+      expect(
+        merged.notes.map((n) => n.content),
+        ['note on the absorbed take'],
+        reason: 'a note added to the absorbed take must follow its audio',
+      );
+      // Shifted onto the merged timeline: 200 ms in the bottom take sits
+      // after the 1000 ms top take.
+      expect(merged.notes.single.positionMs, 1200);
+    });
+
     test('addVocalTake on a FAILED save deletes the imported file', () async {
       final vm = await pumpVm();
       repo.failSaves = true;
@@ -641,6 +724,49 @@ void main() {
           reason: 'the un-persisted stamp must not stay on screen',
         );
         expect(toasts, contains("Couldn't save your changes."));
+      },
+    );
+
+    // Regression guard: the cursor advance was computed AFTER the awaited
+    // write, off the shared field, so two taps inside one save round-trip both
+    // stamped the same line and the cursor then jumped over the next one.
+    test(
+      'two taps inside one save round-trip stamp two different lines',
+      () async {
+        final vm = await pumpVm();
+        await vm.setLyricsText('one\ntwo\nthree');
+        vm.playback.position.value = const Duration(milliseconds: 500);
+        expect(vm.syncIndex, 0);
+
+        await Future.wait([vm.stampNextLyric(), vm.stampNextLyric()]);
+
+        expect(vm.lyrics[0].timeMs, isNotNull);
+        expect(
+          vm.lyrics[1].timeMs,
+          isNotNull,
+          reason:
+              'the second tap must stamp the NEXT line, not re-stamp the first',
+        );
+        expect(vm.lyrics[2].timeMs, isNull);
+        expect(vm.syncIndex, 2);
+      },
+    );
+
+    test(
+      'a failed stamp leaves the cursor on the line it could not stamp',
+      () async {
+        final vm = await pumpVm();
+        await vm.setLyricsText('one\ntwo\nthree');
+        repo.failSaves = true;
+
+        await vm.stampNextLyric();
+
+        expect(vm.lyrics[0].timeMs, isNull);
+        expect(
+          vm.syncIndex,
+          0,
+          reason: 'advancing past a line the write lost would skip it silently',
+        );
       },
     );
   });

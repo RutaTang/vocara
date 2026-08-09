@@ -7,10 +7,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use vocara_engine::dsp::master::MasterNode;
-use vocara_engine::feed::{StreamCtrl, TrackFeeder, WavTrackReader};
+use vocara_engine::feed::{fence_frames, StreamCtrl, TrackFeeder, WavTrackReader};
 use vocara_engine::graph::{Edge, GraphDesc, NodeEntry};
 use vocara_engine::live::{spawn, EngineHandle, RtCell};
-use vocara_engine::ring::spsc;
+use vocara_engine::ring::{spsc, Producer};
 use vocara_engine::sample::{Smp, CHANNELS, ENGINE_SR};
 use vocara_engine::source::{BufferSource, StreamingSource};
 use vocara_engine::wav::write_wav_f32;
@@ -103,6 +103,102 @@ fn streamed_pair(
     let (h, rt) = engine_with(Box::new(node));
     let feeder = TrackFeeder::new(ctrl, prod, reader, start_frame);
     (h, rt, feeder)
+}
+
+/// A source fed BY HAND: the two tests below need control over the window
+/// between a fence's two pushes, which a real feeder never exposes.
+fn hand_fed_source() -> (
+    EngineHandle,
+    Arc<RtCell>,
+    Producer<[Smp; CHANNELS]>,
+    Arc<StreamCtrl>,
+) {
+    let ctrl = StreamCtrl::new();
+    let (prod, cons) = spsc::<[Smp; CHANNELS]>(1024);
+    let node = StreamingSource::new(Arc::clone(&ctrl), cons, 0, 1 << 20);
+    let (h, rt) = engine_with(Box::new(node));
+    h.play();
+    (h, rt, prod, ctrl)
+}
+
+fn render_block(rt: &Arc<RtCell>) -> Vec<Smp> {
+    let mut out = vec![0.0; BLOCK * CHANNELS];
+    rt.render_offline(&mut out, BLOCK);
+    rt.transport().sync_consumed_to_rendered();
+    out
+}
+
+fn push_audio(prod: &mut Producer<[Smp; CHANNELS]>, frames: usize, v: Smp) {
+    for _ in 0..frames {
+        assert!(prod.push([v, -v]), "test ring is big enough");
+    }
+}
+
+/// A fence is TWO pushes, published separately, so the node can observe the
+/// generation frame while the base frame is still invisible. Parking that half
+/// fence must not wedge the source: here the park happens in the FLUSH drain,
+/// which re-runs next block and must not throw the parked fence away (its
+/// generation frame is already consumed and never comes again).
+#[test]
+fn a_flush_fence_split_across_blocks_still_arms_the_source() {
+    let (_h, rt, mut prod, ctrl) = hand_fed_source();
+    let [gen_frame, base_frame] = fence_frames(1, BLOCK as i64);
+    assert!(prod.push(gen_frame));
+    ctrl.gen.store(1, std::sync::atomic::Ordering::Release);
+    ctrl.flush_seq
+        .fetch_add(1, std::sync::atomic::Ordering::Release);
+
+    let parked = render_block(&rt);
+    assert!(
+        parked.iter().all(|s| *s == 0.0),
+        "a fence with no base yet renders silence"
+    );
+
+    // The base frame lands, followed by the generation's audio.
+    assert!(prod.push(base_frame));
+    push_audio(&mut prod, BLOCK, 0.25);
+    let healed = render_block(&rt);
+    assert_eq!(
+        healed[0], 0.25,
+        "a fence whose base arrived a block late must still arm the source"
+    );
+    assert!(healed.iter().all(|s| s.abs() == 0.25));
+}
+
+/// The same split fence, but IN BAND (a loop wrap / starvation jump): the node
+/// pops it mid-render and unarms. Every arming path is gated on `armed`, so the
+/// parked fence must be retried from the render loop itself or nothing ever
+/// completes it.
+#[test]
+fn an_in_band_fence_split_across_blocks_still_rearms_the_source() {
+    let (_h, rt, mut prod, ctrl) = hand_fed_source();
+    // Arm cleanly at generation 1, with exactly one block of audio behind it.
+    let [g1, b1] = fence_frames(1, 0);
+    assert!(prod.push(g1));
+    assert!(prod.push(b1));
+    ctrl.gen.store(1, std::sync::atomic::Ordering::Release);
+    ctrl.flush_seq
+        .fetch_add(1, std::sync::atomic::Ordering::Release);
+    push_audio(&mut prod, BLOCK, 0.5);
+    assert_eq!(render_block(&rt)[0], 0.5, "generation 1 plays");
+
+    // Generation 2 arrives in band; its base frame is not visible yet.
+    let [g2, b2] = fence_frames(2, 2 * BLOCK as i64);
+    assert!(prod.push(g2));
+    let parked = render_block(&rt);
+    assert!(
+        parked.iter().all(|s| *s == 0.0),
+        "a fence with no base yet renders silence"
+    );
+
+    assert!(prod.push(b2));
+    push_audio(&mut prod, BLOCK, 0.25);
+    let healed = render_block(&rt);
+    assert_eq!(
+        healed[0], 0.25,
+        "an in-band fence whose base arrived late must re-arm the source"
+    );
+    assert!(healed.iter().all(|s| s.abs() == 0.25));
 }
 
 #[test]

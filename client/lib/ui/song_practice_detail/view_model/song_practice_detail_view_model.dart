@@ -626,7 +626,8 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// the editor must not pin an old timestamp onto different words — or onto a
   /// blank line. Each old synced time is consumed at most once, in order, when
   /// its trimmed text matches a new line.
-  Future<void> setLyricsText(String text) async {
+  /// Returns whether the write landed (the editor keeps the draft if not).
+  Future<bool> setLyricsText(String text) async {
     final parsed = parsePlainLyrics(text);
     final byText = <String, List<int>>{};
     for (final l in lyrics) {
@@ -644,19 +645,20 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         next.add(line); // parsed plain line carries no time
       }
     }
-    await _setLyrics(next);
+    return _setLyrics(next);
   }
 
   /// Imports pasted/dropped lyrics — `.lrc` if it has time tags, else plain.
-  Future<void> importLyrics(String content) async {
+  /// Returns whether the write landed.
+  Future<bool> importLyrics(String content) async {
     final lines = looksLikeLrc(content)
         ? parseLrc(content)
         : parsePlainLyrics(content);
     if (lines.every((l) => l.isBlank)) {
       _toast("That file didn't contain any lyrics.");
-      return;
+      return false;
     }
-    await _setLyrics(lines);
+    return _setLyrics(lines);
   }
 
   /// Imports lyrics from a DROPPED file: validates the type + size, reads, and
@@ -689,12 +691,13 @@ class SongPracticeDetailViewModel extends ChangeNotifier
 
   /// Applies text saved from the editor: parsed as `.lrc` if it carries time
   /// tags (so pasting LRC just works), otherwise as plain text (keeping times).
-  Future<void> applyEditedLyrics(String text) async {
+  /// Returns whether it persisted — a failed write reverts the model to what's
+  /// on disk, so the editor must stay open on false or the draft is lost.
+  Future<bool> applyEditedLyrics(String text) {
     if (looksLikeLrc(text)) {
-      await importLyrics(text);
-    } else {
-      await setLyricsText(text);
+      return importLyrics(text);
     }
+    return setLyricsText(text);
   }
 
   String lyricsAsText() => lyricsToPlainText(lyrics);
@@ -712,22 +715,38 @@ class SongPracticeDetailViewModel extends ChangeNotifier
 
   /// Stamps the next line at the playhead, then advances past blank lines.
   Future<void> stampNextLyric() async {
-    if (_syncIndex < 0 || _syncIndex >= lyrics.length) return;
-    await stampLyricAt(_syncIndex);
-    var next = _syncIndex + 1;
+    final index = _syncIndex;
+    if (index < 0 || index >= lyrics.length) return;
+    // Advance the cursor BEFORE awaiting the write. Two taps land faster than
+    // one save round-trip, and computing the advance afterwards reads a cursor
+    // the other tap already moved: both would stamp this line and the cursor
+    // would jump a line past them, leaving it unstamped.
+    var next = index + 1;
     while (next < lyrics.length && lyrics[next].isBlank) {
       next++;
     }
     _syncIndex = next;
     notifyListeners();
+    if (!await _stampAt(index) && _syncIndex == next) {
+      // The write failed and the model reverted to disk, so this line carries
+      // no time: put the cursor back on it (unless a later tap moved past).
+      _syncIndex = index;
+      notifyListeners();
+    }
   }
 
-  /// Stamps a specific line at the current playhead.
+  /// Stamps a specific line at the current playhead, parking the cursor on it.
   Future<void> stampLyricAt(int index) async {
     if (index < 0 || index >= lyrics.length) return;
-    final at = position.value.inMilliseconds;
     _syncIndex = index;
-    await _setLyrics([
+    await _stampAt(index);
+  }
+
+  /// Writes the playhead onto [index] WITHOUT touching the sync cursor — its
+  /// callers own the cursor. Returns whether the write landed.
+  Future<bool> _stampAt(int index) {
+    final at = position.value.inMilliseconds;
+    return _setLyrics([
       for (var i = 0; i < lyrics.length; i++)
         if (i == index) lyrics[i].copyWith(timeMs: at) else lyrics[i],
     ]);
@@ -741,28 +760,33 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// Persists a lyrics change without re-syncing the audio engine (lyrics don't
   /// affect playback), so tap-to-time while playing doesn't glitch the audio.
   /// Runs on the same save chain as [_save] (one in-flight write at a time).
-  Future<void> _setLyrics(List<LyricLine> lines) async {
+  /// Returns whether the write landed.
+  Future<bool> _setLyrics(List<LyricLine> lines) async {
     final practice = _practice;
-    if (practice == null) return;
+    if (practice == null) return false;
     _practice = practice.copyWith(lyrics: lines);
-    await _enqueueSave(_writeLyrics);
+    return _enqueueSave(_writeLyrics);
   }
 
   /// The lyrics-only persist body (see [_setLyrics]); queued via [_enqueueSave].
-  Future<void> _writeLyrics() async {
+  /// Returns whether the write landed, so callers can keep the user's text (an
+  /// editor draft, the sync cursor) instead of advancing past a lost change.
+  Future<bool> _writeLyrics() async {
     final sent = _practice;
-    if (sent == null) return;
+    if (sent == null) return false;
     // Same save bracket as [_doSave]: supersede in-flight remote reloads and
     // block new ones until the fresh base is captured.
     _reloadEpoch++;
     _saving = true;
+    var ok = false;
     try {
       final result = await _repository.savePracticeWithBase(
         sent,
         baseHashes: _baseHashes,
       );
-      if (_disposed) return;
+      if (_disposed) return false;
       if (result is Ok<Loaded<SongPractice>>) {
+        ok = true;
         _baseHashes = result.value.baseHashes;
         // Keep a model mutated during the write (see [_doSave]); the queued
         // save behind this one persists it against the fresh base above.
@@ -787,6 +811,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       _saving = false;
     }
     notifyListeners();
+    return ok;
   }
 
   // --- Loading -------------------------------------------------------------
@@ -1624,7 +1649,25 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       );
       final firstAnalysis = await _waveforms.analyze(parts.firstPath);
       final secondAnalysis = await _waveforms.analyze(parts.secondPath);
-      final first = src.copyWith(
+      // Re-read the LIVE practice after the split/analyze awaits so a take
+      // recorded/imported meanwhile isn't dropped by a stale-snapshot rebuild.
+      final cur = _practice;
+      if (cur == null) return;
+      final list = [...cur.vocalTracks];
+      final idx = list.indexWhere((t) => t.id == trackId);
+      if (idx < 0) return; // source removed during the split
+      // Rebuild both halves from the LIVE take, not the pre-await snapshot:
+      // renames and note/marker edits are NOT busy-gated, so one landing during
+      // those awaits would be overwritten here — and a note added meanwhile
+      // would be missing from the desired list, which the save tombstones.
+      final live = list[idx];
+      if (live.clips.length != 1 || live.primaryClip?.id != clip.id) {
+        // The lane's audio changed underneath (no gated path does this today):
+        // abandon the split rather than write halves cut from a stale file.
+        await _discardQuietly([parts.firstPath, parts.secondPath]);
+        return;
+      }
+      final first = live.copyWith(
         // The surviving take keeps its clip id (same row, new file + length).
         clips: [
           clip.copyWith(
@@ -1635,16 +1678,16 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         ],
         // Markers stay with the half their start falls in; a range straddling
         // the cut is clamped so it doesn't dangle past the shortened take.
-        notes: src.notes
+        notes: live.notes
             .where((n) => n.positionMs < atMs)
             .map((n) => clampNoteEnd(n, atMs))
             .toList(),
-        techniqueMarkers: src.techniqueMarkers
+        techniqueMarkers: live.techniqueMarkers
             .where((m) => m.positionMs < atMs)
             .map((m) => clampMarkerEnd(m, atMs))
             .toList(),
       );
-      final second = src.copyWith(
+      final second = live.copyWith(
         id: newId(),
         // A FRESH clip id — otherwise the new take and the surviving `first`
         // take would share one clip primary key and the save transaction would
@@ -1662,24 +1705,17 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         // Relocating notes/markers onto a NEW track id needs fresh ids: the source track
         // is tombstoned (its child rows soft-deleted) but still holds these ids, so reusing
         // them would collide on insert and roll the whole save back.
-        notes: src.notes
+        notes: live.notes
             .where((n) => n.positionMs >= atMs)
             .map((n) => n.copyWith(id: newId()))
             .toList(),
-        techniqueMarkers: src.techniqueMarkers
+        techniqueMarkers: live.techniqueMarkers
             .where((m) => m.positionMs >= atMs)
             .map((m) => m.copyWith(id: newId()))
             .toList(),
-        displayName: '${src.displayName} (2)',
+        displayName: '${live.displayName} (2)',
         createdAt: DateTime.now(),
       );
-      // Re-read the LIVE practice after the split/analyze awaits so a take
-      // recorded/imported meanwhile isn't dropped by a stale-snapshot rebuild.
-      final cur = _practice;
-      if (cur == null) return;
-      final list = [...cur.vocalTracks];
-      final idx = list.indexWhere((t) => t.id == trackId);
-      if (idx < 0) return; // source removed during the split
       list[idx] = first;
       list.insert(idx + 1, second);
       _practice = cur.copyWith(vocalTracks: list);
@@ -1692,12 +1728,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       } else {
         // The failed save reverted the model to the original one-clip take,
         // so the split halves are orphans — clean them up instead.
-        try {
-          await _audioFiles.deleteAudio(parts.firstPath);
-          await _audioFiles.deleteAudio(parts.secondPath);
-        } catch (_) {
-          /* best-effort: a lingering working file is harmless */
-        }
+        await _discardQuietly([parts.firstPath, parts.secondPath]);
       }
     });
     // The surviving take keeps its id but now points at a new file.
@@ -1747,6 +1778,30 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         secondPath: bottomClip.audioFilePath,
       );
       final analysisResult = await _waveforms.analyze(mergedPath);
+      // Re-read the LIVE practice and re-find the indices after the concat/
+      // analyze awaits (they shift if a take was added meanwhile) so the merge
+      // never rebuilds from a stale snapshot and drops a concurrent take.
+      final cur = _practice;
+      if (cur == null) return;
+      final newList = [...cur.vocalTracks];
+      final idx = newList.indexWhere((t) => t.id == top.id);
+      final bottomIdx = newList.indexWhere((t) => t.id == bottom.id);
+      if (idx < 0 || bottomIdx < 0) return;
+      // Both lanes are re-read LIVE for the rebuild below: renames and note/
+      // marker edits are NOT busy-gated, so folding the pre-await snapshots in
+      // would overwrite one that landed during those awaits (and a note added
+      // meanwhile, absent from the desired list, is tombstoned by the save).
+      final liveTop = newList[idx];
+      final liveBottom = newList[bottomIdx];
+      if (liveTop.primaryClip?.id != topClip.id ||
+          liveBottom.primaryClip?.id != bottomClip.id ||
+          liveTop.clips.length != 1 ||
+          liveBottom.clips.length != 1) {
+        // A lane's audio changed underneath (no gated path does this today):
+        // abandon the merge rather than publish a file cut from stale inputs.
+        await _discardQuietly([mergedPath]);
+        return;
+      }
       // Shift the bottom take's markers onto the merged timeline; range markers
       // shift their end by the same delta so the span is preserved.
       final delta = topClip.endMs - bottomClip.startMs;
@@ -1754,8 +1809,8 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       // its child rows keep these ids, so reusing them on the merged (top) track would
       // collide on insert and roll the save back.
       final notes = [
-        ...top.notes,
-        for (final n in bottom.notes)
+        ...liveTop.notes,
+        for (final n in liveBottom.notes)
           n.copyWith(
             id: newId(),
             positionMs: n.positionMs + delta,
@@ -1763,15 +1818,15 @@ class SongPracticeDetailViewModel extends ChangeNotifier
           ),
       ]..sort((a, b) => a.positionMs.compareTo(b.positionMs));
       final markers = [
-        ...top.techniqueMarkers,
-        for (final m in bottom.techniqueMarkers)
+        ...liveTop.techniqueMarkers,
+        for (final m in liveBottom.techniqueMarkers)
           m.copyWith(
             id: newId(),
             positionMs: m.positionMs + delta,
             endMs: m.endMs == null ? null : m.endMs! + delta,
           ),
       ]..sort((a, b) => a.positionMs.compareTo(b.positionMs));
-      final merged = top.copyWith(
+      final merged = liveTop.copyWith(
         // The merged take keeps the top clip's id (same row, new file+length).
         clips: [
           topClip.copyWith(
@@ -1783,15 +1838,6 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         notes: notes,
         techniqueMarkers: markers,
       );
-      // Re-read the LIVE practice and re-find the indices after the concat/
-      // analyze awaits (they shift if a take was added meanwhile) so the merge
-      // never rebuilds from a stale snapshot and drops a concurrent take.
-      final cur = _practice;
-      if (cur == null) return;
-      final newList = [...cur.vocalTracks];
-      final idx = newList.indexWhere((t) => t.id == top.id);
-      final bottomIdx = newList.indexWhere((t) => t.id == bottom.id);
-      if (idx < 0 || bottomIdx < 0) return;
       newList[idx] = merged;
       newList.removeAt(bottomIdx);
       _practice = cur.copyWith(vocalTracks: newList);
@@ -1807,11 +1853,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       } else {
         // The failed save reverted the model to the two original takes, so
         // the merged output is an orphan — clean it up instead.
-        try {
-          await _audioFiles.deleteAudio(mergedPath);
-        } catch (_) {
-          /* best-effort: a lingering working file is harmless */
-        }
+        await _discardQuietly([mergedPath]);
       }
     });
     // The merged take keeps the top take's id but now points at a new file.
@@ -1956,6 +1998,18 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   }
 
   // --- Internals -----------------------------------------------------------
+
+  /// Deletes working files an abandoned edit left behind; a lingering one is
+  /// harmless (the boot sweep reclaims `edits/`), so failures are swallowed.
+  Future<void> _discardQuietly(List<String> paths) async {
+    for (final path in paths) {
+      try {
+        await _audioFiles.deleteAudio(path);
+      } catch (_) {
+        /* best-effort */
+      }
+    }
+  }
 
   AudioTrack? _trackById(String trackId) {
     final practice = _practice;
