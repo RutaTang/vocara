@@ -145,6 +145,13 @@ class LruBytesCache<V> {
   }
 
   void operator []=(String key, V value) {
+    // A disposed cache has LEFT the shared budget, so it can no longer be
+    // chosen as an eviction victim: charging it here would add bytes the
+    // budget can never give back (an owner whose async analysis lands after
+    // its screen was closed did exactly that, permanently shrinking what the
+    // live screens are allowed to hold). Nothing can read the entry back
+    // either, so dropping the write loses nothing.
+    if (_disposed) return;
     final old = _map.remove(key);
     if (old != null) {
       _bytes -= byteOf(old.value);
@@ -174,6 +181,12 @@ class LruBytesCache<V> {
     if (hook != null) keys.forEach(hook);
   }
 
+  /// Whether [dispose] has run. A disposed cache stays usable as an empty
+  /// one — reads miss, writes are dropped — so an owner's in-flight async
+  /// work can land after teardown without corrupting the shared budget.
+  bool get isDisposed => _disposed;
+  bool _disposed = false;
+
   /// Drops everything and leaves the shared budget. Idempotent.
   void dispose() {
     // Leave FIRST: the budget discounts what this cache still holds, so the
@@ -181,6 +194,7 @@ class LruBytesCache<V> {
     _budget._leave(this as LruBytesCache<Object?>);
     _map.clear();
     _bytes = 0;
+    _disposed = true;
   }
 }
 

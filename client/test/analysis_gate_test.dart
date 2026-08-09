@@ -99,5 +99,36 @@ void main() {
       expect(cache.bytes, 0);
       expect(cache.isEmpty, isTrue);
     });
+
+    test('a write after dispose cannot charge the shared budget', () {
+      // The owner of a shared cache disposes it when its screen goes away,
+      // but its in-flight analysis can land afterwards. A disposed cache is
+      // no longer a member of the budget, so anything charged then could
+      // never be evicted — it would permanently shrink what the live screens
+      // may hold, one abandoned analysis at a time.
+      final budget = LruBytesBudget(100);
+      final live = LruBytesCache<List<int>>.shared(budget, (v) => v.length);
+      final leaving = LruBytesCache<List<int>>.shared(budget, (v) => v.length);
+      live['kept'] = List.filled(10, 0);
+      leaving['a'] = List.filled(20, 0);
+      expect(budget.bytes, 30);
+
+      leaving.dispose();
+      expect(
+        budget.bytes,
+        10,
+        reason: 'the disposed cache gave its bytes back',
+      );
+
+      leaving['late-analysis'] = List.filled(40, 0);
+      expect(budget.bytes, 10, reason: 'phantom bytes nothing could evict');
+      expect(leaving.isDisposed, isTrue);
+      expect(leaving['late-analysis'], isNull);
+      // The live cache still owns the whole budget it started with.
+      live['more'] = List.filled(80, 0);
+      expect(live.containsKey('more'), isTrue);
+      expect(live.containsKey('kept'), isTrue);
+      expect(budget.bytes, 90);
+    });
   });
 }

@@ -161,6 +161,22 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   final Map<String, RegisterMap> _registerCache = {};
   final Set<String> _spectrogramLoading = {};
   final Set<String> _metricsLoading = {};
+  // The in-flight compute per path, so a second caller JOINS it instead of
+  // skipping ahead. Kept in lockstep with the loading sets above (which drive
+  // the spinner); these carry the future the joiner awaits. Without them a
+  // caller that arrived mid-compute returned instantly with nothing, and the
+  // aggregate merge — which refuses to cache a partial lane, correctly — threw
+  // the whole lane away with no retry scheduled, leaving the dock blank until
+  // the user changed the selection.
+  final Map<String, Future<void>> _spectrogramInFlight = {};
+  final Map<String, Future<void>> _metricsInFlight = {};
+
+  // Drop an in-flight entry. A plain `map.remove(path)` inside an async body
+  // reads as an unawaited Future (that IS the stored value), so the discard is
+  // spelled out here instead of suppressed at each call site.
+  static void _forgetInFlight(Map<String, Future<void>> m, String path) {
+    m.remove(path);
+  }
   // Paths whose compute finished but produced nothing (non-WAV imports, missing
   // or truncated files). Latched so a null result is never retried — otherwise
   // the always-on inspector would re-launch the read + isolate every rebuild.
@@ -651,10 +667,16 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     if (_disposed ||
         path.isEmpty ||
         _metricsCache.containsKey(path) ||
-        _metricsLoading.contains(path) ||
         _metricsUnavailable.contains(path)) {
       return;
     }
+    // Already computing (possibly as half of a paired clip compute): wait for
+    // it. Returning here as if there were nothing pending is what let the
+    // aggregate merge see a hole that no one would ever fill.
+    final pending = _metricsInFlight[path];
+    if (pending != null) return pending;
+    final done = Completer<void>();
+    _metricsInFlight[path] = done.future;
     _metricsLoading.add(path);
     notifyListeners();
     try {
@@ -670,7 +692,11 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
       // Compute failed; latch so it isn't retried. The lane shows unavailable.
       _metricsUnavailable.add(path);
     } finally {
+      // Removed in the SAME place the loading flag is, so a failed or disposed
+      // compute can never leave a future nobody will complete.
       _metricsLoading.remove(path);
+      _forgetInFlight(_metricsInFlight, path);
+      done.complete();
       notifyListeners();
     }
   }
@@ -691,10 +717,15 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     if (_disposed ||
         path.isEmpty ||
         _spectrogramCache.containsKey(path) ||
-        _spectrogramLoading.contains(path) ||
         _spectrogramUnavailable.contains(path)) {
       return;
     }
+    // Join an in-flight compute rather than skipping it — see
+    // [_ensureMetricsForPath].
+    final pending = _spectrogramInFlight[path];
+    if (pending != null) return pending;
+    final done = Completer<void>();
+    _spectrogramInFlight[path] = done.future;
     _spectrogramLoading.add(path);
     notifyListeners();
     try {
@@ -710,6 +741,8 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
       _spectrogramUnavailable.add(path);
     } finally {
       _spectrogramLoading.remove(path);
+      _forgetInFlight(_spectrogramInFlight, path);
+      done.complete();
       notifyListeners();
     }
   }
@@ -740,6 +773,12 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
       ]);
       return _clipAnalysis(path);
     }
+    // ONE compute, registered under BOTH paths' in-flight maps: whichever half
+    // a later caller asks for, it joins this work instead of starting its own
+    // or giving up.
+    final done = Completer<void>();
+    _spectrogramInFlight[path] = done.future;
+    _metricsInFlight[path] = done.future;
     _spectrogramLoading.add(path);
     _metricsLoading.add(path);
     notifyListeners();
@@ -766,6 +805,9 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     } finally {
       _spectrogramLoading.remove(path);
       _metricsLoading.remove(path);
+      _forgetInFlight(_spectrogramInFlight, path);
+      _forgetInFlight(_metricsInFlight, path);
+      done.complete();
       notifyListeners();
     }
     return _clipAnalysis(path);
@@ -877,9 +919,10 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
       var complete = true;
       for (final c in track.clips) {
         final part = parts[c.audioFilePath];
-        // The cached re-read still covers a clip whose compute was already in
-        // flight for another consumer when the loop reached it: that path
-        // returns before the result lands.
+        // The cached re-read is belt-and-braces now that [_ensureClipAnalysis]
+        // JOINS an in-flight compute instead of returning ahead of it: the
+        // part is already filled. It still covers a byte-budget eviction
+        // between the loop and this merge.
         final m = part?.metrics ?? _metricsCache[c.audioFilePath];
         final spec = part?.spectrogram ?? _spectrogramCache[c.audioFilePath];
         // Fold a clip in only when BOTH analyses are present and non-empty, kept

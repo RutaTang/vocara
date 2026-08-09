@@ -43,6 +43,11 @@ class _StubSpectrograms extends Fake implements SpectrogramService {
   /// How many times the aggregate compute ran, for the pairing tests.
   int bothCalls = 0;
 
+  /// Paths whose compute parks until the test completes them, so an interleaving
+  /// (a clip still computing when a second consumer asks for the same path) can
+  /// be staged deterministically instead of raced.
+  final Map<String, Completer<void>> hold = {};
+
   @override
   Future<TakeAnalysis?> computeBothFromFile(
     String path, {
@@ -51,6 +56,7 @@ class _StubSpectrograms extends Fake implements SpectrogramService {
     double maxHz = 5000,
   }) async {
     bothCalls++;
+    await hold[path]?.future;
     onCompute?.call(path);
     return (spectrogram: specsByPath[path], metrics: metricsByPath[path]);
   }
@@ -296,6 +302,48 @@ void main() {
       // And c1's own frames carry real analysis rather than the merge's
       // silence fill.
       expect(merged.active.take(10).where((a) => a != 0), isNotEmpty);
+      cache.dispose();
+    });
+
+    test('a lane whose clip was already computing still settles, instead of '
+        'staying blank until the selection changes', () async {
+      // Select a clip (its compute starts), then click the lane header before
+      // it lands. The aggregate loop reached that clip mid-compute; skipping
+      // ahead of it produced a lane the merge refused to cache — correctly, it
+      // was incomplete — with nothing scheduled to ever try again, so the dock
+      // sat on "analysis is available for recorded takes" forever.
+      final track = _lane([_clip('c1', 1000), _clip('c2', 5000)]);
+      final stub = _StubSpectrograms(
+        metricsByPath: {'c1.wav': _metrics(10), 'c2.wav': _metrics(10)},
+        specsByPath: {'c1.wav': _spec(10), 'c2.wav': _spec(10)},
+      );
+      // c1 is the SLOW one: it is still in flight when the aggregate loop
+      // asks for it, and only lands after c2 has finished.
+      stub.hold['c1.wav'] = Completer<void>();
+      String? clipId = 'c1';
+      final cache = _cache(
+        spectrograms: stub,
+        selectedTrack: () => track,
+        selectedClipId: () => clipId,
+      );
+
+      final clipCompute = cache.ensureSelectedSpectrogram();
+      await pumpEventQueue();
+      // Lane header clicked: selection widens to the whole lane.
+      clipId = null;
+      final laneCompute = cache.ensureSelectedSpectrogram();
+      await pumpEventQueue();
+      expect(cache.selectedMetrics, isNull, reason: 'c1 is still computing');
+
+      stub.hold['c1.wav']!.complete();
+      await clipCompute;
+      await laneCompute;
+
+      final merged = cache.selectedMetrics;
+      expect(merged, isNotNull, reason: 'the lane must not settle blank');
+      expect(merged!.frames, 50);
+      // The joiner reused c1's work rather than launching a second decode.
+      expect(stub.bothCalls, 2);
       cache.dispose();
     });
 
