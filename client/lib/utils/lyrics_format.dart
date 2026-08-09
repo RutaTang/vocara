@@ -17,6 +17,35 @@ List<LyricLine> parsePlainLyrics(String text) {
 /// Whether [content] contains at least one LRC time tag.
 bool looksLikeLrc(String content) => _lrcTimeTag.hasMatch(content);
 
+/// A whole line that is nothing but an LRC metadata tag — `[ti:Song]`,
+/// `[ar:Artist]`, `[offset:+500]`. Never matches a time tag (those start with
+/// digits and are handled first).
+final _lrcMetaTag = RegExp(r'^\[[A-Za-z#][^\]:]*:[^\]]*\]$');
+
+/// Whether [content] is an LRC DOCUMENT, rather than plain lyrics that merely
+/// happen to contain a bracketed timestamp: EVERY non-blank line must carry a
+/// time tag or be a bare metadata tag.
+///
+/// [looksLikeLrc] asks only whether one time tag appears anywhere. That is the
+/// right question for a file the user handed over as lyrics, and the wrong one
+/// for text they typed themselves: [parseLrc] drops untimed lines by design,
+/// so a single `[04:33]` in an otherwise plain lyric would delete every other
+/// line on save.
+bool isLrcDocument(String content) {
+  var sawTime = false;
+  for (final raw in content.split('\n')) {
+    final line = raw.trim();
+    if (line.isEmpty) continue;
+    if (_lrcTimeTag.hasMatch(line)) {
+      sawTime = true;
+      continue;
+    }
+    if (_lrcMetaTag.hasMatch(line)) continue;
+    return false;
+  }
+  return sawTime;
+}
+
 /// Parses an `.lrc` document into timed lines, sorted by time. A line with
 /// several timestamps emits one entry per timestamp; metadata tags (`[ti:]`,
 /// `[ar:]`, …) and untimed lines are skipped.

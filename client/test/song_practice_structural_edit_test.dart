@@ -752,6 +752,38 @@ void main() {
       },
     );
 
+    // Regression guard: the editor routed on "is there a time tag anywhere",
+    // and parseLrc drops untimed lines by design — so one bracketed timestamp
+    // typed into ordinary lyrics deleted every other line on Save.
+    test('a stray timestamp in typed lyrics keeps every line', () async {
+      final vm = await pumpVm();
+
+      final ok = await vm.applyEditedLyrics(
+        'I waited [04:33] for you\nand then you came\nand we sang',
+      );
+
+      expect(ok, isTrue);
+      expect(vm.lyrics.map((l) => l.text).toList(), [
+        'I waited [04:33] for you',
+        'and then you came',
+        'and we sang',
+      ]);
+    });
+
+    test(
+      'pasting a real LRC document into the editor still syncs it',
+      () async {
+        final vm = await pumpVm();
+
+        await vm.applyEditedLyrics(
+          '[ti:Song]\n[00:12.50]hello\n[01:03.25]world',
+        );
+
+        expect(vm.lyrics.map((l) => l.text).toList(), ['hello', 'world']);
+        expect(vm.lyrics.first.timeMs, 12500);
+      },
+    );
+
     test(
       'a failed stamp leaves the cursor on the line it could not stamp',
       () async {

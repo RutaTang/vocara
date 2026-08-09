@@ -689,12 +689,15 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     }
   }
 
-  /// Applies text saved from the editor: parsed as `.lrc` if it carries time
-  /// tags (so pasting LRC just works), otherwise as plain text (keeping times).
+  /// Applies text saved from the editor: parsed as `.lrc` when the WHOLE text
+  /// reads as an LRC document (so pasting LRC just works), otherwise as plain
+  /// text (keeping times). The whole-document test matters here and not on the
+  /// import path: `parseLrc` drops untimed lines by design, so routing on a
+  /// single stray `[04:33]` would delete every other line the user typed.
   /// Returns whether it persisted — a failed write reverts the model to what's
   /// on disk, so the editor must stay open on false or the draft is lost.
   Future<bool> applyEditedLyrics(String text) {
-    if (looksLikeLrc(text)) {
+    if (isLrcDocument(text)) {
       return importLyrics(text);
     }
     return setLyricsText(text);
