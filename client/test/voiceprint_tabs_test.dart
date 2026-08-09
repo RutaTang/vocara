@@ -1,4 +1,5 @@
-// The eight analysis dock tabs, rendered against analysis the REAL DSP
+// The ten AnalysisSource-driven dock views, rendered against analysis the
+// REAL DSP
 // produced from degenerate audio.
 //
 // analysis_edge_inputs_test already pins that the DSP survives a take stopped
@@ -22,6 +23,7 @@ import 'package:vocara/domain/models/audio_track.dart';
 import 'package:vocara/domain/models/spectrogram.dart';
 import 'package:vocara/domain/models/voice_metrics.dart';
 import 'package:vocara/ui/song_practice_detail/view_model/analysis_source.dart';
+import 'package:vocara/ui/song_practice_detail/widgets/voice_profile_view.dart';
 import 'package:vocara/ui/song_practice_detail/widgets/voiceprint_view.dart';
 
 class _Source extends ChangeNotifier implements AnalysisSource {
@@ -145,6 +147,10 @@ void main() {
       'LTAS': () => LtasTab(vm: src),
       'Vibrato': () => VibratoTab(vm: src),
       'Register': () => RegisterTab(vm: src),
+      // Same AnalysisSource contract, hosted by the same dock (and by the
+      // technique screen's analysis section).
+      'Range': () => RangeView(vm: src),
+      'Dynamics': () => DynamicsView(vm: src),
     };
     for (final entry in tabs.entries) {
       await tester.pumpWidget(
