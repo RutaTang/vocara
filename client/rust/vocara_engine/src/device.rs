@@ -388,7 +388,10 @@ impl OutResampler {
     fn render_block(&mut self) -> bool {
         let frames = self.max_block;
         let n = frames * CHANNELS;
-        if !self.rt.try_render(self.epoch, &mut self.scratch[..n], frames) {
+        if !self
+            .rt
+            .try_render(self.epoch, &mut self.scratch[..n], frames)
+        {
             return false;
         }
         for f in 0..frames {
@@ -1112,7 +1115,8 @@ impl DriftEstimator {
         } else {
             1.0 + err.clamp(-500e-6, 500e-6)
         };
-        self.ratio_bits.store(corrected.to_bits(), Ordering::Relaxed);
+        self.ratio_bits
+            .store(corrected.to_bits(), Ordering::Relaxed);
         corrected
     }
 
@@ -1489,8 +1493,10 @@ fn writer_run(mut rec: Consumer<[Smp; CHANNELS]>, rx: mpsc::Receiver<WriterCmd>)
                             // restart path has no ack channel of its own, so the NEXT Stop
                             // reports it (a surfaced-if-misattributed failure beats silent
                             // corruption; the normal stop-then-start flow never reaches
-                            // here with a live take).
-                            failed = old_take_damaged;
+                            // here with a live take). OR-ed, never assigned: `failed` may
+                            // already hold mid-take write damage from the drain loop, and
+                            // a clean tail-drain/finalize must not erase it.
+                            failed = failed || old_take_damaged;
                             let _ = ack.send(true);
                         }
                         Err(_) => {
@@ -3062,6 +3068,51 @@ mod record_writer_tests {
         STREAM_TEARDOWN_FAILED.store(false, Ordering::Release);
     }
 
+    /// The sticky IO-failure flag exists so a take damaged mid-recording is reported through
+    /// the next Stop's ack. A Start while that take is still live must CARRY the damage
+    /// forward (its own ack only covers the new file's creation), not recompute the flag
+    /// from the restart's own tail-drain/finalize — those can succeed even though the take
+    /// already lost samples, and the damage would evaporate unreported.
+    #[test]
+    fn a_restart_keeps_mid_take_damage_sticky_until_stop_reports_it() {
+        use super::{writer_run, WriterCmd};
+        let (mut prod, cons) = spsc::<[Smp; CHANNELS]>(64);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let join = std::thread::spawn(move || writer_run(cons, rx));
+        // Take A's file creates cleanly but fails its FIRST data write (the injected
+        // stand-in for a disk filling mid-take).
+        let path_a = temp_wav(&format!("sticky_a_{}", crate::wav::TEST_FAIL_FIRST_WRITE));
+        let (ack, ack_rx) = std::sync::mpsc::channel();
+        tx.send(WriterCmd::Start(path_a.to_str().unwrap().to_string(), ack))
+            .unwrap();
+        assert!(ack_rx.recv().unwrap(), "take A's file creation is clean");
+        // One frame whose write fails. The drain loop pops it and writes (and records the
+        // failure) within the same iteration, before the next command check — so once the
+        // ring reports empty, the damage is on the sticky flag and NOT attributable to the
+        // restart's own tail-drain (which sees an empty ring and succeeds).
+        assert!(prod.push([0.5, 0.0]));
+        while prod.free() != prod.capacity() {
+            std::thread::yield_now();
+        }
+        // Restart straight into take B: its create, tail-drain, and finalize all succeed.
+        let path_b = temp_wav("sticky_b");
+        let (back, back_rx) = std::sync::mpsc::channel();
+        tx.send(WriterCmd::Start(path_b.to_str().unwrap().to_string(), back))
+            .unwrap();
+        assert!(back_rx.recv().unwrap(), "take B's file creation is clean");
+        assert!(prod.push([0.25, 0.0]));
+        let (sack, sack_rx) = std::sync::mpsc::channel();
+        tx.send(WriterCmd::Stop(sack)).unwrap();
+        assert!(
+            !sack_rx.recv().unwrap(),
+            "the Stop after a restart must still report take A's mid-take damage"
+        );
+        tx.send(WriterCmd::Shutdown).unwrap();
+        join.join().unwrap();
+        let _ = std::fs::remove_file(&path_a);
+        let _ = std::fs::remove_file(&path_b);
+    }
+
     #[test]
     fn start_while_recording_finalizes_the_previous_take_and_starts_clean() {
         let (mut prod, cons) = spsc::<[Smp; CHANNELS]>(1024);
@@ -3955,7 +4006,10 @@ mod cell_exclusion_tests {
             !cell.try_feed(zombie, &vec![0.5f32; 64]),
             "a zombie from a failed teardown must not feed audio under the new format"
         );
-        assert!(mic.pop().is_none(), "no zombie sample may reach the mic ring");
+        assert!(
+            mic.pop().is_none(),
+            "no zombie sample may reach the mic ring"
+        );
 
         // The replacement stream feeds as the minted generation and is admitted.
         assert!(cell.try_feed(new, &vec![0.5f32; 64]));
@@ -4017,8 +4071,7 @@ mod cell_exclusion_tests {
         assert!(cell.transport().consumed_frames() > 0);
         // Delivery can never outrun production; the resampler holds a FIFO between them.
         assert!(
-            cell.transport().consumed_frames()
-                <= cell.transport().rendered_frames_for_test(),
+            cell.transport().consumed_frames() <= cell.transport().rendered_frames_for_test(),
             "consumed must never outrun rendered"
         );
     }
