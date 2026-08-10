@@ -1,7 +1,43 @@
+import 'dart:ui' as ui;
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vocara/domain/models/audio_track.dart';
+import 'package:vocara/ui/core/widgets/waveform_painter.dart';
 import 'package:vocara/ui/song_practice_detail/widgets/track_row.dart';
+
+/// Rasterizes [painter] at [size] and returns the x-center of the topmost
+/// painted row — with a single full-amplitude spike among zero peaks, that is
+/// the spike's drawn timeline position (centering cancels the antialiasing
+/// skirt on the flanking slopes).
+Future<double> _topmostPaintedX(
+  WidgetTester tester,
+  CustomPainter painter,
+  Size size,
+) async {
+  final rec = ui.PictureRecorder();
+  painter.paint(Canvas(rec), size);
+  final picture = rec.endRecording();
+  double? found;
+  await tester.runAsync(() async {
+    final img = await picture.toImage(size.width.ceil(), size.height.ceil());
+    final data = (await img.toByteData())!;
+    for (var y = 0; y < img.height && found == null; y++) {
+      int? lo, hi;
+      for (var x = 0; x < img.width; x++) {
+        if (data.getUint8((y * img.width + x) * 4 + 3) > 128) {
+          lo ??= x;
+          hi = x;
+        }
+      }
+      if (lo != null) found = (lo + hi!) / 2;
+    }
+    img.dispose();
+  });
+  expect(found, isNotNull, reason: 'nothing painted');
+  return found!;
+}
 
 void main() {
   testWidgets('M/S toggles fire on a reorderable lane (wrapped in Draggable)', (
@@ -273,5 +309,140 @@ void main() {
       expect(starts['a'], 4000);
       expect(commits, 0);
     });
+  });
+
+  // --- Viewport waveform alignment ------------------------------------------
+  //
+  // The lane culls a clip's peaks to the viewport by slicing at WHOLE peak
+  // indices, but the drawn box starts at the un-quantized viewport edge. The
+  // painter must carry the discarded fraction, or the whole waveform draws up
+  // to one peak interval late against the ruler/grid/playhead — and while
+  // panning it freezes on screen, then snaps a bucket at a time.
+
+  group('viewport waveform alignment', () {
+    Widget lane({
+      required AudioTrack track,
+      required int viewSpanMs,
+      required int viewStartMs,
+      ValueListenable<List<double>>? recordingPeaks,
+    }) {
+      final pos = ValueNotifier<Duration>(Duration.zero);
+      addTearDown(pos.dispose);
+      return MaterialApp(
+        home: Scaffold(
+          body: TrackRow(
+            track: track,
+            label: 'Take 1',
+            timelineDurationMs: viewSpanMs,
+            viewStartMs: viewStartMs,
+            position: pos,
+            selected: false,
+            reorderable: false,
+            recordingPeaks: recordingPeaks,
+            onSelect: () {},
+            onClipMoveLive: (_, _) {},
+            onMoveCommit: () {},
+            onSelectClip: (_) {},
+            onClipContextMenu: (_, _) {},
+            onCrossLaneMove: (_) {},
+            onContextMenu: (_) {},
+            onAddNote: () {},
+            onEditNote: (_) {},
+            onAddTechnique: () {},
+            onToggleMute: () {},
+            onToggleSolo: () {},
+            onVolume: (_) {},
+            onVolumeCommit: () {},
+            onDelete: () {},
+          ),
+        ),
+      );
+    }
+
+    testWidgets(
+      'a clip sliced at the viewport edge draws its transient at the true '
+      'timeline position',
+      (tester) async {
+        // Clip 0..10 s with 10 peaks (1 s per peak); the spike is peak 5,
+        // anchored at 5000 ms. Viewport 4500..9500: the slice starts at peak
+        // 4 (4000 ms), HALF a peak before the box's left edge.
+        final track = AudioTrack(
+          id: 't1',
+          kind: AudioTrackKind.vocal,
+          displayName: 'Take 1',
+          createdAt: DateTime(2026),
+          audioFilePath: '/x.wav',
+          durationMs: 10000,
+          waveformPeaks: const [0, 0, 0, 0, 0, 1, 0, 0, 0, 0],
+        );
+        await tester.pumpWidget(
+          lane(track: track, viewSpanMs: 5000, viewStartMs: 4500),
+        );
+
+        final painter = tester
+            .widgetList<CustomPaint>(find.byType(CustomPaint))
+            .map((c) => c.painter)
+            .whereType<WaveformPainter>()
+            .single;
+        // Paint standalone at a round width: the spike's true position is
+        // (5000 − 4500) / 5000 of the box. Anchoring the slice at the box
+        // edge instead would draw it at 1/5 of the width (100), one half-peak
+        // (500 ms) late against the ruler.
+        const size = Size(500, 40);
+        final apexX = await _topmostPaintedX(tester, painter, size);
+        expect(
+          apexX,
+          closeTo(50, 2),
+          reason: 'the transient must line up with its ruler time',
+        );
+      },
+    );
+
+    testWidgets(
+      'the live forming clip keeps its absolute sample-to-column mapping when '
+      'the viewport edge lands mid-sample',
+      (tester) async {
+        // 100 record peaks of 50 ms (take 0..5000 ms), spike at peak 30
+        // (1500 ms). Viewport 1025..2025: the slice starts at peak 20
+        // (1000 ms), half a record-peak before the box edge.
+        final peaks = ValueNotifier<List<double>>([
+          for (var i = 0; i < 100; i++) i == 30 ? 1.0 : 0.0,
+        ]);
+        addTearDown(peaks.dispose);
+        final track = AudioTrack(
+          id: 't1',
+          kind: AudioTrackKind.vocal,
+          displayName: 'Take 1',
+          createdAt: DateTime(2026),
+        );
+        await tester.pumpWidget(
+          lane(
+            track: track,
+            viewSpanMs: 1000,
+            viewStartMs: 1025,
+            recordingPeaks: peaks,
+          ),
+        );
+
+        final painter = tester
+            .widgetList<CustomPaint>(find.byType(CustomPaint))
+            .map((c) => c.painter)
+            .whereType<LiveWaveformPainter>()
+            .single;
+        // The spike bucket covers 1500..1550 ms; its drawn center belongs
+        // (1525 − 1025) / 50 record-peaks right of the box edge, at the
+        // painter's own absolute pixels-per-sample. Re-basing the slice to
+        // the box edge would draw it half a peak (~15 px here) late, and it
+        // would freeze on screen while panning.
+        final expected = (1525 - 1025) / 50 * painter.pixelsPerSample;
+        const size = Size(500, 40);
+        final centerX = await _topmostPaintedX(tester, painter, size);
+        expect(
+          centerX,
+          closeTo(expected, 3),
+          reason: 'the live waveform must stay glued to the timeline',
+        );
+      },
+    );
   });
 }

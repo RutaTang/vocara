@@ -470,6 +470,50 @@ void main() {
     expect(out.isNaN, isTrue);
   });
 
+  test('maxAnalysisSampleRate pins the YIN envelope: voiced at the ceiling, '
+      'structurally unvoiced past the dead bound', () {
+    // The YIN slice spans fftSize / sampleRate seconds while the fmin search
+    // lag is a fixed 1/63 s, so past ~129 kHz yinPitch bails out unvoiced for
+    // EVERY frame regardless of content — the reason the admission gate
+    // refuses rates above [maxAnalysisSampleRate]. Pin both sides so the
+    // ceiling can't drift away from the math it is derived from.
+    Float32List tone(int sr) {
+      final n = sr; // 1 s
+      final out = Float32List(n);
+      for (var i = 0; i < n; i++) {
+        out[i] = 0.6 * sin(2 * pi * 220 * i / sr);
+      }
+      return out;
+    }
+
+    int voiced(VoiceMetrics m) {
+      var c = 0;
+      for (final f in m.f0) {
+        if (!f.isNaN) c++;
+      }
+      return c;
+    }
+
+    final atCeiling = computeVoiceMetrics(
+      tone(maxAnalysisSampleRate),
+      maxAnalysisSampleRate,
+    );
+    expect(
+      voiced(atCeiling),
+      greaterThan(0),
+      reason: 'the admitted envelope must actually be analyzable',
+    );
+
+    final dead = computeVoiceMetrics(tone(192000), 192000);
+    expect(
+      voiced(dead),
+      0,
+      reason:
+          '192 kHz is past the structural dead bound — this is what the '
+          'gate exists to refuse',
+    );
+  });
+
   test('CPP is higher for a periodic voice than for noise', () {
     final voice = computeVoiceMetrics(_vowel(700, 1200, 2600), _sr);
     final noise = computeVoiceMetrics(_noise(), _sr);

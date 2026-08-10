@@ -435,7 +435,12 @@ class RecordingController extends ChangeNotifier {
     if (stopped == null) return;
     _stopping = true;
     try {
-      await _finishStop(stopped);
+      // _mic.stop() above just unregistered the armed-window quit finalizer,
+      // but the take's row commits only at the end of the finalize tail below
+      // — hold the quit gate over it, or a quit in this window exits mid-save
+      // and boot recovery re-adopts the WAV at timeline zero, losing the
+      // placement, punch-in target and latency alignment.
+      await _mic.guardStopFinalize(() => _finishStop(stopped));
     } finally {
       _stopping = false;
     }

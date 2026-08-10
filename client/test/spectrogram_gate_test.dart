@@ -203,6 +203,31 @@ void main() {
     },
   );
 
+  test(
+    'a rate above the voice-analysis envelope is refused (192 kHz)',
+    () async {
+      // A YIN analysis frame spans fftSize / sampleRate seconds, but the fmin
+      // search lag is a fixed 1/63 s — above ~129 kHz the lag no longer fits
+      // the frame and EVERY frame bails out unvoiced regardless of content
+      // (see maxAnalysisSampleRate). Admitting such a file used to render a
+      // healthy spectrogram beside silently empty voice analyses; the gate
+      // must refuse it like any other un-analyzable header. Body present so
+      // the refusal is for the rate, not for missing bytes.
+      const declared = 192000 * 2 * 30; // 30 s mono PCM16 @ 192 kHz
+      final withBody = BytesBuilder()
+        ..add(
+          _wavHeader(
+            sampleRate: 192000,
+            blockAlign: 2,
+            declaredDataBytes: declared,
+          ),
+        )
+        ..add(Uint8List(declared));
+      final f = await write(withBody.toBytes());
+      expect(await SpectrogramService.admitForAnalysis(f), isNull);
+    },
+  );
+
   test('the header-independent byte ceiling holds even when the per-rate '
       'duration math would admit', () async {
     // 8 channels of 32-bit at 44.1 kHz: blockAlign 32 is CONSISTENT, the

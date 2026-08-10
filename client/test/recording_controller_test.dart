@@ -161,6 +161,28 @@ class _FakeMic extends Fake implements MicRecordingController {
     return (path: lastPath!, clean: true, droppedFrames: 0);
   }
 
+  /// Faithful to the real guard where the controller depends on it: the
+  /// finalize tail is registered with the quit finalizer while in flight, so
+  /// the tests can drive a quit against the stop-finalize window.
+  final inFlightTails = <Future<void>>{};
+
+  @override
+  Future<void> guardStopFinalize(Future<void> Function() work) async {
+    RecordingFinalizer.instance.register(_holdQuit);
+    final tail = work();
+    inFlightTails.add(tail);
+    try {
+      await tail;
+    } finally {
+      inFlightTails.remove(tail);
+      if (inFlightTails.isEmpty) {
+        RecordingFinalizer.instance.unregister(_holdQuit);
+      }
+    }
+  }
+
+  Future<void> _holdQuit() => Future.wait(inFlightTails.toList());
+
   @override
   void invalidatePendingStart() {}
 
@@ -177,6 +199,8 @@ void main() {
   late _FakeMic mic;
   late RecordingController controller;
   late SongPractice practice;
+  // Swappable save so a test can park the finalize tail mid-save.
+  late Future<bool> Function() saveImpl;
 
   setUp(() {
     final now = DateTime(2026, 6, 20);
@@ -197,6 +221,7 @@ void main() {
         ),
       ],
     );
+    saveImpl = () async => true;
     engine = _LogEngine();
     playback = _FakePlayback(engine);
     mixer = _FakeMixer();
@@ -222,7 +247,7 @@ void main() {
           't1',
       createEmptyVocalTake: () async {},
       selectRecordedClip: (t, c) {},
-      save: () async => true,
+      save: () => saveImpl(),
       toast: (_) {},
       friendlyError: (e) => '$e',
       mic: mic,
@@ -292,6 +317,51 @@ void main() {
     await b;
     await controller.stopRecording();
   });
+
+  test(
+    'quit during the stop-finalize window waits for the take save',
+    () async {
+      // The armed-window finalizer is unregistered synchronously inside
+      // _mic.stop(), but the take's row only commits at the end of the finalize
+      // tail (analyze + save). A quit landing in that window used to find
+      // nothing registered, exit mid-save, and strand the take for boot
+      // recovery at timeline zero.
+      final saveGate = Completer<bool>();
+      var saves = 0;
+      saveImpl = () {
+        saves++;
+        return saveGate.future;
+      };
+
+      final a = controller.startRecording();
+      await pumpUntil(() => mixer.gates.length == 1);
+      mixer.gates[0].complete();
+      await a;
+      expect(controller.isRecording, isTrue);
+
+      // Stop: the finalize tail parks on the in-flight save.
+      final stopping = controller.stopRecording();
+      await pumpUntil(() => saves == 1);
+
+      // Quit now. finalizeAll must hold the exit until the save committed.
+      var quitDone = false;
+      final quit = RecordingFinalizer.instance.finalizeAll().whenComplete(
+        () => quitDone = true,
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(
+        quitDone,
+        isFalse,
+        reason: 'the quit gate must cover the stop-finalize window',
+      );
+
+      saveGate.complete(true);
+      await quit;
+      await stopping;
+      expect(saves, 1, reason: 'the quit awaited the SAME save, no re-run');
+      expect(RecordingFinalizer.instance.hasActive, isFalse);
+    },
+  );
 }
 
 /// Spin the event loop until [ready] (bounded).

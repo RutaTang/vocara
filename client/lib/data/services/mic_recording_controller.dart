@@ -135,7 +135,9 @@ class RecordingPathStrategy {
 ///    the song VM can instead pass null and keep its own device watch — the
 ///    poll claims only the masked bits, so two watchers can coexist;
 ///  * quit finalization — [onQuitFinalize] is registered for exactly the
-///    armed window, replacing each VM's constructor-lifetime registration.
+///    armed window, replacing each VM's constructor-lifetime registration;
+///    [guardStopFinalize] extends the same gate over the owner's post-stop
+///    finalize tail, which runs after [stop] unregistered the armed window.
 class MicRecordingController {
   MicRecordingController({
     required GraphAudioPlaybackService Function() acquireEngine,
@@ -530,6 +532,42 @@ class MicRecordingController {
     _destination = null;
     return (path: path, clean: clean, droppedFrames: dropped);
   }
+
+  /// Post-stop finalize tails currently held against quit — see
+  /// [guardStopFinalize]. A set, because a parked tail can still be draining
+  /// when the next take's stop starts its own (the same overlap the take
+  /// generation guards exist for), and the earlier tail's completion must not
+  /// drop the quit hold protecting the later one.
+  final _stopFinalizes = <Future<void>>{};
+
+  /// Runs [work] — the owner's post-stop finalize tail (waveform analysis,
+  /// trimming, the save that commits the take row) — while holding the quit
+  /// gate. [stop] unregisters the armed-window finalizer synchronously,
+  /// before any of that work has run; without this bracket a quit in the
+  /// stop-to-save window exits mid-save and the take is left for boot
+  /// recovery as a bare WAV — its timeline placement, punch-in target and
+  /// latency alignment live only in the uncommitted save. Call synchronously
+  /// after [stop] so no event-loop turn separates the armed window's
+  /// registration from this one. A quit while the tail is in flight awaits
+  /// the SAME run; nothing is re-executed.
+  Future<void> guardStopFinalize(Future<void> Function() work) async {
+    _finalizer.register(_holdQuitForFinalize);
+    Future<void>? tail;
+    try {
+      tail = work();
+      _stopFinalizes.add(tail);
+      await tail;
+    } finally {
+      if (tail != null) _stopFinalizes.remove(tail);
+      if (_stopFinalizes.isEmpty) _finalizer.unregister(_holdQuitForFinalize);
+    }
+  }
+
+  /// Registered with [RecordingFinalizer] while a [guardStopFinalize] tail is
+  /// in flight. (A method tear-off is a stable reference, so register and
+  /// unregister match.) Any error is already observed by the guarded await;
+  /// here it lands in finalizeAll's best-effort catch.
+  Future<void> _holdQuitForFinalize() => Future.wait(_stopFinalizes.toList());
 
   /// Stops AND discards an in-flight take (its file is deleted via the path
   /// strategy) — for owners tearing down the session the take belonged to

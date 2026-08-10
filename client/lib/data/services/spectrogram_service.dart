@@ -118,11 +118,17 @@ class SpectrogramService {
             3 => bits == 32 || bits == 64,
             _ => false,
           };
+          // The rate ceiling is the ANALYSIS envelope, not a header-sanity
+          // bound: above [maxAnalysisSampleRate] the YIN frame can no longer
+          // hold the fmin search lag, so every voice metric comes back empty
+          // while the spectrogram still renders (see the constant's doc).
+          // Admitting was the worse failure — a healthy-looking take whose
+          // analyses are silently blank.
           if (channels < 1 ||
               channels > 8 ||
               !legalFormat ||
               sampleRate < 8000 ||
-              sampleRate > 384000 ||
+              sampleRate > maxAnalysisSampleRate ||
               blockAlign != channels * ((bits + 7) ~/ 8)) {
             return null;
           }
