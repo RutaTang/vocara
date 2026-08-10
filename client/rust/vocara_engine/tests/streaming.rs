@@ -201,6 +201,63 @@ fn an_in_band_fence_split_across_blocks_still_rearms_the_source() {
     assert!(healed.iter().all(|s| s.abs() == 0.25));
 }
 
+/// The feeder pushes a discarding replan's fence BEFORE it bumps flush_seq,
+/// and a starved node polls the ring every frame while the flush counter is
+/// read once per block — so the node can fully adopt the new generation IN
+/// BAND inside the block the fence landed in. The next block's flush check
+/// must recognize that adopted state instead of disarming it: the fence is
+/// consumed, so a drain hunting it discards every frame the feeder pushes,
+/// forever (cur_flush never advances), with zero counted xruns.
+#[test]
+fn a_flush_whose_fence_was_already_adopted_in_band_keeps_the_source_armed() {
+    let (_h, rt, mut prod, ctrl) = hand_fed_source();
+    // Arm cleanly at generation 1 with one block of audio.
+    let [g1, b1] = fence_frames(1, 0);
+    assert!(prod.push(g1));
+    assert!(prod.push(b1));
+    ctrl.gen.store(1, std::sync::atomic::Ordering::Release);
+    ctrl.flush_seq
+        .fetch_add(1, std::sync::atomic::Ordering::Release);
+    push_audio(&mut prod, BLOCK, 0.5);
+    assert_eq!(render_block(&rt)[0], 0.5, "generation 1 plays");
+
+    // A discarding replan lands mid-block, feeder-ordered: fence + audio
+    // pushed and gen published FIRST...
+    let [g2, b2] = fence_frames(2, BLOCK as i64);
+    assert!(prod.push(g2));
+    assert!(prod.push(b2));
+    ctrl.gen.store(2, std::sync::atomic::Ordering::Release);
+    push_audio(&mut prod, BLOCK, 0.25);
+    // ...and the node adopts generation 2 in band within this block (its
+    // top-of-block flush read predates the bump below). The fence itself
+    // costs the first frame's pop, so assert on the block's tail.
+    let adopted = render_block(&rt);
+    assert_eq!(
+        adopted[(BLOCK - 1) * CHANNELS],
+        0.25,
+        "generation 2 was adopted in band"
+    );
+
+    // ...THEN the flush counter bump becomes visible.
+    ctrl.flush_seq
+        .fetch_add(1, std::sync::atomic::Ordering::Release);
+    push_audio(&mut prod, BLOCK, 0.75);
+    let kept = render_block(&rt);
+    assert_eq!(
+        kept[0], 0.75,
+        "an already-adopted generation must survive the flush check"
+    );
+    assert!(kept.iter().all(|s| s.abs() == 0.75));
+
+    // And the acknowledgment must stick: later blocks keep playing too.
+    push_audio(&mut prod, BLOCK, 0.125);
+    let steady = render_block(&rt);
+    assert_eq!(
+        steady[0], 0.125,
+        "cur_flush must advance so later blocks stop re-draining the ring"
+    );
+}
+
 #[test]
 fn streamed_render_equals_the_arc_render_bit_for_bit() {
     let frames = 4096;

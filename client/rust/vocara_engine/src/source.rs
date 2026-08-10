@@ -197,36 +197,45 @@ impl Node for StreamingSource {
         let flush = self.ctrl.flush_seq.load(Ordering::Acquire);
         if flush != self.cur_flush {
             let want = self.ctrl.gen.load(Ordering::Acquire);
-            self.armed = false;
-            // KEEP a fence already parked at `want`: its generation frame is
-            // consumed, so dropping it here strands the base frame as one more
-            // discarded frame and leaves the drain below hunting a fence that
-            // will never be pushed again — every later block would drain the
-            // ring to silence until the next replan.
-            if self.pending_fence != Some(want) {
-                self.pending_fence = None;
-            }
-            loop {
-                if self.cur_gen == want && self.armed {
-                    break;
+            // The feeder pushes the flush's fence BEFORE bumping flush_seq,
+            // and a starved node polls the ring every frame while flush_seq
+            // is read once per block — so `want` may be fully adopted IN BAND
+            // already. That adoption consumed the fence: disarming here would
+            // hunt a fence that never comes again, discarding every frame the
+            // feeder pushes from now on. The adopted state IS the post-drain
+            // state; just acknowledge the flush.
+            if !(self.cur_gen == want && self.armed) {
+                self.armed = false;
+                // KEEP a fence already parked at `want`: its generation frame
+                // is consumed, so dropping it here strands the base frame as
+                // one more discarded frame and leaves the drain below hunting
+                // a fence that will never be pushed again — every later block
+                // would drain the ring to silence until the next replan.
+                if self.pending_fence != Some(want) {
+                    self.pending_fence = None;
                 }
-                if let Some(g) = self.pending_fence {
-                    if !self.adopt_fence(g) {
-                        break; // base not visible yet: retry next block
+                loop {
+                    if self.cur_gen == want && self.armed {
+                        break;
                     }
-                    continue;
-                }
-                match self.rx.pop() {
-                    Some(f) => {
-                        if let Some(g) = Self::fence_gen(f) {
-                            if g == want {
-                                self.adopt_fence(g);
-                            }
-                            // A stale fence's base frame is just another
-                            // discarded frame on the next iteration.
+                    if let Some(g) = self.pending_fence {
+                        if !self.adopt_fence(g) {
+                            break; // base not visible yet: retry next block
                         }
+                        continue;
                     }
-                    None => break, // fence not pushed yet: silence this block
+                    match self.rx.pop() {
+                        Some(f) => {
+                            if let Some(g) = Self::fence_gen(f) {
+                                if g == want {
+                                    self.adopt_fence(g);
+                                }
+                                // A stale fence's base frame is just another
+                                // discarded frame on the next iteration.
+                            }
+                        }
+                        None => break, // fence not pushed yet: silence this block
+                    }
                 }
             }
             if self.cur_gen == want && self.armed {
