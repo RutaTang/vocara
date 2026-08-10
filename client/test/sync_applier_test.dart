@@ -141,26 +141,31 @@ void main() {
     },
   );
 
-  RemoteRecord clip(String id, String trackId, String assetId, Hlc h) =>
-      RemoteRecord(
-        table: 'clips',
-        columns: {
-          'id': _id(id),
-          'track_id': _id(trackId),
-          'asset_id': _id(assetId),
-          'start_ms': 0,
-          'duration_ms': 0,
-          'order_index': 0,
-          'created_at': h.wallMs,
-          'updated_at': h.wallMs,
-          'deleted_at': null,
-          'hlc_wall': h.wallMs,
-          'hlc_ctr': h.counter,
-          'hlc_node': h.node,
-          'hlc_packed': h.packed,
-          'schema_v': 1,
-        },
-      );
+  RemoteRecord clip(
+    String id,
+    String trackId,
+    String assetId,
+    Hlc h, {
+    int durationMs = 0,
+  }) => RemoteRecord(
+    table: 'clips',
+    columns: {
+      'id': _id(id),
+      'track_id': _id(trackId),
+      'asset_id': _id(assetId),
+      'start_ms': 0,
+      'duration_ms': durationMs,
+      'order_index': 0,
+      'created_at': h.wallMs,
+      'updated_at': h.wallMs,
+      'deleted_at': null,
+      'hlc_wall': h.wallMs,
+      'hlc_ctr': h.counter,
+      'hlc_node': h.node,
+      'hlc_packed': h.packed,
+      'schema_v': 1,
+    },
+  );
 
   Future<Map<String, Object?>?> row(String id) async {
     final r = await db
@@ -822,6 +827,73 @@ void main() {
       final replayable = SyncRow.decode(parkedChild.payload);
       expect(replayable.table, 'tracks');
       expect(replayable.fields, equals(child.columns));
+    });
+
+    test('a CHECK-violating payload parks under the unreplayable invalid-value '
+        'class, not as a replayable apply-failed', () async {
+      final h = hlc(1000 + 60 * 1000);
+      final res = await applier.apply([
+        RemoteRecord(
+          table: 'assets',
+          columns: {
+            'id': _id('BAD'),
+            'content_hash': 'HASH_BAD',
+            'byte_size': -1, // CHECK (byte_size >= 0) fires in the savepoint
+            'ext': 'wav',
+            'kind': 'audio',
+            'created_at': h.wallMs,
+            'updated_at': h.wallMs,
+            'deleted_at': null,
+            'hlc_wall': h.wallMs,
+            'hlc_ctr': h.counter,
+            'hlc_node': h.node,
+            'hlc_packed': h.packed,
+            'schema_v': 1,
+          },
+        ),
+      ]);
+      expect(res.failed, 1);
+      final parked = await store.list();
+      expect(parked, hasLength(1));
+      expect(
+        parked.single.reason,
+        startsWith('invalid-value:'),
+        reason:
+            'a constraint verdict is a pure function of the payload — its '
+            'replay re-parks forever, so it must not sit in a replayable '
+            'class where it can displace the FK sweep\'s only copy of a row',
+      );
+    });
+
+    test('a CHECK-violating newer state cannot void the FK sweep\'s park — the '
+        'row\'s only surviving copy', () async {
+      // The audited black hole: an honest clip C@H1 (asset not yet
+      // delivered) plus a CHECK-violating update C@H2 in one page. H2 fails
+      // its savepoint and parks; the end-of-batch FK sweep then parks and
+      // deletes C@H1. The sweep's park must WIN retention — it holds the
+      // only copy of applied data, while H2 can never re-apply anywhere.
+      final h1 = hlc(910);
+      final res = await applier.apply([
+        practice('P', 'kept', hlc(900)),
+        track('T', 'P', hlc(905)),
+        clip('C', 'T', 'NOASSET', h1),
+        clip('C', 'T', 'NOASSET', hlc(920), durationMs: -1),
+      ]);
+      expect(res.failed, greaterThanOrEqualTo(1));
+      final parked = await store.list();
+      final c = parked.singleWhere((p) => p.id == _id('C'));
+      expect(
+        c.reason,
+        startsWith('fk-orphan'),
+        reason:
+            'the fk-orphan park is the only copy of the applied row; a '
+            'permanently-unreplayable newer state must not hold the slot',
+      );
+      expect(
+        c.remoteHlcPacked,
+        h1.packed,
+        reason: 'the preserved state must be the applied H1 content',
+      );
     });
 
     test(

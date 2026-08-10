@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:crypto/crypto.dart';
 import 'package:drift/drift.dart';
+import 'package:sqlite3/common.dart' show SqliteException;
 
 import '../db/app_database.dart';
 import 'hlc.dart';
@@ -476,7 +477,7 @@ class SyncApplier {
             // writes are gone while the quarantine row (written in the OUTER
             // transaction) survives with the rest of the batch.
             result.failed++;
-            await _quarantine(rec, 'apply-failed: $e');
+            await _quarantine(rec, _savepointFailureReason(e));
           }
         }
         for (final reject in rejects) {
@@ -607,6 +608,31 @@ class SyncApplier {
   /// contract: [QuarantineStore.put] classifies parks as replayable or
   /// permanently dead by them, so a renamed gate reason must be reflected
   /// there.
+  /// Classifies a savepoint failure into the quarantine's replay classes.
+  /// The default, 'apply-failed', is REPLAYABLE — IO pressure or a racing
+  /// writer may clear on the next cycle, and the newer-schema park relies on
+  /// an app upgrade un-parking it. A CHECK or NOT NULL violation is neither:
+  /// the verdict is a pure function of the payload against a schema
+  /// constraint that never changes at runtime, so its replay re-parks
+  /// forever — and a forever-failing entry sitting in a replayable class
+  /// could displace the FK sweep's park, the only copy of an applied row
+  /// (see [QuarantineStore.put]'s retention rule). Park those under the
+  /// unreplayable 'invalid-value:' class instead.
+  static String _savepointFailureReason(Object e) {
+    // SQLite extended result codes: (275) SQLITE_CONSTRAINT_CHECK,
+    // (1299) SQLITE_CONSTRAINT_NOTNULL. Other constraint codes stay
+    // replayable on purpose: UNIQUE/FK verdicts depend on DB state a later
+    // batch can change.
+    const constraintCheck = 275;
+    const constraintNotNull = 1299;
+    if (e is SqliteException &&
+        (e.extendedResultCode == constraintCheck ||
+            e.extendedResultCode == constraintNotNull)) {
+      return 'invalid-value: $e';
+    }
+    return 'apply-failed: $e';
+  }
+
   Future<void> _quarantine(SyncRow rec, String reason) async {
     final store = quarantine;
     if (store == null) return;

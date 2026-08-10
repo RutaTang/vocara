@@ -101,7 +101,11 @@ class QuarantineStore {
   /// LIVE schema, which an upgrade changes), 'hlc-drift' (a recovered clock
   /// un-parks it), 'fk-orphan' (a delivered parent un-parks it), and
   /// 'apply-failed' (a savepoint failure may be transient, and the
-  /// newer-schema gate parks under this prefix — an upgrade un-parks it).
+  /// newer-schema gate parks under this prefix — an upgrade un-parks it;
+  /// the applier keeps the class honest by parking DETERMINISTIC savepoint
+  /// failures — CHECK / NOT NULL violations, pure functions of the
+  /// payload — under 'invalid-value:' instead, so a forever-failing entry
+  /// can never sit in a replayable class and displace an fk-orphan park).
   /// The prefixes are [SyncApplier]'s reason vocabulary; the applier's
   /// _quarantine doc points back here.
   static const List<String> _unreplayablePrefixes = [
