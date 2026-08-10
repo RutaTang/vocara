@@ -108,6 +108,129 @@ void main() {
     expect(rows.single.quarantinedAt, 200);
   });
 
+  group('replay-class retention (a permanently-unreplayable park must never '
+      'displace or block a replayable one)', () {
+    test('a NEWER unreplayable park does not displace a stored fk-orphan '
+        'park — the parked snapshot is the only copy of a swept row', () async {
+      await put(
+        'practices',
+        'P1',
+        hlcPacked: '0000000001000-000000-N',
+        reason: 'fk-orphan: parent assets/A missing',
+        payload: '{"honest":true}',
+        at: 100,
+      );
+      // A non-conforming writer's newer state parked at the value gate. Its
+      // gate re-rejects the identical payload every replay cycle, so it can
+      // never supersede anything — letting it hold the slot destroys the
+      // only surviving copy of the swept row.
+      await put(
+        'practices',
+        'P1',
+        hlcPacked: '0000000002000-000000-N',
+        reason: 'invalid-value: lyrics_json is JSON but not the shape',
+        payload: '{"garbage":true}',
+        at: 200,
+      );
+
+      final rows = await store.list();
+      expect(rows, hasLength(1));
+      expect(rows.single.remoteHlcPacked, '0000000001000-000000-N');
+      expect(rows.single.reason, startsWith('fk-orphan'));
+      expect(rows.single.payload, '{"honest":true}');
+    });
+
+    test(
+      'an fk-orphan park replaces stored unreplayable garbage even when '
+      'strictly OLDER — the sweep hard-deletes the row right after',
+      () async {
+        // Same-page ordering: the door parks the newer malformed state first,
+        // then the end-of-batch FK sweep parks the current db row. A filtered
+        // sweep park followed by the sweep DELETE is permanent row loss.
+        await put(
+          'practices',
+          'P1',
+          hlcPacked: '0000000002000-000000-N',
+          reason: 'invalid-value: lyrics_json is JSON but not the shape',
+          payload: '{"garbage":true}',
+          at: 100,
+        );
+        await put(
+          'practices',
+          'P1',
+          hlcPacked: '0000000001000-000000-N',
+          reason: 'fk-orphan: parent assets/A missing',
+          payload: '{"honest":true}',
+          at: 200,
+        );
+
+        final rows = await store.list();
+        expect(rows, hasLength(1));
+        expect(rows.single.remoteHlcPacked, '0000000001000-000000-N');
+        expect(rows.single.reason, startsWith('fk-orphan'));
+        expect(rows.single.payload, '{"honest":true}');
+      },
+    );
+
+    test('between two unreplayable parks the newest still wins (nothing '
+        'replayable is at stake, keep the freshest evidence)', () async {
+      await put(
+        'practices',
+        'P1',
+        hlcPacked: '0000000001000-000000-N',
+        reason: 'invalid-id: separator in id',
+        at: 100,
+      );
+      await put(
+        'practices',
+        'P1',
+        hlcPacked: '0000000002000-000000-N',
+        reason: 'invalid-value: mistyped column',
+        at: 200,
+      );
+      expect(
+        (await store.list()).single.remoteHlcPacked,
+        '0000000002000-000000-N',
+      );
+
+      // And the older direction stays a no-op, like within any class.
+      await put(
+        'practices',
+        'P1',
+        hlcPacked: '0000000000500-000000-N',
+        reason: 'invalid-value: older garbage',
+        at: 300,
+      );
+      expect(
+        (await store.list()).single.remoteHlcPacked,
+        '0000000002000-000000-N',
+      );
+    });
+
+    test('an EQUAL stamp replaces ACROSS classes too: the same record state '
+        'whose replay verdict changed relabels the entry', () async {
+      // E.g. a record first parked for HLC drift whose replay (clock
+      // recovered) now fails the value gate: same stamp, new verdict.
+      await put(
+        'practices',
+        'P1',
+        hlcPacked: '0000000001000-000000-N',
+        reason: 'hlc-drift: 6 minutes ahead',
+        at: 100,
+      );
+      await put(
+        'practices',
+        'P1',
+        hlcPacked: '0000000001000-000000-N',
+        reason: 'invalid-value: mistyped column',
+        at: 200,
+      );
+      final rows = await store.list();
+      expect(rows.single.reason, startsWith('invalid-value'));
+      expect(rows.single.quarantinedAt, 200);
+    });
+  });
+
   test('the same id under two different tables parks two rows (composite '
       'key)', () async {
     await put('practices', 'X');
