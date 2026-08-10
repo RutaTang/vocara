@@ -818,8 +818,8 @@ class MixerController extends ChangeNotifier {
     await _save();
   }
 
-  /// Duplicates a bus (its chain, color, level and routing) and inserts the copy
-  /// right after it, then selects it. The copy is never born soloed.
+  /// Duplicates a bus (its chain, color, level, routing and solo/mute state)
+  /// and inserts the copy right after it, then selects it.
   Future<void> duplicateBus(String busId) async {
     final practice = _practiceOf();
     final src = practice?.busById(busId);
