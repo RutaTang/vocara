@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:crypto/crypto.dart';
 import 'package:drift/drift.dart';
+import 'package:sqlite3/common.dart' show SqliteException;
 
 import '../db/app_database.dart';
 import 'hlc.dart';
@@ -64,7 +65,10 @@ class ApplyResult {
 /// [HlcClock.assertPlausible] (check-only, same drift rule) runs with the
 /// other door gates, and the state-changing [HlcClock.mergeVerified] calls
 /// run only AFTER the batch's outer transaction has committed, for the
-/// records whose savepoint settled as applied or skipped — a record that
+/// records whose savepoint settled as applied or skipped AND for the
+/// plausible stamps of records the door gates PARKED (see
+/// [_noteParkedStamp]: a parked snapshot stays eligible to win LWW at
+/// replay, so later local writes must stamp above it) — a record that
 /// fails inside its savepoint, and equally a whole batch whose outer commit
 /// fails (an FK-sweep abort, a throwing beforeCommit hook), must leave NO
 /// side effect behind, and an in-memory clock advanced for writes the
@@ -186,12 +190,13 @@ class SyncApplier {
     final slotResolutions = <(String, String), _SlotResolution>{};
     // Per-batch live-schema cache for the column gate (see [_liveColumns]).
     final liveColumns = <String, Set<String>>{};
-    // Stamps of records whose savepoint settled as applied or skipped. Their
-    // state-changing clock.mergeVerified runs only once the outer transaction
-    // has committed (bottom of this method) — an advance for records the
-    // outer commit then rolled back would be a side effect surviving the
-    // rollback.
-    final settledHlcs = <Hlc>[];
+    // Stamps this batch ACCEPTED: records whose savepoint settled as applied
+    // or skipped, plus door-parked records whose plausible stamp was noted by
+    // [_noteParkedStamp]. Their state-changing clock.mergeVerified runs only
+    // once the outer transaction has committed (bottom of this method) — an
+    // advance for records the outer commit then rolled back would be a side
+    // effect surviving the rollback.
+    final acceptedHlcs = <Hlc>[];
     try {
       await db.transaction(() async {
         await db.customStatement('PRAGMA defer_foreign_keys = ON');
@@ -212,6 +217,7 @@ class SyncApplier {
             if (!_tables.containsKey(rec.table)) {
               result.failed++;
               await _quarantine(rec, 'unknown-table: "${rec.table}"');
+              _noteParkedStamp(rec, acceptedHlcs);
               continue;
             }
             // LWW settle — deliberately AHEAD of the schema_v/column gates
@@ -255,6 +261,7 @@ class SyncApplier {
                 'invalid-schema_v: ${rec.schemaV} is below 1, the lowest '
                 'version any build ever wrote',
               );
+              _noteParkedStamp(rec, acceptedHlcs);
               continue;
             }
             // Entity ids become filesystem path components once applied
@@ -269,6 +276,7 @@ class SyncApplier {
             } on FormatException catch (e) {
               result.failed++;
               await _quarantine(rec, 'invalid-id: ${e.message}');
+              _noteParkedStamp(rec, acceptedHlcs);
               continue;
             }
             // A record from a NEWER record-schema version is quarantined
@@ -283,6 +291,7 @@ class SyncApplier {
                 'apply-failed: schema_v ${rec.schemaV} is newer than this '
                 'build understands ($currentRecordSchemaV)',
               );
+              _noteParkedStamp(rec, acceptedHlcs);
               continue;
             }
             // At an accepted schema_v an unknown column is never legitimate:
@@ -299,6 +308,7 @@ class SyncApplier {
                 'unknown-column: ${unknown.map((c) => '"$c"').join(', ')} '
                 'not in "${rec.table}"',
               );
+              _noteParkedStamp(rec, acceptedHlcs);
               continue;
             }
             // The mirror gate: at the CURRENT record schema version a record
@@ -336,6 +346,7 @@ class SyncApplier {
                   'absent from a schema_v $currentRecordSchemaV record for '
                   '"${rec.table}" (the wire contract is full-row snapshots)',
                 );
+                _noteParkedStamp(rec, acceptedHlcs);
                 continue;
               }
             }
@@ -351,6 +362,7 @@ class SyncApplier {
             } on FormatException catch (e) {
               result.failed++;
               await _quarantine(rec, 'invalid-value: ${e.message}');
+              _noteParkedStamp(rec, acceptedHlcs);
               continue;
             }
             try {
@@ -413,7 +425,7 @@ class SyncApplier {
             // FK-sweep abort, a throwing beforeCommit hook, or a failed
             // outer commit would roll the database back while the in-memory
             // clock kept the advance.
-            settledHlcs.add(rec.hlc);
+            acceptedHlcs.add(rec.hlc);
             if (applied) {
               result.applied++;
               // Record any slot-resolution side effects this record's
@@ -465,7 +477,7 @@ class SyncApplier {
             // writes are gone while the quarantine row (written in the OUTER
             // transaction) survives with the rest of the batch.
             result.failed++;
-            await _quarantine(rec, 'apply-failed: $e');
+            await _quarantine(rec, _savepointFailureReason(e));
           }
         }
         for (final reject in rejects) {
@@ -484,9 +496,9 @@ class SyncApplier {
         // part that has to survive a restart, because a stamp whose record the
         // FK sweep parked leaves no hlc_packed anywhere for the boot seed to
         // find (see SyncStateStore.hlcHighWaterKey).
-        if (settledHlcs.isNotEmpty) {
+        if (acceptedHlcs.isNotEmpty) {
           await _state.raiseHlcHighWater(
-            settledHlcs
+            acceptedHlcs
                 .map((h) => h.packed)
                 .reduce((a, b) => a.compareTo(b) >= 0 ? a : b),
           );
@@ -508,7 +520,7 @@ class SyncApplier {
     }
     if (result.committed) {
       // The batch is durably committed: only now advance the clock past every
-      // settled record's stamp, so subsequent local writes stay causally
+      // accepted record's stamp, so subsequent local writes stay causally
       // after everything the database actually holds. mergeVerified, NOT
       // receive: every stamp here already passed assertPlausible at its
       // gate, and re-running the drift check now could THROW after the data
@@ -519,17 +531,56 @@ class SyncApplier {
       // rejected: it would corrupt causal order. Stamps of records the
       // FK-orphan sweep later parked-and-deleted merge too, deliberately: HLC
       // semantics advance on any RECEIVED message; row survival is a
-      // different layer. Deferring the advance also means the drift gate
-      // judged every record of this batch against the PRE-batch clock
+      // different layer — and door-parked records join for the same reason
+      // (see [_noteParkedStamp]). Deferring the advance also means the drift
+      // gate judged every record of this batch against the PRE-batch clock
       // reference — that is deliberate and conservative: a record plausible
       // only relative to an earlier in-batch stamp quarantines now and is
       // un-parked by the sync engine's end-of-run quarantine replay, once
       // this commit's merges have raised the reference.
-      for (final hlc in settledHlcs) {
+      for (final hlc in acceptedHlcs) {
         clock.mergeVerified(hlc);
       }
     }
     return result;
+  }
+
+  /// Records a DOOR-PARKED record's stamp for the post-commit clock advance
+  /// and the durable high-water mark, exactly like a settled record's.
+  ///
+  /// A door park is not a rollback: the parked snapshot survives the batch
+  /// and stays eligible to win LWW at replay — the newer-schema park is the
+  /// DESIGNED honest path for a mixed-version fleet ("the quarantine replay
+  /// un-parks it after the app upgrade"). Skipping its stamp let a later
+  /// local edit stamp BELOW the parked record, and the replay then silently
+  /// reverted the user's newer edit under LWW — the exact failure
+  /// [SyncStateStore.hlcHighWaterKey] documents. The clock's invariant is to
+  /// advance past everything the device has SEEN, row survival being a
+  /// different layer (same rationale as the FK-orphan merges, see the bottom
+  /// of [apply]).
+  ///
+  /// Two stamps are still excluded, deliberately: a malformed one (no
+  /// well-formed stamp exists to advance past — the park itself keys on
+  /// whatever hlc_packed the record carried) and an implausible one (the
+  /// drift discipline holds at EVERY gate: a suspect stamp must never
+  /// ratchet the clock, which is why the drift gate's own handler never
+  /// calls this). And without a quarantine store (counter-only test wiring)
+  /// nothing is parked at all — no surviving snapshot can out-rank a later
+  /// local edit, and the mark must not claim stamps nothing holds.
+  void _noteParkedStamp(SyncRow rec, List<Hlc> acceptedHlcs) {
+    if (quarantine == null) return;
+    final Hlc hlc;
+    try {
+      hlc = rec.hlc;
+    } catch (_) {
+      return;
+    }
+    try {
+      clock.assertPlausible(hlc);
+    } on HlcDriftException {
+      return;
+    }
+    acceptedHlcs.add(hlc);
   }
 
   /// Persists a rejected record to the quarantine parking lot (latest state
@@ -552,6 +603,36 @@ class SyncApplier {
   /// cannot even be serialized can never be replayed — in both cases there
   /// is genuinely nothing addressable to park, and the counters still record
   /// the rejection.
+  ///
+  /// The [reason] prefixes written here are part of the store's retention
+  /// contract: [QuarantineStore.put] classifies parks as replayable or
+  /// permanently dead by them, so a renamed gate reason must be reflected
+  /// there.
+  /// Classifies a savepoint failure into the quarantine's replay classes.
+  /// The default, 'apply-failed', is REPLAYABLE — IO pressure or a racing
+  /// writer may clear on the next cycle, and the newer-schema park relies on
+  /// an app upgrade un-parking it. A CHECK or NOT NULL violation is neither:
+  /// the verdict is a pure function of the payload against a schema
+  /// constraint that never changes at runtime, so its replay re-parks
+  /// forever — and a forever-failing entry sitting in a replayable class
+  /// could displace the FK sweep's park, the only copy of an applied row
+  /// (see [QuarantineStore.put]'s retention rule). Park those under the
+  /// unreplayable 'invalid-value:' class instead.
+  static String _savepointFailureReason(Object e) {
+    // SQLite extended result codes: (275) SQLITE_CONSTRAINT_CHECK,
+    // (1299) SQLITE_CONSTRAINT_NOTNULL. Other constraint codes stay
+    // replayable on purpose: UNIQUE/FK verdicts depend on DB state a later
+    // batch can change.
+    const constraintCheck = 275;
+    const constraintNotNull = 1299;
+    if (e is SqliteException &&
+        (e.extendedResultCode == constraintCheck ||
+            e.extendedResultCode == constraintNotNull)) {
+      return 'invalid-value: $e';
+    }
+    return 'apply-failed: $e';
+  }
+
   Future<void> _quarantine(SyncRow rec, String reason) async {
     final store = quarantine;
     if (store == null) return;
@@ -682,7 +763,12 @@ class SyncApplier {
   ///    entry) — never lost, never a hot loop. Unlike [_quarantine]'s
   ///    best-effort bookkeeping the park is NOT swallowed on error: after
   ///    the delete a failed park IS a lost row, so a storage error aborts
-  ///    the batch (a retried page over silent loss). Without a quarantine
+  ///    the batch (a retried page over silent loss). An LWW-FILTERED park
+  ///    (not an error) is safe by the store's replay-class retention: a
+  ///    sweep park is only ever filtered by a strictly newer REPLAYABLE
+  ///    state, which supersedes the row once its own replay lands — a
+  ///    permanently-unreplayable entry can never hold the slot against it
+  ///    (see [QuarantineStore.put]). Without a quarantine
   ///    store (counter-only test wiring) the old hard-delete stands.
   ///  * A PRE-EXISTING row UPDATED by this batch is PARKED, then RESTORED —
   ///    never deleted. It satisfied every FK when the batch began (SQLite

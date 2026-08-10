@@ -26,6 +26,38 @@ int niceTimeIntervalMs(int durationMs, double width, {double minPx = 72}) {
   return candidates.last;
 }
 
+/// Cuts the whole-peak slice of [peaks] (spanning [spanStartMs] for
+/// [spanDurMs] on the timeline) visible through the window
+/// [visibleStartMs, visibleEndMs], together with the
+/// [WaveformPainter.indexOffset]/[WaveformPainter.indexSpan] mapping that
+/// anchors it to the timeline. The cut is at WHOLE peak indices while the
+/// window edge is not, so the slice's first peak belongs up to one peak
+/// interval BEFORE the window; painting the slice without this mapping shifts
+/// the whole waveform against ruler/grid/playhead by that fraction. Every
+/// viewport-sliced [WaveformPainter] caller must go through here — the lanes
+/// share one ruler, so they must share one anchoring.
+({List<double> peaks, double indexOffset, double indexSpan}) visiblePeakSlice(
+  List<double> peaks, {
+  required int spanStartMs,
+  required int spanDurMs,
+  required int visibleStartMs,
+  required int visibleEndMs,
+}) {
+  final n = peaks.length;
+  if (n == 0 || spanDurMs <= 0 || visibleEndMs <= visibleStartMs) {
+    return (peaks: const [], indexOffset: 0.0, indexSpan: 1.0);
+  }
+  final start = (visibleStartMs - spanStartMs) / spanDurMs * n;
+  final end = (visibleEndMs - spanStartMs) / spanDurMs * n;
+  final i0 = start.floor().clamp(0, n - 1);
+  final i1 = end.ceil().clamp(i0 + 1, n);
+  return (
+    peaks: peaks.sublist(i0, i1),
+    indexOffset: start - i0,
+    indexSpan: end - start,
+  );
+}
+
 /// Paints a track's normalized peaks as a filled, mirrored audio-clip
 /// silhouette with a faint center axis. A track shorter than the shared
 /// timeline only fills [widthFraction] of the width so lanes align on time.
@@ -34,11 +66,24 @@ class WaveformPainter extends CustomPainter {
     required this.peaks,
     required this.color,
     this.widthFraction = 1.0,
+    this.indexOffset = 0.0,
+    this.indexSpan,
   });
 
   final List<double> peaks;
   final Color color;
   final double widthFraction;
+
+  /// Viewport mapping for a whole-peak slice, in PEAK-INDEX units: the index
+  /// position at the draw area's left edge, and the index distance its width
+  /// covers ([indexSpan]; null = `peaks.length - 1`, the classic
+  /// spread-all-vertices mapping). A slice cut at whole-peak bounds starts up
+  /// to one peak interval EARLIER than the viewport edge; anchoring vertex k
+  /// at `(k − indexOffset) / indexSpan` keeps every peak at its true timeline
+  /// x — aligned with ruler/grid/playhead — instead of shifting the waveform
+  /// by the discarded fraction. Vertices landing outside the box are clipped.
+  final double indexOffset;
+  final double? indexSpan;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -51,16 +96,19 @@ class WaveformPainter extends CustomPainter {
 
     final mid = size.height / 2;
     final n = peaks.length;
+    final span = indexSpan ?? (n - 1).toDouble();
+    // A slice's edge vertices map outside the box by design (see
+    // [indexOffset]); keep them from bleeding into the neighboring padding.
+    if (indexOffset != 0 || indexSpan != null) {
+      canvas.clipRect(Rect.fromLTWH(0, 0, drawWidth, size.height));
+    }
     // One vertex per peak, but never more than per pixel — so a clip mapped far
     // wider than the viewport (when zoomed in) doesn't build a giant path.
     final steps = n.clamp(1, drawWidth.ceil() + 1);
-    double xAt(int i) => steps <= 1 ? 0.0 : i / (steps - 1) * drawWidth;
-    double ampAt(int i) {
-      final idx = steps <= 1
-          ? 0
-          : (i / (steps - 1) * (n - 1)).round().clamp(0, n - 1);
-      return peaks[idx];
-    }
+    double idxAt(int i) => steps <= 1 ? 0.0 : i / (steps - 1) * (n - 1);
+    double xAt(int i) =>
+        span <= 0 ? 0.0 : (idxAt(i) - indexOffset) / span * drawWidth;
+    double ampAt(int i) => peaks[idxAt(i).round().clamp(0, n - 1)];
 
     final path = Path()..moveTo(0, mid);
     for (var i = 0; i < steps; i++) {
@@ -85,7 +133,9 @@ class WaveformPainter extends CustomPainter {
   bool shouldRepaint(covariant WaveformPainter old) =>
       old.peaks != peaks ||
       old.color != color ||
-      old.widthFraction != widthFraction;
+      old.widthFraction != widthFraction ||
+      old.indexOffset != indexOffset ||
+      old.indexSpan != indexSpan;
 }
 
 /// Paints a recording-in-progress waveform that grows rightward at a FIXED
@@ -107,6 +157,7 @@ class LiveWaveformPainter extends CustomPainter {
     required this.peaks,
     required this.color,
     required this.pixelsPerSample,
+    this.sampleOffset = 0.0,
   });
 
   final List<double> peaks;
@@ -115,6 +166,13 @@ class LiveWaveformPainter extends CustomPainter {
   /// Width in device pixels one captured sample occupies — fixed for the whole
   /// take, so the waveform grows rightward without the rest shifting.
   final double pixelsPerSample;
+
+  /// Sample-index position at the drawn box's left edge, in samples of
+  /// [peaks] — the fraction a whole-sample viewport slice discarded when the
+  /// window edge lands mid-sample. Binning columns from `c·spc + offset`
+  /// keeps the absolute mapping glued to the TIMELINE (not the box), so the
+  /// drawn take doesn't freeze on screen and snap while the view pans.
+  final double sampleOffset;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -127,8 +185,8 @@ class LiveWaveformPainter extends CustomPainter {
     final spc = pixelsPerSample <= 0 ? 1.0 : 1.0 / pixelsPerSample;
 
     double ampAt(int c) {
-      var lo = (c * spc).floor();
-      var hi = ((c + 1) * spc).ceil();
+      var lo = (c * spc + sampleOffset).floor();
+      var hi = ((c + 1) * spc + sampleOffset).ceil();
       if (lo >= n) lo = n - 1;
       if (lo < 0) lo = 0;
       if (hi > n) hi = n;
@@ -164,7 +222,8 @@ class LiveWaveformPainter extends CustomPainter {
   bool shouldRepaint(covariant LiveWaveformPainter old) =>
       old.peaks != peaks ||
       old.color != color ||
-      old.pixelsPerSample != pixelsPerSample;
+      old.pixelsPerSample != pixelsPerSample ||
+      old.sampleOffset != sampleOffset;
 }
 
 /// Vertical time-grid lines drawn behind a lane's waveform.

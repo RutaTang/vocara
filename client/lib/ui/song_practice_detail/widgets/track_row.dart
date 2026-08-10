@@ -554,30 +554,39 @@ class _BodyState extends State<_Body> {
 
         // The visible box (clamped to the window) + sliced peaks for a span, so a
         // clip far wider than the view stays bounded and stays aligned.
-        ({double left, double width, List<double> peaks})? visible(
-          int spanStart,
-          int spanDur,
+        ({
+          double left,
+          double width,
           List<double> peaks,
-        ) {
+          double peakOffset,
+          double peakSpan,
+        })?
+        visible(int spanStart, int spanDur, List<double> peaks) {
           if (dur <= 0 || spanDur <= 0) return null;
           final spanEnd = spanStart + spanDur;
           final vs = spanStart > viewStart ? spanStart : viewStart;
           final ve = spanEnd < viewStart + dur ? spanEnd : viewStart + dur;
           if (ve <= vs) return null;
-          final n = peaks.length;
-          List<double> slice;
-          if (n == 0) {
-            slice = const [];
-          } else {
-            final i0 = ((vs - spanStart) / spanDur * n).floor().clamp(0, n - 1);
-            final i1 = ((ve - spanStart) / spanDur * n).ceil().clamp(i0 + 1, n);
-            slice = peaks.sublist(i0, i1);
-          }
+          // The cut is at WHOLE peak indices while the box starts at the
+          // un-quantized viewport edge, so slice[0] belongs up to one peak
+          // interval BEFORE the box. The shared slice helper hands the painter
+          // the discarded fraction (and the box width in peak units) so every
+          // peak draws at its true timeline x — anchored to the ruler, not
+          // the box.
+          final cut = visiblePeakSlice(
+            peaks,
+            spanStartMs: spanStart,
+            spanDurMs: spanDur,
+            visibleStartMs: vs,
+            visibleEndMs: ve,
+          );
           final left = xOf(vs);
           return (
             left: left,
             width: (xOf(ve) - left).clamp(1.0, width),
-            peaks: slice,
+            peaks: cut.peaks,
+            peakOffset: cut.indexOffset,
+            peakSpan: cut.indexSpan,
           );
         }
 
@@ -586,15 +595,22 @@ class _BodyState extends State<_Body> {
         // the drag recognizer mid-gesture, so the commit (persistence + engine
         // realign) would never fire — so it parks as a 1px sliver just outside
         // the lane's edge, where the Stack clips it invisible.
-        ({double left, double width, List<double> peaks})? clipBox(
-          AudioClip clip,
-        ) {
+        ({
+          double left,
+          double width,
+          List<double> peaks,
+          double peakOffset,
+          double peakSpan,
+        })?
+        clipBox(AudioClip clip) {
           final v = visible(clip.startMs, clip.durationMs, clip.waveformPeaks);
           if (v != null || clip.id != _draggingClipId) return v;
           return (
             left: clip.endMs <= viewStart ? -1.0 : width,
             width: 1.0,
             peaks: const <double>[],
+            peakOffset: 0.0,
+            peakSpan: 1.0,
           );
         }
 
@@ -639,6 +655,8 @@ class _BodyState extends State<_Body> {
                   width: v.width,
                   child: _ClipRegion(
                     peaks: v.peaks,
+                    peakOffset: v.peakOffset,
+                    peakSpan: v.peakSpan,
                     color: widget.accent,
                     analyzing: !clip.hasWaveform,
                     selected:
@@ -677,7 +695,13 @@ class _BodyState extends State<_Body> {
                     bottom: 3,
                     width: v.width,
                     child: IgnorePointer(
-                      child: _FormingClip(peaks: v.peaks, pixelsPerSample: pps),
+                      child: _FormingClip(
+                        peaks: v.peaks,
+                        pixelsPerSample: pps,
+                        // Keeps the absolute sample→column mapping glued to
+                        // the timeline when the window edge lands mid-peak.
+                        sampleOffset: v.peakOffset,
+                      ),
                     ),
                   );
                 },
@@ -715,6 +739,8 @@ class _BodyState extends State<_Body> {
 class _ClipRegion extends StatefulWidget {
   const _ClipRegion({
     required this.peaks,
+    required this.peakOffset,
+    required this.peakSpan,
     required this.color,
     required this.analyzing,
     required this.selected,
@@ -729,6 +755,11 @@ class _ClipRegion extends StatefulWidget {
   });
 
   final List<double> peaks;
+
+  /// The slice's viewport mapping in peak-index units (see `visible()`), so
+  /// the painter anchors each peak at its true timeline x.
+  final double peakOffset;
+  final double peakSpan;
   final Color color;
   final bool analyzing;
   final bool selected;
@@ -790,6 +821,8 @@ class _ClipRegionState extends State<_ClipRegion> {
         onHorizontalDragCancel: _finishDrag,
         child: _Region(
           peaks: widget.peaks,
+          peakOffset: widget.peakOffset,
+          peakSpan: widget.peakSpan,
           color: widget.color,
           analyzing: widget.analyzing,
           selected: widget.selected,
@@ -804,12 +837,16 @@ class _ClipRegionState extends State<_ClipRegion> {
 class _Region extends StatelessWidget {
   const _Region({
     required this.peaks,
+    required this.peakOffset,
+    required this.peakSpan,
     required this.color,
     required this.analyzing,
     this.selected = false,
   });
 
   final List<double> peaks;
+  final double peakOffset;
+  final double peakSpan;
   final Color color;
   final bool analyzing;
   final bool selected;
@@ -847,7 +884,12 @@ class _Region extends StatelessWidget {
                     )
                   : CustomPaint(
                       size: Size.infinite,
-                      painter: WaveformPainter(peaks: peaks, color: color),
+                      painter: WaveformPainter(
+                        peaks: peaks,
+                        color: color,
+                        indexOffset: peakOffset,
+                        indexSpan: peakSpan,
+                      ),
                     ),
             ),
           ),
@@ -863,10 +905,15 @@ class _Region extends StatelessWidget {
 /// the take grows — the wobble-free way Logic / Pro Tools / Cubase show a live
 /// take, rather than a waveform that restretches every frame.
 class _FormingClip extends StatelessWidget {
-  const _FormingClip({required this.peaks, required this.pixelsPerSample});
+  const _FormingClip({
+    required this.peaks,
+    required this.pixelsPerSample,
+    required this.sampleOffset,
+  });
 
   final List<double> peaks;
   final double pixelsPerSample;
+  final double sampleOffset;
 
   @override
   Widget build(BuildContext context) {
@@ -898,6 +945,7 @@ class _FormingClip extends StatelessWidget {
                     peaks: peaks,
                     color: color,
                     pixelsPerSample: pixelsPerSample,
+                    sampleOffset: sampleOffset,
                   ),
                 ),
               ),

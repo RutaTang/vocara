@@ -18,20 +18,32 @@ class QuarantineStore {
   /// Upserts the quarantined state for ([table], [id]), keeping the NEWEST
   /// state per row by [hlcPacked] — the store itself is Last-Writer-Wins, not
   /// last-caller-wins. The composite primary key already bounds the lot to
-  /// one entry per row; the HLC guard decides WHICH state that entry holds:
+  /// one entry per row; the guard decides WHICH state that entry holds:
   ///
-  ///  * a strictly newer [hlcPacked] replaces the stored entry;
-  ///  * an EQUAL [hlcPacked] also replaces it (a refreshed reason/payload for
-  ///    the same state — the fk-orphan re-park flow re-parks the identical
-  ///    snapshot every replay cycle and must keep working);
-  ///  * a strictly OLDER [hlcPacked] is a deliberate no-op. Parks are not
-  ///    ordered by arrival: a page can legally deliver P@1000 (parked at the
-  ///    door) before the end-of-batch FK sweep parks the current db row
-  ///    P@950, and the round-6 park+restore can put a live row BACK on an
-  ///    older HLC — so ordering alone can never protect the newest state.
-  ///    Dropping the older park loses nothing: under LWW the replay of the
-  ///    newer parked snapshot supersedes anything the older state could have
-  ///    contributed (the older state would lose that same LWW settle anyway).
+  ///  * an EQUAL [hlcPacked] always replaces the stored entry (a refreshed
+  ///    reason/payload for the SAME record state — the fk-orphan re-park flow
+  ///    re-parks the identical snapshot every replay cycle and must keep
+  ///    working, and a replay whose verdict changed relabels the entry);
+  ///  * between two states of the same replay class (see below), the strictly
+  ///    newer [hlcPacked] wins and a strictly OLDER park is a deliberate
+  ///    no-op. Parks are not ordered by arrival: a page can legally deliver
+  ///    P@1000 (parked at the door) before the end-of-batch FK sweep parks
+  ///    the current db row P@950, and the round-6 park+restore can put a live
+  ///    row BACK on an older HLC — so ordering alone can never protect the
+  ///    newest state. Dropping the older park loses nothing: under LWW the
+  ///    replay of the newer parked snapshot supersedes anything the older
+  ///    state could have contributed (the older state would lose that same
+  ///    LWW settle anyway);
+  ///  * ACROSS replay classes the stamp order does not decide: a state whose
+  ///    gate can never pass ([_unreplayablePrefixes]) supersedes nothing —
+  ///    the replay re-rejects it every cycle, forever — so it must neither
+  ///    displace nor block a replayable state, whatever the stamps say. This
+  ///    matters most for the FK sweep, which parks the ONLY copy of a row it
+  ///    then hard-deletes (the change token is already past the row's page,
+  ///    so nothing re-delivers it): letting a newer-stamped but permanently
+  ///    dead payload hold the slot turned that park into silent row loss.
+  ///    The dropped garbage is only evidence of a non-conforming writer;
+  ///    the dropped row would have been real data.
   ///
   /// The SQL-level `ON CONFLICT ... DO UPDATE ... WHERE` makes the guard
   /// race-free inside the caller's transaction (no read-modify-write gap),
@@ -60,13 +72,51 @@ class QuarantineStore {
           row,
           onConflict: DoUpdate(
             (old) => row,
-            // Overwrite only when the stored state is not newer than the
-            // incoming one (packed HLCs compare lexically).
-            where: (old) =>
-                old.remoteHlcPacked.isSmallerOrEqualValue(hlcPacked),
+            // The retention rule from the doc comment, expressed over the
+            // stored row (packed HLCs compare lexically): within a replay
+            // class the stored state must not be newer than the incoming
+            // one; across classes the replayable state wins outright, and
+            // an equal stamp (same record state) always refreshes.
+            where: (old) {
+              final equal = old.remoteHlcPacked.equals(hlcPacked);
+              final notNewer = old.remoteHlcPacked.isSmallerOrEqualValue(
+                hlcPacked,
+              );
+              final storedUnreplayable = _unreplayablePrefixes
+                  .map((p) => old.reason.like('$p%'))
+                  .reduce((a, b) => a | b);
+              return _replayable(reason)
+                  ? notNewer | storedUnreplayable
+                  : equal | (notNewer & storedUnreplayable);
+            },
           ),
         );
   }
+
+  /// Reason prefixes of parks whose payload can NEVER re-apply: their gate's
+  /// verdict is a pure function of the payload alone, so no app upgrade,
+  /// clock recovery, or later delivery ever changes it — the replay re-parks
+  /// them every cycle, forever. Deliberately NOT listed: 'unknown-table',
+  /// 'unknown-column' and 'missing-column' (their gates re-run against the
+  /// LIVE schema, which an upgrade changes), 'hlc-drift' (a recovered clock
+  /// un-parks it), 'fk-orphan' (a delivered parent un-parks it), and
+  /// 'apply-failed' (a savepoint failure may be transient, and the
+  /// newer-schema gate parks under this prefix — an upgrade un-parks it;
+  /// the applier keeps the class honest by parking DETERMINISTIC savepoint
+  /// failures — CHECK / NOT NULL violations, pure functions of the
+  /// payload — under 'invalid-value:' instead, so a forever-failing entry
+  /// can never sit in a replayable class and displace an fk-orphan park).
+  /// The prefixes are [SyncApplier]'s reason vocabulary; the applier's
+  /// _quarantine doc points back here.
+  static const List<String> _unreplayablePrefixes = [
+    'invalid-schema_v:',
+    'invalid-id:',
+    'invalid-value:',
+    'dead-letter(',
+  ];
+
+  static bool _replayable(String reason) =>
+      !_unreplayablePrefixes.any(reason.startsWith);
 
   /// All quarantined rows, oldest quarantine first (stable review order).
   Future<List<SyncQuarantineRow>> list() =>

@@ -469,6 +469,83 @@ void main() {
     controller.dispose();
   });
 
+  testWidgets('guardStopFinalize holds the quit gate over the post-stop '
+      'finalize tail and releases it once the tail completes', (tester) async {
+    final engine = _FakeEngine();
+    final dest = _FakeDestination();
+    final controller = MicRecordingController(
+      acquireEngine: () => engine,
+      requestPermission: () async => true,
+    );
+    addTearDown(controller.dispose);
+
+    await controller.start(dest.strategy);
+    expect(controller.stop(), isNotNull);
+    // stop() unregistered the armed-window finalizer; the owner's finalize
+    // tail (analyze + save) is still ahead, and must re-hold the gate.
+    expect(RecordingFinalizer.instance.hasActive, isFalse);
+
+    final gate = Completer<void>();
+    final guarded = controller.guardStopFinalize(() => gate.future);
+    expect(
+      RecordingFinalizer.instance.hasActive,
+      isTrue,
+      reason: 'the in-flight finalize tail must hold the quit gate',
+    );
+
+    var quitDone = false;
+    unawaited(
+      RecordingFinalizer.instance.finalizeAll().whenComplete(
+        () => quitDone = true,
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(quitDone, isFalse, reason: 'quit must wait for the in-flight tail');
+
+    gate.complete();
+    await tester.pump();
+    expect(quitDone, isTrue);
+    await guarded;
+    expect(RecordingFinalizer.instance.hasActive, isFalse);
+  });
+
+  testWidgets('overlapping guarded tails: the earlier tail completing must '
+      'not drop the quit hold protecting the later one', (tester) async {
+    final controller = MicRecordingController(
+      acquireEngine: _FakeEngine.new,
+      requestPermission: () async => true,
+    );
+    addTearDown(controller.dispose);
+
+    final g1 = Completer<void>();
+    final g2 = Completer<void>();
+    final t1 = controller.guardStopFinalize(() => g1.future);
+    final t2 = controller.guardStopFinalize(() => g2.future);
+    g1.complete();
+    await tester.pump();
+    expect(
+      RecordingFinalizer.instance.hasActive,
+      isTrue,
+      reason: 'the second tail is still draining',
+    );
+
+    var quitDone = false;
+    unawaited(
+      RecordingFinalizer.instance.finalizeAll().whenComplete(
+        () => quitDone = true,
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(quitDone, isFalse);
+
+    g2.complete();
+    await tester.pump();
+    expect(quitDone, isTrue);
+    await t1;
+    await t2;
+    expect(RecordingFinalizer.instance.hasActive, isFalse);
+  });
+
   testWidgets('dispose while recording closes the WAV handle without '
       'discarding the file', (tester) async {
     final engine = _FakeEngine();

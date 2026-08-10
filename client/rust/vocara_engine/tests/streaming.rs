@@ -201,6 +201,63 @@ fn an_in_band_fence_split_across_blocks_still_rearms_the_source() {
     assert!(healed.iter().all(|s| s.abs() == 0.25));
 }
 
+/// The feeder pushes a discarding replan's fence BEFORE it bumps flush_seq,
+/// and a starved node polls the ring every frame while the flush counter is
+/// read once per block — so the node can fully adopt the new generation IN
+/// BAND inside the block the fence landed in. The next block's flush check
+/// must recognize that adopted state instead of disarming it: the fence is
+/// consumed, so a drain hunting it discards every frame the feeder pushes,
+/// forever (cur_flush never advances), with zero counted xruns.
+#[test]
+fn a_flush_whose_fence_was_already_adopted_in_band_keeps_the_source_armed() {
+    let (_h, rt, mut prod, ctrl) = hand_fed_source();
+    // Arm cleanly at generation 1 with one block of audio.
+    let [g1, b1] = fence_frames(1, 0);
+    assert!(prod.push(g1));
+    assert!(prod.push(b1));
+    ctrl.gen.store(1, std::sync::atomic::Ordering::Release);
+    ctrl.flush_seq
+        .fetch_add(1, std::sync::atomic::Ordering::Release);
+    push_audio(&mut prod, BLOCK, 0.5);
+    assert_eq!(render_block(&rt)[0], 0.5, "generation 1 plays");
+
+    // A discarding replan lands mid-block, feeder-ordered: fence + audio
+    // pushed and gen published FIRST...
+    let [g2, b2] = fence_frames(2, BLOCK as i64);
+    assert!(prod.push(g2));
+    assert!(prod.push(b2));
+    ctrl.gen.store(2, std::sync::atomic::Ordering::Release);
+    push_audio(&mut prod, BLOCK, 0.25);
+    // ...and the node adopts generation 2 in band within this block (its
+    // top-of-block flush read predates the bump below). The fence itself
+    // costs the first frame's pop, so assert on the block's tail.
+    let adopted = render_block(&rt);
+    assert_eq!(
+        adopted[(BLOCK - 1) * CHANNELS],
+        0.25,
+        "generation 2 was adopted in band"
+    );
+
+    // ...THEN the flush counter bump becomes visible.
+    ctrl.flush_seq
+        .fetch_add(1, std::sync::atomic::Ordering::Release);
+    push_audio(&mut prod, BLOCK, 0.75);
+    let kept = render_block(&rt);
+    assert_eq!(
+        kept[0], 0.75,
+        "an already-adopted generation must survive the flush check"
+    );
+    assert!(kept.iter().all(|s| s.abs() == 0.75));
+
+    // And the acknowledgment must stick: later blocks keep playing too.
+    push_audio(&mut prod, BLOCK, 0.125);
+    let steady = render_block(&rt);
+    assert_eq!(
+        steady[0], 0.125,
+        "cur_flush must advance so later blocks stop re-draining the ring"
+    );
+}
+
 #[test]
 fn streamed_render_equals_the_arc_render_bit_for_bit() {
     let frames = 4096;
@@ -263,6 +320,42 @@ fn a_loop_wrap_streams_seamlessly_via_the_wrap_fence() {
     h2.play();
     let arc = render_arc(&h2, &rt2, 40);
     assert_eq!(streamed, arc, "looped stream must equal the reference");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn a_replan_with_the_playhead_past_loop_end_models_the_render_wrap() {
+    // The recording flow plays PAST loop end with the loop disengaged, pauses
+    // (the clock folds beyond loop end), then re-arms the loop without a seek.
+    // On resume the render clock wraps `frame >= loop_end` back to loop_start
+    // before producing anything, and the feeder's pump can replan from the
+    // stale pre-wrap playhead before the first post-play block renders. The
+    // plan must model that wrap: planning a linear run from past loop end
+    // streams positions the transport never plays, silencing the track for
+    // the whole looping session.
+    let frames = 4096;
+    let path = write_track(frames);
+    let (h, rt, mut feeder) = streamed_pair(&path, 0, 8192);
+    h.play();
+    let _ = render_streamed(&h, &rt, &mut feeder, 12); // playhead at 1536
+    h.pause(); // folds the clock past the loop end armed next
+    h.set_loop(true, 100, 1100);
+    h.play();
+    // render_streamed pumps BEFORE each block: the first pump's replan reads
+    // the pre-wrap fold (1536 > 1100), exactly the racing order in question.
+    let streamed = render_streamed(&h, &rt, &mut feeder, 20);
+
+    let (h2, rt2) = engine_with(Box::new(BufferSource::new(ramp_pcm(frames), 0)));
+    h2.play();
+    let _ = render_arc(&h2, &rt2, 12);
+    h2.pause();
+    h2.set_loop(true, 100, 1100);
+    h2.play();
+    let arc = render_arc(&h2, &rt2, 20);
+    assert_eq!(
+        streamed, arc,
+        "a plan made from a pre-wrap playhead must stream the wrapped run"
+    );
     let _ = std::fs::remove_file(&path);
 }
 

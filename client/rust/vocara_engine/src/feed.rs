@@ -277,14 +277,29 @@ impl TrackFeeder {
         ok
     }
 
+    /// The transport position a plan must start from. The render clock wraps
+    /// `frame >= loop_end` back to `loop_start` BEFORE producing anything
+    /// (see `RtProcessor::render_block`), so a raw playhead at/past loop end
+    /// — a pause fold from a run that played with the loop disengaged, held
+    /// until the first post-play block is consumed — must be modeled wrapped:
+    /// a linear plan from there streams positions the transport never plays.
+    fn planned_pos(t: &Shared, basis: &PlanBasis) -> i64 {
+        let pos = t.playhead().max(0);
+        if basis.loop_on && basis.le > basis.ls && pos >= basis.le {
+            basis.ls
+        } else {
+            pos
+        }
+    }
+
     /// Re-plan from the CURRENT transport position after a DISCARDING
     /// discontinuity (flush / loop-param / play state change): bump
     /// flush_seq so the node discards to this fence, then start the run.
     fn replan(&mut self, t: &Shared, basis: PlanBasis) {
-        let pos = t.playhead().max(0);
+        let pos = Self::planned_pos(t, &basis);
         let next_gen = self.generation.wrapping_add(1);
         self.basis = Some(basis);
-        self.run_end = if basis.loop_on && basis.le > basis.ls && pos < basis.le {
+        self.run_end = if basis.loop_on && basis.le > basis.ls {
             basis.le
         } else {
             i64::MAX
@@ -324,11 +339,11 @@ impl TrackFeeder {
         // position with an in-band fence instead (no flush_seq — nothing in
         // the ring needs discarding; it is empty by definition of having
         // starved).
-        let pos = t.playhead().max(0);
-        if pos > self.next_tl && self.run_end != i64::MAX && pos >= self.run_end {
-            // The transport also wrapped meanwhile; realign the run first.
-            self.next_tl = self.run_end;
-        } else if pos > self.next_tl {
+        // `planned_pos` models the render-side wrap, so while looping `pos`
+        // is always inside [ls, le) — a plan behind a wrapped transport shows
+        // up here as `pos > next_tl` like any other starvation.
+        let pos = Self::planned_pos(t, &basis);
+        if pos > self.next_tl {
             let next_gen = self.generation.wrapping_add(1);
             if self.push_fence(next_gen, pos) {
                 self.generation = next_gen;

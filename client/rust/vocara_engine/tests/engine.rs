@@ -171,6 +171,72 @@ fn rcu_graph_swap_changes_output() {
 }
 
 #[test]
+fn a_dangling_send_keeps_sibling_send_slots_addressable() {
+    // Persisted data can carry an aux send whose target bus no longer
+    // resolves; the control plane keeps the dangling entry in its model and
+    // addresses send nodes by MODEL slot. The builder must keep slots stable:
+    // renumbering across a skipped sibling would hand one send's level to
+    // another and leave the last knob addressing a nonexistent node.
+    use vocara_engine::build::BusSpec;
+    let v1 = to_stereo(&sine_mono(330.0, SR, 4000, 0.3));
+    let mut spec = ProjectSpec::new(vec![TrackSpec {
+        sends: vec![None, Some((0, 0.5))], // slot 0 dangling, slot 1 → bus 0
+        ..TrackSpec::vocal(1, Box::new(BufferSource::new(v1, 0)))
+    }]);
+    spec.buses = vec![
+        BusSpec {
+            id: 0,
+            gain: 1.0,
+            send_db: -120.0,
+            output: None,
+            chain: vec![0, 1],
+            sends: vec![None, Some((1, 0.5))], // slot 0 dangling, slot 1 → bus 1
+            comp_meter: None,
+        },
+        BusSpec {
+            id: 1,
+            gain: 1.0,
+            send_db: -120.0,
+            output: None,
+            chain: vec![0, 1],
+            sends: Vec::new(),
+            comp_meter: None,
+        },
+    ];
+    let desc = build(spec);
+    let mut g = desc.compile(SR, BLOCK).unwrap();
+
+    // The valid send keeps ITS model slot's node id; the dangling slot
+    // builds no node (a set there is a silent no-op — it is inaudible anyway).
+    assert!(
+        g.node_mut(build::track_send_id(1, 1)).is_some(),
+        "track send slot 1 must keep its node id across a dangling slot 0"
+    );
+    assert!(
+        g.node_mut(build::track_send_id(1, 0)).is_none(),
+        "a dangling track send must build no node"
+    );
+    assert!(
+        g.node_mut(build::bus_aux_send_id(0, 1)).is_some(),
+        "bus send slot 1 must keep its node id across a dangling slot 0"
+    );
+    assert!(
+        g.node_mut(build::bus_aux_send_id(0, 0)).is_none(),
+        "a dangling bus send must build no node"
+    );
+
+    let mut out = vec![0.0; BLOCK * CHANNELS];
+    for b in 0..8 {
+        g.render(BLOCK, (b * BLOCK) as i64, &mut out);
+    }
+    assert!(
+        all_finite(&out),
+        "graph with a dangling send must stay finite"
+    );
+    assert!(rms(&out) > 1e-3, "the mix must still be audible");
+}
+
+#[test]
 fn builder_assembles_vocal_and_backing_inserts() {
     // 2 vocals (one with EQ → Comp → Reverb inserts) + 1 backing → master.
     let v1 = to_stereo(&sine_mono(330.0, SR, 8000, 0.3));

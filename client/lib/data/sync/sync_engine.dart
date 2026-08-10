@@ -766,11 +766,29 @@ class SyncEngine {
         skipped += result.skipped;
         quarantined += result.quarantined;
         failedRecords += result.failed;
-        token = page.nextToken;
         if (result.applied > 0) {
           announcements.add(await _describeRows(page.rows));
         }
+        // An unmoved token WITHOUT hasMore is the legal at-least-once
+        // redelivery (the page just re-applied as clean LWW skips, and the
+        // token write was a same-value no-op): done, like any final page.
         if (!page.hasMore) break;
+        // TRUST MODEL (sync_transport.dart): a page bearing rows or rejects
+        // MUST advance the token. Looping on an unmoved one would refetch
+        // this identical page forever — every record a clean skip, hasMore
+        // true, no failure surfaced — silently wedging sync (and every push
+        // queued behind _exclusive) in an invisible hot loop. The empty
+        // branch above already refuses to spin; this is the rows-bearing
+        // analogue, and like every other cheaply-verifiable transport
+        // violation it fails the run loudly.
+        if (page.nextToken == token) {
+          throw StateError(
+            'pull transport violation: a page with ${page.rows.length} '
+            'row(s) and ${page.rejects.length} reject(s) returned an '
+            'unmoved change token with hasMore set',
+          );
+        }
+        token = page.nextToken;
       }
       // Replay once more after catching up: this run's successful receives
       // may have raised the clock's max-wall-ever-seen (or delivered a

@@ -85,6 +85,14 @@ fn write_header<W: Write>(
 /// finalize ever runs) survivable: the file on disk is a valid WAV covering everything written
 /// up to the last patch, so the boot-time staging sweep can recover the take instead of finding
 /// a header that still claims zero data bytes.
+/// Test-only deterministic disk-fault injection: a [`create`](WavStream::create) path whose
+/// file name contains this marker opens normally, fails its FIRST data write with an IO error,
+/// and succeeds afterwards — standing in for a disk that fills mid-take, which a hermetic test
+/// cannot produce through real IO. Keyed by path (not a global) so parallel tests writing
+/// ordinary WAVs are untouched.
+#[cfg(test)]
+pub(crate) const TEST_FAIL_FIRST_WRITE: &str = "vocara-fail-first-write";
+
 pub struct WavStream {
     w: BufWriter<File>,
     /// Mono sample count. u64 so a multi-hour recording never overflows (a u32 wrapped at
@@ -94,11 +102,25 @@ pub struct WavStream {
     sample_rate: u32,
     /// Value of [`samples`] at the last in-place header patch (0 = header still says empty).
     patched_at: u64,
+    /// See [`TEST_FAIL_FIRST_WRITE`].
+    #[cfg(test)]
+    fail_next_write: bool,
 }
 
 impl WavStream {
     pub fn create<P: AsRef<Path>>(path: P, channels: u16, sample_rate: u32) -> io::Result<Self> {
-        Self::from_file(File::create(path)?, channels, sample_rate)
+        #[cfg(test)]
+        let inject = path
+            .as_ref()
+            .to_string_lossy()
+            .contains(TEST_FAIL_FIRST_WRITE);
+        #[cfg_attr(not(test), allow(unused_mut))]
+        let mut s = Self::from_file(File::create(path)?, channels, sample_rate)?;
+        #[cfg(test)]
+        {
+            s.fail_next_write = inject;
+        }
+        Ok(s)
     }
 
     /// Like [`create`], but O_EXCL: fails when the path already exists and
@@ -130,6 +152,8 @@ impl WavStream {
             samples: 0,
             sample_rate,
             patched_at: 0,
+            #[cfg(test)]
+            fail_next_write: false,
         })
     }
 
@@ -144,6 +168,11 @@ impl WavStream {
     /// file valid and complete, and callers must not treat it as damage.
     #[inline]
     pub fn write_sample(&mut self, s: f32) -> io::Result<bool> {
+        #[cfg(test)]
+        if self.fail_next_write {
+            self.fail_next_write = false;
+            return Err(io::Error::other("injected disk-full write failure"));
+        }
         if self.samples >= MAX_F32_SAMPLES {
             return Ok(false);
         }

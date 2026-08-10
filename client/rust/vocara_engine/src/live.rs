@@ -5,7 +5,7 @@
 
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{fence, AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::command::{command_channel, CommandReceiver, CommandSender};
@@ -132,11 +132,14 @@ impl Shared {
     fn push_segment(&self, r_start: u64, r_end: u64, tl_end: i64) {
         let slot = (self.seg_head.load(Ordering::Relaxed) as usize) % SEG_RING;
         let seg = &self.segments[slot];
-        seg.ver.fetch_add(1, Ordering::Release); // odd: write in progress
+        // ACQUIRE on the begin-write bump: the data stores below must not become
+        // visible before the version turns odd (Release would only order what came
+        // BEFORE the bump, letting a reader see new fields under an even version).
+        seg.ver.fetch_add(1, Ordering::Acquire); // odd: write in progress
         seg.r_start.store(r_start, Ordering::Relaxed);
         seg.r_end.store(r_end, Ordering::Relaxed);
         seg.tl_end.store(tl_end, Ordering::Relaxed);
-        seg.ver.fetch_add(1, Ordering::Release); // even: consistent
+        seg.ver.fetch_add(1, Ordering::Release); // even: consistent (publishes the data)
         self.seg_head.fetch_add(1, Ordering::Release);
     }
 
@@ -160,7 +163,12 @@ impl Shared {
                 let r_start = seg.r_start.load(Ordering::Relaxed);
                 let r_end = seg.r_end.load(Ordering::Relaxed);
                 let tl_end = seg.tl_end.load(Ordering::Relaxed);
-                let v2 = seg.ver.load(Ordering::Acquire);
+                // ACQUIRE fence before the validating recheck: the data loads above
+                // must be satisfied before v2 is read (v1's acquire only orders them
+                // AFTER v1), or a slot overwritten between the loads could pass
+                // v1 == v2 with fields mixed from writes SEG_RING pushes apart.
+                fence(Ordering::Acquire);
+                let v2 = seg.ver.load(Ordering::Relaxed);
                 if v1 != v2 {
                     continue;
                 }
@@ -988,5 +996,62 @@ mod rt_cell_guard_tests {
             blocks,
             "and must not have entered the processor at all"
         );
+    }
+}
+
+#[cfg(test)]
+mod segment_ring_tests {
+    //! The segment ring's seqlock under concurrent overwrite. An accepted torn slot
+    //! (fields mixed from two writes SEG_RING pushes apart) brackets the consumed
+    //! cursor with a stale timeline end, so `map_consumed` — the playhead and
+    //! `pause`'s clock fold — would return a position seconds away from what was
+    //! actually heard.
+
+    use super::{Shared, SEG_RING};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    /// The writer pushes contiguous spans whose timeline equals rendered space
+    /// (`tl_end == r_end`), so every CONSISTENT read maps the cursor either exactly
+    /// (in-span) or to a span end (hold) — a multiple of `SPAN`. The cursor is parked
+    /// mid-span just ahead of the slot being overwritten, where only a torn accept
+    /// (old `r_start`/`tl_end` under a new `r_end`) can produce anything else.
+    #[test]
+    fn concurrent_overwrite_never_yields_a_torn_mapping() {
+        const SPAN: u64 = 1_000;
+        let sh = Arc::new(Shared::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer = {
+            let sh = Arc::clone(&sh);
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                let mut k: u64 = 0;
+                while !stop.load(Ordering::Relaxed) {
+                    sh.push_segment(k * SPAN, (k + 1) * SPAN, ((k + 1) * SPAN) as i64);
+                    k += 1;
+                }
+            })
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            let head = sh.seg_head.load(Ordering::Acquire) as u64;
+            if head < SEG_RING as u64 + 8 {
+                continue;
+            }
+            // Three spans ahead of the slot under overwrite in scan order: a torn
+            // slot is then checked before the span that consistently holds the
+            // cursor, so a bad accept cannot hide behind the good one.
+            let k = head - SEG_RING as u64 + 3;
+            let consumed = k * SPAN + SPAN / 2; // mid-span: never a span end
+            sh.consumed_total.store(consumed, Ordering::Release);
+            if let Some(tl) = sh.map_consumed() {
+                assert!(
+                    tl == consumed as i64 || tl % SPAN as i64 == 0,
+                    "torn segment accepted: consumed={consumed} mapped to tl={tl}"
+                );
+            }
+        }
+        stop.store(true, Ordering::Release);
+        writer.join().unwrap();
     }
 }

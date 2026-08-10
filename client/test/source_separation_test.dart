@@ -122,6 +122,13 @@ void main() {
     // Stub bodies: block until killed / write valid stems and succeed.
     // `exec` replaces bash so the kill signal reaches sleep directly.
     const sleepBody = 'exec sleep 300';
+    // Models a torch sidecar in a long compute call: SIGTERM is ignored
+    // (the disposition survives exec), only SIGKILL ends it. Records its PID
+    // so tests can watch the process itself, not just the run's verdict.
+    const stubbornBody =
+        'trap "" TERM\n'
+        'echo \$\$ >> "\$dir/pids"\n'
+        'exec sleep 300';
     const successBody = '''
 inst=""; voc=""
 while [ \$# -gt 0 ]; do
@@ -261,6 +268,49 @@ exit 0''';
       SeparationQuitGuard.instance.killAll();
       expect(await sep, isA<SeparationCancelled>());
     });
+
+    test(
+      "the quit sweep reaches a superseded run's still-alive sidecar",
+      () async {
+        // separate() hands the registration to run B BEFORE waiting run A
+        // out, so at quit the registered run has no process yet while A's
+        // SIGTERM-ignoring sidecar is still alive — protected only by a 3 s
+        // escalation timer that dies with the exiting app. The kill sweep
+        // must reach EVERY live sidecar, not just the registered run's.
+        final stub = await writeStub(stubbornBody);
+        final svc = buildService(stub);
+        final src = await writeSource();
+
+        final pids = File(p.join(root.path, 'pids'));
+        final sepA = outcome(svc.separate(src));
+        await waitFor(
+          () => pids.existsSync() && pids.readAsLinesSync().isNotEmpty,
+          'run A sidecar start',
+        );
+        final pidA = int.parse(pids.readAsLinesSync().last);
+
+        // Run B supersedes A: it takes the registration and SIGTERMs A —
+        // which A ignores — then parks awaiting A's wind-down.
+        final sepB = outcome(svc.separate(src));
+        SeparationQuitGuard.instance.killAll();
+
+        // A must die from the sweep's own SIGKILL — well before the 3 s
+        // escalation timer (which the real quit never lives to run) fires.
+        final deadline = DateTime.now().add(const Duration(seconds: 2));
+        while (Process.runSync('kill', ['-0', '$pidA']).exitCode == 0) {
+          if (DateTime.now().isAfter(deadline)) {
+            // Clean up so a failed run doesn't leak the 5-minute sleeper.
+            Process.runSync('kill', ['-9', '$pidA']);
+            fail('superseded sidecar survived the quit kill sweep');
+          }
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+        }
+
+        expect(await sepA, isA<SeparationCancelled>());
+        expect(await sepB, isA<SeparationCancelled>());
+        expect(starts(), 1, reason: 'no sidecar may be spawned while quitting');
+      },
+    );
 
     test('a quit during the hashing phase never spawns a sidecar', () async {
       // Regression: at quit there is no process left to run the

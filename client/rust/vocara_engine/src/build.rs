@@ -211,8 +211,11 @@ pub struct TrackSpec {
     /// `source → chain[0] → … → gain` in this order; only listed inserts exist.
     pub chain: Vec<u8>,
     /// Post-fader aux sends: (target bus index, linear level). Each taps the
-    /// fader output into a bus, independent of the main output routing.
-    pub sends: Vec<(NodeId, f32)>,
+    /// fader output into a bus, independent of the main output routing. The
+    /// control plane addresses send nodes by SLOT (`track_send_id(id, slot)`),
+    /// so a send whose target is unresolvable stays in its slot as `None` —
+    /// dropping it would renumber every later sibling under the caller.
+    pub sends: Vec<Option<(NodeId, f32)>>,
     /// Optional gain-reduction meter the vocal compressor publishes to (for a UI meter).
     pub comp_meter: Option<std::sync::Arc<std::sync::atomic::AtomicU32>>,
 }
@@ -260,8 +263,9 @@ pub struct BusSpec {
     pub output: Option<NodeId>,
     /// Insert-chain order (`FxKind` tags), like [`TrackSpec::chain`].
     pub chain: Vec<u8>,
-    /// Post-fader aux sends: (target bus index, linear level).
-    pub sends: Vec<(NodeId, f32)>,
+    /// Post-fader aux sends: (target bus index, linear level). Slot-stable
+    /// like [`TrackSpec::sends`]: an unresolvable send keeps its slot as `None`.
+    pub sends: Vec<Option<(NodeId, f32)>>,
     pub comp_meter: Option<std::sync::Arc<std::sync::atomic::AtomicU32>>,
 }
 
@@ -338,8 +342,13 @@ pub fn build(spec: ProjectSpec) -> GraphDesc {
         ));
         edges.push(Edge::simple(gain, bus_send));
         edges.push(Edge::simple(bus_send, REVERB_ID));
-        // Post-fader aux sends from this bus into other buses.
-        for (i, &(target, level)) in b.sends.iter().enumerate() {
+        // Post-fader aux sends from this bus into other buses. Node ids come
+        // from the MODEL slot, so an unresolvable slot is skipped WITHOUT
+        // renumbering its siblings (the control plane addresses by slot).
+        for (i, send) in b.sends.iter().enumerate() {
+            let Some((target, level)) = *send else {
+                continue;
+            };
             let s = bus_aux_send_id(b.id, i);
             nodes.push(NodeEntry::new(s, Box::new(MasterNode::new(level, false))));
             edges.push(Edge::simple(gain, s));
@@ -385,8 +394,14 @@ pub fn build(spec: ProjectSpec) -> GraphDesc {
             edges.push(Edge::simple(src, gain));
             edges.push(Edge::simple(gain, pan));
         }
-        // Post-fader aux sends: tap the fader output into target buses.
-        for (i, &(target, level)) in t.sends.iter().enumerate() {
+        // Post-fader aux sends: tap the fader output into target buses. Node
+        // ids come from the MODEL slot, so an unresolvable slot is skipped
+        // WITHOUT renumbering its siblings (the control plane addresses by
+        // slot).
+        for (i, send) in t.sends.iter().enumerate() {
+            let Some((target, level)) = *send else {
+                continue;
+            };
             let s = track_send_id(tid, i);
             nodes.push(NodeEntry::new(s, Box::new(MasterNode::new(level, false))));
             edges.push(Edge::simple(gain, s));

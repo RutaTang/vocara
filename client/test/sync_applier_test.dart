@@ -7,6 +7,7 @@ import 'package:vocara/data/sync/integrity_checker.dart';
 import 'package:vocara/data/sync/quarantine_store.dart';
 import 'package:vocara/data/sync/sync_applier.dart';
 import 'package:vocara/data/sync/sync_row.dart';
+import 'package:vocara/data/sync/sync_state_store.dart';
 import 'package:vocara/data/sync/sync_writer.dart';
 
 String _id(String s) => s.padRight(26, '0').substring(0, 26);
@@ -140,26 +141,31 @@ void main() {
     },
   );
 
-  RemoteRecord clip(String id, String trackId, String assetId, Hlc h) =>
-      RemoteRecord(
-        table: 'clips',
-        columns: {
-          'id': _id(id),
-          'track_id': _id(trackId),
-          'asset_id': _id(assetId),
-          'start_ms': 0,
-          'duration_ms': 0,
-          'order_index': 0,
-          'created_at': h.wallMs,
-          'updated_at': h.wallMs,
-          'deleted_at': null,
-          'hlc_wall': h.wallMs,
-          'hlc_ctr': h.counter,
-          'hlc_node': h.node,
-          'hlc_packed': h.packed,
-          'schema_v': 1,
-        },
-      );
+  RemoteRecord clip(
+    String id,
+    String trackId,
+    String assetId,
+    Hlc h, {
+    int durationMs = 0,
+  }) => RemoteRecord(
+    table: 'clips',
+    columns: {
+      'id': _id(id),
+      'track_id': _id(trackId),
+      'asset_id': _id(assetId),
+      'start_ms': 0,
+      'duration_ms': durationMs,
+      'order_index': 0,
+      'created_at': h.wallMs,
+      'updated_at': h.wallMs,
+      'deleted_at': null,
+      'hlc_wall': h.wallMs,
+      'hlc_ctr': h.counter,
+      'hlc_node': h.node,
+      'hlc_packed': h.packed,
+      'schema_v': 1,
+    },
+  );
 
   Future<Map<String, Object?>?> row(String id) async {
     final r = await db
@@ -603,6 +609,79 @@ void main() {
       );
     });
 
+    test('a door-parked record (schema_v newer than this build) still advances '
+        'the clock AND the durable high-water mark, so a later local edit can '
+        'never stamp below the parked record', () async {
+      final store = QuarantineStore(db);
+      applier = SyncApplier(
+        db,
+        HlcClock(node: _id('LOCAL'), now: () => 1000),
+        builder: SyncRowBuilder(db),
+        quarantine: store,
+      );
+      // Plausible (one minute ahead, within drift) and from a newer build:
+      // the schema gate parks it, and the replay lands it after the app
+      // upgrade — the DESIGNED path for a mixed-version fleet. A local
+      // edit stamped below h would then be silently reverted by that
+      // replay under LWW.
+      final h = hlc(1000 + 60 * 1000);
+      final res = await applier.apply([
+        RemoteRecord(
+          table: 'practices',
+          columns: {
+            ...practice('P', 'from a newer build', h).columns,
+            'schema_v': currentRecordSchemaV + 1,
+          },
+        ),
+      ]);
+      expect(res.committed, isTrue);
+      expect(res.failed, 1);
+      expect((await store.list()).single.remoteHlcPacked, h.packed);
+
+      // In-memory: the very next local stamp is causally after the parked
+      // record.
+      expect(
+        applier.clock.tick() > h,
+        isTrue,
+        reason: 'a local edit must out-rank the parked record',
+      );
+      // Durable: the mark survives a restart even though no table row
+      // carries the parked stamp for the boot seed to find.
+      expect(
+        await SyncStateStore(db).hlcHighWater(),
+        h.packed,
+        reason: 'the parked stamp must reach the durable high-water mark',
+      );
+    });
+
+    test('a door park with an IMPLAUSIBLE stamp still leaves the clock alone '
+        '(the drift discipline holds at every gate)', () async {
+      final store = QuarantineStore(db);
+      applier = SyncApplier(
+        db,
+        HlcClock(node: _id('LOCAL'), now: () => 1000),
+        builder: SyncRowBuilder(db),
+        quarantine: store,
+      );
+      final before = applier.clock.last;
+      // Far-future AND mistyped: the value gate parks it before the drift
+      // gate ever runs, but its suspect stamp must not ratchet anything.
+      final h = hlc(1000 + 6 * 60 * 1000);
+      final res = await applier.apply([
+        RemoteRecord(
+          table: 'practices',
+          columns: {
+            ...practice('P', 'poison', h).columns,
+            'master_volume': 'loud',
+          },
+        ),
+      ]);
+      expect(res.failed, 1);
+      expect((await store.list()).single.reason, startsWith('invalid-value'));
+      expect(applier.clock.last, before);
+      expect(await SyncStateStore(db).hlcHighWater(), isNull);
+    });
+
     test('the post-commit advance survives a wall-clock rollback between the '
         'drift gate and the commit: the run must not report failure for a '
         'page that is already durable', () async {
@@ -748,6 +827,73 @@ void main() {
       final replayable = SyncRow.decode(parkedChild.payload);
       expect(replayable.table, 'tracks');
       expect(replayable.fields, equals(child.columns));
+    });
+
+    test('a CHECK-violating payload parks under the unreplayable invalid-value '
+        'class, not as a replayable apply-failed', () async {
+      final h = hlc(1000 + 60 * 1000);
+      final res = await applier.apply([
+        RemoteRecord(
+          table: 'assets',
+          columns: {
+            'id': _id('BAD'),
+            'content_hash': 'HASH_BAD',
+            'byte_size': -1, // CHECK (byte_size >= 0) fires in the savepoint
+            'ext': 'wav',
+            'kind': 'audio',
+            'created_at': h.wallMs,
+            'updated_at': h.wallMs,
+            'deleted_at': null,
+            'hlc_wall': h.wallMs,
+            'hlc_ctr': h.counter,
+            'hlc_node': h.node,
+            'hlc_packed': h.packed,
+            'schema_v': 1,
+          },
+        ),
+      ]);
+      expect(res.failed, 1);
+      final parked = await store.list();
+      expect(parked, hasLength(1));
+      expect(
+        parked.single.reason,
+        startsWith('invalid-value:'),
+        reason:
+            'a constraint verdict is a pure function of the payload — its '
+            'replay re-parks forever, so it must not sit in a replayable '
+            'class where it can displace the FK sweep\'s only copy of a row',
+      );
+    });
+
+    test('a CHECK-violating newer state cannot void the FK sweep\'s park — the '
+        'row\'s only surviving copy', () async {
+      // The audited black hole: an honest clip C@H1 (asset not yet
+      // delivered) plus a CHECK-violating update C@H2 in one page. H2 fails
+      // its savepoint and parks; the end-of-batch FK sweep then parks and
+      // deletes C@H1. The sweep's park must WIN retention — it holds the
+      // only copy of applied data, while H2 can never re-apply anywhere.
+      final h1 = hlc(910);
+      final res = await applier.apply([
+        practice('P', 'kept', hlc(900)),
+        track('T', 'P', hlc(905)),
+        clip('C', 'T', 'NOASSET', h1),
+        clip('C', 'T', 'NOASSET', hlc(920), durationMs: -1),
+      ]);
+      expect(res.failed, greaterThanOrEqualTo(1));
+      final parked = await store.list();
+      final c = parked.singleWhere((p) => p.id == _id('C'));
+      expect(
+        c.reason,
+        startsWith('fk-orphan'),
+        reason:
+            'the fk-orphan park is the only copy of the applied row; a '
+            'permanently-unreplayable newer state must not hold the slot',
+      );
+      expect(
+        c.remoteHlcPacked,
+        h1.packed,
+        reason: 'the preserved state must be the applied H1 content',
+      );
     });
 
     test(
@@ -2137,6 +2283,55 @@ void main() {
         expect(r.data['hlc_packed'], future.packed);
       },
     );
+
+    test('a permanently-unreplayable newer record cannot void the FK sweep '
+        'park: P@950 applies, P@960 is parked at the value gate, the sweep '
+        'still parks (and later replays) the honest P@950', () async {
+      final honest = hlc(950);
+      final garbage = hlc(960);
+      final res = await applier.apply([
+        // Applies first, into a missing asset parent (locally never seen).
+        practice('P', 'honest', honest, separationAssetId: 'A'),
+        // A newer state from a non-conforming writer: lyrics_json is valid
+        // JSON of the wrong shape, parked at the value gate — a payload the
+        // replay's identical gate re-rejects every cycle, forever.
+        RemoteRecord(
+          table: 'practices',
+          columns: {
+            ...practice('P', 'garbage', garbage).columns,
+            'lyrics_json': '{}',
+          },
+        ),
+      ]);
+      expect(res.committed, isTrue);
+      expect(res.failed, 2); // the parked garbage and the swept honest row
+      expect(await row('P'), isNull, reason: 'the sweep deleted the row');
+
+      // The sweep's park ran LAST with the OLDER stamp. Under plain
+      // newest-stamp retention the dead P@960 held the slot and the honest
+      // P@950 — the only surviving copy of a row the change token is
+      // already past — was silently dropped with the DELETE. The store's
+      // replay-class retention keeps the replayable state instead.
+      final parked = await store.list();
+      expect(parked, hasLength(1));
+      expect(parked.single.remoteHlcPacked, honest.packed);
+      expect(parked.single.reason, startsWith('fk-orphan'));
+      final snapshot = SyncRow.decode(parked.single.payload);
+      expect(snapshot.fields['title'], 'honest');
+
+      // The parent lands: the replayed park restores the honest row.
+      await applier.apply([assetRecord('A', hlc(955))]);
+      final replay = await applier.apply([snapshot]);
+      expect(replay.applied, 1);
+      final r = await db
+          .customSelect(
+            'SELECT title, hlc_packed FROM practices WHERE id = ?',
+            variables: [Variable.withString(_id('P'))],
+          )
+          .getSingle();
+      expect(r.data['title'], 'honest');
+      expect(r.data['hlc_packed'], honest.packed);
+    });
   });
 
   group('derived-node stamps (bookkeeping can never revert a held-wall '

@@ -62,6 +62,40 @@ class _ConflictWithoutServerRow implements PushRowResult {
   bool get accepted => false;
 }
 
+/// A NON-conforming transport for the pull loop's rows-bearing refuse-to-spin
+/// guard: it serves the same rows-bearing page with hasMore set and, once a
+/// token exists, never advances it — the violation sync_transport.dart's
+/// token contract forbids ("a transport must advance the token whenever it
+/// returns rows"). Fetches are BOUNDED so an engine that does spin fails the
+/// test on the fetch count instead of hanging it.
+class _StuckTokenTransport implements SyncTransport {
+  _StuckTokenTransport(this.rows);
+
+  final List<SyncRow> rows;
+  int fetchCalls = 0;
+
+  @override
+  Future<FetchPage> fetchChanges(String? sinceToken) async {
+    fetchCalls++;
+    if (fetchCalls > 4) {
+      throw SyncTransportException('spun: the engine kept refetching');
+    }
+    return FetchPage(rows: rows, nextToken: sinceToken ?? 'T0', hasMore: true);
+  }
+
+  @override
+  Future<PushAck> pushRows(List<SyncRow> rows) async =>
+      PushAck([for (final r in rows) PushRowResult.accepted(r)]);
+
+  @override
+  Future<void> pushAssetBytes(String contentHash, String filePath) =>
+      throw UnimplementedError();
+
+  @override
+  Future<void> fetchAssetBytes(String contentHash, String destPath) =>
+      throw UnimplementedError();
+}
+
 void main() {
   // A fixed epoch anchor: every stamp in these tests is derived from it, so
   // nothing depends on the machine's wall clock.
@@ -906,6 +940,46 @@ void main() {
       expect(await state.changeToken(), '1');
       expect(await oplogCount(), 0);
       expect(events, hasLength(1), reason: 'a no-op page announces nothing');
+    });
+
+    test('a rows-bearing page with an UNMOVED token and hasMore fails the run '
+        'loudly instead of spinning forever (the rows-bearing analogue of the '
+        'empty branch\'s refuse-to-spin guard)', () async {
+      final stuck = _StuckTokenTransport([
+        remotePractice('P', 'served forever', remoteHlc(t0 - 1000)),
+      ]);
+      engine.dispose();
+      engine = SyncEngine(
+        db: db,
+        applier: SyncApplier(
+          db,
+          clock,
+          builder: SyncRowBuilder(db),
+          quarantine: quarantine,
+        ),
+        drain: OplogDrain(db),
+        builder: SyncRowBuilder(db),
+        state: state,
+        integrity: IntegrityChecker(db, writer),
+        transport: stuck,
+        onRemoteApplied: events.add,
+      );
+
+      final run = await engine.pumpPull();
+      // The first delivery landed normally (null token cannot be "unmoved");
+      // the second returned the identical page with the token pinned. An
+      // unguarded loop refetched it forever: every record a clean LWW skip,
+      // hasMore true, no failure surfaced — sync (and every push queued
+      // behind the engine's serialization) silently wedged in-process.
+      expect(run.failed, isTrue, reason: 'the violation must surface');
+      expect('${run.failure}', contains('transport violation'));
+      expect(
+        stuck.fetchCalls,
+        2,
+        reason: 'stop at the first unmoved token — no spin',
+      );
+      expect(run.applied, 1);
+      expect(await practiceTitle('P'), 'served forever');
     });
 
     test(
