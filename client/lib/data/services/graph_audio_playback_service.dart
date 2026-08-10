@@ -312,7 +312,7 @@ Future<PcmAudio?> decodeMediaToMono(
 /// only rebuilds when the file set changes. Volume / mute / the A-B toggle are instant
 /// per-track gain changes. The playhead is read from the engine's atomic frame counter.
 class GraphAudioPlaybackService implements PlaybackEngine {
-  GraphAudioPlaybackService() {
+  GraphAudioPlaybackService() : _decode = _decodeInIsolate {
     _bindings = VocaraEngineBindings(_openVocaraLibrary());
     _engine = _bindings.ve_create();
     _available = _engine != ffi.nullptr;
@@ -321,7 +321,25 @@ class GraphAudioPlaybackService implements PlaybackEngine {
     }
   }
 
+  /// Test-only: drive the sync pipeline against injected [bindings] and an
+  /// injected staging [decode], so its skip/degraded/retry policies are
+  /// exercisable without the native engine or real media files. The engine
+  /// pointer is a dummy the fake bindings must never dereference.
+  @visibleForTesting
+  GraphAudioPlaybackService.withBindings(
+    VocaraEngineBindings bindings, {
+    Future<(int, int)> Function(String path, int rate)? decode,
+  }) : _decode = decode ?? _decodeInIsolate {
+    _bindings = bindings;
+    _engine = ffi.Pointer<VeEngine>.fromAddress(0x1);
+    _available = true;
+    _sampleRate = _bindings.ve_sample_rate(_engine);
+  }
+
   late final VocaraEngineBindings _bindings;
+
+  /// The staging decode ([_decodeInIsolate] in production; injectable in tests).
+  final Future<(int, int)> Function(String path, int rate) _decode;
   ffi.Pointer<VeEngine> _engine = ffi.nullptr;
   bool _available = false;
   double _sampleRate = 48000.0;
@@ -792,14 +810,26 @@ class GraphAudioPlaybackService implements PlaybackEngine {
     final newIndex = <String, int>{};
     for (final t in tracks) {
       final busIdx = t.busId != null ? (newBusIndex[t.busId] ?? -1) : -1;
-      final idx = await _stageTrack(t, busIdx);
+      // A track that fails to stage (idx < 0, e.g. a gone/corrupt file) is simply
+      // left out of the graph this round; the commit still succeeds for the rest and
+      // the skipped track restages on the next topology change (see _committedSig below).
+      // The decode refusals (unreadable file, unsupported rate, over-cap media)
+      // surface as typed exceptions from the isolate and mean exactly "skip this
+      // track"; anything else is a programming error and must escape.
+      int idx;
+      try {
+        idx = await _stageTrack(t, busIdx);
+      } on MediaUnsupportedException catch (e) {
+        DiagnosticsLog.instance.log('engine', 'skip unstageable track: $e');
+        idx = -1;
+      } on MediaTooLongException catch (e) {
+        DiagnosticsLog.instance.log('engine', 'skip unstageable track: $e');
+        idx = -1;
+      }
       if (idx >= 0) {
         newIndex[t.id] = idx;
         _pushSends(idx, t.sends, newBusIndex, bus: false);
       }
-      // A track that fails to stage (idx < 0, e.g. a gone/corrupt file) is simply
-      // left out of the graph this round; the commit still succeeds for the rest and
-      // the skipped track restages on the next topology change (see _committedSig below).
     }
     // A non-zero return means the engine REJECTED this topology (e.g. a routing
     // cycle) and kept the OLD graph. Don't record it as committed or swap the
@@ -904,7 +934,7 @@ class GraphAudioPlaybackService implements PlaybackEngine {
     } finally {
       malloc.free(cachedPath);
     }
-    final (addr, frames) = await _decodeInIsolate(t.path, _sampleRate.round());
+    final (addr, frames) = await _decode(t.path, _sampleRate.round());
     if (addr == 0 || frames == 0) return -1;
     final ptr = ffi.Pointer<ffi.Float>.fromAddress(addr);
     final cpath = t.path.toNativeUtf8();
