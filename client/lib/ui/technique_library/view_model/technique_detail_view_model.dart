@@ -1164,6 +1164,11 @@ class TechniqueDetailViewModel extends ChangeNotifier
     try {
       // Fold the staged media into the technique being saved.
       final media = effectiveMedia;
+      // A successful commit re-reads the aggregate with every media file
+      // resolved through the asset pool, so a clip staged from the sandbox
+      // comes back under a DIFFERENT path. Remember each clip's pre-commit
+      // path by id (ids are stable across the commit) for the remap below.
+      final oldPathById = {for (final m in media) m.id: m.path};
       // Files of examples staged for removal — delete only after the technique
       // without them persists.
       final removedPaths = <String>[
@@ -1190,6 +1195,10 @@ class TechniqueDetailViewModel extends ChangeNotifier
         _draftAdds.clear();
         _draftRemoves.clear();
         _draftLabels.clear();
+        // Selection and the analysis caches key on paths the commit just
+        // rewrote to pool paths; carry them onto the persisted aggregate so
+        // the shown example doesn't silently jump to the first one.
+        _remapMediaAfterCommit(oldPathById);
       }
       return ok;
     } finally {
@@ -1335,6 +1344,33 @@ class TechniqueDetailViewModel extends ChangeNotifier
     if (_saving) return;
     _draftLabels[mediaId] = label.trim();
     notifyListeners();
+  }
+
+  /// Carries the path-keyed state (selection, reference-analysis cache and
+  /// failure latches) across a successful commit. The commit re-reads the
+  /// aggregate with every media file resolved through the asset pool, so a
+  /// clip staged from the sandbox comes back under a different path while its
+  /// id stays stable; without the remap the selection falls back to the first
+  /// example and the just-computed analysis is orphaned under the old path.
+  /// [oldPathById] maps each committed clip's id to its pre-commit path.
+  /// [_loadingPaths] is deliberately left alone: an in-flight analysis keys
+  /// its own completion (cache write + loading clear) on the old path.
+  void _remapMediaAfterCommit(Map<String, String> oldPathById) {
+    for (final m in _technique?.media ?? const <TechniqueMedia>[]) {
+      final old = oldPathById[m.id];
+      if (old == null || old == m.path) continue;
+      final cached = _refCache.remove(old);
+      if (cached != null) _refCache[m.path] = cached;
+      // The pool copy is byte-identical to the staged file, so a latched
+      // failure verdict transfers — recomputing it is doomed.
+      if (_refFailed.remove(old)) _refFailed.add(m.path);
+      final message = _refFailedMessage.remove(old);
+      if (message != null) _refFailedMessage[m.path] = message;
+      if (_selectedExamplePath == old) _selectedExamplePath = m.path;
+    }
+    // Re-normalize like every other media-mutating path (e.g. the selected
+    // example was staged for removal by this very save).
+    _fixSelectionAfterMediaChange();
   }
 
   /// Re-selects a valid example after the current one was removed.
