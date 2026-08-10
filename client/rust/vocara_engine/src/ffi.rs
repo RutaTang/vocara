@@ -802,11 +802,25 @@ pub extern "C" fn ve_stop_monitor(e: *mut VeEngine) -> c_int {
     })
 }
 
+/// Arm the analysis capture. A NEW session starts from an EMPTY ring: the Dart
+/// pull timer is cancelled before stopCapture, stranding the previous session's
+/// tail (up to a full ring) — which the next session's first pull would render
+/// as live input (the recording ring sweeps its stale frames; same class).
+/// Draining while inactive cannot race the producer: the input callback only
+/// pushes while `cap_active` is set. A start DURING a session keeps the ring —
+/// those frames are live, not stale.
+fn arm_capture(cap_active: &AtomicBool, cap_cons: &mut Consumer<[Smp; CHANNELS]>) {
+    if !cap_active.load(Ordering::Acquire) {
+        while cap_cons.pop().is_some() {}
+    }
+    cap_active.store(true, Ordering::Release);
+}
+
 /// Begin capturing input frames for analysis (`ve_input_frames`); opens the input stream. 0 = ok.
 #[no_mangle]
 pub extern "C" fn ve_start_capture(e: *mut VeEngine) -> c_int {
     with_engine(e, -1, |eng| {
-        eng.cap_active.store(true, Ordering::Release);
+        arm_capture(&eng.cap_active, &mut eng.cap_cons);
         sync_input(eng);
         0
     })
@@ -2848,6 +2862,51 @@ mod cache_tests {
         assert!(
             cache_lookup_fresh(&mut cache, p, 6).is_some(),
             "an unreadable source file must not invalidate the cache"
+        );
+    }
+}
+
+#[cfg(test)]
+mod capture_ring_tests {
+    //! The capture ring's session boundary. Both Dart stop paths cancel the
+    //! 30 ms pull timer BEFORE stopCapture, so the frames pushed since the
+    //! last tick stay in the ring across sessions — and the next session's
+    //! first pull would render the PREVIOUS session's tail as live input.
+    //! The recording ring sweeps its stale frames; the capture ring must too.
+
+    use super::arm_capture;
+    use crate::ring::spsc;
+    use crate::sample::{Smp, CHANNELS};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn a_new_capture_session_starts_from_an_empty_ring() {
+        let (mut prod, mut cons) = spsc::<[Smp; CHANNELS]>(64);
+        for _ in 0..5 {
+            assert!(prod.push([0.3, -0.3])); // the previous session's tail
+        }
+        let active = AtomicBool::new(false);
+        arm_capture(&active, &mut cons);
+        assert!(active.load(Ordering::Acquire));
+        assert!(
+            cons.pop().is_none(),
+            "stale frames must not leak into a new session"
+        );
+        // Frames captured AFTER the start flow normally.
+        assert!(prod.push([0.7, -0.7]));
+        assert_eq!(cons.pop(), Some([0.7, -0.7]));
+    }
+
+    #[test]
+    fn a_redundant_start_keeps_a_live_session_frames() {
+        let (mut prod, mut cons) = spsc::<[Smp; CHANNELS]>(64);
+        let active = AtomicBool::new(true); // already mid-session
+        assert!(prod.push([0.4, -0.4]));
+        arm_capture(&active, &mut cons);
+        assert_eq!(
+            cons.pop(),
+            Some([0.4, -0.4]),
+            "a start while capturing must not drop live audio"
         );
     }
 }
