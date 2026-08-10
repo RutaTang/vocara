@@ -1369,6 +1369,28 @@ pub extern "C" fn ve_tracks_add(
     .unwrap_or(-1)
 }
 
+/// Maps staged aux sends (target bus index, level dB) to slot-stable build
+/// sends: a target outside [0, bus_count) — or equal to `own_bus` for a bus's
+/// own sends — keeps its SLOT as `None` instead of being dropped. The control
+/// plane addresses send nodes by MODEL slot (`ve_set_send_level` /
+/// `ve_set_bus_send_level`), so dropping an entry would shift every later
+/// sibling onto the wrong node: the level meant for one send would land on
+/// another, and the last knob would go inert. A dangling send is representable
+/// in persisted data (a missing busId parses to an unresolvable target).
+fn stage_sends(
+    sends: &[(i32, f32)],
+    bus_count: i32,
+    own_bus: Option<i32>,
+) -> Vec<Option<(u32, f32)>> {
+    sends
+        .iter()
+        .map(|&(t, db)| {
+            (t >= 0 && t < bus_count && Some(t) != own_bus)
+                .then(|| (t as u32, crate::sample::db_to_lin(db)))
+        })
+        .collect()
+}
+
 /// Build the multi-source graph from the staged tracks and hot-swap it in (transport state
 /// preserved). Each track: Source(@start) -> Gain -> Pan -> Master. Returns 0 / negative.
 #[no_mangle]
@@ -1399,13 +1421,9 @@ pub extern "C" fn ve_tracks_commit(e: *mut VeEngine) -> c_int {
             } else {
                 pb.chain.clone()
             };
-            // Valid sends to other buses (never to self), level dB → linear.
-            let sends: Vec<(u32, f32)> = pb
-                .sends
-                .iter()
-                .filter(|(t, _)| *t >= 0 && *t < bus_count && *t != i as i32)
-                .map(|&(t, db)| (t as u32, crate::sample::db_to_lin(db)))
-                .collect();
+            // Valid sends to other buses (never to self), level dB → linear;
+            // unresolvable targets hold their slot (see stage_sends).
+            let sends = stage_sends(&pb.sends, bus_count, Some(i as i32));
             bus_specs.push(BusSpec {
                 id: i as u32,
                 gain: if pb.muted { 0.0 } else { pb.gain },
@@ -1441,13 +1459,10 @@ pub extern "C" fn ve_tracks_commit(e: *mut VeEngine) -> c_int {
             } else {
                 pt.chain.clone()
             };
-            // Vocal sends to valid buses, level dB → linear (backing has none).
-            let sends: Vec<(u32, f32)> = if pt.vocal {
-                pt.sends
-                    .iter()
-                    .filter(|(t, _)| *t >= 0 && *t < bus_count)
-                    .map(|&(t, db)| (t as u32, crate::sample::db_to_lin(db)))
-                    .collect()
+            // Vocal sends to valid buses, level dB → linear (backing has
+            // none); unresolvable targets hold their slot (see stage_sends).
+            let sends = if pt.vocal {
+                stage_sends(&pt.sends, bus_count, None)
             } else {
                 Vec::new()
             };
@@ -2863,6 +2878,43 @@ mod cache_tests {
             cache_lookup_fresh(&mut cache, p, 6).is_some(),
             "an unreadable source file must not invalidate the cache"
         );
+    }
+}
+
+#[cfg(test)]
+mod send_slot_tests {
+    //! Staged aux sends keep their MODEL slot across unresolvable targets:
+    //! the control plane addresses send nodes by slot, so filtering here
+    //! would shift sibling levels onto the wrong nodes (see [`stage_sends`]).
+    //!
+    //! [`stage_sends`]: super::stage_sends
+
+    use super::stage_sends;
+
+    #[test]
+    fn unresolvable_targets_hold_their_slot() {
+        let staged = [(-1, 0.0f32), (1, -12.0f32), (99, -6.0f32)];
+        let sends = stage_sends(&staged, 2, None);
+        assert_eq!(sends.len(), 3, "every model slot is represented");
+        assert!(
+            sends[0].is_none(),
+            "a dangling target maps to an empty slot"
+        );
+        let (t, lin) = sends[1].expect("the valid send keeps slot 1");
+        assert_eq!(t, 1);
+        assert!((lin - crate::sample::db_to_lin(-12.0)).abs() < 1e-6);
+        assert!(
+            sends[2].is_none(),
+            "an out-of-range target maps to an empty slot"
+        );
+    }
+
+    #[test]
+    fn a_bus_self_send_holds_its_slot_too() {
+        let staged = [(0, 0.0f32), (1, 0.0f32)];
+        let sends = stage_sends(&staged, 2, Some(0));
+        assert!(sends[0].is_none(), "a self-send is unresolvable for a bus");
+        assert!(sends[1].is_some(), "the sibling send keeps its slot");
     }
 }
 
