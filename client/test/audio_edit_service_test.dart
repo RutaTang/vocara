@@ -62,6 +62,44 @@ Uint8List _extensibleWavPcm16(Int16List samples, int sr) {
   return b.toBytes();
 }
 
+/// Builds a mono PCM16 WAV whose `fmt ` chunk declares an ODD size (17): the
+/// 16 canonical bytes plus one extension byte, followed by the spec-required
+/// word-alignment pad byte before `data`. The old import gate accepted ANY
+/// uncompressed WAV, so a legacy library can still hold such files.
+Uint8List _oddFmtWavPcm16(Int16List samples, int sr) {
+  final data = Uint8List(samples.length * 2);
+  final dv = ByteData.sublistView(data);
+  for (var i = 0; i < samples.length; i++) {
+    dv.setInt16(i * 2, samples[i], Endian.little);
+  }
+  final b = BytesBuilder();
+  void str(String s) => b.add(s.codeUnits);
+  void u32(int v) =>
+      b.add((ByteData(4)..setUint32(0, v, Endian.little)).buffer.asUint8List());
+  void u16(int v) =>
+      b.add((ByteData(2)..setUint16(0, v, Endian.little)).buffer.asUint8List());
+  const fmtSize = 17;
+  final dataPad = data.length.isOdd ? 1 : 0;
+  str('RIFF');
+  u32(4 + (8 + fmtSize + 1) + (8 + data.length + dataPad));
+  str('WAVE');
+  str('fmt ');
+  u32(fmtSize);
+  u16(1); // PCM
+  u16(1); // channels
+  u32(sr); // sample rate
+  u32(sr * 2); // byte rate
+  u16(2); // block align
+  u16(16); // bits per sample
+  b.addByte(0); // 17th fmt byte (a lone extension byte — size is what matters)
+  b.addByte(0); // word-alignment pad before the next chunk
+  str('data');
+  u32(data.length);
+  b.add(data);
+  if (dataPad == 1) b.addByte(0);
+  return b.toBytes();
+}
+
 /// Builds a canonical RIFF/WAVE file with an arbitrary 16-byte `fmt ` chunk
 /// (tag/channels/rate/blockAlign/bits) and raw [data] — for exercising the
 /// header validation with compressed or lying formats.
@@ -548,6 +586,83 @@ void main() {
       fd.getFloat32(1999 * 4, Endian.little),
       closeTo((1999 / sr) * 2 - 1, 1e-6),
     );
+  });
+
+  test('split outputs of an odd-fmt-size WAV keep RIFF word alignment and '
+      'round-trip through the service\'s own parsers', () async {
+    // The re-emit paths preserve the source's fmt body verbatim. When that
+    // body has an odd length, the RIFF spec requires a pad byte before the
+    // next chunk — without it every later chunk sits at an odd offset, so the
+    // service's own walkers (and symphonia's) never find `data` and the split
+    // silently turns a playable clip into two unreadable files.
+    final dir = await Directory.systemTemp.createTemp('vocara_oddfmt');
+    addTearDown(() => dir.delete(recursive: true));
+
+    const sr = 8000;
+    final samples = Int16List.fromList(List.generate(sr, (i) => i - 4000));
+    final srcPath = '${dir.path}/odd.wav';
+    await File(srcPath).writeAsBytes(_oddFmtWavPcm16(samples, sr));
+
+    final edit = AudioEditService(files: _TempFiles(dir));
+    final parts = await edit.splitWav(
+      practiceId: 'P0000000000000000000000000',
+      sourcePath: srcPath,
+      splitFileMs: 250,
+    );
+
+    for (final path in [parts.firstPath, parts.secondPath]) {
+      final bytes = await File(path).readAsBytes();
+      // RIFF(12) + fmt header(8) + fmt body(17) + pad(1) = 38.
+      expect(
+        String.fromCharCodes(bytes, 38, 42),
+        'data',
+        reason: 'the data id must sit at the word-aligned offset',
+      );
+      expect(
+        readWavMono(bytes),
+        isNotNull,
+        reason: 'an emitted half must re-parse',
+      );
+    }
+    final first = readWavMono(await File(parts.firstPath).readAsBytes())!;
+    expect(first.samples.length, 2000); // 250 ms at 8 kHz
+
+    // Full round-trip: merging the halves re-parses them and the merged file
+    // re-parses in turn, with the audio intact.
+    final merged = await edit.concatWav(
+      practiceId: 'P0000000000000000000000000',
+      firstPath: parts.firstPath,
+      secondPath: parts.secondPath,
+    );
+    final round = readWavMono(await File(merged).readAsBytes());
+    expect(round, isNotNull, reason: 'the merged file must re-parse');
+    expect(round!.samples.length, sr);
+    for (var i = 0; i < sr; i += 137) {
+      expect((round.samples[i] * 32768).round(), samples[i]);
+    }
+  });
+
+  test('trimWavHeadInPlace keeps an odd-fmt-size WAV word-aligned, so the '
+      'trimmed take stays parseable and trimmable', () async {
+    final dir = await Directory.systemTemp.createTemp('vocara_oddfmt_trim');
+    addTearDown(() => dir.delete(recursive: true));
+
+    final samples = Int16List.fromList(List.generate(1000, (i) => i));
+    final path = '${dir.path}/odd.wav';
+    await File(path).writeAsBytes(_oddFmtWavPcm16(samples, 1000));
+
+    await trimWavHeadInPlace(path, 250);
+    final pcm = readWavMono(await File(path).readAsBytes());
+    expect(pcm, isNotNull, reason: 'the re-emitted header must re-parse');
+    expect(pcm!.samples.length, 750);
+    expect((pcm.samples.first * 32768).round(), 250);
+
+    // A second trim parses the first trim's own output.
+    await trimWavHeadInPlace(path, 250);
+    final again = readWavMono(await File(path).readAsBytes());
+    expect(again, isNotNull);
+    expect(again!.samples.length, 500);
+    expect((again.samples.first * 32768).round(), 500);
   });
 
   test('edit outputs land under an edits/ subdirectory, never directly in '
