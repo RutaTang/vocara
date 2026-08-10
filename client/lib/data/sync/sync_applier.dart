@@ -64,7 +64,10 @@ class ApplyResult {
 /// [HlcClock.assertPlausible] (check-only, same drift rule) runs with the
 /// other door gates, and the state-changing [HlcClock.mergeVerified] calls
 /// run only AFTER the batch's outer transaction has committed, for the
-/// records whose savepoint settled as applied or skipped — a record that
+/// records whose savepoint settled as applied or skipped AND for the
+/// plausible stamps of records the door gates PARKED (see
+/// [_noteParkedStamp]: a parked snapshot stays eligible to win LWW at
+/// replay, so later local writes must stamp above it) — a record that
 /// fails inside its savepoint, and equally a whole batch whose outer commit
 /// fails (an FK-sweep abort, a throwing beforeCommit hook), must leave NO
 /// side effect behind, and an in-memory clock advanced for writes the
@@ -186,12 +189,13 @@ class SyncApplier {
     final slotResolutions = <(String, String), _SlotResolution>{};
     // Per-batch live-schema cache for the column gate (see [_liveColumns]).
     final liveColumns = <String, Set<String>>{};
-    // Stamps of records whose savepoint settled as applied or skipped. Their
-    // state-changing clock.mergeVerified runs only once the outer transaction
-    // has committed (bottom of this method) — an advance for records the
-    // outer commit then rolled back would be a side effect surviving the
-    // rollback.
-    final settledHlcs = <Hlc>[];
+    // Stamps this batch ACCEPTED: records whose savepoint settled as applied
+    // or skipped, plus door-parked records whose plausible stamp was noted by
+    // [_noteParkedStamp]. Their state-changing clock.mergeVerified runs only
+    // once the outer transaction has committed (bottom of this method) — an
+    // advance for records the outer commit then rolled back would be a side
+    // effect surviving the rollback.
+    final acceptedHlcs = <Hlc>[];
     try {
       await db.transaction(() async {
         await db.customStatement('PRAGMA defer_foreign_keys = ON');
@@ -212,6 +216,7 @@ class SyncApplier {
             if (!_tables.containsKey(rec.table)) {
               result.failed++;
               await _quarantine(rec, 'unknown-table: "${rec.table}"');
+              _noteParkedStamp(rec, acceptedHlcs);
               continue;
             }
             // LWW settle — deliberately AHEAD of the schema_v/column gates
@@ -255,6 +260,7 @@ class SyncApplier {
                 'invalid-schema_v: ${rec.schemaV} is below 1, the lowest '
                 'version any build ever wrote',
               );
+              _noteParkedStamp(rec, acceptedHlcs);
               continue;
             }
             // Entity ids become filesystem path components once applied
@@ -269,6 +275,7 @@ class SyncApplier {
             } on FormatException catch (e) {
               result.failed++;
               await _quarantine(rec, 'invalid-id: ${e.message}');
+              _noteParkedStamp(rec, acceptedHlcs);
               continue;
             }
             // A record from a NEWER record-schema version is quarantined
@@ -283,6 +290,7 @@ class SyncApplier {
                 'apply-failed: schema_v ${rec.schemaV} is newer than this '
                 'build understands ($currentRecordSchemaV)',
               );
+              _noteParkedStamp(rec, acceptedHlcs);
               continue;
             }
             // At an accepted schema_v an unknown column is never legitimate:
@@ -299,6 +307,7 @@ class SyncApplier {
                 'unknown-column: ${unknown.map((c) => '"$c"').join(', ')} '
                 'not in "${rec.table}"',
               );
+              _noteParkedStamp(rec, acceptedHlcs);
               continue;
             }
             // The mirror gate: at the CURRENT record schema version a record
@@ -336,6 +345,7 @@ class SyncApplier {
                   'absent from a schema_v $currentRecordSchemaV record for '
                   '"${rec.table}" (the wire contract is full-row snapshots)',
                 );
+                _noteParkedStamp(rec, acceptedHlcs);
                 continue;
               }
             }
@@ -351,6 +361,7 @@ class SyncApplier {
             } on FormatException catch (e) {
               result.failed++;
               await _quarantine(rec, 'invalid-value: ${e.message}');
+              _noteParkedStamp(rec, acceptedHlcs);
               continue;
             }
             try {
@@ -413,7 +424,7 @@ class SyncApplier {
             // FK-sweep abort, a throwing beforeCommit hook, or a failed
             // outer commit would roll the database back while the in-memory
             // clock kept the advance.
-            settledHlcs.add(rec.hlc);
+            acceptedHlcs.add(rec.hlc);
             if (applied) {
               result.applied++;
               // Record any slot-resolution side effects this record's
@@ -484,9 +495,9 @@ class SyncApplier {
         // part that has to survive a restart, because a stamp whose record the
         // FK sweep parked leaves no hlc_packed anywhere for the boot seed to
         // find (see SyncStateStore.hlcHighWaterKey).
-        if (settledHlcs.isNotEmpty) {
+        if (acceptedHlcs.isNotEmpty) {
           await _state.raiseHlcHighWater(
-            settledHlcs
+            acceptedHlcs
                 .map((h) => h.packed)
                 .reduce((a, b) => a.compareTo(b) >= 0 ? a : b),
           );
@@ -508,7 +519,7 @@ class SyncApplier {
     }
     if (result.committed) {
       // The batch is durably committed: only now advance the clock past every
-      // settled record's stamp, so subsequent local writes stay causally
+      // accepted record's stamp, so subsequent local writes stay causally
       // after everything the database actually holds. mergeVerified, NOT
       // receive: every stamp here already passed assertPlausible at its
       // gate, and re-running the drift check now could THROW after the data
@@ -519,17 +530,56 @@ class SyncApplier {
       // rejected: it would corrupt causal order. Stamps of records the
       // FK-orphan sweep later parked-and-deleted merge too, deliberately: HLC
       // semantics advance on any RECEIVED message; row survival is a
-      // different layer. Deferring the advance also means the drift gate
-      // judged every record of this batch against the PRE-batch clock
+      // different layer — and door-parked records join for the same reason
+      // (see [_noteParkedStamp]). Deferring the advance also means the drift
+      // gate judged every record of this batch against the PRE-batch clock
       // reference — that is deliberate and conservative: a record plausible
       // only relative to an earlier in-batch stamp quarantines now and is
       // un-parked by the sync engine's end-of-run quarantine replay, once
       // this commit's merges have raised the reference.
-      for (final hlc in settledHlcs) {
+      for (final hlc in acceptedHlcs) {
         clock.mergeVerified(hlc);
       }
     }
     return result;
+  }
+
+  /// Records a DOOR-PARKED record's stamp for the post-commit clock advance
+  /// and the durable high-water mark, exactly like a settled record's.
+  ///
+  /// A door park is not a rollback: the parked snapshot survives the batch
+  /// and stays eligible to win LWW at replay — the newer-schema park is the
+  /// DESIGNED honest path for a mixed-version fleet ("the quarantine replay
+  /// un-parks it after the app upgrade"). Skipping its stamp let a later
+  /// local edit stamp BELOW the parked record, and the replay then silently
+  /// reverted the user's newer edit under LWW — the exact failure
+  /// [SyncStateStore.hlcHighWaterKey] documents. The clock's invariant is to
+  /// advance past everything the device has SEEN, row survival being a
+  /// different layer (same rationale as the FK-orphan merges, see the bottom
+  /// of [apply]).
+  ///
+  /// Two stamps are still excluded, deliberately: a malformed one (no
+  /// well-formed stamp exists to advance past — the park itself keys on
+  /// whatever hlc_packed the record carried) and an implausible one (the
+  /// drift discipline holds at EVERY gate: a suspect stamp must never
+  /// ratchet the clock, which is why the drift gate's own handler never
+  /// calls this). And without a quarantine store (counter-only test wiring)
+  /// nothing is parked at all — no surviving snapshot can out-rank a later
+  /// local edit, and the mark must not claim stamps nothing holds.
+  void _noteParkedStamp(SyncRow rec, List<Hlc> acceptedHlcs) {
+    if (quarantine == null) return;
+    final Hlc hlc;
+    try {
+      hlc = rec.hlc;
+    } catch (_) {
+      return;
+    }
+    try {
+      clock.assertPlausible(hlc);
+    } on HlcDriftException {
+      return;
+    }
+    acceptedHlcs.add(hlc);
   }
 
   /// Persists a rejected record to the quarantine parking lot (latest state

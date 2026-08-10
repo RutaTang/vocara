@@ -7,6 +7,7 @@ import 'package:vocara/data/sync/integrity_checker.dart';
 import 'package:vocara/data/sync/quarantine_store.dart';
 import 'package:vocara/data/sync/sync_applier.dart';
 import 'package:vocara/data/sync/sync_row.dart';
+import 'package:vocara/data/sync/sync_state_store.dart';
 import 'package:vocara/data/sync/sync_writer.dart';
 
 String _id(String s) => s.padRight(26, '0').substring(0, 26);
@@ -601,6 +602,79 @@ void main() {
             'merged (before or after the deferral), and a quarantined '
             'record must leave the clock alone',
       );
+    });
+
+    test('a door-parked record (schema_v newer than this build) still advances '
+        'the clock AND the durable high-water mark, so a later local edit can '
+        'never stamp below the parked record', () async {
+      final store = QuarantineStore(db);
+      applier = SyncApplier(
+        db,
+        HlcClock(node: _id('LOCAL'), now: () => 1000),
+        builder: SyncRowBuilder(db),
+        quarantine: store,
+      );
+      // Plausible (one minute ahead, within drift) and from a newer build:
+      // the schema gate parks it, and the replay lands it after the app
+      // upgrade — the DESIGNED path for a mixed-version fleet. A local
+      // edit stamped below h would then be silently reverted by that
+      // replay under LWW.
+      final h = hlc(1000 + 60 * 1000);
+      final res = await applier.apply([
+        RemoteRecord(
+          table: 'practices',
+          columns: {
+            ...practice('P', 'from a newer build', h).columns,
+            'schema_v': currentRecordSchemaV + 1,
+          },
+        ),
+      ]);
+      expect(res.committed, isTrue);
+      expect(res.failed, 1);
+      expect((await store.list()).single.remoteHlcPacked, h.packed);
+
+      // In-memory: the very next local stamp is causally after the parked
+      // record.
+      expect(
+        applier.clock.tick() > h,
+        isTrue,
+        reason: 'a local edit must out-rank the parked record',
+      );
+      // Durable: the mark survives a restart even though no table row
+      // carries the parked stamp for the boot seed to find.
+      expect(
+        await SyncStateStore(db).hlcHighWater(),
+        h.packed,
+        reason: 'the parked stamp must reach the durable high-water mark',
+      );
+    });
+
+    test('a door park with an IMPLAUSIBLE stamp still leaves the clock alone '
+        '(the drift discipline holds at every gate)', () async {
+      final store = QuarantineStore(db);
+      applier = SyncApplier(
+        db,
+        HlcClock(node: _id('LOCAL'), now: () => 1000),
+        builder: SyncRowBuilder(db),
+        quarantine: store,
+      );
+      final before = applier.clock.last;
+      // Far-future AND mistyped: the value gate parks it before the drift
+      // gate ever runs, but its suspect stamp must not ratchet anything.
+      final h = hlc(1000 + 6 * 60 * 1000);
+      final res = await applier.apply([
+        RemoteRecord(
+          table: 'practices',
+          columns: {
+            ...practice('P', 'poison', h).columns,
+            'master_volume': 'loud',
+          },
+        ),
+      ]);
+      expect(res.failed, 1);
+      expect((await store.list()).single.reason, startsWith('invalid-value'));
+      expect(applier.clock.last, before);
+      expect(await SyncStateStore(db).hlcHighWater(), isNull);
     });
 
     test('the post-commit advance survives a wall-clock rollback between the '
