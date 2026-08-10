@@ -1359,6 +1359,25 @@ class StreamingStft {
 
 double _db20(double m) => 20.0 * (math.log(m + 1e-9) / math.ln10);
 
+/// Highest source sample rate the voice-metrics pass produces valid pitch
+/// analysis for — the admission ceiling for file analysis
+/// (`SpectrogramService.admitForAnalysis`).
+///
+/// Derivation: the YIN slice is one FFT frame of raw samples decimated by
+/// yinFactor (≤ 2), so it always spans fftSize / sampleRate SECONDS —
+/// 2048 samples at the production fftSize. [yinPitch]'s widened fmin search
+/// lag is a fixed 1 / (70 Hz · 0.9) ≈ 1/63 s; once the frame is shorter than
+/// that (sampleRate > 63 · 2048 ≈ 129 kHz) the lag is capped to the frame and
+/// the integration window collapses below 2 samples, so EVERY frame returns
+/// unvoiced regardless of content — F0, formants, H1−H2, register, vibrato
+/// and the voice profile all silently empty while the (YIN-free) spectrogram
+/// renders normally. Rates approaching the bound leave integration windows of
+/// a handful of samples, i.e. garbage periodicity. 96 kHz is the highest
+/// standard rate with a usable window, and no standard rate exists between it
+/// and the dead zone, so the gate refuses anything above it instead of
+/// producing a healthy-looking take with empty analyses.
+const int maxAnalysisSampleRate = 96000;
+
 /// YIN periodicity (1 − d′ at the chosen lag) below which a frame is treated as
 /// unvoiced. Clearly-sung vowels read ≈ 0.8–0.95; room noise / breath read well
 /// under this. Gating F0 *and* the formants on periodicity (not just loudness)
