@@ -730,6 +730,36 @@ void main() {
     });
   });
 
+  group('take numbering', () {
+    // Regression guard: boot recovery numbers takes with a regex that counts
+    // "Take N (recovered)" names, but the view model's regex did not — so the
+    // take recorded after a recovery reused the recovered take's number and
+    // the lane list showed two takes with the same number.
+    test('a new take numbers PAST a recovered take instead of duplicating '
+        'its number', () async {
+      final vm = await pumpVm(
+        vocalTracks: [
+          AudioTrack(
+            id: 't1',
+            kind: AudioTrackKind.vocal,
+            displayName: 'Take 1',
+            createdAt: DateTime(2026),
+          ),
+          AudioTrack(
+            id: 't3r',
+            kind: AudioTrackKind.vocal,
+            displayName: 'Take 3 (recovered)',
+            createdAt: DateTime(2026),
+          ),
+        ],
+      );
+
+      await vm.createEmptyVocalTake();
+
+      expect(vm.practice!.vocalTracks.last.displayName, 'Take 4');
+    });
+  });
+
   group('save serialization', () {
     test('two rapid ungated saves never overlap (second chains after the '
         'first and the last write wins)', () async {

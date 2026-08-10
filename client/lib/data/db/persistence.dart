@@ -620,7 +620,7 @@ class Persistence {
     final track = AudioTrack(
       id: newId(),
       kind: AudioTrackKind.vocal,
-      displayName: 'Take ${_nextTakeNumber(practice)} (recovered)',
+      displayName: 'Take ${practice.nextTakeNumber} (recovered)',
       audioFilePath: file.path,
       durationMs: analysis.durationMs,
       startMs: 0,
@@ -656,23 +656,6 @@ class Persistence {
       db.practices,
     )..where((p) => p.id.equals(id))).getSingleOrNull();
     return row != null && row.deletedAt == null;
-  }
-
-  /// One past the highest existing "Take N" / "Take N (recovered)" label in
-  /// the practice's ACTIVE interpretation — the same numbering a normal new
-  /// take gets, so a recovered take slots in as "Take N (recovered)" without
-  /// colliding with or double-counting user takes.
-  static int _nextTakeNumber(SongPractice practice) {
-    final re = RegExp(r'^Take (\d+)(?: \(recovered\))?$');
-    var max = 0;
-    for (final t in practice.activeVocalTracks) {
-      final m = re.firstMatch(t.displayName);
-      if (m != null) {
-        final n = int.parse(m.group(1)!);
-        if (n > max) max = n;
-      }
-    }
-    return max + 1;
   }
 
   /// Content hashes of every asset ANY referencing row — live or tombstoned —

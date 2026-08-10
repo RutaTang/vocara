@@ -1380,20 +1380,9 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     return track.id;
   }
 
-  /// One past the highest existing "Take N" label in the active interpretation,
-  /// so a new take never reuses a number freed by a delete.
-  int _nextTakeNumber() {
-    final re = RegExp(r'^Take (\d+)$');
-    var max = 0;
-    for (final t in versions.vocalTakes) {
-      final m = re.firstMatch(t.displayName);
-      if (m != null) {
-        final n = int.parse(m.group(1)!);
-        if (n > max) max = n;
-      }
-    }
-    return max + 1;
-  }
+  /// [SongPractice.nextTakeNumber] — the numbering shared with boot recovery,
+  /// so a "Take N (recovered)" counts here and vice versa.
+  int _nextTakeNumber() => _practice?.nextTakeNumber ?? 1;
 
   // --- Track mutations -----------------------------------------------------
 

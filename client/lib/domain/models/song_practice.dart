@@ -118,6 +118,26 @@ class SongPractice {
     ];
   }
 
+  /// One past the highest existing "Take N" / "Take N (recovered)" label among
+  /// the active interpretation's takes, so a new take never reuses a number —
+  /// not one freed by a delete, and not one held by a recovered take. THE one
+  /// numbering implementation: normal take naming (the detail view model) and
+  /// boot recovery (Persistence) both hand out numbers over the same set, so
+  /// each side must count the other's names or the two paths produce
+  /// duplicate take numbers.
+  int get nextTakeNumber {
+    final re = RegExp(r'^Take (\d+)(?: \(recovered\))?$');
+    var max = 0;
+    for (final t in activeVocalTracks) {
+      final m = re.firstMatch(t.displayName);
+      if (m != null) {
+        final n = int.parse(m.group(1)!);
+        if (n > max) max = n;
+      }
+    }
+    return max + 1;
+  }
+
   /// The end of the latest-finishing lane (its last clip's end) — the minimum
   /// length the timeline must span so no audio is clipped off the end.
   int get contentEndMs {
