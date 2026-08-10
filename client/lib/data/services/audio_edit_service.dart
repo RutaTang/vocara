@@ -243,13 +243,16 @@ void _trimWavHeadSync(String path, int trimMs) {
       void u32(int v) => header.add(
         (ByteData(4)..setUint32(0, v, Endian.little)).buffer.asUint8List(),
       );
+      // Word alignment for an odd-length fmt body, as in _writeWavHeaderSync.
+      final fmtPad = f.length.isOdd ? 1 : 0;
       final pad = newLen.isOdd ? 1 : 0;
       str('RIFF');
-      u32(4 + (8 + f.length) + (8 + newLen + pad));
+      u32(4 + (8 + f.length + fmtPad) + (8 + newLen + pad));
       str('WAVE');
       str('fmt ');
       u32(f.length);
       header.add(f);
+      if (fmtPad == 1) header.addByte(0);
       str('data');
       u32(newLen);
       out.writeFromSync(header.toBytes());
@@ -362,10 +365,14 @@ _WavLayout? _parseWavAtPath(String path) {
 /// up-front header describes the EXPECTED length, and publishing it unpatched
 /// means a header claiming bytes the file does not hold.
 void _patchWavSizesSync(RandomAccessFile out, Uint8List fmt, int actualLen) {
+  // Data starts after RIFF(12) + fmt header(8) + fmt body + its word-alignment
+  // pad — the exact layout _writeWavHeaderSync emits.
+  final fmtPad = fmt.length.isOdd ? 1 : 0;
+  final dataStart = 28 + fmt.length + fmtPad;
   final pad = actualLen.isOdd ? 1 : 0;
-  out.truncateSync(28 + fmt.length + actualLen);
+  out.truncateSync(dataStart + actualLen);
   if (pad == 1) {
-    out.setPositionSync(28 + fmt.length + actualLen);
+    out.setPositionSync(dataStart + actualLen);
     out.writeByteSync(0);
   }
   void u32At(int off, int v) {
@@ -375,23 +382,30 @@ void _patchWavSizesSync(RandomAccessFile out, Uint8List fmt, int actualLen) {
     );
   }
 
-  u32At(4, 4 + (8 + fmt.length) + (8 + actualLen + pad));
-  u32At(24 + fmt.length, actualLen);
+  u32At(4, 4 + (8 + fmt.length + fmtPad) + (8 + actualLen + pad));
+  u32At(dataStart - 4, actualLen);
 }
 
 /// Writes a WAV header (RIFF + preserved fmt + data size) to [out].
+///
+/// RIFF chunks are word-aligned: an odd-length fmt body (the parsers admit any
+/// size in [16, 1024]) must be followed by a pad byte, or every chunk after it
+/// sits at an odd offset and the aligned walkers — this file's own parsers and
+/// symphonia's — read garbage where the next chunk id should be.
 void _writeWavHeaderSync(RandomAccessFile out, Uint8List fmt, int dataLen) {
   final b = BytesBuilder();
   void str(String s) => b.add(s.codeUnits);
   void u32(int v) =>
       b.add((ByteData(4)..setUint32(0, v, Endian.little)).buffer.asUint8List());
+  final fmtPad = fmt.length.isOdd ? 1 : 0;
   final pad = dataLen.isOdd ? 1 : 0;
   str('RIFF');
-  u32(4 + (8 + fmt.length) + (8 + dataLen + pad));
+  u32(4 + (8 + fmt.length + fmtPad) + (8 + dataLen + pad));
   str('WAVE');
   str('fmt ');
   u32(fmt.length);
   b.add(fmt);
+  if (fmtPad == 1) b.addByte(0);
   str('data');
   u32(dataLen);
   out.writeFromSync(b.toBytes());
@@ -606,10 +620,10 @@ class AudioEditService {
     final bLen = (wb.dataLen ~/ wb.blockAlign) * wb.blockAlign;
     // Classic RIFF sizes are u32: refuse a merge whose header could not cover
     // its own payload instead of writing one that silently lies past 4 GiB.
-    // The budget counts the word-alignment pad too, since the RIFF size the
-    // header carries is 20 + fmt + data + pad.
+    // The budget counts both word-alignment pads too, since the RIFF size the
+    // header carries is 20 + fmt (+ its pad) + data + pad.
     if (aLen + bLen + ((aLen + bLen).isOdd ? 1 : 0) >
-        0xFFFFFFFF - 20 - wa.fmt.length) {
+        0xFFFFFFFF - 20 - wa.fmt.length - (wa.fmt.length.isOdd ? 1 : 0)) {
       throw const FormatException(
         'These takes are too long to merge into a single WAV file.',
       );
