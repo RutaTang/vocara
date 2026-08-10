@@ -237,7 +237,9 @@ impl Shared {
 
     /// Engine frames PRODUCED so far. Delivery can never outrun production, which is the
     /// invariant a retired callback pushing un-rendered frames into a FIFO would break.
-    #[cfg(test)]
+    /// Gated with the device feature: its only caller is the resampler-guard test there,
+    /// and a plain `cargo test` build must stay dead-code-clean.
+    #[cfg(all(test, feature = "device"))]
     pub(crate) fn rendered_frames_for_test(&self) -> u64 {
         self.rendered_total.load(Ordering::Acquire)
     }
