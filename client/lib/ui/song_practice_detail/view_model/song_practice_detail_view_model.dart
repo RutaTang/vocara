@@ -1117,22 +1117,20 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         }
 
         // Only the instrumental is used; the vocal stem is ignored for now.
-        final instDest = await _audioFiles.importAudio(
-          practiceId: _practiceId,
-          sourcePath: stems.instrumentalPath,
-        );
-        var saved = false;
-        try {
+        // Same import discipline as every other lane import: the sidecar
+        // writes a 44.1 kHz PCM16 WAV, so ensureStreamableWav (inside
+        // _withImportedAudio) transcodes it ONCE to an engine-streamable WAV —
+        // otherwise the separated backing would bypass the disk-streaming
+        // feeder and be fully re-decoded into RAM at every project open.
+        String? committedDest;
+        await _withImportedAudio(stems.instrumentalPath, (instDest) async {
           final instAnalysis = await _waveforms.analyze(instDest);
           // Re-read the LIVE practice: notes / lyrics / interpretations may have been
           // edited (and persisted) during the minutes-long separation. Build on the
           // current state so those edits are not clobbered by the pre-await snapshot
           // (mirrors addAccompaniment / addReference).
           final cur = _practice;
-          if (cur == null) {
-            await _audioFiles.deleteAudio(instDest);
-            return;
-          }
+          if (cur == null) return false;
           // The ORIGINAL lane is re-read too, not just the practice around it.
           // Renames and note/marker edits are NOT busy-gated, and separation is
           // the longest operation in the app — folding the pre-await snapshot
@@ -1147,9 +1145,8 @@ class SongPracticeDetailViewModel extends ChangeNotifier
               liveOriginal.primaryClip?.audioFilePath != originalPath) {
             // The lane was replaced or removed while separating: the stems
             // describe audio this project no longer has.
-            await _audioFiles.deleteAudio(instDest);
             _toast('The original changed while separating. Try again.');
-            return;
+            return false;
           }
           final baseName = liveOriginal.displayName.replaceAll(
             RegExp(r'\s*\(Instrumental\)$'),
@@ -1191,33 +1188,29 @@ class SongPracticeDetailViewModel extends ChangeNotifier
             separationSource: originalPath,
           );
           // Persist BEFORE deleting any old audio, so a failed save can't leave
-          // the JSON pointing at files already gone.
-          saved = await _save();
-          if (!saved) {
+          // the JSON pointing at files already gone. On failure
+          // _withImportedAudio rolls the imported/transcoded files back.
+          if (!await _save()) {
             _practice = cur; // revert in-memory to the un-persisted state
             // Restore the pre-separation backing flag.
             mixer.setPlayReferenceSilently(prevPlayRef);
             _toast('Could not save the separated track.');
+            return false;
           }
-        } catch (_) {
-          // Roll back the copy on any failure before it goes live.
-          await _audioFiles.deleteAudio(instDest);
-          rethrow;
-        }
-
-        if (!saved) {
-          await _audioFiles.deleteAudio(instDest);
-          return;
-        }
+          committedDest = instDest;
+          return true;
+        });
+        if (committedDest == null) return;
 
         // The instrumental is live + persisted. Delete any prior backing files
         // that are no longer referenced — never the kept original or new
-        // instrumental. Errors here must NOT roll back the live track.
+        // instrumental. Errors here must NOT roll back the live track (which
+        // is why this runs after _withImportedAudio, not inside its body).
         for (final old in [oldAccompaniment, oldReference]) {
           if (old == null) continue;
           for (final c in old.clips) {
             if (c.audioFilePath == originalPath ||
-                c.audioFilePath == instDest) {
+                c.audioFilePath == committedDest) {
               continue;
             }
             analysis.evictAnalysis(c.audioFilePath);
