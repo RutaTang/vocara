@@ -842,7 +842,14 @@ impl InputCell {
         self.busy
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .ok()?;
-        Some(InputGuard { cell: self })
+        let guard = InputGuard { cell: self };
+        // Re-check under `busy`: `reconfigure` can retire this epoch between the check
+        // above and the compare-exchange, and an entry admitted on that stale check
+        // would decode its samples under the format installed for the NEXT stream.
+        if self.owner.load(Ordering::Acquire) != epoch {
+            return None; // the guard's drop releases `busy`
+        }
+        Some(guard)
     }
 
     /// Feed one input callback's samples as `epoch`. `false` = denied (a retired callback, or a
@@ -858,10 +865,26 @@ impl InputCell {
         true
     }
 
-    /// Reconfigure for a new input stream (native rate + channels). Only call with no active
-    /// input callback (the host thread, between dropping the old stream and building the new).
-    pub fn reconfigure(&self, in_rate: f64, in_channels: usize) {
-        // SAFETY: no input callback runs during reconfigure (host-thread invariant).
+    /// Install the next input stream's native format (rate + channels) and mint the generation
+    /// that stream must feed as. Call on the HOST THREAD, after dropping the old stream and
+    /// before starting the new one. Retirement is enforced here, not assumed: the owner
+    /// generation advances BEFORE the format lands, so a zombie callback that survived a failed
+    /// teardown is denied instead of having its samples decoded under a format it never
+    /// delivered (e.g. a 24 kHz unit's frames emitted 1:1 as 48 kHz).
+    pub fn reconfigure(&self, in_rate: f64, in_channels: usize) -> u64 {
+        // Retire first: once the owner moves, no older generation can enter.
+        let epoch = self.claim();
+        // A retired callback may still be INSIDE `feed` (it entered before the owner moved).
+        // Take `busy` — the same exclusion every accessor takes — so the format switch below
+        // cannot race its state writes. The wait is bounded by one callback's duration.
+        while self
+            .busy
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            std::hint::spin_loop();
+        }
+        // SAFETY: `busy` is held and every older generation is retired — single accessor.
         let st = unsafe { &mut *self.state.get() };
         st.in_channels = in_channels.max(1);
         st.step = in_rate / ENGINE_SR;
@@ -869,6 +892,8 @@ impl InputCell {
         st.primed = false;
         st.prev = [0.0, 0.0];
         st.nominal_acc = 0.0;
+        self.busy.store(false, Ordering::Release);
+        epoch
     }
 
     /// Test-only direct feed. Tests drive the cell with no stream around it, so claim the first
@@ -1519,15 +1544,16 @@ fn build_input_stream(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     cell: Arc<InputCell>,
+    epoch: u64,
     event: Arc<AtomicU32>,
 ) -> Result<DeviceHandle, String> {
     let err_cb = move |err| {
         let _ = err;
         event.fetch_or(EVENT_INPUT_LOST, Ordering::Release);
     };
-    // Retire every older input callback before this stream can deliver a frame; a denied feed
-    // drops its samples rather than racing a second producer into single-producer rings.
-    let epoch = cell.claim();
+    // `epoch` is the generation `reconfigure` minted with this stream's format: every older
+    // callback is already retired, and a denied feed drops its samples rather than racing a
+    // second producer into single-producer rings.
     let stream = device
         .build_input_stream(
             *config,
@@ -1558,8 +1584,11 @@ fn build_input(
         None => default_input_device().ok_or_else(|| "no default input device".to_string())?,
     };
     let (config, rate, channels) = input_config(&device)?;
-    cell.reconfigure(rate, channels);
-    let stream = build_input_stream(&device, &config, Arc::clone(cell), Arc::clone(event))?;
+    // Reconfigure retires every older callback and mints the generation the new stream
+    // feeds as — the format and the admission epoch move together, so no callback can be
+    // admitted under a format it never delivered.
+    let epoch = cell.reconfigure(rate, channels);
+    let stream = build_input_stream(&device, &config, Arc::clone(cell), epoch, Arc::clone(event))?;
     let resolved = device_uid(&device).unwrap_or_default();
     Ok((stream, resolved))
 }
@@ -1675,8 +1704,11 @@ fn open_mic(
     event: &Arc<AtomicU32>,
 ) -> Result<MicHandle, String> {
     // Safe default; `Vpio::start` re-reconfigures the input cell from VPIO's *negotiated* format
-    // (mono/stereo, native rate) after the unit initializes, which is what actually governs feed.
-    input_cell.reconfigure(ENGINE_SR, CHANNELS);
+    // (mono/stereo, native rate) after the unit initializes, which is what actually governs
+    // feed — the generation minted here is superseded there, so its value is dropped. What
+    // matters NOW is the retirement: any zombie callback surviving a failed teardown is denied
+    // from this point on, instead of feeding through the multi-ms VPIO build window.
+    let _ = input_cell.reconfigure(ENGINE_SR, CHANNELS);
     // VPIO renders playback at 48 kHz with no boundary resampler: sync the
     // consumed cursor over anything a dying non-48 kHz cpal stream left in
     // its FIFO (see build_stream).
@@ -3838,6 +3870,32 @@ mod cell_exclusion_tests {
         assert!(mic.pop().is_none(), "a retired callback must feed nothing");
 
         assert!(cell.try_feed(new, &vec![0.5f32; 256]));
+        assert!(mic.pop().is_some());
+    }
+
+    /// A failed teardown can leave a zombie callback owning the cell while the host
+    /// prepares the NEXT stream. `reconfigure` must retire it BEFORE the new format
+    /// applies: admitted past that point, its samples are decoded with the new
+    /// step/channel count (e.g. a 24 kHz AEC-bypass unit's frames emitted 1:1 as
+    /// 48 kHz) — the retiring claim inside the stream build comes milliseconds later.
+    #[test]
+    fn reconfigure_retires_the_zombie_before_the_new_format_applies() {
+        let (cell, mut mic) = input_cell();
+        let zombie = cell.claim();
+        assert!(cell.try_feed(zombie, &vec![0.5f32; 64]));
+        while mic.pop().is_some() {}
+
+        // Host prepares a replacement stream: reconfigure retires the zombie and mints
+        // the generation the new stream will feed as, all before the stream build.
+        let new = cell.reconfigure(24_000.0, 2);
+        assert!(
+            !cell.try_feed(zombie, &vec![0.5f32; 64]),
+            "a zombie from a failed teardown must not feed audio under the new format"
+        );
+        assert!(mic.pop().is_none(), "no zombie sample may reach the mic ring");
+
+        // The replacement stream feeds as the minted generation and is admitted.
+        assert!(cell.try_feed(new, &vec![0.5f32; 64]));
         assert!(mic.pop().is_some());
     }
 

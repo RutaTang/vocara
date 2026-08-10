@@ -475,8 +475,10 @@ impl Vpio {
                 .unwrap_or(placeholder);
             in_ctx.layout = in_layout;
             // input_cb always hands InputCell interleaved STEREO (mono captures are duplicated up),
-            // so configure for identity stereo at the captured rate.
-            in_ctx.input.reconfigure(in_layout.rate, CHANNELS);
+            // so configure for identity stereo at the captured rate. Reconfigure retires every
+            // older generation and mints the one bound to this format — adopt it, or this unit's
+            // own callbacks would be denied as zombies. No callback has fired yet (start below).
+            in_ctx.epoch = in_ctx.input.reconfigure(in_layout.rate, CHANNELS);
             if let Some(oc) = out_ctx.as_mut() {
                 let out_layout = get_asbd(unit, kAudioUnitScope_Input, ELEM_OUTPUT)
                     .map(|a| Layout::from(&a))
