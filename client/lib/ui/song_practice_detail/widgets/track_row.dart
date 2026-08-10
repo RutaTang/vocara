@@ -567,31 +567,26 @@ class _BodyState extends State<_Body> {
           final vs = spanStart > viewStart ? spanStart : viewStart;
           final ve = spanEnd < viewStart + dur ? spanEnd : viewStart + dur;
           if (ve <= vs) return null;
-          final n = peaks.length;
-          List<double> slice;
-          var peakOffset = 0.0;
-          var peakSpan = 1.0;
-          if (n == 0) {
-            slice = const [];
-          } else {
-            final i0 = ((vs - spanStart) / spanDur * n).floor().clamp(0, n - 1);
-            final i1 = ((ve - spanStart) / spanDur * n).ceil().clamp(i0 + 1, n);
-            slice = peaks.sublist(i0, i1);
-            // The cut is at WHOLE peak indices while the box starts at the
-            // un-quantized viewport edge, so slice[0] belongs up to one peak
-            // interval BEFORE the box. Hand the painter the discarded
-            // fraction (and the box width in peak units) so every peak draws
-            // at its true timeline x — anchored to the ruler, not the box.
-            peakOffset = (vs - spanStart) / spanDur * n - i0;
-            peakSpan = (ve - vs) / spanDur * n;
-          }
+          // The cut is at WHOLE peak indices while the box starts at the
+          // un-quantized viewport edge, so slice[0] belongs up to one peak
+          // interval BEFORE the box. The shared slice helper hands the painter
+          // the discarded fraction (and the box width in peak units) so every
+          // peak draws at its true timeline x — anchored to the ruler, not
+          // the box.
+          final cut = visiblePeakSlice(
+            peaks,
+            spanStartMs: spanStart,
+            spanDurMs: spanDur,
+            visibleStartMs: vs,
+            visibleEndMs: ve,
+          );
           final left = xOf(vs);
           return (
             left: left,
             width: (xOf(ve) - left).clamp(1.0, width),
-            peaks: slice,
-            peakOffset: peakOffset,
-            peakSpan: peakSpan,
+            peaks: cut.peaks,
+            peakOffset: cut.indexOffset,
+            peakSpan: cut.indexSpan,
           );
         }
 

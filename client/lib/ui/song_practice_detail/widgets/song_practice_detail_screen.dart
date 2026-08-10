@@ -1207,26 +1207,34 @@ class _MasterRow extends StatelessWidget {
                             valueListenable: vm.recording.recordingPeaks,
                             builder: (context, _, _) {
                               // The master envelope spans the whole extent — show
-                              // only the visible [viewStart, viewStart+span] slice
-                              // so it lines up with the zoomed lanes above.
+                              // only the visible [viewStart, viewStart+span] slice,
+                              // anchored through the shared helper so it lines up
+                              // with the zoomed lanes, ruler and playhead above.
                               final all = vm.mixer.masterWaveformPeaks;
                               final ext = vm.practice?.timelineDurationMs ?? 0;
-                              List<double> peaks = all;
+                              var peaks = all;
+                              var indexOffset = 0.0;
+                              double? indexSpan;
                               if (ext > 0 && tl < ext && all.isNotEmpty) {
-                                final n = all.length;
-                                final i0 = (n * viewStart / ext).floor().clamp(
-                                  0,
-                                  n - 1,
+                                final cut = visiblePeakSlice(
+                                  all,
+                                  spanStartMs: 0,
+                                  spanDurMs: ext,
+                                  visibleStartMs: viewStart,
+                                  visibleEndMs: viewStart + tl > ext
+                                      ? ext
+                                      : viewStart + tl,
                                 );
-                                final i1 = (n * (viewStart + tl) / ext)
-                                    .ceil()
-                                    .clamp(i0 + 1, n);
-                                peaks = all.sublist(i0, i1);
+                                peaks = cut.peaks;
+                                indexOffset = cut.indexOffset;
+                                indexSpan = cut.indexSpan;
                               }
                               return CustomPaint(
                                 painter: WaveformPainter(
                                   peaks: peaks,
                                   color: Studio.accent,
+                                  indexOffset: indexOffset,
+                                  indexSpan: indexSpan,
                                 ),
                               );
                             },
@@ -1500,22 +1508,29 @@ class _BusRow extends StatelessWidget {
                             builder: (context, _, _) {
                               final all = vm.mixer.busWaveformPeaks(bus.id);
                               final ext = vm.practice?.timelineDurationMs ?? 0;
-                              List<double> peaks = all;
+                              var peaks = all;
+                              var indexOffset = 0.0;
+                              double? indexSpan;
                               if (ext > 0 && tl < ext && all.isNotEmpty) {
-                                final n = all.length;
-                                final i0 = (n * viewStart / ext).floor().clamp(
-                                  0,
-                                  n - 1,
+                                final cut = visiblePeakSlice(
+                                  all,
+                                  spanStartMs: 0,
+                                  spanDurMs: ext,
+                                  visibleStartMs: viewStart,
+                                  visibleEndMs: viewStart + tl > ext
+                                      ? ext
+                                      : viewStart + tl,
                                 );
-                                final i1 = (n * (viewStart + tl) / ext)
-                                    .ceil()
-                                    .clamp(i0 + 1, n);
-                                peaks = all.sublist(i0, i1);
+                                peaks = cut.peaks;
+                                indexOffset = cut.indexOffset;
+                                indexSpan = cut.indexSpan;
                               }
                               return CustomPaint(
                                 painter: WaveformPainter(
                                   peaks: peaks,
                                   color: accent,
+                                  indexOffset: indexOffset,
+                                  indexSpan: indexSpan,
                                 ),
                               );
                             },

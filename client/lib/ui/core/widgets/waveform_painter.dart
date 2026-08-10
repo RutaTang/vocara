@@ -26,6 +26,38 @@ int niceTimeIntervalMs(int durationMs, double width, {double minPx = 72}) {
   return candidates.last;
 }
 
+/// Cuts the whole-peak slice of [peaks] (spanning [spanStartMs] for
+/// [spanDurMs] on the timeline) visible through the window
+/// [visibleStartMs, visibleEndMs], together with the
+/// [WaveformPainter.indexOffset]/[WaveformPainter.indexSpan] mapping that
+/// anchors it to the timeline. The cut is at WHOLE peak indices while the
+/// window edge is not, so the slice's first peak belongs up to one peak
+/// interval BEFORE the window; painting the slice without this mapping shifts
+/// the whole waveform against ruler/grid/playhead by that fraction. Every
+/// viewport-sliced [WaveformPainter] caller must go through here — the lanes
+/// share one ruler, so they must share one anchoring.
+({List<double> peaks, double indexOffset, double indexSpan}) visiblePeakSlice(
+  List<double> peaks, {
+  required int spanStartMs,
+  required int spanDurMs,
+  required int visibleStartMs,
+  required int visibleEndMs,
+}) {
+  final n = peaks.length;
+  if (n == 0 || spanDurMs <= 0 || visibleEndMs <= visibleStartMs) {
+    return (peaks: const [], indexOffset: 0.0, indexSpan: 1.0);
+  }
+  final start = (visibleStartMs - spanStartMs) / spanDurMs * n;
+  final end = (visibleEndMs - spanStartMs) / spanDurMs * n;
+  final i0 = start.floor().clamp(0, n - 1);
+  final i1 = end.ceil().clamp(i0 + 1, n);
+  return (
+    peaks: peaks.sublist(i0, i1),
+    indexOffset: start - i0,
+    indexSpan: end - start,
+  );
+}
+
 /// Paints a track's normalized peaks as a filled, mirrored audio-clip
 /// silhouette with a faint center axis. A track shorter than the shared
 /// timeline only fills [widthFraction] of the width so lanes align on time.
