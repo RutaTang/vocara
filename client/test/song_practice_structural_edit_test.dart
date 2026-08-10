@@ -724,6 +724,76 @@ void main() {
       expect(ref.colorValue, 0xFF00FF00);
     });
 
+    // Regression guard: the separation success path imported the instrumental
+    // stem directly — skipping ensureStreamableWav — so the separated backing
+    // (a 44.1 kHz sidecar WAV) bypassed the disk-streaming path and was fully
+    // re-decoded into RAM at every project open, exactly the failure mode the
+    // import discipline exists to prevent.
+    test('the separated instrumental goes through the same import discipline '
+        'as every other import (transcoded to a streamable WAV)', () async {
+      final separation = _GatedSeparation()..gate.complete();
+      final edits = _FakeEdits()..transcodeTo = '/edit/inst48k.wav';
+      final reference = AudioTrack(
+        id: 'ref',
+        kind: AudioTrackKind.reference,
+        displayName: 'Original',
+        audioFilePath: '/pool/original.wav',
+        durationMs: 1000,
+        createdAt: DateTime(2026),
+      );
+      final vm = await pumpVm(
+        separation: separation,
+        reference: reference,
+        edits: edits,
+      );
+      for (var i = 0; i < 400 && !vm.separationAvailable; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+
+      await vm.separateBacking('ref');
+
+      expect(edits.streamableCalls, ['/import/0.wav']);
+      expect(
+        vm.practice!.accompaniment!.clips.single.audioFilePath,
+        '/edit/inst48k.wav',
+        reason: 'the committed backing must be the streamable WAV',
+      );
+      expect(
+        events,
+        contains('delete:/import/0.wav'),
+        reason: 'the non-streamable import copy is redundant once transcoded',
+      );
+    });
+
+    test('a FAILED save after separation deletes the transcoded WAV and the '
+        'import copy, and keeps nothing live', () async {
+      final separation = _GatedSeparation()..gate.complete();
+      final edits = _FakeEdits()..transcodeTo = '/edit/inst48k.wav';
+      final reference = AudioTrack(
+        id: 'ref',
+        kind: AudioTrackKind.reference,
+        displayName: 'Original',
+        audioFilePath: '/pool/original.wav',
+        durationMs: 1000,
+        createdAt: DateTime(2026),
+      );
+      final vm = await pumpVm(
+        separation: separation,
+        reference: reference,
+        edits: edits,
+      );
+      for (var i = 0; i < 400 && !vm.separationAvailable; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+      repo.failSaves = true;
+
+      await vm.separateBacking('ref');
+
+      expect(events, contains('delete:/edit/inst48k.wav'));
+      expect(events, contains('delete:/import/0.wav'));
+      expect(vm.practice!.accompaniment, isNull);
+    });
+
     test('addVocalTake on a FAILED save deletes the imported file', () async {
       final vm = await pumpVm();
       repo.failSaves = true;
@@ -839,6 +909,36 @@ void main() {
         greaterThanOrEqualTo(p.contentEndMs),
         reason: 'the timeline must still cover every lane',
       );
+    });
+  });
+
+  group('take numbering', () {
+    // Regression guard: boot recovery numbers takes with a regex that counts
+    // "Take N (recovered)" names, but the view model's regex did not — so the
+    // take recorded after a recovery reused the recovered take's number and
+    // the lane list showed two takes with the same number.
+    test('a new take numbers PAST a recovered take instead of duplicating '
+        'its number', () async {
+      final vm = await pumpVm(
+        vocalTracks: [
+          AudioTrack(
+            id: 't1',
+            kind: AudioTrackKind.vocal,
+            displayName: 'Take 1',
+            createdAt: DateTime(2026),
+          ),
+          AudioTrack(
+            id: 't3r',
+            kind: AudioTrackKind.vocal,
+            displayName: 'Take 3 (recovered)',
+            createdAt: DateTime(2026),
+          ),
+        ],
+      );
+
+      await vm.createEmptyVocalTake();
+
+      expect(vm.practice!.vocalTracks.last.displayName, 'Take 4');
     });
   });
 

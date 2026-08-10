@@ -240,4 +240,46 @@ void main() {
       ); // and load repairs it
     });
   });
+
+  group('SongPractice take numbering', () {
+    SongPractice practiceWith(List<String> names) => SongPractice(
+      id: 'p',
+      title: 'S',
+      vocalTracks: [
+        for (final (i, name) in names.indexed)
+          _vocal('t$i').copyWith(displayName: name),
+      ],
+      createdAt: DateTime(2026),
+      updatedAt: DateTime(2026),
+    );
+
+    test('counts plain and recovered take names alike (the one shared '
+        'numbering for new takes AND boot recovery)', () {
+      expect(practiceWith([]).nextTakeNumber, 1);
+      expect(practiceWith(['Take 1', 'Take 2']).nextTakeNumber, 3);
+      // A recovered take's number must be visible to the normal path…
+      expect(practiceWith(['Take 1', 'Take 3 (recovered)']).nextTakeNumber, 4);
+      // …and renamed/foreign labels stay out, as before.
+      expect(practiceWith(['Chorus try', 'Take 2 (edited)']).nextTakeNumber, 1);
+    });
+
+    test('numbers over the ACTIVE interpretation only', () {
+      final p = SongPractice(
+        id: 'p',
+        title: 'S',
+        versions: [
+          TakeVersion(id: 'v1', name: 'A', createdAt: DateTime(2026)),
+          TakeVersion(id: 'v2', name: 'B', createdAt: DateTime(2026)),
+        ],
+        activeVersionId: 'v1',
+        vocalTracks: [
+          _vocal('a', versionId: 'v1').copyWith(displayName: 'Take 1'),
+          _vocal('b', versionId: 'v2').copyWith(displayName: 'Take 9'),
+        ],
+        createdAt: DateTime(2026),
+        updatedAt: DateTime(2026),
+      );
+      expect(p.nextTakeNumber, 2);
+    });
+  });
 }

@@ -16,6 +16,43 @@ class ReconcileResult {
   int get total => inserts + updates + tombstones;
 }
 
+/// The write [reconcileCollection] emits for one desired row — the three-way
+/// rules as a pure function of the row's three hashes. The collection pass
+/// itself runs on this, and it is exposed so a caller that must pre-stage
+/// writes around a per-statement UNIQUE constraint (the track-slot vacate in
+/// SongPracticeRepositoryDrift._reconcileTracks) can predict the pass without
+/// keeping a second, divergence-prone copy of the rules.
+enum ReconcileOp {
+  /// Rule 7 (new local row) or rule 5's edited side (revive through upsert).
+  insert,
+
+  /// Rules 1 and 3, and the no-base save over an existing row.
+  update,
+
+  /// Rule 2 or rule 5's untouched side: the persisted state wins, no write.
+  skip,
+
+  /// mine == DB: nothing to write, no HLC tick, no oplog.
+  unchanged,
+}
+
+/// See [ReconcileOp]. [mine]/[db]/[base] are the row's content hashes per the
+/// three sides documented on [reconcileCollection].
+ReconcileOp reconcileOpFor({
+  required String mine,
+  required String? db,
+  required String? base,
+}) {
+  if (db == null) {
+    // Not live in the DB: rule 5's untouched side accepts the remote delete;
+    // everything else inserts (rule 7 new row, rule 5's edited-side revive).
+    return base != null && mine == base ? ReconcileOp.skip : ReconcileOp.insert;
+  }
+  if (mine == db) return ReconcileOp.unchanged;
+  if (base != null && db != base && mine == base) return ReconcileOp.skip;
+  return ReconcileOp.update;
+}
+
 /// Reconciles ONE child collection of a saved aggregate against what is
 /// persisted, as a THREE-WAY merge, emitting the MINIMAL set of writes through
 /// the [SyncWriter] chokepoint.
@@ -96,11 +133,18 @@ Future<ReconcileResult> reconcileCollection<Item>({
   // violation -> the whole save rolls back. Removing first frees the slot.
   // This still holds under the three-way rules: a locally REPLACED slot row
   // was loaded by this editor, so it is in base and is tombstoned here before
-  // the insert pass runs. The one case ordering cannot cover is a slot row
-  // created REMOTELY while this aggregate was open: rule 4 deliberately keeps
-  // it, so a colliding local insert fails the whole save (Result.error at the
-  // repository boundary; the caller reverts/reloads). That is the safe side:
-  // failing loudly over silently tombstoning a row this editor never saw.
+  // the insert pass runs. A slot MOVED between rows that both stay in desired
+  // (a rotation's re-kinded old row, a symmetric swap) is beyond any statement
+  // order — SQLite checks the index per statement, so whichever row writes
+  // first collides with the other still holding its old slot. The caller owns
+  // that case: it pre-vacates the affected rows inside the same transaction
+  // before this pass runs, predicting the pass via [reconcileOpFor] (see
+  // SongPracticeRepositoryDrift._reconcileTracks). The one case nothing local
+  // covers is a slot row created REMOTELY while this aggregate was open: rule
+  // 4 deliberately keeps it, so a colliding local insert fails the whole save
+  // (Result.error at the repository boundary; the caller reverts/reloads).
+  // That is the safe side: failing loudly over silently tombstoning a row
+  // this editor never saw.
   for (final id in currentHashes.keys) {
     if (desiredIds.contains(id)) continue;
     if (!baseHashes.containsKey(id)) {
@@ -126,56 +170,56 @@ Future<ReconcileResult> reconcileCollection<Item>({
   for (final item in desired) {
     final id = idOf(item);
     final mine = hashOf(item);
-    final db = currentHashes[id];
-    final base = baseHashes[id];
 
-    if (db == null) {
-      // Not live in the DB.
-      if (base != null && mine == base) {
-        // Rule 5 (untouched side): the editor held the row, never changed it,
-        // and it is gone from the DB — deleted remotely while the aggregate
-        // was open. Accept the delete; reviving would resurrect a tombstone.
+    switch (reconcileOpFor(
+      mine: mine,
+      db: currentHashes[id],
+      base: baseHashes[id],
+    )) {
+      case ReconcileOp.unchanged:
+        // Unchanged relative to what is persisted (including the case where a
+        // remote write already equals mine): emit nothing — no phantom op.
+        break;
+      case ReconcileOp.skip:
+        // Rule 2: the DB moved on since load and this editor never touched
+        // the row. Keep THEIRS — writing mine would revert the newer state to
+        // stale values under a fresh HLC (the regression this three-way merge
+        // fixes). Or rule 5's untouched side: the editor held the row, never
+        // changed it, and it is gone from the DB — deleted remotely while the
+        // aggregate was open. Accept the delete; reviving would resurrect a
+        // tombstone.
         result.skips++;
-        continue;
-      }
-      // Rule 7 (base == null): a brand-new local row. Or rule 5 (edited
-      // side, base != null && mine != base): an edit-vs-delete conflict — the
-      // active editor wins and the row is revived. Both go through the same
-      // upsert insert path (which clears deleted_at) with a fresh HLC.
-      final stamp = writer.stamp();
-      await insert(item, stamp);
-      await writer.journal(
-        table: table,
-        id: id,
-        op: 'insert',
-        hlc: stamp.hlc,
-        payloadHash: mine,
-      );
-      result.inserts++;
-    } else if (mine == db) {
-      // Unchanged relative to what is persisted (including the case where a
-      // remote write already equals mine): emit nothing — no phantom op.
-    } else if (base != null && db != base && mine == base) {
-      // Rule 2: the DB moved on since load and this editor never touched the
-      // row. Keep THEIRS — writing mine would revert the newer state to stale
-      // values under a fresh HLC (the regression this three-way merge fixes).
-      result.skips++;
-    } else {
-      // Rule 1 (db == base, mine != base): a plain local edit.
-      // Rule 3 (db != base, mine != base): a true conflict — active editor
-      // wins, mine is written with a fresh HLC.
-      // base == null with a live row: no base knowledge (a no-base save over
-      // an existing row) — treated as a conflict, local wins.
-      final stamp = writer.stamp();
-      await update(item, stamp);
-      await writer.journal(
-        table: table,
-        id: id,
-        op: 'update',
-        hlc: stamp.hlc,
-        payloadHash: mine,
-      );
-      result.updates++;
+      case ReconcileOp.insert:
+        // Rule 7 (base == null): a brand-new local row. Or rule 5 (edited
+        // side, base != null && mine != base): an edit-vs-delete conflict —
+        // the active editor wins and the row is revived. Both go through the
+        // same upsert insert path (which clears deleted_at) with a fresh HLC.
+        final stamp = writer.stamp();
+        await insert(item, stamp);
+        await writer.journal(
+          table: table,
+          id: id,
+          op: 'insert',
+          hlc: stamp.hlc,
+          payloadHash: mine,
+        );
+        result.inserts++;
+      case ReconcileOp.update:
+        // Rule 1 (db == base, mine != base): a plain local edit.
+        // Rule 3 (db != base, mine != base): a true conflict — active editor
+        // wins, mine is written with a fresh HLC.
+        // base == null with a live row: no base knowledge (a no-base save
+        // over an existing row) — treated as a conflict, local wins.
+        final stamp = writer.stamp();
+        await update(item, stamp);
+        await writer.journal(
+          table: table,
+          id: id,
+          op: 'update',
+          hlc: stamp.hlc,
+          payloadHash: mine,
+        );
+        result.updates++;
     }
   }
 
