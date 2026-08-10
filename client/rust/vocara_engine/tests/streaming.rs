@@ -267,6 +267,42 @@ fn a_loop_wrap_streams_seamlessly_via_the_wrap_fence() {
 }
 
 #[test]
+fn a_replan_with_the_playhead_past_loop_end_models_the_render_wrap() {
+    // The recording flow plays PAST loop end with the loop disengaged, pauses
+    // (the clock folds beyond loop end), then re-arms the loop without a seek.
+    // On resume the render clock wraps `frame >= loop_end` back to loop_start
+    // before producing anything, and the feeder's pump can replan from the
+    // stale pre-wrap playhead before the first post-play block renders. The
+    // plan must model that wrap: planning a linear run from past loop end
+    // streams positions the transport never plays, silencing the track for
+    // the whole looping session.
+    let frames = 4096;
+    let path = write_track(frames);
+    let (h, rt, mut feeder) = streamed_pair(&path, 0, 8192);
+    h.play();
+    let _ = render_streamed(&h, &rt, &mut feeder, 12); // playhead at 1536
+    h.pause(); // folds the clock past the loop end armed next
+    h.set_loop(true, 100, 1100);
+    h.play();
+    // render_streamed pumps BEFORE each block: the first pump's replan reads
+    // the pre-wrap fold (1536 > 1100), exactly the racing order in question.
+    let streamed = render_streamed(&h, &rt, &mut feeder, 20);
+
+    let (h2, rt2) = engine_with(Box::new(BufferSource::new(ramp_pcm(frames), 0)));
+    h2.play();
+    let _ = render_arc(&h2, &rt2, 12);
+    h2.pause();
+    h2.set_loop(true, 100, 1100);
+    h2.play();
+    let arc = render_arc(&h2, &rt2, 20);
+    assert_eq!(
+        streamed, arc,
+        "a plan made from a pre-wrap playhead must stream the wrapped run"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
 fn a_streamed_track_through_the_full_project_graph_equals_the_arc_build() {
     // Wiring-level: the streaming source must behave identically inside the
     // REAL track chain (vocal insert chain, gains, master) that
