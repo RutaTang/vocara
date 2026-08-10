@@ -1486,6 +1486,7 @@ fn writer_run(mut rec: Consumer<[Smp; CHANNELS]>, rx: mpsc::Receiver<WriterCmd>)
                     // draining its buffered tail into it (mirroring Stop) so those frames
                     // land in the take they belong to. IO errors on that drain/finalize are
                     // carried into `failed` (matching Stop) rather than swallowed.
+                    let had_live_take = wav.is_some();
                     let mut old_take_damaged = false;
                     if let Some(mut w) = wav.take() {
                         while let Some(f) = rec.pop() {
@@ -1509,10 +1510,13 @@ fn writer_run(mut rec: Consumer<[Smp; CHANNELS]>, rx: mpsc::Receiver<WriterCmd>)
                             // restart path has no ack channel of its own, so the NEXT Stop
                             // reports it (a surfaced-if-misattributed failure beats silent
                             // corruption; the normal stop-then-start flow never reaches
-                            // here with a live take). OR-ed, never assigned: `failed` may
-                            // already hold mid-take write damage from the drain loop, and
-                            // a clean tail-drain/finalize must not erase it.
-                            failed = failed || old_take_damaged;
+                            // here with a live take). `failed` is carried only while a live
+                            // take existed — then it holds that take's mid-take drain
+                            // damage, which a clean tail-drain/finalize must not erase.
+                            // Without one, a leftover `failed` is a previous CREATE failure
+                            // already reported through its own ack, and keeping it would
+                            // damn the new take before a sample is written.
+                            failed = (had_live_take && failed) || old_take_damaged;
                             let _ = ack.send(true);
                         }
                         Err(_) => {
@@ -2975,6 +2979,25 @@ mod record_writer_tests {
             !w.stop(),
             "stop after a failed start must not report a clean take"
         );
+    }
+
+    #[test]
+    fn a_failed_start_does_not_poison_the_next_take() {
+        let (mut prod, cons) = spsc::<[Smp; CHANNELS]>(1024);
+        let w = RecordWriter::spawn(cons);
+        // The failed create is fully reported by its own ack; the sticky flag must
+        // describe only takes, so the NEXT take starts with a clean slate.
+        assert!(!w.start("/nonexistent-vocara-dir/take.wav"));
+        let path = temp_wav("after_failed_start");
+        assert!(w.start(path.to_str().unwrap()), "a valid path must create");
+        for i in 0..50 {
+            assert!(prod.push([i as f32 / 100.0, 0.0]));
+        }
+        assert!(
+            w.stop(),
+            "a clean take after a failed start must not inherit the create failure"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
