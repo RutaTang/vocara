@@ -629,11 +629,7 @@ pub extern "C" fn ve_set_output_device(e: *mut VeEngine, uid: *const c_char) -> 
 /// default output for the life of the session. Judge monitor-feedback safety from THIS, not from
 /// the selection. Returns the byte length.
 #[no_mangle]
-pub extern "C" fn ve_actual_output_device(
-    e: *mut VeEngine,
-    buf: *mut c_char,
-    cap: usize,
-) -> usize {
+pub extern "C" fn ve_actual_output_device(e: *mut VeEngine, buf: *mut c_char, cap: usize) -> usize {
     with_engine(e, 0, |eng| {
         let uid = eng
             .output_binding
@@ -1545,11 +1541,14 @@ fn flatten_stereo(mut v: Vec<[Smp; CHANNELS]>) -> Vec<Smp> {
 /// `maxPlaybackDuration` (60 min) — the two must move together.
 const MAX_PLAYBACK_SECS: f64 = 3600.0;
 
-/// Absolute source-frame budget for the splice's two input decodes: 60 minutes at the
-/// 48 kHz take rate ≈ 173 M frames ≈ 1.4 GB in the decode vec — the take format's own
-/// worst case; higher-rate imports shorten proportionally. `ve_decode` callers pass their
-/// own budget as a parameter instead (analysis and playback staging differ by 10x).
-const MAX_SPLICE_SRC_FRAMES: u64 = 173_000_000;
+/// Absolute source-frame budget for the splice's two input decodes. Mirrors the Dart
+/// side's `maxPlaybackSrcFrames` (60 minutes at a 96 kHz source ≈ 346 M frames ≈ 2.8 GB
+/// in the decode vec) — the two must move together: the import gates admit media by the
+/// PLAYBACK budget, and this path is also the import transcode (`ensureStreamableWav`),
+/// so a tighter budget here refuses an in-policy hi-rate file only AFTER its full sandbox
+/// copy. `ve_decode` callers pass their own budget as a parameter instead (analysis and
+/// playback staging differ by 10x).
+const MAX_SPLICE_SRC_FRAMES: u64 = 346_000_000;
 
 /// Highest output rate any decode/splice entry point accepts. Every real caller passes the
 /// engine rate (48 kHz) or a common analysis rate; an absurd rate would multiply into every
@@ -3043,6 +3042,53 @@ mod punch_tests {
             before + 1,
             "only NEW may decode when the split keeps nothing of old"
         );
+        let _ = std::fs::remove_file(&old);
+        let _ = std::fs::remove_file(&new);
+        let _ = std::fs::remove_file(&out);
+    }
+
+    #[test]
+    fn an_in_policy_hi_rate_source_transcodes_within_the_playback_budget() {
+        // The splice budget mirrors the Dart playback budget (`maxPlaybackSrcFrames`):
+        // every import gate admits media by DURATION (60 min) regardless of rate, so a
+        // budget sized to the 48 kHz take rate refused an in-policy hi-rate file (e.g.
+        // a 31-60 minute 96 kHz import) AFTER its full sandbox copy, as a generic
+        // conversion error. A header DECLARING 174 M source frames at 96 kHz — over
+        // the old 173 M cap, within the playback budget — must reach the decode; the
+        // truncated body keeps the test small (a truncated data chunk is a normal end
+        // of stream, so the decode yields just the real frames).
+        let old = temp_wav("hr_old");
+        let new = temp_wav("hr_new");
+        let out = temp_wav("hr_out");
+        crate::wav::write_wav_f32(&old, &[0.1; 96], 2, 48_000).unwrap();
+        let declared_frames: u32 = 174_000_000; // ~30.2 min at 96 kHz — in policy
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + declared_frames * 8).to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&3u16.to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&96_000u32.to_le_bytes());
+        bytes.extend_from_slice(&(96_000u32 * 8).to_le_bytes());
+        bytes.extend_from_slice(&8u16.to_le_bytes());
+        bytes.extend_from_slice(&32u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&(declared_frames * 8).to_le_bytes());
+        for _ in 0..96 * 2 {
+            bytes.extend_from_slice(&0.25f32.to_le_bytes());
+        }
+        std::fs::write(&new, &bytes).unwrap();
+        let c = |p: &std::path::Path| CString::new(p.to_str().unwrap()).unwrap();
+        let (c_old, c_new, c_out) = (c(&old), c(&new), c(&out));
+
+        let frames = super::ve_punch_wav(c_old.as_ptr(), c_new.as_ptr(), 0, 48_000, c_out.as_ptr());
+        assert!(
+            frames > 0,
+            "a source the playback budget admits must transcode, got {frames}"
+        );
+
         let _ = std::fs::remove_file(&old);
         let _ = std::fs::remove_file(&new);
         let _ = std::fs::remove_file(&out);
