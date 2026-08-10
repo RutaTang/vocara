@@ -370,6 +370,132 @@ void main() {
     expect(n, 1);
   });
 
+  // Regression guard: the tombstone-first ordering only frees a slot when the
+  // old row LEAVES the aggregate. A slot ROTATION keeps the old row in desired
+  // with its kind changed — the first-separation flow re-kinds the original
+  // (accompaniment -> reference) while a fresh instrumental takes the
+  // accompaniment slot — and the new row's insert then collided with the old
+  // row still holding the slot in the DB, rolling back the whole save.
+  test('slot rotation (old accompaniment re-kinded to reference + a new '
+      'accompaniment) saves without a ux_track_slot rollback', () async {
+    final base = ok(await repo.createPractice('S'));
+    SongPractice withSlots({
+      AudioTrack? accompaniment,
+      AudioTrack? reference,
+    }) => SongPractice(
+      id: base.id,
+      title: base.title,
+      createdAt: base.createdAt,
+      updatedAt: base.updatedAt,
+      accompaniment: accompaniment,
+      reference: reference,
+      versions: base.versions,
+      activeVersionId: base.versions.single.id,
+    );
+    final originalId = newId();
+    final originalClip = await clip('mix.wav', [1, 2, 3]);
+    ok(
+      await repo.savePractice(
+        withSlots(
+          accompaniment: AudioTrack(
+            id: originalId,
+            kind: AudioTrackKind.accompaniment,
+            displayName: 'Full mix',
+            createdAt: DateTime(2026),
+            clips: [originalClip],
+          ),
+        ),
+      ),
+    );
+
+    // The separation result: same id, kind rotated to reference; a NEW id
+    // claims the accompaniment slot in the same save.
+    final result = await repo.savePractice(
+      withSlots(
+        accompaniment: AudioTrack(
+          id: newId(),
+          kind: AudioTrackKind.accompaniment,
+          displayName: 'Full mix (Instrumental)',
+          createdAt: DateTime(2026),
+          clips: [
+            await clip('inst.wav', [4, 5]),
+          ],
+        ),
+        reference: AudioTrack(
+          id: originalId,
+          kind: AudioTrackKind.reference,
+          displayName: 'Full mix',
+          createdAt: DateTime(2026),
+          clips: [originalClip],
+        ),
+      ),
+    );
+
+    expect(result, isA<Ok<SongPractice>>());
+    final loaded = ok(result);
+    expect(loaded.accompaniment!.displayName, 'Full mix (Instrumental)');
+    expect(loaded.reference!.id, originalId);
+    for (final kind in ['accompaniment', 'reference']) {
+      final n =
+          (await db
+                  .customSelect(
+                    'SELECT COUNT(*) AS n FROM tracks WHERE '
+                    "kind = '$kind' AND deleted_at IS NULL",
+                  )
+                  .getSingle())
+              .read<int>('n');
+      expect(n, 1, reason: 'exactly one live $kind row');
+    }
+  });
+
+  test('a symmetric accompaniment/reference swap saves (no statement order '
+      'can free both slots — the two-phase vacate must)', () async {
+    final base = ok(await repo.createPractice('S'));
+    SongPractice withSlots(AudioTrack accompaniment, AudioTrack reference) =>
+        SongPractice(
+          id: base.id,
+          title: base.title,
+          createdAt: base.createdAt,
+          updatedAt: base.updatedAt,
+          accompaniment: accompaniment,
+          reference: reference,
+          versions: base.versions,
+          activeVersionId: base.versions.single.id,
+        );
+    final aId = newId();
+    final bId = newId();
+    final aClip = await clip('a.wav', [1]);
+    final bClip = await clip('b.wav', [2]);
+    AudioTrack track(String id, AudioTrackKind kind, AudioClip c) => AudioTrack(
+      id: id,
+      kind: kind,
+      displayName: id == aId ? 'A' : 'B',
+      createdAt: DateTime(2026),
+      clips: [c],
+    );
+    ok(
+      await repo.savePractice(
+        withSlots(
+          track(aId, AudioTrackKind.accompaniment, aClip),
+          track(bId, AudioTrackKind.reference, bClip),
+        ),
+      ),
+    );
+
+    // Swap the kinds between the SAME two live rows.
+    final result = await repo.savePractice(
+      withSlots(
+        track(bId, AudioTrackKind.accompaniment, bClip),
+        track(aId, AudioTrackKind.reference, aClip),
+      ),
+    );
+
+    expect(result, isA<Ok<SongPractice>>());
+    final loaded = ok(result);
+    expect(loaded.accompaniment!.id, bId);
+    expect(loaded.reference!.id, aId);
+  });
+
   test('removing a vocal track journals exactly one tombstone per row whose '
       'HLC matches the row (no duplicate / stale oplog entry)', () async {
     final base = ok(await repo.createPractice('S'));

@@ -582,6 +582,37 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
     final desired = [
       for (var i = 0; i < tracks.length; i++) (track: tracks[i], order: i),
     ];
+
+    // A slot MOVE between live rows — the separation flow's rotation (the old
+    // accompaniment re-kinded to reference while a fresh instrumental takes
+    // its slot) or a symmetric swap — cannot be saved by any statement order:
+    // ux_track_slot is enforced per statement, so whichever row writes first
+    // collides with the other still holding its old kind. Two-phase instead:
+    // every live slot row this pass WILL re-kind (predicted with
+    // [reconcileOpFor], the same rules the pass runs on — a rule-2/5 skip must
+    // NOT be vacated, its DB kind is being kept) is parked as 'vocal' first —
+    // outside the partial index, still within the kind CHECK. The row's real
+    // update then writes its final kind inside this same transaction, so the
+    // parked value is never observable outside it.
+    const slotKinds = {'accompaniment', 'reference'};
+    final desiredById = {for (final d in desired) d.track.id: d};
+    for (final r in live) {
+      if (!slotKinds.contains(r.kind)) continue;
+      final d = desiredById[r.id];
+      if (d == null || d.track.kind.name == r.kind) continue;
+      final op = reconcileOpFor(
+        mine: trackHash(d.track, d.order),
+        db: current[r.id],
+        base: (base ?? current)[r.id],
+      );
+      if (op != ReconcileOp.update) continue;
+      await db.customUpdate(
+        'UPDATE tracks SET kind = ? WHERE id = ?',
+        variables: [Variable.withString('vocal'), Variable.withString(r.id)],
+        updates: {db.tracks},
+      );
+    }
+
     var changed = (await reconcileCollection(
       writer: writer,
       table: 'tracks',
