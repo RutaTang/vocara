@@ -340,9 +340,14 @@ class GraphAudioPlaybackService implements PlaybackEngine {
   /// re-running its isolate decodes) on every sync for the rest of the session.
   bool _retryingDegradedCommit = false;
 
-  static int _bitCount(int mask) {
+  /// Population count over all 64 bits of [mask]. The degraded mask crosses
+  /// the FFI as a Uint64, so bit 63 lands in Dart's sign bit: the shift must
+  /// be logical (`>>>`) — an arithmetic `>>` keeps a negative value negative
+  /// forever and the loop would never terminate.
+  @visibleForTesting
+  static int bitCount(int mask) {
     var n = 0;
-    for (var m = mask; m != 0; m >>= 1) {
+    for (var m = mask; m != 0; m >>>= 1) {
       n += m & 1;
     }
     return n;
@@ -839,7 +844,7 @@ class GraphAudioPlaybackService implements PlaybackEngine {
       _retryingDegradedCommit = true;
       DiagnosticsLog.instance.log(
         'engine',
-        'commit degraded ${_bitCount(degraded)} streaming track(s) to silence; '
+        'commit degraded ${bitCount(degraded)} streaming track(s) to silence; '
             'rebuilding once from a fresh probe',
       );
       _committedSig = '';
