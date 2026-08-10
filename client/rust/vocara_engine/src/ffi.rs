@@ -802,11 +802,25 @@ pub extern "C" fn ve_stop_monitor(e: *mut VeEngine) -> c_int {
     })
 }
 
+/// Arm the analysis capture. A NEW session starts from an EMPTY ring: the Dart
+/// pull timer is cancelled before stopCapture, stranding the previous session's
+/// tail (up to a full ring) — which the next session's first pull would render
+/// as live input (the recording ring sweeps its stale frames; same class).
+/// Draining while inactive cannot race the producer: the input callback only
+/// pushes while `cap_active` is set. A start DURING a session keeps the ring —
+/// those frames are live, not stale.
+fn arm_capture(cap_active: &AtomicBool, cap_cons: &mut Consumer<[Smp; CHANNELS]>) {
+    if !cap_active.load(Ordering::Acquire) {
+        while cap_cons.pop().is_some() {}
+    }
+    cap_active.store(true, Ordering::Release);
+}
+
 /// Begin capturing input frames for analysis (`ve_input_frames`); opens the input stream. 0 = ok.
 #[no_mangle]
 pub extern "C" fn ve_start_capture(e: *mut VeEngine) -> c_int {
     with_engine(e, -1, |eng| {
-        eng.cap_active.store(true, Ordering::Release);
+        arm_capture(&eng.cap_active, &mut eng.cap_cons);
         sync_input(eng);
         0
     })
@@ -1355,6 +1369,28 @@ pub extern "C" fn ve_tracks_add(
     .unwrap_or(-1)
 }
 
+/// Maps staged aux sends (target bus index, level dB) to slot-stable build
+/// sends: a target outside [0, bus_count) — or equal to `own_bus` for a bus's
+/// own sends — keeps its SLOT as `None` instead of being dropped. The control
+/// plane addresses send nodes by MODEL slot (`ve_set_send_level` /
+/// `ve_set_bus_send_level`), so dropping an entry would shift every later
+/// sibling onto the wrong node: the level meant for one send would land on
+/// another, and the last knob would go inert. A dangling send is representable
+/// in persisted data (a missing busId parses to an unresolvable target).
+fn stage_sends(
+    sends: &[(i32, f32)],
+    bus_count: i32,
+    own_bus: Option<i32>,
+) -> Vec<Option<(u32, f32)>> {
+    sends
+        .iter()
+        .map(|&(t, db)| {
+            (t >= 0 && t < bus_count && Some(t) != own_bus)
+                .then(|| (t as u32, crate::sample::db_to_lin(db)))
+        })
+        .collect()
+}
+
 /// Build the multi-source graph from the staged tracks and hot-swap it in (transport state
 /// preserved). Each track: Source(@start) -> Gain -> Pan -> Master. Returns 0 / negative.
 #[no_mangle]
@@ -1385,13 +1421,9 @@ pub extern "C" fn ve_tracks_commit(e: *mut VeEngine) -> c_int {
             } else {
                 pb.chain.clone()
             };
-            // Valid sends to other buses (never to self), level dB → linear.
-            let sends: Vec<(u32, f32)> = pb
-                .sends
-                .iter()
-                .filter(|(t, _)| *t >= 0 && *t < bus_count && *t != i as i32)
-                .map(|&(t, db)| (t as u32, crate::sample::db_to_lin(db)))
-                .collect();
+            // Valid sends to other buses (never to self), level dB → linear;
+            // unresolvable targets hold their slot (see stage_sends).
+            let sends = stage_sends(&pb.sends, bus_count, Some(i as i32));
             bus_specs.push(BusSpec {
                 id: i as u32,
                 gain: if pb.muted { 0.0 } else { pb.gain },
@@ -1427,13 +1459,10 @@ pub extern "C" fn ve_tracks_commit(e: *mut VeEngine) -> c_int {
             } else {
                 pt.chain.clone()
             };
-            // Vocal sends to valid buses, level dB → linear (backing has none).
-            let sends: Vec<(u32, f32)> = if pt.vocal {
-                pt.sends
-                    .iter()
-                    .filter(|(t, _)| *t >= 0 && *t < bus_count)
-                    .map(|&(t, db)| (t as u32, crate::sample::db_to_lin(db)))
-                    .collect()
+            // Vocal sends to valid buses, level dB → linear (backing has
+            // none); unresolvable targets hold their slot (see stage_sends).
+            let sends = if pt.vocal {
+                stage_sends(&pt.sends, bus_count, None)
             } else {
                 Vec::new()
             };
@@ -2848,6 +2877,88 @@ mod cache_tests {
         assert!(
             cache_lookup_fresh(&mut cache, p, 6).is_some(),
             "an unreadable source file must not invalidate the cache"
+        );
+    }
+}
+
+#[cfg(test)]
+mod send_slot_tests {
+    //! Staged aux sends keep their MODEL slot across unresolvable targets:
+    //! the control plane addresses send nodes by slot, so filtering here
+    //! would shift sibling levels onto the wrong nodes (see [`stage_sends`]).
+    //!
+    //! [`stage_sends`]: super::stage_sends
+
+    use super::stage_sends;
+
+    #[test]
+    fn unresolvable_targets_hold_their_slot() {
+        let staged = [(-1, 0.0f32), (1, -12.0f32), (99, -6.0f32)];
+        let sends = stage_sends(&staged, 2, None);
+        assert_eq!(sends.len(), 3, "every model slot is represented");
+        assert!(
+            sends[0].is_none(),
+            "a dangling target maps to an empty slot"
+        );
+        let (t, lin) = sends[1].expect("the valid send keeps slot 1");
+        assert_eq!(t, 1);
+        assert!((lin - crate::sample::db_to_lin(-12.0)).abs() < 1e-6);
+        assert!(
+            sends[2].is_none(),
+            "an out-of-range target maps to an empty slot"
+        );
+    }
+
+    #[test]
+    fn a_bus_self_send_holds_its_slot_too() {
+        let staged = [(0, 0.0f32), (1, 0.0f32)];
+        let sends = stage_sends(&staged, 2, Some(0));
+        assert!(sends[0].is_none(), "a self-send is unresolvable for a bus");
+        assert!(sends[1].is_some(), "the sibling send keeps its slot");
+    }
+}
+
+#[cfg(test)]
+mod capture_ring_tests {
+    //! The capture ring's session boundary. Both Dart stop paths cancel the
+    //! 30 ms pull timer BEFORE stopCapture, so the frames pushed since the
+    //! last tick stay in the ring across sessions — and the next session's
+    //! first pull would render the PREVIOUS session's tail as live input.
+    //! The recording ring sweeps its stale frames; the capture ring must too.
+
+    use super::arm_capture;
+    use crate::ring::spsc;
+    use crate::sample::{Smp, CHANNELS};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn a_new_capture_session_starts_from_an_empty_ring() {
+        let (mut prod, mut cons) = spsc::<[Smp; CHANNELS]>(64);
+        for _ in 0..5 {
+            assert!(prod.push([0.3, -0.3])); // the previous session's tail
+        }
+        let active = AtomicBool::new(false);
+        arm_capture(&active, &mut cons);
+        assert!(active.load(Ordering::Acquire));
+        assert!(
+            cons.pop().is_none(),
+            "stale frames must not leak into a new session"
+        );
+        // Frames captured AFTER the start flow normally.
+        assert!(prod.push([0.7, -0.7]));
+        assert_eq!(cons.pop(), Some([0.7, -0.7]));
+    }
+
+    #[test]
+    fn a_redundant_start_keeps_a_live_session_frames() {
+        let (mut prod, mut cons) = spsc::<[Smp; CHANNELS]>(64);
+        let active = AtomicBool::new(true); // already mid-session
+        assert!(prod.push([0.4, -0.4]));
+        arm_capture(&active, &mut cons);
+        assert_eq!(
+            cons.pop(),
+            Some([0.4, -0.4]),
+            "a start while capturing must not drop live audio"
         );
     }
 }
