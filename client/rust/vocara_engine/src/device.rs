@@ -570,6 +570,29 @@ fn build_output(
     Ok((stream, resolved))
 }
 
+/// Restore the cpal output after duplex VPIO released it (mic stopped) or failed to take it
+/// (mic open/reopen failed): try the user's chosen device first, fall back to the system
+/// default. Returns the handle (`None` when BOTH attempts failed) and the resolved uid
+/// (empty when nothing opened). A double failure raises [`EVENT_OUTPUT_LOST`] — the same
+/// contract as SetOutput's double failure — because with nothing open the binding reports
+/// no reroute, the playhead's only clock (the output callback) is gone, and the Dart device
+/// watch re-opens the output ONLY on this event; silence here would leave playback dead for
+/// the rest of the session. Generic over the build attempt so the contract is testable
+/// without CoreAudio.
+fn restore_output_or_flag<H>(
+    preferred: Option<&str>,
+    event: &AtomicU32,
+    mut build: impl FnMut(Option<&str>) -> Result<(H, String), String>,
+) -> (Option<H>, String) {
+    let built = build(preferred).or_else(|_| build(None)).ok();
+    let resolved = built.as_ref().map(|(_, u)| u.clone()).unwrap_or_default();
+    let handle = built.map(|(h, _)| h);
+    if handle.is_none() {
+        event.fetch_or(EVENT_OUTPUT_LOST, Ordering::Release);
+    }
+    (handle, resolved)
+}
+
 /// What the engine's output is bound to right now, as the raw facts the audio-host thread owns.
 /// The device actually rendering is DERIVED from these on demand ([`OutputBinding::actual_uid`])
 /// rather than cached: while duplex VPIO owns the output and its bound mic has no output streams,
@@ -853,7 +876,14 @@ impl InputCell {
         self.busy
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .ok()?;
-        Some(InputGuard { cell: self })
+        let guard = InputGuard { cell: self };
+        // Re-check under `busy`: `reconfigure` can retire this epoch between the check
+        // above and the compare-exchange, and an entry admitted on that stale check
+        // would decode its samples under the format installed for the NEXT stream.
+        if self.owner.load(Ordering::Acquire) != epoch {
+            return None; // the guard's drop releases `busy`
+        }
+        Some(guard)
     }
 
     /// Feed one input callback's samples as `epoch`. `false` = denied (a retired callback, or a
@@ -883,16 +913,21 @@ impl InputCell {
         InputGuard { cell: self }
     }
 
-    /// Reconfigure for a new input stream (native rate + channels). Call on the HOST THREAD,
-    /// between retiring the old stream and starting the new one.
-    pub fn reconfigure(&self, in_rate: f64, in_channels: usize) {
-        // Take the SAME single-accessor flag a feed takes. `claim` retires older callbacks, but it
-        // cannot evict one already inside `feed` — and a teardown whose stop failed leaves exactly
-        // that: a zombie callback still running against a leaked unit (see `vpio::Vpio::stop`).
-        // Writing the state under it would be two live `&mut InputState`, so wait it out; the wait
-        // is one callback's feed (microseconds) and only on that failed-teardown path.
+    /// Install the next input stream's native format (rate + channels) and mint the generation
+    /// that stream must feed as. Call on the HOST THREAD, after dropping the old stream and
+    /// before starting the new one. Retirement is enforced here, not assumed: the owner
+    /// generation advances BEFORE the format lands, so a zombie callback that survived a failed
+    /// teardown is denied instead of having its samples decoded under a format it never
+    /// delivered (e.g. a 24 kHz unit's frames emitted 1:1 as 48 kHz).
+    pub fn reconfigure(&self, in_rate: f64, in_channels: usize) -> u64 {
+        // Retire first: once the owner moves, no older generation can enter.
+        let epoch = self.claim();
+        // A retired callback may still be INSIDE `feed` (it entered before the owner moved).
+        // Take `busy` — the same exclusion every accessor takes — so the format switch below
+        // cannot race its state writes. The wait is bounded by one callback's duration.
         let _g = self.enter_blocking();
-        // SAFETY: the guard is the cell's single-accessor proof for this call.
+        // SAFETY: the guard is the cell's single-accessor proof for this call, and every
+        // older generation is retired.
         let st = unsafe { &mut *self.state.get() };
         st.in_channels = in_channels.max(1);
         st.step = in_rate / ENGINE_SR;
@@ -900,6 +935,7 @@ impl InputCell {
         st.primed = false;
         st.prev = [0.0, 0.0];
         st.nominal_acc = 0.0;
+        epoch
     }
 
     /// Test-only direct feed. Tests drive the cell with no stream around it, so claim the first
@@ -1473,8 +1509,10 @@ fn writer_run(mut rec: Consumer<[Smp; CHANNELS]>, rx: mpsc::Receiver<WriterCmd>)
                             // restart path has no ack channel of its own, so the NEXT Stop
                             // reports it (a surfaced-if-misattributed failure beats silent
                             // corruption; the normal stop-then-start flow never reaches
-                            // here with a live take).
-                            failed = old_take_damaged;
+                            // here with a live take). OR-ed, never assigned: `failed` may
+                            // already hold mid-take write damage from the drain loop, and
+                            // a clean tail-drain/finalize must not erase it.
+                            failed = failed || old_take_damaged;
                             let _ = ack.send(true);
                         }
                         Err(_) => {
@@ -1551,15 +1589,16 @@ fn build_input_stream(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     cell: Arc<InputCell>,
+    epoch: u64,
     event: Arc<AtomicU32>,
 ) -> Result<DeviceHandle, String> {
     let err_cb = move |err| {
         let _ = err;
         event.fetch_or(EVENT_INPUT_LOST, Ordering::Release);
     };
-    // Retire every older input callback before this stream can deliver a frame; a denied feed
-    // drops its samples rather than racing a second producer into single-producer rings.
-    let epoch = cell.claim();
+    // `epoch` is the generation `reconfigure` minted with this stream's format: every older
+    // callback is already retired, and a denied feed drops its samples rather than racing a
+    // second producer into single-producer rings.
     let stream = device
         .build_input_stream(
             *config,
@@ -1590,8 +1629,11 @@ fn build_input(
         None => default_input_device().ok_or_else(|| "no default input device".to_string())?,
     };
     let (config, rate, channels) = input_config(&device)?;
-    cell.reconfigure(rate, channels);
-    let stream = build_input_stream(&device, &config, Arc::clone(cell), Arc::clone(event))?;
+    // Reconfigure retires every older callback and mints the generation the new stream
+    // feeds as — the format and the admission epoch move together, so no callback can be
+    // admitted under a format it never delivered.
+    let epoch = cell.reconfigure(rate, channels);
+    let stream = build_input_stream(&device, &config, Arc::clone(cell), epoch, Arc::clone(event))?;
     let resolved = device_uid(&device).unwrap_or_default();
     Ok((stream, resolved))
 }
@@ -1707,8 +1749,11 @@ fn open_mic(
     event: &Arc<AtomicU32>,
 ) -> Result<MicHandle, String> {
     // Safe default; `Vpio::start` re-reconfigures the input cell from VPIO's *negotiated* format
-    // (mono/stereo, native rate) after the unit initializes, which is what actually governs feed.
-    input_cell.reconfigure(ENGINE_SR, CHANNELS);
+    // (mono/stereo, native rate) after the unit initializes, which is what actually governs
+    // feed — the generation minted here is superseded there, so its value is dropped. What
+    // matters NOW is the retirement: any zombie callback surviving a failed teardown is denied
+    // from this point on, instead of feeding through the multi-ms VPIO build window.
+    let _ = input_cell.reconfigure(ENGINE_SR, CHANNELS);
     // VPIO renders playback at 48 kHz with no boundary resampler: sync the
     // consumed cursor over anything a dying non-48 kHz cpal stream left in
     // its FIFO (see build_stream).
@@ -1943,12 +1988,11 @@ fn audio_host_run(
                             // survives. Restore the user's chosen output (not the system
                             // default); fall back to default only if it can't open.
                             if VPIO_DUPLEX_AEC && out_stream.is_none() {
-                                let built = build_output(cur_out_uid.as_deref(), &rt, &event)
-                                    .or_else(|_| build_output(None, &rt, &event))
-                                    .ok();
-                                let resolved =
-                                    built.as_ref().map(|(_, u)| u.clone()).unwrap_or_default();
-                                out_stream = built.map(|(h, _)| h);
+                                let (built, resolved) =
+                                    restore_output_or_flag(cur_out_uid.as_deref(), &event, |uid| {
+                                        build_output(uid, &rt, &event)
+                                    });
+                                out_stream = built;
                                 rebind_output(&|b| {
                                     b.cpal_uid = resolved.clone();
                                     b.vpio_mic = None;
@@ -1969,11 +2013,11 @@ fn audio_host_run(
                     // during duplex deferred it), falling back to the system default
                     // only if that device can't be opened.
                     if VPIO_DUPLEX_AEC && out_stream.is_none() {
-                        let built = build_output(cur_out_uid.as_deref(), &rt, &event)
-                            .or_else(|_| build_output(None, &rt, &event))
-                            .ok();
-                        let resolved = built.as_ref().map(|(_, u)| u.clone()).unwrap_or_default();
-                        out_stream = built.map(|(h, _)| h);
+                        let (built, resolved) =
+                            restore_output_or_flag(cur_out_uid.as_deref(), &event, |uid| {
+                                build_output(uid, &rt, &event)
+                            });
+                        out_stream = built;
                         // Playback is back on the user's device, so the safety mute clears
                         // itself here — nobody else has to remember to lift it.
                         rebind_output(&|b| {
@@ -2052,12 +2096,11 @@ fn audio_host_run(
                             if VPIO_DUPLEX_AEC && out_stream.is_none() {
                                 // Restore the user's chosen output (not the system default),
                                 // matching StopInput; fall back to default only if it can't open.
-                                let built = build_output(cur_out_uid.as_deref(), &rt, &event)
-                                    .or_else(|_| build_output(None, &rt, &event))
-                                    .ok();
-                                let resolved =
-                                    built.as_ref().map(|(_, u)| u.clone()).unwrap_or_default();
-                                out_stream = built.map(|(h, _)| h);
+                                let (built, resolved) =
+                                    restore_output_or_flag(cur_out_uid.as_deref(), &event, |uid| {
+                                        build_output(uid, &rt, &event)
+                                    });
+                                out_stream = built;
                                 rebind_output(&|b| {
                                     b.cpal_uid = resolved.clone();
                                     b.vpio_mic = None;
@@ -3041,6 +3084,51 @@ mod record_writer_tests {
         STREAM_TEARDOWN_FAILED.store(false, Ordering::Release);
     }
 
+    /// The sticky IO-failure flag exists so a take damaged mid-recording is reported through
+    /// the next Stop's ack. A Start while that take is still live must CARRY the damage
+    /// forward (its own ack only covers the new file's creation), not recompute the flag
+    /// from the restart's own tail-drain/finalize — those can succeed even though the take
+    /// already lost samples, and the damage would evaporate unreported.
+    #[test]
+    fn a_restart_keeps_mid_take_damage_sticky_until_stop_reports_it() {
+        use super::{writer_run, WriterCmd};
+        let (mut prod, cons) = spsc::<[Smp; CHANNELS]>(64);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let join = std::thread::spawn(move || writer_run(cons, rx));
+        // Take A's file creates cleanly but fails its FIRST data write (the injected
+        // stand-in for a disk filling mid-take).
+        let path_a = temp_wav(&format!("sticky_a_{}", crate::wav::TEST_FAIL_FIRST_WRITE));
+        let (ack, ack_rx) = std::sync::mpsc::channel();
+        tx.send(WriterCmd::Start(path_a.to_str().unwrap().to_string(), ack))
+            .unwrap();
+        assert!(ack_rx.recv().unwrap(), "take A's file creation is clean");
+        // One frame whose write fails. The drain loop pops it and writes (and records the
+        // failure) within the same iteration, before the next command check — so once the
+        // ring reports empty, the damage is on the sticky flag and NOT attributable to the
+        // restart's own tail-drain (which sees an empty ring and succeeds).
+        assert!(prod.push([0.5, 0.0]));
+        while prod.free() != prod.capacity() {
+            std::thread::yield_now();
+        }
+        // Restart straight into take B: its create, tail-drain, and finalize all succeed.
+        let path_b = temp_wav("sticky_b");
+        let (back, back_rx) = std::sync::mpsc::channel();
+        tx.send(WriterCmd::Start(path_b.to_str().unwrap().to_string(), back))
+            .unwrap();
+        assert!(back_rx.recv().unwrap(), "take B's file creation is clean");
+        assert!(prod.push([0.25, 0.0]));
+        let (sack, sack_rx) = std::sync::mpsc::channel();
+        tx.send(WriterCmd::Stop(sack)).unwrap();
+        assert!(
+            !sack_rx.recv().unwrap(),
+            "the Stop after a restart must still report take A's mid-take damage"
+        );
+        tx.send(WriterCmd::Shutdown).unwrap();
+        join.join().unwrap();
+        let _ = std::fs::remove_file(&path_a);
+        let _ = std::fs::remove_file(&path_b);
+    }
+
     #[test]
     fn start_while_recording_finalizes_the_previous_take_and_starts_clean() {
         let (mut prod, cons) = spsc::<[Smp; CHANNELS]>(1024);
@@ -3717,7 +3805,10 @@ mod output_safety_tests {
     //! feedback judgement has to follow the former. These pin the decision itself; the two device
     //! lookups it wraps need real CoreAudio, so every case here fixes both uids explicitly.
 
-    use super::{reconcile_output_safety, OutputBinding, EVENT_OUTPUT_REROUTED};
+    use super::{
+        reconcile_output_safety, restore_output_or_flag, OutputBinding, EVENT_OUTPUT_LOST,
+        EVENT_OUTPUT_REROUTED,
+    };
     use crate::dsp::master::MasterNode;
     use crate::graph::{Edge, GraphDesc, NodeEntry};
     use crate::live::{spawn, EngineHandle};
@@ -3842,6 +3933,45 @@ mod output_safety_tests {
         b.lock().unwrap().cpal_uid = "dev-A".into();
         assert!(!reconcile_output_safety(h.transport(), &b, &event));
         assert!(!h.transport().monitor_muted());
+    }
+
+    /// When BOTH restore attempts fail after VPIO released the output, nothing is open:
+    /// `rerouted()` is false by design (nothing open is not a reroute), the playhead's
+    /// only clock — the output callback — is gone, and the Dart device watch re-opens
+    /// the output ONLY on `EVENT_OUTPUT_LOST`. Staying silent here leaves playback dead
+    /// for the rest of the session; the event is the self-heal's sole trigger, exactly
+    /// as on SetOutput's double failure.
+    #[test]
+    fn a_double_failed_output_restore_raises_output_lost() {
+        let event = AtomicU32::new(0);
+        let (handle, resolved) =
+            restore_output_or_flag::<()>(Some("dev-A"), &event, |_| Err("device gone".into()));
+        assert!(handle.is_none());
+        assert!(resolved.is_empty());
+        assert_ne!(
+            event.load(Ordering::Acquire) & EVENT_OUTPUT_LOST,
+            0,
+            "a double-failed restore must raise EVENT_OUTPUT_LOST so the self-heal runs"
+        );
+    }
+
+    /// A restore that succeeds — on the chosen device or via the default fallback — must
+    /// NOT raise the lost event: the fallback case is surfaced through the reroute path
+    /// (binding vs. requested), not through the self-heal trigger.
+    #[test]
+    fn a_successful_output_restore_raises_nothing() {
+        let event = AtomicU32::new(0);
+        let (handle, resolved) = restore_output_or_flag(Some("dev-A"), &event, |uid| match uid {
+            Some(_) => Err("device gone".into()),
+            None => Ok(((), "default-dev".to_string())),
+        });
+        assert!(handle.is_some());
+        assert_eq!(resolved, "default-dev");
+        assert_eq!(
+            event.load(Ordering::Acquire) & EVENT_OUTPUT_LOST,
+            0,
+            "a restore that opened a device must not trigger the self-heal"
+        );
     }
 }
 
@@ -3999,6 +4129,35 @@ mod cell_exclusion_tests {
         }
         // And the cell is still usable, not left with the flag held.
         assert!(cell.try_feed(cell.claim(), &vec![0.5f32; 128]));
+    }
+
+    /// A failed teardown can leave a zombie callback owning the cell while the host
+    /// prepares the NEXT stream. `reconfigure` must retire it BEFORE the new format
+    /// applies: admitted past that point, its samples are decoded with the new
+    /// step/channel count (e.g. a 24 kHz AEC-bypass unit's frames emitted 1:1 as
+    /// 48 kHz) — the retiring claim inside the stream build comes milliseconds later.
+    #[test]
+    fn reconfigure_retires_the_zombie_before_the_new_format_applies() {
+        let (cell, mut mic) = input_cell();
+        let zombie = cell.claim();
+        assert!(cell.try_feed(zombie, &vec![0.5f32; 64]));
+        while mic.pop().is_some() {}
+
+        // Host prepares a replacement stream: reconfigure retires the zombie and mints
+        // the generation the new stream will feed as, all before the stream build.
+        let new = cell.reconfigure(24_000.0, 2);
+        assert!(
+            !cell.try_feed(zombie, &vec![0.5f32; 64]),
+            "a zombie from a failed teardown must not feed audio under the new format"
+        );
+        assert!(
+            mic.pop().is_none(),
+            "no zombie sample may reach the mic ring"
+        );
+
+        // The replacement stream feeds as the minted generation and is admitted.
+        assert!(cell.try_feed(new, &vec![0.5f32; 64]));
+        assert!(mic.pop().is_some());
     }
 
     fn tone_resampler(device_rate: f64) -> (OutResampler, Arc<RtCell>) {
