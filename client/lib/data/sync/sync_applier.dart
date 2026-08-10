@@ -552,6 +552,11 @@ class SyncApplier {
   /// cannot even be serialized can never be replayed — in both cases there
   /// is genuinely nothing addressable to park, and the counters still record
   /// the rejection.
+  ///
+  /// The [reason] prefixes written here are part of the store's retention
+  /// contract: [QuarantineStore.put] classifies parks as replayable or
+  /// permanently dead by them, so a renamed gate reason must be reflected
+  /// there.
   Future<void> _quarantine(SyncRow rec, String reason) async {
     final store = quarantine;
     if (store == null) return;
@@ -682,7 +687,12 @@ class SyncApplier {
   ///    entry) — never lost, never a hot loop. Unlike [_quarantine]'s
   ///    best-effort bookkeeping the park is NOT swallowed on error: after
   ///    the delete a failed park IS a lost row, so a storage error aborts
-  ///    the batch (a retried page over silent loss). Without a quarantine
+  ///    the batch (a retried page over silent loss). An LWW-FILTERED park
+  ///    (not an error) is safe by the store's replay-class retention: a
+  ///    sweep park is only ever filtered by a strictly newer REPLAYABLE
+  ///    state, which supersedes the row once its own replay lands — a
+  ///    permanently-unreplayable entry can never hold the slot against it
+  ///    (see [QuarantineStore.put]). Without a quarantine
   ///    store (counter-only test wiring) the old hard-delete stands.
   ///  * A PRE-EXISTING row UPDATED by this batch is PARKED, then RESTORED —
   ///    never deleted. It satisfied every FK when the batch began (SQLite

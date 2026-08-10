@@ -2137,6 +2137,55 @@ void main() {
         expect(r.data['hlc_packed'], future.packed);
       },
     );
+
+    test('a permanently-unreplayable newer record cannot void the FK sweep '
+        'park: P@950 applies, P@960 is parked at the value gate, the sweep '
+        'still parks (and later replays) the honest P@950', () async {
+      final honest = hlc(950);
+      final garbage = hlc(960);
+      final res = await applier.apply([
+        // Applies first, into a missing asset parent (locally never seen).
+        practice('P', 'honest', honest, separationAssetId: 'A'),
+        // A newer state from a non-conforming writer: lyrics_json is valid
+        // JSON of the wrong shape, parked at the value gate — a payload the
+        // replay's identical gate re-rejects every cycle, forever.
+        RemoteRecord(
+          table: 'practices',
+          columns: {
+            ...practice('P', 'garbage', garbage).columns,
+            'lyrics_json': '{}',
+          },
+        ),
+      ]);
+      expect(res.committed, isTrue);
+      expect(res.failed, 2); // the parked garbage and the swept honest row
+      expect(await row('P'), isNull, reason: 'the sweep deleted the row');
+
+      // The sweep's park ran LAST with the OLDER stamp. Under plain
+      // newest-stamp retention the dead P@960 held the slot and the honest
+      // P@950 — the only surviving copy of a row the change token is
+      // already past — was silently dropped with the DELETE. The store's
+      // replay-class retention keeps the replayable state instead.
+      final parked = await store.list();
+      expect(parked, hasLength(1));
+      expect(parked.single.remoteHlcPacked, honest.packed);
+      expect(parked.single.reason, startsWith('fk-orphan'));
+      final snapshot = SyncRow.decode(parked.single.payload);
+      expect(snapshot.fields['title'], 'honest');
+
+      // The parent lands: the replayed park restores the honest row.
+      await applier.apply([assetRecord('A', hlc(955))]);
+      final replay = await applier.apply([snapshot]);
+      expect(replay.applied, 1);
+      final r = await db
+          .customSelect(
+            'SELECT title, hlc_packed FROM practices WHERE id = ?',
+            variables: [Variable.withString(_id('P'))],
+          )
+          .getSingle();
+      expect(r.data['title'], 'honest');
+      expect(r.data['hlc_packed'], honest.packed);
+    });
   });
 
   group('derived-node stamps (bookkeeping can never revert a held-wall '
