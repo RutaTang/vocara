@@ -567,6 +567,29 @@ fn build_output(
     Ok((stream, resolved))
 }
 
+/// Restore the cpal output after duplex VPIO released it (mic stopped) or failed to take it
+/// (mic open/reopen failed): try the user's chosen device first, fall back to the system
+/// default. Returns the handle (`None` when BOTH attempts failed) and the resolved uid
+/// (empty when nothing opened). A double failure raises [`EVENT_OUTPUT_LOST`] — the same
+/// contract as SetOutput's double failure — because with nothing open the binding reports
+/// no reroute, the playhead's only clock (the output callback) is gone, and the Dart device
+/// watch re-opens the output ONLY on this event; silence here would leave playback dead for
+/// the rest of the session. Generic over the build attempt so the contract is testable
+/// without CoreAudio.
+fn restore_output_or_flag<H>(
+    preferred: Option<&str>,
+    event: &AtomicU32,
+    mut build: impl FnMut(Option<&str>) -> Result<(H, String), String>,
+) -> (Option<H>, String) {
+    let built = build(preferred).or_else(|_| build(None)).ok();
+    let resolved = built.as_ref().map(|(_, u)| u.clone()).unwrap_or_default();
+    let handle = built.map(|(h, _)| h);
+    if handle.is_none() {
+        event.fetch_or(EVENT_OUTPUT_LOST, Ordering::Release);
+    }
+    (handle, resolved)
+}
+
 /// What the engine's output is bound to right now, as the raw facts the audio-host thread owns.
 /// The device actually rendering is DERIVED from these on demand ([`OutputBinding::actual_uid`])
 /// rather than cached: while duplex VPIO owns the output and its bound mic has no output streams,
@@ -1943,12 +1966,11 @@ fn audio_host_run(
                             // survives. Restore the user's chosen output (not the system
                             // default); fall back to default only if it can't open.
                             if VPIO_DUPLEX_AEC && out_stream.is_none() {
-                                let built = build_output(cur_out_uid.as_deref(), &rt, &event)
-                                    .or_else(|_| build_output(None, &rt, &event))
-                                    .ok();
-                                let resolved =
-                                    built.as_ref().map(|(_, u)| u.clone()).unwrap_or_default();
-                                out_stream = built.map(|(h, _)| h);
+                                let (built, resolved) =
+                                    restore_output_or_flag(cur_out_uid.as_deref(), &event, |uid| {
+                                        build_output(uid, &rt, &event)
+                                    });
+                                out_stream = built;
                                 rebind_output(&|b| {
                                     b.cpal_uid = resolved.clone();
                                     b.vpio_mic = None;
@@ -1969,11 +1991,11 @@ fn audio_host_run(
                     // during duplex deferred it), falling back to the system default
                     // only if that device can't be opened.
                     if VPIO_DUPLEX_AEC && out_stream.is_none() {
-                        let built = build_output(cur_out_uid.as_deref(), &rt, &event)
-                            .or_else(|_| build_output(None, &rt, &event))
-                            .ok();
-                        let resolved = built.as_ref().map(|(_, u)| u.clone()).unwrap_or_default();
-                        out_stream = built.map(|(h, _)| h);
+                        let (built, resolved) =
+                            restore_output_or_flag(cur_out_uid.as_deref(), &event, |uid| {
+                                build_output(uid, &rt, &event)
+                            });
+                        out_stream = built;
                         // Playback is back on the user's device, so the safety mute clears
                         // itself here — nobody else has to remember to lift it.
                         rebind_output(&|b| {
@@ -2052,12 +2074,11 @@ fn audio_host_run(
                             if VPIO_DUPLEX_AEC && out_stream.is_none() {
                                 // Restore the user's chosen output (not the system default),
                                 // matching StopInput; fall back to default only if it can't open.
-                                let built = build_output(cur_out_uid.as_deref(), &rt, &event)
-                                    .or_else(|_| build_output(None, &rt, &event))
-                                    .ok();
-                                let resolved =
-                                    built.as_ref().map(|(_, u)| u.clone()).unwrap_or_default();
-                                out_stream = built.map(|(h, _)| h);
+                                let (built, resolved) =
+                                    restore_output_or_flag(cur_out_uid.as_deref(), &event, |uid| {
+                                        build_output(uid, &rt, &event)
+                                    });
+                                out_stream = built;
                                 rebind_output(&|b| {
                                     b.cpal_uid = resolved.clone();
                                     b.vpio_mic = None;
@@ -3717,7 +3738,10 @@ mod output_safety_tests {
     //! feedback judgement has to follow the former. These pin the decision itself; the two device
     //! lookups it wraps need real CoreAudio, so every case here fixes both uids explicitly.
 
-    use super::{reconcile_output_safety, OutputBinding, EVENT_OUTPUT_REROUTED};
+    use super::{
+        reconcile_output_safety, restore_output_or_flag, OutputBinding, EVENT_OUTPUT_LOST,
+        EVENT_OUTPUT_REROUTED,
+    };
     use crate::dsp::master::MasterNode;
     use crate::graph::{Edge, GraphDesc, NodeEntry};
     use crate::live::{spawn, EngineHandle};
@@ -3815,6 +3839,45 @@ mod output_safety_tests {
         b.lock().unwrap().cpal_uid = "dev-A".into();
         assert!(!reconcile_output_safety(h.transport(), &b, &event));
         assert!(!h.transport().monitor_muted());
+    }
+
+    /// When BOTH restore attempts fail after VPIO released the output, nothing is open:
+    /// `rerouted()` is false by design (nothing open is not a reroute), the playhead's
+    /// only clock — the output callback — is gone, and the Dart device watch re-opens
+    /// the output ONLY on `EVENT_OUTPUT_LOST`. Staying silent here leaves playback dead
+    /// for the rest of the session; the event is the self-heal's sole trigger, exactly
+    /// as on SetOutput's double failure.
+    #[test]
+    fn a_double_failed_output_restore_raises_output_lost() {
+        let event = AtomicU32::new(0);
+        let (handle, resolved) =
+            restore_output_or_flag::<()>(Some("dev-A"), &event, |_| Err("device gone".into()));
+        assert!(handle.is_none());
+        assert!(resolved.is_empty());
+        assert_ne!(
+            event.load(Ordering::Acquire) & EVENT_OUTPUT_LOST,
+            0,
+            "a double-failed restore must raise EVENT_OUTPUT_LOST so the self-heal runs"
+        );
+    }
+
+    /// A restore that succeeds — on the chosen device or via the default fallback — must
+    /// NOT raise the lost event: the fallback case is surfaced through the reroute path
+    /// (binding vs. requested), not through the self-heal trigger.
+    #[test]
+    fn a_successful_output_restore_raises_nothing() {
+        let event = AtomicU32::new(0);
+        let (handle, resolved) = restore_output_or_flag(Some("dev-A"), &event, |uid| match uid {
+            Some(_) => Err("device gone".into()),
+            None => Ok(((), "default-dev".to_string())),
+        });
+        assert!(handle.is_some());
+        assert_eq!(resolved, "default-dev");
+        assert_eq!(
+            event.load(Ordering::Acquire) & EVENT_OUTPUT_LOST,
+            0,
+            "a restore that opened a device must not trigger the self-heal"
+        );
     }
 }
 
