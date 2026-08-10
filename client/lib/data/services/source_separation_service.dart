@@ -242,10 +242,27 @@ class ProcessSourceSeparationService implements SourceSeparationService {
   // sweep on the next launch.
   void _killForQuit() {
     _quitting = true;
-    final run = _active;
-    if (run == null) return;
-    run.cancelled = true;
-    run.process?.kill(ProcessSignal.sigkill);
+    _active?.cancelled = true;
+    // Sweep EVERY live sidecar, not just the registered run's process: while
+    // a new run drains its superseded predecessor, the predecessor's sidecar
+    // is alive but no longer reachable through [_active] (whose own process
+    // is still null) — and its escalation timer dies with the exiting app,
+    // so a SIGTERM-ignoring compute phase would orphan it past the quit.
+    for (final proc in _liveSidecars.toList()) {
+      proc.kill(ProcessSignal.sigkill);
+    }
+  }
+
+  // Every spawned sidecar whose exit has not been observed yet. [_active]
+  // alone cannot reach all of them (see [_killForQuit]); membership ends when
+  // the process is reaped, so the quit sweep never signals a stale PID.
+  final _liveSidecars = <Process>{};
+
+  /// Tracks [proc] until it exits, so [_killForQuit] reaches every live
+  /// sidecar regardless of which run owns it.
+  void _trackSidecar(Process proc) {
+    _liveSidecars.add(proc);
+    unawaited(proc.exitCode.whenComplete(() => _liveSidecars.remove(proc)));
   }
 
   // Latched by [_killForQuit]: the app is exiting, so no new sidecar may be
@@ -451,6 +468,7 @@ class ProcessSourceSeparationService implements SourceSeparationService {
       );
     }
     run.process = proc;
+    _trackSidecar(proc);
     // A cancel that raced the Process.start await still aborts the
     // just-started process. During a quit, SIGKILL directly (the escalation
     // timer dies with the exiting app); otherwise route through _cancelRun —
