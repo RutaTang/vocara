@@ -7,6 +7,9 @@
 //    are not absorbed by that skip.
 //  * The degraded-commit mask is a full u64 (bit 63 is the overflow fold), so
 //    counting its bits must terminate on a negative Dart reinterpretation.
+//  * The one rebuild a degraded commit queues reflects the model as it stands
+//    when the retry RUNS: a sync enqueued during the degraded job wins over
+//    the degraded job's own captured topology.
 
 // The binding overrides keep the generated C parameter names (snake_case).
 // ignore_for_file: non_constant_identifier_names
@@ -205,6 +208,58 @@ void main() {
       const t = TrackPlayback(id: 't', path: 't.wav');
       await expectLater(svc.sync(const [t], const []), throwsStateError);
       expect(fake.commits, isEmpty);
+    });
+  });
+
+  group('degraded-commit retry', () {
+    const take = TrackPlayback(id: 't', path: 'take.wav');
+    const backing = TrackPlayback(id: 'b', path: 'backing.wav');
+
+    test('rebuilds from the model current when it runs, not the degraded '
+        'job\'s captured one', () async {
+      final fake = _FakeBindings();
+      fake.cachedPaths.addAll({'take.wav', 'backing.wav'});
+      // Only the first commit (the degraded job's) reports a degraded track.
+      fake.degradedMasks.add(1);
+      final svc = GraphAudioPlaybackService.withBindings(fake);
+      addTearDown(svc.dispose);
+
+      // The degraded job stages take + backing; while it is in flight the
+      // user deletes the take, so the newer model lands on the chain BETWEEN
+      // the degraded job and the retry it queues.
+      final degradedJob = svc.sync(const [take, backing], const []);
+      final newerSync = svc.sync(const [backing], const []);
+      await degradedJob;
+      await newerSync;
+      // Drain the chain: an identical re-sync serializes after the retry.
+      await svc.sync(const [backing], const []);
+
+      // The retry must never re-commit the stale topology over the newer
+      // commit — the deleted take would be audible again while the mixer
+      // shows it gone.
+      expect(fake.commits.first, ['take.wav', 'backing.wav']);
+      for (final commit in fake.commits.skip(1)) {
+        expect(commit, ['backing.wav']);
+      }
+    });
+
+    test('with no newer sync in between, still re-commits the degraded model '
+        'once from a fresh probe', () async {
+      final fake = _FakeBindings();
+      fake.cachedPaths.addAll({'take.wav', 'backing.wav'});
+      fake.degradedMasks.add(1);
+      final svc = GraphAudioPlaybackService.withBindings(fake);
+      addTearDown(svc.dispose);
+
+      await svc.sync(const [take, backing], const []);
+      // Drain the chain (an identical sync serializes after the retry, and
+      // fast-paths once the retry's healthy commit records the signature).
+      await svc.sync(const [take, backing], const []);
+
+      expect(fake.commits, [
+        ['take.wav', 'backing.wav'],
+        ['take.wav', 'backing.wav'],
+      ]);
     });
   });
 }

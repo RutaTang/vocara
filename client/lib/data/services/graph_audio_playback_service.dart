@@ -381,6 +381,14 @@ class GraphAudioPlaybackService implements PlaybackEngine {
   // Serializes sync() calls so a rebuild's async decode can't interleave with another sync.
   final SyncChain _syncChain = SyncChain();
 
+  // The model most recently handed to [sync] — what the degraded retry
+  // rebuilds from. A sync enqueued while the degraded job runs lands on the
+  // chain BEFORE the retry, so the retry must read the model when IT runs;
+  // replaying the degraded job's own captured lists would re-commit a
+  // topology that newer sync already replaced.
+  List<TrackPlayback> _latestTracks = const [];
+  List<BusPlayback> _latestBuses = const [];
+
   /// Whether the native engine started (a device was opened). If false, every call no-ops.
   bool get isAvailable => _available;
   double get sampleRate => _sampleRate;
@@ -651,22 +659,31 @@ class GraphAudioPlaybackService implements PlaybackEngine {
       : Duration.zero;
 
   @override
-  Future<void> sync(List<TrackPlayback> tracks, List<BusPlayback> buses) =>
-      _syncChain.add(() => _doSync(tracks, buses));
+  Future<void> sync(List<TrackPlayback> tracks, List<BusPlayback> buses) {
+    _latestTracks = tracks;
+    _latestBuses = buses;
+    return _syncChain.add(() => _doSync(tracks, buses));
+  }
 
   /// Queues the single rebuild a degraded commit needs.
   ///
   /// Called from inside the running [_doSync], so it must APPEND to the sync
-  /// chain and never await: [sync] already replaced `_syncChain` with the
-  /// in-flight link before `_doSync` started, so this lands right after it.
-  /// A failing retry is swallowed like any other chain failure — the withheld
-  /// signature means the next real sync rebuilds anyway. Disposal makes the
-  /// queued run a no-op (`_available` is false by then).
-  void _scheduleDegradedRebuild(
-    List<TrackPlayback> tracks,
-    List<BusPlayback> buses,
-  ) {
-    unawaited(sync(tracks, buses).catchError((_) {}));
+  /// chain and never await: [sync] already replaced `_syncChain`'s tail with
+  /// the in-flight link before `_doSync` started, so this lands after it —
+  /// and after any sync enqueued while that job ran. The retry therefore
+  /// reads [_latestTracks]/[_latestBuses] at RUN time instead of taking the
+  /// degraded job's lists: when a newer model has already committed, the
+  /// retry fast-paths on its signature instead of resurrecting the stale
+  /// topology over it. A failing retry is swallowed like any other chain
+  /// failure — the withheld signature means the next real sync rebuilds
+  /// anyway. Disposal makes the queued run a no-op (`_available` is false
+  /// by then).
+  void _scheduleDegradedRebuild() {
+    unawaited(
+      _syncChain
+          .add(() => _doSync(_latestTracks, _latestBuses))
+          .catchError((_) {}),
+    );
   }
 
   /// The graph topology that forces a rebuild: each track's file + output routing,
@@ -880,7 +897,7 @@ class GraphAudioPlaybackService implements PlaybackEngine {
       _committedSig = '';
       // Appended to the sync chain rather than awaited: this call IS the
       // chain's current link, so awaiting its successor here would deadlock.
-      _scheduleDegradedRebuild(tracks, buses);
+      _scheduleDegradedRebuild();
     } else {
       _retryingDegradedCommit = false;
       _committedSig = sig;
