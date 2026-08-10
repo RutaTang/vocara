@@ -79,11 +79,20 @@ class TechniqueDetailViewModel extends ChangeNotifier
     _remoteSub = remoteApplied?.listen(_onRemoteApplied);
   }
 
-  // Registered with RecordingFinalizer by the recording controller while a
-  // take is in flight (saves the captured example/practice take on app quit).
-  Future<void> _quitFinalize() async {
+  /// Registered with [RecordingFinalizer] by the recording controller while a
+  /// take is in flight (saves the captured example/practice take on app quit).
+  /// Visible for testing only: an injected test recorder bypasses the
+  /// finalizer registry, so tests drive the quit path by calling this.
+  @visibleForTesting
+  Future<void> quitFinalize() async {
     if (isRecordingExample) {
-      await stopExampleRecording();
+      final staged = await stopExampleRecording();
+      // Stopping only STAGES the clip into the in-memory media draft, which
+      // dies with the exiting process — and the imported file, referenced by
+      // no row, would be swept as an orphan at the next boot. Commit the
+      // captured clip itself so the recording survives the quit (mirrors the
+      // song screen's finalizer, which persists its take).
+      if (staged != null) await _persistExampleAtQuit(staged);
     } else if (isRecordingPractice) {
       // A practice take is ephemeral: the dying process would never show the
       // analysis result, so skip the full DSP pass and only clean up — quit
@@ -542,7 +551,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
           return engine;
         },
         monitor: _monitor,
-        onQuitFinalize: _quitFinalize,
+        onQuitFinalize: quitFinalize,
         onInputDeviceLost: _onInputDeviceLost,
         onDeviceNotice: _onDeviceNotice,
         onRecordLimitReached: _onRecordLimitReached,
@@ -840,14 +849,16 @@ class TechniqueDetailViewModel extends ChangeNotifier
   /// Stops the example recording and imports it into the sandbox as a STAGED
   /// example (added to the draft, not persisted until save), then deletes the
   /// temp. The just-recorded example becomes the selected reference so its
-  /// analysis shows immediately.
-  Future<void> stopExampleRecording() async {
-    if (!isRecordingExample) return;
+  /// analysis shows immediately. Returns the staged clip, or null when
+  /// nothing was staged (not recording, the take failed, or the draft was
+  /// abandoned mid-import).
+  Future<TechniqueMedia?> stopExampleRecording() async {
+    if (!isRecordingExample) return null;
     // Backstop for the in-flight-save invariant (the screen's controls are
     // disabled then): stopping here would stage a clip into the draft the
     // airborne commit already snapshotted, silently dropping it when the save
     // lands. The recording keeps running; save() itself aborts it on success.
-    if (_saving) return;
+    if (_saving) return null;
     final stopped = _recorder.stop();
     // False = the writer hit an IO error during the take, so the WAV on disk
     // is missing, damaged, or incomplete; handled conservatively below.
@@ -860,7 +871,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
     final path = _exampleTempPath;
     if (path == null) {
       notifyListeners();
-      return;
+      return null;
     }
     if (recordingClean && droppedFrames > 0) {
       // The clip is still staged below; the notice only stops it from
@@ -891,7 +902,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
         _recordingNotice = 'Recording failed. The example could not be saved.';
         _savingExample = false;
         notifyListeners();
-        return;
+        return null;
       }
       _recordingNotice =
           'Recording hit a disk error. The example may be incomplete.';
@@ -920,7 +931,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
           'temporary folder.';
       _savingExample = false;
       notifyListeners();
-      return;
+      return null;
     }
     // Import succeeded: the clip lives in the sandbox now, the temp is a
     // duplicate. Keep _exampleTempPath set until the file is actually gone, so
@@ -931,20 +942,55 @@ class TechniqueDetailViewModel extends ChangeNotifier
       // Draft abandoned (Cancel) or VM disposed mid-save; the copied clip is an
       // orphan — delete it rather than staging it behind the read view.
       _deleteMediaQuietly(added.path);
-    } else {
-      // A dirty stop already validated the partial take: reuse its analysis
-      // so the reference view doesn't decode the clip a second time.
-      if (partial != null) _refCache[added.path] = partial;
-      _draftAdds.add(added);
-      _selectedExamplePath = added.path;
-      // The just-recorded example becomes the reference; drop a stale practice take that
-      // was compared against the previous reference (matches selectExample).
-      _resetToReferenceSubject();
-      // Expand the just-recorded example so its analysis shows immediately.
-      _analysisCollapsed = false;
+      _savingExample = false;
+      notifyListeners();
+      return null;
     }
+    // A dirty stop already validated the partial take: reuse its analysis
+    // so the reference view doesn't decode the clip a second time.
+    if (partial != null) _refCache[added.path] = partial;
+    _draftAdds.add(added);
+    _selectedExamplePath = added.path;
+    // The just-recorded example becomes the reference; drop a stale practice take that
+    // was compared against the previous reference (matches selectExample).
+    _resetToReferenceSubject();
+    // Expand the just-recorded example so its analysis shows immediately.
+    _analysisCollapsed = false;
     _savingExample = false;
     notifyListeners();
+    return added;
+  }
+
+  /// Quit-time commit of the example [staged] by [stopExampleRecording]: the
+  /// persisted technique plus the captured clip, and nothing else — the rest
+  /// of the unsaved draft (removals, captions, earlier additions) stays
+  /// uncommitted, exactly as it does when the app quits with no recording in
+  /// flight. Only the take the finalizer just stopped must not die with the
+  /// process.
+  Future<void> _persistExampleAtQuit(TechniqueMedia staged) async {
+    final current = _technique;
+    if (current == null) return;
+    // The commit resolves the clip's sandbox path to a pool path; remap the
+    // selection/caches like [save] does, so the state stays coherent if the
+    // exit is ever abandoned after the finalizer ran.
+    final oldPathById = {
+      for (final m in current.media) m.id: m.path,
+      staged.id: staged.path,
+    };
+    final ok = await _commit(
+      current.copyWith(media: [...current.media, staged]),
+    );
+    if (!ok) {
+      // The clip stays staged; the finalizer has no UI to retry from, so the
+      // loss risk is at least recorded.
+      DiagnosticsLog.instance.log(
+        'technique',
+        'quit-time example commit failed',
+      );
+      return;
+    }
+    _draftAdds.removeWhere((m) => m.id == staged.id);
+    _remapMediaAfterCommit(oldPathById);
   }
 
   // --- AnalysisSource ------------------------------------------------------
@@ -1164,6 +1210,11 @@ class TechniqueDetailViewModel extends ChangeNotifier
     try {
       // Fold the staged media into the technique being saved.
       final media = effectiveMedia;
+      // A successful commit re-reads the aggregate with every media file
+      // resolved through the asset pool, so a clip staged from the sandbox
+      // comes back under a DIFFERENT path. Remember each clip's pre-commit
+      // path by id (ids are stable across the commit) for the remap below.
+      final oldPathById = {for (final m in media) m.id: m.path};
       // Files of examples staged for removal — delete only after the technique
       // without them persists.
       final removedPaths = <String>[
@@ -1190,6 +1241,10 @@ class TechniqueDetailViewModel extends ChangeNotifier
         _draftAdds.clear();
         _draftRemoves.clear();
         _draftLabels.clear();
+        // Selection and the analysis caches key on paths the commit just
+        // rewrote to pool paths; carry them onto the persisted aggregate so
+        // the shown example doesn't silently jump to the first one.
+        _remapMediaAfterCommit(oldPathById);
       }
       return ok;
     } finally {
@@ -1335,6 +1390,33 @@ class TechniqueDetailViewModel extends ChangeNotifier
     if (_saving) return;
     _draftLabels[mediaId] = label.trim();
     notifyListeners();
+  }
+
+  /// Carries the path-keyed state (selection, reference-analysis cache and
+  /// failure latches) across a successful commit. The commit re-reads the
+  /// aggregate with every media file resolved through the asset pool, so a
+  /// clip staged from the sandbox comes back under a different path while its
+  /// id stays stable; without the remap the selection falls back to the first
+  /// example and the just-computed analysis is orphaned under the old path.
+  /// [oldPathById] maps each committed clip's id to its pre-commit path.
+  /// [_loadingPaths] is deliberately left alone: an in-flight analysis keys
+  /// its own completion (cache write + loading clear) on the old path.
+  void _remapMediaAfterCommit(Map<String, String> oldPathById) {
+    for (final m in _technique?.media ?? const <TechniqueMedia>[]) {
+      final old = oldPathById[m.id];
+      if (old == null || old == m.path) continue;
+      final cached = _refCache.remove(old);
+      if (cached != null) _refCache[m.path] = cached;
+      // The pool copy is byte-identical to the staged file, so a latched
+      // failure verdict transfers — recomputing it is doomed.
+      if (_refFailed.remove(old)) _refFailed.add(m.path);
+      final message = _refFailedMessage.remove(old);
+      if (message != null) _refFailedMessage[m.path] = message;
+      if (_selectedExamplePath == old) _selectedExamplePath = m.path;
+    }
+    // Re-normalize like every other media-mutating path (e.g. the selected
+    // example was staged for removal by this very save).
+    _fixSelectionAfterMediaChange();
   }
 
   /// Re-selects a valid example after the current one was removed.
