@@ -130,6 +130,116 @@ void main() {
       expect(second.compareTo(first) > 0, isTrue);
       expect(second.counter, base.counter);
     });
+
+    // The wire grammar (SyncRow.checkHlcConsistency) admits a node of exactly
+    // maxNodeSegments segments whose characters sit anywhere in the node
+    // alphabet — including its top character, which minted ids (Crockford
+    // ULIDs) never contain. A hostile stamp can therefore hand [derived] a
+    // ceiling-length base whose final segment cannot be advanced; deriving
+    // from it must still produce a stamp, not throw (a throw here permanently
+    // disabled every pull run's end-of-run integrity repair).
+    group('hostile ceiling nodes (un-advanceable final segment)', () {
+      const top = 'z'; // last character of the node alphabet
+      String seg(String c) => c * HlcClock.nodeSegmentLength;
+      String chain(String head, String tail, int tailSegments) => [
+        seg(head),
+        for (var i = 0; i < tailSegments; i++) seg(tail),
+      ].join('!');
+
+      test('an exhausted FINAL segment carries into the previous segment, '
+          'staying in node space at the same (wall, counter)', () {
+        final node = chain('A', top, HlcClock.maxNodeSegments - 1);
+        expect(node.length, HlcClock.maxNodeLength, reason: 'fixture sanity');
+        final base = Hlc(wallMs: 1000, counter: 5, node: node);
+
+        final d = HlcClock.derived(base, device);
+        expect(d > base, isTrue, reason: 'must replicate over the base state');
+        expect(d.wallMs, base.wallMs);
+        expect(d.counter, base.counter, reason: 'never escalates the counter');
+        expect(d.node.length, HlcClock.maxNodeLength);
+        // The carry treats the whole chain as one odometer: the exhausted
+        // trailing segments reset to the alphabet's first character and the
+        // first advanceable character bumps.
+        expect(
+          d.node,
+          chain('A', '0', 13).replaceFirst(seg('A'), '${'A' * 25}B'),
+        );
+        // Still strictly below a real next edit at the same wall clock.
+        final realEdit = Hlc(
+          wallMs: base.wallMs,
+          counter: base.counter + 1,
+          node: device,
+        );
+        expect(d < realEdit, isTrue);
+        expect(Hlc.parse(d.packed), d, reason: 'round-trips like any stamp');
+      });
+
+      test('a chain of derivations from an exhausted-final-segment base keeps '
+          'advancing below the next real edit', () {
+        final base = Hlc(
+          wallMs: 1000,
+          counter: 5,
+          node: chain('A', top, HlcClock.maxNodeSegments - 1),
+        );
+        final first = HlcClock.derived(base, device);
+        final second = HlcClock.derived(first, device);
+        expect(first > base, isTrue);
+        expect(second > first, isTrue);
+        final realEdit = Hlc(wallMs: 1000, counter: 6, node: device);
+        expect(second < realEdit, isTrue);
+      });
+
+      test('the absolute TOP of node space leaves node space minimally: '
+          'counter + 1 under the deriving device node', () {
+        // The plan-of-record hostile input: every segment at the alphabet top.
+        final base = Hlc(
+          wallMs: 1000,
+          counter: 5,
+          node: chain(top, top, HlcClock.maxNodeSegments - 1),
+        );
+        final d = HlcClock.derived(base, device);
+        expect(d > base, isTrue, reason: 'must replicate over the base state');
+        expect(d.wallMs, base.wallMs);
+        expect(d.counter, base.counter + 1, reason: 'the minimal escalation');
+        expect(d.node, device, reason: 'distinct per deriving device again');
+        // Bounded: still below everything two counters up.
+        final laterEdit = Hlc(wallMs: 1000, counter: 7, node: '0' * 26);
+        expect(d < laterEdit, isTrue);
+        expect(Hlc.parse(d.packed), d);
+      });
+
+      test('the top-of-node-space spill respects the 6-digit counter cap '
+          '(spills to the next millisecond like tick/receive)', () {
+        final base = Hlc(
+          wallMs: 1000,
+          counter: HlcClock.maxCounter,
+          node: chain(top, top, HlcClock.maxNodeSegments - 1),
+        );
+        final d = HlcClock.derived(base, device);
+        expect(d > base, isTrue);
+        expect(d.wallMs, base.wallMs + 1);
+        expect(d.counter, 0);
+        expect(
+          base.packed.compareTo(d.packed) < 0,
+          isTrue,
+          reason: 'packed ordering stays monotonic across the spill',
+        );
+      });
+
+      test('a derivation from the spilled stamp goes back to plain node '
+          'extension (the chain restarts from the device segment)', () {
+        final base = Hlc(
+          wallMs: 1000,
+          counter: 5,
+          node: chain(top, top, HlcClock.maxNodeSegments - 1),
+        );
+        final spilled = HlcClock.derived(base, device);
+        final next = HlcClock.derived(spilled, device);
+        expect(next > spilled, isTrue);
+        expect(next.counter, spilled.counter, reason: 'extension, not a bump');
+        expect(next.node, '${spilled.node}!$device');
+      });
+    });
   });
 
   group('HlcClock.tick (local writes)', () {

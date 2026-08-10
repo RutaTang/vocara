@@ -160,38 +160,64 @@ class HlcClock {
   /// space entirely, so the derived stamp outranks any same-millisecond honest
   /// write — exactly the tie the extension scheme exists to avoid — and the
   /// wire's node grammar makes the ceiling unreachable without a chain of real
-  /// derivations anyway. Advancing the final segment keeps the stamp strictly
-  /// above its base and strictly below the next real edit, which is the whole
-  /// contract.
+  /// derivations anyway. Advancing the node keeps the stamp strictly above its
+  /// base and strictly below the next real edit, which is the whole contract.
+  ///
+  /// The one exception: the wire grammar also admits a ceiling node whose
+  /// characters sit at the TOP of the alphabet (minted ids are Crockford, so
+  /// only a hostile stamp reaches it) — at the absolute top of node space no
+  /// stamp exists between the base and (wall, counter + 1), so the derivation
+  /// must leave node space after all. It does so MINIMALLY, one counter up
+  /// (spilling to the next millisecond at [maxCounter], like [tick]) under
+  /// [deviceNode]. That stamp can win a node tiebreak against a real edit at
+  /// the very same (wall, counter + 1) — accepted: the input requires a
+  /// hostile ceiling-length stamp, and refusing to derive would instead
+  /// permanently fail every caller (integrity repair, slot resolution) for
+  /// the row carrying it. Total by design: derived() never throws.
   static Hlc derived(Hlc base, String deviceNode) {
     final extended = '${base.node}!$deviceNode';
     if (extended.length <= maxNodeLength) {
       return Hlc(wallMs: base.wallMs, counter: base.counter, node: extended);
     }
-    return Hlc(
-      wallMs: base.wallMs,
-      counter: base.counter,
-      node: _advanceFinalSegment(base.node),
-    );
+    final advanced = _advanceNode(base.node);
+    if (advanced != null) {
+      return Hlc(wallMs: base.wallMs, counter: base.counter, node: advanced);
+    }
+    // Node space above the base is empty: the minimal strictly-greater stamp
+    // lives one counter up. Same spill rule as tick/_advance at the cap.
+    var wall = base.wallMs;
+    var counter = base.counter + 1;
+    if (counter > maxCounter) {
+      wall += 1;
+      counter = 0;
+    }
+    return Hlc(wallMs: wall, counter: counter, node: deviceNode);
   }
 
-  /// [node] with its final segment replaced by its successor in the node
-  /// alphabet. [_nodeAlphabet] is listed in code-unit order AND the wire
-  /// grammar admits nothing outside it, so alphabet order is string order
-  /// here and no legal node sits between a segment and its successor.
-  static String _advanceFinalSegment(String node) {
-    final cut = node.lastIndexOf('!') + 1;
-    final chars = node.substring(cut).split('');
+  /// [node] replaced by its successor among nodes of the same segment shape,
+  /// or null when every character is already at the top of the alphabet. The
+  /// whole chain is one odometer: a carry out of the final segment advances
+  /// the previous one ('!' separators stay fixed in place). [_nodeAlphabet]
+  /// is listed in code-unit order AND the wire grammar admits nothing outside
+  /// it, so alphabet order is string order here; within the final segment no
+  /// legal node sits between a node and its successor, and once a carry
+  /// crosses a segment boundary only a strictly shorter chain that prefixes
+  /// the successor can — an ordering the hostile-only ceiling accepts.
+  static String? _advanceNode(String node) {
+    final chars = node.split('');
     for (var i = chars.length - 1; i >= 0; i--) {
+      if (chars[i] == '!') continue; // segment separator: fixed in place
       final next = _nodeAlphabet.indexOf(chars[i]) + 1;
-      if (next == 0) break; // not a segment character: see the throw below
+      // Outside the alphabet (never stored past the wire gate, but derived()
+      // is total): un-advanceable in place, keep carrying left.
+      if (next == 0) continue;
       if (next < _nodeAlphabet.length) {
         chars[i] = _nodeAlphabet[next];
-        return node.substring(0, cut) + chars.join();
+        return chars.join();
       }
       chars[i] = _nodeAlphabet[0]; // carry one character left
     }
-    throw StateError('HlcClock: no derived stamp remains above node "$node"');
+    return null; // every position exhausted: node space above is empty
   }
 
   static const String _nodeAlphabet =
