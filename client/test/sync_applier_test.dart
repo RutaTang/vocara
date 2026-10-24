@@ -654,6 +654,79 @@ void main() {
       );
     });
 
+    test(
+      'a record whose savepoint fails TRANSIENTLY (a replayable '
+      'apply-failed park) advances the clock and the durable high-water '
+      'mark like a door park; a deterministic CHECK failure does not',
+      () async {
+        final store = QuarantineStore(db);
+        applier = SyncApplier(
+          db,
+          HlcClock(node: _id('LOCAL'), now: () => 1000),
+          builder: SyncRowBuilder(db),
+          quarantine: store,
+        );
+        // A failure no door gate can see and the CHECK / NOT NULL classifier
+        // does not claim: a trigger aborting the INSERT inside the record's
+        // savepoint (SQLITE_CONSTRAINT_TRIGGER) — standing in for the IO
+        // pressure or racing writer the replayable apply-failed class exists
+        // to retry. Its parked snapshot can win LWW at replay, so a later
+        // local edit must stamp above it.
+        await db.customStatement(
+          'CREATE TRIGGER flaky_insert BEFORE INSERT ON practices '
+          "WHEN NEW.title = 'flaky' BEGIN SELECT RAISE(ABORT, 'injected'); END",
+        );
+        final transient = hlc(1000 + 60 * 1000);
+        // A LATER stamp whose savepoint fails deterministically: parked
+        // unreplayable, it can never land, so it must ratchet nothing.
+        final deterministic = hlc(1000 + 120 * 1000);
+        final res = await applier.apply([
+          practice('P', 'flaky', transient),
+          RemoteRecord(
+            table: 'assets',
+            columns: {
+              'id': _id('BAD'),
+              'content_hash': 'HASH_BAD',
+              'byte_size': -1, // CHECK (byte_size >= 0) fires in the savepoint
+              'ext': 'wav',
+              'kind': 'audio',
+              'created_at': deterministic.wallMs,
+              'updated_at': deterministic.wallMs,
+              'deleted_at': null,
+              'hlc_wall': deterministic.wallMs,
+              'hlc_ctr': deterministic.counter,
+              'hlc_node': deterministic.node,
+              'hlc_packed': deterministic.packed,
+              'schema_v': 1,
+            },
+          ),
+        ]);
+        expect(res.committed, isTrue);
+        expect(res.failed, 2);
+        final parked = {for (final q in await store.list()) q.id: q.reason};
+        expect(parked[_id('P')], startsWith('apply-failed'));
+        expect(parked[_id('BAD')], startsWith('invalid-value'));
+
+        expect(
+          applier.clock.tick() > transient,
+          isTrue,
+          reason: 'a local edit must out-rank the replayable parked record',
+        );
+        expect(
+          applier.clock.last < deterministic,
+          isTrue,
+          reason: 'an unreplayable savepoint failure ratchets nothing',
+        );
+        expect(
+          await SyncStateStore(db).hlcHighWater(),
+          transient.packed,
+          reason:
+              'the replayable parked stamp must survive a restart, where no '
+              'table row carries it for the boot seed to find',
+        );
+      },
+    );
+
     test('a door park with an IMPLAUSIBLE stamp still leaves the clock alone '
         '(the drift discipline holds at every gate)', () async {
       final store = QuarantineStore(db);

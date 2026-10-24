@@ -85,7 +85,7 @@ class QuarantineStore {
               final storedUnreplayable = _unreplayablePrefixes
                   .map((p) => old.reason.like('$p%'))
                   .reduce((a, b) => a | b);
-              return _replayable(reason)
+              return isReplayable(reason)
                   ? notNewer | storedUnreplayable
                   : equal | (notNewer & storedUnreplayable);
             },
@@ -115,8 +115,24 @@ class QuarantineStore {
     'dead-letter(',
   ];
 
-  static bool _replayable(String reason) =>
+  /// Whether a park under [reason] can ever re-apply — the replay class
+  /// this store's retention rule keys on (see [_unreplayablePrefixes]).
+  /// Public so the applier classifies its own parks by the SAME rule (a
+  /// replayable park's stamp must ratchet the clock, see
+  /// SyncApplier._noteParkedStamp).
+  static bool isReplayable(String reason) =>
       !_unreplayablePrefixes.any(reason.startsWith);
+
+  /// The SQL twin of [isReplayable], for queries that read the parking lot
+  /// directly (the [IntegrityChecker]'s parked-newer-state guard): a
+  /// predicate over the `sync_quarantine` row aliased [alias], TRUE when its
+  /// stored reason is in a replayable class. GLOB rather than LIKE so it is
+  /// the same exact, case-sensitive prefix test as [isReplayable] (LIKE folds
+  /// case, and its `_` wildcard matches inside 'invalid-schema_v:'); the
+  /// prefixes carry no GLOB metacharacter or quote, so they inline safely.
+  static String replayableSql(String alias) => _unreplayablePrefixes
+      .map((p) => "$alias.reason NOT GLOB '$p*'")
+      .join(' AND ');
 
   /// All quarantined rows, oldest quarantine first (stable review order).
   Future<List<SyncQuarantineRow>> list() =>

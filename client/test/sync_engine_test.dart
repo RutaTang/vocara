@@ -96,6 +96,16 @@ class _StuckTokenTransport implements SyncTransport {
       throw UnimplementedError();
 }
 
+/// Stands in for a process that dies after a pull run's pages committed but
+/// before its end-of-run repair transaction ran.
+class _DyingChecker extends IntegrityChecker {
+  _DyingChecker(super.db, super.writer);
+
+  @override
+  Future<List<IntegrityViolation>> repair({int maxPasses = 8}) =>
+      throw StateError('process killed before the repair');
+}
+
 void main() {
   // A fixed epoch anchor: every stamp in these tests is derived from it, so
   // nothing depends on the machine's wall clock.
@@ -114,7 +124,10 @@ void main() {
   late int nowMs;
   var killNextCommit = false;
 
-  SyncEngine buildEngine({SyncTimerFactory? timers}) => SyncEngine(
+  SyncEngine buildEngine({
+    SyncTimerFactory? timers,
+    IntegrityChecker? integrity,
+  }) => SyncEngine(
     db: db,
     applier: SyncApplier(
       db,
@@ -125,7 +138,7 @@ void main() {
     drain: OplogDrain(db),
     builder: SyncRowBuilder(db),
     state: state,
-    integrity: IntegrityChecker(db, writer),
+    integrity: integrity ?? IntegrityChecker(db, writer),
     transport: transport,
     onRemoteApplied: events.add,
     timers: timers,
@@ -219,26 +232,27 @@ void main() {
 
   // Full-row snapshot (the wire contract): the applier's missing-column gate
   // quarantines a schema_v-current record that omits any table column.
-  SyncRow remoteTrack(String id, String practiceId, Hlc h) => SyncRow(
-    table: 'tracks',
-    fields: {
-      'id': _id(id),
-      'practice_id': _id(practiceId),
-      'kind': 'vocal',
-      'interpretation_id': null,
-      'display_name': 'take',
-      'color_value': null,
-      'muted': 0,
-      'soloed': 0,
-      'volume': 1.0,
-      'pan': 0.0,
-      'bus_id': null,
-      'fx_json': null,
-      'sends_json': null,
-      'order_index': 0,
-      ...syncCols(h),
-    },
-  );
+  SyncRow remoteTrack(String id, String practiceId, Hlc h, {int? deletedAt}) =>
+      SyncRow(
+        table: 'tracks',
+        fields: {
+          'id': _id(id),
+          'practice_id': _id(practiceId),
+          'kind': 'vocal',
+          'interpretation_id': null,
+          'display_name': 'take',
+          'color_value': null,
+          'muted': 0,
+          'soloed': 0,
+          'volume': 1.0,
+          'pan': 0.0,
+          'bus_id': null,
+          'fx_json': null,
+          'sends_json': null,
+          'order_index': 0,
+          ...syncCols(h, deletedAt: deletedAt),
+        },
+      );
 
   SyncRow remoteAsset(String id, String hash, Hlc h) => SyncRow(
     table: 'assets',
@@ -256,19 +270,25 @@ void main() {
     },
   );
 
-  SyncRow remoteClip(String id, String trackId, String assetId, Hlc h) =>
-      SyncRow(
-        table: 'clips',
-        fields: {
-          'id': _id(id),
-          'track_id': _id(trackId),
-          'asset_id': _id(assetId),
-          'start_ms': 0,
-          'duration_ms': 100,
-          'order_index': 0,
-          ...syncCols(h),
-        },
-      );
+  SyncRow remoteClip(
+    String id,
+    String trackId,
+    String assetId,
+    Hlc h, {
+    int? deletedAt,
+    int startMs = 0,
+  }) => SyncRow(
+    table: 'clips',
+    fields: {
+      'id': _id(id),
+      'track_id': _id(trackId),
+      'asset_id': _id(assetId),
+      'start_ms': startMs,
+      'duration_ms': 100,
+      'order_index': 0,
+      ...syncCols(h, deletedAt: deletedAt),
+    },
+  );
 
   /// A wire ECHO of [real] forged to claim the HLC [h] — same (table, id)
   /// identity and an internally-consistent quad, so it correlates cleanly
@@ -942,6 +962,43 @@ void main() {
       expect(events, hasLength(1), reason: 'a no-op page announces nothing');
     });
 
+    test('a run that dies between its committed page and its repair leaves '
+        'nothing broken after a RESTART: the new engine repairs on its first '
+        'successful run even though that run applies nothing', () async {
+      // A live track under a tombstoned practice: the page applies both
+      // (the FK is satisfied — the practice row exists), and only the
+      // end-of-run repair tombstones the track.
+      cloud.accept(
+        remotePractice(
+          'P',
+          'deleted',
+          remoteHlc(t0 - 5000),
+          deletedAt: t0 - 5000,
+        ),
+      );
+      cloud.accept(remoteTrack('T', 'P', remoteHlc(t0 - 4000)));
+      engine.dispose();
+      engine = buildEngine(integrity: _DyingChecker(db, writer));
+      final died = await engine.pumpPull();
+      expect(died.failed, isTrue);
+      expect(died.pages, 1, reason: 'the page and its token committed');
+      expect(await IntegrityChecker(db, writer).check(), isNotEmpty);
+
+      // "Restart": a fresh engine over the same durable store. The token is
+      // already at head, so this run fetches and applies nothing — the
+      // debt the dead process held in memory is gone with it.
+      engine.dispose();
+      engine = buildEngine();
+      final run = await engine.pumpPull();
+      expect(run.failed, isFalse);
+      expect(run.applied, 0);
+      expect(
+        await IntegrityChecker(db, writer).check(),
+        isEmpty,
+        reason: 'the first successful run after boot repairs regardless',
+      );
+    });
+
     test('a rows-bearing page with an UNMOVED token and hasMore fails the run '
         'loudly instead of spinning forever (the rows-bearing analogue of the '
         'empty branch\'s refuse-to-spin guard)', () async {
@@ -1421,6 +1478,234 @@ void main() {
       expect(parked, hasLength(1));
       expect(parked.single.id, _id('FUT'));
       expect(await practiceTitle('FUT'), isNull);
+    });
+  });
+
+  group('end-of-run repair vs a parked parent (the checker never judges a '
+      'row against a state the quarantine already supersedes)', () {
+    // Device D deletes track T (cascading a tombstone onto its clip C);
+    // device B never saw that delete and, concurrently, edits C and T. Both
+    // of B's edits out-rank D's delete under LWW, so the converged state is
+    // T live + C live. Every test below delivers B's T edit in a way this
+    // device PARKS, while B's C edit applies live under the (still locally
+    // tombstoned) T.
+    final deleter = _id('DELETER');
+    final editor = _id('EDITOR');
+    Hlc byD(int wall) => Hlc(wallMs: wall, counter: 0, node: deleter);
+    Hlc byB(int wall) => Hlc(wallMs: wall, counter: 0, node: editor);
+
+    Future<Map<String, Object?>> rowOf(String table, String id) async =>
+        (await db
+                .customSelect(
+                  'SELECT * FROM $table WHERE id = ?',
+                  variables: [Variable.withString(_id(id))],
+                )
+                .getSingle())
+            .data;
+
+    /// Shared history, pulled: P, X, T and C created, then D's delete.
+    Future<void> pullDeletedTrack() async {
+      cloud.accept(remoteAsset('X', 'HASH', byD(t0 - 100000)));
+      cloud.accept(remotePractice('P', 'song', byD(t0 - 100000)));
+      cloud.accept(remoteTrack('T', 'P', byD(t0 - 90000)));
+      cloud.accept(remoteClip('C', 'T', 'X', byD(t0 - 90000)));
+      cloud.accept(
+        remoteTrack('T', 'P', byD(t0 - 60000), deletedAt: t0 - 60000),
+      );
+      cloud.accept(
+        remoteClip('C', 'T', 'X', byD(t0 - 60000), deletedAt: t0 - 60000),
+      );
+      expect((await engine.pumpPull()).failed, isFalse);
+      expect((await rowOf('tracks', 'T'))['deleted_at'], isNotNull);
+      expect((await rowOf('clips', 'C'))['deleted_at'], isNotNull);
+    }
+
+    /// B's clip edit has APPLIED live under the locally tombstoned T, and
+    /// the end-of-run repair left it alone: nothing journaled for C, and a
+    /// push puts no bookkeeping tombstone on the server.
+    Future<void> expectClipDeferred(Hlc clipEdit) async {
+      final c = await rowOf('clips', 'C');
+      expect(c['hlc_packed'], clipEdit.packed);
+      expect(
+        c['deleted_at'],
+        isNull,
+        reason:
+            'the parent\'s NEWER state is parked: the clip is pending, not '
+            'orphaned, and must not be tombstoned on a superseded verdict',
+      );
+      expect(await oplogCount(), 0, reason: 'no repair was journaled');
+      expect((await engine.pumpPush()).failed, isFalse);
+      expect(
+        cloud.serverRowFor('clips', _id('C'))!.fields['deleted_at'],
+        isNull,
+        reason: 'the fleet must not receive a bookkeeping tombstone for C',
+      );
+    }
+
+    /// The converged state once the parked parent has landed.
+    Future<void> expectBothLive() async {
+      expect((await rowOf('tracks', 'T'))['deleted_at'], isNull);
+      expect(
+        (await rowOf('clips', 'C'))['deleted_at'],
+        isNull,
+        reason: 'B\'s clip edit won LWW over D\'s delete',
+      );
+      expect(await quarantine.list(), isEmpty);
+      expect(await IntegrityChecker(db, writer).check(), isEmpty);
+    }
+
+    test('a parent edit parked at the DRIFT gate defers the child\'s repair; '
+        'once the clock catches up both land live everywhere', () async {
+      await pullDeletedTrack();
+      // B's clock runs ~6 min ahead of this device: its LATER track edit
+      // is past the 5-minute drift bound, its earlier clip edit is not.
+      final clipEdit = byB(t0 - 1000);
+      cloud.accept(remoteTrack('T', 'P', byB(t0 + 6 * 60 * 1000)));
+      cloud.accept(remoteClip('C', 'T', 'X', clipEdit, startMs: 500));
+      final run = await engine.pumpPull();
+      expect(run.failed, isFalse);
+      expect(run.quarantined, 1, reason: 'T@B parked at the drift gate');
+      await expectClipDeferred(clipEdit);
+
+      nowMs += 2 * 60 * 1000; // this device's clock catches up
+      expect((await engine.pumpPull()).failed, isFalse);
+      await expectBothLive();
+    });
+
+    test('a parent edit parked on its SCHEMA defers the child\'s repair until '
+        'the upgrade lands it', () async {
+      await pullDeletedTrack();
+      // An unknown column stands in for a newer build's schema (the same
+      // upgrade seam the quarantine-replay tests use).
+      final trackEdit = remoteTrack('T', 'P', byB(t0 - 2000));
+      cloud.accept(
+        SyncRow(
+          table: 'tracks',
+          fields: {...trackEdit.fields, 'brand_new_column': 7},
+        ),
+      );
+      final clipEdit = byB(t0 - 1000);
+      cloud.accept(remoteClip('C', 'T', 'X', clipEdit, startMs: 500));
+      final run = await engine.pumpPull();
+      expect(run.failed, isFalse);
+      expect(run.failedRecords, 1, reason: 'T@B parked on its schema');
+      await expectClipDeferred(clipEdit);
+
+      await db.customStatement(
+        'ALTER TABLE tracks ADD COLUMN brand_new_column INTEGER',
+      );
+      expect((await engine.pumpPull()).failed, isFalse);
+      await expectBothLive();
+    });
+
+    test(
+      'a parent edit the FK sweep parks and RESTORES to its tombstoned '
+      'prior state defers the child\'s repair until the parent lands',
+      () async {
+        await pullDeletedTrack();
+        // B routed T into a new bus Y. Y is parked here on its schema, so B's
+        // T edit dangles: the sweep parks it (fk-orphan) and restores T to
+        // D's tombstone — the table again holds a superseded parent state.
+        final bus = SyncRow(
+          table: 'fx_buses',
+          fields: {
+            'id': _id('Y'),
+            'practice_id': _id('P'),
+            'name': 'verb',
+            'color_value': null,
+            'volume': 1.0,
+            'pan': 0.0,
+            'muted': 0,
+            'soloed': 0,
+            'output_bus_id': null,
+            'fx_json': null,
+            'sends_json': null,
+            'order_index': 0,
+            'brand_new_column': 7,
+            ...syncCols(byB(t0 - 3000)),
+          },
+        );
+        cloud.accept(bus);
+        final trackEdit = remoteTrack('T', 'P', byB(t0 - 2000));
+        cloud.accept(
+          SyncRow(
+            table: 'tracks',
+            fields: {...trackEdit.fields, 'bus_id': _id('Y')},
+          ),
+        );
+        final clipEdit = byB(t0 - 1000);
+        cloud.accept(remoteClip('C', 'T', 'X', clipEdit, startMs: 500));
+        final run = await engine.pumpPull();
+        expect(run.failed, isFalse);
+        final parked = {for (final q in await quarantine.list()) q.tbl: q};
+        expect(parked['tracks']!.reason, startsWith('fk-orphan'));
+        expect((await rowOf('tracks', 'T'))['deleted_at'], isNotNull);
+        await expectClipDeferred(clipEdit);
+
+        await db.customStatement(
+          'ALTER TABLE fx_buses ADD COLUMN brand_new_column INTEGER',
+        );
+        expect((await engine.pumpPull()).failed, isFalse);
+        await expectBothLive();
+        expect((await rowOf('tracks', 'T'))['bus_id'], _id('Y'));
+      },
+    );
+
+    test('a parked parent state that SETTLES as an LWW skip ends the '
+        'deferral: that run repairs even though it applied nothing', () async {
+      await pullDeletedTrack();
+      final trackEdit = remoteTrack('T', 'P', byB(t0 - 2000));
+      cloud.accept(
+        SyncRow(
+          table: 'tracks',
+          fields: {...trackEdit.fields, 'brand_new_column': 7},
+        ),
+      );
+      final clipEdit = byB(t0 - 1000);
+      cloud.accept(remoteClip('C', 'T', 'X', clipEdit, startMs: 500));
+      await engine.pumpPull();
+      expect((await rowOf('clips', 'C'))['deleted_at'], isNull);
+
+      // A local write supersedes the parked state while T stays tombstoned
+      // (stand-in: a re-stamp of T through the writer chokepoint). The
+      // door park ratcheted the clock, so the local stamp out-ranks T@B.
+      final s = writer.stamp();
+      expect(s.hlc > byB(t0 - 2000), isTrue);
+      await db.transaction(() async {
+        await db.customUpdate(
+          'UPDATE tracks SET updated_at = ?, hlc_wall = ?, hlc_ctr = ?, '
+          'hlc_node = ?, hlc_packed = ? WHERE id = ?',
+          variables: [
+            Variable.withInt(s.at),
+            Variable.withInt(s.hlc.wallMs),
+            Variable.withInt(s.hlc.counter),
+            Variable.withString(s.hlc.node),
+            Variable.withString(s.hlc.packed),
+            Variable.withString(_id('T')),
+          ],
+        );
+        await writer.journal(
+          table: 'tracks',
+          id: _id('T'),
+          op: 'tombstone',
+          hlc: s.hlc,
+          payloadHash: '',
+        );
+      });
+
+      // Nothing new on the server: the run's only event is the replay
+      // settling T@B as a skip. The clip's verdict is no longer deferred —
+      // its parent's newest state IS the tombstone — so this run repairs.
+      final run = await engine.pumpPull();
+      expect(run.failed, isFalse);
+      expect(run.applied, 0);
+      expect(await quarantine.list(), isEmpty, reason: 'T@B settled');
+      expect(
+        (await rowOf('clips', 'C'))['deleted_at'],
+        isNotNull,
+        reason: 'the deferred verdict was re-judged when its park settled',
+      );
+      expect(await IntegrityChecker(db, writer).check(), isEmpty);
     });
   });
 

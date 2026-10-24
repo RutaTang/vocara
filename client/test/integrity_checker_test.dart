@@ -9,6 +9,7 @@ import 'package:vocara/data/db/asset_store.dart';
 import 'package:vocara/data/repositories/song_practice_repository_drift.dart';
 import 'package:vocara/data/sync/hlc.dart';
 import 'package:vocara/data/sync/integrity_checker.dart';
+import 'package:vocara/data/sync/quarantine_store.dart';
 import 'package:vocara/data/sync/sync_writer.dart';
 import 'package:vocara/domain/models/audio_fx.dart';
 import 'package:vocara/domain/models/audio_track.dart';
@@ -75,6 +76,40 @@ void main() {
         .getSingle();
     return r.read<String>('id');
   }
+
+  /// Parks a remote state for ([table], [id]) in the sync quarantine, stamped
+  /// [deltaMs] away from the row's CURRENT stamp (positive = newer than what
+  /// the table holds) — what the applier leaves behind when it parks a
+  /// row's newer state at one of its gates.
+  Future<void> park(
+    String table,
+    String id, {
+    required int deltaMs,
+    String reason = 'hlc-drift: parked by the test',
+  }) async {
+    final held = await db
+        .customSelect(
+          'SELECT hlc_packed FROM $table WHERE id = ?',
+          variables: [Variable.withString(id)],
+        )
+        .getSingle();
+    final base = Hlc.parse(held.read<String>('hlc_packed'));
+    await QuarantineStore(db).put(
+      table: table,
+      id: id,
+      hlcPacked: Hlc(
+        wallMs: base.wallMs + deltaMs,
+        counter: 0,
+        node: 'PEER'.padRight(26, '0'),
+      ).packed,
+      schemaV: 1,
+      payload: '{}',
+      reason: reason,
+      quarantinedAt: 0,
+    );
+  }
+
+  Future<int> oplogCount() async => (await db.select(db.oplog).get()).length;
 
   test('a well-formed practice has no violations', () async {
     await seed();
@@ -223,5 +258,131 @@ void main() {
     await db.transaction(() => checker.repair());
     expect(await checker.check(), isEmpty);
     expect((await db.select(db.oplog).get()).length, greaterThan(opsBefore));
+  });
+
+  group('a parked NEWER state of the referenced row defers the verdict', () {
+    // The sync applier can park a row's newer state (drift gate, newer
+    // schema, FK-sweep park-and-restore) while applying rows that reference
+    // it; the table then holds a state the quarantine already supersedes,
+    // and a repair judged against it would journal a derived tombstone or
+    // heal that out-ranks real edits fleet-wide.
+
+    test('a live clip under a tombstoned track whose newer state is parked is '
+        'neither reported nor repaired — nothing is journaled', () async {
+      await seed();
+      final trackId = await firstId('tracks');
+      await rawTombstone('tracks', trackId);
+      await park('tracks', trackId, deltaMs: 1000);
+      final opsBefore = await oplogCount();
+
+      expect(await checker.check(), isEmpty);
+      expect(await db.transaction(() => checker.repair()), isEmpty);
+      expect(await oplogCount(), opsBefore, reason: 'no repair was journaled');
+      final liveClips = await db
+          .customSelect(
+            'SELECT COUNT(*) AS n FROM clips WHERE deleted_at IS NULL',
+          )
+          .getSingle();
+      expect(liveClips.read<int>('n'), 1);
+    });
+
+    test(
+      'only a REPLAYABLE park strictly newer than the local row defers: '
+      'an unreplayable or an older park leaves the repair as it was',
+      () async {
+        await seed();
+        final trackId = await firstId('tracks');
+        await rawTombstone('tracks', trackId);
+
+        // Can never land (a pure function of the payload): defers nothing.
+        await park(
+          'tracks',
+          trackId,
+          deltaMs: 1000,
+          reason: 'invalid-value: parked by the test',
+        );
+        expect(
+          (await checker.check()).map((v) => v.invariant),
+          contains('clip-track'),
+        );
+        // Older than what the table holds: it would settle as an LWW skip.
+        await QuarantineStore(db).delete('tracks', trackId);
+        await park('tracks', trackId, deltaMs: -1000);
+        expect(
+          (await checker.check()).map((v) => v.invariant),
+          contains('clip-track'),
+        );
+        expect(await checker.repair(), isEmpty);
+      },
+    );
+
+    test('a scalar heal is deferred while its TARGET\'s newer state is '
+        'parked (active-interp)', () async {
+      final pr = await seed();
+      final interpId = pr.versions.single.id;
+      await rawTombstone('interpretations', interpId);
+      await park('interpretations', interpId, deltaMs: 1000);
+
+      expect(await checker.check(), isEmpty);
+      await checker.repair();
+      final row = await db
+          .customSelect(
+            'SELECT active_interpretation_id AS a FROM practices WHERE id = ?',
+            variables: [Variable.withString(pr.id)],
+          )
+          .getSingle();
+      expect(
+        row.data['a'],
+        interpId,
+        reason: 'the pointer must survive until the parked state settles',
+      );
+
+      // The park settles (here: discarded) — the verdict is judged again.
+      await QuarantineStore(db).delete('interpretations', interpId);
+      expect(
+        (await checker.check()).map((v) => v.invariant),
+        contains('active-interp'),
+      );
+    });
+
+    test('a bus cycle through a bus whose newer state is parked is not '
+        'broken: the parked route may not close the ring', () async {
+      final base = await seed();
+      final a = FxBus(id: newId(), name: 'A', fx: TrackFx.flat());
+      final b = FxBus(id: newId(), name: 'B', fx: TrackFx.flat());
+      await repo.savePractice(base.copyWith(fxBuses: [a, b]));
+      String stamp(int wall) =>
+          Hlc(wallMs: wall, counter: 0, node: 'PEER'.padRight(26, '0')).packed;
+      await db.customUpdate(
+        'UPDATE fx_buses SET output_bus_id = ?, hlc_packed = ? WHERE id = ?',
+        variables: [
+          Variable.withString(b.id),
+          Variable.withString(stamp(1000)),
+          Variable.withString(a.id),
+        ],
+      );
+      await db.customUpdate(
+        'UPDATE fx_buses SET output_bus_id = ?, hlc_packed = ? WHERE id = ?',
+        variables: [
+          Variable.withString(a.id),
+          Variable.withString(stamp(2000)),
+          Variable.withString(b.id),
+        ],
+      );
+      // B (not the would-be victim A) has a newer state parked.
+      await park('fx_buses', b.id, deltaMs: 1000);
+
+      expect(await checker.check(), isEmpty);
+      await checker.repair();
+      final rows = await db
+          .customSelect('SELECT id, output_bus_id FROM fx_buses')
+          .get();
+      final routes = {
+        for (final r in rows)
+          r.read<String>('id'): r.read<String?>('output_bus_id'),
+      };
+      expect(routes[a.id], b.id, reason: 'A\'s route is not nulled');
+      expect(routes[b.id], a.id);
+    });
   });
 }
