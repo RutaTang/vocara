@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:path/path.dart' as p;
 
 import '../../../data/repositories/technique_repository.dart';
 import '../../../data/services/app_settings_service.dart';
@@ -972,6 +973,10 @@ class TechniqueDetailViewModel extends ChangeNotifier
         id: newId(),
         path: dest,
         kind: TechniqueMedia.kindForPath(dest),
+        // Captioned now: the file is named by a generated id here and by its
+        // content hash once pooled, so the uncaptioned fallback (the file's
+        // basename) would show the user a hash.
+        label: _nextRecordingLabel(),
         addedAt: DateTime.now(),
       );
     } on Exception {
@@ -1014,6 +1019,24 @@ class TechniqueDetailViewModel extends ChangeNotifier
     notifyListeners();
     return added;
   }
+
+  /// The caption a just-recorded example is staged under: "Recording N", one
+  /// past the highest such caption the technique already shows, so takes
+  /// recorded across edit sessions keep counting up.
+  String _nextRecordingLabel() {
+    var highest = 0;
+    for (final m in effectiveMedia) {
+      final n = int.tryParse(
+        _recordingLabel.firstMatch(m.label.trim())?.group(1) ?? '',
+      );
+      if (n != null && n > highest) highest = n;
+    }
+    return 'Recording ${highest + 1}';
+  }
+
+  /// "Recording N" with a bounded N, so an absurd caption typed by hand can't
+  /// overflow the numbering (the same guard "Take N" numbering carries).
+  static final RegExp _recordingLabel = RegExp(r'^Recording (\d{1,9})$');
 
   /// Quit-time commit of the example [staged] by [stopExampleRecording]: the
   /// persisted technique plus the captured clip, and nothing else — the rest
@@ -1405,6 +1428,10 @@ class TechniqueDetailViewModel extends ChangeNotifier
             id: newId(),
             path: dest,
             kind: TechniqueMedia.kindForPath(dest),
+            // The user's own file name: the sandbox copy is named by a
+            // generated id and the pooled file by its content hash, so the
+            // uncaptioned fallback (the file's basename) showed a hash.
+            label: p.basenameWithoutExtension(source),
             addedAt: now,
           ),
         );
