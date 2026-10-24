@@ -1,4 +1,5 @@
 import 'package:drift/drift.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 
 import '../db/app_database.dart';
 
@@ -122,6 +123,21 @@ class OplogDrain {
     return OplogDrainBatch(entries: entries, maxSeq: maxSeq);
   }
 
+  /// The dependency carry-forward [ack] runs before deleting (bound: the
+  /// ack watermark). Its correlated subquery runs once per surviving entry,
+  /// so it must resolve through ix_oplog_entity (a test pins the plan).
+  @visibleForTesting
+  static const String ackCarrySql =
+      'UPDATE oplog SET depends_on_asset_id = ('
+      'SELECT o.depends_on_asset_id FROM oplog o '
+      'WHERE o.entity_table = oplog.entity_table '
+      'AND o.entity_id = oplog.entity_id '
+      'AND o.depends_on_asset_id IS NOT NULL '
+      'AND o.seq <= oplog.seq '
+      'ORDER BY o.seq DESC LIMIT 1'
+      ') WHERE depends_on_asset_id IS NULL AND op <> \'tombstone\' '
+      'AND seq > ?';
+
   /// Deletes every oplog entry with seq <= [uptoSeq], in one transaction.
   /// Call ONLY with a sequence whose entries were durably pushed (or
   /// deliberately dropped): sequences are monotonic (AUTOINCREMENT), so
@@ -157,18 +173,7 @@ class OplogDrain {
   /// persisted onto one.
   Future<int> ack(int uptoSeq) {
     return _db.transaction(() async {
-      await _db.customStatement(
-        'UPDATE oplog SET depends_on_asset_id = ('
-        'SELECT o.depends_on_asset_id FROM oplog o '
-        'WHERE o.entity_table = oplog.entity_table '
-        'AND o.entity_id = oplog.entity_id '
-        'AND o.depends_on_asset_id IS NOT NULL '
-        'AND o.seq <= oplog.seq '
-        'ORDER BY o.seq DESC LIMIT 1'
-        ') WHERE depends_on_asset_id IS NULL AND op <> \'tombstone\' '
-        'AND seq > ?',
-        [uptoSeq],
-      );
+      await _db.customStatement(ackCarrySql, [uptoSeq]);
       return (_db.delete(
         _db.oplog,
       )..where((o) => o.seq.isSmallerOrEqualValue(uptoSeq))).go();

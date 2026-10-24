@@ -136,5 +136,17 @@ class AppDatabase extends _$AppDatabase {
     await customStatement(
       'CREATE INDEX IF NOT EXISTS ix_oplog_hlc ON oplog (hlc_packed)',
     );
+    // Per-entity history: the dependency carry-forward in boot compaction
+    // (Persistence.compactOplog) and in OplogDrain.ack correlates a subquery
+    // on (entity_table, entity_id) for EVERY surviving entry, and the GC's
+    // pending-journal guard probes the same pair per asset. Unindexed, each
+    // probe scans the whole ledger — quadratic in a ledger nothing acks
+    // today (one entry per row ever written): ~6 s at 10k entities, ~24 s at
+    // 20k, on every boot before the window shows. seq rides along so the
+    // ORDER BY seq DESC LIMIT 1 resolves off the index tail.
+    await customStatement(
+      'CREATE INDEX IF NOT EXISTS ix_oplog_entity '
+      'ON oplog (entity_table, entity_id, seq)',
+    );
   }
 }

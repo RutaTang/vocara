@@ -1,6 +1,8 @@
+import 'package:drift/drift.dart' hide isNull, isNotNull;
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vocara/data/db/app_database.dart';
+import 'package:vocara/data/db/persistence.dart';
 import 'package:vocara/data/sync/hlc.dart';
 import 'package:vocara/data/sync/oplog_drain.dart';
 import 'package:vocara/data/sync/sync_writer.dart';
@@ -274,4 +276,41 @@ void main() {
     expect(batch.maxSeq, 0);
     expect(await oplogCount(), 1); // and acks nothing away
   });
+
+  test(
+    'the ack and boot-compaction carry-forward probe each entity through '
+    'ix_oplog_entity instead of scanning the whole ledger per entry',
+    () async {
+      for (var i = 0; i < 50; i++) {
+        await journal('clips', 'C$i', 'insert');
+        await journal('clips', 'C$i', 'update', payloadHash: 'h$i');
+      }
+      Future<List<String>> plan(
+        String sql, [
+        List<Object?> args = const [],
+      ]) async {
+        final rows = await db
+            .customSelect(
+              'EXPLAIN QUERY PLAN $sql',
+              variables: [for (final a in args) Variable(a)],
+            )
+            .get();
+        return [for (final r in rows) r.read<String>('detail')];
+      }
+
+      // Unindexed, the correlated subquery reads `SCAN o`: one full ledger
+      // pass per surviving entry, quadratic in a ledger nothing acks today.
+      for (final steps in [
+        await plan(OplogDrain.ackCarrySql, [0]),
+        await plan(Persistence.compactCarrySql),
+      ]) {
+        expect(
+          steps,
+          contains(startsWith('SEARCH o USING INDEX ix_oplog_entity')),
+          reason: steps.join('\n'),
+        );
+        expect(steps, isNot(contains('SCAN o')));
+      }
+    },
+  );
 }

@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:crypto/crypto.dart';
 import 'package:drift/native.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
@@ -422,7 +423,18 @@ class Persistence {
   /// nothing in flight); one transaction so a crash can never leave a
   /// dependency carried but its history half-deleted, or vice versa.
   Future<int> compactOplog() => db.transaction(() async {
-    await db.customStatement(
+    await db.customStatement(compactCarrySql);
+    return db.customUpdate(
+      'DELETE FROM oplog WHERE seq NOT IN ('
+      'SELECT MAX(seq) FROM oplog GROUP BY entity_table, entity_id)',
+    );
+  });
+
+  /// The dependency carry-forward [compactOplog] runs before it collapses
+  /// history. Its correlated subquery runs once per surviving entry, so it
+  /// must resolve through ix_oplog_entity (a test pins the plan).
+  @visibleForTesting
+  static const String compactCarrySql =
       'UPDATE oplog SET depends_on_asset_id = ('
       'SELECT o.depends_on_asset_id FROM oplog o '
       'WHERE o.entity_table = oplog.entity_table '
@@ -431,13 +443,7 @@ class Persistence {
       'ORDER BY o.seq DESC LIMIT 1'
       ') WHERE depends_on_asset_id IS NULL AND op <> \'tombstone\' '
       'AND seq IN ('
-      'SELECT MAX(seq) FROM oplog GROUP BY entity_table, entity_id)',
-    );
-    return db.customUpdate(
-      'DELETE FROM oplog WHERE seq NOT IN ('
-      'SELECT MAX(seq) FROM oplog GROUP BY entity_table, entity_id)',
-    );
-  });
+      'SELECT MAX(seq) FROM oplog GROUP BY entity_table, entity_id)';
 
   /// Boot-time recovery of hard-kill orphaned take recordings. Returns the
   /// number of takes recovered.
