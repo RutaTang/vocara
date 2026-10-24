@@ -263,6 +263,13 @@ impl TrackFeeder {
         self.reader.reopen()
     }
 
+    /// Ring slots the fill never uses, so a discarding replan's fence always
+    /// fits. While paused the node pops nothing: a ring topped up to the brim
+    /// just before a pause could never take the fence, and every seek or loop
+    /// edit until the next play would be dropped, leaving the track silent
+    /// until the playhead caught up with the stale plan.
+    const REPLAN_HEADROOM: usize = 2;
+
     /// Pushes a two-frame fence when the ring has room for both; on success
     /// publishes the generation. Returns whether it landed (a full ring
     /// retries on the next pump).
@@ -379,8 +386,11 @@ impl TrackFeeder {
                 // Loop wrap: a NEW contiguous run from loop_start, adopted
                 // by the node IN BAND (no flush_seq bump — the pre-wrap tail
                 // still has to play out of the ring first).
+                // The in-band fence must not eat the replan headroom either.
                 let next_gen = self.generation.wrapping_add(1);
-                if !self.push_fence(next_gen, basis.ls) {
+                if self.producer.free() < 2 + Self::REPLAN_HEADROOM
+                    || !self.push_fence(next_gen, basis.ls)
+                {
                     return Ok(()); // ring full: the wrap fence retries next pump
                 }
                 self.generation = next_gen;
@@ -408,7 +418,7 @@ impl TrackFeeder {
             }
             let run_left = (self.run_end - self.next_tl).max(0);
             let span_left = span_end - self.next_tl;
-            let free = self.producer.free();
+            let free = self.producer.free().saturating_sub(Self::REPLAN_HEADROOM);
             let want = self
                 .scratch
                 .len()

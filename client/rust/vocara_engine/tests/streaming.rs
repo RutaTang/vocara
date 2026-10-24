@@ -714,3 +714,127 @@ fn a_loop_edit_after_the_render_wrapped_replans_from_the_render_clock() {
     assert_eq!(bad, 0, "the replan must not silence the pass");
     let _ = std::fs::remove_file(&path);
 }
+
+/// Real cadence: one pump per ~512-frame device callback (4 x BLOCK), with a
+/// pause landing at tick 100 BETWEEN the pump and the callback — the pump has
+/// just topped the ring up and nothing has popped since. `edit` runs while
+/// paused; play resumes at tick 110. Returns what was rendered from resume.
+fn pause_on_a_topped_up_ring(
+    streamed: bool,
+    path: &std::path::Path,
+    pcm: &[Smp],
+    ticks: usize,
+    edit: impl Fn(usize, &EngineHandle),
+) -> Vec<Smp> {
+    let (h, rt, mut feeder) = streamed_pair(path, 0, 16_384);
+    let (h2, rt2) = engine_with(Box::new(BufferSource::new(pcm.to_vec(), 0)));
+    let (h, rt) = if streamed { (h, rt) } else { (h2, rt2) };
+    h.play();
+    let mut out = Vec::new();
+    for t in 0..ticks {
+        edit(t, &h);
+        if t == 110 {
+            h.play();
+        }
+        if streamed {
+            feeder.pump(h.transport()).unwrap();
+        }
+        if t == 100 {
+            h.pause();
+        }
+        for _ in 0..4 {
+            let mut block = vec![0.0; BLOCK * CHANNELS];
+            rt.render_offline(&mut block, BLOCK);
+            rt.transport().sync_consumed_to_rendered();
+            if t >= 110 {
+                out.extend_from_slice(&block);
+            }
+        }
+    }
+    out
+}
+
+fn differing_frames(a: &[Smp], b: &[Smp]) -> usize {
+    (0..a.len() / 2).filter(|&i| a[2 * i] != b[2 * i]).count()
+}
+
+#[test]
+fn a_seek_back_while_paused_on_a_full_ring_plays_from_the_new_position() {
+    // The pause froze a FULL ring, so the seek's replan fence had nowhere to
+    // go: on play the track stayed silent until the playhead walked back up
+    // to where it had been paused.
+    let pcm = offset_pcm(400_000);
+    let path = write_pcm("seekback", &pcm);
+    let edit = |t: usize, h: &EngineHandle| {
+        if t == 105 {
+            h.seek(0);
+        }
+    };
+    let streamed = pause_on_a_topped_up_ring(true, &path, &pcm, 400, edit);
+    let arc = pause_on_a_topped_up_ring(false, &path, &pcm, 400, edit);
+    // At most the first resumed callback may differ while the fence lands.
+    let bad = differing_frames(&streamed, &arc);
+    assert!(bad <= 4 * BLOCK, "{bad} frames differ after the seek back");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn a_loop_set_behind_a_full_paused_ring_plays_every_pass() {
+    // The same frozen ring, then a loop that ends before the pause point (and
+    // the playhead snapped into it): the plan never caught up, so every pass
+    // of the loop was silent, for good.
+    let pcm = offset_pcm(400_000);
+    let path = write_pcm("loopbehind", &pcm);
+    let edit = |t: usize, h: &EngineHandle| {
+        if t == 103 {
+            h.set_loop(true, 0, 24_000);
+            h.seek(0);
+        }
+    };
+    let streamed = pause_on_a_topped_up_ring(true, &path, &pcm, 1000, edit);
+    let arc = pause_on_a_topped_up_ring(false, &path, &pcm, 1000, edit);
+    let bad = differing_frames(&streamed, &arc);
+    assert!(
+        bad <= 4 * BLOCK,
+        "{bad} frames differ across the loop passes"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn a_play_and_pause_with_nothing_heard_keeps_the_playhead() {
+    // Resampled output path: the device trails the render by LAG frames. The
+    // pause's flush skips the cursor over the FIFO, so it then sits at the end
+    // of the last rendered span; a play/pause pair inside one device callback
+    // folded the clock to THAT span's end — forward by the whole backlog.
+    const LAG: u64 = 1024;
+    let (h, rt) = engine_with(Box::new(BufferSource::new(offset_pcm(100_000), 0)));
+    let t = rt.transport();
+    let mut rendered = 0u64;
+    let mut block = vec![0.0; BLOCK * CHANNELS];
+    h.play();
+    for _ in 0..100 {
+        rt.render_offline(&mut block, BLOCK);
+        rendered += BLOCK as u64;
+        let target = rendered.saturating_sub(LAG);
+        let cur = t.consumed_frames();
+        if target > cur {
+            t.advance_consumed(target - cur);
+        }
+    }
+    h.pause();
+    let heard = h.frame();
+    assert_eq!(heard, (rendered - LAG) as i64);
+    // The callback processes the flush: the cursor skips the discarded FIFO.
+    t.advance_consumed(rendered - t.consumed_frames());
+    for _ in 0..10 {
+        rt.render_offline(&mut block, BLOCK);
+        t.sync_consumed_to_rendered();
+    }
+    assert_eq!(h.frame(), heard);
+
+    h.play();
+    assert_eq!(h.frame(), heard, "nothing of the new run is heard yet");
+    h.pause();
+    assert_eq!(h.frame(), heard, "a play/pause with nothing heard moved it");
+}

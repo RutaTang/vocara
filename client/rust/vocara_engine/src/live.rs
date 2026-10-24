@@ -103,6 +103,14 @@ pub struct Shared {
     /// exact at pause (the fold reads the mapping, not a depth estimate).
     rendered_total: AtomicU64,
     consumed_total: AtomicU64,
+    /// `rendered_total` when the transport last started playing. Spans ending at or
+    /// before it belong to an EARLIER run, whose mapping a pause already folded the
+    /// clock back from: until the cursor reaches this run's audio, nothing of it has
+    /// been heard. Without the mark, map(consumed) right after play held at the
+    /// previous run's last RENDERED frame — ahead of what was heard by the output
+    /// FIFO's backlog — so a play/pause with no block heard jumped the playhead
+    /// forward, and the playing playhead flashed the pre-seek position.
+    play_mark: AtomicU64,
     seg_head: AtomicU32,
     segments: [RenderSegment; SEG_RING],
     /// Bumped by seek/pause: the resampler's FIFO still holds pre-seek/pre-pause audio, which
@@ -127,6 +135,7 @@ impl Shared {
             mon_rev_wet: AtomicU32::new(0.2f32.to_bits()),
             rendered_total: AtomicU64::new(0),
             consumed_total: AtomicU64::new(0),
+            play_mark: AtomicU64::new(0),
             seg_head: AtomicU32::new(0),
             segments: std::array::from_fn(|_| RenderSegment {
                 ver: AtomicU32::new(0),
@@ -162,8 +171,10 @@ impl Shared {
     /// map(consumed_total) over the segment ring. A cursor inside a playing
     /// span maps linearly; a cursor in a silence gap (or past the newest
     /// span, e.g. paused refill) holds at the last span it passed. None when
-    /// nothing has ever both rendered-playing and reached the device.
+    /// nothing of the current run (see [`Self::play_mark`]) has both
+    /// rendered-playing and reached the device.
     fn map_consumed(&self) -> Option<i64> {
+        let since = self.play_mark.load(Ordering::Acquire);
         let consumed = self.consumed_total.load(Ordering::Acquire);
         let mut best: Option<(u64, i64)> = None; // (r_end of span, mapped tl)
         for seg in &self.segments {
@@ -187,8 +198,8 @@ impl Shared {
                 if v1 != v2 {
                     continue;
                 }
-                if r_end == r_start {
-                    break; // never-written slot
+                if r_end == r_start || r_end <= since {
+                    break; // never-written slot, or an earlier run's
                 }
                 if consumed >= r_end {
                     // Fully consumed span: candidate "hold" position.
@@ -700,6 +711,11 @@ impl EngineHandle {
         // freshly rendered audio. Flushed before the playing flip so the first playing
         // callback starts from an empty FIFO.
         self.flush_out_boundary();
+        // Marked before the flip: every span this run renders starts at or after it.
+        self.shared.play_mark.store(
+            self.shared.rendered_total.load(Ordering::Acquire),
+            Ordering::Release,
+        );
         self.shared.playing.store(true, Ordering::Release);
     }
     pub fn pause(&self) {
@@ -715,7 +731,8 @@ impl EngineHandle {
         // reached the ears — no gap, no repeat. A callback already in flight
         // when `playing` flipped can still deliver up to one device buffer
         // after this read; that race is physical (the listener heard those
-        // frames) and only costs the same bounded precision it always did.
+        // frames) and only costs the same bounded precision it always did. Nothing of
+        // this run heard yet (None) leaves the clock where play() found it.
         if let Some(heard) = self.shared.map_consumed() {
             self.shared.frame.store(heard, Ordering::Release);
         }
