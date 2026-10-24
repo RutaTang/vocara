@@ -239,7 +239,11 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       save: _save,
       ensureSelection: _ensureSelection,
       toast: _toast,
-      isRecording: () => recording.isRecording,
+      // The whole take window, not just the armed span: a switch while the
+      // mic is still arming (or the stopped take is still landing) moved the
+      // screen to another interpretation, filing the take where the user no
+      // longer looks — no forming waveform, and no take after Stop.
+      isRecording: () => takeInFlight,
       isSeparating: () => isSeparating,
     );
     // Forward every controller's notifications through this VM so all existing
@@ -2311,8 +2315,8 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   bool get liveMonitor => analysis.liveMonitor;
 
   // Cross-cutting recording guard: read by the transport bar, the screen's
-  // PopScope/back path, the lyrics import and the interpretation guards — a
-  // genuinely VM-level condition, not a mixer/playback one.
+  // PopScope/back path and the lyrics import — a genuinely VM-level
+  // condition, not a mixer/playback one.
   bool get isRecording => recording.isRecording;
 
   /// A take owns the model's structure from REC's arm until its finalize has

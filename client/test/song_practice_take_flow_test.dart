@@ -401,4 +401,44 @@ void main() {
       );
     });
   });
+
+  group('interpretations wait out the take window', () {
+    test('a switch while the mic is arming is refused; the take lands on '
+        'screen', () async {
+      final mic = _FakeMic()..ready = Completer<void>();
+      final vm = await pumpVm(engine: _FakeGraphEngine(), mic: mic);
+      vm.selectTrack('take1');
+      final start = vm.recording.startRecording();
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(vm.recording.isStartingTake, isTrue);
+      await vm.versions.setActive('v2');
+      expect(vm.versions.active?.id, 'v1');
+      mic.ready!.complete();
+      await start;
+      await vm.stopRecording();
+      expect(
+        vm.versions.vocalTakes.singleWhere((t) => t.id == 'take1').clips,
+        hasLength(2),
+      );
+    });
+
+    test('create and delete inside the stop window are refused', () async {
+      final mic = _FakeMic();
+      final vm = await pumpVm(engine: _FakeGraphEngine(), mic: mic);
+      vm.selectTrack('take1');
+      await vm.recording.startRecording();
+      final stop = vm.stopRecording();
+      expect(vm.recording.isStopping, isTrue);
+      final create = vm.versions.create('Late');
+      final delete = vm.versions.delete('v1');
+      expect(vm.busy, isFalse);
+      await Future.wait([create, delete, stop]);
+      expect(repo.stored.versions.map((v) => v.id), ['v1', 'v2']);
+      expect(repo.stored.activeVersionId, 'v1');
+      expect(
+        repo.stored.vocalTracks.singleWhere((t) => t.id == 'take1').clips,
+        hasLength(2),
+      );
+    });
+  });
 }
