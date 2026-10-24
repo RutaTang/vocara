@@ -324,6 +324,50 @@ void main() {
     }
   });
 
+  test('yinDifference matches the one-lag loop bit for bit (3000 frames, '
+      'every lag-count remainder)', () {
+    // YIN step 1 as it was: one accumulator per lag, summed in j order.
+    Float64List oneLag(Float32List x, int tauMax, int w) {
+      final d = Float64List(tauMax + 1);
+      for (var tau = 1; tau <= tauMax; tau++) {
+        var sum = 0.0;
+        for (var j = 0; j < w; j++) {
+          final diff = x[j] - x[j + tau];
+          sum += diff * diff;
+        }
+        d[tau] = sum;
+      }
+      return d;
+    }
+
+    final rng = Random(11);
+    for (var t = 0; t < 3000; t++) {
+      final n = const [1024, 2048, 1000, 517, 9][t % 5];
+      final rate = const [24000.0, 22050.0, 48000.0, 44100.0][t % 4];
+      final hz = 60 + rng.nextDouble() * 1200;
+      final noise = (t % 3) * 0.2;
+      final frame = Float32List(n);
+      for (var i = 0; i < n; i++) {
+        frame[i] =
+            0.5 * sin(2 * pi * hz * i / rate) +
+            noise * (rng.nextDouble() - 0.5);
+      }
+      // yinPitch's own bounds, plus arbitrary ones so every tauMax % 4
+      // (the four-lag sweep's tail) is exercised.
+      final tauMax = t.isEven
+          ? min((rate / 63).ceil(), n - 1)
+          : 1 + rng.nextInt(n - 2);
+      final w = n - tauMax;
+      final want = oneLag(frame, tauMax, w);
+      final got = yinDifference(frame, tauMax, w);
+      expect(
+        got.buffer.asUint64List(),
+        want.buffer.asUint64List(),
+        reason: 'frame $t (n=$n, tauMax=$tauMax)',
+      );
+    }
+  });
+
   test('yinPitch rejects a sub-fmin tone instead of reporting a false ~fmin', () {
     // 60 Hz is below fmin (70 Hz). The boundary lag used to read a false ~70 Hz
     // with high confidence and lock the tuner a semitone sharp; now it's NaN.

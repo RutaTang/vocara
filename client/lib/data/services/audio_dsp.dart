@@ -2,6 +2,7 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:fftea/fftea.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 
 import '../../domain/models/spectrogram.dart';
 import '../../domain/models/voice_metrics.dart';
@@ -1392,6 +1393,53 @@ const int maxAnalysisSampleRate = 96000;
 /// is what keeps formant dots off non-periodic noise that clears the RMS floor.
 const double _voicedConfidence = 0.55;
 
+/// YIN step 1, the squared-difference function d(τ) = Σⱼ (x[j] − x[j+τ])²
+/// over the first [w] samples of [frame], for τ in 1..[tauMax] (d[0] is 0).
+///
+/// O(w·τmax) — ~245k multiply-adds per 48 kHz frame, the bulk of the take
+/// analysis and of the live analyzer's UI-isolate budget. A one-lag loop is
+/// bound by its single add chain, so the lags are swept FOUR at a time, each
+/// with its own accumulator summed in the same j order: every d[τ] is the
+/// same IEEE sum as the one-lag loop's, bit for bit (pinned by test), the
+/// four independent chains just overlap. The Float64 copy is exact
+/// (float32 → double is lossless) and spares four conversions per step.
+@visibleForTesting
+Float64List yinDifference(Float32List frame, int tauMax, int w) {
+  final x = Float64List(frame.length);
+  for (var i = 0; i < frame.length; i++) {
+    x[i] = frame[i];
+  }
+  final d = Float64List(tauMax + 1);
+  var tau = 1;
+  for (; tau + 3 <= tauMax; tau += 4) {
+    var s0 = 0.0, s1 = 0.0, s2 = 0.0, s3 = 0.0;
+    for (var j = 0; j < w; j++) {
+      final xj = x[j];
+      final d0 = xj - x[j + tau];
+      final d1 = xj - x[j + tau + 1];
+      final d2 = xj - x[j + tau + 2];
+      final d3 = xj - x[j + tau + 3];
+      s0 += d0 * d0;
+      s1 += d1 * d1;
+      s2 += d2 * d2;
+      s3 += d3 * d3;
+    }
+    d[tau] = s0;
+    d[tau + 1] = s1;
+    d[tau + 2] = s2;
+    d[tau + 3] = s3;
+  }
+  for (; tau <= tauMax; tau++) {
+    var sum = 0.0;
+    for (var j = 0; j < w; j++) {
+      final diff = x[j] - x[j + tau];
+      sum += diff * diff;
+    }
+    d[tau] = sum;
+  }
+  return d;
+}
+
 /// YIN fundamental-frequency estimate (de Cheveigné & Kawahara, 2002) for one
 /// time-domain [frame] sampled at [sampleRate]. Returns the pitch in Hz plus a
 /// periodicity confidence in [0, 1] (1 = perfectly periodic). [f0] is NaN when
@@ -1424,15 +1472,7 @@ const double _voicedConfidence = 0.55;
   }
 
   // 1) Squared-difference function d(τ) = Σⱼ (x[j] − x[j+τ])².
-  final d = Float64List(tauMax + 1);
-  for (var tau = 1; tau <= tauMax; tau++) {
-    var sum = 0.0;
-    for (var j = 0; j < w; j++) {
-      final diff = frame[j] - frame[j + tau];
-      sum += diff * diff;
-    }
-    d[tau] = sum;
-  }
+  final d = yinDifference(frame, tauMax, w);
 
   // 2) Cumulative mean normalized difference d′(τ) — d(τ) divided by the running
   // mean of d up to τ. d′(0)=1; this is what flattens the spurious low-τ dip.
