@@ -668,16 +668,24 @@ class SyncEngine {
   /// fleet-wide (found by the convergence simulation, seeds 0xc1c2b7 and
   /// 0x5eed0009). Once the run is caught up, the delivered prefix is
   /// causally complete (the pusher uploads parents before children and whole
-  /// transactions in order), so the checker sees only genuinely broken
-  /// states. Residual exposure: a pusher whose SINGLE transaction exceeds one
-  /// push chunk (400 rows) can still be observed half-uploaded by a caught-up
-  /// puller; P0 aggregates are far smaller, and the derived repair stamps cap
-  /// the blast radius to bookkeeping that any later real write out-ranks.
+  /// transactions in order) — but the APPLIED prefix need not be: the
+  /// applier may have PARKED a row's newer state (drift gate, newer schema,
+  /// an FK-sweep park-and-restore) while applying its children, and the
+  /// table then still holds a state the quarantine already supersedes. The
+  /// checker therefore defers every verdict that depends on a row with a
+  /// newer replayable parked state (see IntegrityChecker._parkedNewer); the
+  /// replay that later lands or settles that state opens the run's repair
+  /// gate, so the deferred verdict is re-judged in that same run. What the
+  /// checker repairs is thus only genuinely broken. Residual exposure: a
+  /// pusher whose SINGLE transaction exceeds one push chunk (400 rows) can
+  /// still be observed half-uploaded by a caught-up puller; P0 aggregates are
+  /// far smaller, and the derived repair stamps cap the blast radius to
+  /// bookkeeping that any later real write out-ranks.
   Future<PullRun> pumpPull() => _exclusive(_pullLocked);
 
-  /// Set when a run that had already committed applied pages aborted before
-  /// its end-of-run repair: the next successful run repairs even if it
-  /// applies nothing itself.
+  /// Set when a run that had already committed applied pages (or settled
+  /// parked entries) aborted before its end-of-run repair: the next
+  /// successful run repairs even if it applies nothing itself.
   bool _repairDebt = false;
 
   Future<PullRun> _pullLocked() async {
@@ -689,6 +697,10 @@ class SyncEngine {
     // Rows the quarantine replay landed this run (they count toward the
     // repair gate, not toward the page counters — they are not page rows).
     var replayed = 0;
+    // Parked entries the replay SETTLED this run — landed or LWW-skipped.
+    // A skip changes no row, but it ends the deferral of any verdict the
+    // checker held back for that parked state, so it gates the repair too.
+    var settled = 0;
     // Events buffered until the end-of-run repair has run (listeners must
     // always reload an already-consistent view).
     final announcements = <RemoteApplied>[];
@@ -703,6 +715,7 @@ class SyncEngine {
       // case parks EVERY first-pull row while the token marches to head).
       final firstReplay = await _replayQuarantine();
       replayed = firstReplay.count;
+      settled = firstReplay.settled;
       // Replayed rows are announced like page rows: the primary recovery
       // scenario (a whole first-pull backlog parked, then un-parked by a
       // corrected clock) can land an entire library in a run that fetches
@@ -795,10 +808,11 @@ class SyncEngine {
       // missing parent), unlocking rows parked just moments ago.
       final secondReplay = await _replayQuarantine();
       replayed += secondReplay.count;
+      settled += secondReplay.settled;
       if (secondReplay.rows.isNotEmpty) {
         announcements.add(await _describeRows(secondReplay.rows));
       }
-      if (applied > 0 || replayed > 0 || _repairDebt) {
+      if (applied > 0 || replayed > 0 || settled > 0 || _repairDebt) {
         // Caught up: repair the invariants closure ONCE, in one transaction
         // so each repair write commits with its journal entry, then announce.
         await _db.transaction(() => _integrity.repair());
@@ -818,7 +832,7 @@ class SyncEngine {
       // Aborted mid-backlog: committed pages exist without their repair (and
       // without their announcements — freshness only, see [RemoteApplied]).
       // Carry the repair forward so the next successful run settles it.
-      if (applied > 0 || replayed > 0) _repairDebt = true;
+      if (applied > 0 || replayed > 0 || settled > 0) _repairDebt = true;
       return PullRun(
         pages: pages,
         applied: applied,
@@ -862,8 +876,14 @@ class SyncEngine {
   /// An undecodable payload is kept parked for manual review (it can never
   /// re-apply, but dropping it silently is exactly what quarantine exists to
   /// prevent).
-  Future<({int count, List<SyncRow> rows})> _replayQuarantine() async {
-    const nothing = (count: 0, rows: <SyncRow>[]);
+  ///
+  /// Returns how many rows landed ([count], with the rows themselves for the
+  /// announcement) and how many entries SETTLED — landed or skipped — which
+  /// the caller's repair gate needs: either outcome ends a deferral the
+  /// IntegrityChecker held for that parked state.
+  Future<({int count, int settled, List<SyncRow> rows})>
+  _replayQuarantine() async {
+    const nothing = (count: 0, settled: 0, rows: <SyncRow>[]);
     final store = _applier.quarantine;
     if (store == null) return nothing;
     final parked = await store.list();
@@ -877,6 +897,7 @@ class SyncEngine {
         return byRank != 0 ? byRank : a.$1.compareTo(b.$1);
       });
     var applied = 0;
+    var settled = 0;
     // Rows that actually landed, for the caller's RemoteApplied announcement
     // (skips changed nothing locally, so they are not announced).
     final landed = <SyncRow>[];
@@ -918,10 +939,11 @@ class SyncEngine {
           );
         }
         applied += result.applied;
+        settled++;
         if (result.applied > 0) landed.add(row);
       }
     }
-    return (count: applied, rows: landed);
+    return (count: applied, settled: settled, rows: landed);
   }
 
   void _fireRemoteApplied(RemoteApplied event) {

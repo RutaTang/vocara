@@ -2,6 +2,7 @@ import 'package:drift/drift.dart';
 
 import '../db/app_database.dart';
 import 'hlc.dart';
+import 'quarantine_store.dart';
 import 'sync_writer.dart';
 
 /// One detected integrity violation.
@@ -27,7 +28,10 @@ class IntegrityViolation {
 /// Invoked at three points: post-write (debug + periodic), migration-validate
 /// (full DB on the migrated copy), and sync-apply (the affected closure).
 /// Repairs journal through the [SyncWriter] like any edit, but are stamped
-/// with a DERIVED HLC, never a fresh clock tick — see [_repairStamp].
+/// with a DERIVED HLC, never a fresh clock tick — see [_repairStamp]. And no
+/// row is judged against a referenced row whose NEWER state is still parked
+/// in the sync quarantine: that verdict is deferred until the parked state
+/// settles, and neither reported nor repaired meanwhile — see [_parkedNewer].
 class IntegrityChecker {
   IntegrityChecker(this.db, this.writer);
 
@@ -50,6 +54,44 @@ class IntegrityChecker {
   /// closes all three: see [HlcClock.derived].
   SyncStamp _repairStamp(String rowHlcPacked) =>
       SyncStamp(HlcClock.derived(Hlc.parse(rowHlcPacked), writer.clock.node));
+
+  /// SQL predicate: the [table] row named by [idExpr] has a NEWER state still
+  /// PARKED — a replayable `sync_quarantine` entry for it with no local row
+  /// at least as new (the local row is older, or absent). Every verdict that
+  /// judges a row against such a REFERENCED row (a child against its parent,
+  /// a pointer against its target, a route against the bus it leaves) is
+  /// DEFERRED while this holds: it is not a violation yet, only a pending
+  /// state.
+  ///
+  /// Why: a repair judged against a state the quarantine already supersedes
+  /// manufactures intent. The canonical case: a delete of track T on one
+  /// device, concurrent edits of T and its clip C on another (both beat the
+  /// delete, so the converged state is T live + C live). A puller that
+  /// parks the T edit at the drift gate but applies the C edit sees a live
+  /// clip under a tombstoned track, and repairing it tombstones C under a
+  /// derived stamp ABOVE C's winning edit — journaled, pushed, adopted
+  /// fleet-wide, and still standing after T's parked edit lands live. The
+  /// same holds for a newer-schema park, and for an update the FK sweep
+  /// parked and restored over (its prior state may be the tombstone).
+  ///
+  /// A deferral lasts exactly as long as the park. The replay that ends it —
+  /// the parked state lands, or settles as an LWW skip because a newer row
+  /// is held — gates the sync engine's end-of-run repair, so the verdict is
+  /// re-judged in that same run (an entry removed any other way, e.g. a
+  /// manual discard, waits for the next repair). A park that never settles
+  /// (a newer-schema row on a build that is never upgraded) defers its
+  /// dependents as long: the newest known state of the referenced row is
+  /// simply not applicable here, and guessing at it would be the bug above.
+  /// An UNREPLAYABLE entry ([QuarantineStore.replayableSql]) can never land,
+  /// so it defers nothing. Only the REFERENCED row's parked state matters: a
+  /// parked newer state of the repaired row ITSELF already out-ranks the
+  /// derived repair stamp (see [_repairStamp]), here and on every peer, so
+  /// it is never overridden by the repair.
+  static String _parkedNewer(String table, String idExpr) =>
+      "EXISTS (SELECT 1 FROM sync_quarantine q WHERE q.tbl = '$table' "
+      'AND q.id = $idExpr AND ${QuarantineStore.replayableSql('q')} '
+      'AND NOT EXISTS (SELECT 1 FROM $table x WHERE x.id = q.id '
+      'AND x.hlc_packed >= q.remote_hlc_packed))';
 
   /// (childTable, fkColumn, parentTable, invariantId). Ordered PARENT-FIRST so a
   /// repair pass tombstones a dangling parent before its children are examined.
@@ -82,13 +124,16 @@ class IntegrityChecker {
   Future<List<IntegrityViolation>> _scan({required bool repair}) async {
     final out = <IntegrityViolation>[];
 
-    // 1. Dangling children: a live row whose parent is missing or tombstoned.
+    // 1. Dangling children: a live row whose parent is missing or tombstoned
+    //    — unless the parent's newer state is still parked (deferred, see
+    //    [_parkedNewer]).
     for (final (child, fk, parent, inv) in _childEdges) {
       final rows = await db
           .customSelect(
             'SELECT c.id AS id, c.hlc_packed AS h FROM $child c WHERE '
             'c.deleted_at IS NULL AND NOT EXISTS '
-            '(SELECT 1 FROM $parent p WHERE p.id = c.$fk AND p.deleted_at IS NULL)',
+            '(SELECT 1 FROM $parent p WHERE p.id = c.$fk AND p.deleted_at IS NULL) '
+            'AND NOT ${_parkedNewer(parent, 'c.$fk')}',
           )
           .get();
       for (final r in rows) {
@@ -101,7 +146,9 @@ class IntegrityChecker {
     }
 
     // 2. Scalar self-heal: a pointer resolving to a missing/tombstoned target
-    //    is nulled (foreign_key_check passes it, so we must catch it here).
+    //    is nulled (foreign_key_check passes it, so we must catch it here) —
+    //    unless the target's newer state is still parked (deferred, see
+    //    [_parkedNewer]; every query below carries that guard).
     out.addAll(
       await _scalar(
         repair: repair,
@@ -110,7 +157,8 @@ class IntegrityChecker {
             'SELECT p.id AS id, p.hlc_packed AS h FROM practices p WHERE '
             'p.deleted_at IS NULL AND p.active_interpretation_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM '
             'interpretations i WHERE i.id = p.active_interpretation_id AND '
-            'i.deleted_at IS NULL AND i.practice_id = p.id)',
+            'i.deleted_at IS NULL AND i.practice_id = p.id) '
+            'AND NOT ${_parkedNewer('interpretations', 'p.active_interpretation_id')}',
         table: 'practices',
         column: 'active_interpretation_id',
       ),
@@ -122,7 +170,8 @@ class IntegrityChecker {
         sql:
             'SELECT p.id AS id, p.hlc_packed AS h FROM practices p WHERE '
             'p.deleted_at IS NULL AND p.separation_asset_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM assets '
-            'a WHERE a.id = p.separation_asset_id AND a.deleted_at IS NULL)',
+            'a WHERE a.id = p.separation_asset_id AND a.deleted_at IS NULL) '
+            'AND NOT ${_parkedNewer('assets', 'p.separation_asset_id')}',
         table: 'practices',
         column: 'separation_asset_id',
       ),
@@ -137,7 +186,8 @@ class IntegrityChecker {
             'SELECT t.id AS id, t.hlc_packed AS h FROM tracks t WHERE '
             "t.deleted_at IS NULL AND t.kind = 'vocal' AND t.interpretation_id IS NOT NULL AND NOT EXISTS "
             '(SELECT 1 FROM interpretations i WHERE i.id = t.interpretation_id AND '
-            'i.deleted_at IS NULL AND i.practice_id = t.practice_id)',
+            'i.deleted_at IS NULL AND i.practice_id = t.practice_id) '
+            'AND NOT ${_parkedNewer('interpretations', 't.interpretation_id')}',
         table: 'tracks',
         column: 'interpretation_id',
       ),
@@ -152,7 +202,8 @@ class IntegrityChecker {
             'SELECT t.id AS id, t.hlc_packed AS h FROM tracks t WHERE '
             't.deleted_at IS NULL AND t.bus_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fx_buses b WHERE '
             'b.id = t.bus_id AND b.deleted_at IS NULL AND b.practice_id = '
-            't.practice_id)',
+            't.practice_id) '
+            'AND NOT ${_parkedNewer('fx_buses', 't.bus_id')}',
         table: 'tracks',
         column: 'bus_id',
       ),
@@ -167,7 +218,8 @@ class IntegrityChecker {
             'SELECT b.id AS id, b.hlc_packed AS h FROM fx_buses b WHERE '
             'b.deleted_at IS NULL AND b.output_bus_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fx_buses o '
             'WHERE o.id = b.output_bus_id AND o.deleted_at IS NULL AND '
-            'o.practice_id = b.practice_id)',
+            'o.practice_id = b.practice_id) '
+            'AND NOT ${_parkedNewer('fx_buses', 'b.output_bus_id')}',
         table: 'fx_buses',
         column: 'output_bus_id',
       ),
@@ -251,6 +303,12 @@ class IntegrityChecker {
   /// LWW rule the rest of the merge uses, and the newer edit survives. The
   /// outer [repair] fixpoint loop comes back for any further cycle. Every
   /// replica sees the same rows here, so every replica picks the same victim.
+  ///
+  /// A bus whose newer state is still parked ([_parkedNewer]) contributes no
+  /// edge: its route is pending, and the parked state may well not close the
+  /// ring — breaking it now would null a peer's route fleet-wide for a cycle
+  /// that never existed. Dropping edges can only hide cycles, never invent
+  /// one; a ring through the pending bus is judged once its state settles.
   Future<List<IntegrityViolation>> _busCycles({required bool repair}) async {
     final rows = await db
         .customSelect(
@@ -259,6 +317,7 @@ class IntegrityChecker {
           '  WHERE b.deleted_at IS NULL AND b.output_bus_id IS NOT NULL '
           '    AND EXISTS (SELECT 1 FROM fx_buses o WHERE o.id = b.output_bus_id '
           '      AND o.deleted_at IS NULL AND o.practice_id = b.practice_id)'
+          '    AND NOT ${_parkedNewer('fx_buses', 'b.id')}'
           '), reach(start, node) AS ('
           '  SELECT src, dst FROM edge '
           '  UNION '

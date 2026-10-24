@@ -118,6 +118,17 @@ class QuarantineStore {
   static bool _replayable(String reason) =>
       !_unreplayablePrefixes.any(reason.startsWith);
 
+  /// The SQL twin of [_replayable], for queries that read the parking lot
+  /// directly (the [IntegrityChecker]'s parked-newer-state guard): a
+  /// predicate over the `sync_quarantine` row aliased [alias], TRUE when its
+  /// stored reason is in a replayable class. GLOB rather than LIKE so it is
+  /// the same exact, case-sensitive prefix test as [_replayable] (LIKE folds
+  /// case, and its `_` wildcard matches inside 'invalid-schema_v:'); the
+  /// prefixes carry no GLOB metacharacter or quote, so they inline safely.
+  static String replayableSql(String alias) => _unreplayablePrefixes
+      .map((p) => "$alias.reason NOT GLOB '$p*'")
+      .join(' AND ');
+
   /// All quarantined rows, oldest quarantine first (stable review order).
   Future<List<SyncQuarantineRow>> list() =>
       (_db.select(_db.syncQuarantine)..orderBy([
