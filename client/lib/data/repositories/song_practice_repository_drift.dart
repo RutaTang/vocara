@@ -321,8 +321,9 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
       final clipAsset = <String, String>{}; // clipId -> assetId
       for (final t in allTracks) {
         for (final c in t.clips) {
-          // resolveOrImport: an `asset://` ref (bytes missing locally) keeps its
-          // id without re-importing; a real path is imported + deduped.
+          // resolveOrImport: an `asset://` ref (bytes missing locally) or a
+          // live asset's pool path (every hydrated clip) keeps its id without
+          // re-importing; any other path is imported + deduped.
           final assetId = await assets.resolveOrImport(c.audioFilePath);
           clipAsset[c.id] = assetId;
           await _cacheWaveform(assetId, c.waveformPeaks);
