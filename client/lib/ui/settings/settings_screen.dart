@@ -4,7 +4,6 @@ import 'dart:io';
 import 'package:file_selector/file_selector.dart' show getSaveLocation;
 import 'package:flutter/material.dart';
 import 'package:forui/forui.dart';
-import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
 import '../../data/db/persistence.dart';
@@ -12,6 +11,8 @@ import '../../data/services/app_settings_service.dart';
 import '../../data/services/diagnostics_log.dart';
 import '../../data/services/update_check_service.dart';
 import '../../domain/models/audio_device.dart';
+import '../../routing/navigation.dart';
+import '../../routing/routes.dart';
 import '../core/themes/studio.dart';
 import '../core/widgets/confirm_dialog.dart';
 import '../core/widgets/window_drag_bar.dart';
@@ -408,7 +409,10 @@ class _Header extends StatelessWidget {
       ),
       child: Row(
         children: [
-          _IconButton(icon: FIcons.chevronLeft, onTap: () => context.pop()),
+          _IconButton(
+            icon: FIcons.chevronLeft,
+            onTap: () => popOrGo(context, Routes.home),
+          ),
           const SizedBox(width: 6),
           const Text(
             'Settings',

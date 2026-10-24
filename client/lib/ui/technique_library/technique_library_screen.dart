@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
 import '../../domain/models/technique.dart';
+import '../../routing/navigation.dart';
 import '../../routing/routes.dart';
 import '../../utils/result.dart';
 import '../core/themes/studio.dart';
@@ -125,7 +126,7 @@ class _Header extends StatelessWidget {
           MouseRegion(
             cursor: SystemMouseCursors.click,
             child: GestureDetector(
-              onTap: () => context.pop(),
+              onTap: () => popOrGo(context, Routes.home),
               child: Container(
                 width: 32,
                 height: 32,

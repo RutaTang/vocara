@@ -1,9 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:forui/forui.dart';
-import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
 import '../../../domain/models/technique.dart';
+import '../../../routing/navigation.dart';
+import '../../../routing/routes.dart';
 import '../../core/themes/studio.dart';
 import '../../core/widgets/confirm_dialog.dart';
 import '../../core/widgets/studio_button.dart';
@@ -201,7 +202,7 @@ class _TechniqueDetailScreenState extends State<TechniqueDetailScreen> {
 
   Future<void> _handleBack() async {
     if (_isDirtyEditing && !await _confirmDiscard()) return;
-    if (mounted) context.pop();
+    if (mounted) popOrGo(context, Routes.techniqueLibrary);
   }
 
   Future<void> _delete(TechniqueDetailViewModel vm) async {
@@ -216,7 +217,7 @@ class _TechniqueDetailScreenState extends State<TechniqueDetailScreen> {
     );
     if (!confirmed) return;
     final ok = await vm.delete();
-    if (ok && mounted) context.pop();
+    if (ok && mounted) popOrGo(context, Routes.techniqueLibrary);
   }
 
   Future<void> _removeMedia(TechniqueDetailViewModel vm, String mediaId) async {
