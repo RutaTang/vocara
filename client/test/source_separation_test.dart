@@ -255,6 +255,28 @@ exit 0''';
       expect(await sep, isA<SeparationCancelled>());
     });
 
+    test('a cancel at ~100% (after the sidecar exited) still reports '
+        'cancelled, not stems for the caller to import', () async {
+      // `cancelled` was checked once, right after the sidecar exited; the
+      // commit awaits after it (size checks, renames, cache cap) could take a
+      // Cancel and the run still returned success. Cancelling on the final
+      // progress tick lands the cancel after every one of those awaits.
+      final stub = await writeStub(successBody);
+      final svc = buildService(stub);
+      final src = await writeSource();
+
+      final sep = outcome(
+        svc.separate(
+          src,
+          onProgress: (v) {
+            if (v >= 1.0) svc.cancel();
+          },
+        ),
+      );
+      expect(await sep, isA<SeparationCancelled>());
+      expect(tmpFilesInCache(), isEmpty);
+    });
+
     test('the quit guard kills the in-flight sidecar', () async {
       final stub = await writeStub(sleepBody);
       final svc = buildService(stub);
