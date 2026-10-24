@@ -106,7 +106,7 @@ class _FakeSpectrograms extends Fake implements SpectrogramService {
   }
 
   @override
-  Future<TakeAnalysis?> computeBothFromFile(
+  Future<TakeAnalysisBundle?> computeBothFromFile(
     String path, {
     int fftSize = 2048,
     int hop = 512,

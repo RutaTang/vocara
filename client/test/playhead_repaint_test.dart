@@ -167,12 +167,13 @@ class _FakeSpectrograms extends Fake implements SpectrogramService {
   final metrics = _metrics();
 
   @override
-  Future<TakeAnalysis?> computeBothFromFile(
+  Future<TakeAnalysisBundle?> computeBothFromFile(
     String path, {
     int fftSize = 2048,
     int hop = 512,
     double maxHz = 5000,
-  }) async => (spectrogram: spectrogram, metrics: metrics);
+  }) async =>
+      (spectrogram: spectrogram, metrics: metrics, ltas: null, profile: null);
 
   @override
   Future<VoiceMetrics?> computeMetricsFromFile(
