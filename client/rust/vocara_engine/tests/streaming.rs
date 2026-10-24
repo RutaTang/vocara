@@ -1241,3 +1241,38 @@ fn an_in_band_fence_past_an_in_band_flush_keeps_the_source_armed() {
     let silent = (0..tail.len() / 2).filter(|&i| tail[2 * i] == 0.0).count();
     assert_eq!(silent, 0);
 }
+
+#[test]
+fn a_pause_right_after_a_seek_keeps_the_seek() {
+    // Resampled path: nothing of the post-seek render has reached the device
+    // when the pause lands. The fold mapped the consumed cursor through the
+    // PRE-seek spans and moved the clock back there — the seek was lost — and
+    // until then the playing playhead showed the old position.
+    const LAG: u64 = 1024;
+    let (h, rt) = engine_with(Box::new(BufferSource::new(offset_pcm(400_000), 0)));
+    let t = rt.transport();
+    let mut rendered = 0u64;
+    let mut block = vec![0.0; BLOCK * CHANNELS];
+    let mut render = |n: usize| {
+        for _ in 0..n {
+            rt.render_offline(&mut block, BLOCK);
+            rendered += BLOCK as u64;
+            let target = rendered.saturating_sub(LAG);
+            let cur = t.consumed_frames();
+            if target > cur {
+                t.advance_consumed(target - cur);
+            }
+        }
+    };
+    h.play();
+    render(100);
+    h.seek(200_000);
+    render(1); // the render applies it; the device has heard none of it yet
+    assert!(h.frame() >= 200_000, "playing: shows {}", h.frame());
+    h.pause();
+    assert!(
+        (200_000..=200_000 + BLOCK as i64).contains(&h.frame()),
+        "paused at {}",
+        h.frame()
+    );
+}

@@ -103,13 +103,15 @@ pub struct Shared {
     /// exact at pause (the fold reads the mapping, not a depth estimate).
     rendered_total: AtomicU64,
     consumed_total: AtomicU64,
-    /// `rendered_total` when the transport last started playing. Spans ending at or
-    /// before it belong to an EARLIER run, whose mapping a pause already folded the
-    /// clock back from: until the cursor reaches this run's audio, nothing of it has
-    /// been heard. Without the mark, map(consumed) right after play held at the
-    /// previous run's last RENDERED frame — ahead of what was heard by the output
-    /// FIFO's backlog — so a play/pause with no block heard jumped the playhead
-    /// forward, and the playing playhead flashed the pre-seek position.
+    /// `rendered_total` when the transport last started playing, or the render last
+    /// applied a seek: a new run. Spans ending at or before it belong to an EARLIER
+    /// run: until the cursor reaches this run's audio, nothing of it has been heard.
+    /// Without the mark, map(consumed) right after play held at the previous run's
+    /// last RENDERED frame — ahead of what was heard by the output FIFO's backlog —
+    /// so a play/pause with no block heard jumped the playhead forward; and right
+    /// after a seek it held at the pre-seek position, so the playing playhead
+    /// flashed it and a pause in that window folded the clock back there, losing
+    /// the seek. Only ever raised (both writers use fetch_max).
     play_mark: AtomicU64,
     seg_head: AtomicU32,
     segments: [RenderSegment; SEG_RING],
@@ -377,6 +379,12 @@ impl RtProcessor {
             // `render_pos` in between saw neither, planned from the pre-seek clock, and left a
             // backward seek silent until the transport walked back up to it. A newer seek that
             // lands meanwhile fails the exchange and stays pending for the next block.
+            // A seek starts a new run for the consumed mapping (see `play_mark`),
+            // marked before the clock moves.
+            self.shared.play_mark.fetch_max(
+                self.shared.rendered_total.load(Ordering::Relaxed),
+                Ordering::AcqRel,
+            );
             self.shared.frame.store(seek, Ordering::Release);
             let _ = self.shared.seek_req.compare_exchange(
                 seek,
@@ -726,9 +734,9 @@ impl EngineHandle {
         // callback starts from an empty FIFO.
         self.flush_out_boundary();
         // Marked before the flip: every span this run renders starts at or after it.
-        self.shared.play_mark.store(
+        self.shared.play_mark.fetch_max(
             self.shared.rendered_total.load(Ordering::Acquire),
-            Ordering::Release,
+            Ordering::AcqRel,
         );
         self.shared.playing.store(true, Ordering::Release);
     }
