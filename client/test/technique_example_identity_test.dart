@@ -268,4 +268,27 @@ void main() {
     await tester.pumpWidget(const SizedBox());
     vm.dispose();
   });
+
+  test('an uncaptioned example named by the app reads by its kind, never a '
+      'hash', () {
+    // The caption is the only name the user gave; with it cleared (or never
+    // set, as on examples saved before captions were staged) the fallback was
+    // the stored file's name — a generated id, or the pool's 64-hex hash.
+    TechniqueMedia media(String path, {String label = ''}) => TechniqueMedia(
+      id: 'm',
+      path: path,
+      kind: TechniqueMedia.kindForPath(path),
+      label: label,
+      addedAt: DateTime(2026),
+    );
+    final hash = '9f64a747${'0' * 52}806a';
+    expect(media('/pool/$hash.wav').displayLabel, 'Audio example');
+    expect(media('/pool/$hash.mp4').displayLabel, 'Video example');
+    expect(
+      media('/t/01M5Q7CW5YY1DCXTX5ZY7TPT68.wav').displayLabel,
+      'Audio example',
+    );
+    expect(media('/t/My Demo.wav').displayLabel, 'My Demo.wav');
+    expect(media('/pool/$hash.wav', label: '  Twang  ').displayLabel, 'Twang');
+  });
 }

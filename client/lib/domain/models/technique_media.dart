@@ -33,9 +33,23 @@ class TechniqueMedia {
 
   bool get isVideo => kind == TechniqueMediaKind.video;
 
-  /// The label to display: the user's caption, or the file name as a fallback.
-  String get displayLabel =>
-      label.trim().isNotEmpty ? label.trim() : p.basename(path);
+  /// The label to display: the user's caption, or the file name as a fallback
+  /// — unless the app named the file (an import's generated id, or the
+  /// content hash the asset pool stores it under), which says nothing to the
+  /// user: an uncaptioned example then reads by its kind.
+  String get displayLabel {
+    final caption = label.trim();
+    if (caption.isNotEmpty) return caption;
+    if (_generatedName.hasMatch(p.basenameWithoutExtension(path))) {
+      return isVideo ? 'Video example' : 'Audio example';
+    }
+    return p.basename(path);
+  }
+
+  /// A 64-hex content hash, or a 26-character ULID.
+  static final RegExp _generatedName = RegExp(
+    r'^(?:[0-9a-f]{64}|[0-9A-HJKMNP-TV-Z]{26})$',
+  );
 
   TechniqueMedia copyWith({String? label}) {
     return TechniqueMedia(
