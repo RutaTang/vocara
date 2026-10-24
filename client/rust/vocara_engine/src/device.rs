@@ -627,6 +627,22 @@ fn restore_output_or_flag<H>(
     (handle, resolved)
 }
 
+/// Whether duplex VPIO renders the engine's output in the cpal stream's place.
+#[derive(Default, Clone, PartialEq, Eq, Debug)]
+enum VpioOutput {
+    /// No: the cpal stream, if one is open, renders.
+    #[default]
+    Off,
+    /// A unit is being built (the mic opening, or reopening on another device). The cpal output
+    /// is already gone and VPIO renders the engine — monitor included — from the moment it
+    /// starts, before the host can say which endpoint it landed on: nothing the binding knows is
+    /// evidence of where sound is going until the host rebinds to `Bound` or back to `Off`.
+    Opening,
+    /// Running, bound (via CurrentDevice) to this mic uid; empty = the system-default mic, where
+    /// VPIO binds no device at all.
+    Bound(String),
+}
+
 /// What the engine's output is bound to right now, as the raw facts the audio-host thread owns.
 /// The device actually rendering is DERIVED from these on demand ([`OutputBinding::actual_uid`])
 /// rather than cached: while duplex VPIO owns the output and its bound mic has no output streams,
@@ -641,37 +657,40 @@ pub struct OutputBinding {
     /// The open cpal stream follows the system default (see [`DeviceHandle`]): `cpal_uid` is
     /// only what the default was when it was built.
     cpal_follows_default: bool,
-    /// `Some(mic_uid)` while duplex VPIO renders the output in cpal's place; the string is the
-    /// bound mic's uid, empty for the system-default mic (VPIO then binds no device at all).
-    vpio_mic: Option<String>,
+    /// Duplex VPIO's share of the output (see [`VpioOutput`]).
+    vpio: VpioOutput,
     /// Whether [`Self::rerouted`] was true the last time safety was reconciled. Kept so the
     /// event fires on the transition instead of on every poll.
     was_rerouted: bool,
 }
 
 impl OutputBinding {
-    /// The device the engine is ACTUALLY rendering to; empty = nothing open (or unknowable).
+    /// The device the engine is ACTUALLY rendering to; empty = nothing open (or unknowable, as
+    /// while a VPIO unit is still opening).
     pub fn actual_uid(&self) -> String {
         if self.renders_to_default() {
             return system_default_output_uid();
         }
-        match &self.vpio_mic {
-            Some(mic) => mic.clone(),
-            None => self.cpal_uid.clone(),
+        match &self.vpio {
+            VpioOutput::Bound(mic) => mic.clone(),
+            VpioOutput::Opening => String::new(),
+            VpioOutput::Off => self.cpal_uid.clone(),
         }
     }
 
     /// Whether playback goes wherever the system default output is, rather than to one device.
     fn renders_to_default(&self) -> bool {
-        match &self.vpio_mic {
+        match &self.vpio {
             // VPIO is ONE communication endpoint bound (via CurrentDevice) to the mic: when that
             // device also has output streams it serves both legs, and otherwise — including the
             // system-default mic, where no device is bound at all — playback goes to the system
             // default output. The app-selected output device is not part of this path.
-            Some(mic) => mic.is_empty() || output_device_by_uid(mic).is_none(),
+            VpioOutput::Bound(mic) => mic.is_empty() || output_device_by_uid(mic).is_none(),
+            // Not known yet: see `VpioOutput::Opening`.
+            VpioOutput::Opening => false,
             // A default-following stream renders wherever the default is now; the uid resolved
             // at build time goes stale on the first default change and read as a reroute.
-            None => self.cpal_follows_default && !self.cpal_uid.is_empty(),
+            VpioOutput::Off => self.cpal_follows_default && !self.cpal_uid.is_empty(),
         }
     }
 
@@ -723,9 +742,16 @@ fn system_default_output_uid() -> String {
 /// cannot lift it. It clears itself as soon as playback is back on the chosen device, so no other
 /// thread has to know about it.
 ///
+/// While a VPIO unit is OPENING the mute is held whatever else the binding says: the unit renders
+/// the monitor from the moment it starts, and the facts left from before the open (the cpal
+/// output it replaced, or the previous unit's mic) describe a device that is no longer playing.
+/// The reroute verdict, and with it the event's edge, waits for the host's rebind.
+///
 /// Callable from the host thread (after any command that can move the binding) and from the FFI
 /// poll (so a mid-session change of the SYSTEM default is caught within a tick). The event fires
-/// only on the transition into the rerouted state.
+/// only on the transition into the rerouted state. Returns whether the monitor is now held muted.
+/// Every write of the mute happens under the binding lock, so a poll that read the binding just
+/// before the host moved it cannot land its verdict after the host's.
 pub fn reconcile_output_safety(
     transport: &Shared,
     binding: &Mutex<OutputBinding>,
@@ -734,6 +760,10 @@ pub fn reconcile_output_safety(
     let Ok(mut b) = binding.lock() else {
         return false;
     };
+    if b.vpio == VpioOutput::Opening {
+        transport.set_monitor_muted(true);
+        return true;
+    }
     let rerouted = b.rerouted();
     transport.set_monitor_muted(rerouted);
     if rerouted && !b.was_rerouted {
@@ -1839,14 +1869,6 @@ fn open_mic(
     build_input(uid, input_cell, event).map(|(h, _)| h)
 }
 
-/// Duplex VPIO renders the engine, monitor included, from the moment the unit starts — before
-/// the host can publish which endpoint it landed on and re-derive the safety mute. Mute first:
-/// every path out of the open (success or the restored cpal output) rebinds, and that reconcile
-/// lifts the mute again once playback is known to be on the chosen device.
-fn premute_for_vpio(rt: &Arc<RtCell>) {
-    rt.transport().set_monitor_muted(true);
-}
-
 #[allow(unused_assignments)]
 // One positional slot per shared atomic/collaborator the host thread owns for its whole
 // life; a params struct would only restate this list.
@@ -1878,6 +1900,15 @@ fn audio_host_run(
     // mute from it. Called after EVERY command that can move the binding — including the ones
     // that only defer a request — because "the user picked headphones" is only evidence that
     // monitoring is safe while the engine is actually rendering to them.
+    // Duplex VPIO renders the engine, monitor included, from the moment the unit starts — before
+    // the host can publish which endpoint it landed on. Publish that a unit is opening BEFORE
+    // building it: the safety mute then holds against every reconcile (including the FFI poll's)
+    // until one of the paths out of the open rebinds to the unit or to the restored cpal output.
+    let begin_vpio_open = |b: &mut OutputBinding| {
+        b.cpal_uid.clear();
+        b.cpal_follows_default = false;
+        b.vpio = VpioOutput::Opening;
+    };
     let rebind_output = |mutate: &dyn Fn(&mut OutputBinding)| {
         if let Ok(mut b) = output_binding.lock() {
             mutate(&mut b);
@@ -1919,7 +1950,7 @@ fn audio_host_run(
                 b.requested.clear();
                 b.cpal_uid = uid.clone();
                 b.cpal_follows_default = handle.follows_default;
-                b.vpio_mic = None;
+                b.vpio = VpioOutput::Off;
             });
             let _ = ready_tx.send(Ok(uid));
             Some(handle)
@@ -1978,7 +2009,7 @@ fn audio_host_run(
                                 b.requested = uid.clone();
                                 b.cpal_uid = resolved.clone();
                                 b.cpal_follows_default = follows;
-                                b.vpio_mic = None;
+                                b.vpio = VpioOutput::Off;
                             });
                             let _ = reply.send(0);
                         }
@@ -1990,7 +2021,7 @@ fn audio_host_run(
                                 b.requested = uid.clone();
                                 b.cpal_uid.clear();
                                 b.cpal_follows_default = false;
-                                b.vpio_mic = None;
+                                b.vpio = VpioOutput::Off;
                             });
                             event.fetch_or(EVENT_OUTPUT_LOST, Ordering::Release);
                             let _ = reply.send(-1);
@@ -2023,7 +2054,7 @@ fn audio_host_run(
                     // the take records from the default one.
                     if VPIO_DUPLEX_AEC {
                         out_stream = None;
-                        premute_for_vpio(&rt);
+                        rebind_output(&begin_vpio_open);
                     }
                     let mut fell_back = false;
                     let built =
@@ -2056,7 +2087,7 @@ fn audio_host_run(
                                 rebind_output(&|b| {
                                     b.cpal_uid.clear();
                                     b.cpal_follows_default = false;
-                                    b.vpio_mic = Some(bound.clone());
+                                    b.vpio = VpioOutput::Bound(bound.clone());
                                 });
                             }
                         }
@@ -2078,7 +2109,7 @@ fn audio_host_run(
                                 rebind_output(&|b| {
                                     b.cpal_uid = resolved.clone();
                                     b.cpal_follows_default = follows;
-                                    b.vpio_mic = None;
+                                    b.vpio = VpioOutput::Off;
                                 });
                             }
                             event.fetch_or(EVENT_INPUT_LOST, Ordering::Release);
@@ -2107,7 +2138,7 @@ fn audio_host_run(
                         rebind_output(&|b| {
                             b.cpal_uid = resolved.clone();
                             b.cpal_follows_default = follows;
-                            b.vpio_mic = None;
+                            b.vpio = VpioOutput::Off;
                         });
                     }
                 }
@@ -2140,7 +2171,7 @@ fn audio_host_run(
                     input_stopped(&input_state);
                     in_stream = None;
                     if VPIO_DUPLEX_AEC {
-                        premute_for_vpio(&rt);
+                        rebind_output(&begin_vpio_open);
                     }
                     let mut fell_back = false;
                     match open_mic(cur_in_uid.as_deref(), &rt, &input_cell, &event).or_else(|e| {
@@ -2169,7 +2200,7 @@ fn audio_host_run(
                                 rebind_output(&|b| {
                                     b.cpal_uid.clear();
                                     b.cpal_follows_default = false;
-                                    b.vpio_mic = Some(bound.clone());
+                                    b.vpio = VpioOutput::Bound(bound.clone());
                                 });
                             }
                             // The reopen minted a NEW stream generation while the applied
@@ -2202,7 +2233,7 @@ fn audio_host_run(
                                 rebind_output(&|b| {
                                     b.cpal_uid = resolved.clone();
                                     b.cpal_follows_default = follows;
-                                    b.vpio_mic = None;
+                                    b.vpio = VpioOutput::Off;
                                 });
                             }
                             event.fetch_or(EVENT_INPUT_LOST, Ordering::Release);
@@ -2221,7 +2252,7 @@ fn audio_host_run(
                 rebind_output(&|b| {
                     b.cpal_uid.clear();
                     b.cpal_follows_default = false;
-                    b.vpio_mic = None;
+                    b.vpio = VpioOutput::Off;
                 });
                 break;
             }
@@ -3953,7 +3984,7 @@ mod output_safety_tests {
 
     use super::{
         reconcile_output_safety, restore_output_or_flag, system_default_output_uid, OutputBinding,
-        EVENT_OUTPUT_LOST, EVENT_OUTPUT_REROUTED,
+        VpioOutput, EVENT_OUTPUT_LOST, EVENT_OUTPUT_REROUTED,
     };
     use crate::dsp::master::MasterNode;
     use crate::graph::{Edge, GraphDesc, NodeEntry};
@@ -3986,7 +4017,7 @@ mod output_safety_tests {
             requested: "dev-A".into(),
             cpal_uid: "dev-A".into(),
             cpal_follows_default: false,
-            vpio_mic: None,
+            vpio: VpioOutput::Off,
             was_rerouted: false,
         });
         assert!(!reconcile_output_safety(h.transport(), &b, &event));
@@ -4005,7 +4036,7 @@ mod output_safety_tests {
             requested: "dev-A".into(),
             cpal_uid: "dev-B".into(),
             cpal_follows_default: false,
-            vpio_mic: None,
+            vpio: VpioOutput::Off,
             was_rerouted: false,
         });
         assert!(reconcile_output_safety(h.transport(), &b, &event));
@@ -4031,7 +4062,7 @@ mod output_safety_tests {
             requested: "dev-A".into(),
             cpal_uid: String::new(),
             cpal_follows_default: false,
-            vpio_mic: None,
+            vpio: VpioOutput::Off,
             was_rerouted: false,
         });
         assert!(!reconcile_output_safety(h.transport(), &b, &event));
@@ -4050,7 +4081,7 @@ mod output_safety_tests {
             requested: String::new(),
             cpal_uid: "whatever-the-default-resolved-to".into(),
             cpal_follows_default: true,
-            vpio_mic: None,
+            vpio: VpioOutput::Off,
             was_rerouted: false,
         };
         assert_eq!(following_default.requested_pick(), "");
@@ -4061,7 +4092,7 @@ mod output_safety_tests {
             // re-attaches that device when it comes back.
             cpal_uid: "dev-B".into(),
             cpal_follows_default: false,
-            vpio_mic: None,
+            vpio: VpioOutput::Off,
             was_rerouted: false,
         };
         assert_eq!(explicit.requested_pick(), "dev-A");
@@ -4080,11 +4111,96 @@ mod output_safety_tests {
             requested: String::new(),
             cpal_uid: "the-default-when-the-stream-was-built".into(),
             cpal_follows_default: true,
-            vpio_mic: None,
+            vpio: VpioOutput::Off,
             was_rerouted: false,
         };
         assert_eq!(following.actual_uid(), system_default_output_uid());
         assert!(!following.rerouted());
+    }
+
+    /// While a VPIO unit opens, the binding still held the output it replaced — the cpal stream on
+    /// the chosen device — so the FFI poll's reconcile read "not rerouted" and lifted the mute the
+    /// host had just set, while the new unit was already rendering the monitor into whatever
+    /// endpoint it landed on. The opening state holds the mute against every reconcile until the
+    /// host rebinds; here the open fails and playback is restored to the chosen device.
+    #[test]
+    fn a_vpio_unit_opening_holds_the_mute_until_the_host_rebinds() {
+        let h = engine();
+        let event = AtomicU32::new(0);
+        let b = Mutex::new(OutputBinding {
+            requested: "dev-A".into(),
+            cpal_uid: "dev-A".into(),
+            cpal_follows_default: false,
+            vpio: VpioOutput::Off,
+            was_rerouted: false,
+        });
+        assert!(!reconcile_output_safety(h.transport(), &b, &event));
+        assert!(!h.transport().monitor_muted());
+
+        // The host drops the cpal output and publishes the open (its `begin_vpio_open`).
+        {
+            let mut g = b.lock().unwrap();
+            g.cpal_uid.clear();
+            g.vpio = VpioOutput::Opening;
+        }
+        assert!(reconcile_output_safety(h.transport(), &b, &event));
+        assert!(h.transport().monitor_muted());
+        // Polls while the unit is still being built must not lift it.
+        for _ in 0..3 {
+            assert!(reconcile_output_safety(h.transport(), &b, &event));
+            assert!(
+                h.transport().monitor_muted(),
+                "a poll lifted the mute mid-open"
+            );
+        }
+        assert_eq!(
+            event.load(Ordering::Relaxed) & EVENT_OUTPUT_REROUTED,
+            0,
+            "an open in progress is not a reroute to report"
+        );
+
+        // The open failed and the chosen output came back: the host's rebind lifts the mute.
+        {
+            let mut g = b.lock().unwrap();
+            g.cpal_uid = "dev-A".into();
+            g.vpio = VpioOutput::Off;
+        }
+        assert!(!reconcile_output_safety(h.transport(), &b, &event));
+        assert!(!h.transport().monitor_muted());
+    }
+
+    /// An open does not reset the reroute edge: playback that was already off the chosen device
+    /// before a mic reopen, and is still off it after, is not announced a second time.
+    #[test]
+    fn an_open_keeps_the_reroute_edge() {
+        let h = engine();
+        let event = AtomicU32::new(0);
+        let b = Mutex::new(OutputBinding {
+            requested: "dev-A".into(),
+            cpal_uid: "dev-B".into(),
+            cpal_follows_default: false,
+            vpio: VpioOutput::Off,
+            was_rerouted: false,
+        });
+        assert!(reconcile_output_safety(h.transport(), &b, &event));
+        assert_eq!(
+            event.swap(0, Ordering::Relaxed) & EVENT_OUTPUT_REROUTED,
+            EVENT_OUTPUT_REROUTED
+        );
+        {
+            let mut g = b.lock().unwrap();
+            g.cpal_uid.clear();
+            g.vpio = VpioOutput::Opening;
+        }
+        assert!(reconcile_output_safety(h.transport(), &b, &event));
+        {
+            let mut g = b.lock().unwrap();
+            g.cpal_uid = "dev-B".into();
+            g.vpio = VpioOutput::Off;
+        }
+        assert!(reconcile_output_safety(h.transport(), &b, &event));
+        assert!(h.transport().monitor_muted());
+        assert_eq!(event.load(Ordering::Relaxed) & EVENT_OUTPUT_REROUTED, 0);
     }
 
     /// The mute is not a latch: once playback is back on the chosen device it lifts itself, so no
@@ -4097,7 +4213,7 @@ mod output_safety_tests {
             requested: "dev-A".into(),
             cpal_uid: "dev-B".into(),
             cpal_follows_default: false,
-            vpio_mic: None,
+            vpio: VpioOutput::Off,
             was_rerouted: false,
         });
         reconcile_output_safety(h.transport(), &b, &event);
