@@ -47,10 +47,22 @@ class TechniqueRepositoryDrift implements TechniqueRepository {
         final c = b.updatedAt.compareTo(a.updatedAt);
         return c != 0 ? c : b.id.compareTo(a.id);
       });
+      // Every technique's media (and their assets) in one set read, not a
+      // query per technique plus one per example: 601 statements and 400
+      // file checks for a 200-technique library, on every library open and
+      // every "add technique" picker. Should that read fail, each row falls
+      // back to its own read inside the per-row guard below — the old path
+      // exactly, so an unreadable row still only costs itself.
+      _MediaRows? media;
+      try {
+        media = await _readMedia([for (final r in rows) r.id]);
+      } catch (_) {
+        media = null;
+      }
       final out = <Technique>[];
       for (final r in rows) {
         try {
-          out.add(await _hydrate(r));
+          out.add(await _hydrate(r, media: media));
         } catch (_) {
           // Skip a single corrupt row (e.g. a malformed JSON column) rather than
           // failing the whole list — the other readable records must still show.
@@ -431,32 +443,20 @@ class TechniqueRepositoryDrift implements TechniqueRepository {
   /// with the SAME sync_hashes.dart projections the save path uses.
   Future<Technique> _hydrate(
     TechniqueRow row, {
+    _MediaRows? media,
     Map<String, String>? baseHashes,
   }) async {
     baseHashes?[row.id] = techniqueRowHash(row);
-    final mediaRows =
-        await (db.select(db.techniqueMedia)
-              ..where(
-                (m) => m.techniqueId.equals(row.id) & m.deletedAt.isNull(),
-              )
-              ..orderBy([
-                (m) => OrderingTerm(expression: m.orderIndex),
-                // Stable tie-break for equal indices (concurrent offline inserts):
-                // ULID ids order by creation time, so every replica agrees.
-                (m) => OrderingTerm(expression: m.id),
-              ]))
-            .get();
-    final media = <TechniqueMedia>[];
-    for (final m in mediaRows) {
+    final read = media ?? await _readMedia([row.id]);
+    final out = <TechniqueMedia>[];
+    for (final m in read.media[row.id] ?? const <TechniqueMediaRow>[]) {
       baseHashes?[m.id] = techniqueMediaRowHash(m);
-      // Keep the media even if its bytes are missing locally (carry an
-      // `asset://` ref) so a reload + save never drops the example.
-      final path =
-          await assets.resolve(m.assetId) ?? AssetStore.refFor(m.assetId);
-      media.add(
+      out.add(
         TechniqueMedia(
           id: m.id,
-          path: path,
+          // Keep the media even if its bytes are missing locally (carry an
+          // `asset://` ref) so a reload + save never drops the example.
+          path: read.paths[m.assetId] ?? AssetStore.refFor(m.assetId),
           kind: m.kind == 'video'
               ? TechniqueMediaKind.video
               : TechniqueMediaKind.audio,
@@ -475,9 +475,58 @@ class TechniqueRepositoryDrift implements TechniqueRepository {
       cues: row.cues,
       exercises: row.exercises,
       acousticSignature: row.acousticSignature,
-      media: media,
+      media: out,
       createdAt: _dt(row.createdAt),
       updatedAt: _dt(row.updatedAt),
     );
   }
+
+  /// The live media of [techniqueIds] grouped by technique, each group in
+  /// (order_index, id) order — stable tie-break for equal indices
+  /// (concurrent offline inserts): ULID ids order by creation time, so every
+  /// replica agrees — plus each media asset's local path (absent = bytes not
+  /// here). Asset rows are read live or tombstoned, like [AssetStore.resolve].
+  Future<_MediaRows> _readMedia(List<String> techniqueIds) async {
+    final rows = <TechniqueMediaRow>[];
+    for (final chunk in AssetStore.inChunks(techniqueIds)) {
+      rows.addAll(
+        await (db.select(db.techniqueMedia)
+              ..where((m) => m.techniqueId.isIn(chunk) & m.deletedAt.isNull())
+              ..orderBy([
+                (m) => OrderingTerm(expression: m.techniqueId),
+                (m) => OrderingTerm(expression: m.orderIndex),
+                (m) => OrderingTerm(expression: m.id),
+              ]))
+            .get(),
+      );
+    }
+    final assetRows = <AssetRow>[];
+    for (final chunk in AssetStore.inChunks(
+      {for (final m in rows) m.assetId}.toList(),
+    )) {
+      assetRows.addAll(
+        await (db.select(db.assets)..where((a) => a.id.isIn(chunk))).get(),
+      );
+    }
+    final paths = <String, String>{};
+    await Future.wait([
+      for (final a in assetRows)
+        assets.resolveRow(a).then((path) {
+          if (path != null) paths[a.id] = path;
+        }),
+    ]);
+    final media = <String, List<TechniqueMediaRow>>{};
+    for (final m in rows) {
+      (media[m.techniqueId] ??= <TechniqueMediaRow>[]).add(m);
+    }
+    return _MediaRows(media: media, paths: paths);
+  }
+}
+
+/// [TechniqueRepositoryDrift._readMedia]'s result.
+class _MediaRows {
+  const _MediaRows({required this.media, required this.paths});
+
+  final Map<String, List<TechniqueMediaRow>> media;
+  final Map<String, String> paths;
 }

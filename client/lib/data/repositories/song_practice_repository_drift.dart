@@ -1,5 +1,4 @@
 import 'dart:convert';
-import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:drift/drift.dart';
@@ -1125,12 +1124,7 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
   /// (live or tombstoned, like the per-clip lookups it replaces).
   Future<Map<String, String>> _contentHashes(Set<String> ids) async {
     final out = <String, String>{};
-    final all = ids.toList();
-    for (var i = 0; i < all.length; i += AssetStore.inQueryChunk) {
-      final chunk = all.sublist(
-        i,
-        math.min(i + AssetStore.inQueryChunk, all.length),
-      );
+    for (final chunk in AssetStore.inChunks(ids.toList())) {
       for (final a in await (db.select(
         db.assets,
       )..where((a) => a.id.isIn(chunk))).get()) {
@@ -1186,12 +1180,16 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
                 ), // stable tie-break; see interpretations
               ]))
             .get();
+    // Every live child of every track in a handful of set reads, not three
+    // queries per track plus three per clip (394 round trips for a 30-lane,
+    // 100-clip practice — paid again by every save's re-read).
+    final children = await _readChildren([for (final t in trackRows) t.id]);
     AudioTrack? accompaniment;
     AudioTrack? reference;
     final vocals = <AudioTrack>[];
     for (final tr in trackRows) {
       baseHashes?[tr.id] = trackRowHash(tr);
-      final track = await _hydrateTrack(tr, baseHashes: baseHashes);
+      final track = _hydrateTrack(tr, children, baseHashes: baseHashes);
       switch (tr.kind) {
         case 'accompaniment':
           accompaniment ??= track;
@@ -1261,42 +1259,33 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
     );
   }
 
-  Future<AudioTrack> _hydrateTrack(
-    TrackRow tr, {
+  AudioTrack _hydrateTrack(
+    TrackRow tr,
+    _ChildRows children, {
     Map<String, String>? baseHashes,
-  }) async {
-    final clipRows =
-        await (db.select(db.clips)
-              ..where((c) => c.trackId.equals(tr.id) & c.deletedAt.isNull())
-              ..orderBy([
-                (c) => OrderingTerm(expression: c.orderIndex),
-                (c) => OrderingTerm(
-                  expression: c.id,
-                ), // stable tie-break; see interpretations
-              ]))
-            .get();
+  }) {
     final clips = <AudioClip>[];
-    for (final c in clipRows) {
+    for (final c in children.clips[tr.id] ?? const <ClipRow>[]) {
       baseHashes?[c.id] = clipRowHash(c);
-      // Keep the clip even when its bytes are missing locally (carry an
-      // `asset://` ref) so a reload never drops it — dropping it would make the
-      // next save tombstone the row, losing the take permanently.
-      final path =
-          await assets.resolve(c.assetId) ?? AssetStore.refFor(c.assetId);
+      final peaks = children.peaks[c.assetId];
       clips.add(
         AudioClip(
           id: c.id,
-          audioFilePath: path,
+          // Keep the clip even when its bytes are missing locally (carry an
+          // `asset://` ref) so a reload never drops it — dropping it would
+          // make the next save tombstone the row, losing the take permanently.
+          audioFilePath:
+              children.paths[c.assetId] ?? AssetStore.refFor(c.assetId),
           durationMs: c.durationMs,
           startMs: c.startMs,
-          waveformPeaks: await _waveformFor(c.assetId),
+          // Decoded per clip: two clips over the same bytes never share one
+          // mutable list.
+          waveformPeaks: peaks == null ? const [] : _decodePeaks(peaks),
         ),
       );
     }
 
-    final noteRows = await (db.select(
-      db.practiceNotes,
-    )..where((n) => n.trackId.equals(tr.id) & n.deletedAt.isNull())).get();
+    final noteRows = children.notes[tr.id] ?? const <PracticeNoteRow>[];
     final notes = [
       for (final n in noteRows)
         PracticeNote(
@@ -1314,9 +1303,7 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
       }
     }
 
-    final markerRows = await (db.select(
-      db.techniqueMarkers,
-    )..where((m) => m.trackId.equals(tr.id) & m.deletedAt.isNull())).get();
+    final markerRows = children.markers[tr.id] ?? const <TechniqueMarkerRow>[];
     if (baseHashes != null) {
       for (final m in markerRows) {
         baseHashes[m.id] = techniqueMarkerRowHash(m);
@@ -1360,19 +1347,100 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
     );
   }
 
-  Future<List<double>> _waveformFor(String assetId) async {
-    final asset = await (db.select(
-      db.assets,
-    )..where((a) => a.id.equals(assetId))).getSingleOrNull();
-    if (asset == null) return const [];
-    final cache =
-        await (db.select(db.waveformCache)..where(
-              (w) =>
-                  w.contentHash.equals(asset.contentHash) &
-                  w.algoVersion.equals(_waveformAlgoVersion),
-            ))
-            .getSingleOrNull();
-    return cache == null ? const [] : _decodePeaks(cache.peaks);
+  /// The live clips / notes / markers of [trackIds], grouped by track, plus
+  /// the clips' resolved paths and cached peaks — six set reads (chunked by
+  /// [AssetStore.inChunks]) whatever the practice's size. Each group
+  /// keeps the order its old per-track query returned: clips by
+  /// (order_index, id); notes and markers in rowid order, which is what the
+  /// per-track `track_id = ?` scan over ix_notes_track / ix_markers_track
+  /// yielded. Asset rows are read live or tombstoned, like [AssetStore.resolve].
+  Future<_ChildRows> _readChildren(List<String> trackIds) async {
+    final clips = <ClipRow>[];
+    final notes = <PracticeNoteRow>[];
+    final markers = <TechniqueMarkerRow>[];
+    for (final chunk in AssetStore.inChunks(trackIds)) {
+      clips.addAll(
+        await (db.select(db.clips)
+              ..where((c) => c.trackId.isIn(chunk) & c.deletedAt.isNull())
+              ..orderBy([
+                (c) => OrderingTerm(expression: c.trackId),
+                (c) => OrderingTerm(expression: c.orderIndex),
+                (c) => OrderingTerm(
+                  expression: c.id,
+                ), // stable tie-break; see interpretations
+              ]))
+            .get(),
+      );
+      notes.addAll(
+        await (db.select(db.practiceNotes)
+              ..where((n) => n.trackId.isIn(chunk) & n.deletedAt.isNull())
+              ..orderBy([
+                (n) => OrderingTerm(expression: n.trackId),
+                (n) => OrderingTerm(expression: db.practiceNotes.rowId),
+              ]))
+            .get(),
+      );
+      markers.addAll(
+        await (db.select(db.techniqueMarkers)
+              ..where((m) => m.trackId.isIn(chunk) & m.deletedAt.isNull())
+              ..orderBy([
+                (m) => OrderingTerm(expression: m.trackId),
+                (m) => OrderingTerm(expression: db.techniqueMarkers.rowId),
+              ]))
+            .get(),
+      );
+    }
+
+    final assetRows = <AssetRow>[];
+    for (final chunk in AssetStore.inChunks(
+      {for (final c in clips) c.assetId}.toList(),
+    )) {
+      assetRows.addAll(
+        await (db.select(db.assets)..where((a) => a.id.isIn(chunk))).get(),
+      );
+    }
+    final peaksByHash = <String, Uint8List>{};
+    for (final chunk in AssetStore.inChunks(
+      {for (final a in assetRows) a.contentHash}.toList(),
+    )) {
+      for (final w
+          in await (db.select(db.waveformCache)..where(
+                (w) =>
+                    w.contentHash.isIn(chunk) &
+                    w.algoVersion.equals(_waveformAlgoVersion),
+              ))
+              .get()) {
+        peaksByHash[w.contentHash] = w.peaks;
+      }
+    }
+    final paths = <String, String>{};
+    final peaks = <String, Uint8List>{};
+    await Future.wait([
+      for (final a in assetRows)
+        assets.resolveRow(a).then((path) {
+          if (path != null) paths[a.id] = path;
+        }),
+    ]);
+    for (final a in assetRows) {
+      final p = peaksByHash[a.contentHash];
+      if (p != null) peaks[a.id] = p;
+    }
+
+    Map<String, List<R>> byTrack<R>(List<R> rows, String Function(R) track) {
+      final out = <String, List<R>>{};
+      for (final r in rows) {
+        (out[track(r)] ??= <R>[]).add(r);
+      }
+      return out;
+    }
+
+    return _ChildRows(
+      clips: byTrack(clips, (c) => c.trackId),
+      notes: byTrack(notes, (n) => n.trackId),
+      markers: byTrack(markers, (m) => m.trackId),
+      paths: paths,
+      peaks: peaks,
+    );
   }
 
   List<LyricLine> _lyricsFrom(String? json) {
@@ -1398,4 +1466,23 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
     final copy = Uint8List.fromList(bytes);
     return copy.buffer.asFloat32List(0, copy.lengthInBytes ~/ 4).toList();
   }
+}
+
+/// [SongPracticeRepositoryDrift._readChildren]'s result: live child rows by
+/// track id, and per clip asset id its local path (absent = bytes not here)
+/// and its cached peak bytes (absent = not cached).
+class _ChildRows {
+  const _ChildRows({
+    required this.clips,
+    required this.notes,
+    required this.markers,
+    required this.paths,
+    required this.peaks,
+  });
+
+  final Map<String, List<ClipRow>> clips;
+  final Map<String, List<PracticeNoteRow>> notes;
+  final Map<String, List<TechniqueMarkerRow>> markers;
+  final Map<String, String> paths;
+  final Map<String, Uint8List> peaks;
 }

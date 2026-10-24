@@ -246,4 +246,77 @@ void main() {
     );
     expect((await cache())[8], [0.0625, 1.0]);
   });
+
+  test('a load costs the same few statements whatever the practice '
+      'holds', () async {
+    Future<int> loadCost(SongPractice pr) async {
+      expect(await repo.savePractice(pr), isA<Ok<SongPractice>>());
+      statements.sql.clear();
+      await load(pr.id);
+      return statements.sql.length;
+    }
+
+    final small = await loadCost(await practice(2, 1));
+    final large = await loadCost(await practice(9, 5));
+    // practice + interpretations + tracks + buses, and one read each for
+    // clips / notes / markers / their assets / their cached peaks. It was
+    // 3 per lane plus 3 per clip (16 vs 166 here).
+    expect(large, small);
+    expect(large, lessThanOrEqualTo(9));
+  });
+
+  test('hydration keeps each lane\'s children in the order their per-lane '
+      'reads returned them', () async {
+    final now = DateTime.fromMillisecondsSinceEpoch(1000);
+    // Ids minted in REVERSE of list order, so any sort by id would visibly
+    // reorder them: lanes come back by order index, notes and markers in
+    // insertion (rowid) order.
+    final ids = [for (var i = 0; i < 24; i++) newId()].reversed.toList();
+    var next = 0;
+    PracticeNote note(String text) => PracticeNote(
+      id: ids[next++],
+      positionMs: 0,
+      content: text,
+      createdAt: now,
+      updatedAt: now,
+    );
+    TechniqueMarker marker(String name) => TechniqueMarker(
+      id: ids[next++],
+      positionMs: 0,
+      techniqueId: newId(),
+      techniqueName: name,
+      createdAt: now,
+      updatedAt: now,
+    );
+    AudioTrack lane(String name) => AudioTrack(
+      id: ids[next++],
+      kind: AudioTrackKind.vocal,
+      displayName: name,
+      createdAt: now,
+      notes: [note('$name-c'), note('$name-a'), note('$name-b')],
+      techniqueMarkers: [marker('$name-z'), marker('$name-y')],
+    );
+    final pr = SongPractice(
+      id: newId(),
+      title: 'Song',
+      createdAt: now,
+      updatedAt: now,
+      vocalTracks: [lane('one'), lane('two'), lane('three')],
+    );
+    expect(await repo.savePractice(pr), isA<Ok<SongPractice>>());
+
+    final got = (await load(pr.id)).aggregate;
+    for (final (i, t) in got.vocalTracks.indexed) {
+      final want = pr.vocalTracks[i];
+      expect(t.id, want.id);
+      expect(
+        [for (final n in t.notes) n.content],
+        [for (final n in want.notes) n.content],
+      );
+      expect(
+        [for (final m in t.techniqueMarkers) m.techniqueName],
+        [for (final m in want.techniqueMarkers) m.techniqueName],
+      );
+    }
+  });
 }

@@ -1,5 +1,7 @@
 import 'dart:io';
 
+import 'package:drift/drift.dart'
+    show ApplyInterceptor, QueryExecutor, QueryInterceptor;
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
@@ -12,6 +14,21 @@ import 'package:vocara/domain/models/technique.dart';
 import 'package:vocara/domain/models/technique_media.dart';
 import 'package:vocara/utils/id.dart';
 import 'package:vocara/utils/result.dart';
+
+/// Counts the reads a repository call issues.
+class _Reads extends QueryInterceptor {
+  int count = 0;
+
+  @override
+  Future<List<Map<String, Object?>>> runSelect(
+    QueryExecutor executor,
+    String statement,
+    List<Object?> args,
+  ) {
+    count++;
+    return super.runSelect(executor, statement, args);
+  }
+}
 
 void main() {
   late AppDatabase db;
@@ -205,5 +222,53 @@ void main() {
       hasLength(1),
     );
     expect(await repo.getTechnique(a.id), isA<Error<Technique>>());
+  });
+
+  test('the library lists in the same few reads however many techniques and '
+      'examples it holds, each example in order with its path', () async {
+    final reads = _Reads();
+    final counted = AppDatabase(NativeDatabase.memory().interceptWith(reads));
+    addTearDown(counted.close);
+    final writer = SyncWriter(
+      counted,
+      HlcClock(node: 'NODE'.padRight(26, '0')),
+    );
+    final library = TechniqueRepositoryDrift(
+      db: counted,
+      writer: writer,
+      assets: AssetStore(db: counted, root: tmp, writer: writer),
+    );
+    var made = 0;
+    Future<int> listCost(int add) async {
+      for (var i = 0; i < add; i++, made++) {
+        await library.saveTechnique(
+          technique(
+            name: 'T$made',
+            media: [
+              await media('a$made.wav', [made, 1]),
+              await media('b$made.wav', [made, 2]),
+            ],
+          ),
+        );
+      }
+      reads.count = 0;
+      final listed =
+          (await library.listTechniques() as Ok<List<Technique>>).value;
+      expect(listed, hasLength(made));
+      for (final t in listed) {
+        final n = t.name.substring(1);
+        expect(t.media.map((m) => m.label), ['a$n.wav', 'b$n.wav']);
+        for (final m in t.media) {
+          expect(await File(m.path).exists(), isTrue);
+        }
+      }
+      return reads.count;
+    }
+
+    // techniques + their media + those media's assets. It was 1 + one per
+    // technique + one per example (7 vs 31 here).
+    final few = await listCost(2);
+    expect(await listCost(8), few);
+    expect(few, 3);
   });
 }

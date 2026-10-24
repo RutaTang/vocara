@@ -238,9 +238,7 @@ class AssetStore {
   /// set in one query per [inQueryChunk] paths.
   Future<Map<String, String>> _livePoolOwners(Set<String> rels) async {
     final owners = <String, String>{};
-    final all = rels.toList();
-    for (var i = 0; i < all.length; i += inQueryChunk) {
-      final chunk = all.sublist(i, math.min(i + inQueryChunk, all.length));
+    for (final chunk in inChunks(rels.toList())) {
       final rows =
           await (db.select(db.assets)
                 ..where(
@@ -256,8 +254,15 @@ class AssetStore {
   }
 
   /// Bound on the ids/paths one `IN (...)` query binds, far below SQLite's
-  /// host-parameter ceiling; set reads are chunked by it.
+  /// host-parameter ceiling; set reads go through [inChunks].
   static const int inQueryChunk = 500;
+
+  /// [items] in consecutive slices of at most [inQueryChunk], for set reads.
+  static Iterable<List<T>> inChunks<T>(List<T> items) sync* {
+    for (var i = 0; i < items.length; i += inQueryChunk) {
+      yield items.sublist(i, math.min(i + inQueryChunk, items.length));
+    }
+  }
 
   /// Resolves an asset id to an absolute path on THIS device, or null if the
   /// asset is unknown or its bytes are not present locally.
@@ -265,7 +270,13 @@ class AssetStore {
     final a = await (db.select(
       db.assets,
     )..where((x) => x.id.equals(assetId))).getSingleOrNull();
-    final rel = a?.localRelPath;
+    return a == null ? null : resolveRow(a);
+  }
+
+  /// [resolve] for an asset row the caller already read (a hydration that
+  /// reads all of an aggregate's assets in one query).
+  Future<String?> resolveRow(AssetRow a) async {
+    final rel = a.localRelPath;
     if (rel == null) return null;
     final abs = p.join(root.path, rel);
     return await File(abs).exists() ? abs : null;
