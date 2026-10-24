@@ -98,7 +98,13 @@ class MixerStrip extends StatelessWidget {
                 );
                 if (name != null) await vm.mixer.renameBus(b.id, name);
               },
-              onDelete: () => vm.mixer.deleteBus(b.id),
+              // Asks first, like the timeline lane's Delete: the bus's FX
+              // chain and every send into it go with it, with no undo.
+              onDelete: () async {
+                if (await confirmDeleteBus(context, b.name)) {
+                  await vm.mixer.deleteBus(b.id);
+                }
+              },
             ),
           _AddBusButton(onTap: () => vm.mixer.createBus()),
         ],

@@ -1362,12 +1362,9 @@ class _BusRow extends StatelessWidget {
   }
 
   Future<void> _delete(BuildContext context) async {
-    final ok = await showConfirmDialog(
-      context,
-      title: 'Delete "${bus.name}"?',
-      body: 'Removing this FX bus re-routes anything feeding it to the master.',
-    );
-    if (ok) await vm.mixer.deleteBus(bus.id);
+    if (await confirmDeleteBus(context, bus.name)) {
+      await vm.mixer.deleteBus(bus.id);
+    }
   }
 
   @override
