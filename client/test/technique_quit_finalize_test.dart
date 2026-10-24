@@ -257,6 +257,31 @@ void main() {
     expect(repo.technique.media, isEmpty);
   });
 
+  test('a quit while a plain Save commits waits for the commit', () async {
+    // Regression: only a Save that finalized a recording held the quit. A
+    // text or media edit's Save followed by Cmd+Q exited mid-commit — most
+    // plausibly during the pool import of a large staged clip — and the edit
+    // was gone, its staged files swept as orphans at the next boot.
+    repo.saveGate = Completer<void>();
+    vm.beginEdit();
+    final saving = vm.save(vm.technique!.copyWith(summary: 'typed'));
+    await pumpEventQueue();
+    expect(repo.baseSaves, 1, reason: 'the commit is in flight');
+
+    var quitDone = false;
+    final quit = RecordingFinalizer.instance.finalizeAll().whenComplete(
+      () => quitDone = true,
+    );
+    await pumpEventQueue();
+    expect(quitDone, isFalse, reason: 'the quit must wait for the save');
+
+    repo.saveGate!.complete();
+    await quit;
+    expect(await saving, isTrue);
+    expect(repo.technique.summary, 'typed', reason: 'the edit landed');
+    expect(RecordingFinalizer.instance.hasActive, isFalse);
+  });
+
   testWidgets('a quit while Save is finalizing a recording example waits for '
       'the take to commit', (tester) async {
     // Regression: Save stopped the take — which unregisters the armed-window

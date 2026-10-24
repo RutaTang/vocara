@@ -2184,10 +2184,14 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// only after the previous one fully completed, then reads the LIVE
   /// [_practice]/[_baseHashes]. Independent of [BusyGate]: ops never wait on
   /// the gate, so a gated save chaining after an ungated one cannot deadlock.
+  ///
+  /// Each queued persist holds the quit until it lands (its wait in the queue
+  /// included): an edit already made in the UI must not be lost to a Cmd+Q
+  /// that exits between the edit and its commit.
   Future<T> _enqueueSave<T>(Future<T> Function() op) {
     final next = _saveTail.then((_) => op());
     _saveTail = next.then<void>((_) {}, onError: (_) {});
-    return next;
+    return _finalizer.hold(() => next);
   }
 
   /// Takes in a successful save of [sent]. Adopts the re-read aggregate and

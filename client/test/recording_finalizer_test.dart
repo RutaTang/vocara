@@ -62,6 +62,36 @@ void main() {
     },
   );
 
+  test('a held save keeps the quit waiting until it settles, and only that '
+      'long', () async {
+    final finalizer = RecordingFinalizer.forTesting();
+    final commit = Completer<int>();
+    final saved = finalizer.hold(() => commit.future);
+    expect(finalizer.hasActive, isTrue, reason: 'held from the first call');
+
+    var quitDone = false;
+    final quit = finalizer.finalizeAll().whenComplete(() => quitDone = true);
+    await pumpEventQueue();
+    expect(quitDone, isFalse, reason: 'the quit waits for the airborne save');
+
+    commit.complete(7);
+    await quit;
+    expect(await saved, 7, reason: "the caller still gets the save's result");
+    expect(finalizer.hasActive, isFalse);
+  });
+
+  test('a failed held save reaches its caller, never the quit', () async {
+    final finalizer = RecordingFinalizer.forTesting();
+    final commit = Completer<void>();
+    final saved = finalizer.hold(() => commit.future);
+    final quit = finalizer.finalizeAll();
+    commit.completeError(StateError('disk full'));
+
+    await expectLater(saved, throwsStateError);
+    await quit; // completes normally
+    expect(finalizer.hasActive, isFalse);
+  });
+
   test('the normal path still runs every finalizer to completion', () async {
     final finalizer = RecordingFinalizer.forTesting();
     var ran = 0;

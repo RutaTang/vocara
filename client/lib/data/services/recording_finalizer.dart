@@ -24,7 +24,8 @@ import 'diagnostics_log.dart';
 /// before the staging sweep.
 ///
 /// A recording view model registers a callback when it starts and removes it
-/// when it stops or is disposed.
+/// when it stops or is disposed. A save in flight holds the quit the same way
+/// for exactly its own lifetime ([hold]).
 class RecordingFinalizer {
   RecordingFinalizer._()
     : perFinalizerBudget = _defaultPerFinalizer,
@@ -67,6 +68,24 @@ class RecordingFinalizer {
 
   void unregister(Future<void> Function() finalize) =>
       _pending.remove(finalize);
+
+  /// Runs [work] — a save the user already asked for — while holding the
+  /// quit: registered from the synchronous start of [work] until it settles,
+  /// so a quit landing mid-save waits for it (under the same budgets as any
+  /// finalizer) instead of exiting under it. Without this a Save followed by
+  /// Cmd+Q exited before the commit, and the edit was lost with nothing left
+  /// to recover. [work]'s outcome is returned to the caller unchanged; the
+  /// quit only waits for it.
+  Future<T> hold<T>(Future<T> Function() work) async {
+    final future = work();
+    Future<void> waitForIt() => future.then<void>((_) {}, onError: (_) {});
+    register(waitForIt);
+    try {
+      return await future;
+    } finally {
+      unregister(waitForIt);
+    }
+  }
 
   /// Runs every registered finalizer (best-effort; one failure never blocks the
   /// rest or the quit). Iterates a snapshot, so a finalizer that unregisters

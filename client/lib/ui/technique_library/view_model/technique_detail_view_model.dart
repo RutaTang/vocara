@@ -10,6 +10,7 @@ import '../../../data/services/graph_audio_playback_service.dart';
 import '../../../data/services/media_analysis_service.dart';
 import '../../../data/services/mic_recording_controller.dart';
 import '../../../data/services/monitor_service.dart';
+import '../../../data/services/recording_finalizer.dart';
 import '../../../data/services/technique_media_service.dart';
 import '../../../data/sync/sync_engine.dart';
 import '../../../data/sync/sync_hashes.dart';
@@ -69,11 +70,13 @@ class TechniqueDetailViewModel extends ChangeNotifier
     AppSettingsService? appSettings,
     MediaAnalysisService analysisService = const MediaAnalysisService(),
     @visibleForTesting MicRecordingController? recorder,
+    RecordingFinalizer? finalizer,
   }) : _repository = repository,
        _mediaService = mediaService,
        _appSettings = appSettings,
        _analysis = analysisService,
-       _recorderOverride = recorder {
+       _recorderOverride = recorder,
+       _finalizer = finalizer ?? RecordingFinalizer.instance {
     load = Command0(_load)..execute();
     // Freshness reloads when sync applies remote changes to THIS technique.
     _remoteSub = remoteApplied?.listen(_onRemoteApplied);
@@ -106,6 +109,10 @@ class TechniqueDetailViewModel extends ChangeNotifier
   final MediaAnalysisService _analysis;
   final AppSettingsService? _appSettings;
   final String techniqueId;
+
+  /// The quit registry an armed take and an in-flight [save] hold the app's
+  /// exit on (the app-wide instance unless a test injects its own).
+  final RecordingFinalizer _finalizer;
 
   /// Loads the technique (runs once on creation).
   late final Command0<Technique> load;
@@ -587,6 +594,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
         onInputDeviceLost: _onInputDeviceLost,
         onDeviceNotice: _onDeviceNotice,
         onRecordLimitReached: _onRecordLimitReached,
+        finalizer: _finalizer,
       );
 
   /// True during the example/practice record START window — after the user tapped
@@ -1267,7 +1275,13 @@ class TechniqueDetailViewModel extends ChangeNotifier
     // that then committed anyway.
     _saving = true;
     try {
-      if (!finalizeTake) return await _commitEdit(edited);
+      // Held against quit like the take path below: the user pressed Save,
+      // and a Cmd+Q landing during the pool import or the commit must wait
+      // for it rather than exit with the edit (and its staged files, swept
+      // as orphans at the next boot) silently lost.
+      if (!finalizeTake) {
+        return await _finalizer.hold(() => _commitEdit(edited));
+      }
       // stop() unregisters the armed-window quit finalizer, yet the take is
       // safe only once the commit below lands: until then it is a temp WAV no
       // boot recovery scans plus an in-memory draft entry. Hold the quit gate
