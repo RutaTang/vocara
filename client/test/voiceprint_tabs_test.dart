@@ -229,6 +229,30 @@ void main() {
     await pumpTabs(tester, _Source(track: _track(1000), loading: true));
   });
 
+  testWidgets('outside the take the readouts are empty, not its edge frame', (
+    tester,
+  ) async {
+    // The playhead was clamped into the subject's span, so past the take's
+    // end the metrics bar (and the spectrum, vowel and vibrato readouts) kept
+    // showing its LAST frame as if it were playing.
+    final src = _analyzed(_sine(24000, 220, 48000)); // 0.5 s, voiced
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SizedBox(height: 260, child: TimbreTab(vm: src)),
+        ),
+      ),
+    );
+    src.position.value = const Duration(milliseconds: 250);
+    await tester.pump();
+    expect(find.textContaining('Hz'), findsWidgets, reason: 'over the take');
+
+    src.position.value = const Duration(seconds: 3);
+    await tester.pump();
+    expect(find.text('220 Hz'), findsNothing);
+    expect(find.textContaining(RegExp(r'^\d+ Hz$')), findsNothing);
+  });
+
   testWidgets('a subject with a zero-length span does not divide by it', (
     tester,
   ) async {

@@ -324,11 +324,14 @@ class PowerLane extends StatelessWidget {
         child: ValueListenableBuilder<Duration>(
           valueListenable: position,
           builder: (context, pos, _) {
-            final seconds = ((pos.inMilliseconds - track.startMs) / 1000.0)
-                .clamp(0.0, track.durationMs / 1000.0);
+            final ms = pos.inMilliseconds - track.startMs;
+            // Outside the take nothing is playing: paint an empty spectrum
+            // rather than the take's first/last frame (a stale edge).
+            final inSpan = ms >= 0 && ms <= track.durationMs;
+            final seconds = ms / 1000.0;
             final m = metrics;
             var formants = const <double>[];
-            if (m != null && m.frames > 0) {
+            if (inSpan && m != null && m.frames > 0) {
               final fr = m.frameAtTime(seconds);
               formants = [m.f1[fr], m.f2[fr], m.f3[fr]];
             }
@@ -337,7 +340,7 @@ class PowerLane extends StatelessWidget {
               // lane's loose-height slot — Size.infinite makes it fill instead.
               size: Size.infinite,
               painter: PowerSpectrumPainter(
-                column: spec.columnAtTime(seconds),
+                column: inSpan ? spec.columnAtTime(seconds) : Float32List(0),
                 binHz: spec.binHz,
                 maxHz: spec.maxHz,
                 formants: formants,

@@ -82,16 +82,24 @@ void _seekTo(
   );
 }
 
-/// The absolute playhead [pos] as subject-local seconds, clamped to the
-/// analysis subject's [durationMs] span (which begins at [startMs] on the
-/// shared timeline). Callers pass [AnalysisSource.analysisStartMs] /
-/// [AnalysisSource.analysisDurationMs] — the span the shown metrics /
-/// spectrogram actually cover: the lane span for a whole-lane subject (a
-/// multi-clip aggregate places each clip's frames at its lane-relative
-/// offset), or the clip's own span when one clip of a multi-clip lane is
-/// selected (its analysis is clip-local).
-double _localSeconds(Duration pos, int durationMs, int startMs) =>
-    (pos.inMilliseconds - startMs).clamp(0, durationMs) / 1000.0;
+/// The absolute playhead [pos] as subject-local seconds within the analysis
+/// subject's [durationMs] span (which begins at [startMs] on the shared
+/// timeline), or null when the playhead is outside it. Callers pass
+/// [AnalysisSource.analysisStartMs] / [AnalysisSource.analysisDurationMs] —
+/// the span the shown metrics / spectrogram actually cover: the lane span for
+/// a whole-lane subject (a multi-clip aggregate places each clip's frames at
+/// its lane-relative offset), or the clip's own span when one clip of a
+/// multi-clip lane is selected (its analysis is clip-local).
+///
+/// Null, not clamped: a clamped time read the take's first or last frame as
+/// if it were under the playhead (a stale edge), so the readouts showed a
+/// spectrum, vowel and metrics for audio that is not playing. Outside the
+/// span every readout shows its empty state, as the pitch lane does.
+double? _localSeconds(Duration pos, int durationMs, int startMs) {
+  final ms = pos.inMilliseconds - startMs;
+  if (ms < 0 || ms > durationMs) return null;
+  return ms / 1000.0;
+}
 
 /// The take spectrogram stack: image + grid + formant overlay + seek + playhead.
 Widget _takeSpectroStack(
@@ -325,12 +333,17 @@ class PowerTab extends StatelessWidget {
             final seconds = _localSeconds(pos, spanMs, startMs);
             // Guard frames>0: an empty take's f1/f2/f3 are empty lists.
             final hasFrames = metrics != null && metrics.frames > 0;
-            final fr = hasFrames ? metrics.frameAtTime(seconds) : null;
+            final fr = hasFrames && seconds != null
+                ? metrics.frameAtTime(seconds)
+                : null;
             final formants = fr == null
                 ? const <double>[]
                 : [metrics!.f1[fr], metrics.f2[fr], metrics.f3[fr]];
             return _SpectrumStrip(
-              column: spec.columnAtTime(seconds),
+              // An empty column paints nothing (outside the subject's span).
+              column: seconds == null
+                  ? Float32List(0)
+                  : spec.columnAtTime(seconds),
               binHz: spec.binHz,
               maxHz: spec.maxHz,
               formants: formants,
@@ -364,7 +377,9 @@ class VowelTab extends StatelessWidget {
       return ValueListenableBuilder<Duration>(
         valueListenable: vm.position,
         builder: (context, pos, _) {
-          final fr = m.frameAtTime(_localSeconds(pos, spanMs, startMs));
+          final seconds = _localSeconds(pos, spanMs, startMs);
+          if (seconds == null) return _vowelPanel(double.nan, double.nan);
+          final fr = m.frameAtTime(seconds);
           return _vowelPanel(m.f1[fr], m.f2[fr]);
         },
       );
@@ -797,10 +812,11 @@ class VibratoTab extends StatelessWidget {
       return ValueListenableBuilder<Duration>(
         valueListenable: vm.position,
         builder: (context, pos, _) {
-          final fr = m.frameAtTime(_localSeconds(pos, spanMs, startMs));
+          final seconds = _localSeconds(pos, spanMs, startMs);
+          final fr = seconds == null ? null : m.frameAtTime(seconds);
           Vibrato? v;
           for (final n in notes) {
-            if (fr >= n.startFrame && fr <= n.endFrame) {
+            if (fr != null && fr >= n.startFrame && fr <= n.endFrame) {
               v = byNote[n];
               break;
             }
@@ -1646,16 +1662,19 @@ class _MetricsBar extends StatelessWidget {
     return ValueListenableBuilder<Duration>(
       valueListenable: vm.position,
       builder: (context, pos, _) {
-        final t = (pos.inMilliseconds - startMs).clamp(0, durationMs) / 1000.0;
+        final t = _localSeconds(pos, durationMs, startMs);
+        // Outside the subject's span every chip reads "—" (NaN).
+        double at(Float32List series) =>
+            t == null ? double.nan : metrics.sampleAt(series, t);
         return Row(
           children: [
-            _F0Chip(hz: metrics.sampleAt(metrics.f0, t)),
+            _F0Chip(hz: at(metrics.f0)),
             const SizedBox(width: 8),
             _Metric(
               label: 'RING',
               tip:
                   'Singer\'s-formant ring (3 kHz projection): higher carries more',
-              value: metrics.sampleAt(metrics.ring, t),
+              value: at(metrics.ring),
               avg: metrics.ringAvg,
             ),
             const SizedBox(width: 8),
@@ -1663,7 +1682,7 @@ class _MetricsBar extends StatelessWidget {
               label: 'TILT',
               tip:
                   'Spectral tilt: higher = brighter/pressed, lower = darker/breathy',
-              value: metrics.sampleAt(metrics.tilt, t),
+              value: at(metrics.tilt),
               avg: metrics.tiltAvg,
             ),
             const SizedBox(width: 8),
@@ -1671,7 +1690,7 @@ class _MetricsBar extends StatelessWidget {
               label: 'CPP',
               tip:
                   'Cepstral peak prominence: higher = cleaner, lower = breathier',
-              value: metrics.sampleAt(metrics.cpp, t),
+              value: at(metrics.cpp),
               avg: metrics.cppAvg,
             ),
             const Spacer(),
