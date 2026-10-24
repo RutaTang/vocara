@@ -378,9 +378,15 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     if (!event.practiceIds.contains(_practiceId)) return;
     if (busy || isRecording || isSeparating || _saving) return;
     final epoch = ++_reloadEpoch;
+    final before = _practice;
     final loaded = await _repository.loadPractice(_practiceId);
     if (_disposed || epoch != _reloadEpoch) return;
     if (busy || isRecording || isSeparating || _saving) return;
+    // Live edits (fader/pan ticks, clip drags, FX knobs) change the model
+    // without saving or bumping the epoch; adopting the disk read over one
+    // would snap the control back and make its release commit the old value.
+    // Skip — the edit's own save merges the remote change.
+    if (!identical(_practice, before)) return;
     if (loaded is! Ok<Loaded<SongPractice>>) {
       // Deleted remotely (or unreadable): keep showing the current state. A
       // later save aborts safely on the tombstoned parent; navigation-on-

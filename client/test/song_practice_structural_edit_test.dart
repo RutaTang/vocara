@@ -37,9 +37,15 @@ class _FakeRepo extends Fake implements SongPracticeRepository {
   int inFlight = 0;
   int maxInFlight = 0;
 
+  /// When set, loads park on it — a remote reload's read held in flight.
+  Completer<void>? loadGate;
+
   @override
-  Future<Result<Loaded<SongPractice>>> loadPractice(String id) async =>
-      Result.ok(Loaded(stored, const {}));
+  Future<Result<Loaded<SongPractice>>> loadPractice(String id) async {
+    final gate = loadGate;
+    if (gate != null) await gate.future;
+    return Result.ok(Loaded(stored, const {}));
+  }
 
   @override
   Future<Result<Loaded<SongPractice>>> savePracticeWithBase(
@@ -966,6 +972,36 @@ void main() {
         greaterThanOrEqualTo(p.contentEndMs),
         reason: 'the timeline must still cover every lane',
       );
+    });
+
+    test('a live fader edit made while the reload reads survives it', () async {
+      // Live edits (fader/pan ticks, clip drags, FX knobs) change the model
+      // without saving or bumping the reload epoch, so a reload whose read
+      // was in flight adopted the disk state over them: the slider snapped
+      // back and the release committed the OLD value.
+      final remote = StreamController<RemoteApplied>.broadcast();
+      addTearDown(remote.close);
+      final vm = await pumpVm(remoteApplied: remote.stream);
+
+      repo.loadGate = Completer<void>();
+      remote.add(
+        RemoteApplied(
+          rows: const [],
+          practiceIds: const {'p1'},
+          techniqueIds: const {},
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+      vm.mixer.setTrackVolumeLive('single', 0.3); // dragging, not released
+      repo.loadGate!.complete(); // the reload's read lands mid-drag
+      repo.loadGate = null;
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      await vm.mixer.commitTrackVolume(); // release
+
+      final single = repo.stored.vocalTracks.firstWhere(
+        (t) => t.id == 'single',
+      );
+      expect(single.volume, 0.3);
     });
   });
 
