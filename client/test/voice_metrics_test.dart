@@ -108,6 +108,29 @@ Float32List _sine(double hz, double sr, int n) {
   return out;
 }
 
+/// A harmonic tone at [f0]: H1..H[harmonics] with amplitude 1/hᵖ (p =
+/// [rolloff]) and fixed phases — or, with [h2OverDb], a note whose 2nd
+/// harmonic sits that many dB over H1 and H3 (a bright high vowel).
+Float32List _harmonic(
+  double f0,
+  double sr,
+  int n, {
+  int harmonics = 6,
+  double rolloff = 1,
+  double? h2OverDb,
+}) {
+  final out = Float32List(n);
+  final side = h2OverDb == null ? 0.0 : pow(10, -h2OverDb / 20).toDouble();
+  for (var h = 1; h <= (h2OverDb == null ? harmonics : 3); h++) {
+    if (h * f0 >= sr / 2) break;
+    final a = h2OverDb == null ? 1 / pow(h, rolloff) : (h == 2 ? 1.0 : side);
+    for (var i = 0; i < n; i++) {
+      out[i] += 0.4 * a * sin(2 * pi * h * f0 * i / sr + 0.7 * h);
+    }
+  }
+  return out;
+}
+
 Float32List _noise({double sec = 1.0, int seed = 7}) {
   final n = (_sr * sec).round();
   final rnd = Random(seed);
@@ -402,6 +425,61 @@ void main() {
     // The batch pass agrees: no frame of a held high note carries a pitch.
     final m = computeVoiceMetrics(_tones([1760]), _sr);
     expect(m.f0.where((v) => !v.isNaN), isEmpty);
+  });
+
+  test('yinPitch reads a high note whose 2nd harmonic dominates at its own '
+      'pitch, not NaN', () {
+    // H2 16-20 dB over H1/H3 repeats almost exactly at T/2, below the band
+    // for any note above ~605 Hz: the scan's first dip sat there and the
+    // range gate dropped a real, in-band note. 22.05/24 kHz are the
+    // decimated YIN rates the take analysis runs at for 44.1/48 kHz input.
+    for (final sr in [22050.0, 24000.0, 44100.0, 48000.0]) {
+      final n = sr < 30000 ? 1024 : 2048;
+      for (final hz in [620.0, 700.0, 800.0, 950.0, 1050.0]) {
+        for (final db in [16.0, 20.0]) {
+          final y = yinPitch(_harmonic(hz, sr, n, h2OverDb: db), sr);
+          expect(
+            y.f0,
+            closeTo(hz, hz * 0.01),
+            reason: '$hz Hz, H2 +$db dB at $sr Hz read as ${y.f0}',
+          );
+          expect(y.periodicity, greaterThan(0.9));
+        }
+      }
+    }
+    // End to end: a held bright 700 Hz note carries its pitch in the take.
+    final note = _harmonic(700, _sr.toDouble(), _sr, h2OverDb: 16);
+    final voiced = computeVoiceMetrics(note, _sr).f0.where((v) => !v.isNaN);
+    expect(voiced, isNotEmpty);
+    expect(_median(Float32List.fromList(voiced.toList())), closeTo(700, 7));
+  });
+
+  test('an above-band tone still reads NaN, bright timbres included', () {
+    // The rescue above must never turn an above-band tone into its octave-
+    // low double: integer-lag misalignment can leave a bright tone's 2T dip
+    // deeper than its T dip, and only the absent fundamental gives it away.
+    for (final sr in [22050.0, 24000.0, 44100.0]) {
+      final n = sr < 30000 ? 1024 : 2048;
+      for (var hz = 1250.0; hz < sr / 4; hz *= 1.005) {
+        for (final rolloff in [0.0, 1.0, 2.0]) {
+          final y = yinPitch(
+            _harmonic(
+              hz,
+              sr,
+              n,
+              harmonics: rolloff == 0 ? 1 : 6,
+              rolloff: rolloff,
+            ),
+            sr,
+          );
+          expect(
+            y.f0.isNaN,
+            isTrue,
+            reason: '$hz Hz (1/h^$rolloff) at $sr Hz read as ${y.f0} Hz',
+          );
+        }
+      }
+    }
   });
 
   test('yinPitch periodicity is far lower for noise than for a tone', () {

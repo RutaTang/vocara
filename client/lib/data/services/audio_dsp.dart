@@ -1507,22 +1507,26 @@ Float64List yinDifference(Float32List frame, int tauMax, int w) {
       if (dn[t] < dn[best]) best = t;
     }
     tau = best;
+  } else if (sampleRate / _yinVertex(dn, tau, tauMax).lag > fmax * 1.03) {
+    // The first dip lies ABOVE the band. For an above-band tone that is its
+    // period, and the range gate below answers NaN, as it must. But a real
+    // in-band note whose 2nd harmonic dominates — a bright high vowel, H2
+    // 16 dB over H1/H3 — repeats almost exactly at T/2, so its first dip
+    // sits there and the note read NaN (every such note above ~605 Hz once
+    // the scan began below the band). It is only NEARLY periodic at T/2
+    // (H1/H3 don't cancel there) and truly periodic at T: an in-band double
+    // whose dip is clearly deeper, and whose fundamental is really in the
+    // frame, is the period. An above-band tone is periodic at every multiple
+    // and has nothing at f/2, so it still reads NaN.
+    tau = _deeperInBandMultiple(frame, dn, tau, tauMin, tauMax) ?? tau;
   }
 
   // 4) Parabolic interpolation around the chosen lag for sub-sample precision,
   // and the depth of d′ AT that interpolated vertex (a touch below dn[tau]) —
   // which is the more faithful periodicity/voicing confidence.
-  var betterTau = tau.toDouble();
-  var dMin = dn[tau];
-  if (tau > 1 && tau < tauMax) {
-    final s0 = dn[tau - 1], s1 = dn[tau], s2 = dn[tau + 1];
-    final denom = s0 - 2 * s1 + s2;
-    if (denom > 1e-12) {
-      // Only interpolate a genuine (convex) minimum.
-      betterTau = tau + 0.5 * (s0 - s2) / denom;
-      dMin = s1 - (s0 - s2) * (s0 - s2) / (8 * denom);
-    }
-  }
+  final vertex = _yinVertex(dn, tau, tauMax);
+  final betterTau = vertex.lag;
+  final dMin = vertex.depth;
 
   final periodicity = (1.0 - dMin).clamp(0.0, 1.0);
   final f0 = betterTau > 0 ? sampleRate / betterTau : double.nan;
@@ -1533,6 +1537,86 @@ Float64List yinDifference(Float32List frame, int tauMax, int w) {
     return (f0: double.nan, periodicity: periodicity);
   }
   return (f0: f0, periodicity: periodicity);
+}
+
+/// The parabolic vertex of d′ around integer lag [tau]: the sub-sample lag
+/// and the interpolated depth there. Only a genuine (convex) minimum is
+/// interpolated; otherwise the integer lag and its own depth.
+({double lag, double depth}) _yinVertex(Float64List dn, int tau, int tauMax) {
+  if (tau > 1 && tau < tauMax) {
+    final s0 = dn[tau - 1], s1 = dn[tau], s2 = dn[tau + 1];
+    final denom = s0 - 2 * s1 + s2;
+    if (denom > 1e-12) {
+      return (
+        lag: tau + 0.5 * (s0 - s2) / denom,
+        depth: s1 - (s0 - s2) * (s0 - s2) / (8 * denom),
+      );
+    }
+  }
+  return (lag: tau.toDouble(), depth: dn[tau]);
+}
+
+/// How much deeper (absolute d′) the in-band multiple's dip must be than an
+/// above-band first dip to be taken as the true period. A note whose 2nd
+/// harmonic sits 16 dB over H1/H3 dips ~0.1 at T/2 and ~0 at T.
+const double _multipleMargin = 0.02;
+
+/// The weakest fundamental, relative to the frame's overall level, that a
+/// rescued period may claim (−35 dB). A note whose H2 dominates still has a
+/// real H1 at that pitch (−16 dB in the case this exists for); an above-band
+/// tone has nothing there but noise and window leakage (< −60 dB) — the
+/// check that keeps a bright high tone, whose integer-lag misalignment can
+/// leave its 2T dip deeper than its T dip, from reading an octave low.
+const double _minFundamentalRatio = 0.0178;
+
+/// The integer lag of the in-band double 2τ of the above-band dip at [tau]
+/// when that is the period (see [yinPitch] step 3), or null. Only the double
+/// is considered: a 3rd-harmonic-dominated note stays NaN, as before, rather
+/// than widen what a misaligned high tone can be mistaken for.
+int? _deeperInBandMultiple(
+  Float32List frame,
+  Float64List dn,
+  int tau,
+  int tauMin,
+  int tauMax,
+) {
+  final first = _yinVertex(dn, tau, tauMax);
+  final target = (first.lag * 2).round();
+  if (target < tauMin || target >= tauMax) return null;
+  // The double's own local minimum, within a lag of the target.
+  var m = target;
+  if (dn[target - 1] < dn[m]) m = target - 1;
+  if (dn[target + 1] < dn[m]) m = target + 1;
+  if (m < tauMin) return null;
+  final twice = _yinVertex(dn, m, tauMax);
+  if (twice.depth >= 0.5 * first.depth ||
+      first.depth - twice.depth < _multipleMargin) {
+    return null;
+  }
+  return _fundamentalRatio(frame, 1 / twice.lag) >= _minFundamentalRatio
+      ? m
+      : null;
+}
+
+/// The amplitude of the sinusoid at normalized frequency [cycles] (cycles
+/// per sample) in [frame], relative to the frame's overall level — both
+/// Hann-windowed, so a component of amplitude a among components a₁…aₖ reads
+/// ≈ a / √(Σaᵢ²). One direct DFT term: O(n), on the rare rescue path only.
+double _fundamentalRatio(Float32List frame, double cycles) {
+  final n = frame.length;
+  var re = 0.0, im = 0.0, energy = 0.0, wSum = 0.0;
+  for (var i = 0; i < n; i++) {
+    final w = 0.5 - 0.5 * math.cos(2 * math.pi * i / (n - 1));
+    final x = frame[i] * w;
+    final ph = 2 * math.pi * cycles * i;
+    re += x * math.cos(ph);
+    im += x * math.sin(ph);
+    energy += frame[i] * frame[i] * w;
+    wSum += w;
+  }
+  if (energy <= 0 || wSum <= 0) return 0;
+  final amplitude = 2 * math.sqrt(re * re + im * im) / wSum;
+  return amplitude / math.sqrt(2 * energy / wSum);
 }
 
 /// One live-analysis frame: the dB spectrogram column plus the per-frame voice
