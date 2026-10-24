@@ -92,6 +92,28 @@ void main() {
     },
   );
 
+  test(
+    'a low-rate source caps maxHz at the highest bin both builders emit',
+    () {
+      // At 8 kHz the bins stop at Nyquist (4 kHz); a maxHz left at 5 kHz
+      // stretched the 0–4 kHz image over a 0–5 kHz axis, grid and formant
+      // overlay. Rates whose bins reach 5 kHz keep it unchanged.
+      for (final sr in [8000, 11025, 44100, 48000]) {
+        final samples = Float32List(sr ~/ 4);
+        for (var i = 0; i < samples.length; i++) {
+          samples[i] = sin(2 * pi * 1000 * i / sr) * 0.5;
+        }
+        final batch = computeSpectrogram(samples, sr);
+        final b = StreamingSpectrogramBuilder(sr)..add(samples);
+        final streamed = b.finish();
+        final top = batch.freqOfBin(batch.bins - 1);
+        final want = sr < 10000 ? top : 5000.0;
+        expect(batch.maxHz, want, reason: '$sr Hz batch');
+        expect(streamed.maxHz, want, reason: '$sr Hz streamed');
+      }
+    },
+  );
+
   test('StreamingStft emits columns with energy at the tone frequency', () {
     const sr = 44100;
     final stft = StreamingStft(
