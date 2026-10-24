@@ -39,11 +39,13 @@ use objc2_audio_toolbox::{
 };
 use objc2_audio_toolbox::{AudioOutputUnitStart, AudioOutputUnitStop};
 use objc2_core_audio_types::{
-    kAudioFormatFlagIsFloat, kAudioFormatFlagIsPacked, kAudioFormatLinearPCM, AudioBuffer,
-    AudioBufferList, AudioStreamBasicDescription, AudioTimeStamp,
+    kAudioFormatFlagIsFloat, kAudioFormatFlagIsNonInterleaved, kAudioFormatFlagIsPacked,
+    kAudioFormatLinearPCM, AudioBuffer, AudioBufferList, AudioStreamBasicDescription,
+    AudioTimeStamp,
 };
 
 use crate::aec::Aec;
+use crate::capture_layout::{downmix_to_mono, CaptureLayout, MAX_CAPTURE_CH};
 use crate::device::InputCell;
 use crate::dsp::capture_cleanup::HighPass;
 use crate::live::RtCell;
@@ -61,7 +63,7 @@ const MAX_FRAMES: usize = 4096;
 /// round-trip to ~20 ms so the adaptive filter + double-talk detector actually work.
 const VPIO_MAX_SLICE: u32 = 512;
 /// Max channels we provision buffers / scratch for (mic + speaker are mono or stereo).
-const MAX_CH: usize = 2;
+const MAX_CH: usize = MAX_CAPTURE_CH;
 /// Far-end reference ring capacity (mono samples). Comfortably spans several IO buffers of backlog.
 const REF_RING_CAP: usize = 1 << 15; // 32768
 /// Echo-path length our AEC models. Covers the macOS duplex round-trip (~170 ms) + reverb tail.
@@ -127,12 +129,15 @@ fn engine_asbd() -> AudioStreamBasicDescription {
     }
 }
 
-/// Effective layout of one element, read back from the unit after initialize. (The callbacks
-/// supply/handle interleaving at runtime, so only the channel count + rate are kept.)
+/// Effective layout of one element, read back from the unit after initialize. The output
+/// callback follows the buffer list VPIO hands it; the input callback BUILDS the list it renders
+/// into, so it needs the negotiated interleaving too (see [`CaptureLayout`]).
 #[derive(Clone, Copy)]
 struct Layout {
     channels: usize,
     rate: f64,
+    /// `kAudioFormatFlagIsNonInterleaved` was NOT set: one buffer of interleaved frames.
+    interleaved: bool,
 }
 
 impl Layout {
@@ -144,7 +149,12 @@ impl Layout {
             } else {
                 VPIO_RATE
             },
+            interleaved: asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved == 0,
         }
+    }
+
+    fn capture(&self) -> CaptureLayout {
+        CaptureLayout::new(self.channels, !self.interleaved)
     }
 }
 
@@ -176,7 +186,8 @@ struct InCtx {
     abl: AblN,
     /// Buffer we SUPPLY to `AudioUnitRender` (VPIO copies the captured mic into it). Supplying our
     /// own buffer is the robust AUHAL input pattern; the lend pattern (NULL mData) returned success
-    /// here but never set mData, so `feed` never ran.
+    /// here but never set mData, so `feed` never ran. Non-interleaved captures use one
+    /// `MAX_FRAMES` plane of it per channel.
     render_buf: Vec<f32>,
     /// Interleaved-stereo scratch handed to `InputCell` (mono is duplicated up; `MAX_FRAMES*MAX_CH`).
     scratch: Vec<f32>,
@@ -389,6 +400,7 @@ impl Vpio {
             let placeholder = Layout {
                 channels: REQ_CH as usize,
                 rate: VPIO_RATE,
+                interleaved: true,
             };
             // Retire every older callback before this unit can deliver or render a frame.
             let in_epoch = input.claim();
@@ -685,9 +697,10 @@ unsafe fn set_struct(
 
 // ---- RT-safe callbacks ------------------------------------------------------------------------
 
-/// Input callback (element 1): pull the captured + echo-cancelled mic frames via `AudioUnitRender`
-/// into a descriptor matching VPIO's negotiated layout (it lends its buffers via NULL `mData`),
-/// then forward interleaved f32 to `InputCell`. Handles mono/stereo, interleaved/non-interleaved.
+/// Input callback (element 1): pull the captured mic frames via `AudioUnitRender` into buffers we
+/// supply, laid out as VPIO negotiated (one interleaved buffer, or one plane per channel), cancel
+/// the echo, then forward interleaved f32 to `InputCell`. Handles mono/stereo,
+/// interleaved/non-interleaved.
 unsafe extern "C-unwind" fn input_cb(
     in_ref: NonNull<c_void>,
     flags: NonNull<AudioUnitRenderActionFlags>,
@@ -709,19 +722,26 @@ unsafe extern "C-unwind" fn input_cb(
         // would underrun (zeros injected into the far-end stream). The snapshot can only
         // UNDER-estimate (safe: a real backlog is then trimmed one cycle later).
         let ref_len_entry = ctx.ref_cons.len();
-        // Channels the negotiated format advertises (the room we provide). The mic is frequently
-        // mono even when the format claims stereo, so we read the real count back after render.
-        let req_ch = ctx.layout.channels.clamp(1, MAX_CH);
+        // The list the negotiated format calls for (the room we provide). The mic is frequently
+        // mono even when the format claims stereo, so the real count is read back after render.
+        // A NON-INTERLEAVED format needs one single-channel buffer per channel: handed the one
+        // interleaved buffer instead, the render fails every cycle and the mic is dead.
+        let cap = ctx.layout.capture();
+        let nbuf = cap.buffers();
+        let per_buf = cap.channels_per_buffer() * frames; // samples each buffer has room for
 
-        // SUPPLY our own interleaved buffer (mData non-null). The lend pattern (NULL mData) returned
-        // st=0 with mData still NULL on this unit → `feed` never ran (the black-meter / 0-frames bug).
-        let cap_samples = frames * req_ch;
-        ctx.abl.m_number_buffers = 1;
-        ctx.abl.m_buffers[0] = AudioBuffer {
-            mNumberChannels: req_ch as u32,
-            mDataByteSize: (cap_samples * 4) as u32,
-            mData: ctx.render_buf.as_mut_ptr() as *mut c_void,
-        };
+        // SUPPLY our own buffers (mData non-null). The lend pattern (NULL mData) returned st=0
+        // with mData still NULL on this unit → `feed` never ran (the black-meter / 0-frames bug).
+        // Buffer b lives at render_buf[b * MAX_FRAMES..]: a plane holds at most MAX_FRAMES
+        // samples, and a single interleaved buffer starts at 0 with room for MAX_FRAMES * MAX_CH.
+        ctx.abl.m_number_buffers = nbuf as u32;
+        for b in 0..nbuf {
+            ctx.abl.m_buffers[b] = AudioBuffer {
+                mNumberChannels: cap.channels_per_buffer() as u32,
+                mDataByteSize: (per_buf * 4) as u32,
+                mData: ctx.render_buf[b * MAX_FRAMES..].as_mut_ptr() as *mut c_void,
+            };
+        }
 
         let abl_ptr = (&mut ctx.abl as *mut AblN) as *mut AudioBufferList;
         let st = AudioUnitRender(
@@ -733,13 +753,17 @@ unsafe extern "C-unwind" fn input_cb(
             NonNull::new_unchecked(abl_ptr),
         );
 
-        // Actual captured channels = samples / frames (VPIO reports stereo but often delivers mono;
-        // reading 1 mono sample-per-frame as an L/R pair is exactly the "helium voice" bug).
-        let got_bytes = (ctx.abl.m_buffers[0].mDataByteSize as usize).min(cap_samples * 4);
-        let got_samples = got_bytes / std::mem::size_of::<f32>();
-        let act_ch = got_samples
-            .checked_div(frames)
-            .map_or(1, |c| c.clamp(1, MAX_CH));
+        // What each buffer actually came back with (its mDataByteSize, never past the room we
+        // gave it). `downmix_to_mono` reads the real channel count off these sizes.
+        let mut got: [&[f32]; MAX_CH] = [&[]; MAX_CH];
+        let mut got_samples = 0usize;
+        for (b, g) in got.iter_mut().enumerate().take(nbuf) {
+            let len = (ctx.abl.m_buffers[b].mDataByteSize as usize / std::mem::size_of::<f32>())
+                .min(per_buf);
+            let start = b * MAX_FRAMES;
+            *g = &ctx.render_buf[start..start + len];
+            got_samples += len;
+        }
 
         if st != 0 {
             // Sustained AudioUnitRender failure means the input device went away (hot-unplug /
@@ -787,14 +811,7 @@ unsafe extern "C-unwind" fn input_cb(
         ctx.err_streak = 0;
 
         // Downmix the RAW mic to mono. `n` = captured frames.
-        let n = (got_samples / act_ch).min(frames);
-        for i in 0..n {
-            ctx.mic_mono[i] = if act_ch == 1 {
-                ctx.render_buf[i]
-            } else {
-                0.5 * (ctx.render_buf[i * act_ch] + ctx.render_buf[i * act_ch + 1])
-            };
-        }
+        let n = downmix_to_mono(cap, &got[..nbuf], frames, &mut ctx.mic_mono[..frames]);
         if ctx.aec_bypass {
             // AEC bypassed (mismatched element rates): no far-end pairing exists, the ref
             // ring is unpumped. The raw mic takes the same high-pass + gain path below.

@@ -8,6 +8,7 @@
 
 pub mod aec;
 pub mod build;
+pub mod capture_layout;
 pub mod command;
 pub mod engine;
 pub mod feed;
