@@ -155,6 +155,55 @@ void main() {
     },
   );
 
+  test('resolveOrImport of a pool path a live asset owns returns that asset '
+      'without staging a copy or re-hashing the bytes', () async {
+    final id = await store.importFile(
+      (await makeSrc('take.wav', [1, 2, 3, 4])).path,
+    );
+    // What hydration hands every clip, and so what every later save passes.
+    final pooled = (await store.resolve(id))!;
+    final opsBefore = (await db.select(db.oplog).get()).length;
+
+    // Bytes changed under the content address after pooling (rot / an outside
+    // edit — the case verifyPoolIntegrity reports and leaves alone)...
+    await File(pooled).writeAsBytes([1, 2, 3, 5], flush: true);
+    // ...and no room to stage anything: a file where the staging dir goes.
+    final staging = Directory(p.join(tmp.path, 'assets', '.staging'));
+    if (await staging.exists()) await staging.delete(recursive: true);
+    await File(staging.path).writeAsBytes([0]);
+    // (A genuine import really is blocked now — the case below isn't vacuous.)
+    await expectLater(
+      store.importFile((await makeSrc('other.wav', [9])).path),
+      throwsA(isA<FileSystemException>()),
+    );
+
+    expect(await store.resolveOrImport(pooled), id);
+    // No new asset minted for the changed bytes, nothing journaled, and the
+    // pooled file is still exactly what was there.
+    expect(await db.select(db.assets).get(), hasLength(1));
+    expect(await db.select(db.oplog).get(), hasLength(opsBefore));
+    expect(await File(pooled).readAsBytes(), [1, 2, 3, 5]);
+  });
+
+  test('resolveOrImport still imports + dedups a file that is not a live '
+      "asset's pool path", () async {
+    final id = await store.importFile(
+      (await makeSrc('take.wav', [6, 6, 6])).path,
+    );
+    // An external copy of the same bytes dedups to the existing asset...
+    expect(
+      await store.resolveOrImport((await makeSrc('copy.wav', [6, 6, 6])).path),
+      id,
+    );
+    // ...and new bytes, even placed inside the pool tree, are imported.
+    final stray = File(p.join(tmp.path, 'assets', 'stray.wav'));
+    await stray.writeAsBytes([8, 8]);
+    final strayId = await store.resolveOrImport(stray.path);
+    expect(strayId, isNot(id));
+    expect(await db.select(db.assets).get(), hasLength(2));
+    expect(await File((await store.resolve(strayId))!).readAsBytes(), [8, 8]);
+  });
+
   test(
     'sweepStaging clears audio/ and technique_media/ but never the pool',
     () async {
