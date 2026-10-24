@@ -155,6 +155,15 @@ class TechniqueDetailViewModel extends ChangeNotifier
   /// pre-remote content with nothing pending to correct it.
   bool _missedRemote = false;
 
+  /// Whether an edit session may open now. Not while a practice take is
+  /// recording or its start is still pending: the edit view has no practice
+  /// recorder (so no Stop for the take), [save] refuses while the mic is hot
+  /// (every Save would fail), and Cancel's [discardMediaDraft] would abort the
+  /// take with no prompt. The user stops the take first. The screen disables
+  /// Edit on this and also checks it at tap time, since a pending start
+  /// notifies nothing and the button can still look live.
+  bool get canEdit => !isRecordingPractice && !_recorder.isStarting;
+
   /// Open an edit session. Pairs with [endEdit]; the screen calls this when it
   /// seeds the form's controllers, so the flag's lifetime is exactly theirs.
   void beginEdit() {
