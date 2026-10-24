@@ -253,6 +253,11 @@ class TechniqueDetailViewModel extends ChangeNotifier
       notifyListeners();
       return Result.ok(result.value.aggregate);
     }
+    // The failure must reach the screen too: it watches only this view model,
+    // and the command notifies just its own listeners, so without this the
+    // spinner (keyed on load.running) is never rebuilt away. The rebuild runs
+    // on the next frame, after the command has cleared `running`.
+    notifyListeners();
     return Result.error((result as Error<Loaded<Technique>>).error);
   }
 

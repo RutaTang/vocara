@@ -75,6 +75,20 @@ class _GatedSaveRepo extends _FakeRepo {
   }
 }
 
+/// A repo whose [loadTechnique] parks on [gate] and then fails — a technique
+/// deleted underneath the route, or an unreadable row, on a slow disk.
+class _FailingLoadRepo extends _FakeRepo {
+  _FailingLoadRepo(super.technique);
+
+  final Completer<void> gate = Completer<void>();
+
+  @override
+  Future<Result<Loaded<Technique>>> loadTechnique(String id) async {
+    await gate.future;
+    return Result.error(Exception('simulated read failure'));
+  }
+}
+
 Technique _technique({
   bool body = true,
   List<TechniqueMedia> media = const [],
@@ -156,6 +170,40 @@ void main() {
     expect(find.text('EXAMPLES'), findsOneWidget);
     expect(find.textContaining('Drag an audio'), findsNothing);
     expect(find.text('Empty content'), findsWidgets);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('a failed load shows the error state, not an endless spinner', (
+    tester,
+  ) async {
+    // Regression: the screen watches only the view model, and the load's
+    // failure path notified nothing but the (unwatched) command — the
+    // spinner, keyed on load.running, was never rebuilt away.
+    final repo = _FailingLoadRepo(_technique());
+    final vm = TechniqueDetailViewModel(
+      repository: repo,
+      mediaService: TechniqueMediaService(storage: LocalStorageService()),
+      techniqueId: 't1',
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ChangeNotifierProvider.value(
+          value: vm,
+          child: const TechniqueDetailScreen(),
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+
+    // The read fails only once the screen is up and showing the spinner.
+    repo.gate.complete();
+    await tester.pump();
+    await tester.pump();
+
+    expect(vm.load.error, isTrue);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    expect(find.text('This technique could not be loaded.'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
