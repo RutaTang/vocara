@@ -600,31 +600,6 @@ class SyncApplier {
     acceptedHlcs.add(hlc);
   }
 
-  /// Persists a rejected record to the quarantine parking lot (latest state
-  /// per row) INSIDE the current outer apply transaction.
-  ///
-  /// A STORAGE failure here fails the WHOLE batch, aligned with the FK
-  /// sweep's park: the put is the only thing standing between a rejected
-  /// record and silent permanent loss — the change token advances past this
-  /// page when the batch commits, so a record whose park was dropped would
-  /// be forever behind the token (while its dependents may have parked
-  /// fine), unreachable by any replay. The failure is wrapped in
-  /// [_QuarantinePutException] so the per-record handler in [apply] rethrows
-  /// it (re-parking through the same failing store cannot succeed) and the
-  /// outer transaction rolls back: token unmoved, a retried page over a
-  /// silent loss.
-  ///
-  /// The two early returns below are the ONE remaining silent drop, and they
-  /// are unavoidable: a record with no usable id cannot be keyed into the
-  /// parking lot (or retried into any table) at all, and a payload that
-  /// cannot even be serialized can never be replayed — in both cases there
-  /// is genuinely nothing addressable to park, and the counters still record
-  /// the rejection.
-  ///
-  /// The [reason] prefixes written here are part of the store's retention
-  /// contract: [QuarantineStore.put] classifies parks as replayable or
-  /// permanently dead by them, so a renamed gate reason must be reflected
-  /// there.
   /// Classifies a savepoint failure into the quarantine's replay classes.
   /// The default, 'apply-failed', is REPLAYABLE — IO pressure or a racing
   /// writer may clear on the next cycle, and the newer-schema park relies on
@@ -650,6 +625,31 @@ class SyncApplier {
     return 'apply-failed: $e';
   }
 
+  /// Persists a rejected record to the quarantine parking lot (latest state
+  /// per row) INSIDE the current outer apply transaction.
+  ///
+  /// A STORAGE failure here fails the WHOLE batch, aligned with the FK
+  /// sweep's park: the put is the only thing standing between a rejected
+  /// record and silent permanent loss — the change token advances past this
+  /// page when the batch commits, so a record whose park was dropped would
+  /// be forever behind the token (while its dependents may have parked
+  /// fine), unreachable by any replay. The failure is wrapped in
+  /// [_QuarantinePutException] so the per-record handler in [apply] rethrows
+  /// it (re-parking through the same failing store cannot succeed) and the
+  /// outer transaction rolls back: token unmoved, a retried page over a
+  /// silent loss.
+  ///
+  /// The two early returns below are the ONE remaining silent drop, and they
+  /// are unavoidable: a record with no usable id cannot be keyed into the
+  /// parking lot (or retried into any table) at all, and a payload that
+  /// cannot even be serialized can never be replayed — in both cases there
+  /// is genuinely nothing addressable to park, and the counters still record
+  /// the rejection.
+  ///
+  /// The [reason] prefixes written here are part of the store's retention
+  /// contract: [QuarantineStore.put] classifies parks as replayable or
+  /// permanently dead by them, so a renamed gate reason must be reflected
+  /// there.
   Future<void> _quarantine(SyncRow rec, String reason) async {
     final store = quarantine;
     if (store == null) return;

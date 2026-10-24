@@ -36,7 +36,9 @@ either works; this repo standardizes on the former).
    workflow runs the full pipeline:
    - **Guard**: the tag must sit on master HEAD and match the pubspec version.
    - **Validate**: format, analyze, unit tests, Rust engine tests (both
-     feature modes) + clippy, and all five e2e journeys.
+     feature modes) + clippy, and all twelve integration suites (the five
+     UI journeys plus the seven service-level pipelines; the same list as
+     `just e2e`).
    - **Build**: universal prod build → deep re-sign → DMG → notarize →
      staple → Gatekeeper assessment.
    - **Publish**: GitHub release with the DMG and a `SHA256SUMS` file. A tag
