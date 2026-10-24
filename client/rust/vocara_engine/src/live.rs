@@ -132,10 +132,14 @@ impl Shared {
     fn push_segment(&self, r_start: u64, r_end: u64, tl_end: i64) {
         let slot = (self.seg_head.load(Ordering::Relaxed) as usize) % SEG_RING;
         let seg = &self.segments[slot];
-        // ACQUIRE on the begin-write bump: the data stores below must not become
-        // visible before the version turns odd (Release would only order what came
-        // BEFORE the bump, letting a reader see new fields under an even version).
-        seg.ver.fetch_add(1, Ordering::Acquire); // odd: write in progress
+        // The data stores below must not become visible before the version turns
+        // odd. An Acquire RMW alone does not guarantee that — acquire orders later
+        // accesses after its LOAD half, not after its store — so a reader could
+        // see new fields under the old even version. The release fence after the
+        // bump is the seqlock writer pattern (crossbeam's): it pairs with the
+        // reader's acquire fence before its validating recheck.
+        seg.ver.fetch_add(1, Ordering::Relaxed); // odd: write in progress
+        fence(Ordering::Release);
         seg.r_start.store(r_start, Ordering::Relaxed);
         seg.r_end.store(r_end, Ordering::Relaxed);
         seg.tl_end.store(tl_end, Ordering::Relaxed);
@@ -355,6 +359,11 @@ impl RtProcessor {
             let mut frame = self.shared.frame.load(Ordering::Relaxed);
             let mut rendered = self.shared.rendered_total.load(Ordering::Relaxed);
 
+            // set_loop publishes the two bounds as separate stores, so this pair
+            // can be torn (new start, old end). It never publishes a span shorter
+            // than MIN_LOOP_FRAMES, so a shorter one is a torn read: treat it as
+            // no active loop for this block rather than render it frame by frame.
+            let loop_en = loop_en && le - ls >= MIN_LOOP_FRAMES;
             let mut done = 0;
             while done < frames {
                 if loop_en && le > ls && frame >= le {
