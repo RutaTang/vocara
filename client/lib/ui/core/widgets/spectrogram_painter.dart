@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:isolate';
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
@@ -53,18 +54,83 @@ void _heat(double t, Uint8List px, int idx) {
   px[idx + 3] = 255;
 }
 
+/// The widest take spectrogram image, in columns. One column per analysis
+/// frame is ~94 a second, so a take past ~3 minutes is wider than a GPU
+/// texture holds (16384 on the Macs this runs on), and the engine then scales
+/// the decoded image to fit — on the default (Skia) backend uniformly, which
+/// cut a 10-minute take's 215 frequency rows to 62 and dropped frames to a
+/// plain linear resample. Longer takes are max-pooled to this many columns
+/// instead: every frequency row stays, and the loudest frame of each group
+/// survives.
+const int kMaxSpectrogramImageColumns = 16384;
+
+/// The RGBA pixels of [s] as an image (low frequency at the bottom),
+/// auto-scaled to a [dynamicRangeDb] window below the peak: one column per
+/// frame, or — past [maxColumns] frames — [maxColumns] columns, column `c`
+/// holding the per-bin maximum of frames `[c·frames/w, (c+1)·frames/w)`, so
+/// each still covers an equal share of the take. Pure, so it runs on a worker
+/// isolate; [s] must be non-empty.
+@visibleForTesting
+({Uint8List pixels, int width, int height}) spectrogramPixels(
+  Spectrogram s, {
+  double dynamicRangeDb = 72,
+  int maxColumns = kMaxSpectrogramImageColumns,
+}) {
+  final frames = s.frames;
+  final h = s.bins;
+  final w = frames <= maxColumns ? frames : maxColumns;
+  final pixels = Uint8List(w * h * 4);
+  // A non-finite peak would make ceil, floor and range all NaN, so every bin
+  // would come out non-finite rather than just the offending ones.
+  final peak = s.maxDb.isFinite ? s.maxDb : _minCeilDb;
+  final ceil = peak < _minCeilDb ? _minCeilDb : peak;
+  final floor = ceil - dynamicRangeDb;
+  final range = (ceil - floor) <= 0 ? 1.0 : (ceil - floor);
+
+  if (w == frames) {
+    for (var f = 0; f < w; f++) {
+      final base = f * h;
+      for (var b = 0; b < h; b++) {
+        final t = (s.db[base + b] - floor) / range;
+        final idx = ((h - 1 - b) * w + f) * 4; // flip: low freq at bottom
+        _heat(t, pixels, idx);
+      }
+    }
+    return (pixels: pixels, width: w, height: h);
+  }
+
+  // Max-pool. A NaN bin loses every comparison, so a group of only NaN stays
+  // at -infinity — non-finite, which _heat paints like the NaN itself.
+  final maxDb = Float64List(h);
+  for (var c = 0; c < w; c++) {
+    maxDb.fillRange(0, h, double.negativeInfinity);
+    final last = (c + 1) * frames ~/ w;
+    for (var f = c * frames ~/ w; f < last; f++) {
+      final base = f * h;
+      for (var b = 0; b < h; b++) {
+        final v = s.db[base + b];
+        if (v > maxDb[b]) maxDb[b] = v;
+      }
+    }
+    for (var b = 0; b < h; b++) {
+      final t = (maxDb[b] - floor) / range;
+      _heat(t, pixels, ((h - 1 - b) * w + c) * 4);
+    }
+  }
+  return (pixels: pixels, width: w, height: h);
+}
+
 /// Renders a [Spectrogram] to an RGBA image (low frequency at the bottom),
-/// auto-scaled to a [dynamicRangeDb] window below the peak.
+/// auto-scaled to a [dynamicRangeDb] window below the peak, at most
+/// [kMaxSpectrogramImageColumns] wide (see [spectrogramPixels]).
 Future<ui.Image> renderSpectrogramImage(
   Spectrogram s, {
   double dynamicRangeDb = 72,
-}) {
-  final w = s.frames;
-  final h = s.bins;
+}) async {
   // An empty spectrogram (frames/bins == 0, e.g. a not-yet-analysed or silent
   // take) would hand decodeImageFromPixels a zero-size buffer, which never
   // completes / throws. Emit a 1x1 transparent placeholder instead.
-  if (w == 0 || h == 0) {
+  if (s.frames == 0 || s.bins == 0) {
     final blank = Completer<ui.Image>();
     ui.decodeImageFromPixels(
       Uint8List(4),
@@ -75,32 +141,58 @@ Future<ui.Image> renderSpectrogramImage(
     );
     return blank.future;
   }
-  final pixels = Uint8List(w * h * 4);
-  // A non-finite peak would make ceil, floor and range all NaN, so every bin
-  // would come out non-finite rather than just the offending ones.
-  final peak = s.maxDb.isFinite ? s.maxDb : _minCeilDb;
-  final ceil = peak < _minCeilDb ? _minCeilDb : peak;
-  final floor = ceil - dynamicRangeDb;
-  final range = (ceil - floor) <= 0 ? 1.0 : (ceil - floor);
-
-  for (var f = 0; f < w; f++) {
-    final base = f * h;
-    for (var b = 0; b < h; b++) {
-      final t = (s.db[base + b] - floor) / range;
-      final idx = ((h - 1 - b) * w + f) * 4; // flip: low freq at bottom
-      _heat(t, pixels, idx);
-    }
-  }
-
+  // A colour lookup per bin per frame — ~12M for a 10-minute take, hundreds
+  // of ms that froze the UI on every take selection — so off the UI isolate.
+  final px = await Isolate.run(
+    () => spectrogramPixels(s, dynamicRangeDb: dynamicRangeDb),
+  );
   final completer = Completer<ui.Image>();
   ui.decodeImageFromPixels(
-    pixels,
-    w,
-    h,
+    px.pixels,
+    px.width,
+    px.height,
     ui.PixelFormat.rgba8888,
     completer.complete,
   );
   return completer.future;
+}
+
+/// Rendered take spectrograms by [Spectrogram] identity (analyses are never
+/// mutated; a new one is a new object), least recently used first. A take's
+/// image is rendered once and shared: the dock tab and the take's inline lane
+/// show the same one, and switching tabs or folding a lane open no longer
+/// renders it again. Small, since each entry is a texture of up to
+/// [kMaxSpectrogramImageColumns] × bins pixels.
+final Map<Spectrogram, Future<ui.Image>> _spectrogramImages = {};
+const int _spectrogramImageCacheSize = 4;
+
+/// A handle on [s]'s rendered image (see [renderSpectrogramImage]), shared
+/// with every other caller for the same spectrogram. The caller owns the
+/// returned handle and disposes it; the cache keeps its own until evicted.
+Future<ui.Image> spectrogramImageFor(Spectrogram s) async {
+  var image = _spectrogramImages.remove(s);
+  if (image == null) {
+    final rendering = image = renderSpectrogramImage(s);
+    // A failed render isn't kept: the next caller tries again.
+    unawaited(
+      rendering.then<void>(
+        (_) {},
+        onError: (Object _) {
+          if (identical(_spectrogramImages[s], rendering)) {
+            _spectrogramImages.remove(s);
+          }
+        },
+      ),
+    );
+  }
+  _spectrogramImages[s] = image; // most recently used
+  while (_spectrogramImages.length > _spectrogramImageCacheSize) {
+    final evicted = _spectrogramImages.remove(_spectrogramImages.keys.first)!;
+    // Handles already cloned off it stay valid: an image's memory goes with
+    // its last handle.
+    unawaited(evicted.then((i) => i.dispose(), onError: (Object _) {}));
+  }
+  return (await image).clone();
 }
 
 /// Brightness multiplier applied to unvoiced live columns — a voiceprint should
@@ -207,7 +299,12 @@ class _SpectrogramImageState extends State<SpectrogramImage> {
 
   Future<void> _render() async {
     final gen = ++_generation;
-    final image = await renderSpectrogramImage(widget.spectrogram);
+    final ui.Image image;
+    try {
+      image = await spectrogramImageFor(widget.spectrogram);
+    } catch (_) {
+      return; // nothing to show; a later mount renders again
+    }
     // Drop a stale render: the widget was disposed, OR a newer _render started
     // (rapid take switches, whose decodes don't necessarily complete in order),
     // so this image is no longer the current one. Without the generation check an
