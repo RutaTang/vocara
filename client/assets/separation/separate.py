@@ -30,8 +30,10 @@ to see what is available locally.
 import argparse
 import os
 import shutil
+import signal
 import sys
 import tempfile
+import zipfile
 
 # An INSTRUMENTAL-specialist Mel-Band Roformer: it predicts the backing directly
 # (rather than mixture - vocals), which removes far more vocal/breath residue and
@@ -65,6 +67,41 @@ def pick(paths, *needles):
     return None
 
 
+class Cancelled(SystemExit):
+    """The Dart side's Cancel (SIGTERM), unwinding as a normal exit."""
+
+
+def on_sigterm(signum, _frame):
+    # Python's default SIGTERM action kills the process without unwinding, so
+    # no `finally` ran on a Cancel: the workdir leaked into the temp directory.
+    raise Cancelled(128 + signum)
+
+
+def load_model(separator, model):
+    """Loads the model, re-downloading its checkpoint once if the cached copy
+    is truncated.
+
+    audio-separator downloads straight to the final path and skips any file
+    that already exists, so a download cut short (a Cancel, a dropped
+    connection) leaves a checkpoint that fails every later load until it is
+    deleted (its loader sys.exit()s on one, hence SystemExit is caught too).
+    A torch checkpoint is a zip whose central directory is written last, so
+    only a non-zip copy is deleted: an intact checkpoint failing for another
+    reason is not re-downloaded on every run (a non-zip format such as ONNX
+    always gets the one retry).
+    """
+    try:
+        separator.load_model(model_filename=model)
+    except Cancelled:
+        raise
+    except (Exception, SystemExit):
+        cached = os.path.join(separator.model_file_dir, model)
+        if not os.path.isfile(cached) or zipfile.is_zipfile(cached):
+            raise
+        os.remove(cached)
+        separator.load_model(model_filename=model)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True)
@@ -94,7 +131,7 @@ def main():
         emit(0.05)
 
         try:
-            separator.load_model(model_filename=args.model)
+            load_model(separator, args.model)
         except Exception as exc:  # noqa: BLE001 - surface any load failure verbatim
             # Advice first, verbatim cause LAST: the Dart side surfaces the last
             # non-empty stderr line to the user, so the actual error must be it.
@@ -145,4 +182,5 @@ def main():
 
 
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, on_sigterm)
     sys.exit(main())
