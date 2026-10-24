@@ -57,12 +57,14 @@ class _FakeRepo implements TechniqueRepository {
 }
 
 /// A repo whose [saveTechniqueWithBase] parks on [gate] until the test releases
-/// it — models a slow disk so a save can be observed mid-flight.
+/// it — models a slow disk so a save can be observed mid-flight. With
+/// [failNext] set, the released save fails instead (and clears the flag).
 class _GatedSaveRepo extends _FakeRepo {
   _GatedSaveRepo(super.technique);
 
   final Completer<void> gate = Completer<void>();
   int saveWithBaseCalls = 0;
+  bool failNext = false;
 
   @override
   Future<Result<Loaded<Technique>>> saveTechniqueWithBase(
@@ -71,6 +73,10 @@ class _GatedSaveRepo extends _FakeRepo {
   }) async {
     saveWithBaseCalls++;
     await gate.future;
+    if (failNext) {
+      failNext = false;
+      return Result.error(Exception('simulated write failure'));
+    }
     return super.saveTechniqueWithBase(t, baseHashes: baseHashes);
   }
 }
@@ -567,6 +573,45 @@ void main() {
     );
     expect(vm.effectiveMedia, isEmpty, reason: 'the orphan is not staged');
     expect(media.deleted, ['/sandbox/dropped.wav']);
+  });
+
+  test('a staged clip is listed once while the save commits, and once again '
+      'after the save fails', () async {
+    // Regression: the commit's optimistic aggregate already carries the
+    // staged additions while the draft still holds them, so effectiveMedia
+    // listed every staged clip twice for the whole commit (an extra card,
+    // and an extra audio player per duplicate).
+    final media = _GatedImportMedia()..gate.complete();
+    final repo = _GatedSaveRepo(_technique())..failNext = true;
+    final vm = TechniqueDetailViewModel(
+      repository: repo,
+      mediaService: media,
+      techniqueId: 't1',
+    );
+    addTearDown(vm.dispose);
+    for (var i = 0; i < 200 && vm.technique == null; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+    expect(vm.technique, isNotNull);
+    vm.beginMediaDraft();
+    vm.beginEdit();
+    await vm.addMedia(['/tmp/clip.wav']);
+    final staged = vm.effectiveMedia.single;
+
+    final failing = vm.save(vm.technique!);
+    expect(vm.saving, isTrue);
+    expect(vm.effectiveMedia.map((m) => m.id), [staged.id]);
+    repo.gate.complete();
+    expect(await failing, isFalse);
+    // The failed save reverted the aggregate; the clip is still staged — and
+    // still listed exactly once — for the retry.
+    expect(vm.effectiveMedia.map((m) => m.id), [staged.id]);
+    expect(vm.hasMediaDraft, isTrue);
+
+    expect(await vm.save(vm.technique!), isTrue);
+    expect(vm.effectiveMedia.map((m) => m.id), [staged.id]);
+    expect(vm.hasMediaDraft, isFalse);
+    expect(repo.technique.media.map((m) => m.id), [staged.id]);
   });
 }
 

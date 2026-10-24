@@ -291,11 +291,22 @@ class TechniqueDetailViewModel extends ChangeNotifier
   /// The example list as the user currently sees it: persisted media (minus
   /// staged removals, with staged captions) followed by staged additions. In the
   /// read view the draft is empty, so this is just the technique's media.
+  ///
+  /// A staged addition is listed from the draft for as long as the draft holds
+  /// it, even when [_technique] already carries the same clip: [_commit]'s
+  /// optimistic aggregate includes every staged addition (and so does the
+  /// just-committed one, until [save] clears the draft), and listing both
+  /// showed each staged clip twice — with a second audio player — for the
+  /// whole commit. Keeping the DRAFT copy (not the aggregate's) leaves the
+  /// list exactly as it was before the save: same order, and the sandbox path
+  /// the selection still points at until [save] remaps it. A failed save
+  /// reverts the aggregate, so nothing else is needed to restore the list.
   List<TechniqueMedia> get effectiveMedia {
     final base = _technique?.media ?? const <TechniqueMedia>[];
+    final stagedIds = {for (final m in _draftAdds) m.id};
     final out = <TechniqueMedia>[];
     for (final m in base) {
-      if (_draftRemoves.contains(m.id)) continue;
+      if (_draftRemoves.contains(m.id) || stagedIds.contains(m.id)) continue;
       final label = _draftLabels[m.id];
       out.add(label == null ? m : m.copyWith(label: label));
     }
