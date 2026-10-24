@@ -22,7 +22,9 @@ import 'package:vocara/data/services/waveform_service.dart';
 import 'package:vocara/data/sync/hlc.dart';
 import 'package:vocara/data/sync/oplog_drain.dart';
 import 'package:vocara/data/sync/sync_state_store.dart';
+import 'package:vocara/domain/models/audio_track.dart';
 import 'package:vocara/domain/models/song_practice.dart';
+import 'package:vocara/utils/id.dart';
 import 'package:vocara/utils/result.dart';
 
 void main() {
@@ -244,6 +246,9 @@ void main() {
       final dir = persistence.assets.root;
       if (await dir.exists()) await dir.delete(recursive: true);
     });
+    final practice =
+        (await persistence.songRepo.createPractice('Song') as Ok<SongPractice>)
+            .value;
     final src = File(p.join(persistence.assets.root.path, 'take.wav'));
     await src.writeAsBytes(monoWav(200), flush: true);
 
@@ -261,9 +266,36 @@ void main() {
     final holdSave = Completer<void>();
     String? assetId;
     final save = persistence.writeGate.shared(() async {
-      assetId = await persistence.assets.importFile(src.path);
+      final id = await persistence.assets.importFile(src.path);
+      // Age the fresh row past the sweep's 24 h grace window. Without this
+      // the age guard alone kept it live and the window checks below proved
+      // nothing about the gate: now ONLY the gate stands between this
+      // unreferenced row and the sweep.
+      await persistence.db.customStatement(
+        'UPDATE assets SET created_at = 1, updated_at = 1',
+      );
+      assetId = id;
       events.add('imported');
       await holdSave.future;
+      // The rows referencing the import commit last (nested shared section;
+      // the gate is reader-preferring, so the queued repair cannot block it).
+      final pooled = (await persistence.assets.resolve(id))!;
+      final saved = await persistence.songRepo.savePractice(
+        practice.copyWith(
+          vocalTracks: [
+            AudioTrack(
+              id: newId(),
+              kind: AudioTrackKind.vocal,
+              displayName: 'Take 1',
+              audioFilePath: pooled,
+              durationMs: 4,
+              createdAt: DateTime(2026),
+              versionId: practice.activeVersionId,
+            ),
+          ],
+        ),
+      );
+      expect(saved, isA<Ok<SongPractice>>());
       events.add('save-committed');
     });
     while (assetId == null) {
@@ -276,15 +308,14 @@ void main() {
     await Future<void>.delayed(const Duration(milliseconds: 25));
     // The exclusive pass must still be queued behind the in-flight save...
     expect(events, ['imported']);
-    // ...so the freshly imported, not-yet-referenced asset is untouched.
+    // ...so the imported, not-yet-referenced (and aged) asset is untouched.
     expect(await assetLive(assetId!), isTrue);
 
     holdSave.complete();
     await save;
     await repair;
     expect(events, ['imported', 'save-committed', 'repair-done']);
-    // Once the repair does run, the young unreferenced row is additionally
-    // protected by the sweep's age grace window.
+    // Once the repair does run, the committed clip row references the asset.
     expect(await assetLive(assetId!), isTrue);
   });
 

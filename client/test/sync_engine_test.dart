@@ -1727,8 +1727,14 @@ void main() {
       // notification only once the transaction has COMPLETED (here: rolled
       // back) — never from inside it. The resulting poke is harmless: the
       // journal entry rolled back with the data, so the pump pushes nothing.
-      try {
-        await db.transaction(() async {
+      //
+      // The in-transaction count is RECORDED and asserted outside: an expect
+      // inside the body throws its failure through the transaction, where the
+      // rollback's own catch used to swallow it — the assertion could never
+      // fail.
+      int? pokesInside;
+      await expectLater(
+        db.transaction(() async {
           final s = writer.stamp();
           await writer.journal(
             table: 'practices',
@@ -1737,10 +1743,14 @@ void main() {
             hlc: s.hlc,
             payloadHash: 'h',
           );
-          expect(created, isEmpty, reason: 'no poke inside an open txn');
+          // Give a would-be in-transaction notification its chance to land.
+          await pumpEventQueue();
+          pokesInside = created.length;
           throw StateError('roll it back');
-        });
-      } catch (_) {}
+        }),
+        throwsStateError,
+      );
+      expect(pokesInside, 0, reason: 'no poke inside an open txn');
       await pumpEventQueue();
       for (final t in created) {
         t.fire();

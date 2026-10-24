@@ -226,8 +226,15 @@ void main() {
     expect(await File(poolPath).exists(), isTrue);
 
     // Pool bytes are reclaimed ONLY by the hash-refcount GC: with t2 still
-    // referencing the hash, a sweep keeps the file in place.
-    await assets.sweepUnreferenced();
+    // referencing the hash, a sweep keeps the file in place. The sweep runs
+    // with no age grace: under the default 24 h window a seconds-old asset is
+    // never swept whatever references it, so this proved nothing.
+    expect(await assets.sweepUnreferenced(minAge: Duration.zero), 0);
     expect(await File(poolPath).exists(), isTrue);
+
+    // ...and once nothing references the hash, that same sweep reclaims it.
+    expect(await repo.deleteTechnique(t2Id), isA<Ok<void>>());
+    expect(await assets.sweepUnreferenced(minAge: Duration.zero), 1);
+    expect(await File(poolPath).exists(), isFalse);
   });
 }
