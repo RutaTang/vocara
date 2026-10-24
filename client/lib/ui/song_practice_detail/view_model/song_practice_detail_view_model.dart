@@ -1277,7 +1277,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
                 c.audioFilePath == committedDest) {
               continue;
             }
-            analysis.evictAnalysis(c.audioFilePath);
+            _evictUnused(c.audioFilePath);
             try {
               await _audioFiles.deleteAudio(c.audioFilePath);
             } catch (_) {
@@ -1487,7 +1487,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       if (await _save()) {
         analysis.dropLaneState(trackId);
         for (final c in doomed) {
-          analysis.evictAnalysis(c.audioFilePath);
+          _evictUnused(c.audioFilePath);
           await _audioFiles.deleteAudio(c.audioFilePath);
         }
       }
@@ -1541,7 +1541,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       // succeeded — a failed save reverts the model back to referencing this
       // clip, so its file must survive.
       if (await _save()) {
-        analysis.evictAnalysis(clip.audioFilePath);
+        _evictUnused(clip.audioFilePath);
         await _audioFiles.deleteAudio(clip.audioFilePath);
       }
       analysis.onTrackAudioChanged(trackId);
@@ -1827,7 +1827,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       // Persist BEFORE deleting any old audio, so a failed save can't leave
       // the model pointing at a file that's already gone.
       if (await _save()) {
-        analysis.evictAnalysis(clip.audioFilePath);
+        _evictUnused(clip.audioFilePath);
         await _audioFiles.deleteAudio(clip.audioFilePath);
         _toast('Take split.');
       } else {
@@ -1965,8 +1965,8 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       // the model pointing at files that are already gone.
       if (await _save()) {
         analysis.dropLaneState(bottom.id); // the absorbed take is gone
-        analysis.evictAnalysis(topClip.audioFilePath);
-        analysis.evictAnalysis(bottomClip.audioFilePath);
+        _evictUnused(topClip.audioFilePath);
+        _evictUnused(bottomClip.audioFilePath);
         await _audioFiles.deleteAudio(topClip.audioFilePath);
         await _audioFiles.deleteAudio(bottomClip.audioFilePath);
         _toast('Takes merged.');
@@ -2354,6 +2354,16 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// (permission, take setup, the mic's ready handshake) and the stop window
   /// (pause, head trim, analysis — seconds for a long take), during both of
   /// which the busy gate is free. Every structural pre-guard refuses it.
+  /// Drops [path]'s analysis once no lane plays it any more. Two lanes over
+  /// identical bytes share one pooled path, so deleting, splitting or merging
+  /// one of them evicted the other's analysis too — and disowned a compute
+  /// still in flight for it, leaving that lane's dock with nothing to show
+  /// until it was selected again. Its bytes are unchanged, so it stays valid.
+  void _evictUnused(String path) {
+    if (_practice?.referencesAudio(path) ?? false) return;
+    analysis.evictAnalysis(path);
+  }
+
   bool get takeInFlight =>
       recording.isRecording || recording.isStartingTake || recording.isStopping;
 

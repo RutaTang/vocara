@@ -208,7 +208,11 @@ class InterpretationsController extends ChangeNotifier {
           // Delete EVERY clip's file, not just the primary — a multi-clip take
           // would otherwise orphan its trailing clips' audio.
           for (final c in t.clips) {
-            _analysis.evictAnalysis(c.audioFilePath);
+            // Another interpretation's take may play the same pooled bytes:
+            // its analysis stays (see SongPractice.referencesAudio).
+            if (!(_practiceOf()?.referencesAudio(c.audioFilePath) ?? false)) {
+              _analysis.evictAnalysis(c.audioFilePath);
+            }
             await _audioFiles.deleteAudio(c.audioFilePath);
           }
         }

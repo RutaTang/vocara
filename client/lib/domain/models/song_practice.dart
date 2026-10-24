@@ -117,6 +117,19 @@ class SongPractice {
     ];
   }
 
+  /// Whether any clip of any track still plays [path]. The asset pool is
+  /// content-addressed, so two lanes over the same bytes (a duplicated take,
+  /// one file imported twice) share one path: removing one of them must not
+  /// discard what the other still shows (its analysis, its file).
+  bool referencesAudio(String path) {
+    for (final t in [?accompaniment, ?reference, ...vocalTracks]) {
+      for (final c in t.clips) {
+        if (c.audioFilePath == path) return true;
+      }
+    }
+    return false;
+  }
+
   /// Whether vocal take [t] is listed under the active interpretation: its
   /// own, or — when its interpretation resolves to none of [versions] — the
   /// active one, so it is never invisible. Sync can leave such a take: the

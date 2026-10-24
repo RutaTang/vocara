@@ -683,6 +683,50 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 20));
       expect(spectrograms.requested, ['/pool/take1.wav']);
     });
+
+    test('for a path another lane still plays is kept', () async {
+      // Identical bytes resolve to ONE pool path, so a duplicated take (or a
+      // file imported twice) has both lanes at the same path. Deleting one
+      // evicted the other's analysis and disowned its compute in flight,
+      // leaving the dock with no result and no loading state until the lane
+      // was selected again.
+      AudioTrack shared(String id) => AudioTrack(
+        id: id,
+        kind: AudioTrackKind.vocal,
+        displayName: id,
+        audioFilePath: '/pool/shared.wav',
+        durationMs: 1000,
+        createdAt: DateTime(2026),
+        versionId: 'v1',
+      );
+      final vm = await pumpVm(
+        seed: _seed(
+          accompaniment: _backing(),
+          vocalTracks: [shared('a'), shared('b')],
+        ),
+      );
+      // The dock alone (inspector collapsed) computes only on pushes.
+      vm.toggleInspectorPanel();
+      vm.analysis.showDockTab(DockTab.spectrogram);
+      spectrograms.gate = Completer<void>();
+      vm.selectTrack('a');
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+      expect(spectrograms.requested, ['/pool/shared.wav']);
+
+      await vm.deleteTrack('b');
+      expect(vm.selectedTrackId, 'a');
+      spectrograms.gate!.complete();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      // The compute landed for the lane still on screen (this fake answers
+      // null, which latches "unavailable").
+      expect(
+        vm.analysis.spectrogramLoading ||
+            vm.analysis.selectedMetricsUnavailable ||
+            vm.analysis.selectedSpectrogram != null,
+        isTrue,
+        reason: 'the dock was left with nothing to show',
+      );
+    });
   });
 
   group('a clip dropped onto a take', () {
