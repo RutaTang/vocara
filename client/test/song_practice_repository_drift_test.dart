@@ -8,6 +8,7 @@ import 'package:vocara/data/db/app_database.dart';
 import 'package:vocara/data/db/asset_store.dart';
 import 'package:vocara/data/repositories/song_practice_repository_drift.dart';
 import 'package:vocara/data/sync/hlc.dart';
+import 'package:vocara/data/sync/integrity_checker.dart';
 import 'package:vocara/data/sync/sync_hashes.dart';
 import 'package:vocara/data/sync/sync_writer.dart';
 import 'package:vocara/domain/models/audio_fx.dart';
@@ -16,6 +17,7 @@ import 'package:vocara/domain/models/fx_bus.dart';
 import 'package:vocara/domain/models/lyric_line.dart';
 import 'package:vocara/domain/models/practice_note.dart';
 import 'package:vocara/domain/models/song_practice.dart';
+import 'package:vocara/domain/models/take_version.dart';
 import 'package:vocara/domain/models/technique_marker.dart';
 import 'package:vocara/utils/id.dart';
 import 'package:vocara/utils/result.dart';
@@ -826,6 +828,70 @@ void main() {
       expect(await _liveCount(db, db.clips), 0);
     },
   );
+
+  test('a take whose interpretation was deleted under it loads reattached to '
+      'the first live interpretation once the integrity repair ran', () async {
+    final now = DateTime(2026);
+    final keep = TakeVersion(id: newId(), name: 'Keep', createdAt: now);
+    final gone = TakeVersion(id: newId(), name: 'Gone', createdAt: now);
+    AudioTrack take(String name, String versionId) => AudioTrack(
+      id: newId(),
+      kind: AudioTrackKind.vocal,
+      displayName: name,
+      createdAt: now,
+      versionId: versionId,
+    );
+    final onGone = take('Take 1', gone.id);
+    final onKeep = take('Take 2', keep.id);
+    final pr = ok(
+      await repo.savePractice(
+        SongPractice(
+          id: newId(),
+          title: 'Song',
+          createdAt: now,
+          updatedAt: now,
+          versions: [keep, gone],
+          activeVersionId: gone.id,
+          vocalTracks: [onGone, onKeep],
+        ),
+      ),
+    );
+
+    // A synced-in delete of the ACTIVE interpretation, then the integrity
+    // repair sync runs after every page: it NULLs the practice's active
+    // pointer and the orphaned take's pointer.
+    await db.customStatement(
+      'UPDATE interpretations SET deleted_at = 1 WHERE id = ?',
+      [gone.id],
+    );
+    final checker = IntegrityChecker(
+      db,
+      SyncWriter(db, HlcClock(node: 'FIX'.padRight(26, '0'))),
+    );
+    await db.transaction(() => checker.repair());
+    Future<PracticeRow> practiceRow() =>
+        (db.select(db.practices)..where((x) => x.id.equals(pr.id))).getSingle();
+    Future<TrackRow> takeRow() => (db.select(
+      db.tracks,
+    )..where((x) => x.id.equals(onGone.id))).getSingle();
+    expect((await practiceRow()).activeInterpretationId, isNull);
+    expect((await takeRow()).interpretationId, isNull);
+
+    // Read verbatim, the take matched no interpretation and was in no view.
+    final loaded =
+        (await repo.loadPractice(pr.id) as Ok<Loaded<SongPractice>>).value;
+    final got = loaded.aggregate;
+    expect(got.activeVersionId, keep.id);
+    expect(got.activeVocalTracks.map((t) => t.id), [onGone.id, onKeep.id]);
+
+    // The next save persists the reattachment as an ordinary local edit.
+    expect(
+      await repo.savePracticeWithBase(got, baseHashes: loaded.baseHashes),
+      isA<Ok<Loaded<SongPractice>>>(),
+    );
+    expect((await practiceRow()).activeInterpretationId, keep.id);
+    expect((await takeRow()).interpretationId, keep.id);
+  });
 }
 
 Future<int> _liveCount(AppDatabase db, TableInfo<Table, dynamic> table) async {
