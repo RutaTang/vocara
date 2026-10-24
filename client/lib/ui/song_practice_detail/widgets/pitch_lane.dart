@@ -455,10 +455,15 @@ class PitchLanePainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final dur = timelineDurationMs;
     if (dur <= 0 || hiSemi <= loSemi) return;
+    // Zoomed in, most of the take maps outside the box. Nothing on the way
+    // clips a painter to its size (a Stack clips only children that overflow
+    // their layout), so without this the notes left of the viewport painted
+    // over the track-header column.
+    canvas.clipRect(Offset.zero & size);
     final span = (hiSemi - loSemi).toDouble();
     double yOf(double semi) => (1 - (semi - loSemi) / span) * size.height;
     // Map absolute timeline ms into the viewport; off-screen parts are clipped
-    // by the lane, so no clamp (which would pin them to the edge).
+    // (above), so no clamp (which would pin them to the edge).
     double xOf(double ms) => (ms - viewStartMs) / dur * size.width;
     double xOfFrame(int fr) => xOf(startMs + metrics.timeOfFrame(fr) * 1000);
 

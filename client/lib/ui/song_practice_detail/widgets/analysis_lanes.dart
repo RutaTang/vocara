@@ -465,6 +465,9 @@ class LoudnessLanePainter extends CustomPainter {
     final dur = timelineDurationMs;
     final frames = metrics.frames;
     if (dur <= 0 || frames == 0) return;
+    // Zoomed in, most of the envelope maps outside the box; keep it from
+    // painting over the track-header column (see [PitchLanePainter.paint]).
+    canvas.clipRect(Offset.zero & size);
 
     var peak = -1e9;
     for (final v in metrics.loudness) {
