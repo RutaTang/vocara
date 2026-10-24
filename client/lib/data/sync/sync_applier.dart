@@ -66,13 +66,14 @@ class ApplyResult {
 /// other door gates, and the state-changing [HlcClock.mergeVerified] calls
 /// run only AFTER the batch's outer transaction has committed, for the
 /// records whose savepoint settled as applied or skipped AND for the
-/// plausible stamps of records the door gates PARKED (see
-/// [_noteParkedStamp]: a parked snapshot stays eligible to win LWW at
-/// replay, so later local writes must stamp above it) — a record that
-/// fails inside its savepoint, and equally a whole batch whose outer commit
-/// fails (an FK-sweep abort, a throwing beforeCommit hook), must leave NO
-/// side effect behind, and an in-memory clock advanced for writes the
-/// database rolled back is a side effect. The post-commit advance is
+/// plausible stamps of records the door gates PARKED, or that a savepoint
+/// failure parked REPLAYABLE (see [_noteParkedStamp]: a parked snapshot
+/// stays eligible to win LWW at replay, so later local writes must stamp
+/// above it) — a record that fails inside its savepoint deterministically,
+/// and equally a whole batch whose outer commit fails (an FK-sweep abort, a
+/// throwing beforeCommit hook), must leave NO side effect behind, and an
+/// in-memory clock advanced for writes the database rolled back is a side
+/// effect. The post-commit advance is
 /// mergeVerified rather than [HlcClock.receive] because re-running the drift
 /// check after the commit could throw for stamps that are already durable
 /// (see the bottom of [apply]).
@@ -191,8 +192,9 @@ class SyncApplier {
     // Per-batch live-schema cache for the column gate (see [_liveColumns]).
     final liveColumns = <String, Set<String>>{};
     // Stamps this batch ACCEPTED: records whose savepoint settled as applied
-    // or skipped, plus door-parked records whose plausible stamp was noted by
-    // [_noteParkedStamp]. Their state-changing clock.mergeVerified runs only
+    // or skipped, plus parked records (door gates, replayable savepoint
+    // failures) whose plausible stamp was noted by [_noteParkedStamp]. Their
+    // state-changing clock.mergeVerified runs only
     // once the outer transaction has committed (bottom of this method) — an
     // advance for records the outer commit then rolled back would be a side
     // effect surviving the rollback.
@@ -477,7 +479,18 @@ class SyncApplier {
             // writes are gone while the quarantine row (written in the OUTER
             // transaction) survives with the rest of the batch.
             result.failed++;
-            await _quarantine(rec, _savepointFailureReason(e));
+            final reason = _savepointFailureReason(e);
+            await _quarantine(rec, reason);
+            // The savepoint rolled the record's writes back, but a
+            // REPLAYABLE park (apply-failed) still leaves its snapshot
+            // behind, eligible to win LWW at replay — so its stamp ratchets
+            // the clock and the durable high-water mark exactly like a door
+            // park's (see [_noteParkedStamp]). A deterministic failure
+            // (invalid-value) can never land, so it keeps the class rule
+            // that a savepoint failure leaves no side effect.
+            if (QuarantineStore.isReplayable(reason)) {
+              _noteParkedStamp(rec, acceptedHlcs);
+            }
           }
         }
         for (final reject in rejects) {
@@ -531,8 +544,9 @@ class SyncApplier {
       // rejected: it would corrupt causal order. Stamps of records the
       // FK-orphan sweep later parked-and-deleted merge too, deliberately: HLC
       // semantics advance on any RECEIVED message; row survival is a
-      // different layer — and door-parked records join for the same reason
-      // (see [_noteParkedStamp]). Deferring the advance also means the drift
+      // different layer — and door-parked records, like replayable savepoint
+      // parks, join for the same reason (see [_noteParkedStamp]). Deferring
+      // the advance also means the drift
       // gate judged every record of this batch against the PRE-batch clock
       // reference — that is deliberate and conservative: a record plausible
       // only relative to an earlier in-batch stamp quarantines now and is
@@ -546,7 +560,10 @@ class SyncApplier {
   }
 
   /// Records a DOOR-PARKED record's stamp for the post-commit clock advance
-  /// and the durable high-water mark, exactly like a settled record's.
+  /// and the durable high-water mark, exactly like a settled record's — and
+  /// the stamp of a record whose savepoint failure was parked REPLAYABLE
+  /// (apply-failed): the savepoint rolled its write back, but its snapshot
+  /// survives in the store just the same.
   ///
   /// A door park is not a rollback: the parked snapshot survives the batch
   /// and stays eligible to win LWW at replay — the newer-schema park is the
