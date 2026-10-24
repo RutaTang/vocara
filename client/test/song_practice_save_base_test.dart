@@ -49,8 +49,11 @@ class _FakeWaveforms extends Fake implements WaveformService {}
 
 class _FakeEdits extends Fake implements AudioEditService {}
 
-/// Just enough engine surface for the playback/mixer controllers to wire up.
+/// Just enough engine surface for the playback/mixer controllers to wire up;
+/// counts graph syncs.
 class _FakeEngine extends Fake implements PlaybackEngine {
+  int syncs = 0;
+
   @override
   Stream<Duration> get position => const Stream.empty();
   @override
@@ -67,7 +70,7 @@ class _FakeEngine extends Fake implements PlaybackEngine {
   Future<void> sync(
     List<TrackPlayback> tracks,
     List<BusPlayback> buses,
-  ) async {}
+  ) async => syncs++;
   @override
   Future<void> setVolume(
     String id,
@@ -143,7 +146,10 @@ void main() {
     return (await load(created.id)).aggregate;
   }
 
+  late _FakeEngine engine;
+
   Future<SongPracticeDetailViewModel> open(String practiceId) async {
+    engine = _FakeEngine();
     final vm = SongPracticeDetailViewModel(
       repository: repo,
       techniqueRepository: _FakeTechRepo(),
@@ -153,7 +159,7 @@ void main() {
       separationService: FakeSourceSeparationService(available: false),
       appSettings: AppSettingsService(storage: LocalStorageService()),
       practiceId: practiceId,
-      playbackEngine: _FakeEngine(),
+      playbackEngine: engine,
       editService: _FakeEdits(),
     );
     addTearDown(vm.dispose);
@@ -233,6 +239,34 @@ void main() {
     expect(take.displayName, 'B');
     expect(take.notes, isEmpty);
   });
+
+  test(
+    'a lyrics save that merged a concurrent change resyncs the engine',
+    () async {
+      // The lyrics path skips the engine resync so tap-to-time never glitches
+      // playback, and remote reloads are skipped while a save is in flight —
+      // so a concurrent change the lyrics save merged (a take muted or deleted
+      // elsewhere) showed in the UI while the engine kept playing the old mix.
+      final p = await seed();
+      final vm = await open(p.id);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      final quiet = engine.syncs;
+      expect(await vm.setLyricsText('first line'), isTrue);
+      expect(engine.syncs, quiet, reason: 'a plain lyric save stays quiet');
+
+      final other = await load(p.id);
+      final take = other.aggregate.vocalTracks.single;
+      await repo.savePracticeWithBase(
+        other.aggregate.copyWith(vocalTracks: [take.copyWith(muted: true)]),
+        baseHashes: other.baseHashes,
+      );
+      expect(await vm.setLyricsText('second line'), isTrue);
+
+      expect(vm.practice!.vocalTracks.single.muted, isTrue);
+      expect(engine.syncs, greaterThan(quiet), reason: 'the mix must follow');
+    },
+  );
 
   test(
     'a save reports what it sent in the same hashes a load reports',

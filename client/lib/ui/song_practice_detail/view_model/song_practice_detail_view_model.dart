@@ -764,7 +764,8 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   }
 
   /// Persists a lyrics change without re-syncing the audio engine (lyrics don't
-  /// affect playback), so tap-to-time while playing doesn't glitch the audio.
+  /// affect playback), so tap-to-time while playing doesn't glitch the audio —
+  /// unless the save merged a concurrent change (see [_writeLyrics]).
   /// Runs on the same save chain as [_save] (one in-flight write at a time).
   /// Returns whether the write landed.
   Future<bool> _setLyrics(List<LyricLine> lines) async {
@@ -793,7 +794,21 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       if (_disposed) return false;
       if (result is Ok<Loaded<SongPractice>>) {
         ok = true;
-        _adoptSaved(sent, result.value);
+        final saved = result.value;
+        final sentHashes = saved.sentHashes;
+        if (identical(_practice, sent) &&
+            sentHashes != null &&
+            !mapEquals(sentHashes, saved.baseHashes)) {
+          // The store differs from what this write sent: the merge kept rows a
+          // concurrent writer changed (remote reloads are skipped while a save
+          // is in flight, so during tap-to-time this is how they arrive).
+          // Adopt the re-read the way a load does and resync the engine — but
+          // only then, so a plain lyric stamp still never touches playback.
+          _adoptLoaded(saved);
+          await mixer.resyncPlayback();
+        } else {
+          _adoptSaved(sent, saved);
+        }
       } else {
         // Mirror [_doSave]'s failure path: revert the optimistic lyrics to
         // what's actually on disk, so the screen never keeps showing lines a
