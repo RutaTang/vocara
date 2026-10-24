@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:isolate';
 
 import 'package:flutter/foundation.dart';
 
@@ -1023,8 +1024,13 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
           complete = false;
         }
       }
-      final mergedMetrics = mergeVoiceMetrics(metrics);
-      final mergedSpec = mergeSpectrograms(specs);
+      // Off the UI isolate: the merges and the views derived from them are
+      // lane-length work (a 10-minute lane's LTAS and profile alone ran
+      // ~250 ms in the dock's getters).
+      final lane = await Isolate.run(() => _mergeLane(metrics, specs));
+      if (_disposed) return;
+      final mergedMetrics = lane.metrics;
+      final mergedSpec = lane.spectrogram;
       // A lane whose parts did not all land is not cached: leaving the key
       // absent makes the next ensure recompute against now-warm per-clip
       // caches, where a cached partial would be permanent (the key only
@@ -1044,6 +1050,15 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
             spectrogram: mergedSpec,
             metrics: mergedMetrics,
           );
+          // Seeded only while the pair is held: the eviction hook drops these
+          // memos with it, and an entry the byte budget refused at once must
+          // not leave them behind.
+          if (_aggAnalysisCache.containsKey(key)) {
+            if (lane.ltas case final ltas?) _aggLtasCache[key] = ltas;
+            if (lane.profile case final profile?) {
+              _aggProfileCache[key] = profile;
+            }
+          }
         } else {
           _aggUnavailable.add(key);
         }
@@ -1179,4 +1194,28 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     // notifyListeners must not fire into a half-torn-down widget tree.
     super.dispose();
   }
+}
+
+/// A lane's merged analysis plus the LTAS and voice profile the dock derives
+/// from it, exactly as its getters would ([AnalysisCache.selectedLtas] needs
+/// the spectrogram, [AnalysisCache.selectedProfile] the metrics). Pure, so it
+/// runs on a worker isolate.
+({
+  VoiceMetrics? metrics,
+  Spectrogram? spectrogram,
+  Ltas? ltas,
+  VoiceProfile? profile,
+})
+_mergeLane(
+  List<({int offsetMs, VoiceMetrics metrics})> metrics,
+  List<({int offsetMs, Spectrogram spectrogram})> specs,
+) {
+  final m = mergeVoiceMetrics(metrics);
+  final spec = mergeSpectrograms(specs);
+  return (
+    metrics: m,
+    spectrogram: spec,
+    ltas: spec == null ? null : computeLtas(spec, m),
+    profile: m == null ? null : analyzeVoiceProfile(m),
+  );
 }

@@ -352,6 +352,48 @@ void main() {
       cache.dispose();
     });
 
+    test(
+      'a lane aggregate comes with the LTAS and profile its pair gives',
+      () async {
+        // Merged (and derived) on a worker isolate now; the dock's getters must
+        // still answer exactly what computing from the merged pair gives.
+        final track = _lane([_clip('c1', 1000), _clip('c2', 5000)]);
+        final cache = _cache(
+          spectrograms: _StubSpectrograms(
+            metricsByPath: {'c1.wav': _metrics(10), 'c2.wav': _metrics(10)},
+            specsByPath: {'c1.wav': _spec(10), 'c2.wav': _spec(10)},
+          ),
+          selectedTrack: () => track,
+        );
+        await cache.ensureSelectedSpectrogram();
+        final spec = cache.selectedSpectrogram!;
+        final metrics = cache.selectedMetrics!;
+        final ltas = cache.selectedLtas!;
+        final fresh = computeLtas(spec, metrics);
+        expect(ltas.db, fresh.db);
+        expect(ltas.alphaRatio, fresh.alphaRatio);
+        expect(ltas.singersFormantDb, fresh.singersFormantDb);
+        expect(ltas.frameCount, fresh.frameCount);
+        final profile = cache.selectedProfile!;
+        final freshProfile = analyzeVoiceProfile(metrics);
+        expect(
+          [
+            profile.lowMidi,
+            profile.highMidi,
+            profile.tessLoMidi,
+            profile.tessHiMidi,
+          ],
+          [
+            freshProfile.lowMidi,
+            freshProfile.highMidi,
+            freshProfile.tessLoMidi,
+            freshProfile.tessHiMidi,
+          ],
+        );
+        cache.dispose();
+      },
+    );
+
     test('a clip evicted while a LATER clip computes is not baked into the '
         'lane aggregate as silence', () async {
       // The per-clip caches are byte-budgeted, so analyzing clip N can evict
