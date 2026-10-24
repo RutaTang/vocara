@@ -801,12 +801,7 @@ class VibratoTab extends StatelessWidget {
     return _withMetrics(vm, (m, track) {
       final spanMs = vm.analysisDurationMs;
       final startMs = vm.analysisStartMs;
-      final notes = segmentPitchNotes(m);
-      // Memoize per note once per build — the take's vibrato doesn't change as
-      // the playhead moves, so we must not recompute it on every position tick.
-      final byNote = <PitchNote, Vibrato>{
-        for (final n in notes) n: analyzeVibrato(m, n.startFrame, n.endFrame),
-      };
+      final notes = pitchNotesOf(m);
       return ValueListenableBuilder<Duration>(
         valueListenable: vm.position,
         builder: (context, pos, _) {
@@ -815,7 +810,9 @@ class VibratoTab extends StatelessWidget {
           Vibrato? v;
           for (final n in notes) {
             if (fr != null && fr >= n.startFrame && fr <= n.endFrame) {
-              v = byNote[n];
+              // Memoized per note: a take's vibrato doesn't change as the
+              // playhead moves, so it is not recomputed on position ticks.
+              v = noteVibratoOf(m, n);
               break;
             }
           }
@@ -981,7 +978,7 @@ class RegisterTab extends StatelessWidget {
       if (reg == null || !reg.hasData) {
         return const StudioHint('Sing a passage to map your registers.');
       }
-      final range = pitchSemitoneRange(m);
+      final range = pitchRangeOf(m);
       final spanMs = vm.analysisDurationMs;
       final startMs = vm.analysisStartMs;
       return Padding(

@@ -200,6 +200,39 @@ Set<int> _worstNotes(List<PitchNote> notes) {
   return idx.where((i) => notes[i].medianCents.abs() > 30).take(3).toSet();
 }
 
+// Per-take memos of what the pitch views derive from a take's metrics. Each
+// derivation walks every frame (segmentation is several ms for a 10-minute
+// take), and the views calling them rebuild on every view-model notify — a
+// fader drag, a trackpad pan, a clip move. Metrics are never mutated after
+// they are computed or merged (a new analysis is a new object), so identity
+// is the key, and an Expando lets each entry go with its take.
+final Expando<List<PitchNote>> _notesMemo = Expando('pitchNotes');
+final Expando<({int lo, int hi})> _rangeMemo = Expando('pitchRange');
+final Expando<Set<int>> _worstMemo = Expando('worstNotes');
+final Expando<Map<PitchNote, Vibrato>> _vibratoMemo = Expando('noteVibrato');
+
+/// [segmentPitchNotes] at its default thresholds, computed once per take.
+List<PitchNote> pitchNotesOf(VoiceMetrics m) =>
+    _notesMemo[m] ??= List.unmodifiable(segmentPitchNotes(m));
+
+/// [pitchSemitoneRange], computed once per take.
+({int lo, int hi}) pitchRangeOf(VoiceMetrics m) =>
+    _rangeMemo[m] ??= pitchSemitoneRange(m);
+
+/// The notes to flag in [notes] (see [_worstNotes]), computed once per list —
+/// pass the memoized [pitchNotesOf] list.
+Set<int> worstNotesOf(List<PitchNote> notes) =>
+    _worstMemo[notes] ??= Set.unmodifiable(_worstNotes(notes));
+
+/// [analyzeVibrato] over [note] (one of [pitchNotesOf]`(m)`) at its default
+/// thresholds, computed once per note.
+Vibrato noteVibratoOf(VoiceMetrics m, PitchNote note) =>
+    (_vibratoMemo[m] ??= <PitchNote, Vibrato>{})[note] ??= analyzeVibrato(
+      m,
+      note.startFrame,
+      note.endFrame,
+    );
+
 /// A Logic/Cubase-style sub-lane folded out under a vocal take: the take's pitch
 /// shown as note blocks (quantized to semitones, tinted green→red by how in tune)
 /// with the fine F0 contour inside, plus an in-tune% score and a playhead
@@ -242,11 +275,11 @@ class PitchLane extends StatelessWidget {
   Widget build(BuildContext context) {
     final m = metrics;
     final notes = (m != null && !loading)
-        ? segmentPitchNotes(m)
+        ? pitchNotesOf(m)
         : const <PitchNote>[];
     final inTune = pitchInTunePercent(notes);
-    final worst = _worstNotes(notes);
-    final range = m != null ? pitchSemitoneRange(m) : (lo: 48, hi: 72);
+    final worst = worstNotesOf(notes);
+    final range = m != null ? pitchRangeOf(m) : (lo: 48, hi: 72);
 
     return Container(
       height: height,

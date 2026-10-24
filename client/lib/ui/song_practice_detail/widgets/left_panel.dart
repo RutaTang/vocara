@@ -13,7 +13,8 @@ import '../../core/widgets/cap_label.dart';
 import '../../core/widgets/studio_controls.dart';
 import '../view_model/song_practice_detail_view_model.dart';
 import 'fx_panel.dart';
-import 'pitch_lane.dart' show PitchNote, segmentPitchNotes, pitchInTunePercent;
+import 'pitch_lane.dart'
+    show PitchNote, noteVibratoOf, pitchInTunePercent, pitchNotesOf;
 import 'track_context_menu.dart';
 
 const double _panelWidth = 272;
@@ -1087,7 +1088,7 @@ class _VoiceSummary extends StatelessWidget {
       return const _Empty('No analysis for this take.', inset: false);
     }
 
-    final notes = segmentPitchNotes(m);
+    final notes = pitchNotesOf(m);
     final inTune = notes.isEmpty ? null : pitchInTunePercent(notes);
     final vib = _longestNoteVibrato(m, notes);
     final reg = vm.selectedRegister;
@@ -1199,7 +1200,7 @@ class _VoiceSummary extends StatelessWidget {
         longest = n;
       }
     }
-    return analyzeVibrato(m, longest.startFrame, longest.endFrame);
+    return noteVibratoOf(m, longest);
   }
 }
 
