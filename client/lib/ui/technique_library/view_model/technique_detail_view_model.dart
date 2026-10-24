@@ -383,9 +383,15 @@ class TechniqueDetailViewModel extends ChangeNotifier
       if (!m.isVideo) m,
   ];
 
-  /// Path of the example whose analysis is shown. Null falls back to the first
+  /// Id of the example whose analysis is shown. Null falls back to the first
   /// audio example.
-  String? _selectedExamplePath;
+  ///
+  /// An id, not a path: two examples with identical bytes resolve to the SAME
+  /// pooled file once saved, and a path then named both of them — both cards
+  /// opened with the analysis and a playhead-linked player, and the second
+  /// could never be selected on its own. The analysis caches stay keyed by
+  /// path: an analysis is a property of the file's bytes, shared correctly.
+  String? _selectedExampleId;
 
   /// The example clip used as the reference "ground truth": the selected audio
   /// example, or the first one. Null when the technique has no audio example.
@@ -393,7 +399,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
     final audio = audioExamples;
     if (audio.isEmpty) return null;
     for (final m in audio) {
-      if (m.path == _selectedExamplePath) return m;
+      if (m.id == _selectedExampleId) return m;
     }
     return audio.first;
   }
@@ -402,28 +408,28 @@ class TechniqueDetailViewModel extends ChangeNotifier
   /// selected example can be expanded (accordion), so this one flag suffices.
   bool _analysisCollapsed = false;
 
-  /// The example whose inline analysis is currently expanded, or null when
-  /// collapsed.
-  String? get expandedExamplePath =>
-      _analysisCollapsed ? null : referenceMedia?.path;
+  /// The id of the example whose inline analysis is currently expanded, or
+  /// null when collapsed.
+  String? get expandedExampleId =>
+      _analysisCollapsed ? null : referenceMedia?.id;
 
-  /// Toggles a card's inline analysis: collapse/expand the selected one, or
-  /// select-and-expand a different one.
-  void toggleExampleExpanded(String path) {
-    if (referenceMedia?.path == path) {
+  /// Toggles a card's inline analysis (by media id): collapse/expand the
+  /// selected one, or select-and-expand a different one.
+  void toggleExampleExpanded(String mediaId) {
+    if (referenceMedia?.id == mediaId) {
       _analysisCollapsed = !_analysisCollapsed;
       notifyListeners();
     } else {
       _analysisCollapsed = false;
-      selectExample(path);
+      selectExample(mediaId);
     }
   }
 
   /// Switches which example's analysis is shown (and which drives the playhead).
   /// Drops any practice take, since it was compared against the old reference.
-  void selectExample(String path) {
-    if (referenceMedia?.path == path) return;
-    _selectedExamplePath = path;
+  void selectExample(String mediaId) {
+    if (referenceMedia?.id == mediaId) return;
+    _selectedExampleId = mediaId;
     _resetToReferenceSubject();
     notifyListeners();
     unawaited(ensureReferenceAnalysis());
@@ -1009,7 +1015,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
     // so the reference view doesn't decode the clip a second time.
     if (partial != null) _refCache[added.path] = partial;
     _draftAdds.add(added);
-    _selectedExamplePath = added.path;
+    _selectedExampleId = added.id;
     // The just-recorded example becomes the reference; drop a stale practice take that
     // was compared against the previous reference (matches selectExample).
     _resetToReferenceSubject();
@@ -1048,7 +1054,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
     final current = _technique;
     if (current == null) return;
     // The commit resolves the clip's sandbox path to a pool path; remap the
-    // selection/caches like [save] does, so the state stays coherent if the
+    // analysis caches like [save] does, so the state stays coherent if the
     // exit is ever abandoned after the finalizer ran.
     final oldPathById = {
       for (final m in current.media) m.id: m.path,
@@ -1364,9 +1370,9 @@ class TechniqueDetailViewModel extends ChangeNotifier
       _draftAdds.clear();
       _draftRemoves.clear();
       _draftLabels.clear();
-      // Selection and the analysis caches key on paths the commit just
-      // rewrote to pool paths; carry them onto the persisted aggregate so
-      // the shown example doesn't silently jump to the first one.
+      // The analysis caches key on paths the commit just rewrote to pool
+      // paths; carry them onto the persisted aggregate so the shown example's
+      // analysis isn't recomputed (or its failure verdict forgotten).
       _remapMediaAfterCommit(oldPathById);
     }
     return ok;
@@ -1465,7 +1471,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
     // Select + expand the first newly added audio example so its analysis shows.
     for (final m in added) {
       if (!m.isVideo) {
-        _selectedExamplePath = m.path;
+        _selectedExampleId = m.id;
         // The selected reference changed; drop a stale practice take (see selectExample).
         _resetToReferenceSubject();
         _analysisCollapsed = false;
@@ -1516,12 +1522,12 @@ class TechniqueDetailViewModel extends ChangeNotifier
     notifyListeners();
   }
 
-  /// Carries the path-keyed state (selection, reference-analysis cache and
-  /// failure latches) across a successful commit. The commit re-reads the
-  /// aggregate with every media file resolved through the asset pool, so a
-  /// clip staged from the sandbox comes back under a different path while its
-  /// id stays stable; without the remap the selection falls back to the first
-  /// example and the just-computed analysis is orphaned under the old path.
+  /// Carries the path-keyed state (reference-analysis cache and failure
+  /// latches) across a successful commit. The commit re-reads the aggregate
+  /// with every media file resolved through the asset pool, so a clip staged
+  /// from the sandbox comes back under a different path while its id stays
+  /// stable; without the remap the just-computed analysis is orphaned under
+  /// the old path. (The selection is keyed by id, so it needs no carrying.)
   /// [oldPathById] maps each committed clip's id to its pre-commit path.
   /// [_loadingPaths] is deliberately left alone: an in-flight analysis keys
   /// its own completion (cache write + loading clear) on the old path.
@@ -1536,7 +1542,6 @@ class TechniqueDetailViewModel extends ChangeNotifier
       if (_refFailed.remove(old)) _refFailed.add(m.path);
       final message = _refFailedMessage.remove(old);
       if (message != null) _refFailedMessage[m.path] = message;
-      if (_selectedExamplePath == old) _selectedExamplePath = m.path;
     }
     // Re-normalize like every other media-mutating path (e.g. the selected
     // example was staged for removal by this very save).
@@ -1546,13 +1551,13 @@ class TechniqueDetailViewModel extends ChangeNotifier
   /// Re-selects a valid example after the current one was removed.
   void _fixSelectionAfterMediaChange() {
     final audio = audioExamples;
-    final before = _selectedExamplePath;
+    final before = _selectedExampleId;
     if (audio.isEmpty) {
-      _selectedExamplePath = null;
-    } else if (!audio.any((m) => m.path == _selectedExamplePath)) {
-      _selectedExamplePath = audio.first.path;
+      _selectedExampleId = null;
+    } else if (!audio.any((m) => m.id == _selectedExampleId)) {
+      _selectedExampleId = audio.first.id;
     }
-    if (_selectedExamplePath != before) {
+    if (_selectedExampleId != before) {
       // The reference example changed — drop the practice take, matching selectExample.
       _resetToReferenceSubject();
     }

@@ -302,7 +302,7 @@ void main() {
     // reachable under the new one.
     expect(vm.referenceMedia!.id, recorded.id);
     expect(vm.referenceMedia!.path, isNot(recorded.path));
-    expect(vm.expandedExamplePath, vm.referenceMedia!.path);
+    expect(vm.expandedExampleId, vm.referenceMedia!.id);
     expect(identical(vm.referenceAnalysis, computed), isTrue);
     await vm.ensureReferenceAnalysis();
     expect(analysis.analyzeCalls, analyzeCallsBeforeSave);

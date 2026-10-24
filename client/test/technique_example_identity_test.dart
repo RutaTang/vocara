@@ -1,18 +1,24 @@
-// How a technique's examples are named once they cross the sandbox →
-// asset-pool hand-off, end to end on the real drift repository.
+// How a technique's examples are named and told apart once they cross the
+// sandbox → asset-pool hand-off, end to end on the real drift repository.
 //
-// An imported clip is copied into the sandbox under a generated id and
+// Names: an imported clip is copied into the sandbox under a generated id and
 // pooled under its content hash, and an uncaptioned example falls back to its
 // file's basename — so a dropped "My Twang Demo.wav" read as
 // "01M5Q7…T68.wav" while staged and as a 64-hex hash once saved.
+//
+// Identity: two examples with identical bytes resolve to the SAME pooled file.
+// Selection and expansion were keyed by path, so both cards opened with the
+// analysis panel and a playhead-linked player, and the second example could
+// never be selected on its own.
 
 import 'dart:io';
 
 import 'package:drift/native.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:forui/forui.dart';
 import 'package:path/path.dart' as p;
+import 'package:provider/provider.dart';
 import 'package:vocara/data/db/app_database.dart';
 import 'package:vocara/data/db/asset_store.dart';
 import 'package:vocara/data/repositories/technique_repository_drift.dart';
@@ -24,7 +30,10 @@ import 'package:vocara/data/sync/hlc.dart';
 import 'package:vocara/data/sync/sync_writer.dart';
 import 'package:vocara/domain/models/technique.dart';
 import 'package:vocara/domain/models/technique_analysis.dart';
+import 'package:vocara/domain/models/technique_media.dart';
 import 'package:vocara/ui/technique_library/view_model/technique_detail_view_model.dart';
+import 'package:vocara/ui/technique_library/widgets/technique_analysis_section.dart';
+import 'package:vocara/ui/technique_library/widgets/technique_detail_screen.dart';
 import 'package:vocara/utils/id.dart';
 import 'package:vocara/utils/result.dart';
 
@@ -198,5 +207,65 @@ void main() {
       'Recording 2',
       'Recording 3',
     ]);
+  });
+
+  testWidgets('two byte-identical examples open and select independently', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1200, 2600);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    final ids = [newId(), newId()];
+    late TechniqueDetailViewModel vm;
+    await tester.runAsync(() async {
+      final now = DateTime(2026, 7);
+      final current =
+          (await repo.getTechnique(techniqueId) as Ok<Technique>).value;
+      await repo.saveTechnique(
+        current.copyWith(
+          media: [
+            for (final (i, id) in ids.indexed)
+              TechniqueMedia(
+                id: id,
+                path: await source('take $i.wav', [9, 9, 9]),
+                kind: TechniqueMediaKind.audio,
+                label: 'Take $i',
+                addedAt: now,
+              ),
+          ],
+        ),
+      );
+      vm = newVm();
+      await loaded(vm);
+    });
+    // The pool dedups identical bytes: one file, two examples.
+    expect(vm.technique!.media.map((m) => m.path).toSet(), hasLength(1));
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ChangeNotifierProvider.value(
+          value: vm,
+          child: const TechniqueDetailScreen(),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(
+      find.byType(TechniqueExampleAnalysis),
+      findsOneWidget,
+      reason: 'only the selected example shows its analysis',
+    );
+    expect(vm.referenceMedia!.id, ids[0]);
+
+    // Expanding the second card selects IT, not the first sharing its file.
+    await tester.tap(find.byIcon(FIcons.chevronDown).last);
+    await tester.pump();
+    expect(vm.referenceMedia!.id, ids[1]);
+    expect(find.byType(TechniqueExampleAnalysis), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox());
+    vm.dispose();
   });
 }

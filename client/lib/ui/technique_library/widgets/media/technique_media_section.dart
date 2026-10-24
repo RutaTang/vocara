@@ -28,10 +28,10 @@ class TechniqueMediaSection extends StatelessWidget {
     this.savingRecording = false,
     this.canRecord = true,
     this.recordLevel,
-    this.analyzedPath,
+    this.analyzedId,
     this.onPlaybackPosition,
     this.analysisScrub,
-    this.expandedPath,
+    this.expandedId,
     this.onToggleExpand,
     this.analysisBuilder,
     this.liveMonitor = false,
@@ -44,19 +44,22 @@ class TechniqueMediaSection extends StatelessWidget {
   final ValueChanged<List<String>> onAddPaths;
   final ValueChanged<String> onRemove;
 
-  /// Path of the example whose analysis is currently shown: its inline player
-  /// drives the analysis playhead so the spectrogram follows along as it plays.
-  final String? analyzedPath;
+  /// Media id of the example whose analysis is currently shown: its inline
+  /// player drives the analysis playhead so the spectrogram follows along as
+  /// it plays. An id, not a path: byte-identical examples share one pooled
+  /// file, and a path matched every one of them.
+  final String? analyzedId;
   final ValueChanged<Duration>? onPlaybackPosition;
 
   /// Pushes analysis-scrub times into the analyzed clip's player so scrubbing
   /// the spectrogram also moves playback (bidirectional sync).
   final ValueListenable<Duration>? analysisScrub;
 
-  /// Path of the example whose inline analysis is expanded (accordion), or null.
-  final String? expandedPath;
+  /// Media id of the example whose inline analysis is expanded (accordion),
+  /// or null.
+  final String? expandedId;
 
-  /// Toggles a card's inline analysis open/closed.
+  /// Toggles a card's inline analysis open/closed (called with its media id).
   final ValueChanged<String>? onToggleExpand;
 
   /// Builds the analysis panel shown inside the expanded card (and, while
@@ -145,17 +148,17 @@ class TechniqueMediaSection extends StatelessWidget {
             onRename: (label) => onRename(m.id, label),
             // Only the analyzed clip's player is linked to the analysis playhead
             // (both directions).
-            onPosition: m.path == analyzedPath ? onPlaybackPosition : null,
-            seekSignal: m.path == analyzedPath ? analysisScrub : null,
+            onPosition: m.id == analyzedId ? onPlaybackPosition : null,
+            seekSignal: m.id == analyzedId ? analysisScrub : null,
             // Pair each audio example with a collapsible analysis. While
             // recording an example the live preview shows under the record
             // control instead, so the card's static analysis is hidden then.
             canExpand: !m.isVideo && analysisBuilder != null,
-            expanded: m.path == expandedPath,
+            expanded: m.id == expandedId,
             onToggleExpand: onToggleExpand == null
                 ? null
-                : () => onToggleExpand!(m.path),
-            analysis: m.path == expandedPath && (!liveMonitor || !editable)
+                : () => onToggleExpand!(m.id),
+            analysis: m.id == expandedId && (!liveMonitor || !editable)
                 ? analysisBuilder?.call()
                 : null,
           ),
