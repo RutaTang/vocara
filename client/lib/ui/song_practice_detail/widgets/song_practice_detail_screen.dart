@@ -387,12 +387,23 @@ class _WorkspaceState extends State<_Workspace> {
         DetailTransportBar(
           vm: vm,
           practice: practice,
-          // context.go replaces the route imperatively and does NOT fire the
-          // PopScope, so finalize an in-flight recording here too — otherwise
-          // the in-app back arrow would drop the take the PopScope protects.
+          // A programmatic pop (or go) is not vetoed by the PopScope, so
+          // finalize an in-flight recording here too — otherwise the in-app
+          // back arrow would drop the take the PopScope protects.
+          //
+          // Pop, never go, when Home pushed this route: Home awaits that push
+          // to reload its list and release its open guard, and go_router
+          // completes a push future only on pop — after a go(home), every
+          // later card tap was silently ignored. go is only the fallback for
+          // a deep link, where nothing lies beneath to pop to.
           onBack: () async {
             if (vm.isRecording) await vm.stopRecording();
-            if (context.mounted) context.go(Routes.home);
+            if (!context.mounted) return;
+            if (context.canPop()) {
+              context.pop();
+            } else {
+              context.go(Routes.home);
+            }
           },
         ),
         Expanded(
