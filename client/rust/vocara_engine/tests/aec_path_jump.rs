@@ -2,29 +2,32 @@
 //!
 //! A sudden loudspeaker/room gain INCREASE leaves the AEC's tracked path model (gxx) stale
 //! and under-predicting the now-louder echo. The shaped near-end test then trips every block
-//! (any `nearend_ratio` above ~(NEAREND_TRIP+1)/2 = 2 does), re-arms the double-talk hangover
-//! indefinitely, and freezes adaptation PERMANENTLY: gxx only refreshes under far-only
-//! evidence, which requires `hang == 0`. The breaker must detect that pinned-hangover +
-//! high-coherence signature and re-seed the model.
+//! (any `nearend_ratio` above the hangover's arming point, (NEAREND_FULL_STEP+NEAREND_TRIP)/2
+//! = 2.5, does), re-arms the double-talk hangover indefinitely, and freezes adaptation
+//! PERMANENTLY: gxx only refreshes under far-only evidence, which requires `hang == 0`. The
+//! breaker must detect that pinned-hangover + high-coherence signature and re-seed the model.
 //!
-//! The ORIGINAL breaker armed only on `nearend_ratio > NEAREND_TRIP` (3.0) with a
+//! The ORIGINAL breaker armed only on `nearend_ratio > NEAREND_TRIP` with a
 //! reset-to-zero-on-miss debounce, so:
-//!   * a jump whose post-jump ratio lands in the (2, 3] band froze forever and could NEVER
-//!     arm the breaker (the dead band), and
+//!   * a jump whose post-jump ratio lands between the arming point and the trip ((2.5, 3.5]
+//!     today) froze forever and could NEVER arm the breaker (the dead band), and
 //!   * on non-stationary material a single below-trip block reset the 96-consecutive-blocks
 //!     debounce, starving the breaker even above the trip.
 //!
 //! These tests pin the reworked arming (hangover held + mic coherent with the echo estimate,
 //! drain-on-miss debounce): the deadlock must engage, the breaker must fire, and ERLE must
-//! recover — for a power jump INSIDE the old dead band (2.5x) and above it (4x) — while
-//! genuine double-talk must never fire it.
+//! recover — for a power jump INSIDE the old dead band (4x) and above it (6x) — while
+//! genuine double-talk must never fire it. A smaller jump no longer deadlocks at all: up to
+//! ~3x the shaped ratio stays under the arming point, far-only gxx updates keep landing, and
+//! the model and filter simply re-converge (a 2.5x jump measures ~30 dB ERLE over the
+//! 0.1-0.5 s after it, where the old tuning sat frozen at ~9 dB until the breaker fired).
 //!
 //! The far-end is a MULTITONE with one tone per (bin-aligned) FFT bin: per-bin block powers
-//! are then stable, so the per-bin gxx ratio tracking is unbiased and the post-jump
-//! nearend_ratio sits predictably at ~jump/1.2 (one far-only gxx step slips in before the
-//! hangover pins). White noise would NOT reproduce the deadlock: its per-bin power jitter
-//! biases gxx high (mean-of-ratios), the ratio never reaches the trip band, and the filter
-//! just re-adapts — verified while building this harness.
+//! are stable, so the post-jump nearend_ratio sits at a predictable level: the jump, less
+//! the far-only gxx updates that slip in before the hangover pins (measured: 4x reads ~2.8,
+//! 6x ~4.8). White noise would not have reproduced the deadlock under the old mean-of-ratios
+//! gxx: its per-bin power jitter biased gxx high, the ratio never reached the trip band, and
+//! the filter just re-adapted; the ratio-of-averages model is calibrated on any material.
 
 use vocara_engine::aec::Aec;
 
@@ -127,7 +130,7 @@ fn erle_db(mic: &[f32], out: &[f32], lo: usize, hi: usize) -> f64 {
 }
 
 /// Converge on the multitone through a synthetic echo path, then multiply the echo-path gain
-/// by `power_jump` (in POWER; post-jump `nearend_ratio` reads ~power_jump/1.2). Asserts, in
+/// by `power_jump` (in POWER; see the module docs for where the ratio lands). Asserts, in
 /// order: no false fire during convergence; the deadlock genuinely ENGAGES (ERLE stuck at the
 /// frozen-filter level right after the jump); the breaker fires within ~1 s; and ERLE
 /// recovers to a sane converged level within 1.5 s of the jump (measured over the following
@@ -211,29 +214,29 @@ fn run_path_jump(power_jump: f32, max_frozen_erle_db: f64) {
     }
 }
 
-/// A 2.5x POWER jump lands the post-jump nearend_ratio at ~2.05 — INSIDE the old (2, 3] dead
+/// A 4x POWER jump lands the post-jump nearend_ratio at ~2.8 — INSIDE the (2.5, 3.5] dead
 /// band where the original `nearend_ratio > NEAREND_TRIP` arming could never fire and the
-/// freeze was permanent (this is the discriminating regression case: the pre-fix breaker
-/// leaves ERLE stuck at ~9.5 dB forever here). Frozen-filter ERLE is
-/// 10*log10(2.5/(sqrt(2.5)-1)^2) ~ 8.9 dB; the engage-check bound sits just above it.
+/// freeze was permanent (this is the discriminating regression case for that breaker).
+/// Frozen-filter ERLE is 10*log10(4/(sqrt(4)-1)^2) ~ 6 dB; the engage-check bound sits just
+/// above it.
 #[test]
 fn path_gain_jump_in_old_dead_band_recovers() {
-    run_path_jump(2.5, 11.0);
+    run_path_jump(4.0, 9.0);
 }
 
-/// A 4x POWER jump (post-jump ratio ~3.3, above the old trip) must also recover — this
-/// covers the general mechanism including the drain-on-miss debounce. Frozen-filter ERLE is
-/// 10*log10(4) ~ 6 dB.
+/// A 6x POWER jump (post-jump ratio ~4.8, above the trip) must also recover — this covers the
+/// general mechanism including the drain-on-miss debounce. Frozen-filter ERLE is
+/// 10*log10(6/(sqrt(6)-1)^2) ~ 4.6 dB.
 #[test]
 fn path_gain_jump_above_trip_recovers() {
-    run_path_jump(4.0, 9.0);
+    run_path_jump(6.0, 7.5);
 }
 
 /// Genuine double-talk — an INDEPENDENT near-end voice with NO path change — must never fire
 /// the breaker, and adaptation must stay frozen so the voice survives at full level. The
-/// voice power is ~1.5x the echo, putting nearend_ratio at ~2.5: squarely in the
-/// hangover-pinning band the breaker watches (verified: hang stays pinned at 30 during the
-/// pulses). It is PULSED (~250 ms on / ~150 ms off, gaps shorter than the hangover) — the
+/// voice power is ~1.7x the echo, putting nearend_ratio at ~2.7: squarely in the
+/// hangover-pinning band the breaker watches (verified: the hangover is held on 234 of the 236
+/// voiced blocks). It is PULSED (~250 ms on / ~150 ms off, gaps shorter than the hangover) — the
 /// adversarial case for a false fire, because the hangover stays armed across the gaps while
 /// the smoothed coherence recovers between phrases; the voiced blocks' depressed coherence
 /// must drain the streak faster than those gap tails can build it.
@@ -257,7 +260,7 @@ fn double_talk_does_not_fire_breaker() {
         let blk = (n - conv_len) / BLOCK;
         if blk % 75 < 47 {
             let t = n as f32 / sr;
-            *v = 0.8 * (two_pi * 330.0 * t).sin();
+            *v = 0.9 * (two_pi * 330.0 * t).sin();
         }
     }
     let mic: Vec<f32> = (0..total).map(|n| echo[n] + voice[n]).collect();

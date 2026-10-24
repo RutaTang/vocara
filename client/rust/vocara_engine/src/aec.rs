@@ -271,14 +271,37 @@ const COH_LO: f32 = 0.40;
 /// momentary double-talk can satisfy them; gain tracking must be tighter than the gate it feeds,
 /// otherwise voice energy in `p_mic` over-estimates the gain and desensitizes the Geigel test.
 const COH_GAIN: f32 = 0.85;
-/// Per-bin echo-path power-gain smoothing (leaky, updated only on confirmed far-only blocks).
-/// Slow enough to be stable, fast enough to track a real (slowly drifting) speaker/room path.
+/// Smoothing of the per-bin mic and far-end power averages the echo-path gain `gxx` is the ratio
+/// of (leaky, updated only on confirmed far-only blocks). Slow enough to be stable, fast enough to
+/// track a real (slowly drifting) speaker/room path.
 const GXX_SMOOTH: f32 = 0.9;
-/// Mic/expected-echo power ratio (using the FREQUENCY-SHAPED gxx model) above which a block is
-/// taken as carrying genuine near-end voice and the hard freeze hangover is armed. Set above the
-/// residual ripple a chord change leaves in the shaped estimate (≈1.5-2x) but well below the ratio
-/// a real sung voice produces (typically >4x), so chord changes adapt through while voice freezes.
-const NEAREND_TRIP: f32 = 3.0;
+/// Mic/expected-echo power ratio (`nearend_ratio`, from the FREQUENCY-SHAPED gxx model) at or below
+/// which adaptation runs at the full step. The ratio is CALIBRATED — it reads ~1 on far-only audio
+/// whatever the material — so this only has to clear its far-only spread: measured on the
+/// synthetic bench (tests/aec_bench.rs) the 99th percentile is ~1.45 on harmonic music, dry or
+/// reverberant, and ~1.7 on drum-and-noise backing (90th ~1.4). A modestly louder echo path
+/// (+1.6 dB) mostly stays under it too, so the filter re-converges through a path change instead
+/// of stalling.
+const NEAREND_FULL_STEP: f32 = 1.5;
+/// `nearend_ratio` at which adaptation is frozen outright. The double-talk hangover arms halfway
+/// between this and NEAREND_FULL_STEP (2.5): a singer about 2 dB above the echo freezes the filter,
+/// one at the echo's level (ratio ~2) cuts the step by a quarter. Tuned on the bench: a lower trip
+/// (3.0) protects a 0 dB singer a little more but slows re-convergence after an echo-path change on
+/// noise-like backing by ~2.5 dB at 2-4 s; a higher one gives the voice protection back. The old
+/// trip of 3.0 sat on a ratio that the old mean-of-ratios gxx biased LOW by ~3-11x depending on the
+/// material, i.e. it effectively armed at ~7-22x; see `gxx`.
+const NEAREND_TRIP: f32 = 3.5;
+/// Freeze point used while the path model is YOUNG, decaying linearly to NEAREND_TRIP over
+/// GXX_MATURE_BLOCKS far-only updates after it was (re-)seeded. A model fitted on the first chord
+/// or two has only measured the path at those partials; through a room with fine spectral structure
+/// (a reverberant path fades over tens of Hz, far inside one 94 Hz bin) the next chord's partials
+/// can echo 2-3x louder than it predicts, which reads as double-talk and froze the cold start
+/// chord after chord (on the reverberant path of the unit tests below, the first ~2 s of a take
+/// lost 2.5-5 dB of ERLE). Once the model has seen enough far-only material the full sensitivity
+/// applies.
+const NEAREND_TRIP_YOUNG: f32 = 6.0;
+/// Far-only gxx updates (~1.1 s of confirmed far-only audio) until the path model counts as mature.
+const GXX_MATURE_BLOCKS: u32 = 200;
 /// Floor on the secondary (rho*coh) throttle post-convergence. The rho/coh terms collapse on ANY
 /// foreground residual spike — including a far-only chord change, which is NOT near-end. This floor
 /// keeps a usable trickle of adaptation alive through such spikes so the filter re-converges, while
@@ -317,17 +340,18 @@ const BOOTSTRAP_IGNITE: f32 = 0.30;
 /// breath between phrases or a consonant transient doesn't immediately resume fast adaptation.
 const HANG_BLOCKS: u32 = 30;
 /// Accumulated blocks of the "echo-path GAIN INCREASE" signature — the double-talk hangover held
-/// armed (the shaped near-end test keeps re-tripping it, which covers EVERY deadlocked ratio
-/// above ~(NEAREND_TRIP+1)/2, not just ratio > NEAREND_TRIP) while the mic stays highly coherent
-/// with the echo estimate (coh > COH_GAIN) — before we conclude the path model is stale and
-/// re-seed it. That signature is unreachable by near-end voice (voice loud enough to hold the
-/// hangover necessarily DEPRESSES coherence; see the breaker below). The streak DRAINS on a miss
-/// (saturating_sub(2)) instead of resetting to 0, so non-stationary (rhythmic) material — whose
-/// pauses and level dips briefly drop far_active or the ratio — cannot postpone the breaker
-/// forever, while real voice still can't reach it: each phrase contributes at most HANG_BLOCKS of
-/// post-phrase high-coherence tail and the voiced blocks themselves (depressed coherence) drain
-/// the streak twice as fast as the tail builds it. The deadlock it breaks is otherwise PERMANENT,
-/// so a ~0.5 s confirmation costs only a little residual echo (~0.5 s @ 48 kHz / 256 blocks).
+/// armed (the shaped near-end test keeps re-tripping it, which covers EVERY deadlocked ratio above
+/// the hangover's arming point (NEAREND_FULL_STEP+NEAREND_TRIP)/2, not just ratio > NEAREND_TRIP)
+/// while the mic stays highly coherent with the echo estimate (coh > COH_GAIN) — before we conclude
+/// the path model is stale and re-seed it. That signature is unreachable by near-end voice (voice
+/// loud enough to hold the hangover necessarily DEPRESSES coherence; see the breaker below). The
+/// streak DRAINS on a miss (saturating_sub(2)) instead of resetting to 0, so non-stationary
+/// (rhythmic) material — whose pauses and level dips briefly drop far_active or the ratio — cannot
+/// postpone the breaker forever, while real voice still can't reach it: each phrase contributes at
+/// most HANG_BLOCKS of post-phrase high-coherence tail and the voiced blocks themselves (depressed
+/// coherence) drain the streak twice as fast as the tail builds it. The deadlock it breaks is
+/// otherwise PERMANENT, so a ~0.5 s confirmation (96 blocks of 256 at 48 kHz) costs only a little
+/// residual echo.
 const PATH_CHANGE_HOLD: u32 = 96;
 /// Gate attack smoothing toward a *lower* target (freeze). 1.0 => freeze within one block.
 const GATE_ATTACK: f32 = 1.0;
@@ -383,10 +407,10 @@ const DIV_RESET_HOLD: u32 = 64;
 // thin the voice a little — precisely the VPIO "voice tiny and choppy" failure — so it is kept off.
 //
 // When enabled it is a STRUCTURALLY voice-safe lever: a per-bin magnitude Wiener gain driven by the
-// FREQUENCY-SHAPED, FILTER-INDEPENDENT echo-power estimate `gxx[k]*|X_now[k]|^2` (same path model
+// FREQUENCY-SHAPED, FILTER-INDEPENDENT echo-power estimate `gxx[k]*x_ref[k]` (same path model
 // the DTD uses) versus the known mic power `|D[k]|^2`:
 //
-//     gain[k] = max(FLOOR, 1 - OVER * echo_pow[k] / |D[k]|^2),  echo_pow = max(gxx*|X|^2, |Y_fg|^2)
+//     gain[k] = max(FLOOR, 1 - OVER * echo_pow[k] / |D[k]|^2),  echo_pow = max(gxx*x_ref, |Y_fg|^2)
 //
 //   * In a VOICE-dominated bin, echo_pow/|D|^2 → 0 (the echo model, built only from the reference,
 //     cannot explain voice energy), so gain ≈ 1 and the voice passes ~untouched.
@@ -419,7 +443,7 @@ const SUPPRESS_OVER: f32 = 1.4;
 /// (the "choppiness" the user reported). Smoothing the gain trajectory keeps the voice continuous.
 const SUPPRESS_SMOOTH: f32 = 0.85;
 /// Near-end-dominance bypass: if the block's mic power exceeds the SHAPED-model expected echo power
-/// (sum_k gxx[k]*|X_now[k]|^2) by more than this factor, the block is voice-dominated and the
+/// (sum_k gxx[k]*x_ref[k]) by more than this factor, the block is voice-dominated and the
 /// suppressor is pinned to unity (no attenuation at all). The block-level backstop to the per-bin
 /// floor: when the singer is clearly louder than any predicted backing, the output is the mic,
 /// untouched. Set conservatively LOW (≈3 dB) so any clearly-audible singing reliably bypasses —
@@ -486,24 +510,50 @@ pub struct Aec {
     // Wiener gain rather than a coherence approximation.
     yh_pow: Box<[f32]>, // length half: |Y_fg[k]|^2 of the current block's echo estimate
 
-    // ---- per-bin echo-path POWER gain, gxx[k] ≈ E[|D_echo[k]|^2] / E[|X[k]|^2] ----
-    // Tracked (leaky) ONLY during confirmed far-only blocks. This is the frequency-SHAPED echo
-    // model: unlike the scalar `echo_gain`, it captures that the speaker/room path is louder in
-    // some bands than others. Two things rely on it, and both need the frequency shape to be
-    // robust against a moving harmony (a chord change moves far-end energy between bands; a flat
-    // gain then mis-predicts the new chord's echo and looks like near-end, which is exactly the
-    // bug that stranded the filter frozen on music):
-    //   * the near-end (double-talk) test: expected echo = sum_k gxx[k]*|X[k]|^2; voice shows up
+    // ---- per-bin echo-path POWER gain, gxx[k] = E[|D_echo[k]|^2] / E[x_ref[k]] ----
+    // This is the frequency-SHAPED echo model: unlike the scalar `echo_gain`, it captures that the
+    // speaker/room path is louder in some bands than others. Two things rely on it, and both need
+    // the frequency shape to be robust against a moving harmony (a chord change moves far-end
+    // energy between bands; a flat gain then mis-predicts the new chord's echo and looks like
+    // near-end, which is exactly the bug that stranded the filter frozen on music):
+    //   * the near-end (double-talk) test: expected echo = sum_k gxx[k]*x_ref[k]; voice shows up
     //     as mic energy ABOVE this, a chord change does not;
-    //   * the residual suppressor: per-bin expected echo power = gxx[k]*|X[k]|^2.
+    //   * the residual suppressor: per-bin expected echo power = gxx[k]*x_ref[k].
+    //
+    // It is the RATIO OF LEAKY AVERAGES gxx_dd/gxx_xx, both tracked ONLY during confirmed far-only
+    // blocks — never a leaky average of the per-block ratio |D|^2/|X|^2. The mean of a ratio is
+    // biased high by E[|X|^2]*E[1/|X|^2]: small on a steady tone stack, but a fluctuating bin power
+    // (any noise-like or non-stationary backing) inflates it without bound, and the far-end frame
+    // not lining up with the echo it produced (the round trip is several blocks) inflates it more.
+    // Measured: far-only nearend_ratio read ~0.2 on music and ~0.09 on drum-and-noise backing
+    // instead of ~1, so the singer had to be ~10-20x the echo power before the detector saw them
+    // at all, and the filter kept adapting into the voice.
     gxx: Box<[f32]>, // length half
+    /// Leaky per-bin averages of |D[k]|^2 and x_ref[k] over confirmed far-only blocks; gxx is
+    /// their ratio.
+    gxx_dd: Box<[f32]>, // length half
+    gxx_xx: Box<[f32]>, // length half
     /// True once gxx has been seeded from at least one confirmed far-only block.
     gxx_valid: bool,
+    /// Far-only updates gxx has absorbed since it was (re-)seeded, saturating at
+    /// GXX_MATURE_BLOCKS: how far the young-model leniency (NEAREND_TRIP_YOUNG) has decayed.
+    gxx_age: u32,
     /// Per-bin mic power |D[k]|^2 for the current block ([mic_prev|mic_cur] framing), computed
     /// once per block and shared by the near-end test, gxx tracking, and the suppressor.
     d_pow: Box<[f32]>, // length half
-    /// Per-bin current far-end power |X_now[k]|^2 ([far_prev|far_cur] framing), shared likewise.
+    /// Per-bin current far-end power |X_now[k]|^2 ([far_prev|far_cur] framing).
     x_pow_now: Box<[f32]>, // length half
+    /// Per-bin far-end power the CURRENT mic block's echo was made from: the far-end delay line's
+    /// |X_p[k]|^2 weighted by the share of the foreground filter's energy in partition p. The
+    /// echo in this mic block left the speaker a round trip ago (several blocks), so comparing it
+    /// against |X_now|^2 mis-predicts every transient and every beating partial — a drum hit is
+    /// "expected" blocks before it echoes, then echoes into a block that expects nothing. Weighting
+    /// by where the filter has put its energy aligns the far-end power with the echo it produced
+    /// without depending on how well the filter has converged in level (gxx sets the level).
+    /// Falls back to |X_now|^2 while the filter is still all zero.
+    x_ref: Box<[f32]>, // length half
+    /// Scratch: the foreground filter's energy per partition (length parts), for `x_ref`.
+    part_pow: Box<[f32]>,
 
     // ---- input/output rings: decouple arbitrary call length from the fixed block engine ----
     in_mic: Box<[f32]>, // length B accumulator
@@ -599,9 +649,14 @@ impl Aec {
 
             yh_pow: zeros(half),
             gxx: zeros(half),
+            gxx_dd: zeros(half),
+            gxx_xx: zeros(half),
             gxx_valid: false,
+            gxx_age: 0,
             d_pow: zeros(half),
             x_pow_now: zeros(half),
+            x_ref: zeros(half),
+            part_pow: zeros(parts),
 
             in_mic: zeros(block),
             in_far: zeros(block),
@@ -707,14 +762,14 @@ impl Aec {
         for v in self.yh_pow.iter_mut() {
             *v = 0.0;
         }
-        for v in self.gxx.iter_mut() {
-            *v = 0.0;
-        }
-        self.gxx_valid = false;
+        self.clear_path_model();
         for v in self.d_pow.iter_mut() {
             *v = 0.0;
         }
         for v in self.x_pow_now.iter_mut() {
+            *v = 0.0;
+        }
+        for v in self.x_ref.iter_mut() {
             *v = 0.0;
         }
         for v in self.out_ring.iter_mut() {
@@ -813,6 +868,7 @@ impl Aec {
             let xi = self.fr_im[k];
             self.x_pow_now[k] = xr * xr + xi * xi;
         }
+        self.update_far_ref();
         // Save current far block as the next overlap-save history.
         self.far_prev.copy_from_slice(&self.in_far[..b]);
 
@@ -978,32 +1034,25 @@ impl Aec {
                 self.echo_gain = leaky(self.echo_gain, inst_gain, 0.97);
             }
 
-            // Track the per-bin echo-path power gain gxx[k] = |D[k]|^2 / |X[k]|^2 from this
-            // confirmed far-only block. This is the FREQUENCY-SHAPED echo model that makes the
-            // near-end test and the suppressor robust to chord changes (see the `gxx` field docs).
-            // Only updated under the same STRICT far-only evidence that gates `echo_gain`, so voice
-            // can never contaminate the path model.
-            for k in 0..self.half {
-                let inst = self.d_pow[k] / (self.x_pow_now[k] + REG_ABS);
-                if self.gxx_valid {
-                    self.gxx[k] = leaky(self.gxx[k], inst, GXX_SMOOTH);
-                } else {
-                    self.gxx[k] = inst; // seed directly (avoid a chronic under-estimate)
-                }
-            }
-            self.gxx_valid = true;
+            // Fold this confirmed far-only block into the per-bin echo-path power gain gxx (see the
+            // `gxx` field docs). This is the FREQUENCY-SHAPED echo model that makes the near-end
+            // test and the suppressor robust to chord changes. Only updated under the same STRICT
+            // far-only evidence that gates `echo_gain`, so voice can never contaminate the path
+            // model. The first block seeds it directly (avoid a chronic under-estimate).
+            self.track_path_model(!self.gxx_valid);
         }
 
         // Frequency-shaped near-end (double-talk) measure: compare the actual mic power against the
-        // echo power the SHAPED path model predicts for the current reference,
-        //   expected = sum_k gxx[k] * |X_now[k]|^2,   nearend_ratio = p_mic_block / expected.
+        // echo power the SHAPED path model predicts for the far-end that made it,
+        //   expected = sum_k gxx[k] * x_ref[k],   nearend_ratio = p_mic_block / expected.
         // A chord change merely moves far-end energy between bands the model already knows, so it
         // does NOT inflate this ratio; genuine voice adds energy the reference cannot explain, so it
-        // does. This replaces the flat-scalar Geigel test that a chord change used to fool.
+        // does. This replaces the flat-scalar Geigel test that a chord change used to fool. With
+        // gxx a ratio of averages it is CALIBRATED: ~1 on far-only audio of any kind.
         let mut shaped_expected = 0.0f64;
         let mut mic_block_pow = 0.0f64;
         for k in 0..self.half {
-            shaped_expected += (self.gxx[k] * self.x_pow_now[k]) as f64;
+            shaped_expected += (self.gxx[k] * self.x_ref[k]) as f64;
             mic_block_pow += self.d_pow[k] as f64;
         }
         let nearend_ratio = if self.gxx_valid {
@@ -1023,33 +1072,33 @@ impl Aec {
         // ----- Path-change deadlock breaker (sudden echo-path GAIN INCREASE) -----
         // A sudden loudspeaker/room gain INCREASE leaves the tracked path model (gxx) stale and
         // UNDER-predicting the now-louder echo, so the shaped near-end test trips (ANY
-        // nearend_ratio above ~(NEAREND_TRIP+1)/2 does), re-arms the hangover every block, and
-        // pins the gate at 0 indefinitely. Every normal recovery path is blocked: gxx only
-        // refreshes inside far_only_evidence (needs hang == 0, which the pinned hangover never
-        // grants, and rho < RHO_LO); the divergence guard needs rho > DIV_RATIO, far above a
-        // stale under-cancelling filter's residual ((F-1)^2/F^2 < 1 for any gain jump F). (A
-        // gain DECREASE self-corrects — the model then OVER-predicts, nearend_ratio < 1, the
-        // gate reopens — so only an INCREASE deadlocks.)
+        // nearend_ratio above the arming point (NEAREND_FULL_STEP+NEAREND_TRIP)/2 does), re-arms
+        // the hangover every block, and pins the gate at 0 indefinitely. Every normal recovery path
+        // is blocked: gxx only refreshes inside far_only_evidence (needs hang == 0, which the
+        // pinned hangover never grants, and rho < RHO_LO); the divergence guard needs rho >
+        // DIV_RATIO, far above a stale under-cancelling filter's residual ((F-1)^2/F^2 < 1 for any
+        // gain jump F). (A gain DECREASE self-corrects — the model then OVER-predicts,
+        // nearend_ratio < 1, the gate reopens — so only an INCREASE deadlocks.)
         //
         // The tell that this is a louder PURE ECHO and not near-end voice: the mic stays highly
         // COHERENT with the filter's echo estimate (coh ~ 1 — a scaled echo is still a scaled
-        // echo), whereas voice adds energy UNCORRELATED with the estimate and necessarily
-        // DEPRESSES coh (unexplained energy strong enough to hold the hangover pushes coh to
-        // ~1/ratio < 1/2, far under COH_GAIN). So "hangover held AND coh > COH_GAIN" can ONLY be
-        // a stale-model path increase — and, unlike arming on nearend_ratio > NEAREND_TRIP, it
-        // covers the WHOLE deadlocked band, including ratios in ((NEAREND_TRIP+1)/2, NEAREND_TRIP]
-        // that freeze the gate but could never reach a trip-level arming test. (And gxx is a
-        // per-bin power RATIO, so a merely louder BACKING at the SAME path leaves it unchanged —
-        // only a louder PATH trips this.) The signature must ACCUMULATE across many blocks before
-        // firing; a miss DRAINS the streak (saturating_sub(2)) rather than resetting it, so the
-        // pauses/dips of real (rhythmic) far-end material cannot postpone the breaker forever,
-        // while genuine voice — whose depressed coherence makes every voiced block a miss —
-        // drains it faster than the bounded (<= HANG_BLOCKS) post-phrase hangover tail can build
-        // it. On firing we re-seed the stale path model from the current (confirmed pure-echo)
-        // block and drop back to the cold-start bootstrap so adaptation re-ignites and
-        // re-converges to the new path. Voice-safe: the reused bootstrap gate is the SAME
-        // coherence-ramp voice protection used at cold start, and the high-coherence guard above
-        // already excludes any real near-end on the re-seed block itself.
+        // echo), whereas voice adds energy UNCORRELATED with the estimate and necessarily DEPRESSES
+        // coh (unexplained energy strong enough to hold the hangover pushes coh to ~1/ratio < 1/2,
+        // far under COH_GAIN). So "hangover held AND coh > COH_GAIN" can ONLY be a stale-model path
+        // increase — and, unlike arming on nearend_ratio > NEAREND_TRIP, it covers the WHOLE
+        // deadlocked band, including ratios between the arming point and NEAREND_TRIP that freeze
+        // the gate but could never reach a trip-level arming test. (And gxx is a per-bin power
+        // RATIO, so a merely louder BACKING at the SAME path leaves it unchanged — only a louder
+        // PATH trips this.) The signature must ACCUMULATE across many blocks before firing; a miss
+        // DRAINS the streak (saturating_sub(2)) rather than resetting it, so the pauses/dips of
+        // real (rhythmic) far-end material cannot postpone the breaker forever, while genuine voice
+        // — whose depressed coherence makes every voiced block a miss — drains it faster than the
+        // bounded (<= HANG_BLOCKS) post-phrase hangover tail can build it. On firing we re-seed the
+        // stale path model from the current (confirmed pure-echo) block and drop back to the
+        // cold-start bootstrap so adaptation re-ignites and re-converges to the new path.
+        // Voice-safe: the reused bootstrap gate is the SAME coherence-ramp voice protection used at
+        // cold start, and the high-coherence guard above already excludes any real near-end on the
+        // re-seed block itself.
         let path_change_freeze = self.converged && far_active && self.hang > 0 && coh > COH_GAIN;
         if path_change_freeze {
             self.path_change_streak = self.path_change_streak.saturating_add(1);
@@ -1061,11 +1110,9 @@ impl Aec {
             // seed the far_only_evidence path uses on a cold model, forced through here to break the
             // stale-model chicken-and-egg (far_only_evidence itself cannot run because rho is above
             // RHO_LO). The block is confirmed high-coherence pure echo, so d_pow IS the true echo
-            // power for x_pow_now.
-            for k in 0..self.half {
-                self.gxx[k] = self.d_pow[k] / (self.x_pow_now[k] + REG_ABS);
-            }
-            self.gxx_valid = true;
+            // power for x_ref. (A one-block seed is the least reliable model there is, so the
+            // young-model leniency restarts with it.)
+            self.track_path_model(true);
             // Drop to cold bootstrap so the (now high-coherence) gate reopens and the filter
             // re-converges to the louder path; echo_gain re-tracks upward under far_only_evidence.
             self.converged = false;
@@ -1113,9 +1160,14 @@ impl Aec {
         } else {
             // FREQUENCY-SHAPED Geigel: how much the mic exceeds the echo the shaped path model
             // predicts for the current reference. Robust to chord changes (see `nearend_ratio`).
-            // This is now the PRIMARY adaptation gate post-convergence: it is the filter-independent
-            // near-end detector, so it (and only it) decides whether the voice is present.
-            let g_geigel = clamp01((NEAREND_TRIP - nearend_ratio) / (NEAREND_TRIP - 1.0));
+            // This is now the PRIMARY adaptation gate post-convergence: it is the near-end detector
+            // whose LEVEL does not depend on the filter (the filter only lends x_ref its timing),
+            // so it (and only it) decides whether the voice is present. Full step up to
+            // NEAREND_FULL_STEP, frozen at the trip, which starts lenient while the path model is
+            // young (see NEAREND_TRIP_YOUNG).
+            let young = 1.0 - self.gxx_age as f32 / GXX_MATURE_BLOCKS as f32;
+            let trip = NEAREND_TRIP + (NEAREND_TRIP_YOUNG - NEAREND_TRIP) * young;
+            let g_geigel = clamp01((trip - nearend_ratio) / (trip - NEAREND_FULL_STEP));
             let g_rho = clamp01((RHO_HI - rho) / (RHO_HI - RHO_LO));
             let g_coh = clamp01((coh - COH_LO) / (COH_HI - COH_LO));
             // rho/coh now only act as a SECONDARY throttle with a floor: they may slow adaptation
@@ -1129,7 +1181,8 @@ impl Aec {
             // POSITIVE near-end (double-talk) evidence — the only thing allowed to arm the hard
             // freeze hangover — comes ONLY from the FREQUENCY-SHAPED, FILTER-INDEPENDENT near-end
             // test: the mic carries clearly more energy than the SHAPED reference model can explain
-            // (g_geigel well below 1, i.e. nearend_ratio above ~halfway to NEAREND_TRIP).
+            // (g_geigel well below 1, i.e. nearend_ratio past the midpoint of its ramp: 2.5 once the
+            // path model is mature).
             //
             // Crucially we do NOT arm the hangover from the coherence/rho terms. Those collapse
             // whenever the foreground filter's residual spikes — and the dominant cause of a
@@ -1206,10 +1259,7 @@ impl Aec {
             // => gxx can never refresh, and the stale shaped near-end test pins the freeze (the
             // same deadlock mechanism the path-change breaker guards against). A give-up must
             // genuinely re-bootstrap from cold.
-            for v in self.gxx.iter_mut() {
-                *v = 0.0;
-            }
-            self.gxx_valid = false;
+            self.clear_path_model();
             self.echo_gain = 0.0;
             self.converged = false;
             self.hang = 0;
@@ -1333,8 +1383,86 @@ impl Aec {
     }
 
     // -------------------------------------------------------------------------------------
+    // Frequency-shaped echo-path model (gxx) and the far-end power it maps (x_ref).
+    // -------------------------------------------------------------------------------------
+
+    /// Recompute `x_ref` (see its field docs) from the far-end delay line, weighting each
+    /// partition's |X_p[k]|^2 by that partition's share of the foreground filter's energy.
+    /// Partitions holding a negligible share are skipped. O(parts * half), no allocation.
+    fn update_far_ref(&mut self) {
+        let half = self.half;
+        let parts = self.parts;
+        let mut total = 0.0f32;
+        for p in 0..parts {
+            let ws = p * half;
+            let mut e = 0.0f32;
+            for k in 0..half {
+                let wr = self.wfg_re[ws + k];
+                let wi = self.wfg_im[ws + k];
+                e += wr * wr + wi * wi;
+            }
+            self.part_pow[p] = e;
+            total += e;
+        }
+        if total <= EPS {
+            // Cold (all-zero) filter: no timing to borrow yet, use the current far-end frame.
+            self.x_ref.copy_from_slice(&self.x_pow_now);
+            return;
+        }
+        for v in self.x_ref.iter_mut() {
+            *v = 0.0;
+        }
+        let inv = 1.0 / total;
+        for p in 0..parts {
+            let w = self.part_pow[p] * inv;
+            if w < 1.0e-4 {
+                continue;
+            }
+            let xs = ((self.head + p) % parts) * half;
+            for k in 0..half {
+                let xr = self.x_re[xs + k];
+                let xi = self.x_im[xs + k];
+                self.x_ref[k] += w * (xr * xr + xi * xi);
+            }
+        }
+    }
+
+    /// Fold the current block — confirmed pure echo by the caller — into the path model:
+    /// gxx[k] = gxx_dd[k] / gxx_xx[k], a ratio of leaky averages. `seed` restarts both averages
+    /// from this block alone (and restarts the young-model leniency with them).
+    fn track_path_model(&mut self, seed: bool) {
+        for k in 0..self.half {
+            if seed {
+                self.gxx_dd[k] = self.d_pow[k];
+                self.gxx_xx[k] = self.x_ref[k];
+            } else {
+                self.gxx_dd[k] = leaky(self.gxx_dd[k], self.d_pow[k], GXX_SMOOTH);
+                self.gxx_xx[k] = leaky(self.gxx_xx[k], self.x_ref[k], GXX_SMOOTH);
+            }
+            self.gxx[k] = self.gxx_dd[k] / (self.gxx_xx[k] + REG_ABS);
+        }
+        self.gxx_valid = true;
+        self.gxx_age = if seed {
+            1
+        } else {
+            (self.gxx_age + 1).min(GXX_MATURE_BLOCKS)
+        };
+    }
+
+    /// Forget the path model entirely (cold start / give-up reset).
+    fn clear_path_model(&mut self) {
+        for k in 0..self.half {
+            self.gxx[k] = 0.0;
+            self.gxx_dd[k] = 0.0;
+            self.gxx_xx[k] = 0.0;
+        }
+        self.gxx_valid = false;
+        self.gxx_age = 0;
+    }
+
+    // -------------------------------------------------------------------------------------
     // Optional residual-echo suppressor (default OFF). Per-bin magnitude Wiener gain driven by the
-    // FREQUENCY-SHAPED, FILTER-INDEPENDENT echo-power estimate gxx[k]*|X_now[k]|^2 versus the known
+    // FREQUENCY-SHAPED, FILTER-INDEPENDENT echo-power estimate gxx[k]*x_ref[k] versus the known
     // mic power |D[k]|^2, with a hard high gain floor and a near-end-dominance bypass. See the
     // SUPPRESS_* constant docs for why this is voice-safe by construction.
     //
@@ -1356,7 +1484,7 @@ impl Aec {
         let mut shaped_expected = 0.0f64;
         let mut mic_block_pow = 0.0f64;
         for k in 0..half {
-            shaped_expected += (self.gxx[k] * self.x_pow_now[k]) as f64;
+            shaped_expected += (self.gxx[k] * self.x_ref[k]) as f64;
             mic_block_pow += self.d_pow[k] as f64;
         }
         if self.gxx_valid
@@ -1380,7 +1508,7 @@ impl Aec {
         self.fft.transform(&mut self.e_re, &mut self.e_im, false);
 
         // Per-bin Wiener gain from the SHAPED, filter-independent echo estimate:
-        //   echo_pow[k] = max( gxx[k]*|X_now[k]|^2 , |Y_fg[k]|^2 )   (shaped-path ∪ filter estimate)
+        //   echo_pow[k] = max( gxx[k]*x_ref[k] , |Y_fg[k]|^2 )   (shaped-path ∪ filter estimate)
         //   gain[k]     = clamp( 1 - OVER * echo_pow[k] / |D[k]|^2 , FLOOR, 1 )
         // d_pow[k] (|D[k]|^2, computed once per block) is the denominator: where the voice dominates
         // a bin, echo_pow/|D|^2 → 0 so gain → 1 (voice untouched); where the backing dominates, the
@@ -1388,7 +1516,7 @@ impl Aec {
         // (it is not in the reference and the filter never models it), so it cannot self-attenuate.
         for k in 0..half {
             let d_pow = self.d_pow[k] + EPS;
-            let ref_echo_pow = self.gxx[k] * self.x_pow_now[k]; // shaped path * |X_now|^2
+            let ref_echo_pow = self.gxx[k] * self.x_ref[k]; // shaped path * far-end power
             let echo_pow = ref_echo_pow.max(self.yh_pow[k]); // ∪ the filter's own estimate
                                                              // clamp01 maps NaN→0 (f32::clamp would propagate NaN into sup_gain).
             let ratio = clamp01(SUPPRESS_OVER * echo_pow / d_pow);
