@@ -165,6 +165,7 @@ class FxPanel extends StatelessWidget {
               const SizedBox(height: 8),
               _EqGraph(
                 inputColumn: _eqInput,
+                wake: _isBus ? null : vm.position,
                 bands: fx.eq,
                 on: fx.eqOn,
                 onChanged: (i, band) =>
@@ -214,7 +215,7 @@ class FxPanel extends StatelessWidget {
                 vm.commitFx,
               ),
               const SizedBox(height: 2),
-              _GrMeter(poll: _gr),
+              _GrMeter(poll: _gr, wake: vm.position),
             ],
           ],
         ),
@@ -856,6 +857,7 @@ class _SliderPainter extends CustomPainter {
 class _EqGraph extends StatefulWidget {
   const _EqGraph({
     required this.inputColumn,
+    this.wake,
     required this.bands,
     required this.on,
     required this.onChanged,
@@ -864,6 +866,9 @@ class _EqGraph extends StatefulWidget {
 
   /// Pre-EQ input spectrum source (null → draw the response curve only).
   final ({Float32List col, double binHz})? Function() inputColumn;
+
+  /// Wakes the idle analyzer (see [_EqSpectrumLayer.wake]).
+  final Listenable? wake;
   final List<EqBand> bands;
   final bool on;
   final void Function(int index, EqBand band) onChanged;
@@ -964,6 +969,7 @@ class _EqGraphState extends State<_EqGraph> {
                   Positioned.fill(
                     child: _EqSpectrumLayer(
                       inputColumn: widget.inputColumn,
+                      wake: widget.wake,
                       bands: widget.bands,
                       on: widget.on,
                     ),
@@ -1040,14 +1046,24 @@ class _SpectrumData {
 /// Drives the live spectrum: a ticker samples the playhead's input column each
 /// frame, octave-smooths + tilts it, applies analyzer ballistics (instant
 /// attack, slow release), and repaints [_SpectrumPainter].
+///
+/// The ticker stops once a frame changes nothing (the ballistics have settled
+/// on the input), so a paused transport no longer produces frames forever —
+/// it ticked at the display rate for as long as a take with the EQ on was
+/// selected. [wake] (the playhead) and any rebuild — which is how a newly
+/// computed input spectrum or a band edit arrives — start it again.
 class _EqSpectrumLayer extends StatefulWidget {
   const _EqSpectrumLayer({
     required this.inputColumn,
+    this.wake,
     required this.bands,
     required this.on,
   });
 
   final ({Float32List col, double binHz})? Function() inputColumn;
+
+  /// Changes whenever the input may have: the playhead.
+  final Listenable? wake;
   final List<EqBand> bands;
   final bool on;
 
@@ -1071,13 +1087,33 @@ class _EqSpectrumLayerState extends State<_EqSpectrumLayer>
   void initState() {
     super.initState();
     _ticker = createTicker(_tick)..start();
+    widget.wake?.addListener(_wake);
+  }
+
+  @override
+  void didUpdateWidget(_EqSpectrumLayer old) {
+    super.didUpdateWidget(old);
+    if (!identical(old.wake, widget.wake)) {
+      old.wake?.removeListener(_wake);
+      widget.wake?.addListener(_wake);
+    }
+    _wake();
   }
 
   @override
   void dispose() {
+    widget.wake?.removeListener(_wake);
     _ticker.dispose();
     _repaint.dispose();
     super.dispose();
+  }
+
+  void _wake() {
+    if (_ticker.isActive) return;
+    // A restarted ticker counts from zero again: start the frame clock over
+    // as at the first start.
+    _last = Duration.zero;
+    _ticker.start();
   }
 
   void _tick(Duration now) {
@@ -1088,9 +1124,11 @@ class _EqSpectrumLayerState extends State<_EqSpectrumLayer>
 
     final input = widget.inputColumn();
     final target = Float32List(_spectrumPoints);
+    var changed = false;
     if (input == null) {
       target.fillRange(0, _spectrumPoints, _floorDb);
     } else {
+      if (!_data.hasSignal) changed = true;
       _data.hasSignal = true;
       final col = input.col;
       final binHz = input.binHz;
@@ -1128,21 +1166,26 @@ class _EqSpectrumLayerState extends State<_EqSpectrumLayer>
     var maxDb = _floorDb;
     for (var i = 0; i < _spectrumPoints; i++) {
       final tv = target[i];
-      _data.pre[i] = tv >= _data.pre[i]
-          ? tv
-          : math.max(tv, _data.pre[i] - fall);
+      final was = _data.pre[i];
+      _data.pre[i] = tv >= was ? tv : math.max(tv, was - fall);
+      if (_data.pre[i] != was) changed = true;
       if (_data.pre[i] > maxDb) maxDb = _data.pre[i];
     }
     // Adapt the top-of-scale only while there's real input; otherwise hold it so
     // the decaying spectrum falls to the bottom (not into the middle of the box).
     if (input != null) {
       final desiredCeil = maxDb + 6;
-      _data.ceil = desiredCeil > _data.ceil
+      final was = _data.ceil;
+      _data.ceil = desiredCeil > was
           ? desiredCeil
-          : math.max(desiredCeil, _data.ceil - _ceilFallPerSec * dt);
+          : math.max(desiredCeil, was - _ceilFallPerSec * dt);
+      if (_data.ceil != was) changed = true;
     }
 
     _repaint.value++;
+    // Settled: with time passing (dt > 0) and nothing moving, every later
+    // frame would paint this one again until the input changes.
+    if (!changed && dt > 0) _ticker.stop();
   }
 
   @override
@@ -1409,38 +1452,78 @@ class _Dropdown extends StatelessWidget {
 
 /// A live gain-reduction meter for a vocal compressor — polls the engine and shows the
 /// reduction as a bar (accent → red as it deepens) with a falling peak tick.
+///
+/// Polling stops once the reading has held still for [_GrMeterState._idlePolls]
+/// polls (it rebuilt at 20 Hz for as long as the compressor was shown, even
+/// with nothing playing), and [wake] or a rebuild starts it again.
 class _GrMeter extends StatefulWidget {
-  const _GrMeter({required this.poll});
+  const _GrMeter({required this.poll, this.wake});
 
   /// Polls the current gain reduction (dB, >= 0) of the target compressor.
   final double Function() poll;
+
+  /// Changes whenever audio may be running through the compressor: the
+  /// playhead.
+  final Listenable? wake;
 
   @override
   State<_GrMeter> createState() => _GrMeterState();
 }
 
 class _GrMeterState extends State<_GrMeter> {
+  /// Unchanged polls (at 50 ms) before polling stops.
+  static const int _idlePolls = 10;
+
   Timer? _timer;
+  int _unchanged = 0;
   double _gr = 0;
   double _peak = 0;
 
   @override
   void initState() {
     super.initState();
-    _timer = Timer.periodic(const Duration(milliseconds: 50), (_) {
-      final v = widget.poll();
-      if (!mounted) return;
-      setState(() {
-        _gr = v;
-        _peak = v > _peak ? v : math.max(v, _peak - 0.8);
-      });
-    });
+    _start();
+    widget.wake?.addListener(_start);
+  }
+
+  @override
+  void didUpdateWidget(_GrMeter old) {
+    super.didUpdateWidget(old);
+    if (!identical(old.wake, widget.wake)) {
+      old.wake?.removeListener(_start);
+      widget.wake?.addListener(_start);
+    }
+    _start();
   }
 
   @override
   void dispose() {
+    widget.wake?.removeListener(_start);
     _timer?.cancel();
     super.dispose();
+  }
+
+  void _start() {
+    _unchanged = 0;
+    _timer ??= Timer.periodic(const Duration(milliseconds: 50), (_) => _poll());
+  }
+
+  void _poll() {
+    final v = widget.poll();
+    if (!mounted) return;
+    final peak = v > _peak ? v : math.max(v, _peak - 0.8);
+    if (v == _gr && peak == _peak) {
+      if (++_unchanged >= _idlePolls) {
+        _timer?.cancel();
+        _timer = null;
+      }
+      return;
+    }
+    _unchanged = 0;
+    setState(() {
+      _gr = v;
+      _peak = peak;
+    });
   }
 
   @override

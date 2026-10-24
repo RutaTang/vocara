@@ -29,6 +29,7 @@ class _FakeMixer extends Fake implements MixerController {
   final busReorders = <(String, List<FxKind>)>[];
   double trackGr = 0;
   double busGr = 0;
+  int grPolls = 0;
 
   @override
   void setTrackFxLive(String trackId, TrackFx fx) => trackFx.add(fx);
@@ -45,19 +46,29 @@ class _FakeMixer extends Fake implements MixerController {
       busReorders.add((busId, order));
 
   @override
-  double gainReductionDb(String trackId) => trackGr;
+  double gainReductionDb(String trackId) {
+    grPolls++;
+    return trackGr;
+  }
 
   @override
-  double busGainReductionDb(String busId) => busGr;
+  double busGainReductionDb(String busId) {
+    grPolls++;
+    return busGr;
+  }
 }
 
 class _FakeAnalysis extends Fake implements AnalysisCache {
   int eqInputCalls = 0;
 
+  /// The pre-EQ column under the playhead; null = no spectrum yet (the graph
+  /// draws the response curve alone).
+  ({Float32List col, double binHz})? input;
+
   @override
   ({Float32List col, double binHz})? eqInputColumn(String trackId) {
     eqInputCalls++;
-    return null; // no spectrum yet — the graph draws the response curve alone
+    return input;
   }
 }
 
@@ -71,6 +82,9 @@ class _FakeVm extends Fake implements SongPracticeDetailViewModel {
 
   @override
   AnalysisCache get analysis => fakeAnalysis;
+
+  @override
+  final ValueNotifier<Duration> position = ValueNotifier(Duration.zero);
 
   @override
   Future<void> commitFx() async => commits++;
@@ -295,5 +309,101 @@ void main() {
       reason: "a preset is tone, not the user's plugin order",
     );
     expect(vm.commits, 1);
+  });
+
+  // The EQ analyzer ticked at the display rate, and the GR meter rebuilt at
+  // 20 Hz, for as long as they were on screen — a paused transport never let
+  // the app go idle. Both now stop once nothing moves, and the playhead (or a
+  // rebuild) starts them again.
+  testWidgets('the EQ analyzer stops ticking once settled and the playhead '
+      'wakes it', (tester) async {
+    final vm = await pump(
+      tester,
+      track: _track(fx: _fxAllOff().copyWith(eqOn: true)),
+    );
+    // A real input column, so the ballistics have something to settle on.
+    vm.fakeAnalysis.input = (
+      col: Float32List.fromList([for (var b = 0; b < 1025; b++) -40.0 - b % 7]),
+      binHz: 48000 / 2048,
+    );
+    Future<int> settle() async {
+      var frames = 0;
+      while (tester.binding.hasScheduledFrame && frames < 600) {
+        await tester.pump(const Duration(milliseconds: 16));
+        frames++;
+      }
+      return frames;
+    }
+
+    final first = await settle();
+    expect(tester.binding.hasScheduledFrame, isFalse, reason: 'idle');
+    expect(first, lessThan(600));
+    final calls = vm.fakeAnalysis.eqInputCalls;
+    await tester.pump(const Duration(seconds: 1));
+    expect(
+      vm.fakeAnalysis.eqInputCalls,
+      calls,
+      reason: 'no polling while idle',
+    );
+
+    // The playhead moved: the analyzer runs again, then idles again.
+    vm.position.value = const Duration(milliseconds: 500);
+    expect(tester.binding.hasScheduledFrame, isTrue);
+    await settle();
+    expect(vm.fakeAnalysis.eqInputCalls, greaterThan(calls));
+    expect(tester.binding.hasScheduledFrame, isFalse);
+  });
+
+  testWidgets('the EQ analyzer decays to the floor before it idles', (
+    tester,
+  ) async {
+    final vm = await pump(
+      tester,
+      track: _track(fx: _fxAllOff().copyWith(eqOn: true)),
+    );
+    vm.fakeAnalysis.input = (
+      col: Float32List.fromList(List.filled(1025, -10.0)),
+      binHz: 48000 / 2048,
+    );
+    await tester.pump(const Duration(milliseconds: 16));
+    await tester.pump(const Duration(milliseconds: 16));
+    // The input goes away (playhead left the clip): the release takes a few
+    // seconds at 34 dB/s, and the ticker must run all of it.
+    vm.fakeAnalysis.input = null;
+    vm.position.value = const Duration(milliseconds: 9000);
+    var frames = 0;
+    while (tester.binding.hasScheduledFrame && frames < 1000) {
+      await tester.pump(const Duration(milliseconds: 16));
+      frames++;
+    }
+    expect(frames, greaterThan(100), reason: 'the full release is animated');
+    expect(tester.binding.hasScheduledFrame, isFalse);
+  });
+
+  testWidgets('the gain-reduction meter stops polling once still and the '
+      'playhead wakes it', (tester) async {
+    final vm = await pump(
+      tester,
+      track: _track(fx: _fxAllOff().copyWith(compOn: true)),
+    );
+    await tester.pump(const Duration(seconds: 2));
+    final polls = vm.fakeMixer.grPolls;
+    expect(polls, greaterThan(0));
+    await tester.pump(const Duration(seconds: 2));
+    expect(vm.fakeMixer.grPolls, polls, reason: 'idle with nothing playing');
+
+    // Audio through the compressor moves the playhead: polling resumes and
+    // the meter shows the reduction.
+    vm.fakeMixer.trackGr = 6;
+    vm.position.value = const Duration(milliseconds: 100);
+    await tester.pump(const Duration(milliseconds: 120));
+    expect(vm.fakeMixer.grPolls, greaterThan(polls));
+    expect(find.text('-6.0'), findsOneWidget);
+    // Held still again, it goes idle again.
+    await tester.pump(const Duration(seconds: 2));
+    final later = vm.fakeMixer.grPolls;
+    await tester.pump(const Duration(seconds: 1));
+    expect(vm.fakeMixer.grPolls, later);
+    expect(find.text('-6.0'), findsOneWidget);
   });
 }

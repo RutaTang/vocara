@@ -186,6 +186,10 @@ class _FakeVm extends Fake implements SongPracticeDetailViewModel {
   @override
   Future<void> commitFx() async {}
 
+  // The FX panel's idle analyzer and meter wake on the playhead.
+  @override
+  final ValueNotifier<Duration> position = ValueNotifier(Duration.zero);
+
   @override
   bool get spectrogramLoading => false;
 
