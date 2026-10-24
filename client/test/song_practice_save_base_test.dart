@@ -23,6 +23,7 @@ import 'package:vocara/domain/models/fx_bus.dart';
 import 'package:vocara/domain/models/lyric_line.dart';
 import 'package:vocara/domain/models/practice_note.dart';
 import 'package:vocara/domain/models/song_practice.dart';
+import 'package:vocara/domain/models/take_version.dart';
 import 'package:vocara/domain/models/technique_marker.dart';
 import 'package:vocara/ui/song_practice_detail/view_model/song_practice_detail_view_model.dart';
 import 'package:vocara/utils/id.dart';
@@ -304,4 +305,95 @@ void main() {
       expect(saved.sentHashes, saved.baseHashes);
     },
   );
+
+  test('... for every entity a practice can carry, and again on a save from '
+      'the re-read (pool) paths', () async {
+    // The test above has no clips, backings, separation source, second
+    // interpretation, sends or bus output routing: a projection drift in
+    // any of those would make every save (a lyric stamp included) re-read
+    // the practice and resync the engine.
+    Future<String> file(String name, int seed) async {
+      final f = File('${tmp.path}/$name');
+      await f.writeAsBytes(List.generate(200, (i) => (i * seed) & 0xff));
+      return f.path;
+    }
+
+    final p = await seed();
+    final loaded = await load(p.id);
+    final v2 = TakeVersion(
+      id: newId(),
+      name: 'Interp 2',
+      createdAt: DateTime(2026),
+    );
+    final bus = FxBus(id: newId(), name: 'Bus', fx: TrackFx.flat());
+    final bus2 = FxBus(
+      id: newId(),
+      name: 'Bus2',
+      fx: TrackFx.flat(),
+      outputBusId: bus.id,
+      sends: [TrackSend(busId: bus.id, levelDb: -6)],
+    );
+    AudioTrack track(AudioTrackKind kind, String path, {String? version}) {
+      final vocal = kind == AudioTrackKind.vocal;
+      return AudioTrack(
+        id: newId(),
+        kind: kind,
+        displayName: kind.name,
+        createdAt: DateTime(2026),
+        clips: [
+          AudioClip(
+            id: newId(),
+            audioFilePath: path,
+            durationMs: 1000,
+            startMs: 10,
+            waveformPeaks: const [0.1, 0.2],
+          ),
+        ],
+        versionId: version,
+        busId: vocal ? bus.id : null,
+        sends: vocal ? [TrackSend(busId: bus2.id, levelDb: -3)] : const [],
+        fx: vocal ? TrackFx.flat() : null,
+        notes: [note('n')],
+      );
+    }
+
+    final full = loaded.aggregate.copyWith(
+      versions: [...loaded.aggregate.versions, v2],
+      accompaniment: track(
+        AudioTrackKind.accompaniment,
+        await file('acc.wav', 3),
+      ),
+      reference: track(AudioTrackKind.reference, await file('ref.wav', 5)),
+      vocalTracks: [
+        track(
+          AudioTrackKind.vocal,
+          await file('v1.wav', 7),
+          version: p.activeVersionId,
+        ),
+        track(AudioTrackKind.vocal, await file('v2.wav', 11), version: v2.id),
+        // The same bytes as v1: a deduplicated asset.
+        track(AudioTrackKind.vocal, await file('v1dup.wav', 7), version: v2.id),
+      ],
+      fxBuses: [bus, bus2],
+      separationSource: await file('orig.wav', 13),
+      reverb: const ReverbSettings(),
+      lyrics: const [LyricLine(text: 'la', timeMs: 1)],
+    );
+    final first =
+        (await repo.savePracticeWithBase(full, baseHashes: loaded.baseHashes)
+                as Ok<Loaded<SongPractice>>)
+            .value;
+    expect(first.sentHashes, first.baseHashes, reason: 'first save');
+
+    final second =
+        (await repo.savePracticeWithBase(
+                  first.aggregate.copyWith(
+                    lyrics: const [LyricLine(text: 'lb', timeMs: 2)],
+                  ),
+                  baseHashes: first.baseHashes,
+                )
+                as Ok<Loaded<SongPractice>>)
+            .value;
+    expect(second.sentHashes, second.baseHashes, reason: 'second save');
+  });
 }
