@@ -1082,6 +1082,10 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       return;
     } // no concurrent structural edit
     if (!_admitImportDuration(sourcePath)) return;
+    // The playhead at the DROP: copying, transcoding and analyzing take
+    // seconds, and during playback (or a scrub meanwhile) a read after them
+    // placed the clip wherever the playhead had moved on to.
+    final startMs = math.max(0, position.value.inMilliseconds);
     await _busyGate.run(() async {
       await _withImportedAudio(sourcePath, (dest) async {
         final waveform = await _waveforms.analyze(dest);
@@ -1089,7 +1093,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
           id: newId(),
           audioFilePath: dest,
           durationMs: waveform.durationMs,
-          startMs: math.max(0, position.value.inMilliseconds),
+          startMs: startMs,
           waveformPeaks: waveform.peaks,
         );
         _updateTrack(target.id, (t) => t.copyWith(clips: [...t.clips, clip]));

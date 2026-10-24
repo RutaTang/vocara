@@ -684,4 +684,24 @@ void main() {
       expect(spectrograms.requested, ['/pool/take1.wav']);
     });
   });
+
+  group('a clip dropped onto a take', () {
+    test(
+      'lands where the playhead was at the drop, not after the import',
+      () async {
+        final vm = await pumpVm();
+        vm.position.value = const Duration(milliseconds: 700);
+        waveforms.gate = Completer<void>(); // the import is being analyzed
+        final drop = vm.addClipToTake('take1', '/src/drop.wav');
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+        // Playback (or a scrub) moves the playhead on meanwhile.
+        vm.position.value = const Duration(milliseconds: 4000);
+        waveforms.gate!.complete();
+        await drop;
+        final take1 = repo.stored.vocalTracks.single;
+        expect(take1.clips, hasLength(2));
+        expect(take1.clips.last.startMs, 700);
+      },
+    );
+  });
 }
