@@ -15,6 +15,7 @@ import '../../../domain/models/fx_bus.dart';
 import '../../../domain/models/practice_note.dart';
 import '../../../domain/models/song_practice.dart';
 import '../../../domain/models/technique_marker.dart';
+import '../../../routing/navigation.dart';
 import '../../../routing/routes.dart';
 import '../../../utils/format.dart';
 import '../../core/themes/studio.dart';
@@ -96,7 +97,7 @@ class SongPracticeDetailScreen extends StatelessWidget {
             listenable: Listenable.merge([vm, vm.load]),
             builder: (context, _) {
               if (vm.load.running && vm.practice == null) {
-                return const Center(
+                return const _NoWorkspace(
                   child: CircularProgressIndicator(
                     valueColor: AlwaysStoppedAnimation(Studio.textSecondary),
                   ),
@@ -104,7 +105,7 @@ class SongPracticeDetailScreen extends StatelessWidget {
               }
               final practice = vm.practice;
               if (practice == null) {
-                return const Center(
+                return const _NoWorkspace(
                   child: Text(
                     'Could not load this practice.',
                     style: TextStyle(color: Studio.textSecondary),
@@ -116,6 +117,49 @@ class SongPracticeDetailScreen extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// The screen while there is no workspace — loading, or a practice that could
+/// not be loaded: [child] centred under a bar with the transport's back
+/// control. Without it there was no way back at all, and Home's open guard,
+/// released only when this route pops, stayed set.
+class _NoWorkspace extends StatelessWidget {
+  const _NoWorkspace({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Container(
+          height: 54,
+          padding: const EdgeInsets.symmetric(horizontal: 14),
+          alignment: Alignment.centerLeft,
+          decoration: const BoxDecoration(
+            color: Studio.surface,
+            border: Border(bottom: BorderSide(color: Studio.border)),
+          ),
+          child: MouseRegion(
+            cursor: SystemMouseCursors.click,
+            child: GestureDetector(
+              onTap: () => popOrGo(context, Routes.home),
+              child: const SizedBox(
+                width: 30,
+                height: 30,
+                child: Icon(
+                  FIcons.chevronLeft,
+                  size: 20,
+                  color: Studio.textSecondary,
+                ),
+              ),
+            ),
+          ),
+        ),
+        Expanded(child: Center(child: child)),
+      ],
     );
   }
 }

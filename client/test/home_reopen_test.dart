@@ -225,4 +225,68 @@ void main() {
     await tester.pumpWidget(const SizedBox());
     await tester.runAsync(() => persistence.db.close());
   });
+
+  testWidgets('a practice that cannot be loaded still has a way back', (
+    tester,
+  ) async {
+    // Loading and load failure showed no transport bar, so no back control:
+    // the user was stuck, and the opener's awaited push never completed.
+    final persistence = Persistence.memory();
+    final storage = LocalStorageService();
+    var returned = false;
+    final router = GoRouter(
+      routes: [
+        GoRoute(
+          path: Routes.home,
+          builder: (context, _) => Scaffold(
+            body: TextButton(
+              onPressed: () async {
+                await context.push(Routes.songPractice('missing'));
+                returned = true;
+              },
+              child: const Text('open'),
+            ),
+          ),
+        ),
+        GoRoute(
+          path: Routes.songPracticePattern,
+          builder: (context, state) => ChangeNotifierProvider(
+            create: (context) => SongPracticeDetailViewModel(
+              repository: persistence.songRepo,
+              techniqueRepository: persistence.techRepo,
+              audioFileService: AudioFileService(storage: storage),
+              waveformService: WaveformService(storage: storage),
+              spectrogramService: const SpectrogramService(),
+              separationService: FakeSourceSeparationService(available: false),
+              appSettings: AppSettingsService(
+                storage: storage,
+                enumerateOutputs: () => const [],
+                enumerateInputs: () => const [],
+              ),
+              practiceId: state.pathParameters['id']!,
+              playbackEngine: _FakeEngine(),
+              probeDuration: (_) => null,
+            ),
+            child: const SongPracticeDetailScreen(),
+          ),
+        ),
+      ],
+    );
+    await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+    await tester.tap(find.text('open'));
+    for (var i = 0; i < 10; i++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 20)),
+      );
+      await tester.pump(const Duration(milliseconds: 50));
+    }
+    expect(find.text('Could not load this practice.'), findsOneWidget);
+    await tester.tap(find.byIcon(FIcons.chevronLeft));
+    await tester.pumpAndSettle();
+    expect(find.byType(SongPracticeDetailScreen), findsNothing);
+    expect(returned, isTrue, reason: "the opener's push completed");
+
+    await tester.pumpWidget(const SizedBox());
+    await tester.runAsync(() => persistence.db.close());
+  });
 }
