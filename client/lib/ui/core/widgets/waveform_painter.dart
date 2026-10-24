@@ -337,8 +337,49 @@ class TimeRulerPainter extends CustomPainter {
       old.startMs != startMs;
 }
 
+/// A [PlayheadPainter] overlay on its own layer, ignoring pointers — the form
+/// every playhead in the app takes. The painter repaints on every position
+/// tick (60 Hz while the transport runs), and a repaint spreads to everything
+/// that shares its layer: without the [RepaintBoundary] the ruler's and the
+/// dock's playheads repainted the whole screen each frame, a 10-minute take's
+/// formant overlay (one dot per analysis frame) included.
+class PlayheadLayer extends StatelessWidget {
+  const PlayheadLayer({
+    required this.position,
+    required this.timelineDurationMs,
+    required this.color,
+    this.showHead = false,
+    this.startMs = 0,
+    super.key,
+  });
+
+  final ValueListenable<Duration> position;
+  final int timelineDurationMs;
+  final Color color;
+  final bool showHead;
+  final int startMs;
+
+  @override
+  Widget build(BuildContext context) {
+    return RepaintBoundary(
+      child: IgnorePointer(
+        child: CustomPaint(
+          painter: PlayheadPainter(
+            position: position,
+            timelineDurationMs: timelineDurationMs,
+            color: color,
+            showHead: showHead,
+            startMs: startMs,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// Paints the playback playhead as a vertical line. Repaints itself whenever
-/// [position] ticks (via `super.repaint`), so the tree doesn't rebuild.
+/// [position] ticks (via `super.repaint`), so the tree doesn't rebuild. Mount
+/// it through [PlayheadLayer], which isolates that repaint.
 class PlayheadPainter extends CustomPainter {
   PlayheadPainter({
     required this.position,

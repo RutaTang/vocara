@@ -342,15 +342,11 @@ class PitchLane extends StatelessWidget {
             ),
           ),
           Positioned.fill(
-            child: IgnorePointer(
-              child: CustomPaint(
-                painter: PlayheadPainter(
-                  position: position,
-                  timelineDurationMs: timelineDurationMs,
-                  color: Studio.playhead,
-                  startMs: takeLocal ? track.startMs : viewStartMs,
-                ),
-              ),
+            child: PlayheadLayer(
+              position: position,
+              timelineDurationMs: timelineDurationMs,
+              color: Studio.playhead,
+              startMs: takeLocal ? track.startMs : viewStartMs,
             ),
           ),
         ],

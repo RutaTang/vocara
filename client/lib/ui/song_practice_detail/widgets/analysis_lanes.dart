@@ -270,15 +270,11 @@ class SpectrogramLane extends StatelessWidget {
                 ),
               ),
               Positioned.fill(
-                child: IgnorePointer(
-                  child: CustomPaint(
-                    painter: PlayheadPainter(
-                      position: position,
-                      timelineDurationMs: timelineDurationMs,
-                      startMs: viewStartMs,
-                      color: Studio.playhead,
-                    ),
-                  ),
+                child: PlayheadLayer(
+                  position: position,
+                  timelineDurationMs: timelineDurationMs,
+                  startMs: viewStartMs,
+                  color: Studio.playhead,
                 ),
               ),
             ],
@@ -399,15 +395,11 @@ class LoudnessLane extends StatelessWidget {
             ),
           ),
           Positioned.fill(
-            child: IgnorePointer(
-              child: CustomPaint(
-                painter: PlayheadPainter(
-                  position: position,
-                  timelineDurationMs: timelineDurationMs,
-                  startMs: viewStartMs,
-                  color: Studio.playhead,
-                ),
-              ),
+            child: PlayheadLayer(
+              position: position,
+              timelineDurationMs: timelineDurationMs,
+              startMs: viewStartMs,
+              color: Studio.playhead,
             ),
           ),
         ],
@@ -769,15 +761,11 @@ class _MarkerLaneState extends State<_MarkerLane> {
               ),
             for (final it in widget.items) ..._marker(it, xOf, w),
             Positioned.fill(
-              child: IgnorePointer(
-                child: CustomPaint(
-                  painter: PlayheadPainter(
-                    position: widget.position,
-                    timelineDurationMs: dur,
-                    startMs: widget.viewStartMs,
-                    color: Studio.playhead,
-                  ),
-                ),
+              child: PlayheadLayer(
+                position: widget.position,
+                timelineDurationMs: dur,
+                startMs: widget.viewStartMs,
+                color: Studio.playhead,
               ),
             ),
           ],

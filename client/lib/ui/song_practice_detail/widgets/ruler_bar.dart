@@ -76,16 +76,12 @@ class RulerBar extends StatelessWidget {
             textColor: Studio.textSecondary,
           ),
         );
-        final playhead = IgnorePointer(
-          child: CustomPaint(
-            painter: PlayheadPainter(
-              position: position,
-              timelineDurationMs: dur,
-              startMs: viewStart,
-              color: Studio.playhead,
-              showHead: true,
-            ),
-          ),
+        final playhead = PlayheadLayer(
+          position: position,
+          timelineDurationMs: dur,
+          startMs: viewStart,
+          color: Studio.playhead,
+          showHead: true,
         );
 
         if (dur <= 0 || w <= 0) {

@@ -222,16 +222,20 @@ class _Lcd extends StatelessWidget {
         borderRadius: BorderRadius.circular(6),
         border: Border.all(color: Studio.border),
       ),
-      child: ValueListenableBuilder<Duration>(
-        valueListenable: position,
-        builder: (context, pos, _) => Text(
-          '${formatClock(pos)} / ${formatClockMs(totalDurationMs)}',
-          style: const TextStyle(
-            color: Studio.lcd,
-            fontSize: 14,
-            fontWeight: FontWeight.w600,
-            letterSpacing: 1,
-            fontFeatures: [FontFeature.tabularFigures()],
+      // The readout changes on every position tick; its own layer keeps that
+      // repaint from spreading to the rest of the transport bar and beyond.
+      child: RepaintBoundary(
+        child: ValueListenableBuilder<Duration>(
+          valueListenable: position,
+          builder: (context, pos, _) => Text(
+            '${formatClock(pos)} / ${formatClockMs(totalDurationMs)}',
+            style: const TextStyle(
+              color: Studio.lcd,
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 1,
+              fontFeatures: [FontFeature.tabularFigures()],
+            ),
           ),
         ),
       ),

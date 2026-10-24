@@ -1289,15 +1289,11 @@ class _MasterRow extends StatelessWidget {
                       ),
                     ),
                     Positioned.fill(
-                      child: IgnorePointer(
-                        child: CustomPaint(
-                          painter: PlayheadPainter(
-                            position: vm.position,
-                            timelineDurationMs: tl,
-                            startMs: viewStart,
-                            color: Studio.playhead,
-                          ),
-                        ),
+                      child: PlayheadLayer(
+                        position: vm.position,
+                        timelineDurationMs: tl,
+                        startMs: viewStart,
+                        color: Studio.playhead,
                       ),
                     ),
                   ],
@@ -1582,15 +1578,11 @@ class _BusRow extends StatelessWidget {
                       ),
                     ),
                     Positioned.fill(
-                      child: IgnorePointer(
-                        child: CustomPaint(
-                          painter: PlayheadPainter(
-                            position: vm.position,
-                            timelineDurationMs: tl,
-                            startMs: viewStart,
-                            color: Studio.playhead,
-                          ),
-                        ),
+                      child: PlayheadLayer(
+                        position: vm.position,
+                        timelineDurationMs: tl,
+                        startMs: viewStart,
+                        color: Studio.playhead,
                       ),
                     ),
                   ],

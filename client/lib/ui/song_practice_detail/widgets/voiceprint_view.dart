@@ -142,16 +142,12 @@ Widget _takeSpectroStack(
           ),
         ),
         Positioned.fill(
-          child: IgnorePointer(
-            child: CustomPaint(
-              painter: PlayheadPainter(
-                position: vm.position,
-                timelineDurationMs: spanMs,
-                color: Studio.playhead,
-                showHead: true,
-                startMs: startMs,
-              ),
-            ),
+          child: PlayheadLayer(
+            position: vm.position,
+            timelineDurationMs: spanMs,
+            color: Studio.playhead,
+            showHead: true,
+            startMs: startMs,
           ),
         ),
       ],
@@ -542,15 +538,11 @@ class TimbreTab extends StatelessWidget {
                       ),
                     ),
                     Positioned.fill(
-                      child: IgnorePointer(
-                        child: CustomPaint(
-                          painter: PlayheadPainter(
-                            position: vm.position,
-                            timelineDurationMs: spanMs,
-                            color: Studio.playhead,
-                            startMs: startMs,
-                          ),
-                        ),
+                      child: PlayheadLayer(
+                        position: vm.position,
+                        timelineDurationMs: spanMs,
+                        color: Studio.playhead,
+                        startMs: startMs,
                       ),
                     ),
                   ],
@@ -1027,15 +1019,11 @@ class RegisterTab extends StatelessWidget {
                       ),
                     ),
                     Positioned.fill(
-                      child: IgnorePointer(
-                        child: CustomPaint(
-                          painter: PlayheadPainter(
-                            position: vm.position,
-                            timelineDurationMs: spanMs,
-                            color: Studio.playhead,
-                            startMs: startMs,
-                          ),
-                        ),
+                      child: PlayheadLayer(
+                        position: vm.position,
+                        timelineDurationMs: spanMs,
+                        color: Studio.playhead,
+                        startMs: startMs,
                       ),
                     ),
                   ],

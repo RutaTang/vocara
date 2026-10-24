@@ -716,15 +716,11 @@ class _BodyState extends State<_Body> {
                 ),
               ),
             Positioned.fill(
-              child: IgnorePointer(
-                child: CustomPaint(
-                  painter: PlayheadPainter(
-                    position: widget.position,
-                    timelineDurationMs: dur,
-                    startMs: viewStart,
-                    color: Studio.playhead,
-                  ),
-                ),
+              child: PlayheadLayer(
+                position: widget.position,
+                timelineDurationMs: dur,
+                startMs: viewStart,
+                color: Studio.playhead,
               ),
             ),
           ],
