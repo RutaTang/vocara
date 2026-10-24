@@ -252,6 +252,27 @@ void main() {
       // The model keeps counting both backings regardless of the toggle.
       expect(host.practice!.activeNoteCount, 4);
     });
+    test(
+      'a solo left on the HIDDEN backing does not silence the mix',
+      () async {
+        final host = _Host(_practice(vocals: [_vocal('v1')]));
+        // Listen to the original alone: switch to it and solo it.
+        host.mixer.setPlayReference(true);
+        await host.mixer.toggleSolo('ref');
+        // Back to singing over the accompaniment: the reference lane, with its
+        // lit S, is no longer shown anywhere.
+        host.mixer.setPlayReference(false);
+        await host.mixer.resyncPlayback();
+        final muted = {for (final t in host.engine.lastTracks!) t.id: t.muted};
+        expect(muted['acc-c0'], isFalse, reason: 'the shown backing must play');
+        expect(muted['v1-c0'], isFalse, reason: 'the take must play');
+        expect(
+          muted['ref-c0'],
+          isTrue,
+          reason: 'the hidden backing stays silent',
+        );
+      },
+    );
   });
 
   group('resyncPlayback', () {

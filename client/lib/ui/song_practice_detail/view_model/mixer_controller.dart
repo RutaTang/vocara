@@ -258,8 +258,17 @@ class MixerController extends ChangeNotifier {
   bool _audibleBus(FxBus b, SoloResolution solo) =>
       !b.muted && solo.busInSolo(b.id);
 
-  /// The mix's current solo state — see [resolveSolo].
-  SoloResolution _resolveSolo() => resolveSolo(_allTracksOf(), fxBuses);
+  /// The mix's current solo state — see [resolveSolo]. The INACTIVE backing
+  /// is left out: [_audibleTrack] silences it regardless, and it is not shown
+  /// anywhere, so a solo left lit on it (solo the original, switch back to the
+  /// accompaniment) must not count toward "anything soloed" — that silenced
+  /// every visible lane with no lit S in sight.
+  SoloResolution _resolveSolo() => resolveSolo([
+    for (final t in _allTracksOf())
+      if (!(t.isAccompaniment && _playReference) &&
+          !(t.isReference && !_playReference))
+        t,
+  ], fxBuses);
 
   /// Pushes the current mute/solo state of every track *and* bus to the audio
   /// engine immediately, so M/S respond on click without waiting for the save
