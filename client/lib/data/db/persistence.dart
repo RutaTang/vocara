@@ -878,7 +878,8 @@ class Persistence {
 /// hashes the file itself exactly as before, meeting the same error at the
 /// same point. A hash is a pure function of the bytes, and nothing writes a
 /// staged file during boot, so a prefetched hash IS the one the walk would
-/// have computed.
+/// have computed — and so is the one its save's import already measured
+/// ([AssetStore.knownHashOf]), which spares re-reading the session's takes.
 class _StagedHashes {
   _StagedHashes(this._files, {int parallel = 4}) {
     for (final f in _files) {
@@ -903,7 +904,9 @@ class _StagedHashes {
       String? hash;
       try {
         if (Persistence._isRecorderShaped(await AudioFileService.probeWav(f))) {
-          hash = await AssetStore.sha256OfFile(f.path);
+          hash =
+              await AssetStore.knownHashOf(f) ??
+              await AssetStore.sha256OfFile(f.path);
         }
       } catch (_) {
         hash = null; // the walk meets this again itself (see the class doc)

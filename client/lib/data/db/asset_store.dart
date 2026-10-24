@@ -64,7 +64,9 @@ class AssetStore {
     // old stat -> hash -> copy sequence opened the source three times with
     // awaits between them: a source modified mid-import could put one file's
     // bytes under another file's hash with a third file's recorded size.
+    final before = await _sizeAndMtime(sourcePath);
     final staged = await _stageToPool(File(sourcePath));
+    await _rememberStagedHash(sourcePath, before, staged);
     try {
       // Promote BEFORE the row work: idempotent by content address, and it
       // replaces a truncated crash leftover with the verified bytes whichever
@@ -312,6 +314,68 @@ class AssetStore {
     );
     return _StagedImport(hash: hash, size: size, tmpPath: tmpPath);
   }
+
+  /// Where an import keeps the hash it measured for a staged recording,
+  /// beside the file (see [knownHashOf]); swept with the staging tree.
+  static String _hashSidecar(String path) => '$path.sha256';
+
+  static Future<(int, int)?> _sizeAndMtime(String path) async {
+    try {
+      final st = await File(path).stat();
+      if (st.type != FileSystemEntityType.file) return null;
+      return (st.size, st.modified.microsecondsSinceEpoch);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Leaves [staged]'s hash beside [sourcePath] when it is a staged recording
+  /// (under `audio/`) that did not change while it was read. Best-effort: a
+  /// missing sidecar only means boot hashes the file itself.
+  Future<void> _rememberStagedHash(
+    String sourcePath,
+    (int, int)? before,
+    _StagedImport staged,
+  ) async {
+    if (before == null || !p.isWithin(p.join(root.path, 'audio'), sourcePath)) {
+      return;
+    }
+    final after = await _sizeAndMtime(sourcePath);
+    if (after != before || after!.$1 != staged.size) return;
+    try {
+      await File(
+        _hashSidecar(sourcePath),
+      ).writeAsString('${after.$1} ${after.$2} ${staged.hash}', flush: true);
+    } catch (_) {}
+  }
+
+  /// The sha256 an import measured for the staged file [f], while [f] is
+  /// unchanged since (same size and modification time); null otherwise.
+  ///
+  /// Boot recovery judges each staged recording by its content hash, and a
+  /// graceful stop leaves every take of the session in staging after its save
+  /// pooled — and so hashed — it: without this the next boot re-read every
+  /// one of them in full before the window appeared. A file that has no
+  /// sidecar (a hard kill skips the save) or changed is hashed as before.
+  static Future<String?> knownHashOf(File f) async {
+    try {
+      final parts = (await File(
+        _hashSidecar(f.path),
+      ).readAsString()).split(' ');
+      if (parts.length != 3 || !_sha256Hex.hasMatch(parts[2])) return null;
+      final now = await _sizeAndMtime(f.path);
+      if (now == null) return null;
+      final (size, mtime) = now;
+      if (int.tryParse(parts[0]) != size || int.tryParse(parts[1]) != mtime) {
+        return null;
+      }
+      return parts[2];
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static final RegExp _sha256Hex = RegExp(r'^[0-9a-f]{64}$');
 
   /// The sha256 of the file at [path], read in a background isolate (see
   /// [_stageToPool]). Throws what the read throws.

@@ -300,6 +300,36 @@ void main() {
       expect(await store.resolve(id), isNotNull);
     },
   );
+
+  group('a staged recording remembers the hash its import measured', () {
+    // Boot recovery judges each staged take by its content hash; a graceful
+    // stop leaves the session's takes in staging after the save pooled them,
+    // and the next boot re-read every one in full to hash it again.
+    Future<File> staged(String name, List<int> bytes) async {
+      final f = File(p.join(tmp.path, 'audio', 'practice1', name));
+      await f.parent.create(recursive: true);
+      return f..writeAsBytesSync(bytes);
+    }
+
+    test('and reports it while the file is unchanged', () async {
+      final f = await staged('take.wav', List.generate(4096, (i) => i & 0xff));
+      await store.importFile(f.path);
+      expect(
+        await AssetStore.knownHashOf(f),
+        await AssetStore.sha256OfFile(f.path),
+      );
+      f.writeAsBytesSync([1, 2, 3], mode: FileMode.append);
+      expect(await AssetStore.knownHashOf(f), isNull, reason: 'it changed');
+    });
+
+    test('only for files in the staging tree', () async {
+      final elsewhere = File(p.join(tmp.path, 'import.wav'))
+        ..writeAsBytesSync(List.filled(64, 7));
+      await store.importFile(elsewhere.path);
+      expect(await AssetStore.knownHashOf(elsewhere), isNull);
+      expect(File('${elsewhere.path}.sha256').existsSync(), isFalse);
+    });
+  });
 }
 
 /// Records every directory flush (the real flush still runs underneath).
