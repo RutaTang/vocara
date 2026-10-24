@@ -107,6 +107,9 @@ class _TechniqueDetailScreenState extends State<TechniqueDetailScreen> {
   TechniqueDetailViewModel? _vm;
 
   void _enterEdit(TechniqueDetailViewModel vm, Technique t) {
+    // A practice take recording (or still starting) would be stranded in the
+    // editor, which has no practice Stop. See TechniqueDetailViewModel.canEdit.
+    if (!vm.canEdit) return;
     _vm = vm;
     vm.beginMediaDraft();
     // Tell the VM the form is open BEFORE seeding it: from here until
@@ -144,13 +147,16 @@ class _TechniqueDetailScreenState extends State<TechniqueDetailScreen> {
   }
 
   Future<void> _save(TechniqueDetailViewModel vm) async {
-    // Finalize any in-flight example recording first, so Save preserves it
-    // (and releases the mic) instead of leaving it running.
-    if (vm.isRecordingExample) await vm.stopExampleRecording();
     final base = vm.technique;
     if (base == null) return;
     final name = _name!.text.trim();
-    // Build from the LIVE technique so any media added mid-edit is preserved.
+    // Build from the form BEFORE any await: an in-flight example recording is
+    // finalized by vm.save itself (stopped, imported and committed under the
+    // quit gate, with Cancel and the form frozen throughout). Stopping it here
+    // first used to leave a window where Cancel → Discard tore the form down
+    // under this method, which then dereferenced the disposed controllers.
+    // The media comes from the VM's draft at commit time, so a clip staged by
+    // that stop is still saved.
     final built = base.copyWith(
       name: name.isEmpty ? base.name : name,
       aliases: parseCommaList(_aliases!.text),
@@ -255,6 +261,7 @@ class _TechniqueDetailScreenState extends State<TechniqueDetailScreen> {
                 : (technique?.name ?? 'Technique'),
             editing: _editing,
             canEdit: technique != null,
+            editBlocked: !vm.canEdit,
             onBack: _handleBack,
             onEdit: technique == null ? null : () => _enterEdit(vm, technique),
             onDelete: () => _delete(vm),
@@ -360,6 +367,7 @@ class _Header extends StatelessWidget {
     required this.title,
     required this.editing,
     required this.canEdit,
+    required this.editBlocked,
     required this.onBack,
     required this.onEdit,
     required this.onDelete,
@@ -372,6 +380,10 @@ class _Header extends StatelessWidget {
   final String title;
   final bool editing;
   final bool canEdit;
+
+  /// While true Edit is shown but disabled: a practice take is recording (or
+  /// starting), and the editor has no practice Stop to end it.
+  final bool editBlocked;
   final VoidCallback onBack;
   final VoidCallback? onEdit;
   final VoidCallback onDelete;
@@ -386,10 +398,11 @@ class _Header extends StatelessWidget {
   /// base hashes).
   final bool saveBlocked;
 
-  /// While true Cancel is disabled: the save is committing, and Cancel →
-  /// Discard would delete the staged media files the airborne commit is
-  /// persisting rows for (committed rows pointing at deleted files). It also
-  /// keeps the edit form alive until the save resolves either way.
+  /// While true Cancel is disabled: the save is committing (or still staging
+  /// the example take it finalizes), and Cancel → Discard would delete the
+  /// staged media files the airborne commit is persisting rows for (committed
+  /// rows pointing at deleted files). It also keeps the edit form alive until
+  /// the save resolves either way.
   final bool cancelBlocked;
 
   @override
@@ -459,6 +472,7 @@ class _Header extends StatelessWidget {
             StudioButton(
               icon: FIcons.pencil,
               label: 'Edit',
+              enabled: !editBlocked,
               onTap: onEdit ?? () {},
             ),
             const SizedBox(width: 8),

@@ -60,6 +60,27 @@ class _FailOnceRepo extends _FakeRepo {
   }
 }
 
+/// A repo that actually forgets deleted techniques, so a later reload sees the
+/// library the view model was left with.
+class _DeletingRepo extends _FakeRepo {
+  _DeletingRepo(super.techniques);
+
+  @override
+  Future<Result<void>> deleteTechnique(String id) async {
+    techniques = techniques.where((t) => t.id != id).toList();
+    return const Result.ok(null);
+  }
+}
+
+/// Media service whose per-technique cleanup is a no-op (the real one
+/// resolves the app-support dir through a platform channel).
+class _NoDiskMedia extends TechniqueMediaService {
+  _NoDiskMedia() : super(storage: LocalStorageService());
+
+  @override
+  Future<void> deleteTechniqueMedia(String techniqueId) async {}
+}
+
 Technique _t(String id, String name, List<String> tags) {
   final now = DateTime(2026, 6, 20);
   return Technique(
@@ -215,5 +236,45 @@ void main() {
     expect(find.text('Curbing'), findsWidgets); // CVT technique stays
     expect(find.text('Twang'), findsNothing); // EVT technique filtered out
     expect(tester.takeException(), isNull);
+  });
+
+  test('deleting the last technique a filter matches drops the filter, '
+      'exactly as a reload would', () async {
+    // Regression: the reload drops a filter that can no longer match (so the
+    // grid is never stuck empty with the filter's chip gone), but the delete
+    // only pruned the list — deleting the sole EVT technique left "No
+    // techniques match this filter." under a ghost EVT filter.
+    final vm = TechniqueLibraryViewModel(
+      repository: _DeletingRepo([
+        _t('1', 'Twang', const ['EVT']),
+        _t('2', 'Belting', const ['EVT']),
+        _t('3', 'Curbing', const ['CVT']),
+        _t('4', 'Mixed voice', const []),
+      ]),
+      mediaService: _NoDiskMedia(),
+    );
+    addTearDown(vm.dispose);
+    for (var i = 0; i < 200 && !vm.load.completed; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+    expect(vm.all, hasLength(4));
+
+    // A filter that still matches something survives the delete…
+    vm.setTag('evt');
+    await vm.deleteTechnique.execute('1');
+    expect(vm.activeTag, 'evt');
+    expect(vm.filtered.map((t) => t.id), ['2']);
+
+    // …the last match going drops it, back to the whole library.
+    await vm.deleteTechnique.execute('2');
+    expect(vm.activeTag, isNull);
+    expect(vm.filtered.map((t) => t.id), ['3', '4']);
+
+    // Same for "Untagged" once no untagged technique is left.
+    vm.setTag(kUntaggedFilter);
+    expect(vm.filtered.map((t) => t.id), ['4']);
+    await vm.deleteTechnique.execute('4');
+    expect(vm.activeTag, isNull);
+    expect(vm.filtered.map((t) => t.id), ['3']);
   });
 }

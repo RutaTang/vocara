@@ -10,6 +10,7 @@ import 'package:vocara/data/services/graph_audio_playback_service.dart'
     show MediaTooLongException;
 import 'package:vocara/data/services/local_storage_service.dart';
 import 'package:vocara/data/services/media_analysis_service.dart';
+import 'package:vocara/data/services/mic_recording_controller.dart';
 import 'package:vocara/data/services/technique_media_service.dart';
 import 'package:vocara/data/sync/sync_hashes.dart';
 import 'package:vocara/domain/models/technique.dart';
@@ -57,12 +58,14 @@ class _FakeRepo implements TechniqueRepository {
 }
 
 /// A repo whose [saveTechniqueWithBase] parks on [gate] until the test releases
-/// it — models a slow disk so a save can be observed mid-flight.
+/// it — models a slow disk so a save can be observed mid-flight. With
+/// [failNext] set, the released save fails instead (and clears the flag).
 class _GatedSaveRepo extends _FakeRepo {
   _GatedSaveRepo(super.technique);
 
   final Completer<void> gate = Completer<void>();
   int saveWithBaseCalls = 0;
+  bool failNext = false;
 
   @override
   Future<Result<Loaded<Technique>>> saveTechniqueWithBase(
@@ -71,7 +74,25 @@ class _GatedSaveRepo extends _FakeRepo {
   }) async {
     saveWithBaseCalls++;
     await gate.future;
+    if (failNext) {
+      failNext = false;
+      return Result.error(Exception('simulated write failure'));
+    }
     return super.saveTechniqueWithBase(t, baseHashes: baseHashes);
+  }
+}
+
+/// A repo whose [loadTechnique] parks on [gate] and then fails — a technique
+/// deleted underneath the route, or an unreadable row, on a slow disk.
+class _FailingLoadRepo extends _FakeRepo {
+  _FailingLoadRepo(super.technique);
+
+  final Completer<void> gate = Completer<void>();
+
+  @override
+  Future<Result<Loaded<Technique>>> loadTechnique(String id) async {
+    await gate.future;
+    return Result.error(Exception('simulated read failure'));
   }
 }
 
@@ -156,6 +177,40 @@ void main() {
     expect(find.text('EXAMPLES'), findsOneWidget);
     expect(find.textContaining('Drag an audio'), findsNothing);
     expect(find.text('Empty content'), findsWidgets);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('a failed load shows the error state, not an endless spinner', (
+    tester,
+  ) async {
+    // Regression: the screen watches only the view model, and the load's
+    // failure path notified nothing but the (unwatched) command — the
+    // spinner, keyed on load.running, was never rebuilt away.
+    final repo = _FailingLoadRepo(_technique());
+    final vm = TechniqueDetailViewModel(
+      repository: repo,
+      mediaService: TechniqueMediaService(storage: LocalStorageService()),
+      techniqueId: 't1',
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ChangeNotifierProvider.value(
+          value: vm,
+          child: const TechniqueDetailScreen(),
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+
+    // The read fails only once the screen is up and showing the spinner.
+    repo.gate.complete();
+    await tester.pump();
+    await tester.pump();
+
+    expect(vm.load.error, isTrue);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    expect(find.text('This technique could not be loaded.'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -478,6 +533,163 @@ void main() {
     expect(find.text('Cancel'), findsNothing, reason: 'back in the read view');
     expect(tester.takeException(), isNull);
   });
+
+  test('an import abandoned by Cancel clears its busy state for the next '
+      'edit session', () async {
+    // Regression: the abandoned branch reset importingMedia without notifying,
+    // so the screen kept the import spinner and the disabled Save/add/Record
+    // it last saw — into the NEXT edit session, until something else
+    // happened to rebuild it.
+    final media = _GatedImportMedia();
+    final vm = TechniqueDetailViewModel(
+      repository: _FakeRepo(_technique()),
+      mediaService: media,
+      techniqueId: 't1',
+    );
+    addTearDown(vm.dispose);
+    for (var i = 0; i < 200 && vm.technique == null; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+    expect(vm.technique, isNotNull);
+    bool? shownImporting;
+    vm.addListener(() => shownImporting = vm.importingMedia);
+
+    vm.beginMediaDraft();
+    vm.beginEdit();
+    final importing = vm.addMedia(['/tmp/dropped.wav']);
+    expect(shownImporting, isTrue);
+    // Cancel, then Edit again while the copy is still parked.
+    await vm.discardMediaDraft();
+    vm.endEdit();
+    vm.beginMediaDraft();
+    vm.beginEdit();
+
+    media.gate.complete();
+    await importing;
+    expect(vm.importingMedia, isFalse);
+    expect(
+      shownImporting,
+      isFalse,
+      reason: 'the screen must hear that the import is over',
+    );
+    expect(vm.effectiveMedia, isEmpty, reason: 'the orphan is not staged');
+    expect(media.deleted, ['/sandbox/dropped.wav']);
+  });
+
+  test('a staged clip is listed once while the save commits, and once again '
+      'after the save fails', () async {
+    // Regression: the commit's optimistic aggregate already carries the
+    // staged additions while the draft still holds them, so effectiveMedia
+    // listed every staged clip twice for the whole commit (an extra card,
+    // and an extra audio player per duplicate).
+    final media = _GatedImportMedia()..gate.complete();
+    final repo = _GatedSaveRepo(_technique())..failNext = true;
+    final vm = TechniqueDetailViewModel(
+      repository: repo,
+      mediaService: media,
+      techniqueId: 't1',
+    );
+    addTearDown(vm.dispose);
+    for (var i = 0; i < 200 && vm.technique == null; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+    expect(vm.technique, isNotNull);
+    vm.beginMediaDraft();
+    vm.beginEdit();
+    await vm.addMedia(['/tmp/clip.wav']);
+    final staged = vm.effectiveMedia.single;
+
+    final failing = vm.save(vm.technique!);
+    expect(vm.saving, isTrue);
+    expect(vm.effectiveMedia.map((m) => m.id), [staged.id]);
+    repo.gate.complete();
+    expect(await failing, isFalse);
+    // The failed save reverted the aggregate; the clip is still staged — and
+    // still listed exactly once — for the retry.
+    expect(vm.effectiveMedia.map((m) => m.id), [staged.id]);
+    expect(vm.hasMediaDraft, isTrue);
+
+    expect(await vm.save(vm.technique!), isTrue);
+    expect(vm.effectiveMedia.map((m) => m.id), [staged.id]);
+    expect(vm.hasMediaDraft, isFalse);
+    expect(repo.technique.media.map((m) => m.id), [staged.id]);
+  });
+
+  testWidgets('Save while an example take records keeps Cancel and the form '
+      'frozen until the take and the edits are committed', (tester) async {
+    // Regression: Save stopped the take and awaited its import with Cancel
+    // still live. Cancel → Discard in that window tore the form down, and the
+    // resuming Save then dereferenced the disposed controllers (or, with the
+    // dialog still open when the import landed, committed anyway).
+    tester.view.physicalSize = const Size(1200, 2600);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+
+    final repo = _FakeRepo(_technique(body: false));
+    final media = _GatedImportMedia();
+    final vm = TechniqueDetailViewModel(
+      repository: repo,
+      mediaService: media,
+      techniqueId: 't1',
+      recorder: _FakeRecorder(),
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ChangeNotifierProvider.value(
+          value: vm,
+          child: const TechniqueDetailScreen(),
+        ),
+      ),
+    );
+    await tester.pump(); // let the load command resolve
+    await tester.pump();
+    await tester.tap(find.text('Edit').first);
+    await tester.pump();
+    await tester.enterText(find.byType(TextField).first, 'Twang, revised');
+    expect(await vm.startExampleRecording(), isNull);
+    await tester.pump();
+    expect(vm.isRecordingExample, isTrue);
+
+    StudioButton button(String label) =>
+        tester.widget<StudioButton>(find.widgetWithText(StudioButton, label));
+
+    // Save: the take stops and its import parks on the gate.
+    await tester.tap(find.text('Save'));
+    await tester.pump();
+    expect(vm.isRecordingExample, isFalse, reason: 'Save released the mic');
+    expect(vm.savingExample, isTrue, reason: 'the take is still importing');
+    expect(
+      button('Cancel').enabled,
+      isFalse,
+      reason: 'a Discard now would tear the form down under the save',
+    );
+    expect(button('Save').enabled, isFalse);
+    expect(
+      tester
+          .widgetList<TextField>(find.byType(TextField))
+          .every((f) => f.enabled == false),
+      isTrue,
+      reason: 'the edits were already read for this save',
+    );
+    await tester.tap(find.text('Cancel'));
+    await tester.pump();
+    expect(find.text('Discard unsaved changes?'), findsNothing);
+
+    // The import lands (its temp-dir cleanup is real file IO), then the
+    // commit: the take AND the typed edit persist, and the editor closes.
+    media.gate.complete();
+    for (var i = 0; i < 200 && repo.technique.media.isEmpty; i++) {
+      await tester.pump();
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 5)),
+      );
+    }
+    await tester.pump();
+    expect(repo.technique.name, 'Twang, revised');
+    expect(repo.technique.media.map((m) => m.path), ['/sandbox/take.wav']);
+    expect(find.text('Cancel'), findsNothing, reason: 'back in the read view');
+    expect(tester.takeException(), isNull);
+  });
 }
 
 /// Analysis fake that always trips the decode-length cap, as a real
@@ -486,4 +698,77 @@ class _CapTrippingAnalysis extends Fake implements MediaAnalysisService {
   @override
   Future<TechniqueAnalysis?> analyze(String path) async =>
       throw const MediaTooLongException(Duration(minutes: 30));
+}
+
+/// Recorder fake that touches no disk: [start] hands out a path in a folder
+/// that does not exist, and [stop] reports a clean take there. The quit-gate
+/// bracket just runs its work (the quit itself is exercised elsewhere).
+class _FakeRecorder extends Fake implements MicRecordingController {
+  bool recording = false;
+
+  final ValueNotifier<double> _level = ValueNotifier(0);
+
+  static const _path = '/tmp/vocara_no_such_take_dir/take.wav';
+
+  @override
+  ValueNotifier<double> get level => _level;
+
+  @override
+  bool get isRecording => recording;
+
+  @override
+  bool get isStarting => false;
+
+  @override
+  bool get feedingMonitor => false;
+
+  @override
+  Future<MicRecordingStart> start(RecordingPathStrategy destination) async {
+    recording = true;
+    return const MicRecordingStart.started(_path);
+  }
+
+  @override
+  MicRecordingStop? stop() {
+    if (!recording) return null;
+    recording = false;
+    return (path: _path, clean: true, droppedFrames: 0);
+  }
+
+  @override
+  Future<void> guardStopFinalize(Future<void> Function() work) => work();
+
+  @override
+  Future<void> abort() async {
+    recording = false;
+  }
+
+  @override
+  void invalidatePendingStart() {}
+
+  @override
+  void dispose() {
+    _level.dispose();
+  }
+}
+
+/// A media service whose [importMedia] parks on [gate] (a slow copy) and
+/// records deletions instead of touching the disk.
+class _GatedImportMedia extends TechniqueMediaService {
+  _GatedImportMedia() : super(storage: LocalStorageService());
+
+  final Completer<void> gate = Completer<void>();
+  final deleted = <String>[];
+
+  @override
+  Future<String> importMedia({
+    required String techniqueId,
+    required String sourcePath,
+  }) async {
+    await gate.future;
+    return '/sandbox/${sourcePath.split('/').last}';
+  }
+
+  @override
+  Future<void> deleteMedia(String path) async => deleted.add(path);
 }
