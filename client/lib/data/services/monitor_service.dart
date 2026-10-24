@@ -155,15 +155,16 @@ class MonitorService extends ChangeNotifier {
     if (!_active) return;
     final n = samples.length;
     if (n == 0) return;
+    final pcm = _finiteOnly(samples);
     var sumSq = 0.0;
     for (var i = 0; i < n; i++) {
-      sumSq += samples[i] * samples[i];
+      sumSq += pcm[i] * pcm[i];
     }
     final rms = math.sqrt(sumSq / n);
     final dbfs = 20 * (math.log(rms + 1e-9) / math.ln10);
     _level = ((dbfs + 50) / 50).clamp(0.0, 1.0);
 
-    _analyzer.addSamples(samples, (f) {
+    _analyzer.addSamples(pcm, (f) {
       _columns.add(f.column);
       _f0.add(f.f0);
       _f1.add(f.f1);
@@ -219,6 +220,26 @@ class MonitorService extends ChangeNotifier {
       _tunerF0 = _tuner.add(f.f0, f.f0Confidence);
     });
     notifyListeners();
+  }
+
+  /// [samples] with every non-finite value zeroed before any DSP touches
+  /// them, as the take paths do (SpectrogramService's reader,
+  /// MediaAnalysisService). One NaN inside a held note lands in a frame the
+  /// voiced gate still counts, and from there in the LTAS power sum and the
+  /// tilt / CPP sums — running totals only [start] resets, so one glitch from
+  /// the input driver would blank those readouts for the rest of the session.
+  /// A scrubbed COPY rather than an in-place fix (the buffer is the
+  /// caller's), paid for only by the rare chunk that needs one.
+  static Float32List _finiteOnly(Float32List samples) {
+    for (var i = 0; i < samples.length; i++) {
+      if (samples[i].isFinite) continue;
+      final out = Float32List.fromList(samples);
+      for (var j = i; j < out.length; j++) {
+        if (!out[j].isFinite) out[j] = 0.0;
+      }
+      return out;
+    }
+    return samples;
   }
 
   void stop() {

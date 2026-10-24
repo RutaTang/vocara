@@ -248,11 +248,44 @@ void main() {
     );
   });
 
+  testWidgets('the LTAS stats read "—" rather than throw on a non-finite '
+      'value', (tester) async {
+    // int.round() on NaN / Infinity throws, which would replace the whole
+    // tab with an error widget; a stat that cannot be measured reads as a
+    // dash, like the rest of the dock's readouts.
+    final base = _analyzed(_sine(48000, 220, 48000));
+    final l = base.ltas!;
+    final src = _Source(
+      track: base.track,
+      metrics: base.metrics,
+      spectrogram: base.spectrogram,
+      ltas: Ltas(
+        db: l.db,
+        binHz: l.binHz,
+        maxHz: l.maxHz,
+        maxDb: l.maxDb,
+        alphaRatio: double.nan,
+        singersFormantDb: double.infinity,
+        frameCount: l.frameCount,
+      ),
+      durationMs: base.durationMs,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SizedBox(height: 260, child: LtasTab(vm: src)),
+        ),
+      ),
+    );
+    expect(tester.takeException(), isNull);
+    expect(find.text('—'), findsNWidgets(2));
+  });
+
   group('the LIVE monitor path', () {
     // The views the mic drives: a rolling spectrogram, the tuner, the live
     // spectrum strip and the live dynamics panel. MonitorService.feedSamples
-    // takes raw mic samples with no finiteness filter of its own, so what a
-    // misbehaving driver delivers reaches these views intact.
+    // takes raw mic samples straight from the input driver, so these feed it
+    // what a misbehaving driver could deliver.
     testWidgets('renders a fed monitor', (tester) async {
       await pumpTabs(tester, _live(_sine(24000, 220, 48000)));
     });
@@ -267,6 +300,30 @@ void main() {
       data[200] = double.infinity;
       data[300] = double.negativeInfinity;
       await pumpTabs(tester, _live(data));
+    });
+
+    testWidgets('a NaN INSIDE a sustained note leaves the session sums finite', (
+      tester,
+    ) async {
+      // The case above lands its bad samples before the analyzer has seen a
+      // held note, so no voiced frame ever sums them. Here one lands mid-note:
+      // the voiced gate rides through a few unvoiced frames, so the frame
+      // carrying the NaN still counts as voiced and its column, tilt and CPP
+      // go into running sums that only start() resets. Unscrubbed, the live
+      // LTAS (and the TILT / CPP averages) would read NaN for the rest of the
+      // session — and the LTAS tab would throw formatting it.
+      final data = _sine(48000, 220, 48000);
+      data[30000] = double.nan;
+      final src = _live(data);
+      final ltas = src.monitor.liveLtas!;
+      expect(ltas.alphaRatio.isFinite, isTrue);
+      expect(ltas.singersFormantDb.isFinite, isTrue);
+      expect(ltas.db.every((d) => d.isFinite), isTrue);
+      expect(src.monitor.tiltAvg.isFinite, isTrue);
+      expect(src.monitor.cppAvg.isFinite, isTrue);
+      // Scrubbed in a copy: the chunk is the caller's buffer.
+      expect(data[30000].isNaN, isTrue);
+      await pumpTabs(tester, src);
     });
 
     testWidgets('renders a monitor started but never fed', (tester) async {
