@@ -18,7 +18,9 @@ import 'package:vocara/data/sync/sync_hashes.dart';
 import 'package:vocara/domain/models/audio_fx.dart';
 import 'package:vocara/domain/models/audio_track.dart';
 import 'package:vocara/domain/models/song_practice.dart';
+import 'package:vocara/domain/models/spectrogram.dart';
 import 'package:vocara/domain/models/take_version.dart';
+import 'package:vocara/domain/models/voice_metrics.dart';
 import 'package:vocara/ui/song_practice_detail/view_model/song_practice_detail_view_model.dart';
 import 'package:vocara/utils/result.dart';
 
@@ -35,6 +37,21 @@ class _FakeRepo extends Fake implements SongPracticeRepository {
   /// Fails only the NEXT save, then heals.
   bool failNextSave = false;
 
+  /// Models the asset pool: a save re-reads every vocal clip at its POOL path,
+  /// as SongPracticeRepositoryDrift's hydrate does.
+  bool pooling = false;
+
+  static AudioTrack _pooled(AudioTrack t) => t.copyWith(
+    clips: [
+      for (final c in t.clips)
+        c.audioFilePath.startsWith('/pool/')
+            ? c
+            : c.copyWith(
+                audioFilePath: '/pool/${c.audioFilePath.split('/').last}',
+              ),
+    ],
+  );
+
   @override
   Future<Result<Loaded<SongPractice>>> loadPractice(String id) async =>
       Result.ok(Loaded(stored, const {}));
@@ -49,12 +66,53 @@ class _FakeRepo extends Fake implements SongPracticeRepository {
       failNextSave = false;
       return Result.error(Exception('save failed'));
     }
-    stored = practice;
+    stored = pooling
+        ? practice.copyWith(
+            vocalTracks: [for (final t in practice.vocalTracks) _pooled(t)],
+          )
+        : practice;
     return Result.ok(Loaded(stored, const {}));
   }
 }
 
 class _FakeTechRepo extends Fake implements TechniqueRepository {}
+
+/// Records every path an analysis was asked for; analyzes nothing.
+class _FakeSpectrograms extends Fake implements SpectrogramService {
+  final requested = <String>[];
+
+  @override
+  Future<Spectrogram?> computeFromFile(
+    String path, {
+    int fftSize = 2048,
+    int hop = 512,
+    double maxHz = 5000,
+  }) async {
+    requested.add(path);
+    return null;
+  }
+
+  @override
+  Future<VoiceMetrics?> computeMetricsFromFile(
+    String path, {
+    int fftSize = 2048,
+    int hop = 512,
+  }) async {
+    requested.add(path);
+    return null;
+  }
+
+  @override
+  Future<TakeAnalysis?> computeBothFromFile(
+    String path, {
+    int fftSize = 2048,
+    int hop = 512,
+    double maxHz = 5000,
+  }) async {
+    requested.add(path);
+    return null;
+  }
+}
 
 class _FakeFiles extends Fake implements AudioFileService {
   int imports = 0;
@@ -284,6 +342,7 @@ SongPractice _seed({
 void main() {
   late _FakeRepo repo;
   late _FakeWaveforms waveforms;
+  late _FakeSpectrograms spectrograms;
 
   Future<SongPracticeDetailViewModel> pumpVm({
     SongPractice? seed,
@@ -292,12 +351,13 @@ void main() {
   }) async {
     repo = _FakeRepo(seed ?? _seed());
     waveforms = _FakeWaveforms();
+    spectrograms = _FakeSpectrograms();
     final vm = SongPracticeDetailViewModel(
       repository: repo,
       techniqueRepository: _FakeTechRepo(),
       audioFileService: _FakeFiles(),
       waveformService: waveforms,
-      spectrogramService: const SpectrogramService(),
+      spectrogramService: spectrograms,
       separationService: FakeSourceSeparationService(available: false),
       appSettings: AppSettingsService(
         storage: LocalStorageService(),
@@ -568,6 +628,37 @@ void main() {
       await reanalyze;
 
       expect(repo.stored.vocalTracks.single.clips.single.startMs, 300);
+    });
+  });
+
+  group('the dock follows a clip that just landed', () {
+    // Inspector collapsed, dock open on an analysis tab: the dock computes
+    // only when pushed, so the push must name the clip as the model shows it.
+    Future<SongPracticeDetailViewModel> pumpDockOnly() async {
+      final vm = await pumpVm(engine: _FakeGraphEngine(), mic: _FakeMic());
+      repo.pooling = true;
+      vm.toggleInspectorPanel();
+      expect(vm.inspectorOpen, isFalse);
+      vm.analysis.showDockTab(DockTab.spectrogram);
+      return vm;
+    }
+
+    test('a recording punched into a take', () async {
+      final vm = await pumpDockOnly();
+      vm.selectTrack('take1');
+      await vm.recording.startRecording();
+      await vm.stopRecording();
+      final clip = vm.selectedTrack!.clipById(vm.selectedClipId!)!;
+      expect(clip.audioFilePath, '/pool/rec0.wav');
+      expect(spectrograms.requested, contains('/pool/rec0.wav'));
+    });
+
+    test('a clip dropped onto a take', () async {
+      final vm = await pumpDockOnly();
+      await vm.addClipToTake('take1', '/src/drop.wav');
+      final clip = vm.selectedTrack!.clipById(vm.selectedClipId!)!;
+      expect(clip.audioFilePath, '/pool/import0.wav');
+      expect(spectrograms.requested, contains('/pool/import0.wav'));
     });
   });
 }

@@ -561,12 +561,15 @@ class RecordingController extends ChangeNotifier {
         );
       }
       final target = targetId == null ? null : _trackById(targetId);
+      final String landedOn;
       if (target == null || target.kind != AudioTrackKind.vocal) {
         // No armed take → the recording becomes a new take at the cursor.
-        _selectRecordedClip(
-          _appendVocal(path: path, analysis: analysis, startMs: startMs),
-          null,
+        landedOn = _appendVocal(
+          path: path,
+          analysis: analysis,
+          startMs: startMs,
         );
+        _selectRecordedClip(landedOn, null);
       } else {
         // Drop the recording onto the armed take as its own clip at the cursor —
         // a separate clip, never merged into existing audio (Logic / Cubase).
@@ -583,9 +586,15 @@ class RecordingController extends ChangeNotifier {
         // recording, leaving the lane selection stale would pair this clip id with
         // the wrong lane and the inspector would analyze the wrong subject.
         _selectRecordedClip(target.id, clip.id);
-        _analysis.onTrackAudioChanged(target.id);
+        landedOn = target.id;
       }
       await _save();
+      // Only AFTER the save: it re-reads the clip at its pooled path, which is
+      // the key the analysis caches look it up by. Refreshed before it, the
+      // dock analyzed the staging path nothing shows — and, computing only on
+      // these pushes, then sat on "not available" for the new take while the
+      // inspector (when open) analyzed the take a second time.
+      _analysis.onTrackAudioChanged(landedOn);
     }
 
     // The gate is normally free here — every structural action pre-guards on

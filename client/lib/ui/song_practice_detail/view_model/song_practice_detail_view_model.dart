@@ -1096,8 +1096,11 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         _selectedTrackId = target.id;
         _selectedClipId = clip.id;
         _selectedBusId = null; // track and bus selection are exclusive
+        final saved = await _save();
+        // After the save, which re-reads the clip at its pooled path — the key
+        // the analysis caches use (see RecordingController's finalize).
         analysis.onTrackAudioChanged(target.id);
-        return _save();
+        return saved;
       });
     });
   }
