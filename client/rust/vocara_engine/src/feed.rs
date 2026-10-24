@@ -277,14 +277,20 @@ impl TrackFeeder {
         ok
     }
 
-    /// The transport position a plan must start from. The render clock wraps
-    /// `frame >= loop_end` back to `loop_start` BEFORE producing anything
-    /// (see `RtProcessor::render_block`), so a raw playhead at/past loop end
-    /// — a pause fold from a run that played with the loop disengaged, held
-    /// until the first post-play block is consumed — must be modeled wrapped:
-    /// a linear plan from there streams positions the transport never plays.
+    /// The transport position a plan must start from: where the NEXT block
+    /// renders ([`Shared::render_pos`]), not the audible playhead. On the
+    /// resampled path the playhead trails the render by the output FIFO; once
+    /// the render has wrapped to loop_start while the audible position is
+    /// still short of loop_end, a plan based at the playhead sits a whole pass
+    /// ahead of the node, which renders silence until it catches up.
+    /// The render clock wraps `frame >= loop_end` back to `loop_start` BEFORE
+    /// producing anything (see `RtProcessor::render_block`), so a raw position
+    /// at/past loop end — a pause fold from a run that played with the loop
+    /// disengaged, held until the first post-play block is consumed — must be
+    /// modeled wrapped: a linear plan from there streams positions the
+    /// transport never plays.
     fn planned_pos(t: &Shared, basis: &PlanBasis) -> i64 {
-        let pos = t.playhead().max(0);
+        let pos = t.render_pos().max(0);
         if basis.loop_on && basis.le > basis.ls && pos >= basis.le {
             basis.ls
         } else {
@@ -342,8 +348,14 @@ impl TrackFeeder {
         // `planned_pos` models the render-side wrap, so while looping `pos`
         // is always inside [ls, le) — a plan behind a wrapped transport shows
         // up here as `pos > next_tl` like any other starvation.
+        // The ring must actually be DRAINED: right after a wrap fence the
+        // plan restarts at loop_start while the transport is still playing
+        // the pre-wrap tail out of the ring, so `pos > next_tl` alone would
+        // jump the next pass ahead of the node and silence most of it. Past a
+        // non-looped track's end the node never pops the one jump fence, so
+        // the same check keeps every later pump from minting another.
         let pos = Self::planned_pos(t, &basis);
-        if pos > self.next_tl {
+        if pos > self.next_tl && self.producer.free() == self.producer.capacity() {
             let next_gen = self.generation.wrapping_add(1);
             if self.push_fence(next_gen, pos) {
                 self.generation = next_gen;

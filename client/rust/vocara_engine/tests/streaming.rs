@@ -557,3 +557,160 @@ fn a_failed_reopen_leaves_the_working_handle_intact() {
     assert_eq!(reader.read_at(0, &mut still).unwrap(), 64);
     assert_eq!(still, reference, "the surviving handle still reads");
 }
+
+/// A ramp whose FIRST frame is non-zero: [`ramp_pcm`] starts at sin(0) = 0,
+/// which hides a dropout on exactly the first sample of a track.
+fn offset_pcm(frames: usize) -> Vec<Smp> {
+    let mut pcm = Vec::with_capacity(frames * CHANNELS);
+    for i in 0..frames {
+        let v = 0.25 + i as Smp * 1e-5;
+        pcm.push(v);
+        pcm.push(-v);
+    }
+    pcm
+}
+
+fn write_pcm(tag: &str, pcm: &[Smp]) -> std::path::PathBuf {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "vocara_stream_{tag}_{}_{seq}.wav",
+        std::process::id()
+    ));
+    write_wav_f32(&path, pcm, CHANNELS as u16, ENGINE_SR as u32).unwrap();
+    path
+}
+
+#[test]
+fn a_loop_longer_than_the_ring_streams_every_pass() {
+    // The real geometry: multi-second loops over a 16384-frame ring. Right
+    // after the wrap fence the plan restarts at loop_start while the node is
+    // still playing the pre-wrap tail out of the ring; the starvation jump
+    // used to read that as "transport ahead of the plan" and push a fence
+    // into the middle of the next pass, which the node then sat silent
+    // waiting for. The 1000-frame loop in the test above never exposed it:
+    // the feeder stays ahead of so short a pass.
+    for &(ls, le, ring) in &[
+        (100i64, 1100i64, 8192usize),
+        (0, 3000, 8192),
+        (0, 20_000, 4096),
+        (0, 48_000, 16_384),
+    ] {
+        let frames = (le as usize + 10).max(4096);
+        let path = write_track(frames);
+        let (h, rt, mut feeder) = streamed_pair(&path, 0, ring);
+        h.set_loop(true, ls, le);
+        h.seek(ls);
+        h.play();
+        let blocks = ((le - ls) as usize * 3) / BLOCK + 10; // three passes
+        let streamed = render_streamed(&h, &rt, &mut feeder, blocks);
+
+        let (h2, rt2) = engine_with(Box::new(BufferSource::new(ramp_pcm(frames), 0)));
+        h2.set_loop(true, ls, le);
+        h2.seek(ls);
+        h2.play();
+        let arc = render_arc(&h2, &rt2, blocks);
+        let bad = (0..streamed.len() / 2)
+            .filter(|&i| streamed[2 * i] != arc[2 * i])
+            .count();
+        assert_eq!(bad, 0, "loop [{ls}, {le}) over a {ring}-frame ring");
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[test]
+fn past_a_tracks_end_the_feeder_mints_at_most_one_fence() {
+    // The node never pops past the span, so a fence pushed there sits in the
+    // ring. Re-minting one every pump filled the ring with fences, which a
+    // later seek back then had to wade through.
+    let path = write_track(1024);
+    let (h, rt, mut feeder) = streamed_pair(&path, 0, 4096);
+    h.play();
+    let _ = render_streamed(&h, &rt, &mut feeder, 20); // playhead 2560: past the end
+    let g0 = feeder.ctrl.gen.load(std::sync::atomic::Ordering::Relaxed);
+    let _ = render_streamed(&h, &rt, &mut feeder, 100);
+    let g1 = feeder.ctrl.gen.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        g1.wrapping_sub(g0) <= 1,
+        "{} generations minted over 100 post-span pumps",
+        g1.wrapping_sub(g0)
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn a_loop_starting_before_the_track_plays_its_first_frame_every_pass() {
+    // A take that starts mid-loop: the wrap fence's base (loop_start) is
+    // before the track's first frame. Adopting it re-armed the node below the
+    // span AFTER this frame's pre-span clamp, silencing the track's first
+    // frame on every pass after the first.
+    let frames = 4096;
+    let start = 500i64;
+    let path = write_pcm("offset", &offset_pcm(frames));
+    let (h, rt, mut feeder) = streamed_pair(&path, start, 8192);
+    h.set_loop(true, 100, 1100);
+    h.seek(100);
+    h.play();
+    let streamed = render_streamed(&h, &rt, &mut feeder, 40);
+
+    let (h2, rt2) = engine_with(Box::new(BufferSource::new(offset_pcm(frames), start)));
+    h2.set_loop(true, 100, 1100);
+    h2.seek(100);
+    h2.play();
+    let arc = render_arc(&h2, &rt2, 40);
+    assert_eq!(streamed, arc, "each pass must play the track's first frame");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn a_loop_edit_after_the_render_wrapped_replans_from_the_render_clock() {
+    // On the resampled output path the device trails the render by its FIFO,
+    // so near loop end the render can already have wrapped to loop_start
+    // while the audible playhead has not. A replan then (dragging a loop
+    // handle) based at the audible playhead put the plan a whole pass ahead
+    // of the node, which rendered silence until the clock caught up.
+    const LAG: u64 = 256;
+    let frames = 8192;
+    let path = write_pcm("lagged", &offset_pcm(frames));
+    let run = |streamed: bool| -> Vec<Smp> {
+        let (h, rt, mut feeder) = streamed_pair(&path, 0, 16_384);
+        let (h2, rt2) = engine_with(Box::new(BufferSource::new(offset_pcm(frames), 0)));
+        let (h, rt) = if streamed { (h, rt) } else { (h2, rt2) };
+        let mut rendered = 0u64;
+        let mut out = Vec::new();
+        let mut render = |h: &EngineHandle, feeder: &mut TrackFeeder, blocks: usize| {
+            for _ in 0..blocks {
+                if streamed {
+                    feeder.pump(h.transport()).unwrap();
+                }
+                let mut block = vec![0.0; BLOCK * CHANNELS];
+                rt.render_offline(&mut block, BLOCK);
+                out.extend_from_slice(&block);
+                rendered += BLOCK as u64;
+                // The device has consumed all but the last LAG frames.
+                let t = rt.transport();
+                let target = rendered.saturating_sub(LAG);
+                let cur = t.consumed_frames();
+                if target > cur {
+                    t.advance_consumed(target - cur);
+                }
+            }
+        };
+        h.set_loop(true, 0, 4000);
+        h.seek(0);
+        h.play();
+        // 32 blocks = 4096 frames rendered: the render wrapped at 4000, the
+        // audible playhead (4096 - LAG = 3840) has not.
+        render(&h, &mut feeder, 32);
+        h.set_loop(true, 64, 4000);
+        render(&h, &mut feeder, 40);
+        out
+    };
+    let streamed = run(true);
+    let arc = run(false);
+    let bad = (0..streamed.len() / 2)
+        .filter(|&i| streamed[2 * i] != arc[2 * i])
+        .count();
+    assert_eq!(bad, 0, "the replan must not silence the pass");
+    let _ = std::fs::remove_file(&path);
+}

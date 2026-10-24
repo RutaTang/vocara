@@ -236,6 +236,18 @@ impl Shared {
             .unwrap_or_else(|| self.frame.load(Ordering::Acquire))
     }
 
+    /// Where the NEXT rendered block starts: a pending seek's target, else the
+    /// render clock. Ahead of [`Self::playhead`] by the output FIFO on the
+    /// resampled path — the position a streaming feeder must plan from, since
+    /// it fills the ring the render consumes, not what the listener hears.
+    pub fn render_pos(&self) -> i64 {
+        let seek = self.seek_req.load(Ordering::Acquire);
+        if seek >= 0 {
+            return seek;
+        }
+        self.frame.load(Ordering::Acquire)
+    }
+
     /// Engine frames delivered to the output device so far (the consumed
     /// cursor's raw counter) — the OUTPUT-clock reference the drift
     /// estimator compares the input counter against.

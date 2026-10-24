@@ -289,6 +289,14 @@ impl Node for StreamingSource {
                     break;
                 }
             }
+            // The adoption above can re-arm at a pre-span base (a loop_start
+            // before start_frame): the feeder skipped those positions, so skip
+            // them here too — the clamp at the top of this iteration already
+            // ran, and deferring it a frame silences this one and then discards
+            // the track's real first frame in the next frame's catch-up.
+            if self.armed && self.ring_pos < self.start_frame {
+                self.ring_pos = self.start_frame;
+            }
             if !self.armed || self.ring_pos != tl {
                 out[o] = 0.0;
                 out[o + 1] = 0.0;
