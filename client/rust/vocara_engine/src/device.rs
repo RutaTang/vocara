@@ -1830,6 +1830,14 @@ fn open_mic(
     build_input(uid, input_cell, event).map(|(h, _)| h)
 }
 
+/// Duplex VPIO renders the engine, monitor included, from the moment the unit starts — before
+/// the host can publish which endpoint it landed on and re-derive the safety mute. Mute first:
+/// every path out of the open (success or the restored cpal output) rebinds, and that reconcile
+/// lifts the mute again once playback is known to be on the chosen device.
+fn premute_for_vpio(rt: &Arc<RtCell>) {
+    rt.transport().set_monitor_muted(true);
+}
+
 #[allow(unused_assignments)]
 // One positional slot per shared atomic/collaborator the host thread owns for its whole
 // life; a params struct would only restate this list.
@@ -2006,6 +2014,7 @@ fn audio_host_run(
                     // the take records from the default one.
                     if VPIO_DUPLEX_AEC {
                         out_stream = None;
+                        premute_for_vpio(&rt);
                     }
                     let mut fell_back = false;
                     let built =
@@ -2121,6 +2130,9 @@ fn audio_host_run(
                     // StopInput on why the store precedes the drop).
                     input_stopped(&input_state);
                     in_stream = None;
+                    if VPIO_DUPLEX_AEC {
+                        premute_for_vpio(&rt);
+                    }
                     let mut fell_back = false;
                     match open_mic(cur_in_uid.as_deref(), &rt, &input_cell, &event).or_else(|e| {
                         if cur_in_uid.is_some() {

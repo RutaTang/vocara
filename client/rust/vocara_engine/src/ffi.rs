@@ -889,14 +889,23 @@ pub extern "C" fn ve_start_input_recording(e: *mut VeEngine, path: *const c_char
         if !eng.writer.start(p) {
             return -1;
         }
-        // A fresh take starts with clean counters: both belong to exactly one recording
-        // (`ve_record_dropped_frames` after stop; `ve_record_written_frames` during it).
-        eng.rec_dropped.store(0, Ordering::Release);
-        eng.rec_written.store(0, Ordering::Release);
+        begin_take(&eng.rec_dropped, &eng.rec_written, &eng.device_event);
         eng.rec_active.store(true, Ordering::Release);
         sync_input(eng);
         0
     })
+}
+
+/// A fresh take starts with clean per-take state: both counters belong to exactly one
+/// recording (`ve_record_dropped_frames` after stop; `ve_record_written_frames` during it),
+/// and so does the record-limit event. The fan-out re-raises that bit on every frame past
+/// the limit until the stop lands, so a take that hit it leaves it latched after its own
+/// poller claimed it — and the next take's first poll would stop it on the spot. Only that
+/// bit: device-loss events still pending belong to their pollers.
+fn begin_take(dropped: &AtomicU64, written: &AtomicU64, event: &AtomicU32) {
+    dropped.store(0, Ordering::Release);
+    written.store(0, Ordering::Release);
+    event.fetch_and(!device::EVENT_RECORD_LIMIT, Ordering::AcqRel);
 }
 
 /// Stop the input recording (finalizes the WAV); closes the input stream if nothing else needs
@@ -3025,6 +3034,26 @@ mod capture_ring_tests {
             cons.pop(),
             Some([0.4, -0.4]),
             "a start while capturing must not drop live audio"
+        );
+    }
+}
+
+#[cfg(test)]
+mod begin_take_tests {
+    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+    #[test]
+    fn a_new_take_drops_the_last_takes_record_limit_but_keeps_device_events() {
+        let dropped = AtomicU64::new(7);
+        let written = AtomicU64::new(9);
+        let event =
+            AtomicU32::new(crate::device::EVENT_RECORD_LIMIT | crate::device::EVENT_INPUT_LOST);
+        super::begin_take(&dropped, &written, &event);
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
+        assert_eq!(written.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            event.load(Ordering::Relaxed),
+            crate::device::EVENT_INPUT_LOST
         );
     }
 }
