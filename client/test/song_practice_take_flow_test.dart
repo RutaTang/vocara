@@ -441,4 +441,38 @@ void main() {
       );
     });
   });
+
+  group("REC's empty take", () {
+    test(
+      'a failed save aborts the start instead of arming the backing',
+      () async {
+        final engine = _FakeGraphEngine();
+        final vm = await pumpVm(
+          seed: _seed(
+            accompaniment: AudioTrack(
+              id: 'acc',
+              kind: AudioTrackKind.accompaniment,
+              displayName: 'Backing',
+              audioFilePath: '/pool/acc.wav',
+              durationMs: 5000,
+              createdAt: DateTime(2026),
+            ),
+          ),
+          engine: engine,
+          mic: _FakeMic(),
+        );
+        expect(vm.selectedTrackId, 'acc'); // the load selects the backing lane
+        expect(vm.recording.recordTargetId, isNull); // nothing armed
+        repo.failNextSave = true; // the empty take's save fails
+        await vm.recording.startRecording();
+        expect(vm.isRecording, isFalse);
+        expect(
+          engine.muted['acc-c0'],
+          isNot(isTrue),
+          reason: 'the backing was frozen as the punch-in target and muted',
+        );
+        expect(vm.practice!.vocalTracks.map((t) => t.id), ['take1']);
+      },
+    );
+  });
 }

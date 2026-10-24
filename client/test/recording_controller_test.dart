@@ -250,7 +250,7 @@ void main() {
       updateTrack: (id, fn) {},
       appendVocal: ({required path, required analysis, required startMs}) =>
           't1',
-      createEmptyVocalTake: () async {},
+      createEmptyVocalTake: () async => null,
       selectRecordedClip: (t, c) {},
       save: () => saveImpl(),
       toast: (_) {},
@@ -411,7 +411,7 @@ void main() {
       updateTrack: (id, fn) {},
       appendVocal: ({required path, required analysis, required startMs}) =>
           't1',
-      createEmptyVocalTake: () async {},
+      createEmptyVocalTake: () async => null,
       selectRecordedClip: (t, c) {},
       save: () async {
         saves++;

@@ -1381,10 +1381,11 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   // --- Takes -----------------------------------------------------------------
 
   /// Creates an empty vocal take (a lane with no clip yet) in the active
-  /// interpretation and selects it, so the next REC records into it.
-  Future<void> createEmptyVocalTake() async {
+  /// interpretation and selects it, so the next REC records into it. Returns
+  /// its id once its save landed, null otherwise (REC then records nothing).
+  Future<String?> createEmptyVocalTake() async {
     final practice = _practice;
-    if (practice == null) return;
+    if (practice == null) return null;
     final track = AudioTrack(
       id: newId(),
       kind: AudioTrackKind.vocal,
@@ -1402,7 +1403,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       vocalTracks: [...practice.vocalTracks, track],
     );
     _selectedTrackId = track.id;
-    await _save();
+    return await _save() ? track.id : null;
   }
 
   String _appendVocal({

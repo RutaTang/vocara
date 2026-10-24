@@ -55,7 +55,7 @@ class RecordingController extends ChangeNotifier {
       required int startMs,
     })
     appendVocal,
-    required Future<void> Function() createEmptyVocalTake,
+    required Future<String?> Function() createEmptyVocalTake,
     required void Function(String trackId, String? clipId) selectRecordedClip,
     required Future<bool> Function() save,
     required void Function(String) toast,
@@ -122,7 +122,10 @@ class RecordingController extends ChangeNotifier {
     required int startMs,
   })
   _appendVocal;
-  final Future<void> Function() _createEmptyVocalTake;
+
+  /// Creates the empty take REC records into when nothing is armed; returns
+  /// its id once its save landed, or null when it did not.
+  final Future<String?> Function() _createEmptyVocalTake;
 
   /// Selects the lane (and, when non-null, the clip) the recording landed on.
   /// A null clip id leaves the host's clip selection untouched (new-take case).
@@ -191,8 +194,13 @@ class RecordingController extends ChangeNotifier {
       // create an empty take to record into — there's no separate REC lane.
       var targetId = recordTargetId;
       if (targetId == null) {
-        await _createEmptyVocalTake();
-        targetId = _selectedTrackId();
+        // The id the take was created with, never a re-read of the selection:
+        // a failed save reverts the model and moves the selection to the first
+        // lane — usually the backing, which the take would then mute as its
+        // punch-in target for the whole recording. Nothing to record into:
+        // abort (the save already said so).
+        targetId = await _createEmptyVocalTake();
+        if (targetId == null) throw const _TakeSetupFailed();
       }
       _takeGeneration++;
       _recordingTargetId = targetId;
@@ -433,7 +441,7 @@ class RecordingController extends ChangeNotifier {
       // dead-buttoned. Generation-guarded: after this take's stop a NEW take
       // can already be armed, and a bare isRecording check would stop it.
       if (_mic.isRecording && _takeGeneration == takeGen) _mic.stop();
-      _toast(_friendlyError(e));
+      if (e is! _TakeSetupFailed) _toast(_friendlyError(e));
       notifyListeners();
     }
   }
@@ -817,4 +825,11 @@ class RecordingController extends ChangeNotifier {
     recordingPeaks.dispose();
     super.dispose();
   }
+}
+
+/// Thrown from the take setup when the empty take REC was to record into
+/// could not be saved. Aborts the start silently: the failed save has already
+/// told the user.
+class _TakeSetupFailed implements Exception {
+  const _TakeSetupFailed();
 }
