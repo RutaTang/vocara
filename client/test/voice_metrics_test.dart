@@ -347,6 +347,19 @@ void main() {
     },
   );
 
+  test('yinPitch reads an above-fmax tone as NaN, not one octave low', () {
+    // A period shorter than the search band's first lag has its first d′ dip at
+    // 2T, which the range gate accepted as f0/2 — every whistle-register note
+    // above ~1.36 kHz read an octave low with full confidence.
+    for (final hz in [1397.0, 1568.0, 1760.0, 2093.0]) {
+      final y = yinPitch(_sine(hz, _sr.toDouble(), 2048), _sr.toDouble());
+      expect(y.f0.isNaN, isTrue, reason: '$hz Hz read as ${y.f0} Hz');
+    }
+    // The batch pass agrees: no frame of a held high note carries a pitch.
+    final m = computeVoiceMetrics(_tones([1760]), _sr);
+    expect(m.f0.where((v) => !v.isNaN), isEmpty);
+  });
+
   test('yinPitch periodicity is far lower for noise than for a tone', () {
     final tone = yinPitch(
       Float32List.sublistView(_tones([220]), 0, 2048),
