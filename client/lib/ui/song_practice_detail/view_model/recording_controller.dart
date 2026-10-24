@@ -462,6 +462,12 @@ class RecordingController extends ChangeNotifier {
     final recordingClean = stopped.clean;
     final path = stopped.path;
     await _playback.engine.pause();
+    // The take disabled the engine's loop wrap. Re-arm it here rather than
+    // relying on the finalize's save: a finalize that drops an unreadable
+    // partial take returns before saving, which left the loop button lit over
+    // a transport that no longer looped. (The mic stopped above, so this push
+    // is no longer held off as a mid-take one.)
+    _playback.ensureLoopRange();
     // Placement compensation, two independent terms:
     //  * pre-roll — the WAV has been recording since the arm, but the backing started
     //    `_recordingPreRollMs` later, so the sung content begins that far INTO the file;

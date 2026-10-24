@@ -74,7 +74,15 @@ class PlaybackController extends ChangeNotifier {
     }
   }
 
-  Future<void> seek(Duration to) => _engine.seek(to);
+  /// Moves the backing. Ignored while a take is in flight: the take is placed
+  /// on a straight timeline from where it started, so a ruler click, lyric tap
+  /// or analysis scrub that jumped the backing mid-take would leave everything
+  /// sung after the jump against the wrong part of the song. (The recording
+  /// controller drives its own seeks through [engine] directly.)
+  Future<void> seek(Duration to) async {
+    if (_isRecording()) return;
+    await _engine.seek(to);
+  }
 
   /// The recording clock's playhead write. While a take is armed the engine's
   /// position stream is ignored (the record tick owns the playhead), so the
@@ -87,7 +95,11 @@ class PlaybackController extends ChangeNotifier {
   }
 
   /// Stops playback and returns the playhead to the start of the play range.
+  /// A no-op while a take is in flight (pausing and rewinding the backing
+  /// under a still-rolling mic would misalign the take); the transport bar
+  /// routes its Stop to the recording instead.
   Future<void> stop() async {
+    if (_isRecording()) return;
     await _engine.pause();
     await _engine.seek(Duration(milliseconds: _loopStartMs));
   }
@@ -96,6 +108,18 @@ class PlaybackController extends ChangeNotifier {
 
   bool _loopEnabled = false;
   bool get loopEnabled => _loopEnabled;
+
+  /// Pushes the loop region to the engine. A take disables the engine's wrap
+  /// (the recording plays freely from its start), and every push here — a
+  /// save's [ensureLoopRange], a loop toggle or handle drag mid-take — must
+  /// keep it disabled, or the backing would jump back at loop end while the
+  /// mic keeps recording straight on. The region itself still updates, and
+  /// [ensureLoopRange] re-arms the wrap once the take stops.
+  void _pushLoop() => _engine.setLoop(
+    _loopEnabled && !_isRecording(),
+    _loopStartMs,
+    _loopEndMs,
+  );
 
   int _loopStartMs = 0;
   int _loopEndMs = 0;
@@ -239,7 +263,7 @@ class PlaybackController extends ChangeNotifier {
     if (_loopStartMs > _loopEndMs - minLoopMs) {
       _loopStartMs = (_loopEndMs - minLoopMs).clamp(0, timeline);
     }
-    _engine.setLoop(_loopEnabled, _loopStartMs, _loopEndMs);
+    _pushLoop();
   }
 
   /// When the loop is active, bring the playhead inside [loopStart, loopEnd).
@@ -247,7 +271,9 @@ class PlaybackController extends ChangeNotifier {
   /// BEFORE loopStart up into the window, so without this enabling a loop while
   /// the playhead is to its left plays a long out-of-region pass before wrapping.
   void _snapPlayheadIntoLoop() {
-    if (!_loopEnabled || !hasLoop) return;
+    // Never mid-take: the record clock owns the playhead, and the seek would
+    // jump the backing under the rolling take.
+    if (!_loopEnabled || !hasLoop || _isRecording()) return;
     final posMs = position.value.inMilliseconds;
     if (posMs < _loopStartMs || posMs >= _loopEndMs) {
       position.value = Duration(milliseconds: _loopStartMs);
@@ -269,7 +295,7 @@ class PlaybackController extends ChangeNotifier {
     // returns a negative upperLimit (release) when upper < lower.
     final hi = math.max(0, _loopEndMs - minLoopMs);
     _loopStartMs = ms.clamp(0, hi);
-    _engine.setLoop(_loopEnabled, _loopStartMs, _loopEndMs);
+    _pushLoop();
     _snapPlayheadIntoLoop();
     notifyListeners();
   }
@@ -280,14 +306,14 @@ class PlaybackController extends ChangeNotifier {
     // `_loopStartMs + minLoopMs` can exceed _loopMaxMs (lower > upper).
     final lo = math.min(_loopStartMs + minLoopMs, _loopMaxMs);
     _loopEndMs = ms.clamp(lo, _loopMaxMs);
-    _engine.setLoop(_loopEnabled, _loopStartMs, _loopEndMs);
+    _pushLoop();
     _snapPlayheadIntoLoop();
     notifyListeners();
   }
 
   void toggleLoop() {
     _loopEnabled = !_loopEnabled;
-    _engine.setLoop(_loopEnabled, _loopStartMs, _loopEndMs);
+    _pushLoop();
     _snapPlayheadIntoLoop();
     notifyListeners();
   }

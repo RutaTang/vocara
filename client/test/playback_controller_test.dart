@@ -187,6 +187,64 @@ void main() {
     });
   });
 
+  // A take plays the backing freely from its start and disables the engine's
+  // loop wrap. Every controller push used to re-send the remembered loop, so
+  // any save during the take (a fader release → ensureLoopRange), a loop
+  // toggle or handle drag re-armed the wrap, and the backing jumped back at
+  // loop end under a mic that kept recording straight on: everything sung
+  // after the jump landed against the wrong part of the song.
+  group('during a take', () {
+    PlaybackController looping() {
+      final c = controller(timelineMs: 60000)..ensureLoopRange();
+      c.setLoopStart(10000);
+      c.setLoopEnd(20000);
+      c.toggleLoop();
+      // REC: the recording controller disables the wrap directly.
+      recording = true;
+      c.engine.setLoop(false, 0, 0);
+      c.setRecordingPosition(const Duration(milliseconds: 30000));
+      engine.calls.clear();
+      return c;
+    }
+
+    test('a save\'s ensureLoopRange keeps the engine wrap off', () {
+      final c = looping();
+      c.ensureLoopRange();
+      expect(engine.calls, ['loop:false:10000:20000']);
+      expect(c.loopEnabled, isTrue, reason: 'the region itself is kept');
+    });
+
+    test('loop toggles and handle drags neither re-arm the wrap nor seek', () {
+      final c = looping();
+      c.toggleLoop();
+      c.toggleLoop();
+      c.setLoopStart(12000);
+      c.setLoopEnd(18000);
+      expect(
+        engine.calls.where(
+          (x) => x.startsWith('seek') || x.startsWith('loop:true'),
+        ),
+        isEmpty,
+      );
+      expect((c.loopStartMs, c.loopEndMs), (12000, 18000));
+      expect(c.position.value, const Duration(milliseconds: 30000));
+    });
+
+    test('seek and stop leave the backing alone', () async {
+      final c = looping();
+      await c.seek(const Duration(milliseconds: 5000));
+      await c.stop();
+      expect(engine.calls, isEmpty);
+    });
+
+    test('the wrap re-arms once the take has stopped', () {
+      final c = looping();
+      recording = false;
+      c.ensureLoopRange();
+      expect(engine.calls, ['loop:true:10000:20000']);
+    });
+  });
+
   group('loop region', () {
     test('ensureLoopRange defaults the region to the content length', () {
       final c = controller(timelineMs: 60000);

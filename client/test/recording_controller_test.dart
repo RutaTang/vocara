@@ -51,6 +51,11 @@ class _FakePlayback extends Fake implements PlaybackController {
   /// real controller; here only the value matters).
   @override
   void setRecordingPosition(Duration to) => position.value = to;
+
+  int loopRearms = 0;
+
+  @override
+  void ensureLoopRange() => loopRearms++;
 }
 
 /// resyncPlayback parks each call on its own completer, so a take's
@@ -317,6 +322,24 @@ void main() {
     await b;
     await controller.stopRecording();
   });
+
+  test(
+    'stopping a take re-arms the loop wrap without waiting on a save',
+    () async {
+      // The take disables the engine's wrap; only the finalize's save used to
+      // re-arm it, so a finalize that drops an unreadable partial take (no
+      // save) left the loop button lit over a transport that no longer looped.
+      // Here the save re-arms nothing, so the stop itself must.
+      final a = controller.startRecording();
+      await pumpUntil(() => mixer.gates.length == 1);
+      mixer.gates[0].complete();
+      await a;
+      expect(playback.loopRearms, 0);
+
+      await controller.stopRecording();
+      expect(playback.loopRearms, 1);
+    },
+  );
 
   test(
     'quit during the stop-finalize window waits for the take save',

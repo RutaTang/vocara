@@ -240,6 +240,22 @@ void main() {
     );
   });
 
+  testWidgets('stop WHILE RECORDING ends the take, not the transport', (
+    tester,
+  ) async {
+    // The transport stop paused and rewound the backing under a mic that
+    // kept recording, misaligning everything sung after it.
+    final vm = await pump(
+      tester,
+      practice: _practice(takes: [_take('t1')]),
+      recording: true,
+    );
+    await tester.tap(button(FIcons.square).first);
+    await tester.pump();
+    expect(vm.stopRecordings, 1);
+    expect(vm.fakePlayback.stops, 0);
+  });
+
   testWidgets('the loop toggle is dead until a loop region exists', (
     tester,
   ) async {

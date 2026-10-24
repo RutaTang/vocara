@@ -115,7 +115,11 @@ class DetailTransportBar extends StatelessWidget {
                   icon: FIcons.square,
                   color: Studio.textSecondary,
                   size: 34,
-                  onTap: hasTracks ? vm.playback.stop : null,
+                  // Mid-take, Stop ends the take (what Stop means in any DAW);
+                  // the transport stop itself is a no-op while recording.
+                  onTap: vm.isRecording
+                      ? vm.stopRecording
+                      : (hasTracks ? vm.playback.stop : null),
                 ),
                 const SizedBox(width: 8),
                 StudioRoundButton(
