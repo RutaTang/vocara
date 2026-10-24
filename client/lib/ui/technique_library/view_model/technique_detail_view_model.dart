@@ -696,10 +696,16 @@ class TechniqueDetailViewModel extends ChangeNotifier
   TechniqueAnalysis? _practice;
 
   /// Bumped whenever the reference changes (_resetToReferenceSubject) or the
-  /// practice take is cleared, so a stopPractice() analysis that resolves late
-  /// knows its take is stale — recorded against a now-replaced reference — and
-  /// discards its result instead of pairing mismatched clips.
+  /// practice take is cleared, so a take whose reference changed while it was
+  /// recording or being analyzed knows it is stale — recorded against a
+  /// now-replaced reference — and is discarded instead of pairing mismatched
+  /// clips.
   int _practiceGeneration = 0;
+
+  /// The [_practiceGeneration] the take now recording was ARMED under: the
+  /// reference a take is recorded against is the one selected when capture
+  /// starts, so the snapshot is taken then, not at Stop (see [stopPractice]).
+  int _practiceTakeGeneration = 0;
 
   /// The analysis of the latest practice recording (ephemeral), or null.
   TechniqueAnalysis? get practiceAnalysis => _practice;
@@ -738,6 +744,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
     // (dispose or a generation bump). Nothing armed; leave state untouched.
     if (!r.started) return null;
     _practiceTempPath = r.path;
+    _practiceTakeGeneration = _practiceGeneration;
     _recordingExample = false;
     _practiceFailed = false;
     notifyListeners();
@@ -771,6 +778,25 @@ class TechniqueDetailViewModel extends ChangeNotifier
       await deleteTempRecordingDir(path);
       return;
     }
+    // The take was recorded against the reference selected when it ARMED. A
+    // reference change since then (the example cards stay live while
+    // recording, so opening another one mid-take is one tap) already dropped
+    // the previous take and pointed the views at the new reference; analyzing
+    // this one would pair it in the gap table with a reference it was never
+    // recorded against. A snapshot taken HERE accepted exactly that, while
+    // the same tap landing just after Stop discarded the take — the verdict
+    // hung on which side of Stop the tap fell. Discard it, and say why: the
+    // user just pressed Stop and expects a result.
+    final generation = _practiceTakeGeneration;
+    if (_practiceGeneration != generation) {
+      _practiceTempPath = null;
+      await deleteTempRecordingDir(path);
+      _recordingNotice =
+          'Practice take discarded: the reference example changed while '
+          'recording.';
+      notifyListeners();
+      return;
+    }
     if (recordingClean && droppedFrames > 0) {
       // The take is kept and analyzed anyway; the notice only stops it from
       // masquerading as gapless. A dirty stop surfaces its own notice below.
@@ -779,11 +805,10 @@ class TechniqueDetailViewModel extends ChangeNotifier
     _practiceLoading = true;
     _practiceFailed = false;
     _subject = TechniqueAnalysisSubject.practice;
-    // Snapshot the reference generation: if it changes during analyze() (the user
-    // selected/added/recorded a different reference, or cleared the take), this
-    // take was recorded against a now-replaced reference. Discarding its result
-    // avoids showing/comparing a take against the wrong reference.
-    final generation = _practiceGeneration;
+    // The same generation guards the analysis: if it changes during analyze()
+    // (the user selected/added/recorded a different reference, or cleared the
+    // take), the result is discarded rather than shown against the wrong
+    // reference.
     notifyListeners();
 
     // analyze() can THROW (native decode / isolate failure). Without try/finally
@@ -841,8 +866,11 @@ class TechniqueDetailViewModel extends ChangeNotifier
     _practiceFailed = false;
     _practiceFailedMessage = null;
     // Invalidate any in-flight stopPractice() analysis so it doesn't resurrect
-    // the take the user just discarded.
-    _practiceGeneration++;
+    // the take the user just discarded. Not while a NEW take is recording: no
+    // analysis can be in flight then (a take only arms with none loading),
+    // and the bump would void that take at its Stop although its reference
+    // never changed (see [stopPractice]).
+    if (!isRecordingPractice) _practiceGeneration++;
     if (_subject == TechniqueAnalysisSubject.practice) {
       _subject = TechniqueAnalysisSubject.reference;
     }
