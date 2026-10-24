@@ -1,0 +1,84 @@
+import 'package:flutter/gestures.dart'
+    show PointerDeviceKind, kDoubleTapTimeout;
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:vocara/ui/core/widgets/studio_controls.dart';
+
+void main() {
+  group('StudioPanKnob', () {
+    /// A knob wired the way every strip wires it: onChanged feeds the new
+    /// value straight back in, which only lands on the next rebuild.
+    Future<ValueNotifier<double>> pumpKnob(WidgetTester tester) async {
+      final pan = ValueNotifier(0.0);
+      addTearDown(pan.dispose);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Center(
+              child: ValueListenableBuilder<double>(
+                valueListenable: pan,
+                builder: (_, v, _) => StudioPanKnob(
+                  value: v,
+                  onChanged: (next) => pan.value = next,
+                  onCommit: () {},
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      return pan;
+    }
+
+    /// Presses on the knob and moves far enough for the pan to be accepted
+    /// (that first move only wins the gesture), then lets a frame build.
+    Future<TestGesture> grab(WidgetTester tester, double dx) async {
+      final g = await tester.startGesture(
+        tester.getCenter(find.byType(StudioPanKnob)),
+        kind: PointerDeviceKind.mouse,
+      );
+      await g.moveBy(Offset(dx, 0));
+      await tester.pump();
+      return g;
+    }
+
+    // Regression guard: each move panned from the widget's value, which only
+    // updates on rebuild, so two pointer moves inside one frame (a fast
+    // mouse) both started from the same stale value and the first was lost.
+    testWidgets('two moves inside one frame both count', (tester) async {
+      final pan = await pumpKnob(tester);
+      final g = await grab(tester, 20);
+      final before = pan.value;
+
+      await g.moveBy(const Offset(8, 0));
+      await g.moveBy(const Offset(8, 0));
+      await tester.pump();
+      await g.up();
+
+      expect(pan.value, closeTo(before + 16 / 80, 1e-9));
+      // Let the knob's double-tap (re-center) recognizer time out.
+      await tester.pump(kDoubleTapTimeout);
+    });
+
+    testWidgets('each drag starts from the value as it is now', (tester) async {
+      final pan = await pumpKnob(tester);
+      var g = await grab(tester, 20);
+      await g.moveBy(const Offset(16, 0));
+      await tester.pump();
+      await g.up();
+      await tester.pump(kDoubleTapTimeout);
+      expect(pan.value, closeTo(16 / 80, 1e-9));
+
+      // Changed elsewhere between drags (the inspector's knob for the same
+      // channel, a sync): the next drag must not resume the last one's pan.
+      pan.value = -0.5;
+      await tester.pump();
+      g = await grab(tester, -20);
+      await g.moveBy(const Offset(-8, 0));
+      await tester.pump();
+      await g.up();
+      expect(pan.value, closeTo(-0.5 - 8 / 80, 1e-9));
+      await tester.pump(kDoubleTapTimeout);
+    });
+  });
+}

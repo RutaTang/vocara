@@ -6,7 +6,7 @@ import '../themes/studio.dart';
 
 /// A compact rotary pan knob ([-1, 1]; 0 = center). Drag horizontally to pan,
 /// double-tap to re-center; optionally shows an L##/C/R## label below.
-class StudioPanKnob extends StatelessWidget {
+class StudioPanKnob extends StatefulWidget {
   const StudioPanKnob({
     required this.value,
     required this.onChanged,
@@ -24,24 +24,47 @@ class StudioPanKnob extends StatelessWidget {
   final bool showLabel;
   final Color accent;
 
+  @override
+  State<StudioPanKnob> createState() => _StudioPanKnobState();
+}
+
+class _StudioPanKnobState extends State<StudioPanKnob> {
+  // The pan a held drag has reached. Each move adds to THIS rather than to
+  // widget.value, which only catches up on the next rebuild: two pointer moves
+  // inside one frame (a fast mouse) would otherwise both start from the same
+  // stale value, and the first would be lost. Seeded from value per drag.
+  double? _drag;
+
   String get _label {
-    final p = (value * 100).round();
+    final p = (widget.value * 100).round();
     if (p == 0) return 'C';
     return p < 0 ? 'L${-p}' : 'R$p';
   }
 
   @override
   Widget build(BuildContext context) {
+    final size = widget.size;
     return MouseRegion(
       cursor: SystemMouseCursors.resizeLeftRight,
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
-        onPanUpdate: (d) =>
-            onChanged((value + d.delta.dx / 80).clamp(-1.0, 1.0)),
-        onPanEnd: (_) => onCommit(),
+        onPanStart: (_) => _drag = widget.value,
+        onPanUpdate: (d) {
+          final next = ((_drag ?? widget.value) + d.delta.dx / 80).clamp(
+            -1.0,
+            1.0,
+          );
+          _drag = next;
+          widget.onChanged(next);
+        },
+        onPanEnd: (_) {
+          _drag = null;
+          widget.onCommit();
+        },
+        onPanCancel: () => _drag = null,
         onDoubleTap: () {
-          onChanged(0);
-          onCommit();
+          widget.onChanged(0);
+          widget.onCommit();
         },
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -49,9 +72,11 @@ class StudioPanKnob extends StatelessWidget {
             SizedBox(
               width: size,
               height: size,
-              child: CustomPaint(painter: _PanKnobPainter(value, accent)),
+              child: CustomPaint(
+                painter: _PanKnobPainter(widget.value, widget.accent),
+              ),
             ),
-            if (showLabel) ...[
+            if (widget.showLabel) ...[
               const SizedBox(height: 2),
               SizedBox(
                 width: size + 8,
