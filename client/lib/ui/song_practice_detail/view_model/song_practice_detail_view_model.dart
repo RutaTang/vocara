@@ -793,12 +793,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       if (_disposed) return false;
       if (result is Ok<Loaded<SongPractice>>) {
         ok = true;
-        _baseHashes = result.value.baseHashes;
-        // Keep a model mutated during the write (see [_doSave]); the queued
-        // save behind this one persists it against the fresh base above.
-        if (identical(_practice, sent)) {
-          _practice = result.value.aggregate;
-        }
+        _adoptSaved(sent, result.value);
       } else {
         // Mirror [_doSave]'s failure path: revert the optimistic lyrics to
         // what's actually on disk, so the screen never keeps showing lines a
@@ -2158,6 +2153,24 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     return next;
   }
 
+  /// Takes in a successful save of [sent]. Adopts the re-read aggregate and
+  /// its fresh base only if no caller mutated the model while the write was
+  /// in flight. Otherwise the save queued behind this one carries the newer
+  /// model — overwriting [_practice] would silently drop that edit — and its
+  /// base must be the state that model derives from: what this save SENT,
+  /// not the re-read store. The re-read includes rows the three-way rules
+  /// kept from concurrent writers that the newer model has never seen, and
+  /// merging against it would make the queued save tombstone a remote insert,
+  /// revert a remote edit and resurrect a remote delete.
+  void _adoptSaved(SongPractice sent, Loaded<SongPractice> saved) {
+    if (identical(_practice, sent)) {
+      _practice = saved.aggregate;
+      _baseHashes = saved.baseHashes;
+    } else {
+      _baseHashes = saved.sentHashes ?? saved.baseHashes;
+    }
+  }
+
   /// Persists [_practice]. Returns whether the write succeeded — callers that
   /// then delete files must gate the deletion on a successful save so a failed
   /// write can't leave the JSON referencing audio that's already gone.
@@ -2185,14 +2198,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       // playback/selection resync below must not touch now-disposed notifiers.
       if (_disposed) return ok;
       if (ok) {
-        _baseHashes = result.value.baseHashes;
-        // Adopt the re-read aggregate only if no caller mutated the model
-        // while the write was in flight: a save queued behind this one already
-        // carries the newer model and will persist it against the fresh base
-        // above — overwriting [_practice] here would silently drop that edit.
-        if (identical(_practice, sent)) {
-          _practice = result.value.aggregate;
-        }
+        _adoptSaved(sent, result.value);
       } else {
         // Revert the optimistic in-memory model to what's actually on disk, so the
         // UI never keeps showing edits a failed write didn't persist. The base

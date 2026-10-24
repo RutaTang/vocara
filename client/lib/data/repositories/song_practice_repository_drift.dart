@@ -46,6 +46,109 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
   static int _ms(DateTime d) => d.millisecondsSinceEpoch;
   static DateTime _dt(int ms) => DateTime.fromMillisecondsSinceEpoch(ms);
 
+  // --- save-side content-hash projections -------------------------------------
+  // The MINE side of every three-way merge. The reconcile passes and
+  // [_sentHashes] both hash through these, so "what a save sent" can never
+  // drift from what its merge compared.
+
+  static String _practiceHash(
+    SongPractice p, {
+    required String? separationAssetId,
+    required String? reverbJson,
+    required String lyricsJson,
+  }) => practiceContentHash(
+    title: p.title,
+    timelineDurationMs: p.timelineDurationMs,
+    masterVolume: p.masterVolume,
+    activeInterpretationId: p.activeVersionId,
+    separationAssetId: separationAssetId,
+    reverbJson: reverbJson,
+    lyricsJson: lyricsJson,
+  );
+
+  static String _interpretationHash(TakeVersion v, int order) =>
+      interpretationContentHash(name: v.name, orderIndex: order);
+
+  static String _busHash(FxBus b, int order) => fxBusContentHash(
+    name: b.name,
+    colorValue: b.colorValue,
+    volume: b.volume,
+    pan: b.pan,
+    muted: b.muted,
+    soloed: b.soloed,
+    outputBusId: b.outputBusId,
+    fxJson: jsonEncode(b.fx.toJson()),
+    sendsJson: jsonEncode(b.sends.map((s) => s.toJson()).toList()),
+    orderIndex: order,
+  );
+
+  static String _trackHash(AudioTrack t, int order) => trackContentHash(
+    kind: t.kind.name,
+    interpretationId: t.versionId,
+    displayName: t.displayName,
+    colorValue: t.colorValue,
+    muted: t.muted,
+    soloed: t.soloed,
+    volume: t.volume,
+    pan: t.pan,
+    busId: t.busId,
+    fxJson: t.fx == null ? null : jsonEncode(t.fx!.toJson()),
+    sendsJson: jsonEncode(t.sends.map((s) => s.toJson()).toList()),
+    orderIndex: order,
+  );
+
+  static String _clipHash(AudioClip c, String assetId, int order) =>
+      clipContentHash(
+        assetId: assetId,
+        startMs: c.startMs,
+        durationMs: c.durationMs,
+        orderIndex: order,
+      );
+
+  static String _noteHash(PracticeNote n) => practiceNoteContentHash(
+    positionMs: n.positionMs,
+    endMs: n.endMs,
+    content: n.content,
+  );
+
+  static String _markerHash(TechniqueMarker m) => techniqueMarkerContentHash(
+    positionMs: m.positionMs,
+    endMs: m.endMs,
+    techniqueId: m.techniqueId,
+    techniqueName: m.techniqueName,
+  );
+
+  /// rowId -> MINE hash of every row of [p] exactly as a save sends it — the
+  /// whole aggregate, including children the merge never reached (those of a
+  /// track whose remote delete it accepted). See [Loaded.sentHashes].
+  static Map<String, String> _sentHashes(
+    SongPractice p,
+    List<AudioTrack> tracks,
+    Map<String, String> clipAsset, {
+    required String? separationAssetId,
+    required String? reverbJson,
+    required String lyricsJson,
+  }) => {
+    p.id: _practiceHash(
+      p,
+      separationAssetId: separationAssetId,
+      reverbJson: reverbJson,
+      lyricsJson: lyricsJson,
+    ),
+    for (var i = 0; i < p.versions.length; i++)
+      p.versions[i].id: _interpretationHash(p.versions[i], i),
+    for (var i = 0; i < p.fxBuses.length; i++)
+      p.fxBuses[i].id: _busHash(p.fxBuses[i], i),
+    for (var i = 0; i < tracks.length; i++)
+      tracks[i].id: _trackHash(tracks[i], i),
+    for (final t in tracks) ...{
+      for (var i = 0; i < t.clips.length; i++)
+        t.clips[i].id: _clipHash(t.clips[i], clipAsset[t.clips[i].id]!, i),
+      for (final n in t.notes) n.id: _noteHash(n),
+      for (final m in t.techniqueMarkers) m.id: _markerHash(m),
+    },
+  };
+
   // --- read -----------------------------------------------------------------
 
   @override
@@ -284,8 +387,24 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
 
       // Re-read the saved aggregate WITH fresh base hashes, so the caller's
       // next save merges against what this save actually left in the store
-      // (including any concurrent rows the three-way rules kept).
-      return loadPractice(practice.id);
+      // (including any concurrent rows the three-way rules kept) — plus the
+      // hashes of what it SENT, for a caller whose model moved on meanwhile.
+      final reloaded = await loadPractice(practice.id);
+      if (reloaded is! Ok<Loaded<SongPractice>>) return reloaded;
+      return Result.ok(
+        Loaded(
+          reloaded.value.aggregate,
+          reloaded.value.baseHashes,
+          sentHashes: _sentHashes(
+            practice,
+            allTracks,
+            clipAsset,
+            separationAssetId: separationAssetId,
+            reverbJson: reverbJson,
+            lyricsJson: lyricsJson,
+          ),
+        ),
+      );
     } catch (e) {
       // The data boundary must always return a Result, never throw — a
       // data-layer Error (e.g. a StateError) must still surface as Result.error
@@ -323,11 +442,8 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
       // surfaces Result.error, like the pre-upsert-revive PK failure.
       throw StateError('practice ${p.id} is deleted; refusing to save over it');
     }
-    final hash = practiceContentHash(
-      title: p.title,
-      timelineDurationMs: p.timelineDurationMs,
-      masterVolume: p.masterVolume,
-      activeInterpretationId: p.activeVersionId,
+    final hash = _practiceHash(
+      p,
       separationAssetId: separationAssetId,
       reverbJson: reverbJson,
       lyricsJson: lyricsJson,
@@ -431,8 +547,7 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
       currentHashes: current,
       desired: desired,
       idOf: (d) => d.v.id,
-      hashOf: (d) =>
-          interpretationContentHash(name: d.v.name, orderIndex: d.order),
+      hashOf: (d) => _interpretationHash(d.v, d.order),
       insert: (d, s) => db
           .into(db.interpretations)
           .insertOnConflictUpdate(
@@ -476,18 +591,6 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
     Map<String, String>? base,
   ) async {
     final live = await _live(db.fxBuses, (x) => x.practiceId.equals(p.id));
-    String busHash(FxBus b, int order) => fxBusContentHash(
-      name: b.name,
-      colorValue: b.colorValue,
-      volume: b.volume,
-      pan: b.pan,
-      muted: b.muted,
-      soloed: b.soloed,
-      outputBusId: b.outputBusId,
-      fxJson: jsonEncode(b.fx.toJson()),
-      sendsJson: jsonEncode(b.sends.map((s) => s.toJson()).toList()),
-      orderIndex: order,
-    );
     final current = {for (final r in live) r.id: fxBusRowHash(r)};
     final desired = [
       for (var i = 0; i < p.fxBuses.length; i++) (bus: p.fxBuses[i], order: i),
@@ -500,7 +603,7 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
       currentHashes: current,
       desired: desired,
       idOf: (d) => d.bus.id,
-      hashOf: (d) => busHash(d.bus, d.order),
+      hashOf: (d) => _busHash(d.bus, d.order),
       insert: (d, s) => db
           .into(db.fxBuses)
           .insertOnConflictUpdate(
@@ -564,20 +667,6 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
     Map<String, String>? base,
   ) async {
     final live = await _live(db.tracks, (x) => x.practiceId.equals(p.id));
-    String trackHash(AudioTrack t, int order) => trackContentHash(
-      kind: t.kind.name,
-      interpretationId: t.versionId,
-      displayName: t.displayName,
-      colorValue: t.colorValue,
-      muted: t.muted,
-      soloed: t.soloed,
-      volume: t.volume,
-      pan: t.pan,
-      busId: t.busId,
-      fxJson: t.fx == null ? null : jsonEncode(t.fx!.toJson()),
-      sendsJson: jsonEncode(t.sends.map((s) => s.toJson()).toList()),
-      orderIndex: order,
-    );
     final current = {for (final r in live) r.id: trackRowHash(r)};
     final desired = [
       for (var i = 0; i < tracks.length; i++) (track: tracks[i], order: i),
@@ -601,7 +690,7 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
       final d = desiredById[r.id];
       if (d == null || d.track.kind.name == r.kind) continue;
       final op = reconcileOpFor(
-        mine: trackHash(d.track, d.order),
+        mine: _trackHash(d.track, d.order),
         db: current[r.id],
         base: (base ?? current)[r.id],
       );
@@ -621,7 +710,7 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
       currentHashes: current,
       desired: desired,
       idOf: (d) => d.track.id,
-      hashOf: (d) => trackHash(d.track, d.order),
+      hashOf: (d) => _trackHash(d.track, d.order),
       insert: (d, s) => db
           .into(db.tracks)
           .insertOnConflictUpdate(
@@ -729,12 +818,7 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
       currentHashes: current,
       desired: desired,
       idOf: (d) => d.clip.id,
-      hashOf: (d) => clipContentHash(
-        assetId: d.assetId,
-        startMs: d.clip.startMs,
-        durationMs: d.clip.durationMs,
-        orderIndex: d.order,
-      ),
+      hashOf: (d) => _clipHash(d.clip, d.assetId, d.order),
       insert: (d, s) => db
           .into(db.clips)
           .insertOnConflictUpdate(
@@ -789,11 +873,7 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
       currentHashes: current,
       desired: t.notes,
       idOf: (n) => n.id,
-      hashOf: (n) => practiceNoteContentHash(
-        positionMs: n.positionMs,
-        endMs: n.endMs,
-        content: n.content,
-      ),
+      hashOf: _noteHash,
       insert: (n, s) => db
           .into(db.practiceNotes)
           .insertOnConflictUpdate(
@@ -849,12 +929,7 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
       currentHashes: current,
       desired: t.techniqueMarkers,
       idOf: (m) => m.id,
-      hashOf: (m) => techniqueMarkerContentHash(
-        positionMs: m.positionMs,
-        endMs: m.endMs,
-        techniqueId: m.techniqueId,
-        techniqueName: m.techniqueName,
-      ),
+      hashOf: _markerHash,
       insert: (m, s) => db
           .into(db.techniqueMarkers)
           .insertOnConflictUpdate(

@@ -15,12 +15,25 @@ import 'sync_writer.dart';
 /// between load and save, and swap in the freshly returned map after every
 /// successful save.
 class Loaded<T> {
-  const Loaded(this.aggregate, this.baseHashes);
+  const Loaded(this.aggregate, this.baseHashes, {this.sentHashes});
 
   final T aggregate;
 
   /// rowId -> content hash of the row as persisted when [aggregate] was read.
   final Map<String, String> baseHashes;
+
+  /// Set on a SAVE's result only (null for a plain load): rowId -> the MINE
+  /// hash of every row of the aggregate exactly as that save SENT it.
+  ///
+  /// The base for a caller whose model moved on while the save was in flight
+  /// (it keeps its newer model instead of adopting [aggregate]). [baseHashes]
+  /// would be wrong for it: they describe the re-read store, including rows
+  /// the three-way rules kept from concurrent writers that the newer model
+  /// has never seen — merging against them makes the next save tombstone a
+  /// remote insert (in base, not desired), revert a remote edit (mine !=
+  /// base) and resurrect a remote delete. The sent state is exactly what that
+  /// model derives from.
+  final Map<String, String>? sentHashes;
 }
 
 // ---------------------------------------------------------------------------

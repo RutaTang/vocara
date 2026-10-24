@@ -37,7 +37,8 @@ abstract class SongPracticeRepository {
   /// Persists [practice] as a THREE-WAY merge against [baseHashes] (captured
   /// by [loadPractice] or returned by the previous save) and returns the saved
   /// aggregate re-read from the store together with FRESH base hashes for the
-  /// next save.
+  /// next save — and, as [Loaded.sentHashes], the hashes of [practice] as
+  /// sent: the base for a caller that kept a model newer than [practice].
   Future<Result<Loaded<SongPractice>>> savePracticeWithBase(
     SongPractice practice, {
     required Map<String, String> baseHashes,
