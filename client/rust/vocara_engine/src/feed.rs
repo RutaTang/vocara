@@ -398,13 +398,7 @@ impl TrackFeeder {
     }
 
     /// Brings the plan up to date with the transport (a replan on any
-    /// discontinuity) WITHOUT filling: what [`Self::pump`] does first. A commit
-    /// made while paused primes its new rings with just this, on the caller's
-    /// thread, and leaves the reading to the pump thread.
-    pub fn plan(&mut self, t: &Shared) {
-        self.sync_plan(t);
-    }
-
+    /// discontinuity): what every fill does first.
     fn sync_plan(&mut self, t: &Shared) -> PlanBasis {
         let basis = PlanBasis {
             flush_gen: t.out_flush_gen(),
@@ -427,7 +421,17 @@ impl TrackFeeder {
     /// tears the streaming source down; playback degrades to silence for
     /// this track rather than corrupting anything).
     pub fn pump(&mut self, t: &Shared) -> Result<(), String> {
+        self.pump_at_most(t, usize::MAX)
+    }
+
+    /// [`Self::pump`], pushing at most [`frames`] frames of audio: a commit
+    /// made while paused primes each new ring with one device callback's
+    /// worth on the caller's thread (so a Play right after it opens on audio,
+    /// whatever order the pump thread fills the rings in) and leaves the rest
+    /// of the reading to the pump thread.
+    pub fn pump_at_most(&mut self, t: &Shared, frames: usize) -> Result<(), String> {
         let basis = self.sync_plan(t);
+        let mut budget = frames;
         // Paused, the fill still runs: the plan starts where play resumes.
         // Starvation recovery: the transport ran AHEAD of the plan (the ring
         // starved and the node discarded everything). Feeding the stale gap
@@ -506,9 +510,10 @@ impl TrackFeeder {
                 .scratch
                 .len()
                 .min(free)
+                .min(budget)
                 .min(run_left.min(span_left) as usize);
             if want == 0 {
-                return Ok(()); // ring full (or boundary reached this pump)
+                return Ok(()); // ring full, budget spent (or boundary reached)
             }
             let local = self.next_tl - self.start_frame;
             let got = self.reader.read_at(local, &mut self.scratch[..want])?;
@@ -522,6 +527,7 @@ impl TrackFeeder {
             }
             self.next_tl += got as i64;
             self.pushed(got);
+            budget -= got;
             if got < want {
                 // Physically truncated file: treat the rest as silence.
                 return Ok(());

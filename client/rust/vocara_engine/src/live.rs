@@ -754,7 +754,8 @@ impl EngineHandle {
         // when `playing` flipped can still deliver up to one device buffer
         // after this read; that race is physical (the listener heard those
         // frames) and only costs the same bounded precision it always did. Nothing of
-        // this run heard yet (None) leaves the clock where play() found it.
+        // this run (since play or a seek) heard yet (None) leaves the render clock:
+        // where play() or the seek put it, plus at most the one block rendered since.
         if let Some(heard) = self.shared.map_consumed() {
             self.shared.frame.store(heard, Ordering::Release);
         }

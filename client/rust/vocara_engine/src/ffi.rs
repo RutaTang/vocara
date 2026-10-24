@@ -325,6 +325,10 @@ impl Drop for VeEngine {
 }
 
 const MAX_BLOCK: usize = 1024;
+/// What a commit made while paused primes into each new stream ring: the
+/// largest device callback (VPIO's 4096-frame slice), so the first one after
+/// Play finds audio on every track.
+const PAUSED_PRIME_FRAMES: usize = 4096;
 const RING_FRAMES: usize = 1 << 16; // ~1.4 s @ 48k of headroom
 const MIC_RING_FRAMES: usize = 1 << 12; // 4096 frames ≈ 85 ms @ 48k (monitor jitter buffer)
 const CAP_RING_FRAMES: usize = 1 << 13; // analysis capture (Dart polls ve_input_frames)
@@ -1563,18 +1567,21 @@ pub extern "C" fn ve_tracks_commit(e: *mut VeEngine) -> c_int {
             Err(_) => return -1,
         };
         // Prime every new stream ring BEFORE the graph goes live, so the
-        // first rendered block finds audio, not a cold ring. Paused, only the
-        // plan: filling every ring here read each track from disk on the
-        // caller's (UI) thread, which the pump thread, woken below, does
-        // before Play can need it.
+        // first rendered block finds audio, not a cold ring. Paused, only one
+        // device callback's worth each: filling every ring here read each
+        // track's whole ring from disk on the caller's (UI) thread, and the
+        // pump thread, woken below, tops them up. Nothing at all was too
+        // little: it fills one ring at a time, so a Play right after the
+        // commit (an interpretation switch pauses, commits and plays within a
+        // millisecond) opened the last-filled tracks on silence.
         let transport = Arc::clone(eng.handle.shared_arc());
         let playing = transport.is_playing();
         for f in &mut new_feeders {
-            if playing {
-                let _ = f.pump(&transport);
+            let _ = if playing {
+                f.pump(&transport)
             } else {
-                f.plan(&transport);
-            }
+                f.pump_at_most(&transport, PAUSED_PRIME_FRAMES)
+            };
         }
         eng.handle.publish_graph(graph);
         // Swap the feeder set; the pump thread exists only while needed. The

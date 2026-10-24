@@ -1276,3 +1276,49 @@ fn a_pause_right_after_a_seek_keeps_the_seek() {
         h.frame()
     );
 }
+
+#[test]
+fn play_right_after_a_paused_commit_opens_on_audio() {
+    // An interpretation switch pauses, commits the new graph and plays within
+    // a millisecond. The commit primed nothing while paused (the pump thread
+    // filled the rings, one whole ring at a time), so the tracks it reached
+    // last opened on silence when the first callback beat it.
+    let pcm = offset_pcm(400_000);
+    let path = write_pcm("pausedcommit", &pcm);
+    let run = |streamed: bool, pump_after_ticks: usize| {
+        let (h, rt, mut feeder) = streamed_pair(&path, 0, 1 << 16);
+        let (h2, rt2) = engine_with(Box::new(BufferSource::new(pcm.to_vec(), 0)));
+        let (h, rt) = if streamed { (h, rt) } else { (h2, rt2) };
+        let mut block = vec![0.0; BLOCK * CHANNELS];
+        h.seek(24_000);
+        for _ in 0..4 {
+            rt.render_offline(&mut block, BLOCK);
+        }
+        if streamed {
+            // What ve_tracks_commit primes while paused.
+            feeder.pump_at_most(h.transport(), 4096).unwrap();
+        }
+        for _ in 0..4 {
+            rt.render_offline(&mut block, BLOCK);
+        }
+        h.play();
+        let mut out = Vec::new();
+        for t in 0..60 {
+            if streamed && t >= pump_after_ticks {
+                feeder.pump(h.transport()).unwrap();
+            }
+            for _ in 0..4 {
+                rt.render_offline(&mut block, BLOCK);
+                rt.transport().sync_consumed_to_rendered();
+                out.extend_from_slice(&block);
+            }
+        }
+        out
+    };
+    let arc = run(false, 0);
+    for late in [0, 1, 2] {
+        let bad = differing_frames(&run(true, late), &arc);
+        assert_eq!(bad, 0, "the pump thread landed {late} callbacks late");
+    }
+    let _ = std::fs::remove_file(&path);
+}
