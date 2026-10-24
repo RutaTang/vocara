@@ -259,6 +259,26 @@ class _FakeEngine extends Fake implements PlaybackEngine {
   Future<void> dispose() async {}
 }
 
+/// Engine that remembers the last mute pushed for each source — through a
+/// full graph sync or a live per-source level push, whichever came last.
+class _MuteTrackingEngine extends _FakeEngine {
+  final Map<String, bool> muted = {};
+
+  @override
+  Future<void> sync(List<TrackPlayback> tracks, List<BusPlayback> buses) async {
+    for (final t in tracks) {
+      muted[t.id] = t.muted;
+    }
+  }
+
+  @override
+  Future<void> setVolume(
+    String id,
+    double volume, {
+    bool muted = false,
+  }) async => this.muted[id] = muted;
+}
+
 SongPractice _seedPractice({
   List<AudioTrack>? vocalTracks,
   AudioTrack? reference,
@@ -335,6 +355,7 @@ void main() {
     SourceSeparationService? separation,
     AudioTrack? reference,
     Stream<RemoteApplied>? remoteApplied,
+    PlaybackEngine? engine,
   }) async {
     events = <String>[];
     repo = _FakeRepo(
@@ -353,7 +374,7 @@ void main() {
           separation ?? FakeSourceSeparationService(available: false),
       appSettings: AppSettingsService(storage: storage),
       practiceId: 'p1',
-      playbackEngine: _FakeEngine(),
+      playbackEngine: engine ?? _FakeEngine(),
       editService: edits ?? _FakeEdits(),
       probeDuration: probeDuration,
       remoteApplied: remoteApplied,
@@ -792,6 +813,42 @@ void main() {
       expect(events, contains('delete:/edit/inst48k.wav'));
       expect(events, contains('delete:/import/0.wav'));
       expect(vm.practice!.accompaniment, isNull);
+    });
+
+    test('a FAILED save after separation tells the engine the backing toggle '
+        'came back', () async {
+      // The flow flips the toggle to the instrumental silently before its
+      // save, and the save's failure path resyncs the engine under that
+      // flipped flag. Restoring the flag silently afterwards left the toggle
+      // showing Original while the engine played the accompaniment side and
+      // kept the original muted.
+      final separation = _GatedSeparation()..gate.complete();
+      final engine = _MuteTrackingEngine();
+      final reference = AudioTrack(
+        id: 'ref',
+        kind: AudioTrackKind.reference,
+        displayName: 'Original',
+        audioFilePath: '/pool/original.wav',
+        durationMs: 1000,
+        createdAt: DateTime(2026),
+      );
+      final vm = await pumpVm(
+        separation: separation,
+        reference: reference,
+        engine: engine,
+      );
+      for (var i = 0; i < 400 && !vm.separationAvailable; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+      vm.mixer.setPlayReference(true); // listening to the original
+      final refClip = vm.practice!.reference!.clips.single.id;
+      expect(engine.muted[refClip], isFalse);
+      repo.failSaves = true;
+
+      await vm.separateBacking('ref');
+
+      expect(vm.mixer.playReference, isTrue);
+      expect(engine.muted[refClip], isFalse, reason: 'the original must play');
     });
 
     test('addVocalTake on a FAILED save deletes the imported file', () async {

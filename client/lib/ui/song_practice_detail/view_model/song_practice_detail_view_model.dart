@@ -1218,8 +1218,10 @@ class SongPracticeDetailViewModel extends ChangeNotifier
           // _withImportedAudio rolls the imported/transcoded files back.
           if (!await _save()) {
             _practice = cur; // revert in-memory to the un-persisted state
-            // Restore the pre-separation backing flag.
-            mixer.setPlayReferenceSilently(prevPlayRef);
+            // Restore the pre-separation backing flag AND push it: the failed
+            // save already resynced the engine under the flipped flag, so a
+            // silent restore left the toggle and the audible backing apart.
+            mixer.setPlayReference(prevPlayRef);
             _toast('Could not save the separated track.');
             return false;
           }

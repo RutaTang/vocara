@@ -214,8 +214,9 @@ class MixerController extends ChangeNotifier {
   }
 
   /// Sets the backing A/B flag WITHOUT touching the engine or notifying — for
-  /// the separation flow, whose save→[resyncPlayback] applies the mix and
-  /// whose failure path restores the previous flag before reverting the model.
+  /// the separation flow, whose save→[resyncPlayback] applies the mix. (Its
+  /// failure path restores the previous flag through [setPlayReference]: the
+  /// failed save has already resynced the engine under the flipped flag.)
   void setPlayReferenceSilently(bool value) => _playReference = value;
 
   /// Notes on the lanes the workspace is actually showing: the active backing
