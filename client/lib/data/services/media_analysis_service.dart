@@ -70,8 +70,10 @@ class MediaAnalysisService {
     for (var i = 0; i < samples.length; i++) {
       if (!samples[i].isFinite) samples[i] = 0.0;
     }
-    final metrics = computeVoiceMetrics(samples, sampleRate);
-    final spectrogram = computeSpectrogram(samples, sampleRate);
+    final (:metrics, :spectrogram) = computeVoiceMetricsAndSpectrogram(
+      samples,
+      sampleRate,
+    );
     return TechniqueAnalysis(
       metrics: metrics,
       spectrogram: spectrogram,

@@ -92,6 +92,41 @@ void main() {
     },
   );
 
+  test('computeVoiceMetricsAndSpectrogram equals the two separate passes '
+      'bit for bit (its spectrogram is the metrics pass\'s own FFT)', () {
+    Uint32List bits(Float32List a) =>
+        a.buffer.asUint32List(a.offsetInBytes, a.length);
+    final rng = Random(5);
+    for (final sr in [8000, 16000, 22050, 44100, 48000]) {
+      // Sub-frame, exact-frame, hop-ragged and longer lengths: the trailing
+      // zero-padded frame and the empty input included.
+      for (final n in [0, 300, 2048, 2049, 9001, sr]) {
+        final samples = Float32List(n);
+        for (var i = 0; i < n; i++) {
+          samples[i] =
+              0.4 * sin(2 * pi * 220 * i / sr) +
+              0.05 * (rng.nextDouble() - 0.5);
+        }
+        final both = computeVoiceMetricsAndSpectrogram(samples, sr);
+        final spec = computeSpectrogram(samples, sr);
+        final metrics = computeVoiceMetrics(samples, sr);
+        final s = both.spectrogram;
+        final why = 'sr=$sr n=$n';
+        expect(s.frames, spec.frames, reason: why);
+        expect(s.bins, spec.bins, reason: why);
+        expect(s.maxHz, spec.maxHz, reason: why);
+        expect(bits(s.db), bits(spec.db), reason: why);
+        expect(s.minDb, spec.minDb, reason: why);
+        expect(s.maxDb, spec.maxDb, reason: why);
+        expect(both.metrics.frames, metrics.frames, reason: why);
+        expect(bits(both.metrics.f0), bits(metrics.f0), reason: why);
+        expect(bits(both.metrics.cpp), bits(metrics.cpp), reason: why);
+        expect(bits(both.metrics.f1), bits(metrics.f1), reason: why);
+        expect(both.metrics.active, metrics.active, reason: why);
+      }
+    }
+  });
+
   test(
     'a low-rate source caps maxHz at the highest bin both builders emit',
     () {
