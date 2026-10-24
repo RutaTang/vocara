@@ -200,6 +200,66 @@ Future<ui.Image> spectrogramImageFor(Spectrogram s) async {
 /// pushed toward black instead of glowing at the auto-scaled floor.
 const double _idleColumnDim = 0.32;
 
+/// The colour ceiling for a live window: its loudest bin, but at least
+/// [_minCeilDb] (see there).
+double _liveCeil(Iterable<double> columnPeaks) {
+  var ceil = -1e9;
+  for (final v in columnPeaks) {
+    if (v > ceil) ceil = v;
+  }
+  return ceil < _minCeilDb ? _minCeilDb : ceil;
+}
+
+/// A live column's loudest bin (-1e9 when it has none).
+double _columnPeak(Float32List col) {
+  var peak = -1e9;
+  for (final v in col) {
+    if (v > peak) peak = v;
+  }
+  return peak;
+}
+
+/// Paints live column [col] into image column [x] of [pixels] ([w] wide, one
+/// row per bin, low frequency at the bottom), dimmed when unvoiced.
+void _paintLiveColumn(
+  Uint8List pixels,
+  int w,
+  int bins,
+  int x,
+  Float32List col,
+  bool unvoiced,
+  double floor,
+  double range,
+) {
+  final dim = unvoiced ? _idleColumnDim : 1.0;
+  for (var b = 0; b < bins; b++) {
+    final t = (col[b] - floor) / range * dim;
+    _heat(t, pixels, ((bins - 1 - b) * w + x) * 4);
+  }
+}
+
+/// The RGBA pixels [renderColumnsImage] decodes: [columns] (each length
+/// [bins]) oldest on the left, auto-scaled below the peak, unvoiced columns
+/// (0 in [active]) dimmed. [columns] must be non-empty.
+@visibleForTesting
+Uint8List liveColumnsPixels(
+  List<Float32List> columns,
+  int bins, {
+  double dynamicRangeDb = 72,
+  List<int>? active,
+}) {
+  final w = columns.length;
+  final pixels = Uint8List(w * bins * 4);
+  final ceil = _liveCeil(columns.map(_columnPeak));
+  final floor = ceil - dynamicRangeDb;
+  final range = (ceil - floor) <= 0 ? 1.0 : (ceil - floor);
+  for (var f = 0; f < w; f++) {
+    final unvoiced = active != null && f < active.length && active[f] == 0;
+    _paintLiveColumn(pixels, w, bins, f, columns[f], unvoiced, floor, range);
+  }
+  return pixels;
+}
+
 /// Renders a live rolling window of dB [columns] (each length [bins]) to an
 /// RGBA image, oldest column on the left. Auto-scaled below the peak. When
 /// [active] is supplied (1 = voiced, aligned with [columns]), unvoiced columns
@@ -210,57 +270,145 @@ Future<ui.Image> renderColumnsImage(
   double dynamicRangeDb = 72,
   List<int>? active,
 }) {
-  final w = columns.length;
   // Same zero-size guard as renderSpectrogramImage, for the same reason: a
   // zero-size buffer makes decodeImageFromPixels never complete, and the only
   // caller AWAITS this — so the live view would freeze on its last image with
   // nothing to say why. Not reachable today (the caller returns early on no
   // columns, and bins is a positive constant of the analyser's FFT size); it
   // is here so the two renderers cannot disagree about it.
-  if (w == 0 || bins <= 0) {
-    final blank = Completer<ui.Image>();
-    ui.decodeImageFromPixels(
-      Uint8List(4),
-      1,
-      1,
-      ui.PixelFormat.rgba8888,
-      blank.complete,
-    );
-    return blank.future;
+  if (columns.isEmpty || bins <= 0) {
+    return decodeRgbaImage(Uint8List(4), 1, 1);
   }
-  final pixels = Uint8List(w * bins * 4);
+  return decodeRgbaImage(
+    liveColumnsPixels(
+      columns,
+      bins,
+      dynamicRangeDb: dynamicRangeDb,
+      active: active,
+    ),
+    columns.length,
+    bins,
+  );
+}
 
-  var ceil = -1e9;
-  for (final col in columns) {
-    for (final v in col) {
-      if (v > ceil) ceil = v;
-    }
+/// Decodes [width] × [height] RGBA [pixels] into an image. A zero-size image
+/// decodes as a 1x1 transparent placeholder: decodeImageFromPixels never
+/// completes on a zero-size buffer, and the callers await it.
+Future<ui.Image> decodeRgbaImage(Uint8List pixels, int width, int height) {
+  if (width <= 0 || height <= 0) {
+    pixels = Uint8List(4);
+    width = 1;
+    height = 1;
   }
-  if (ceil < _minCeilDb) ceil = _minCeilDb;
-  final floor = ceil - dynamicRangeDb;
-  final range = (ceil - floor) <= 0 ? 1.0 : (ceil - floor);
-
-  for (var f = 0; f < w; f++) {
-    final col = columns[f];
-    final dim = (active != null && f < active.length && active[f] == 0)
-        ? _idleColumnDim
-        : 1.0;
-    for (var b = 0; b < bins; b++) {
-      final t = (col[b] - floor) / range * dim;
-      final idx = ((bins - 1 - b) * w + f) * 4;
-      _heat(t, pixels, idx);
-    }
-  }
-
   final completer = Completer<ui.Image>();
   ui.decodeImageFromPixels(
     pixels,
-    w,
-    bins,
+    width,
+    height,
     ui.PixelFormat.rgba8888,
     completer.complete,
   );
   return completer.future;
+}
+
+/// [liveColumnsPixels] for the live monitor's rolling window, kept up to date
+/// incrementally. The window only ever gains columns on the right and loses
+/// them on the left, and while its colour ceiling (its loudest bin) holds, a
+/// column already on screen keeps its colours — so an update shifts the
+/// previous pixels left and colours only the new columns, instead of the
+/// whole window (720 × 215 bins) on every frame. When the ceiling moves, or
+/// the window isn't a continuation of the last one, it repaints in full.
+/// Either way the pixels are exactly [liveColumnsPixels]'.
+class LiveColumnsRaster {
+  LiveColumnsRaster({this.dynamicRangeDb = 72});
+
+  final double dynamicRangeDb;
+
+  // The last update's window, as given (the monitor's columns are stable
+  // objects: a column is appended once and evicted once).
+  List<Float32List> _columns = const [];
+  List<int>? _active;
+  int _bins = 0;
+  double _ceil = double.nan;
+  Uint8List _pixels = Uint8List(0);
+
+  // Each column's loudest bin, computed once per column.
+  final Expando<double> _peaks = Expando('liveColumnPeak');
+
+  /// Pixels for [columns] (non-empty) as [liveColumnsPixels] would paint
+  /// them, in a buffer the caller owns.
+  Uint8List update(List<Float32List> columns, int bins, {List<int>? active}) {
+    final w = columns.length;
+    final ceil = _liveCeil(columns.map((c) => _peaks[c] ??= _columnPeak(c)));
+    final floor = ceil - dynamicRangeDb;
+    final range = (ceil - floor) <= 0 ? 1.0 : (ceil - floor);
+    bool unvoiced(int f) =>
+        active != null && f < active.length && active[f] == 0;
+
+    final kept = (bins == _bins && ceil == _ceil)
+        ? _continuation(columns, active)
+        : null;
+    final Uint8List pixels;
+    var from = 0;
+    if (kept == null) {
+      pixels = Uint8List(w * bins * 4);
+    } else {
+      // Shift the columns still on screen to the left edge, row by row.
+      final (evicted, overlap) = kept;
+      final oldW = _columns.length;
+      pixels = w == oldW ? _pixels : Uint8List(w * bins * 4);
+      for (var row = 0; row < bins; row++) {
+        pixels.setRange(
+          row * w * 4,
+          (row * w + overlap) * 4,
+          _pixels,
+          (row * oldW + evicted) * 4,
+        );
+      }
+      from = overlap;
+    }
+    for (var f = from; f < w; f++) {
+      _paintLiveColumn(
+        pixels,
+        w,
+        bins,
+        f,
+        columns[f],
+        unvoiced(f),
+        floor,
+        range,
+      );
+    }
+
+    _columns = List.of(columns);
+    _active = active == null ? null : List.of(active);
+    _bins = bins;
+    _ceil = ceil;
+    _pixels = pixels;
+    return Uint8List.fromList(pixels);
+  }
+
+  /// When [columns] continues the last window — its first columns are the
+  /// last window's, from some point on, in order, with the same voicing —
+  /// how many columns were evicted from the left and how many carry over.
+  (int, int)? _continuation(List<Float32List> columns, List<int>? active) {
+    final old = _columns;
+    if (old.isEmpty || columns.isEmpty) return null;
+    final evicted = old.indexWhere((c) => identical(c, columns.first));
+    if (evicted < 0) return null;
+    final overlap = old.length - evicted;
+    if (overlap > columns.length) return null;
+    bool unvoicedNow(int f) =>
+        active != null && f < active.length && active[f] == 0;
+    final oldActive = _active;
+    bool unvoicedThen(int f) =>
+        oldActive != null && f < oldActive.length && oldActive[f] == 0;
+    for (var i = 0; i < overlap; i++) {
+      if (!identical(old[evicted + i], columns[i])) return null;
+      if (unvoicedThen(evicted + i) != unvoicedNow(i)) return null;
+    }
+    return (evicted, overlap);
+  }
 }
 
 /// Renders a spectrogram image asynchronously and paints it scaled to fill the

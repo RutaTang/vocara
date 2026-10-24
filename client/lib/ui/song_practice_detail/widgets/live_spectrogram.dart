@@ -23,6 +23,11 @@ class _LiveSpectrogramState extends State<LiveSpectrogram> {
   bool _scheduled = false;
   int _generation = 0;
 
+  // Colours only the columns that arrived since the last frame (unless the
+  // window's ceiling moved): the whole 720-column window was recoloured on
+  // every frame before.
+  final LiveColumnsRaster _raster = LiveColumnsRaster();
+
   @override
   void initState() {
     super.initState();
@@ -74,7 +79,11 @@ class _LiveSpectrogramState extends State<LiveSpectrogram> {
     final colsCopy = List<Float32List>.of(cols);
     final activeCopy = List<int>.of(widget.monitor.activeColumns);
     final gen = ++_generation;
-    final image = await renderColumnsImage(colsCopy, bins, active: activeCopy);
+    final image = await decodeRgbaImage(
+      _raster.update(colsCopy, bins, active: activeCopy),
+      colsCopy.length,
+      bins,
+    );
     // Drop a stale render: unmounted, or a newer _rebuild started while this one
     // awaited (renders aren't guaranteed to complete in submission order), so an
     // earlier frame completing last would install a stale image.
