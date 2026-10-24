@@ -1,3 +1,6 @@
+import 'dart:ui' as ui;
+
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vocara/ui/core/widgets/waveform_painter.dart';
 
@@ -35,7 +38,11 @@ void main() {
         visibleEndMs: 3600, // exactly bucket 20
       );
       expect(cut.indexOffset, closeTo(0.0, 1e-9));
-      expect(cut.peaks.length, 10);
+      // Buckets 10..19 are in view, plus bucket 20: the painter draws each
+      // peak as a vertex at its bucket's START, so the last in-view bucket
+      // only gets a right edge to draw to from the vertex at or past the
+      // window's end. Stopping at 19 left the last bucket blank.
+      expect(cut.peaks.length, 11);
       expect(cut.indexSpan, closeTo(10.0, 1e-9));
     });
 
@@ -97,4 +104,116 @@ void main() {
       }
     });
   });
+
+  // What the slice is FOR: a full-amplitude clip must paint the whole box it
+  // is visible in. The cut stopped one peak short of the window's right edge
+  // and the painter drew nothing past the last vertex, so the strip after it
+  // stayed blank — the clip's final bucket never drew, and a window inside
+  // one bucket (a long take at max zoom) drew nothing at all.
+  group('a sliced clip paints out to the box edges', () {
+    final full = List<double>.filled(1000, 1.0);
+    const size = Size(500, 40);
+
+    Future<(int, int)> painted(
+      WidgetTester tester, {
+      required int spanDurMs,
+      required int visibleStartMs,
+      required int visibleEndMs,
+    }) {
+      final cut = visiblePeakSlice(
+        full,
+        spanStartMs: 0,
+        spanDurMs: spanDurMs,
+        visibleStartMs: visibleStartMs,
+        visibleEndMs: visibleEndMs,
+      );
+      return _paintedRange(
+        tester,
+        WaveformPainter(
+          peaks: cut.peaks,
+          color: const Color(0xFFFFFFFF),
+          indexOffset: cut.indexOffset,
+          indexSpan: cut.indexSpan,
+        ),
+        size,
+      );
+    }
+
+    testWidgets('a window ending mid-clip', (tester) async {
+      // 180 ms buckets; 4590..5750 ms = buckets 25.5 .. 31.94.
+      final (lo, hi) = await painted(
+        tester,
+        spanDurMs: 180000,
+        visibleStartMs: 4590,
+        visibleEndMs: 5750,
+      );
+      expect(lo, 0);
+      expect(hi, size.width - 1);
+    });
+
+    testWidgets('a bucket-aligned window', (tester) async {
+      final (_, hi) = await painted(
+        tester,
+        spanDurMs: 180000,
+        visibleStartMs: 1800,
+        visibleEndMs: 3600,
+      );
+      expect(hi, size.width - 1);
+    });
+
+    testWidgets('a window ending at the clip end draws the final bucket', (
+      tester,
+    ) async {
+      // No peak past the clip's last one to draw to: the painter holds the
+      // last peak out to the edge instead.
+      final (_, hi) = await painted(
+        tester,
+        spanDurMs: 180000,
+        visibleStartMs: 179000,
+        visibleEndMs: 180000,
+      );
+      expect(hi, size.width - 1);
+    });
+
+    testWidgets('a window inside one bucket (a long take at max zoom)', (
+      tester,
+    ) async {
+      // A 20-minute clip: 1200 ms buckets, viewed through a 1 s window.
+      final (lo, hi) = await painted(
+        tester,
+        spanDurMs: 1200000,
+        visibleStartMs: 600100,
+        visibleEndMs: 601100,
+      );
+      expect(lo, 0);
+      expect(hi, size.width - 1);
+    });
+  });
+}
+
+/// The leftmost and rightmost opaque x on a row a quarter of the way down
+/// [size] — inside the body of a full-amplitude waveform, above its axis.
+Future<(int, int)> _paintedRange(
+  WidgetTester tester,
+  CustomPainter painter,
+  Size size,
+) async {
+  final rec = ui.PictureRecorder();
+  painter.paint(Canvas(rec), size);
+  final picture = rec.endRecording();
+  int? lo, hi;
+  await tester.runAsync(() async {
+    final img = await picture.toImage(size.width.ceil(), size.height.ceil());
+    final data = (await img.toByteData())!;
+    final y = img.height ~/ 4;
+    for (var x = 0; x < img.width; x++) {
+      if (data.getUint8((y * img.width + x) * 4 + 3) > 128) {
+        lo ??= x;
+        hi = x;
+      }
+    }
+    img.dispose();
+  });
+  expect(lo, isNotNull, reason: 'nothing painted');
+  return (lo!, hi!);
 }

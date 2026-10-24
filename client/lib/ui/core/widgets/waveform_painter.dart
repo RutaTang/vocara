@@ -50,7 +50,12 @@ int niceTimeIntervalMs(int durationMs, double width, {double minPx = 72}) {
   final start = (visibleStartMs - spanStartMs) / spanDurMs * n;
   final end = (visibleEndMs - spanStartMs) / spanDurMs * n;
   final i0 = start.floor().clamp(0, n - 1);
-  final i1 = end.ceil().clamp(i0 + 1, n);
+  // One peak PAST the window's last one: the painter draws each peak as a
+  // vertex at its bucket's start, so the last bucket in view only has a right
+  // edge to draw to from the vertex at or beyond the window end. Stopping at
+  // ceil(end) left the strip after the last vertex blank — and a window inside
+  // a single bucket (a long take at max zoom) one vertex, which draws nothing.
+  final i1 = (end.ceil() + 1).clamp(i0 + 1, n);
   return (
     peaks: peaks.sublist(i0, i1),
     indexOffset: start - i0,
@@ -110,11 +115,24 @@ class WaveformPainter extends CustomPainter {
         span <= 0 ? 0.0 : (idxAt(i) - indexOffset) / span * drawWidth;
     double ampAt(int i) => peaks[idxAt(i).round().clamp(0, n - 1)];
 
+    // A slice whose window reaches the clip's END has no peak past its last
+    // one to draw to (see [visiblePeakSlice]), so its final bucket — from the
+    // last vertex to the box's right edge — would stay blank: hold the last
+    // peak out to the edge. A no-op for a slice that carries a vertex past the
+    // edge and for the spread-all mapping, whose last vertex sits on it (bar a
+    // lone peak, which now fills the box instead of drawing nothing).
+    final last = steps - 1;
+    final tail = xAt(last) < drawWidth;
     final path = Path()..moveTo(0, mid);
     for (var i = 0; i < steps; i++) {
       path.lineTo(xAt(i), mid - ampAt(i) * mid * 0.9);
     }
-    for (var i = steps - 1; i >= 0; i--) {
+    if (tail) {
+      path
+        ..lineTo(drawWidth, mid - ampAt(last) * mid * 0.9)
+        ..lineTo(drawWidth, mid + ampAt(last) * mid * 0.9);
+    }
+    for (var i = last; i >= 0; i--) {
       path.lineTo(xAt(i), mid + ampAt(i) * mid * 0.9);
     }
     path.close();
