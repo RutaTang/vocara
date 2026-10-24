@@ -218,7 +218,9 @@ class AssetStore {
   /// `<hash>.part` name made them tear each other's copy apart.
   Future<_StagedImport> _stageToPool(File src) async {
     final stagingDir = Directory(p.join(root.path, 'assets', '.staging'));
-    await stagingDir.create(recursive: true);
+    // Durably: on the first import this also creates the pool dir itself,
+    // which every pooled file's directory entry hangs off.
+    await _createDirDurably(stagingDir);
     final tmp = File(p.join(stagingDir.path, '${newId()}.part'));
     final sink = tmp.openWrite();
     Digest? digest;
@@ -275,13 +277,29 @@ class AssetStore {
     if (await dest.exists() && await dest.length() == staged.size) {
       return rel; // identical bytes already pooled
     }
-    await dest.parent.create(recursive: true);
+    await _createDirDurably(dest.parent);
     await fs.fsyncFile(staged.tmpPath);
     // A concurrent import of the same hash may have placed it first; rename
     // is idempotent enough (overwrites with identical bytes).
     await fs.atomicRename(staged.tmpPath, dest.path);
     await fs.fsyncDir(dest.parent.path);
     return rel;
+  }
+
+  /// Creates [dir] and any missing ancestors, flushing each directory THIS
+  /// call creates into its parent. Flushing the file's own shard after the
+  /// rename only makes the file's entry durable within that shard; a power
+  /// loss must also find the shard itself, so a fresh `assets/<ab>/` or
+  /// `assets/<ab>/<cd>/` has to be on permanent storage before the row
+  /// referencing a file inside it commits. An ancestor that already exists is
+  /// not re-flushed: its creator did that (or, for a concurrent import racing
+  /// into the same fresh shard, is doing it — the same in-process window as
+  /// the already-pooled early return in [_promoteStaged]).
+  Future<void> _createDirDurably(Directory dir) async {
+    if (await dir.exists()) return;
+    await _createDirDurably(dir.parent);
+    await dir.create(); // an EEXIST from a concurrent creator is success
+    await fs.fsyncDir(dir.parent.path);
   }
 
   /// Clears the transient staging trees (`audio/`, `technique_media/`) where

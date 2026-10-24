@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:vocara/data/db/app_database.dart';
 import 'package:vocara/data/db/asset_store.dart';
+import 'package:vocara/data/db/durable_fs.dart';
 import 'package:vocara/data/sync/hlc.dart';
 import 'package:vocara/data/sync/sync_writer.dart';
 
@@ -137,6 +138,31 @@ void main() {
     }
   });
 
+  test('the first import into an empty pool flushes every directory it '
+      'creates into its parent, not just the file into its shard', () async {
+    final fs = _DirFlushLog();
+    final logged = AssetStore(
+      db: db,
+      root: tmp,
+      writer: SyncWriter(db, HlcClock(node: 'NODE'.padRight(26, '0'))),
+      fs: fs,
+    );
+    final id = await logged.importFile(
+      (await makeSrc('take.wav', [1, 2, 3])).path,
+    );
+    final rel = (await (db.select(
+      db.assets,
+    )..where((a) => a.id.equals(id))).getSingle()).localRelPath!;
+
+    // assets/<ab>/<cd>/<hash>.wav: this import created assets/, <ab> and
+    // <cd> as well as the file, so a power cut after the row commits must
+    // find every link of that chain — each new directory flushed into its
+    // parent (root, assets/, <ab>), not only the file into <cd>.
+    final shard = p.dirname(rel);
+    final flushed = fs.dirs.map((d) => p.relative(d, from: tmp.path));
+    expect(flushed, containsAll(['.', 'assets', p.dirname(shard), shard]));
+  });
+
   test(
     'a truncated pool file left by a crash is replaced, not trusted',
     () async {
@@ -232,4 +258,15 @@ void main() {
       expect(await store.resolve(id), isNotNull);
     },
   );
+}
+
+/// Records every directory flush (the real flush still runs underneath).
+class _DirFlushLog extends DurableFs {
+  final List<String> dirs = [];
+
+  @override
+  Future<void> fsyncDir(String path) async {
+    dirs.add(path);
+    await super.fsyncDir(path);
+  }
 }
