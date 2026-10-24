@@ -186,6 +186,51 @@ void main() {
     expect(await totalChanges(), before);
   });
 
+  test('a save reads each child table once, however many lanes', () async {
+    // It read every lane's clips, notes and markers with a query each: 90
+    // statements on a 30-lane practice, inside the save's transaction.
+    Future<int> childReads(int lanes) async {
+      final pr = await practice(lanes, 2);
+      expect(await repo.savePractice(pr), isA<Ok<SongPractice>>());
+      final loaded = await load(pr.id);
+      // An edit on every lane, so every lane's children are reconciled.
+      final edited = loaded.aggregate.copyWith(
+        vocalTracks: [
+          for (final t in loaded.aggregate.vocalTracks)
+            t.copyWith(
+              notes: [for (final n in t.notes) n.copyWith(content: 'edited')],
+            ),
+        ],
+      );
+      statements.sql.clear();
+      final saved = await repo.savePracticeWithBase(
+        edited,
+        baseHashes: loaded.baseHashes,
+      );
+      expect(saved, isA<Ok<Loaded<SongPractice>>>());
+      // The save's own reads, not its re-read (hydration reads with IN too).
+      final perTrack = [
+        for (final table in ['clips', 'practice_notes', 'technique_markers'])
+          statements.sql
+              .where(
+                (q) =>
+                    q.startsWith('SELECT') &&
+                    q.contains('FROM "$table"') &&
+                    q.contains('"track_id" = ?'),
+              )
+              .length,
+      ];
+      expect(perTrack, [0, 0, 0], reason: '$lanes lanes');
+      return statements.sql.length;
+    }
+
+    final small = await childReads(2);
+    final large = await childReads(12);
+    // Writes still scale with the edits (one note update per lane); reads
+    // must not add three per lane on top.
+    expect(large - small, lessThanOrEqualTo((12 - 2) * 4));
+  });
+
   test('the waveform cache ends as the per-clip writes left it: last write '
       'per content hash wins, in clip order', () async {
     final now = DateTime.fromMillisecondsSinceEpoch(1000);

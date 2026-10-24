@@ -839,11 +839,39 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
       for (final r in await _live(db.tracks, (x) => x.practiceId.equals(p.id)))
         r.id,
     };
-    for (final t in tracks) {
-      if (!liveTrackIds.contains(t.id)) continue;
-      changed += await _reconcileClips(t, clipAsset, now, base);
-      changed += await _reconcileNotes(t, now, base);
-      changed += await _reconcileMarkers(t, now, base);
+    //
+    // Their live children in one set read per table, not three per track (90
+    // for a 30-lane practice, on every save). Read after the track pass, whose
+    // cascades are the only writes to other tracks' children: each pass below
+    // writes its own track's rows alone, since local edits never move a child
+    // id to another parent (cross-parent transplants mint fresh ids; see
+    // reconcile.dart), so what is listed under a track stays its own until
+    // that track's pass.
+    final reconciled = [
+      for (final t in tracks)
+        if (liveTrackIds.contains(t.id)) t,
+    ];
+    final children = await _liveChildRows([for (final t in reconciled) t.id]);
+    for (final t in reconciled) {
+      changed += await _reconcileClips(
+        t,
+        clipAsset,
+        now,
+        base,
+        children.clips[t.id] ?? const [],
+      );
+      changed += await _reconcileNotes(
+        t,
+        now,
+        base,
+        children.notes[t.id] ?? const [],
+      );
+      changed += await _reconcileMarkers(
+        t,
+        now,
+        base,
+        children.markers[t.id] ?? const [],
+      );
     }
     return changed;
   }
@@ -853,8 +881,8 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
     Map<String, String> clipAsset,
     int now,
     Map<String, String>? base,
+    List<ClipRow> live,
   ) async {
-    final live = await _live(db.clips, (x) => x.trackId.equals(t.id));
     final current = {for (final r in live) r.id: clipRowHash(r)};
     final desired = [
       for (var i = 0; i < t.clips.length; i++)
@@ -912,8 +940,8 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
     AudioTrack t,
     int now,
     Map<String, String>? base,
+    List<PracticeNoteRow> live,
   ) async {
-    final live = await _live(db.practiceNotes, (x) => x.trackId.equals(t.id));
     final current = {for (final r in live) r.id: practiceNoteRowHash(r)};
     return (await reconcileCollection(
       writer: writer,
@@ -965,11 +993,8 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
     AudioTrack t,
     int now,
     Map<String, String>? base,
+    List<TechniqueMarkerRow> live,
   ) async {
-    final live = await _live(
-      db.techniqueMarkers,
-      (x) => x.trackId.equals(t.id),
-    );
     final current = {for (final r in live) r.id: techniqueMarkerRowHash(r)};
     return (await reconcileCollection(
       writer: writer,
@@ -1399,41 +1424,8 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
   /// per-track `track_id = ?` scan over ix_notes_track / ix_markers_track
   /// yielded. Asset rows are read live or tombstoned, like [AssetStore.resolve].
   Future<_ChildRows> _readChildren(List<String> trackIds) async {
-    final clips = <ClipRow>[];
-    final notes = <PracticeNoteRow>[];
-    final markers = <TechniqueMarkerRow>[];
-    for (final chunk in AssetStore.inChunks(trackIds)) {
-      clips.addAll(
-        await (db.select(db.clips)
-              ..where((c) => c.trackId.isIn(chunk) & c.deletedAt.isNull())
-              ..orderBy([
-                (c) => OrderingTerm(expression: c.trackId),
-                (c) => OrderingTerm(expression: c.orderIndex),
-                (c) => OrderingTerm(
-                  expression: c.id,
-                ), // stable tie-break; see interpretations
-              ]))
-            .get(),
-      );
-      notes.addAll(
-        await (db.select(db.practiceNotes)
-              ..where((n) => n.trackId.isIn(chunk) & n.deletedAt.isNull())
-              ..orderBy([
-                (n) => OrderingTerm(expression: n.trackId),
-                (n) => OrderingTerm(expression: db.practiceNotes.rowId),
-              ]))
-            .get(),
-      );
-      markers.addAll(
-        await (db.select(db.techniqueMarkers)
-              ..where((m) => m.trackId.isIn(chunk) & m.deletedAt.isNull())
-              ..orderBy([
-                (m) => OrderingTerm(expression: m.trackId),
-                (m) => OrderingTerm(expression: db.techniqueMarkers.rowId),
-              ]))
-            .get(),
-      );
-    }
+    final live = await _liveChildRows(trackIds);
+    final clips = [for (final rows in live.clips.values) ...rows];
 
     final assetRows = <AssetRow>[];
     for (final chunk in AssetStore.inChunks(
@@ -1470,6 +1462,65 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
       if (p != null) peaks[a.id] = p;
     }
 
+    return _ChildRows(
+      clips: live.clips,
+      notes: live.notes,
+      markers: live.markers,
+      paths: paths,
+      peaks: peaks,
+    );
+  }
+
+  /// The live clips / notes / markers of [trackIds], grouped by track: one
+  /// set read per table (chunked by [AssetStore.inChunks]), each group in
+  /// the order its old per-track query returned — clips by
+  /// (order_index, id); notes and markers in rowid order, which is what the
+  /// per-track `track_id = ?` scan over ix_notes_track / ix_markers_track
+  /// yielded.
+  Future<
+    ({
+      Map<String, List<ClipRow>> clips,
+      Map<String, List<PracticeNoteRow>> notes,
+      Map<String, List<TechniqueMarkerRow>> markers,
+    })
+  >
+  _liveChildRows(List<String> trackIds) async {
+    final clips = <ClipRow>[];
+    final notes = <PracticeNoteRow>[];
+    final markers = <TechniqueMarkerRow>[];
+    for (final chunk in AssetStore.inChunks(trackIds)) {
+      clips.addAll(
+        await (db.select(db.clips)
+              ..where((c) => c.trackId.isIn(chunk) & c.deletedAt.isNull())
+              ..orderBy([
+                (c) => OrderingTerm(expression: c.trackId),
+                (c) => OrderingTerm(expression: c.orderIndex),
+                (c) => OrderingTerm(
+                  expression: c.id,
+                ), // stable tie-break; see interpretations
+              ]))
+            .get(),
+      );
+      notes.addAll(
+        await (db.select(db.practiceNotes)
+              ..where((n) => n.trackId.isIn(chunk) & n.deletedAt.isNull())
+              ..orderBy([
+                (n) => OrderingTerm(expression: n.trackId),
+                (n) => OrderingTerm(expression: db.practiceNotes.rowId),
+              ]))
+            .get(),
+      );
+      markers.addAll(
+        await (db.select(db.techniqueMarkers)
+              ..where((m) => m.trackId.isIn(chunk) & m.deletedAt.isNull())
+              ..orderBy([
+                (m) => OrderingTerm(expression: m.trackId),
+                (m) => OrderingTerm(expression: db.techniqueMarkers.rowId),
+              ]))
+            .get(),
+      );
+    }
+
     Map<String, List<R>> byTrack<R>(List<R> rows, String Function(R) track) {
       final out = <String, List<R>>{};
       for (final r in rows) {
@@ -1478,12 +1529,10 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
       return out;
     }
 
-    return _ChildRows(
+    return (
       clips: byTrack(clips, (c) => c.trackId),
       notes: byTrack(notes, (n) => n.trackId),
       markers: byTrack(markers, (m) => m.trackId),
-      paths: paths,
-      peaks: peaks,
     );
   }
 
