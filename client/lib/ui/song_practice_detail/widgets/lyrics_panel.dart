@@ -1,9 +1,12 @@
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_selector/file_selector.dart' show XTypeGroup, openFile;
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show RenderAbstractViewport;
 import 'package:flutter/services.dart';
 import 'package:forui/forui.dart' show FIcons;
 
+import '../../../domain/models/lyric_line.dart';
 import '../../../domain/models/practice_note.dart';
 import '../../../domain/models/technique_marker.dart';
 import '../../../utils/format.dart';
@@ -789,12 +792,15 @@ class _LyricsReaderState extends State<_LyricsReader> {
   final ScrollController _scroll = ScrollController();
   List<GlobalKey> _keys = const [];
   int _active = -1;
+  // The lyrics [_active] indexes into (see didUpdateWidget).
+  List<LyricLine> _lines = const [];
 
   SongPracticeDetailViewModel get vm => widget.vm;
 
   @override
   void initState() {
     super.initState();
+    _lines = vm.lyrics;
     _keys = List.generate(vm.lyrics.length, (_) => GlobalKey());
     vm.position.addListener(_onTick);
     WidgetsBinding.instance.addPostFrameCallback((_) => _onTick());
@@ -806,6 +812,19 @@ class _LyricsReaderState extends State<_LyricsReader> {
     if (vm.lyrics.length != _keys.length) {
       _keys = List.generate(vm.lyrics.length, (_) => GlobalKey());
     }
+    // New lyrics (an import or edit while reading) re-time the lines, so the
+    // latched index belongs to the OLD list: it would light whatever line now
+    // sits there, and _onTick's same-index early-out would keep it until the
+    // playhead next crossed a line — never, while paused. Re-pick it for this
+    // build, and reveal it once laid out. Compared by value: the practice is
+    // rebuilt on unrelated edits too, and that must not yank the scroll back.
+    if (!listEquals(vm.lyrics, _lines)) {
+      _lines = vm.lyrics;
+      final idx = _active = vm.currentLyricIndex(
+        vm.position.value.inMilliseconds,
+      );
+      WidgetsBinding.instance.addPostFrameCallback((_) => _reveal(idx));
+    }
   }
 
   void _onTick() {
@@ -813,17 +832,66 @@ class _LyricsReaderState extends State<_LyricsReader> {
     final idx = vm.currentLyricIndex(vm.position.value.inMilliseconds);
     if (idx == _active) return;
     setState(() => _active = idx);
-    if (idx >= 0 && idx < _keys.length) {
-      final ctx = _keys[idx].currentContext;
-      if (ctx != null) {
-        Scrollable.ensureVisible(
-          ctx,
-          alignment: 0.4,
-          duration: const Duration(milliseconds: 320),
-          curve: Curves.easeOut,
-        );
-      }
+    _reveal(idx);
+  }
+
+  /// Scrolls the active line [idx] into view. ListView.builder only builds the
+  /// lines near the viewport, so after a seek (or opening Focus mid-song) the
+  /// line can have no element to ensureVisible; skipping it there left the
+  /// reader parked while the playhead ran on, for good — every later line is
+  /// just as unbuilt. So an unbuilt line is JUMPED to at an offset
+  /// extrapolated from the lines that are built, and revealed a frame later
+  /// once the list has built around it; each pass extrapolates from lines
+  /// nearer the target, so a rough first guess still converges.
+  void _reveal(int idx, [int pass = 0]) {
+    // The playhead moved on to another line: its own _reveal has taken over.
+    if (!mounted || idx != _active || idx < 0 || idx >= _keys.length) return;
+    final ctx = _keys[idx].currentContext;
+    if (ctx != null) {
+      Scrollable.ensureVisible(
+        ctx,
+        alignment: 0.4,
+        duration: const Duration(milliseconds: 320),
+        curve: Curves.easeOut,
+      );
+      return;
     }
+    if (pass >= 4 || !_scroll.hasClients) return;
+    final top = _estimateTop(idx);
+    if (top == null) return;
+    final pos = _scroll.position;
+    _scroll.jumpTo(
+      (top - pos.viewportDimension * 0.4).clamp(
+        pos.minScrollExtent,
+        pos.maxScrollExtent,
+      ),
+    );
+    WidgetsBinding.instance.addPostFrameCallback((_) => _reveal(idx, pass + 1));
+  }
+
+  /// The scroll offset at which unbuilt line [idx] would start, extrapolated
+  /// at the average height of the lines that are built; null when none are.
+  double? _estimateTop(int idx) {
+    int? first, last;
+    var firstTop = 0.0, lastEnd = 0.0;
+    for (var i = 0; i < _keys.length; i++) {
+      final box = _keys[i].currentContext?.findRenderObject();
+      if (box is! RenderBox || !box.hasSize) continue;
+      final top = RenderAbstractViewport.of(
+        box,
+      ).getOffsetToReveal(box, 0).offset;
+      if (first == null) {
+        first = i;
+        firstTop = top;
+      }
+      last = i;
+      lastEnd = top + box.size.height;
+    }
+    if (first == null || last == null) return null;
+    final avg = (lastEnd - firstTop) / (last - first + 1);
+    return idx < first
+        ? firstTop - (first - idx) * avg
+        : lastEnd + (idx - last - 1) * avg;
   }
 
   @override

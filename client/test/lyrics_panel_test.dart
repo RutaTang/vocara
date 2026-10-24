@@ -1,6 +1,7 @@
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:vocara/domain/models/lyric_line.dart';
 import 'package:vocara/ui/song_practice_detail/view_model/song_practice_detail_view_model.dart';
 import 'package:vocara/ui/song_practice_detail/widgets/lyrics_panel.dart';
 
@@ -55,6 +56,68 @@ class _FakeVm extends Fake implements SongPracticeDetailViewModel {
     return true;
   }
 }
+
+/// Fake for the karaoke READER: a playhead and enough synced lines that most
+/// of them sit far outside the viewport (and so are never built by the
+/// ListView until scrolled to).
+class _ReaderVm extends Fake implements SongPracticeDetailViewModel {
+  @override
+  final ValueNotifier<Duration> position = ValueNotifier(Duration.zero);
+
+  @override
+  List<LyricLine> lyrics = _timed(stepMs: 1000);
+
+  // Same pick as the real VM: the synced line with the latest time at or
+  // before the playhead.
+  @override
+  int currentLyricIndex(int positionMs) {
+    var idx = -1;
+    var best = -1;
+    for (var i = 0; i < lyrics.length; i++) {
+      final t = lyrics[i].timeMs;
+      if (t != null && t <= positionMs && t >= best) {
+        best = t;
+        idx = i;
+      }
+    }
+    return idx;
+  }
+
+  @override
+  void seekToLyric(LyricLine line) {}
+
+  @override
+  void setLyricsFocus(bool on) {}
+}
+
+List<LyricLine> _timed({required int stepMs}) => [
+  for (var i = 0; i < 80; i++) LyricLine(text: 'line $i', timeMs: i * stepMs),
+];
+
+Future<void> _pumpFocus(WidgetTester tester, _ReaderVm vm) async {
+  tester.view.physicalSize = const Size(900, 600);
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.reset);
+  await tester.pumpWidget(
+    MaterialApp(
+      home: Scaffold(body: LyricsFocusOverlay(vm: vm)),
+    ),
+  );
+  await tester.pumpAndSettle();
+}
+
+/// Whether [text] is laid out inside the reader's viewport — not merely
+/// built in the list's off-screen cache extent.
+bool _onScreen(WidgetTester tester, String text) {
+  final line = find.text(text);
+  if (line.evaluate().isEmpty) return false;
+  return tester
+      .getRect(find.byType(ListView))
+      .contains(tester.getRect(line).center);
+}
+
+bool _highlighted(WidgetTester tester, String text) =>
+    tester.widget<Text>(find.text(text)).style!.fontWeight == FontWeight.w700;
 
 Future<void> _pumpPanel(WidgetTester tester, _FakeVm vm) {
   return tester.pumpWidget(
@@ -175,6 +238,66 @@ void main() {
       'user typed draft',
       reason: 'a failed import must not clobber what the user is typing',
     );
+    expect(tester.takeException(), isNull);
+  });
+
+  // Regression guard: the reader only scrolled to a line that already had an
+  // element, and ListView.builder only builds the lines near the viewport. A
+  // seek far down the song named an unbuilt line, so nothing scrolled — and
+  // every line after it was just as unbuilt, so the reader stayed parked for
+  // the rest of the song.
+  testWidgets('the karaoke reader follows the playhead after a seek', (
+    tester,
+  ) async {
+    final vm = _ReaderVm();
+    await _pumpFocus(tester, vm);
+    vm.position.value = const Duration(milliseconds: 3000);
+    await tester.pumpAndSettle();
+    expect(_onScreen(tester, 'line 3'), isTrue);
+
+    // A ruler click / transport seek to 0:50…
+    vm.position.value = const Duration(milliseconds: 50000);
+    await tester.pumpAndSettle();
+    expect(_onScreen(tester, 'line 50'), isTrue);
+
+    // …and playback carries on from there.
+    for (var s = 51; s <= 55; s++) {
+      vm.position.value = Duration(milliseconds: s * 1000);
+      await tester.pumpAndSettle();
+    }
+    expect(_onScreen(tester, 'line 55'), isTrue);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('opening Focus mid-song reveals the active line', (tester) async {
+    final vm = _ReaderVm()
+      ..position.value = const Duration(milliseconds: 40000);
+    await _pumpFocus(tester, vm);
+    expect(_onScreen(tester, 'line 40'), isTrue);
+    expect(_highlighted(tester, 'line 40'), isTrue);
+    expect(tester.takeException(), isNull);
+  });
+
+  // The highlighted index belonged to the OLD lyrics: after an import or edit
+  // under a paused playhead it lit whatever line now sat at that index, and
+  // stayed there until the playhead next crossed a line.
+  testWidgets('new lyrics re-pick (and reveal) the line under the playhead', (
+    tester,
+  ) async {
+    final vm = _ReaderVm()..position.value = const Duration(milliseconds: 5000);
+    await _pumpFocus(tester, vm);
+    expect(_highlighted(tester, 'line 5'), isTrue);
+
+    // Re-timed lyrics: 5 s is now line 50's.
+    vm.lyrics = _timed(stepMs: 100);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: LyricsFocusOverlay(vm: vm)),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(_onScreen(tester, 'line 50'), isTrue);
+    expect(_highlighted(tester, 'line 50'), isTrue);
     expect(tester.takeException(), isNull);
   });
 }
