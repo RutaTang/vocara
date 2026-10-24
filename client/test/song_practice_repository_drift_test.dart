@@ -450,6 +450,23 @@ void main() {
       expect(summaries.map(show), hydrated.map(show));
       expect(summaries.map((p) => p.id), [saved.id, empty.id]);
       expect(show(summaries.first), endsWith(' 2 true 6'));
+
+      // One hydration cannot read is still LISTED (deliberately: it can be
+      // deleted from Home), where the hydrated list drops it.
+      final corrupt = ok(await repo.createPractice('Corrupt'));
+      await db.customStatement(
+        "UPDATE practices SET lyrics_json = '{not json' WHERE id = ?",
+        [corrupt.id],
+      );
+      final listed = (await repo.listPractices() as Ok<List<SongPractice>>)
+          .value
+          .map((p) => p.id);
+      expect(listed, isNot(contains(corrupt.id)));
+      final summarized =
+          (await repo.listPracticeSummaries() as Ok<List<PracticeSummary>>)
+              .value
+              .map((p) => p.id);
+      expect(summarized, contains(corrupt.id));
     },
   );
 

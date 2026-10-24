@@ -18,7 +18,10 @@ abstract class SongPracticeRepository {
 
   /// What the Home list shows of every live practice (see
   /// [PracticeSummary]), newest first like [listPractices] — without
-  /// hydrating any of them.
+  /// hydrating any of them. So unlike [listPractices], a practice whose rows
+  /// this build cannot read (a malformed or newer-format JSON column) is
+  /// still listed: Home can delete it, and opening it says it could not be
+  /// loaded, where before it simply vanished from the list.
   Future<Result<List<PracticeSummary>>> listPracticeSummaries();
 
   Future<Result<SongPractice>> getPractice(String id);
