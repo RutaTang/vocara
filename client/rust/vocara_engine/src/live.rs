@@ -361,16 +361,29 @@ impl RtProcessor {
         let _fz = FlushGuard::new();
         let total = frames * CHANNELS;
 
-        // Load the live graph once for this block (RCU; no refcount, nothing to drop).
+        // Drain the commands first, each onto the graph current when it is popped: loading the
+        // graph before the drain applied a commit's follow-up parameters to the graph that
+        // commit had just retired whenever the publish landed mid-drain.
+        self.cmd_rx.apply_current(&self.cell, MAX_CMDS_PER_BLOCK);
+
+        // Then load the live graph once for this block (RCU; no refcount, nothing to drop).
         // SAFETY: the control thread's reaper holds a one-block grace epoch before freeing a
         // retired graph, so the pointee outlives this block; we never cache the reference.
         let g: &mut Graph = unsafe { &mut *self.cell.load() };
 
-        self.cmd_rx.apply(g, MAX_CMDS_PER_BLOCK);
-
-        let seek = self.shared.seek_req.swap(-1, Ordering::AcqRel);
+        let seek = self.shared.seek_req.load(Ordering::Acquire);
         if seek >= 0 {
+            // The new clock is published BEFORE the request retires: a feeder reading
+            // `render_pos` in between saw neither, planned from the pre-seek clock, and left a
+            // backward seek silent until the transport walked back up to it. A newer seek that
+            // lands meanwhile fails the exchange and stays pending for the next block.
             self.shared.frame.store(seek, Ordering::Release);
+            let _ = self.shared.seek_req.compare_exchange(
+                seek,
+                -1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
             g.reset();
         }
 

@@ -7,6 +7,7 @@
 use std::collections::VecDeque;
 
 use crate::graph::{Graph, NodeId};
+use crate::graph_cell::GraphCell;
 use crate::ring::{spsc, Consumer, Producer};
 
 /// A single parameter change. POD so it crosses the ring as a value (no Drop).
@@ -72,6 +73,22 @@ impl CommandReceiver {
         for _ in 0..max {
             match self.cons.pop() {
                 Some(c) => graph.set_param(c.node, c.param, c.value),
+                None => break,
+            }
+        }
+    }
+
+    /// Apply up to `max` queued commands, each to the graph CURRENT when it is popped. A
+    /// command pushed after `publish_graph` (a commit's parameter storm) must reach the new
+    /// graph, never the retired one a block loaded before the publish landed: the pop's
+    /// Acquire pairs with the push, which the publish precedes, so this load sees the new
+    /// pointer. RT-safe (bounded, wait-free).
+    pub fn apply_current(&mut self, cell: &GraphCell, max: usize) {
+        for _ in 0..max {
+            match self.cons.pop() {
+                // SAFETY: the reaper's one-block grace epoch keeps any graph loaded during
+                // this block alive until it ends; the reference is not kept past the call.
+                Some(c) => unsafe { &mut *cell.load() }.set_param(c.node, c.param, c.value),
                 None => break,
             }
         }

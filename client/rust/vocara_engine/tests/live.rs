@@ -313,3 +313,100 @@ fn no_renderer_frees_retired_graphs_immediately() {
         "raising the gate re-arms the grace epoch"
     );
 }
+
+#[test]
+fn a_parameter_sent_after_a_publish_reaches_the_new_graph() {
+    // The render loaded the graph pointer, THEN drained the command ring onto it. A commit
+    // whose publish landed while a callback worked through a backlog (the tail of an earlier
+    // commit's parameter storm) had its own follow-up parameters popped in that same drain
+    // and applied to the graph it had just retired: the new graph never got them.
+    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+    use std::sync::Arc;
+    use vocara_engine::dsp::biquad::EqNode;
+    use vocara_engine::source::BufferSource;
+
+    // DC 0.8 (10 s) -> EQ (3) -> master (2).
+    let graph = || {
+        GraphDesc {
+            nodes: vec![
+                NodeEntry::new(
+                    1,
+                    Box::new(BufferSource::new(vec![0.8; 480_000 * CHANNELS], 0)),
+                ),
+                NodeEntry::new(3, Box::new(EqNode::default_strip())),
+                NodeEntry::new(2, Box::new(MasterNode::unity())),
+            ],
+            edges: vec![Edge::simple(1, 3), Edge::simple(3, 2)],
+            master: 2,
+        }
+        .compile(SR, BLOCK)
+        .unwrap()
+    };
+    let (_mic, mic_cons) = spsc::<[f32; CHANNELS]>(256);
+    let (mut h, mut rt) = spawn(graph(), HashMap::new(), mic_cons, CMD_RING_CAPACITY);
+    h.play();
+    let level = Arc::new(AtomicU32::new(0));
+    let blocks = Arc::new(AtomicU64::new(0));
+    let starting = Arc::new(AtomicU64::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    // Device-callback cadence: one block per ~0.5 ms, each announcing its start.
+    let device = {
+        let (level, blocks, starting, stop) = (
+            level.clone(),
+            blocks.clone(),
+            starting.clone(),
+            stop.clone(),
+        );
+        std::thread::spawn(move || {
+            let mut out = vec![0.0f32; BLOCK * CHANNELS];
+            while !stop.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_micros(500));
+                starting.fetch_add(1, Ordering::Release);
+                rt.process(&mut out, BLOCK);
+                level.store(rms(&out).to_bits(), Ordering::Release);
+                blocks.fetch_add(1, Ordering::Release);
+            }
+        })
+    };
+    let rounds = 30;
+    let mut lost = 0;
+    for round in 0..rounds {
+        let next = graph();
+        // A backlog for the CURRENT graph: level-neutral EQ retunes (0 dB bands), then
+        // parameters the master ignores, for ring occupancy.
+        for k in 0..12u16 {
+            h.set_param(
+                3,
+                ((k % 6) << 3) | (k / 6),
+                300.0 + f32::from(k) + round as f32,
+            );
+        }
+        for k in 12..100u16 {
+            h.set_param(2, 100 + k, 0.0);
+        }
+        h.flush();
+        // The commit publishes just as the next callback starts draining that backlog, and
+        // its follow-up silences the NEW graph's master.
+        let s0 = starting.load(Ordering::Acquire);
+        while starting.load(Ordering::Acquire) == s0 {
+            std::hint::spin_loop();
+        }
+        h.publish_graph(next);
+        h.set_param(2, mparam::GAIN, 0.0);
+        h.flush();
+        let b0 = blocks.load(Ordering::Acquire);
+        while blocks.load(Ordering::Acquire) < b0 + 60 {
+            std::hint::spin_loop();
+        }
+        if f32::from_bits(level.load(Ordering::Acquire)) > 0.1 {
+            lost += 1;
+        }
+        h.reap();
+    }
+    stop.store(true, Ordering::Relaxed);
+    device.join().unwrap();
+    assert_eq!(
+        lost, 0,
+        "{lost}/{rounds} post-publish parameters hit the retired graph"
+    );
+}
