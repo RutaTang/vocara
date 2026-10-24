@@ -708,6 +708,9 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
       }
       if (m != null) {
         _metricsCache[path] = m;
+        // An LTAS read while these were computing was built ungated (see
+        // [selectedLtas]); drop it so the next read applies the voiced gate.
+        _ltasCache.remove(path);
       } else {
         _metricsUnavailable.add(path);
       }
@@ -836,6 +839,7 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
       }
       if (m != null) {
         _metricsCache[path] = m;
+        _ltasCache.remove(path); // see _ensureMetricsForPath's identical drop
       } else {
         _metricsUnavailable.add(path);
       }

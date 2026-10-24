@@ -69,6 +69,28 @@ class _StubSpectrograms extends Fake implements SpectrogramService {
   }
 }
 
+/// [_StubSpectrograms] whose per-path METRICS compute parks on [metricsGate]:
+/// the window in which a subject's spectrogram is already cached but its
+/// metrics are not.
+class _GatedMetricsSpectrograms extends _StubSpectrograms {
+  _GatedMetricsSpectrograms({
+    required super.metricsByPath,
+    required super.specsByPath,
+  });
+
+  final Completer<void> metricsGate = Completer<void>();
+
+  @override
+  Future<VoiceMetrics?> computeMetricsFromFile(
+    String path, {
+    int fftSize = 2048,
+    int hop = 512,
+  }) async {
+    await metricsGate.future;
+    return super.computeMetricsFromFile(path, fftSize: fftSize, hop: hop);
+  }
+}
+
 class _FakeMonitor extends Fake implements MonitorService {
   int starts = 0;
   int stops = 0;
@@ -179,6 +201,47 @@ Spectrogram _spec(int frames, {int bins = 2}) => Spectrogram(
 );
 
 void main() {
+  test(
+    'an LTAS read before the metrics landed is rebuilt once they do',
+    () async {
+      // The LTAS tab renders as soon as the spectrogram is in (the inline lane
+      // may have computed it alone), and computeLtas drops its voiced-frame
+      // gate while metrics are missing. That ungated result was memoized and
+      // never replaced, so silence frames stayed averaged in for the session.
+      final metrics = _metrics(20)..active.fillRange(10, 20, 0); // 10 voiced
+      final stub = _GatedMetricsSpectrograms(
+        metricsByPath: {'c1.wav': metrics},
+        specsByPath: {'c1.wav': _spec(20)},
+      );
+      final track = _lane([_clip('c1', 0)]);
+      final cache = AnalysisCache(
+        spectrograms: stub,
+        monitor: _FakeMonitor(),
+        graphEngine: () => null,
+        pausePlayback: () async {},
+        isPlaying: () => false,
+        isRecording: () => false,
+        selectedTrack: () => track,
+        selectedClipId: () => null,
+        trackById: (id) => id == track.id ? track : null,
+        position: ValueNotifier(Duration.zero),
+        seek: (_) async {},
+        cacheBudget: LruBytesBudget(1 << 30),
+      );
+      addTearDown(cache.dispose);
+
+      await cache.ensureSpectrogramFor(track.id); // spectrogram only
+      final analyzing = cache.ensureSelectedSpectrogram(); // metrics pending
+      await Future<void>.delayed(Duration.zero);
+      expect(cache.selectedLtas!.frameCount, 20, reason: 'ungated meanwhile');
+
+      stub.metricsGate.complete();
+      await analyzing;
+      expect(cache.selectedMetrics, isNotNull);
+      expect(cache.selectedLtas!.frameCount, 10, reason: 'voiced-gated now');
+    },
+  );
+
   group('aggregateKeyFor', () {
     test('embeds the ordered clip ids and their timeline starts', () {
       final cache = _cache();
