@@ -48,8 +48,14 @@ class _StubSpectrograms extends Fake implements SpectrogramService {
   /// be staged deterministically instead of raced.
   final Map<String, Completer<void>> hold = {};
 
+  /// Derived views served with a path's pair, standing in for the ones the
+  /// real service computes in its isolate; absent = none served (the cache
+  /// then derives them itself, as for any pair without them).
+  final Map<String, Ltas> ltasByPath = {};
+  final Map<String, VoiceProfile> profileByPath = {};
+
   @override
-  Future<TakeAnalysis?> computeBothFromFile(
+  Future<TakeAnalysisBundle?> computeBothFromFile(
     String path, {
     int fftSize = 2048,
     int hop = 512,
@@ -62,6 +68,8 @@ class _StubSpectrograms extends Fake implements SpectrogramService {
     final result = (
       spectrogram: specsByPath[path],
       metrics: metricsByPath[path],
+      ltas: ltasByPath[path],
+      profile: profileByPath[path],
     );
     await hold[path]?.future;
     onCompute?.call(path);
@@ -806,6 +814,31 @@ void main() {
         cache.dispose();
       },
     );
+
+    test('a clip pair\'s LTAS and profile are served from the analysis '
+        'compute, not rebuilt on the UI isolate', () async {
+      final track = _lane([_clip('c1', 0)]);
+      final metrics = _metrics(10);
+      final spec = _spec(10);
+      final stub = _StubSpectrograms(
+        metricsByPath: {'c1.wav': metrics},
+        specsByPath: {'c1.wav': spec},
+      );
+      final ltas = computeLtas(spec, metrics);
+      final profile = analyzeVoiceProfile(metrics);
+      stub.ltasByPath['c1.wav'] = ltas;
+      stub.profileByPath['c1.wav'] = profile;
+      final cache = _cache(spectrograms: stub, selectedTrack: () => track);
+      addTearDown(cache.dispose);
+
+      await cache.ensureSelectedSpectrogram();
+      expect(stub.bothCalls, 1);
+      expect(identical(cache.selectedLtas, ltas), isTrue);
+      expect(identical(cache.selectedProfile, profile), isTrue);
+      // ...and they go with their source, like any derived memo.
+      cache.evictAnalysis('c1.wav');
+      expect(cache.derivedEntries, 0);
+    });
 
     test('a disposed screen stops charging the shared budget', () async {
       // The budget outlives any one screen, so a cache that does not leave it

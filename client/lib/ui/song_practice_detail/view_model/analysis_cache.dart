@@ -855,6 +855,20 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
       } else {
         _metricsUnavailable.add(path);
       }
+      // The pair's LTAS and voice profile were derived in the analysis
+      // isolate (see TakeAnalysisBundle), so the getters below find them
+      // memoized instead of building them on this isolate. Seeded only while
+      // every source is still resident — an insert above can evict — so a
+      // derived memo never outlives what it was derived from.
+      if (both?.ltas case final ltas?
+          when _spectrogramCache.containsKey(path) &&
+              _metricsCache.containsKey(path)) {
+        _ltasCache[path] = ltas;
+      }
+      if (both?.profile case final profile?
+          when _metricsCache.containsKey(path)) {
+        _profileCache[path] = profile;
+      }
     } catch (_) {
       // Compute failed; latch both so neither is retried (matching the
       // individual paths' latch discipline).

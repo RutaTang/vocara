@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vocara/data/services/audio_dsp.dart';
 import 'package:vocara/data/services/spectrogram_service.dart';
+import 'package:vocara/domain/models/voice_metrics.dart';
 
 /// Builds a RIFF/WAVE header with an arbitrary chunk sequence and a `data`
 /// chunk whose DECLARED size is [declaredDataBytes] — the payload itself is
@@ -523,5 +524,54 @@ void main() {
       expect(pcm.samples[0], closeTo(0.5, 1e-9));
       expect(pcm.samples[4], closeTo(0.25, 1e-9));
     });
+  });
+
+  test('computeBothFromFile brings the LTAS and voice profile of exactly the '
+      'pair it returns, derived in its isolate', () async {
+    final dir = await Directory.systemTemp.createTemp('vocara_both');
+    addTearDown(() => dir.delete(recursive: true));
+    const sr = 48000;
+    final samples = Float64List(sr * 2);
+    for (var i = 0; i < samples.length; i++) {
+      final t = i / sr;
+      // A sung-ish tone with a breath gap, so the LTAS voicing gate matters.
+      samples[i] = t % 1.0 < 0.8
+          ? 0.4 *
+                math.sin(
+                  2 * math.pi * (220 + 6 * math.sin(2 * math.pi * 5 * t)) * t,
+                )
+          : 0.0;
+    }
+    final f = File('${dir.path}/take.wav')
+      ..writeAsBytesSync(writeWavMono(samples, sr));
+
+    final both = (await const SpectrogramService().computeBothFromFile(
+      f.path,
+    ))!;
+    final spec = both.spectrogram!;
+    final metrics = both.metrics!;
+    final ltas = computeLtas(spec, metrics);
+    final profile = analyzeVoiceProfile(metrics);
+
+    expect(both.ltas!.db, ltas.db);
+    expect(both.ltas!.frameCount, ltas.frameCount);
+    expect(both.ltas!.alphaRatio, ltas.alphaRatio);
+    expect(both.ltas!.singersFormantDb, ltas.singersFormantDb);
+    expect(both.ltas!.frameCount, lessThan(spec.frames)); // voiced-gated
+    final got = both.profile!;
+    expect(
+      [got.lowMidi, got.highMidi, got.tessLoMidi, got.tessHiMidi],
+      [
+        profile.lowMidi,
+        profile.highMidi,
+        profile.tessLoMidi,
+        profile.tessHiMidi,
+      ],
+    );
+    expect(got.passaggioMidi, profile.passaggioMidi);
+    expect(
+      [got.softDb, got.loudDb, got.medianDb],
+      [profile.softDb, profile.loudDb, profile.medianDb],
+    );
   });
 }

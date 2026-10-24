@@ -13,6 +13,19 @@ import 'media_analysis_service.dart';
 /// [SpectrogramService.computeBothFromFile].
 typedef TakeAnalysis = ({Spectrogram? spectrogram, VoiceMetrics? metrics});
 
+/// [TakeAnalysis] plus the views derived from exactly that pair, computed in
+/// the analysis isolate beside it: [ltas] is `computeLtas(spectrogram,
+/// metrics)` and [profile] `analyzeVoiceProfile(metrics)`. Built on the UI
+/// isolate instead, on first display, they cost a 10-minute take ~250 ms of
+/// frame time (12M `pow` calls for the LTAS alone). Null where their source
+/// is null.
+typedef TakeAnalysisBundle = ({
+  Spectrogram? spectrogram,
+  VoiceMetrics? metrics,
+  Ltas? ltas,
+  VoiceProfile? profile,
+});
+
 /// Everything the admission gate learned from the header, handed to the
 /// streaming reader so the isolate never re-walks (or re-trusts) the chunks:
 /// where the PCM lives, its layout, and the effective sample format
@@ -338,8 +351,9 @@ class SpectrogramService {
   /// selected; computing them separately used to decode the same file twice in
   /// two concurrent isolates — twice the bytes, twice the PCM, at the same
   /// moment. Null when the file is missing or over the analysis cap; each
-  /// field is null when its compute failed.
-  Future<TakeAnalysis?> computeBothFromFile(
+  /// field is null when its compute failed. The pair's LTAS and voice profile
+  /// ride along (see [TakeAnalysisBundle]).
+  Future<TakeAnalysisBundle?> computeBothFromFile(
     String path, {
     int fftSize = 2048,
     int hop = 512,
@@ -374,8 +388,13 @@ class SpectrogramService {
           analyzer.add(chunk);
         });
         if (!any) return null;
-        final out = analyzer.finish();
-        return (spectrogram: out.spectrogram, metrics: out.metrics);
+        final (:spectrogram, :metrics) = analyzer.finish();
+        return (
+          spectrogram: spectrogram,
+          metrics: metrics,
+          ltas: spectrogram == null ? null : computeLtas(spectrogram, metrics),
+          profile: analyzeVoiceProfile(metrics),
+        );
       }),
     );
   }
