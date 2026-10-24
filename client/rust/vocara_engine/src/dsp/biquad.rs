@@ -236,6 +236,16 @@ impl Band {
         } else {
             Coeffs::PASS
         };
+        // No audio has run since the fade began: this is a later field of the same
+        // multi-command edit (ve_set_eq_band sends FREQ, Q, GAIN_DB and ENABLED back to
+        // back, all applied before the block renders). Retarget the pending fade —
+        // the target filters' history still equals the current ones' — instead of
+        // committing it below, which would swap the old response out instantly.
+        if self.xfading && self.mix == 0.0 {
+            self.ln.set_coeffs(c);
+            self.rn.set_coeffs(c);
+            return;
+        }
         // If already cross-fading, collapse the in-flight blend into the current filter
         // first so the new fade starts from a defined state.
         if self.xfading {

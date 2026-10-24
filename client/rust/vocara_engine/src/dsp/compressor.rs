@@ -130,7 +130,8 @@ impl Node for CompressorNode {
             }
         }
         if self.bypass {
-            // Keep smoothers tracking so re-enabling doesn't jump.
+            // The smoothers and envelope hold while bypassed; set_param(BYPASS)
+            // clears the envelope on the transition so re-enabling starts idle.
             if let Some(m) = &self.meter {
                 m.store(0, Ordering::Relaxed);
             }
@@ -209,7 +210,17 @@ impl Node for CompressorNode {
                 self.recompute_ballistics();
             }
             param::MAKEUP_DB => self.makeup.set_target(value),
-            param::BYPASS => self.bypass = value >= 0.5,
+            param::BYPASS => {
+                let bypass = value >= 0.5;
+                // The envelope froze at whatever the material was doing when the
+                // bypass engaged; re-enabling over a quieter passage would duck it
+                // by that stale reduction for a whole release time. Start idle, as
+                // reset() does after a seek.
+                if bypass != self.bypass {
+                    self.env_db = 0.0;
+                }
+                self.bypass = bypass;
+            }
             _ => {}
         }
     }

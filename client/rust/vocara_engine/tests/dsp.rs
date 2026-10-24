@@ -350,3 +350,66 @@ fn doubler_bypass_toggle_does_not_replay_stale_tail() {
         "stale pre-bypass audio replayed as a ghost, rms={ghost}"
     );
 }
+
+#[test]
+fn an_eq_band_edit_sent_field_by_field_still_crossfades() {
+    // ve_set_eq_band sends FREQ, Q, GAIN_DB and ENABLED as four commands the
+    // audio thread applies back to back before the block renders. Each later
+    // field used to commit the fade the previous one had just started, so the
+    // band swapped coefficients instantly (a click on every knob drag). The
+    // burst must sound exactly like one set_band call.
+    use vocara_engine::dsp::biquad::param as eqparam;
+    let block = 256;
+    let input = to_stereo(&sine_mono(700.0, SR, 20 * block, 0.5));
+    let mut burst = EqNode::default_strip();
+    let mut single = EqNode::default_strip();
+    burst.prepare(SR, block);
+    single.prepare(SR, block);
+    let (pre, post) = input.split_at(10 * block * CHANNELS);
+    let a0 = run_phase(&mut burst, pre, SR, block);
+    let b0 = run_phase(&mut single, pre, SR, block);
+    assert_eq!(a0, b0);
+    let band = 2u16 << eqparam::FIELD_BITS; // the 700 Hz peaking band
+    burst.set_param(band | eqparam::FREQ, 700.0);
+    burst.set_param(band | eqparam::Q, 1.0);
+    burst.set_param(band | eqparam::GAIN_DB, 12.0);
+    burst.set_param(band | eqparam::ENABLED, 1.0);
+    single.set_band(2, BandSpec::peaking(700.0, 1.0, 12.0));
+    let a = run_phase(&mut burst, post, SR, block);
+    let b = run_phase(&mut single, post, SR, block);
+    let max_diff = a
+        .iter()
+        .zip(b.iter())
+        .map(|(x, y)| (x - y).abs())
+        .fold(0.0f32, f32::max);
+    assert!(
+        max_diff < 1e-6,
+        "the field-by-field edit must cross-fade like a single one, diff {max_diff}"
+    );
+}
+
+#[test]
+fn re_enabling_a_compressor_does_not_duck_with_a_stale_envelope() {
+    // Bypass during a loud passage, re-enable on a quiet one: the envelope
+    // froze at the loud passage's reduction, and the quiet audio was ducked
+    // by it until the release recovered.
+    let block = 256;
+    let mut comp = CompressorNode::new(-18.0, 4.0, 6.0, 5.0, 200.0, 0.0);
+    comp.prepare(SR, block);
+    let loud = to_stereo(&sine_mono(220.0, SR, 24_000, 0.9));
+    let _ = run_phase(&mut comp, &loud, SR, block);
+    assert!(
+        comp.gain_reduction_db() > 6.0,
+        "the loud passage compresses"
+    );
+    comp.set_param(cparam::BYPASS, 1.0);
+    let quiet = to_stereo(&sine_mono(220.0, SR, 4 * block, 0.02)); // ~-34 dB
+    let _ = run_phase(&mut comp, &quiet, SR, block);
+    comp.set_param(cparam::BYPASS, 0.0);
+    let out = run_phase(&mut comp, &quiet, SR, block);
+    let g = rms(&out[..block * CHANNELS]) / rms(&quiet[..block * CHANNELS]);
+    assert!(
+        g > 0.95,
+        "below-threshold audio must pass at ~unity right after re-enabling, got {g}"
+    );
+}
