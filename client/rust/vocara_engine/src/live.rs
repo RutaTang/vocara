@@ -18,8 +18,19 @@ use crate::node::{Node, ProcessIo};
 use crate::ring::{Consumer, Producer};
 use crate::sample::{Smp, CHANNELS, ENGINE_SR};
 
-/// Max parameter commands applied per audio block (bounds RT work).
-const MAX_CMDS_PER_BLOCK: usize = 64;
+/// Max parameter commands applied per audio block (bounds RT work). Sized for the
+/// post-commit storm: a rebuilt graph starts every node at its defaults, and the host then
+/// re-pushes every live parameter (~58 per clip). At 64 per block a 40-clip project took
+/// ~0.4 s to reach the new graph — its later tracks played dry and centred, then their pans
+/// swept back and their FX snapped on, on every resync. Each command is one lookup and a
+/// cheap coefficient update, so a full budget costs a fraction of a millisecond, once.
+const MAX_CMDS_PER_BLOCK: usize = 1024;
+
+/// Capacity of the control → audio parameter ring the FFI engine is spawned with. Large
+/// enough that a post-commit storm (~58 commands per clip) fits whole: every FFI setter
+/// flushes, so the storm then needs no later flush to land — while paused, nothing polls
+/// [`EngineHandle::reap`], and an overflowed tail used to wait for the next play.
+pub const CMD_RING_CAPACITY: usize = 8192;
 
 /// One contiguous PLAYING render span, mapping a range of the rendered-frame
 /// counter to its END position on the timeline (seqlock-published by the

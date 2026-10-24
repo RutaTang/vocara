@@ -7,7 +7,7 @@ use common::*;
 use std::collections::HashMap;
 
 use vocara_engine::dsp::master::{param as mparam, MasterNode};
-use vocara_engine::live::spawn;
+use vocara_engine::live::{spawn, CMD_RING_CAPACITY};
 use vocara_engine::ring::spsc;
 use vocara_engine::source::RingSource;
 use vocara_engine::{Edge, GraphDesc, NodeEntry, CHANNELS};
@@ -156,6 +156,58 @@ fn reap_drains_overflowed_param_storm_without_explicit_flush() {
         rms(&out) < 1e-3,
         "tail of an overflowed param storm never delivered: master still audible at {}",
         rms(&out)
+    );
+}
+
+#[test]
+fn a_post_commit_parameter_storm_reaches_the_graph_within_a_few_blocks() {
+    // After every commit the host re-pushes each live parameter of the rebuilt graph, ~58
+    // per clip, each as set + flush. With the old 1024-slot ring drained 64 per block, a
+    // 40-clip project's tail took ~0.4 s to land (its tracks dry and centred meanwhile), and
+    // the overflow beyond the ring waited for reap() — which nothing calls while paused.
+    // No reap here: the storm must land on its own flushes. Measured against a lone mute,
+    // since the master's gain smoother takes its own blocks to reach silence.
+    fn blocks_until_muted(storm_clips: u16) -> usize {
+        let (prod, cons) = spsc::<[f32; CHANNELS]>(1 << 16);
+        let desc = GraphDesc {
+            nodes: vec![
+                NodeEntry::new(1, Box::new(RingSource::new(cons))),
+                NodeEntry::new(2, Box::new(MasterNode::unity())),
+            ],
+            edges: vec![Edge::simple(1, 2)],
+            master: 2,
+        };
+        let g = desc.compile(SR, BLOCK).unwrap();
+        let mut producers = HashMap::new();
+        producers.insert(1u32, prod);
+        let (_mic_prod, mic_cons) = spsc::<[f32; CHANNELS]>(256);
+        let (mut h, mut rt) = spawn(g, producers, mic_cons, CMD_RING_CAPACITY);
+        h.push_pcm(1, &frames_dc(0.8, 65536));
+        h.play();
+        for clip in 0..storm_clips {
+            for p in 0..58u16 {
+                // Unknown params (RingSource ignores them): padding in the storm's shape.
+                h.set_param(1, 100 + clip * 58 + p, 0.0);
+                h.flush();
+            }
+        }
+        h.set_param(2, mparam::GAIN, 0.0); // the storm's LAST command
+        h.flush();
+        let mut out = vec![0.0; BLOCK * CHANNELS];
+        for blocks in 1..=400 {
+            rt.process(&mut out, BLOCK);
+            if rms(&out) < 1e-3 {
+                return blocks;
+            }
+        }
+        usize::MAX
+    }
+    let lone = blocks_until_muted(0);
+    let storm = blocks_until_muted(40);
+    assert!(
+        storm <= lone + 3,
+        "the storm's tail took {storm} blocks to take effect (a lone command: {lone}; \
+         usize::MAX = never)"
     );
 }
 

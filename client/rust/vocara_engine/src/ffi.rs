@@ -21,7 +21,7 @@ use std::sync::Arc;
 use crate::build::{self, build, BusSpec, ProjectSpec, TrackSpec};
 use crate::device::{self, AudioHost, RecordWriter};
 use crate::graph::NodeId;
-use crate::live::{spawn, EngineHandle, RtCell};
+use crate::live::{spawn, EngineHandle, RtCell, CMD_RING_CAPACITY};
 use crate::ring::{spsc, Consumer};
 use crate::sample::{Smp, CHANNELS, ENGINE_SR};
 use crate::source::{BufferSource, RingSource};
@@ -428,7 +428,7 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
         let (mic_prod, mic_cons) = spsc::<[Smp; CHANNELS]>(MIC_RING_FRAMES);
         let (cap_prod, cap_cons) = spsc::<[Smp; CHANNELS]>(CAP_RING_FRAMES);
         let (rec_prod, rec_cons) = spsc::<[Smp; CHANNELS]>(REC_RING_FRAMES);
-        let (handle, rt) = spawn(graph, HashMap::new(), mic_cons, 1024);
+        let (handle, rt) = spawn(graph, HashMap::new(), mic_cons, CMD_RING_CAPACITY);
         // The audio-host thread owns the !Send streams and the shared RtCell for the engine's
         // whole life; FFI threads only message it.
         let rt_cell = RtCell::new(rt);
