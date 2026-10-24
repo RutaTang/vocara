@@ -437,9 +437,10 @@ impl OutResampler {
             // The kernel for the chunk's LAST read position touches content index
             // floor(pos + (chunk-1)*step) + HALF; render until the FIFO covers it.
             // One frame of margin: the kernel reaches that position by adding `step`
-            // chunk-1 times, and the iterated sum can round to one ULP above the
-            // single multiply-add here — across an integer boundary, one frame past
-            // the FIFO's end (an index panic on the IO thread). It grows with `pos`,
+            // chunk-1 times, and the iterated sum drifts above the single
+            // multiply-add here by rounding error (hundreds of ULPs, far below a
+            // frame) — enough to cross an integer boundary, one frame past the
+            // FIFO's end (an index panic on the IO thread). It grows with `pos`,
             // which only seek/pause/play resets: hours of uptime at 44.1 kHz with a
             // large device buffer reach it. The constructor's slack absorbs the frame.
             let last_pos = self.pos + (chunk.saturating_sub(1)) as f64 * self.step;
@@ -651,23 +652,26 @@ pub struct OutputBinding {
 impl OutputBinding {
     /// The device the engine is ACTUALLY rendering to; empty = nothing open (or unknowable).
     pub fn actual_uid(&self) -> String {
+        if self.renders_to_default() {
+            return system_default_output_uid();
+        }
+        match &self.vpio_mic {
+            Some(mic) => mic.clone(),
+            None => self.cpal_uid.clone(),
+        }
+    }
+
+    /// Whether playback goes wherever the system default output is, rather than to one device.
+    fn renders_to_default(&self) -> bool {
         match &self.vpio_mic {
             // VPIO is ONE communication endpoint bound (via CurrentDevice) to the mic: when that
             // device also has output streams it serves both legs, and otherwise — including the
             // system-default mic, where no device is bound at all — playback goes to the system
             // default output. The app-selected output device is not part of this path.
-            Some(mic) => {
-                if !mic.is_empty() && output_device_by_uid(mic).is_some() {
-                    return mic.clone();
-                }
-                system_default_output_uid()
-            }
+            Some(mic) => mic.is_empty() || output_device_by_uid(mic).is_none(),
             // A default-following stream renders wherever the default is now; the uid resolved
             // at build time goes stale on the first default change and read as a reroute.
-            None if self.cpal_follows_default && !self.cpal_uid.is_empty() => {
-                system_default_output_uid()
-            }
-            None => self.cpal_uid.clone(),
+            None => self.cpal_follows_default && !self.cpal_uid.is_empty(),
         }
     }
 
@@ -691,6 +695,11 @@ impl OutputBinding {
     /// Playback is open but not on the device the user asked for. Nothing open is not a reroute:
     /// there is no sound to come out of the wrong speaker.
     pub fn rerouted(&self) -> bool {
+        // Following the default as asked: resolving the default once per side could straddle a
+        // default change and fire a false reroute (and a monitor mute) for one poll.
+        if self.requested.is_empty() && self.renders_to_default() {
+            return false;
+        }
         let actual = self.actual_uid();
         !actual.is_empty() && actual != self.requested_uid()
     }

@@ -357,7 +357,9 @@ jobs:
           SUBMIT_LOG="$(mktemp)"
           xcrun notarytool submit "${{ steps.dmg.outputs.dmg }}" "${NOTARY_ARGS[@]}" --wait 2>&1 | tee "$SUBMIT_LOG" || true
           if ! grep -q "status: Accepted" "$SUBMIT_LOG"; then
-            SUBMISSION_ID=$(grep "id:" "$SUBMIT_LOG" | head -1 | awk '{print $2}')
+            # `|| true`: a failure that printed no id (auth, network) must still reach the
+            # error below instead of ending the script on grep's no-match under pipefail.
+            SUBMISSION_ID=$(grep -m1 "id:" "$SUBMIT_LOG" | awk '{print $2}' || true)
             echo "::error::Notarization not accepted; log follows."
             [ -n "$SUBMISSION_ID" ] && xcrun notarytool log "$SUBMISSION_ID" "${NOTARY_ARGS[@]}" || true
             exit 1
