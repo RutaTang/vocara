@@ -353,11 +353,6 @@ class GraphAudioPlaybackService implements PlaybackEngine {
   // triggers a rebuild, otherwise sync only pushes live volumes/mutes.
   String _committedSig = '';
 
-  /// True between a degraded commit and the one rebuild it triggers, so a file
-  /// that stays unreadable settles instead of rebuilding the graph (and
-  /// re-running its isolate decodes) on every sync for the rest of the session.
-  bool _retryingDegradedCommit = false;
-
   /// Population count over all 64 bits of [mask]. The degraded mask crosses
   /// the FFI as a Uint64, so bit 63 lands in Dart's sign bit: the shift must
   /// be logical (`>>>`) — an arithmetic `>>` keeps a negative value negative
@@ -669,7 +664,7 @@ class GraphAudioPlaybackService implements PlaybackEngine {
   void _scheduleDegradedRebuild() {
     unawaited(
       _syncChain
-          .add(() => _doSync(_latestTracks, _latestBuses))
+          .add(() => _doSync(_latestTracks, _latestBuses, retry: true))
           .catchError((_) {}),
     );
   }
@@ -764,10 +759,19 @@ class GraphAudioPlaybackService implements PlaybackEngine {
     }
   }
 
+  /// [retry] marks the one rebuild a degraded commit queues (see
+  /// [_scheduleDegradedRebuild]): it never queues another, so a file that
+  /// stays unreadable settles instead of rebuilding the graph (and re-running
+  /// its isolate decodes) on every sync for the rest of the session. A
+  /// parameter rather than shared state: a flag set by the degraded commit
+  /// and cleared only on a later successful one stayed set when a rejected
+  /// commit returned early in between, and the NEXT degraded commit then
+  /// never got its retry.
   Future<void> _doSync(
     List<TrackPlayback> tracks,
-    List<BusPlayback> buses,
-  ) async {
+    List<BusPlayback> buses, {
+    bool retry = false,
+  }) async {
     if (!_available) return;
     final sig = _topologySig(tracks, buses);
     if (sig == _committedSig) {
@@ -820,6 +824,11 @@ class GraphAudioPlaybackService implements PlaybackEngine {
         DiagnosticsLog.instance.log('engine', 'skip unstageable track: $e');
         idx = -1;
       }
+      // Disposed (the page closed) while this track decoded: the rest of the
+      // rebuild is for an engine that no longer exists. Without this every
+      // remaining track was still decoded to PCM — seconds of CPU and up to
+      // gigabytes per hour of audio — only to be refused by a null engine.
+      if (!_available) return;
       if (idx >= 0) {
         newIndex[t.id] = idx;
         _pushSends(idx, t.sends, newBusIndex, bus: false);
@@ -862,10 +871,9 @@ class GraphAudioPlaybackService implements PlaybackEngine {
     // non-canonical it is decoded and staged as PCM instead (it plays), and if
     // it is truly gone the stage MISSES and the track is left out — neither of
     // which can degrade again, so one retry is enough and there is no rebuild
-    // loop (_retryingDegradedCommit bounds it either way).
+    // loop ([retry] bounds it either way).
     final degraded = _bindings.ve_commit_degraded_mask(_engine);
-    if (degraded != 0 && !_retryingDegradedCommit) {
-      _retryingDegradedCommit = true;
+    if (degraded != 0 && !retry) {
       DiagnosticsLog.instance.log(
         'engine',
         'commit degraded ${bitCount(degraded)} streaming track(s) to silence; '
@@ -876,7 +884,6 @@ class GraphAudioPlaybackService implements PlaybackEngine {
       // chain's current link, so awaiting its successor here would deadlock.
       _scheduleDegradedRebuild();
     } else {
-      _retryingDegradedCommit = false;
       _committedSig = sig;
     }
 
@@ -947,6 +954,11 @@ class GraphAudioPlaybackService implements PlaybackEngine {
     final (addr, frames) = await _decode(t.path, _sampleRate.round());
     if (addr == 0 || frames == 0) return -1;
     final ptr = ffi.Pointer<ffi.Float>.fromAddress(addr);
+    if (!_available) {
+      // Disposed during the decode: nothing will take the buffer.
+      _bindings.ve_free_decoded(ptr, frames);
+      return -1;
+    }
     final cpath = t.path.toNativeUtf8();
     try {
       final idx = _bindings.ve_tracks_add_pcm(

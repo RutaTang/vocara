@@ -14,6 +14,7 @@
 // The binding overrides keep the generated C parameter names (snake_case).
 // ignore_for_file: non_constant_identifier_names
 
+import 'dart:async';
 import 'dart:ffi' as ffi;
 
 import 'package:ffi/ffi.dart';
@@ -36,6 +37,14 @@ class _FakeBindings extends Fake implements VocaraEngineBindings {
   /// Scripted `ve_commit_degraded_mask` results, consumed front-first
   /// (empty = 0, the healthy answer).
   final List<int> degradedMasks = [];
+
+  /// Scripted `ve_tracks_commit` results, consumed front-first (empty = 0,
+  /// accepted). A non-zero result models the engine REJECTING the topology
+  /// and keeping its old graph; only accepted commits land in [commits].
+  final List<int> commitResults = [];
+
+  /// Decoded buffers handed back through `ve_free_decoded`.
+  int frees = 0;
 
   final List<String> _staging = [];
 
@@ -93,8 +102,9 @@ class _FakeBindings extends Fake implements VocaraEngineBindings {
 
   @override
   int ve_tracks_commit(ffi.Pointer<VeEngine> e) {
-    commits.add(List.of(_staging));
-    return 0;
+    final result = commitResults.isEmpty ? 0 : commitResults.removeAt(0);
+    if (result == 0) commits.add(List.of(_staging));
+    return result;
   }
 
   @override
@@ -127,7 +137,7 @@ class _FakeBindings extends Fake implements VocaraEngineBindings {
   int ve_set_master(ffi.Pointer<VeEngine> e, double gain) => 0;
 
   @override
-  void ve_free_decoded(ffi.Pointer<ffi.Float> ptr, int frames) {}
+  void ve_free_decoded(ffi.Pointer<ffi.Float> ptr, int frames) => frees++;
 
   @override
   void ve_destroy(ffi.Pointer<VeEngine> e) {}
@@ -211,6 +221,42 @@ void main() {
     });
   });
 
+  test(
+    'closing the engine mid-rebuild stops decoding the remaining tracks',
+    () async {
+      // The sync checked availability only on entry, so after the page closed
+      // during the first decode every remaining track was still decoded in
+      // full (seconds of CPU, up to gigabytes of PCM) for a null engine.
+      final fake = _FakeBindings();
+      final decoded = <String>[];
+      final pending = <Completer<(int, int)>>[];
+      final svc = GraphAudioPlaybackService.withBindings(
+        fake,
+        decode: (path, rate) {
+          decoded.add(path);
+          final c = Completer<(int, int)>();
+          pending.add(c);
+          return c.future;
+        },
+      );
+      final sync = svc.sync(const [
+        TrackPlayback(id: 'a', path: 'a.mp3'),
+        TrackPlayback(id: 'b', path: 'b.mp3'),
+        TrackPlayback(id: 'c', path: 'c.mp3'),
+      ], const []);
+      await pumpEventQueue();
+      expect(decoded, ['a.mp3']);
+
+      await svc.dispose(); // the user leaves the page mid-load
+      pending.single.complete((0x1000, 10));
+      await sync;
+
+      expect(decoded, ['a.mp3']);
+      expect(fake.frees, 1, reason: 'the decode in flight is still freed');
+      expect(fake.commits, isEmpty);
+    },
+  );
+
   group('degraded-commit retry', () {
     const take = TrackPlayback(id: 't', path: 'take.wav');
     const backing = TrackPlayback(id: 'b', path: 'backing.wav');
@@ -241,6 +287,38 @@ void main() {
       for (final commit in fake.commits.skip(1)) {
         expect(commit, ['backing.wav']);
       }
+    });
+
+    test('a rejected commit in between does not cost a later degraded commit '
+        'its retry', () async {
+      // The retry used to be gated on a flag the degraded commit set and only
+      // a later SUCCESSFUL commit cleared. A rejected commit (the engine kept
+      // its old graph) returns early, so with the queued sync and the retry
+      // both rejected the flag stayed set, and the next degraded commit was
+      // recorded as committed with its track silent for the session.
+      final fake = _FakeBindings();
+      fake.cachedPaths.addAll({'take.wav', 'backing.wav'});
+      const moved = TrackPlayback(id: 't', path: 'take.wav', startMs: 500);
+      final svc = GraphAudioPlaybackService.withBindings(fake);
+      addTearDown(svc.dispose);
+
+      // The first accepted commit degrades; the sync queued behind it and the
+      // retry it queues are both rejected; the next accepted commit — an
+      // unrelated edit — degrades too.
+      fake.degradedMasks.addAll([1, 1]);
+      fake.commitResults.addAll([0, 1, 1]);
+      final degradedJob = svc.sync(const [take, backing], const []);
+      final rejected = svc.sync(const [backing], const []);
+      await degradedJob;
+      await rejected;
+      await svc.sync(const [moved, backing], const []); // after the retry
+      await svc.sync(const [moved, backing], const []); // drain ITS retry
+
+      expect(fake.commits, [
+        ['take.wav', 'backing.wav'],
+        ['take.wav', 'backing.wav'],
+        ['take.wav', 'backing.wav'], // the second degraded commit's retry
+      ]);
     });
 
     test('with no newer sync in between, still re-commits the degraded model '
