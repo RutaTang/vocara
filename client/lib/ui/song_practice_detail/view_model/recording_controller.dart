@@ -293,12 +293,11 @@ class RecordingController extends ChangeNotifier {
     if (id == null) return null;
     final t = _trackById(id);
     if (t == null || t.kind != AudioTrackKind.vocal) return null;
-    // The same rule [SongPractice.activeVocalTracks] shows lanes by: the
-    // RESOLVED interpretation (a null/dangling active id falls back to the
-    // first), and every take when none resolves. Comparing the raw id left a
-    // visible take un-armable whenever the active id did not resolve.
-    final shown = _practiceOf()?.activeVersion?.id;
-    if (shown != null && t.versionId != shown) return null;
+    // The rule [SongPractice.activeVocalTracks] lists lanes by: a take on
+    // screen is armable. Comparing the raw ids left a visible take
+    // un-armable whenever the active id, or the take's own, did not resolve.
+    final practice = _practiceOf();
+    if (practice != null && !practice.listsTake(t)) return null;
     return id;
   }
 

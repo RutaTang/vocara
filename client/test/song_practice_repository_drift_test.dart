@@ -1,6 +1,6 @@
 import 'dart:io';
 
-import 'package:drift/drift.dart' show Table, TableInfo;
+import 'package:drift/drift.dart' show Table, TableInfo, Variable;
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
@@ -9,6 +9,7 @@ import 'package:vocara/data/db/asset_store.dart';
 import 'package:vocara/data/repositories/song_practice_repository_drift.dart';
 import 'package:vocara/data/sync/hlc.dart';
 import 'package:vocara/data/sync/integrity_checker.dart';
+import 'package:vocara/data/sync/quarantine_store.dart';
 import 'package:vocara/data/sync/sync_hashes.dart';
 import 'package:vocara/data/sync/sync_writer.dart';
 import 'package:vocara/domain/models/audio_fx.dart';
@@ -829,11 +830,14 @@ void main() {
     },
   );
 
-  test('a take whose interpretation was deleted under it loads reattached to '
-      'the first live interpretation once the integrity repair ran', () async {
+  group('a take whose interpretation resolves to none', () {
+    // Sync leaves such takes: the integrity repair NULLs a pointer at an
+    // interpretation another device deleted, and one whose newer state is
+    // parked in the quarantine is not here yet. The take is LISTED under the
+    // active interpretation, but loading rewrites nothing: a load-time
+    // rewrite was an edit nobody made, whose next save — any save — outranked
+    // other devices' concurrent changes and the parked interpretation's own.
     final now = DateTime(2026);
-    final keep = TakeVersion(id: newId(), name: 'Keep', createdAt: now);
-    final gone = TakeVersion(id: newId(), name: 'Gone', createdAt: now);
     AudioTrack take(String name, String versionId) => AudioTrack(
       id: newId(),
       kind: AudioTrackKind.vocal,
@@ -841,56 +845,159 @@ void main() {
       createdAt: now,
       versionId: versionId,
     );
-    final onGone = take('Take 1', gone.id);
-    final onKeep = take('Take 2', keep.id);
-    final pr = ok(
-      await repo.savePractice(
-        SongPractice(
-          id: newId(),
-          title: 'Song',
-          createdAt: now,
-          updatedAt: now,
-          versions: [keep, gone],
-          activeVersionId: gone.id,
-          vocalTracks: [onGone, onKeep],
+    Future<TrackRow> trackRow(String id) =>
+        (db.select(db.tracks)..where((t) => t.id.equals(id))).getSingle();
+    Future<void> repair() => db.transaction(
+      () => IntegrityChecker(
+        db,
+        SyncWriter(db, HlcClock(node: 'FIX'.padRight(26, '0'))),
+      ).repair(),
+    );
+
+    /// Two interpretations; the ACTIVE one is deleted by another device and
+    /// the repair NULLs both pointers at it.
+    Future<({SongPractice pr, AudioTrack orphan, AudioTrack other})>
+    deletedUnderIt() async {
+      final keep = TakeVersion(id: newId(), name: 'Keep', createdAt: now);
+      final gone = TakeVersion(id: newId(), name: 'Gone', createdAt: now);
+      final orphan = take('Take 1', gone.id);
+      final other = take('Take 2', keep.id);
+      final pr = ok(
+        await repo.savePractice(
+          SongPractice(
+            id: newId(),
+            title: 'Song',
+            createdAt: now,
+            updatedAt: now,
+            versions: [keep, gone],
+            activeVersionId: gone.id,
+            vocalTracks: [orphan, other],
+          ),
         ),
-      ),
-    );
+      );
+      await db.customStatement(
+        'UPDATE interpretations SET deleted_at = 1 WHERE id = ?',
+        [gone.id],
+      );
+      await repair();
+      expect((await trackRow(orphan.id)).interpretationId, isNull);
+      return (pr: pr, orphan: orphan, other: other);
+    }
 
-    // A synced-in delete of the ACTIVE interpretation, then the integrity
-    // repair sync runs after every page: it NULLs the practice's active
-    // pointer and the orphaned take's pointer.
-    await db.customStatement(
-      'UPDATE interpretations SET deleted_at = 1 WHERE id = ?',
-      [gone.id],
-    );
-    final checker = IntegrityChecker(
-      db,
-      SyncWriter(db, HlcClock(node: 'FIX'.padRight(26, '0'))),
-    );
-    await db.transaction(() => checker.repair());
-    Future<PracticeRow> practiceRow() =>
-        (db.select(db.practices)..where((x) => x.id.equals(pr.id))).getSingle();
-    Future<TrackRow> takeRow() => (db.select(
-      db.tracks,
-    )..where((x) => x.id.equals(onGone.id))).getSingle();
-    expect((await practiceRow()).activeInterpretationId, isNull);
-    expect((await takeRow()).interpretationId, isNull);
+    Future<Loaded<SongPractice>> load(String id) async =>
+        (await repo.loadPractice(id) as Ok<Loaded<SongPractice>>).value;
 
-    // Read verbatim, the take matched no interpretation and was in no view.
-    final loaded =
-        (await repo.loadPractice(pr.id) as Ok<Loaded<SongPractice>>).value;
-    final got = loaded.aggregate;
-    expect(got.activeVersionId, keep.id);
-    expect(got.activeVocalTracks.map((t) => t.id), [onGone.id, onKeep.id]);
+    /// Saves [loaded] with only the OTHER take's volume changed.
+    Future<void> unrelatedSave(Loaded<SongPractice> loaded, String otherId) =>
+        repo.savePracticeWithBase(
+          loaded.aggregate.copyWith(
+            vocalTracks: [
+              for (final t in loaded.aggregate.vocalTracks)
+                t.id == otherId ? t.copyWith(volume: 0.3) : t,
+            ],
+          ),
+          baseHashes: loaded.baseHashes,
+        );
 
-    // The next save persists the reattachment as an ordinary local edit.
-    expect(
-      await repo.savePracticeWithBase(got, baseHashes: loaded.baseHashes),
-      isA<Ok<Loaded<SongPractice>>>(),
-    );
-    expect((await practiceRow()).activeInterpretationId, keep.id);
-    expect((await takeRow()).interpretationId, keep.id);
+    test('is listed under the active interpretation, and armable', () async {
+      final f = await deletedUnderIt();
+      final got = (await load(f.pr.id)).aggregate;
+      expect(got.activeVocalTracks.map((t) => t.id), [f.orphan.id, f.other.id]);
+      final orphan = got.vocalTracks.firstWhere((t) => t.id == f.orphan.id);
+      expect(got.listsTake(orphan), isTrue);
+      expect(orphan.versionId, isNull, reason: 'loaded verbatim');
+    });
+
+    test('a remote delete of it survives an unrelated save', () async {
+      final f = await deletedUnderIt();
+      final loaded = await load(f.pr.id);
+      await db.customStatement(
+        "UPDATE tracks SET deleted_at = 5, hlc_packed = 'zzzz' WHERE id = ?",
+        [f.orphan.id],
+      );
+      await unrelatedSave(loaded, f.other.id);
+      expect((await trackRow(f.orphan.id)).deletedAt, isNotNull);
+    });
+
+    test('remote edits of it and of the practice survive an unrelated '
+        'save', () async {
+      final f = await deletedUnderIt();
+      final loaded = await load(f.pr.id);
+      await db.customStatement(
+        "UPDATE tracks SET display_name = 'Remote name', hlc_packed = 'zzzz' "
+        'WHERE id = ?',
+        [f.orphan.id],
+      );
+      await db.customStatement(
+        "UPDATE practices SET title = 'Remote title', hlc_packed = 'zzzz' "
+        'WHERE id = ?',
+        [f.pr.id],
+      );
+      await unrelatedSave(loaded, f.other.id);
+      expect((await trackRow(f.orphan.id)).displayName, 'Remote name');
+      final practice = await (db.select(
+        db.practices,
+      )..where((x) => x.id.equals(f.pr.id))).getSingle();
+      expect(practice.title, 'Remote title');
+    });
+
+    test('a take whose interpretation is PARKED stays its own when the park '
+        'lands', () async {
+      final keep = TakeVersion(id: newId(), name: 'Keep', createdAt: now);
+      final x = TakeVersion(id: newId(), name: 'X', createdAt: now);
+      final onX = take('Take on X', x.id);
+      final other = take('Take on Keep', keep.id);
+      final pr = ok(
+        await repo.savePractice(
+          SongPractice(
+            id: newId(),
+            title: 'Song',
+            createdAt: now,
+            updatedAt: now,
+            versions: [keep, x],
+            activeVersionId: keep.id,
+            vocalTracks: [onX, other],
+          ),
+        ),
+      );
+      // X is tombstoned here, but a NEWER live state of it is parked (an edit
+      // that beat the delete, held by the drift gate): the repair defers.
+      await db.customStatement(
+        'UPDATE interpretations SET deleted_at = 1 WHERE id = ?',
+        [x.id],
+      );
+      final held = await db
+          .customSelect(
+            'SELECT hlc_packed FROM interpretations WHERE id = ?',
+            variables: [Variable.withString(x.id)],
+          )
+          .getSingle();
+      final base = Hlc.parse(held.read<String>('hlc_packed'));
+      await QuarantineStore(db).put(
+        table: 'interpretations',
+        id: x.id,
+        hlcPacked: Hlc(
+          wallMs: base.wallMs + 1000,
+          counter: 0,
+          node: 'PEER'.padRight(26, '0'),
+        ).packed,
+        schemaV: 1,
+        payload: '{}',
+        reason: 'hlc-drift: parked by the test',
+        quarantinedAt: 0,
+      );
+      await repair();
+      expect((await trackRow(onX.id)).interpretationId, x.id);
+
+      final loaded = await load(pr.id);
+      expect(
+        loaded.aggregate.activeVocalTracks.map((t) => t.id),
+        [onX.id, other.id],
+        reason: 'listed meanwhile',
+      );
+      await unrelatedSave(loaded, other.id);
+      expect((await trackRow(onX.id)).interpretationId, x.id);
+    });
   });
 }
 

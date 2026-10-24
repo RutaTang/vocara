@@ -1184,22 +1184,6 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
     // queries per track plus three per clip (394 round trips for a 30-lane,
     // 100-clip practice — paid again by every save's re-read).
     final children = await _readChildren([for (final t in trackRows) t.id]);
-    // The interpretation pointers are LOGICAL and can dangle: a synced-in
-    // delete tombstones an interpretation, and the integrity repair then
-    // NULLs the practice's active pointer and every take's pointer at it.
-    // Read verbatim, such a take matched no interpretation and vanished from
-    // every view (the active list filters by pointer). Normalize exactly as
-    // SongPractice.fromJson does: an active pointer that resolves to no live
-    // interpretation falls back to the first one, and a vocal take whose
-    // pointer resolves to none is reattached to the active one. The base
-    // hashes stay those of the rows as read, so the next save writes the
-    // reattachment as an ordinary local edit. (With no live interpretation at
-    // all nothing is rewritten: activeVocalTracks then shows every take.)
-    final liveVersionIds = {for (final v in versions) v.id};
-    final activeVersionId =
-        versions.isEmpty || liveVersionIds.contains(row.activeInterpretationId)
-        ? row.activeInterpretationId
-        : versions.first.id;
     AudioTrack? accompaniment;
     AudioTrack? reference;
     final vocals = <AudioTrack>[];
@@ -1212,11 +1196,7 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
         case 'reference':
           reference ??= track;
         default:
-          vocals.add(
-            versions.isEmpty || liveVersionIds.contains(track.versionId)
-                ? track
-                : track.copyWith(versionId: activeVersionId),
-          );
+          vocals.add(track);
       }
     }
 
@@ -1262,7 +1242,7 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
       reference: reference,
       vocalTracks: vocals,
       versions: versions,
-      activeVersionId: activeVersionId,
+      activeVersionId: row.activeInterpretationId,
       lyrics: _lyricsFrom(row.lyricsJson),
       timelineDurationMs: row.timelineDurationMs,
       separationSource: row.separationAssetId == null

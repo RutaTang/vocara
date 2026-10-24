@@ -107,15 +107,28 @@ class SongPractice {
     return versions.isEmpty ? null : versions.first;
   }
 
-  /// Vocal takes belonging to the active interpretation. When no interpretation
-  /// is resolved (legacy), all takes are returned.
+  /// Vocal takes belonging to the active interpretation (see [listsTake]).
+  /// When no interpretation is resolved (legacy), all takes are returned.
   List<AudioTrack> get activeVocalTracks {
-    final vid = activeVersion?.id;
-    if (vid == null) return vocalTracks;
+    if (activeVersion == null) return vocalTracks;
     return [
       for (final t in vocalTracks)
-        if (t.versionId == vid) t,
+        if (listsTake(t)) t,
     ];
+  }
+
+  /// Whether vocal take [t] is listed under the active interpretation: its
+  /// own, or — when its interpretation resolves to none of [versions] — the
+  /// active one, so it is never invisible. Sync can leave such a take: the
+  /// integrity repair nulls a pointer at an interpretation another device
+  /// deleted, and one still in the sync quarantine is not here yet. Only the
+  /// listing falls back; the stored pointer is left exactly as it is, since
+  /// rewriting it at load would be an edit nobody made (one that outranked
+  /// other devices' changes and the parked interpretation's own).
+  bool listsTake(AudioTrack t) {
+    final active = activeVersion;
+    if (active == null || t.versionId == active.id) return true;
+    return !versions.any((v) => v.id == t.versionId);
   }
 
   /// One past the highest existing "Take N" / "Take N (recovered)" label among
