@@ -211,24 +211,33 @@ class DiagnosticsLog {
   /// Anchored to user-space roots so `package:` URIs in stack frames — the
   /// most valuable diagnostic content — pass through untouched. Paths may
   /// contain spaces (song titles do), so a match runs greedily to the next
-  /// quote or line end and is then cut back at the first extension; when in
-  /// doubt this over-scrubs rather than leak.
+  /// quote or line end and is then cut back at the last extension in the
+  /// path's final component; when in doubt this over-scrubs rather than leak.
   @visibleForTesting
   static String scrubPaths(String message) {
     return message.replaceAllMapped(_absolutePath, (m) {
       final matched = m[0]!;
-      final ext = _extensionInside.firstMatch(matched);
-      if (ext == null) return '<path>';
-      // Text after the extension is prose, not path — but it may hold another
-      // path of its own, so scrub it recursively (it is strictly shorter).
+      // The path runs to where a second root starts a new word (prose naming
+      // another path), else to the match end — and only its FINAL component
+      // can carry the extension: a dot further up ('Vol.2 Live/…') belongs to
+      // a directory name, and cutting there leaked the rest of the path.
+      final end = _nextRoot.firstMatch(matched)?.start ?? matched.length;
+      final last = matched.lastIndexOf('/', end - 1) + 1;
+      Match? ext;
+      for (final e in _extensionInside.allMatches(matched, last)) {
+        if (e.start < end) ext = e;
+      }
+      // Text after the cut is prose, not path — but it may hold another path
+      // of its own, so scrub it recursively (it is strictly shorter).
+      if (ext == null) return '<path>${scrubPaths(matched.substring(end))}';
       return '<path>${ext[0]}${scrubPaths(matched.substring(ext.end))}';
     });
   }
 
-  static final RegExp _absolutePath = RegExp(
-    '/(?:Users|private|var|tmp|Volumes|Library|Applications|home|etc|opt)'
-    '(?:/[^\'"\\n]+)+',
-  );
+  static const String _roots =
+      '/(?:Users|private|var|tmp|Volumes|Library|Applications|home|etc|opt)';
+  static final RegExp _absolutePath = RegExp('$_roots(?:/[^\'"\\n]+)+');
+  static final RegExp _nextRoot = RegExp('\\s(?=$_roots/)');
   static final RegExp _extensionInside = RegExp(
     r'\.[A-Za-z0-9]{1,8}(?=[\s.,;:)\]}]|$)',
   );

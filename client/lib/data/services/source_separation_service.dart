@@ -560,6 +560,11 @@ class ProcessSourceSeparationService implements SourceSeparationService {
       // lives content-addressed in the asset pool.
       await _capStemsCache(cacheDir, _stemsCacheMaxBytes, keep: key);
       onProgress?.call(1.0);
+      // Re-check last: the size checks, renames and cache cap above all await,
+      // and a Cancel landing in them (the bar already near 100%) must still
+      // win — the caller would otherwise import stems the user cancelled. The
+      // committed pair stays cached; a retry is an instant cache hit.
+      if (run.cancelled) throw const SeparationCancelled();
       return (instrumentalPath: inst.path, vocalPath: voc.path);
     } finally {
       // Ensure the subprocess is never left running. On the normal / cancel /

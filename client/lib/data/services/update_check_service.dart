@@ -199,10 +199,19 @@ class UpdateCheckService extends ChangeNotifier {
   /// [current]. Tolerates a leading `v` and a `+build` suffix; anything not
   /// purely numeric-dotted (e.g. `1.1.0-rc1`) is conservatively NOT newer, so
   /// a malformed manifest can never raise the banner.
+  ///
+  /// The CURRENT build alone may carry a `-prerelease` suffix — release.yml
+  /// ships `-` tags as prereleases, and an RC install whose own version was
+  /// unparseable read "up to date" forever. It compares by its release core,
+  /// and the GA of that same core counts as newer (semver: X.Y.Z-pre <
+  /// X.Y.Z). A prerelease candidate still never parses, so none is offered.
   @visibleForTesting
   static bool isNewer(String candidate, String current) {
     final a = _parseVersion(candidate);
-    final b = _parseVersion(current);
+    final plus = current.indexOf('+'); // a '-' in +build metadata isn't one
+    final core = plus >= 0 ? current.substring(0, plus) : current;
+    final dash = core.indexOf('-');
+    final b = _parseVersion(dash >= 0 ? core.substring(0, dash) : core);
     if (a == null || b == null) return false;
     final len = a.length > b.length ? a.length : b.length;
     for (var i = 0; i < len; i++) {
@@ -210,7 +219,7 @@ class UpdateCheckService extends ChangeNotifier {
       final y = i < b.length ? b[i] : 0;
       if (x != y) return x > y;
     }
-    return false;
+    return dash >= 0; // equal cores: the GA beats its own prerelease
   }
 
   static List<int>? _parseVersion(String raw) {

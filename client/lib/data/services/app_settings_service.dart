@@ -73,6 +73,10 @@ class AppSettingsService extends ChangeNotifier {
   /// the document uses, so a setter and its load guard cannot drift apart.
   final Set<String> _userChosen = {};
 
+  /// [load] reads still parked, and whether a [_persist] was held back by one.
+  int _loadsInFlight = 0;
+  bool _persistDeferred = false;
+
   /// The persisted output device UID, or null = system default.
   String? get outputDeviceUid => _outputDeviceUid;
 
@@ -240,11 +244,14 @@ class AppSettingsService extends ChangeNotifier {
   /// why.
   Future<void> load() async {
     Map<String, dynamic>? doc;
+    _loadsInFlight++;
     try {
       doc = await _storage.read(_collection, _docId);
     } catch (_) {
       doc =
           null; // never let a read failure abort startup; fall back to defaults
+    } finally {
+      _loadsInFlight--;
     }
     // A uid and its last-known display name are ONE choice — adopt or skip
     // them together, or an adopted name would label the user's new device.
@@ -281,6 +288,12 @@ class AppSettingsService extends ChangeNotifier {
     // have to reach the panel, so notify unconditionally — always past an
     // await here, never inside the build that created the service.
     notifyListeners();
+    // A choice persisted while the read was parked was held back (see
+    // [_persist]); write it now that the untouched fields hold the document.
+    if (_persistDeferred && _loadsInFlight == 0) {
+      _persistDeferred = false;
+      await _persist();
+    }
   }
 
   /// Re-query the available output + input devices (static; no engine required). Only notifies
@@ -468,6 +481,15 @@ class AppSettingsService extends ChangeNotifier {
   /// showing a value the disk had refused. The outcome belongs in state that
   /// the UI can render, not in a Future no call site can hold.
   Future<void> _persist() async {
+    // The document is all seven fields from memory, and while [load] is parked
+    // in its read the fields the user has not touched still hold constructor
+    // defaults: writing then put those defaults on disk, and load() never
+    // wrote again (a read racing the write could even adopt them). Hold the
+    // write back; load() issues it once the document's values are in place.
+    if (_loadsInFlight > 0) {
+      _persistDeferred = true;
+      return;
+    }
     try {
       await _storage.write(_collection, _docId, {
         _kOutputUid: _outputDeviceUid,

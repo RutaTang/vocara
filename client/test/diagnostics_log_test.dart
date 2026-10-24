@@ -138,6 +138,36 @@ void main() {
       );
     });
 
+    test('a dot in a directory or file name does not end the scrub early', () {
+      // The cut used to land on the FIRST `.ext`-looking run, so a dotted
+      // directory leaked the rest of the path verbatim.
+      expect(
+        DiagnosticsLog.scrubPaths(
+          "path = '/Users/alice/Music/Vol.2 Live/My Secret Song.wav'",
+        ),
+        "path = '<path>.wav'",
+      );
+      expect(
+        DiagnosticsLog.scrubPaths(
+          '/Users/alice/feat.Ed Sheeran/Perfect Duet.wav (OS Error)',
+        ),
+        '<path>.wav (OS Error)',
+      );
+      expect(
+        DiagnosticsLog.scrubPaths('at /Users/alice/Adele 2016.12 Remix/Hello'),
+        'at <path>',
+      );
+      expect(
+        DiagnosticsLog.scrubPaths('/Users/a/My.Song.wav gone'),
+        '<path>.wav gone',
+      );
+      // A second path after an extensionless one is still scrubbed on its own.
+      expect(
+        DiagnosticsLog.scrubPaths('cp /Users/a/dir /Users/b/y.wav failed'),
+        'cp <path> <path>.wav failed',
+      );
+    });
+
     test('leaves package URIs and non-path text untouched', () {
       const stackFrame =
           '#0  AssetStore._importFile '

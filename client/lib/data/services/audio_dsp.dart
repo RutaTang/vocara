@@ -128,6 +128,14 @@ PcmAudio? readWavMono(Uint8List bytes) {
   return PcmAudio(out, sampleRate);
 }
 
+/// The top of the range a [maxBin]-bin spectrogram actually covers — what both
+/// builders record as [Spectrogram.maxHz]. Normally the requested [maxHz] (the
+/// last bin sits at or just past it), but below 10 kHz the bins stop at Nyquist
+/// first, and a maxHz left above that stretched the image's rows over a taller
+/// axis, grid and formant overlay than they hold.
+double _coveredMaxHz(double maxHz, int maxBin, int sampleRate, int fftSize) =>
+    math.min(maxHz, (maxBin - 1) * sampleRate / fftSize);
+
 /// Incremental spectrogram builder with EXACTLY [computeSpectrogram]'s
 /// column math (same fftea STFT windowing — `stream`/`flush` share `run`'s
 /// pipeline — same dB conversion, same assembly), fed in chunks so the
@@ -198,7 +206,7 @@ class StreamingSpectrogramBuilder {
     return Spectrogram(
       frames: frames,
       bins: maxBin,
-      maxHz: maxHz,
+      maxHz: _coveredMaxHz(maxHz, maxBin, sampleRate, fftSize),
       sampleRate: sampleRate,
       fftSize: fftSize,
       hop: hop,
@@ -262,7 +270,7 @@ Spectrogram computeSpectrogram(
   return Spectrogram(
     frames: frames,
     bins: maxBin,
-    maxHz: maxHz,
+    maxHz: _coveredMaxHz(maxHz, maxBin, sampleRate, fftSize),
     sampleRate: sampleRate,
     fftSize: fftSize,
     hop: hop,
@@ -1436,11 +1444,15 @@ const double _voicedConfidence = 0.55;
     dn[tau] = running > 0 ? d[tau] * tau / running : 1.0;
   }
 
-  // 3) Absolute threshold: the first lag in the search band whose dip falls
-  // below [threshold] (descending to that dip's local minimum); if none does,
-  // fall back to the global minimum so periodicity still reflects the best lag.
+  // 3) Absolute threshold: the first lag whose dip falls below [threshold]
+  // (descending to that dip's local minimum); if none does, fall back to the
+  // in-band global minimum so periodicity still reflects the best lag. The
+  // threshold scan starts below the band (d′ is defined from τ=1): starting it
+  // at tauMin skipped an above-fmax tone's true period T and landed on its 2T
+  // dip, which the range gate then accepted as f0/2 — an octave-low pitch at
+  // full confidence. Found at T, such a tone fails the range gate → NaN.
   var tau = -1;
-  for (var t = tauMin; t <= tauMax; t++) {
+  for (var t = 2; t <= tauMax; t++) {
     if (dn[t] < threshold) {
       while (t + 1 <= tauMax && dn[t + 1] < dn[t]) {
         t++;

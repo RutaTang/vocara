@@ -263,6 +263,22 @@ void main() {
       expect(practiceWith(['Chorus try', 'Take 2 (edited)']).nextTakeNumber, 1);
     });
 
+    test('an absurd take number (user rename / sync) neither throws nor '
+        'wraps negative — it is skipped like any foreign label', () {
+      // 20 digits overflowed int.parse (FormatException on every new take and
+      // every boot recovery); max-int made max + 1 wrap negative.
+      expect(
+        practiceWith(['Take 2', 'Take 99999999999999999999']).nextTakeNumber,
+        3,
+      );
+      expect(
+        practiceWith(['Take 2', 'Take 9223372036854775807']).nextTakeNumber,
+        3,
+      );
+      // Large-but-sane numbers still count.
+      expect(practiceWith(['Take 2', 'Take 1000000']).nextTakeNumber, 1000001);
+    });
+
     test('numbers over the ACTIVE interpretation only', () {
       final p = SongPractice(
         id: 'p',

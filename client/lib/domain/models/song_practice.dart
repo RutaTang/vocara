@@ -131,8 +131,13 @@ class SongPractice {
     for (final t in activeVocalTracks) {
       final m = re.firstMatch(t.displayName);
       if (m != null) {
-        final n = int.parse(m.group(1)!);
-        if (n > max) max = n;
+        // Names are user-editable and sync-delivered, so the digits can be
+        // anything: 20 of them overflowed int.parse (every new take and every
+        // boot recovery threw), and max-int wrapped max + 1 negative. A
+        // number no real numbering reaches is skipped like a foreign label —
+        // it can't collide, since handed-out numbers stay far below it.
+        final n = int.tryParse(m.group(1)!);
+        if (n != null && n < 1 << 31 && n > max) max = n;
       }
     }
     return max + 1;

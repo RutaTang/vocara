@@ -116,6 +116,18 @@ void main() {
       expect(UpdateCheckService.isNewer('', '1.0.0'), isFalse);
       expect(UpdateCheckService.isNewer('1.0.1', 'garbage'), isFalse);
     });
+
+    test('a prerelease CURRENT build is offered its GA and anything later', () {
+      // release.yml ships `-` tags as prereleases; an RC install's own
+      // version used to be unparseable, so it read "up to date" forever.
+      expect(UpdateCheckService.isNewer('1.0.0', '1.0.0-rc.1'), isTrue);
+      expect(UpdateCheckService.isNewer('1.0.1', 'v1.0.0-rc.1+3'), isTrue);
+      expect(UpdateCheckService.isNewer('0.9.9', '1.0.0-rc.1'), isFalse);
+      // A prerelease candidate is still never offered.
+      expect(UpdateCheckService.isNewer('1.0.0-rc.2', '1.0.0-rc.1'), isFalse);
+      // A '-' inside +build metadata is not a prerelease marker.
+      expect(UpdateCheckService.isNewer('1.0.0', '1.0.0+build-7'), isFalse);
+    });
   });
 
   group('check', () {
