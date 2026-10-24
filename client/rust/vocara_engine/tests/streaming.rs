@@ -838,3 +838,247 @@ fn a_play_and_pause_with_nothing_heard_keeps_the_playhead() {
     h.pause();
     assert_eq!(h.frame(), heard, "a play/pause with nothing heard moved it");
 }
+
+/// Real cadence: one pump per ~512-frame device callback (4 x BLOCK), before
+/// or after that callback; `edit` runs at the start of each tick. Returns
+/// everything rendered.
+fn at_real_cadence(
+    streamed: bool,
+    path: &std::path::Path,
+    pcm: &[Smp],
+    ticks: usize,
+    pump_before_render: bool,
+    edit: impl Fn(usize, &EngineHandle),
+) -> Vec<Smp> {
+    let (h, rt, mut feeder) = streamed_pair(path, 0, 16_384);
+    let (h2, rt2) = engine_with(Box::new(BufferSource::new(pcm.to_vec(), 0)));
+    let (h, rt) = if streamed { (h, rt) } else { (h2, rt2) };
+    // The commit primes every stream ring before the graph goes live.
+    if streamed {
+        feeder.pump(h.transport()).unwrap();
+    }
+    h.play();
+    let mut out = Vec::new();
+    for t in 0..ticks {
+        edit(t, &h);
+        if streamed && pump_before_render {
+            feeder.pump(h.transport()).unwrap();
+        }
+        for _ in 0..4 {
+            let mut block = vec![0.0; BLOCK * CHANNELS];
+            rt.render_offline(&mut block, BLOCK);
+            rt.transport().sync_consumed_to_rendered();
+            out.extend_from_slice(&block);
+        }
+        if streamed && !pump_before_render {
+            feeder.pump(h.transport()).unwrap();
+        }
+    }
+    out
+}
+
+fn streamed_vs_arc(
+    tag: &str,
+    ticks: usize,
+    pump_before_render: bool,
+    edit: impl Fn(usize, &EngineHandle),
+) -> usize {
+    let pcm = offset_pcm(400_000);
+    let path = write_pcm(tag, &pcm);
+    let streamed = at_real_cadence(true, &path, &pcm, ticks, pump_before_render, &edit);
+    let arc = at_real_cadence(false, &path, &pcm, ticks, pump_before_render, &edit);
+    let _ = std::fs::remove_file(&path);
+    differing_frames(&streamed, &arc)
+}
+
+#[test]
+fn a_resume_whose_first_callback_beats_the_pump_plays_at_once() {
+    // Play replanned, discarding what the fill had queued behind the pause's
+    // own plan; when the first playing callback came before the next pump,
+    // the track opened every resume with a block of silence.
+    let bad = streamed_vs_arc("resume", 200, false, |t, h| {
+        if t == 100 {
+            h.pause();
+        }
+        if t == 110 {
+            h.play();
+        }
+    });
+    assert_eq!(bad, 0);
+}
+
+#[test]
+fn a_seek_during_playback_leaves_no_hole_behind_its_fence() {
+    // With only the fence's two slots to spare, the fill behind a replan got
+    // just what the node had consumed since the last pump, and the node ran
+    // dry right before the next one.
+    let bad = streamed_vs_arc("seekhole", 200, true, |t, h| {
+        if t == 100 {
+            h.seek(50_000);
+        }
+    });
+    assert_eq!(bad, 0);
+}
+
+#[test]
+fn dragging_a_loop_handle_during_playback_leaves_no_holes() {
+    // A drag replans on every pump; each replan left the same hole.
+    let bad = streamed_vs_arc("drag", 180, true, |t, h| {
+        if (100..160).contains(&t) {
+            h.set_loop(true, 0, 300_000 + (t as i64) * 480);
+        }
+    });
+    assert_eq!(bad, 0);
+}
+
+#[test]
+fn a_replan_whose_fill_reaches_loop_end_keeps_the_pre_wrap_run() {
+    // The fill behind a replan can now reach loop end and push the wrap's
+    // fence before the node takes the flush. The node discards up to the
+    // flush TARGET, so the wrap's in-band fence must not become it: that
+    // skipped the rest of the pass.
+    for edit_at in [40usize, 45, 46] {
+        let bad = streamed_vs_arc("nearend", 120, true, |t, h| {
+            if t == 0 {
+                h.set_loop(true, 0, 24_000);
+            }
+            if t == edit_at {
+                h.set_loop(true, 0, 24_100);
+            }
+        });
+        assert_eq!(bad, 0, "loop edited at tick {edit_at}");
+    }
+}
+
+/// xorshift64: a deterministic op stream for the differential fuzz below.
+struct Rng(u64);
+
+impl Rng {
+    fn below(&mut self, n: u64) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0 % n
+    }
+}
+
+/// One block on a device whose consumed cursor trails the render by `lag`
+/// frames (0 = the identity path), pumping first when asked.
+fn lagged_block(
+    h: &EngineHandle,
+    rt: &Arc<RtCell>,
+    feeder: Option<&mut TrackFeeder>,
+    lag: u64,
+    rendered: &mut u64,
+) -> Vec<Smp> {
+    if let Some(f) = feeder {
+        f.pump(h.transport()).unwrap();
+    }
+    let mut block = vec![0.0; BLOCK * CHANNELS];
+    rt.render_offline(&mut block, BLOCK);
+    *rendered += BLOCK as u64;
+    let t = rt.transport();
+    let target = rendered.saturating_sub(lag);
+    let cur = t.consumed_frames();
+    if target > cur {
+        t.advance_consumed(target - cur);
+    }
+    block
+}
+
+/// Random seeks, pause/play, loops (before, across, inside and outside the
+/// track), loop off and feeder stalls, on a streamed track and its in-memory
+/// twin; after each op settles, the two renders must be identical.
+fn fuzz_case(seed: u64, lag: u64) -> Vec<String> {
+    let mut rng = Rng(seed * 2_654_435_761 + 1);
+    let frames = 20_000usize;
+    let start = [0i64, 500, 3000, 12_000][rng.below(4) as usize];
+    let cadence = 1 + rng.below(3) as usize;
+    let ring = [2048usize, 8192, 16_384][rng.below(3) as usize];
+    let path = write_track(frames);
+    let (h, rt, mut feeder) = streamed_pair(&path, start, ring);
+    let (h2, rt2) = engine_with(Box::new(BufferSource::new(ramp_pcm(frames), start)));
+    let (mut r1, mut r2) = (0u64, 0u64);
+    let mut fails = Vec::new();
+    h.play();
+    h2.play();
+    let mut loop_len = 0i64;
+    for op in 0..20 {
+        let desc = match rng.below(7) {
+            0 => {
+                let p = rng.below(26_000) as i64;
+                h.seek(p);
+                h2.seek(p);
+                format!("seek {p}")
+            }
+            1 => {
+                h.pause();
+                h2.pause();
+                for _ in 0..rng.below(4) {
+                    lagged_block(&h, &rt, Some(&mut feeder), lag, &mut r1);
+                    lagged_block(&h2, &rt2, None, lag, &mut r2);
+                }
+                h.play();
+                h2.play();
+                "pause/play".into()
+            }
+            2 | 3 => {
+                let ls = rng.below(34_000) as i64;
+                let span = if rng.below(4) == 0 { 300 } else { 9_000 };
+                let len = 256 + rng.below(span) as i64;
+                h.set_loop(true, ls, ls + len);
+                h2.set_loop(true, ls, ls + len);
+                loop_len = len;
+                format!("loop [{ls},{})", ls + len)
+            }
+            4 => {
+                h.set_loop(false, 0, 0);
+                h2.set_loop(false, 0, 0);
+                loop_len = 0;
+                "loop off".into()
+            }
+            5 => {
+                let n = rng.below(200);
+                for _ in 0..n {
+                    lagged_block(&h, &rt, None, lag, &mut r1);
+                    lagged_block(&h2, &rt2, None, lag, &mut r2);
+                }
+                format!("stall {n}")
+            }
+            _ => "nothing".into(),
+        };
+        // Settle for two loop passes (or a ring) plus slack; the last 8
+        // blocks must match.
+        let settle = (2 * loop_len.max(ring as i64)) as usize / BLOCK + 40;
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        for i in 0..settle {
+            let pump = (i % cadence == 0).then_some(&mut feeder);
+            let x = lagged_block(&h, &rt, pump, lag, &mut r1);
+            let y = lagged_block(&h2, &rt2, None, lag, &mut r2);
+            if i + 8 >= settle {
+                a.extend(x);
+                b.extend(y);
+            }
+        }
+        let bad = differing_frames(&a, &b);
+        if bad > 0 {
+            fails.push(format!(
+                "seed {seed} lag {lag} cadence {cadence} start {start} ring {ring} \
+                 op {op} [{desc}]: {bad} frames differ after settling"
+            ));
+        }
+    }
+    let _ = std::fs::remove_file(&path);
+    fails
+}
+
+#[test]
+fn the_streamed_render_settles_onto_the_in_memory_one_under_random_transport_ops() {
+    let mut fails = Vec::new();
+    for seed in 100..106u64 {
+        for lag in [0u64, 300, 1100] {
+            fails.extend(fuzz_case(seed, lag));
+        }
+    }
+    assert!(fails.is_empty(), "{}", fails.join("\n"));
+}

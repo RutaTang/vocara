@@ -232,6 +232,11 @@ pub struct TrackFeeder {
     next_tl: i64,
     run_end: i64,
     basis: Option<PlanBasis>,
+    /// Where the newest discarding plan starts (see [`Self::resumes_held_plan`]).
+    plan_pos: i64,
+    /// Frames pushed since the newest DISCARDING fence, fence included, while
+    /// the ring may still hold frames from before it (None once it cannot).
+    since_flush: Option<usize>,
     scratch: Vec<[Smp; CHANNELS]>,
 }
 
@@ -253,6 +258,8 @@ impl TrackFeeder {
             next_tl: 0,
             run_end: 0,
             basis: None,
+            plan_pos: 0,
+            since_flush: None,
             scratch: vec![[0.0; CHANNELS]; 1024],
         }
     }
@@ -263,24 +270,55 @@ impl TrackFeeder {
         self.reader.reopen()
     }
 
-    /// Ring slots the fill never uses, so a discarding replan's fence always
-    /// fits. While paused the node pops nothing: a ring topped up to the brim
-    /// just before a pause could never take the fence, and every seek or loop
-    /// edit until the next play would be dropped, leaving the track silent
-    /// until the playhead caught up with the stale plan.
-    const REPLAN_HEADROOM: usize = 2;
+    /// The slots the fill leaves free: room for a discarding replan's fence
+    /// AND fresh audio behind it. The node drops the whole stale backlog at
+    /// once when it adopts the fence; with only the fence's two slots to
+    /// spare, the fill behind it got just what the node had consumed since
+    /// the last pump, and the node ran dry before the next one — a hole after
+    /// every seek and on every pump of a loop-handle drag. Until that backlog
+    /// is gone, though (see [`Self::since_flush`]), its space is about to be
+    /// freed wholesale, so the fill may use all of it but one more fence: a
+    /// further replan must always land, or a paused node — which pops
+    /// nothing — would drop every seek and loop edit until play.
+    fn fill_reserve(&mut self) -> usize {
+        if let Some(n) = self.since_flush {
+            // FIFO: a frame from before the fence remains exactly while the
+            // ring holds more than was pushed since it.
+            if self.producer.capacity() - self.producer.free() <= n {
+                self.since_flush = None;
+            }
+        }
+        if self.since_flush.is_some() {
+            2
+        } else {
+            (self.producer.capacity() / 8).max(2)
+        }
+    }
 
-    /// Pushes a two-frame fence when the ring has room for both; on success
-    /// publishes the generation. Returns whether it landed (a full ring
-    /// retries on the next pump).
-    fn push_fence(&mut self, generation: u32, base_tl: i64) -> bool {
+    fn pushed(&mut self, n: usize) {
+        if let Some(c) = &mut self.since_flush {
+            *c += n;
+        }
+    }
+
+    /// Pushes a two-frame fence when the ring has room for both. A
+    /// `discarding` fence publishes its generation as the node's flush
+    /// target; an in-band one (a loop wrap, a starvation jump) must not: a
+    /// replan's fill reaching loop end before the node took the flush moved
+    /// the target past the whole pre-wrap run, and the node discarded it.
+    /// Returns whether it landed (a full ring retries on the next pump).
+    fn push_fence(&mut self, generation: u32, base_tl: i64, discarding: bool) -> bool {
         if self.producer.free() < 2 {
             return false;
         }
         let [a, b] = fence_frames(generation, base_tl);
         let ok = self.producer.push(a) && self.producer.push(b);
         debug_assert!(ok, "free() >= 2 guaranteed room for both fence frames");
-        self.ctrl.gen.store(generation, Ordering::Release);
+        if discarding {
+            self.ctrl.gen.store(generation, Ordering::Release);
+            self.since_flush = Some(0);
+        }
+        self.pushed(2);
         ok
     }
 
@@ -317,9 +355,10 @@ impl TrackFeeder {
         } else {
             i64::MAX
         };
-        if self.push_fence(next_gen, pos) {
+        if self.push_fence(next_gen, pos, true) {
             self.generation = next_gen;
             self.next_tl = pos;
+            self.plan_pos = pos;
             self.ctrl.flush_seq.fetch_add(1, Ordering::Release);
         } else {
             // Ring full of doomed frames: force the basis stale so the next
@@ -327,6 +366,22 @@ impl TrackFeeder {
             // lands).
             self.basis = None;
         }
+    }
+
+    /// Play from pause, with nothing moved, resumes exactly where the held
+    /// plan starts: the pause's replan planned from the folded clock, and a
+    /// paused node renders nothing. Replanning here discarded the audio the
+    /// fill had queued behind that plan while paused, for a fresh fence that
+    /// lands only at the next pump — so when the device callback beat the
+    /// pump, every resume opened with a block of silence on this track.
+    fn resumes_held_plan(&self, t: &Shared, basis: &PlanBasis) -> bool {
+        let Some(old) = self.basis else {
+            return false;
+        };
+        !old.playing
+            && basis.playing
+            && (old.loop_on, old.ls, old.le) == (basis.loop_on, basis.ls, basis.le)
+            && Self::planned_pos(t, basis) == self.plan_pos
     }
 
     /// Top the ring up. Returns Err only on unreadable file (the caller
@@ -341,11 +396,13 @@ impl TrackFeeder {
             le: t.loop_end(),
         };
         if self.basis != Some(basis) {
-            self.replan(t, basis);
+            if self.resumes_held_plan(t, &basis) {
+                self.basis = Some(basis);
+            } else {
+                self.replan(t, basis);
+            }
         }
-        if !basis.playing {
-            return Ok(()); // paused: hold the plan; play() bumps flush_gen
-        }
+        // Paused, the fill still runs: the plan starts where play resumes.
         // Starvation recovery: the transport ran AHEAD of the plan (the ring
         // starved and the node discarded everything). Feeding the stale gap
         // would waste a whole ring of catch-up; JUMP the plan to the current
@@ -362,9 +419,9 @@ impl TrackFeeder {
         // non-looped track's end the node never pops the one jump fence, so
         // the same check keeps every later pump from minting another.
         let pos = Self::planned_pos(t, &basis);
-        if pos > self.next_tl && self.producer.free() == self.producer.capacity() {
+        if basis.playing && pos > self.next_tl && self.producer.free() == self.producer.capacity() {
             let next_gen = self.generation.wrapping_add(1);
-            if self.push_fence(next_gen, pos) {
+            if self.push_fence(next_gen, pos, false) {
                 self.generation = next_gen;
                 self.next_tl = pos;
             }
@@ -386,10 +443,10 @@ impl TrackFeeder {
                 // Loop wrap: a NEW contiguous run from loop_start, adopted
                 // by the node IN BAND (no flush_seq bump — the pre-wrap tail
                 // still has to play out of the ring first).
-                // The in-band fence must not eat the replan headroom either.
+                // The in-band fence must not eat the fill reserve either.
                 let next_gen = self.generation.wrapping_add(1);
-                if self.producer.free() < 2 + Self::REPLAN_HEADROOM
-                    || !self.push_fence(next_gen, basis.ls)
+                if self.producer.free() < 2 + self.fill_reserve()
+                    || !self.push_fence(next_gen, basis.ls, false)
                 {
                     return Ok(()); // ring full: the wrap fence retries next pump
                 }
@@ -418,7 +475,7 @@ impl TrackFeeder {
             }
             let run_left = (self.run_end - self.next_tl).max(0);
             let span_left = span_end - self.next_tl;
-            let free = self.producer.free().saturating_sub(Self::REPLAN_HEADROOM);
+            let free = self.producer.free().saturating_sub(self.fill_reserve());
             let want = self
                 .scratch
                 .len()
@@ -433,10 +490,12 @@ impl TrackFeeder {
                 if !self.producer.push(self.scratch[i]) {
                     // Raced full: rewind next_tl to the unpushed frame.
                     self.next_tl += i as i64;
+                    self.pushed(i);
                     return Ok(());
                 }
             }
             self.next_tl += got as i64;
+            self.pushed(got);
             if got < want {
                 // Physically truncated file: treat the rest as silence.
                 return Ok(());

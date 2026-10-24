@@ -298,9 +298,19 @@ impl VeEngine {
                         set.retain(|s| s.lock().map(|g| !g.dead).unwrap_or(false));
                     }
                 }
-                std::thread::sleep(std::time::Duration::from_millis(10));
+                // Woken early by a transport command (see `wake_feeders`).
+                std::thread::park_timeout(std::time::Duration::from_millis(10));
             }
         }));
+    }
+
+    /// Replan the streams NOW rather than at the next 10 ms tick. A seek (or a
+    /// loop edit) is resynchronized by the replan's fence: the device callback
+    /// that renders first without it plays this track as silence.
+    fn wake_feeders(&self) {
+        if let Some(j) = &self.feeder_join {
+            j.thread().unpark();
+        }
     }
 }
 
@@ -1070,6 +1080,7 @@ pub extern "C" fn ve_record_latency_frames(_e: *mut VeEngine) -> u32 {
 pub extern "C" fn ve_play(e: *mut VeEngine) -> c_int {
     with_engine(e, -1, |eng| {
         eng.handle.play();
+        eng.wake_feeders();
         0
     })
 }
@@ -1078,6 +1089,7 @@ pub extern "C" fn ve_play(e: *mut VeEngine) -> c_int {
 pub extern "C" fn ve_pause(e: *mut VeEngine) -> c_int {
     with_engine(e, -1, |eng| {
         eng.handle.pause();
+        eng.wake_feeders();
         0
     })
 }
@@ -1086,6 +1098,7 @@ pub extern "C" fn ve_pause(e: *mut VeEngine) -> c_int {
 pub extern "C" fn ve_seek(e: *mut VeEngine, frame: i64) -> c_int {
     with_engine(e, -1, |eng| {
         eng.handle.seek(frame);
+        eng.wake_feeders();
         0
     })
 }
@@ -1094,6 +1107,7 @@ pub extern "C" fn ve_seek(e: *mut VeEngine, frame: i64) -> c_int {
 pub extern "C" fn ve_set_loop(e: *mut VeEngine, enabled: c_int, start: i64, end: i64) -> c_int {
     with_engine(e, -1, |eng| {
         eng.handle.set_loop(enabled != 0, start, end);
+        eng.wake_feeders();
         0
     })
 }
