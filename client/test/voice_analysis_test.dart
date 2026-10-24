@@ -15,6 +15,7 @@ VoiceMetrics _vm({Float32List? f0, Float32List? h1h2, int frames = 0}) {
   return VoiceMetrics(
     frames: n,
     hop: _hop,
+    fftSize: 2048,
     sampleRate: _sr,
     ring: z,
     tilt: z,

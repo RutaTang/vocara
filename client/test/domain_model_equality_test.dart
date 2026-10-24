@@ -43,6 +43,7 @@ VoiceMetrics _metrics() {
   return VoiceMetrics(
     frames: 4,
     hop: 512,
+    fftSize: 2048,
     sampleRate: 44100,
     ring: flat(0),
     tilt: flat(0),

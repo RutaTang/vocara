@@ -18,7 +18,7 @@ import 'package:vocara/ui/core/widgets/spectrogram_painter.dart';
 import 'package:vocara/ui/song_practice_detail/widgets/analysis_lanes.dart';
 import 'package:vocara/ui/song_practice_detail/widgets/pitch_lane.dart';
 
-const int _sr = 48000, _hop = 512;
+const int _sr = 48000, _hop = 512, _fft = 2048;
 
 /// [frames] of synthetic analysis: a note every ~0.5 s with vibrato, mostly
 /// voiced, and a NaN gap (as between the clips of a multi-clip take) in the
@@ -31,6 +31,7 @@ VoiceMetrics _metrics(int frames) {
   return VoiceMetrics(
     frames: frames,
     hop: _hop,
+    fftSize: _fft,
     sampleRate: _sr,
     ring: curve((_) => 0),
     tilt: curve((_) => 0),
@@ -250,12 +251,14 @@ class _WholeTakeLoudness extends CustomPainter {
   bool shouldRepaint(_WholeTakeLoudness old) => true;
 }
 
-/// The formant overlay as it painted before: one drawCircle per voiced frame.
+/// The formant overlay as it painted before: one drawCircle per voiced frame,
+/// at the frame's window centre on a [durMs] axis.
 class _PerFrameFormants extends CustomPainter {
-  _PerFrameFormants(this.metrics, this.maxHz);
+  _PerFrameFormants(this.metrics, this.maxHz, this.durMs);
 
   final VoiceMetrics metrics;
   final double maxHz;
+  final int durMs;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -265,7 +268,7 @@ class _PerFrameFormants extends CustomPainter {
       for (var fr = 0; fr < frames; fr++) {
         final hz = f[fr];
         if (hz.isNaN || hz <= 0 || hz > maxHz) continue;
-        final x = (fr + 0.5) / frames * size.width;
+        final x = metrics.timeOfFrame(fr) * 1000 / durMs * size.width;
         final y = (1 - hz / maxHz) * size.height;
         canvas.drawCircle(Offset(x, y), radius, paint);
       }
@@ -327,11 +330,15 @@ void main() {
   );
 
   // Windows across the take: the whole of it, deep zoom (a 1-second window),
-  // either end, a window cutting a note and a loudness gap, a take placed
-  // later on the timeline, and a window past the take's end.
+  // deeper still (a quarter second, whose 8 px margin is narrower than the
+  // half window each frame is drawn past its start, so the frame window must
+  // bracket frames by their CENTRES), either end, a window cutting a note
+  // and a loudness gap, a take placed later on the timeline, and a window
+  // past the take's end.
   const windows = [
     (durMs: 70000, viewStartMs: 0, startMs: 0),
     (durMs: 1000, viewStartMs: 30017, startMs: 0),
+    (durMs: 250, viewStartMs: 30025, startMs: 0),
     (durMs: 5000, viewStartMs: 0, startMs: 0),
     (durMs: 4000, viewStartMs: 57000, startMs: 0),
     (durMs: 2300, viewStartMs: 9411, startMs: 0),
@@ -369,12 +376,18 @@ void main() {
     tester,
   ) async {
     const dock = Size(700, 220);
+    // The take's own length, (frames - 1)·hop + fftSize samples.
+    final takeMs = ((m.frames - 1) * _hop + _fft) * 1000 ~/ _sr;
     final got = await _raster(
       tester,
-      FormantTrackPainter(metrics: m, maxHz: 5000),
+      FormantTrackPainter(metrics: m, maxHz: 5000, timelineDurationMs: takeMs),
       dock,
     );
-    final want = await _raster(tester, _PerFrameFormants(m, 5000), dock);
+    final want = await _raster(
+      tester,
+      _PerFrameFormants(m, 5000, takeMs),
+      dock,
+    );
     var painted = 0;
     for (var i = 3; i < want.bytes.lengthInBytes; i += 4) {
       if (want.bytes.getUint8(i) != 0) painted++;

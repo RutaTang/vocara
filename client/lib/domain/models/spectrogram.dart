@@ -1,9 +1,58 @@
 import 'dart:typed_data';
 
+/// The STFT framing every per-frame analysis is laid out on, and the ONE
+/// frame↔time mapping all of them share. Frame f analyses the [fftSize]-sample
+/// window that STARTS at sample f·[hop] — the spectrogram column and every
+/// voice metric of that frame (YIN and LPC run on windows centred on the same
+/// point) describe the audio around the window's CENTRE, f·hop + fftSize/2.
+///
+/// So a frame is placed at its centre, never at its start: a start-anchored
+/// frame reads every onset half a window (~21 ms at 2048/48 kHz) EARLY, so the
+/// pitch, loudness and spectrogram views led the waveform and the playhead
+/// read a frame two hops ahead of the audio under it. Everything that turns a
+/// frame into a time, or a time into a frame — painters, readouts, seeks —
+/// goes through here so drawing and reading cannot disagree.
+mixin AnalysisFraming {
+  int get frames;
+  int get hop;
+  int get fftSize;
+  int get sampleRate;
+
+  /// Seconds from the analysed audio's start to the centre of [frame]'s
+  /// analysis window — the moment that frame describes.
+  double timeOfFrame(int frame) => (frame * hop + fftSize / 2) / sampleRate;
+
+  /// The fractional, unclamped frame index whose window centre sits at
+  /// [seconds] — the exact inverse of [timeOfFrame]. For callers that need a
+  /// floor or ceiling (a visible frame window) rather than the nearest frame.
+  double framePosition(double seconds) =>
+      (seconds * sampleRate - fftSize / 2) / hop;
+
+  /// The frame whose window centre is nearest [seconds], clamped to the frame
+  /// range (0 when there are no frames).
+  int frameAtTime(double seconds) {
+    if (frames == 0) return 0;
+    var f = framePosition(seconds).round();
+    if (f < 0) f = 0;
+    if (f >= frames) f = frames - 1;
+    return f;
+  }
+
+  /// Where [frame]'s cell begins and ends (seconds) when frames are drawn as
+  /// contiguous hop-wide columns: centred on [timeOfFrame], so a column's
+  /// middle is the moment it describes, and [frameAtTime] of any time inside
+  /// the cell answers [frame]. The spectrogram image spans
+  /// `cellStart(0)..cellEnd(frames - 1)` — NOT the take's whole length, which
+  /// would stretch the columns and drift them along the time axis.
+  double cellStart(int frame) => timeOfFrame(frame) - hop / 2 / sampleRate;
+  double cellEnd(int frame) => timeOfFrame(frame) + hop / 2 / sampleRate;
+}
+
 /// A computed spectrogram: a [frames] × [bins] grid of magnitudes in dB,
 /// covering 0..[maxHz]. Row-major: `db[frame * bins + bin]`. Frequency is
-/// linear in bin index (bin b ≈ b * sampleRate / fftSize Hz).
-class Spectrogram {
+/// linear in bin index (bin b ≈ b * sampleRate / fftSize Hz). Frame times
+/// follow [AnalysisFraming].
+class Spectrogram with AnalysisFraming {
   Spectrogram({
     required this.frames,
     required this.bins,
@@ -16,11 +65,15 @@ class Spectrogram {
     required this.maxDb,
   });
 
+  @override
   final int frames;
   final int bins;
   final double maxHz;
+  @override
   final int sampleRate;
+  @override
   final int fftSize;
+  @override
   final int hop;
 
   /// Magnitudes in dB, row-major (`frame * bins + bin`).
@@ -31,24 +84,23 @@ class Spectrogram {
 
   double freqOfBin(int bin) => bin * sampleRate / fftSize;
   double get binHz => sampleRate / fftSize;
-  double timeOfFrame(int frame) => frame * hop / sampleRate;
-  double get durationSeconds => frames * hop / sampleRate;
 
   /// dB value at a frame/bin (clamped to range).
   double valueAt(int frame, int bin) => db[frame * bins + bin];
 
-  /// The column (dB per bin) nearest [seconds]; empty if no frames.
+  /// The column (dB per bin) whose window is centred nearest [seconds]; empty
+  /// if no frames.
   Float32List columnAtTime(double seconds) {
     if (frames == 0) return Float32List(0);
-    var frame = (seconds * sampleRate / hop).round();
-    if (frame < 0) frame = 0;
-    if (frame >= frames) frame = frames - 1;
+    final frame = frameAtTime(seconds);
     return Float32List.sublistView(db, frame * bins, frame * bins + bins);
   }
 }
 
 /// The frame a part starting [offsetMs] after the lane's span start occupies
-/// on the merged grid, for a [sampleRate]/[hop] framing. The spectrogram and
+/// on the merged grid, for a [sampleRate]/[hop] framing. An OFFSET, so no
+/// half-window term: every frame of the part keeps its own window-centre
+/// placement, shifted whole by the part's start. The spectrogram and
 /// voice-metrics merges of one take must round this identically: their outputs
 /// are read against a single lane axis, so a one-frame disagreement slides the
 /// pitch/formant overlays off the columns they annotate.
@@ -75,10 +127,11 @@ bool mergedSpanIsLegal(int frames) =>
 /// Merges several clips' [Spectrogram]s into one lane-spanning analysis for a
 /// multi-clip take. Each part carries [offsetMs] — the clip's start relative to
 /// the LANE's span start (clip.startMs − track.startMs, so ≥ 0) — and its
-/// frames are placed at that offset, so frame f of the result always sits
-/// f·hop/sampleRate seconds after the lane start. Gaps between clips become
-/// floor (merged minDb) columns, which the heat renderer draws as silence;
-/// where clips overlap, the later-starting clip wins.
+/// frames are placed at that offset, so frame f of the result's window always
+/// starts f·hop/sampleRate seconds after the lane start — its [timeOfFrame]
+/// is lane-relative exactly as each part's is clip-relative. Gaps between
+/// clips become floor (merged minDb) columns, which the heat renderer draws
+/// as silence; where clips overlap, the later-starting clip wins.
 ///
 /// Parts must share [bins], [fftSize], [sampleRate] and [hop]; any part whose
 /// framing differs from the first is skipped, as are frameless parts. Returns

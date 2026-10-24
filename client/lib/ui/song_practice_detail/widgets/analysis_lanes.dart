@@ -255,8 +255,13 @@ class SpectrogramLane extends StatelessWidget {
                 child: ClipRect(
                   child: Stack(
                     children: [
+                      // This box spans the take, so the image places its
+                      // columns on the take's own time axis inside it.
                       Positioned.fill(
-                        child: SpectrogramImage(spectrogram: spec),
+                        child: SpectrogramImage(
+                          spectrogram: spec,
+                          timelineDurationMs: track.durationMs,
+                        ),
                       ),
                       Positioned.fill(
                         child: IgnorePointer(

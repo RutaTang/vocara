@@ -1010,8 +1010,8 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
         final spec = part?.spectrogram ?? _spectrogramCache[c.audioFilePath];
         // Fold a clip in only when BOTH analyses are present and non-empty, kept
         // as a pair — an empty/degenerate clip yields spec.frames=1 but
-        // metrics.frames=0, which would desync the two merged framings (the
-        // formant overlay then normalizes against the wrong frame count).
+        // metrics.frames=0, which would desync the two merged framings (LTAS
+        // gates spectrogram frames by the metrics' frame index).
         if (m != null && spec != null && m.frames > 0 && spec.frames > 0) {
           final offsetMs = c.startMs - laneStartMs;
           metrics.add((offsetMs: offsetMs, metrics: m));

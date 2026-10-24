@@ -113,7 +113,15 @@ Widget _takeSpectroStack(
     builder: (context, c) => Stack(
       children: [
         const Positioned.fill(child: ColoredBox(color: Studio.inset)),
-        Positioned.fill(child: SpectrogramImage(spectrogram: spec)),
+        // The image, the overlay, the seek and the playhead all map the same
+        // subject axis [startMs, startMs + spanMs], so a column, its dots, the
+        // moment a tap seeks to and the frame the readouts show agree.
+        Positioned.fill(
+          child: SpectrogramImage(
+            spectrogram: spec,
+            timelineDurationMs: spanMs,
+          ),
+        ),
         Positioned.fill(
           child: IgnorePointer(
             child: CustomPaint(
@@ -128,6 +136,7 @@ Widget _takeSpectroStack(
                 painter: FormantTrackPainter(
                   metrics: metrics,
                   maxHz: spec.maxHz,
+                  timelineDurationMs: spanMs,
                 ),
               ),
             ),

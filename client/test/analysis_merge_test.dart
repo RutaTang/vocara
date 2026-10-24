@@ -13,6 +13,7 @@ VoiceMetrics _metrics({
   required List<double> ring,
   required List<int> active,
   int hop = _hop,
+  int fftSize = 2048,
   int sampleRate = _sr,
   double peakDbfs = double.nan,
   double clippedFraction = 0,
@@ -24,6 +25,7 @@ VoiceMetrics _metrics({
   return VoiceMetrics(
     frames: n,
     hop: hop,
+    fftSize: fftSize,
     sampleRate: sampleRate,
     ring: Float32List.fromList(ring),
     tilt: flat(0),
@@ -202,6 +204,28 @@ void main() {
       // b is dropped (different sampleRate), so only a survives — unchanged.
       final m = mergeVoiceMetrics([_mAt(0, a), _mAt(200, b)])!;
       expect(identical(m, a), isTrue);
+    });
+
+    test('a part with a different WINDOW is a different framing too', () {
+      // Same hop and rate, but frames are placed at their window centre, so a
+      // 1024-sample window puts every frame of b at another time than the
+      // merged result's frame would claim: b is dropped, not misplaced.
+      final a = _metrics(ring: [1, 2], active: [1, 1]);
+      final b = _metrics(ring: [9], active: [1], fftSize: 1024);
+      final m = mergeVoiceMetrics([_mAt(0, a), _mAt(200, b)])!;
+      expect(identical(m, a), isTrue);
+      expect(m.fftSize, 2048);
+    });
+
+    test('the merged result keeps the parts\' window length', () {
+      final a = _metrics(ring: [1, 2], active: [1, 1], fftSize: 400);
+      final b = _metrics(ring: [3], active: [1], fftSize: 400);
+      final m = mergeVoiceMetrics([_mAt(0, a), _mAt(300, b)])!;
+      expect(m.fftSize, 400);
+      // hop 100 @ 1 kHz with a 400-sample window: frame f is centred at
+      // f·100 + 200 ms, so b's lone frame (placed at frame 3) reads 500 ms.
+      expect(m.timeOfFrame(3), closeTo(0.5, 1e-9));
+      expect(m.timeOfFrame(3), closeTo(0.3 + b.timeOfFrame(0), 1e-9));
     });
 
     test('a dropped part leaves its gap instead of shifting the survivor', () {

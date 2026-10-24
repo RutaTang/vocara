@@ -126,6 +126,7 @@ VoiceMetrics _metrics() {
   return VoiceMetrics(
     frames: _frames,
     hop: _hop,
+    fftSize: 2048,
     sampleRate: _sr,
     ring: curve((i) => math.sin(i / 50)),
     tilt: curve((i) => math.cos(i / 70)),

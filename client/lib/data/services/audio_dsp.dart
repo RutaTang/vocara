@@ -659,6 +659,7 @@ class _MetricsPass {
     return VoiceMetrics(
       frames: nFrames,
       hop: hop,
+      fftSize: fftSize,
       sampleRate: sampleRate,
       ring: ring,
       tilt: tilt,

@@ -32,6 +32,7 @@ VoiceMetrics _metrics({int frames = 4000, double detuneCents = 40}) {
   return VoiceMetrics(
     frames: frames,
     hop: hop,
+    fftSize: 2048,
     sampleRate: sr,
     ring: curve((_) => 0),
     tilt: curve((_) => 0),

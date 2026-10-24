@@ -4,13 +4,15 @@ import 'dart:typed_data';
 import 'spectrogram.dart';
 
 /// Per-frame voice-timbre metrics derived from a take's STFT, aligned to the
-/// same framing as its [Spectrogram] ([hop] / [sampleRate]). Every curve has
+/// same framing as its [Spectrogram] ([hop] / [fftSize] / [sampleRate]; see
+/// [AnalysisFraming] for where each frame sits in time). Every curve has
 /// length [frames]; formant/F0 values are in Hz, or NaN on unvoiced/low-energy
 /// frames. See `computeVoiceMetrics` for how each is computed.
-class VoiceMetrics {
+class VoiceMetrics with AnalysisFraming {
   VoiceMetrics({
     required this.frames,
     required this.hop,
+    required this.fftSize,
     required this.sampleRate,
     required this.ring,
     required this.tilt,
@@ -36,8 +38,16 @@ class VoiceMetrics {
   /// no second copy of the number to forget.
   static const int bytesPerFrame = 9 * 4 + 1;
 
+  @override
   final int frames;
+  @override
   final int hop;
+
+  /// The analysis window length in samples. Frame times are window-CENTRED,
+  /// so the mapping needs it as much as [hop].
+  @override
+  final int fftSize;
+  @override
   final int sampleRate;
 
   /// Singing Power Ratio (F18): peak dB in 2–4 kHz minus peak dB in 0–2 kHz.
@@ -100,17 +110,8 @@ class VoiceMetrics {
   /// True when the signal-to-noise ratio is too low to trust the timbre metrics.
   bool get isLowSnr => snrDb.isFinite && snrDb < 10;
 
-  double timeOfFrame(int frame) => frame * hop / sampleRate;
-
-  int frameAtTime(double seconds) {
-    if (frames == 0) return 0;
-    var f = (seconds * sampleRate / hop).round();
-    if (f < 0) f = 0;
-    if (f >= frames) f = frames - 1;
-    return f;
-  }
-
-  /// The value of a curve nearest [seconds] (NaN if there are no frames).
+  /// The value of a curve at the frame centred nearest [seconds] (NaN if there
+  /// are no frames).
   double sampleAt(Float32List curve, double seconds) =>
       frames == 0 ? double.nan : curve[frameAtTime(seconds)];
 }
@@ -118,13 +119,15 @@ class VoiceMetrics {
 /// Merges several clips' [VoiceMetrics] into one lane-spanning analysis for a
 /// multi-clip take. Each part carries [offsetMs] — the clip's start relative to
 /// the LANE's span start (clip.startMs − track.startMs, so ≥ 0) — and its
-/// frames are placed at that offset, so frame f of the result always sits
-/// f·hop/sampleRate seconds after the lane start. Gaps between clips become NaN
-/// frames (inactive), which every curve consumer already treats as "no voice";
-/// where clips overlap, the later-starting clip wins.
+/// frames are placed at that offset, so frame f of the result's window always
+/// starts f·hop/sampleRate seconds after the lane start — its [timeOfFrame]
+/// is lane-relative exactly as each part's is clip-relative. Gaps between
+/// clips become NaN frames (inactive), which every curve consumer already
+/// treats as "no voice"; where clips overlap, the later-starting clip wins.
 ///
-/// Parts must share [hop] and [sampleRate] — they do when computed by the same
-/// SpectrogramService defaults — and any part whose framing differs from the
+/// Parts must share [hop], [fftSize] and [sampleRate] — they do when computed
+/// by the same SpectrogramService defaults; the window length matters because
+/// it places every frame in time — and any part whose framing differs from the
 /// first is skipped, as are frameless parts. Returns null when nothing
 /// survives or when two or more parts span past [maxMergedLaneFrames], and a
 /// lone survivor starting at the lane origin unchanged.
@@ -146,6 +149,7 @@ VoiceMetrics? mergeVoiceMetrics(
         (p) =>
             p.metrics.frames > 0 &&
             p.metrics.hop == first.hop &&
+            p.metrics.fftSize == first.fftSize &&
             p.metrics.sampleRate == first.sampleRate,
       )
       .toList();
@@ -246,6 +250,7 @@ VoiceMetrics? mergeVoiceMetrics(
   return VoiceMetrics(
     frames: total,
     hop: first.hop,
+    fftSize: first.fftSize,
     sampleRate: first.sampleRate,
     ring: ring,
     tilt: tilt,

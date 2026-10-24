@@ -21,6 +21,7 @@ VoiceMetrics _metrics({
   return VoiceMetrics(
     frames: n,
     hop: 512,
+    fftSize: 2048,
     sampleRate: 44100,
     ring: Float32List(n),
     tilt: Float32List(n),

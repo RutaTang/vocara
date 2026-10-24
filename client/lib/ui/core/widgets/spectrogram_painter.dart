@@ -431,17 +431,26 @@ class LiveColumnsRaster {
   }
 }
 
-/// Renders a spectrogram image asynchronously and paints it scaled to fill the
-/// available area. A track shorter than the timeline only fills [widthFraction].
+/// Renders a spectrogram image asynchronously and paints it on a time axis: the
+/// box spans [timelineDurationMs] of the spectrogram's own time from its left
+/// edge, and the image covers only its frames' cells
+/// ([AnalysisFraming.cellStart] of the first to [AnalysisFraming.cellEnd] of
+/// the last), so every column sits over the moment its window is centred on —
+/// the same mapping the overlays, the playhead and a seek use. Stretching the
+/// image over the whole box instead spreads the columns over the take's full
+/// length — early near its start, late near its end — and off the time axis.
+/// A max-pooled image (see [spectrogramPixels]) spans the same cells: pooled
+/// column c covers frames [c·frames/w, (c+1)·frames/w), which is exactly its
+/// share of that extent.
 class SpectrogramImage extends StatefulWidget {
   const SpectrogramImage({
     required this.spectrogram,
-    this.widthFraction = 1.0,
+    required this.timelineDurationMs,
     super.key,
   });
 
   final Spectrogram spectrogram;
-  final double widthFraction;
+  final int timelineDurationMs;
 
   @override
   State<SpectrogramImage> createState() => _SpectrogramImageState();
@@ -496,19 +505,37 @@ class _SpectrogramImageState extends State<SpectrogramImage> {
   @override
   Widget build(BuildContext context) {
     final image = _image;
-    if (image == null) return const SizedBox.expand();
+    final s = widget.spectrogram;
+    final dur = widget.timelineDurationMs;
+    // Nothing to place: no frames (the image is a blank placeholder) or no
+    // axis to place them on.
+    if (image == null || s.frames == 0 || dur <= 0) {
+      return const SizedBox.expand();
+    }
     return CustomPaint(
       size: Size.infinite,
-      painter: _SpectrogramImagePainter(image, widget.widthFraction),
+      painter: _SpectrogramImagePainter(
+        image,
+        startFraction: s.cellStart(0) * 1000 / dur,
+        endFraction: s.cellEnd(s.frames - 1) * 1000 / dur,
+      ),
     );
   }
 }
 
 class _SpectrogramImagePainter extends CustomPainter {
-  _SpectrogramImagePainter(this.image, this.widthFraction);
+  _SpectrogramImagePainter(
+    this.image, {
+    required this.startFraction,
+    required this.endFraction,
+  });
 
   final ui.Image image;
-  final double widthFraction;
+
+  /// Where the first column's left edge and the last column's right edge fall,
+  /// as fractions of the box width.
+  final double startFraction;
+  final double endFraction;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -518,7 +545,12 @@ class _SpectrogramImagePainter extends CustomPainter {
       image.width.toDouble(),
       image.height.toDouble(),
     );
-    final dst = Rect.fromLTWH(0, 0, size.width * widthFraction, size.height);
+    final dst = Rect.fromLTRB(
+      startFraction * size.width,
+      0,
+      endFraction * size.width,
+      size.height,
+    );
     canvas.drawImageRect(
       image,
       src,
@@ -529,7 +561,9 @@ class _SpectrogramImagePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_SpectrogramImagePainter old) =>
-      old.image != image || old.widthFraction != widthFraction;
+      old.image != image ||
+      old.startFraction != startFraction ||
+      old.endFraction != endFraction;
 }
 
 /// Horizontal frequency grid (1–5 kHz) + the Singer's Formant band overlay,
@@ -716,17 +750,24 @@ const Color f0Color = Color(0xFFF2F2F8);
 
 /// Overlays the F0 pitch track and the F1/F2/F3 formant tracks (F17) on the
 /// spectrogram: one dot per frame, time across X and frequency up Y. F0 is drawn
-/// in white; formants in [formantColors].
+/// in white; formants in [formantColors]. The box spans [timelineDurationMs]
+/// of the metrics' own time, exactly like the [SpectrogramImage] under it.
 class FormantTrackPainter extends CustomPainter {
-  FormantTrackPainter({required this.metrics, required this.maxHz});
+  FormantTrackPainter({
+    required this.metrics,
+    required this.maxHz,
+    required this.timelineDurationMs,
+  });
 
   final VoiceMetrics metrics;
   final double maxHz;
+  final int timelineDurationMs;
 
   @override
   void paint(Canvas canvas, Size size) {
     final frames = metrics.frames;
-    if (frames == 0) return;
+    final dur = timelineDurationMs;
+    if (frames == 0 || dur <= 0) return;
     // One round point per voiced frame, drawn as a single point batch per
     // track: a round-capped point [radius]·2 wide is the same filled dot as
     // drawCircle, but a 10-minute take is ~56k frames per track, and as
@@ -737,9 +778,11 @@ class FormantTrackPainter extends CustomPainter {
       for (var fr = 0; fr < frames; fr++) {
         final hz = f[fr];
         if (hz.isNaN || hz <= 0 || hz > maxHz) continue;
-        // Cell-centered, matching the spectrogram image's per-column stretch
-        // (column c centers at (c+0.5)/frames·width) so dots sit on the ridges.
-        points[n++] = (fr + 0.5) / frames * size.width;
+        // At the frame's window centre on the time axis — the middle of the
+        // image column [SpectrogramImage] draws for the same frame, so dots
+        // sit on the ridges AND under the playhead at the moment they mark.
+        // Not (fr + 0.5) / frames: the frame count is not the box length.
+        points[n++] = metrics.timeOfFrame(fr) * 1000 / dur * size.width;
         points[n++] = (1 - hz / maxHz) * size.height;
       }
       if (n == 0) return;
@@ -761,7 +804,9 @@ class FormantTrackPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(FormantTrackPainter old) =>
-      old.metrics != metrics || old.maxHz != maxHz;
+      old.metrics != metrics ||
+      old.maxHz != maxHz ||
+      old.timelineDurationMs != timelineDurationMs;
 }
 
 /// Live equivalent of [FormantTrackPainter]: draws rolling F0/F1/F2/F3 histories

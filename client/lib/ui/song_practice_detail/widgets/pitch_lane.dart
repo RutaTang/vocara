@@ -80,11 +80,17 @@ String _centsStr(double cents) {
 }) {
   if (m.frames == 0) return (first: 0, last: -1);
   if (durMs <= 0 || width <= 0) return (first: 0, last: m.frames - 1);
-  final framesPerMs = m.sampleRate / m.hop / 1000;
   final marginMs = marginPx * durMs / width;
-  final lo = ((viewStartMs - marginMs - startMs) * framesPerMs).floor() - 1;
+  // Through the shared frame↔time mapping, so the window brackets the frames
+  // whose CENTRES — where the painters draw them — fall in view; the extra
+  // frame each side carries the segment that crosses the box edge.
+  final lo =
+      m.framePosition((viewStartMs - marginMs - startMs) / 1000).floor() - 1;
   final hi =
-      ((viewStartMs + durMs + marginMs - startMs) * framesPerMs).ceil() + 1;
+      m
+          .framePosition((viewStartMs + durMs + marginMs - startMs) / 1000)
+          .ceil() +
+      1;
   return (first: math.max(0, lo), last: math.min(m.frames - 1, hi));
 }
 
@@ -433,10 +439,11 @@ class _PlayheadNoteReadoutState extends State<_PlayheadNoteReadout> {
 
   String _textAt(Duration pos) {
     final m = widget.metrics;
-    // Only read a note when the playhead is actually over this take
-    // (frameAtTime would otherwise clamp to a stale edge).
+    // Only read a note when the playhead is actually over this take's frames
+    // (frameAtTime would otherwise clamp to a stale edge) — up to the end of
+    // the last frame's cell.
     final t = (pos.inMilliseconds - widget.trackStartMs) / 1000.0;
-    final n = (m.frames > 0 && t >= 0 && t <= m.timeOfFrame(m.frames - 1))
+    final n = (m.frames > 0 && t >= 0 && t <= m.cellEnd(m.frames - 1))
         ? _noteAtFrame(widget.notes, m.frameAtTime(t))
         : null;
     return n == null
@@ -527,6 +534,8 @@ class PitchLanePainter extends CustomPainter {
     // Map absolute timeline ms into the viewport; off-screen parts are clipped
     // (above), so no clamp (which would pin them to the edge).
     double xOf(double ms) => (ms - viewStartMs) / dur * size.width;
+    // A frame sits at its window's centre — where the waveform shows the
+    // audio it measured — not at the window's start, half a window early.
     double xOfFrame(int fr) => xOf(startMs + metrics.timeOfFrame(fr) * 1000);
 
     // Semitone grid (octave C lines bolder + labeled).
