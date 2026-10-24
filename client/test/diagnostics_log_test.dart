@@ -161,10 +161,32 @@ void main() {
         DiagnosticsLog.scrubPaths('/Users/a/My.Song.wav gone'),
         '<path>.wav gone',
       );
+      expect(
+        DiagnosticsLog.scrubPaths("'/Users/a/Ms.Lauryn Hill.wav' gone"),
+        "'<path>.wav' gone",
+      );
       // A second path after an extensionless one is still scrubbed on its own.
       expect(
         DiagnosticsLog.scrubPaths('cp /Users/a/dir /Users/b/y.wav failed'),
         'cp <path> <path>.wav failed',
+      );
+    });
+
+    test('a dotted number in the prose after a path is not taken for its '
+        'extension', () {
+      // Taking the LAST extension-looking run in the final component cut
+      // the message at '12.3s', losing the file type and the context.
+      expect(
+        DiagnosticsLog.scrubPaths(
+          'decode failed for /Users/alice/Music/take.wav after 12.3s',
+        ),
+        'decode failed for <path>.wav after 12.3s',
+      );
+      expect(
+        DiagnosticsLog.scrubPaths(
+          'stage /Users/alice/Music/My Song.m4a: rate 22.05 kHz unsupported',
+        ),
+        'stage <path>.m4a: rate 22.05 kHz unsupported',
       );
     });
 

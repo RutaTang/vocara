@@ -223,10 +223,20 @@ class DiagnosticsLog {
       // a directory name, and cutting there leaked the rest of the path.
       final end = _nextRoot.firstMatch(matched)?.start ?? matched.length;
       final last = matched.lastIndexOf('/', end - 1) + 1;
+      // Within it, the LAST extension-looking run wins (a dotted file name,
+      // 'Ms.Lauryn Hill.wav', must not leak its tail) — but a file type the
+      // app actually handles wins over prose after the path, so
+      // 'take.wav after 12.3s' keeps its '.wav' and the context.
       Match? ext;
+      Match? known;
       for (final e in _extensionInside.allMatches(matched, last)) {
-        if (e.start < end) ext = e;
+        if (e.start >= end) break;
+        ext = e;
+        if (_knownExtensions.contains(e[0]!.substring(1).toLowerCase())) {
+          known = e;
+        }
       }
+      ext = known ?? ext;
       // Text after the cut is prose, not path — but it may hold another path
       // of its own, so scrub it recursively (it is strictly shorter).
       if (ext == null) return '<path>${scrubPaths(matched.substring(end))}';
@@ -238,6 +248,12 @@ class DiagnosticsLog {
       '/(?:Users|private|var|tmp|Volumes|Library|Applications|home|etc|opt)';
   static final RegExp _absolutePath = RegExp('$_roots(?:/[^\'"\\n]+)+');
   static final RegExp _nextRoot = RegExp('\\s(?=$_roots/)');
+  static final Set<String> _knownExtensions = {
+    ...'wav wave aif aiff aifc caf mp3 m4a aac flac ogg oga opus mp4 m4v mov '
+            'webm mkv json db sqlite sqlite3 ckpt pth onnx yaml txt log zip '
+            'tmp part png jpg jpeg pdf py'
+        .split(' '),
+  };
   static final RegExp _extensionInside = RegExp(
     r'\.[A-Za-z0-9]{1,8}(?=[\s.,;:)\]}]|$)',
   );
