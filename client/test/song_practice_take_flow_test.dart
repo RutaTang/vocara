@@ -475,4 +475,28 @@ void main() {
       },
     );
   });
+
+  group('a take that becomes selected replaces a bus selection', () {
+    test('REC with a bus selected: the new take, not the bus, owns the '
+        'inspector', () async {
+      final vm = await pumpVm(engine: _FakeGraphEngine(), mic: _FakeMic());
+      final busId = await vm.mixer.createBus();
+      expect(vm.selectedBusId, busId);
+      await vm.recording.startRecording();
+      await vm.stopRecording();
+      final take = vm.practice!.vocalTracks.last;
+      expect(take.id, isNot('take1'));
+      expect(take.clips, hasLength(1));
+      expect(vm.selectedTrackId, take.id);
+      expect(vm.selectedBusId, isNull);
+    });
+
+    test('a clip dropped onto a take with a bus selected', () async {
+      final vm = await pumpVm();
+      await vm.mixer.createBus();
+      await vm.addClipToTake('take1', '/src/drop.wav');
+      expect(vm.selectedTrackId, 'take1');
+      expect(vm.selectedBusId, isNull);
+    });
+  });
 }

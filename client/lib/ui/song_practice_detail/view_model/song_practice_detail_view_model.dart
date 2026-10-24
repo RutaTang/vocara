@@ -495,6 +495,10 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   void _selectRecordedClip(String trackId, String? clipId) {
     _selectedTrackId = trackId;
     if (clipId != null) _selectedClipId = clipId;
+    // Mutually exclusive with a bus (see [selectBus]): a bus still selected
+    // from before the take kept owning the inspector, beside a second
+    // highlighted lane.
+    _selectedBusId = null;
   }
 
   /// Selects a just-created/duplicated bus. Bus and track selection are
@@ -1091,6 +1095,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         _updateTrack(target.id, (t) => t.copyWith(clips: [...t.clips, clip]));
         _selectedTrackId = target.id;
         _selectedClipId = clip.id;
+        _selectedBusId = null; // track and bus selection are exclusive
         analysis.onTrackAudioChanged(target.id);
         return _save();
       });
@@ -1403,6 +1408,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       vocalTracks: [...practice.vocalTracks, track],
     );
     _selectedTrackId = track.id;
+    _selectedBusId = null; // track and bus selection are exclusive
     return await _save() ? track.id : null;
   }
 
