@@ -261,38 +261,27 @@ void main() {
     if (await tmp.exists()) await tmp.delete(recursive: true);
   });
 
-  test('a reference switched WHILE the take records discards it at Stop — '
-      'never paired with a reference it was not recorded against', () async {
+  test('switching examples WHILE the take records is refused, and the take '
+      'is judged against the example it armed under', () async {
     expect(await vm.startPractice(), isNull);
     expect(vm.isRecordingPractice, isTrue);
 
     // Mid-take the user opens the second example's card (the cards stay
-    // live while recording): E2 becomes the reference and the practice
-    // panel, Stop included, moves under it.
+    // live while recording). It used to switch the reference, and the take
+    // recorded against E1 was then either paired with E2 (the generation was
+    // snapshotted at Stop) or thrown away at Stop: refused instead.
     vm.toggleExampleExpanded('E2');
-    expect(vm.referenceMedia!.id, 'E2');
+    expect(vm.referenceMedia!.id, 'E1');
+    expect(vm.recordingNotice, contains('Stop the practice take'));
+    // Nor can its own card fold away the Stop it holds.
+    vm.toggleExampleExpanded('E1');
+    expect(vm.expandedExampleId, 'E1');
     expect(vm.isRecordingPractice, isTrue);
 
     await vm.stopPractice();
-
-    // The generation used to be snapshotted at Stop, AFTER the switch: the
-    // take recorded against E1 was analyzed and shown as "Your practice",
-    // and the gap table paired it with E2 — while the same tap landing just
-    // after Stop discarded it.
-    expect(
-      vm.practiceAnalysis,
-      isNull,
-      reason: 'the E1 take must not be paired with E2',
-    );
-    expect(vm.analysisSubject, TechniqueAnalysisSubject.reference);
-    expect(vm.practiceAnalysisLoading, isFalse);
-    expect(vm.canRecordPractice, isTrue);
-    expect(
-      analysis.analyzed.where((path) => path.endsWith('take.wav')),
-      isEmpty,
-      reason: 'a stale take is discarded without the DSP pass',
-    );
-    expect(vm.recordingNotice, contains('reference example changed'));
+    expect(vm.practiceAnalysis, isNotNull);
+    expect(vm.analysisSubject, TechniqueAnalysisSubject.practice);
+    expect(vm.referenceMedia!.id, 'E1');
   });
 
   test('a take whose reference held from arm to Stop is analyzed and shown '

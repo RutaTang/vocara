@@ -414,9 +414,12 @@ class TechniqueDetailViewModel extends ChangeNotifier
       _analysisCollapsed ? null : referenceMedia?.id;
 
   /// Toggles a card's inline analysis (by media id): collapse/expand the
-  /// selected one, or select-and-expand a different one.
+  /// selected one, or select-and-expand a different one. While a practice
+  /// take records, its Stop lives in the selected card: collapsing that card
+  /// hid it (until re-expanded), so the card stays open.
   void toggleExampleExpanded(String mediaId) {
     if (referenceMedia?.id == mediaId) {
+      if (isRecordingPractice && !_analysisCollapsed) return;
       _analysisCollapsed = !_analysisCollapsed;
       notifyListeners();
     } else {
@@ -427,8 +430,15 @@ class TechniqueDetailViewModel extends ChangeNotifier
 
   /// Switches which example's analysis is shown (and which drives the playhead).
   /// Drops any practice take, since it was compared against the old reference.
+  /// Refused while one records: it is compared against the example it armed
+  /// under, so switching mid-take only threw it away at Stop.
   void selectExample(String mediaId) {
     if (referenceMedia?.id == mediaId) return;
+    if (isRecordingPractice) {
+      _recordingNotice = 'Stop the practice take to switch examples.';
+      notifyListeners();
+      return;
+    }
     _selectedExampleId = mediaId;
     _resetToReferenceSubject();
     notifyListeners();
