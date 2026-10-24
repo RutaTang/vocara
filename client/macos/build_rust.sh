@@ -16,7 +16,11 @@ cd "$CRATE"
 
 build_one() {
   local target="$1"
-  cargo build --release --locked --features device --target "$target" >&2
+  # An explicit --target-dir: a CARGO_TARGET_DIR or build.target-dir set in the
+  # environment would otherwise build elsewhere while the path below copied a
+  # stale dylib from an earlier build (or failed when there was none).
+  cargo build --release --locked --features device --target "$target" \
+    --target-dir "$CRATE/target" >&2
   echo "$CRATE/target/$target/release/$LIB"
 }
 

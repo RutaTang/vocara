@@ -318,8 +318,11 @@ jobs:
         run: |
           set -euo pipefail
           codesign --verify --deep --strict --verbose=2 "$APP_PATH"
-          codesign --display --verbose=2 "$APP_PATH" 2>&1 \
-            | grep -E "Authority=Developer ID|flags=.*runtime" \
+          # BOTH must hold, so test them separately: one alternation grep
+          # passed when either line matched (a Developer ID signature without
+          # the runtime flag, or an ad-hoc one with it).
+          SIG="$(codesign --display --verbose=2 "$APP_PATH" 2>&1)"
+          grep -q "Authority=Developer ID" <<<"$SIG" && grep -qE "flags=.*runtime" <<<"$SIG" \
             || { echo "::error::app is not Developer ID signed with hardened runtime"; exit 1; }
 
       - name: Create and sign DMG
@@ -348,9 +351,11 @@ jobs:
 
           # notarytool's exit code is not reliable across Xcode versions for a
           # rejected submission, so check the reported status explicitly and
-          # fetch the log on failure.
+          # fetch the log on failure. `|| true`: under pipefail a non-zero
+          # exit would end the script here, before the status check and the
+          # log fetch below ever ran.
           SUBMIT_LOG="$(mktemp)"
-          xcrun notarytool submit "${{ steps.dmg.outputs.dmg }}" "${NOTARY_ARGS[@]}" --wait 2>&1 | tee "$SUBMIT_LOG"
+          xcrun notarytool submit "${{ steps.dmg.outputs.dmg }}" "${NOTARY_ARGS[@]}" --wait 2>&1 | tee "$SUBMIT_LOG" || true
           if ! grep -q "status: Accepted" "$SUBMIT_LOG"; then
             SUBMISSION_ID=$(grep "id:" "$SUBMIT_LOG" | head -1 | awk '{print $2}')
             echo "::error::Notarization not accepted; log follows."
