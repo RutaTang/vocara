@@ -186,6 +186,41 @@ void main() {
     expect(await second.exists(), isFalse);
   });
 
+  test('a boot with many staged files reaches the same outcome for each '
+      'with their hashes computed ahead of the walk', () async {
+    // The hashes are prefetched in background isolates while the walk runs
+    // file by file; every per-file decision must still be the walk's own.
+    final a = await createPractice();
+    final b = await createPractice();
+    final twin = monoWav(4800, gain: 0.3);
+    final twins = [
+      await stageOrphan(a.id, twin),
+      await stageOrphan(a.id, twin),
+    ];
+    final distinct = [
+      await stageOrphan(b.id, monoWav(4800, gain: 0.6)),
+      await stageOrphan(b.id, monoWav(5200, gain: 0.6)),
+    ];
+    final notATake = await stageOrphan(a.id, [1, 2, 3, 4, 5, 6, 7, 8]);
+    final orphanedPractice = await stageOrphan(newId(), monoWav(4800));
+
+    expect(await persistence.recoverStagedRecordings(analyze: fakeAnalyze), 3);
+    expect((await reload(a.id)).vocalTracks, hasLength(1)); // twins: ONE take
+    expect((await reload(b.id)).vocalTracks, hasLength(2));
+    // Recovered files are deleted; the rest is the sweep's.
+    expect([
+      for (final f in twins) await f.exists(),
+    ], unorderedEquals([true, false]));
+    for (final f in distinct) {
+      expect(await f.exists(), isFalse);
+    }
+    expect(await notATake.exists(), isTrue);
+    expect(await orphanedPractice.exists(), isTrue);
+    expect(persistence.recoveryRetryPaths, isEmpty);
+    // A second boot finds nothing new to adopt.
+    expect(await persistence.recoverStagedRecordings(analyze: fakeAnalyze), 0);
+  });
+
   test('a crash between the row commit and the file delete cannot duplicate '
       'the take on the next boot', () async {
     final practice = await createPractice();

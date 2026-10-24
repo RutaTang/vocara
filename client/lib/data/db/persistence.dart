@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 
-import 'package:crypto/crypto.dart';
 import 'package:drift/native.dart';
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:path/path.dart' as p;
@@ -496,7 +496,7 @@ class Persistence {
     // files with identical bytes cannot both become takes in one boot.
     final referenced = await _referencedContentHashes();
 
-    var recovered = 0;
+    final candidates = <({String practiceId, File file})>[];
     await for (final dir in staging.list()) {
       if (dir is! Directory) continue;
       final practiceId = p.basename(dir.path);
@@ -504,23 +504,35 @@ class Persistence {
         if (f is! File || p.extension(f.path).toLowerCase() != '.wav') {
           continue;
         }
-        try {
-          switch (await _recoverOrphanTake(
-            f,
-            practiceId,
-            referenced,
-            analyze,
-          )) {
-            case _RecoveryOutcome.recovered:
-              recovered++;
-            case _RecoveryOutcome.junk:
-              break; // provably not a recoverable take: leave it to the sweep
-            case _RecoveryOutcome.failed:
-              await _holdBackForRetry(f, 'the store reported a failure');
-          }
-        } catch (e) {
-          await _holdBackForRetry(f, 'the attempt threw (${e.runtimeType})');
+        candidates.add((practiceId: practiceId, file: f));
+      }
+    }
+    // Every staged take is hashed before it can be judged, and a graceful
+    // stop leaves each of the last session's takes here for the sweep, so
+    // this boot pass re-reads all of them before the window shows. Hash them
+    // ahead of the sequential walk, a few background isolates at a time; the
+    // walk itself — and so every outcome — is unchanged.
+    final hashes = _StagedHashes([for (final c in candidates) c.file]);
+
+    var recovered = 0;
+    for (final (:practiceId, file: f) in candidates) {
+      try {
+        switch (await _recoverOrphanTake(
+          f,
+          practiceId,
+          referenced,
+          analyze,
+          hashes,
+        )) {
+          case _RecoveryOutcome.recovered:
+            recovered++;
+          case _RecoveryOutcome.junk:
+            break; // provably not a recoverable take: leave it to the sweep
+          case _RecoveryOutcome.failed:
+            await _holdBackForRetry(f, 'the store reported a failure');
         }
+      } catch (e) {
+        await _holdBackForRetry(f, 'the attempt threw (${e.runtimeType})');
       }
     }
     return recovered;
@@ -583,6 +595,7 @@ class Persistence {
     String practiceId,
     Set<String> referencedHashes,
     WavAnalyzer analyze,
+    _StagedHashes hashes,
   ) async {
     // Only what the recording engine writes is a candidate: a canonical-header
     // MONO WAV — 32-bit float today, 16-bit PCM from pre-float versions — with
@@ -597,18 +610,15 @@ class Persistence {
     // on the strength of a read that never happened would sweep the only copy
     // of a crashed take into the trash, where the 30-day prune eventually
     // deletes it — and no later boot rescans the trash.
-    final probe = await AudioFileService.probeWav(file);
-    if (probe == null ||
-        probe.channels != 1 ||
-        (probe.bitsPerSample != 16 && probe.bitsPerSample != 32) ||
-        probe.dataBytes <= 0) {
+    if (!_isRecorderShaped(await AudioFileService.probeWav(file))) {
       return _RecoveryOutcome.junk;
     }
 
     // Bytes already referenced by a completed save → a normal leftover, not an
     // orphaned take (this is also what makes a re-run after a mid-recovery
     // crash a no-op instead of a duplicate take).
-    final hash = (await sha256.bind(file.openRead()).first).toString();
+    final hash =
+        await hashes.of(file) ?? await AssetStore.sha256OfFile(file.path);
     if (referencedHashes.contains(hash)) return _RecoveryOutcome.junk;
 
     // The practice must still exist and be live (tombstones filtered); an
@@ -664,6 +674,13 @@ class Persistence {
     }
     return _RecoveryOutcome.recovered;
   }
+
+  /// The shape the recording engine writes (see [_recoverOrphanTake]).
+  static bool _isRecorderShaped(WavProbe? probe) =>
+      probe != null &&
+      probe.channels == 1 &&
+      (probe.bitsPerSample == 16 || probe.bitsPerSample == 32) &&
+      probe.dataBytes > 0;
 
   /// Whether a LIVE (non-tombstoned) practice row with [id] exists. Throws on
   /// a database failure — the caller depends on that to tell "gone" apart
@@ -848,4 +865,54 @@ class Persistence {
     await fs.fsyncDir(dir.path);
     return node;
   }
+}
+
+/// Boot recovery's staged-take hashes, computed AHEAD of its sequential walk
+/// in up to [parallel] background isolates, in walk order — so by the time the
+/// walk reaches a file its hash is usually done, and the main isolate never
+/// spends the read. Only recorder-shaped files are hashed (a cheap header
+/// probe first), matching what the walk itself would hash.
+///
+/// Purely an accelerator: any failure here — a probe or read that throws, a
+/// file that changed shape — just answers null, and the walk then probes and
+/// hashes the file itself exactly as before, meeting the same error at the
+/// same point. A hash is a pure function of the bytes, and nothing writes a
+/// staged file during boot, so a prefetched hash IS the one the walk would
+/// have computed.
+class _StagedHashes {
+  _StagedHashes(this._files, {int parallel = 4}) {
+    for (final f in _files) {
+      _results[f.path] = Completer<String?>();
+    }
+    final workers = math.min(
+      math.min(parallel, Platform.numberOfProcessors),
+      _files.length,
+    );
+    for (var i = 0; i < workers; i++) {
+      unawaited(_work());
+    }
+  }
+
+  final List<File> _files;
+  final Map<String, Completer<String?>> _results = {};
+  var _next = 0;
+
+  Future<void> _work() async {
+    while (_next < _files.length) {
+      final f = _files[_next++];
+      String? hash;
+      try {
+        if (Persistence._isRecorderShaped(await AudioFileService.probeWav(f))) {
+          hash = await AssetStore.sha256OfFile(f.path);
+        }
+      } catch (_) {
+        hash = null; // the walk meets this again itself (see the class doc)
+      }
+      _results[f.path]!.complete(hash);
+    }
+  }
+
+  /// [file]'s prefetched sha256, or null when the walk must hash it itself.
+  Future<String?> of(File file) =>
+      _results[file.path]?.future ?? Future<String?>.value();
 }

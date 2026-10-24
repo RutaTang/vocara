@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:math' as math;
 
 import 'package:crypto/crypto.dart';
@@ -295,48 +296,27 @@ class AssetStore {
   /// ULID — concurrent imports of the same content each stage privately and
   /// converge only at the (idempotent) promote rename, where the old shared
   /// `<hash>.part` name made them tear each other's copy apart.
+  ///
+  /// The pass runs in a background isolate ([_copyAndHash]): sha256 is pure
+  /// Dart, and on the UI isolate a 10-minute take (115 MB) cost ~3 s of
+  /// main-isolate time in ~45 ms stalls, right as a recording stops.
   Future<_StagedImport> _stageToPool(File src) async {
     final stagingDir = Directory(p.join(root.path, 'assets', '.staging'));
     // Durably: on the first import this also creates the pool dir itself,
     // which every pooled file's directory entry hangs off.
     await _createDirDurably(stagingDir);
-    final tmp = File(p.join(stagingDir.path, '${newId()}.part'));
-    final sink = tmp.openWrite();
-    Digest? digest;
-    final hasher = sha256.startChunkedConversion(
-      ChunkedConversionSink<Digest>.withCallback((ds) => digest = ds.single),
+    final tmpPath = p.join(stagingDir.path, '${newId()}.part');
+    final srcPath = src.path;
+    final (:hash, :size) = await Isolate.run(
+      () => _copyAndHash(srcPath, tmpPath),
     );
-    var size = 0;
-    try {
-      // addStream applies backpressure (the source pauses while a chunk is
-      // being written), so memory stays flat on multi-gigabyte imports.
-      await sink.addStream(
-        src.openRead().map((chunk) {
-          hasher.add(chunk);
-          size += chunk.length;
-          return chunk;
-        }),
-      );
-      await sink.close();
-      hasher.close();
-    } catch (_) {
-      // Don't leave a partial staging file on a failed/disk-full copy;
-      // surface the error so the save fails loudly instead of silently
-      // dropping the take.
-      try {
-        await sink.close();
-      } catch (_) {}
-      try {
-        if (await tmp.exists()) await tmp.delete();
-      } catch (_) {}
-      rethrow;
-    }
-    return _StagedImport(
-      hash: digest!.toString(),
-      size: size,
-      tmpPath: tmp.path,
-    );
+    return _StagedImport(hash: hash, size: size, tmpPath: tmpPath);
   }
+
+  /// The sha256 of the file at [path], read in a background isolate (see
+  /// [_stageToPool]). Throws what the read throws.
+  static Future<String> sha256OfFile(String path) =>
+      Isolate.run(() => _copyAndHash(path, null).hash);
 
   /// Moves a staged file to its content address. An already-present pool file
   /// is reused only when its length matches the staged byte count — a
@@ -756,7 +736,7 @@ class AssetStore {
       final hash = dot < 0 ? name : name.substring(0, dot);
       if (hash.length != 64) continue; // not a content-addressed pool file
       try {
-        final actual = (await sha256.bind(e.openRead()).first).toString();
+        final actual = await sha256OfFile(e.path);
         if (actual != hash) bad.add(e.path);
       } catch (_) {
         // Unreadable right now: that is a different failure (and one the
@@ -906,4 +886,52 @@ class _StagedImport {
   final String hash;
   final int size;
   final String tmpPath;
+}
+
+/// Reads [srcPath] once, in fixed-size chunks, hashing every byte and — when
+/// [tmpPath] is given — writing it there, so the staged bytes, the hash and
+/// the byte count provably describe the same content. Synchronous: it runs
+/// inside an isolate of its own, where blocking costs nothing and a single
+/// reused buffer keeps memory flat on any file size. A failed copy leaves no
+/// partial staging file behind; the error is rethrown, so the save fails
+/// loudly instead of silently dropping the take.
+({String hash, int size}) _copyAndHash(String srcPath, String? tmpPath) {
+  final tmp = tmpPath == null ? null : File(tmpPath);
+  RandomAccessFile? out;
+  RandomAccessFile? input;
+  Digest? digest;
+  final hasher = sha256.startChunkedConversion(
+    ChunkedConversionSink<Digest>.withCallback((ds) => digest = ds.single),
+  );
+  var size = 0;
+  try {
+    out = tmp?.openSync(mode: FileMode.writeOnly);
+    input = File(srcPath).openSync();
+    final buf = Uint8List(1 << 20);
+    while (true) {
+      final n = input.readIntoSync(buf);
+      if (n == 0) break;
+      // The hasher copies what it is handed, so the buffer is free to reuse.
+      hasher.add(Uint8List.sublistView(buf, 0, n));
+      out?.writeFromSync(buf, 0, n);
+      size += n;
+    }
+    input.closeSync();
+    input = null;
+    out?.closeSync();
+    out = null;
+    hasher.close();
+    return (hash: digest!.toString(), size: size);
+  } catch (_) {
+    try {
+      input?.closeSync();
+    } catch (_) {}
+    try {
+      out?.closeSync();
+    } catch (_) {}
+    try {
+      if (tmp != null && tmp.existsSync()) tmp.deleteSync();
+    } catch (_) {}
+    rethrow;
+  }
 }
