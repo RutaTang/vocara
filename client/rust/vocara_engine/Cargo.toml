@@ -21,6 +21,7 @@ device = [
     "dep:objc2-core-audio-types",
     "dep:objc2-core-foundation",
     "dep:rubato",
+    "dep:libc",
 ]
 
 [[example]]
@@ -60,6 +61,9 @@ objc2-core-foundation = { version = "0.3", optional = true, default-features = f
     "CFBase",
 ] }
 rubato = { version = "4.0.0", optional = true }
+# getrlimit/setrlimit for the engine's open-file budget (see ffi::raise_open_file_limit).
+# Already in the graph through cpal; declared so the FFI can call it directly.
+libc = { version = "0.2", optional = true }
 
 [profile.release]
 # Default panic = "unwind", NOT abort: every FFI entry point is wrapped in catch_unwind,

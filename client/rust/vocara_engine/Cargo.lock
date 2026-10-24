@@ -960,6 +960,7 @@ name = "vocara_engine"
 version = "0.1.0"
 dependencies = [
  "cpal",
+ "libc",
  "objc2-audio-toolbox",
  "objc2-core-audio",
  "objc2-core-audio-types",

@@ -414,6 +414,7 @@ fn cache_lookup_fresh(
 #[no_mangle]
 pub extern "C" fn ve_create() -> *mut VeEngine {
     let built = catch_unwind(|| -> Result<*mut VeEngine, String> {
+        raise_open_file_limit();
         // Baseline placeholder track: a silent ring (nothing feeds it), immediately replaced
         // by the first ve_tracks_commit.
         let (_prod, cons) = spsc::<[Smp; CHANNELS]>(RING_FRAMES);
@@ -2709,6 +2710,48 @@ pub extern "C" fn ve_track_gr(e: *mut VeEngine, track: c_int) -> f32 {
         Some(Some(m)) => f32::from_bits(m.load(Ordering::Relaxed)),
         _ => 0.0,
     })
+}
+
+/// Raises the process's soft open-file limit toward its hard limit, once per engine,
+/// best-effort. A macOS GUI process starts at a soft RLIMIT_NOFILE of 256, and every
+/// disk-streamed track holds an open file — twice over during a commit, which opens the new
+/// graph's readers while the old graph's feeders still hold theirs — on top of the app's own
+/// descriptors (SQLite, fonts, decode isolates, CoreAudio). Around a hundred clips that
+/// exhausts it: the commit's opens fail with EMFILE, those tracks degrade to permanent
+/// silence, and every other descriptor user in the process starts failing too. Capped at
+/// 10 240 (OPEN_MAX), above which macOS refuses the call even under an unlimited hard limit.
+fn raise_open_file_limit() {
+    const WANT: libc::rlim_t = 10_240;
+    // SAFETY: getrlimit/setrlimit only read/write the plain struct passed by pointer.
+    unsafe {
+        let mut rl = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl) != 0 {
+            return;
+        }
+        let target = WANT.min(rl.rlim_max);
+        if rl.rlim_cur < target {
+            rl.rlim_cur = target;
+            let _ = libc::setrlimit(libc::RLIMIT_NOFILE, &rl);
+        }
+    }
+}
+
+#[cfg(test)]
+mod open_file_limit_tests {
+    #[test]
+    fn the_engine_raises_the_soft_open_file_limit() {
+        super::raise_open_file_limit();
+        let mut rl = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: as in raise_open_file_limit.
+        assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl) }, 0);
+        assert!(rl.rlim_cur >= rl.rlim_max.min(10_240));
+    }
 }
 
 #[cfg(test)]
