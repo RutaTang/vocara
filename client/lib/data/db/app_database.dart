@@ -136,6 +136,14 @@ class AppDatabase extends _$AppDatabase {
     await customStatement(
       'CREATE INDEX IF NOT EXISTS ix_oplog_hlc ON oplog (hlc_packed)',
     );
+    // A save resolves every clip's pool path back to its live owner
+    // (AssetStore.resolveOrImportAll) by local_rel_path. Asset rows are only
+    // ever tombstoned, so the table grows with the library's whole history;
+    // unindexed, those lookups scan it (100 per save: 55 ms of SQL at 10k
+    // assets, 172 ms at 30k).
+    await customStatement(
+      'CREATE INDEX IF NOT EXISTS ix_assets_rel ON assets (local_rel_path)',
+    );
     // Per-entity history: the dependency carry-forward in boot compaction
     // (Persistence.compactOplog) and in OplogDrain.ack correlates a subquery
     // on (entity_table, entity_id) for EVERY surviving entry, and the GC's

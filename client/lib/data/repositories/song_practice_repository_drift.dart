@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:drift/drift.dart';
@@ -318,17 +319,22 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
 
       // Assets first (idempotent, deduped): every clip's audio + the separation
       // source. A dependent clip row never exists without its asset.
+      final clips = [for (final t in allTracks) ...t.clips];
+      // resolveOrImportAll: an `asset://` ref (bytes missing locally) or a
+      // live asset's pool path (every hydrated clip) keeps its id without
+      // re-importing; any other path is imported + deduped — per clip, in
+      // order, exactly as resolveOrImport would answer.
+      final clipAssetIds = await assets.resolveOrImportAll([
+        for (final c in clips) c.audioFilePath,
+      ]);
       final clipAsset = <String, String>{}; // clipId -> assetId
-      for (final t in allTracks) {
-        for (final c in t.clips) {
-          // resolveOrImport: an `asset://` ref (bytes missing locally) or a
-          // live asset's pool path (every hydrated clip) keeps its id without
-          // re-importing; any other path is imported + deduped.
-          final assetId = await assets.resolveOrImport(c.audioFilePath);
-          clipAsset[c.id] = assetId;
-          await _cacheWaveform(assetId, c.waveformPeaks);
-        }
+      for (var i = 0; i < clips.length; i++) {
+        clipAsset[clips[i].id] = clipAssetIds[i];
       }
+      await _cacheWaveforms([
+        for (var i = 0; i < clips.length; i++)
+          (assetId: clipAssetIds[i], peaks: clips[i].waveformPeaks),
+      ]);
       String? separationAssetId;
       if (practice.separationSource != null &&
           practice.separationSource!.isNotEmpty) {
@@ -1080,21 +1086,58 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
     );
   }
 
-  Future<void> _cacheWaveform(String assetId, List<double> peaks) async {
-    if (peaks.isEmpty) return;
-    final asset = await (db.select(
-      db.assets,
-    )..where((a) => a.id.equals(assetId))).getSingleOrNull();
-    if (asset == null) return;
-    await db
-        .into(db.waveformCache)
-        .insertOnConflictUpdate(
-          WaveformCacheCompanion.insert(
-            contentHash: asset.contentHash,
-            algoVersion: _waveformAlgoVersion,
-            peaks: _encodePeaks(peaks),
-          ),
+  /// Caches each clip's peaks under its asset's content hash: one asset read
+  /// and ONE batch (a single transaction) for the whole save. It used to be a
+  /// select plus an auto-committed upsert per clip — 100 write transactions
+  /// on every save of a 100-clip practice, each rewriting a blob that almost
+  /// never changed (the peaks were hydrated from this very row). The upsert's
+  /// WHERE skips a row whose bytes already match, and the batch runs in clip
+  /// order, so the final cache is exactly the per-clip loop's (last write per
+  /// hash wins).
+  Future<void> _cacheWaveforms(
+    List<({String assetId, List<double> peaks})> clips,
+  ) async {
+    final pending = [
+      for (final c in clips)
+        if (c.peaks.isNotEmpty) c,
+    ];
+    if (pending.isEmpty) return;
+    final hashes = await _contentHashes({for (final c in pending) c.assetId});
+    final writes = [
+      for (final c in pending)
+        if (hashes[c.assetId] case final hash?) (hash: hash, peaks: c.peaks),
+    ];
+    if (writes.isEmpty) return;
+    await db.batch((b) {
+      for (final w in writes) {
+        b.customStatement(
+          'INSERT INTO waveform_cache (content_hash, algo_version, peaks) '
+          'VALUES (?, ?, ?) ON CONFLICT (content_hash, algo_version) '
+          'DO UPDATE SET peaks = excluded.peaks '
+          'WHERE waveform_cache.peaks IS NOT excluded.peaks',
+          [w.hash, _waveformAlgoVersion, _encodePeaks(w.peaks)],
         );
+      }
+    });
+  }
+
+  /// assetId -> content hash for every id in [ids] that has an asset row
+  /// (live or tombstoned, like the per-clip lookups it replaces).
+  Future<Map<String, String>> _contentHashes(Set<String> ids) async {
+    final out = <String, String>{};
+    final all = ids.toList();
+    for (var i = 0; i < all.length; i += AssetStore.inQueryChunk) {
+      final chunk = all.sublist(
+        i,
+        math.min(i + AssetStore.inQueryChunk, all.length),
+      );
+      for (final a in await (db.select(
+        db.assets,
+      )..where((a) => a.id.isIn(chunk))).get()) {
+        out[a.id] = a.contentHash;
+      }
+    }
+    return out;
   }
 
   // --- hydration ------------------------------------------------------------

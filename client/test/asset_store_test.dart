@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:drift/drift.dart' show Value;
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
@@ -228,6 +229,47 @@ void main() {
     expect(strayId, isNot(id));
     expect(await db.select(db.assets).get(), hasLength(2));
     expect(await File((await store.resolve(strayId))!).readAsBytes(), [8, 8]);
+  });
+
+  test('resolveOrImportAll answers each reference exactly as resolveOrImport '
+      'would at that point of a sequential walk', () async {
+    final a = await store.importFile((await makeSrc('a.wav', [1, 1])).path);
+    final pooledA = (await store.resolve(a))!;
+    // A pool file whose only asset row is tombstoned has no live owner, so
+    // its first reference IMPORTS it — minting the live owner that a later
+    // reference to the same path must then resolve to (an owner map read
+    // once up front would miss it and import a second time).
+    final t = await store.importFile((await makeSrc('t.wav', [2, 2])).path);
+    final pooledT = (await store.resolve(t))!;
+    await (db.update(db.assets)..where((x) => x.id.equals(t))).write(
+      const AssetsCompanion(deletedAt: Value(1)),
+    );
+    final fresh = (await makeSrc('fresh.wav', [3, 3])).path;
+    final missing = 'M'.padRight(26, '0');
+
+    final paths = [
+      pooledA,
+      AssetStore.refFor(missing),
+      fresh,
+      pooledT,
+      pooledT,
+      fresh,
+      pooledA,
+    ];
+    final ids = await store.resolveOrImportAll(paths);
+
+    expect(ids[0], a);
+    expect(ids[1], missing); // an asset:// ref keeps its embedded id
+    expect(ids[2], isNot(anyOf(a, t))); // imported
+    expect(ids[3], isNot(anyOf(a, t, ids[2]))); // re-imported, new live row
+    expect(ids[4], ids[3]); // the owner that import just minted
+    expect(ids[5], ids[2]); // deduped by content
+    expect(ids[6], a);
+    expect(await db.select(db.assets).get(), hasLength(4));
+    // One at a time, on the store this left, every answer is the same.
+    for (var i = 0; i < paths.length; i++) {
+      expect(await store.resolveOrImport(paths[i]), ids[i], reason: '#$i');
+    }
   });
 
   test(

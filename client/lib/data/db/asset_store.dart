@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:crypto/crypto.dart';
 import 'package:drift/drift.dart';
@@ -173,23 +174,90 @@ class AssetStore {
     );
   }
 
+  /// [resolveOrImport] for a whole save's references, answered in order.
+  ///
+  /// Every save re-sends every clip, so resolving them one by one cost a
+  /// gate entry plus an owner query per clip on EVERY save of a practice —
+  /// even a mute click. Here the pool paths' owners are read in one query
+  /// ([_livePoolOwners]) and each element gets exactly the answer
+  /// [resolveOrImport] would give at that point of a sequential walk: the
+  /// owner map is trusted only until this call imports something, because an
+  /// import can mint the live owner of a pool path further down the list
+  /// (or re-point a deduped row's local_rel_path), and is re-read after one.
+  Future<List<String>> resolveOrImportAll(
+    List<String> pathsOrRefs, {
+    String kind = 'audio',
+  }) => gate.shared(() async {
+    final out = <String>[];
+    Map<String, String>? owners;
+    for (var i = 0; i < pathsOrRefs.length; i++) {
+      final path = pathsOrRefs[i];
+      final embedded = assetIdOf(path);
+      if (embedded != null) {
+        out.add(embedded);
+        continue;
+      }
+      final rel = _poolRelOf(path);
+      if (rel != null) {
+        owners ??= await _livePoolOwners({
+          for (final rest in pathsOrRefs.skip(i)) ?_poolRelOf(rest),
+        });
+        final owner = owners[rel];
+        if (owner != null) {
+          out.add(owner);
+          continue;
+        }
+      }
+      out.add(await _importFile(path, kind: kind));
+      owners = null; // see the doc: an import invalidates the owner map
+    }
+    return out;
+  });
+
+  /// The pool-relative path of [path], or null when [path] is not inside the
+  /// content-addressed pool.
+  String? _poolRelOf(String path) {
+    final pool = p.join(root.path, 'assets');
+    if (!p.isWithin(pool, path)) return null;
+    return p.relative(path, from: root.path);
+  }
+
   /// The live asset whose pooled file is [path], or null when [path] is not a
   /// live asset's pool path. Identity is the recorded local_rel_path itself
   /// ([relPathFor] is a pure function of hash + ext), so nothing is read from
   /// the file. When identical bytes are live under more than one asset id,
   /// the first by HLC wins, mirroring [importFile]'s dedup order.
   Future<String?> _livePoolAssetAt(String path) async {
-    final pool = p.join(root.path, 'assets');
-    if (!p.isWithin(pool, path)) return null;
-    final rel = p.relative(path, from: root.path);
-    final owner =
-        await (db.select(db.assets)
-              ..where((a) => a.localRelPath.equals(rel) & a.deletedAt.isNull())
-              ..orderBy([(a) => OrderingTerm(expression: a.hlcPacked)])
-              ..limit(1))
-            .getSingleOrNull();
-    return owner?.id;
+    final rel = _poolRelOf(path);
+    if (rel == null) return null;
+    return (await _livePoolOwners({rel}))[rel];
   }
+
+  /// rel -> the live asset owning that pool path, for every rel in [rels]
+  /// that has one — [_livePoolAssetAt]'s rule (first by HLC) applied to a
+  /// set in one query per [inQueryChunk] paths.
+  Future<Map<String, String>> _livePoolOwners(Set<String> rels) async {
+    final owners = <String, String>{};
+    final all = rels.toList();
+    for (var i = 0; i < all.length; i += inQueryChunk) {
+      final chunk = all.sublist(i, math.min(i + inQueryChunk, all.length));
+      final rows =
+          await (db.select(db.assets)
+                ..where(
+                  (a) => a.localRelPath.isIn(chunk) & a.deletedAt.isNull(),
+                )
+                ..orderBy([(a) => OrderingTerm(expression: a.hlcPacked)]))
+              .get();
+      for (final r in rows) {
+        owners.putIfAbsent(r.localRelPath!, () => r.id);
+      }
+    }
+    return owners;
+  }
+
+  /// Bound on the ids/paths one `IN (...)` query binds, far below SQLite's
+  /// host-parameter ceiling; set reads are chunked by it.
+  static const int inQueryChunk = 500;
 
   /// Resolves an asset id to an absolute path on THIS device, or null if the
   /// asset is unknown or its bytes are not present locally.
