@@ -1,3 +1,4 @@
+import '../../domain/models/practice_summary.dart';
 import '../../domain/models/song_practice.dart';
 import '../../utils/result.dart';
 import '../sync/sync_hashes.dart';
@@ -14,6 +15,11 @@ import '../sync/sync_hashes.dart';
 /// re-read the aggregate.
 abstract class SongPracticeRepository {
   Future<Result<List<SongPractice>>> listPractices();
+
+  /// What the Home list shows of every live practice (see
+  /// [PracticeSummary]), newest first like [listPractices] — without
+  /// hydrating any of them.
+  Future<Result<List<PracticeSummary>>> listPracticeSummaries();
 
   Future<Result<SongPractice>> getPractice(String id);
 

@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:forui/forui.dart';
 
-import '../../../domain/models/song_practice.dart';
+import '../../../domain/models/practice_summary.dart';
 import '../../core/themes/studio.dart';
 
 /// A song-practice tile on the home grid. Tapping opens the workspace; the
@@ -14,7 +14,7 @@ class PracticeProjectCard extends StatefulWidget {
     super.key,
   });
 
-  final SongPractice practice;
+  final PracticeSummary practice;
   final VoidCallback onOpen;
   final VoidCallback onDelete;
 
@@ -109,8 +109,8 @@ class _PracticeProjectCardState extends State<PracticeProjectCard> {
     );
   }
 
-  String _subtitle(SongPractice p) {
-    final takes = p.vocalTracks.length;
+  String _subtitle(PracticeSummary p) {
+    final takes = p.takeCount;
     final takeLabel = takes == 1 ? '1 take' : '$takes takes';
     final accompaniment = p.hasAccompaniment ? 'backing · ' : '';
     return '$accompaniment$takeLabel · ${p.noteCount} notes';

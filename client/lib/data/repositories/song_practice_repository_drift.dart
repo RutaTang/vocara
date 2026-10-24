@@ -8,6 +8,7 @@ import '../../domain/models/audio_track.dart';
 import '../../domain/models/fx_bus.dart';
 import '../../domain/models/lyric_line.dart';
 import '../../domain/models/practice_note.dart';
+import '../../domain/models/practice_summary.dart';
 import '../../domain/models/song_practice.dart';
 import '../../domain/models/take_version.dart';
 import '../../domain/models/technique_marker.dart';
@@ -150,6 +151,49 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
   };
 
   // --- read -----------------------------------------------------------------
+
+  @override
+  Future<Result<List<PracticeSummary>>> listPracticeSummaries() async {
+    try {
+      final rows = await (db.select(
+        db.practices,
+      )..where((p) => p.deletedAt.isNull())).get();
+      rows.sort((a, b) {
+        final c = b.updatedAt.compareTo(a.updatedAt);
+        return c != 0 ? c : b.id.compareTo(a.id);
+      });
+      // The counts hydration would produce, from the live rows it reads: a
+      // vocal take is any live track that is not a backing, and the note
+      // count spans every live lane.
+      final counts = {
+        for (final r
+            in await db
+                .customSelect(
+                  'SELECT t.practice_id AS pid, '
+                  "SUM(t.kind NOT IN ('accompaniment', 'reference')) AS takes, "
+                  "MAX(t.kind = 'accompaniment') AS backing, "
+                  'SUM((SELECT COUNT(*) FROM practice_notes n '
+                  '  WHERE n.track_id = t.id AND n.deleted_at IS NULL)) AS notes '
+                  'FROM tracks t WHERE t.deleted_at IS NULL GROUP BY t.practice_id',
+                )
+                .get())
+          r.read<String>('pid'): r,
+      };
+      return Result.ok([
+        for (final p in rows)
+          PracticeSummary(
+            id: p.id,
+            title: p.title,
+            updatedAt: _dt(p.updatedAt),
+            takeCount: counts[p.id]?.read<int>('takes') ?? 0,
+            hasAccompaniment: (counts[p.id]?.read<int>('backing') ?? 0) != 0,
+            noteCount: counts[p.id]?.read<int>('notes') ?? 0,
+          ),
+      ]);
+    } catch (e) {
+      return Result.error(e is Exception ? e : Exception(e.toString()));
+    }
+  }
 
   @override
   Future<Result<List<SongPractice>>> listPractices() async {

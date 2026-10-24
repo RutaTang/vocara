@@ -6,6 +6,7 @@ import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
 import '../../../data/services/update_check_service.dart';
+import '../../../domain/models/practice_summary.dart';
 import '../../../domain/models/song_practice.dart';
 import '../../../routing/routes.dart';
 import '../../../utils/result.dart';
@@ -170,7 +171,10 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  Future<void> _deletePractice(HomeViewModel vm, SongPractice practice) async {
+  Future<void> _deletePractice(
+    HomeViewModel vm,
+    PracticeSummary practice,
+  ) async {
     final confirmed = await showConfirmDialog(
       context,
       title: 'Delete "${practice.title}"?',
@@ -280,8 +284,8 @@ class _Body extends StatelessWidget {
   });
 
   final HomeViewModel vm;
-  final void Function(SongPractice) onOpen;
-  final void Function(SongPractice) onDelete;
+  final void Function(PracticeSummary) onOpen;
+  final void Function(PracticeSummary) onDelete;
   final VoidCallback onRetry;
 
   @override

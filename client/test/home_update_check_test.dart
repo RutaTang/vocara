@@ -9,6 +9,7 @@ import 'package:provider/provider.dart';
 import 'package:vocara/data/repositories/song_practice_repository.dart';
 import 'package:vocara/data/services/update_check_service.dart';
 import 'package:vocara/data/sync/sync_hashes.dart';
+import 'package:vocara/domain/models/practice_summary.dart';
 import 'package:vocara/domain/models/song_practice.dart';
 import 'package:vocara/ui/home/view_model/home_view_model.dart';
 import 'package:vocara/ui/home/widgets/home_screen.dart';
@@ -18,6 +19,10 @@ import 'package:vocara/utils/result.dart';
 class _FakeRepo implements SongPracticeRepository {
   @override
   Future<Result<List<SongPractice>>> listPractices() async =>
+      const Result.ok([]);
+
+  @override
+  Future<Result<List<PracticeSummary>>> listPracticeSummaries() async =>
       const Result.ok([]);
 
   @override

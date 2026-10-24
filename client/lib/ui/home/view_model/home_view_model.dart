@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 
 import '../../../data/repositories/song_practice_repository.dart';
 import '../../../data/sync/sync_engine.dart';
+import '../../../domain/models/practice_summary.dart';
 import '../../../domain/models/song_practice.dart';
 import '../../../utils/command.dart';
 import '../../../utils/result.dart';
@@ -35,7 +36,7 @@ class HomeViewModel extends ChangeNotifier {
   }
 
   /// Loads the practice list (runs once on creation).
-  late final Command0<List<SongPractice>> load;
+  late final Command0<List<PracticeSummary>> load;
 
   /// Creates a new practice from a title; result carries the created practice.
   late final Command1<SongPractice, String> createProject;
@@ -45,8 +46,8 @@ class HomeViewModel extends ChangeNotifier {
 
   StreamSubscription<RemoteApplied>? _remoteSub;
 
-  List<SongPractice> _projects = const [];
-  List<SongPractice> get projects => _projects;
+  List<PracticeSummary> _projects = const [];
+  List<PracticeSummary> get projects => _projects;
 
   /// Freshness-only reload when sync applied remote changes to the practices
   /// table (a new/renamed/deleted practice). Skipped while any command runs —
@@ -58,9 +59,9 @@ class HomeViewModel extends ChangeNotifier {
     load.execute();
   }
 
-  Future<Result<List<SongPractice>>> _load() async {
-    final result = await _repository.listPractices();
-    if (result is Ok<List<SongPractice>>) {
+  Future<Result<List<PracticeSummary>>> _load() async {
+    final result = await _repository.listPracticeSummaries();
+    if (result is Ok<List<PracticeSummary>>) {
       _projects = result.value;
       notifyListeners();
     }
@@ -70,7 +71,7 @@ class HomeViewModel extends ChangeNotifier {
   Future<Result<SongPractice>> _createProject(String title) async {
     final result = await _repository.createPractice(title);
     if (result is Ok<SongPractice>) {
-      _projects = [result.value, ..._projects];
+      _projects = [PracticeSummary.of(result.value), ..._projects];
       notifyListeners();
     }
     return result;

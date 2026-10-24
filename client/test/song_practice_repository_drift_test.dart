@@ -17,6 +17,7 @@ import 'package:vocara/domain/models/audio_track.dart';
 import 'package:vocara/domain/models/fx_bus.dart';
 import 'package:vocara/domain/models/lyric_line.dart';
 import 'package:vocara/domain/models/practice_note.dart';
+import 'package:vocara/domain/models/practice_summary.dart';
 import 'package:vocara/domain/models/song_practice.dart';
 import 'package:vocara/domain/models/take_version.dart';
 import 'package:vocara/domain/models/technique_marker.dart';
@@ -381,6 +382,74 @@ void main() {
       expect(await _liveCount(db, db.tracks), 0);
       expect(await _liveCount(db, db.clips), 0); // cascaded
       expect(await _liveCount(db, db.practiceNotes), 0);
+    },
+  );
+
+  test(
+    'the summary read reports what summarizing the full list would',
+    () async {
+      // Home reads summaries instead of hydrating every practice (every clip's
+      // peaks, a file check per clip) on each return to it; the counts must
+      // still be exactly what the hydrated aggregate gives.
+      final now = DateTime(2026);
+      PracticeNote note() => PracticeNote(
+        id: newId(),
+        positionMs: 0,
+        content: 'n',
+        createdAt: now,
+        updatedAt: now,
+      );
+      AudioTrack track(AudioTrackKind kind, {String? version, int notes = 0}) =>
+          AudioTrack(
+            id: newId(),
+            kind: kind,
+            displayName: kind.name,
+            createdAt: now,
+            versionId: version,
+            notes: [for (var i = 0; i < notes; i++) note()],
+          );
+      final empty = ok(await repo.createPractice('Empty'));
+      final full = ok(await repo.createPractice('Full'));
+      final v2 = TakeVersion(id: newId(), name: 'Second', createdAt: now);
+      final doomed = track(AudioTrackKind.vocal, notes: 3);
+      final saved = ok(
+        await repo.savePractice(
+          full.copyWith(
+            versions: [...full.versions, v2],
+            accompaniment: track(AudioTrackKind.accompaniment, notes: 1),
+            reference: track(AudioTrackKind.reference, notes: 2),
+            vocalTracks: [
+              track(AudioTrackKind.vocal, version: full.activeVersionId),
+              track(AudioTrackKind.vocal, version: v2.id, notes: 4),
+              doomed,
+            ],
+          ),
+        ),
+      );
+      // A tombstoned take (and its notes) and a tombstoned note count for
+      // neither; nor does a deleted practice.
+      await db.customStatement(
+        'UPDATE tracks SET deleted_at = 1 WHERE id = ?',
+        [doomed.id],
+      );
+      await db.customStatement(
+        'UPDATE practice_notes SET deleted_at = 1 WHERE id = ?',
+        [saved.vocalTracks[1].notes.first.id],
+      );
+      await repo.deletePractice(ok(await repo.createPractice('Gone')).id);
+
+      final hydrated = (await repo.listPractices() as Ok<List<SongPractice>>)
+          .value
+          .map(PracticeSummary.of);
+      final summaries =
+          (await repo.listPracticeSummaries() as Ok<List<PracticeSummary>>)
+              .value;
+      String show(PracticeSummary p) =>
+          '${p.id} ${p.title} ${p.updatedAt.millisecondsSinceEpoch} '
+          '${p.takeCount} ${p.hasAccompaniment} ${p.noteCount}';
+      expect(summaries.map(show), hydrated.map(show));
+      expect(summaries.map((p) => p.id), [saved.id, empty.id]);
+      expect(show(summaries.first), endsWith(' 2 true 6'));
     },
   );
 
