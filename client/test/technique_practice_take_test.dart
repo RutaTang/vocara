@@ -3,6 +3,7 @@
 // tests pin the seams between the two — a take must never leak into (or be
 // stranded by) an edit session.
 
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -19,6 +20,7 @@ import 'package:vocara/data/sync/sync_hashes.dart';
 import 'package:vocara/domain/models/spectrogram.dart';
 import 'package:vocara/domain/models/technique.dart';
 import 'package:vocara/domain/models/technique_analysis.dart';
+import 'package:vocara/domain/models/technique_media.dart';
 import 'package:vocara/domain/models/voice_metrics.dart';
 import 'package:vocara/ui/core/widgets/studio_button.dart';
 import 'package:vocara/ui/technique_library/view_model/technique_detail_view_model.dart';
@@ -64,10 +66,16 @@ class _FakeRepo implements TechniqueRepository {
 }
 
 /// Analysis fake that returns a FRESH canned analysis per call, so a test can
-/// tell the practice take's analysis from the reference's by identity.
+/// tell the practice take's analysis from the reference's by identity. While
+/// [gate] is set, every call parks on it (a slow DSP pass).
 class _FreshAnalysis extends Fake implements MediaAnalysisService {
+  Completer<void>? gate;
+
   @override
-  Future<TechniqueAnalysis?> analyze(String path) async => _analysis();
+  Future<TechniqueAnalysis?> analyze(String path) async {
+    await gate?.future;
+    return _analysis();
+  }
 }
 
 /// Recorder fake: [start] writes a WAV stub into its own temp dir and [stop]
@@ -192,14 +200,43 @@ TechniqueAnalysis _analysis() {
 
 const _techniqueId = 'T1000000000000000000000000';
 
-Technique _technique() {
+Technique _technique({List<String> examples = const []}) {
   final now = DateTime(2026, 6, 20);
   return Technique(
     id: _techniqueId,
     name: 'Twang',
+    media: [
+      for (final (i, path) in examples.indexed)
+        TechniqueMedia(
+          id: 'M$i',
+          path: path,
+          kind: TechniqueMediaKind.audio,
+          addedAt: now,
+        ),
+    ],
     createdAt: now,
     updatedAt: now,
   );
+}
+
+/// A loaded view model over [repo] (no screen), for the VM-level tests.
+Future<TechniqueDetailViewModel> _loadedVm(
+  _FakeRepo repo,
+  _FreshAnalysis analysis,
+) async {
+  final vm = TechniqueDetailViewModel(
+    repository: repo,
+    mediaService: TechniqueMediaService(storage: LocalStorageService()),
+    techniqueId: _techniqueId,
+    analysisService: analysis,
+    recorder: _FakeRecorder(),
+  );
+  addTearDown(vm.dispose);
+  for (var i = 0; i < 200 && vm.technique == null; i++) {
+    await Future<void>.delayed(const Duration(milliseconds: 5));
+  }
+  expect(vm.technique, isNotNull);
+  return vm;
 }
 
 Future<TechniqueDetailViewModel> _pumpScreen(
@@ -278,5 +315,48 @@ void main() {
     expect(find.text('Edit technique'), findsOneWidget);
     expect(repo.baseSaves, 0);
     expect(tester.takeException(), isNull);
+  });
+
+  test('opening the editor points the analysis back at the reference, even '
+      'when the practice analysis lands after it', () async {
+    // Regression: the edit view's example card has no Reference/Practice
+    // switch, yet beginEdit kept the practice subject — the card showed the
+    // practice take's analysis, and playback/scrub (which only drive the
+    // reference) no longer moved it.
+    final analysis = _FreshAnalysis();
+    final vm = await _loadedVm(
+      _FakeRepo(_technique(examples: ['/tmp/ref-a.wav'])),
+      analysis,
+    );
+    await vm.ensureReferenceAnalysis();
+    expect(await vm.startPractice(), isNull);
+    await vm.stopPractice();
+    expect(vm.analysisSubject, TechniqueAnalysisSubject.practice);
+
+    vm.beginMediaDraft();
+    vm.beginEdit();
+    expect(vm.analysisSubject, TechniqueAnalysisSubject.reference);
+    expect(
+      identical(vm.selectedMetrics, vm.referenceAnalysis!.metrics),
+      isTrue,
+    );
+    vm.endEdit();
+
+    // Edit tapped while a take's analysis is still running: the take landing
+    // afterwards must not flip the open editor over to it either.
+    analysis.gate = Completer<void>();
+    expect(await vm.startPractice(), isNull);
+    final stopping = vm.stopPractice();
+    expect(vm.practiceAnalysisLoading, isTrue);
+    vm.beginMediaDraft();
+    vm.beginEdit();
+    analysis.gate!.complete();
+    await stopping;
+    expect(vm.practiceAnalysis, isNotNull, reason: 'the take itself is kept');
+    expect(vm.analysisSubject, TechniqueAnalysisSubject.reference);
+    expect(
+      identical(vm.selectedMetrics, vm.referenceAnalysis!.metrics),
+      isTrue,
+    );
   });
 }

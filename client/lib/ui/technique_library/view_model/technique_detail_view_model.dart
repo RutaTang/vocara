@@ -169,6 +169,13 @@ class TechniqueDetailViewModel extends ChangeNotifier
   void beginEdit() {
     _editing = true;
     _missedRemote = false;
+    // The editor's example card has no Reference/Practice switch and only the
+    // reference drives (and is driven by) the inline player, so a practice
+    // subject left over from the read view would show the take's analysis
+    // under the example with no way back. The take itself is kept for the
+    // read view's switch; a take still being analyzed lands without touching
+    // the subject (see [stopPractice]).
+    showAnalysisSubject(TechniqueAnalysisSubject.reference);
   }
 
   /// Close the edit session (cancel, successful save, or the screen going
