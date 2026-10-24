@@ -275,49 +275,54 @@ class _BusChannelFooter extends StatelessWidget {
               const Spacer(),
               MouseRegion(
                 cursor: SystemMouseCursors.click,
-                child: GestureDetector(
-                  onTap: () =>
-                      showStudioMenu(context, menuAnchorBelow(context), [
-                        StudioMenuItem(
-                          label: 'Stereo Out',
-                          selected: bus.outputBusId == null,
-                          onTap: () => vm.mixer.setBusOutput(bus.id, null),
-                        ),
-                        for (final b in buses)
-                          if (b.id != bus.id)
-                            StudioMenuItem(
-                              label: b.name,
-                              selected: bus.outputBusId == b.id,
-                              onTap: () => vm.mixer.setBusOutput(bus.id, b.id),
-                            ),
-                      ], width: 180),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 9,
-                      vertical: 5,
-                    ),
-                    decoration: BoxDecoration(
-                      color: Studio.inset,
-                      borderRadius: BorderRadius.circular(6),
-                      border: Border.all(color: Studio.border),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          dest,
-                          style: const TextStyle(
-                            color: Studio.textSecondary,
-                            fontSize: 11,
+                child: Builder(
+                  builder: (anchor) => GestureDetector(
+                    // The chip's own context: the footer's anchored the menu
+                    // below the whole footer instead of under the chip.
+                    onTap: () =>
+                        showStudioMenu(anchor, menuAnchorBelow(anchor), [
+                          StudioMenuItem(
+                            label: 'Stereo Out',
+                            selected: bus.outputBusId == null,
+                            onTap: () => vm.mixer.setBusOutput(bus.id, null),
                           ),
-                        ),
-                        const SizedBox(width: 4),
-                        const Icon(
-                          Icons.expand_more,
-                          size: 14,
-                          color: Studio.textFaint,
-                        ),
-                      ],
+                          for (final b in buses)
+                            if (b.id != bus.id)
+                              StudioMenuItem(
+                                label: b.name,
+                                selected: bus.outputBusId == b.id,
+                                onTap: () =>
+                                    vm.mixer.setBusOutput(bus.id, b.id),
+                              ),
+                        ], width: 180),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 9,
+                        vertical: 5,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Studio.inset,
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(color: Studio.border),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            dest,
+                            style: const TextStyle(
+                              color: Studio.textSecondary,
+                              fontSize: 11,
+                            ),
+                          ),
+                          const SizedBox(width: 4),
+                          const Icon(
+                            Icons.expand_more,
+                            size: 14,
+                            color: Studio.textFaint,
+                          ),
+                        ],
+                      ),
                     ),
                   ),
                 ),
@@ -618,6 +623,9 @@ class _SendsSection extends StatelessWidget {
     return '—';
   }
 
+  /// Opens the target picker under the chip whose context is [context] —
+  /// callers pass the CHIP's (a Builder below it), not this section's, or the
+  /// menu anchors below the last send row.
   void _menu(
     BuildContext context,
     List<FxBus> options,
@@ -648,35 +656,37 @@ class _SendsSection extends StatelessWidget {
             if (canAdd)
               MouseRegion(
                 cursor: SystemMouseCursors.click,
-                child: GestureDetector(
-                  onTap: () => _menu(context, addable, onAdd),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 7,
-                      vertical: 3,
-                    ),
-                    decoration: BoxDecoration(
-                      color: Studio.surfaceRaised,
-                      borderRadius: BorderRadius.circular(5),
-                      border: Border.all(color: Studio.border),
-                    ),
-                    child: const Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          FIcons.plus,
-                          size: 11,
-                          color: Studio.textSecondary,
-                        ),
-                        SizedBox(width: 3),
-                        Text(
-                          'Send',
-                          style: TextStyle(
+                child: Builder(
+                  builder: (anchor) => GestureDetector(
+                    onTap: () => _menu(anchor, addable, onAdd),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 7,
+                        vertical: 3,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Studio.surfaceRaised,
+                        borderRadius: BorderRadius.circular(5),
+                        border: Border.all(color: Studio.border),
+                      ),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            FIcons.plus,
+                            size: 11,
                             color: Studio.textSecondary,
-                            fontSize: 10,
                           ),
-                        ),
-                      ],
+                          SizedBox(width: 3),
+                          Text(
+                            'Send',
+                            style: TextStyle(
+                              color: Studio.textSecondary,
+                              fontSize: 10,
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   ),
                 ),
@@ -691,31 +701,34 @@ class _SendsSection extends StatelessWidget {
                 width: 66,
                 child: MouseRegion(
                   cursor: SystemMouseCursors.click,
-                  child: GestureDetector(
-                    onTap: () {
-                      final options = [
-                        for (final b in targets)
-                          if (b.id == sends[i].busId || !used.contains(b.id)) b,
-                      ];
-                      _menu(context, options, (id) => onRetarget(i, id));
-                    },
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 6,
-                        vertical: 3,
-                      ),
-                      decoration: BoxDecoration(
-                        color: Studio.inset,
-                        borderRadius: BorderRadius.circular(4),
-                        border: Border.all(color: Studio.border),
-                      ),
-                      child: Text(
-                        _name(sends[i].busId),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: Studio.textSecondary,
-                          fontSize: 10,
+                  child: Builder(
+                    builder: (anchor) => GestureDetector(
+                      onTap: () {
+                        final options = [
+                          for (final b in targets)
+                            if (b.id == sends[i].busId || !used.contains(b.id))
+                              b,
+                        ];
+                        _menu(anchor, options, (id) => onRetarget(i, id));
+                      },
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 6,
+                          vertical: 3,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Studio.inset,
+                          borderRadius: BorderRadius.circular(4),
+                          border: Border.all(color: Studio.border),
+                        ),
+                        child: Text(
+                          _name(sends[i].busId),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: Studio.textSecondary,
+                            fontSize: 10,
+                          ),
                         ),
                       ),
                     ),

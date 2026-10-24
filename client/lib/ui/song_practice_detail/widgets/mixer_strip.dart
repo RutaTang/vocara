@@ -294,7 +294,9 @@ class _BusChannel extends StatelessWidget {
     final outName = _busName(buses, bus.outputBusId);
     return GestureDetector(
       onTap: onSelect,
-      onSecondaryTap: () => showStudioMenu(context, menuAnchorBelow(context), [
+      // At the click, like a context menu: anchoring below this full-height
+      // strip opened it at the bottom of the mixer.
+      onSecondaryTapDown: (d) => showStudioMenu(context, d.globalPosition, [
         StudioMenuItem(label: 'Rename', onTap: onRename),
         StudioMenuItem(label: 'Delete bus', danger: true, onTap: onDelete),
       ], width: 160),

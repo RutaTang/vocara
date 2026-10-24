@@ -230,5 +230,16 @@ void main() {
       expect(vm.fakeMixer.deletedBuses, isEmpty);
       expect(tester.takeException(), isNull);
     });
+
+    testWidgets('the right-click menu opens at the click', (tester) async {
+      // It anchored below the full-height strip, opening at the bottom of the
+      // mixer however high up the strip was clicked.
+      await pumpWithBus(tester);
+      final click = tester.getCenter(find.text('Lead Vox'));
+      await tester.tapAt(click, buttons: kSecondaryButton);
+      await tester.pumpAndSettle();
+      final item = tester.getRect(find.text('Rename'));
+      expect((item.top - click.dy).abs(), lessThan(40));
+    });
   });
 }

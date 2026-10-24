@@ -403,6 +403,44 @@ void main() {
     });
   });
 
+  group('menu placement', () {
+    // The send chips and the bus OUTPUT chip opened their menus from an
+    // ANCESTOR's context, so the menu dropped below the whole sends section /
+    // footer (or at its left edge) instead of under the chip that was clicked.
+    testWidgets('the add-send menu opens under its chip', (tester) async {
+      await pump(
+        tester,
+        track: _vocal(
+          sends: const [
+            TrackSend(busId: 'a'),
+            TrackSend(busId: 'b'),
+          ],
+        ),
+        buses: [_bus('a', 'Reverb'), _bus('b', 'Delay'), _bus('c', 'Room')],
+      );
+      final chip = tester.getRect(find.text('Send'));
+      await tester.tap(find.text('Send'));
+      await tester.pumpAndSettle();
+      final item = tester.getRect(find.text('Room'));
+      expect(item.top - chip.bottom, lessThan(30));
+    });
+
+    testWidgets("a bus's OUTPUT menu opens under its chip", (tester) async {
+      await pump(
+        tester,
+        bus: _bus('a', 'Reverb'),
+        buses: [_bus('a', 'Reverb'), _bus('b', 'Delay')],
+      );
+      final chip = tester.getRect(find.text('Stereo Out'));
+      await tester.tap(find.text('Stereo Out'));
+      await tester.pumpAndSettle();
+      // The menu's first row repeats the chip's label.
+      final item = tester.getRect(find.text('Stereo Out').last);
+      expect((item.left - chip.left).abs(), lessThan(30));
+      expect(item.top - chip.bottom, lessThan(30));
+    });
+  });
+
   group('output routing', () {
     testWidgets('a take can be routed to a bus and back to the master', (
       tester,
