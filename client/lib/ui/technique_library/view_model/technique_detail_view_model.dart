@@ -884,6 +884,12 @@ class TechniqueDetailViewModel extends ChangeNotifier
   /// analysis shows immediately. Returns the staged clip, or null when
   /// nothing was staged (not recording, the take failed, or the draft was
   /// abandoned mid-import).
+  ///
+  /// Not quit-guarded past the stop, deliberately: the clip only lands in the
+  /// in-memory draft, which a quit discards like any unsaved edit, so holding
+  /// the exit for the import would persist nothing. A Save while the take
+  /// records runs this same tail and its commit under the quit gate instead
+  /// (see [save]).
   Future<TechniqueMedia?> stopExampleRecording() async {
     if (!isRecordingExample) return null;
     // Backstop for the in-flight-save invariant (the screen's controls are
@@ -891,7 +897,15 @@ class TechniqueDetailViewModel extends ChangeNotifier
     // airborne commit already snapshotted, silently dropping it when the save
     // lands. The recording keeps running; save() itself aborts it on success.
     if (_saving) return null;
-    final stopped = _recorder.stop();
+    return _stageStoppedExample(_recorder.stop());
+  }
+
+  /// The tail of [stopExampleRecording] after the hardware [stopped]: import
+  /// the take into the draft (see there). Split out so [save] can run it,
+  /// together with its commit, inside one quit-gate bracket.
+  Future<TechniqueMedia?> _stageStoppedExample(
+    MicRecordingStop? stopped,
+  ) async {
     // False = the writer hit an IO error during the take, so the WAV on disk
     // is missing, damaged, or incomplete; handled conservatively below.
     final recordingClean = stopped?.clean ?? true;
@@ -1218,7 +1232,9 @@ class TechniqueDetailViewModel extends ChangeNotifier
   }
 
   /// Saves edited text fields plus the staged media draft. Returns whether it
-  /// persisted.
+  /// persisted. An example take still recording is finalized BY the save —
+  /// stopped, staged and committed with the rest — so Save keeps the take and
+  /// releases the mic.
   Future<bool> save(Technique edited) async {
     // Re-entrancy guard (the UI also disables Save, this is the backstop):
     // a second commit racing the first would run against the same, now-stale
@@ -1231,53 +1247,39 @@ class TechniqueDetailViewModel extends ChangeNotifier
     // snapshot effectiveMedia BEFORE that operation lands — its result would
     // then be silently thrown away when this save clears the draft and the
     // screen leaves edit mode. The UI disables Save for all of these; this is
-    // the invariant backstop for a same-frame click.
-    if (_importingMedia || savingExample || _recorder.isRecording) {
+    // the invariant backstop for a same-frame click. A recording EXAMPLE take
+    // is the exception: this save stops and stages it itself, before taking
+    // that snapshot. (A practice take never reaches an edit session; see
+    // [canEdit].)
+    final finalizeTake = isRecordingExample;
+    if (_importingMedia ||
+        savingExample ||
+        (_recorder.isRecording && !finalizeTake)) {
       return false;
     }
-    // Held across the commit AND its cleanup below, not just the repository
-    // write: until the successful commit's draft is cleared, a Cancel →
-    // discardMediaDraft would delete staged files whose rows just persisted.
+    // Held across the take's import (when there is one), the commit AND its
+    // cleanup below, not just the repository write: until the successful
+    // commit's draft is cleared, a Cancel → discardMediaDraft would delete
+    // staged files whose rows just persisted. Holding it from the import on
+    // also keeps Cancel and the form frozen while the take is staged — the
+    // screen built [edited] from the form before calling, and a Cancel →
+    // Discard landing mid-import used to tear the form down under a save
+    // that then committed anyway.
     _saving = true;
     try {
-      // Fold the staged media into the technique being saved.
-      final media = effectiveMedia;
-      // A successful commit re-reads the aggregate with every media file
-      // resolved through the asset pool, so a clip staged from the sandbox
-      // comes back under a DIFFERENT path. Remember each clip's pre-commit
-      // path by id (ids are stable across the commit) for the remap below.
-      final oldPathById = {for (final m in media) m.id: m.path};
-      // Files of examples staged for removal — delete only after the technique
-      // without them persists.
-      final removedPaths = <String>[
-        for (final m in (_technique?.media ?? const <TechniqueMedia>[]))
-          if (_draftRemoves.contains(m.id)) m.path,
-      ];
-      final ok = await _commit(edited.copyWith(media: media));
-      if (ok) {
-        // A successful save ends the edit session (the screen leaves edit mode):
-        // invalidate a recording start still pending behind its awaits, and stop
-        // an example recording that armed while the commit was in flight — in the
-        // read view a live example mic would have no stop affordance.
-        _recorder.invalidatePendingStart();
-        if (_recorder.isRecording && _recordingExample) {
-          await _recorder.abort();
-          _recordingExample = false;
-          _exampleTempPath = null;
-        }
-        for (final path in removedPaths) {
-          await _mediaService.deleteMedia(path);
-        }
-        // The staged additions are now part of the persisted technique; clear the
-        // draft so their files aren't treated as orphans.
-        _draftAdds.clear();
-        _draftRemoves.clear();
-        _draftLabels.clear();
-        // Selection and the analysis caches key on paths the commit just
-        // rewrote to pool paths; carry them onto the persisted aggregate so
-        // the shown example doesn't silently jump to the first one.
-        _remapMediaAfterCommit(oldPathById);
-      }
+      if (!finalizeTake) return await _commitEdit(edited);
+      // stop() unregisters the armed-window quit finalizer, yet the take is
+      // safe only once the commit below lands: until then it is a temp WAV no
+      // boot recovery scans plus an in-memory draft entry. Hold the quit gate
+      // over the import AND the commit (as the song flow does over its
+      // finalize tail), entered synchronously after the stop so no event-loop
+      // turn separates the two registrations.
+      final stopped = _recorder.stop();
+      var ok = false;
+      await _recorder.guardStopFinalize(() async {
+        await _stageStoppedExample(stopped);
+        ok = await _commitEdit(edited);
+      });
       return ok;
     } finally {
       // Clear BEFORE the notify so the rebuild that shows the outcome also
@@ -1286,6 +1288,51 @@ class TechniqueDetailViewModel extends ChangeNotifier
       _saving = false;
       notifyListeners();
     }
+  }
+
+  /// The commit half of [save] (which holds [_saving] around it): fold the
+  /// draft into [edited], persist it, and on success clean up after the
+  /// draft.
+  Future<bool> _commitEdit(Technique edited) async {
+    // Fold the staged media into the technique being saved.
+    final media = effectiveMedia;
+    // A successful commit re-reads the aggregate with every media file
+    // resolved through the asset pool, so a clip staged from the sandbox
+    // comes back under a DIFFERENT path. Remember each clip's pre-commit
+    // path by id (ids are stable across the commit) for the remap below.
+    final oldPathById = {for (final m in media) m.id: m.path};
+    // Files of examples staged for removal — delete only after the technique
+    // without them persists.
+    final removedPaths = <String>[
+      for (final m in (_technique?.media ?? const <TechniqueMedia>[]))
+        if (_draftRemoves.contains(m.id)) m.path,
+    ];
+    final ok = await _commit(edited.copyWith(media: media));
+    if (ok) {
+      // A successful save ends the edit session (the screen leaves edit mode):
+      // invalidate a recording start still pending behind its awaits, and stop
+      // an example recording that armed while the commit was in flight — in the
+      // read view a live example mic would have no stop affordance.
+      _recorder.invalidatePendingStart();
+      if (_recorder.isRecording && _recordingExample) {
+        await _recorder.abort();
+        _recordingExample = false;
+        _exampleTempPath = null;
+      }
+      for (final path in removedPaths) {
+        await _mediaService.deleteMedia(path);
+      }
+      // The staged additions are now part of the persisted technique; clear the
+      // draft so their files aren't treated as orphans.
+      _draftAdds.clear();
+      _draftRemoves.clear();
+      _draftLabels.clear();
+      // Selection and the analysis caches key on paths the commit just
+      // rewrote to pool paths; carry them onto the persisted aggregate so
+      // the shown example doesn't silently jump to the first one.
+      _remapMediaAfterCommit(oldPathById);
+    }
+    return ok;
   }
 
   /// Deletes this technique and its example files. Returns whether it persisted

@@ -10,6 +10,7 @@ import 'package:vocara/data/services/graph_audio_playback_service.dart'
     show MediaTooLongException;
 import 'package:vocara/data/services/local_storage_service.dart';
 import 'package:vocara/data/services/media_analysis_service.dart';
+import 'package:vocara/data/services/mic_recording_controller.dart';
 import 'package:vocara/data/services/technique_media_service.dart';
 import 'package:vocara/data/sync/sync_hashes.dart';
 import 'package:vocara/domain/models/technique.dart';
@@ -613,6 +614,82 @@ void main() {
     expect(vm.hasMediaDraft, isFalse);
     expect(repo.technique.media.map((m) => m.id), [staged.id]);
   });
+
+  testWidgets('Save while an example take records keeps Cancel and the form '
+      'frozen until the take and the edits are committed', (tester) async {
+    // Regression: Save stopped the take and awaited its import with Cancel
+    // still live. Cancel → Discard in that window tore the form down, and the
+    // resuming Save then dereferenced the disposed controllers (or, with the
+    // dialog still open when the import landed, committed anyway).
+    tester.view.physicalSize = const Size(1200, 2600);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+
+    final repo = _FakeRepo(_technique(body: false));
+    final media = _GatedImportMedia();
+    final vm = TechniqueDetailViewModel(
+      repository: repo,
+      mediaService: media,
+      techniqueId: 't1',
+      recorder: _FakeRecorder(),
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ChangeNotifierProvider.value(
+          value: vm,
+          child: const TechniqueDetailScreen(),
+        ),
+      ),
+    );
+    await tester.pump(); // let the load command resolve
+    await tester.pump();
+    await tester.tap(find.text('Edit').first);
+    await tester.pump();
+    await tester.enterText(find.byType(TextField).first, 'Twang, revised');
+    expect(await vm.startExampleRecording(), isNull);
+    await tester.pump();
+    expect(vm.isRecordingExample, isTrue);
+
+    StudioButton button(String label) =>
+        tester.widget<StudioButton>(find.widgetWithText(StudioButton, label));
+
+    // Save: the take stops and its import parks on the gate.
+    await tester.tap(find.text('Save'));
+    await tester.pump();
+    expect(vm.isRecordingExample, isFalse, reason: 'Save released the mic');
+    expect(vm.savingExample, isTrue, reason: 'the take is still importing');
+    expect(
+      button('Cancel').enabled,
+      isFalse,
+      reason: 'a Discard now would tear the form down under the save',
+    );
+    expect(button('Save').enabled, isFalse);
+    expect(
+      tester
+          .widgetList<TextField>(find.byType(TextField))
+          .every((f) => f.enabled == false),
+      isTrue,
+      reason: 'the edits were already read for this save',
+    );
+    await tester.tap(find.text('Cancel'));
+    await tester.pump();
+    expect(find.text('Discard unsaved changes?'), findsNothing);
+
+    // The import lands (its temp-dir cleanup is real file IO), then the
+    // commit: the take AND the typed edit persist, and the editor closes.
+    media.gate.complete();
+    for (var i = 0; i < 200 && repo.technique.media.isEmpty; i++) {
+      await tester.pump();
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 5)),
+      );
+    }
+    await tester.pump();
+    expect(repo.technique.name, 'Twang, revised');
+    expect(repo.technique.media.map((m) => m.path), ['/sandbox/take.wav']);
+    expect(find.text('Cancel'), findsNothing, reason: 'back in the read view');
+    expect(tester.takeException(), isNull);
+  });
 }
 
 /// Analysis fake that always trips the decode-length cap, as a real
@@ -621,6 +698,58 @@ class _CapTrippingAnalysis extends Fake implements MediaAnalysisService {
   @override
   Future<TechniqueAnalysis?> analyze(String path) async =>
       throw const MediaTooLongException(Duration(minutes: 30));
+}
+
+/// Recorder fake that touches no disk: [start] hands out a path in a folder
+/// that does not exist, and [stop] reports a clean take there. The quit-gate
+/// bracket just runs its work (the quit itself is exercised elsewhere).
+class _FakeRecorder extends Fake implements MicRecordingController {
+  bool recording = false;
+
+  final ValueNotifier<double> _level = ValueNotifier(0);
+
+  static const _path = '/tmp/vocara_no_such_take_dir/take.wav';
+
+  @override
+  ValueNotifier<double> get level => _level;
+
+  @override
+  bool get isRecording => recording;
+
+  @override
+  bool get isStarting => false;
+
+  @override
+  bool get feedingMonitor => false;
+
+  @override
+  Future<MicRecordingStart> start(RecordingPathStrategy destination) async {
+    recording = true;
+    return const MicRecordingStart.started(_path);
+  }
+
+  @override
+  MicRecordingStop? stop() {
+    if (!recording) return null;
+    recording = false;
+    return (path: _path, clean: true, droppedFrames: 0);
+  }
+
+  @override
+  Future<void> guardStopFinalize(Future<void> Function() work) => work();
+
+  @override
+  Future<void> abort() async {
+    recording = false;
+  }
+
+  @override
+  void invalidatePendingStart() {}
+
+  @override
+  void dispose() {
+    _level.dispose();
+  }
 }
 
 /// A media service whose [importMedia] parks on [gate] (a slow copy) and
