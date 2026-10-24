@@ -8,6 +8,7 @@
 //! Gated behind the `device` feature so the DSP core stays dependency-free.
 
 use std::cell::UnsafeCell;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -539,16 +540,25 @@ fn build_stream(
         device.build_output_stream(
             *config, // cpal 0.18 takes the config by value (StreamConfig is Copy)
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                // Forced stereo: interleaved frames = len / 2. process() chunks to max_block.
-                let frames = data.len() / channels;
-                if !rt.try_render(epoch, data, frames) {
-                    // Retired (or a zombie is still inside): silence, and DO NOT sync the
-                    // consumed cursor — nothing was rendered to deliver.
+                // A panic must not unwind into CoreAudio (cpal does not catch it, so the
+                // process aborts): contain it and deliver silence, as the VPIO callbacks
+                // and every FFI entry point do.
+                let rendered = catch_unwind(AssertUnwindSafe(|| {
+                    // Forced stereo: interleaved frames = len / 2. process() chunks to
+                    // max_block.
+                    let frames = data.len() / channels;
+                    if !rt.try_render(epoch, data, frames) {
+                        // Retired (or a zombie is still inside): silence, and DO NOT sync
+                        // the consumed cursor — nothing was rendered to deliver.
+                        data.fill(0.0);
+                        return;
+                    }
+                    // Identity path: the render IS the delivery.
+                    rt.transport().sync_consumed_to_rendered();
+                }));
+                if rendered.is_err() {
                     data.fill(0.0);
-                    return;
                 }
-                // Identity path: the render IS the delivery.
-                rt.transport().sync_consumed_to_rendered();
             },
             err_cb,
             None,
@@ -558,8 +568,11 @@ fn build_stream(
         device.build_output_stream(
             *config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                // Contained like the identity path's callback: a panic here aborted the app.
                 let frames = data.len() / channels;
-                res.process(data, frames);
+                if catch_unwind(AssertUnwindSafe(|| res.process(data, frames))).is_err() {
+                    data.fill(0.0);
+                }
             },
             err_cb,
             None,
@@ -1639,7 +1652,9 @@ fn build_input_stream(
         .build_input_stream(
             *config,
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                cell.try_feed(epoch, data);
+                // Contained like the output callbacks: a panic must not unwind into the
+                // host audio API.
+                let _ = catch_unwind(AssertUnwindSafe(|| cell.try_feed(epoch, data)));
             },
             err_cb,
             None,

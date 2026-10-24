@@ -813,9 +813,14 @@ pub extern "C" fn ve_stop_monitor(e: *mut VeEngine) -> c_int {
 /// pull timer is cancelled before stopCapture, stranding the previous session's
 /// tail (up to a full ring) — which the next session's first pull would render
 /// as live input (the recording ring sweeps its stale frames; same class).
-/// Draining while inactive cannot race the producer: the input callback only
-/// pushes while `cap_active` is set. A start DURING a session keeps the ring —
-/// those frames are live, not stale.
+/// The input callback only pushes while `cap_active` is set, but it samples the
+/// flag once per device buffer: a callback already inside `feed` when
+/// `ve_stop_capture` cleared it can still push the rest of that buffer after
+/// this drain. At most one device buffer (a few ms) of the previous session can
+/// therefore lead the new one, and only on a stop → start inside one buffer
+/// period; memory-safe either way (the ring is SPSC and the drain is the only
+/// consumer here). A start DURING a session keeps the ring — those frames are
+/// live, not stale.
 fn arm_capture(cap_active: &AtomicBool, cap_cons: &mut Consumer<[Smp; CHANNELS]>) {
     if !cap_active.load(Ordering::Acquire) {
         while cap_cons.pop().is_some() {}
