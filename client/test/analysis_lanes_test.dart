@@ -15,6 +15,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vocara/data/services/audio_dsp.dart';
 import 'package:vocara/domain/models/audio_track.dart';
+import 'package:vocara/domain/models/practice_note.dart';
 import 'package:vocara/domain/models/spectrogram.dart';
 import 'package:vocara/domain/models/voice_metrics.dart';
 import 'package:vocara/ui/song_practice_detail/widgets/analysis_lanes.dart';
@@ -216,6 +217,93 @@ void main() {
         timelineMs: 20000,
         analysis: analysis,
       );
+    });
+  });
+
+  // The Notes / Techniques lanes add a range by dragging across them. The
+  // drag used to be held in PIXELS and turned into times only on release, at
+  // whatever viewStart the lane had THEN — so a follow-cursor page flip while
+  // the drag was held committed a range the user never touched — and a
+  // right-to-left drag handed the editors start > end, whose header then
+  // read as a point ("Note at …") for a range.
+  group('a range drag on a marker lane', () {
+    /// A NotesLane whose view start can be moved mid-gesture, as
+    /// follow-cursor does during playback.
+    Future<(ValueNotifier<int>, List<(int, int?)>)> pumpNotes(
+      WidgetTester tester,
+    ) async {
+      final viewStart = ValueNotifier(0);
+      addTearDown(viewStart.dispose);
+      final added = <(int, int?)>[];
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: ValueListenableBuilder<int>(
+              valueListenable: viewStart,
+              builder: (_, vs, _) => NotesLane(
+                track: _track(durationMs: 60000),
+                timelineDurationMs: 10000,
+                viewStartMs: vs,
+                position: position,
+                onAddNote: (s, e) => added.add((s, e)),
+                onEditNote: (PracticeNote _) {},
+              ),
+            ),
+          ),
+        ),
+      );
+      return (viewStart, added);
+    }
+
+    Future<void> drag(
+      WidgetTester tester,
+      Offset from,
+      Offset by, {
+      VoidCallback? beforeRelease,
+    }) async {
+      final g = await tester.startGesture(from);
+      await g.moveBy(by / 2);
+      await tester.pump();
+      await g.moveBy(by / 2);
+      await tester.pump();
+      beforeRelease?.call();
+      await tester.pump();
+      await g.up();
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('a right-to-left drag commits an ordered range', (
+      tester,
+    ) async {
+      final (_, added) = await pumpNotes(tester);
+      final lane = tester.getRect(find.byType(NotesLane));
+      await drag(
+        tester,
+        Offset(lane.right - 100, lane.center.dy),
+        const Offset(-400, 0),
+      );
+      final (start, end) = added.single;
+      expect(end, isNotNull);
+      expect(start, lessThan(end!));
+    });
+
+    testWidgets('a page flip while the drag is held commits the range that '
+        'was dragged over', (tester) async {
+      final (viewStart, added) = await pumpNotes(tester);
+      final lane = tester.getRect(find.byType(NotesLane));
+      final from = Offset(lane.center.dx - 200, lane.center.dy);
+      await drag(tester, from, const Offset(240, 0));
+      final dragged = added.single;
+
+      added.clear();
+      await drag(
+        tester,
+        from,
+        const Offset(240, 0),
+        // The playhead reached the window's end: follow-cursor pages on.
+        beforeRelease: () => viewStart.value = 7800,
+      );
+      expect(added.single, dragged);
     });
   });
 }
