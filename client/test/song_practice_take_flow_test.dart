@@ -81,6 +81,9 @@ class _FakeTechRepo extends Fake implements TechniqueRepository {}
 class _FakeSpectrograms extends Fake implements SpectrogramService {
   final requested = <String>[];
 
+  /// When set, the paired compute parks until it completes.
+  Completer<void>? gate;
+
   @override
   Future<Spectrogram?> computeFromFile(
     String path, {
@@ -110,6 +113,8 @@ class _FakeSpectrograms extends Fake implements SpectrogramService {
     double maxHz = 5000,
   }) async {
     requested.add(path);
+    final g = gate;
+    if (g != null) await g.future;
     return null;
   }
 }
@@ -308,6 +313,15 @@ class _FakeMic extends Fake implements MicRecordingController {
   @override
   void dispose() {}
 }
+
+AudioTrack _backing() => AudioTrack(
+  id: 'acc',
+  kind: AudioTrackKind.accompaniment,
+  displayName: 'Backing',
+  audioFilePath: '/pool/acc.wav',
+  durationMs: 5000,
+  createdAt: DateTime(2026),
+);
 
 SongPractice _seed({
   String? activeVersionId = 'v1',
@@ -515,16 +529,7 @@ void main() {
       () async {
         final engine = _FakeGraphEngine();
         final vm = await pumpVm(
-          seed: _seed(
-            accompaniment: AudioTrack(
-              id: 'acc',
-              kind: AudioTrackKind.accompaniment,
-              displayName: 'Backing',
-              audioFilePath: '/pool/acc.wav',
-              durationMs: 5000,
-              createdAt: DateTime(2026),
-            ),
-          ),
+          seed: _seed(accompaniment: _backing()),
           engine: engine,
           mic: _FakeMic(),
         );
@@ -659,6 +664,24 @@ void main() {
       final clip = vm.selectedTrack!.clipById(vm.selectedClipId!)!;
       expect(clip.audioFilePath, '/pool/import0.wav');
       expect(spectrograms.requested, contains('/pool/import0.wav'));
+    });
+  });
+
+  group('an analysis in flight for a take that is removed', () {
+    test('is discarded, not run again on the dead file', () async {
+      // The load selects the backing lane, which carries no analysis.
+      final vm = await pumpVm(seed: _seed(accompaniment: _backing()));
+      expect(spectrograms.requested, isEmpty);
+      spectrograms.gate = Completer<void>();
+      vm.selectTrack('take1'); // the inspector starts analyzing it
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+      expect(spectrograms.requested, ['/pool/take1.wav']);
+      await vm.deleteTrack('take1');
+      expect(vm.practice!.vocalTracks, isEmpty);
+      expect(spectrograms.gate!.isCompleted, isFalse, reason: 'in flight');
+      spectrograms.gate!.complete();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(spectrograms.requested, ['/pool/take1.wav']);
     });
   });
 }

@@ -1996,7 +1996,8 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       final analyzed = <String, WaveformResult>{};
       for (final c in track.clips) {
         analyzed[c.id] = await _waveforms.analyze(c.audioFilePath);
-        analysis.evictAnalysis(c.audioFilePath);
+        // Same path, possibly new bytes: redo a compute still in flight.
+        analysis.evictAnalysis(c.audioFilePath, recompute: true);
       }
       _updateTrack(
         trackId,

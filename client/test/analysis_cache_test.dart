@@ -436,7 +436,7 @@ void main() {
       await pumpEventQueue();
 
       // The file is replaced on disk and the take re-analyzed.
-      cache.evictAnalysis('c1.wav');
+      cache.evictAnalysis('c1.wav', recompute: true);
       stub.metricsByPath['c1.wav'] = _metrics(20);
       stub.specsByPath['c1.wav'] = _spec(20);
       stub.hold.remove('c1.wav')!.complete();
@@ -465,7 +465,7 @@ void main() {
       final first = cache.ensureSelectedSpectrogram();
       await pumpEventQueue();
 
-      cache.evictAnalysis('c1.wav');
+      cache.evictAnalysis('c1.wav', recompute: true);
       stub.metricsByPath['c1.wav'] = _metrics(10);
       stub.specsByPath['c1.wav'] = _spec(10);
       stub.hold.remove('c1.wav')!.complete();
@@ -474,6 +474,30 @@ void main() {
 
       expect(cache.selectedMetricsUnavailable, isFalse);
       expect(cache.selectedMetrics?.frames, 10);
+      cache.dispose();
+    });
+
+    test('a clip evicted mid-compute because it LEFT the model (delete, '
+        'split, merge) is not analyzed again', () async {
+      // Redoing the discarded work is for re-analyze, where the same path now
+      // holds new bytes. A removed file's redo just re-decoded it into one of
+      // the app-wide analysis slots, for a cache entry nothing reads.
+      final track = _lane([_clip('c1', 0)]);
+      final stub = _StubSpectrograms(
+        metricsByPath: {'c1.wav': _metrics(10)},
+        specsByPath: {'c1.wav': _spec(10)},
+      );
+      stub.hold['c1.wav'] = Completer<void>();
+      final cache = _cache(spectrograms: stub, selectedTrack: () => track);
+
+      final first = cache.ensureSelectedSpectrogram();
+      await pumpEventQueue();
+      cache.evictAnalysis('c1.wav');
+      stub.hold.remove('c1.wav')!.complete();
+      await first;
+      await pumpEventQueue();
+
+      expect(stub.bothCalls, 1);
       cache.dispose();
     });
 

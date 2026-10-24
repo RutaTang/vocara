@@ -188,6 +188,13 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   /// under a key nothing invalidates again, so the take showed the OLD audio's
   /// analysis (or a permanent "unavailable") for the rest of the session.
   final Map<String, int> _pathGeneration = {};
+
+  /// Paths whose latest [evictAnalysis] asked for a stale in-flight compute to
+  /// be REDONE (re-analyze: the same path now holds new bytes). Every other
+  /// eviction is for a file that left the model — a deleted take, a split or
+  /// merged-away clip — where redoing it only re-decoded a dead file into one
+  /// of the app-wide analysis slots.
+  final Set<String> _recomputeOnStale = {};
   int _generationOf(String path) => _pathGeneration[path] ?? 0;
   void _bumpGeneration(String path) =>
       _pathGeneration[path] = _generationOf(path) + 1;
@@ -725,8 +732,11 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
       done.complete();
       notifyListeners();
       // Redo the discarded work against the current file, now that the
-      // in-flight slot is free (a joiner of the dropped compute got nothing).
-      if (stale) unawaited(_ensureMetricsForPath(path));
+      // in-flight slot is free (a joiner of the dropped compute got nothing)
+      // — when the eviction asked for it; see [_recomputeOnStale].
+      if (stale && _recomputeOnStale.contains(path)) {
+        unawaited(_ensureMetricsForPath(path));
+      }
     }
   }
 
@@ -780,7 +790,9 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
       _forgetInFlight(_spectrogramInFlight, path);
       done.complete();
       notifyListeners();
-      if (stale) unawaited(_ensureSpectrogramForPath(path));
+      if (stale && _recomputeOnStale.contains(path)) {
+        unawaited(_ensureSpectrogramForPath(path));
+      }
     }
   }
 
@@ -857,7 +869,9 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
       _forgetInFlight(_metricsInFlight, path);
       done.complete();
       notifyListeners();
-      if (stale) unawaited(_ensureClipAnalysis(path));
+      if (stale && _recomputeOnStale.contains(path)) {
+        unawaited(_ensureClipAnalysis(path));
+      }
     }
     return _clipAnalysis(path);
   }
@@ -1030,13 +1044,20 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
 
   // --- Eviction / refresh ----------------------------------------------------
 
-  /// Drops the cached spectrogram + voice metrics for an audio [path] that no
-  /// longer exists (split/merge/re-analyze replace a take's file).
-  void evictAnalysis(String path) {
+  /// Drops the cached spectrogram + voice metrics for an audio [path] whose
+  /// file left the model (delete/split/merge) or, with [recompute], whose
+  /// CONTENT was replaced under the same path (re-analyze) — only then is a
+  /// compute still in flight for it redone against the new bytes.
+  void evictAnalysis(String path, {bool recompute = false}) {
     // Disown any compute still in flight for this path: it read the file
     // BEFORE this eviction, so its result (or its "unavailable" latch) must
     // not land on top of the replacement. See [_pathGeneration].
     _bumpGeneration(path);
+    if (recompute) {
+      _recomputeOnStale.add(path);
+    } else {
+      _recomputeOnStale.remove(path);
+    }
     // remove fires the eviction hook, which drops the derived memos with it.
     _spectrogramCache.remove(path);
     _metricsCache.remove(path);

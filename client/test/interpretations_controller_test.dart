@@ -53,7 +53,8 @@ class _FakeAnalysis extends Fake implements AnalysisCache {
   void dropLaneState(String trackId) => droppedLanes.add(trackId);
 
   @override
-  void evictAnalysis(String path) => evicted.add(path);
+  void evictAnalysis(String path, {bool recompute = false}) =>
+      evicted.add(path);
 }
 
 class _FakeFiles extends Fake implements AudioFileService {
