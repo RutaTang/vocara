@@ -186,7 +186,7 @@ class _WorkspaceState extends State<_Workspace> {
     List<String> paths,
     Future<void> Function(List<String> audio) action,
   ) async {
-    if (vm.isRecording || vm.isSeparating || vm.busy) {
+    if (vm.takeInFlight || vm.isSeparating || vm.busy) {
       _showToast('Finish the current action before importing.');
       return;
     }

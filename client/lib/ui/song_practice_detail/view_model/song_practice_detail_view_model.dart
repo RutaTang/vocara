@@ -12,6 +12,7 @@ import '../../../data/services/app_settings_service.dart';
 import '../../../data/services/audio_edit_service.dart';
 import '../../../data/services/audio_file_service.dart';
 import '../../../data/services/graph_audio_playback_service.dart';
+import '../../../data/services/mic_recording_controller.dart';
 import '../../../data/services/monitor_service.dart';
 import '../../../data/services/playback_engine.dart';
 import '../../../data/services/playback_engine_factory.dart';
@@ -124,6 +125,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     RecordingFinalizer? finalizer,
     Future<String?> Function(String suggestedName)? saveLocationPicker,
     @visibleForTesting Duration? Function(String path)? probeDuration,
+    @visibleForTesting MicRecordingController? mic,
   }) : _repository = repository,
        _techniqueRepository = techniqueRepository,
        _audioFiles = audioFileService,
@@ -225,6 +227,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       save: _save,
       toast: _toast,
       friendlyError: _friendlyError,
+      mic: mic,
     );
     versions = InterpretationsController(
       engine: _playback,
@@ -946,10 +949,11 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// Imports [sourcePath] as the accompaniment (replacing any existing one).
   Future<void> addAccompaniment(String sourcePath) async {
     if (_practice == null) return;
-    // No concurrent structural edit. isRecording is part of EVERY structural
+    // No concurrent structural edit. takeInFlight is part of EVERY structural
     // pre-guard: the gate must be free when the stop finalize needs it, or the
-    // finalize would be rejected and the take stranded until the boot sweep.
-    if (busy || isSeparating || isRecording) return;
+    // finalize waits behind the edit — and the edit may delete or move the
+    // very lane the take is landing on.
+    if (busy || isSeparating || takeInFlight) return;
     if (!_admitImportDuration(sourcePath)) return;
     await _busyGate.run(() async {
       await _withImportedAudio(sourcePath, (dest) async {
@@ -999,7 +1003,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// existing one).
   Future<void> addReference(String sourcePath) async {
     if (_practice == null) return;
-    if (busy || isSeparating || isRecording) {
+    if (busy || isSeparating || takeInFlight) {
       return;
     } // no concurrent structural edit
     if (!_admitImportDuration(sourcePath)) return;
@@ -1041,7 +1045,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   Future<void> addVocalTake(String sourcePath) async {
     final practice = _practice;
     if (practice == null) return;
-    if (busy || isSeparating || isRecording) {
+    if (busy || isSeparating || takeInFlight) {
       return;
     } // no concurrent structural edit
     if (!_admitImportDuration(sourcePath)) return;
@@ -1066,7 +1070,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     if (practice == null) return;
     final target = _trackById(trackId);
     if (target == null || target.kind != AudioTrackKind.vocal) return;
-    if (busy || isSeparating || isRecording) {
+    if (busy || isSeparating || takeInFlight) {
       return;
     } // no concurrent structural edit
     if (!_admitImportDuration(sourcePath)) return;
@@ -1113,7 +1117,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       _toast('Source separation is not available in this version.');
       return;
     }
-    if (isRecording) {
+    if (takeInFlight) {
       _toast('Stop recording to separate the backing.');
       return;
     }
@@ -1433,7 +1437,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   Future<void> deleteTrack(String trackId) async {
     final practice = _practice;
     if (practice == null) return;
-    if (busy || isSeparating || isRecording) {
+    if (busy || isSeparating || takeInFlight) {
       return;
     } // no concurrent structural edit
     await _busyGate.run(() async {
@@ -1479,7 +1483,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     final track = _trackById(trackId);
     final clip = track?.clipById(clipId);
     if (track == null || clip == null) return;
-    if (busy || isSeparating || isRecording) {
+    if (busy || isSeparating || takeInFlight) {
       return;
     } // no concurrent structural edit
     await _busyGate.run(() async {
@@ -1599,7 +1603,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   Future<void> duplicateTrack(String trackId) async {
     final src = _trackById(trackId);
     if (_practice == null || src == null || src.isBacking) return;
-    if (busy || isSeparating || isRecording) {
+    if (busy || isSeparating || takeInFlight) {
       return;
     } // no concurrent structural edit
     await _busyGate.run(() async {
@@ -1682,7 +1686,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     final practice = _practice;
     final src = _trackById(trackId);
     if (practice == null || src == null || src.isBacking) return;
-    if (busy || isSeparating || isRecording) {
+    if (busy || isSeparating || takeInFlight) {
       return;
     } // no concurrent structural edit
     // Byte-splitting is a ONE-FILE operation: a multi-clip lane has several
@@ -1821,7 +1825,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   Future<void> mergeTrackDown(String trackId) async {
     final practice = _practice;
     if (practice == null) return;
-    if (busy || isSeparating || isRecording) {
+    if (busy || isSeparating || takeInFlight) {
       return;
     } // no concurrent structural edit
     // Pick the partner from the VISIBLE (active-interpretation) order — the same list the
@@ -1955,7 +1959,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   Future<void> reanalyzeTrack(String trackId) async {
     final track = _trackById(trackId);
     if (track == null) return;
-    if (busy || isSeparating || isRecording) {
+    if (busy || isSeparating || takeInFlight) {
       return;
     } // no concurrent structural edit
     await _busyGate.run(() async {
@@ -2307,9 +2311,17 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   bool get liveMonitor => analysis.liveMonitor;
 
   // Cross-cutting recording guard: read by the transport bar, the screen's
-  // PopScope/back path, the lyrics import, and the separation/interpretation
-  // guards above — a genuinely VM-level condition, not a mixer/playback one.
+  // PopScope/back path, the lyrics import and the interpretation guards — a
+  // genuinely VM-level condition, not a mixer/playback one.
   bool get isRecording => recording.isRecording;
+
+  /// A take owns the model's structure from REC's arm until its finalize has
+  /// committed. [isRecording] alone misses both ends: the arm window
+  /// (permission, take setup, the mic's ready handshake) and the stop window
+  /// (pause, head trim, analysis — seconds for a long take), during both of
+  /// which the busy gate is free. Every structural pre-guard refuses it.
+  bool get takeInFlight =>
+      recording.isRecording || recording.isStartingTake || recording.isStopping;
 
   // Cross-cutting stop: invoked from both the transport bar and the screen's
   // back/PopScope path (finalize the in-flight take before leaving the route).

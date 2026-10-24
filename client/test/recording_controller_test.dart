@@ -385,6 +385,59 @@ void main() {
       expect(RecordingFinalizer.instance.hasActive, isFalse);
     },
   );
+
+  test('a finalize waiting on the busy gate still commits after the screen '
+      'is disposed', () async {
+    // Stop, then Back: the route stops waiting once isRecording reads false.
+    // The finalize used to give up on its next retry if the gate was held,
+    // stranding the take until boot recovery re-adopted it at 0:00.
+    final gate = BusyGate(onError: (_) {});
+    var saves = 0;
+    final c = RecordingController(
+      graphEngine: _FakeGraph.new,
+      playback: playback,
+      mixer: mixer,
+      analysis: _FakeAnalysis(),
+      busyGate: gate,
+      audioFiles: _FakeFiles(),
+      waveforms: _FakeWaveforms(),
+      appSettings: _FakeSettings(),
+      practiceId: 'p1',
+      finalizer: RecordingFinalizer.instance,
+      practice: () => practice,
+      selectedTrackId: () => 't1',
+      trackById: (id) =>
+          practice.vocalTracks.where((t) => t.id == id).firstOrNull,
+      updateTrack: (id, fn) {},
+      appendVocal: ({required path, required analysis, required startMs}) =>
+          't1',
+      createEmptyVocalTake: () async {},
+      selectRecordedClip: (t, c) {},
+      save: () async {
+        saves++;
+        return true;
+      },
+      toast: (_) {},
+      friendlyError: (e) => '$e',
+      mic: _FakeMic(),
+    );
+    final start = c.startRecording();
+    await pumpUntil(() => mixer.gates.length == 1);
+    mixer.gates.single.complete();
+    await start;
+    expect(c.isRecording, isTrue);
+
+    final hold = Completer<void>();
+    final held = gate.run(() => hold.future);
+    final stop = c.stopRecording();
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    c.dispose();
+    await Future<void>.delayed(const Duration(milliseconds: 120));
+    hold.complete();
+    await held;
+    await stop;
+    expect(saves, 1, reason: 'the take never committed');
+  });
 }
 
 /// Spin the event loop until [ready] (bounded).

@@ -1,12 +1,15 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show ValueNotifier;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vocara/data/repositories/song_practice_repository.dart';
 import 'package:vocara/data/repositories/technique_repository.dart';
 import 'package:vocara/data/services/app_settings_service.dart';
 import 'package:vocara/data/services/audio_edit_service.dart';
 import 'package:vocara/data/services/audio_file_service.dart';
+import 'package:vocara/data/services/graph_audio_playback_service.dart';
 import 'package:vocara/data/services/local_storage_service.dart';
+import 'package:vocara/data/services/mic_recording_controller.dart';
 import 'package:vocara/data/services/playback_engine.dart';
 import 'package:vocara/data/services/source_separation_service.dart';
 import 'package:vocara/data/services/spectrogram_service.dart';
@@ -55,6 +58,13 @@ class _FakeTechRepo extends Fake implements TechniqueRepository {}
 
 class _FakeFiles extends Fake implements AudioFileService {
   int imports = 0;
+  int recordings = 0;
+
+  @override
+  Future<String> newRecordingPath({
+    required String practiceId,
+    String extension = 'wav',
+  }) async => '/audio/p1/rec${recordings++}.wav';
 
   @override
   Future<String> importAudio({
@@ -88,6 +98,19 @@ class _FakeEdits extends Fake implements AudioEditService {
     required String practiceId,
     required String path,
   }) async => path;
+
+  @override
+  Future<({String firstPath, String secondPath})> splitWav({
+    required String practiceId,
+    required String sourcePath,
+    required int splitFileMs,
+  }) async => (firstPath: '/edit/first.wav', secondPath: '/edit/second.wav');
+
+  @override
+  Future<String> duplicate({
+    required String practiceId,
+    required String sourcePath,
+  }) async => '/edit/dup.wav';
 }
 
 class _FakeEngine extends Fake implements PlaybackEngine {
@@ -128,6 +151,99 @@ class _FakeEngine extends Fake implements PlaybackEngine {
   Future<void> dispose() async {}
 }
 
+/// The native engine as far as recording and the settings attach touch it,
+/// with every source's last pushed mute remembered.
+class _FakeGraphEngine extends _FakeEngine
+    implements GraphAudioPlaybackService {
+  final Map<String, bool> muted = {};
+
+  @override
+  Future<void> sync(List<TrackPlayback> tracks, List<BusPlayback> buses) async {
+    for (final t in tracks) {
+      muted[t.id] = t.muted;
+    }
+  }
+
+  @override
+  Future<void> setVolume(
+    String id,
+    double volume, {
+    bool muted = false,
+  }) async => this.muted[id] = muted;
+
+  @override
+  bool get isAvailable => true;
+  @override
+  bool setOutputDevice(String uid) => true;
+  @override
+  bool setInputDevice(String uid) => true;
+  @override
+  void setMonitorReverb(double room, double damping, double wet) {}
+  @override
+  void setInputGain(double gain) {}
+  @override
+  void setMonitorGain(double gain) {}
+  @override
+  String actualOutputDevice() => '';
+  @override
+  String currentOutputDevice() => '';
+  @override
+  int pollDeviceEvents(int mask) => 0;
+  @override
+  int streamXruns() => 0;
+  @override
+  int inputFramesReceived() => 0;
+  @override
+  int recordWrittenFrames() => 0;
+  @override
+  double recordLatencyMs() => 0;
+}
+
+/// Recorder double: [start] runs the destination's create() (the VM's take
+/// setup) and, when [ready] is set, parks there — the mic's ready handshake,
+/// up to two seconds on a cold open — before arming.
+class _FakeMic extends Fake implements MicRecordingController {
+  bool _recording = false;
+  bool _starting = false;
+  String? _path;
+  Completer<void>? ready;
+
+  @override
+  final ValueNotifier<double> level = ValueNotifier(0);
+  @override
+  bool get isRecording => _recording;
+  @override
+  bool get isStarting => _starting;
+
+  @override
+  Future<MicRecordingStart> start(RecordingPathStrategy destination) async {
+    _starting = true;
+    try {
+      _path = await destination.create();
+      final r = ready;
+      if (r != null) await r.future;
+      _recording = true;
+      return MicRecordingStart.started(_path!);
+    } finally {
+      _starting = false;
+    }
+  }
+
+  @override
+  MicRecordingStop? stop() {
+    if (!_recording) return null;
+    _recording = false;
+    return (path: _path!, clean: true, droppedFrames: 0);
+  }
+
+  @override
+  Future<void> guardStopFinalize(Future<void> Function() work) => work();
+  @override
+  void invalidatePendingStart() {}
+  @override
+  void dispose() {}
+}
+
 SongPractice _seed({
   String? activeVersionId = 'v1',
   AudioTrack? accompaniment,
@@ -165,6 +281,7 @@ void main() {
   Future<SongPracticeDetailViewModel> pumpVm({
     SongPractice? seed,
     PlaybackEngine? engine,
+    MicRecordingController? mic,
   }) async {
     repo = _FakeRepo(seed ?? _seed());
     waveforms = _FakeWaveforms();
@@ -183,6 +300,7 @@ void main() {
       practiceId: 'p1',
       playbackEngine: engine ?? _FakeEngine(),
       editService: _FakeEdits(),
+      mic: mic,
     );
     addTearDown(vm.dispose);
     for (var i = 0; i < 400 && vm.practice == null; i++) {
@@ -229,6 +347,58 @@ void main() {
       final added = vm.practice!.vocalTracks.last;
       expect(added.clips.single.audioFilePath, '/audio/p1/import0.wav');
       expect(vm.versions.vocalTakes.map((t) => t.id), contains(added.id));
+    });
+  });
+
+  group('the take window guards every structural edit', () {
+    test('Stop → an edit inside the stop window is refused and the take '
+        'lands on its lane', () async {
+      final mic = _FakeMic();
+      final vm = await pumpVm(engine: _FakeGraphEngine(), mic: mic);
+      vm.selectTrack('take1'); // arm the existing take
+      await vm.recording.startRecording();
+      expect(vm.isRecording, isTrue);
+      vm.position.value = const Duration(milliseconds: 500);
+
+      final stop = vm.stopRecording();
+      // isRecording already reads false and the gate is free, but the take is
+      // not in the model yet.
+      expect(vm.isRecording, isFalse);
+      expect(vm.recording.isStopping, isTrue);
+      final edits = [
+        vm.deleteTrack('take1'),
+        vm.duplicateTrack('take1'),
+        vm.splitTrackAtPlayhead('take1'),
+        vm.reanalyzeTrack('take1'),
+        vm.addVocalTake('/src/drop.wav'),
+        vm.addClipToTake('take1', '/src/drop.wav'),
+      ];
+      expect(vm.busy, isFalse, reason: 'an edit took the gate mid-stop');
+      await Future.wait(edits);
+      await stop;
+
+      final take1 = repo.stored.vocalTracks.singleWhere((t) => t.id == 'take1');
+      expect(take1.clips, hasLength(2), reason: 'the take punched into take1');
+      expect(repo.stored.vocalTracks, hasLength(1));
+    });
+
+    test('REC → an edit inside the arm window is refused', () async {
+      final mic = _FakeMic()..ready = Completer<void>();
+      final vm = await pumpVm(engine: _FakeGraphEngine(), mic: mic);
+      vm.selectTrack('take1');
+      final start = vm.recording.startRecording();
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(vm.recording.isStartingTake, isTrue);
+      await vm.deleteTrack('take1');
+      expect(vm.practice!.vocalTracks.map((t) => t.id), ['take1']);
+      mic.ready!.complete();
+      await start;
+      expect(vm.recording.recordTargetId, 'take1');
+      await vm.stopRecording();
+      expect(
+        repo.stored.vocalTracks.singleWhere((t) => t.id == 'take1').clips,
+        hasLength(2),
+      );
     });
   });
 }

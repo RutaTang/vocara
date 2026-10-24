@@ -60,7 +60,7 @@ class RecordingController extends ChangeNotifier {
     required Future<bool> Function() save,
     required void Function(String) toast,
     required String Function(Object) friendlyError,
-    @visibleForTesting MicRecordingController? mic,
+    MicRecordingController? mic,
   }) : _graphEngine = graphEngine,
        _micOverride = mic,
        _playback = playback,
@@ -152,7 +152,8 @@ class RecordingController extends ChangeNotifier {
   /// Test seam: a fake recorder so controller-level races (the take ABA, the
   /// stop-vs-continuation windows) are testable without the platform channels
   /// the real controller's permission/engine path needs. Mirrors the technique
-  /// VM's recorder override.
+  /// VM's recorder override. Not annotated here: the view model passes its own
+  /// (test-only) override through, so the screen-level flows are testable too.
   final MicRecordingController? _micOverride;
 
   late final MicRecordingController _mic =
@@ -221,6 +222,12 @@ class RecordingController extends ChangeNotifier {
   /// without this a fast Stop→REC would arm take #2 interleaved with take #1's
   /// finalize. Checked by [startRecording]'s guard.
   bool _stopping = false;
+
+  /// True from Stop until the stopped take's finalize has committed (see
+  /// [_stopping]) — the window where [isRecording] already reads false but the
+  /// take is not in the model yet. The host's structural edits refuse it like
+  /// a take in flight: one holding the busy gate here makes the finalize wait.
+  bool get isStopping => _stopping;
 
   /// Live input level (0..1) while recording. Drives the meter only.
   /// NOTE: currently no widget on this screen reads it (kept for parity;
@@ -499,7 +506,10 @@ class RecordingController extends ChangeNotifier {
     final targetId = _recordingTargetId;
     _recordingTargetId = null;
     _recPeaks.clear();
-    recordingPeaks.value = const [];
+    // The screen can be left during the awaits above (Stop, then Back: the
+    // route no longer waits once isRecording is false). The finalize below
+    // still has to run, so don't touch the disposed notifier on the way.
+    if (!_disposed) recordingPeaks.value = const [];
     notifyListeners();
 
     Future<void> finalize() async {
@@ -571,11 +581,13 @@ class RecordingController extends ChangeNotifier {
     }
 
     // The gate is normally free here — every structural action pre-guards on
-    // isRecording — but the finalize must NEVER be dropped (the take would be
-    // stranded on disk until the next boot sweep), so on the off-chance an
-    // action still holds the gate, wait it out and retry.
+    // the whole take window (arm → recording → this stop) — but the finalize
+    // must NEVER be dropped (the take would be stranded on disk until the next
+    // boot, which re-adopts it at 0:00 without its lane or placement), so on
+    // the off-chance an action still holds the gate, wait it out and retry.
+    // Even once the screen is disposed: the host's save still writes after
+    // dispose (it only skips the UI resync), and every gate holder finishes.
     while (!await _busyGate.run(finalize)) {
-      if (_disposed) return;
       await Future<void>.delayed(const Duration(milliseconds: 50));
     }
   }
