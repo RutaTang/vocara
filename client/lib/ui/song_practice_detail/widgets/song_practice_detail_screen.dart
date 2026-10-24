@@ -21,6 +21,7 @@ import '../../core/themes/studio.dart';
 import '../../core/widgets/confirm_dialog.dart';
 import '../../core/widgets/studio_button.dart';
 import '../../core/widgets/studio_controls.dart';
+import '../../core/widgets/tick_boundary.dart';
 import '../../core/widgets/waveform_painter.dart';
 import '../view_model/song_practice_detail_view_model.dart';
 import 'analysis_lanes.dart';
@@ -682,6 +683,15 @@ class _Center extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // The center pane is a relayout and repaint boundary of its own (it fills
+    // its Expanded either way): rebuilding anything under [_pane]'s
+    // LayoutBuilder — a lane's live take, the master envelope — re-lays it
+    // out, and without the boundary that layout climbed to the Scaffold and
+    // repainted the side panels, the transport bar and the dock with it.
+    return SizedBox.expand(child: RepaintBoundary(child: _pane()));
+  }
+
+  Widget _pane() {
     final backing = vm.mixer.activeBacking;
     final ref = vm.mixer.playReference;
     // The visible timeline span (zoomable down to a 1-second window) and the
@@ -1244,46 +1254,50 @@ class _MasterRow extends StatelessWidget {
                       ),
                     ),
                     // The composite mix envelope. Rebuilt on every recording tick
-                    // (via recordingPeaks) so it renders live while recording.
+                    // (via recordingPeaks) so it renders live while recording —
+                    // inside a TickBoundary, so that 20 Hz rebuild stays here.
                     Positioned.fill(
                       child: IgnorePointer(
                         child: Padding(
                           padding: const EdgeInsets.symmetric(vertical: 10),
-                          child: ValueListenableBuilder<List<double>>(
-                            valueListenable: vm.recording.recordingPeaks,
-                            builder: (context, _, _) {
-                              // The master envelope spans the whole extent — show
-                              // only the visible [viewStart, viewStart+span] slice,
-                              // anchored through the shared helper so it lines up
-                              // with the zoomed lanes, ruler and playhead above.
-                              final all = vm.mixer.masterWaveformPeaks;
-                              final ext = vm.practice?.timelineDurationMs ?? 0;
-                              var peaks = all;
-                              var indexOffset = 0.0;
-                              double? indexSpan;
-                              if (ext > 0 && tl < ext && all.isNotEmpty) {
-                                final cut = visiblePeakSlice(
-                                  all,
-                                  spanStartMs: 0,
-                                  spanDurMs: ext,
-                                  visibleStartMs: viewStart,
-                                  visibleEndMs: viewStart + tl > ext
-                                      ? ext
-                                      : viewStart + tl,
+                          child: TickBoundary(
+                            child: ValueListenableBuilder<List<double>>(
+                              valueListenable: vm.recording.recordingPeaks,
+                              builder: (context, _, _) {
+                                // The master envelope spans the whole extent — show
+                                // only the visible [viewStart, viewStart+span] slice,
+                                // anchored through the shared helper so it lines up
+                                // with the zoomed lanes, ruler and playhead above.
+                                final all = vm.mixer.masterWaveformPeaks;
+                                final ext =
+                                    vm.practice?.timelineDurationMs ?? 0;
+                                var peaks = all;
+                                var indexOffset = 0.0;
+                                double? indexSpan;
+                                if (ext > 0 && tl < ext && all.isNotEmpty) {
+                                  final cut = visiblePeakSlice(
+                                    all,
+                                    spanStartMs: 0,
+                                    spanDurMs: ext,
+                                    visibleStartMs: viewStart,
+                                    visibleEndMs: viewStart + tl > ext
+                                        ? ext
+                                        : viewStart + tl,
+                                  );
+                                  peaks = cut.peaks;
+                                  indexOffset = cut.indexOffset;
+                                  indexSpan = cut.indexSpan;
+                                }
+                                return CustomPaint(
+                                  painter: WaveformPainter(
+                                    peaks: peaks,
+                                    color: Studio.accent,
+                                    indexOffset: indexOffset,
+                                    indexSpan: indexSpan,
+                                  ),
                                 );
-                                peaks = cut.peaks;
-                                indexOffset = cut.indexOffset;
-                                indexSpan = cut.indexSpan;
-                              }
-                              return CustomPaint(
-                                painter: WaveformPainter(
-                                  peaks: peaks,
-                                  color: Studio.accent,
-                                  indexOffset: indexOffset,
-                                  indexSpan: indexSpan,
-                                ),
-                              );
-                            },
+                              },
+                            ),
                           ),
                         ),
                       ),
@@ -1542,37 +1556,40 @@ class _BusRow extends StatelessWidget {
                       child: IgnorePointer(
                         child: Padding(
                           padding: const EdgeInsets.symmetric(vertical: 10),
-                          child: ValueListenableBuilder<List<double>>(
-                            valueListenable: vm.recording.recordingPeaks,
-                            builder: (context, _, _) {
-                              final all = vm.mixer.busWaveformPeaks(bus.id);
-                              final ext = vm.practice?.timelineDurationMs ?? 0;
-                              var peaks = all;
-                              var indexOffset = 0.0;
-                              double? indexSpan;
-                              if (ext > 0 && tl < ext && all.isNotEmpty) {
-                                final cut = visiblePeakSlice(
-                                  all,
-                                  spanStartMs: 0,
-                                  spanDurMs: ext,
-                                  visibleStartMs: viewStart,
-                                  visibleEndMs: viewStart + tl > ext
-                                      ? ext
-                                      : viewStart + tl,
+                          child: TickBoundary(
+                            child: ValueListenableBuilder<List<double>>(
+                              valueListenable: vm.recording.recordingPeaks,
+                              builder: (context, _, _) {
+                                final all = vm.mixer.busWaveformPeaks(bus.id);
+                                final ext =
+                                    vm.practice?.timelineDurationMs ?? 0;
+                                var peaks = all;
+                                var indexOffset = 0.0;
+                                double? indexSpan;
+                                if (ext > 0 && tl < ext && all.isNotEmpty) {
+                                  final cut = visiblePeakSlice(
+                                    all,
+                                    spanStartMs: 0,
+                                    spanDurMs: ext,
+                                    visibleStartMs: viewStart,
+                                    visibleEndMs: viewStart + tl > ext
+                                        ? ext
+                                        : viewStart + tl,
+                                  );
+                                  peaks = cut.peaks;
+                                  indexOffset = cut.indexOffset;
+                                  indexSpan = cut.indexSpan;
+                                }
+                                return CustomPaint(
+                                  painter: WaveformPainter(
+                                    peaks: peaks,
+                                    color: accent,
+                                    indexOffset: indexOffset,
+                                    indexSpan: indexSpan,
+                                  ),
                                 );
-                                peaks = cut.peaks;
-                                indexOffset = cut.indexOffset;
-                                indexSpan = cut.indexSpan;
-                              }
-                              return CustomPaint(
-                                painter: WaveformPainter(
-                                  peaks: peaks,
-                                  color: accent,
-                                  indexOffset: indexOffset,
-                                  indexSpan: indexSpan,
-                                ),
-                              );
-                            },
+                              },
+                            ),
                           ),
                         ),
                       ),

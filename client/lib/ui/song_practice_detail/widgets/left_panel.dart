@@ -76,8 +76,13 @@ class _LeftPanelState extends State<LeftPanel> {
       });
     }
 
-    if (!vm.inspectorOpen) return _Rail(onTap: vm.toggleInspectorPanel);
-    return _Body(vm: vm);
+    // Its own layer: whatever else on the screen repaints (the dock's live
+    // readouts, a lane's take), the inspector's strips and faders don't.
+    return RepaintBoundary(
+      child: vm.inspectorOpen
+          ? _Body(vm: vm)
+          : _Rail(onTap: vm.toggleInspectorPanel),
+    );
   }
 }
 

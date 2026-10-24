@@ -341,6 +341,99 @@ void main() {
     expect(r.paragraphs, lessThanOrEqualTo(10));
   });
 
+  testWidgets('the Pitch and Timbre tabs repaint only their playheads per '
+      'tick', (tester) async {
+    final vm = await _pumpScreen(tester);
+    vm.selectTrack('t0');
+    vm.analysis.showDockTab(DockTab.pitch);
+    await tester.pump(const Duration(milliseconds: 16));
+    await tester.pump(const Duration(milliseconds: 16));
+    expect(vm.selectedMetrics, isNotNull);
+    // The pitch header's note readout used to rebuild every tick under the
+    // tab's LayoutBuilder, re-laying-out (so repainting) the whole screen.
+    var r = await _paintedPerTicks(tester, vm.position);
+    expect(r.painters.keys, everyElement(PlayheadPainter));
+
+    // The metrics bar's chips are content-sized, so they re-lay-out on each
+    // tick; the timbre curves (every frame of the take) must not repaint.
+    vm.analysis.showDockTab(DockTab.timbre);
+    await tester.pump(const Duration(milliseconds: 16));
+    r = await _paintedPerTicks(tester, vm.position);
+    expect(r.painters.keys, everyElement(PlayheadPainter));
+  });
+
+  testWidgets('an expanded take repaints its playheads and the power '
+      'spectrum per tick, nothing else', (tester) async {
+    final vm = await _pumpScreen(tester);
+    vm.analysis.toggleTrackExpanded('t1');
+    vm.analysis.toggleLane('t1', AnalysisLane.loudness);
+    vm.analysis.toggleLane('t1', AnalysisLane.power);
+    await tester.pump(const Duration(milliseconds: 16));
+    await tester.pump(const Duration(milliseconds: 16));
+    expect(vm.analysis.metricsFor('t1'), isNotNull);
+    expect(vm.analysis.spectrogramFor('t1'), isNotNull);
+
+    final r = await _paintedPerTicks(tester, vm.position);
+    expect(
+      r.painters.keys.map((t) => '$t'),
+      everyElement(isIn(['PlayheadPainter', '_PlayheadPowerPainter'])),
+    );
+    expect(
+      r.painters.keys.map((t) => '$t'),
+      contains('_PlayheadPowerPainter'),
+      reason: 'the power spectrum follows the playhead',
+    );
+  });
+
+  testWidgets('a recording tick repaints the master envelope and the '
+      'playheads, nothing else', (tester) async {
+    // Few lanes, so the master lane is on screen.
+    final vm = await _pumpScreen(tester, lanes: 2);
+    final peaks = <double>[];
+    void tick(int i) {
+      peaks.add(0.5);
+      vm.recording.recordingPeaks.value = List.unmodifiable(peaks);
+      vm.position.value = Duration(milliseconds: 20100 + i * 50);
+    }
+
+    tick(0);
+    await tester.pump(const Duration(milliseconds: 50));
+    final painters = <Type, int>{};
+    debugOnProfilePaint = (ro) {
+      if (ro is RenderCustomPaint && ro.painter != null) {
+        painters.update(
+          ro.painter!.runtimeType,
+          (n) => n + 1,
+          ifAbsent: () => 1,
+        );
+      }
+    };
+    try {
+      for (var i = 1; i <= 10; i++) {
+        tick(i);
+        await tester.pump(const Duration(milliseconds: 50));
+      }
+    } finally {
+      debugOnProfilePaint = null;
+    }
+    expect(
+      painters.keys,
+      everyElement(isIn([PlayheadPainter, WaveformPainter])),
+    );
+    // One master envelope per tick: the lanes' own waveforms stay put.
+    expect(painters[WaveformPainter], 10);
+  });
+
+  testWidgets('the transport clock turning over a second repaints only the '
+      'transport bar', (tester) async {
+    final vm = await _pumpScreen(tester);
+    final r = await _paintedPerTicks(tester, vm.position, startMs: 19950);
+    expect(
+      r.painters.keys.map((t) => '$t'),
+      everyElement(isIn(['PlayheadPainter', '_ZoomSliderPainter'])),
+    );
+  });
+
   testWidgets('every playhead sits on its own layer', (tester) async {
     final vm = await _pumpScreen(tester);
     vm.selectTrack('t0');

@@ -8,6 +8,7 @@ import '../../../domain/models/audio_track.dart';
 import '../../../domain/models/fx_bus.dart';
 import '../../core/themes/studio.dart';
 import '../../core/widgets/studio_controls.dart';
+import '../../core/widgets/tick_boundary.dart';
 import '../view_model/song_practice_detail_view_model.dart';
 import 'track_context_menu.dart';
 
@@ -566,6 +567,9 @@ class _MicInputChannel extends StatelessWidget {
               ),
               const SizedBox(height: 8),
               // Shared input level meter (monitor + record are the same mic).
+              // It moves at 20 Hz while the mic is live; the TickBoundary (in
+              // the fixed-size box) keeps that rebuild from re-laying-out the
+              // strip column's LayoutBuilder and the screen around it.
               ClipRRect(
                 borderRadius: BorderRadius.circular(3),
                 child: SizedBox(
@@ -573,14 +577,16 @@ class _MicInputChannel extends StatelessWidget {
                   width: double.infinity,
                   child: ColoredBox(
                     color: Studio.inset,
-                    child: Align(
-                      alignment: Alignment.centerLeft,
-                      child: ValueListenableBuilder<double>(
-                        valueListenable: vm.recording.inputLevel,
-                        builder: (_, v, _) => FractionallySizedBox(
-                          widthFactor: v.clamp(0.0, 1.0),
-                          heightFactor: 1.0,
-                          child: const ColoredBox(color: Studio.record),
+                    child: TickBoundary(
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: ValueListenableBuilder<double>(
+                          valueListenable: vm.recording.inputLevel,
+                          builder: (_, v, _) => FractionallySizedBox(
+                            widthFactor: v.clamp(0.0, 1.0),
+                            heightFactor: 1.0,
+                            child: const ColoredBox(color: Studio.record),
+                          ),
                         ),
                       ),
                     ),

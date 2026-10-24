@@ -317,37 +317,71 @@ class PowerLane extends StatelessWidget {
     } else {
       body = ColoredBox(
         color: Studio.inset,
-        child: ValueListenableBuilder<Duration>(
-          valueListenable: position,
-          builder: (context, pos, _) {
-            final ms = pos.inMilliseconds - track.startMs;
-            // Outside the take nothing is playing: paint an empty spectrum
-            // rather than the take's first/last frame (a stale edge).
-            final inSpan = ms >= 0 && ms <= track.durationMs;
-            final seconds = ms / 1000.0;
-            final m = metrics;
-            var formants = const <double>[];
-            if (inSpan && m != null && m.frames > 0) {
-              final fr = m.frameAtTime(seconds);
-              formants = [m.f1[fr], m.f2[fr], m.f3[fr]];
-            }
-            return CustomPaint(
-              // Childless CustomPaint defaults to Size.zero and collapses in the
-              // lane's loose-height slot — Size.infinite makes it fill instead.
-              size: Size.infinite,
-              painter: PowerSpectrumPainter(
-                column: inSpan ? spec.columnAtTime(seconds) : Float32List(0),
-                binHz: spec.binHz,
-                maxHz: spec.maxHz,
-                formants: formants,
-              ),
-            );
-          },
+        // The spectrum follows the playhead through its painter's repaint
+        // listenable, on a layer of its own: a tick repaints just this. A
+        // per-tick rebuild here would sit under the timeline's LayoutBuilders
+        // and re-lay-out the whole center pane on every frame of playback.
+        child: RepaintBoundary(
+          child: CustomPaint(
+            // Childless CustomPaint defaults to Size.zero and collapses in the
+            // lane's loose-height slot — Size.infinite makes it fill instead.
+            size: Size.infinite,
+            painter: _PlayheadPowerPainter(
+              position: position,
+              track: track,
+              spectrogram: spec,
+              metrics: metrics,
+            ),
+          ),
         ),
       );
     }
     return _laneShell('POWER SPECTRUM', kPitchLaneHeight, body);
   }
+}
+
+/// [PowerSpectrumPainter] for the column under the playhead: reads [position]
+/// at paint time and repaints whenever it ticks.
+class _PlayheadPowerPainter extends CustomPainter {
+  _PlayheadPowerPainter({
+    required this.position,
+    required this.track,
+    required this.spectrogram,
+    required this.metrics,
+  }) : super(repaint: position);
+
+  final ValueListenable<Duration> position;
+  final AudioTrack track;
+  final Spectrogram spectrogram;
+  final VoiceMetrics? metrics;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final ms = position.value.inMilliseconds - track.startMs;
+    // Outside the take nothing is playing: paint an empty spectrum
+    // rather than the take's first/last frame (a stale edge).
+    final inSpan = ms >= 0 && ms <= track.durationMs;
+    final seconds = ms / 1000.0;
+    final m = metrics;
+    var formants = const <double>[];
+    if (inSpan && m != null && m.frames > 0) {
+      final fr = m.frameAtTime(seconds);
+      formants = [m.f1[fr], m.f2[fr], m.f3[fr]];
+    }
+    PowerSpectrumPainter(
+      column: inSpan ? spectrogram.columnAtTime(seconds) : Float32List(0),
+      binHz: spectrogram.binHz,
+      maxHz: spectrogram.maxHz,
+      formants: formants,
+    ).paint(canvas, size);
+  }
+
+  @override
+  bool shouldRepaint(_PlayheadPowerPainter old) =>
+      !identical(old.position, position) ||
+      old.track != track ||
+      old.spectrogram != spectrogram ||
+      old.metrics != metrics;
 }
 
 /// The take's loudness (RMS dBFS) envelope — the dynamics / phrasing curve,

@@ -126,24 +126,28 @@ class BottomDock extends StatelessWidget {
                 decoration: const BoxDecoration(
                   border: Border(top: BorderSide(color: Studio.border)),
                 ),
-                child: switch (vm.analysis.dockTab) {
-                  DockTab.analysisSummary => VoiceSummaryView(vm: vm),
-                  DockTab.spectrogram => SpectrogramTab(vm: vm),
-                  DockTab.power => PowerTab(vm: vm),
-                  DockTab.ltas => LtasTab(vm: vm),
-                  DockTab.vowel => VowelTab(vm: vm),
-                  DockTab.pitch => PitchTab(vm: vm),
-                  DockTab.vibrato => VibratoTab(vm: vm),
-                  DockTab.timbre => TimbreTab(vm: vm),
-                  DockTab.registers => RegisterTab(vm: vm),
-                  DockTab.range => RangeView(vm: vm),
-                  DockTab.dynamics => DynamicsView(vm: vm),
-                  DockTab.mixer => MixerStrip(
-                    vm: vm,
-                    tracks: tracks,
-                    onDeleteTrack: onDeleteTrack,
-                  ),
-                },
+                // The tabs' per-tick content (playhead readouts, the live
+                // mic) repaints inside this layer rather than the screen's.
+                child: RepaintBoundary(
+                  child: switch (vm.analysis.dockTab) {
+                    DockTab.analysisSummary => VoiceSummaryView(vm: vm),
+                    DockTab.spectrogram => SpectrogramTab(vm: vm),
+                    DockTab.power => PowerTab(vm: vm),
+                    DockTab.ltas => LtasTab(vm: vm),
+                    DockTab.vowel => VowelTab(vm: vm),
+                    DockTab.pitch => PitchTab(vm: vm),
+                    DockTab.vibrato => VibratoTab(vm: vm),
+                    DockTab.timbre => TimbreTab(vm: vm),
+                    DockTab.registers => RegisterTab(vm: vm),
+                    DockTab.range => RangeView(vm: vm),
+                    DockTab.dynamics => DynamicsView(vm: vm),
+                    DockTab.mixer => MixerStrip(
+                      vm: vm,
+                      tracks: tracks,
+                      onDeleteTrack: onDeleteTrack,
+                    ),
+                  },
+                ),
               ),
             ),
         ],

@@ -529,11 +529,17 @@ class TimbreTab extends StatelessWidget {
                 ),
                 child: Stack(
                   children: [
+                    // The curves walk every frame of the take, and the metrics
+                    // bar above re-lays-out on each playhead tick (its chips
+                    // are content-sized); this layer keeps those relayouts
+                    // from repainting the curves.
                     Positioned.fill(
-                      child: CustomPaint(
-                        painter: _TimbreCurvesPainter(
-                          metrics: m,
-                          timelineDurationMs: spanMs,
+                      child: RepaintBoundary(
+                        child: CustomPaint(
+                          painter: _TimbreCurvesPainter(
+                            metrics: m,
+                            timelineDurationMs: spanMs,
+                          ),
                         ),
                       ),
                     ),

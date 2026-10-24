@@ -40,142 +40,152 @@ class DetailTransportBar extends StatelessWidget {
         practice.activeVocalTracks.isNotEmpty;
     final canPlay = hasTracks && !vm.isRecording;
 
-    return Container(
-      height: 54,
-      padding: const EdgeInsets.symmetric(horizontal: 14),
-      decoration: const BoxDecoration(
-        color: Studio.surface,
-        border: Border(bottom: BorderSide(color: Studio.border)),
-      ),
-      child: Stack(
-        children: [
-          // Left: back + title + counts.
-          Align(
-            alignment: Alignment.centerLeft,
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                _BackButton(onTap: onBack),
-                const SizedBox(width: 6),
-                Text(
-                  practice.title,
-                  style: const TextStyle(
-                    color: Studio.textPrimary,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w700,
+    // Its own layer: a relayout elsewhere on the screen (the dock's per-tick
+    // readouts climb to the Scaffold) repaints the screen's shell, not the
+    // bar's controls.
+    return RepaintBoundary(
+      child: Container(
+        height: 54,
+        padding: const EdgeInsets.symmetric(horizontal: 14),
+        decoration: const BoxDecoration(
+          color: Studio.surface,
+          border: Border(bottom: BorderSide(color: Studio.border)),
+        ),
+        child: Stack(
+          children: [
+            // Left: back + title + counts.
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _BackButton(onTap: onBack),
+                  const SizedBox(width: 6),
+                  Text(
+                    practice.title,
+                    style: const TextStyle(
+                      color: Studio.textPrimary,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                    ),
                   ),
-                ),
-                const SizedBox(width: 10),
-                Text(
-                  '${takes == 1 ? '1 take' : '$takes takes'} · $notes notes',
-                  style: const TextStyle(color: Studio.textFaint, fontSize: 12),
-                ),
-              ],
-            ),
-          ),
-          // Right: timeline zoom — a horizontal slider flanked by zoom icons,
-          // like Logic's zoom control.
-          Align(
-            alignment: Alignment.centerRight,
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                _ZoomIcon(
-                  icon: FIcons.zoomOut,
-                  onTap: () => vm.playback.zoomTimeline(1.25),
-                ),
-                const SizedBox(width: 8),
-                _ZoomSlider(
-                  value: vm.playback.timelineZoom,
-                  onChanged: vm.playback.setTimelineZoomLive,
-                  onChangeEnd: vm.playback.commitTimelineZoom,
-                ),
-                const SizedBox(width: 8),
-                _ZoomIcon(
-                  icon: FIcons.zoomIn,
-                  onTap: () => vm.playback.zoomTimeline(0.8),
-                ),
-              ],
-            ),
-          ),
-          // Center: the transport, independent of the title width.
-          Align(
-            alignment: Alignment.center,
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                StudioRoundButton(
-                  icon: vm.playback.isPlaying ? FIcons.pause : FIcons.play,
-                  filled: true,
-                  size: 34,
-                  onTap: canPlay ? vm.playback.togglePlay : null,
-                ),
-                const SizedBox(width: 8),
-                StudioRoundButton(
-                  icon: FIcons.square,
-                  color: Studio.textSecondary,
-                  size: 34,
-                  // Mid-take, Stop ends the take (what Stop means in any DAW);
-                  // the transport stop itself is a no-op while recording.
-                  onTap: vm.isRecording
-                      ? vm.stopRecording
-                      : (hasTracks ? vm.playback.stop : null),
-                ),
-                const SizedBox(width: 8),
-                StudioRoundButton(
-                  icon: FIcons.repeat,
-                  color: vm.playback.loopEnabled
-                      ? Studio.accent
-                      : Studio.textSecondary,
-                  size: 34,
-                  onTap: vm.playback.hasLoop ? vm.playback.toggleLoop : null,
-                ),
-                const SizedBox(width: 8),
-                StudioRoundButton(
-                  icon: FIcons.locateFixed,
-                  color: vm.playback.followCursor
-                      ? Studio.accent
-                      : Studio.textSecondary,
-                  size: 34,
-                  onTap: vm.playback.toggleFollowCursor,
-                ),
-                const SizedBox(width: 16),
-                _Lcd(
-                  position: vm.position,
-                  totalDurationMs: practice.timelineDurationMs,
-                ),
-                const SizedBox(width: 12),
-                // Input monitoring: arm the mic (meter + level live in the mixer's MIC strip).
-                StudioRoundButton(
-                  icon: FIcons.headphones,
-                  color: vm.recording.inputMonitorEnabled
-                      ? Studio.accent
-                      : Studio.textSecondary,
-                  size: 34,
-                  onTap: vm.recording.toggleInputMonitor,
-                ),
-                const SizedBox(width: 12),
-                _RecPill(
-                  isRecording: vm.isRecording,
-                  onTap: () => vm.isRecording
-                      ? vm.stopRecording()
-                      : vm.recording.startRecording(),
-                ),
-                if (vm.busy) ...[
-                  const SizedBox(width: 14),
-                  const SizedBox(
-                    width: 13,
-                    height: 13,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      valueColor: AlwaysStoppedAnimation(Studio.textSecondary),
+                  const SizedBox(width: 10),
+                  Text(
+                    '${takes == 1 ? '1 take' : '$takes takes'} · $notes notes',
+                    style: const TextStyle(
+                      color: Studio.textFaint,
+                      fontSize: 12,
                     ),
                   ),
                 ],
-              ],
+              ),
             ),
-          ),
-        ],
+            // Right: timeline zoom — a horizontal slider flanked by zoom icons,
+            // like Logic's zoom control.
+            Align(
+              alignment: Alignment.centerRight,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _ZoomIcon(
+                    icon: FIcons.zoomOut,
+                    onTap: () => vm.playback.zoomTimeline(1.25),
+                  ),
+                  const SizedBox(width: 8),
+                  _ZoomSlider(
+                    value: vm.playback.timelineZoom,
+                    onChanged: vm.playback.setTimelineZoomLive,
+                    onChangeEnd: vm.playback.commitTimelineZoom,
+                  ),
+                  const SizedBox(width: 8),
+                  _ZoomIcon(
+                    icon: FIcons.zoomIn,
+                    onTap: () => vm.playback.zoomTimeline(0.8),
+                  ),
+                ],
+              ),
+            ),
+            // Center: the transport, independent of the title width.
+            Align(
+              alignment: Alignment.center,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  StudioRoundButton(
+                    icon: vm.playback.isPlaying ? FIcons.pause : FIcons.play,
+                    filled: true,
+                    size: 34,
+                    onTap: canPlay ? vm.playback.togglePlay : null,
+                  ),
+                  const SizedBox(width: 8),
+                  StudioRoundButton(
+                    icon: FIcons.square,
+                    color: Studio.textSecondary,
+                    size: 34,
+                    // Mid-take, Stop ends the take (what Stop means in any DAW);
+                    // the transport stop itself is a no-op while recording.
+                    onTap: vm.isRecording
+                        ? vm.stopRecording
+                        : (hasTracks ? vm.playback.stop : null),
+                  ),
+                  const SizedBox(width: 8),
+                  StudioRoundButton(
+                    icon: FIcons.repeat,
+                    color: vm.playback.loopEnabled
+                        ? Studio.accent
+                        : Studio.textSecondary,
+                    size: 34,
+                    onTap: vm.playback.hasLoop ? vm.playback.toggleLoop : null,
+                  ),
+                  const SizedBox(width: 8),
+                  StudioRoundButton(
+                    icon: FIcons.locateFixed,
+                    color: vm.playback.followCursor
+                        ? Studio.accent
+                        : Studio.textSecondary,
+                    size: 34,
+                    onTap: vm.playback.toggleFollowCursor,
+                  ),
+                  const SizedBox(width: 16),
+                  _Lcd(
+                    position: vm.position,
+                    totalDurationMs: practice.timelineDurationMs,
+                  ),
+                  const SizedBox(width: 12),
+                  // Input monitoring: arm the mic (meter + level live in the mixer's MIC strip).
+                  StudioRoundButton(
+                    icon: FIcons.headphones,
+                    color: vm.recording.inputMonitorEnabled
+                        ? Studio.accent
+                        : Studio.textSecondary,
+                    size: 34,
+                    onTap: vm.recording.toggleInputMonitor,
+                  ),
+                  const SizedBox(width: 12),
+                  _RecPill(
+                    isRecording: vm.isRecording,
+                    onTap: () => vm.isRecording
+                        ? vm.stopRecording()
+                        : vm.recording.startRecording(),
+                  ),
+                  if (vm.busy) ...[
+                    const SizedBox(width: 14),
+                    const SizedBox(
+                      width: 13,
+                      height: 13,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        valueColor: AlwaysStoppedAnimation(
+                          Studio.textSecondary,
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

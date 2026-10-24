@@ -38,18 +38,22 @@ class RightPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (!vm.lyricsOpen) return _Rail(vm: vm);
-    return Container(
-      width: _panelWidth,
-      decoration: const BoxDecoration(
-        color: Studio.surface,
-        border: Border(left: BorderSide(color: Studio.border)),
-      ),
-      child: Column(
-        children: [
-          _TabBar(vm: vm),
-          const Divider(height: 1, color: Studio.border),
-          Expanded(child: _tabBody()),
-        ],
+    // Its own layer, so the rest of the screen repainting (the dock's live
+    // readouts, the center pane) doesn't repaint the lyrics and notes.
+    return RepaintBoundary(
+      child: Container(
+        width: _panelWidth,
+        decoration: const BoxDecoration(
+          color: Studio.surface,
+          border: Border(left: BorderSide(color: Studio.border)),
+        ),
+        child: Column(
+          children: [
+            _TabBar(vm: vm),
+            const Divider(height: 1, color: Studio.border),
+            Expanded(child: _tabBody()),
+          ],
+        ),
       ),
     );
   }

@@ -6,6 +6,7 @@ import '../../../domain/models/audio_track.dart';
 import '../../../domain/models/practice_note.dart';
 import '../../core/themes/studio.dart';
 import '../../core/widgets/studio_controls.dart';
+import '../../core/widgets/tick_boundary.dart';
 import '../../core/widgets/waveform_painter.dart';
 import 'track_context_menu.dart';
 
@@ -675,36 +676,53 @@ class _BodyState extends State<_Body> {
                   ),
                 ),
             // The forming clip while this lane is the armed recording target.
+            // It rebuilds on every recording tick (20 Hz); the TickBoundary
+            // over the whole lane keeps that rebuild from re-laying-out the
+            // lane — and, through the timeline's LayoutBuilders, the screen.
             if (widget.recordingPeaks != null)
-              ValueListenableBuilder<List<double>>(
-                valueListenable: widget.recordingPeaks!,
-                builder: (context, peaks, _) {
-                  final v = visible(
-                    widget.recordingStartMs,
-                    peaks.length * _kRecordIntervalMs,
-                    peaks,
-                  );
-                  if (v == null) return const SizedBox.shrink();
-                  // Fixed pixels-per-sample for the whole take (timeline px/ms ×
-                  // record interval) — the live painter anchors columns to it so
-                  // the waveform grows without the drawn part shifting.
-                  final pps = dur <= 0 ? 1.0 : _kRecordIntervalMs * width / dur;
-                  return Positioned(
-                    left: v.left,
-                    top: 3,
-                    bottom: 3,
-                    width: v.width,
-                    child: IgnorePointer(
-                      child: _FormingClip(
-                        peaks: v.peaks,
-                        pixelsPerSample: pps,
-                        // Keeps the absolute sample→column mapping glued to
-                        // the timeline when the window edge lands mid-peak.
-                        sampleOffset: v.peakOffset,
-                      ),
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: TickBoundary(
+                    child: ValueListenableBuilder<List<double>>(
+                      valueListenable: widget.recordingPeaks!,
+                      builder: (context, peaks, _) {
+                        final v = visible(
+                          widget.recordingStartMs,
+                          peaks.length * _kRecordIntervalMs,
+                          peaks,
+                        );
+                        if (v == null) return const SizedBox.shrink();
+                        // Fixed pixels-per-sample for the whole take
+                        // (timeline px/ms × record interval) — the live
+                        // painter anchors columns to it so the waveform grows
+                        // without the drawn part shifting.
+                        final pps = dur <= 0
+                            ? 1.0
+                            : _kRecordIntervalMs * width / dur;
+                        return Stack(
+                          children: [
+                            Positioned(
+                              left: v.left,
+                              top: 3,
+                              bottom: 3,
+                              width: v.width,
+                              child: IgnorePointer(
+                                child: _FormingClip(
+                                  peaks: v.peaks,
+                                  pixelsPerSample: pps,
+                                  // Keeps the absolute sample→column mapping
+                                  // glued to the timeline when the window
+                                  // edge lands mid-peak.
+                                  sampleOffset: v.peakOffset,
+                                ),
+                              ),
+                            ),
+                          ],
+                        );
+                      },
                     ),
-                  );
-                },
+                  ),
+                ),
               ),
             for (final note in track.notes)
               Positioned(

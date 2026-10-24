@@ -279,30 +279,11 @@ class PitchLane extends StatelessWidget {
               ),
               const SizedBox(height: 3),
               // Live readout of the note under the playhead.
-              ValueListenableBuilder<Duration>(
-                valueListenable: position,
-                builder: (context, pos, _) {
-                  final m = metrics!;
-                  // Only read a note when the playhead is actually over this
-                  // take (frameAtTime would otherwise clamp to a stale edge).
-                  final t = (pos.inMilliseconds - track.startMs) / 1000.0;
-                  final n =
-                      (m.frames > 0 &&
-                          t >= 0 &&
-                          t <= m.timeOfFrame(m.frames - 1))
-                      ? _noteAtFrame(notes, m.frameAtTime(t))
-                      : null;
-                  return Text(
-                    n == null
-                        ? '—'
-                        : '${_semiName(n.semitone)} ${_centsStr(n.medianCents)}',
-                    style: const TextStyle(
-                      color: Studio.textSecondary,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  );
-                },
+              _PlayheadNoteReadout(
+                position: position,
+                metrics: metrics!,
+                notes: notes,
+                trackStartMs: track.startMs,
               ),
             ],
           ],
@@ -325,18 +306,22 @@ class PitchLane extends StatelessWidget {
       color: Studio.inset,
       child: Stack(
         children: [
+          // Its own layer: the header's note readout re-lays-out a few times
+          // a second during playback, and must not repaint the notes with it.
           Positioned.fill(
             child: IgnorePointer(
-              child: CustomPaint(
-                painter: PitchLanePainter(
-                  metrics: m,
-                  notes: notes,
-                  worst: worst,
-                  timelineDurationMs: timelineDurationMs,
-                  startMs: takeLocal ? 0 : track.startMs,
-                  viewStartMs: viewStartMs,
-                  loSemi: range.lo,
-                  hiSemi: range.hi,
+              child: RepaintBoundary(
+                child: CustomPaint(
+                  painter: PitchLanePainter(
+                    metrics: m,
+                    notes: notes,
+                    worst: worst,
+                    timelineDurationMs: timelineDurationMs,
+                    startMs: takeLocal ? 0 : track.startMs,
+                    viewStartMs: viewStartMs,
+                    loSemi: range.lo,
+                    hiSemi: range.hi,
+                  ),
                 ),
               ),
             ),
@@ -360,6 +345,85 @@ PitchNote? _noteAtFrame(List<PitchNote> notes, int fr) {
     if (fr >= n.startFrame && fr <= n.endFrame) return n;
   }
   return null;
+}
+
+/// The pitch header's readout of the note under the playhead. It follows the
+/// position notifier itself and rebuilds only when the text changes — a few
+/// times a second, not on every tick. A per-tick rebuild here sits under the
+/// timeline's LayoutBuilders, and re-laid-out (so repainted) the whole screen
+/// on every frame of playback.
+class _PlayheadNoteReadout extends StatefulWidget {
+  const _PlayheadNoteReadout({
+    required this.position,
+    required this.metrics,
+    required this.notes,
+    required this.trackStartMs,
+  });
+
+  final ValueListenable<Duration> position;
+  final VoiceMetrics metrics;
+  final List<PitchNote> notes;
+  final int trackStartMs;
+
+  @override
+  State<_PlayheadNoteReadout> createState() => _PlayheadNoteReadoutState();
+}
+
+class _PlayheadNoteReadoutState extends State<_PlayheadNoteReadout> {
+  late String _text = _textAt(widget.position.value);
+
+  String _textAt(Duration pos) {
+    final m = widget.metrics;
+    // Only read a note when the playhead is actually over this take
+    // (frameAtTime would otherwise clamp to a stale edge).
+    final t = (pos.inMilliseconds - widget.trackStartMs) / 1000.0;
+    final n = (m.frames > 0 && t >= 0 && t <= m.timeOfFrame(m.frames - 1))
+        ? _noteAtFrame(widget.notes, m.frameAtTime(t))
+        : null;
+    return n == null
+        ? '—'
+        : '${_semiName(n.semitone)} ${_centsStr(n.medianCents)}';
+  }
+
+  void _onTick() {
+    final text = _textAt(widget.position.value);
+    if (text != _text) setState(() => _text = text);
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    widget.position.addListener(_onTick);
+  }
+
+  @override
+  void didUpdateWidget(_PlayheadNoteReadout old) {
+    super.didUpdateWidget(old);
+    if (!identical(old.position, widget.position)) {
+      old.position.removeListener(_onTick);
+      widget.position.addListener(_onTick);
+    }
+    // New metrics / notes / placement re-time the readout.
+    _text = _textAt(widget.position.value);
+  }
+
+  @override
+  void dispose() {
+    widget.position.removeListener(_onTick);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      _text,
+      style: const TextStyle(
+        color: Studio.textSecondary,
+        fontSize: 11,
+        fontWeight: FontWeight.w600,
+      ),
+    );
+  }
 }
 
 /// Draws the semitone grid, the detected note blocks (tinted by how in-tune,
