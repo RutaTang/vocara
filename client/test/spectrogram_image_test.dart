@@ -6,6 +6,7 @@
 // the whole image down to fit — uniformly on the default Skia backend, which
 // cut a 10-minute take's frequency rows from 215 to 62.
 
+import 'dart:developer' show reachabilityBarrier;
 import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
@@ -136,4 +137,56 @@ void main() {
       }
     });
   });
+
+  testWidgets('overlapping requests and in-flight evictions never hand out '
+      'a disposed image', (tester) async {
+    final takes = [
+      for (var i = 0; i < 7; i++) _spec(300, 16, (f, b) => (f * b + i) % 60.0),
+    ];
+    await tester.runAsync(() async {
+      for (var round = 0; round < 5; round++) {
+        final requests = <Future<ui.Image>>[];
+        for (var i = 0; i < takes.length; i++) {
+          requests.add(spectrogramImageFor(takes[i]));
+          // Re-ask the first take while it is in flight and being evicted.
+          if (i.isOdd) requests.add(spectrogramImageFor(takes[0]));
+        }
+        final images = await Future.wait(requests);
+        for (final image in images) {
+          expect(image.debugDisposed, isFalse);
+          expect(await image.toByteData(), isNotNull);
+          image.dispose();
+        }
+      }
+    });
+  });
+
+  testWidgets('the cache does not keep a spectrogram alive', (tester) async {
+    // A strong key kept every recently shown spectrogram — tens to hundreds
+    // of MB for a long take — resident after the analysis cache let it go
+    // and after the practice closed, until four newer takes were rendered.
+    late WeakReference<Spectrogram> weak;
+    await tester.runAsync(() async {
+      Future<void> showAndLeave() async {
+        final s = _spec(2000, 64, (f, b) => (f + b) % 60.0);
+        weak = WeakReference(s);
+        (await spectrogramImageFor(s)).dispose(); // the widget is gone
+      }
+
+      await showAndLeave();
+      await _collectGarbage();
+      expect(weak.target, isNull);
+    });
+  });
+}
+
+/// Allocates until the VM has run two full collections.
+Future<void> _collectGarbage() async {
+  final barrier = reachabilityBarrier;
+  final garbage = <List<int>>[];
+  while (reachabilityBarrier < barrier + 2) {
+    await Future<void>.delayed(Duration.zero);
+    garbage.add(List.generate(30000, (n) => n));
+    if (garbage.length > 100) garbage.removeAt(0);
+  }
 }

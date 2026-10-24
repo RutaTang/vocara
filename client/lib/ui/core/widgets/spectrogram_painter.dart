@@ -158,41 +158,61 @@ Future<ui.Image> renderSpectrogramImage(
 }
 
 /// Rendered take spectrograms by [Spectrogram] identity (analyses are never
-/// mutated; a new one is a new object), least recently used first. A take's
-/// image is rendered once and shared: the dock tab and the take's inline lane
-/// show the same one, and switching tabs or folding a lane open no longer
-/// renders it again. Small, since each entry is a texture of up to
+/// mutated; a new one is a new object). A take's image is rendered once and
+/// shared: the dock tab and the take's inline lane show the same one, and
+/// switching tabs or folding a lane open no longer renders it again.
+///
+/// Keyed WEAKLY: the analysis cache owns a spectrogram's lifetime under its
+/// byte budget, and a strong key here kept every recently shown one (tens to
+/// hundreds of MB each) resident after the cache let it go — and after the
+/// practice was closed — until four newer takes had been rendered.
+final Expando<Future<ui.Image>> _spectrogramImages = Expando();
+
+/// The most recently requested renders, oldest first: the cache's own image
+/// handles live here, at most [_spectrogramImageCacheSize] textures of up to
 /// [kMaxSpectrogramImageColumns] × bins pixels.
-final Map<Spectrogram, Future<ui.Image>> _spectrogramImages = {};
+final List<(WeakReference<Spectrogram>, Future<ui.Image>)> _recentImages = [];
 const int _spectrogramImageCacheSize = 4;
 
 /// A handle on [s]'s rendered image (see [renderSpectrogramImage]), shared
 /// with every other caller for the same spectrogram. The caller owns the
 /// returned handle and disposes it; the cache keeps its own until evicted.
 Future<ui.Image> spectrogramImageFor(Spectrogram s) async {
-  var image = _spectrogramImages.remove(s);
+  var image = _spectrogramImages[s];
   if (image == null) {
     final rendering = image = renderSpectrogramImage(s);
+    _spectrogramImages[s] = rendering;
     // A failed render isn't kept: the next caller tries again.
+    final key = WeakReference(s);
     unawaited(
       rendering.then<void>(
         (_) {},
         onError: (Object _) {
-          if (identical(_spectrogramImages[s], rendering)) {
-            _spectrogramImages.remove(s);
+          final target = key.target;
+          if (target != null &&
+              identical(_spectrogramImages[target], rendering)) {
+            _spectrogramImages[target] = null;
           }
+          _recentImages.removeWhere((e) => identical(e.$2, rendering));
         },
       ),
     );
   }
-  _spectrogramImages[s] = image; // most recently used
-  while (_spectrogramImages.length > _spectrogramImageCacheSize) {
-    final evicted = _spectrogramImages.remove(_spectrogramImages.keys.first)!;
+  final shared = image;
+  _recentImages
+    ..removeWhere((e) => identical(e.$2, shared))
+    ..add((WeakReference(s), shared)); // most recently used
+  while (_recentImages.length > _spectrogramImageCacheSize) {
+    final (key, evicted) = _recentImages.removeAt(0);
+    final target = key.target;
+    if (target != null && identical(_spectrogramImages[target], evicted)) {
+      _spectrogramImages[target] = null;
+    }
     // Handles already cloned off it stay valid: an image's memory goes with
     // its last handle.
     unawaited(evicted.then((i) => i.dispose(), onError: (Object _) {}));
   }
-  return (await image).clone();
+  return (await shared).clone();
 }
 
 /// Brightness multiplier applied to unvoiced live columns — a voiceprint should
