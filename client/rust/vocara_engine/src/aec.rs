@@ -1357,6 +1357,13 @@ impl Aec {
 
         // ----- 8) Dual-filter copy logic -----
         // Adopt the background into the foreground only when it is provably cancelling better.
+        // The foreground takes the POST-update background weights, as in Valin's MDF (speex
+        // mdf.c, TWO_PATH: W gets its gradient step before the foreground decision, and the
+        // updated W is what is copied). The one difference: MDF scores the updated W on the current
+        // frame, while p_err_bg scores the weights from before this block's step. Deciding and
+        // copying before the update instead (so the copy is exactly the scored weights, as in MDF)
+        // moved every metric on the bench in tests/aec_bench.rs by 0.2 dB or less, so this order
+        // stays.
         if self.p_err_bg < COPY_MARGIN * self.p_err_fg {
             self.wfg_re.copy_from_slice(&self.wbg_re);
             self.wfg_im.copy_from_slice(&self.wbg_im);
