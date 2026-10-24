@@ -231,6 +231,72 @@ void main() {
     });
   });
 
+  group('the FK sweep\'s own slot (putSwept)', () {
+    Future<void> putSwept(
+      String id, {
+      required String hlcPacked,
+      String payload = '{"swept":true}',
+      int at = 1000,
+    }) => store.putSwept(
+      table: 'tracks',
+      id: _id(id),
+      hlcPacked: hlcPacked,
+      schemaV: 1,
+      payload: payload,
+      reason: 'fk-orphan: parent practices/P missing',
+      quarantinedAt: at,
+    );
+
+    test('a door park of the same row neither displaces nor filters the '
+        'sweep\'s park, in either order', () async {
+      await putSwept('T1', hlcPacked: '0000000001000-000000-N', at: 100);
+      await put(
+        'tracks',
+        'T1',
+        hlcPacked: '0000000009000-000000-N',
+        reason: 'hlc-drift: 6 minutes ahead',
+        at: 200,
+      );
+      // The other order, on a second row: door first, then the sweep.
+      await put(
+        'tracks',
+        'T2',
+        hlcPacked: '0000000009000-000000-N',
+        reason: 'hlc-drift: 6 minutes ahead',
+        at: 300,
+      );
+      await putSwept('T2', hlcPacked: '0000000001000-000000-N', at: 400);
+
+      final rows = await store.list();
+      expect(rows.map((q) => (q.id, q.remoteHlcPacked)), [
+        (QuarantineStore.sweepSlotId(_id('T1')), '0000000001000-000000-N'),
+        (_id('T1'), '0000000009000-000000-N'),
+        (_id('T2'), '0000000009000-000000-N'),
+        (QuarantineStore.sweepSlotId(_id('T2')), '0000000001000-000000-N'),
+      ]);
+    });
+
+    test(
+      'a door entry holding the SAME state is folded into the sweep slot '
+      '(the relabel, and how a pre-split fk-orphan entry moves over)',
+      () async {
+        // A pre-split build parked the sweep's state under the bare row id.
+        await put(
+          'tracks',
+          'T1',
+          hlcPacked: '0000000001000-000000-N',
+          reason: 'fk-orphan: parent practices/P missing',
+          at: 100,
+        );
+        await putSwept('T1', hlcPacked: '0000000001000-000000-N', at: 200);
+
+        final rows = await store.list();
+        expect(rows.single.id, QuarantineStore.sweepSlotId(_id('T1')));
+        expect(rows.single.quarantinedAt, 200);
+      },
+    );
+  });
+
   test('the same id under two different tables parks two rows (composite '
       'key)', () async {
     await put('practices', 'X');

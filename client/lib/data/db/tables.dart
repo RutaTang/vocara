@@ -293,6 +293,9 @@ class SyncState extends Table {
 /// (table, id) — a record whose HLC was implausibly far in the future, or one
 /// the local schema could not apply (forward-incompatible). Kept so nothing is
 /// silently dropped and a later app upgrade / manual review can re-apply it.
+/// The FK sweep's park of a row whose parent has not arrived sits beside it
+/// under a slot key of its own (QuarantineStore.sweepSlotId) — two replay
+/// obligations, so a row can hold two entries without any second column.
 ///
 /// SAFETY: the remote stamp column is deliberately named remote_hlc_packed,
 /// NOT hlc_packed. Persistence._seedClock seeds the boot HLC from MAX of every
@@ -306,7 +309,9 @@ class SyncQuarantine extends Table {
   /// on purpose, this row is ABOUT a remote record, not a synced row itself).
   TextColumn get tbl => text()();
 
-  /// The rejected record's row id within [tbl].
+  /// The rejected record's row id within [tbl] — or a key derived for its
+  /// slot (the FK sweep's slot, a dead letter's content hash); a replayable
+  /// payload always carries the record's real id.
   TextColumn get id => text()();
 
   /// The remote record's packed HLC as received (see class doc for the name).

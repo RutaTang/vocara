@@ -87,10 +87,15 @@ class IntegrityChecker {
   /// parked newer state of the repaired row ITSELF already out-ranks the
   /// derived repair stamp (see [_repairStamp]), here and on every peer, so
   /// it is never overridden by the repair.
+  ///
+  /// Both of the referenced row's parking-lot entries count — the door's,
+  /// and the FK sweep's own slot, which holds exactly that parked-and-
+  /// restored update (see [QuarantineStore.entryOfRowSql]).
   static String _parkedNewer(String table, String idExpr) =>
       "EXISTS (SELECT 1 FROM sync_quarantine q WHERE q.tbl = '$table' "
-      'AND q.id = $idExpr AND ${QuarantineStore.replayableSql('q')} '
-      'AND NOT EXISTS (SELECT 1 FROM $table x WHERE x.id = q.id '
+      'AND ${QuarantineStore.entryOfRowSql('q', idExpr)} '
+      'AND ${QuarantineStore.replayableSql('q')} '
+      'AND NOT EXISTS (SELECT 1 FROM $table x WHERE x.id = $idExpr '
       'AND x.hlc_packed >= q.remote_hlc_packed))';
 
   /// (childTable, fkColumn, parentTable, invariantId). Ordered PARENT-FIRST so a

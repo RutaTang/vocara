@@ -10750,7 +10750,9 @@ class SyncQuarantineRow extends DataClass
   /// on purpose, this row is ABOUT a remote record, not a synced row itself).
   final String tbl;
 
-  /// The rejected record's row id within [tbl].
+  /// The rejected record's row id within [tbl] — or a key derived for its
+  /// slot (the FK sweep's slot, a dead letter's content hash); a replayable
+  /// payload always carries the record's real id.
   final String id;
 
   /// The remote record's packed HLC as received (see class doc for the name).

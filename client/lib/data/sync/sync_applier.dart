@@ -607,9 +607,10 @@ class SyncApplier {
   /// the verdict is a pure function of the payload against a schema
   /// constraint that never changes at runtime, so its replay re-parks
   /// forever — and a forever-failing entry sitting in a replayable class
-  /// could displace the FK sweep's park, the only copy of an applied row
-  /// (see [QuarantineStore.put]'s retention rule). Park those under the
-  /// unreplayable 'invalid-value:' class instead.
+  /// could displace a replayable park of the same row, the only copy of a
+  /// state the change token already passed (see [QuarantineStore.put]'s
+  /// retention rule). Park those under the unreplayable 'invalid-value:'
+  /// class instead.
   static String _savepointFailureReason(Object e) {
     // SQLite extended result codes: (275) SQLITE_CONSTRAINT_CHECK,
     // (1299) SQLITE_CONSTRAINT_NOTNULL. Other constraint codes stay
@@ -780,12 +781,15 @@ class SyncApplier {
   ///    entry) — never lost, never a hot loop. Unlike [_quarantine]'s
   ///    best-effort bookkeeping the park is NOT swallowed on error: after
   ///    the delete a failed park IS a lost row, so a storage error aborts
-  ///    the batch (a retried page over silent loss). An LWW-FILTERED park
-  ///    (not an error) is safe by the store's replay-class retention: a
-  ///    sweep park is only ever filtered by a strictly newer REPLAYABLE
-  ///    state, which supersedes the row once its own replay lands — a
-  ///    permanently-unreplayable entry can never hold the slot against it
-  ///    (see [QuarantineStore.put]). Without a quarantine
+  ///    the batch (a retried page over silent loss). The park goes to the
+  ///    row's own SWEEP slot ([QuarantineStore.putSwept]), so no door park
+  ///    of the same row — a drift-parked or newer-schema newer state, a
+  ///    dead payload — can displace it or filter it out: such a state waits
+  ///    on a different gate, and letting it hold the only slot left the row
+  ///    deleted (or stale) after its parent landed. Within the slot it is
+  ///    only ever filtered by a strictly newer sweep park — a state that
+  ///    likewise passed every gate and waits only on a parent. Without a
+  ///    quarantine
   ///    store (counter-only test wiring) the old hard-delete stands.
   ///  * A PRE-EXISTING row UPDATED by this batch is PARKED, then RESTORED —
   ///    never deleted. It satisfied every FK when the batch began (SQLite
@@ -906,7 +910,7 @@ class SyncApplier {
               final fkid = v.readNullable<int>('fkid');
               final column = fkid == null ? null : await _fkColumn(table, fkid);
               final parentId = column == null ? null : snapshot.fields[column];
-              await store.put(
+              await store.putSwept(
                 table: table,
                 id: id,
                 hlcPacked: snapshot.hlcPacked,
@@ -964,7 +968,7 @@ class SyncApplier {
             final fkid = v.readNullable<int>('fkid');
             final column = fkid == null ? null : await _fkColumn(table, fkid);
             final parentId = column == null ? null : snapshot.fields[column];
-            await store.put(
+            await store.putSwept(
               table: table,
               id: id,
               hlcPacked: snapshot.hlcPacked,

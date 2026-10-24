@@ -4,7 +4,10 @@ import '../db/app_database.dart';
 
 /// Persistence for the LOCAL-ONLY `sync_quarantine` parking lot: the NEWEST
 /// (by HLC) rejected remote state per (table, id) — see tables.dart for the
-/// schema and the remote_hlc_packed naming rationale.
+/// schema and the remote_hlc_packed naming rationale. A row has up to TWO
+/// entries: the door's, keyed by its id ([put]), and the FK sweep's, keyed by
+/// [sweepSlotId] ([putSwept]) — two replay obligations that must never
+/// displace each other (see [putSwept]).
 ///
 /// Like [SyncStateStore], every method is a plain drift operation so it joins
 /// a caller-provided transaction: the [SyncApplier] persists a quarantine
@@ -18,7 +21,7 @@ class QuarantineStore {
   /// Upserts the quarantined state for ([table], [id]), keeping the NEWEST
   /// state per row by [hlcPacked] — the store itself is Last-Writer-Wins, not
   /// last-caller-wins. The composite primary key already bounds the lot to
-  /// one entry per row; the guard decides WHICH state that entry holds:
+  /// one entry per key; the guard decides WHICH state that entry holds:
   ///
   ///  * an EQUAL [hlcPacked] always replaces the stored entry (a refreshed
   ///    reason/payload for the SAME record state — the fk-orphan re-park flow
@@ -27,23 +30,28 @@ class QuarantineStore {
   ///  * between two states of the same replay class (see below), the strictly
   ///    newer [hlcPacked] wins and a strictly OLDER park is a deliberate
   ///    no-op. Parks are not ordered by arrival: a page can legally deliver
-  ///    P@1000 (parked at the door) before the end-of-batch FK sweep parks
-  ///    the current db row P@950, and the round-6 park+restore can put a live
-  ///    row BACK on an older HLC — so ordering alone can never protect the
-  ///    newest state. Dropping the older park loses nothing: under LWW the
-  ///    replay of the newer parked snapshot supersedes anything the older
-  ///    state could have contributed (the older state would lose that same
-  ///    LWW settle anyway);
+  ///    P@1000 (parked at the door) before an older P@950 that parks too,
+  ///    and the round-6 park+restore can put a live row BACK on an older HLC
+  ///    that a later sweep then parks — so ordering alone can never protect
+  ///    the newest state. Dropping the older park loses nothing: under LWW
+  ///    the replay of the newer parked snapshot supersedes anything the
+  ///    older state could have contributed (the older state would lose that
+  ///    same LWW settle anyway). That holds between two REFUSED states —
+  ///    neither has been vetted, and the newest is the one LWW finally keeps
+  ///    — but not against the FK sweep's park, a state that already passed
+  ///    every gate, which is why the sweep parks under a key of its own (see
+  ///    [putSwept]);
   ///  * ACROSS replay classes the stamp order does not decide: a state whose
   ///    gate can never pass ([_unreplayablePrefixes]) supersedes nothing —
   ///    the replay re-rejects it every cycle, forever — so it must neither
-  ///    displace nor block a replayable state, whatever the stamps say. This
-  ///    matters most for the FK sweep, which parks the ONLY copy of a row it
-  ///    then hard-deletes (the change token is already past the row's page,
-  ///    so nothing re-delivers it): letting a newer-stamped but permanently
-  ///    dead payload hold the slot turned that park into silent row loss.
-  ///    The dropped garbage is only evidence of a non-conforming writer;
-  ///    the dropped row would have been real data.
+  ///    displace nor block a replayable state, whatever the stamps say. Every
+  ///    replayable park is the ONLY copy of its state (the change token is
+  ///    already past the record's page, so nothing re-delivers it): letting a
+  ///    newer-stamped but permanently dead payload hold the slot turned that
+  ///    park into silent loss — first seen on the FK sweep's park, which
+  ///    since has a slot of its own ([putSwept]). The dropped garbage is only
+  ///    evidence of a non-conforming writer; the dropped state would have
+  ///    been real data.
   ///
   /// The SQL-level `ON CONFLICT ... DO UPDATE ... WHERE` makes the guard
   /// race-free inside the caller's transaction (no read-modify-write gap),
@@ -93,6 +101,83 @@ class QuarantineStore {
         );
   }
 
+  /// The parking-lot key of row [id]'s FK-SWEEP slot: the row id plus a
+  /// suffix outside the wire id alphabet (SyncRow's id shape admits only
+  /// `[0-9A-Za-z_-]`, and the sweep only ever parks rows that passed it), so
+  /// no conforming record's door entry can share the key — a hostile id
+  /// spelling it parks as 'invalid-id:', which [put]'s class rule never lets
+  /// displace the replayable sweep park. The payload still carries the real
+  /// id: the replay decodes it, never this key.
+  static String sweepSlotId(String id) => '$id$_sweepSlotSuffix';
+
+  static const String _sweepSlotSuffix = '#fk-sweep';
+
+  /// The SQL twin of a row's keys: a predicate over the `sync_quarantine`
+  /// row aliased [alias], TRUE when it is an entry OF the row whose id is
+  /// the SQL expression [idExpr] — its door entry or its sweep slot
+  /// ([sweepSlotId]). A reader asking "is a newer state of this row
+  /// parked?" must match both: the sweep's park is often exactly that state
+  /// (an update parked and restored over, see [putSwept]).
+  static String entryOfRowSql(String alias, String idExpr) =>
+      "$alias.id IN ($idExpr, $idExpr || '$_sweepSlotSuffix')";
+
+  /// Parks the FK sweep's snapshot of row ([table], [id]) in that row's
+  /// SWEEP slot ([sweepSlotId]) — beside the door's (table, id) entry, never
+  /// in competition with it.
+  ///
+  /// The two hold different replay obligations, and neither can stand in
+  /// for the other. A door park is a state some gate REFUSED; it replays
+  /// once that gate passes (a recovered clock, an app upgrade). The sweep's
+  /// park is a state that passed EVERY gate and applied, rolled back only
+  /// because its parent has not arrived yet — the sole surviving copy of a
+  /// row the sweep then deleted or restored to its pre-batch state, due the
+  /// moment the parent lands. Sharing one slot let them displace each other
+  /// by stamp: a drift-parked newer state (a peer's runaway clock) evicted
+  /// the sweep's copy — or, parked first on the same page, filtered the
+  /// sweep's put out — and once the parent arrived the replay found only the
+  /// still-implausible state, so the row stayed deleted (or stale) for as
+  /// long as the clock stayed behind, while every peer that held the parent
+  /// showed the honest state. [put]'s "the newer state supersedes it" holds
+  /// only once the newer state CAN replay, and a door gate is not the
+  /// sweep's gate. In separate slots each entry replays and settles on its
+  /// own terms, and plain LWW at replay converges the row whichever lands
+  /// first.
+  ///
+  /// Within the slot [put]'s retention applies unchanged (every sweep park
+  /// is replayable, so the newest wins and an equal stamp refreshes the
+  /// re-park cycle). A door entry holding the SAME state (equal stamp) is
+  /// folded away: that state is now accounted for here under its current
+  /// verdict — the relabel a door park whose replay applied and was then
+  /// swept used to get from the shared slot, and the path by which an
+  /// fk-orphan entry parked under the bare row id by an older build moves
+  /// over on its first replay.
+  Future<void> putSwept({
+    required String table,
+    required String id,
+    required String hlcPacked,
+    required int schemaV,
+    required String payload,
+    required String reason,
+    required int quarantinedAt,
+  }) => _db.transaction(() async {
+    await put(
+      table: table,
+      id: sweepSlotId(id),
+      hlcPacked: hlcPacked,
+      schemaV: schemaV,
+      payload: payload,
+      reason: reason,
+      quarantinedAt: quarantinedAt,
+    );
+    await (_db.delete(_db.syncQuarantine)..where(
+          (q) =>
+              q.tbl.equals(table) &
+              q.id.equals(id) &
+              q.remoteHlcPacked.equals(hlcPacked),
+        ))
+        .go();
+  });
+
   /// Reason prefixes of parks whose payload can NEVER re-apply: their gate's
   /// verdict is a pure function of the payload alone, so no app upgrade,
   /// clock recovery, or later delivery ever changes it — the replay re-parks
@@ -105,7 +190,7 @@ class QuarantineStore {
   /// the applier keeps the class honest by parking DETERMINISTIC savepoint
   /// failures — CHECK / NOT NULL violations, pure functions of the
   /// payload — under 'invalid-value:' instead, so a forever-failing entry
-  /// can never sit in a replayable class and displace an fk-orphan park).
+  /// can never sit in a replayable class and displace a replayable park).
   /// The prefixes are [SyncApplier]'s reason vocabulary; the applier's
   /// _quarantine doc points back here.
   static const List<String> _unreplayablePrefixes = [

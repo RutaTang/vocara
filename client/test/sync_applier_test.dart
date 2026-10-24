@@ -852,7 +852,9 @@ void main() {
         final parked = await store.list();
         expect(parked, hasLength(1));
         expect(parked.single.tbl, 'tracks');
-        expect(parked.single.id, _id('T'));
+        // In the row's own sweep slot, beside (never instead of) any door
+        // park of the same row — see QuarantineStore.putSwept.
+        expect(parked.single.id, QuarantineStore.sweepSlotId(_id('T')));
         expect(
           parked.single.reason,
           'fk-orphan: parent practices/${_id('NEVER')} missing',
@@ -885,7 +887,7 @@ void main() {
       final parked = await store.list();
       expect(parked, hasLength(2));
       final parkedChild = parked.singleWhere((q) => q.tbl == 'tracks');
-      expect(parkedChild.id, _id('T'));
+      expect(parkedChild.id, QuarantineStore.sweepSlotId(_id('T')));
       expect(
         parkedChild.reason,
         'fk-orphan: parent practices/${_id('P')} missing',
@@ -943,8 +945,8 @@ void main() {
       // The audited black hole: an honest clip C@H1 (asset not yet
       // delivered) plus a CHECK-violating update C@H2 in one page. H2 fails
       // its savepoint and parks; the end-of-batch FK sweep then parks and
-      // deletes C@H1. The sweep's park must WIN retention — it holds the
-      // only copy of applied data, while H2 can never re-apply anywhere.
+      // deletes C@H1. The sweep's park must survive — it holds the only copy
+      // of applied data, while H2 can never re-apply anywhere.
       final h1 = hlc(910);
       final res = await applier.apply([
         practice('P', 'kept', hlc(900)),
@@ -954,7 +956,9 @@ void main() {
       ]);
       expect(res.failed, greaterThanOrEqualTo(1));
       final parked = await store.list();
-      final c = parked.singleWhere((p) => p.id == _id('C'));
+      final c = parked.singleWhere(
+        (p) => p.id == QuarantineStore.sweepSlotId(_id('C')),
+      );
       expect(
         c.reason,
         startsWith('fk-orphan'),
@@ -985,7 +989,7 @@ void main() {
         // foreign_key_check entry finds the row already deleted).
         final parked = await store.list();
         expect(parked, hasLength(1));
-        expect(parked.single.id, _id('C'));
+        expect(parked.single.id, QuarantineStore.sweepSlotId(_id('C')));
         expect(parked.single.reason, startsWith('fk-orphan'));
       },
     );
@@ -1087,7 +1091,7 @@ void main() {
       final parked = await store.list();
       expect(parked, hasLength(2));
       final parkedUpdate = parked.singleWhere((q) => q.tbl == 'practices');
-      expect(parkedUpdate.id, _id('P'));
+      expect(parkedUpdate.id, QuarantineStore.sweepSlotId(_id('P')));
       expect(
         parkedUpdate.reason,
         'fk-orphan: parent assets/${_id('A')} missing',
@@ -2310,10 +2314,20 @@ void main() {
       },
     );
 
+    Future<Map<String, Object?>> practiceRow() async =>
+        (await db
+                .customSelect(
+                  'SELECT title, separation_asset_id, hlc_packed FROM practices '
+                  'WHERE id = ?',
+                  variables: [Variable.withString(_id('P'))],
+                )
+                .getSingle())
+            .data;
+
     test(
       'legal same-page ordering — P@950 applies then is FK-swept, P@1000 '
-      'was parked at the drift gate — keeps the parked entry at P@1000, '
-      'and the replay lands P@1000 once the parent and clock recover',
+      'was parked at the drift gate — parks BOTH: P@950 lands with its '
+      'parent while the clock is still behind, P@1000 once it catches up',
       () async {
         final future = hlc(1000 + HlcClock.defaultMaxDriftMs + 60 * 1000);
         final res = await applier.apply([
@@ -2325,37 +2339,76 @@ void main() {
         expect(res.committed, isTrue);
         expect(res.quarantined, 1); // P@1000
         expect(res.applied, 0); // P@950 applied but was swept
-        expect(res.failed, 1); // ...and parked as an fk-orphan (a no-op put)
+        expect(res.failed, 1); // ...and parked as an fk-orphan
         expect(await row('P'), isNull);
 
-        // The sweep's park of the CURRENT db row (P@950) ran LAST — under an
-        // unconditional upsert it overwrote the newer state forever, because
-        // the server never re-delivers either page. The store is LWW: the
-        // parked entry still holds P@1000.
+        // The sweep's park of the CURRENT db row (P@950) ran LAST. Under an
+        // unconditional upsert it overwrote the newer state; under the
+        // shared slot's LWW guard it was filtered out instead, and the DELETE
+        // then took P@950's only copy. Neither may happen: the door entry
+        // keeps P@1000 and the row's sweep slot keeps P@950.
         final parked = await store.list();
-        expect(parked, hasLength(1));
-        expect(parked.single.tbl, 'practices');
-        expect(parked.single.remoteHlcPacked, future.packed);
-        expect(SyncRow.decode(parked.single.payload).fields['title'], 'v1000');
+        expect(parked, hasLength(2));
+        final door = parked.singleWhere((q) => q.id == _id('P'));
+        expect(door.remoteHlcPacked, future.packed);
+        expect(door.reason, startsWith('hlc-drift'));
+        final swept = parked.singleWhere(
+          (q) => q.id == QuarantineStore.sweepSlotId(_id('P')),
+        );
+        expect(swept.remoteHlcPacked, hlc(950).packed);
+        expect(swept.reason, startsWith('fk-orphan'));
 
-        // The parent lands and the clock catches up: the replay lands the
-        // NEWEST state (P@1000), not the swept 950.
+        // The parent lands while P@1000 is still implausible: the replay
+        // lands the honest P@950 NOW instead of leaving the row deleted
+        // until the clock catches up with the runaway peer.
         await applier.apply([assetRecord('A', hlc(960))]);
+        expect(
+          (await applier.apply([SyncRow.decode(door.payload)])).quarantined,
+          1,
+        );
+        expect(
+          (await applier.apply([SyncRow.decode(swept.payload)])).applied,
+          1,
+        );
+        expect((await practiceRow())['title'], 'v950');
+
+        // The clock catches up: P@1000 lands over it by plain LWW.
         now = future.wallMs;
-        final replay = await applier.apply([
-          SyncRow.decode(parked.single.payload),
-        ]);
+        final replay = await applier.apply([SyncRow.decode(door.payload)]);
         expect(replay.applied, 1);
-        final r = await db
-            .customSelect(
-              'SELECT title, hlc_packed FROM practices WHERE id = ?',
-              variables: [Variable.withString(_id('P'))],
-            )
-            .getSingle();
-        expect(r.data['title'], 'v1000');
-        expect(r.data['hlc_packed'], future.packed);
+        final r = await practiceRow();
+        expect(r['title'], 'v1000');
+        expect(r['hlc_packed'], future.packed);
       },
     );
+
+    test('park-and-restore: a drift-parked newer state does not displace the '
+        'parked UPDATE — the restored row moves to it once its parent '
+        'lands', () async {
+      await applier.apply([practice('P', 'v900', hlc(900))]);
+      final future = hlc(1000 + HlcClock.defaultMaxDriftMs + 60 * 1000);
+      final res = await applier.apply([
+        // Repoints the pre-existing row at a missing asset: parked by the
+        // sweep, the row restored to P@900 verbatim.
+        practice('P', 'v950', hlc(950), separationAssetId: 'A'),
+        practice('P', 'v1000', future), // parked at the drift gate
+      ]);
+      expect(res.committed, isTrue);
+      expect((await practiceRow())['hlc_packed'], hlc(900).packed);
+      expect(await store.list(), hasLength(2));
+
+      // Under the shared slot only P@1000 survived: once the asset landed
+      // the row stayed on the restored P@900 — the update every peer holding
+      // the asset shows was gone from this device.
+      await applier.apply([assetRecord('A', hlc(960))]);
+      for (final q in await store.list()) {
+        await applier.apply([SyncRow.decode(q.payload)]);
+      }
+      final healed = await practiceRow();
+      expect(healed['title'], 'v950');
+      expect(healed['separation_asset_id'], _id('A'));
+      expect(healed['hlc_packed'], hlc(950).packed);
+    });
 
     test('a permanently-unreplayable newer record cannot void the FK sweep '
         'park: P@950 applies, P@960 is parked at the value gate, the sweep '
@@ -2381,15 +2434,23 @@ void main() {
       expect(await row('P'), isNull, reason: 'the sweep deleted the row');
 
       // The sweep's park ran LAST with the OLDER stamp. Under plain
-      // newest-stamp retention the dead P@960 held the slot and the honest
-      // P@950 — the only surviving copy of a row the change token is
-      // already past — was silently dropped with the DELETE. The store's
-      // replay-class retention keeps the replayable state instead.
+      // newest-stamp retention in one shared slot the dead P@960 held it and
+      // the honest P@950 — the only surviving copy of a row the change token
+      // is already past — was silently dropped with the DELETE. The sweep
+      // parks into the row's own slot: the dead state stays beside it as
+      // evidence and can never displace it.
       final parked = await store.list();
-      expect(parked, hasLength(1));
-      expect(parked.single.remoteHlcPacked, honest.packed);
-      expect(parked.single.reason, startsWith('fk-orphan'));
-      final snapshot = SyncRow.decode(parked.single.payload);
+      expect(parked, hasLength(2));
+      expect(
+        parked.singleWhere((q) => q.id == _id('P')).reason,
+        startsWith('invalid-value'),
+      );
+      final swept = parked.singleWhere(
+        (q) => q.id == QuarantineStore.sweepSlotId(_id('P')),
+      );
+      expect(swept.remoteHlcPacked, honest.packed);
+      expect(swept.reason, startsWith('fk-orphan'));
+      final snapshot = SyncRow.decode(swept.payload);
       expect(snapshot.fields['title'], 'honest');
 
       // The parent lands: the replayed park restores the honest row.

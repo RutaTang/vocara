@@ -1396,7 +1396,7 @@ void main() {
       final parked = await quarantine.list();
       expect(parked, hasLength(1));
       expect(parked.single.tbl, 'tracks');
-      expect(parked.single.id, _id('T'));
+      expect(parked.single.id, QuarantineStore.sweepSlotId(_id('T')));
       expect(parked.single.reason, startsWith('fk-orphan'));
       final track = await db
           .customSelect(
@@ -1405,6 +1405,88 @@ void main() {
           )
           .getSingleOrNull();
       expect(track, isNull, reason: 'never live while the parent is missing');
+    });
+
+    group('a drift-parked newer state never displaces the FK sweep\'s copy '
+        'of the same row', () {
+      // T@honest is a plausible child whose parent P has not arrived: it
+      // applies and the FK sweep parks its only copy. T@runaway is a newer
+      // state of the same row from a peer whose clock runs 6 minutes ahead:
+      // the drift gate parks it. Both pages are behind the change token, so
+      // the parking lot is the only place either state still exists.
+      final honest = remoteHlc(t0 - 1000);
+      final runawayStamp = remoteHlc(t0 + 6 * 60 * 1000);
+      final runaway = SyncRow(
+        table: 'tracks',
+        fields: {
+          ...remoteTrack('T', 'P', runawayStamp).fields,
+          'display_name': 'runaway',
+        },
+      );
+
+      Future<Map<String, Object?>?> trackRow() async =>
+          (await db
+                  .customSelect(
+                    'SELECT display_name, hlc_packed FROM tracks WHERE id = ?',
+                    variables: [Variable.withString(_id('T'))],
+                  )
+                  .getSingleOrNull())
+              ?.data;
+
+      // The parent lands while the runaway clock is still ahead: the honest
+      // state is due NOW. Under one shared (table, id) entry the runaway
+      // state had evicted it (or filtered its park out), the replay found
+      // only a stamp the drift gate still refuses, and the row stayed
+      // deleted on this device — while every peer holding the parent showed
+      // T@honest — until the wall clock caught up with the bad peer.
+      Future<void> parentLandsThenClockCatchesUp() async {
+        cloud.accept(remotePractice('P', 'parent', remoteHlc(t0 - 2000)));
+        final run = await engine.pumpPull();
+        expect(run.failed, isFalse);
+        expect(await trackRow(), {
+          'display_name': 'take',
+          'hlc_packed': honest.packed,
+        }, reason: 'the swept honest state lands with its parent');
+        final parked = await quarantine.list();
+        expect(parked, hasLength(1));
+        expect(parked.single.id, _id('T'));
+        expect(parked.single.reason, startsWith('hlc-drift'));
+
+        // The clock reaches the runaway stamp: its own replay lands it over
+        // the honest state by plain LWW, and the parking lot drains.
+        nowMs = runawayStamp.wallMs;
+        expect((await engine.pumpPull()).failed, isFalse);
+        expect(await trackRow(), {
+          'display_name': 'runaway',
+          'hlc_packed': runawayStamp.packed,
+        });
+        expect(await quarantine.list(), isEmpty);
+      }
+
+      test('sweep first: a later page\'s drift park leaves the sweep\'s '
+          'park in place', () async {
+        cloud.accept(remoteTrack('T', 'P', honest));
+        expect((await engine.pumpPull()).failedRecords, 1);
+        cloud.accept(runaway);
+        expect((await engine.pumpPull()).quarantined, 1);
+        expect(await trackRow(), isNull);
+        expect(await quarantine.list(), hasLength(2));
+
+        await parentLandsThenClockCatchesUp();
+      });
+
+      test('same page: the door parks the runaway state BEFORE the '
+          'end-of-batch sweep parks the honest one', () async {
+        cloud.accept(remoteTrack('T', 'P', honest));
+        cloud.accept(runaway);
+        final first = await engine.pumpPull();
+        expect(first.quarantined, 1);
+        expect(first.failedRecords, 1);
+        expect(await trackRow(), isNull);
+        expect(await quarantine.list(), hasLength(2));
+
+        await parentLandsThenClockCatchesUp();
+      });
     });
 
     test(
