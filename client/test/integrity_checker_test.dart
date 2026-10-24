@@ -345,8 +345,9 @@ void main() {
       );
     });
 
-    test('a bus cycle through a bus whose newer state is parked is not '
-        'broken: the parked route may not close the ring', () async {
+    test('a bus cycle through a bus whose newer state is parked is broken '
+        'AT that bus: the parked route may not close the ring, but the engine '
+        'refuses a live one', () async {
       final base = await seed();
       final a = FxBus(id: newId(), name: 'A', fx: TrackFx.flat());
       final b = FxBus(id: newId(), name: 'B', fx: TrackFx.flat());
@@ -372,17 +373,39 @@ void main() {
       // B (not the would-be victim A) has a newer state parked.
       await park('fx_buses', b.id, deltaMs: 1000);
 
-      expect(await checker.check(), isEmpty);
+      expect(
+        (await checker.check()).map((v) => v.invariant),
+        everyElement('bus-cycle'),
+        reason: 'the ring is live: the engine would refuse the whole graph',
+      );
       await checker.repair();
       final rows = await db
-          .customSelect('SELECT id, output_bus_id FROM fx_buses')
+          .customSelect('SELECT id, output_bus_id, hlc_packed FROM fx_buses')
           .get();
       final routes = {
         for (final r in rows)
           r.read<String>('id'): r.read<String?>('output_bus_id'),
       };
       expect(routes[a.id], b.id, reason: 'A\'s route is not nulled');
-      expect(routes[b.id], a.id);
+      expect(
+        routes[b.id],
+        isNull,
+        reason: 'the ring is cut at the pending bus',
+      );
+      expect(await checker.check(), isEmpty);
+      // The cut ranks below B's parked state, so it lasts only until that
+      // state lands.
+      final parked = await db
+          .customSelect(
+            'SELECT remote_hlc_packed AS h FROM sync_quarantine WHERE id = ?',
+            variables: [Variable.withString(b.id)],
+          )
+          .getSingle();
+      final cut = rows.firstWhere((r) => r.read<String>('id') == b.id);
+      expect(
+        cut.read<String>('hlc_packed').compareTo(parked.read<String>('h')),
+        lessThan(0),
+      );
     });
   });
 }

@@ -304,11 +304,15 @@ class IntegrityChecker {
   /// outer [repair] fixpoint loop comes back for any further cycle. Every
   /// replica sees the same rows here, so every replica picks the same victim.
   ///
-  /// A bus whose newer state is still parked ([_parkedNewer]) contributes no
-  /// edge: its route is pending, and the parked state may well not close the
-  /// ring — breaking it now would null a peer's route fleet-wide for a cycle
-  /// that never existed. Dropping edges can only hide cycles, never invent
-  /// one; a ring through the pending bus is judged once its state settles.
+  /// A ring through a bus whose newer state is still parked ([_parkedNewer])
+  /// is broken AT that bus instead. Its route is pending and the parked state
+  /// may well not close the ring, so cutting another member would null a
+  /// peer's route fleet-wide for a cycle that never existed; but the ring
+  /// cannot be left standing either — the engine refuses a cyclic graph, so
+  /// the practice would play nothing (or never take another structural edit)
+  /// for as long as the park lasts. The parked bus's own parked state already
+  /// out-ranks the derived repair stamp, so the cut lasts exactly until that
+  /// state lands, and a ring it really closes is judged again then.
   Future<List<IntegrityViolation>> _busCycles({required bool repair}) async {
     final rows = await db
         .customSelect(
@@ -317,13 +321,14 @@ class IntegrityChecker {
           '  WHERE b.deleted_at IS NULL AND b.output_bus_id IS NOT NULL '
           '    AND EXISTS (SELECT 1 FROM fx_buses o WHERE o.id = b.output_bus_id '
           '      AND o.deleted_at IS NULL AND o.practice_id = b.practice_id)'
-          '    AND NOT ${_parkedNewer('fx_buses', 'b.id')}'
           '), reach(start, node) AS ('
           '  SELECT src, dst FROM edge '
           '  UNION '
           '  SELECT r.start, e.dst FROM reach r JOIN edge e ON e.src = r.node'
           ') '
-          'SELECT b.id AS id, b.hlc_packed AS h FROM fx_buses b '
+          'SELECT b.id AS id, b.hlc_packed AS h, '
+          '  ${_parkedNewer('fx_buses', 'b.id')} AS parked '
+          'FROM fx_buses b '
           'WHERE EXISTS (SELECT 1 FROM reach r WHERE r.start = b.id AND r.node = b.id) '
           'ORDER BY b.hlc_packed ASC, b.id ASC',
         )
@@ -339,7 +344,10 @@ class IntegrityChecker {
         ),
     ];
     if (repair) {
-      final victim = rows.first;
+      final victim = rows.firstWhere(
+        (r) => r.read<int>('parked') != 0,
+        orElse: () => rows.first,
+      );
       await _nullColumn(
         'fx_buses',
         'output_bus_id',
