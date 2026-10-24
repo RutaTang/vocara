@@ -1383,7 +1383,12 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       displayName: 'Take ${_nextTakeNumber()}',
       durationMs: 0,
       createdAt: DateTime.now(),
-      versionId: practice.activeVersionId,
+      // The RESOLVED interpretation (what the lanes show), not the raw field:
+      // a null or dangling active id — the integrity repair nulls one whose
+      // interpretation was deleted on another device — still shows the first
+      // interpretation, and a take stamped with the raw value would be filed
+      // under no interpretation at all and never appear.
+      versionId: practice.activeVersion?.id,
     );
     _practice = practice.copyWith(
       vocalTracks: [...practice.vocalTracks, track],
@@ -1409,7 +1414,9 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       startMs: startMs,
       waveformPeaks: analysis.peaks,
       createdAt: DateTime.now(),
-      versionId: practice.activeVersionId,
+      // Resolved, like createEmptyVocalTake: a recording or import must land
+      // in the interpretation on screen.
+      versionId: practice.activeVersion?.id,
     );
     _practice = practice.copyWith(
       vocalTracks: [...practice.vocalTracks, track],
