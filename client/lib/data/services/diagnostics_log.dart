@@ -225,12 +225,14 @@ class DiagnosticsLog {
       final last = matched.lastIndexOf('/', end - 1) + 1;
       // Within it, the LAST extension-looking run wins (a dotted file name,
       // 'Ms.Lauryn Hill.wav', must not leak its tail) — but a file type the
-      // app actually handles wins over prose after the path, so
-      // 'take.wav after 12.3s' keeps its '.wav' and the context.
+      // app actually handles wins over later runs that read as NUMBERS, so
+      // 'take.wav after 12.3s' keeps its '.wav' and the context. Any other
+      // later run is still part of the name ('Lesson.mov with Jane Doe.avi').
       Match? ext;
       Match? known;
       for (final e in _extensionInside.allMatches(matched, last)) {
         if (e.start >= end) break;
+        if (known != null && !_numericRun.hasMatch(e[0]!)) known = null;
         ext = e;
         if (_knownExtensions.contains(e[0]!.substring(1).toLowerCase())) {
           known = e;
@@ -254,6 +256,7 @@ class DiagnosticsLog {
             'tmp part png jpg jpeg pdf py'
         .split(' '),
   };
+  static final RegExp _numericRun = RegExp(r'^\.\d');
   static final RegExp _extensionInside = RegExp(
     r'\.[A-Za-z0-9]{1,8}(?=[\s.,;:)\]}]|$)',
   );

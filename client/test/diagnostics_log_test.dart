@@ -188,6 +188,15 @@ void main() {
         ),
         'stage <path>.m4a: rate 22.05 kHz unsupported',
       );
+      // But only over numbers: a known type INSIDE a name whose own
+      // extension is unlisted must not leak the rest of that name.
+      for (final message in [
+        'import failed: /Users/alice/Music/Sonata Op.27.Part II (Jane Doe).wma',
+        'decode failed: /Users/alice/Movies/Lesson.mov with Jane Doe.avi',
+      ]) {
+        final out = DiagnosticsLog.scrubPaths(message);
+        expect(out, isNot(contains('Jane Doe')), reason: out);
+      }
     });
 
     test('leaves package URIs and non-path text untouched', () {
