@@ -431,8 +431,14 @@ impl OutResampler {
             let chunk = (out_frames - done).min(self.max_block);
             // The kernel for the chunk's LAST read position touches content index
             // floor(pos + (chunk-1)*step) + HALF; render until the FIFO covers it.
+            // One frame of margin: the kernel reaches that position by adding `step`
+            // chunk-1 times, and the iterated sum can round to one ULP above the
+            // single multiply-add here — across an integer boundary, one frame past
+            // the FIFO's end (an index panic on the IO thread). It grows with `pos`,
+            // which only seek/pause/play resets: hours of uptime at 44.1 kHz with a
+            // large device buffer reach it. The constructor's slack absorbs the frame.
             let last_pos = self.pos + (chunk.saturating_sub(1)) as f64 * self.step;
-            let need_content = last_pos.floor() as i64 + SINC_HALF as i64;
+            let need_content = last_pos.floor() as i64 + SINC_HALF as i64 + 1;
             let need_len = (need_content - self.origin + 1) as usize;
             // The FIFO is sized in `new` so reaching `need_len` never reallocates.
             debug_assert!(need_len + self.max_block <= self.fifo.capacity());
@@ -3469,6 +3475,33 @@ mod out_resampler_tests {
             rms < 0.05,
             "alias residue RMS {rms} for a tone above the device Nyquist"
         );
+    }
+
+    #[test]
+    fn hours_of_uptime_never_read_past_the_fifo() {
+        // The state at the start of a callback after ~5.8 h of 44.1 kHz streaming with no
+        // seek/pause/play, captured from an exact-arithmetic simulation: the read
+        // position's iterated sum lands one frame past what the fill computed, and the
+        // last kernel tap indexed `fifo[len]` — a panic unwinding into CoreAudio.
+        let desc = GraphDesc {
+            nodes: vec![NodeEntry::new(1, Box::new(MasterNode::unity()))],
+            edges: Vec::<Edge>::new(),
+            master: 1,
+        };
+        let g = desc.compile(ENGINE_SR, 1024).unwrap();
+        let (_mic_prod, mic_cons) = spsc::<[Smp; CHANNELS]>(256);
+        let (_h, rt) = spawn(g, HashMap::new(), mic_cons, 256);
+        let cell = RtCell::new(rt);
+        let mut res = OutResampler::new(44_100.0, 1024, Arc::clone(&cell), cell.claim());
+        res.pos = f64::from_bits(4_741_681_551_278_637_648);
+        res.origin = 1_001_160_460;
+        res.consumed_floor = res.pos.floor() as i64;
+        res.fifo.clear();
+        for _ in 0..244 {
+            res.fifo.push([0.0, 0.0]);
+        }
+        let mut out = vec![0.0f32; 2048 * CHANNELS];
+        res.process(&mut out, 2048);
     }
 
     fn ramp_engine() -> (EngineHandle, OutResampler) {
