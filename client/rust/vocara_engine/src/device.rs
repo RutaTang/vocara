@@ -78,6 +78,10 @@ fn effective_gate(streams_up: bool) -> bool {
 /// only ever lives on the [`AudioHost`] thread that created it.
 pub struct DeviceHandle {
     _stream: cpal::Stream,
+    /// An OUTPUT stream built from the system default device (not a uid). cpal builds those
+    /// on a DefaultOutput unit, which follows the system default by itself — so the device it
+    /// renders to is whatever the default is NOW, not the uid resolved when it was built.
+    follows_default: bool,
 }
 
 impl Drop for DeviceHandle {
@@ -516,9 +520,15 @@ fn build_stream(
     // stream starts with an empty (or no) FIFO, so the cursor equals the
     // render counter — sync before any callback can run.
     rt.transport().sync_consumed_to_rendered();
-    let err_cb = move |err| {
+    let err_cb = move |err: cpal::Error| {
+        // A stream following the system default reports a default change as DeviceChanged:
+        // cpal already rerouted it and documents that it stays active with no rebuild needed.
+        // Flagging it as lost made the host rebuild a working stream (an audible gap) and the
+        // stale binding read as a reroute, hard-muting the monitor behind a false warning.
+        if err.kind() == cpal::ErrorKind::DeviceChanged {
+            return;
+        }
         // No logging/alloc on the error path: flag the loss for the host's device-event poll.
-        let _ = err;
         event.fetch_or(EVENT_OUTPUT_LOST, Ordering::Release);
     };
     // Retire every older output callback before this stream can produce a sample: a teardown
@@ -557,7 +567,10 @@ fn build_stream(
     }
     .map_err(|e| format!("build_output_stream: {e}"))?;
     stream.play().map_err(|e| format!("stream.play: {e}"))?;
-    Ok(DeviceHandle { _stream: stream })
+    Ok(DeviceHandle {
+        _stream: stream,
+        follows_default: false,
+    })
 }
 
 /// Open an output stream for the device with `uid` (or the system default when `uid` is None).
@@ -571,7 +584,8 @@ fn build_output(
         None => default_output_device().ok_or_else(|| "no default output device".to_string())?,
     };
     let config = output_config(&device)?;
-    let stream = build_stream(&device, &config, Arc::clone(rt), Arc::clone(event))?;
+    let mut stream = build_stream(&device, &config, Arc::clone(rt), Arc::clone(event))?;
+    stream.follows_default = uid.is_none();
     let resolved = device_uid(&device).unwrap_or_default();
     Ok((stream, resolved))
 }
@@ -610,6 +624,9 @@ pub struct OutputBinding {
     requested: String,
     /// The resolved uid of the open cpal output stream; empty = no cpal output.
     cpal_uid: String,
+    /// The open cpal stream follows the system default (see [`DeviceHandle`]): `cpal_uid` is
+    /// only what the default was when it was built.
+    cpal_follows_default: bool,
     /// `Some(mic_uid)` while duplex VPIO renders the output in cpal's place; the string is the
     /// bound mic's uid, empty for the system-default mic (VPIO then binds no device at all).
     vpio_mic: Option<String>,
@@ -630,6 +647,11 @@ impl OutputBinding {
                 if !mic.is_empty() && output_device_by_uid(mic).is_some() {
                     return mic.clone();
                 }
+                system_default_output_uid()
+            }
+            // A default-following stream renders wherever the default is now; the uid resolved
+            // at build time goes stale on the first default change and read as a reroute.
+            None if self.cpal_follows_default && !self.cpal_uid.is_empty() => {
                 system_default_output_uid()
             }
             None => self.cpal_uid.clone(),
@@ -1622,7 +1644,10 @@ fn build_input_stream(
     stream
         .play()
         .map_err(|e| format!("input stream.play: {e}"))?;
-    Ok(DeviceHandle { _stream: stream })
+    Ok(DeviceHandle {
+        _stream: stream,
+        follows_default: false,
+    })
 }
 
 /// Open an input stream for `uid` (or the default input when None), after reconfiguring `cell`
@@ -1857,6 +1882,7 @@ fn audio_host_run(
             rebind_output(&|b| {
                 b.requested.clear();
                 b.cpal_uid = uid.clone();
+                b.cpal_follows_default = handle.follows_default;
                 b.vpio_mic = None;
             });
             let _ = ready_tx.send(Ok(uid));
@@ -1909,19 +1935,25 @@ fn audio_host_run(
                         // RESOLVED uid goes to the binding instead, so the reroute test compares
                         // what is playing against what was asked for.
                         Ok((handle, resolved)) => {
+                            let follows = handle.follows_default;
                             out_stream = Some(handle);
                             cur_out_uid = Some(uid.clone());
                             rebind_output(&|b| {
                                 b.requested = uid.clone();
                                 b.cpal_uid = resolved.clone();
+                                b.cpal_follows_default = follows;
                                 b.vpio_mic = None;
                             });
                             let _ = reply.send(0);
                         }
                         Err(_) => {
+                            // The pick is still the user's intent: a later restore (the mic
+                            // closing) must aim at it, not at the device they moved away from.
+                            cur_out_uid = Some(uid.clone());
                             rebind_output(&|b| {
                                 b.requested = uid.clone();
                                 b.cpal_uid.clear();
+                                b.cpal_follows_default = false;
                                 b.vpio_mic = None;
                             });
                             event.fetch_or(EVENT_OUTPUT_LOST, Ordering::Release);
@@ -1986,6 +2018,7 @@ fn audio_host_run(
                             if VPIO_DUPLEX_AEC {
                                 rebind_output(&|b| {
                                     b.cpal_uid.clear();
+                                    b.cpal_follows_default = false;
                                     b.vpio_mic = Some(bound.clone());
                                 });
                             }
@@ -2003,8 +2036,11 @@ fn audio_host_run(
                                         build_output(uid, &rt, &event)
                                     });
                                 out_stream = built;
+                                let follows =
+                                    out_stream.as_ref().is_some_and(|h| h.follows_default);
                                 rebind_output(&|b| {
                                     b.cpal_uid = resolved.clone();
+                                    b.cpal_follows_default = follows;
                                     b.vpio_mic = None;
                                 });
                             }
@@ -2028,10 +2064,12 @@ fn audio_host_run(
                                 build_output(uid, &rt, &event)
                             });
                         out_stream = built;
+                        let follows = out_stream.as_ref().is_some_and(|h| h.follows_default);
                         // Playback is back on the user's device, so the safety mute clears
                         // itself here — nobody else has to remember to lift it.
                         rebind_output(&|b| {
                             b.cpal_uid = resolved.clone();
+                            b.cpal_follows_default = follows;
                             b.vpio_mic = None;
                         });
                     }
@@ -2054,7 +2092,10 @@ fn audio_host_run(
                 let _ = reply.send(0);
             }
             HostCmd::SetInput { uid, reply } => {
-                cur_in_uid = Some(uid.clone());
+                // Dart sends '' for "System Default": that is None here, the default input —
+                // never a uid lookup that cannot match, which "fell back" to the default on
+                // every open and warned that the mic the user explicitly chose was missing.
+                cur_in_uid = (!uid.is_empty()).then(|| uid.clone());
                 if in_stream.is_some() {
                     // Reopen on the new device (drop old first → single-accessor; cpal output is
                     // already off in duplex). Not-running for the whole swap window (see
@@ -2062,9 +2103,13 @@ fn audio_host_run(
                     input_stopped(&input_state);
                     in_stream = None;
                     let mut fell_back = false;
-                    match open_mic(Some(&uid), &rt, &input_cell, &event).or_else(|_| {
-                        fell_back = true;
-                        open_mic(None, &rt, &input_cell, &event)
+                    match open_mic(cur_in_uid.as_deref(), &rt, &input_cell, &event).or_else(|e| {
+                        if cur_in_uid.is_some() {
+                            fell_back = true;
+                            open_mic(None, &rt, &input_cell, &event)
+                        } else {
+                            Err(e)
+                        }
                     }) {
                         Ok(handle) => {
                             in_stream = Some(handle);
@@ -2083,6 +2128,7 @@ fn audio_host_run(
                             if VPIO_DUPLEX_AEC {
                                 rebind_output(&|b| {
                                     b.cpal_uid.clear();
+                                    b.cpal_follows_default = false;
                                     b.vpio_mic = Some(bound.clone());
                                 });
                             }
@@ -2111,8 +2157,11 @@ fn audio_host_run(
                                         build_output(uid, &rt, &event)
                                     });
                                 out_stream = built;
+                                let follows =
+                                    out_stream.as_ref().is_some_and(|h| h.follows_default);
                                 rebind_output(&|b| {
                                     b.cpal_uid = resolved.clone();
+                                    b.cpal_follows_default = follows;
                                     b.vpio_mic = None;
                                 });
                             }
@@ -2131,6 +2180,7 @@ fn audio_host_run(
                 out_stream = None;
                 rebind_output(&|b| {
                     b.cpal_uid.clear();
+                    b.cpal_follows_default = false;
                     b.vpio_mic = None;
                 });
                 break;
@@ -3862,8 +3912,8 @@ mod output_safety_tests {
     //! lookups it wraps need real CoreAudio, so every case here fixes both uids explicitly.
 
     use super::{
-        reconcile_output_safety, restore_output_or_flag, OutputBinding, EVENT_OUTPUT_LOST,
-        EVENT_OUTPUT_REROUTED,
+        reconcile_output_safety, restore_output_or_flag, system_default_output_uid, OutputBinding,
+        EVENT_OUTPUT_LOST, EVENT_OUTPUT_REROUTED,
     };
     use crate::dsp::master::MasterNode;
     use crate::graph::{Edge, GraphDesc, NodeEntry};
@@ -3895,6 +3945,7 @@ mod output_safety_tests {
         let b = Mutex::new(OutputBinding {
             requested: "dev-A".into(),
             cpal_uid: "dev-A".into(),
+            cpal_follows_default: false,
             vpio_mic: None,
             was_rerouted: false,
         });
@@ -3913,6 +3964,7 @@ mod output_safety_tests {
         let b = Mutex::new(OutputBinding {
             requested: "dev-A".into(),
             cpal_uid: "dev-B".into(),
+            cpal_follows_default: false,
             vpio_mic: None,
             was_rerouted: false,
         });
@@ -3938,6 +3990,7 @@ mod output_safety_tests {
         let b = Mutex::new(OutputBinding {
             requested: "dev-A".into(),
             cpal_uid: String::new(),
+            cpal_follows_default: false,
             vpio_mic: None,
             was_rerouted: false,
         });
@@ -3956,6 +4009,7 @@ mod output_safety_tests {
         let following_default = OutputBinding {
             requested: String::new(),
             cpal_uid: "whatever-the-default-resolved-to".into(),
+            cpal_follows_default: true,
             vpio_mic: None,
             was_rerouted: false,
         };
@@ -3966,10 +4020,31 @@ mod output_safety_tests {
             // A failed open left the fallback playing: the PICK is still dev-A, so resubmitting it
             // re-attaches that device when it comes back.
             cpal_uid: "dev-B".into(),
+            cpal_follows_default: false,
             vpio_mic: None,
             was_rerouted: false,
         };
         assert_eq!(explicit.requested_pick(), "dev-A");
+    }
+
+    /// A stream built on the system default follows it (cpal's DefaultOutput unit reroutes by
+    /// itself), so the uid resolved at build time is stale after the first default change.
+    /// Reading that snapshot as "what is playing" made every default change (headphones
+    /// plugged in) look like a reroute away from the user's choice — monitor hard-muted, a
+    /// false "playback moved" warning — for a user who never picked an output. (The one case
+    /// here that consults the real default: both sides of the comparison resolve it through
+    /// the same lookup, so it holds on any machine, including one with no output at all.)
+    #[test]
+    fn a_stream_following_the_default_is_not_rerouted_when_the_default_moves() {
+        let following = OutputBinding {
+            requested: String::new(),
+            cpal_uid: "the-default-when-the-stream-was-built".into(),
+            cpal_follows_default: true,
+            vpio_mic: None,
+            was_rerouted: false,
+        };
+        assert_eq!(following.actual_uid(), system_default_output_uid());
+        assert!(!following.rerouted());
     }
 
     /// The mute is not a latch: once playback is back on the chosen device it lifts itself, so no
@@ -3981,6 +4056,7 @@ mod output_safety_tests {
         let b = Mutex::new(OutputBinding {
             requested: "dev-A".into(),
             cpal_uid: "dev-B".into(),
+            cpal_follows_default: false,
             vpio_mic: None,
             was_rerouted: false,
         });
