@@ -312,6 +312,21 @@ Future<({Map<Type, int> painters, int paragraphs})> _paintedPerTicks(
   return (painters: painters, paragraphs: paragraphs);
 }
 
+/// The widget types rebuilt by the frame after [change].
+Future<Set<String>> _rebuiltBy(WidgetTester tester, VoidCallback change) async {
+  await tester.pump(const Duration(milliseconds: 16));
+  final rebuilt = <String>{};
+  debugOnRebuildDirtyWidget = (e, _) =>
+      rebuilt.add(e.widget.runtimeType.toString());
+  try {
+    change();
+    await tester.pump(const Duration(milliseconds: 16));
+  } finally {
+    debugOnRebuildDirtyWidget = null;
+  }
+  return rebuilt;
+}
+
 void main() {
   testWidgets('a playhead tick repaints only the playheads (dock closed)', (
     tester,
@@ -459,6 +474,45 @@ void main() {
         up = up.parent;
       }
       expect(up, isNotNull);
+    }
+  });
+
+  testWidgets('changing the VIEW rebuilds the timeline, not the workspace', (
+    tester,
+  ) async {
+    // Pan, zoom, follow and loop-edge drags arrive at trackpad, drag or
+    // playhead rate; forwarded through the view model, each one rebuilt the
+    // whole workspace — both side panels, the dock, the transport bar and
+    // every lane's header (1326 -> 549 widgets per pan over 30 lanes).
+    final vm = await _pumpScreen(tester);
+    final playback = vm.playback;
+    const elsewhere = ['LeftPanel', 'RightPanel', 'BottomDock'];
+    final changes = <String, VoidCallback>{
+      'zoom': () => playback.setTimelineZoomLive(0.6),
+      'pan': () => playback.panView(2000),
+      'follow': playback.toggleFollowCursor,
+      'loop edge': () => playback.setLoopEnd(playback.loopEndMs - 500),
+    };
+    for (final MapEntry(key: name, value: change) in changes.entries) {
+      final rebuilt = await _rebuiltBy(tester, change);
+      expect(rebuilt, contains('TrackRow'), reason: '$name: the lanes follow');
+      expect(rebuilt, contains('RulerBar'), reason: '$name: the ruler follows');
+      // Nor the lane headers: nothing they show depends on the view.
+      for (final w in [...elsewhere, 'DetailTransportBar', '_TrackHeader']) {
+        expect(rebuilt, isNot(contains(w)), reason: '$name rebuilt $w');
+      }
+    }
+    // A page-flip of the follow-cursor scroll, driven by the playhead.
+    final span = playback.viewSpanMs;
+    final flip = await _rebuiltBy(
+      tester,
+      () => playback.setRecordingPosition(
+        Duration(milliseconds: playback.viewStartMs + span),
+      ),
+    );
+    expect(flip, contains('TrackRow'));
+    for (final w in elsewhere) {
+      expect(flip, isNot(contains(w)), reason: 'a follow page-flip rebuilt $w');
     }
   });
 }

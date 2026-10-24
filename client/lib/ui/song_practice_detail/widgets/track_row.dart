@@ -186,23 +186,25 @@ class TrackRow extends StatelessWidget {
       ),
       child: Row(
         children: [
-          _TrackHeader(
-            track: track,
-            label: label,
-            selected: selected,
-            armed: armed,
-            accent: accent,
-            canExpand: canExpand,
-            expanded: expanded,
-            onToggleExpand: onToggleExpand,
-            onSelect: onSelect,
-            onContextMenu: onContextMenu,
-            onToggleMute: onToggleMute,
-            onToggleSolo: onToggleSolo,
-            onVolume: onVolume,
-            onVolumeCommit: onVolumeCommit,
-            onAddNote: onAddNote,
-            onAddTechnique: onAddTechnique,
+          _StableHeader(
+            _TrackHeader(
+              track: track,
+              label: label,
+              selected: selected,
+              armed: armed,
+              accent: accent,
+              canExpand: canExpand,
+              expanded: expanded,
+              onToggleExpand: onToggleExpand,
+              onSelect: onSelect,
+              onContextMenu: onContextMenu,
+              onToggleMute: onToggleMute,
+              onToggleSolo: onToggleSolo,
+              onVolume: onVolume,
+              onVolumeCommit: onVolumeCommit,
+              onAddNote: onAddNote,
+              onAddTechnique: onAddTechnique,
+            ),
           ),
           Expanded(
             child: _Body(
@@ -269,6 +271,20 @@ class _TrackHeader extends StatelessWidget {
   final VoidCallback onVolumeCommit;
   final VoidCallback onAddNote;
   final VoidCallback onAddTechnique;
+
+  /// Whether [other] shows exactly what this does. The callbacks are not
+  /// compared (the lane rebuilds them every time): they capture only this
+  /// lane's ids and [track], which is compared by identity — any edit to the
+  /// track replaces the object.
+  bool showsSameAs(_TrackHeader other) =>
+      identical(track, other.track) &&
+      label == other.label &&
+      selected == other.selected &&
+      armed == other.armed &&
+      accent == other.accent &&
+      canExpand == other.canExpand &&
+      expanded == other.expanded &&
+      (onToggleExpand == null) == (other.onToggleExpand == null);
 
   @override
   Widget build(BuildContext context) {
@@ -1041,4 +1057,30 @@ class _DragGhost extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Keeps showing the same [_TrackHeader] instance while what it shows is
+/// unchanged, so Flutter skips its subtree. A timeline pan or zoom rebuilds
+/// every lane (the body follows the viewport), and each header — mute, solo,
+/// fader, menu and labels, some 45 widgets — was rebuilt with it for nothing.
+class _StableHeader extends StatefulWidget {
+  const _StableHeader(this.header);
+
+  final _TrackHeader header;
+
+  @override
+  State<_StableHeader> createState() => _StableHeaderState();
+}
+
+class _StableHeaderState extends State<_StableHeader> {
+  late _TrackHeader _shown = widget.header;
+
+  @override
+  void didUpdateWidget(_StableHeader old) {
+    super.didUpdateWidget(old);
+    if (!widget.header.showsSameAs(_shown)) _shown = widget.header;
+  }
+
+  @override
+  Widget build(BuildContext context) => _shown;
 }

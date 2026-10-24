@@ -40,6 +40,9 @@ class _FakePlayback extends Fake implements PlaybackController {
   final ValueNotifier<Duration> position = ValueNotifier(Duration.zero);
 
   @override
+  final Listenable viewport = ChangeNotifier();
+
+  @override
   bool get isPlaying => playing;
 
   @override

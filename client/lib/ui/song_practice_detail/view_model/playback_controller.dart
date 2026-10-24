@@ -52,6 +52,15 @@ class PlaybackController extends ChangeNotifier {
   /// Master-clock playhead position. Drives the playhead overlay only.
   final ValueNotifier<Duration> position = ValueNotifier(Duration.zero);
 
+  /// Fires for changes to the timeline VIEW alone — pan, follow page-flips,
+  /// zoom, follow on/off and loop-edge drags — which do NOT notify this
+  /// controller. They arrive at trackpad, drag or playhead rate, and forwarded
+  /// through the view model each one rebuilt the whole workspace (some 1700
+  /// widgets). Only the timeline and the transport's zoom, follow and loop
+  /// controls read that state, and they listen here.
+  Listenable get viewport => _viewport;
+  final _ViewportNotifier _viewport = _ViewportNotifier();
+
   bool _isPlaying = false;
   bool get isPlaying => _isPlaying;
 
@@ -170,7 +179,7 @@ class PlaybackController extends ChangeNotifier {
     if (span == viewSpanMs) return;
     _viewSpanMs = span;
     _recenterViewOnPlayhead();
-    notifyListeners();
+    _viewport.changed();
   }
 
   Future<void> commitTimelineZoom() async {}
@@ -182,7 +191,7 @@ class PlaybackController extends ChangeNotifier {
     if (span == viewSpanMs) return;
     _viewSpanMs = span;
     _recenterViewOnPlayhead();
-    notifyListeners();
+    _viewport.changed();
   }
 
   // --- Viewport pan / follow -----------------------------------------------
@@ -204,7 +213,7 @@ class PlaybackController extends ChangeNotifier {
   void toggleFollowCursor() {
     _followCursor = !_followCursor;
     if (_followCursor) _recenterViewOnPlayhead();
-    notifyListeners();
+    _viewport.changed();
   }
 
   /// Pans the visible window by [deltaMs] (horizontal scroll / drag). Turns off
@@ -216,13 +225,13 @@ class PlaybackController extends ChangeNotifier {
     if (next == _viewStartMs) {
       if (_followCursor) {
         _followCursor = false;
-        notifyListeners();
+        _viewport.changed();
       }
       return;
     }
     _followCursor = false;
     _viewStartMs = next;
-    notifyListeners();
+    _viewport.changed();
   }
 
   void _recenterViewOnPlayhead() {
@@ -246,7 +255,7 @@ class PlaybackController extends ChangeNotifier {
     final next = (playheadMs - span ~/ 10).clamp(0, maxStart);
     if (next == _viewStartMs) return;
     _viewStartMs = next;
-    notifyListeners();
+    _viewport.changed();
   }
 
   /// Defaults the play region to the content length (the longest take) on first
@@ -297,7 +306,7 @@ class PlaybackController extends ChangeNotifier {
     _loopStartMs = ms.clamp(0, hi);
     _pushLoop();
     _snapPlayheadIntoLoop();
-    notifyListeners();
+    _viewport.changed(); // a handle drag: the region only (see [viewport])
   }
 
   /// Drags the right edge of the loop region.
@@ -308,7 +317,7 @@ class PlaybackController extends ChangeNotifier {
     _loopEndMs = ms.clamp(lo, _loopMaxMs);
     _pushLoop();
     _snapPlayheadIntoLoop();
-    notifyListeners();
+    _viewport.changed(); // a handle drag: the region only (see [viewport])
   }
 
   void toggleLoop() {
@@ -324,6 +333,23 @@ class PlaybackController extends ChangeNotifier {
     _positionSub?.cancel();
     _playingSub?.cancel();
     position.dispose();
+    _viewport.dispose();
+    super.dispose();
+  }
+}
+
+class _ViewportNotifier extends ChangeNotifier {
+  bool _disposed = false;
+
+  /// Guarded like the controller's own notifications: a position event can
+  /// race the tear-down.
+  void changed() {
+    if (!_disposed) notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
     super.dispose();
   }
 }

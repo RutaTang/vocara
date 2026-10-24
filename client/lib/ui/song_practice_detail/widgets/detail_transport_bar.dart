@@ -92,10 +92,16 @@ class DetailTransportBar extends StatelessWidget {
                     onTap: () => vm.playback.zoomTimeline(1.25),
                   ),
                   const SizedBox(width: 8),
-                  _ZoomSlider(
-                    value: vm.playback.timelineZoom,
-                    onChanged: vm.playback.setTimelineZoomLive,
-                    onChangeEnd: vm.playback.commitTimelineZoom,
+                  // View state notifies the viewport only (see
+                  // PlaybackController.viewport), as do the loop and follow
+                  // buttons' below.
+                  ListenableBuilder(
+                    listenable: vm.playback.viewport,
+                    builder: (context, _) => _ZoomSlider(
+                      value: vm.playback.timelineZoom,
+                      onChanged: vm.playback.setTimelineZoomLive,
+                      onChangeEnd: vm.playback.commitTimelineZoom,
+                    ),
                   ),
                   const SizedBox(width: 8),
                   _ZoomIcon(
@@ -129,22 +135,30 @@ class DetailTransportBar extends StatelessWidget {
                         : (hasTracks ? vm.playback.stop : null),
                   ),
                   const SizedBox(width: 8),
-                  StudioRoundButton(
-                    icon: FIcons.repeat,
-                    color: vm.playback.loopEnabled
-                        ? Studio.accent
-                        : Studio.textSecondary,
-                    size: 34,
-                    onTap: vm.playback.hasLoop ? vm.playback.toggleLoop : null,
+                  ListenableBuilder(
+                    listenable: vm.playback.viewport,
+                    builder: (context, _) => StudioRoundButton(
+                      icon: FIcons.repeat,
+                      color: vm.playback.loopEnabled
+                          ? Studio.accent
+                          : Studio.textSecondary,
+                      size: 34,
+                      onTap: vm.playback.hasLoop
+                          ? vm.playback.toggleLoop
+                          : null,
+                    ),
                   ),
                   const SizedBox(width: 8),
-                  StudioRoundButton(
-                    icon: FIcons.locateFixed,
-                    color: vm.playback.followCursor
-                        ? Studio.accent
-                        : Studio.textSecondary,
-                    size: 34,
-                    onTap: vm.playback.toggleFollowCursor,
+                  ListenableBuilder(
+                    listenable: vm.playback.viewport,
+                    builder: (context, _) => StudioRoundButton(
+                      icon: FIcons.locateFixed,
+                      color: vm.playback.followCursor
+                          ? Studio.accent
+                          : Studio.textSecondary,
+                      size: 34,
+                      onTap: vm.playback.toggleFollowCursor,
+                    ),
                   ),
                   const SizedBox(width: 16),
                   _Lcd(

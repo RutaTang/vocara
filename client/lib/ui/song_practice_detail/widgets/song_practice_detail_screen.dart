@@ -688,7 +688,17 @@ class _Center extends StatelessWidget {
     // LayoutBuilder — a lane's live take, the master envelope — re-lays it
     // out, and without the boundary that layout climbed to the Scaffold and
     // repainted the side panels, the transport bar and the dock with it.
-    return SizedBox.expand(child: RepaintBoundary(child: _pane()));
+    //
+    // The view itself (pan, follow, zoom, loop edges) notifies only
+    // [PlaybackController.viewport], so the timeline rebuilds for it alone.
+    return SizedBox.expand(
+      child: RepaintBoundary(
+        child: ListenableBuilder(
+          listenable: vm.playback.viewport,
+          builder: (context, _) => _pane(),
+        ),
+      ),
+    );
   }
 
   Widget _pane() {
