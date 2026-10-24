@@ -183,6 +183,11 @@ pub struct VeEngine {
     /// underruns stay in the total — removal used to make the aggregate
     /// DECREASE, which the Dart watch's monotonic compare read as healthy.
     stream_ctrls: Vec<Arc<crate::feed::StreamCtrl>>,
+    /// Underruns counted by control blocks earlier commits retired: every commit
+    /// mints fresh ones, so without this carry the aggregate restarted from zero
+    /// at each resync and the Dart watch's monotonic compare stayed silent until
+    /// a starving track out-counted the previous graph's total.
+    retired_xruns: u64,
     /// Staged-track indices whose streamable file could not be reopened by the
     /// last SUCCESSFUL commit — one bit each (see [`mark_degraded`] for how a
     /// project wider than the mask folds). Such a track went into the graph
@@ -502,6 +507,7 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
             bus_gr_meters: Vec::new(),
             feeders: Arc::new(std::sync::Mutex::new(Vec::new())),
             stream_ctrls: Vec::new(),
+            retired_xruns: 0,
             degraded_mask: 0,
             feeder_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             feeder_join: None,
@@ -1537,6 +1543,12 @@ pub extern "C" fn ve_tracks_commit(e: *mut VeEngine) -> c_int {
         // Swap the feeder set; the pump thread exists only while needed. The
         // control blocks are recorded separately so ve_stream_xruns keeps
         // counting a track whose feeder is later dropped.
+        let retired: u64 = eng
+            .stream_ctrls
+            .iter()
+            .map(|c| c.xruns.load(std::sync::atomic::Ordering::Relaxed))
+            .sum();
+        eng.retired_xruns = eng.retired_xruns.saturating_add(retired);
         eng.stream_ctrls = new_ctrls;
         eng.degraded_mask = degraded;
         {
@@ -2062,10 +2074,13 @@ pub extern "C" fn ve_stream_xruns(e: *mut VeEngine) -> u64 {
         // feeder dropped after persistent I/O failure must keep contributing
         // its (still-growing) underruns, or the aggregate DECREASES and the
         // Dart watch's monotonic compare reads the dead track as healthy.
-        eng.stream_ctrls
+        let live: u64 = eng
+            .stream_ctrls
             .iter()
             .map(|c| c.xruns.load(std::sync::atomic::Ordering::Relaxed))
-            .sum()
+            .sum();
+        // Plus every retired graph's count: the aggregate never restarts at a commit.
+        eng.retired_xruns.saturating_add(live)
     })
 }
 

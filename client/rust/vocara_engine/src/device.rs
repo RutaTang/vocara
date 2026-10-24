@@ -963,6 +963,10 @@ impl InputCell {
         st.primed = false;
         st.prev = [0.0, 0.0];
         st.nominal_acc = 0.0;
+        // The meter holds the previous session's last peak until a callback overwrites it,
+        // and the new stream's first callback can be hundreds of ms away (a VPIO open): the
+        // next take's live waveform and the mic meter started on that stale peak.
+        st.level.store(0, Ordering::Relaxed);
         epoch
     }
 
@@ -4145,6 +4149,40 @@ mod cell_exclusion_tests {
         );
         cell.reconfigure(ENGINE_SR, 1);
         (cell, mic_cons)
+    }
+
+    /// The meter is written only by a callback, so a new input stream used to start on the
+    /// previous session's last peak until its first callback arrived (hundreds of ms for a
+    /// VPIO open) — and that stale peak led the next take's live waveform.
+    #[test]
+    fn a_new_input_stream_starts_its_meter_at_zero() {
+        let level = Arc::new(AtomicU32::new(0));
+        let (mic_prod, _mic) = spsc::<[Smp; CHANNELS]>(1 << 12);
+        let (cap_prod, _c) = spsc::<[Smp; CHANNELS]>(8);
+        let (rec_prod, _r) = spsc::<[Smp; CHANNELS]>(8);
+        let cell = InputCell::new(
+            mic_prod,
+            cap_prod,
+            rec_prod,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::clone(&level),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(1.0f64.to_bits())),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU32::new(0)),
+        );
+        cell.reconfigure(ENGINE_SR, 1);
+        cell.feed_test(&[0.5f32; 256]);
+        assert!(f32::from_bits(level.load(std::sync::atomic::Ordering::Relaxed)) > 0.4);
+
+        cell.reconfigure(ENGINE_SR, 1); // the next session's stream opens
+        assert_eq!(
+            f32::from_bits(level.load(std::sync::atomic::Ordering::Relaxed)),
+            0.0
+        );
     }
 
     /// Two input callbacks would be two producers on rings that are single-producer by
