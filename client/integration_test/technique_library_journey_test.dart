@@ -17,18 +17,16 @@ import 'package:vocara/utils/result.dart';
 
 import 'support/e2e.dart';
 
-/// UI-driven journeys for the technique LIBRARY list surface: the empty state
-/// and the search + tag filters over a seeded grid. The library list carries no
-/// indefinite painters, so these could `pumpAndSettle`, but we keep bounded
-/// [pumpUntil] for consistency.
+/// UI-driven journeys for the technique LIBRARY list surface: the empty state,
+/// creating a technique through the dialog (into its detail and back to the
+/// grid), and the search filter over a seeded grid. The tag filter is covered
+/// by the widget tests (`test/technique_library_layout_test.dart`), not here.
+/// The library list carries no indefinite painters, so these could
+/// `pumpAndSettle`, but we keep bounded [pumpUntil] for consistency.
 ///
 /// Run with the library deep-link:
 ///   flutter test integration_test/technique_library_journey_test.dart -d macos \
 ///       --dart-define=START=/techniques
-///
-/// Creating a technique through the dialog is covered at the ViewModel level in
-/// `test/`-side and `technique_library_test.dart`; it is intentionally not
-/// re-driven here because the create→detail route push is layout-heavy.
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
   MediaKit.ensureInitialized();

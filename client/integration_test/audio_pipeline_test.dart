@@ -127,7 +127,7 @@ void main() {
     );
     expect(vm.errorMessage, isNull);
 
-    // Exercise the media_kit transport: play, then pause.
+    // Exercise the native engine's transport: play, then pause.
     await vm.playback.togglePlay();
     await tester.pump(const Duration(milliseconds: 400));
     await vm.playback.togglePlay();

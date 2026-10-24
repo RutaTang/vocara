@@ -311,8 +311,11 @@ void main() {
     },
   );
 
-  // Real sidecar path — gated. This must NEVER fail when the python engine is
-  // absent (the common CI / sandboxed case); it early-returns instead.
+  // Real sidecar path — gated on the engine being INSTALLED. This must never
+  // fail when the python engine is absent (the common CI / sandboxed case);
+  // it early-returns instead. Once the engine is present, though, a failing
+  // separation is exactly the regression this smoke exists to catch, so it
+  // fails the test rather than printing and passing.
   testWidgets(
     'ProcessSourceSeparationService: gated real-sidecar smoke (skips when '
     'no engine is installed)',
@@ -344,29 +347,17 @@ void main() {
         freq: 220,
       );
 
-      SeparationResult? result;
-      Object? failure;
+      final SeparationResult result;
       try {
         result = await svc.separate(srcPath);
-      } catch (e) {
-        // A present-but-flaky engine (model download, ffmpeg path) shouldn't
-        // hard-fail the suite; record it for the orchestrator and bail.
-        failure = e;
       } finally {
         // Best-effort: ensure no sidecar process is left running regardless of
         // how separate() resolved.
         svc.cancel();
       }
 
-      if (failure != null) {
-        // ignore: avoid_print
-        print('Real separation present but failed at runtime: $failure');
-        return;
-      }
-
-      expect(result, isNotNull);
       expect(
-        await File(result!.instrumentalPath).exists(),
+        await File(result.instrumentalPath).exists(),
         isTrue,
         reason: 'the real engine writes an instrumental stem',
       );

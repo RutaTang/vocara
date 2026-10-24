@@ -27,10 +27,9 @@ import 'package:vocara/ui/song_practice_detail/widgets/song_practice_detail_scre
 /// these are normally already satisfied.
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
-  // The default PlaybackEngine is media_kit (no native engine unless the
-  // VOCARA_ENGINE=native dart-define is set); initialize it so building the
-  // detail workspace (which constructs a media_kit-backed PlaybackEngine) is
-  // safe.
+  // main() initializes media_kit (it backs the technique example players)
+  // before the tree builds; mirror it so this boots the tree main() boots.
+  // The song detail itself plays through the native engine.
   MediaKit.ensureInitialized();
 
   final messenger =

@@ -31,8 +31,9 @@ import 'support/e2e.dart';
 /// that would also defeat `pumpAndSettle`).
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
-  // Opening a practice constructs a media_kit-backed PlaybackEngine in the
-  // detail workspace; initialize the library so that build is safe.
+  // main() initializes media_kit (it backs the technique example players)
+  // before the tree builds; mirror it so this boots the tree main() boots.
+  // The song detail itself plays through the native engine.
   MediaKit.ensureInitialized();
 
   late Directory tmpDir;

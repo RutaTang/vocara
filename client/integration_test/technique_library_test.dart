@@ -105,7 +105,7 @@ void main() {
   });
 
   testWidgets(
-    'library: create technique -> appears in list, filters by tag and query',
+    'library: create technique -> appears in list, filters by query',
     (tester) async {
       final libVm = TechniqueLibraryViewModel(
         repository: persistence.techRepo,
@@ -352,7 +352,8 @@ void main() {
         expect(tone.durationMs, greaterThan(500));
         expect(tone.metrics.frames, greaterThan(0));
         expect(tone.spectrogram, isNotNull);
-        // Every reported f0 value is finite (no NaN/Inf leaking out).
+        // No f0 value is infinite: a voiced frame carries a finite pitch and
+        // an unvoiced one NaN (the documented marker), never ±Infinity.
         for (final f in tone.metrics.f0) {
           expect(f.isFinite || f.isNaN, isTrue);
         }
