@@ -160,22 +160,28 @@ class TechniqueLibraryViewModel extends ChangeNotifier {
     final result = await _repository.listTechniques();
     if (result is Ok<List<Technique>>) {
       _all = result.value;
-      // Drop an active filter that can no longer match after edits/deletes, so
-      // we never get stuck on an empty grid with the filter's chip gone. Covers
-      // both a tag that no longer exists (case-insensitive) and the "Untagged"
-      // filter once every technique has a tag.
-      if (_activeTag != null) {
-        final activeLower = _activeTag!.toLowerCase();
-        final stale = _activeTag == kUntaggedFilter
-            ? _all.every((t) => t.tags.isNotEmpty)
-            : !_all.any(
-                (t) => t.tags.any((tag) => tag.toLowerCase() == activeLower),
-              );
-        if (stale) _activeTag = null;
-      }
+      _dropStaleTagFilter();
       notifyListeners();
     }
     return result;
+  }
+
+  /// Drops an active filter that can no longer match after edits/deletes, so
+  /// we never get stuck on an empty grid with the filter's chip gone. Covers
+  /// both a tag that no longer exists (case-insensitive) and the "Untagged"
+  /// filter once every technique has a tag. Both paths that can shrink [_all]
+  /// run it — a delete prunes the list without a reload, so deleting the last
+  /// technique a filter matches would otherwise strand it. (A create only
+  /// adds, so it can never make a filter stale.)
+  void _dropStaleTagFilter() {
+    if (_activeTag == null) return;
+    final activeLower = _activeTag!.toLowerCase();
+    final stale = _activeTag == kUntaggedFilter
+        ? _all.every((t) => t.tags.isNotEmpty)
+        : !_all.any(
+            (t) => t.tags.any((tag) => tag.toLowerCase() == activeLower),
+          );
+    if (stale) _activeTag = null;
   }
 
   Future<Result<Technique>> _createTechnique(String name) async {
@@ -199,6 +205,7 @@ class TechniqueLibraryViewModel extends ChangeNotifier {
     final result = await _repository.deleteTechnique(id);
     if (result is Ok<void>) {
       _all = _all.where((t) => t.id != id).toList();
+      _dropStaleTagFilter();
       notifyListeners();
       await _mediaService.deleteTechniqueMedia(id);
     }
