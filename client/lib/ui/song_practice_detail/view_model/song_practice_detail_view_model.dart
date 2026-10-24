@@ -1757,9 +1757,15 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       // staging WAV as a whole "(recovered)" take beside the two halves. A
       // fresh id tombstones the old row, which keeps its asset referenced.
       final firstClipId = newId();
+      // The CLIP is re-read live too: a drag is not busy-gated either, and it
+      // moves the clip without touching its file. The file was cut at an
+      // offset INTO the clip, so both halves (and the cut) follow the clip to
+      // where it sits now — rebuilding from the snapshot snapped it back.
+      final liveClip = live.primaryClip!;
+      final cutMs = atMs + liveClip.startMs - clip.startMs;
       final first = live.copyWith(
         clips: [
-          clip.copyWith(
+          liveClip.copyWith(
             id: firstClipId,
             audioFilePath: parts.firstPath,
             durationMs: firstAnalysis.durationMs,
@@ -1769,12 +1775,12 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         // Markers stay with the half their start falls in; a range straddling
         // the cut is clamped so it doesn't dangle past the shortened take.
         notes: live.notes
-            .where((n) => n.positionMs < atMs)
-            .map((n) => clampNoteEnd(n, atMs))
+            .where((n) => n.positionMs < cutMs)
+            .map((n) => clampNoteEnd(n, cutMs))
             .toList(),
         techniqueMarkers: live.techniqueMarkers
-            .where((m) => m.positionMs < atMs)
-            .map((m) => clampMarkerEnd(m, atMs))
+            .where((m) => m.positionMs < cutMs)
+            .map((m) => clampMarkerEnd(m, cutMs))
             .toList(),
       );
       final second = live.copyWith(
@@ -1788,7 +1794,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
             id: newId(),
             audioFilePath: parts.secondPath,
             durationMs: secondAnalysis.durationMs,
-            startMs: atMs,
+            startMs: cutMs,
             waveformPeaks: secondAnalysis.peaks,
           ),
         ],
@@ -1796,11 +1802,11 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         // is tombstoned (its child rows soft-deleted) but still holds these ids, so reusing
         // them would collide on insert and roll the whole save back.
         notes: live.notes
-            .where((n) => n.positionMs >= atMs)
+            .where((n) => n.positionMs >= cutMs)
             .map((n) => n.copyWith(id: newId()))
             .toList(),
         techniqueMarkers: live.techniqueMarkers
-            .where((m) => m.positionMs >= atMs)
+            .where((m) => m.positionMs >= cutMs)
             .map((m) => m.copyWith(id: newId()))
             .toList(),
         displayName: '${live.displayName} (2)',
@@ -1897,9 +1903,14 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         await _discardQuietly([mergedPath]);
         return;
       }
+      // The clips themselves are re-read live as well: a drag (not gated)
+      // moves a clip without changing its file, and the merged clip must sit
+      // where the top clip is NOW, not where it was before the awaits.
+      final liveTopClip = liveTop.primaryClip!;
+      final liveBottomClip = liveBottom.primaryClip!;
       // Shift the bottom take's markers onto the merged timeline; range markers
       // shift their end by the same delta so the span is preserved.
-      final delta = topClip.endMs - bottomClip.startMs;
+      final delta = liveTopClip.endMs - liveBottomClip.startMs;
       // Fresh ids for the bottom take's notes/markers: the bottom track is tombstoned but
       // its child rows keep these ids, so reusing them on the merged (top) track would
       // collide on insert and roll the save back.
@@ -1928,7 +1939,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       final mergedClipId = newId();
       final merged = liveTop.copyWith(
         clips: [
-          topClip.copyWith(
+          liveTopClip.copyWith(
             id: mergedClipId,
             audioFilePath: mergedPath,
             durationMs: analysisResult.durationMs,
@@ -1977,19 +1988,23 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       // Analyze EVERY clip's file (a lane can hold several independent files),
       // then fold the results back in BY CLIP ID against the live model — a
       // clip added/removed during the analyze awaits must survive untouched.
-      final updatedById = <String, AudioClip>{};
+      // Only what the analysis measured is folded in: a clip dragged during
+      // the awaits keeps its new position (the pre-await copy snapped it back).
+      final analyzed = <String, WaveformResult>{};
       for (final c in track.clips) {
-        final waveform = await _waveforms.analyze(c.audioFilePath);
-        updatedById[c.id] = c.copyWith(
-          durationMs: waveform.durationMs,
-          waveformPeaks: waveform.peaks,
-        );
+        analyzed[c.id] = await _waveforms.analyze(c.audioFilePath);
         analysis.evictAnalysis(c.audioFilePath);
       }
       _updateTrack(
         trackId,
         (t) => t.copyWith(
-          clips: [for (final c in t.clips) updatedById[c.id] ?? c],
+          clips: [
+            for (final c in t.clips)
+              if (analyzed[c.id] case final w?)
+                c.copyWith(durationMs: w.durationMs, waveformPeaks: w.peaks)
+              else
+                c,
+          ],
         ),
       );
       await _save();

@@ -107,6 +107,13 @@ class _FakeEdits extends Fake implements AudioEditService {
   }) async => (firstPath: '/edit/first.wav', secondPath: '/edit/second.wav');
 
   @override
+  Future<String> concatWav({
+    required String practiceId,
+    required String firstPath,
+    required String secondPath,
+  }) async => '/edit/merged.wav';
+
+  @override
   Future<String> duplicate({
     required String practiceId,
     required String sourcePath,
@@ -497,6 +504,70 @@ void main() {
       await vm.addClipToTake('take1', '/src/drop.wav');
       expect(vm.selectedTrackId, 'take1');
       expect(vm.selectedBusId, isNull);
+    });
+  });
+
+  group('a clip dragged while a long edit runs keeps its new position', () {
+    AudioTrack take(String id, String name) => AudioTrack(
+      id: id,
+      kind: AudioTrackKind.vocal,
+      displayName: name,
+      audioFilePath: '/pool/$id.wav',
+      durationMs: 1000,
+      createdAt: DateTime(2026),
+      versionId: 'v1',
+    );
+
+    test('split: both halves follow the dragged clip', () async {
+      final vm = await pumpVm();
+      vm.position.value = const Duration(milliseconds: 500);
+      waveforms.gate = Completer<void>(); // the halves are being analyzed
+      final split = vm.splitTrackAtPlayhead('take1');
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+      vm.moveClipStartLive('take1', 'take1-c0', 300);
+      await vm.commitTrackMove();
+      waveforms.gate!.complete();
+      await split;
+
+      final first = repo.stored.vocalTracks[0];
+      final second = repo.stored.vocalTracks[1];
+      expect(first.id, 'take1');
+      expect(first.clips.single.startMs, 300, reason: 'the drag snapped back');
+      expect(second.clips.single.startMs, 800);
+    });
+
+    test(
+      'merge: the merged clip sits where the top clip was dragged',
+      () async {
+        final vm = await pumpVm(
+          seed: _seed(
+            vocalTracks: [take('top', 'Top'), take('bottom', 'Bottom')],
+          ),
+        );
+        waveforms.gate = Completer<void>(); // the merged file is being analyzed
+        final merge = vm.mergeTrackDown('top');
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+        vm.moveClipStartLive('top', 'top-c0', 300);
+        await vm.commitTrackMove();
+        waveforms.gate!.complete();
+        await merge;
+
+        expect(repo.stored.vocalTracks.map((t) => t.id), ['top']);
+        expect(repo.stored.vocalTracks.single.clips.single.startMs, 300);
+      },
+    );
+
+    test('re-analyze: the analyzed clip keeps the dragged position', () async {
+      final vm = await pumpVm();
+      waveforms.gate = Completer<void>();
+      final reanalyze = vm.reanalyzeTrack('take1');
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+      vm.moveClipStartLive('take1', 'take1-c0', 300);
+      await vm.commitTrackMove();
+      waveforms.gate!.complete();
+      await reanalyze;
+
+      expect(repo.stored.vocalTracks.single.clips.single.startMs, 300);
     });
   });
 }
