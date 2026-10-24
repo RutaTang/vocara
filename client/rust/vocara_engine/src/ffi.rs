@@ -21,7 +21,7 @@ use std::sync::Arc;
 use crate::build::{self, build, BusSpec, ProjectSpec, TrackSpec};
 use crate::device::{self, AudioHost, RecordWriter};
 use crate::graph::NodeId;
-use crate::live::{spawn, EngineHandle, RtCell, CMD_RING_CAPACITY};
+use crate::live::{spawn, EngineHandle, RtCell, Shared, CMD_RING_CAPACITY};
 use crate::ring::{spsc, Consumer};
 use crate::sample::{Smp, CHANNELS, ENGINE_SR};
 use crate::source::{BufferSource, RingSource};
@@ -263,6 +263,65 @@ impl FeederSlot {
     }
 }
 
+/// One pump-thread round over the feeder set, in two passes. First every
+/// stream gets its next callback's worth — a seek's or loop edit's replan
+/// fence and [`PAUSED_PRIME_FRAMES`] of audio behind it — and only then is
+/// each ring topped up. One pass filled each ring to the brim before even
+/// replanning the next, so after a seek with many streamed tracks the last
+/// ones missed the first callback (≈0.4 ms per full ring against a ~10 ms
+/// callback) and opened on silence. Returns whether a feeder was retired.
+fn pump_round(slots: &[Arc<std::sync::Mutex<FeederSlot>>], transport: &Shared) -> bool {
+    let (mut any_dead, failed) = pump_heads(slots, transport);
+    any_dead |= top_up(slots, transport, &failed);
+    any_dead
+}
+
+/// [`pump_round`]'s first pass. Returns whether a feeder was retired and which
+/// slots failed (the top-up skips those, so a failure counts once per round).
+fn pump_heads(
+    slots: &[Arc<std::sync::Mutex<FeederSlot>>],
+    transport: &Shared,
+) -> (bool, Vec<bool>) {
+    let mut any_dead = false;
+    let mut failed = vec![false; slots.len()];
+    for (i, slot_arc) in slots.iter().enumerate() {
+        let Ok(mut slot) = slot_arc.lock() else {
+            continue;
+        };
+        if slot.dead {
+            continue;
+        }
+        if let Err(e) = slot.feeder.pump_at_most(transport, PAUSED_PRIME_FRAMES) {
+            failed[i] = true;
+            any_dead |= slot.record_pump(Err(e));
+        }
+    }
+    (any_dead, failed)
+}
+
+/// [`pump_round`]'s second pass: every slot that did not fail its head.
+fn top_up(
+    slots: &[Arc<std::sync::Mutex<FeederSlot>>],
+    transport: &Shared,
+    failed: &[bool],
+) -> bool {
+    let mut any_dead = false;
+    for (i, slot_arc) in slots.iter().enumerate() {
+        if failed[i] {
+            continue;
+        }
+        let Ok(mut slot) = slot_arc.lock() else {
+            continue;
+        };
+        if slot.dead {
+            continue;
+        }
+        let result = slot.feeder.pump(transport);
+        any_dead |= slot.record_pump(result);
+    }
+    any_dead
+}
+
 impl VeEngine {
     /// Spawns the feeder pump thread once (idempotent). The thread holds
     /// only the transport Arc and the feeder set; it exits when
@@ -282,17 +341,7 @@ impl VeEngine {
                     Ok(set) => set.clone(),
                     Err(_) => break,
                 };
-                let mut any_dead = false;
-                for slot_arc in &slots {
-                    let Ok(mut slot) = slot_arc.lock() else {
-                        continue;
-                    };
-                    if slot.dead {
-                        continue;
-                    }
-                    let result = slot.feeder.pump(&transport);
-                    any_dead |= slot.record_pump(result);
-                }
+                let any_dead = pump_round(&slots, &transport);
                 if any_dead {
                     if let Ok(mut set) = feeders.lock() {
                         set.retain(|s| s.lock().map(|g| !g.dead).unwrap_or(false));
@@ -325,9 +374,11 @@ impl Drop for VeEngine {
 }
 
 const MAX_BLOCK: usize = 1024;
-/// What a commit made while paused primes into each new stream ring: the
-/// largest device callback (VPIO's 4096-frame slice), so the first one after
-/// Play finds audio on every track.
+/// One device callback's worth of a stream, the largest there is (VPIO's
+/// 4096-frame slice): what a commit made while paused primes into each new
+/// ring, and what each pump round gives every stream before topping any up
+/// (see [`pump_round`]), so the first callback after Play or a seek finds
+/// audio on every track.
 const PAUSED_PRIME_FRAMES: usize = 4096;
 const RING_FRAMES: usize = 1 << 16; // ~1.4 s @ 48k of headroom
 const MIC_RING_FRAMES: usize = 1 << 12; // 4096 frames ≈ 85 ms @ 48k (monitor jitter buffer)
@@ -2803,7 +2854,7 @@ mod feeder_slot_tests {
     //! The pump thread's transient-failure policy. A single I/O error used to
     //! remove the feeder for good — one EIO on a network volume, and that
     //! track was silent for the rest of the session with its underruns
-    //! vanishing from the health aggregate too.
+    //! vanishing from the health aggregate too. Also the order of a round.
 
     use super::{FeederSlot, MAX_FEEDER_FAILS};
     use crate::feed::{StreamCtrl, TrackFeeder, WavTrackReader};
@@ -2854,6 +2905,57 @@ mod feeder_slot_tests {
         assert!(s.dead);
         // Reported dead exactly once, so the sweep runs once.
         assert!(!s.record_pump(Err("EIO".into())));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_round_gives_every_stream_its_next_callback_before_topping_any_up() {
+        use crate::graph::{GraphDesc, NodeEntry};
+        use std::sync::{Arc, Mutex};
+        // A transport to plan against; the graph itself is irrelevant here.
+        let graph = GraphDesc {
+            nodes: vec![NodeEntry::new(
+                1,
+                Box::new(crate::dsp::master::MasterNode::unity()),
+            )],
+            edges: vec![],
+            master: 1,
+        }
+        .compile(48_000.0, 128)
+        .unwrap();
+        let (_mic, mic_cons) = spsc::<[Smp; CHANNELS]>(256);
+        let (handle, _rt) =
+            crate::live::spawn(graph, std::collections::HashMap::new(), mic_cons, 256);
+        let path =
+            std::env::temp_dir().join(format!("vocara_pump_round_{}.wav", std::process::id()));
+        crate::wav::write_wav_f32(
+            &path,
+            &vec![0.25 as Smp; 100_000 * CHANNELS],
+            CHANNELS as u16,
+            48_000,
+        )
+        .unwrap();
+        let mut rings = Vec::new();
+        let slots: Vec<_> = (0..3)
+            .map(|_| {
+                let (prod, cons) = spsc::<[Smp; CHANNELS]>(16_384);
+                rings.push(cons);
+                let reader = WavTrackReader::open(path.to_str().unwrap()).unwrap();
+                let feeder = TrackFeeder::new(StreamCtrl::new(), prod, reader, 0);
+                Arc::new(Mutex::new(FeederSlot::new(feeder)))
+            })
+            .collect();
+        handle.seek(10_000);
+        let (dead, failed) = super::pump_heads(&slots, handle.transport());
+        assert!(!dead && failed.iter().all(|f| !f));
+        // Every stream holds its replan fence and exactly one callback.
+        for ring in &rings {
+            assert_eq!(ring.len(), 2 + super::PAUSED_PRIME_FRAMES);
+        }
+        assert!(!super::top_up(&slots, handle.transport(), &failed));
+        for ring in &rings {
+            assert!(ring.len() > 2 + super::PAUSED_PRIME_FRAMES, "topped up");
+        }
         let _ = std::fs::remove_file(path);
     }
 }
