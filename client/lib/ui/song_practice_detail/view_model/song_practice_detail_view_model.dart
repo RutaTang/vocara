@@ -1728,10 +1728,17 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         await _discardQuietly([parts.firstPath, parts.secondPath]);
         return;
       }
+      // The surviving take keeps its lane, but its clip is a NEW row. Never
+      // re-point a clip id at a different file: the reconcile would overwrite
+      // the row's asset in place, leaving nothing that references the
+      // original recording, and the next boot's recovery would adopt its
+      // staging WAV as a whole "(recovered)" take beside the two halves. A
+      // fresh id tombstones the old row, which keeps its asset referenced.
+      final firstClipId = newId();
       final first = live.copyWith(
-        // The surviving take keeps its clip id (same row, new file + length).
         clips: [
           clip.copyWith(
+            id: firstClipId,
             audioFilePath: parts.firstPath,
             durationMs: firstAnalysis.durationMs,
             waveformPeaks: firstAnalysis.peaks,
@@ -1780,6 +1787,8 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       list[idx] = first;
       list.insert(idx + 1, second);
       _practice = cur.copyWith(vocalTracks: list);
+      final followSelection = _selectedClipId == clip.id;
+      if (followSelection) _selectedClipId = firstClipId;
       // Persist BEFORE deleting any old audio, so a failed save can't leave
       // the model pointing at a file that's already gone.
       if (await _save()) {
@@ -1789,10 +1798,13 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       } else {
         // The failed save reverted the model to the original one-clip take,
         // so the split halves are orphans — clean them up instead.
+        if (followSelection && _selectedClipId == firstClipId) {
+          _selectedClipId = clip.id;
+        }
         await _discardQuietly([parts.firstPath, parts.secondPath]);
       }
     });
-    // The surviving take keeps its id but now points at a new file.
+    // The surviving take keeps its id but now plays a new file.
     analysis.onTrackAudioChanged(trackId);
   }
 
@@ -1887,10 +1899,15 @@ class SongPracticeDetailViewModel extends ChangeNotifier
             endMs: m.endMs == null ? null : m.endMs! + delta,
           ),
       ]..sort((a, b) => a.positionMs.compareTo(b.positionMs));
+      // The merged take keeps the top lane, but its clip is a NEW row — never
+      // the top clip's id re-pointed at the merged file (see split: the
+      // original recording would lose its last reference and come back at
+      // the next boot as a "(recovered)" take).
+      final mergedClipId = newId();
       final merged = liveTop.copyWith(
-        // The merged take keeps the top clip's id (same row, new file+length).
         clips: [
           topClip.copyWith(
+            id: mergedClipId,
             audioFilePath: mergedPath,
             durationMs: analysisResult.durationMs,
             waveformPeaks: analysisResult.peaks,
@@ -1902,6 +1919,8 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       newList[idx] = merged;
       newList.removeAt(bottomIdx);
       _practice = cur.copyWith(vocalTracks: newList);
+      final followSelection = _selectedClipId == topClip.id;
+      if (followSelection) _selectedClipId = mergedClipId;
       // Persist BEFORE deleting any old audio, so a failed save can't leave
       // the model pointing at files that are already gone.
       if (await _save()) {
@@ -1914,10 +1933,13 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       } else {
         // The failed save reverted the model to the two original takes, so
         // the merged output is an orphan — clean it up instead.
+        if (followSelection && _selectedClipId == mergedClipId) {
+          _selectedClipId = topClip.id;
+        }
         await _discardQuietly([mergedPath]);
       }
     });
-    // The merged take keeps the top take's id but now points at a new file.
+    // The merged take keeps the top take's id but now plays a new file.
     analysis.onTrackAudioChanged(trackId);
   }
 

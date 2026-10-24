@@ -601,6 +601,39 @@ void main() {
       expect(vm.practice!.vocalTracks.map((t) => t.id), ['top', 'bottom']);
     });
 
+    // Split and merge used to keep the surviving clip's id and point it at
+    // the new file. The save then overwrote that clip row's asset in place,
+    // so nothing referenced the original recording any more, and the next
+    // boot's recovery adopted its staging WAV as a whole "(recovered)" take
+    // beside the edited ones (see recording_recovery_test for the recovery
+    // side of that contract). The edited clip must be a NEW row.
+    test('split puts the surviving half in a new clip row, selection and '
+        'all', () async {
+      final vm = await pumpVm();
+      final original = vm.practice!.vocalTracks.first.clips.single.id;
+      vm.selectClip('single', original);
+      vm.playback.position.value = const Duration(milliseconds: 500);
+      await vm.splitTrackAtPlayhead('single');
+
+      final first = vm.practice!.vocalTracks.firstWhere(
+        (t) => t.id == 'single',
+      );
+      expect(first.clips.single.id, isNot(original));
+      expect(vm.selectedClipId, first.clips.single.id);
+    });
+
+    test('merge puts the merged audio in a new clip row, selection and '
+        'all', () async {
+      final vm = await pumpVm(vocalTracks: _mergeableTakes());
+      final original = vm.practice!.vocalTracks.first.clips.single.id;
+      vm.selectClip('top', original);
+      await vm.mergeTrackDown('top');
+
+      final merged = vm.practice!.vocalTracks.single;
+      expect(merged.clips.single.id, isNot(original));
+      expect(vm.selectedClipId, merged.clips.single.id);
+    });
+
     // Regression guard: split/merge rebuilt their lanes from the snapshot
     // taken BEFORE the analyze awaits. Renames and note edits are not
     // busy-gated, so one landing during those seconds was overwritten — and a

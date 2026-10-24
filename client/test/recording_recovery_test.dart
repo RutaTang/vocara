@@ -345,6 +345,60 @@ void main() {
   });
 
   test(
+    'a recording whose clip an edit replaced is not recovered again',
+    () async {
+      // A graceful stop pools the take and leaves its staging WAV for the boot
+      // sweep, which decides "already saved" by asking whether any row — live
+      // or tombstoned — still references those bytes. Split and merge replace
+      // the edited clip with a NEW row, so the old one is tombstoned with its
+      // asset intact and the original stays referenced. (Re-pointing the same
+      // clip id at the edited file overwrote that reference, and the original
+      // came back as a whole "(recovered)" take.)
+      final practice = await createPractice();
+      final rec = await stageOrphan(practice.id, monoWav(4800));
+      final take = AudioTrack(
+        id: newId(),
+        kind: AudioTrackKind.vocal,
+        displayName: 'Take 1',
+        audioFilePath: rec.path,
+        durationMs: 100,
+        createdAt: DateTime.now(),
+        versionId: practice.activeVersion?.id,
+      );
+      await persistence.songRepo.savePractice(
+        practice.copyWith(vocalTracks: [take]),
+      );
+
+      final edited = File(p.join(root.path, 'edits', '${newId()}.wav'));
+      await edited.parent.create(recursive: true);
+      await edited.writeAsBytes(monoWav(2400, gain: 0.3), flush: true);
+      final loaded = await reload(practice.id);
+      final lane = loaded.vocalTracks.single;
+      await persistence.songRepo.savePractice(
+        loaded.copyWith(
+          vocalTracks: [
+            lane.copyWith(
+              clips: [
+                AudioClip(
+                  id: newId(),
+                  audioFilePath: edited.path,
+                  durationMs: 50,
+                ),
+              ],
+            ),
+          ],
+        ),
+      );
+
+      expect(
+        await persistence.recoverStagedRecordings(analyze: fakeAnalyze),
+        0,
+      );
+      expect((await reload(practice.id)).vocalTracks, hasLength(1));
+    },
+  );
+
+  test(
     'probeWav THROWS on an unreadable file instead of answering null',
     () async {
       // The contract the recovery classification rests on: null means "provably
