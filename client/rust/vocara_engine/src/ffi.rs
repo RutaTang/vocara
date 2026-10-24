@@ -1563,10 +1563,18 @@ pub extern "C" fn ve_tracks_commit(e: *mut VeEngine) -> c_int {
             Err(_) => return -1,
         };
         // Prime every new stream ring BEFORE the graph goes live, so the
-        // first rendered block finds audio, not a cold ring.
+        // first rendered block finds audio, not a cold ring. Paused, only the
+        // plan: filling every ring here read each track from disk on the
+        // caller's (UI) thread, which the pump thread, woken below, does
+        // before Play can need it.
         let transport = Arc::clone(eng.handle.shared_arc());
+        let playing = transport.is_playing();
         for f in &mut new_feeders {
-            let _ = f.pump(&transport);
+            if playing {
+                let _ = f.pump(&transport);
+            } else {
+                f.plan(&transport);
+            }
         }
         eng.handle.publish_graph(graph);
         // Swap the feeder set; the pump thread exists only while needed. The
@@ -1591,6 +1599,7 @@ pub extern "C" fn ve_tracks_commit(e: *mut VeEngine) -> c_int {
             drop(feeders);
             if active {
                 eng.ensure_feeder_thread();
+                eng.wake_feeders();
             }
         }
         eng.track_gain_nodes = (0..n).map(|i| build::gain_id((i + 1) as u32)).collect();

@@ -276,6 +276,13 @@ impl Graph {
         }
     }
 
+    /// Stopped-transport housekeeping (see [`Node::idle`]).
+    pub fn idle(&mut self) {
+        for s in &mut self.schedule {
+            s.node.idle();
+        }
+    }
+
     /// Borrow a node mutably by id (tests / metering).
     pub fn node_mut(&mut self, node: NodeId) -> Option<&mut (dyn Node + '_)> {
         match self.index.get(&node) {

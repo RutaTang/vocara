@@ -772,9 +772,8 @@ fn a_seek_back_while_paused_on_a_full_ring_plays_from_the_new_position() {
     };
     let streamed = pause_on_a_topped_up_ring(true, &path, &pcm, 400, edit);
     let arc = pause_on_a_topped_up_ring(false, &path, &pcm, 400, edit);
-    // At most the first resumed callback may differ while the fence lands.
     let bad = differing_frames(&streamed, &arc);
-    assert!(bad <= 4 * BLOCK, "{bad} frames differ after the seek back");
+    assert_eq!(bad, 0, "{bad} frames differ after the seek back");
     let _ = std::fs::remove_file(&path);
 }
 
@@ -794,10 +793,7 @@ fn a_loop_set_behind_a_full_paused_ring_plays_every_pass() {
     let streamed = pause_on_a_topped_up_ring(true, &path, &pcm, 1000, edit);
     let arc = pause_on_a_topped_up_ring(false, &path, &pcm, 1000, edit);
     let bad = differing_frames(&streamed, &arc);
-    assert!(
-        bad <= 4 * BLOCK,
-        "{bad} frames differ across the loop passes"
-    );
+    assert_eq!(bad, 0, "{bad} frames differ across the loop passes");
     let _ = std::fs::remove_file(&path);
 }
 
@@ -1081,4 +1077,167 @@ fn the_streamed_render_settles_onto_the_in_memory_one_under_random_transport_ops
         }
     }
     assert!(fails.is_empty(), "{}", fails.join("\n"));
+}
+
+#[test]
+fn seeking_while_paused_then_playing_opens_without_a_hole() {
+    // Paused, the node popped nothing, so the pause's replan backlog never
+    // left the ring: a seek's fence took the last free slots with no audio
+    // behind it, a second seek's could not land at all, and Play opened with
+    // a whole callback of silence (one per callback size, ~85 ms at 4096).
+    for seeks in 1..=4i64 {
+        for pump_before_render in [true, false] {
+            let bad = streamed_vs_arc("pausedscrub", 160, pump_before_render, |t, h| {
+                if t == 100 {
+                    h.pause();
+                }
+                if (102..102 + seeks as usize).contains(&t) {
+                    h.seek(50_000 * (t as i64 - 101));
+                }
+                if t == 110 {
+                    h.play();
+                }
+            });
+            assert_eq!(
+                bad, 0,
+                "{seeks} seeks, pump before render: {pump_before_render}"
+            );
+        }
+    }
+}
+
+#[test]
+fn stop_then_play_opens_without_a_silent_callback() {
+    // Stop is pause + seek to the play range's start. The pump woken by the
+    // pause can replan in between, which left the seek's fence nothing but
+    // the last two slots of a ring the paused node never drained.
+    let pcm = offset_pcm(400_000);
+    let path = write_pcm("stopplay", &pcm);
+    for pump_between in [false, true] {
+        let run = |streamed: bool| {
+            let (h, rt, mut feeder) = streamed_pair(&path, 0, 16_384);
+            let (h2, rt2) = engine_with(Box::new(BufferSource::new(pcm.to_vec(), 0)));
+            let (h, rt) = if streamed { (h, rt) } else { (h2, rt2) };
+            let mut pump = |h: &EngineHandle| {
+                if streamed {
+                    feeder.pump(h.transport()).unwrap();
+                }
+            };
+            pump(&h);
+            h.seek(24_000);
+            h.play();
+            let mut out = Vec::new();
+            for t in 0..200 {
+                if t == 100 {
+                    h.pause();
+                    if pump_between {
+                        pump(&h);
+                    }
+                    h.seek(24_000);
+                }
+                if t == 110 {
+                    h.play();
+                }
+                pump(&h);
+                for _ in 0..4 {
+                    let mut block = vec![0.0; BLOCK * CHANNELS];
+                    rt.render_offline(&mut block, BLOCK);
+                    rt.transport().sync_consumed_to_rendered();
+                    out.extend_from_slice(&block);
+                }
+            }
+            out
+        };
+        let bad = differing_frames(&run(true), &run(false));
+        assert_eq!(bad, 0, "pump between pause and seek: {pump_between}");
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn a_held_plan_the_node_has_partly_played_is_not_resumed() {
+    // A play/pause the pump never saw (its one thread stuck on another
+    // track's slow read) lets the node play the head of the paused plan; a
+    // seek back to that plan's start then matched it again, and Play resumed
+    // a plan the node was already past — silent until it caught up.
+    let pcm = offset_pcm(400_000);
+    let path = write_pcm("heldplayed", &pcm);
+    let held = std::cell::Cell::new(0i64);
+    let run = |streamed: bool| {
+        let (h, rt, mut feeder) = streamed_pair(&path, 0, 16_384);
+        let (h2, rt2) = engine_with(Box::new(BufferSource::new(pcm.to_vec(), 0)));
+        let (h, rt) = if streamed { (h, rt) } else { (h2, rt2) };
+        if streamed {
+            feeder.pump(h.transport()).unwrap();
+        }
+        h.play();
+        let mut out = Vec::new();
+        for t in 0..160 {
+            if t == 100 {
+                h.pause();
+                held.set(h.frame());
+            }
+            if t == 105 {
+                h.play();
+            }
+            if t == 108 {
+                h.pause();
+                h.seek(held.get());
+                h.play();
+            }
+            // The pump is stalled through ticks 105..108.
+            if streamed && !(105..108).contains(&t) {
+                feeder.pump(h.transport()).unwrap();
+            }
+            for _ in 0..4 {
+                let mut block = vec![0.0; BLOCK * CHANNELS];
+                rt.render_offline(&mut block, BLOCK);
+                rt.transport().sync_consumed_to_rendered();
+                if t >= 108 {
+                    out.extend_from_slice(&block);
+                }
+            }
+        }
+        out
+    };
+    let bad = differing_frames(&run(true), &run(false));
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(bad, 0);
+}
+
+#[test]
+fn an_in_band_fence_past_an_in_band_flush_keeps_the_source_armed() {
+    // A starved node adopts a discarding fence IN BAND (its block read
+    // flush_seq before the feeder bumped it), then an in-band wrap/jump fence
+    // in the same block. Only discarding fences publish ctrl.gen, so the next
+    // block's flush target is a generation the node is already PAST: hunting
+    // it exactly discarded every later frame, silently (no xruns).
+    use std::sync::atomic::Ordering;
+    let (_h, rt, mut prod, ctrl) = hand_fed_source();
+    let [g1, b1] = fence_frames(1, 0);
+    assert!(prod.push(g1));
+    assert!(prod.push(b1));
+    ctrl.gen.store(1, Ordering::Release);
+    ctrl.flush_seq.fetch_add(1, Ordering::Release);
+    push_audio(&mut prod, BLOCK, 0.5);
+    assert_eq!(render_block(&rt)[0], 0.5, "generation 1 plays");
+
+    let [g2, b2] = fence_frames(2, BLOCK as i64);
+    assert!(prod.push(g2));
+    assert!(prod.push(b2));
+    ctrl.gen.store(2, Ordering::Release);
+    push_audio(&mut prod, 32, 0.25);
+    let [g3, b3] = fence_frames(3, BLOCK as i64 + 33);
+    assert!(prod.push(g3));
+    assert!(prod.push(b3));
+    push_audio(&mut prod, BLOCK, 0.75);
+    let _ = render_block(&rt); // adopts 2, then 3, both in band
+    ctrl.flush_seq.fetch_add(1, Ordering::Release); // the bump lands late
+    push_audio(&mut prod, 4 * BLOCK, 0.125);
+    let mut tail = Vec::new();
+    for _ in 0..4 {
+        tail.extend(render_block(&rt));
+    }
+    let silent = (0..tail.len() / 2).filter(|&i| tail[2 * i] == 0.0).count();
+    assert_eq!(silent, 0);
 }

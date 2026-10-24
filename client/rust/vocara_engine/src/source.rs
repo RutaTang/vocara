@@ -178,25 +178,17 @@ impl StreamingSource {
             None => None,
         }
     }
-}
-
-impl Node for StreamingSource {
-    fn prepare(&mut self, _sample_rate: f64, _max_block: usize) {}
-
-    fn num_in(&self) -> usize {
-        0
-    }
-
-    fn process(&mut self, io: &mut ProcessIo) {
+    /// Drain to the newest discarding fence (see `process`). Also runs while the
+    /// transport is stopped, so a paused replan's stale backlog leaves the ring.
+    fn take_flush(&mut self) {
         use std::sync::atomic::Ordering;
-        // A DISCARDING discontinuity (flush/loop-change/play-state): drain to
-        // the newest fence before rendering anything — the ring's older
-        // content predates the transport change. A loop WRAP does not bump
-        // flush_seq; its fence is adopted in band below, after the pre-wrap
-        // tail plays out.
         let flush = self.ctrl.flush_seq.load(Ordering::Acquire);
         if flush != self.cur_flush {
             let want = self.ctrl.gen.load(Ordering::Acquire);
+            // Generations rise monotonically in ring order and only DISCARDING fences
+            // publish `want`: a node armed at a LATER generation (an in-band wrap/jump
+            // fence adopted after `want` was itself adopted in band) is past the drain.
+            let reached = |g: u32| (g.wrapping_sub(want) as i32) >= 0;
             // The feeder pushes the flush's fence BEFORE bumping flush_seq,
             // and a starved node polls the ring every frame while flush_seq
             // is read once per block — so `want` may be fully adopted IN BAND
@@ -204,18 +196,18 @@ impl Node for StreamingSource {
             // hunt a fence that never comes again, discarding every frame the
             // feeder pushes from now on. The adopted state IS the post-drain
             // state; just acknowledge the flush.
-            if !(self.cur_gen == want && self.armed) {
+            if !(reached(self.cur_gen) && self.armed) {
                 self.armed = false;
                 // KEEP a fence already parked at `want`: its generation frame
                 // is consumed, so dropping it here strands the base frame as
                 // one more discarded frame and leaves the drain below hunting
                 // a fence that will never be pushed again — every later block
                 // would drain the ring to silence until the next replan.
-                if self.pending_fence != Some(want) {
+                if !self.pending_fence.is_some_and(reached) {
                     self.pending_fence = None;
                 }
                 loop {
-                    if self.cur_gen == want && self.armed {
+                    if reached(self.cur_gen) && self.armed {
                         break;
                     }
                     if let Some(g) = self.pending_fence {
@@ -227,7 +219,7 @@ impl Node for StreamingSource {
                     match self.rx.pop() {
                         Some(f) => {
                             if let Some(g) = Self::fence_gen(f) {
-                                if g == want {
+                                if reached(g) {
                                     self.adopt_fence(g);
                                 }
                                 // A stale fence's base frame is just another
@@ -238,10 +230,31 @@ impl Node for StreamingSource {
                     }
                 }
             }
-            if self.cur_gen == want && self.armed {
+            if reached(self.cur_gen) && self.armed {
                 self.cur_flush = flush;
             }
         }
+    }
+}
+
+impl Node for StreamingSource {
+    fn prepare(&mut self, _sample_rate: f64, _max_block: usize) {}
+
+    fn num_in(&self) -> usize {
+        0
+    }
+
+    fn idle(&mut self) {
+        self.take_flush();
+    }
+
+    fn process(&mut self, io: &mut ProcessIo) {
+        // A DISCARDING discontinuity (flush/loop-change/play-state): drain to
+        // the newest fence before rendering anything — the ring's older
+        // content predates the transport change. A loop WRAP does not bump
+        // flush_seq; its fence is adopted in band below, after the pre-wrap
+        // tail plays out.
+        self.take_flush();
         for i in 0..io.frames {
             // Complete a fence parked by an earlier pop (its base frame was
             // not visible yet — the two pushes publish separately). Every

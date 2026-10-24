@@ -442,6 +442,7 @@ impl RtProcessor {
             for s in &mut out[..total] {
                 *s = 0.0;
             }
+            g.idle();
             // Silence frames delivered while stopped are rendered frames too
             // — a gap between segments, so a consumed cursor that reaches
             // them HOLDS at the last playing span instead of drifting.

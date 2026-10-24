@@ -55,6 +55,10 @@ pub trait Node: Send {
     /// Clear histories / delay lines (used on seek so tails don't bleed across a jump).
     fn reset(&mut self) {}
 
+    /// Called once per block while the transport is STOPPED (the node is not processed).
+    /// RT-safe. Default: nothing.
+    fn idle(&mut self) {}
+
     /// Number of input ports (0 for a source).
     fn num_in(&self) -> usize {
         1

@@ -237,6 +237,8 @@ pub struct TrackFeeder {
     /// Frames pushed since the newest DISCARDING fence, fence included, while
     /// the ring may still hold frames from before it (None once it cannot).
     since_flush: Option<usize>,
+    /// Frames pushed since the newest discarding fence, fence included (never cleared).
+    plan_pushed: usize,
     scratch: Vec<[Smp; CHANNELS]>,
 }
 
@@ -260,6 +262,7 @@ impl TrackFeeder {
             basis: None,
             plan_pos: 0,
             since_flush: None,
+            plan_pushed: 0,
             scratch: vec![[0.0; CHANNELS]; 1024],
         }
     }
@@ -271,15 +274,16 @@ impl TrackFeeder {
     }
 
     /// The slots the fill leaves free: room for a discarding replan's fence
-    /// AND fresh audio behind it. The node drops the whole stale backlog at
-    /// once when it adopts the fence; with only the fence's two slots to
-    /// spare, the fill behind it got just what the node had consumed since
-    /// the last pump, and the node ran dry before the next one — a hole after
-    /// every seek and on every pump of a loop-handle drag. Until that backlog
-    /// is gone, though (see [`Self::since_flush`]), its space is about to be
-    /// freed wholesale, so the fill may use all of it but one more fence: a
-    /// further replan must always land, or a paused node — which pops
-    /// nothing — would drop every seek and loop edit until play.
+    /// AND fresh audio behind it — a quarter of the ring, which covers the
+    /// largest device callback (VPIO's 4096 frames). The node drops the whole
+    /// stale backlog at once when it adopts the fence; with only the fence's
+    /// two slots to spare, the fill behind it got just what the node had
+    /// consumed since the last pump, and the node ran dry before the next one
+    /// — a hole after every seek and on every pump of a loop-handle drag.
+    /// Until that backlog is gone, though (see [`Self::since_flush`]), its
+    /// space is about to be freed wholesale, so the fill may use all of it but
+    /// one more fence: a further replan must still land before the node next
+    /// drains (a stopped node drains in `idle`, once per device callback).
     fn fill_reserve(&mut self) -> usize {
         if let Some(n) = self.since_flush {
             // FIFO: a frame from before the fence remains exactly while the
@@ -291,11 +295,12 @@ impl TrackFeeder {
         if self.since_flush.is_some() {
             2
         } else {
-            (self.producer.capacity() / 8).max(2)
+            (self.producer.capacity() / 4).max(2)
         }
     }
 
     fn pushed(&mut self, n: usize) {
+        self.plan_pushed += n;
         if let Some(c) = &mut self.since_flush {
             *c += n;
         }
@@ -317,6 +322,7 @@ impl TrackFeeder {
         if discarding {
             self.ctrl.gen.store(generation, Ordering::Release);
             self.since_flush = Some(0);
+            self.plan_pushed = 0;
         }
         self.pushed(2);
         ok
@@ -380,14 +386,26 @@ impl TrackFeeder {
         };
         !old.playing
             && basis.playing
+            // Nothing of the held plan consumed: a play/pause the pump never saw (or a
+            // render in flight at pause) may have popped its head, and a seek back to
+            // plan_pos would then resume a plan the node is already past. FIFO: the
+            // plan's fence and everything behind it remain while the ring holds at
+            // least what was pushed since that fence, less the fence the node may
+            // already have adopted.
+            && self.producer.capacity() - self.producer.free() + 2 >= self.plan_pushed
             && (old.loop_on, old.ls, old.le) == (basis.loop_on, basis.ls, basis.le)
             && Self::planned_pos(t, basis) == self.plan_pos
     }
 
-    /// Top the ring up. Returns Err only on unreadable file (the caller
-    /// tears the streaming source down; playback degrades to silence for
-    /// this track rather than corrupting anything).
-    pub fn pump(&mut self, t: &Shared) -> Result<(), String> {
+    /// Brings the plan up to date with the transport (a replan on any
+    /// discontinuity) WITHOUT filling: what [`Self::pump`] does first. A commit
+    /// made while paused primes its new rings with just this, on the caller's
+    /// thread, and leaves the reading to the pump thread.
+    pub fn plan(&mut self, t: &Shared) {
+        self.sync_plan(t);
+    }
+
+    fn sync_plan(&mut self, t: &Shared) -> PlanBasis {
         let basis = PlanBasis {
             flush_gen: t.out_flush_gen(),
             playing: t.is_playing(),
@@ -402,6 +420,14 @@ impl TrackFeeder {
                 self.replan(t, basis);
             }
         }
+        basis
+    }
+
+    /// Top the ring up. Returns Err only on unreadable file (the caller
+    /// tears the streaming source down; playback degrades to silence for
+    /// this track rather than corrupting anything).
+    pub fn pump(&mut self, t: &Shared) -> Result<(), String> {
+        let basis = self.sync_plan(t);
         // Paused, the fill still runs: the plan starts where play resumes.
         // Starvation recovery: the transport ran AHEAD of the plan (the ring
         // starved and the node discarded everything). Feeding the stale gap
