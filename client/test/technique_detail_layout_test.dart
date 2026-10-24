@@ -526,6 +526,48 @@ void main() {
     expect(find.text('Cancel'), findsNothing, reason: 'back in the read view');
     expect(tester.takeException(), isNull);
   });
+
+  test('an import abandoned by Cancel clears its busy state for the next '
+      'edit session', () async {
+    // Regression: the abandoned branch reset importingMedia without notifying,
+    // so the screen kept the import spinner and the disabled Save/add/Record
+    // it last saw — into the NEXT edit session, until something else
+    // happened to rebuild it.
+    final media = _GatedImportMedia();
+    final vm = TechniqueDetailViewModel(
+      repository: _FakeRepo(_technique()),
+      mediaService: media,
+      techniqueId: 't1',
+    );
+    addTearDown(vm.dispose);
+    for (var i = 0; i < 200 && vm.technique == null; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+    expect(vm.technique, isNotNull);
+    bool? shownImporting;
+    vm.addListener(() => shownImporting = vm.importingMedia);
+
+    vm.beginMediaDraft();
+    vm.beginEdit();
+    final importing = vm.addMedia(['/tmp/dropped.wav']);
+    expect(shownImporting, isTrue);
+    // Cancel, then Edit again while the copy is still parked.
+    await vm.discardMediaDraft();
+    vm.endEdit();
+    vm.beginMediaDraft();
+    vm.beginEdit();
+
+    media.gate.complete();
+    await importing;
+    expect(vm.importingMedia, isFalse);
+    expect(
+      shownImporting,
+      isFalse,
+      reason: 'the screen must hear that the import is over',
+    );
+    expect(vm.effectiveMedia, isEmpty, reason: 'the orphan is not staged');
+    expect(media.deleted, ['/sandbox/dropped.wav']);
+  });
 }
 
 /// Analysis fake that always trips the decode-length cap, as a real
@@ -534,4 +576,25 @@ class _CapTrippingAnalysis extends Fake implements MediaAnalysisService {
   @override
   Future<TechniqueAnalysis?> analyze(String path) async =>
       throw const MediaTooLongException(Duration(minutes: 30));
+}
+
+/// A media service whose [importMedia] parks on [gate] (a slow copy) and
+/// records deletions instead of touching the disk.
+class _GatedImportMedia extends TechniqueMediaService {
+  _GatedImportMedia() : super(storage: LocalStorageService());
+
+  final Completer<void> gate = Completer<void>();
+  final deleted = <String>[];
+
+  @override
+  Future<String> importMedia({
+    required String techniqueId,
+    required String sourcePath,
+  }) async {
+    await gate.future;
+    return '/sandbox/${sourcePath.split('/').last}';
+  }
+
+  @override
+  Future<void> deleteMedia(String path) async => deleted.add(path);
 }

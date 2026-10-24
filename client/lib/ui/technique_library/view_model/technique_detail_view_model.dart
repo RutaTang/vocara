@@ -1348,6 +1348,10 @@ class TechniqueDetailViewModel extends ChangeNotifier
       for (final m in added) {
         _deleteMediaQuietly(m.path);
       }
+      // The screen last saw importingMedia true (its spinner, and Save/add/
+      // Record disabled) and the user may already be in a NEW edit session:
+      // tell it the import is over, or that busy state sticks there.
+      notifyListeners();
       return;
     }
 
