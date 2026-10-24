@@ -718,6 +718,8 @@ class LtasTab extends StatelessWidget {
     });
   }
 
+  static String _dbOrDash(double v) => v.isFinite ? '${v.round()} dB' : '—';
+
   Widget _ltasBody(Ltas ltas, {required bool live}) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 12, 20, 16),
@@ -729,14 +731,17 @@ class LtasTab extends StatelessWidget {
             child: Row(
               children: [
                 if (live) ...[const _LiveDot(), const SizedBox(width: 14)],
+                // Guarded: round() throws on NaN / Infinity, which would swap
+                // the whole tab for an error widget; an unmeasurable stat
+                // reads as a dash like the dock's other readouts.
                 _StatInline(
                   label: "Singer's formant",
-                  value: '${ltas.singersFormantDb.round()} dB',
+                  value: _dbOrDash(ltas.singersFormantDb),
                 ),
                 const SizedBox(width: 22),
                 _StatInline(
                   label: 'Brightness α',
-                  value: '${ltas.alphaRatio.round()} dB',
+                  value: _dbOrDash(ltas.alphaRatio),
                 ),
               ],
             ),

@@ -251,6 +251,17 @@ Future<void> showBusContextMenu(
   );
 }
 
+/// Asks before deleting the FX bus named [busName]; true to go ahead. Every
+/// surface that offers the delete (the timeline lane's menu, the mixer strip's
+/// menu and trash icon) goes through this one prompt: a delete takes the bus's
+/// FX chain and every send into it with it, and there is no undo.
+Future<bool> confirmDeleteBus(BuildContext context, String busName) =>
+    showConfirmDialog(
+      context,
+      title: 'Delete "$busName"?',
+      body: 'Removing this FX bus re-routes anything feeding it to the master.',
+    );
+
 /// A minimal context menu for a single clip: export (the per-clip escape
 /// hatch for multi-clip lanes) and delete.
 Future<void> showClipContextMenu(

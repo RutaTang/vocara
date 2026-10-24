@@ -1,23 +1,36 @@
+import 'package:flutter/gestures.dart' show kSecondaryButton;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:forui/forui.dart' show FIcons;
+import 'package:vocara/data/services/app_settings_service.dart';
+import 'package:vocara/data/services/local_storage_service.dart';
+import 'package:vocara/domain/models/audio_fx.dart';
 import 'package:vocara/domain/models/audio_track.dart';
 import 'package:vocara/domain/models/fx_bus.dart';
 import 'package:vocara/ui/song_practice_detail/view_model/mixer_controller.dart';
+import 'package:vocara/ui/song_practice_detail/view_model/recording_controller.dart';
 import 'package:vocara/ui/song_practice_detail/view_model/song_practice_detail_view_model.dart';
 import 'package:vocara/ui/song_practice_detail/widgets/mixer_strip.dart';
 
 /// Minimal fake mixer: only the members MixerStrip touches while building a
-/// track strip + the master strip. `supportsEffects: false` hides the
-/// mic-input and bus strips, which would drag in audio settings / engine state.
+/// track strip + the master strip. `supportsEffects: false` (the default)
+/// hides the mic-input and bus strips; [effects] turns them on for the bus
+/// tests, which then need the host's audio settings and input meter too.
 class _FakeMixer extends Fake implements MixerController {
   final List<double> trackVolumes = [];
   final List<double> masterVolumes = [];
+  final List<String> deletedBuses = [];
+  bool effects = false;
+  List<FxBus> buses = const [];
 
   @override
-  bool get supportsEffects => false;
+  bool get supportsEffects => effects;
 
   @override
-  List<FxBus> get fxBuses => const [];
+  List<FxBus> get fxBuses => buses;
+
+  @override
+  Future<void> deleteBus(String busId) async => deletedBuses.add(busId);
 
   @override
   double get masterVolume => 0.8;
@@ -49,6 +62,22 @@ class _FakeVm extends Fake implements SongPracticeDetailViewModel {
 
   @override
   String? get selectedBusId => null;
+
+  // The mic-input strip's dependencies (only built with mixer effects on).
+  @override
+  final AppSettingsService appSettings = AppSettingsService(
+    storage: LocalStorageService(),
+    enumerateOutputs: () => const [],
+    enumerateInputs: () => const [],
+  );
+
+  @override
+  final RecordingController recording = _FakeRecording();
+}
+
+class _FakeRecording extends Fake implements RecordingController {
+  @override
+  final ValueNotifier<double> inputLevel = ValueNotifier(0);
 }
 
 AudioTrack _track() => AudioTrack(
@@ -142,5 +171,64 @@ void main() {
     await _pumpMixer(tester, vm, height: 80);
     expect(tester.takeException(), isNull);
     expect(find.byType(SingleChildScrollView), findsNWidgets(2));
+  });
+
+  // Regression guard: the bus strip's trash icon (and its right-click "Delete
+  // bus") deleted on the spot, while the timeline's bus lane asks first — and
+  // a delete takes the bus's whole FX chain and every send into it, with no
+  // undo.
+  group('deleting a bus from the mixer asks first', () {
+    Future<_FakeVm> pumpWithBus(WidgetTester tester) async {
+      final vm = _FakeVm();
+      vm.fakeMixer
+        ..effects = true
+        ..buses = [FxBus(id: 'b1', name: 'Lead Vox', fx: TrackFx.flat())];
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              height: 420,
+              width: 900,
+              child: MixerStrip(
+                vm: vm,
+                tracks: const [],
+                onDeleteTrack: (_) {},
+              ),
+            ),
+          ),
+        ),
+      );
+      return vm;
+    }
+
+    testWidgets('the trash icon', (tester) async {
+      final vm = await pumpWithBus(tester);
+      await tester.tap(find.byIcon(FIcons.trash2));
+      await tester.pumpAndSettle();
+      expect(find.text('Delete "Lead Vox"?'), findsOneWidget);
+      expect(vm.fakeMixer.deletedBuses, isEmpty);
+
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(vm.fakeMixer.deletedBuses, isEmpty);
+
+      await tester.tap(find.byIcon(FIcons.trash2));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Delete'));
+      await tester.pumpAndSettle();
+      expect(vm.fakeMixer.deletedBuses, ['b1']);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('the right-click menu', (tester) async {
+      final vm = await pumpWithBus(tester);
+      await tester.tap(find.text('Lead Vox'), buttons: kSecondaryButton);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Delete bus'));
+      await tester.pumpAndSettle();
+      expect(find.text('Delete "Lead Vox"?'), findsOneWidget);
+      expect(vm.fakeMixer.deletedBuses, isEmpty);
+      expect(tester.takeException(), isNull);
+    });
   });
 }

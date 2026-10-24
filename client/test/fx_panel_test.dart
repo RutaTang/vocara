@@ -10,6 +10,7 @@
 
 import 'dart:typed_data';
 
+import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vocara/domain/models/audio_fx.dart';
@@ -240,6 +241,35 @@ void main() {
     vm.fakeMixer.busGr = 6;
     vm.fakeMixer.trackGr = 99; // must not be read
     await tester.pump(const Duration(milliseconds: 100));
+    expect(tester.takeException(), isNull);
+  });
+
+  // Regression guard: a scroll-wheel Q edit persists on a 400 ms debounce, and
+  // dispose CANCELLED that pending commit — so changing the selection,
+  // collapsing the inspector or leaving within 400 ms of the last wheel tick
+  // kept the Q live in memory and never wrote it.
+  testWidgets('a wheel Q edit still commits when the EQ goes away inside the '
+      'debounce', (tester) async {
+    final vm = await pump(
+      tester,
+      track: _track(fx: _fxAllOff().copyWith(eqOn: true)),
+    );
+    final graph = find.byWidgetPredicate(
+      (w) => w.runtimeType.toString() == '_EqGraph',
+    );
+    final mouse = TestPointer(1, PointerDeviceKind.mouse);
+    await tester.sendEventToBinding(mouse.hover(tester.getCenter(graph)));
+    await tester.sendEventToBinding(mouse.scroll(const Offset(0, -40)));
+    await tester.pump();
+    expect(vm.fakeMixer.trackFx, hasLength(1), reason: 'the Q edit is live');
+    expect(vm.commits, 0, reason: 'debounced, not yet written');
+
+    // Selection moves on before the debounce fires.
+    await tester.pumpWidget(const SizedBox());
+    expect(vm.commits, 1, reason: 'the pending Q must be flushed, not dropped');
+
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(vm.commits, 1, reason: 'flushed once — the timer is gone');
     expect(tester.takeException(), isNull);
   });
 

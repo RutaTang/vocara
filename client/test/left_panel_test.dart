@@ -202,17 +202,22 @@ class _FakeVm extends Fake implements SongPracticeDetailViewModel {
   Ltas? get selectedLtas => null;
 }
 
-AudioTrack _vocal({List<TrackSend> sends = const [], String? busId}) =>
-    AudioTrack(
-      id: 't1',
-      kind: AudioTrackKind.vocal,
-      displayName: 'Take 1',
-      audioFilePath: '/x.wav',
-      durationMs: 5000,
-      createdAt: DateTime(2026),
-      sends: sends,
-      busId: busId,
-    );
+AudioTrack _vocal({
+  String id = 't1',
+  List<TrackSend> sends = const [],
+  String? busId,
+  TrackFx? fx,
+}) => AudioTrack(
+  id: id,
+  kind: AudioTrackKind.vocal,
+  displayName: 'Take 1',
+  audioFilePath: '/x.wav',
+  durationMs: 5000,
+  createdAt: DateTime(2026),
+  sends: sends,
+  busId: busId,
+  fx: fx,
+);
 
 FxBus _bus(String id, String name) =>
     FxBus(id: id, name: name, fx: TrackFx.flat());
@@ -432,6 +437,40 @@ void main() {
         findsOneWidget,
         reason: "the bus's own header only — never itself as a destination",
       );
+    });
+  });
+
+  // Regression guard: the inspector built its FxPanel without a key, so
+  // selecting another take (or bus) reused the panel's element tree and the
+  // EQ's live state — the analyzer's smoothed spectrum, adaptive ceiling and
+  // latched "has signal" flag — carried over from the previous channel.
+  group('selecting another channel gives the FX panel fresh state', () {
+    final eqOn = TrackFx.flat().copyWith(eqOn: true);
+    State<StatefulWidget> spectrum(WidgetTester tester) => tester.state(
+      find.byWidgetPredicate(
+        (w) => w.runtimeType.toString() == '_EqSpectrumLayer',
+      ),
+    );
+
+    testWidgets('take to take', (tester) async {
+      await pump(tester, track: _vocal(fx: eqOn));
+      final before = spectrum(tester);
+      await pump(
+        tester,
+        track: _vocal(id: 't2', fx: eqOn),
+      );
+      expect(spectrum(tester), isNot(same(before)));
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('bus to bus', (tester) async {
+      final a = FxBus(id: 'a', name: 'Reverb', fx: eqOn);
+      final b = FxBus(id: 'b', name: 'Delay', fx: eqOn);
+      await pump(tester, bus: a, buses: [a, b]);
+      final before = spectrum(tester);
+      await pump(tester, bus: b, buses: [a, b]);
+      expect(spectrum(tester), isNot(same(before)));
+      expect(tester.takeException(), isNull);
     });
   });
 }

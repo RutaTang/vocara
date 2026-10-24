@@ -893,7 +893,15 @@ class _EqGraphState extends State<_EqGraph> {
 
   @override
   void dispose() {
-    _qCommit?.cancel();
+    // Flush, don't drop, a wheel Q edit still inside its debounce: the edit is
+    // already live in the model, so changing the selection, collapsing the
+    // inspector or leaving within 400 ms of the last tick would otherwise keep
+    // it in memory and never write it. (onCommit only persists the model,
+    // which is safe from here.)
+    if (_qCommit?.isActive ?? false) {
+      _qCommit!.cancel();
+      widget.onCommit();
+    }
     super.dispose();
   }
 

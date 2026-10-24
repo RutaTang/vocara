@@ -682,14 +682,28 @@ class _MarkerLane extends StatefulWidget {
 }
 
 class _MarkerLaneState extends State<_MarkerLane> {
-  // While a range drag is in progress, the start and current x (lane-local).
-  double? _dragStartX;
-  double? _dragCurX;
+  // While a range drag is in progress, the TIMES (ms) under its start and its
+  // current pointer — taken at the view start of the moment each was touched.
+  // Not pixels converted on release: follow-cursor can page the view while
+  // the drag is held, and the release-time view start would then commit a
+  // range the user never dragged over (and draw the highlight there too).
+  int? _dragStartMs;
+  int? _dragCurMs;
 
   void _resetDrag() => setState(() {
-    _dragStartX = null;
-    _dragCurX = null;
+    _dragStartMs = null;
+    _dragCurMs = null;
   });
+
+  /// The held drag's range in time order, or null when none is held. A
+  /// right-to-left drag must reach onAdd (and the editors, whose header tells
+  /// a range from a point by end > start) as the same range a left-to-right
+  /// one would.
+  (int, int)? get _dragRange {
+    final s = _dragStartMs, e = _dragCurMs;
+    if (s == null || e == null) return null;
+    return s < e ? (s, e) : (e, s);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -703,10 +717,12 @@ class _MarkerLaneState extends State<_MarkerLane> {
             dur <= 0 ? 0 : (widget.viewStartMs + x / w * dur).round();
 
         void endDrag() {
-          final sx = _dragStartX, cx = _dragCurX;
-          if (sx != null && cx != null) widget.onAdd(msOf(sx), msOf(cx));
+          final range = _dragRange;
+          if (range != null) widget.onAdd(range.$1, range.$2);
           _resetDrag();
         }
+
+        final held = _dragRange;
 
         return Stack(
           children: [
@@ -716,22 +732,25 @@ class _MarkerLaneState extends State<_MarkerLane> {
                 onTapUp: (d) =>
                     widget.onAdd(msOf(d.localPosition.dx.clamp(0.0, w)), null),
                 onHorizontalDragStart: (d) => setState(() {
-                  _dragStartX = d.localPosition.dx.clamp(0.0, w);
-                  _dragCurX = _dragStartX;
+                  _dragStartMs = msOf(d.localPosition.dx.clamp(0.0, w));
+                  _dragCurMs = _dragStartMs;
                 }),
                 onHorizontalDragUpdate: (d) => setState(
-                  () => _dragCurX = d.localPosition.dx.clamp(0.0, w),
+                  () => _dragCurMs = msOf(d.localPosition.dx.clamp(0.0, w)),
                 ),
                 onHorizontalDragEnd: (_) => endDrag(),
                 onHorizontalDragCancel: _resetDrag,
                 child: const ColoredBox(color: Studio.inset),
               ),
             ),
-            // Live range-selection highlight while dragging.
-            if (_dragStartX != null && _dragCurX != null)
+            // Live range-selection highlight while dragging, drawn from the
+            // times so a page flip carries it with the content (clamped to
+            // the box once part of it scrolls out).
+            if (held != null)
               Positioned(
-                left: _dragStartX! < _dragCurX! ? _dragStartX! : _dragCurX!,
-                width: (_dragCurX! - _dragStartX!).abs().clamp(1.0, w),
+                left: xOf(held.$1).clamp(0.0, w),
+                width: (xOf(held.$2).clamp(0.0, w) - xOf(held.$1).clamp(0.0, w))
+                    .clamp(1.0, w),
                 top: 0,
                 bottom: 0,
                 child: IgnorePointer(

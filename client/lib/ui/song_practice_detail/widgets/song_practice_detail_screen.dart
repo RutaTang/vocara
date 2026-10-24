@@ -992,6 +992,38 @@ class _NewTakeButton extends StatelessWidget {
   }
 }
 
+/// The timeline scrollbar's thumb in a groove [grooveW] px wide: its left
+/// edge, its width, and how many ms one px of thumb drag pans (0 when there is
+/// nothing to scroll).
+///
+/// The thumb has a 28 px floor so it stays grabbable at deep zoom, so it is
+/// wider than its share of the timeline and its left edge can only travel
+/// `grooveW - width`: the start maps over THAT range ([0, extent − span] onto
+/// [0, travel]), and a drag maps back the same way. Mapping the start onto the
+/// whole groove instead ran the floored thumb off the groove's end near the
+/// last page, clipped to a ~2 px sliver at deep zoom.
+@visibleForTesting
+({double left, double width, double msPerPx}) timelineScrollThumb({
+  required int startMs,
+  required int spanMs,
+  required int extentMs,
+  required double grooveW,
+}) {
+  final floor = grooveW < 28.0 ? grooveW : 28.0;
+  final width = (spanMs / extentMs * grooveW).clamp(floor, grooveW);
+  final travel = grooveW - width;
+  // A song shorter than the minimum view span has span > extent.
+  final scrollMs = extentMs - spanMs;
+  if (travel <= 0 || scrollMs <= 0) {
+    return (left: 0.0, width: width, msPerPx: 0.0);
+  }
+  return (
+    left: (startMs / scrollMs * travel).clamp(0.0, travel),
+    width: width,
+    msPerPx: scrollMs / travel,
+  );
+}
+
 /// A draggable horizontal scrollbar under the lanes — the reliable way to pan
 /// the timeline (works regardless of trackpad gesture quirks). Hidden at fit-all
 /// zoom (nothing to scroll); aligned to the timeline column (right of headers).
@@ -1021,9 +1053,12 @@ class _TimelineScrollbar extends StatelessWidget {
                 child: LayoutBuilder(
                   builder: (context, c) {
                     final w = c.maxWidth;
-                    final start = vm.playback.viewStartMs;
-                    final thumbLeft = (start / ext * w).clamp(0.0, w);
-                    final thumbW = (span / ext * w).clamp(28.0, w);
+                    final thumb = timelineScrollThumb(
+                      startMs: vm.playback.viewStartMs,
+                      spanMs: span,
+                      extentMs: ext,
+                      grooveW: w,
+                    );
                     return Stack(
                       children: [
                         Positioned.fill(
@@ -1035,8 +1070,8 @@ class _TimelineScrollbar extends StatelessWidget {
                           ),
                         ),
                         Positioned(
-                          left: thumbLeft,
-                          width: thumbW,
+                          left: thumb.left,
+                          width: thumb.width,
                           top: 0,
                           bottom: 0,
                           child: MouseRegion(
@@ -1044,9 +1079,9 @@ class _TimelineScrollbar extends StatelessWidget {
                             child: GestureDetector(
                               behavior: HitTestBehavior.opaque,
                               onHorizontalDragUpdate: (d) {
-                                if (w <= 0) return;
+                                if (thumb.msPerPx <= 0) return;
                                 vm.playback.panView(
-                                  (d.delta.dx / w * ext).round(),
+                                  (d.delta.dx * thumb.msPerPx).round(),
                                 );
                               },
                               child: DecoratedBox(
@@ -1362,12 +1397,9 @@ class _BusRow extends StatelessWidget {
   }
 
   Future<void> _delete(BuildContext context) async {
-    final ok = await showConfirmDialog(
-      context,
-      title: 'Delete "${bus.name}"?',
-      body: 'Removing this FX bus re-routes anything feeding it to the master.',
-    );
-    if (ok) await vm.mixer.deleteBus(bus.id);
+    if (await confirmDeleteBus(context, bus.name)) {
+      await vm.mixer.deleteBus(bus.id);
+    }
   }
 
   @override

@@ -212,7 +212,11 @@ class _BusBody extends StatelessWidget {
         Expanded(
           child: Padding(
             padding: const EdgeInsets.fromLTRB(14, 12, 14, 0),
-            child: FxPanel(vm: vm, bus: bus),
+            // Keyed per channel (here and in _BodyContent): unkeyed, selecting
+            // another bus or take reused the panel's element tree, carrying
+            // the EQ analyzer's smoothed spectrum, adaptive ceiling and
+            // latched "has signal" over from the previous channel.
+            child: FxPanel(key: ValueKey(bus.id), vm: vm, bus: bus),
           ),
         ),
         _BusChannelFooter(vm: vm, bus: bus),
@@ -408,6 +412,8 @@ class _BodyContent extends StatelessWidget {
       track: track,
       showRouting: isVocal,
     );
+    // Both FxPanels below are keyed by the take, so selecting another one
+    // starts its EQ analyzer fresh (see the bus inspector's).
     return LayoutBuilder(
       builder: (context, constraints) {
         if (constraints.maxHeight < _kMinPinnedHeight) {
@@ -425,7 +431,11 @@ class _BodyContent extends StatelessWidget {
                     padding: const EdgeInsets.fromLTRB(14, 12, 14, 0),
                     child: SizedBox(
                       height: 220,
-                      child: FxPanel(vm: vm, track: track),
+                      child: FxPanel(
+                        key: ValueKey(track.id),
+                        vm: vm,
+                        track: track,
+                      ),
                     ),
                   )
                 else
@@ -449,7 +459,11 @@ class _BodyContent extends StatelessWidget {
               child: isVocal
                   ? Padding(
                       padding: const EdgeInsets.fromLTRB(14, 12, 14, 0),
-                      child: FxPanel(vm: vm, track: track),
+                      child: FxPanel(
+                        key: ValueKey(track.id),
+                        vm: vm,
+                        track: track,
+                      ),
                     )
                   : const _Empty(
                       'Backing track plays dry, with no effects.',
