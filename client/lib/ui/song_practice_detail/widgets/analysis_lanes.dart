@@ -496,7 +496,16 @@ class LoudnessLanePainter extends CustomPainter {
       started = false;
     }
 
-    for (var fr = 0; fr < frames; fr++) {
+    // Only the frames that can reach the (clipped) box: zoomed in on a long
+    // take, the path would otherwise run through every frame of it.
+    final window = laneVisibleFrames(
+      metrics,
+      startMs: startMs,
+      viewStartMs: viewStartMs,
+      durMs: dur,
+      width: size.width,
+    );
+    for (var fr = window.first; fr <= window.last; fr++) {
       final db = metrics.loudness[fr];
       if (!db.isFinite) {
         closeSegment();

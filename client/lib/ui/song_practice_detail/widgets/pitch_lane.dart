@@ -62,6 +62,32 @@ String _centsStr(double cents) {
   return (lo: loI, hi: hiI);
 }
 
+/// The frames of [m] whose drawing can reach a lane [width] px wide that shows
+/// [durMs] of timeline from [viewStartMs], for frames placed from [startMs]:
+/// the frames under the viewport plus [marginPx] each side (stroke caps and
+/// miter joins reach past their vertex), clamped to the take. The lane
+/// painters clip to their box, so skipping frames outside this range changes
+/// nothing on screen — it keeps a zoomed-in long take from walking (and
+/// building paths through) every one of its frames. Empty when
+/// [first] > [last].
+({int first, int last}) laneVisibleFrames(
+  VoiceMetrics m, {
+  required int startMs,
+  required int viewStartMs,
+  required int durMs,
+  required double width,
+  double marginPx = 8,
+}) {
+  if (m.frames == 0) return (first: 0, last: -1);
+  if (durMs <= 0 || width <= 0) return (first: 0, last: m.frames - 1);
+  final framesPerMs = m.sampleRate / m.hop / 1000;
+  final marginMs = marginPx * durMs / width;
+  final lo = ((viewStartMs - marginMs - startMs) * framesPerMs).floor() - 1;
+  final hi =
+      ((viewStartMs + durMs + marginMs - startMs) * framesPerMs).ceil() + 1;
+  return (first: math.max(0, lo), last: math.min(m.frames - 1, hi));
+}
+
 /// A detected sung note: a run of voiced frames quantized to one [semitone],
 /// with the median cents deviation of the take's actual pitch within it.
 class PitchNote {
@@ -451,6 +477,9 @@ class PitchLanePainter extends CustomPainter {
   final int loSemi;
   final int hiSemi;
 
+  /// How far right of a flagged note's start its cents label can reach.
+  static const double _labelReachPx = 80;
+
   @override
   void paint(Canvas canvas, Size size) {
     final dur = timelineDurationMs;
@@ -480,11 +509,21 @@ class PitchLanePainter extends CustomPainter {
     final semiH = size.height / span;
     final blockH = semiH * 0.62;
 
+    // Only the notes that can reach the box are drawn (it is clipped): a block
+    // with its stroke, and for the flagged ones the cents label right of its
+    // start. Zoomed in on a long take that is a handful of the notes.
+    bool offBox(int i, double x0, double x1) {
+      if (x0 - 2 > size.width) return true;
+      if (x1 + 2 >= 0) return false;
+      return !worst.contains(i) || x0 + 2 + _labelReachPx < 0;
+    }
+
     // Note blocks.
     for (var i = 0; i < notes.length; i++) {
       final n = notes[i];
       final x0 = xOfFrame(n.startFrame);
       final x1 = math.max(xOfFrame(n.endFrame), x0 + 2);
+      if (offBox(i, x0, x1)) continue;
       final yc = yOf(n.semitone.toDouble());
       final rrect = RRect.fromRectAndRadius(
         Rect.fromLTRB(x0, yc - blockH / 2, x1, yc + blockH / 2),
@@ -513,9 +552,19 @@ class PitchLanePainter extends CustomPainter {
       ..color = Studio.textPrimary.withValues(alpha: 0.85)
       ..strokeWidth = 1.3
       ..strokeCap = StrokeCap.round;
+    final window = laneVisibleFrames(
+      metrics,
+      startMs: startMs,
+      viewStartMs: viewStartMs,
+      durMs: dur,
+      width: size.width,
+    );
     for (final n in notes) {
+      if (n.endFrame < window.first || n.startFrame > window.last) continue;
       double? px, py;
-      for (var fr = n.startFrame; fr <= n.endFrame; fr++) {
+      final from = math.max(n.startFrame, window.first);
+      final to = math.min(n.endFrame, window.last);
+      for (var fr = from; fr <= to; fr++) {
         final hz = metrics.f0[fr];
         if (hz.isNaN || hz <= 0) {
           px = null;

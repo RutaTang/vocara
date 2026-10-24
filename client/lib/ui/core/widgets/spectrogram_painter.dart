@@ -462,17 +462,30 @@ class FormantTrackPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final frames = metrics.frames;
     if (frames == 0) return;
+    // One round point per voiced frame, drawn as a single point batch per
+    // track: a round-capped point [radius]·2 wide is the same filled dot as
+    // drawCircle, but a 10-minute take is ~56k frames per track, and as
+    // ~225k separate drawCircle calls it cost tens of ms to record.
+    final points = Float32List(frames * 2);
     void track(Float32List f, Color color, double radius) {
-      final paint = Paint()..color = color.withValues(alpha: 0.9);
+      var n = 0;
       for (var fr = 0; fr < frames; fr++) {
         final hz = f[fr];
         if (hz.isNaN || hz <= 0 || hz > maxHz) continue;
         // Cell-centered, matching the spectrogram image's per-column stretch
         // (column c centers at (c+0.5)/frames·width) so dots sit on the ridges.
-        final x = (fr + 0.5) / frames * size.width;
-        final y = (1 - hz / maxHz) * size.height;
-        canvas.drawCircle(Offset(x, y), radius, paint);
+        points[n++] = (fr + 0.5) / frames * size.width;
+        points[n++] = (1 - hz / maxHz) * size.height;
       }
+      if (n == 0) return;
+      canvas.drawRawPoints(
+        ui.PointMode.points,
+        Float32List.sublistView(points, 0, n),
+        Paint()
+          ..color = color.withValues(alpha: 0.9)
+          ..strokeWidth = radius * 2
+          ..strokeCap = StrokeCap.round,
+      );
     }
 
     track(metrics.f1, formantColors[0], 1.1);
