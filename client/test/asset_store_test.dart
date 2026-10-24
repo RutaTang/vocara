@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:vocara/data/db/app_database.dart';
 import 'package:vocara/data/db/asset_store.dart';
+import 'package:vocara/data/db/durable_fs.dart';
 import 'package:vocara/data/sync/hlc.dart';
 import 'package:vocara/data/sync/sync_writer.dart';
 
@@ -137,6 +138,31 @@ void main() {
     }
   });
 
+  test('the first import into an empty pool flushes every directory it '
+      'creates into its parent, not just the file into its shard', () async {
+    final fs = _DirFlushLog();
+    final logged = AssetStore(
+      db: db,
+      root: tmp,
+      writer: SyncWriter(db, HlcClock(node: 'NODE'.padRight(26, '0'))),
+      fs: fs,
+    );
+    final id = await logged.importFile(
+      (await makeSrc('take.wav', [1, 2, 3])).path,
+    );
+    final rel = (await (db.select(
+      db.assets,
+    )..where((a) => a.id.equals(id))).getSingle()).localRelPath!;
+
+    // assets/<ab>/<cd>/<hash>.wav: this import created assets/, <ab> and
+    // <cd> as well as the file, so a power cut after the row commits must
+    // find every link of that chain — each new directory flushed into its
+    // parent (root, assets/, <ab>), not only the file into <cd>.
+    final shard = p.dirname(rel);
+    final flushed = fs.dirs.map((d) => p.relative(d, from: tmp.path));
+    expect(flushed, containsAll(['.', 'assets', p.dirname(shard), shard]));
+  });
+
   test(
     'a truncated pool file left by a crash is replaced, not trusted',
     () async {
@@ -154,6 +180,55 @@ void main() {
       );
     },
   );
+
+  test('resolveOrImport of a pool path a live asset owns returns that asset '
+      'without staging a copy or re-hashing the bytes', () async {
+    final id = await store.importFile(
+      (await makeSrc('take.wav', [1, 2, 3, 4])).path,
+    );
+    // What hydration hands every clip, and so what every later save passes.
+    final pooled = (await store.resolve(id))!;
+    final opsBefore = (await db.select(db.oplog).get()).length;
+
+    // Bytes changed under the content address after pooling (rot / an outside
+    // edit — the case verifyPoolIntegrity reports and leaves alone)...
+    await File(pooled).writeAsBytes([1, 2, 3, 5], flush: true);
+    // ...and no room to stage anything: a file where the staging dir goes.
+    final staging = Directory(p.join(tmp.path, 'assets', '.staging'));
+    if (await staging.exists()) await staging.delete(recursive: true);
+    await File(staging.path).writeAsBytes([0]);
+    // (A genuine import really is blocked now — the case below isn't vacuous.)
+    await expectLater(
+      store.importFile((await makeSrc('other.wav', [9])).path),
+      throwsA(isA<FileSystemException>()),
+    );
+
+    expect(await store.resolveOrImport(pooled), id);
+    // No new asset minted for the changed bytes, nothing journaled, and the
+    // pooled file is still exactly what was there.
+    expect(await db.select(db.assets).get(), hasLength(1));
+    expect(await db.select(db.oplog).get(), hasLength(opsBefore));
+    expect(await File(pooled).readAsBytes(), [1, 2, 3, 5]);
+  });
+
+  test('resolveOrImport still imports + dedups a file that is not a live '
+      "asset's pool path", () async {
+    final id = await store.importFile(
+      (await makeSrc('take.wav', [6, 6, 6])).path,
+    );
+    // An external copy of the same bytes dedups to the existing asset...
+    expect(
+      await store.resolveOrImport((await makeSrc('copy.wav', [6, 6, 6])).path),
+      id,
+    );
+    // ...and new bytes, even placed inside the pool tree, are imported.
+    final stray = File(p.join(tmp.path, 'assets', 'stray.wav'));
+    await stray.writeAsBytes([8, 8]);
+    final strayId = await store.resolveOrImport(stray.path);
+    expect(strayId, isNot(id));
+    expect(await db.select(db.assets).get(), hasLength(2));
+    expect(await File((await store.resolve(strayId))!).readAsBytes(), [8, 8]);
+  });
 
   test(
     'sweepStaging clears audio/ and technique_media/ but never the pool',
@@ -183,4 +258,15 @@ void main() {
       expect(await store.resolve(id), isNotNull);
     },
   );
+}
+
+/// Records every directory flush (the real flush still runs underneath).
+class _DirFlushLog extends DurableFs {
+  final List<String> dirs = [];
+
+  @override
+  Future<void> fsyncDir(String path) async {
+    dirs.add(path);
+    await super.fsyncDir(path);
+  }
 }

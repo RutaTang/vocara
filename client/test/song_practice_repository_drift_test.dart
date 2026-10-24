@@ -447,6 +447,51 @@ void main() {
     expect(await _liveCount(db, db.clips), 1);
   });
 
+  test('a save that touches no audio keeps every clip on its asset, even when '
+      'a pooled file changed after pooling', () async {
+    final base = ok(await repo.createPractice('S'));
+    final vocal = AudioTrack(
+      id: newId(),
+      kind: AudioTrackKind.vocal,
+      displayName: 'Take',
+      createdAt: DateTime(2026),
+      versionId: base.versions.single.id,
+      clips: [
+        await clip('take.wav', [1, 2, 3, 4]),
+      ],
+    );
+    ok(
+      await repo.savePractice(
+        SongPractice(
+          id: base.id,
+          title: base.title,
+          createdAt: base.createdAt,
+          updatedAt: base.updatedAt,
+          vocalTracks: [vocal],
+          versions: base.versions,
+          activeVersionId: base.versions.single.id,
+        ),
+      ),
+    );
+    final reloaded = ok(await repo.getPractice(base.id));
+    final assetBefore = (await db.select(db.clips).getSingle()).assetId;
+
+    // The clip comes back carrying its pool path; flip a byte under it (rot /
+    // an outside edit — verifyPoolIntegrity's report-only case).
+    final pooled = reloaded.vocalTracks.single.clips.single.audioFilePath;
+    await File(pooled).writeAsBytes([1, 2, 3, 5], flush: true);
+
+    final opsBefore = (await db.select(db.oplog).get()).length;
+    ok(await repo.savePractice(reloaded.copyWith(title: 'Renamed')));
+
+    // A rename must not mint an asset for the changed bytes and re-point the
+    // clip at it (journaled, that would ship the bad bytes fleet-wide).
+    expect((await db.select(db.clips).getSingle()).assetId, assetBefore);
+    expect(await db.select(db.assets).get(), hasLength(1));
+    final ops = (await db.select(db.oplog).get()).skip(opsBefore);
+    expect(ops.map((o) => '${o.entityTable}:${o.op}'), ['practices:update']);
+  });
+
   test('replacing the accompaniment does not roll back (tombstone before insert '
       'frees the unique slot)', () async {
     final base = ok(await repo.createPractice('S'));

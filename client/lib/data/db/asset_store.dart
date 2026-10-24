@@ -149,12 +149,46 @@ class AssetStore {
       pathOrRef.startsWith('asset://') ? pathOrRef.substring(8) : null;
 
   /// The asset id for a clip/media reference: if it's an `asset://` ref (bytes
-  /// missing locally), the embedded id is reused as-is; otherwise the file at
-  /// the path is imported (idempotent + deduped).
+  /// missing locally), the embedded id is reused as-is; if it's the pool path
+  /// of a live asset (what [resolve] hands out, so every hydrated clip/media
+  /// comes back to its next save this way), that asset's id is reused too;
+  /// otherwise the file at the path is imported (idempotent + deduped).
+  ///
+  /// The pool-path case must NOT go through [importFile]: that streams a full
+  /// copy into staging and re-hashes it only to find the bytes already
+  /// pooled. A save that touched no audio would then need free disk for its
+  /// largest clip (ENOSPC failing a rename), and a pooled file whose bytes
+  /// changed after pooling (the case [verifyPoolIntegrity] reports and
+  /// deliberately leaves alone) would be minted a NEW asset and its clip
+  /// re-pointed at it — journaled, so the bad bytes would ship fleet-wide.
+  ///
+  /// Runs under the shared side of [gate], like [importFile].
   Future<String> resolveOrImport(String pathOrRef, {String kind = 'audio'}) {
     final embedded = assetIdOf(pathOrRef);
     if (embedded != null) return Future.value(embedded);
-    return importFile(pathOrRef, kind: kind);
+    return gate.shared(
+      () async =>
+          await _livePoolAssetAt(pathOrRef) ??
+          await _importFile(pathOrRef, kind: kind),
+    );
+  }
+
+  /// The live asset whose pooled file is [path], or null when [path] is not a
+  /// live asset's pool path. Identity is the recorded local_rel_path itself
+  /// ([relPathFor] is a pure function of hash + ext), so nothing is read from
+  /// the file. When identical bytes are live under more than one asset id,
+  /// the first by HLC wins, mirroring [importFile]'s dedup order.
+  Future<String?> _livePoolAssetAt(String path) async {
+    final pool = p.join(root.path, 'assets');
+    if (!p.isWithin(pool, path)) return null;
+    final rel = p.relative(path, from: root.path);
+    final owner =
+        await (db.select(db.assets)
+              ..where((a) => a.localRelPath.equals(rel) & a.deletedAt.isNull())
+              ..orderBy([(a) => OrderingTerm(expression: a.hlcPacked)])
+              ..limit(1))
+            .getSingleOrNull();
+    return owner?.id;
   }
 
   /// Resolves an asset id to an absolute path on THIS device, or null if the
@@ -184,7 +218,9 @@ class AssetStore {
   /// `<hash>.part` name made them tear each other's copy apart.
   Future<_StagedImport> _stageToPool(File src) async {
     final stagingDir = Directory(p.join(root.path, 'assets', '.staging'));
-    await stagingDir.create(recursive: true);
+    // Durably: on the first import this also creates the pool dir itself,
+    // which every pooled file's directory entry hangs off.
+    await _createDirDurably(stagingDir);
     final tmp = File(p.join(stagingDir.path, '${newId()}.part'));
     final sink = tmp.openWrite();
     Digest? digest;
@@ -231,8 +267,8 @@ class AssetStore {
   /// Length is deliberately the whole test HERE. It is exact against what this
   /// path can produce (an interrupted copy is short, and a file already at
   /// this hash's address came from the same bytes), and a real content check
-  /// would re-read the entire file on every save — a practice save re-imports
-  /// every clip's audio. Content is verified in [verifyPoolIntegrity] instead,
+  /// would re-read the entire pooled file on every import of bytes the pool
+  /// already holds. Content is verified in [verifyPoolIntegrity] instead,
   /// which the repair pass runs once and which also covers what no import
   /// check could: bytes that changed after they were pooled.
   Future<String> _promoteStaged(_StagedImport staged, String ext) async {
@@ -241,13 +277,29 @@ class AssetStore {
     if (await dest.exists() && await dest.length() == staged.size) {
       return rel; // identical bytes already pooled
     }
-    await dest.parent.create(recursive: true);
+    await _createDirDurably(dest.parent);
     await fs.fsyncFile(staged.tmpPath);
     // A concurrent import of the same hash may have placed it first; rename
     // is idempotent enough (overwrites with identical bytes).
     await fs.atomicRename(staged.tmpPath, dest.path);
     await fs.fsyncDir(dest.parent.path);
     return rel;
+  }
+
+  /// Creates [dir] and any missing ancestors, flushing each directory THIS
+  /// call creates into its parent. Flushing the file's own shard after the
+  /// rename only makes the file's entry durable within that shard; a power
+  /// loss must also find the shard itself, so a fresh `assets/<ab>/` or
+  /// `assets/<ab>/<cd>/` has to be on permanent storage before the row
+  /// referencing a file inside it commits. An ancestor that already exists is
+  /// not re-flushed: its creator did that (or, for a concurrent import racing
+  /// into the same fresh shard, is doing it — the same in-process window as
+  /// the already-pooled early return in [_promoteStaged]).
+  Future<void> _createDirDurably(Directory dir) async {
+    if (await dir.exists()) return;
+    await _createDirDurably(dir.parent);
+    await dir.create(); // an EEXIST from a concurrent creator is success
+    await fs.fsyncDir(dir.parent.path);
   }
 
   /// Clears the transient staging trees (`audio/`, `technique_media/`) where
@@ -602,8 +654,8 @@ class AssetStore {
   /// already-present pool file whose LENGTH matches the freshly staged bytes,
   /// which is the right guard for what import can actually create — a
   /// truncated crash leftover — but it is not a content check, and paying for
-  /// one there would re-read the whole file on every save (a practice save
-  /// re-imports each clip's audio). So the content check lives here instead,
+  /// one there would re-read the whole pooled file on every import of bytes
+  /// the pool already holds. So the content check lives here instead,
   /// in the user-invoked repair pass, where reading the pool once is
   /// affordable — and where it also catches the case import never could:
   /// bytes that rot or are edited AFTER they were pooled.

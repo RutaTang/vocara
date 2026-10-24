@@ -45,16 +45,18 @@ class DurableFs {
     }
   }
 
-  /// Flush a directory entry so a rename into it survives power loss. A directory
-  /// fd can only be opened read-only, and its entries are made durable with a
-  /// plain `fsync` on that fd. No pure-Dart fallback exists (best-effort no-op).
+  /// Flush a directory entry so a rename into it survives power loss. A
+  /// directory fd can only be opened read-only; its entries get the same
+  /// `F_FULLFSYNC` as [fsyncFile], because a plain `fsync` on macOS only hands
+  /// them to the drive, whose write cache can still lose them — and the entry
+  /// must be on permanent storage before the row referencing it commits. A
+  /// filesystem that refuses F_FULLFSYNC falls back to a plain `fsync`. No
+  /// pure-Dart fallback exists (best-effort no-op off macOS).
   Future<void> fsyncDir(String path) async {
     if (Platform.isMacOS) {
       // Off the UI isolate for the same reason as fsyncFile; awaited so the
       // caller's durability ordering (entry flushed before the DB commit) holds.
-      await Isolate.run(
-        () => _tryNativeFsync(path, _oRdonly, fullFsync: false),
-      );
+      await Isolate.run(() => _tryNativeFsync(path, _oRdonly, fullFsync: true));
     }
   }
 
@@ -102,8 +104,9 @@ bool _tryNativeFsync(String path, int oflag, {required bool fullFsync}) {
     if (fd < 0) return false;
     try {
       if (fullFsync && _fcntl(fd, _fFullFsync) == 0) return true;
-      // F_FULLFSYNC unsupported by the filesystem, or a directory fd: fall back
-      // to fsync (still flushes the file/dir metadata through the OS).
+      // F_FULLFSYNC refused (unsupported by the filesystem for this file or
+      // directory): fall back to fsync (still flushes the file/dir metadata
+      // through the OS).
       return _fsync(fd) == 0;
     } finally {
       _close(fd);
