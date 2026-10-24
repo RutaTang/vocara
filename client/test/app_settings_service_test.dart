@@ -389,6 +389,37 @@ void main() {
       expect(storage.lastWrite!['inputDeviceUid'], _builtInMic.uid);
     });
 
+    test('a choice persisted while load() is in flight does not clobber the '
+        'untouched fields on disk', () async {
+      // _persist serializes all seven fields from memory. Run while load()
+      // was parked in read(), it wrote the constructor defaults for every
+      // field the user had not touched, and load() never wrote again — the
+      // next launch lost the saved output device and gains.
+      outs = [_builtInOut, _headphones];
+      storage.doc = {
+        'outputDeviceUid': _headphones.uid,
+        'outputDeviceName': _headphones.name,
+        'recordGainDb': 3.0,
+        'monitorGain': 0.5,
+      };
+      final gate = Completer<void>();
+      storage.readGate = gate;
+
+      final loading = service.load(); // parked inside read()
+      await service.setInputDevice(_builtInMic.uid);
+      // Nothing may race the read: on a real disk it could read back the
+      // very defaults the racing write put there.
+      expect(storage.writes, 0);
+      gate.complete();
+      await loading;
+
+      expect(storage.lastWrite!['inputDeviceUid'], _builtInMic.uid);
+      expect(storage.lastWrite!['outputDeviceUid'], _headphones.uid);
+      expect(storage.lastWrite!['outputDeviceName'], _headphones.name);
+      expect(storage.lastWrite!['recordGainDb'], 3.0);
+      expect(storage.lastWrite!['monitorGain'], 0.5);
+    });
+
     test('one wrong-typed field costs only that field, not the engine '
         'apply', () async {
       // The reads used to sit outside the try, so a single bad entry threw a
