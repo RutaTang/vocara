@@ -79,7 +79,10 @@ class InterpretationsController extends ChangeNotifier {
   /// reload → resume (playback continues from the same spot if it was playing).
   Future<void> setActive(String versionId) async {
     final practice = _practiceOf();
-    if (practice == null || practice.activeVersionId == versionId) return;
+    // The interpretation ON SCREEN, which a stored id that resolves to none
+    // falls back from (see SongPractice.activeVersion): picking it is no
+    // switch, and must not pause, save and resume playback for nothing.
+    if (practice == null || practice.activeVersion?.id == versionId) return;
     if (_isRecording()) {
       _toast('Stop recording to switch interpretation.');
       return;

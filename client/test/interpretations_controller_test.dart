@@ -224,6 +224,21 @@ void main() {
       expect(host.engine.log, isEmpty);
     });
 
+    test('picking the interpretation shown when the stored id resolves to '
+        'none is no switch', () async {
+      // Sync can leave the stored active id null or pointing at a deleted
+      // interpretation; the first one is then what is shown.
+      final host = _Host(
+        _practice(
+          versions: [_version('v1', 'One'), _version('v2', 'Two')],
+          activeVersionId: 'gone',
+        ),
+      );
+      await host.controller.setActive('v1');
+      expect(host.saves, 0);
+      expect(host.engine.log, isEmpty);
+    });
+
     test(
       'a take committed during the pause await survives the switch '
       '(rebuilds from the LIVE practice, not the pre-await snapshot)',
