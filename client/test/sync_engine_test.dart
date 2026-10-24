@@ -96,6 +96,16 @@ class _StuckTokenTransport implements SyncTransport {
       throw UnimplementedError();
 }
 
+/// Stands in for a process that dies after a pull run's pages committed but
+/// before its end-of-run repair transaction ran.
+class _DyingChecker extends IntegrityChecker {
+  _DyingChecker(super.db, super.writer);
+
+  @override
+  Future<List<IntegrityViolation>> repair({int maxPasses = 8}) =>
+      throw StateError('process killed before the repair');
+}
+
 void main() {
   // A fixed epoch anchor: every stamp in these tests is derived from it, so
   // nothing depends on the machine's wall clock.
@@ -114,7 +124,10 @@ void main() {
   late int nowMs;
   var killNextCommit = false;
 
-  SyncEngine buildEngine({SyncTimerFactory? timers}) => SyncEngine(
+  SyncEngine buildEngine({
+    SyncTimerFactory? timers,
+    IntegrityChecker? integrity,
+  }) => SyncEngine(
     db: db,
     applier: SyncApplier(
       db,
@@ -125,7 +138,7 @@ void main() {
     drain: OplogDrain(db),
     builder: SyncRowBuilder(db),
     state: state,
-    integrity: IntegrityChecker(db, writer),
+    integrity: integrity ?? IntegrityChecker(db, writer),
     transport: transport,
     onRemoteApplied: events.add,
     timers: timers,
@@ -947,6 +960,43 @@ void main() {
       expect(await state.changeToken(), '1');
       expect(await oplogCount(), 0);
       expect(events, hasLength(1), reason: 'a no-op page announces nothing');
+    });
+
+    test('a run that dies between its committed page and its repair leaves '
+        'nothing broken after a RESTART: the new engine repairs on its first '
+        'successful run even though that run applies nothing', () async {
+      // A live track under a tombstoned practice: the page applies both
+      // (the FK is satisfied — the practice row exists), and only the
+      // end-of-run repair tombstones the track.
+      cloud.accept(
+        remotePractice(
+          'P',
+          'deleted',
+          remoteHlc(t0 - 5000),
+          deletedAt: t0 - 5000,
+        ),
+      );
+      cloud.accept(remoteTrack('T', 'P', remoteHlc(t0 - 4000)));
+      engine.dispose();
+      engine = buildEngine(integrity: _DyingChecker(db, writer));
+      final died = await engine.pumpPull();
+      expect(died.failed, isTrue);
+      expect(died.pages, 1, reason: 'the page and its token committed');
+      expect(await IntegrityChecker(db, writer).check(), isNotEmpty);
+
+      // "Restart": a fresh engine over the same durable store. The token is
+      // already at head, so this run fetches and applies nothing — the
+      // debt the dead process held in memory is gone with it.
+      engine.dispose();
+      engine = buildEngine();
+      final run = await engine.pumpPull();
+      expect(run.failed, isFalse);
+      expect(run.applied, 0);
+      expect(
+        await IntegrityChecker(db, writer).check(),
+        isEmpty,
+        reason: 'the first successful run after boot repairs regardless',
+      );
     });
 
     test('a rows-bearing page with an UNMOVED token and hasMore fails the run '

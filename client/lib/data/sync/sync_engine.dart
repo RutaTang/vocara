@@ -686,7 +686,20 @@ class SyncEngine {
   /// Set when a run that had already committed applied pages (or settled
   /// parked entries) aborted before its end-of-run repair: the next
   /// successful run repairs even if it applies nothing itself.
-  bool _repairDebt = false;
+  ///
+  /// Starts TRUE, so every engine lifetime repairs on its first successful
+  /// run. The pages and their change token are durable the moment they
+  /// commit, but this flag is not: a crash or quit between a page commit and
+  /// the repair transaction lost the debt with the process, the next run
+  /// (token already past those pages) applied nothing and skipped the
+  /// repair, and the violations those pages delivered (a live child under a
+  /// tombstoned parent, a dangling pointer, a bus cycle the native engine
+  /// rejects) stood until some later pull happened to apply a row. Repairing
+  /// once per boot settles whatever such a run left behind without
+  /// persisting anything: it covers every case a durable debt marker would
+  /// (and needs no write per page to keep one), and the repair is
+  /// idempotent — on a consistent store it is one scan that writes nothing.
+  bool _repairDebt = true;
 
   Future<PullRun> _pullLocked() async {
     var pages = 0;
