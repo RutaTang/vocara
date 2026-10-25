@@ -458,3 +458,66 @@ fn a_staged_graph_goes_live_with_its_parameters_already_in_place() {
     );
     assert!(!h.publish_staged(), "nothing left to publish");
 }
+
+#[test]
+fn commands_queued_for_the_old_graph_never_reach_the_new_one() {
+    // A storm of live values for the old graph (a fast-path sync's re-push) is still in the
+    // command ring — the audio thread drains a bounded number per block — when the next
+    // commit publishes. Those commands address nodes by id, and a rebuilt graph can number a
+    // different lane under the same id: applied there after the commit's own staged values,
+    // the old lane's fader landed on the new lane, while the UI showed the right one.
+    use vocara_engine::BufferSource;
+    for capacity in [CMD_RING_CAPACITY, 256] {
+        // CMD_RING_CAPACITY: the stale command waits in the ring; 256: in the sender's
+        // overflow queue, which a reap flushes later.
+        let (prod, cons) = spsc::<[f32; CHANNELS]>(8192);
+        let old = GraphDesc {
+            nodes: vec![
+                NodeEntry::new(1, Box::new(RingSource::new(cons))),
+                NodeEntry::new(2, Box::new(MasterNode::unity())),
+            ],
+            edges: vec![Edge::simple(1, 2)],
+            master: 2,
+        };
+        let mut producers = HashMap::new();
+        producers.insert(1u32, prod);
+        let (_mic_prod, mic_cons) = spsc::<[f32; CHANNELS]>(256);
+        let (mut h, mut rt) = spawn(
+            old.compile(SR, BLOCK).unwrap(),
+            producers,
+            mic_cons,
+            capacity,
+        );
+        h.push_pcm(1, &frames_dc(0.5, 8192));
+        h.play();
+        let mut out = vec![0.0; BLOCK * CHANNELS];
+        for i in 0..1500u32 {
+            h.set_param(100_000 + i, 0, 0.0); // the rest of the storm (no such nodes)
+        }
+        h.set_param(2, mparam::GAIN, 0.1); // the old lane's fader, queued last
+        h.flush();
+        rt.process(&mut out, BLOCK); // drains only part of it
+
+        let new = GraphDesc {
+            nodes: vec![
+                NodeEntry::new(1, Box::new(BufferSource::new(vec![0.5; 32_768], 0))),
+                NodeEntry::new(2, Box::new(MasterNode::unity())),
+            ],
+            edges: vec![Edge::simple(1, 2)],
+            master: 2,
+        };
+        h.stage_graph(new.compile(SR, BLOCK).unwrap());
+        h.set_param(2, mparam::GAIN, 0.8); // the new lane's own value
+        h.flush();
+        assert!(h.publish_staged());
+        for _ in 0..16 {
+            h.reap();
+            rt.process(&mut out, BLOCK);
+        }
+        let worst = out.iter().map(|&x| (x - 0.4).abs()).fold(0.0f32, f32::max);
+        assert!(
+            worst < 1e-4,
+            "ring {capacity}: the new graph must keep its own gain (worst error {worst})"
+        );
+    }
+}

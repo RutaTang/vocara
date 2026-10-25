@@ -902,8 +902,11 @@ impl EngineHandle {
         }
     }
 
-    fn publish_boxed(&mut self, graph: Box<Graph>) {
+    fn publish_boxed(&mut self, mut graph: Box<Graph>) {
         debug_assert_eq!(graph.max_block(), self.max_block);
+        // Commands still queued were sent for the graph this replaces; the new one takes
+        // only those sent from here on (see CommandSender::begin_epoch).
+        graph.set_epoch(self.cmd_tx.begin_epoch());
         let retired = self.cell.publish(graph);
         let safe_after = self.shared.blocks.load(Ordering::Acquire) + 2;
         self.retired.push((retired, safe_after));

@@ -94,6 +94,8 @@ pub struct Graph {
     index: HashMap<NodeId, usize>,
     sr: f64,
     max_block: usize,
+    /// The command epoch it was published under (see `CommandSender::begin_epoch`).
+    epoch: u32,
 }
 
 impl GraphDesc {
@@ -206,6 +208,7 @@ impl GraphDesc {
             index,
             sr,
             max_block,
+            epoch: 0,
         })
     }
 }
@@ -297,5 +300,14 @@ impl Graph {
 
     pub fn max_block(&self) -> usize {
         self.max_block
+    }
+
+    /// The command epoch this graph takes commands from (see `CommandSender::begin_epoch`).
+    pub fn epoch(&self) -> u32 {
+        self.epoch
+    }
+
+    pub fn set_epoch(&mut self, epoch: u32) {
+        self.epoch = epoch;
     }
 }
