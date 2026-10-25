@@ -223,4 +223,46 @@ void main() {
     await tester.pump();
     expect(save().enabled, isTrue);
   });
+
+  testWidgets('a pending example start reads as starting, not as saving', (
+    tester,
+  ) async {
+    // Regression: the record row took its busy state from savingExample,
+    // which also covers a pending start, so through the permission prompt
+    // and the mic open it said "Saving example…" before anything was
+    // recorded.
+    tester.view.physicalSize = const Size(1200, 2600);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    final recorder = _ParkedRecorder();
+    final vm = TechniqueDetailViewModel(
+      repository: _FakeRepo(_technique()),
+      mediaService: TechniqueMediaService(storage: LocalStorageService()),
+      techniqueId: _techniqueId,
+      analysisService: _NoAnalysis(),
+      recorder: recorder,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ChangeNotifierProvider.value(
+          value: vm,
+          child: const TechniqueDetailScreen(),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    await tester.tap(find.text('Edit'));
+    await tester.pump();
+
+    unawaited(vm.startExampleRecording());
+    await tester.pump();
+    expect(find.text('Saving example…'), findsNothing);
+    expect(find.text('Starting the microphone…'), findsOneWidget);
+
+    recorder.pending!.complete(const MicRecordingStart.invalidated());
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('Starting the microphone…'), findsNothing);
+  });
 }

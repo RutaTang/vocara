@@ -26,6 +26,7 @@ class TechniqueMediaSection extends StatelessWidget {
     this.onStopRecord,
     this.isRecording = false,
     this.savingRecording = false,
+    this.startingRecording = false,
     this.canRecord = true,
     this.recordLevel,
     this.analyzedId,
@@ -96,6 +97,11 @@ class TechniqueMediaSection extends StatelessWidget {
   final VoidCallback? onStopRecord;
   final bool isRecording;
   final bool savingRecording;
+
+  /// True while an example recording's start is still pending (the mic
+  /// permission prompt, the mic open). [savingRecording] covers this window
+  /// too, so the controls stay busy; this only picks the record row's label.
+  final bool startingRecording;
 
   /// Whether a new example recording can start now (false e.g. while a drag-drop
   /// import is still copying).
@@ -190,6 +196,7 @@ class TechniqueMediaSection extends StatelessWidget {
               onStop: enabled ? onStopRecord : null,
               isRecording: isRecording,
               saving: savingRecording,
+              starting: startingRecording,
               canRecord: canRecord && enabled,
               level: recordLevel,
             ),
@@ -699,15 +706,17 @@ class _DialogButton extends StatelessWidget {
   }
 }
 
-/// Record-an-example control under the drop zone: a Record button that becomes a
-/// level meter + Stop while recording, then a "Saving…" state while the clip is
-/// imported as a persisted example.
+/// Record-an-example control under the drop zone: a Record button that shows a
+/// "Starting…" state while the mic opens, becomes a level meter + Stop while
+/// recording, then a "Saving…" state while the clip is imported as a persisted
+/// example.
 class _RecordRow extends StatelessWidget {
   const _RecordRow({
     required this.onStart,
     required this.onStop,
     required this.isRecording,
     required this.saving,
+    required this.starting,
     required this.canRecord,
     required this.level,
   });
@@ -716,6 +725,7 @@ class _RecordRow extends StatelessWidget {
   final VoidCallback? onStop;
   final bool isRecording;
   final bool saving;
+  final bool starting;
   final bool canRecord;
   final ValueListenable<double>? level;
 
@@ -732,8 +742,8 @@ class _RecordRow extends StatelessWidget {
   Widget build(BuildContext context) {
     if (saving) {
       return Row(
-        children: const [
-          SizedBox(
+        children: [
+          const SizedBox(
             width: 13,
             height: 13,
             child: CircularProgressIndicator(
@@ -741,10 +751,13 @@ class _RecordRow extends StatelessWidget {
               valueColor: AlwaysStoppedAnimation(Studio.textSecondary),
             ),
           ),
-          SizedBox(width: 8),
+          const SizedBox(width: 8),
           Text(
-            'Saving example…',
-            style: TextStyle(color: Studio.textFaint, fontSize: 12),
+            // A pending start is busy too, but nothing is recorded yet: it
+            // read "Saving example…" through the permission prompt and the
+            // mic open.
+            starting ? 'Starting the microphone…' : 'Saving example…',
+            style: const TextStyle(color: Studio.textFaint, fontSize: 12),
           ),
         ],
       );

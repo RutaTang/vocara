@@ -330,6 +330,7 @@ class _TechniqueDetailScreenState extends State<TechniqueDetailScreen> {
           onStopRecord: vm.stopExampleRecording,
           isRecording: vm.isRecordingExample,
           savingRecording: vm.savingExample,
+          startingRecording: vm.starting,
           canRecord: vm.canRecordExample,
           recordLevel: vm.recordLevel,
           analyzedId: vm.referenceMedia?.id,
