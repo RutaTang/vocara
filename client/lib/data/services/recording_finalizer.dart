@@ -87,6 +87,37 @@ class RecordingFinalizer {
     }
   }
 
+  /// Stopped takes still landing, per practice id (see [landing]).
+  final _landing = <String, Set<Future<void>>>{};
+
+  /// Runs [work] — the post-stop finalize of a take of [practiceId] (its
+  /// analysis, then the save that commits it) — listed for [landed] until it
+  /// settles. The finalize outlives the screen that stopped the take (Stop,
+  /// then Back), and a screen reopened on the practice meanwhile read it
+  /// without the take.
+  Future<void> landing(String practiceId, Future<void> Function() work) async {
+    final tail = work();
+    final tails = _landing.putIfAbsent(practiceId, () => {})..add(tail);
+    try {
+      await tail;
+    } finally {
+      tails.remove(tail);
+      if (tails.isEmpty) _landing.remove(practiceId);
+    }
+  }
+
+  /// Completes once every take of [practiceId] landing now has settled,
+  /// whatever its outcome (the finalize reports its own) — or after
+  /// [perFinalizerBudget], like a quit's wait: a wedged finalize then costs
+  /// the reopened screen only the take's visibility, never the screen.
+  Future<void> landed(String practiceId) {
+    final tails = _landing[practiceId];
+    if (tails == null) return Future.value();
+    return Future.wait([
+      for (final tail in tails) tail.then<void>((_) {}, onError: (_) {}),
+    ]).timeout(perFinalizerBudget, onTimeout: () => const []);
+  }
+
   /// Runs every registered finalizer (best-effort; one failure never blocks the
   /// rest or the quit). Iterates a snapshot, so a finalizer that unregisters
   /// itself mid-run is safe. Concurrent calls (e.g. a close click racing a

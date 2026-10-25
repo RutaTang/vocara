@@ -358,6 +358,28 @@ void main() {
   late _FakeWaveforms waveforms;
   late _FakeSpectrograms spectrograms;
 
+  /// A detail screen over the current [repo], loading in the background.
+  SongPracticeDetailViewModel openVm({
+    PlaybackEngine? engine,
+    MicRecordingController? mic,
+  }) => SongPracticeDetailViewModel(
+    repository: repo,
+    techniqueRepository: _FakeTechRepo(),
+    audioFileService: _FakeFiles(),
+    waveformService: waveforms,
+    spectrogramService: spectrograms,
+    separationService: FakeSourceSeparationService(available: false),
+    appSettings: AppSettingsService(
+      storage: LocalStorageService(),
+      enumerateOutputs: () => const [],
+      enumerateInputs: () => const [],
+    ),
+    practiceId: 'p1',
+    playbackEngine: engine ?? _FakeEngine(),
+    editService: _FakeEdits(),
+    mic: mic,
+  );
+
   Future<SongPracticeDetailViewModel> pumpVm({
     SongPractice? seed,
     PlaybackEngine? engine,
@@ -366,23 +388,7 @@ void main() {
     repo = _FakeRepo(seed ?? _seed());
     waveforms = _FakeWaveforms();
     spectrograms = _FakeSpectrograms();
-    final vm = SongPracticeDetailViewModel(
-      repository: repo,
-      techniqueRepository: _FakeTechRepo(),
-      audioFileService: _FakeFiles(),
-      waveformService: waveforms,
-      spectrogramService: spectrograms,
-      separationService: FakeSourceSeparationService(available: false),
-      appSettings: AppSettingsService(
-        storage: LocalStorageService(),
-        enumerateOutputs: () => const [],
-        enumerateInputs: () => const [],
-      ),
-      practiceId: 'p1',
-      playbackEngine: engine ?? _FakeEngine(),
-      editService: _FakeEdits(),
-      mic: mic,
-    );
+    final vm = openVm(engine: engine, mic: mic);
     addTearDown(vm.dispose);
     for (var i = 0; i < 400 && vm.practice == null; i++) {
       await Future<void>.delayed(const Duration(milliseconds: 5));
@@ -747,5 +753,41 @@ void main() {
         expect(take1.clips.last.startMs, 700);
       },
     );
+  });
+
+  test('a practice reopened while its last take is landing shows the '
+      'take', () async {
+    // Stop, then Back: the route no longer waits once isRecording is false,
+    // and the take's finalize (its analysis, then the save) outlives the
+    // screen. Reopening the practice inside those seconds read it without the
+    // take, which then appeared only after some later edit saved.
+    repo = _FakeRepo(_seed());
+    waveforms = _FakeWaveforms();
+    spectrograms = _FakeSpectrograms();
+    final first = openVm(engine: _FakeGraphEngine(), mic: _FakeMic());
+    for (var i = 0; i < 400 && first.practice == null; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+    first.selectTrack('take1');
+    await first.recording.startRecording();
+    expect(first.isRecording, isTrue);
+
+    waveforms.gate = Completer<void>(); // the take is being analyzed
+    final stop = first.stopRecording();
+    first.dispose();
+
+    final reopened = openVm();
+    addTearDown(reopened.dispose);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    waveforms.gate!.complete();
+    await stop;
+    for (var i = 0; i < 400 && reopened.practice == null; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+
+    final take1 = reopened.practice!.vocalTracks.singleWhere(
+      (t) => t.id == 'take1',
+    );
+    expect(take1.clips, hasLength(2), reason: 'the take it was reopened on');
   });
 }

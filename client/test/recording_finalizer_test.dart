@@ -106,4 +106,29 @@ void main() {
 
     expect(ran, 3);
   });
+
+  test('a reopened practice waits for its landing take, but not for a '
+      'wedged one', () async {
+    final finalizer = RecordingFinalizer.forTesting(
+      perFinalizerBudget: const Duration(milliseconds: 30),
+    );
+    final take = Completer<void>();
+    final never = Completer<void>();
+    addTearDown(() {
+      if (!never.isCompleted) never.complete();
+    });
+    unawaited(finalizer.landing('p1', () => take.future));
+    var landed = false;
+    unawaited(finalizer.landed('p1').then((_) => landed = true));
+    await Future<void>.delayed(const Duration(milliseconds: 5));
+    expect(landed, isFalse, reason: 'its take is still landing');
+    take.complete();
+    await Future<void>.delayed(Duration.zero);
+    expect(landed, isTrue);
+
+    unawaited(finalizer.landing('p1', () => never.future));
+    // The outer guard is the test's stand-in for a screen that never opens.
+    await finalizer.landed('p1').timeout(const Duration(seconds: 2));
+    await finalizer.landed('other').timeout(const Duration(seconds: 2));
+  });
 }

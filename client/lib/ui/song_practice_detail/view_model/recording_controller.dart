@@ -487,7 +487,11 @@ class RecordingController extends ChangeNotifier {
       // — hold the quit gate over it, or a quit in this window exits mid-save
       // and boot recovery re-adopts the WAV at timeline zero, losing the
       // placement, punch-in target and latency alignment.
-      await _mic.guardStopFinalize(() => _finishStop(stopped));
+      // Listed per practice too: a screen reopened on it while the take is
+      // still landing waits for the take (see the host's load).
+      await _mic.guardStopFinalize(
+        () => _finalizer.landing(_practiceId, () => _finishStop(stopped)),
+      );
     } finally {
       _stopping = false;
     }

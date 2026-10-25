@@ -844,6 +844,10 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   // --- Loading -------------------------------------------------------------
 
   Future<Result<SongPractice>> _load() async {
+    // A take stopped just before the last screen on this practice closed may
+    // still be landing (its finalize outlives that screen): read the practice
+    // after it, or this screen shows it without the take.
+    await _finalizer.landed(_practiceId);
     // Load through the base-hash path: the hashes captured here are what every
     // later save three-way merges against (see [_baseHashes]).
     final loaded = await _repository.loadPractice(_practiceId);
