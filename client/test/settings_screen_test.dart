@@ -17,6 +17,7 @@ import 'package:vocara/data/services/diagnostics_log.dart';
 import 'package:vocara/data/services/graph_audio_playback_service.dart';
 import 'package:vocara/data/services/local_storage_service.dart';
 import 'package:vocara/data/services/update_check_service.dart';
+import 'package:vocara/domain/models/audio_device.dart';
 import 'package:vocara/ui/settings/licenses.dart';
 import 'package:vocara/ui/settings/settings_screen.dart';
 
@@ -138,6 +139,37 @@ void main() {
     settings.refreshDevices();
     await tester.pump();
     expect(find.text('Input channel'), findsNothing);
+
+    await _teardown(tester, persistence);
+  });
+
+  testWidgets('names the device the input-channel choice applies to', (
+    tester,
+  ) async {
+    // The chosen interface is unplugged, so the default records — and a
+    // choice made under the chosen one's offline row lands on the default.
+    final settings = AppSettingsService(
+      storage: LocalStorageService(),
+      enumerateOutputs: () => const [],
+      enumerateInputs: () => const [
+        AudioDevice(
+          uid: 'second',
+          name: 'Second Interface',
+          isDefault: true,
+          isInput: true,
+        ),
+      ],
+      inputChannelCount: (_) => 2,
+    );
+    // Real file I/O: it never completes inside the test's fake async zone.
+    await tester.runAsync(() => settings.setInputDevice('unplugged'));
+    final persistence = await _pumpSettings(tester, settings: settings);
+    await tester.pump();
+
+    expect(
+      find.textContaining('Second Interface — Auto follows'),
+      findsOneWidget,
+    );
 
     await _teardown(tester, persistence);
   });

@@ -151,6 +151,12 @@ class AppSettingsService extends ChangeNotifier {
       _inputChannelByUid[_inputKey] ??
       GraphAudioPlaybackService.inputChannelAuto;
 
+  /// The name of the device the input-channel choice applies to: the one capturing (see
+  /// [_inputKey]), which is the system default while the chosen device is unplugged — the panel
+  /// names it, or a choice made under the offline row landed on another interface unseen.
+  String get inputChannelDeviceName =>
+      _byUid(_inputDevices, _inputKey)?.name ?? '';
+
   /// The current input device's channel count (0 = unknown) — the panel offers the input-channel
   /// choice only from 2. Read from the device itself, so it is known with no song open and no mic
   /// running; refreshed with the device list.
@@ -541,13 +547,19 @@ class AppSettingsService extends ChangeNotifier {
   }
 
   /// Points [engine], one this service does not track (the technique page owns its own), at the
-  /// user's input choice: the device, and which of its inputs to record. A new engine starts on
-  /// Auto, so without the second a singer who picked Input 1 to keep a guitar on input 2 out got
-  /// it blended into those takes.
+  /// user's input choice: the device, which of its inputs to record, and the record gain. A new
+  /// engine starts on Auto and the default gain, so without them a singer who picked Input 1 to
+  /// keep a guitar on input 2 out got it blended into those takes, at a level they had not set.
+  ///
+  /// Re-reads the devices first: the list is polled only while Settings is open, and the channel
+  /// choice belongs to the device capturing NOW — an interface plugged in since launch read as
+  /// missing, and its takes ran on the built-in mic's choice.
   void applyInputTo(GraphAudioPlaybackService engine) {
+    refreshDevices();
     final uid = _inputDeviceUid;
     if (uid != null && uid.isNotEmpty) engine.setInputDevice(uid);
     engine.setInputChannel(inputChannel);
+    engine.setInputGain(_dbToLinear(_recordGainDb));
   }
 
   /// Choose which input(s) of the current input device the engine records and monitors (a

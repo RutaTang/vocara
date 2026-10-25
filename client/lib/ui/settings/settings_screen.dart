@@ -156,6 +156,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 if (settings.inputChannelCount >= 2) ...[
                   const SizedBox(height: 12),
                   _InputChannelCard(
+                    device: settings.inputChannelDeviceName,
                     mode: settings.inputChannel,
                     onSelect: settings.setInputChannel,
                   ),
@@ -731,7 +732,15 @@ class _MonitorReverbCard extends StatelessWidget {
 /// or Input 2 keeps the other out (say, a guitar DI on input 2). Same chrome as the reverb card;
 /// the segmented control matches the backing-track toggle.
 class _InputChannelCard extends StatelessWidget {
-  const _InputChannelCard({required this.mode, required this.onSelect});
+  const _InputChannelCard({
+    required this.device,
+    required this.mode,
+    required this.onSelect,
+  });
+
+  /// The device the choice applies to ('' when unknown): the one recording,
+  /// which is the system default while the chosen device is unplugged.
+  final String device;
 
   /// A GraphAudioPlaybackService `inputChannel*` mode.
   final int mode;
@@ -750,19 +759,19 @@ class _InputChannelCard extends StatelessWidget {
         children: [
           const Icon(FIcons.mic, size: 16, color: Studio.textFaint),
           const SizedBox(width: 12),
-          const Expanded(
+          Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
+                const Text(
                   'Input channel',
                   style: TextStyle(color: Studio.textSecondary, fontSize: 13),
                 ),
-                SizedBox(height: 2),
+                const SizedBox(height: 2),
                 Text(
-                  'Auto follows the input you sing into. Pick one to keep '
-                  'a second source out.',
-                  style: TextStyle(color: Studio.textFaint, fontSize: 11),
+                  '${device.isEmpty ? '' : '$device — '}Auto follows the input '
+                  'you sing into. Pick one to keep a second source out.',
+                  style: const TextStyle(color: Studio.textFaint, fontSize: 11),
                 ),
               ],
             ),

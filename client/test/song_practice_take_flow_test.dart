@@ -16,6 +16,7 @@ import 'package:vocara/data/services/source_separation_service.dart';
 import 'package:vocara/data/services/spectrogram_service.dart';
 import 'package:vocara/data/services/waveform_service.dart';
 import 'package:vocara/data/sync/sync_hashes.dart';
+import 'package:vocara/domain/models/audio_device.dart';
 import 'package:vocara/domain/models/audio_fx.dart';
 import 'package:vocara/domain/models/audio_track.dart';
 import 'package:vocara/domain/models/song_practice.dart';
@@ -257,8 +258,12 @@ class _FakeGraphEngine extends _FakeEngine
   void setMonitorReverb(double room, double damping, double wet) {}
   @override
   void setInputGain(double gain) {}
+
+  /// Every input-channel mode pushed, in order.
+  final inputChannels = <int>[];
+
   @override
-  void setInputChannel(int mode) {}
+  void setInputChannel(int mode) => inputChannels.add(mode);
   @override
   void setMonitorGain(double gain) {}
   @override
@@ -376,6 +381,7 @@ void main() {
     PlaybackEngine? engine,
     MicRecordingController? mic,
     RecordingFinalizer? finalizer,
+    AppSettingsService? appSettings,
   }) => SongPracticeDetailViewModel(
     repository: repo,
     techniqueRepository: _FakeTechRepo(),
@@ -383,11 +389,13 @@ void main() {
     waveformService: waveforms,
     spectrogramService: spectrograms,
     separationService: FakeSourceSeparationService(available: false),
-    appSettings: AppSettingsService(
-      storage: LocalStorageService(),
-      enumerateOutputs: () => const [],
-      enumerateInputs: () => const [],
-    ),
+    appSettings:
+        appSettings ??
+        AppSettingsService(
+          storage: LocalStorageService(),
+          enumerateOutputs: () => const [],
+          enumerateInputs: () => const [],
+        ),
     practiceId: 'p1',
     playbackEngine: engine ?? _FakeEngine(),
     editService: _FakeEdits(),
@@ -1031,4 +1039,49 @@ void main() {
       );
     },
   );
+
+  test('a take records on the channel choice of the device capturing '
+      'now', () async {
+    // The devices are polled only while Settings is open: a default that
+    // moved to a plugged-in interface since the screen opened left the take
+    // on the built-in mic's choice.
+    AudioDevice mic({required bool isDefault}) => AudioDevice(
+      uid: 'built-in',
+      name: 'Built-in',
+      isDefault: isDefault,
+      isInput: true,
+    );
+    AudioDevice iface({required bool isDefault}) => AudioDevice(
+      uid: 'iface',
+      name: 'Interface',
+      isDefault: isDefault,
+      isInput: true,
+    );
+    var ins = [iface(isDefault: true)];
+    final settings = AppSettingsService(
+      storage: LocalStorageService(),
+      enumerateOutputs: () => const [],
+      enumerateInputs: () => List.of(ins),
+      inputChannelCount: (_) => 2,
+    );
+    settings.refreshDevices();
+    await settings.setInputChannel(GraphAudioPlaybackService.inputChannel2);
+    ins = [mic(isDefault: true), iface(isDefault: false)];
+    settings.refreshDevices(); // the default back on the built-in mic
+
+    repo = _FakeRepo(_seed());
+    waveforms = _FakeWaveforms();
+    spectrograms = _FakeSpectrograms();
+    final engine = _FakeGraphEngine();
+    final vm = openVm(engine: engine, mic: _FakeMic(), appSettings: settings);
+    addTearDown(vm.dispose);
+    for (var i = 0; i < 400 && vm.practice == null; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+    ins = [mic(isDefault: false), iface(isDefault: true)];
+    vm.selectTrack('take1');
+    await vm.recording.startRecording();
+    expect(engine.inputChannels.last, GraphAudioPlaybackService.inputChannel2);
+    await vm.stopRecording();
+  });
 }

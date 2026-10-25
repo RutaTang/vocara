@@ -77,8 +77,11 @@ class _FakeEngine extends Fake implements GraphAudioPlaybackService {
   @override
   void setMonitorGain(double gain) => monitorGains.add(gain);
 
+  /// Every input gain pushed (linear), in order.
+  final inputGainCalls = <double>[];
+
   @override
-  void setInputGain(double gain) {}
+  void setInputGain(double gain) => inputGainCalls.add(gain);
 
   @override
   void setMonitorReverb(double room, double damping, double wet) {}
@@ -620,6 +623,30 @@ void main() {
       service.applyInputTo(engine);
       expect(engine.inputCalls, [_interface.uid]);
       expect(engine.inputChannelCalls, [1]);
+      expect(
+        engine.inputGainCalls,
+        hasLength(1),
+        reason: 'and the record gain',
+      );
+    });
+
+    test('the technique engine is keyed on an interface plugged in since the '
+        'last poll', () async {
+      // Nothing polls the devices outside Settings: read off the list from
+      // launch, the plugged-in interface was missing and its takes ran on the
+      // built-in mic's choice.
+      ins = [_builtInMic];
+      storage.doc = {
+        'inputDeviceUid': _interface.uid,
+        'inputChannelByUid': {_interface.uid: 1},
+        'recordGainDb': 0.0,
+      };
+      await service.load();
+      ins = [_builtInMic, _interface]; // plugged in; no poll since
+      final engine = _FakeEngine();
+      service.applyInputTo(engine);
+      expect(engine.inputChannelCalls, [1]);
+      expect(engine.inputGainCalls.single, closeTo(1.0, 1e-9));
     });
 
     test(

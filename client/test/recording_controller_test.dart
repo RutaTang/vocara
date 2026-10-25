@@ -111,6 +111,9 @@ class _FakeWaveforms extends Fake implements WaveformService {
 
 class _FakeSettings extends Fake implements AppSettingsService {
   @override
+  void refreshDevices() {}
+
+  @override
   bool get bluetoothInOutConflict => false;
 
   // The 1 s device watch calls this on every tick, like streamXruns below.
