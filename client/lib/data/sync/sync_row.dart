@@ -223,7 +223,7 @@ class SyncRow {
     r'$',
   );
 
-  /// The envelope every entity id on the wire must fit: 1–64 characters of
+  /// The envelope every entity id on the wire must fit: 26–36 characters of
   /// `[0-9A-Za-z_-]`. This is a SECURITY gate, not a style check: ids become
   /// filesystem path components (`audio/<practiceId>/`,
   /// `technique_media/<techniqueId>/`) and are handed to recursive deletes —
@@ -231,11 +231,19 @@ class SyncRow {
   /// hostile sync record write or delete OUTSIDE the media tree. No dot and
   /// no separator in the alphabet closes that entirely.
   ///
+  /// The length is the one every synced table's id column declares
+  /// (SyncCols in tables.dart). drift enforces it only on its own inserts,
+  /// so the applier's raw-SQL insert would otherwise land a row no local
+  /// write could have produced — and that the repository's revive path (a
+  /// drift insert) then refuses, failing the save.
+  ///
   /// Deliberately a SUPERSET of today's id grammars — [newId] ULIDs plus the
-  /// legacy-migration clip shape `<trackId>-c0` — rather than an exact
-  /// enumeration: the services whose components really are pure ULIDs
-  /// (audio/technique media dirs) enforce that stricter shape themselves.
-  static final RegExp _idShape = RegExp(r'^[0-9A-Za-z_-]{1,64}$');
+  /// legacy-migration shapes `<trackId>-c0` (clips) and `<practiceId>__v1`
+  /// (interpretations) — rather than an exact enumeration: the services
+  /// whose components really are pure ULIDs (audio/technique media dirs)
+  /// enforce that stricter shape themselves. Quarantine slot keys
+  /// (QuarantineStore.sweepSlotId, dead letters) never ride the wire.
+  static final RegExp _idShape = RegExp(r'^[0-9A-Za-z_-]{26,36}$');
 
   /// Tables whose OWN id becomes a filesystem path component: the media
   /// services build `audio/<practiceId>/` and `technique_media/<techniqueId>/`

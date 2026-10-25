@@ -50,7 +50,12 @@ One namespace ("zone") per user account. Two stores per zone:
 
 1. **Rows** — latest state per `(table, id)`:
    - `table`: string (client table name)
-   - `id`: ULID string (26–36 chars)
+   - `id`: 26–36 characters of `[0-9A-Za-z_-]` — a 26-character ULID for
+     every id minted today, plus the legacy-migration shapes `<trackId>-c0`
+     (clips) and `<practiceId>__v1` (interpretations). Practice and technique
+     ids name media directories and must be exactly 26 of `[0-9A-Z]`. Every
+     `*_id` field follows the same rule. The client refuses anything else
+     per record (parked `invalid-id`), so the server never needs to check.
    - `hlcPacked`: string — lexicographically comparable hybrid logical clock;
      the ONLY value the server ever compares
    - `schemaV`: int (opaque to the server)

@@ -441,6 +441,40 @@ void main() {
       }
     });
 
+    test('every id is 26–36 characters, the length drift enforces on each '
+        'local insert; the shapes minted and seeded today all fit', () {
+      Map<String, Object?> clipFields(String id, {String? trackId}) => {
+        ...practiceFields(id),
+        'track_id': trackId ?? newId(),
+      };
+      for (final id in ['SHORT', 'A' * 25, 'A' * 37]) {
+        expect(
+          () => SyncRow.checkIdShapes('clips', clipFields(id)),
+          throwsFormatException,
+          reason: id,
+        );
+        expect(
+          () =>
+              SyncRow.checkIdShapes('clips', clipFields(newId(), trackId: id)),
+          throwsFormatException,
+          reason: 'a reference is an id too: $id',
+        );
+      }
+      for (final id in [
+        newId(),
+        '${newId()}-c0', // a legacy take's derived clip
+        '${newId()}__v1', // a legacy practice's default interpretation
+        'E2EPRACTICESEED00000000000', // the e2e harness's seeded rows
+        'A' * 36,
+      ]) {
+        expect(
+          () => SyncRow.checkIdShapes('clips', clipFields(id)),
+          returnsNormally,
+          reason: id,
+        );
+      }
+    });
+
     test('a CHILD table keeps the superset (the legacy derived clip shape '
         'never names a directory)', () {
       final trackId = newId();

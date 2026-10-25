@@ -368,6 +368,55 @@ void main() {
     expect(count.read<int>('n'), 2, reason: 'neither hostile row may land');
   });
 
+  test('an id outside the 26–36 characters every local row is minted under '
+      'parks as invalid-id instead of landing through raw SQL', () async {
+    // drift checks that length only on its own inserts, so the applier's
+    // raw INSERT let a 5-character track id land — a row the repository's
+    // revive path (an insert through drift) then refused, failing the save.
+    final store = QuarantineStore(db);
+    final parkingApplier = SyncApplier(
+      db,
+      HlcClock(node: _id('LOCAL'), now: () => 1000),
+      builder: SyncRowBuilder(db),
+      quarantine: store,
+    );
+    RemoteRecord interp(String id, Hlc h) => RemoteRecord(
+      table: 'interpretations',
+      columns: {
+        'id': id,
+        'practice_id': _id('P'),
+        'name': '',
+        'order_index': 0,
+        'created_at': h.wallMs,
+        'updated_at': h.wallMs,
+        'deleted_at': null,
+        'hlc_wall': h.wallMs,
+        'hlc_ctr': h.counter,
+        'hlc_node': h.node,
+        'hlc_packed': h.packed,
+        'schema_v': 1,
+      },
+    );
+    final res = await parkingApplier.apply([
+      practice('P', 'kept', hlc(900)),
+      RemoteRecord(
+        table: 'tracks',
+        columns: {...track('T', 'P', hlc(910)).columns, 'id': 'SHORT'},
+      ),
+      interp('L' * 37, hlc(911)),
+      // The shapes that do occur: a legacy migration's derived id.
+      interp('${_id('P')}__v1', hlc(912)),
+    ]);
+    expect(res.applied, 2);
+    expect(res.failed, 2);
+    final parked = await store.list();
+    expect(parked.map((q) => q.reason), everyElement(startsWith('invalid-id')));
+    final tracks = await db
+        .customSelect('SELECT COUNT(*) AS n FROM tracks')
+        .getSingle();
+    expect(tracks.read<int>('n'), 0, reason: 'the short id must not land');
+  });
+
   test(
     'an unaddressable record parks as a DEAD LETTER instead of vanishing',
     () async {
