@@ -5,6 +5,7 @@ import 'package:forui/forui.dart';
 
 import '../../../domain/models/audio_track.dart';
 import '../../core/themes/studio.dart';
+import '../../core/widgets/stable_subtree.dart';
 import '../view_model/song_practice_detail_view_model.dart';
 import 'left_panel.dart' show VoiceSummaryView;
 import 'mixer_strip.dart';
@@ -66,113 +67,162 @@ class BottomDock extends StatelessWidget {
   Widget build(BuildContext context) {
     final open = vm.analysis.dockOpen;
 
-    return Container(
-      decoration: const BoxDecoration(
-        color: Studio.surface,
-        border: Border(top: BorderSide(color: Studio.border)),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (open)
-            _ResizeHandle(
-              // From the height on screen, so a drag down from a capped dock
-              // moves it at once — read per move, not per build, or two
-              // moves inside one frame would both start from the same value.
-              onDrag: (dy) => vm.analysis.setDockHeight(_contentHeight - dy),
+    // Its own layer, like the side panels: the workspace re-lays-out under
+    // its LayoutBuilder on every notification of the view model, and that
+    // repainted the tab strip's dozen labels with it.
+    return RepaintBoundary(
+      child: Container(
+        decoration: const BoxDecoration(
+          color: Studio.surface,
+          border: Border(top: BorderSide(color: Studio.border)),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (open)
+              _ResizeHandle(
+                // From the height on screen, so a drag down from a capped dock
+                // moves it at once — read per move, not per build, or two
+                // moves inside one frame would both start from the same value.
+                onDrag: (dy) => vm.analysis.setDockHeight(_contentHeight - dy),
+              ),
+            // Kept while what it shows is unchanged: every notification of
+            // the view model rebuilds the dock, a fader or clip-drag tick
+            // included, and the tab strip is some 70 widgets.
+            StableSubtree<_TabBar>(
+              sameAs: _TabBar.same,
+              child: _TabBar(
+                vm: vm,
+                open: open,
+                tab: vm.analysis.dockTab,
+                showsLive: open && vm.analysis.activeTabSupportsLive,
+                live: vm.liveMonitor,
+              ),
             ),
-          SizedBox(
-            height: 34,
-            child: Row(
-              children: [
-                const SizedBox(width: 12),
-                // Left: the voice-analysis tabs (scroll on a narrow window).
-                Expanded(
-                  child: SingleChildScrollView(
-                    scrollDirection: Axis.horizontal,
-                    child: Row(
-                      children: [
-                        for (final t in DockTab.values)
-                          if (t != DockTab.mixer) ...[
-                            _Tab(
-                              label: _tabLabel(t),
-                              active: open && vm.analysis.dockTab == t,
-                              onTap: () => vm.analysis.showDockTab(t),
-                            ),
-                            const SizedBox(width: 6),
-                          ],
-                      ],
-                    ),
+            if (open)
+              SizedBox(
+                height: _contentHeight,
+                child: DecoratedBox(
+                  decoration: const BoxDecoration(
+                    border: Border(top: BorderSide(color: Studio.border)),
                   ),
-                ),
-                if (open && vm.analysis.activeTabSupportsLive) ...[
-                  const SizedBox(width: 8),
-                  SourceToggle(
-                    live: vm.liveMonitor,
-                    onSelect: (v) => vm.analysis.setLiveMonitor(v),
-                  ),
-                ],
-                // Right: Mixer, separated from the analysis tabs.
-                const SizedBox(width: 10),
-                Container(width: 1, height: 16, color: Studio.border),
-                const SizedBox(width: 10),
-                _Tab(
-                  label: _tabLabel(DockTab.mixer),
-                  active: open && vm.analysis.dockTab == DockTab.mixer,
-                  onTap: () => vm.analysis.showDockTab(DockTab.mixer),
-                ),
-                const SizedBox(width: 6),
-                MouseRegion(
-                  cursor: SystemMouseCursors.click,
-                  child: GestureDetector(
-                    onTap: vm.analysis.toggleDock,
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 12),
-                      child: Icon(
-                        // Panel-toggle icon, matching the left inspector + right
-                        // lyrics panel's collapse buttons (this is the bottom
-                        // panel).
-                        open ? FIcons.panelBottomClose : FIcons.panelBottomOpen,
-                        size: 15,
-                        color: Studio.textSecondary,
+                  // The tabs' per-tick content (playhead readouts, the live
+                  // mic) repaints inside this layer rather than the screen's.
+                  child: RepaintBoundary(
+                    child: switch (vm.analysis.dockTab) {
+                      DockTab.analysisSummary => VoiceSummaryView(vm: vm),
+                      DockTab.spectrogram => SpectrogramTab(vm: vm),
+                      DockTab.power => PowerTab(vm: vm),
+                      DockTab.ltas => LtasTab(vm: vm),
+                      DockTab.vowel => VowelTab(vm: vm),
+                      DockTab.pitch => PitchTab(vm: vm),
+                      DockTab.vibrato => VibratoTab(vm: vm),
+                      DockTab.timbre => TimbreTab(vm: vm),
+                      DockTab.registers => RegisterTab(vm: vm),
+                      DockTab.range => RangeView(vm: vm),
+                      DockTab.dynamics => DynamicsView(vm: vm),
+                      DockTab.mixer => MixerStrip(
+                        vm: vm,
+                        tracks: tracks,
+                        onDeleteTrack: onDeleteTrack,
                       ),
-                    ),
+                    },
                   ),
                 ),
-              ],
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// The dock's tab strip: the analysis tabs, the Take/Live toggle where the
+/// open tab has one, the mixer tab and the dock toggle.
+class _TabBar extends StatelessWidget {
+  const _TabBar({
+    required this.vm,
+    required this.open,
+    required this.tab,
+    required this.showsLive,
+    required this.live,
+  });
+
+  final SongPracticeDetailViewModel vm;
+  final bool open;
+  final DockTab tab;
+  final bool showsLive;
+  final bool live;
+
+  /// The [StableSubtree.sameAs] of the strip: its callbacks capture only the
+  /// view model.
+  static bool same(_TabBar next, _TabBar shown) =>
+      identical(next.vm, shown.vm) &&
+      next.open == shown.open &&
+      next.tab == shown.tab &&
+      next.showsLive == shown.showsLive &&
+      next.live == shown.live;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 34,
+      child: Row(
+        children: [
+          const SizedBox(width: 12),
+          // Left: the voice-analysis tabs (scroll on a narrow window).
+          Expanded(
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: [
+                  for (final t in DockTab.values)
+                    if (t != DockTab.mixer) ...[
+                      _Tab(
+                        label: _tabLabel(t),
+                        active: open && tab == t,
+                        onTap: () => vm.analysis.showDockTab(t),
+                      ),
+                      const SizedBox(width: 6),
+                    ],
+                ],
+              ),
             ),
           ),
-          if (open)
-            SizedBox(
-              height: _contentHeight,
-              child: DecoratedBox(
-                decoration: const BoxDecoration(
-                  border: Border(top: BorderSide(color: Studio.border)),
-                ),
-                // The tabs' per-tick content (playhead readouts, the live
-                // mic) repaints inside this layer rather than the screen's.
-                child: RepaintBoundary(
-                  child: switch (vm.analysis.dockTab) {
-                    DockTab.analysisSummary => VoiceSummaryView(vm: vm),
-                    DockTab.spectrogram => SpectrogramTab(vm: vm),
-                    DockTab.power => PowerTab(vm: vm),
-                    DockTab.ltas => LtasTab(vm: vm),
-                    DockTab.vowel => VowelTab(vm: vm),
-                    DockTab.pitch => PitchTab(vm: vm),
-                    DockTab.vibrato => VibratoTab(vm: vm),
-                    DockTab.timbre => TimbreTab(vm: vm),
-                    DockTab.registers => RegisterTab(vm: vm),
-                    DockTab.range => RangeView(vm: vm),
-                    DockTab.dynamics => DynamicsView(vm: vm),
-                    DockTab.mixer => MixerStrip(
-                      vm: vm,
-                      tracks: tracks,
-                      onDeleteTrack: onDeleteTrack,
-                    ),
-                  },
+          if (showsLive) ...[
+            const SizedBox(width: 8),
+            SourceToggle(
+              live: live,
+              onSelect: (v) => vm.analysis.setLiveMonitor(v),
+            ),
+          ],
+          // Right: Mixer, separated from the analysis tabs.
+          const SizedBox(width: 10),
+          Container(width: 1, height: 16, color: Studio.border),
+          const SizedBox(width: 10),
+          _Tab(
+            label: _tabLabel(DockTab.mixer),
+            active: open && tab == DockTab.mixer,
+            onTap: () => vm.analysis.showDockTab(DockTab.mixer),
+          ),
+          const SizedBox(width: 6),
+          MouseRegion(
+            cursor: SystemMouseCursors.click,
+            child: GestureDetector(
+              onTap: vm.analysis.toggleDock,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                child: Icon(
+                  // Panel-toggle icon, matching the left inspector + right
+                  // lyrics panel's collapse buttons (this is the bottom
+                  // panel).
+                  open ? FIcons.panelBottomClose : FIcons.panelBottomOpen,
+                  size: 15,
+                  color: Studio.textSecondary,
                 ),
               ),
             ),
+          ),
         ],
       ),
     );

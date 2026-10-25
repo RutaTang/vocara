@@ -34,6 +34,7 @@ import 'package:vocara/domain/models/voice_metrics.dart';
 import 'package:vocara/ui/core/widgets/waveform_painter.dart';
 import 'package:vocara/ui/song_practice_detail/view_model/song_practice_detail_view_model.dart';
 import 'package:vocara/ui/song_practice_detail/widgets/bottom_dock.dart';
+import 'package:vocara/ui/song_practice_detail/widgets/fx_panel.dart';
 import 'package:vocara/ui/song_practice_detail/widgets/ruler_bar.dart';
 import 'package:vocara/ui/song_practice_detail/widgets/song_practice_detail_screen.dart';
 import 'package:vocara/utils/result.dart';
@@ -71,7 +72,17 @@ class _FakeSeparation extends Fake implements SourceSeparationService {
 }
 
 /// Just enough engine for the controllers to wire up without native audio.
+/// [effects] makes it the native engine's stand-in: the inspector's FX
+/// panel, the mixer's MIC strip and buses show.
 class _FakeEngine extends Fake implements PlaybackEngine {
+  _FakeEngine({this.effects = false});
+
+  final bool effects;
+
+  @override
+  void setBusVolume(String busId, double volume, {bool muted = false}) {}
+  @override
+  double trackGainReductionDb(String trackId) => 0;
   @override
   Stream<Duration> get position => const Stream.empty();
   @override
@@ -81,7 +92,7 @@ class _FakeEngine extends Fake implements PlaybackEngine {
   @override
   bool get isPlaying => false;
   @override
-  bool get supportsEffects => false;
+  bool get supportsEffects => effects;
   @override
   void setLoop(bool enabled, int startMs, int endMs) {}
   @override
@@ -237,6 +248,7 @@ Future<SongPracticeDetailViewModel> _pumpScreen(
   int lanes = 8,
   Size size = const Size(1800, 1100),
   RecordingFinalizer? finalizer,
+  bool effects = false,
 }) async {
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
@@ -254,7 +266,7 @@ Future<SongPracticeDetailViewModel> _pumpScreen(
       enumerateOutputs: () => const [],
     ),
     practiceId: 'p1',
-    playbackEngine: _FakeEngine(),
+    playbackEngine: _FakeEngine(effects: effects),
     editService: _FakeEdits(),
     probeDuration: (_) => null,
     finalizer: finalizer,
@@ -317,6 +329,52 @@ Future<({Map<Type, int> painters, int paragraphs})> _paintedPerTicks(
     debugOnProfilePaint = null;
   }
   return (painters: painters, paragraphs: paragraphs);
+}
+
+/// How many widgets of each type the frame after [change] rebuilt.
+Future<Map<String, int>> _rebuildCountsBy(
+  WidgetTester tester,
+  VoidCallback change,
+) async {
+  await tester.pump(const Duration(milliseconds: 16));
+  final rebuilt = <String, int>{};
+  debugOnRebuildDirtyWidget = (e, _) => rebuilt.update(
+    e.widget.runtimeType.toString(),
+    (n) => n + 1,
+    ifAbsent: () => 1,
+  );
+  try {
+    change();
+    await tester.pump(const Duration(milliseconds: 16));
+  } finally {
+    debugOnRebuildDirtyWidget = null;
+  }
+  return rebuilt;
+}
+
+/// How many times each painter type painted in the frame after [change].
+Future<Map<String, int>> _paintsBy(
+  WidgetTester tester,
+  VoidCallback change,
+) async {
+  await tester.pump(const Duration(milliseconds: 16));
+  final painted = <String, int>{};
+  debugOnProfilePaint = (ro) {
+    if (ro is RenderCustomPaint && ro.painter != null) {
+      painted.update(
+        '${ro.painter.runtimeType}',
+        (n) => n + 1,
+        ifAbsent: () => 1,
+      );
+    }
+  };
+  try {
+    change();
+    await tester.pump(const Duration(milliseconds: 16));
+  } finally {
+    debugOnProfilePaint = null;
+  }
+  return painted;
 }
 
 /// The widget types rebuilt by the frame after [change].
@@ -502,7 +560,17 @@ void main() {
     };
     for (final MapEntry(key: name, value: change) in changes.entries) {
       final rebuilt = await _rebuiltBy(tester, change);
-      expect(rebuilt, contains('TrackRow'), reason: '$name: the lanes follow');
+      if (name == 'loop edge') {
+        // The loop band is the timeline's, over the lanes: no lane shows
+        // anything of it, so each keeps the row it built.
+        expect(rebuilt, isNot(contains('TrackRow')), reason: name);
+      } else {
+        expect(
+          rebuilt,
+          contains('TrackRow'),
+          reason: '$name: the lanes follow',
+        );
+      }
       expect(rebuilt, contains('RulerBar'), reason: '$name: the ruler follows');
       // Nor the lane headers: nothing they show depends on the view.
       for (final w in [...elsewhere, 'DetailTransportBar', '_TrackHeader']) {
@@ -521,6 +589,84 @@ void main() {
     for (final w in elsewhere) {
       expect(flip, isNot(contains(w)), reason: 'a follow page-flip rebuilt $w');
     }
+  });
+
+  // A live edit — a fader, pan-knob or FX tick, a clip drag — notifies the
+  // view model at pointer rate, and every notification rebuilds the
+  // workspace. Each one used to rebuild every lane, header and body, and
+  // repaint every lane's waveforms and the ruler's labels: 913 widgets and
+  // 1857 render objects per tick over 12 three-clip lanes. Only what the edit
+  // changed may now rebuild or repaint.
+  testWidgets('a fader tick rebuilds and repaints its own lane alone', (
+    tester,
+  ) async {
+    final vm = await _pumpScreen(tester);
+    var v = 0.5;
+    void fader() => vm.mixer.setTrackVolumeLive('t3', v += 0.01);
+    final rebuilt = await _rebuildCountsBy(tester, fader);
+    expect(rebuilt['TrackRow'], 1, reason: 'the other lanes are kept');
+    expect(rebuilt['_TrackHeader'], 1, reason: 'its fader moved');
+    expect(rebuilt['_ClipRegion'], 1, reason: 'its body follows its track');
+    final painted = await _paintsBy(tester, fader);
+    expect(
+      painted['WaveformPainter'],
+      2,
+      reason: "the lane's clip, and the master envelope its level scales",
+    );
+    expect(painted, isNot(contains('TimeRulerPainter')));
+    expect(painted['TimelineGridPainter'], 1, reason: 'its own lane');
+    // The edit itself still lands on screen.
+    expect(vm.practice!.vocalTracks[3].volume, closeTo(v, 1e-9));
+  });
+
+  testWidgets('a pan repaints the lanes\' waveforms, not their headers', (
+    tester,
+  ) async {
+    final vm = await _pumpScreen(tester);
+    vm.playback.setTimelineZoomLive(0.6);
+    vm.playback.panView(5000);
+    await tester.pump(const Duration(milliseconds: 16));
+    final painted = await _paintsBy(tester, () => vm.playback.panView(300));
+    expect(painted['WaveformPainter'], greaterThan(1), reason: 'they moved');
+    expect(painted, isNot(contains('_FaderPainter')), reason: 'they did not');
+  });
+
+  testWidgets('a mixer fader tick rebuilds its own channel strip alone', (
+    tester,
+  ) async {
+    final vm = await _pumpScreen(tester);
+    vm.analysis.showDockTab(DockTab.mixer);
+    await tester.pump(const Duration(milliseconds: 50));
+    var v = 0.5;
+    final rebuilt = await _rebuildCountsBy(
+      tester,
+      () => vm.mixer.setTrackVolumeLive('t3', v += 0.01),
+    );
+    expect(rebuilt['_Channel'], 1);
+    expect(rebuilt['_VerticalFader'], 1, reason: 'nor the master strip');
+    expect(rebuilt, isNot(contains('_Tab')), reason: 'the tab strip is kept');
+  });
+
+  testWidgets('the inspector keeps its FX panel through another lane\'s '
+      'edits, and follows its own', (tester) async {
+    final vm = await _pumpScreen(tester, effects: true);
+    vm.selectTrack('t0');
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(find.byType(FxPanel), findsOneWidget);
+    var v = 0.5;
+    var rebuilt = await _rebuildCountsBy(
+      tester,
+      () => vm.mixer.setTrackVolumeLive('t3', v += 0.01),
+    );
+    expect(rebuilt, isNot(contains('FxPanel')));
+    expect(rebuilt, isNot(contains('_MicInputChannel')));
+
+    final fx = TrackFx.flat();
+    rebuilt = await _rebuildCountsBy(
+      tester,
+      () => vm.mixer.setTrackFxLive('t0', fx.copyWith(compOn: true)),
+    );
+    expect(rebuilt['FxPanel'], 1, reason: 'its own take changed');
   });
 
   // The dock's height was clamped to a fixed range, not to the window: on a

@@ -8,6 +8,7 @@ import '../../../data/services/app_settings_service.dart';
 import '../../../domain/models/audio_track.dart';
 import '../../../domain/models/fx_bus.dart';
 import '../../core/themes/studio.dart';
+import '../../core/widgets/stable_subtree.dart';
 import '../../core/widgets/studio_controls.dart';
 import '../../core/widgets/tick_boundary.dart';
 import '../view_model/song_practice_detail_view_model.dart';
@@ -46,29 +47,40 @@ class MixerStrip extends StatelessWidget {
         // Mic input strip: the live input's meter + record gain + monitor (hear-yourself) gain.
         // Only meaningful on the native engine (device I/O + monitoring).
         if (vm.mixer.supportsEffects) ...[
-          _MicInputChannel(vm: vm),
+          // It reads only the settings and the input meter, both of which
+          // it listens to itself.
+          StableSubtree<_MicInputChannel>(
+            sameAs: (next, shown) => identical(next.vm, shown.vm),
+            child: _MicInputChannel(vm: vm),
+          ),
           Container(
             width: 1,
             margin: const EdgeInsets.fromLTRB(2, 14, 12, 14),
             color: Studio.border,
           ),
         ],
+        // Each strip is kept while it shows the same thing: a fader or knob
+        // tick changes one strip, and rebuilding the rest re-laid-out and
+        // repainted every strip in the desk, at pointer rate.
         for (final t in tracks)
-          _Channel(
-            track: t,
-            selected: vm.selectedTrackId == t.id && vm.selectedBusId == null,
-            // Backing tracks stay dry → no output routing chip.
-            buses: t.isBacking ? const [] : buses,
-            routedBusId: t.busId,
-            onRoute: (id) => vm.mixer.setTrackBus(t.id, id),
-            onSelect: () => vm.selectTrack(t.id),
-            onMute: () => vm.mixer.toggleMute(t.id),
-            onSolo: () => vm.mixer.toggleSolo(t.id),
-            onVolume: (v) => vm.mixer.setTrackVolumeLive(t.id, v),
-            onVolumeCommit: vm.mixer.commitTrackVolume,
-            onPan: (p) => vm.mixer.setTrackPanLive(t.id, p),
-            onPanCommit: vm.mixer.commitTrackVolume,
-            onDelete: () => onDeleteTrack(t),
+          StableSubtree<_Channel>(
+            sameAs: (next, shown) => next.showsSameAs(shown),
+            child: _Channel(
+              track: t,
+              selected: vm.selectedTrackId == t.id && vm.selectedBusId == null,
+              // Backing tracks stay dry → no output routing chip.
+              buses: t.isBacking ? const [] : buses,
+              routedBusId: t.busId,
+              onRoute: (id) => vm.mixer.setTrackBus(t.id, id),
+              onSelect: () => vm.selectTrack(t.id),
+              onMute: () => vm.mixer.toggleMute(t.id),
+              onSolo: () => vm.mixer.toggleSolo(t.id),
+              onVolume: (v) => vm.mixer.setTrackVolumeLive(t.id, v),
+              onVolumeCommit: vm.mixer.commitTrackVolume,
+              onPan: (p) => vm.mixer.setTrackPanLive(t.id, p),
+              onPanCommit: vm.mixer.commitTrackVolume,
+              onDelete: () => onDeleteTrack(t),
+            ),
           ),
         // FX buses (DAW groups). Only meaningful on the native effects engine.
         if (vm.mixer.supportsEffects) ...[
@@ -79,34 +91,37 @@ class MixerStrip extends StatelessWidget {
             color: Studio.border,
           ),
           for (final b in buses)
-            _BusChannel(
-              bus: b,
-              selected: vm.selectedBusId == b.id,
-              buses: buses,
-              onSelect: () => vm.selectBus(b.id),
-              onRoute: (out) => vm.mixer.setBusOutput(b.id, out),
-              onMute: () => vm.mixer.toggleBusMute(b.id),
-              onSolo: () => vm.mixer.toggleBusSolo(b.id),
-              onVolume: (v) => vm.mixer.setBusVolumeLive(b.id, v),
-              onVolumeCommit: vm.commitFx,
-              onPan: (p) => vm.mixer.setBusPanLive(b.id, p),
-              onPanCommit: vm.commitFx,
-              onRename: () async {
-                final name = await showRenameDialog(
-                  context,
-                  current: b.name,
-                  title: 'Rename bus',
-                  hint: 'Bus name',
-                );
-                if (name != null) await vm.mixer.renameBus(b.id, name);
-              },
-              // Asks first, like the timeline lane's Delete: the bus's FX
-              // chain and every send into it go with it, with no undo.
-              onDelete: () async {
-                if (await confirmDeleteBus(context, b.name)) {
-                  await vm.mixer.deleteBus(b.id);
-                }
-              },
+            StableSubtree<_BusChannel>(
+              sameAs: (next, shown) => next.showsSameAs(shown),
+              child: _BusChannel(
+                bus: b,
+                selected: vm.selectedBusId == b.id,
+                buses: buses,
+                onSelect: () => vm.selectBus(b.id),
+                onRoute: (out) => vm.mixer.setBusOutput(b.id, out),
+                onMute: () => vm.mixer.toggleBusMute(b.id),
+                onSolo: () => vm.mixer.toggleBusSolo(b.id),
+                onVolume: (v) => vm.mixer.setBusVolumeLive(b.id, v),
+                onVolumeCommit: vm.commitFx,
+                onPan: (p) => vm.mixer.setBusPanLive(b.id, p),
+                onPanCommit: vm.commitFx,
+                onRename: () async {
+                  final name = await showRenameDialog(
+                    context,
+                    current: b.name,
+                    title: 'Rename bus',
+                    hint: 'Bus name',
+                  );
+                  if (name != null) await vm.mixer.renameBus(b.id, name);
+                },
+                // Asks first, like the timeline lane's Delete: the bus's FX
+                // chain and every send into it go with it, with no undo.
+                onDelete: () async {
+                  if (await confirmDeleteBus(context, b.name)) {
+                    await vm.mixer.deleteBus(b.id);
+                  }
+                },
+              ),
             ),
           _AddBusButton(onTap: () => vm.mixer.createBus()),
         ],
@@ -116,10 +131,14 @@ class MixerStrip extends StatelessWidget {
           margin: const EdgeInsets.fromLTRB(2, 14, 14, 14),
           color: Studio.border,
         ),
-        _MasterChannel(
-          value: vm.mixer.masterVolume,
-          onVolume: vm.mixer.setMasterVolumeLive,
-          onVolumeCommit: vm.mixer.commitMasterVolume,
+        StableSubtree<_MasterChannel>(
+          // Its callbacks are the mixer's own methods.
+          sameAs: (next, shown) => next.value == shown.value,
+          child: _MasterChannel(
+            value: vm.mixer.masterVolume,
+            onVolume: vm.mixer.setMasterVolumeLive,
+            onVolumeCommit: vm.mixer.commitMasterVolume,
+          ),
         ),
       ],
     );
@@ -287,6 +306,14 @@ class _BusChannel extends StatelessWidget {
   final VoidCallback onPanCommit;
   final VoidCallback onRename;
   final VoidCallback onDelete;
+
+  /// Whether [other] shows exactly what this strip does. The callbacks are
+  /// not compared: they capture only [bus] — compared by identity, as any
+  /// edit replaces it — the view model and the desk's own context.
+  bool showsSameAs(_BusChannel other) =>
+      identical(bus, other.bus) &&
+      selected == other.selected &&
+      identical(buses, other.buses);
 
   @override
   Widget build(BuildContext context) {
@@ -751,6 +778,15 @@ class _Channel extends StatelessWidget {
   final ValueChanged<double> onPan;
   final VoidCallback onPanCommit;
   final VoidCallback onDelete;
+
+  /// Whether [other] shows exactly what this strip does. The callbacks are
+  /// not compared: they capture only [track] — compared by identity, as any
+  /// edit replaces it — and the view model.
+  bool showsSameAs(_Channel other) =>
+      identical(track, other.track) &&
+      selected == other.selected &&
+      identical(buses, other.buses) &&
+      routedBusId == other.routedBusId;
 
   static String _formatDb(double v) {
     if (v <= 0.0001) return '-∞';

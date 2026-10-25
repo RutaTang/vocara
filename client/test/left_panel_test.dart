@@ -118,7 +118,8 @@ class _FakeMixer extends Fake implements MixerController {
   double busGainReductionDb(String busId) => 0;
 }
 
-class _FakeAnalysis extends Fake implements AnalysisCache {
+// A listenable: the FX panel's EQ analyzer wakes on the analysis caches.
+class _FakeAnalysis extends Fake with ChangeNotifier implements AnalysisCache {
   @override
   ({Float32List col, double binHz})? eqInputColumn(String trackId) => null;
 

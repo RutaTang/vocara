@@ -58,12 +58,18 @@ class RulerBar extends StatelessWidget {
       builder: (context, constraints) {
         final w = constraints.maxWidth;
 
-        final ticks = CustomPaint(
-          painter: TimeRulerPainter(
-            timelineDurationMs: dur,
-            startMs: viewStart,
-            tickColor: Studio.gridStrong,
-            textColor: Studio.textSecondary,
+        // A layer of its own: the ruler rebuilds on every notification of
+        // the view model (a fader or clip-drag tick included), and the
+        // relayout that follows repainted the ticks — laying out every time
+        // label again (~0.4 ms in a debug build) when the view hadn't moved.
+        final ticks = RepaintBoundary(
+          child: CustomPaint(
+            painter: TimeRulerPainter(
+              timelineDurationMs: dur,
+              startMs: viewStart,
+              tickColor: Studio.gridStrong,
+              textColor: Studio.textSecondary,
+            ),
           ),
         );
         final playhead = PlayheadLayer(

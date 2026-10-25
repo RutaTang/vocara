@@ -736,9 +736,7 @@ class _MetricsPass {
 /// batch stage reads the previous stage's f32-stored output), so the
 /// streamed decimated signal is bit-identical to the batch copy.
 class _StreamDecimator {
-  _StreamDecimator(this.factor, double fs)
-    : assert(factor >= 1),
-      _stages = List.generate(3, (_) => _BiquadState()) {
+  _StreamDecimator(this.factor, double fs) : assert(factor >= 1) {
     final fc = 0.45 * fs / factor;
     final w0 = 2 * math.pi * fc / fs;
     final cosw = math.cos(w0), sinw = math.sin(w0);
@@ -752,23 +750,28 @@ class _StreamDecimator {
   }
 
   final int factor;
-  final List<_BiquadState> _stages;
+  final _BiquadState _s0 = _BiquadState(),
+      _s1 = _BiquadState(),
+      _s2 = _BiquadState();
   late final double _b0, _b1, _b2, _a1, _a2;
   var _phase = 0;
 
   /// Feeds one raw sample; appends the decimated output sample to [out]
-  /// when this position lands on the decimation grid.
-  void feed(double x, void Function(double) out) {
+  /// when this position lands on the decimation grid. Called once per input
+  /// sample of the take (~29M for 10 minutes at 48 kHz), so the sink is the
+  /// buffer itself rather than a callback, and the three stages are spelled
+  /// out.
+  void feed(double x, _RollingF32 out) {
     var v = x;
     if (factor > 1) {
-      for (final st in _stages) {
-        // Round to Float32 between stages, matching the batch's in-place
-        // Float32List storage exactly.
-        v = _f32(st.step(v, _b0, _b1, _b2, _a1, _a2));
-      }
+      // Round to Float32 between stages, matching the batch's in-place
+      // Float32List storage exactly.
+      v = _f32(_s0.step(v, _b0, _b1, _b2, _a1, _a2));
+      v = _f32(_s1.step(v, _b0, _b1, _b2, _a1, _a2));
+      v = _f32(_s2.step(v, _b0, _b1, _b2, _a1, _a2));
     }
-    if (_phase == 0) out(v);
-    _phase = (_phase + 1) % factor;
+    if (_phase == 0) out.add(v);
+    if (++_phase == factor) _phase = 0;
   }
 
   static final Float32List _round = Float32List(1);
@@ -854,9 +857,12 @@ class _RollingF32 {
   /// decimator tail note in [StreamingTakeAnalyzer]).
   Float32List slice(int start, int count, int maxLen) {
     final out = Float32List(count);
-    for (var i = 0; i < count; i++) {
-      final idx = start + i;
-      out[i] = idx >= maxLen ? 0 : at(idx);
+    // The readable span [start, end): held, and below [maxLen]; the rest of
+    // the window stays zero.
+    final from = math.max(start, _base);
+    final end = math.min(start + count, math.min(_len, maxLen));
+    if (end > from) {
+      out.setRange(from - start, end - start, _buf, from - _base);
     }
     return out;
   }
@@ -908,16 +914,27 @@ class StreamingTakeAnalyzer {
   final _yin = _RollingF32();
   var _nextFrame = 0;
 
+  /// Samples taken in between frame emissions. Emitting only once a whole
+  /// chunk was in (the file reader's are 4 MiB: a million samples and more)
+  /// kept the chunk in the rolling buffers, which then copied what was left
+  /// of it on every compaction — every 32 frames — so a 10-minute take spent
+  /// about as long compacting as transforming. Frames read the same samples
+  /// whenever they are emitted.
+  static const int _emitBlock = 4096;
+
   /// Feeds the next chunk of mono samples.
   void add(Float32List chunk) {
     _pass.feedClip(chunk);
-    for (var i = 0; i < chunk.length; i++) {
-      final s = chunk[i];
-      _raw.add(s);
-      _dsDec.feed(s, _ds.add);
-      _yinDec.feed(s, _yin.add);
+    for (var at = 0; at < chunk.length; at += _emitBlock) {
+      final end = math.min(chunk.length, at + _emitBlock);
+      for (var i = at; i < end; i++) {
+        final s = chunk[i];
+        _raw.add(s);
+        _dsDec.feed(s, _ds);
+        _yinDec.feed(s, _yin);
+      }
+      _emitReady(flush: false);
     }
-    _emitReady(flush: false);
   }
 
   void _emitReady({required bool flush}) {
@@ -1496,36 +1513,46 @@ const double _voicedConfidence = 0.55;
 ///
 /// O(w·τmax) — ~245k multiply-adds per 48 kHz frame, the bulk of the take
 /// analysis and of the live analyzer's UI-isolate budget. A one-lag loop is
-/// bound by its single add chain, so the lags are swept FOUR at a time, each
-/// with its own accumulator summed in the same j order: every d[τ] is the
-/// same IEEE sum as the one-lag loop's, bit for bit (pinned by test), the
-/// four independent chains just overlap. The Float64 copy is exact
-/// (float32 → double is lossless) and spares four conversions per step.
+/// bound by its single add chain, so the lags are swept FOUR at a time, two
+/// to a SIMD lane pair: `pairs` holds (x[k], x[k+1]) at k, so one vector
+/// subtract against the splatted x[j] forms the differences for lags τ and
+/// τ+1 together. Every lane is its own accumulator summed in the same j
+/// order with the same IEEE multiply and add (no fused multiply-add), so
+/// every d[τ] is the one-lag loop's sum, bit for bit (pinned by test) — the
+/// four chains just overlap, two per instruction. The Float64 copy is exact
+/// (float32 → double is lossless) and spares the conversions per step.
 @visibleForTesting
 Float64List yinDifference(Float32List frame, int tauMax, int w) {
-  final x = Float64List(frame.length);
-  for (var i = 0; i < frame.length; i++) {
+  final n = frame.length;
+  final x = Float64List(n);
+  for (var i = 0; i < n; i++) {
     x[i] = frame[i];
   }
   final d = Float64List(tauMax + 1);
   var tau = 1;
-  for (; tau + 3 <= tauMax; tau += 4) {
-    var s0 = 0.0, s1 = 0.0, s2 = 0.0, s3 = 0.0;
-    for (var j = 0; j < w; j++) {
-      final xj = x[j];
-      final d0 = xj - x[j + tau];
-      final d1 = xj - x[j + tau + 1];
-      final d2 = xj - x[j + tau + 2];
-      final d3 = xj - x[j + tau + 3];
-      s0 += d0 * d0;
-      s1 += d1 * d1;
-      s2 += d2 * d2;
-      s3 += d3 * d3;
+  if (tauMax >= 4 && w > 0) {
+    final pairs = Float64x2List(n - 1);
+    for (var k = 0; k < n - 1; k++) {
+      pairs[k] = Float64x2(x[k], x[k + 1]);
     }
-    d[tau] = s0;
-    d[tau + 1] = s1;
-    d[tau + 2] = s2;
-    d[tau + 3] = s3;
+    final splat = Float64x2List(w);
+    for (var j = 0; j < w; j++) {
+      splat[j] = Float64x2.splat(x[j]);
+    }
+    for (; tau + 3 <= tauMax; tau += 4) {
+      var s01 = Float64x2.zero(), s23 = Float64x2.zero();
+      for (var j = 0; j < w; j++) {
+        final xj = splat[j];
+        final d01 = xj - pairs[j + tau];
+        final d23 = xj - pairs[j + tau + 2];
+        s01 += d01 * d01;
+        s23 += d23 * d23;
+      }
+      d[tau] = s01.x;
+      d[tau + 1] = s01.y;
+      d[tau + 2] = s23.x;
+      d[tau + 3] = s23.y;
+    }
   }
   for (; tau <= tauMax; tau++) {
     var sum = 0.0;

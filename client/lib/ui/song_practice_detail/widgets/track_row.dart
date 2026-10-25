@@ -7,6 +7,7 @@ import 'package:forui/forui.dart';
 import '../../../domain/models/audio_track.dart';
 import '../../../domain/models/practice_note.dart';
 import '../../core/themes/studio.dart';
+import '../../core/widgets/stable_subtree.dart';
 import '../../core/widgets/studio_controls.dart';
 import '../../core/widgets/tick_boundary.dart';
 import '../../core/widgets/waveform_painter.dart';
@@ -127,6 +128,30 @@ class TrackRow extends StatelessWidget {
   final VoidCallback? onToggleExpand;
   final Widget? subLanes;
 
+  /// Whether [other] shows exactly what this row does, so the lane list may
+  /// keep the row it built before. The callbacks are not compared: they
+  /// capture only this lane's ids, [track] — compared by identity, as any edit
+  /// replaces it — and the view model. A row with [subLanes] never is: they
+  /// show analysis state none of this covers.
+  bool showsSameAs(TrackRow other) =>
+      subLanes == null &&
+      other.subLanes == null &&
+      key == other.key &&
+      identical(track, other.track) &&
+      label == other.label &&
+      timelineDurationMs == other.timelineDurationMs &&
+      viewStartMs == other.viewStartMs &&
+      identical(position, other.position) &&
+      selected == other.selected &&
+      armed == other.armed &&
+      reorderable == other.reorderable &&
+      selectedClipId == other.selectedClipId &&
+      identical(recordingPeaks, other.recordingPeaks) &&
+      recordingStartMs == other.recordingStartMs &&
+      canExpand == other.canExpand &&
+      expanded == other.expanded &&
+      (onToggleExpand == null) == (other.onToggleExpand == null);
+
   @override
   Widget build(BuildContext context) {
     if (!reorderable) return _content(context, dropping: false);
@@ -188,44 +213,53 @@ class TrackRow extends StatelessWidget {
       ),
       child: Row(
         children: [
-          _StableHeader(
-            _TrackHeader(
-              track: track,
-              label: label,
-              selected: selected,
-              armed: armed,
-              accent: accent,
-              canExpand: canExpand,
-              expanded: expanded,
-              onToggleExpand: onToggleExpand,
-              onSelect: onSelect,
-              onContextMenu: onContextMenu,
-              onToggleMute: onToggleMute,
-              onToggleSolo: onToggleSolo,
-              onVolume: onVolume,
-              onVolumeCommit: onVolumeCommit,
-              onAddNote: onAddNote,
-              onAddTechnique: onAddTechnique,
+          // A layer of its own, so the waveforms repainting under a pan or a
+          // zoom (every lane, at trackpad rate) leave the header's fader, M/S
+          // and labels alone — and a fader tick leaves the waveforms alone.
+          RepaintBoundary(
+            child: StableSubtree<_TrackHeader>(
+              sameAs: (next, shown) => next.showsSameAs(shown),
+              child: _TrackHeader(
+                track: track,
+                label: label,
+                selected: selected,
+                armed: armed,
+                accent: accent,
+                canExpand: canExpand,
+                expanded: expanded,
+                onToggleExpand: onToggleExpand,
+                onSelect: onSelect,
+                onContextMenu: onContextMenu,
+                onToggleMute: onToggleMute,
+                onToggleSolo: onToggleSolo,
+                onVolume: onVolume,
+                onVolumeCommit: onVolumeCommit,
+                onAddNote: onAddNote,
+                onAddTechnique: onAddTechnique,
+              ),
             ),
           ),
           Expanded(
-            child: _Body(
-              track: track,
-              timelineDurationMs: timelineDurationMs,
-              viewStartMs: viewStartMs,
-              position: position,
-              accent: accent,
-              laneSelected: selected,
-              selectedClipId: selectedClipId,
-              recordingPeaks: recordingPeaks,
-              recordingStartMs: recordingStartMs,
-              onSelect: onSelect,
-              onSelectClip: onSelectClip,
-              onClipMoveLive: onClipMoveLive,
-              onMoveCommit: onMoveCommit,
-              onContextMenu: onContextMenu,
-              onClipContextMenu: onClipContextMenu,
-              onEditNote: onEditNote,
+            child: StableSubtree<_Body>(
+              sameAs: (next, shown) => next.showsSameAs(shown),
+              child: _Body(
+                track: track,
+                timelineDurationMs: timelineDurationMs,
+                viewStartMs: viewStartMs,
+                position: position,
+                accent: accent,
+                laneSelected: selected,
+                selectedClipId: selectedClipId,
+                recordingPeaks: recordingPeaks,
+                recordingStartMs: recordingStartMs,
+                onSelect: onSelect,
+                onSelectClip: onSelectClip,
+                onClipMoveLive: onClipMoveLive,
+                onMoveCommit: onMoveCommit,
+                onContextMenu: onContextMenu,
+                onClipContextMenu: onClipContextMenu,
+                onEditNote: onEditNote,
+              ),
             ),
           ),
         ],
@@ -274,10 +308,13 @@ class _TrackHeader extends StatelessWidget {
   final VoidCallback onAddNote;
   final VoidCallback onAddTechnique;
 
-  /// Whether [other] shows exactly what this does. The callbacks are not
-  /// compared (the lane rebuilds them every time): they capture only this
-  /// lane's ids and [track], which is compared by identity — any edit to the
-  /// track replaces the object.
+  /// Whether [other] shows exactly what this does, so the lane keeps the
+  /// header it shows ([StableSubtree]): a timeline pan or zoom rebuilds every
+  /// lane (the body follows the viewport), and each header — mute, solo,
+  /// fader, menu and labels, some 45 widgets — was rebuilt with it for
+  /// nothing. The callbacks are not compared (the lane rebuilds them every
+  /// time): they capture only this lane's ids and [track], which is compared
+  /// by identity — any edit to the track replaces the object.
   bool showsSameAs(_TrackHeader other) =>
       identical(track, other.track) &&
       label == other.label &&
@@ -538,6 +575,24 @@ class _Body extends StatefulWidget {
   final ValueChanged<Offset> onContextMenu;
   final void Function(String clipId, Offset position) onClipContextMenu;
   final ValueChanged<PracticeNote> onEditNote;
+
+  /// Whether [other] shows exactly what this does, so the lane keeps the body
+  /// it shows ([StableSubtree]): a fader, pan-knob or FX tick, a clip drag or
+  /// the master fader changes at most one lane, and re-running every other
+  /// lane's body re-laid-out and repainted all of its clips and waveforms, at
+  /// pointer rate. As with [_TrackHeader.showsSameAs], the callbacks are not
+  /// compared: they capture only this lane's ids and [track], which is
+  /// compared by identity.
+  bool showsSameAs(_Body other) =>
+      identical(track, other.track) &&
+      timelineDurationMs == other.timelineDurationMs &&
+      viewStartMs == other.viewStartMs &&
+      identical(position, other.position) &&
+      accent == other.accent &&
+      laneSelected == other.laneSelected &&
+      selectedClipId == other.selectedClipId &&
+      identical(recordingPeaks, other.recordingPeaks) &&
+      recordingStartMs == other.recordingStartMs;
 
   @override
   State<_Body> createState() => _BodyState();
@@ -1082,30 +1137,4 @@ class _DragGhost extends StatelessWidget {
       ),
     );
   }
-}
-
-/// Keeps showing the same [_TrackHeader] instance while what it shows is
-/// unchanged, so Flutter skips its subtree. A timeline pan or zoom rebuilds
-/// every lane (the body follows the viewport), and each header — mute, solo,
-/// fader, menu and labels, some 45 widgets — was rebuilt with it for nothing.
-class _StableHeader extends StatefulWidget {
-  const _StableHeader(this.header);
-
-  final _TrackHeader header;
-
-  @override
-  State<_StableHeader> createState() => _StableHeaderState();
-}
-
-class _StableHeaderState extends State<_StableHeader> {
-  late _TrackHeader _shown = widget.header;
-
-  @override
-  void didUpdateWidget(_StableHeader old) {
-    super.didUpdateWidget(old);
-    if (!widget.header.showsSameAs(_shown)) _shown = widget.header;
-  }
-
-  @override
-  Widget build(BuildContext context) => _shown;
 }

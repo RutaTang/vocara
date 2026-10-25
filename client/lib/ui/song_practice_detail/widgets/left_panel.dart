@@ -10,6 +10,7 @@ import '../../../domain/models/voice_metrics.dart';
 import '../../../utils/format.dart';
 import '../../core/themes/studio.dart';
 import '../../core/widgets/cap_label.dart';
+import '../../core/widgets/stable_subtree.dart';
 import '../../core/widgets/studio_controls.dart';
 import '../view_model/song_practice_detail_view_model.dart';
 import 'fx_panel.dart';
@@ -223,7 +224,10 @@ class _BusBody extends StatelessWidget {
     // another bus or take reused the panel's element tree, carrying the EQ
     // analyzer's smoothed spectrum, adaptive ceiling and latched "has signal"
     // over from the previous channel.
-    final fx = FxPanel(key: ValueKey(bus.id), vm: vm, bus: bus);
+    final fx = StableSubtree<FxPanel>(
+      sameAs: FxPanel.same,
+      child: FxPanel(key: ValueKey(bus.id), vm: vm, bus: bus),
+    );
     final footer = _BusChannelFooter(vm: vm, bus: bus);
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -475,10 +479,13 @@ class _BodyContent extends StatelessWidget {
                     padding: const EdgeInsets.fromLTRB(14, 12, 14, 0),
                     child: SizedBox(
                       height: 220,
-                      child: FxPanel(
-                        key: ValueKey(track.id),
-                        vm: vm,
-                        track: track,
+                      child: StableSubtree<FxPanel>(
+                        sameAs: FxPanel.same,
+                        child: FxPanel(
+                          key: ValueKey(track.id),
+                          vm: vm,
+                          track: track,
+                        ),
                       ),
                     ),
                   )
@@ -503,10 +510,13 @@ class _BodyContent extends StatelessWidget {
               child: isVocal
                   ? Padding(
                       padding: const EdgeInsets.fromLTRB(14, 12, 14, 0),
-                      child: FxPanel(
-                        key: ValueKey(track.id),
-                        vm: vm,
-                        track: track,
+                      child: StableSubtree<FxPanel>(
+                        sameAs: FxPanel.same,
+                        child: FxPanel(
+                          key: ValueKey(track.id),
+                          vm: vm,
+                          track: track,
+                        ),
                       ),
                     )
                   : const _Empty(
