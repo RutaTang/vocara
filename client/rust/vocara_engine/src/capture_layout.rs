@@ -109,25 +109,33 @@ pub fn downmix_to_mono(
 /// toward an input-lost verdict. The VPIO unit has no error callback, so a sustained streak is the
 /// only way a mid-session disconnect reaches the host's device-event poll.
 ///
-/// Counted only once the unit has captured its first frame. Before that it is warming up — a
-/// Bluetooth headset switching to its headset profile can fail or come back empty for longer
-/// than the limit — and a loss reported then was still latched when the take being armed started
-/// recording from the now-delivering mic, whose first poll stopped it. A unit that never delivers
-/// is refused by the arm's ready handshake (no recorded progress) and caught by the device
-/// watch's frame-counter stall check instead.
+/// Two allowances, because a unit that has not captured its first frame yet is not dead in the
+/// same way. Before that it is warming up — a Bluetooth headset switching to its headset profile
+/// can fail or come back empty for a second or two — and the ~200 ms streak rule reported a loss
+/// that was still latched when the take being armed started recording from the now-delivering
+/// mic, whose first poll stopped it. So the warm-up gets its own, generous allowance measured in
+/// FRAMES (cycle sizes vary with the device): a unit, a reopened one included, that has delivered
+/// nothing by then is reported lost once. After the first capture, `limit` dead cycles in a row
+/// are a loss.
 pub struct DeadCaptureStreak {
-    /// Dead cycles in a row that make the mic lost.
+    /// Dead cycles in a row that make a delivering mic lost.
     limit: u32,
     streak: u32,
-    /// Whether the unit has captured anything yet (see the type doc).
+    /// Dead frames a unit may spend before its first capture (see the type doc).
+    warmup_frames: u64,
+    /// Dead frames spent so far before the first capture.
+    warmup: u64,
+    /// Whether the unit has captured anything yet.
     delivered: bool,
 }
 
 impl DeadCaptureStreak {
-    pub const fn new(limit: u32) -> DeadCaptureStreak {
+    pub const fn new(limit: u32, warmup_frames: u64) -> DeadCaptureStreak {
         DeadCaptureStreak {
             limit,
             streak: 0,
+            warmup_frames,
+            warmup: 0,
             delivered: false,
         }
     }
@@ -138,11 +146,14 @@ impl DeadCaptureStreak {
         self.streak = 0;
     }
 
-    /// A cycle that captured nothing. `true` exactly once per streak, on the cycle that reaches
-    /// the limit — the caller raises the loss then, not on every cycle after.
-    pub fn on_dead(&mut self) -> bool {
+    /// A cycle of `frames` that captured nothing. `true` exactly once per streak (or once for the
+    /// warm-up), on the cycle that crosses its allowance — the caller raises the loss then, not
+    /// on every cycle after.
+    pub fn on_dead(&mut self, frames: usize) -> bool {
         if !self.delivered {
-            return false;
+            let before = self.warmup;
+            self.warmup = before.saturating_add(frames as u64);
+            return before < self.warmup_frames && self.warmup >= self.warmup_frames;
         }
         self.streak = self.streak.saturating_add(1);
         self.streak == self.limit
@@ -245,40 +256,66 @@ mod tests {
     }
 
     const LIMIT: u32 = 20;
+    /// A 512-frame cycle, and a warm-up allowance of 250 of them (2.67 s at 48 kHz).
+    const CYCLE: usize = 512;
+    const WARMUP: u64 = 250 * CYCLE as u64;
 
-    /// A unit that has not captured its first frame is warming up, not lost: counted as a loss,
+    /// A unit that has not captured its first frame is warming up: counted by the streak rule,
     /// the warm-up latched EVENT_INPUT_LOST under the take being armed, and the take's first poll
-    /// then stopped it once the mic was delivering.
+    /// then stopped it once the mic was delivering. Inside its allowance it is not lost.
     #[test]
-    fn a_unit_that_has_not_delivered_yet_is_not_lost() {
-        let mut s = DeadCaptureStreak::new(LIMIT);
-        for cycle in 0..10 * LIMIT {
-            assert!(!s.on_dead(), "warm-up cycle {cycle} reported the mic lost");
+    fn a_unit_warming_up_is_not_lost_within_its_allowance() {
+        let mut s = DeadCaptureStreak::new(LIMIT, WARMUP);
+        for cycle in 1..250 {
+            assert!(
+                !s.on_dead(CYCLE),
+                "warm-up cycle {cycle} reported the mic lost"
+            );
         }
+        // Delivering now, and later dying: the ordinary streak rule applies.
+        s.on_capture();
+        for _ in 1..LIMIT {
+            assert!(!s.on_dead(CYCLE));
+        }
+        assert!(s.on_dead(CYCLE));
+    }
+
+    /// A unit — a reopened one included — that never delivers is reported lost once its warm-up
+    /// allowance has passed, and only once: before, nothing ever reported it, and the technique
+    /// page, which has no frame-counter stall watch, never learned the mic was dead.
+    #[test]
+    fn a_unit_that_never_delivers_is_lost_once_its_warm_up_has_passed() {
+        let mut s = DeadCaptureStreak::new(LIMIT, WARMUP);
+        let reports: Vec<usize> = (1..=1000).filter(|_| s.on_dead(CYCLE)).collect();
+        assert_eq!(
+            reports,
+            vec![250],
+            "lost exactly once, on the cycle that crosses the allowance"
+        );
     }
 
     /// Once the unit has delivered, the limit-th dead cycle in a row reports the loss, once.
     #[test]
     fn a_streak_after_the_first_capture_reports_the_loss_once() {
-        let mut s = DeadCaptureStreak::new(LIMIT);
+        let mut s = DeadCaptureStreak::new(LIMIT, WARMUP);
         s.on_capture();
         for cycle in 1..LIMIT {
-            assert!(!s.on_dead(), "cycle {cycle} is under the limit");
+            assert!(!s.on_dead(CYCLE), "cycle {cycle} is under the limit");
         }
-        assert!(s.on_dead(), "the limit-th dead cycle reports the loss");
+        assert!(s.on_dead(CYCLE), "the limit-th dead cycle reports the loss");
         for _ in 0..LIMIT {
-            assert!(!s.on_dead(), "a loss is reported once per streak");
+            assert!(!s.on_dead(CYCLE), "a loss is reported once per streak");
         }
     }
 
     /// A capture inside a streak starts it over: transient failures never add up to a loss.
     #[test]
     fn a_capture_starts_the_streak_over() {
-        let mut s = DeadCaptureStreak::new(LIMIT);
+        let mut s = DeadCaptureStreak::new(LIMIT, WARMUP);
         s.on_capture();
         for _ in 0..5 {
             for _ in 1..LIMIT {
-                assert!(!s.on_dead());
+                assert!(!s.on_dead(CYCLE));
             }
             s.on_capture();
         }

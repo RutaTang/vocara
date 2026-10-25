@@ -74,6 +74,15 @@ const AEC_BLOCK_FRAMES: u32 = 256;
 /// as lost. At the ~10 ms VPIO slice that is ~200 ms of dead capture — a real disconnect, not a
 /// one-off transient.
 const INPUT_LOST_STREAK: u32 = 20;
+/// How long a unit that has not delivered its first frame may fail or come back empty before it
+/// is flagged lost: comfortably longer than a Bluetooth headset's switch to its headset profile,
+/// so a warming-up mic is never a "disconnected" one (see [`DeadCaptureStreak`]).
+const INPUT_WARMUP_SECS: f64 = 2.5;
+
+/// The warm-up allowance in frames of the mic element at `rate` (what each dead cycle counts).
+fn input_warmup_frames(rate: f64) -> u64 {
+    (rate * INPUT_WARMUP_SECS) as u64
+}
 
 /// Estimated record round-trip latency (frames @ ENGINE_SR): output IO (buffer + safety + device
 /// latency) + acoustic flight + input IO + the AEC block. The captured vocal lands this far behind
@@ -218,8 +227,8 @@ struct InCtx {
     /// EVENT_INPUT_LOST on a sustained render-failure streak so a mid-session mic disconnect is
     /// observable, matching the cpal `err_cb` path (the VPIO unit itself has no error callback).
     event: Arc<AtomicU32>,
-    /// Dead capture cycles toward EVENT_INPUT_LOST, counted once the unit has delivered (see
-    /// [`DeadCaptureStreak`]).
+    /// Dead capture cycles toward EVENT_INPUT_LOST: a warm-up allowance before the unit's first
+    /// capture, the streak rule after it (see [`DeadCaptureStreak`]).
     dead: DeadCaptureStreak,
 }
 
@@ -427,7 +436,7 @@ impl Vpio {
                 hp: HighPass::new(),
                 layout: placeholder,
                 event,
-                dead: DeadCaptureStreak::new(INPUT_LOST_STREAK),
+                dead: DeadCaptureStreak::new(INPUT_LOST_STREAK, input_warmup_frames(VPIO_RATE)),
             });
             let in_ptr = (&mut *in_ctx as *mut InCtx) as *mut c_void;
 
@@ -488,6 +497,9 @@ impl Vpio {
                 .map(|a| Layout::from(&a))
                 .unwrap_or(placeholder);
             in_ctx.layout = in_layout;
+            // Dead cycles count the mic element's own frames, at the rate it negotiated.
+            in_ctx.dead =
+                DeadCaptureStreak::new(INPUT_LOST_STREAK, input_warmup_frames(in_layout.rate));
             // input_cb always hands InputCell interleaved STEREO (mono captures are duplicated up),
             // so configure for identity stereo at the captured rate. Reconfigure retires every
             // older generation and mints the one bound to this format — adopt it, or this unit's
@@ -772,7 +784,7 @@ unsafe extern "C-unwind" fn input_cb(
             // default-device change): the VPIO unit has no error callback, so flag it for the
             // host's device-event poll (it rebuilds), matching build_input's cpal err_cb.
             // RT-safe: a plain counter plus one atomic OR fired once at the threshold.
-            if ctx.dead.on_dead() {
+            if ctx.dead.on_dead(frames) {
                 ctx.event
                     .fetch_or(crate::device::EVENT_INPUT_LOST, Ordering::Release);
             }
@@ -791,11 +803,10 @@ unsafe extern "C-unwind" fn input_cb(
         if got_samples == 0 {
             // A render that SUCCEEDS (st==0) but delivers zero frames is also a dead mic: the
             // device is alive yet its capture pipeline hands us nothing (a stalled default-device
-            // change; a unit that never delivers at all is the arm's ready handshake's to refuse,
-            // see `DeadCaptureStreak`). Accumulate toward EVENT_INPUT_LOST
+            // change, or a unit that never delivers at all). Accumulate toward EVENT_INPUT_LOST
             // just like a hard render failure — otherwise these empty successes reset the streak
             // and the loss is never flagged. RT-safe: a plain counter plus one atomic OR.
-            if ctx.dead.on_dead() {
+            if ctx.dead.on_dead(frames) {
                 ctx.event
                     .fetch_or(crate::device::EVENT_INPUT_LOST, Ordering::Release);
             }
