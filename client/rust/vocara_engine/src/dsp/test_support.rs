@@ -72,9 +72,10 @@ pub(crate) fn assert_matches_reference<N: Node>(
         let mut want = vec![0.0; frames * CHANNELS];
         reference(slow, inp, &mut want);
         for (k, (g, w)) in got.iter().zip(&want).enumerate() {
-            assert_eq!(
-                g.to_bits(),
-                w.to_bits(),
+            // Bit for bit — except that any NaN matches any NaN: which payload and sign a NaN
+            // carries out of two NaN operands is the compiler's choice, not the algorithm's.
+            assert!(
+                g.to_bits() == w.to_bits() || (g.is_nan() && w.is_nan()),
                 "block {b} sample {k}: {g} vs the reference's {w}"
             );
         }
