@@ -1397,6 +1397,19 @@ pub extern "C" fn ve_buses_add(e: *mut VeEngine, gain: f32, muted: c_int, output
     })
 }
 
+/// The gain a staged track or bus is built with. A non-finite one (no meaning for any node) builds
+/// at unity, the node's own default: the live setters drop such values at the control boundary,
+/// but a build has no earlier value to keep, and a NaN reaching a gain smoother stays NaN.
+fn staged_gain(muted: bool, gain: f32) -> f32 {
+    if muted {
+        0.0
+    } else if gain.is_finite() {
+        gain
+    } else {
+        1.0
+    }
+}
+
 /// Sets a staged track's insert-chain order (FxKind tags, e.g. [0,1] = EQ→Comp).
 /// Call after [`ve_tracks_add`] and before [`ve_tracks_commit`].
 #[no_mangle]
@@ -1765,7 +1778,7 @@ pub extern "C" fn ve_tracks_commit_staged(e: *mut VeEngine) -> c_int {
             let sends = stage_sends(&pb.sends, bus_count, Some(i as i32));
             bus_specs.push(BusSpec {
                 id: i as u32,
-                gain: if pb.muted { 0.0 } else { pb.gain },
+                gain: staged_gain(pb.muted, pb.gain),
                 send_db: -120.0,
                 output,
                 chain,
@@ -1865,7 +1878,7 @@ pub extern "C" fn ve_tracks_commit_staged(e: *mut VeEngine) -> c_int {
                 id: (i + 1) as u32,
                 source,
                 vocal: pt.vocal,
-                gain: if pt.muted { 0.0 } else { pt.gain },
+                gain: staged_gain(pt.muted, pt.gain),
                 pan: 0.0,
                 send_db: -120.0,
                 bus,
@@ -3543,6 +3556,21 @@ mod cache_tests {
             cache_lookup_fresh(&mut cache, p, 6).is_some(),
             "an unreadable source file must not invalidate the cache"
         );
+    }
+}
+
+#[cfg(test)]
+mod staged_gain_tests {
+    use super::staged_gain;
+
+    #[test]
+    fn a_non_finite_staged_gain_builds_at_unity() {
+        assert_eq!(staged_gain(false, 0.5), 0.5);
+        assert_eq!(staged_gain(true, 0.5), 0.0);
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(staged_gain(false, bad), 1.0);
+            assert_eq!(staged_gain(true, bad), 0.0);
+        }
     }
 }
 

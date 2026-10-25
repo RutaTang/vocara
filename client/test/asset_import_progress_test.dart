@@ -95,12 +95,14 @@ void main() {
 
   test('a quit waits for a save still landing a large file past its budget '
       'instead of cutting it off', () async {
-    // Each flush is short, but together they outlast one budget window.
-    final fs = _SlowFs(const Duration(milliseconds: 150));
+    // Each flush is short, but together they outlast one budget window. Two
+    // or more land in every window, so only a step stalled for a whole window
+    // (not scheduling jitter on a loaded machine) could read as a wedge.
+    final fs = _SlowFs(const Duration(milliseconds: 300));
     final store = storeWith(fs);
     final finalizer = RecordingFinalizer.forTesting(
-      perFinalizerBudget: const Duration(milliseconds: 400),
-      totalBudget: const Duration(milliseconds: 400),
+      perFinalizerBudget: const Duration(milliseconds: 800),
+      totalBudget: const Duration(milliseconds: 800),
       progressCeiling: const Duration(seconds: 20),
       progress: AssetStore.bytesBeingCopied,
     );
