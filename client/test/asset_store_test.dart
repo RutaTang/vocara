@@ -301,6 +301,16 @@ void main() {
     },
   );
 
+  test('a landed import leaves nothing counted as still copying', () async {
+    // A quit waits on a Save that is still pooling a large file, judged by
+    // this count moving (see RecordingFinalizer): a staging file left in it
+    // would read as a copy in progress for the rest of the session.
+    expect(await AssetStore.bytesBeingCopied(), 0);
+    final src = await makeSrc('big.wav', List<int>.filled(512 * 1024, 7));
+    await store.importFile(src.path);
+    expect(await AssetStore.bytesBeingCopied(), 0);
+  });
+
   group('a staged recording remembers the hash its import measured', () {
     // Boot recovery judges each staged take by its content hash; a graceful
     // stop leaves the session's takes in staging after the save pooled them,

@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import '../db/asset_store.dart';
 import 'diagnostics_log.dart';
 
 /// Process-wide registry of in-flight recordings so the app can FINALIZE them
@@ -29,7 +30,9 @@ import 'diagnostics_log.dart';
 class RecordingFinalizer {
   RecordingFinalizer._()
     : perFinalizerBudget = _defaultPerFinalizer,
-      totalBudget = _defaultTotal;
+      totalBudget = _defaultTotal,
+      progressCeiling = _defaultProgressCeiling,
+      _progress = AssetStore.bytesBeingCopied;
 
   /// An isolated instance for tests, with budgets small enough to drive the
   /// expiry paths in real time.
@@ -37,7 +40,9 @@ class RecordingFinalizer {
   RecordingFinalizer.forTesting({
     this.perFinalizerBudget = _defaultPerFinalizer,
     this.totalBudget = _defaultTotal,
-  });
+    this.progressCeiling = _defaultProgressCeiling,
+    Future<int> Function()? progress,
+  }) : _progress = progress ?? (() async => 0);
 
   /// The single app-wide instance (recordings are bound to the one main window).
   static final RecordingFinalizer instance = RecordingFinalizer._();
@@ -53,8 +58,20 @@ class RecordingFinalizer {
   /// cannot serialize their budgets into a quit macOS ends on its own terms.
   static const Duration _defaultTotal = Duration(seconds: 8);
 
+  /// How long a quit keeps waiting, all told, on a finalizer that is still
+  /// making progress past its budget (see [_settle]): a save pooling a large
+  /// file — a 1 GB technique video copies for well over 5 s — is working, not
+  /// wedged, and cutting it off lost the user's Save outright.
+  static const Duration _defaultProgressCeiling = Duration(seconds: 60);
+
   final Duration perFinalizerBudget;
   final Duration totalBudget;
+  final Duration progressCeiling;
+
+  /// A counter that rises while finalizers do real work (the bytes imports
+  /// have copied so far): the quit's evidence that a finalizer past its
+  /// budget is still working.
+  final Future<int> Function() _progress;
 
   final _pending = <Future<void> Function()>{};
 
@@ -118,6 +135,32 @@ class RecordingFinalizer {
     ]).timeout(perFinalizerBudget, onTimeout: () => const []);
   }
 
+  /// Waits for [work] for [budget] — and for another [budget] each time the
+  /// last one ended with [_progress] advanced past [mark] (the finalizer is
+  /// still moving bytes), up to [progressCeiling] since the quit began. A finalizer making
+  /// no progress for a whole [budget] is wedged, and times out as before.
+  Future<void> _settle(
+    Future<void> work,
+    Duration budget,
+    Stopwatch spent,
+    int mark,
+  ) async {
+    while (true) {
+      try {
+        await work.timeout(budget);
+        return;
+      } on TimeoutException {
+        final now = await _progress();
+        if (now <= mark || spent.elapsed >= progressCeiling) rethrow;
+        mark = now;
+        DiagnosticsLog.instance.log(
+          'quit',
+          'a finalizer past its budget is still copying; waiting on',
+        );
+      }
+    }
+  }
+
   /// Runs every registered finalizer (best-effort; one failure never blocks the
   /// rest or the quit). Iterates a snapshot, so a finalizer that unregisters
   /// itself mid-run is safe. Concurrent calls (e.g. a close click racing a
@@ -125,10 +168,11 @@ class RecordingFinalizer {
   /// finalizers; once a run completes, a later call starts a fresh one.
   ///
   /// BOUNDED: each finalizer gets [perFinalizerBudget] and the whole run
-  /// [totalBudget]. Both quit paths gate the app's exit on this future, and an
-  /// exit macOS ends on its own terms is worse than a skipped save — a take
-  /// left behind is recovered on the next boot, a force-killed process
-  /// finalizes nothing at all.
+  /// [totalBudget]; only a finalizer still making progress waits on past its
+  /// budget, and never past [progressCeiling]. Both quit paths gate the app's
+  /// exit on this future, and an exit macOS ends on its own terms is worse
+  /// than a skipped save — a take left behind is recovered on the next boot, a
+  /// force-killed process finalizes nothing at all.
   Future<void> finalizeAll() =>
       _inFlight ??= _finalizeAll().whenComplete(() => _inFlight = null);
 
@@ -146,7 +190,11 @@ class RecordingFinalizer {
       }
       final budget = left < perFinalizerBudget ? left : perFinalizerBudget;
       try {
-        await pending[i]().timeout(budget);
+        // Read before the finalizer starts: [_settle] must attach to its
+        // future at once, or a finalizer failing straight away escapes as an
+        // unhandled error.
+        final mark = await _progress();
+        await _settle(pending[i](), budget, spent, mark);
       } on TimeoutException {
         // Quitting past a wedged finalize loses strictly LESS than being
         // force-killed while still waiting: the streaming WAV's header is

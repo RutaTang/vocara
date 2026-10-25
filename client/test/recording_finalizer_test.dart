@@ -62,6 +62,49 @@ void main() {
     },
   );
 
+  test(
+    'a held save still copying past its budget keeps the quit waiting',
+    () async {
+      // A Save pooling a large example (a 1 GB video copies for well over the
+      // 5 s budget) is working, not wedged: cutting it off lost the Save.
+      var copied = 0;
+      final finalizer = RecordingFinalizer.forTesting(
+        perFinalizerBudget: const Duration(milliseconds: 40),
+        totalBudget: const Duration(milliseconds: 60),
+        progressCeiling: const Duration(seconds: 5),
+        progress: () async => copied,
+      );
+      var landed = false;
+      final save = finalizer.hold(() async {
+        for (var i = 0; i < 15; i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+          copied += 1 << 20; // a megabyte more on disk
+        }
+        landed = true;
+      });
+      await finalizer.finalizeAll().timeout(const Duration(seconds: 2));
+      expect(landed, isTrue, reason: 'the quit cut off a save still copying');
+      await save;
+    },
+  );
+
+  test('a held save that stops progressing is still cut off', () async {
+    final finalizer = RecordingFinalizer.forTesting(
+      perFinalizerBudget: const Duration(milliseconds: 40),
+      totalBudget: const Duration(milliseconds: 60),
+      progressCeiling: const Duration(seconds: 5),
+      progress: () async => 7, // never moves
+    );
+    final never = Completer<void>();
+    addTearDown(() {
+      if (!never.isCompleted) never.complete();
+    });
+    unawaited(finalizer.hold(() => never.future));
+    final sw = Stopwatch()..start();
+    await finalizer.finalizeAll().timeout(const Duration(seconds: 2));
+    expect(sw.elapsedMilliseconds, lessThan(500));
+  });
+
   test('a held save keeps the quit waiting until it settles, and only that '
       'long', () async {
     final finalizer = RecordingFinalizer.forTesting();

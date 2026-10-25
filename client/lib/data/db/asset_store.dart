@@ -309,10 +309,35 @@ class AssetStore {
     await _createDirDurably(stagingDir);
     final tmpPath = p.join(stagingDir.path, '${newId()}.part');
     final srcPath = src.path;
-    final (:hash, :size) = await Isolate.run(
-      () => _copyAndHash(srcPath, tmpPath),
-    );
-    return _StagedImport(hash: hash, size: size, tmpPath: tmpPath);
+    _copying.add(tmpPath);
+    try {
+      final (:hash, :size) = await Isolate.run(
+        () => _copyAndHash(srcPath, tmpPath),
+      );
+      return _StagedImport(hash: hash, size: size, tmpPath: tmpPath);
+    } finally {
+      _copying.remove(tmpPath);
+    }
+  }
+
+  /// Staging files being written right now, by every store (see
+  /// [bytesBeingCopied]).
+  static final Set<String> _copying = {};
+
+  /// How many bytes the imports in flight have written to staging so far.
+  /// The copy runs in a background isolate, so its progress is read off the
+  /// growing files: a quit waiting on a save that is pooling a large file
+  /// keeps waiting while this moves (see RecordingFinalizer).
+  static Future<int> bytesBeingCopied() async {
+    var total = 0;
+    for (final path in List.of(_copying)) {
+      try {
+        total += await File(path).length();
+      } catch (_) {
+        // Not created yet, or already renamed into the pool.
+      }
+    }
+    return total;
   }
 
   /// Where an import keeps the hash it measured for a staged recording,
