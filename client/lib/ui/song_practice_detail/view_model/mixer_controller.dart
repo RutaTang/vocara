@@ -915,6 +915,54 @@ class MixerController extends ChangeNotifier {
     return best[targetBusId] ?? 0.0;
   }
 
+  /// The lane envelopes last folded, by bus id (null: the master), with what
+  /// they were folded from. The master and bus lanes rebuild on every
+  /// notification of the view model — a fader, knob or clip-drag tick, a pan,
+  /// a selection — and each rebuild re-folded every clip's peaks: 36k samples
+  /// over 12 three-clip lanes, ~0.5 ms in a debug build.
+  final Map<String?, ({List<Object?> key, List<double> peaks})> _envelopes = {};
+
+  /// [fold]'s envelope for [busId], refolded only when what it reads changed:
+  /// the timeline length, the master gain, the A/B backing, the buses (solo
+  /// and routing), every track the mix holds — compared by identity, as any
+  /// edit replaces it — and the take being recorded.
+  List<double> _envelope(String? busId, List<double> Function() fold) {
+    final recording = _isRecording();
+    final key = <Object?>[
+      _practiceOf()?.timelineDurationMs,
+      masterVolume,
+      _playReference,
+      fxBuses,
+      recording,
+      if (recording) ...[
+        _recordingTargetId(),
+        _recordingPeaks(),
+        _recordingStartMs(),
+        _recordingDurationMs(),
+      ],
+      ..._allTracksOf(),
+    ];
+    final memo = _envelopes[busId];
+    if (memo != null && _sameKey(memo.key, key)) return memo.peaks;
+    final peaks = List<double>.unmodifiable(fold());
+    _envelopes[busId] = (key: key, peaks: peaks);
+    return peaks;
+  }
+
+  static bool _sameKey(List<Object?> a, List<Object?> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      final x = a[i], y = b[i];
+      // Values by value, objects (tracks, lists) by identity.
+      if (x is num || x is bool || x is String || x == null) {
+        if (x != y) return false;
+      } else if (!identical(x, y)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   /// A composite waveform for an FX bus lane: the max-envelope of every audible
   /// take that reaches [busId] — by main output or by aux send, directly or
   /// through another bus — scaled by the take's volume and the gain of the route
@@ -922,7 +970,10 @@ class MixerController extends ChangeNotifier {
   ///
   /// Like the master lane this is the DRY source envelope, not the bus's wet
   /// output: bus effects, volume and pan are not modelled here either.
-  List<double> busWaveformPeaks(String busId) {
+  List<double> busWaveformPeaks(String busId) =>
+      _envelope(busId, () => _busWaveformPeaks(busId));
+
+  List<double> _busWaveformPeaks(String busId) {
     final tl = _practiceOf()?.timelineDurationMs ?? 0;
     if (tl <= 0) return const [];
     const n = 1000;
@@ -956,7 +1007,10 @@ class MixerController extends ChangeNotifier {
   /// track envelope (scaled by each track's volume and the master gain) at every
   /// point on the timeline, plus the live take while recording. It approximates
   /// the downmix for display and recomputes reactively as tracks/levels change.
-  List<double> get masterWaveformPeaks {
+  List<double> get masterWaveformPeaks =>
+      _envelope(null, () => _masterWaveformPeaks());
+
+  List<double> _masterWaveformPeaks() {
     final tl = _practiceOf()?.timelineDurationMs ?? 0;
     if (tl <= 0) return const [];
     const n = 1000;

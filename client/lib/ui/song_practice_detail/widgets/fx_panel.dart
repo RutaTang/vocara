@@ -121,6 +121,26 @@ class FxPanel extends StatelessWidget {
 
   bool get _isBus => bus != null;
 
+  /// The `StableSubtree.sameAs` of an FX panel: everything it shows comes
+  /// from its [track] or [bus] — compared by identity, as any edit replaces
+  /// them — and what it reads from the view model it reads through its own
+  /// listeners and polls, never from a build. So a fader, knob or clip drag
+  /// elsewhere (every view-model notification rebuilds the inspector) leaves
+  /// the whole insert chain alone.
+  static bool same(FxPanel next, FxPanel shown) =>
+      next.key == shown.key &&
+      identical(next.vm, shown.vm) &&
+      identical(next.track, shown.track) &&
+      identical(next.bus, shown.bus);
+
+  /// What wakes a take's idle EQ analyzer: the playhead, and the analysis
+  /// caches — where a newly computed input spectrum arrives, which a rebuild
+  /// of this panel (kept across unrelated ones, see [same]) is no longer sure
+  /// to deliver. One per view model, so the analyzer keeps its listeners.
+  static Listenable _analyzerWake(SongPracticeDetailViewModel vm) =>
+      _analyzerWakes[vm] ??= Listenable.merge([vm.position, vm.analysis]);
+  static final _analyzerWakes = Expando<Listenable>('FxPanel analyzer wake');
+
   TrackFx get _fx => _isBus ? bus!.fx : (track!.fx ?? TrackFx.flat());
 
   void _setFx(TrackFx fx, {bool commit = false}) {
@@ -165,7 +185,7 @@ class FxPanel extends StatelessWidget {
               const SizedBox(height: 8),
               _EqGraph(
                 inputColumn: _eqInput,
-                wake: _isBus ? null : vm.position,
+                wake: _isBus ? null : _analyzerWake(vm),
                 bands: fx.eq,
                 on: fx.eqOn,
                 onChanged: (i, band) =>
@@ -1050,8 +1070,9 @@ class _SpectrumData {
 /// The ticker stops once a frame changes nothing (the ballistics have settled
 /// on the input), so a paused transport no longer produces frames forever —
 /// it ticked at the display rate for as long as a take with the EQ on was
-/// selected. [wake] (the playhead) and any rebuild — which is how a newly
-/// computed input spectrum or a band edit arrives — start it again.
+/// selected. [wake] (the playhead, and the analysis caches a newly computed
+/// input spectrum arrives in) and any rebuild — which is how a band edit
+/// arrives — start it again.
 class _EqSpectrumLayer extends StatefulWidget {
   const _EqSpectrumLayer({
     required this.inputColumn,
@@ -1062,7 +1083,7 @@ class _EqSpectrumLayer extends StatefulWidget {
 
   final ({Float32List col, double binHz})? Function() inputColumn;
 
-  /// Changes whenever the input may have: the playhead.
+  /// Changes whenever the input may have: the playhead and the analysis.
   final Listenable? wake;
   final List<EqBand> bands;
   final bool on;

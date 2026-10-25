@@ -20,6 +20,7 @@ import '../../../routing/routes.dart';
 import '../../../utils/format.dart';
 import '../../core/themes/studio.dart';
 import '../../core/widgets/confirm_dialog.dart';
+import '../../core/widgets/stable_subtree.dart';
 import '../../core/widgets/studio_button.dart';
 import '../../core/widgets/studio_controls.dart';
 import '../../core/widgets/tick_boundary.dart';
@@ -747,57 +748,51 @@ class _Center extends StatelessWidget {
   final void Function(AudioTrack track, String clipId, Offset position)
   onClipContextMenu;
 
-  Widget _row(AudioTrack track) => Padding(
-    // Inset to align lanes with the ruler, labels and drop-hint boxes.
-    padding: const EdgeInsets.symmetric(horizontal: kTimelineHMargin),
-    child: TrackRow(
-      key: ValueKey(track.id),
-      track: track,
-      label: track.displayName,
-      timelineDurationMs: vm.playback.viewSpanMs,
-      viewStartMs: vm.playback.viewStartMs,
-      position: vm.position,
-      selected: vm.selectedTrackId == track.id,
-      armed: !track.isBacking && vm.recording.recordTargetId == track.id,
-      selectedClipId: vm.selectedTrackId == track.id ? vm.selectedClipId : null,
-      recordingPeaks:
-          (vm.isRecording && vm.recording.recordTargetId == track.id)
-          ? vm.recording.recordingPeaks
-          : null,
-      recordingStartMs: vm.recording.recordingStartMs,
-      onSelect: () => vm.selectTrack(track.id),
-      reorderable: !track.isBacking,
-      onSelectClip: (clipId) => vm.selectClip(track.id, clipId),
-      onClipMoveLive: (clipId, ms) =>
-          vm.moveClipStartLive(track.id, clipId, ms),
-      onMoveCommit: vm.commitTrackMove,
-      onClipContextMenu: (clipId, pos) => onClipContextMenu(track, clipId, pos),
-      onCrossLaneMove: (draggedId) =>
-          vm.moveVocalTrackToLaneOf(draggedId, track.id),
-      onContextMenu: (pos) => onContextMenu(track, pos),
-      onAddNote: () => onAddNote(track.id),
-      onEditNote: (note) => onEditNote(track.id, note),
-      onAddTechnique: () => onAddTechnique(track.id),
-      onToggleMute: () => vm.mixer.toggleMute(track.id),
-      onToggleSolo: () => vm.mixer.toggleSolo(track.id),
-      onVolume: (v) => vm.mixer.setTrackVolumeLive(track.id, v),
-      onVolumeCommit: vm.mixer.commitTrackVolume,
-      onDelete: () => onDeleteTrack(track),
-      canExpand: !track.isBacking,
-      expanded: vm.analysis.isTrackExpanded(track.id),
-      onToggleExpand: () => vm.analysis.toggleTrackExpanded(track.id),
-      subLanes: vm.analysis.isTrackExpanded(track.id)
-          ? AnalysisLanes(
-              vm: vm,
-              track: track,
-              timelineDurationMs: vm.playback.viewSpanMs,
-              onAddNote: (s, e) => onAddNoteAt(track.id, s, e),
-              onEditNote: (n) => onEditNote(track.id, n),
-              onAddTechnique: (s, e) => onAddTechniqueAt(track.id, s, e),
-              onEditTechnique: (m) => onEditTechnique(track.id, m),
-            )
-          : null,
-    ),
+  TrackRow _row(AudioTrack track) => TrackRow(
+    key: ValueKey(track.id),
+    track: track,
+    label: track.displayName,
+    timelineDurationMs: vm.playback.viewSpanMs,
+    viewStartMs: vm.playback.viewStartMs,
+    position: vm.position,
+    selected: vm.selectedTrackId == track.id,
+    armed: !track.isBacking && vm.recording.recordTargetId == track.id,
+    selectedClipId: vm.selectedTrackId == track.id ? vm.selectedClipId : null,
+    recordingPeaks: (vm.isRecording && vm.recording.recordTargetId == track.id)
+        ? vm.recording.recordingPeaks
+        : null,
+    recordingStartMs: vm.recording.recordingStartMs,
+    onSelect: () => vm.selectTrack(track.id),
+    reorderable: !track.isBacking,
+    onSelectClip: (clipId) => vm.selectClip(track.id, clipId),
+    onClipMoveLive: (clipId, ms) => vm.moveClipStartLive(track.id, clipId, ms),
+    onMoveCommit: vm.commitTrackMove,
+    onClipContextMenu: (clipId, pos) => onClipContextMenu(track, clipId, pos),
+    onCrossLaneMove: (draggedId) =>
+        vm.moveVocalTrackToLaneOf(draggedId, track.id),
+    onContextMenu: (pos) => onContextMenu(track, pos),
+    onAddNote: () => onAddNote(track.id),
+    onEditNote: (note) => onEditNote(track.id, note),
+    onAddTechnique: () => onAddTechnique(track.id),
+    onToggleMute: () => vm.mixer.toggleMute(track.id),
+    onToggleSolo: () => vm.mixer.toggleSolo(track.id),
+    onVolume: (v) => vm.mixer.setTrackVolumeLive(track.id, v),
+    onVolumeCommit: vm.mixer.commitTrackVolume,
+    onDelete: () => onDeleteTrack(track),
+    canExpand: !track.isBacking,
+    expanded: vm.analysis.isTrackExpanded(track.id),
+    onToggleExpand: () => vm.analysis.toggleTrackExpanded(track.id),
+    subLanes: vm.analysis.isTrackExpanded(track.id)
+        ? AnalysisLanes(
+            vm: vm,
+            track: track,
+            timelineDurationMs: vm.playback.viewSpanMs,
+            onAddNote: (s, e) => onAddNoteAt(track.id, s, e),
+            onEditNote: (n) => onEditNote(track.id, n),
+            onAddTechnique: (s, e) => onAddTechniqueAt(track.id, s, e),
+            onEditTechnique: (m) => onEditTechnique(track.id, m),
+          )
+        : null,
   );
 
   @override
@@ -885,25 +880,24 @@ class _Center extends StatelessWidget {
                           // Backing region: its own drop zone, so only it highlights when a
                           // file is dragged over it. Drop fills the empty backing slot; any
                           // extra files become new takes.
-                          _AudioDropZone(
-                            onDropPaths: onDropBacking,
-                            builder: (hover) => backing != null
-                                ? _DropHighlight(
-                                    active: hover,
-                                    child: _row(backing),
-                                  )
-                                : _LanePad(
-                                    child: _BrowseTap(
-                                      onPaths: onDropBacking,
-                                      child: _DropHint(
-                                        icon: ref ? FIcons.disc3 : FIcons.music,
-                                        text: ref
-                                            ? 'Drag the original song here, or click to browse'
-                                            : 'Drag a backing track here, or click to browse',
-                                        highlighted: hover,
-                                      ),
-                                    ),
+                          StableSubtree<_Lane>(
+                            sameAs: _Lane.same,
+                            child: _Lane(
+                              row: backing == null ? null : _row(backing),
+                              onDropPaths: onDropBacking,
+                              empty: (hover) => _LanePad(
+                                child: _BrowseTap(
+                                  onPaths: onDropBacking,
+                                  child: _DropHint(
+                                    icon: ref ? FIcons.disc3 : FIcons.music,
+                                    text: ref
+                                        ? 'Drag the original song here, or click to browse'
+                                        : 'Drag a backing track here, or click to browse',
+                                    highlighted: hover,
                                   ),
+                                ),
+                              ),
+                            ),
                           ),
                           TakesHeader(vm: vm),
                           if (vm.versions.vocalTakes.isEmpty && !vm.isRecording)
@@ -927,12 +921,12 @@ class _Center extends StatelessWidget {
                             // highlights). The live recording draws on the armed lane itself
                             // (Logic / Cubase), so there's no separate REC lane.
                             for (final t in vm.versions.vocalTakes)
-                              _AudioDropZone(
-                                onDropPaths: (paths) =>
-                                    onDropClipToTake(t.id, paths),
-                                builder: (hover) => _DropHighlight(
-                                  active: hover,
-                                  child: _row(t),
+                              StableSubtree<_Lane>(
+                                sameAs: _Lane.same,
+                                child: _Lane(
+                                  row: _row(t),
+                                  onDropPaths: (paths) =>
+                                      onDropClipToTake(t.id, paths),
                                 ),
                               ),
                           // FX BUSES — DAW group lanes (Cubase-style), between the
@@ -1365,64 +1359,12 @@ class _MasterRow extends StatelessWidget {
         ),
         child: Row(
           children: [
-            Container(
-              width: kTrackHeaderW,
-              decoration: const BoxDecoration(
-                color: Studio.panel,
-                border: Border(right: BorderSide(color: Studio.border)),
-              ),
-              child: Row(
-                children: [
-                  Container(width: 3, color: Studio.accent),
-                  Expanded(
-                    child: Padding(
-                      padding: const EdgeInsets.fromLTRB(9, 10, 8, 10),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          const Text(
-                            'MASTER',
-                            style: TextStyle(
-                              color: Studio.accent,
-                              fontSize: 11.5,
-                              fontWeight: FontWeight.w700,
-                              letterSpacing: 0.4,
-                            ),
-                          ),
-                          Row(
-                            children: [
-                              Expanded(
-                                child: StudioFader(
-                                  value: vol,
-                                  accent: Studio.accent,
-                                  onChanged: vm.mixer.setMasterVolumeLive,
-                                  onChangeEnd: vm.mixer.commitMasterVolume,
-                                ),
-                              ),
-                              const SizedBox(width: 8),
-                              SizedBox(
-                                width: 40,
-                                child: Text(
-                                  '${_formatDb(vol)} dB',
-                                  textAlign: TextAlign.right,
-                                  style: const TextStyle(
-                                    color: Studio.textSecondary,
-                                    fontSize: 10,
-                                    fontWeight: FontWeight.w600,
-                                    fontFeatures: [
-                                      FontFeature.tabularFigures(),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ],
+            // Kept, and on its own layer, as a take's header: the envelope
+            // beside it follows every pan or zoom, the fader need not.
+            RepaintBoundary(
+              child: StableSubtree<_MasterHeaderStrip>(
+                sameAs: _MasterHeaderStrip.same,
+                child: _MasterHeaderStrip(vm: vm, volume: vol),
               ),
             ),
             Expanded(
@@ -1480,6 +1422,81 @@ class _MasterRow extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// The master lane's header: the label, the master fader and its dB readout.
+class _MasterHeaderStrip extends StatelessWidget {
+  const _MasterHeaderStrip({required this.vm, required this.volume});
+
+  final SongPracticeDetailViewModel vm;
+  final double volume;
+
+  /// The [StableSubtree.sameAs] of the strip: its callbacks are the mixer's
+  /// own methods.
+  static bool same(_MasterHeaderStrip next, _MasterHeaderStrip shown) =>
+      identical(next.vm, shown.vm) && next.volume == shown.volume;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: kTrackHeaderW,
+      decoration: const BoxDecoration(
+        color: Studio.panel,
+        border: Border(right: BorderSide(color: Studio.border)),
+      ),
+      child: Row(
+        children: [
+          Container(width: 3, color: Studio.accent),
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(9, 10, 8, 10),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  const Text(
+                    'MASTER',
+                    style: TextStyle(
+                      color: Studio.accent,
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.4,
+                    ),
+                  ),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: StudioFader(
+                          value: volume,
+                          accent: Studio.accent,
+                          onChanged: vm.mixer.setMasterVolumeLive,
+                          onChangeEnd: vm.mixer.commitMasterVolume,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      SizedBox(
+                        width: 40,
+                        child: Text(
+                          '${_MasterRow._formatDb(volume)} dB',
+                          textAlign: TextAlign.right,
+                          style: const TextStyle(
+                            color: Studio.textSecondary,
+                            fontSize: 10,
+                            fontWeight: FontWeight.w600,
+                            fontFeatures: [FontFeature.tabularFigures()],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -1955,6 +1972,50 @@ class _BrowseTap extends StatelessWidget {
         },
         child: child,
       ),
+    );
+  }
+}
+
+/// A lane of the timeline list: [row] in its own file drop zone, or, for an
+/// empty backing slot (no [row]), the [empty] hint. Kept while its row shows
+/// the same thing ([same]): every notification of the view model rebuilds the
+/// lane list, and a fader, pan-knob or FX tick, a clip drag or the master
+/// fader changes at most one lane, so rebuilding every other lane's drop zone
+/// and row shell cost a dozen widgets a lane, at pointer rate.
+class _Lane extends StatelessWidget {
+  const _Lane({required this.row, required this.onDropPaths, this.empty});
+
+  final TrackRow? row;
+
+  /// Captures only the lane's track id (which an unchanged row pins) and the
+  /// workspace's drop handlers.
+  final Future<void> Function(List<String> paths) onDropPaths;
+  final Widget Function(bool hovering)? empty;
+
+  /// The [StableSubtree.sameAs] of a lane. An empty slot is never kept.
+  static bool same(_Lane next, _Lane shown) {
+    final row = next.row, before = shown.row;
+    return row != null && before != null && row.showsSameAs(before);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final row = this.row;
+    return _AudioDropZone(
+      onDropPaths: onDropPaths,
+      builder: (hover) => row == null
+          ? empty!(hover)
+          : _DropHighlight(
+              active: hover,
+              child: Padding(
+                // Inset to align lanes with the ruler, labels and drop-hint
+                // boxes.
+                padding: const EdgeInsets.symmetric(
+                  horizontal: kTimelineHMargin,
+                ),
+                child: row,
+              ),
+            ),
     );
   }
 }

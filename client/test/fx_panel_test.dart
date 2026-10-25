@@ -58,7 +58,9 @@ class _FakeMixer extends Fake implements MixerController {
   }
 }
 
-class _FakeAnalysis extends Fake implements AnalysisCache {
+// A listenable: the EQ analyzer wakes on the analysis caches, where a newly
+// computed input spectrum arrives.
+class _FakeAnalysis extends Fake with ChangeNotifier implements AnalysisCache {
   int eqInputCalls = 0;
 
   /// The pre-EQ column under the playhead; null = no spectrum yet (the graph
@@ -352,6 +354,35 @@ void main() {
     await settle();
     expect(vm.fakeAnalysis.eqInputCalls, greaterThan(calls));
     expect(tester.binding.hasScheduledFrame, isFalse);
+  });
+
+  // The inspector keeps its FX panel across every view-model notification
+  // that leaves the take alone (a fader or clip drag elsewhere), so a rebuild
+  // no longer brings the analyzer the input spectrum that has just been
+  // computed: the analysis caches announcing it must wake it on their own,
+  // or a paused take's EQ stays blank until the playhead moves.
+  testWidgets('an input spectrum computed while the EQ analyzer idles wakes '
+      'it without a rebuild', (tester) async {
+    final vm = await pump(
+      tester,
+      track: _track(fx: _fxAllOff().copyWith(eqOn: true)),
+    );
+    var frames = 0;
+    while (tester.binding.hasScheduledFrame && frames < 600) {
+      await tester.pump(const Duration(milliseconds: 16));
+      frames++;
+    }
+    expect(tester.binding.hasScheduledFrame, isFalse, reason: 'idle');
+    final calls = vm.fakeAnalysis.eqInputCalls;
+
+    vm.fakeAnalysis.input = (
+      col: Float32List.fromList(List.filled(1025, -20.0)),
+      binHz: 48000 / 2048,
+    );
+    vm.fakeAnalysis.notifyListeners();
+    expect(tester.binding.hasScheduledFrame, isTrue, reason: 'woken');
+    await tester.pump(const Duration(milliseconds: 16));
+    expect(vm.fakeAnalysis.eqInputCalls, greaterThan(calls));
   });
 
   testWidgets('the EQ analyzer decays to the floor before it idles', (

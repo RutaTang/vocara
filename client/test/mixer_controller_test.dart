@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vocara/data/services/playback_engine.dart';
@@ -569,6 +571,104 @@ void main() {
       host.recording = false;
       await host.mixer.toggleMute('v1');
       expect(host.mixer.masterWaveformPeaks[500], 0.0);
+    });
+
+    // The master and bus lanes rebuild on every notification of the view
+    // model, and each rebuild folded every clip's peaks again (~0.5 ms over 12
+    // three-clip lanes in a debug build). Each envelope is now folded once per
+    // change of what it reads — and must still follow every such change: a
+    // fresh controller over the same state is the oracle.
+    test('the lane envelopes are refolded exactly when what they show '
+        'changes', () async {
+      final host = _Host(
+        _practice(
+          vocals: [
+            _vocal('v1', peaks: [0.8], busId: 'busA'),
+            _vocal('v2', peaks: [0.3, 0.6]),
+          ],
+          buses: [_bus('busA')],
+        ),
+      );
+      List<double> freshMaster() {
+        final h = _Host(host.practice)
+          ..recording = host.recording
+          ..recordingTarget = host.recordingTarget
+          ..recPeaks = host.recPeaks
+          ..recStartMs = host.recStartMs
+          ..recDurationMs = host.recDurationMs;
+        h.mixer.setPlayReference(host.mixer.playReference);
+        return h.mixer.masterWaveformPeaks;
+      }
+
+      List<double> freshBus() =>
+          _Host(host.practice).mixer.busWaveformPeaks('busA');
+
+      var master = host.mixer.masterWaveformPeaks;
+      var bus = host.mixer.busWaveformPeaks('busA');
+      expect(identical(host.mixer.masterWaveformPeaks, master), isTrue);
+      expect(identical(host.mixer.busWaveformPeaks('busA'), bus), isTrue);
+
+      Future<void> expectRefolded(
+        String what,
+        FutureOr<void> Function() change,
+      ) async {
+        await change();
+        final m = host.mixer.masterWaveformPeaks;
+        final b = host.mixer.busWaveformPeaks('busA');
+        expect(m, freshMaster(), reason: what);
+        expect(b, freshBus(), reason: what);
+        expect(
+          identical(host.mixer.masterWaveformPeaks, m),
+          isTrue,
+          reason: '$what: then kept',
+        );
+        master = m;
+        bus = b;
+      }
+
+      await expectRefolded(
+        'a fader',
+        () => host.mixer.setTrackVolumeLive('v1', 0.5),
+      );
+      expect(master[500], closeTo(0.4, 1e-9));
+      await expectRefolded('a mute', () => host.mixer.toggleMute('v2'));
+      await expectRefolded('a solo', () => host.mixer.toggleSolo('v2'));
+      await expectRefolded('the master', () {
+        host.mixer.setMasterVolumeLive(0.5);
+      });
+      await expectRefolded('the A/B backing', () {
+        host.mixer.setPlayReference(true);
+      });
+      await expectRefolded('a clip move', () {
+        host.updateTrack(
+          'v1',
+          (t) => t.copyWith(
+            clips: [for (final c in t.clips) c.copyWith(startMs: 2000)],
+          ),
+        );
+      });
+      await expectRefolded('a routing change', () {
+        host.practice = host.practice!.copyWith(
+          fxBuses: [_bus('busA'), _bus('busB')],
+        );
+      });
+      await expectRefolded('a take starting', () {
+        host
+          ..recording = true
+          ..recordingTarget = 'v1'
+          ..recPeaks = const [0.5]
+          ..recDurationMs = 2000;
+      });
+      await expectRefolded('a recording tick', () {
+        host
+          ..recPeaks = const [0.5, 0.9]
+          ..recDurationMs = 2050;
+      });
+      await expectRefolded('the take stopping', () {
+        host
+          ..recording = false
+          ..recPeaks = const [];
+      });
     });
 
     test('busWaveformPeaks folds only takes routed into the bus, including '
