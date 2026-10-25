@@ -253,11 +253,16 @@ pub struct TrackFeeder {
     basis: Option<PlanBasis>,
     /// Where the newest discarding plan starts (see [`Self::resumes_held_plan`]).
     plan_pos: i64,
+    /// The newest discarding plan started before the track's span and has
+    /// minted no starvation jump since (see [`Self::holds_pre_span_plan`]).
+    plan_pre_span: bool,
     /// Frames pushed since the newest DISCARDING fence, fence included, while
     /// the ring may still hold frames from before it (None once it cannot).
     since_flush: Option<usize>,
     /// Frames pushed since the newest discarding fence, fence included (never cleared).
     plan_pushed: usize,
+    /// Audio frames read from the file so far (see [`Self::frames_read`]).
+    frames_read: u64,
     scratch: Vec<[Smp; CHANNELS]>,
 }
 
@@ -280,10 +285,18 @@ impl TrackFeeder {
             run_end: 0,
             basis: None,
             plan_pos: 0,
+            plan_pre_span: false,
             since_flush: None,
             plan_pushed: 0,
+            frames_read: 0,
             scratch: vec![[0.0; CHANNELS]; 1024],
         }
+    }
+
+    /// Audio frames this feeder has read from its file so far: what its plans
+    /// have cost the pump, every replan's refill included. Diagnostics.
+    pub fn frames_read(&self) -> u64 {
+        self.frames_read
     }
 
     /// Refresh the reader's file handle (see [`WavTrackReader::reopen`]);
@@ -390,6 +403,7 @@ impl TrackFeeder {
             self.generation = next_gen;
             self.next_tl = pos;
             self.plan_pos = pos;
+            self.plan_pre_span = pos <= self.start_frame;
             self.ctrl.flush_seq.fetch_add(1, Ordering::Release);
         } else {
             // Ring full of doomed frames: force the basis stale so the next
@@ -420,6 +434,27 @@ impl TrackFeeder {
             && self.producer.capacity() - self.producer.free() + 2 >= self.plan_pushed
             && (old.loop_on, old.ls, old.le) == (basis.loop_on, basis.ls, basis.le)
             && Self::planned_pos(t, basis) == self.plan_pos
+    }
+
+    /// A seek (or pause, or play) that stays before the track's span changes
+    /// nothing this track will play. A plan that starts before the span queues
+    /// the same frames whatever its start: the fill skips straight to the
+    /// span, and the node renders the pre-span positions as silence without
+    /// popping, then clamps to the span's first frame. So the held plan stands
+    /// while its node has consumed none of it (the FIFO check of
+    /// [`Self::resumes_held_plan`]) and the loop is unchanged. Replanning
+    /// instead landed a discarding fence behind the whole queue: the node
+    /// popped every queued frame on the audio thread to reach it, and the pump
+    /// read the same frames from disk again — for every clip ahead of the
+    /// playhead, on every seek of a ruler drag.
+    fn holds_pre_span_plan(&self, t: &Shared, basis: &PlanBasis) -> bool {
+        let Some(old) = self.basis else {
+            return false;
+        };
+        self.plan_pre_span
+            && self.producer.capacity() - self.producer.free() + 2 >= self.plan_pushed
+            && (old.loop_on, old.ls, old.le) == (basis.loop_on, basis.ls, basis.le)
+            && Self::planned_pos(t, basis) <= self.start_frame
     }
 
     /// Whether the node is parked on THIS plan at a position the transport
@@ -454,7 +489,7 @@ impl TrackFeeder {
             le: t.loop_end(),
         };
         if self.basis != Some(basis) {
-            if self.resumes_held_plan(t, &basis) {
+            if self.resumes_held_plan(t, &basis) || self.holds_pre_span_plan(t, &basis) {
                 self.basis = Some(basis);
             } else {
                 self.replan(t, basis);
@@ -505,6 +540,8 @@ impl TrackFeeder {
             if self.push_fence(next_gen, pos, false) {
                 self.generation = next_gen;
                 self.next_tl = pos;
+                // The run now starts where the jump put it, not where the plan did.
+                self.plan_pre_span = false;
             }
         }
         loop {
@@ -568,6 +605,7 @@ impl TrackFeeder {
             }
             let local = self.next_tl - self.start_frame;
             let got = self.reader.read_at(local, &mut self.scratch[..want])?;
+            self.frames_read += got as u64;
             for i in 0..got {
                 if !self.producer.push(self.scratch[i]) {
                     // Raced full: rewind next_tl to the unpushed frame.
