@@ -200,21 +200,40 @@ class _LyricsTabState extends State<_LyricsTab> {
     await _importDrop(file.path);
   }
 
+  /// Below this tab height the editor and the sync view drop the toolbar
+  /// above them. The dock can leave the side panels as little as the
+  /// timeline's floor, and the toolbar then pushed the editor's Save/Cancel
+  /// and the sync view's Clear/Tap/Done under the dock, out of reach. Both
+  /// keep a way out without it (Cancel, Done); the reader is a plain list
+  /// and keeps it at any height.
+  static const double _kToolbarMinHeight = 128;
+
   @override
   Widget build(BuildContext context) {
-    return Column(
-      children: [
-        if (vm.hasLyrics) _LyricsToolbar(vm: vm, onImport: _browseImport),
-        Expanded(
-          child: DropTarget(
-            onDragDone: (d) async {
-              if (d.files.isEmpty) return;
-              await _importDrop(d.files.first.path);
-            },
-            child: _body(),
-          ),
-        ),
-      ],
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final toolbar =
+            vm.hasLyrics &&
+            (vm.lyricsMode == LyricsMode.read ||
+                constraints.maxHeight >= _kToolbarMinHeight);
+        return Column(
+          children: [
+            if (toolbar) _LyricsToolbar(vm: vm, onImport: _browseImport),
+            Expanded(
+              // Keyed, so the toolbar coming or going (the dock dragged past
+              // the threshold) keeps the editor or the sync list it holds.
+              key: const ValueKey('lyrics-tab-body'),
+              child: DropTarget(
+                onDragDone: (d) async {
+                  if (d.files.isEmpty) return;
+                  await _importDrop(d.files.first.path);
+                },
+                child: _body(),
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
 
@@ -991,11 +1010,22 @@ class _LyricsEditorState extends State<_LyricsEditor> {
     super.dispose();
   }
 
+  /// Below this height the editor tightens its spacing, so Save and Cancel
+  /// stay on screen with a usable line of text above them.
+  static const double _kCompactBelow = 120;
+
   @override
   Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) =>
+          _editor(compact: constraints.maxHeight < _kCompactBelow),
+    );
+  }
+
+  Widget _editor({required bool compact}) {
     final vm = widget.vm;
     return Padding(
-      padding: const EdgeInsets.all(12),
+      padding: EdgeInsets.all(compact ? 8 : 12),
       child: Column(
         children: [
           Expanded(
@@ -1005,7 +1035,10 @@ class _LyricsEditorState extends State<_LyricsEditor> {
                 borderRadius: BorderRadius.circular(8),
                 border: Border.all(color: Studio.border),
               ),
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              padding: EdgeInsets.symmetric(
+                horizontal: 12,
+                vertical: compact ? 4 : 10,
+              ),
               child: TextField(
                 controller: _c,
                 // The user's edits only, not focus or selection churn: the
@@ -1031,7 +1064,7 @@ class _LyricsEditorState extends State<_LyricsEditor> {
               ),
             ),
           ),
-          const SizedBox(height: 12),
+          SizedBox(height: compact ? 6 : 12),
           Row(
             children: [
               StudioButton(
@@ -1127,9 +1160,24 @@ class _LyricsSyncState extends State<_LyricsSync> {
         '${((ms % 1000) ~/ 10).toString().padLeft(2, '0')}';
   }
 
+  /// Below this height the how-to hint scrolls with the lines instead of
+  /// sitting pinned above them: pinned, it pushed Clear / Tap / Done under the
+  /// dock on a short panel (the minimum window with the dock open).
+  static const double _kPinnedHintMinHeight = 176;
+
+  Widget _hint() => Container(
+    width: double.infinity,
+    padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+    color: Studio.accent.withValues(alpha: 0.06),
+    child: const Text(
+      'Play, then press Space (or Tap) on each line as you reach it. '
+      'Click a line to re-time it.',
+      style: TextStyle(color: Studio.textSecondary, fontSize: 11, height: 1.4),
+    ),
+  );
+
   @override
   Widget build(BuildContext context) {
-    final lines = vm.lyrics;
     return Focus(
       autofocus: true,
       onKeyEvent: (node, e) {
@@ -1139,118 +1187,127 @@ class _LyricsSyncState extends State<_LyricsSync> {
         }
         return KeyEventResult.ignored;
       },
-      child: Column(
-        children: [
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
-            color: Studio.accent.withValues(alpha: 0.06),
-            child: const Text(
-              'Play, then press Space (or Tap) on each line as you reach it. '
-              'Click a line to re-time it.',
-              style: TextStyle(
-                color: Studio.textSecondary,
-                fontSize: 11,
-                height: 1.4,
-              ),
-            ),
-          ),
-          Expanded(
-            child: ListView.builder(
-              controller: _scroll,
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
-              itemCount: lines.length,
-              itemBuilder: (context, i) {
-                final l = lines[i];
-                if (l.isBlank) return SizedBox(height: 10, key: _keys[i]);
-                final target = i == vm.syncIndex;
-                return Container(
-                  key: _keys[i],
-                  margin: const EdgeInsets.symmetric(vertical: 2),
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 6,
-                  ),
-                  decoration: BoxDecoration(
-                    color: target
-                        ? Studio.accent.withValues(alpha: 0.12)
-                        : Colors.transparent,
-                    borderRadius: BorderRadius.circular(6),
-                    border: Border.all(
-                      color: target
-                          ? Studio.accent.withValues(alpha: 0.5)
-                          : Colors.transparent,
-                    ),
-                  ),
-                  child: MouseRegion(
-                    cursor: SystemMouseCursors.click,
-                    child: GestureDetector(
-                      onTap: () => vm.stampLyricAt(i),
-                      child: Row(
-                        children: [
-                          SizedBox(
-                            width: 52,
-                            child: Text(
-                              l.isSynced ? _fmt(l.timeMs!) : '—',
-                              style: TextStyle(
-                                color: l.isSynced
-                                    ? Studio.accent
-                                    : Studio.textFaint,
-                                fontSize: 11,
-                                fontWeight: FontWeight.w600,
-                                fontFeatures: const [
-                                  FontFeature.tabularFigures(),
-                                ],
-                              ),
-                            ),
-                          ),
-                          Expanded(
-                            child: Text(
-                              l.text,
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                color: target
-                                    ? Studio.textPrimary
-                                    : Studio.textSecondary,
-                                fontSize: 13,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
+      child: LayoutBuilder(
+        builder: (context, constraints) =>
+            _sync(pinHint: constraints.maxHeight >= _kPinnedHintMinHeight),
+      ),
+    );
+  }
+
+  Widget _sync({required bool pinHint}) {
+    final lines = vm.lyrics;
+    // The hint's slot at the top of the list when it scrolls with the lines.
+    final lead = pinHint ? 0 : 1;
+    return Column(
+      children: [
+        if (pinHint) _hint(),
+        Expanded(
+          child: ListView.builder(
+            controller: _scroll,
+            // Scrolling, the hint spans the list's full width as it does
+            // pinned; the lines take the side padding themselves.
+            padding: pinHint
+                ? const EdgeInsets.symmetric(horizontal: 10, vertical: 10)
+                : const EdgeInsets.only(bottom: 10),
+            itemCount: lines.length + lead,
+            itemBuilder: (context, item) {
+              if (item < lead) {
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 10),
+                  child: _hint(),
                 );
-              },
-            ),
+              }
+              final line = _line(item - lead);
+              return pinHint
+                  ? line
+                  : Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 10),
+                      child: line,
+                    );
+            },
           ),
-          const Divider(height: 1, color: Studio.border),
-          Padding(
-            padding: const EdgeInsets.all(10),
-            child: Row(
-              children: [
-                StudioButton(
-                  label: 'Clear',
-                  variant: StudioButtonVariant.danger,
-                  onTap: vm.clearLyricTimes,
-                ),
-                const Spacer(),
-                StudioButton(
-                  label: 'Tap (Space)',
-                  icon: FIcons.target,
-                  variant: StudioButtonVariant.accent,
-                  onTap: vm.stampNextLyric,
-                ),
-                const SizedBox(width: 8),
-                StudioButton(
-                  label: 'Done',
-                  onTap: () => vm.setLyricsMode(LyricsMode.read),
-                ),
-              ],
-            ),
+        ),
+        const Divider(height: 1, color: Studio.border),
+        Padding(
+          padding: const EdgeInsets.all(10),
+          child: Row(
+            children: [
+              StudioButton(
+                label: 'Clear',
+                variant: StudioButtonVariant.danger,
+                onTap: vm.clearLyricTimes,
+              ),
+              const Spacer(),
+              StudioButton(
+                label: 'Tap (Space)',
+                icon: FIcons.target,
+                variant: StudioButtonVariant.accent,
+                onTap: vm.stampNextLyric,
+              ),
+              const SizedBox(width: 8),
+              StudioButton(
+                label: 'Done',
+                onTap: () => vm.setLyricsMode(LyricsMode.read),
+              ),
+            ],
           ),
-        ],
+        ),
+      ],
+    );
+  }
+
+  /// Line [i] of the sync list: its time and text, tap to stamp it.
+  Widget _line(int i) {
+    final l = vm.lyrics[i];
+    if (l.isBlank) return SizedBox(height: 10, key: _keys[i]);
+    final target = i == vm.syncIndex;
+    return Container(
+      key: _keys[i],
+      margin: const EdgeInsets.symmetric(vertical: 2),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      decoration: BoxDecoration(
+        color: target
+            ? Studio.accent.withValues(alpha: 0.12)
+            : Colors.transparent,
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(
+          color: target
+              ? Studio.accent.withValues(alpha: 0.5)
+              : Colors.transparent,
+        ),
+      ),
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
+          onTap: () => vm.stampLyricAt(i),
+          child: Row(
+            children: [
+              SizedBox(
+                width: 52,
+                child: Text(
+                  l.isSynced ? _fmt(l.timeMs!) : '—',
+                  style: TextStyle(
+                    color: l.isSynced ? Studio.accent : Studio.textFaint,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                    fontFeatures: const [FontFeature.tabularFigures()],
+                  ),
+                ),
+              ),
+              Expanded(
+                child: Text(
+                  l.text,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: target ? Studio.textPrimary : Studio.textSecondary,
+                    fontSize: 13,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

@@ -278,13 +278,22 @@ class _WorkspaceState extends State<_Workspace> {
       });
 
   /// Drop onto an existing vocal take's lane: each file is added as a new clip on that
-  /// take at the playhead (never merged into the existing clips).
-  Future<void> _dropClipToTake(String trackId, List<String> paths) =>
-      _guardedAudioDrop(paths, (audio) async {
-        for (final a in audio) {
-          await vm.addClipToTake(trackId, a);
-        }
-      });
+  /// take at the playhead (never merged into the existing clips) — the playhead at the
+  /// drop, or [atMs] when the caller took it earlier. Every file lands there: each import
+  /// waits for the one before, and read per file, playback running on meanwhile spread a
+  /// multi-file drop across the song.
+  Future<void> _dropClipToTake(
+    String trackId,
+    List<String> paths, {
+    int? atMs,
+  }) {
+    final at = atMs ?? vm.position.value.inMilliseconds;
+    return _guardedAudioDrop(paths, (audio) async {
+      for (final a in audio) {
+        await vm.addClipToTake(trackId, a, atMs: at);
+      }
+    });
+  }
 
   /// Adds a note at the playhead (a point) — used by the header / context menu /
   /// right panel.
@@ -409,8 +418,13 @@ class _WorkspaceState extends State<_Workspace> {
         onAddNote: () => _addNote(track.id),
         onAddTechnique: () => _addTechnique(track.id),
         onAddClip: () async {
+          // "At playhead" means where it was at the tap: the open panel can
+          // stay up for seconds while playback runs on.
+          final atMs = vm.position.value.inMilliseconds;
           final paths = await _pickAudioPaths();
-          if (paths.isNotEmpty) await _dropClipToTake(track.id, paths);
+          if (paths.isNotEmpty) {
+            await _dropClipToTake(track.id, paths, atMs: atMs);
+          }
         },
         onDuplicate: () => vm.duplicateTrack(track.id),
         onSplit: () => vm.splitTrackAtPlayhead(track.id),

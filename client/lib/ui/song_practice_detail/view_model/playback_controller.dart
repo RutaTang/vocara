@@ -136,6 +136,15 @@ class PlaybackController extends ChangeNotifier {
 
   int _loopStartMs = 0;
   int _loopEndMs = 0;
+
+  /// Whether the loop's end is still the default — the end of the content —
+  /// rather than an edge the user dragged. A default end follows the content
+  /// as it grows: a new practice opens on the 20 s placeholder timeline, and
+  /// the first import or take left the region (and every loop pass) stuck on
+  /// those 20 seconds of a three-minute song. Set once the user drags the end
+  /// handle; a dragged start leaves the end the default. Transient, like the
+  /// region itself (neither is saved), so a reopen starts from the default.
+  bool _loopEndFollowsContent = true;
   int get loopStartMs => _loopStartMs;
   int get loopEndMs => _loopEndMs;
   bool get hasLoop => _loopEndMs > _loopStartMs;
@@ -282,16 +291,19 @@ class PlaybackController extends ChangeNotifier {
     _viewport.changed();
   }
 
-  /// Defaults the play region to the content length (the longest take) on first
-  /// load, and keeps it within the (possibly longer) timeline afterwards. Also
-  /// what re-arms the loop after recording disabled the engine's wrap.
+  /// Defaults the play region to the content length (the longest take), keeps
+  /// a default end on the content's end as it grows (see
+  /// [_loopEndFollowsContent]), and keeps a dragged one within it. Also what
+  /// re-arms the loop after recording disabled the engine's wrap.
   void ensureLoopRange() {
     final timeline = _practice()?.timelineDurationMs ?? 0;
     // Clamp the loop to real audio (content), not the padded timeline, and pull
     // it BACK when content shrinks — e.g. deleting the longest take must not
     // leave loopEnd cycling through a now-silent tail.
     final max = _loopMaxMs;
-    if (_loopEndMs <= 0 || _loopEndMs > max) _loopEndMs = max;
+    if (_loopEndFollowsContent || _loopEndMs <= 0 || _loopEndMs > max) {
+      _loopEndMs = max;
+    }
     if (_loopStartMs < 0) _loopStartMs = 0;
     if (_loopStartMs > _loopEndMs - minLoopMs) {
       _loopStartMs = (_loopEndMs - minLoopMs).clamp(0, timeline);
@@ -338,6 +350,8 @@ class PlaybackController extends ChangeNotifier {
     // Guard the lower bound symmetrically: for sub-minLoopMs content
     // `_loopStartMs + minLoopMs` can exceed _loopMaxMs (lower > upper).
     final lo = math.min(_loopStartMs + minLoopMs, _loopMaxMs);
+    // The user's own end from here on: content growth no longer moves it.
+    _loopEndFollowsContent = false;
     _loopEndMs = ms.clamp(lo, _loopMaxMs);
     _pushLoop();
     _snapPlayheadIntoLoop();

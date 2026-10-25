@@ -1191,7 +1191,16 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// Imports [sourcePath] and adds it as a new CLIP on the existing vocal take [trackId] at
   /// the playhead — the drag-drop equivalent of punching a recording onto an armed take.
   /// Existing clips are left untouched (Logic / Cubase: clips never auto-merge).
-  Future<void> addClipToTake(String trackId, String sourcePath) async {
+  ///
+  /// [atMs] is where the clip goes when the caller took the playhead earlier
+  /// than this call: at the tap that opened a file picker (the picker can stay
+  /// up for seconds while playback runs on), or at a drop of several files
+  /// (each one's import waits for the one before).
+  Future<void> addClipToTake(
+    String trackId,
+    String sourcePath, {
+    int? atMs,
+  }) async {
     final practice = _practice;
     if (practice == null) return;
     final target = _trackById(trackId);
@@ -1203,7 +1212,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     // The playhead at the DROP: copying, transcoding and analyzing take
     // seconds, and during playback (or a scrub meanwhile) a read after them
     // placed the clip wherever the playhead had moved on to.
-    final startMs = math.max(0, position.value.inMilliseconds);
+    final startMs = math.max(0, atMs ?? position.value.inMilliseconds);
     await _busyGate.run(() async {
       await _withImportedAudio(sourcePath, (dest) async {
         final waveform = await _waveforms.analyze(dest);
