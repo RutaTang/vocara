@@ -53,10 +53,16 @@ class _FixedGuard implements LibraryGuard {
 /// reclaiming needs it EXCLUSIVE, which no process can get while any other
 /// one holds it at all:
 ///
-///  * at boot, [forLibrary] takes it shared (waiting, bounded, while an
-///    owner's boot holds it exclusive), then [Persistence.open] tries to
-///    upgrade. Only a process that is alone on the library gets exclusive,
-///    runs recovery and the sweeps, and hands it back to shared;
+///  * at boot, [forLibrary] first tries for it EXCLUSIVE from nothing — of
+///    launches racing on an idle library exactly one wins (taking shared
+///    first, then upgrading, let two simultaneous launches refuse each other,
+///    leaving the library unowned and a pending upgrade refused by both).
+///    The winner is the boot's owner ([tryExclusive] hands it that claim):
+///    it runs recovery and the sweeps, then hands the lock back to shared.
+///    Every other launch waits for its shared hold — however long an owner's
+///    boot takes, telling the app once the wait runs long, but NEVER going
+///    on without it: an instance with no hold is one the owner's sweeps
+///    cannot see, and they trashed the take it was recording;
 ///  * Repair library tries the same upgrade and reclaims nothing without it.
 ///
 /// An instance that started second keeps its shared hold, so it still guards
@@ -76,14 +82,14 @@ class _FixedGuard implements LibraryGuard {
 /// exclusive holds inside this process are counted. The kernel releases
 /// everything when the process exits, however it exits.
 class LibraryLock implements LibraryGuard {
-  LibraryLock._(this.path, this._file, this._poll);
+  LibraryLock._(this.path, this._file);
 
   /// The lock file's name inside the library directory.
   static const String fileName = 'vocara.lock';
 
-  /// How long boot waits for an owner's boot to hand the lock back before it
-  /// goes on without a shared hold (see [forLibrary]).
-  static const Duration defaultWait = Duration(seconds: 10);
+  /// How long a launch waits on an owner's boot before [forLibrary] tells
+  /// the app (which then shows a waiting window; the wait goes on).
+  static const Duration defaultWait = Duration(seconds: 2);
 
   /// How often a wait for the shared hold retries.
   static const Duration defaultPoll = Duration(milliseconds: 100);
@@ -104,14 +110,16 @@ class LibraryLock implements LibraryGuard {
   /// all (see [_unsupported]).
   final RandomAccessFile? _file;
 
-  final Duration _poll;
-
   /// Whether this process holds the lock at least shared right now.
   bool _shared = false;
 
   /// [tryExclusive] calls in this process that returned true and are not
   /// released yet. The lock is exclusive while this is above zero.
   int _exclusiveHolds = 0;
+
+  /// The exclusive hold [forLibrary] took from nothing, not yet handed to a
+  /// [tryExclusive] (the boot's): it counts in [_exclusiveHolds] already.
+  bool _bootClaim = false;
 
   /// Set when the platform refused the lock for a reason that says nothing
   /// about another process (no lock file, a filesystem without record
@@ -135,18 +143,15 @@ class LibraryLock implements LibraryGuard {
   @visibleForTesting
   bool get holdsLock => _shared || _exclusiveHolds > 0;
 
-  /// This process's guard for [dir], holding the lock shared when it can.
-  ///
-  /// The shared hold is refused only while another process's boot holds the
-  /// lock exclusive, which lasts as long as its recovery and sweeps. This
-  /// retries every [poll] for up to [wait], then returns without a hold
-  /// rather than hang the launch: the caller then runs as a non-owner (an
-  /// upgrade still fails while the other process holds the lock), and the
-  /// shared hold keeps being retried in the background until it is taken.
+  /// This process's guard for [dir]: holding the lock exclusive when this
+  /// launch won it from nothing (the boot's claim, see the class doc), else
+  /// shared — taken only once an owner's boot hands it back. [onStillWaiting]
+  /// is called once if that takes longer than [wait]; the wait goes on.
   static Future<LibraryLock> forLibrary(
     Directory dir, {
     Duration wait = defaultWait,
     Duration poll = defaultPoll,
+    void Function()? onStillWaiting,
   }) async {
     final path = p.join(p.canonicalize(dir.path), fileName);
     final known = _byPath[path];
@@ -157,7 +162,7 @@ class LibraryLock implements LibraryGuard {
       // nothing: open the new file.
       if (lock._file == null || await File(path).exists()) return lock;
     }
-    final created = _open(path, wait, poll);
+    final created = _open(path, wait, poll, onStillWaiting);
     _byPath[path] = created;
     return created;
   }
@@ -166,6 +171,7 @@ class LibraryLock implements LibraryGuard {
     String path,
     Duration wait,
     Duration poll,
+    void Function()? onStillWaiting,
   ) async {
     RandomAccessFile? file;
     try {
@@ -175,26 +181,37 @@ class LibraryLock implements LibraryGuard {
     } on FileSystemException catch (e) {
       _logUnsupported(e);
     }
-    final lock = LibraryLock._(path, file, poll);
+    final lock = LibraryLock._(path, file);
     if (file == null) {
       lock._unsupported = true;
       return lock;
     }
-    final deadline = DateTime.now().add(wait);
+    if (await lock._locked(lock._tryBootClaim)) return lock;
+    final slow = DateTime.now().add(wait);
+    var told = false;
     while (!await lock._locked(lock._tryShared)) {
       if (lock._unsupported) return lock;
-      if (!DateTime.now().isBefore(deadline)) {
+      if (!told && !DateTime.now().isBefore(slow)) {
+        told = true;
         DiagnosticsLog.instance.log(
           'persistence',
           'library lock still held exclusively by another process after '
-              '${wait.inMilliseconds} ms; opening without it for now',
+              '${wait.inMilliseconds} ms; still waiting for it',
         );
-        unawaited(lock._keepTryingShared());
-        return lock;
+        onStillWaiting?.call();
       }
       await Future<void>.delayed(poll);
     }
     return lock;
+  }
+
+  /// The whole library from nothing, never waiting: refused while any other
+  /// process holds the lock at all. Call only through [_locked].
+  Future<bool> _tryBootClaim() async {
+    if (!await _lock(FileLock.exclusive)) return false;
+    _exclusiveHolds = 1;
+    _bootClaim = true;
+    return true;
   }
 
   /// One non-blocking attempt at the shared hold. Call only through
@@ -206,19 +223,14 @@ class LibraryLock implements LibraryGuard {
     return _shared;
   }
 
-  /// Retries the shared hold until it is taken (or the lock turns out to be
-  /// unsupported), so an instance that booted while another one owned the
-  /// library still ends up guarding it.
-  Future<void> _keepTryingShared() async {
-    while (!_unsupported && !holdsLock) {
-      await Future<void>.delayed(_poll);
-      await _locked(_tryShared);
-    }
-  }
-
   @override
   Future<bool> tryExclusive() => _locked(() async {
     if (_unsupported) return true;
+    if (_bootClaim) {
+      // The hold [forLibrary] took from nothing: this is the boot's.
+      _bootClaim = false;
+      return true;
+    }
     if (_exclusiveHolds > 0) {
       _exclusiveHolds++;
       return true;

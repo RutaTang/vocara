@@ -706,10 +706,13 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     return _replaceLyrics(lines);
   }
 
-  /// Persists NEW words (an import, an edit), shown at once: the sync cursor re-seeds on them
-  /// by itself (see [_cursor]).
+  /// Persists a NEW text (an import, an edit), shown at once, and re-seeds the sync cursor on
+  /// whatever stands next (this text, or the disk's if the write fails). Forced, not left to
+  /// [_cursor]'s words check: the same words re-imported without their times are a new text
+  /// too, and the cursor left at line d stamped it while a–c had lost theirs.
   Future<bool> _replaceLyrics(List<LyricLine> lines) {
     final saved = _setLyrics(lines);
+    _syncWords = null;
     notifyListeners();
     return saved;
   }

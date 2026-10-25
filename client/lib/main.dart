@@ -76,7 +76,10 @@ Future<void> main() async {
   // failures get a dedicated minimal error window instead.
   final Persistence persistence;
   try {
-    persistence = await Persistence.open();
+    persistence = await Persistence.open(
+      onWaitingForLibrary: () =>
+          _runFatalWindow(FatalOpenScreen.waitingForLibrary(onQuit: _quit)),
+    );
   } on NewerLibraryException catch (e) {
     DiagnosticsLog.instance.log('boot', 'open refused: $e');
     _runFatalWindow(FatalOpenScreen.newerLibrary(onQuit: _quit));

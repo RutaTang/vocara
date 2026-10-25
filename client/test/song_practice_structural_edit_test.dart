@@ -1350,6 +1350,30 @@ void main() {
 
   group('the sync cursor follows the words under it', () {
     test(
+      'the same words re-imported without their times restart the cursor',
+      () async {
+        final vm = await pumpVm();
+        await vm.setLyricsText('a\nb\nc\nd\ne\nf');
+        vm.setLyricsMode(LyricsMode.sync);
+        vm.playback.position.value = const Duration(milliseconds: 1000);
+        for (var i = 0; i < 3; i++) {
+          await vm.stampNextLyric();
+        }
+        expect(vm.syncIndex, 3);
+        // In Sync mode the user drops the same plain lyrics again: every time is gone.
+        expect(await vm.importLyrics('a\nb\nc\nd\ne\nf'), isTrue);
+        expect(vm.lyrics.every((l) => l.timeMs == null), isTrue);
+        vm.playback.position.value = const Duration(milliseconds: 5000);
+        await vm.stampNextLyric();
+        expect(
+          vm.lyrics[0].timeMs,
+          5000,
+          reason: 'the cursor stayed on d while a-c had lost their times',
+        );
+      },
+    );
+
+    test(
       'a failed import puts the cursor back on the restored words',
       () async {
         final vm = await pumpVm();

@@ -229,19 +229,31 @@ class Persistence {
   /// surfaced by main() in a dedicated error window. A library another
   /// process holds otherwise opens normally, minus boot recovery and the
   /// boot sweeps (see [ownsLibrary]).
+  ///
+  /// [onWaitingForLibrary] is called once if another Vocara's boot keeps this
+  /// launch waiting for its hold on the library (see [LibraryLock]): the app
+  /// shows a window meanwhile. The wait has no deadline — going on without
+  /// the hold left the work of this instance where that boot's sweeps could
+  /// trash it.
   static Future<Persistence> open({
     Directory? dir,
     WavAnalyzer? analyze,
     Future<LibraryGuard> Function(Directory dir)? libraryLock,
+    void Function()? onWaitingForLibrary,
   }) async {
     dir ??= await getApplicationSupportDirectory();
     // The single-instance guard comes first: a half-finished migration's
     // marker may belong to another process that is migrating right now. This
-    // instance holds the lock shared from here on (see [LibraryLock]); it
-    // boots as the owner only if it can upgrade to exclusive, which no
-    // process can while any other has the library open, and hands the lock
-    // back to shared when the boot is done.
-    final guard = await (libraryLock ?? LibraryLock.forLibrary)(dir);
+    // instance holds the lock from here on (see [LibraryLock]); it boots as
+    // the owner only if it took the lock exclusive, which no process can
+    // while any other has the library open, and hands it back to shared when
+    // the boot is done.
+    final guard =
+        await (libraryLock ??
+            (d) => LibraryLock.forLibrary(
+              d,
+              onStillWaiting: onWaitingForLibrary,
+            ))(dir);
     final ownsLibrary = await guard.tryExclusive();
     try {
       return await _open(dir, analyze, guard, ownsLibrary);

@@ -352,28 +352,53 @@ void main() {
     expect(lock.holdsLock, isTrue, reason: 'a refused upgrade keeps shared');
   }, skip: _hasPython ? false : _noPython);
 
-  test('a launch gives up waiting on an owner that never finishes booting, '
-      'opens as a non-owner, and takes its shared hold once it can', () async {
+  test("a launch keeps waiting out an owner's long boot, tells the app once, "
+      'and opens holding the lock', () async {
+    // It used to give up after a deadline and run with no hold at all: the
+    // owner's boot sweeps, cleared before it started, then trashed the take
+    // it was recording.
     final owner = await _OtherProcess.hold(lockPath(), shared: false);
     addTearDown(owner.release);
 
-    final sw = Stopwatch()..start();
-    final lock = await LibraryLock.forLibrary(
+    var told = 0;
+    LibraryLock? opened;
+    final launch = LibraryLock.forLibrary(
       root,
-      wait: const Duration(milliseconds: 300),
+      wait: const Duration(milliseconds: 200),
       poll: const Duration(milliseconds: 20),
-    );
-    expect(sw.elapsed, greaterThanOrEqualTo(const Duration(milliseconds: 300)));
-    expect(sw.elapsed, lessThan(const Duration(seconds: 10)));
-    expect(lock.holdsLock, isFalse);
-    expect(await lock.tryExclusive(), isFalse, reason: 'the owner runs');
+      onStillWaiting: () => told++,
+    ).then((l) => opened = l);
+    await Future<void>.delayed(const Duration(milliseconds: 800));
+    expect(opened, isNull, reason: 'went on without a hold');
+    expect(told, 1, reason: 'the app is told once, to show its window');
 
     await owner.release();
-    final deadline = DateTime.now().add(_helperTimeout);
-    while (!lock.holdsLock && DateTime.now().isBefore(deadline)) {
-      await Future<void>.delayed(const Duration(milliseconds: 20));
-    }
-    expect(lock.holdsLock, isTrue, reason: 'the background retry took it');
+    final lock = await launch.timeout(_helperTimeout);
+    expect(lock.holdsLock, isTrue);
+    expect(told, 1);
+    expect(await lock.tryExclusive(), isTrue, reason: 'alone now');
+    await lock.releaseExclusive();
+    expect(await _OtherProcess.couldTake(lockPath(), shared: false), isFalse);
+  }, skip: _hasPython ? false : _noPython);
+
+  test('a launch on an idle library takes it exclusive from nothing, so of '
+      'launches racing there exactly one owns it', () async {
+    // Shared first, then an upgrade, let two launches at the same moment
+    // refuse each other: neither owned the library, and a pending upgrade
+    // was refused by both ("another Vocara is using it").
+    final lock = await LibraryLock.forLibrary(root);
+    expect(
+      await _OtherProcess.couldTake(lockPath(), shared: true),
+      isFalse,
+      reason: 'a second launch must not get in before this boot is done',
+    );
+    expect(await lock.tryExclusive(), isTrue, reason: "the boot's claim");
+    await lock.releaseExclusive();
+    expect(
+      await _OtherProcess.couldTake(lockPath(), shared: true),
+      isTrue,
+      reason: 'handed back to shared once the boot is done',
+    );
     expect(await _OtherProcess.couldTake(lockPath(), shared: false), isFalse);
   }, skip: _hasPython ? false : _noPython);
 

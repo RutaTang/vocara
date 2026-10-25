@@ -44,6 +44,23 @@ class FatalOpenScreen extends StatelessWidget {
         key: key,
       );
 
+  /// Another Vocara is still starting up on the library (recovering a
+  /// crashed take can take a while), and this one waits for it before it
+  /// opens: running alongside that boot, unguarded, its cleanup could trash
+  /// what this one records. Not an error — the real window replaces this one
+  /// as soon as the wait ends — but the same minimal chrome.
+  const FatalOpenScreen.waitingForLibrary({
+    required VoidCallback onQuit,
+    Key? key,
+  }) : this(
+         title: 'Waiting for another Vocara to finish starting up…',
+         message:
+             'This window opens by itself as soon as it has. Quit if you '
+             'would rather not wait.',
+         onQuit: onQuit,
+         key: key,
+       );
+
   /// Any other fatal open failure: show the error and offer the library
   /// folder (for backups or support) plus quit.
   const FatalOpenScreen.openFailed({

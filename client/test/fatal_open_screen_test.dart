@@ -45,6 +45,25 @@ void main() {
     expect(quits, 1);
   });
 
+  testWidgets('waiting window says what it waits for and can quit', (
+    tester,
+  ) async {
+    var quits = 0;
+    await tester.pumpWidget(
+      FatalOpenApp(
+        screen: FatalOpenScreen.waitingForLibrary(onQuit: () => quits++),
+      ),
+    );
+
+    expect(
+      find.text('Waiting for another Vocara to finish starting up…'),
+      findsOneWidget,
+    );
+    expect(find.text('Reveal Library Folder'), findsNothing);
+    await tester.tap(find.text('Quit Vocara'));
+    expect(quits, 1);
+  });
+
   testWidgets('open-failed window shows the error detail and both actions '
       'work', (tester) async {
     var quits = 0;
