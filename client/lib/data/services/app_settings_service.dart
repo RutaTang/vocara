@@ -134,22 +134,38 @@ class AppSettingsService extends ChangeNotifier {
   /// while it is connected, else the system default — what the engine records from when the
   /// selection is System Default, or when the chosen device is unplugged. Keyed by the selection
   /// instead, a choice made for one interface followed the default onto the next.
-  String get _inputKey {
+  String get _inputKey => _keyIn(_inputDevices);
+
+  // [_inputKey] against [devices].
+  String _keyIn(List<AudioDevice> devices) {
     final uid = _inputDeviceUid;
-    if (uid != null && uid.isNotEmpty && !_isMissing(_inputDevices, uid)) {
+    if (uid != null && uid.isNotEmpty && !_isMissing(devices, uid)) {
       return uid;
     }
-    for (final d in _inputDevices) {
+    for (final d in devices) {
       if (d.isDefault) return d.uid;
     }
     return uid ?? '';
   }
 
+  // The choice for the device that [key] names.
+  int _channelFor(String key) =>
+      _inputChannelByUid[key] ?? GraphAudioPlaybackService.inputChannelAuto;
+
+  /// The input-channel choice of the device capturing NOW, read off a fresh enumeration of the
+  /// inputs without adopting it: the list is polled only while Settings is open, and the device
+  /// poll owns adopting it (with its switches back to a returned device).
+  int _channelCapturingNow() => _channelFor(_keyIn(_enumerateInputs()));
+
+  /// Before a take: point the attached engine at the input-channel choice of the device capturing
+  /// now (an interface plugged in, or a default that moved, since the screen opened). Only that —
+  /// a full [refreshDevices] there also switched a returned device back synchronously, re-opening
+  /// the mic or blocking on the output host right as the take armed.
+  void syncInputChannel() => _engine?.setInputChannel(_channelCapturingNow());
+
   /// Which input(s) of the current input device the engine records and monitors: a
   /// [GraphAudioPlaybackService] `inputChannel*` mode, Auto unless chosen for this device.
-  int get inputChannel =>
-      _inputChannelByUid[_inputKey] ??
-      GraphAudioPlaybackService.inputChannelAuto;
+  int get inputChannel => _channelFor(_inputKey);
 
   /// The name of the device the input-channel choice applies to: the one capturing (see
   /// [_inputKey]), which is the system default while the chosen device is unplugged — the panel
@@ -551,14 +567,13 @@ class AppSettingsService extends ChangeNotifier {
   /// engine starts on Auto and the default gain, so without them a singer who picked Input 1 to
   /// keep a guitar on input 2 out got it blended into those takes, at a level they had not set.
   ///
-  /// Re-reads the devices first: the list is polled only while Settings is open, and the channel
-  /// choice belongs to the device capturing NOW — an interface plugged in since launch read as
-  /// missing, and its takes ran on the built-in mic's choice.
+  /// The channel choice is the device capturing NOW's (see [_channelCapturingNow]): read off the
+  /// polled list, an interface plugged in since launch read as missing, and its takes ran on the
+  /// built-in mic's choice.
   void applyInputTo(GraphAudioPlaybackService engine) {
-    refreshDevices();
     final uid = _inputDeviceUid;
     if (uid != null && uid.isNotEmpty) engine.setInputDevice(uid);
-    engine.setInputChannel(inputChannel);
+    engine.setInputChannel(_channelCapturingNow());
     engine.setInputGain(_dbToLinear(_recordGainDb));
   }
 

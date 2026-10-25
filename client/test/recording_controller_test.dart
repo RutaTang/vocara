@@ -111,7 +111,7 @@ class _FakeWaveforms extends Fake implements WaveformService {
 
 class _FakeSettings extends Fake implements AppSettingsService {
   @override
-  void refreshDevices() {}
+  void syncInputChannel() {}
 
   @override
   bool get bluetoothInOutConflict => false;

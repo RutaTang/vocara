@@ -378,11 +378,10 @@ class RecordingController extends ChangeNotifier {
       await _analysis.setLiveMonitor(false);
       final engine = _graphEngine();
       if (engine == null) return;
-      // The devices are polled only while Settings is open: re-read them, so a
-      // take records on the input-channel choice of the device capturing now
-      // (an interface plugged in, or a default that moved, since the screen
-      // opened) — refreshDevices pushes it to the engine when that changed.
-      _appSettings.refreshDevices();
+      // The devices are polled only while Settings is open: the take records
+      // on the input-channel choice of the device capturing now (an interface
+      // plugged in, or a default that moved, since the screen opened).
+      _appSettings.syncInputChannel();
       final starting = _mic.start(_takeDestination);
       // The arm window is open: show it, so Stop reaches [stopRecording].
       notifyListeners();

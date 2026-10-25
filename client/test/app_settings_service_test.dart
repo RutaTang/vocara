@@ -650,6 +650,32 @@ void main() {
     });
 
     test(
+      'a take start re-keys the channel without switching devices',
+      () async {
+        // Doing the full device refresh there also switched a returned device
+        // back synchronously — re-opening the mic, or blocking on the output
+        // host — right as the take armed. That stays the device poll's.
+        ins = [_builtInMic];
+        storage.doc = {
+          'inputDeviceUid': _interface.uid,
+          'inputChannelByUid': {_interface.uid: 2},
+        };
+        await service.load();
+        final engine = _FakeEngine();
+        service.attachEngine(engine);
+        engine.inputCalls.clear();
+        ins = [_builtInMic, _interface]; // plugged back in
+
+        service.syncInputChannel();
+        expect(engine.inputChannelCalls.last, 2, reason: "the interface's");
+        expect(engine.inputCalls, isEmpty, reason: 'no device switch');
+
+        service.refreshDevices(); // the poll still switches it back
+        expect(engine.inputCalls, [_interface.uid]);
+      },
+    );
+
+    test(
       'System Default keeps each default device on its own choice',
       () async {
         // Keyed by the selection, a choice made while one interface was the
