@@ -136,6 +136,10 @@ pub struct ReverbNode {
     wet: Smoothed,
     dry: Smoothed,
     width: Smoothed,
+    /// Whether the comb/allpass lines may hold non-zero state (any processed block since
+    /// the last clear). A clean reverb lets reset() — run on the audio thread for every
+    /// reverb in the graph on each seek — skip sweeping ~110 KB of lines.
+    dirty: bool,
     sr: f64,
 }
 
@@ -160,6 +164,7 @@ impl ReverbNode {
             wet: Smoothed::new(wet),
             dry: Smoothed::new(dry),
             width: Smoothed::new(width),
+            dirty: false,
             sr,
         }
     }
@@ -175,6 +180,7 @@ impl Node for ReverbNode {
         self.sr = sample_rate;
         self.left = Channel::new(sample_rate, 0);
         self.right = Channel::new(sample_rate, STEREO_SPREAD);
+        self.dirty = false;
         let tau = 0.02;
         self.feedback.set_time(tau, sample_rate);
         self.damp1.set_time(tau, sample_rate);
@@ -193,6 +199,7 @@ impl Node for ReverbNode {
         let mut feed = [0.0f32; 2];
         match inp {
             Some(inp) => {
+                self.dirty = true;
                 for i in 0..frames {
                     let il = inp[CHANNELS * i];
                     let ir = inp[CHANNELS * i + 1];
@@ -250,7 +257,55 @@ impl Node for ReverbNode {
     }
 
     fn reset(&mut self) {
-        self.left.clear();
-        self.right.clear();
+        if self.dirty {
+            self.left.clear();
+            self.right.clear();
+            self.dirty = false;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run_block(r: &mut ReverbNode, input: &[f32]) {
+        let mut out = vec![0.0; input.len()];
+        let inputs: [&[f32]; 1] = [input];
+        let mut outs: [&mut [f32]; 1] = [&mut out[..]];
+        let mut io = ProcessIo {
+            inputs: &inputs,
+            outputs: &mut outs[..],
+            frames: input.len() / CHANNELS,
+            tl: 0,
+            sr: 48_000.0,
+        };
+        r.process(&mut io);
+    }
+
+    #[test]
+    fn a_seek_does_not_sweep_lines_nothing_wrote() {
+        // A freshly built reverb's comb/allpass lines are already silent: a seek's reset()
+        // (audio thread, every reverb in the graph) must not sweep them.
+        let mut r = ReverbNode::default_bus();
+        r.prepare(48_000.0, 256);
+        r.left.combs[0].buf[7] = 1.0;
+        r.reset();
+        assert_eq!(r.left.combs[0].buf[7], 1.0, "reset swept untouched lines");
+
+        // Lines the reverb has run through ARE cleared.
+        r.left.combs[0].buf[7] = 0.0;
+        run_block(&mut r, &[0.5; 512]);
+        r.reset();
+        let all_zero = |c: &Channel| {
+            c.combs
+                .iter()
+                .all(|k| k.buf.iter().all(|&s| s == 0.0) && k.store == 0.0)
+                && c.allpasses.iter().all(|a| a.buf.iter().all(|&s| s == 0.0))
+        };
+        assert!(
+            all_zero(&r.left) && all_zero(&r.right),
+            "reset must clear a used reverb"
+        );
     }
 }

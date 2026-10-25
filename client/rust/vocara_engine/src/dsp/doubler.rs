@@ -23,6 +23,9 @@ pub struct DoublerNode {
     /// Ring entries still holding pre-bypass audio, counted down while bypassed as process()
     /// progressively overwrites them with silence (mirrors DelayNode's ghost-echo guard).
     stale: usize,
+    /// Whether the lines may hold non-zero audio (mirrors DelayNode's): lets reset() skip
+    /// clearing lines that are already silent.
+    dirty: bool,
     phase_l: f32,
     phase_r: f32,
     delay_ms: f32,
@@ -41,6 +44,7 @@ impl DoublerNode {
             buf_r: vec![0.0; len],
             pos: 0,
             stale: 0,
+            dirty: false,
             phase_l: 0.0,
             phase_r: std::f32::consts::PI, // L/R out of phase for width
             delay_ms: 18.0,
@@ -78,6 +82,7 @@ impl Node for DoublerNode {
         self.buf_r = vec![0.0; len];
         self.pos = 0;
         self.stale = 0; // freshly zeroed lines
+        self.dirty = false;
     }
 
     fn process(&mut self, io: &mut ProcessIo) {
@@ -109,12 +114,16 @@ impl Node for DoublerNode {
                 self.pos = (self.pos + 1) % len;
             }
             self.stale -= clear;
+            if self.stale == 0 {
+                self.dirty = false; // the sweep has covered the whole line
+            }
             return;
         }
         let len = self.buf_l.len();
         if len < 4 {
             return;
         }
+        self.dirty = true;
         let mix = self.mix.clamp(0.0, 1.0);
         let base = (self.delay_ms as f64 * 0.001 * self.sr) as f32;
         let depth = (self.depth_ms as f64 * 0.001 * self.sr) as f32;
@@ -164,16 +173,60 @@ impl Node for DoublerNode {
 
     fn reset(&mut self) {
         // Seek clears the modulated delay lines and resets the LFO phase so the
-        // doubler doesn't smear pre-jump audio across the discontinuity.
-        for s in self.buf_l.iter_mut() {
-            *s = 0.0;
-        }
-        for s in self.buf_r.iter_mut() {
-            *s = 0.0;
+        // doubler doesn't smear pre-jump audio across the discontinuity. Lines known to be
+        // silent are left alone (see `dirty`).
+        if self.dirty {
+            for s in self.buf_l.iter_mut() {
+                *s = 0.0;
+            }
+            for s in self.buf_r.iter_mut() {
+                *s = 0.0;
+            }
         }
         self.pos = 0;
         self.stale = 0;
+        self.dirty = false;
         self.phase_l = 0.0;
         self.phase_r = std::f32::consts::PI;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run_block(d: &mut DoublerNode, input: &[Smp]) {
+        let mut out = vec![0.0; input.len()];
+        let inputs: [&[Smp]; 1] = [input];
+        let mut outs: [&mut [Smp]; 1] = [&mut out[..]];
+        let mut io = ProcessIo {
+            inputs: &inputs,
+            outputs: &mut outs[..],
+            frames: input.len() / CHANNELS,
+            tl: 0,
+            sr: 48_000.0,
+        };
+        d.process(&mut io);
+    }
+
+    #[test]
+    fn a_seek_does_not_sweep_a_line_nothing_wrote() {
+        // Same contract as the delay's: a never-enabled doubler's lines are already silent,
+        // so a seek's reset() must not sweep them on the audio thread.
+        let mut d = DoublerNode::new();
+        d.prepare(48_000.0, 256);
+        run_block(&mut d, &[0.5; 512]); // bypassed: nothing reaches the lines
+        d.buf_l[123] = 1.0;
+        d.reset();
+        assert_eq!(d.buf_l[123], 1.0, "reset swept a line nothing had written");
+
+        d.buf_l[123] = 0.0;
+        d.set_param(param::BYPASS, 0.0);
+        run_block(&mut d, &[0.5; 512]);
+        d.reset();
+        assert!(
+            d.buf_l.iter().chain(d.buf_r.iter()).all(|&s| s == 0.0),
+            "reset must clear lines that were written"
+        );
     }
 }

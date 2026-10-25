@@ -23,6 +23,11 @@ pub struct DelayNode {
     /// progressively overwrites them with silence (see the bypass branch). Re-armed to the
     /// full line length on every active→bypassed transition.
     stale: usize,
+    /// Whether the ring may hold non-zero audio: set by the active path's writes, cleared
+    /// once a bypass has swept the whole line (or a reset has). A clean line lets reset()
+    /// skip its O(line) clear — a seek runs it on the audio thread for every vocal clip's
+    /// delay (~0.75 MB each), and most of them were never switched on.
+    dirty: bool,
     time_ms: f32,
     feedback: f32,
     mix: f32,
@@ -38,6 +43,7 @@ impl DelayNode {
             buf_r: vec![0.0; len],
             pos: 0,
             stale: 0,
+            dirty: false,
             time_ms: 300.0,
             feedback: 0.3,
             mix: 0.0,
@@ -61,6 +67,7 @@ impl Node for DelayNode {
         self.buf_r = vec![0.0; len];
         self.pos = 0;
         self.stale = 0; // freshly zeroed line
+        self.dirty = false;
     }
 
     fn process(&mut self, io: &mut ProcessIo) {
@@ -94,6 +101,9 @@ impl Node for DelayNode {
                 self.pos = (self.pos + 1) % len;
             }
             self.stale -= clear;
+            if self.stale == 0 {
+                self.dirty = false; // the sweep has covered the whole line
+            }
             return;
         }
 
@@ -101,6 +111,7 @@ impl Node for DelayNode {
         if len == 0 {
             return;
         }
+        self.dirty = true;
         let d = ((self.time_ms as f64 * 0.001 * self.sr) as usize).clamp(1, len - 1);
         let fb = self.feedback.clamp(0.0, 0.98);
         let mix = self.mix.clamp(0.0, 1.0);
@@ -140,14 +151,73 @@ impl Node for DelayNode {
 
     fn reset(&mut self) {
         // Seek clears the echo buffer so pre-jump audio (up to MAX_SECONDS, plus
-        // accumulated feedback) doesn't bleed across the discontinuity.
-        for s in self.buf_l.iter_mut() {
-            *s = 0.0;
-        }
-        for s in self.buf_r.iter_mut() {
-            *s = 0.0;
+        // accumulated feedback) doesn't bleed across the discontinuity. A line known to be
+        // silent is left alone (see `dirty`).
+        if self.dirty {
+            for s in self.buf_l.iter_mut() {
+                *s = 0.0;
+            }
+            for s in self.buf_r.iter_mut() {
+                *s = 0.0;
+            }
         }
         self.pos = 0;
         self.stale = 0;
+        self.dirty = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run_block(d: &mut DelayNode, input: &[Smp]) {
+        let mut out = vec![0.0; input.len()];
+        let inputs: [&[Smp]; 1] = [input];
+        let mut outs: [&mut [Smp]; 1] = [&mut out[..]];
+        let mut io = ProcessIo {
+            inputs: &inputs,
+            outputs: &mut outs[..],
+            frames: input.len() / CHANNELS,
+            tl: 0,
+            sr: 48_000.0,
+        };
+        d.process(&mut io);
+    }
+
+    #[test]
+    fn a_seek_does_not_sweep_a_line_nothing_wrote() {
+        // reset() runs on the audio thread for every vocal clip's delay on every seek (a
+        // ruler drag seeks per pointer move), and a never-enabled delay's ~0.75 MB line is
+        // already silent. Plant a sentinel where only a sweep would look: it must survive.
+        let mut d = DelayNode::new();
+        d.prepare(48_000.0, 256);
+        run_block(&mut d, &[0.5; 512]); // bypassed: nothing reaches the line
+        d.buf_l[123] = 1.0;
+        d.reset();
+        assert_eq!(d.buf_l[123], 1.0, "reset swept a line nothing had written");
+
+        // A line the active path wrote IS cleared.
+        d.buf_l[123] = 0.0;
+        d.set_param(param::BYPASS, 0.0);
+        run_block(&mut d, &[0.5; 512]);
+        d.reset();
+        assert!(
+            d.buf_l.iter().chain(d.buf_r.iter()).all(|&s| s == 0.0),
+            "reset must clear a line that was written"
+        );
+
+        // A bypass that has fully swept the line leaves it clean again.
+        d.set_param(param::BYPASS, 0.0);
+        run_block(&mut d, &[0.5; 512]);
+        d.set_param(param::BYPASS, 1.0);
+        let line = d.buf_l.len() * CHANNELS;
+        run_block(&mut d, &vec![0.0; line]);
+        d.buf_l[123] = 1.0;
+        d.reset();
+        assert_eq!(
+            d.buf_l[123], 1.0,
+            "reset swept a line the bypass had cleaned"
+        );
     }
 }
