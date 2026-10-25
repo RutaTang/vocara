@@ -82,6 +82,14 @@ class _FakeVm extends Fake implements SongPracticeDetailViewModel {
     if (path.endsWith('.lrc')) text = 'dropped line one\ndropped line two';
   }
 
+  // What the sync view reads.
+  @override
+  int get syncIndex => 0;
+  @override
+  Future<void> stampNextLyric() async {}
+  @override
+  Future<void> stampLyricAt(int index) async {}
+
   @override
   Future<bool> applyEditedLyrics(String t) async {
     applied = t;
@@ -154,14 +162,18 @@ bool _onScreen(WidgetTester tester, String text) {
 bool _highlighted(WidgetTester tester, String text) =>
     tester.widget<Text>(find.text(text)).style!.fontWeight == FontWeight.w700;
 
-Future<void> _pumpPanel(WidgetTester tester, _FakeVm vm) {
+Future<void> _pumpPanel(
+  WidgetTester tester,
+  _FakeVm vm, {
+  double textScale = 0.6,
+}) {
   return tester.pumpWidget(
     MaterialApp(
       home: MediaQuery(
         // The em-wide test font overflows the fixed-width tab bar that real
         // fonts fit comfortably; scale text down — this test targets the
         // drop-to-editor routing, not tab-bar layout.
-        data: const MediaQueryData(textScaler: TextScaler.linear(0.6)),
+        data: MediaQueryData(textScaler: TextScaler.linear(textScale)),
         child: Scaffold(
           body: Align(
             alignment: Alignment.topLeft,
@@ -287,6 +299,27 @@ void main() {
     await tester.pump();
     expect(vm.applied, 'first verse\nsecond');
     expect(vm.mode, LyricsMode.read);
+  });
+
+  testWidgets('a save that lands after the user moved on to Sync leaves Sync', (
+    tester,
+  ) async {
+    // Save closed the editor when its write landed, so a user who had tapped
+    // Sync meanwhile (the lyrics already showed) was thrown back to Read.
+    // (The sync toolbar needs a smaller scale than the editor to fit the
+    // em-wide test font.)
+    final vm = _FakeVm()..saveGate = Completer<void>();
+    await _pumpPanel(tester, vm, textScale: 0.5);
+    await tester.enterText(find.byType(TextField), 'first verse');
+    await tester.tap(find.text('Save'));
+    await tester.pump();
+    await tester.tap(find.byTooltip('Sync (tap-to-time)'));
+    await _pumpPanel(tester, vm, textScale: 0.5); // the fake does not notify
+    expect(vm.mode, LyricsMode.sync);
+    vm.saveGate!.complete();
+    await tester.pump();
+    await tester.pump();
+    expect(vm.mode, LyricsMode.sync);
   });
 
   // Regression guard: the edit lived only in the editor's own state, which a

@@ -222,6 +222,38 @@ void main() {
     });
   });
 
+  test('a lane whose first clip left the model still hears its FX', () async {
+    // The first clip of a take deleted, its save still in flight: the mixer
+    // sends the lane's FX and pan to the remaining clips, which the playing
+    // graph still runs through the deleted clip's chain. Skipping followers
+    // dropped every one of them until the resync committed.
+    final fake = _Fake();
+    final svc = GraphAudioPlaybackService.withBindings(
+      fake,
+      decode: (p, r) async => (0x1000, 10),
+    );
+    addTearDown(svc.dispose);
+    final clips = [
+      for (var i = 0; i < 3; i++)
+        TrackPlayback(
+          id: 'c$i',
+          path: 'c$i.wav',
+          startMs: i * 1000,
+          laneId: 'take',
+          fx: TrackFx.flat(),
+        ),
+    ];
+    await svc.sync(clips, const []);
+    final perSync = fake.chainCalls.length;
+    fake.chainCalls.clear();
+    final fx = TrackFx.flat().copyWith(eqOn: false);
+    for (final c in clips.skip(1)) {
+      svc.setTrackFx(c.id, fx);
+      svc.setTrackPan(c.id, 0.3);
+    }
+    expect(fake.chainCalls, hasLength(perSync), reason: 'once, not per clip');
+  });
+
   test('an FX drag on a many-clip lane sets the lane chain once', () async {
     final fake = _Fake();
     final svc = GraphAudioPlaybackService.withBindings(
@@ -244,12 +276,14 @@ void main() {
     expect(fake.chainCalls.toSet(), {0}, reason: 'only the leader is set');
 
     fake.chainCalls.clear();
-    // The mixer pushes the lane's value to each of its clips.
-    for (final c in clips) {
-      svc.setTrackFx(c.id, TrackFx.flat());
-      svc.setTrackPan(c.id, 0.3);
+    // The mixer pushes the lane's value (one object per tick) to each clip.
+    for (var tick = 0; tick < 2; tick++) {
+      final fx = TrackFx.flat().copyWith(eqOn: tick.isEven);
+      for (final c in clips) {
+        svc.setTrackFx(c.id, fx);
+        svc.setTrackPan(c.id, 0.3 + tick * 0.1);
+      }
     }
-    expect(fake.chainCalls.toSet(), {0});
-    expect(fake.chainCalls.length, perSync);
+    expect(fake.chainCalls.length, 2 * perSync);
   });
 }

@@ -1051,8 +1051,12 @@ class _LyricsEditorState extends State<_LyricsEditor> {
                   // Nor over text typed while the write waited (it queues
                   // behind other saves, a slow import's copy among them):
                   // that is still the draft, and closing dropped it.
+                  // And only out of edit mode: the user may have moved on to
+                  // Sync while it waited.
                   final now = mounted ? _c.text : (vm.lyricsDraft ?? text);
-                  if (now == text) vm.setLyricsMode(LyricsMode.read);
+                  if (now == text && vm.lyricsMode == LyricsMode.edit) {
+                    vm.setLyricsMode(LyricsMode.read);
+                  }
                 },
               ),
             ],

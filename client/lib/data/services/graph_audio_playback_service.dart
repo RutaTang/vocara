@@ -384,12 +384,19 @@ class GraphAudioPlaybackService implements PlaybackEngine {
   }
 
   final Map<String, int> _trackIndex = {};
-  // The committed tracks that play through an earlier clip's chain (see
-  // [TrackPlayback.laneId]). Pan, FX and sends address that chain, so they are
-  // pushed for the lane's leader only: a copy per clip filled the engine's
-  // command ring on a many-clip lane, and each FX drag tick then reached the
-  // audio a few blocks late, holding every other live edit up behind it.
-  final Set<String> _laneFollowers = {};
+  // Each committed track's chain owner: its own index, or for a clip that plays
+  // through an earlier clip's chain (see [TrackPlayback.laneId]) that leader's.
+  // Pan, FX and sends address the chain whichever clip they are sent for.
+  final Map<String, int> _chainOwner = {};
+  // What each chain last received per setter since the last full push
+  // ([_pushLiveParams]). The mixer sends a lane's value to every one of its
+  // clips, all onto one chain: a copy per clip filled the engine's command ring
+  // on a many-clip lane, and each FX drag tick then reached the audio a few
+  // blocks late, holding every other live edit up behind it. Deduplicated per
+  // chain rather than by skipping followers, so the lane is still reached when
+  // its leader clip has left the model (a delete still saving) but not yet the
+  // graph that plays.
+  final Map<Object, Object> _chainSent = {};
   // Each FX bus id's index into the committed graph (for live bus FX/volume/meter).
   final Map<String, int> _busIndex = {};
   // Each live setter's newest value, stamped with [_liveSeq]. A sync job pushes
@@ -700,6 +707,9 @@ class GraphAudioPlaybackService implements PlaybackEngine {
   /// Applies a live edit now and records it under [key] (one entry per
   /// parameter), for the sync jobs whose snapshot predates it.
   void _live(Object key, void Function() apply) {
+    // Re-inserted, so the log replays in the order the edits were made: two
+    // clips of a lane share a chain, and the newer value must land last.
+    _liveEdits.remove(key);
     _liveEdits[key] = (seq: ++_liveSeq, apply: apply);
     apply();
   }
@@ -881,7 +891,7 @@ class GraphAudioPlaybackService implements PlaybackEngine {
 
     _bindings.ve_tracks_begin(_engine);
     final newIndex = <String, int>{};
-    final newFollowers = <String>{};
+    final newOwner = <String, int>{};
     // Each lane's first clip that staged: its chain is the one every later clip
     // of the lane plays through (see [TrackPlayback.laneId]).
     final laneLeader = <String, int>{};
@@ -910,6 +920,7 @@ class GraphAudioPlaybackService implements PlaybackEngine {
       if (!_available) return;
       if (idx >= 0) {
         newIndex[t.id] = idx;
+        newOwner[t.id] = idx;
         _pushSends(idx, t.sends, newBusIndex, bus: false);
         final lane = t.laneId;
         if (lane != null) {
@@ -917,7 +928,7 @@ class GraphAudioPlaybackService implements PlaybackEngine {
           if (leader == null) {
             laneLeader[lane] = idx;
           } else if (_bindings.ve_track_lane(_engine, idx, leader) == 0) {
-            newFollowers.add(t.id);
+            newOwner[t.id] = leader;
           }
         }
       }
@@ -938,9 +949,9 @@ class GraphAudioPlaybackService implements PlaybackEngine {
       _trackIndex
         ..clear()
         ..addAll(newIndex);
-      _laneFollowers
+      _chainOwner
         ..clear()
-        ..addAll(newFollowers);
+        ..addAll(newOwner);
       _busIndex
         ..clear()
         ..addAll(newBusIndex);
@@ -1004,12 +1015,14 @@ class GraphAudioPlaybackService implements PlaybackEngine {
   ///
   /// Indices come from the committed maps, so a track that failed to stage is simply skipped.
   void _pushLiveParams(List<TrackPlayback> tracks, List<BusPlayback> buses) {
+    _chainSent.clear();
     for (final t in tracks) {
       final idx = _trackIndex[t.id];
       if (idx == null) continue;
       _bindings.ve_set_track_volume(_engine, idx, t.volume, t.muted ? 1 : 0);
-      // The rest is the lane chain's, set through its leader.
-      if (_laneFollowers.contains(t.id)) continue;
+      // The rest is the lane chain's, set through its leader (always in the
+      // model a graph was built from).
+      if (_chainOwner[t.id] != idx) continue;
       _bindings.ve_set_pan(_engine, idx, t.pan);
       final fx = t.fx;
       if (fx != null) _applyFxToIndex(idx, fx);
@@ -1098,16 +1111,26 @@ class GraphAudioPlaybackService implements PlaybackEngine {
     });
   }
 
-  /// [trackId]'s committed index when it owns its chain; null for a lane
-  /// follower (its pan, FX and sends are its leader's) or an unstaged track.
-  int? _chainIndex(String trackId) =>
-      _laneFollowers.contains(trackId) ? null : _trackIndex[trackId];
+  /// [trackId]'s committed index, when [value] is new for the chain it plays
+  /// through under [kind] (see [_chainSent]); null otherwise.
+  int? _chainIndex(String trackId, Object kind, Object value) {
+    final idx = _trackIndex[trackId];
+    final owner = _chainOwner[trackId];
+    if (idx == null || owner == null) return null;
+    final key = (kind, owner);
+    // Identity for FX (the mixer hands every clip of a lane the same object),
+    // equality for levels.
+    final sent = _chainSent[key];
+    if (sent != null && (identical(sent, value) || sent == value)) return null;
+    _chainSent[key] = value;
+    return idx;
+  }
 
   @override
   void setTrackPan(String id, double pan) {
     if (!_available) return;
     _live(('pan', id), () {
-      final idx = _chainIndex(id);
+      final idx = _chainIndex(id, 'pan', pan);
       if (idx != null) _bindings.ve_set_pan(_engine, idx, pan);
     });
   }
@@ -1163,7 +1186,7 @@ class GraphAudioPlaybackService implements PlaybackEngine {
   void setTrackFx(String trackId, TrackFx fx) {
     if (!_available) return;
     _live(('fx', trackId), () {
-      final idx = _chainIndex(trackId);
+      final idx = _chainIndex(trackId, 'fx', fx);
       if (idx != null) _applyFxToIndex(idx, fx);
     });
   }
@@ -1208,7 +1231,7 @@ class GraphAudioPlaybackService implements PlaybackEngine {
   void setTrackSendLevel(String trackId, int slot, double levelDb) {
     if (!_available) return;
     _live(('send', trackId, slot), () {
-      final idx = _chainIndex(trackId);
+      final idx = _chainIndex(trackId, ('send', slot), levelDb);
       if (idx != null) {
         _bindings.ve_set_send_level(_engine, idx, slot, levelDb);
       }
@@ -1470,7 +1493,8 @@ class GraphAudioPlaybackService implements PlaybackEngine {
       _inputPullBuf = null;
     }
     _trackIndex.clear();
-    _laneFollowers.clear();
+    _chainOwner.clear();
+    _chainSent.clear();
     _busIndex.clear();
     _liveEdits.clear();
     _committedSig = '';
