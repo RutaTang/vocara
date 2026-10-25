@@ -854,59 +854,65 @@ class GraphAudioPlaybackService implements PlaybackEngine {
     // index maps — otherwise an identical re-sync short-circuits on _committedSig
     // and never retries, and the cached indices diverge from the live graph.
     // Leave the prior committed state intact so a corrected topology rebuilds.
-    if (_bindings.ve_tracks_commit_staged(_engine) != 0) return;
-    _trackIndex
-      ..clear()
-      ..addAll(newIndex);
-    _busIndex
-      ..clear()
-      ..addAll(newBusIndex);
-    // Record the committed signature even when a track was skipped (e.g. a gone or
-    // corrupt file). Forcing the empty sentinel here used to guarantee a retry, but
-    // because the signature excludes live volume/mute, EVERY fader/mute/FX tweak then
-    // missed the fast path and rebuilt the whole graph — re-running the dead clip's
-    // isolate decode and re-staging everything on each tick (audible glitch + constant
-    // re-decode). Recording the real `sig` keeps unrelated live changes on the fast
-    // path; a skipped track is restaged on the next real topology change (a structural
-    // edit, backing toggle or reopen — all of which change `sig`), which is also when a
-    // transiently-unreadable file would have become readable again.
-    //
-    // A DEGRADED track is different from a skipped one and must not be treated
-    // the same way. Staging probes a streamable WAV and then hands the engine
-    // an empty buffer, trusting the commit to reopen the file; when that
-    // second open fails the track is IN the graph, holds an index, has gain
-    // and meters — and renders silence forever, while the commit returns
-    // success and the track contributes no underruns. Recording the signature
-    // over that would make it permanent for the session, so the signature is
-    // withheld and the rebuild is QUEUED HERE. Withholding alone was not
-    // enough: the only caller syncs on structural mix edits, and nothing in
-    // play / seek / a fader move ever calls it, so a "retry on the next sync"
-    // could wait for the rest of the session while the take sat silent.
-    // The retry re-probes on a fresh open: if the file came back
-    // non-canonical it is decoded and staged as PCM instead (it plays), and if
-    // it is truly gone the stage MISSES and the track is left out — neither of
-    // which can degrade again, so one retry is enough and there is no rebuild
-    // loop ([retry] bounds it either way).
-    final degraded = _bindings.ve_commit_degraded_mask(_engine);
-    if (degraded != 0 && !retry) {
-      DiagnosticsLog.instance.log(
-        'engine',
-        'commit degraded ${bitCount(degraded)} streaming track(s) to silence; '
-            'rebuilding once from a fresh probe',
-      );
-      _committedSig = '';
-      // Appended to the sync chain rather than awaited: this call IS the
-      // chain's current link, so awaiting its successor here would deadlock.
-      _scheduleDegradedRebuild();
-    } else {
-      _committedSig = sig;
-    }
-
-    // The rebuild reset every node to defaults — re-apply persisted effects + levels. The
-    // new graph is still staged, so these land on it before it renders anything (its first
-    // block already plays the mix as set, instead of the build defaults ramping into it),
-    // and only then does it go live.
+    final committed = _bindings.ve_tracks_commit_staged(_engine);
+    // Published whatever happens from here on: a commit the engine staged and nothing
+    // published (a throw below, or an engine-side failure after the stage that still
+    // returned non-zero) left the old graph playing while every setter addressed the
+    // staged one — mute, faders and FX went dead until the next topology change. A
+    // publish with nothing staged (a rejected topology) is a no-op.
     try {
+      if (committed != 0) return;
+      _trackIndex
+        ..clear()
+        ..addAll(newIndex);
+      _busIndex
+        ..clear()
+        ..addAll(newBusIndex);
+      // Record the committed signature even when a track was skipped (e.g. a gone or
+      // corrupt file). Forcing the empty sentinel here used to guarantee a retry, but
+      // because the signature excludes live volume/mute, EVERY fader/mute/FX tweak then
+      // missed the fast path and rebuilt the whole graph — re-running the dead clip's
+      // isolate decode and re-staging everything on each tick (audible glitch + constant
+      // re-decode). Recording the real `sig` keeps unrelated live changes on the fast
+      // path; a skipped track is restaged on the next real topology change (a structural
+      // edit, backing toggle or reopen — all of which change `sig`), which is also when a
+      // transiently-unreadable file would have become readable again.
+      //
+      // A DEGRADED track is different from a skipped one and must not be treated
+      // the same way. Staging probes a streamable WAV and then hands the engine
+      // an empty buffer, trusting the commit to reopen the file; when that
+      // second open fails the track is IN the graph, holds an index, has gain
+      // and meters — and renders silence forever, while the commit returns
+      // success and the track contributes no underruns. Recording the signature
+      // over that would make it permanent for the session, so the signature is
+      // withheld and the rebuild is QUEUED HERE. Withholding alone was not
+      // enough: the only caller syncs on structural mix edits, and nothing in
+      // play / seek / a fader move ever calls it, so a "retry on the next sync"
+      // could wait for the rest of the session while the take sat silent.
+      // The retry re-probes on a fresh open: if the file came back
+      // non-canonical it is decoded and staged as PCM instead (it plays), and if
+      // it is truly gone the stage MISSES and the track is left out — neither of
+      // which can degrade again, so one retry is enough and there is no rebuild
+      // loop ([retry] bounds it either way).
+      final degraded = _bindings.ve_commit_degraded_mask(_engine);
+      if (degraded != 0 && !retry) {
+        DiagnosticsLog.instance.log(
+          'engine',
+          'commit degraded ${bitCount(degraded)} streaming track(s) to silence; '
+              'rebuilding once from a fresh probe',
+        );
+        _committedSig = '';
+        // Appended to the sync chain rather than awaited: this call IS the
+        // chain's current link, so awaiting its successor here would deadlock.
+        _scheduleDegradedRebuild();
+      } else {
+        _committedSig = sig;
+      }
+
+      // The rebuild reset every node to defaults — re-apply persisted effects + levels. The
+      // new graph is still staged, so these land on it before it renders anything (its first
+      // block already plays the mix as set, instead of the build defaults ramping into it),
+      // and only then does it go live.
       _pushLiveParams(tracks, buses);
     } finally {
       _bindings.ve_tracks_publish(_engine);

@@ -126,9 +126,14 @@ class _FakeBindings extends Fake implements VocaraEngineBindings {
     return 0;
   }
 
+  /// Makes `ve_commit_degraded_mask` throw (something failing after a commit).
+  bool throwOnDegradedMask = false;
+
   @override
-  int ve_commit_degraded_mask(ffi.Pointer<VeEngine> e) =>
-      degradedMasks.isEmpty ? 0 : degradedMasks.removeAt(0);
+  int ve_commit_degraded_mask(ffi.Pointer<VeEngine> e) {
+    if (throwOnDegradedMask) throw StateError('the read after the commit');
+    return degradedMasks.isEmpty ? 0 : degradedMasks.removeAt(0);
+  }
 
   @override
   int ve_set_track_volume(
@@ -202,13 +207,34 @@ void main() {
     await svc.sync(const [TrackPlayback(id: 'a', path: 'a.wav')], const []);
     expect(fake.events, ['commit', 'volume', 'master', 'publish']);
 
-    // A rejected topology stages nothing, so there is nothing to publish.
+    // A rejected topology stages nothing: the publish that follows it anyway
+    // (see the next test) is a no-op, and no live value is pushed.
     fake.events.clear();
     fake.commitResults.add(-1);
     await svc.sync(const [
       TrackPlayback(id: 'a', path: 'a.wav', startMs: 10),
     ], const []);
-    expect(fake.events, ['commit']);
+    expect(fake.events, ['commit', 'publish']);
+  });
+
+  test('a commit that fails after staging still goes live', () async {
+    // Staged but never published, the old graph kept playing while every
+    // setter addressed the staged one: mute, faders and FX went dead until the
+    // next topology change.
+    final fake = _FakeBindings()
+      ..cachedPaths.add('a.wav')
+      ..throwOnDegradedMask = true;
+    final svc = GraphAudioPlaybackService.withBindings(
+      fake,
+      decode: (path, rate) async => (0x1000, 10),
+    );
+    addTearDown(svc.dispose);
+
+    await expectLater(
+      svc.sync(const [TrackPlayback(id: 'a', path: 'a.wav')], const []),
+      throwsStateError,
+    );
+    expect(fake.events, ['commit', 'publish']);
   });
 
   group('one chain per lane', () {
