@@ -358,27 +358,32 @@ class Persistence {
   /// never tombstone an asset a save just imported, or trash its in-flight
   /// pool file. Meant for a diagnostics/settings action, never the boot path
   /// (boot has its own gated sweeps in [open]).
-  Future<RepairReport> repairLibrary() => writeGate.exclusive(() async {
+  ///
+  /// With sync attached, the pass also runs in the engine's serial section:
+  /// between two pages of a pull run the store can hold a half-delivered
+  /// aggregate (a live child whose parent's revive is on the next page), and
+  /// a repair judged against it would journal derived intent that reaches
+  /// every device. That section is taken FIRST and the gate inside it: held
+  /// the other way round, the gate's exclusive side stayed held for as long
+  /// as the pull run took to finish, and every save, import and take stalled
+  /// behind it. Neither order deadlocks — the engine never takes [writeGate],
+  /// and nothing holding the gate waits on a pump.
+  Future<RepairReport> repairLibrary() {
+    final sync = _sync;
+    return sync == null ? _repairPass() : sync.runExclusive(_repairPass);
+  }
+
+  Future<RepairReport> _repairPass() => writeGate.exclusive(() async {
     final checker = IntegrityChecker(db, writer);
-    // With sync attached, the integrity pass runs in the engine's serial
-    // section: between two pages of a pull run the store can hold a
-    // half-delivered aggregate (a live child whose parent's revive is on the
-    // next page), and a repair judged against it would journal derived
-    // intent that reaches every device. The engine never takes [writeGate],
-    // so waiting on it here cannot deadlock.
-    Future<T> serial<T>(Future<T> Function() op) =>
-        _sync?.runExclusive(op) ?? op();
-    final (found, unrepaired) = await serial(() async {
-      final found = await checker.check();
-      // One transaction around the whole repair fixpoint, exactly like the
-      // sync engine's end-of-pull repair: each individual repair is a row
-      // UPDATE plus its oplog entry, and the invariant "a row mutation and
-      // its journal entry commit in the SAME transaction" must hold here too
-      // — two autocommit statements would let a crash between them
-      // tombstone/heal a synced row with no journal entry, so the change
-      // would never propagate.
-      return (found, await db.transaction(() => checker.repair()));
-    });
+    final found = await checker.check();
+    // One transaction around the whole repair fixpoint, exactly like the
+    // sync engine's end-of-pull repair: each individual repair is a row
+    // UPDATE plus its oplog entry, and the invariant "a row mutation and
+    // its journal entry commit in the SAME transaction" must hold here too
+    // — two autocommit statements would let a crash between them
+    // tombstone/heal a synced row with no journal entry, so the change
+    // would never propagate.
+    final unrepaired = await db.transaction(() => checker.repair());
     // A cascade can repair MORE than the initial scan saw; the report never
     // claims a negative remainder.
     final repaired = (found.length - unrepaired.length).clamp(0, found.length);

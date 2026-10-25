@@ -443,6 +443,38 @@ void main() {
     expect(await persistence.db.select(persistence.db.oplog).get(), isEmpty);
   });
 
+  test(
+    'a repair waiting for a pull run does not hold up saves meanwhile',
+    () async {
+      // The repair took the write gate first and only then queued behind the
+      // pull: for the whole run every save, import and take (each a shared
+      // holder of the gate) stalled behind it.
+      final persistence = Persistence.memory();
+      final transport = _PausingTransport(FakeCloud());
+      persistence.attachSync(transport);
+      addTearDown(() async {
+        persistence.sync!.dispose();
+        await persistence.db.close();
+        final dir = persistence.assets.root;
+        if (await dir.exists()) await dir.delete(recursive: true);
+      });
+      transport.pauseAfter = transport.fetchCalls;
+      final pull = persistence.sync!.pumpPull();
+      await transport.paused.future;
+      final repair = persistence.repairLibrary();
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      final saved = await persistence.writeGate
+          .shared(() async => true)
+          .timeout(const Duration(seconds: 1), onTimeout: () => false);
+      expect(saved, isTrue, reason: 'a save must not wait for the pull run');
+
+      transport.resume.complete();
+      expect((await pull).failed, isFalse);
+      await repair;
+    },
+  );
+
   test('device node id survives restarts', () async {
     final p1 = await boot();
     await p1.db.close();
