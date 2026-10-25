@@ -95,13 +95,22 @@ class TechniqueDetailViewModel extends ChangeNotifier
   @visibleForTesting
   Future<void> quitFinalize() async {
     if (isRecordingExample) {
-      final staged = await stopExampleRecording();
+      // The same backstop as [stopExampleRecording]: an airborne save owns
+      // the take.
+      if (_saving) return;
       // Stopping only STAGES the clip into the in-memory media draft, which
       // dies with the exiting process — and the imported file, referenced by
       // no row, would be swept as an orphan at the next boot. Commit the
       // captured clip itself so the recording survives the quit (mirrors the
-      // song screen's finalizer, which persists its take).
-      if (staged != null) await _persistExampleAtQuit(staged);
+      // song screen's finalizer, which persists its take). Held for the quit
+      // from the stop on, like [save]'s: the stop unregisters this finalizer,
+      // so a close-button run cut off mid-stage or mid-commit left the exit
+      // request's run nothing to wait on, and the clip was lost.
+      final stopped = _recorder.stop();
+      await _recorder.guardStopFinalize(() async {
+        final staged = await _stageStoppedExample(stopped);
+        if (staged != null) await _persistExampleAtQuit(staged);
+      });
     } else if (isRecordingPractice) {
       // A practice take is ephemeral: the dying process would never show the
       // analysis result, so skip the full DSP pass and only clean up — quit

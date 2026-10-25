@@ -248,6 +248,38 @@ void main() {
     expect(vm.referenceMedia!.id, persisted.id);
   });
 
+  test(
+    "the quit's own commit of an example holds the quit until it lands",
+    () async {
+      // Stopping unregisters the take's finalizer: unheld, a close-button run
+      // cut off mid-stage or mid-commit left the exit request's run nothing to
+      // wait on, and the clip — a temp WAV boot recovery never scans — was lost.
+      vm.beginMediaDraft();
+      expect(await vm.startExampleRecording(), isNull);
+      repo.saveGate = Completer<void>();
+      final finalizing = vm.quitFinalize();
+      await pumpEventQueue();
+      expect(
+        RecordingFinalizer.instance.hasActive,
+        isTrue,
+        reason: 'the stage and commit hold the quit',
+      );
+
+      var exitDone = false;
+      final exit = RecordingFinalizer.instance.finalizeAll().whenComplete(
+        () => exitDone = true,
+      );
+      await pumpEventQueue();
+      expect(exitDone, isFalse, reason: "the exit request's run waits for it");
+
+      repo.saveGate!.complete();
+      await finalizing;
+      await exit;
+      expect(repo.technique.media, hasLength(1), reason: 'the clip landed');
+      expect(RecordingFinalizer.instance.hasActive, isFalse);
+    },
+  );
+
   test('quit finalize of a practice take persists nothing (ephemeral by '
       'design)', () async {
     expect(await vm.startPractice(), isNull);
