@@ -254,11 +254,41 @@ class _StudioFaderState extends State<StudioFader> {
   }
 }
 
-/// A fader's level in dB ("-14.0 dB"), right-aligned in the fixed width
-/// beside a horizontal fader, so the fader keeps its length as the level
-/// moves. One line always: in 40 px, every level below -10 dB wrapped onto two
-/// ("-14.0" over "dB") in a font as wide as the system one, and a wider font
-/// still scales the reading down rather than wrap it.
+/// A value read out in a fixed width beside its control, right-aligned, so
+/// the control keeps its length as the value moves. One line always: a
+/// reading a font sets wider than the box is scaled down, not wrapped onto a
+/// second line ("1444" over "ms").
+class FixedWidthReadout extends StatelessWidget {
+  const FixedWidthReadout(
+    this.text, {
+    required this.width,
+    required this.style,
+    super.key,
+  });
+
+  final String text;
+  final double width;
+  final TextStyle style;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: width,
+      child: Align(
+        alignment: Alignment.centerRight,
+        heightFactor: 1,
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Text(text, maxLines: 1, style: style),
+        ),
+      ),
+    );
+  }
+}
+
+/// A fader's level in dB ("-14.0 dB") beside a horizontal fader. In 40 px,
+/// every level below -10 dB wrapped onto two lines in a font as wide as the
+/// system one; this box fits it.
 class FaderDbReadout extends StatelessWidget {
   const FaderDbReadout(this.volume, {super.key});
 
@@ -273,24 +303,14 @@ class FaderDbReadout extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return SizedBox(
+    return FixedWidthReadout(
+      '${format(volume)} dB',
       width: 46,
-      child: Align(
-        alignment: Alignment.centerRight,
-        heightFactor: 1,
-        child: FittedBox(
-          fit: BoxFit.scaleDown,
-          child: Text(
-            '${format(volume)} dB',
-            maxLines: 1,
-            style: const TextStyle(
-              color: Studio.textSecondary,
-              fontSize: 10,
-              fontWeight: FontWeight.w600,
-              fontFeatures: [FontFeature.tabularFigures()],
-            ),
-          ),
-        ),
+      style: const TextStyle(
+        color: Studio.textSecondary,
+        fontSize: 10,
+        fontWeight: FontWeight.w600,
+        fontFeatures: [FontFeature.tabularFigures()],
       ),
     );
   }

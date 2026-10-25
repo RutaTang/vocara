@@ -13,6 +13,7 @@ import '../../../domain/models/fx_bus.dart';
 import '../../../domain/models/fx_presets.dart';
 import '../../core/themes/studio.dart';
 import '../../core/widgets/cap_label.dart';
+import '../../core/widgets/studio_controls.dart' show FixedWidthReadout;
 import '../view_model/song_practice_detail_view_model.dart';
 import 'track_context_menu.dart';
 
@@ -661,16 +662,10 @@ class FxPanel extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 8),
-          SizedBox(
+          FixedWidthReadout(
+            _fmtVal(value, unit),
             width: 42,
-            child: Text(
-              _fmtVal(value, unit),
-              textAlign: TextAlign.right,
-              style: const TextStyle(
-                color: Studio.textSecondary,
-                fontSize: 10.5,
-              ),
-            ),
+            style: const TextStyle(color: Studio.textSecondary, fontSize: 10.5),
           ),
         ],
       ),

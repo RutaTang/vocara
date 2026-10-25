@@ -194,4 +194,40 @@ void main() {
       }
     });
   });
+
+  group('FixedWidthReadout', () {
+    // The FX panel's 42 px value box: "1444 ms" (a delay time) set 42.3 px
+    // wide in a font as wide as the system one and wrapped onto two lines.
+    testWidgets('a reading wider than its box scales down onto one line', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        const Directionality(
+          textDirection: TextDirection.ltr,
+          child: Center(
+            child: FixedWidthReadout(
+              '1444 ms',
+              width: 42,
+              style: TextStyle(fontSize: 10.5),
+            ),
+          ),
+        ),
+      );
+      final paragraph = tester.renderObject<RenderParagraph>(
+        find.text('1444 ms'),
+      );
+      final oneLine = TextPainter(
+        text: paragraph.text,
+        textDirection: TextDirection.ltr,
+        maxLines: 1,
+      )..layout();
+      addTearDown(oneLine.dispose);
+      expect(paragraph.size.height, oneLine.height);
+      final box = tester.getRect(find.byType(FixedWidthReadout));
+      final drawn = tester.getRect(find.text('1444 ms'));
+      expect(box.width, 42);
+      expect(drawn.left, greaterThanOrEqualTo(box.left - 0.01));
+      expect(drawn.right, closeTo(box.right, 0.01));
+    });
+  });
 }
