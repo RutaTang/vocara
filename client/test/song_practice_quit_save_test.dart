@@ -173,4 +173,54 @@ void main() {
     expect(stored.vocalTracks.single.displayName, 'Keeper');
     expect(finalizer.hasActive, isFalse);
   });
+
+  // The lyrics editor's draft outlives the editor widget (a tab switch
+  // disposes it), but it is the user's to apply: neither another edit's save
+  // nor a quit may write it, and closing the editor drops it.
+  test('an unsaved lyrics draft is never saved behind the user', () async {
+    final created =
+        (await repo.createPractice('Song') as Ok<SongPractice>).value;
+    final take = AudioTrack(
+      id: newId(),
+      kind: AudioTrackKind.vocal,
+      displayName: 'Take 1',
+      createdAt: DateTime(2026),
+      versionId: created.activeVersionId,
+    );
+    await repo.savePractice(created.copyWith(vocalTracks: [take]));
+
+    final finalizer = RecordingFinalizer.forTesting();
+    final vm = SongPracticeDetailViewModel(
+      repository: repo,
+      techniqueRepository: _FakeTechRepo(),
+      audioFileService: _NoopFiles(),
+      waveformService: _FakeWaveforms(),
+      spectrogramService: const SpectrogramService(),
+      separationService: FakeSourceSeparationService(available: false),
+      appSettings: AppSettingsService(storage: LocalStorageService()),
+      practiceId: created.id,
+      playbackEngine: _FakeEngine(),
+      editService: _FakeEdits(),
+      finalizer: finalizer,
+    );
+    addTearDown(vm.dispose);
+    for (var i = 0; i < 400 && vm.practice == null; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+    expect(vm.practice, isNotNull);
+
+    vm.setLyricsMode(LyricsMode.edit);
+    vm.lyricsDraft = 'never saved';
+    await vm.renameTrack(take.id, 'Keeper');
+    await finalizer.finalizeAll();
+
+    final stored =
+        (await repo.getPractice(created.id) as Ok<SongPractice>).value;
+    expect(stored.vocalTracks.single.displayName, 'Keeper');
+    expect(stored.lyrics, isEmpty, reason: 'only Save applies a draft');
+    expect(vm.lyrics, isEmpty);
+
+    vm.setLyricsMode(LyricsMode.read);
+    expect(vm.lyricsDraft, isNull, reason: 'closing the editor drops it');
+  });
 }

@@ -1,7 +1,9 @@
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:vocara/domain/models/audio_track.dart';
 import 'package:vocara/domain/models/lyric_line.dart';
+import 'package:vocara/domain/models/practice_note.dart';
 import 'package:vocara/ui/song_practice_detail/view_model/song_practice_detail_view_model.dart';
 import 'package:vocara/ui/song_practice_detail/widgets/lyrics_panel.dart';
 
@@ -10,6 +12,8 @@ import 'package:vocara/ui/song_practice_detail/widgets/lyrics_panel.dart';
 class _FakeVm extends Fake implements SongPracticeDetailViewModel {
   String text = 'old line';
   LyricsMode mode = LyricsMode.edit;
+  RightTab tab = RightTab.lyrics;
+  bool open = true;
   final List<String> imported = [];
   String? applied;
 
@@ -17,22 +21,47 @@ class _FakeVm extends Fake implements SongPracticeDetailViewModel {
   bool saveSucceeds = true;
 
   @override
-  bool get lyricsOpen => true;
+  bool get lyricsOpen => open;
 
   @override
-  RightTab get rightTab => RightTab.lyrics;
+  RightTab get rightTab => tab;
 
   @override
   void toggleLyricsPanel() {}
 
+  // The Notes tab with nothing selected, for tab-switch tests.
+  @override
+  AudioTrack? get selectedTrack => null;
+
+  @override
+  List<({String trackId, String trackName, PracticeNote note})> get allNotes =>
+      const [];
+
   @override
   bool get hasLyrics => text.isNotEmpty;
+
+  // The reader, for when the editor closes.
+  @override
+  List<LyricLine> get lyrics => [LyricLine(text: text)];
+
+  @override
+  final ValueNotifier<Duration> position = ValueNotifier(Duration.zero);
+
+  @override
+  int currentLyricIndex(int positionMs) => -1;
 
   @override
   LyricsMode get lyricsMode => mode;
 
   @override
-  void setLyricsMode(LyricsMode m) => mode = m;
+  String? lyricsDraft;
+
+  @override
+  void setLyricsMode(LyricsMode m) {
+    // As the real VM: leaving the editor (Save, Cancel) drops its draft.
+    if (m != LyricsMode.edit) lyricsDraft = null;
+    mode = m;
+  }
 
   @override
   void setLyricsFocus(bool on) {}
@@ -221,6 +250,57 @@ void main() {
       reason: 'the unsaved draft must survive for a retry',
     );
     expect(tester.takeException(), isNull);
+  });
+
+  // Regression guard: the edit lived only in the editor's own state, which a
+  // tab switch or a collapse of the panel threw away. Back on Lyrics the
+  // still-open editor re-seeded from the saved lyrics and the edit was gone.
+  group('an unsaved edit', () {
+    String editorText(WidgetTester tester) =>
+        tester.widget<TextField>(find.byType(TextField)).controller!.text;
+
+    testWidgets('survives a switch to another tab and back', (tester) async {
+      final vm = _FakeVm();
+      await _pumpPanel(tester, vm);
+      await tester.enterText(find.byType(TextField), 'user typed draft');
+
+      vm.tab = RightTab.notes;
+      await _pumpPanel(tester, vm);
+      expect(find.byType(TextField), findsNothing);
+      vm.tab = RightTab.lyrics;
+      await _pumpPanel(tester, vm);
+
+      expect(editorText(tester), 'user typed draft');
+      expect(vm.applied, isNull, reason: 'a tab switch saves nothing');
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('survives collapsing the panel', (tester) async {
+      final vm = _FakeVm();
+      await _pumpPanel(tester, vm);
+      await tester.enterText(find.byType(TextField), 'user typed draft');
+
+      vm.open = false;
+      await _pumpPanel(tester, vm);
+      vm.open = true;
+      await _pumpPanel(tester, vm);
+
+      expect(editorText(tester), 'user typed draft');
+    });
+
+    testWidgets('is dropped by Cancel', (tester) async {
+      final vm = _FakeVm();
+      await _pumpPanel(tester, vm);
+      await tester.enterText(find.byType(TextField), 'user typed draft');
+      await tester.tap(find.text('Cancel'));
+      await _pumpPanel(tester, vm);
+      expect(find.byType(TextField), findsNothing);
+
+      vm.mode = LyricsMode.edit; // open the editor again
+      await _pumpPanel(tester, vm);
+      expect(editorText(tester), 'old line');
+      expect(vm.applied, isNull);
+    });
   });
 
   testWidgets('a rejected drop leaves the in-progress edit untouched', (

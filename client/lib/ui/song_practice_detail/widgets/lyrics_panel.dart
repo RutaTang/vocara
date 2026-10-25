@@ -179,8 +179,11 @@ class _LyricsTabState extends State<_LyricsTab> {
     // explicit "replace the lyrics" action, so the editor must show (and Save
     // must apply) the imported text. A failed or no-op import leaves the
     // in-progress edit untouched.
-    if (editing && mounted && vm.lyricsAsText() != before) {
-      setState(() => _editorSeed++);
+    if (editing && vm.lyricsAsText() != before) {
+      // The import replaces the draft too, or the re-created editor would
+      // reopen on it instead of the imported lyrics.
+      vm.lyricsDraft = null;
+      if (mounted) setState(() => _editorSeed++);
     }
   }
 
@@ -969,8 +972,10 @@ class _LyricsEditor extends StatefulWidget {
 }
 
 class _LyricsEditorState extends State<_LyricsEditor> {
+  // Reopens on the unsaved draft, if any: a tab switch or a collapse of the
+  // panel disposes this editor (see [SongPracticeDetailViewModel.lyricsDraft]).
   late final TextEditingController _c = TextEditingController(
-    text: widget.vm.lyricsAsText(),
+    text: widget.vm.lyricsDraft ?? widget.vm.lyricsAsText(),
   );
 
   @override
@@ -996,6 +1001,9 @@ class _LyricsEditorState extends State<_LyricsEditor> {
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
               child: TextField(
                 controller: _c,
+                // The user's edits only, not focus or selection churn: the
+                // draft must never be re-written behind a re-seed.
+                onChanged: (text) => vm.lyricsDraft = text,
                 autofocus: true,
                 expands: true,
                 maxLines: null,

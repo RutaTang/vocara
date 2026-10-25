@@ -600,9 +600,17 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   void setLyricsMode(LyricsMode mode) {
     if (_lyricsMode == mode) return;
     _lyricsMode = mode;
+    if (mode != LyricsMode.edit) lyricsDraft = null;
     if (mode == LyricsMode.sync) _syncIndex = _firstUnsyncedIndex();
     notifyListeners();
   }
+
+  /// The open lyrics editor's unsaved text. Held here, not in the editor: a
+  /// switch to another right-panel tab or a collapse of the panel disposes
+  /// the editor, which then reopened on the saved lyrics and the edit was
+  /// gone. Memory only — the editor's Save is the one thing that applies it —
+  /// and dropped when the editor closes (Save, Cancel) or the screen does.
+  String? lyricsDraft;
 
   bool _lyricsFocus = false;
   bool get lyricsFocus => _lyricsFocus;
