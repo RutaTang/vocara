@@ -1662,6 +1662,8 @@ pub extern "C" fn ve_tracks_add(
 /// sibling onto the wrong node: the level meant for one send would land on
 /// another, and the last knob would go inert. A dangling send is representable
 /// in persisted data (a missing busId parses to an unresolvable target).
+/// A non-finite level builds the send silent, as [`staged_gain`] builds a gain
+/// at unity: a build has no earlier value to keep.
 fn stage_sends(
     sends: &[(i32, f32)],
     bus_count: i32,
@@ -1670,8 +1672,14 @@ fn stage_sends(
     sends
         .iter()
         .map(|&(t, db)| {
-            (t >= 0 && t < bus_count && Some(t) != own_bus)
-                .then(|| (t as u32, crate::sample::db_to_lin(db)))
+            (t >= 0 && t < bus_count && Some(t) != own_bus).then(|| {
+                let lin = if db.is_finite() {
+                    crate::sample::db_to_lin(db)
+                } else {
+                    0.0
+                };
+                (t as u32, lin)
+            })
         })
         .collect()
 }
@@ -3601,6 +3609,14 @@ mod send_slot_tests {
             sends[2].is_none(),
             "an out-of-range target maps to an empty slot"
         );
+    }
+
+    #[test]
+    fn a_non_finite_send_level_builds_silent() {
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let sends = stage_sends(&[(0, bad)], 1, None);
+            assert_eq!(sends[0], Some((0, 0.0)), "{bad}");
+        }
     }
 
     #[test]

@@ -537,7 +537,10 @@ impl RtProcessor {
 
         if target == 0.0 && self.mon_gain.current() <= MON_IDLE {
             // Off and silent: land the ramp on exact zero, keep the ring drained, add nothing.
+            // Still advance the smoother: one never advanced is not yet "live", and its first
+            // non-zero target (the session's first arm) jumped straight there — a click.
             self.mon_gain.snap(0.0);
+            let _ = self.mon_gain.advance(frames);
             self.mon_idle = true;
             for _ in 0..frames {
                 if self.mic_rx.pop().is_none() {
@@ -1221,6 +1224,28 @@ mod monitor_tests {
                 break;
             }
         }
+    }
+
+    #[test]
+    fn the_sessions_first_arm_ramps_in() {
+        // Idle from the start, the smoother was never advanced, so the first arm stepped the
+        // voice from silence to full gain in one sample.
+        let (h, mut rt, mut mic) = engine();
+        h.set_monitor_reverb(0.6, 0.5, 0.0); // dry only
+        let mut out = vec![0.0; BLOCK * CHANNELS];
+        for _ in 0..20 {
+            feed(&mut mic, BLOCK);
+            rt.process(&mut out, BLOCK);
+        }
+        h.set_monitor_gain(1.0);
+        assert!(rt.mon_gain.current() <= MON_IDLE);
+        feed(&mut mic, BLOCK);
+        rt.process(&mut out, BLOCK);
+        assert!(
+            rt.mon_gain.current() < 0.9,
+            "the first arm jumped to {} (no ramp: a click)",
+            rt.mon_gain.current()
+        );
     }
 
     #[test]

@@ -30,6 +30,20 @@ class FatalOpenScreen extends StatelessWidget {
         key: key,
       );
 
+  /// Another Vocara is running on the library, and this one would have to
+  /// upgrade it to open it: upgrading under a running app could corrupt it.
+  /// Reopening alone can't help while the other is running, so say what does.
+  const FatalOpenScreen.libraryInUse({required VoidCallback onQuit, Key? key})
+    : this(
+        title: 'Another Vocara is using this library.',
+        message:
+            'Quit the other Vocara, then open this one again. It needs to '
+            'update the library, which it can only do while no other copy '
+            'of Vocara is running.',
+        onQuit: onQuit,
+        key: key,
+      );
+
   /// Any other fatal open failure: show the error and offer the library
   /// folder (for backups or support) plus quit.
   const FatalOpenScreen.openFailed({

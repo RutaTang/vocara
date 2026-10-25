@@ -81,6 +81,10 @@ Future<void> main() async {
     DiagnosticsLog.instance.log('boot', 'open refused: $e');
     _runFatalWindow(FatalOpenScreen.newerLibrary(onQuit: _quit));
     return;
+  } on LibraryInUseException catch (e) {
+    DiagnosticsLog.instance.log('boot', 'open refused: $e');
+    _runFatalWindow(FatalOpenScreen.libraryInUse(onQuit: _quit));
+    return;
   } catch (e, stack) {
     DiagnosticsLog.instance.log('boot', 'open failed: $e\n$stack');
     _runFatalWindow(

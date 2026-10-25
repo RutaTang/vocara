@@ -1,6 +1,7 @@
 // The minimal fatal-open window main() shows when Persistence.open throws:
-// the newer-library refusal and the generic open failure, each with working
-// actions. Rendered through FatalOpenApp, the exact wrapper main() uses.
+// the newer-library and library-in-use refusals and the generic open failure,
+// each with working actions. Rendered through FatalOpenApp, the exact wrapper
+// main() uses.
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vocara/ui/core/widgets/fatal_open_screen.dart';
@@ -20,6 +21,24 @@ void main() {
     );
     expect(find.text('Please update Vocara to open it.'), findsOneWidget);
     // The data is fine and no folder action is offered, only quitting.
+    expect(find.text('Reveal Library Folder'), findsNothing);
+
+    await tester.tap(find.text('Quit Vocara'));
+    expect(quits, 1);
+  });
+
+  testWidgets('library-in-use window says to quit the other Vocara', (
+    tester,
+  ) async {
+    // "Quit and reopen" (the generic copy) can't help while the other copy
+    // runs: the window must name the one action that does.
+    var quits = 0;
+    await tester.pumpWidget(
+      FatalOpenApp(screen: FatalOpenScreen.libraryInUse(onQuit: () => quits++)),
+    );
+
+    expect(find.text('Another Vocara is using this library.'), findsOneWidget);
+    expect(find.textContaining('Quit the other Vocara'), findsOneWidget);
     expect(find.text('Reveal Library Folder'), findsNothing);
 
     await tester.tap(find.text('Quit Vocara'));
