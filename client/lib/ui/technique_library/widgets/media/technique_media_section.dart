@@ -140,6 +140,9 @@ class TechniqueMediaSection extends StatelessWidget {
         const SizedBox(height: 10),
         for (final m in media) ...[
           _MediaTile(
+            // Keyed by clip: unkeyed, removing a card handed every later
+            // slot to the next clip and rebuilt its player mid-playback.
+            key: ValueKey(m.id),
             media: m,
             // A frozen edit surface (in-flight save) hides the hover
             // rename/remove icons too — the clip stays playable.
@@ -221,6 +224,7 @@ class _MediaTile extends StatefulWidget {
     this.expanded = false,
     this.onToggleExpand,
     this.analysis,
+    super.key,
   });
 
   final TechniqueMedia media;
@@ -242,11 +246,19 @@ class _MediaTile extends StatefulWidget {
   State<_MediaTile> createState() => _MediaTileState();
 }
 
-class _MediaTileState extends State<_MediaTile> {
+class _MediaTileState extends State<_MediaTile>
+    with AutomaticKeepAliveClientMixin {
   bool _hover = false;
+
+  /// The page around the cards is a lazy ListView: without this, scrolling
+  /// the Examples block past its cache extent disposed every player in it,
+  /// stopping a clip the user was following and resetting it to 0:00.
+  @override
+  bool get wantKeepAlive => true;
 
   @override
   Widget build(BuildContext context) {
+    super.build(context);
     final m = widget.media;
     final canExpand = widget.canExpand && widget.onToggleExpand != null;
     return MouseRegion(
