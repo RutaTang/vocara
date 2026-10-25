@@ -30,8 +30,8 @@
 //! the node's head with the whole ring behind it. The ring is SPSC, so the
 //! node has to stay clear of the slots being rewritten: it counts every block
 //! it enters and leaves ([`StreamCtrl::node_entered`], [`StreamCtrl::node_left`])
-//! and pops nothing at or past [`StreamCtrl::pop_limit`], read once at the
-//! block's start. The
+//! and pops nothing at or past [`StreamCtrl::pop_limit`], read at the block's
+//! start (and again while it stands at it: lifted, it plays on). The
 //! feeder raises the limit to the node's head, waits out a block that began
 //! before it (the only one that can have missed it), takes the queue back,
 //! pushes the new fence, and lifts the limit.
@@ -931,6 +931,100 @@ mod tests {
         for (i, fr) in out.chunks(2).enumerate() {
             assert_eq!(fr[0], value(10_000 + i), "frame {i} after the seek");
         }
+    }
+
+    #[test]
+    fn a_block_that_enters_during_a_take_back_plays_on_once_the_limit_lifts() {
+        // A node block can enter while a take-back holds the pop limit at its head (between
+        // the raise and the lift). Held there for the whole block, it rendered a callback of
+        // silence in the middle of steady playback: a loop-handle drag replans at the
+        // playhead on every tick, the queue still right for it.
+        let (h, mut f, mut node, path) = rig("liftedlimit");
+        h.play();
+        f.pump(h.transport()).unwrap();
+        let mut tl = 0i64;
+        for _ in 0..4 {
+            block(&mut node, tl, 512);
+            tl += 512;
+        }
+        // A discarding replan at the playhead: the queue taken back, the limit raised.
+        h.seek(tl);
+        let basis = TrackFeeder::basis_of(h.transport());
+        let next_gen = f.generation.wrapping_add(1);
+        assert!(f.discard_queued(), "the queue is taken back");
+
+        // The block enters now; the feeder publishes the new fence, lifts the limit and
+        // fills the run before the block renders.
+        let mut out = vec![0.0; 512 * CHANNELS];
+        {
+            let inputs: [&[Smp]; 0] = [];
+            let mut outs: [&mut [Smp]; 1] = [&mut out[..]];
+            let mut io = ProcessIo {
+                inputs: &inputs,
+                outputs: &mut outs[..],
+                frames: 512,
+                tl,
+                sr: crate::sample::ENGINE_SR,
+            };
+            node.process_entered(&mut io, || {
+                assert!(f.push_fence(next_gen, tl, true));
+                f.ctrl.pop_limit.store(NO_POP_LIMIT, Ordering::Release);
+                f.basis = Some(basis);
+                f.generation = next_gen;
+                f.next_tl = tl;
+                f.plan_pos = tl;
+                f.run_end = i64::MAX;
+                f.pump(h.transport()).unwrap();
+            });
+        }
+        // The flush is announced after the block: it met the new fence in band.
+        f.ctrl.flush_seq.fetch_add(1, Ordering::Release);
+        // The fence consumed the first frame's pop; every frame after it plays.
+        for (i, fr) in out.chunks(2).enumerate().skip(1) {
+            assert_eq!(fr[0], value(tl as usize + i), "frame {i} of the block");
+        }
+        assert_eq!(
+            f.ctrl.xruns.load(Ordering::Relaxed),
+            0,
+            "no underrun counted"
+        );
+        // The next block acknowledges the flush without draining what it plays.
+        let next = block(&mut node, tl + 512, 512);
+        let _ = std::fs::remove_file(&path);
+        for (i, fr) in next.chunks(2).enumerate() {
+            assert_eq!(
+                fr[0],
+                value(tl as usize + 512 + i),
+                "frame {i} of the next block"
+            );
+        }
+    }
+
+    #[test]
+    fn a_block_held_at_the_limit_counts_no_underrun() {
+        // Standing at a take-back's limit is the feeder mid-replan, not the ring run dry: the
+        // health counter (logged as stream underruns) must not read it as one.
+        let (h, mut f, mut node, path) = rig("heldlimit");
+        h.play();
+        f.pump(h.transport()).unwrap();
+        let mut tl = 0i64;
+        for _ in 0..4 {
+            block(&mut node, tl, 512);
+            tl += 512;
+        }
+        let before = f.ctrl.xruns.load(Ordering::Relaxed);
+        h.seek(tl);
+        assert!(f.discard_queued(), "the queue is taken back");
+        // A whole block inside the take-back: the limit stays raised.
+        let out = block(&mut node, tl, 512);
+        f.ctrl.pop_limit.store(NO_POP_LIMIT, Ordering::Release);
+        let _ = std::fs::remove_file(&path);
+        assert!(out.iter().all(|&x| x == 0.0), "held: silent");
+        assert_eq!(
+            f.ctrl.xruns.load(Ordering::Relaxed),
+            before,
+            "no underrun counted"
+        );
     }
 
     #[test]

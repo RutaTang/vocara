@@ -100,8 +100,9 @@ pub struct StreamingSource {
     /// the next pop.
     pending_fence: Option<u32>,
     /// This block's [`crate::feed::StreamCtrl::pop_limit`]: the ring index
-    /// the node stops at while the feeder takes the queue back.
-    limit: usize,
+    /// the node stops at while the feeder takes the queue back. A cell: the
+    /// read-only ring probes refresh it (see [`Self::at_limit`]).
+    limit: std::cell::Cell<usize>,
 }
 
 impl StreamingSource {
@@ -121,7 +122,7 @@ impl StreamingSource {
             ring_pos: 0,
             armed: false,
             pending_fence: None,
-            limit: crate::feed::NO_POP_LIMIT,
+            limit: std::cell::Cell::new(crate::feed::NO_POP_LIMIT),
         }
     }
 
@@ -132,7 +133,7 @@ impl StreamingSource {
     fn enter_block(&mut self) {
         use std::sync::atomic::Ordering;
         self.ctrl.node_entered.fetch_add(1, Ordering::SeqCst);
-        self.limit = self.ctrl.pop_limit.load(Ordering::SeqCst);
+        self.limit.set(self.ctrl.pop_limit.load(Ordering::SeqCst));
     }
 
     /// Leaves a block: publishes whether a fence is half taken, then marks the
@@ -148,10 +149,29 @@ impl StreamingSource {
     }
 
     /// Whether this block's pop limit stops the node at its ring head.
+    ///
+    /// Standing at it, the node reads the limit again: a block can enter in
+    /// the moment a take-back holds it (between the feeder's raise and its
+    /// lift), and held there for the whole block it dropped a callback out of
+    /// steady playback — a loop-handle drag replans on every tick. Seen
+    /// lifted (Acquire, against the feeder's Release lift after it published
+    /// the new fence), the slots are the new plan's and the block plays on; a
+    /// later take-back waits this block out before it retracts anything, as it
+    /// does every block that entered before its raise.
     #[inline]
     fn at_limit(&self) -> bool {
-        self.limit != crate::feed::NO_POP_LIMIT
-            && self.rx.position().wrapping_sub(self.limit) as isize >= 0
+        use std::sync::atomic::Ordering;
+        let limit = self.limit.get();
+        if limit == crate::feed::NO_POP_LIMIT
+            || (self.rx.position().wrapping_sub(limit) as isize) < 0
+        {
+            return false;
+        }
+        if self.ctrl.pop_limit.load(Ordering::Acquire) == crate::feed::NO_POP_LIMIT {
+            self.limit.set(crate::feed::NO_POP_LIMIT);
+            return false;
+        }
+        true
     }
 
     /// The ring's next frame (consumed), short of the pop limit.
@@ -330,6 +350,19 @@ impl Node for StreamingSource {
     }
 }
 
+#[cfg(test)]
+impl StreamingSource {
+    /// [`Node::process`] with `between` run after the block's entry (its
+    /// pop-limit read) and before its render: what the feeder does in that
+    /// moment.
+    pub(crate) fn process_entered(&mut self, io: &mut ProcessIo, between: impl FnOnce()) {
+        self.enter_block();
+        between();
+        self.render(io);
+        self.leave_block();
+    }
+}
+
 impl StreamingSource {
     /// One playing block (see [`Node::process`]).
     fn render(&mut self, io: &mut ProcessIo) {
@@ -418,7 +451,9 @@ impl StreamingSource {
                 None => {
                     out[o] = 0.0;
                     out[o + 1] = 0.0;
-                    if self.ring_empty() && self.pending_fence.is_none() {
+                    // Held at a take-back's limit is the feeder mid-replan, not
+                    // the ring run dry: no underrun.
+                    if self.rx.is_empty() && !self.at_limit() && self.pending_fence.is_none() {
                         // Wait-free health signal, read via the ctrl by the
                         // FFI aggregate (ve_stream_xruns).
                         self.ctrl
