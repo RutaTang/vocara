@@ -122,6 +122,10 @@ class LruBytesCache<V> {
 
   bool containsKey(String key) => _map.containsKey(key);
 
+  /// The keys held, least recently used first. Unlike a read, listing them
+  /// does not refresh anyone's recency.
+  Iterable<String> get keys => _map.keys;
+
   /// The recency stamp of this cache's oldest entry, or null when empty. Only
   /// true because [operator []] re-inserts on read, which also moves the entry
   /// to the back of the iteration order.

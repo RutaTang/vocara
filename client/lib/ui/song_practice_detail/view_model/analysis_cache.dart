@@ -179,15 +179,16 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     m.remove(path);
   }
 
-  /// Bumped by [evictAnalysis] per path (and by [_evictAggregates] for the
-  /// whole aggregate family). A compute captures the generation it started
-  /// under and, if it changed by the time the result lands, that result
-  /// describes bytes the eviction has already declared stale: it must not be
-  /// cached, and must not latch "unavailable" over the new file. Re-analyze is
-  /// exactly this window — it evicts each clip while the dock may still be
-  /// computing it — and without the check the stale result was written back
-  /// under a key nothing invalidates again, so the take showed the OLD audio's
-  /// analysis (or a permanent "unavailable") for the rest of the session.
+  /// Bumped by [evictAnalysis] per path (the lane merges folding that path
+  /// are disowned through [_aggDisowned]). A compute captures the generation
+  /// it started under and, if it changed by the time the result lands, that
+  /// result describes bytes the eviction has already declared stale: it must
+  /// not be cached, and must not latch "unavailable" over the new file.
+  /// Re-analyze is exactly this window — it evicts each clip while the dock
+  /// may still be computing it — and without the check the stale result was
+  /// written back under a key nothing invalidates again, so the take showed
+  /// the OLD audio's analysis (or a permanent "unavailable") for the rest of
+  /// the session.
   final Map<String, int> _pathGeneration = {};
 
   /// Paths whose latest [evictAnalysis] asked for a stale in-flight compute to
@@ -199,7 +200,6 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   int _generationOf(String path) => _pathGeneration[path] ?? 0;
   void _bumpGeneration(String path) =>
       _pathGeneration[path] = _generationOf(path) + 1;
-  int _aggGeneration = 0;
   // Paths whose compute finished but produced nothing (non-WAV imports, missing
   // or truncated files). Latched so a null result is never retried — otherwise
   // the always-on inspector would re-launch the read + isolate every rebuild.
@@ -229,6 +229,12 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   final Map<String, RegisterMap> _aggRegisterCache = {};
   final Set<String> _aggLoading = {};
   final Set<String> _aggUnavailable = {};
+
+  /// Lane merges in flight (keys in [_aggLoading]) that an [evictAnalysis]
+  /// of a file they fold has disowned: their result describes bytes already
+  /// declared stale, so it is neither cached nor latched, and the lane is
+  /// merged again if a view still shows it (see [_showsLane]).
+  final Set<String> _aggDisowned = {};
 
   /// Everything memoized FROM a per-path analysis: the profile and register
   /// map derive from the metrics, the LTAS from the spectrogram and metrics.
@@ -973,7 +979,6 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
         _aggUnavailable.contains(key)) {
       return;
     }
-    final generation = _aggGeneration;
     _aggLoading.add(key);
     notifyListeners();
     try {
@@ -1038,9 +1043,9 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
       // absent makes the next ensure recompute against now-warm per-clip
       // caches, where a cached partial would be permanent (the key only
       // changes with the clip set).
-      // See [_pathGeneration]: an eviction landed while the clips were being
+      // See [_aggDisowned]: an eviction landed while the clips were being
       // analyzed, so this merge folds bytes that are already stale.
-      if (complete && generation == _aggGeneration) {
+      if (complete && !_aggDisowned.contains(key)) {
         // Stored as ONE entry: both merges describe the same clips at the same
         // offsets, every derived view (LTAS, profile, register) is only sound
         // against that exact pair, and the guard above takes a cached entry to
@@ -1067,12 +1072,29 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
         }
       }
     } catch (_) {
-      if (generation == _aggGeneration) _aggUnavailable.add(key);
+      if (!_aggDisowned.contains(key)) _aggUnavailable.add(key);
     } finally {
       _aggLoading.remove(key);
+      final disowned = _aggDisowned.remove(key);
       notifyListeners();
+      // The discarded merge left the lane with no result and no spinner, and
+      // nothing else asks again (the folded-out lanes compute only on these
+      // pushes): merge the lane as it is now, if a view still shows it.
+      if (disowned && !_disposed && _showsLane(track.id)) {
+        final live = _trackById(track.id);
+        if (live != null && live.clips.length > 1) {
+          unawaited(_ensureAggregateAnalysis(live));
+        }
+      }
     }
   }
+
+  /// Whether a view still shows [trackId]'s whole-lane analysis: its
+  /// folded-out sub-lanes, or the dock and inspector with the lane itself
+  /// (not one of its clips) as the subject.
+  bool _showsLane(String trackId) =>
+      _expandedTracks.contains(trackId) ||
+      (selectedTrack?.id == trackId && (_analysisSubject?.aggregate ?? false));
 
   // --- Eviction / refresh ----------------------------------------------------
 
@@ -1098,23 +1120,31 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     _metricsUnavailable.remove(path);
     _eqSpectroCache.remove(path);
     _eqSpectroUnavailable.remove(path);
-    // Any whole-lane aggregate may have folded this path in — drop them all
-    // (cheap to recompute, and only multi-clip takes ever have them).
-    _evictAggregates();
+    _evictAggregatesFolding(path);
   }
 
-  /// Drops every cached whole-lane aggregate. Aggregate keys embed the clip ids
-  /// so a changed clip set self-invalidates, but a clip's *file* can change with
-  /// its id intact (re-analyze), so any file mutation clears them outright.
-  void _evictAggregates() {
-    // Disown in-flight merges too (see [_pathGeneration]); unconditional,
-    // because a merge in flight leaves both collections below empty.
-    _aggGeneration++;
-    if (_aggAnalysisCache.isEmpty && _aggUnavailable.isEmpty) return;
-    // clear fires the eviction hook per key, which drops the derived memos.
-    _aggAnalysisCache.clear();
-    _aggUnavailable.clear();
+  /// Drops the whole-lane aggregates that folded [path] in. Aggregate keys
+  /// embed the clip files so a changed clip set self-invalidates, but a
+  /// file's *content* can change at the same path (re-analyze), so a file
+  /// mutation drops the lanes playing it — and ONLY those: clearing every
+  /// lane blanked other takes' folded-out lanes, which nothing asked for
+  /// again.
+  void _evictAggregatesFolding(String path) {
+    // Disown the merges in flight over it too (see [_aggDisowned]).
+    for (final key in _aggLoading) {
+      if (_aggregateFolds(key, path)) _aggDisowned.add(key);
+    }
+    // remove fires the eviction hook, which drops the derived memos with it.
+    for (final key in [..._aggAnalysisCache.keys]) {
+      if (_aggregateFolds(key, path)) _aggAnalysisCache.remove(key);
+    }
+    _aggUnavailable.removeWhere((key) => _aggregateFolds(key, path));
   }
+
+  /// Whether the aggregate [key] (see [aggregateKeyFor]) folds the clip file
+  /// [path] in: each clip ends `:<path>`, comma-separated.
+  static bool _aggregateFolds(String key, String path) =>
+      key.endsWith(':$path') || key.contains(':$path,');
 
   /// After a track's audio file changes (re-analyze/split/merge), refresh any
   /// open Voiceprint dock and inline sub-lanes that point at it.

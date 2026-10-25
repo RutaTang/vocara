@@ -135,6 +135,7 @@ AnalysisCache _cache({
   Future<void> Function()? pausePlayback,
   bool Function()? isPlaying,
   bool Function()? isRecording,
+  AudioTrack? Function(String)? trackById,
   LruBytesBudget? cacheBudget,
 }) => AnalysisCache(
   spectrograms: spectrograms ?? _FakeSpectrograms(),
@@ -145,7 +146,7 @@ AnalysisCache _cache({
   isRecording: isRecording ?? () => false,
   selectedTrack: selectedTrack ?? () => null,
   selectedClipId: selectedClipId ?? () => null,
-  trackById: (_) => null,
+  trackById: trackById ?? (_) => null,
   position: ValueNotifier(Duration.zero),
   seek: (_) async {},
   // A private budget by default so tests never evict each other's entries
@@ -208,6 +209,14 @@ Spectrogram _spec(int frames, {int bins = 2}) => Spectrogram(
   minDb: -60,
   maxDb: 0,
 );
+
+/// Lets the event loop run (the lane merge is a real isolate) until [done]
+/// holds, bounded; the caller's expectations then say what went wrong.
+Future<void> _settled(bool Function() done) async {
+  for (var i = 0; i < 400 && !done(); i++) {
+    await Future<void>.delayed(const Duration(milliseconds: 5));
+  }
+}
 
 void main() {
   test(
@@ -777,6 +786,79 @@ void main() {
       expect(cache.liveMonitor, isFalse);
       expect(engine.captureStarts, 0);
       cache.dispose();
+    });
+  });
+
+  group('aggregate eviction', () {
+    final laneA = _lane([_clip('a1', 0), _clip('a2', 2000)], id: 'A');
+    final laneC = _lane([_clip('c1', 0), _clip('c2', 2000)], id: 'C');
+    _StubSpectrograms stub() => _StubSpectrograms(
+      metricsByPath: {
+        for (final p in ['a1.wav', 'a2.wav', 'c1.wav', 'c2.wav'])
+          p: _metrics(10),
+      },
+      specsByPath: {
+        for (final p in ['a1.wav', 'a2.wav', 'c1.wav', 'c2.wav']) p: _spec(10),
+      },
+    );
+    AudioTrack? lanes(String id) => {'A': laneA, 'C': laneC}[id];
+
+    test('removing one lane\'s file keeps the analysis of a lane that never '
+        'played it', () async {
+      // Deleting a clip or a take, a split, a merge or a re-analyze evicts the
+      // files they touched — and with them EVERY lane aggregate, so another
+      // take's folded-out pitch lane went blank (no data, no spinner) and was
+      // never computed again until the lane was toggled.
+      final cache = _cache(spectrograms: stub(), trackById: lanes);
+      addTearDown(cache.dispose);
+      await cache.ensureMetricsFor('A');
+      await cache.ensureMetricsFor('C');
+
+      cache.evictAnalysis('a1.wav');
+
+      expect(cache.metricsFor('A'), isNull, reason: 'A folded the file in');
+      expect(cache.metricsFor('C'), isNotNull, reason: 'C never played it');
+    });
+
+    test('a lane merge in flight survives an eviction of a file it does not '
+        'fold', () async {
+      final s = stub();
+      s.hold['c2.wav'] = Completer<void>();
+      final cache = _cache(spectrograms: s, trackById: lanes);
+      addTearDown(cache.dispose);
+      await cache.ensureMetricsFor('A');
+      final computing = cache.ensureMetricsFor('C');
+      await pumpEventQueue();
+
+      cache.evictAnalysis('a1.wav');
+      s.hold.remove('c2.wav')!.complete();
+      await computing;
+
+      expect(cache.metricsFor('C'), isNotNull);
+    });
+
+    test('a shown lane whose merge was disowned mid-flight is merged again, '
+        'not left blank with no spinner', () async {
+      // Re-analyze evicts each clip while a folded-out lane may still be
+      // merging it: the merge is rightly discarded, but nothing asked for the
+      // lane again, so it sat empty until it was toggled.
+      final s = stub();
+      s.hold['c2.wav'] = Completer<void>();
+      final cache = _cache(spectrograms: s, trackById: lanes);
+      addTearDown(cache.dispose);
+      cache.toggleTrackExpanded('C'); // the pitch lane computes the aggregate
+      await pumpEventQueue();
+
+      cache.evictAnalysis('c2.wav', recompute: true);
+      s.metricsByPath['c2.wav'] = _metrics(20);
+      s.hold.remove('c2.wav')!.complete();
+      await _settled(() => cache.metricsFor('C') != null);
+
+      expect(cache.metricsLoadingFor('C'), isFalse);
+      final merged = cache.metricsFor('C');
+      expect(merged, isNotNull, reason: 'the lane is analyzed again');
+      // The re-analyzed c2 (20 frames from 2000 ms) now ends the lane span.
+      expect(merged!.frames, 40);
     });
   });
 
