@@ -638,18 +638,25 @@ enum VpioOutput {
     /// starts, before the host can say which endpoint it landed on: nothing the binding knows is
     /// evidence of where sound is going until the host rebinds to `Bound` or back to `Off`.
     Opening,
-    /// Running, bound (via CurrentDevice) to `mic`; empty = the system-default mic, where VPIO
-    /// binds no device at all. `has_output`: that device also has output streams (see
-    /// [`mic_has_output`]), resolved once by the host when it binds — a device's streams do not
-    /// change while it is bound, and resolving them per poll walked the whole device list on the
-    /// Dart thread, under the binding lock the host's next rebind waits on.
-    Bound { mic: String, has_output: bool },
+    /// Running, bound (via CurrentDevice) to this mic uid; empty = the system-default mic, where
+    /// VPIO binds no device at all.
+    Bound(String),
 }
 
-/// Whether the mic VPIO binds also has output streams, i.e. serves both legs of the duplex unit
-/// (see [`OutputBinding::renders_to_default`]). Walks the device list: host thread, at bind time.
-fn mic_has_output(mic: &str) -> bool {
-    !mic.is_empty() && output_device_by_uid(mic).is_some()
+/// Whether the mic duplex VPIO is bound to is present right now AND has output streams, i.e. serves
+/// the output leg too (see [`OutputBinding::renders_to_default`]). Asked of that one device on
+/// every poll — two HAL reads, UID to device and its output stream list — rather than a walk over
+/// every device (which ran on the Dart thread under the binding lock) or a fact cached at bind:
+/// a bound headset can be unplugged, and one mid profile switch when the unit binds can report
+/// no outputs for a moment, and either cached answer then held for the rest of the session.
+#[cfg(target_vendor = "apple")]
+fn bound_mic_serves_output(mic: &str) -> bool {
+    crate::vpio::device_serves_output(mic)
+}
+/// Off Apple there is no duplex VPIO, so no mic is ever bound; the lookup only keeps this total.
+#[cfg(not(target_vendor = "apple"))]
+fn bound_mic_serves_output(mic: &str) -> bool {
+    output_device_by_uid(mic).is_some()
 }
 
 /// What the engine's output is bound to right now, as the raw facts the audio-host thread owns.
@@ -677,24 +684,31 @@ impl OutputBinding {
     /// The device the engine is ACTUALLY rendering to; empty = nothing open (or unknowable, as
     /// while a VPIO unit is still opening).
     pub fn actual_uid(&self) -> String {
-        if self.renders_to_default() {
+        self.actual_uid_given(self.renders_to_default(&bound_mic_serves_output))
+    }
+
+    /// [`Self::actual_uid`] once [`Self::renders_to_default`] has been decided.
+    fn actual_uid_given(&self, renders_to_default: bool) -> String {
+        if renders_to_default {
             return system_default_output_uid();
         }
         match &self.vpio {
-            VpioOutput::Bound { mic, .. } => mic.clone(),
+            VpioOutput::Bound(mic) => mic.clone(),
             VpioOutput::Opening => String::new(),
             VpioOutput::Off => self.cpal_uid.clone(),
         }
     }
 
     /// Whether playback goes wherever the system default output is, rather than to one device.
-    fn renders_to_default(&self) -> bool {
+    /// `serves_output` answers for a bound mic ([`bound_mic_serves_output`]; tests pass their own).
+    fn renders_to_default(&self, serves_output: &dyn Fn(&str) -> bool) -> bool {
         match &self.vpio {
             // VPIO is ONE communication endpoint bound (via CurrentDevice) to the mic: when that
             // device also has output streams it serves both legs, and otherwise — including the
-            // system-default mic, where no device is bound at all — playback goes to the system
-            // default output. The app-selected output device is not part of this path.
-            VpioOutput::Bound { has_output, .. } => !has_output,
+            // system-default mic, where no device is bound at all, and a bound device that has
+            // since disappeared — playback goes to the system default output. The app-selected
+            // output device is not part of this path.
+            VpioOutput::Bound(mic) => mic.is_empty() || !serves_output(mic),
             // Not known yet: see `VpioOutput::Opening`.
             VpioOutput::Opening => false,
             // A default-following stream renders wherever the default is now; the uid resolved
@@ -723,12 +737,18 @@ impl OutputBinding {
     /// Playback is open but not on the device the user asked for. Nothing open is not a reroute:
     /// there is no sound to come out of the wrong speaker.
     pub fn rerouted(&self) -> bool {
+        self.rerouted_with(&bound_mic_serves_output)
+    }
+
+    /// [`Self::rerouted`], asking `serves_output` about a bound mic (once).
+    fn rerouted_with(&self, serves_output: &dyn Fn(&str) -> bool) -> bool {
+        let to_default = self.renders_to_default(serves_output);
         // Following the default as asked: resolving the default once per side could straddle a
         // default change and fire a false reroute (and a monitor mute) for one poll.
-        if self.requested.is_empty() && self.renders_to_default() {
+        if self.requested.is_empty() && to_default {
             return false;
         }
-        let actual = self.actual_uid();
+        let actual = self.actual_uid_given(to_default);
         !actual.is_empty() && actual != self.requested_uid()
     }
 }
@@ -766,6 +786,16 @@ pub fn reconcile_output_safety(
     binding: &Mutex<OutputBinding>,
     event: &AtomicU32,
 ) -> bool {
+    reconcile_output_safety_with(transport, binding, event, &bound_mic_serves_output)
+}
+
+/// [`reconcile_output_safety`], asking `serves_output` about a bound mic (tests pass their own).
+fn reconcile_output_safety_with(
+    transport: &Shared,
+    binding: &Mutex<OutputBinding>,
+    event: &AtomicU32,
+    serves_output: &dyn Fn(&str) -> bool,
+) -> bool {
     let Ok(mut b) = binding.lock() else {
         return false;
     };
@@ -773,7 +803,7 @@ pub fn reconcile_output_safety(
         transport.set_monitor_muted(true);
         return true;
     }
-    let rerouted = b.rerouted();
+    let rerouted = b.rerouted_with(serves_output);
     transport.set_monitor_muted(rerouted);
     if rerouted && !b.was_rerouted {
         event.fetch_or(EVENT_OUTPUT_REROUTED, Ordering::Release);
@@ -2110,15 +2140,10 @@ fn audio_host_run(
                             // lets the monitor be muted before a single block renders into
                             // whatever speaker VPIO landed on.
                             if VPIO_DUPLEX_AEC {
-                                // Resolved here, outside the binding lock (see `VpioOutput`).
-                                let has_output = mic_has_output(&bound);
                                 rebind_output(&|b| {
                                     b.cpal_uid.clear();
                                     b.cpal_follows_default = false;
-                                    b.vpio = VpioOutput::Bound {
-                                        mic: bound.clone(),
-                                        has_output,
-                                    };
+                                    b.vpio = VpioOutput::Bound(bound.clone());
                                 });
                             }
                         }
@@ -2228,15 +2253,10 @@ fn audio_host_run(
                             // (VPIO renders through the mic's endpoint) — re-derive which
                             // speaker is live before the monitor rides on the old answer.
                             if VPIO_DUPLEX_AEC {
-                                // Resolved here, outside the binding lock (see `VpioOutput`).
-                                let has_output = mic_has_output(&bound);
                                 rebind_output(&|b| {
                                     b.cpal_uid.clear();
                                     b.cpal_follows_default = false;
-                                    b.vpio = VpioOutput::Bound {
-                                        mic: bound.clone(),
-                                        has_output,
-                                    };
+                                    b.vpio = VpioOutput::Bound(bound.clone());
                                 });
                             }
                             // The reopen minted a NEW stream generation while the applied
@@ -4048,14 +4068,16 @@ mod output_safety_tests {
     //! lookups it wraps need real CoreAudio, so every case here fixes both uids explicitly.
 
     use super::{
-        reconcile_output_safety, restore_output_or_flag, system_default_output_uid, OutputBinding,
-        VpioOutput, EVENT_OUTPUT_LOST, EVENT_OUTPUT_REROUTED,
+        reconcile_output_safety, reconcile_output_safety_with, restore_output_or_flag,
+        system_default_output_uid, OutputBinding, VpioOutput, EVENT_OUTPUT_LOST,
+        EVENT_OUTPUT_REROUTED,
     };
     use crate::dsp::master::MasterNode;
     use crate::graph::{Edge, GraphDesc, NodeEntry};
     use crate::live::{spawn, EngineHandle};
     use crate::ring::spsc;
     use crate::sample::{Smp, CHANNELS, ENGINE_SR};
+    use std::cell::Cell;
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Mutex;
@@ -4234,34 +4256,74 @@ mod output_safety_tests {
         assert!(!h.transport().monitor_muted());
     }
 
-    /// A bound mic's own output streams are a fact the host records when it binds, so the poll
-    /// judges the binding without walking the device list under the binding lock (every 50 ms on
-    /// the technique page, on the Dart thread). Here the headset is no device the lookup could
-    /// find: the answer has to come from the binding alone.
+    /// A headset VPIO is bound to that disappears takes the output leg with it: playback goes to
+    /// the system default, and the poll must see that — reroute, monitor muted — instead of the
+    /// headset it was bound to. Bound while it was present (with outputs), it is no device the
+    /// machine has now; the real per-poll probe answers.
     #[test]
-    fn a_bound_mic_is_judged_from_the_binding_not_a_device_lookup() {
+    fn an_unplugged_bound_headset_sends_playback_to_the_default() {
         let h = engine();
         let event = AtomicU32::new(0);
         let b = Mutex::new(OutputBinding {
             requested: "dev-headset".into(),
             cpal_uid: String::new(),
             cpal_follows_default: false,
-            vpio: VpioOutput::Bound {
-                mic: "dev-headset".into(),
-                has_output: true,
-            },
+            vpio: VpioOutput::Bound("dev-headset".into()),
             was_rerouted: false,
         });
-        assert_eq!(b.lock().unwrap().actual_uid(), "dev-headset");
-        assert!(!reconcile_output_safety(h.transport(), &b, &event));
-        assert!(!h.transport().monitor_muted());
-
-        // An input-only mic: VPIO plays through the system default output.
-        b.lock().unwrap().vpio = VpioOutput::Bound {
-            mic: "dev-usb-mic".into(),
-            has_output: false,
-        };
         assert_eq!(b.lock().unwrap().actual_uid(), system_default_output_uid());
+        assert!(reconcile_output_safety(h.transport(), &b, &event));
+        assert!(h.transport().monitor_muted());
+    }
+
+    /// Whether the bound mic serves the output is asked afresh on every poll, never latched: a
+    /// headset mid profile switch that shows no outputs as the unit binds reads as a reroute for
+    /// that poll only, and its unplugging later is seen on the next one. (A fact cached at bind
+    /// held the first answer for the session: a false mute and "playback moved" toast, or an
+    /// unmuted monitor on a headset that was gone.)
+    #[test]
+    fn a_bound_headset_is_judged_afresh_on_every_poll() {
+        let h = engine();
+        let event = AtomicU32::new(0);
+        let serves = Cell::new(false);
+        let probe = |mic: &str| {
+            assert_eq!(mic, "dev-headset", "only the bound mic is asked");
+            serves.get()
+        };
+        let b = Mutex::new(OutputBinding {
+            requested: "dev-headset".into(),
+            cpal_uid: String::new(),
+            cpal_follows_default: false,
+            vpio: VpioOutput::Bound("dev-headset".into()),
+            was_rerouted: false,
+        });
+        // Mid profile switch: no outputs yet, so playback is on the default for now.
+        assert!(reconcile_output_safety_with(
+            h.transport(),
+            &b,
+            &event,
+            &probe
+        ));
+        assert!(h.transport().monitor_muted());
+        // The switch completed: the headset serves both legs, which is what the user picked.
+        serves.set(true);
+        assert!(!reconcile_output_safety_with(
+            h.transport(),
+            &b,
+            &event,
+            &probe
+        ));
+        assert!(!h.transport().monitor_muted());
+        assert!(!b.lock().unwrap().rerouted_with(&probe));
+        // Unplugged mid-session: the next poll mutes again.
+        serves.set(false);
+        assert!(reconcile_output_safety_with(
+            h.transport(),
+            &b,
+            &event,
+            &probe
+        ));
+        assert!(h.transport().monitor_muted());
     }
 
     /// An open does not reset the reroute edge: playback that was already off the chosen device

@@ -1073,7 +1073,7 @@ unsafe fn dev_set_u32(dev: u32, sel: u32, scope: u32, v: u32) -> i32 {
 /// Whether `dev` can actually play audio: probes `kAudioDevicePropertyStreams` on the OUTPUT scope.
 /// A failed query or an empty stream list both mean "not an output device" (e.g. an input-only USB
 /// mic), so the output leg must be attributed to the default output device instead. Not RT — called
-/// only during `start`.
+/// during `start`, and by [`device_serves_output`].
 unsafe fn has_output_streams(dev: u32) -> bool {
     use objc2_core_audio::{
         kAudioDevicePropertyStreams, kAudioObjectPropertyElementMain,
@@ -1094,6 +1094,14 @@ unsafe fn has_output_streams(dev: u32) -> bool {
         NonNull::from(&mut size),
     );
     st == 0 && size > 0
+}
+
+/// Whether the device with `uid` is present right now and has output streams: a bound mic that
+/// serves the duplex unit's output leg too. Two HAL reads for that one device (UID to device, then
+/// its output stream list), so the device-event poll can ask afresh every tick. Not RT.
+pub(crate) fn device_serves_output(uid: &str) -> bool {
+    // SAFETY: a plain HAL property query on a device id the HAL just resolved.
+    device_id_for_uid(uid).is_some_and(|dev| unsafe { has_output_streams(dev) })
 }
 
 /// Request a small IO buffer on the device(s) the VPIO unit binds (cuts monitor/record latency and
