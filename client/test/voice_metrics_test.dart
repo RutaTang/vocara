@@ -652,7 +652,29 @@ void main() {
   test('CPP is higher for a periodic voice than for noise', () {
     final voice = computeVoiceMetrics(_vowel(700, 1200, 2600), _sr);
     final noise = computeVoiceMetrics(_noise(), _sr);
-    expect(voice.cppAvg, greaterThan(noise.cppAvg));
+    expect(voice.cppAvg, isNot(isNaN));
+    // Noise voices no frame, so it has no CPP average at all ("—"), which is
+    // the sharpest form of "lower". Per frame, the voice still beats it.
+    expect(noise.cppAvg, isNaN);
+    expect(_median(voice.cpp), greaterThan(_median(noise.cpp)));
+  });
+
+  test('a take with no voiced frame reports its timbre averages as no data', () {
+    // Breath, a whispered exercise or a muted mic: there is no voiced frame to
+    // average. A 0.0 here read as a measurement ("Clarity 0.0", a gap of
+    // several dB to the technique reference); NaN is what every readout
+    // renders as "—", and what the live monitor's averages already answer.
+    final takes = {
+      'noise': computeVoiceMetrics(_noise(), _sr),
+      'silence': computeVoiceMetrics(Float32List(_sr), _sr),
+      'empty': computeVoiceMetrics(Float32List(0), _sr),
+    };
+    for (final MapEntry(key: what, value: m) in takes.entries) {
+      expect(m.f0.where((v) => v.isFinite), isEmpty, reason: what);
+      expect(m.ringAvg, isNaN, reason: '$what ringAvg');
+      expect(m.tiltAvg, isNaN, reason: '$what tiltAvg');
+      expect(m.cppAvg, isNaN, reason: '$what cppAvg');
+    }
   });
 
   test('ring index rises when there is strong 2–4 kHz energy', () {
@@ -784,7 +806,7 @@ void main() {
   test('truly empty input yields zero frames without throwing', () {
     final m = computeVoiceMetrics(Float32List(0), _sr);
     expect(m.frames, 0);
-    expect(m.ringAvg, 0);
+    expect(m.ringAvg, isNaN); // nothing to average: no data, not 0 dB
   });
 
   test(

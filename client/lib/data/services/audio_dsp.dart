@@ -141,46 +141,81 @@ double _coveredMaxHz(double maxHz, int maxBin, int sampleRate, int fftSize) =>
 int _spectrogramBins(double maxHz, int fftSize, int sampleRate) =>
     math.min(fftSize ~/ 2 + 1, (maxHz * fftSize / sampleRate).ceil() + 1);
 
-/// Assembles dB [columns] of [maxBin] bins each into a [Spectrogram] — the
-/// one assembly every builder shares, so they agree on the dB range and on
-/// the empty-input defaults.
-Spectrogram _assembleSpectrogram(
-  List<Float32List> columns, {
-  required int maxBin,
-  required double maxHz,
-  required int sampleRate,
-  required int fftSize,
-  required int hop,
-}) {
-  final frames = columns.length;
-  final db = Float32List(frames * maxBin);
-  var minDb = double.infinity;
-  var maxDb = -double.infinity;
-  for (var f = 0; f < frames; f++) {
-    final col = columns[f];
-    final base = f * maxBin;
-    for (var b = 0; b < maxBin; b++) {
-      final v = col[b];
-      db[base + b] = v;
+/// How many STFT frames fftea's framing gives [samples] samples — `run`, and
+/// `stream` + `flush` alike, zero-pad and emit a trailing partial frame; empty
+/// input gives none.
+int stftFrameCount(int samples, {int fftSize = 2048, int hop = 512}) =>
+    samples <= 0
+    ? 0
+    : (samples <= fftSize ? 1 : ((samples - fftSize + hop - 1) ~/ hop) + 1);
+
+/// The dB image of a spectrogram as it is built: each column's [bins] values
+/// are written STRAIGHT into one flat buffer, sized up front from the frame
+/// count when the caller knows it. Every column used to be a list of its own
+/// until the end, which then copied them all into the flat image, so a build
+/// held its whole result twice (the 18 kHz EQ display of a 10-minute take:
+/// ~173 MB of columns beside ~173 MB of image). The one assembly every
+/// builder shares, so they agree on the dB range and the empty-input defaults.
+class _SpectrogramImage {
+  _SpectrogramImage(this.bins, {int expectedFrames = 0})
+    : _db = Float32List(math.max(0, expectedFrames) * bins);
+
+  final int bins;
+  Float32List _db;
+  int _frames = 0;
+
+  /// Claims the next column and returns its offset into [db]; the caller
+  /// writes its [bins] values there. Read [db] AFTER calling this: an
+  /// unforeseen extra column (a caller with no frame count) regrows it.
+  int nextColumn() {
+    final end = (_frames + 1) * bins;
+    if (end > _db.length) {
+      final grown = Float32List(math.max(end, _db.length * 2));
+      grown.setRange(0, _frames * bins, _db);
+      _db = grown;
+    }
+    return _frames++ * bins;
+  }
+
+  Float32List get db => _db;
+
+  /// The finished [Spectrogram]: the buffer itself when the frame count was
+  /// right, an exact-size copy only when fewer frames came (a file cut short
+  /// on disk), so the image never carries dead capacity into the caches that
+  /// budget it by size.
+  Spectrogram finish({
+    required double maxHz,
+    required int sampleRate,
+    required int fftSize,
+    required int hop,
+  }) {
+    final used = _frames * bins;
+    final db = used == _db.length
+        ? _db
+        : Float32List.fromList(Float32List.sublistView(_db, 0, used));
+    var minDb = double.infinity;
+    var maxDb = -double.infinity;
+    for (var i = 0; i < used; i++) {
+      final v = db[i];
       if (v < minDb) minDb = v;
       if (v > maxDb) maxDb = v;
     }
+    if (_frames == 0) {
+      minDb = -90;
+      maxDb = 0;
+    }
+    return Spectrogram(
+      frames: _frames,
+      bins: bins,
+      maxHz: _coveredMaxHz(maxHz, bins, sampleRate, fftSize),
+      sampleRate: sampleRate,
+      fftSize: fftSize,
+      hop: hop,
+      db: db,
+      minDb: minDb,
+      maxDb: maxDb,
+    );
   }
-  if (frames == 0) {
-    minDb = -90;
-    maxDb = 0;
-  }
-  return Spectrogram(
-    frames: frames,
-    bins: maxBin,
-    maxHz: _coveredMaxHz(maxHz, maxBin, sampleRate, fftSize),
-    sampleRate: sampleRate,
-    fftSize: fftSize,
-    hop: hop,
-    db: db,
-    minDb: minDb,
-    maxDb: maxDb,
-  );
 }
 
 /// Incremental spectrogram builder with EXACTLY [computeSpectrogram]'s
@@ -189,13 +224,18 @@ Spectrogram _assembleSpectrogram(
 /// full-track sample buffer never has to exist. Pinned equal to the batch
 /// path by test.
 class StreamingSpectrogramBuilder {
+  /// [expectedFrames] — the [stftFrameCount] of the whole input, when known —
+  /// sizes the image once; without it the image grows as columns arrive.
   StreamingSpectrogramBuilder(
     this.sampleRate, {
     this.fftSize = 2048,
     this.hop = 512,
     this.maxHz = 5000,
+    int expectedFrames = 0,
   }) : maxBin = _spectrogramBins(maxHz, fftSize, sampleRate),
-       _stft = STFT(fftSize, Window.hanning(fftSize));
+       _stft = STFT(fftSize, Window.hanning(fftSize)) {
+    _image = _SpectrogramImage(maxBin, expectedFrames: expectedFrames);
+  }
 
   final int sampleRate;
   final int fftSize;
@@ -203,18 +243,18 @@ class StreamingSpectrogramBuilder {
   final double maxHz;
   final int maxBin;
   final STFT _stft;
-  final List<Float32List> _columns = [];
+  late final _SpectrogramImage _image;
   bool _any = false;
 
   static const double _ln10 = 2.302585092994046;
 
   void _column(Float64x2List freq) {
     final mags = freq.discardConjugates().magnitudes();
-    final col = Float32List(maxBin);
+    final base = _image.nextColumn();
+    final db = _image.db;
     for (var b = 0; b < maxBin; b++) {
-      col[b] = 20.0 * (math.log(mags[b] + 1e-9) / _ln10);
+      db[base + b] = 20.0 * (math.log(mags[b] + 1e-9) / _ln10);
     }
-    _columns.add(col);
   }
 
   /// Feeds the next chunk of mono samples.
@@ -229,9 +269,7 @@ class StreamingSpectrogramBuilder {
   /// lone zero-padded one.
   Spectrogram finish() {
     if (_any) _stft.flush(_column);
-    return _assembleSpectrogram(
-      _columns,
-      maxBin: maxBin,
+    return _image.finish(
       maxHz: maxHz,
       sampleRate: sampleRate,
       fftSize: fftSize,
@@ -251,7 +289,10 @@ Spectrogram computeSpectrogram(
   final maxBin = _spectrogramBins(maxHz, fftSize, sampleRate);
 
   final stft = STFT(fftSize, Window.hanning(fftSize));
-  final columns = <Float32List>[];
+  final image = _SpectrogramImage(
+    maxBin,
+    expectedFrames: stftFrameCount(samples.length, fftSize: fftSize, hop: hop),
+  );
   const ln10 = 2.302585092994046;
 
   // Empty input → no frames, so VoiceMetrics.frames == Spectrogram.frames stays aligned
@@ -260,17 +301,15 @@ Spectrogram computeSpectrogram(
   if (samples.isNotEmpty) {
     stft.run(samples, (Float64x2List freq) {
       final mags = freq.discardConjugates().magnitudes();
-      final col = Float32List(maxBin);
+      final base = image.nextColumn();
+      final db = image.db;
       for (var b = 0; b < maxBin; b++) {
-        col[b] = 20.0 * (math.log(mags[b] + 1e-9) / ln10);
+        db[base + b] = 20.0 * (math.log(mags[b] + 1e-9) / ln10);
       }
-      columns.add(col);
     }, hop);
   }
 
-  return _assembleSpectrogram(
-    columns,
-    maxBin: maxBin,
+  return image.finish(
     maxHz: maxHz,
     sampleRate: sampleRate,
     fftSize: fftSize,
@@ -329,7 +368,10 @@ class _MetricsPass {
        per = Float32List(capacityFrames),
        voicedMask = Uint8List(capacityFrames),
        frame = Float64List(fftSize),
-       logmag = Float64List(fftSize) {
+       logmag = Float64List(fftSize),
+       image = spectrogramBins > 0
+           ? _SpectrogramImage(spectrogramBins, expectedFrames: capacityFrames)
+           : null {
     dsRate = sampleRate / dsFactor;
     yinRate = sampleRate / yinFactor;
     lpcOrder = (2 + dsRate / 1000).round().clamp(8, 20);
@@ -377,13 +419,16 @@ class _MetricsPass {
   var _emitted = 0;
 
   /// When > 0, every frame also keeps the first [spectrogramBins] bins of its
-  /// dB spectrum as a spectrogram column ([columns]). The spectrogram's STFT
+  /// dB spectrum as a spectrogram column ([image]). The spectrogram's STFT
   /// is this pass's first FFT exactly — same frames, same Hann window, same
   /// fftea transform, same 20·log10(|X| + 1e-9) — so the column IS what a
   /// separate [computeSpectrogram] would compute, bit for bit (pinned by
   /// test), without transforming every frame a third time.
   final int spectrogramBins;
-  final List<Float32List> columns = [];
+
+  /// The spectrogram image, sized from the pass's frame capacity; null when
+  /// no spectrogram is kept.
+  final _SpectrogramImage? image;
 
   // Clip/peak scan state (streamed; the batch feeds the whole track once).
   var _len = 0;
@@ -480,12 +525,13 @@ class _MetricsPass {
     for (var k = 0; k <= half; k++) {
       logmag[k] = _db(mags[k]);
     }
-    if (spectrogramBins > 0) {
-      final col = Float32List(spectrogramBins);
+    final image = this.image;
+    if (image != null) {
+      final base = image.nextColumn();
+      final db = image.db;
       for (var b = 0; b < spectrogramBins; b++) {
-        col[b] = logmag[b];
+        db[base + b] = logmag[b];
       }
-      columns.add(col);
     }
     for (var k = half + 1; k < fftSize; k++) {
       logmag[k] = logmag[fftSize - k];
@@ -631,7 +677,10 @@ class _MetricsPass {
         h1h2[fr] = double.nan;
       }
     }
-    final inv = n == 0 ? 0.0 : 1.0 / n;
+    // No voiced frame means no timbre average: NaN, the readouts' "—" (and
+    // what the live monitor's averages answer). A 0.0 read as a measurement
+    // (CPP "0.0", a technique gap of several dB to the reference).
+    final inv = n == 0 ? double.nan : 1.0 / n;
 
     // --- Input quality: peak level, clipping, SNR --------------------------
     final peakDbfs = _len == 0
@@ -876,9 +925,7 @@ class StreamingTakeAnalyzer {
     // The frame count is fixed by the FINAL length; during feeding only
     // frames whose inputs are complete may emit (they exist for any longer
     // final length too).
-    final nFrames = len == 0
-        ? 0
-        : (len <= fftSize ? 1 : ((len - fftSize + hop - 1) ~/ hop) + 1);
+    final nFrames = stftFrameCount(len, fftSize: fftSize, hop: hop);
     while (_nextFrame < nFrames) {
       final fr = _nextFrame;
       final start = fr * hop;
@@ -975,9 +1022,7 @@ _MetricsPass _batchPass(
   // Spectrogram.frames and the per-frame overlay/playhead stay aligned. The
   // final frame is zero-padded past the end of [samples].
   final len = samples.length;
-  final nFrames = len == 0
-      ? 0
-      : (len <= fftSize ? 1 : ((len - fftSize + hop - 1) ~/ hop) + 1);
+  final nFrames = stftFrameCount(len, fftSize: fftSize, hop: hop);
   final pass = _MetricsPass(
     sampleRate,
     fftSize: fftSize,
@@ -1020,16 +1065,12 @@ _MetricsPass _batchPass(
 
 /// The spectrogram [pass] captured, or null when it captured none.
 Spectrogram? _spectrogramOf(_MetricsPass pass, double maxHz) =>
-    pass.spectrogramBins == 0
-    ? null
-    : _assembleSpectrogram(
-        pass.columns,
-        maxBin: pass.spectrogramBins,
-        maxHz: maxHz,
-        sampleRate: pass.sampleRate,
-        fftSize: pass.fftSize,
-        hop: pass.hop,
-      );
+    pass.image?.finish(
+      maxHz: maxHz,
+      sampleRate: pass.sampleRate,
+      fftSize: pass.fftSize,
+      hop: pass.hop,
+    );
 
 // ---- F17 formant estimation (LPC) ---------------------------------------
 

@@ -282,4 +282,21 @@ void main() {
       lessThan(content.indexOf('===== diagnostics.log =====')),
     );
   });
+
+  test('discardArchive removes the bundle and its own temp folder, never '
+      'a folder that holds anything else', () async {
+    final log = DiagnosticsLog.forTesting(directory: dir);
+    final path = await log.exportArchive();
+    await DiagnosticsLog.discardArchive(path);
+    expect(await File(path).exists(), isFalse);
+    expect(await File(path).parent.exists(), isFalse);
+
+    // A path somewhere else: only that file goes, its neighbours stay.
+    final other = File('${dir.path}/bundle.txt')..writeAsStringSync('x');
+    final neighbour = File('${dir.path}/keep.txt')..writeAsStringSync('y');
+    await DiagnosticsLog.discardArchive(other.path);
+    expect(await other.exists(), isFalse);
+    expect(await neighbour.exists(), isTrue);
+    expect(await dir.exists(), isTrue);
+  });
 }

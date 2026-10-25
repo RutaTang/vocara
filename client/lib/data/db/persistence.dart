@@ -259,6 +259,11 @@ class Persistence {
             '(${e.runtimeType}); skipping all destructive sweeps this boot',
       );
     }
+    // Waveform intermediates an analysis left when the app quit or was killed
+    // mid-way. Derived scratch, never a copy of anything, so it needs no gate;
+    // but only now, once recovery's own analyses (which write there too) are
+    // done, and before any screen can start one.
+    await WaveformService.sweepScratch(dir);
     if (sweepGateOpen) {
       // The whole boot maintenance pass holds the write gate exclusively.
       // Nothing user-facing is running yet, so this is uncontended today; it
@@ -536,6 +541,8 @@ class Persistence {
     await for (final dir in staging.list()) {
       if (dir is! Directory) continue;
       final practiceId = p.basename(dir.path);
+      // Files directly in the practice folder only: imports and edit outputs
+      // stage in subdirectories precisely so this scan never adopts them.
       await for (final f in dir.list()) {
         if (f is! File || p.extension(f.path).toLowerCase() != '.wav') {
           continue;
@@ -635,10 +642,11 @@ class Persistence {
   ) async {
     // Only what the recording engine writes is a candidate: a canonical-header
     // MONO WAV — 32-bit float today, 16-bit PCM from pre-float versions — with
-    // a non-empty payload. Staged imports are almost never that shape, and
-    // misreviving an import as a "take" would be worse than sweeping it. An
-    // empty payload (killed before the first ~1 s header patch) carries no
-    // audio worth keeping.
+    // a non-empty payload. Imports and edit outputs can have that shape, so
+    // they stage one level down (`imports/`, `edits/`), which the scan above
+    // never enters: misreviving one as a "take" would be worse than sweeping
+    // it. An empty payload (killed before the first ~1 s header patch) carries
+    // no audio worth keeping.
     // An UNREADABLE file is not junk. `probeWav` answers null only for shape
     // (too short / wrong layout / not PCM / gone) and THROWS on any other I/O
     // failure, so a permission denial or a hardware fault leaves here as an

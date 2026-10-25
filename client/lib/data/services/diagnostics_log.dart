@@ -170,6 +170,23 @@ class DiagnosticsLog {
     return out.path;
   }
 
+  /// Removes a bundle [exportArchive] wrote, once the caller has copied it
+  /// where the user wanted it: the file, then its folder ONLY if that left it
+  /// empty (a non-recursive delete, so a path from anywhere else can never take
+  /// more than the file with it). Every export used to leave both behind.
+  /// Best-effort; never throws.
+  static Future<void> discardArchive(String path) async {
+    final file = File(path);
+    try {
+      await file.delete();
+    } catch (_) {}
+    try {
+      await file.parent.delete();
+    } catch (_) {
+      // Not empty, or already gone: the file was all that was ours.
+    }
+  }
+
   void _enqueue(Future<void> Function() write) {
     _tail = _tail.then((_) async {
       try {

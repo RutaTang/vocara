@@ -86,7 +86,8 @@ class VoiceMetrics with AnalysisFraming {
   /// 1 where the frame carries enough energy to be voice (drives the averages).
   final Uint8List active;
 
-  /// Averages over [active] frames only.
+  /// Averages over the VOICED frames; NaN when no frame is voiced (breath, a
+  /// whisper, a muted mic), which every readout shows as "—".
   final double ringAvg;
   final double tiltAvg;
   final double cppAvg;
@@ -230,7 +231,8 @@ VoiceMetrics? mergeVoiceMetrics(
         n++;
       }
     }
-    return n == 0 ? 0.0 : sum / n;
+    // Nothing voiced: no average (NaN, rendered "—"), as for a single clip.
+    return n == 0 ? double.nan : sum / n;
   }
 
   // Aggregate the quality gate across clips so a multi-clip take still flags a

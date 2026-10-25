@@ -160,6 +160,25 @@ void main() {
       expect(m.ringAvg, closeTo(3.0, 1e-9));
     });
 
+    test('a lane with no voiced frame has no timbre averages (NaN, not 0)', () {
+      // Audible but unvoiced throughout (breath between phrases on both
+      // clips): nothing to average, which the readouts show as "—".
+      final a = _metrics(
+        ring: [2, 3],
+        active: [1, 1],
+        f0: [double.nan, double.nan],
+      );
+      final b = _metrics(
+        ring: [4, 5],
+        active: [1, 1],
+        f0: [double.nan, double.nan],
+      );
+      final m = mergeVoiceMetrics([_mAt(0, a), _mAt(200, b)])!;
+      expect(m.ringAvg, isNaN);
+      expect(m.tiltAvg, isNaN);
+      expect(m.cppAvg, isNaN);
+    });
+
     test('aggregates the quality gate so a clipped/noisy clip still warns', () {
       final clean = _metrics(
         ring: [1, 1],

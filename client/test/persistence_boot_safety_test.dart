@@ -240,6 +240,39 @@ void main() {
     },
   );
 
+  test('boot clears waveform intermediates an interrupted analysis left, '
+      'after recovery\'s own analyses are done', () async {
+    // WaveformService removes its .wave scratch file in a finally, which a
+    // quit (the budget cuts a stop's finalize off mid-analysis) or a kill
+    // never reaches; nothing else ever looked in waveform_cache/ again.
+    final practiceId = await createPracticeAndClose();
+    await stageOrphan(practiceId, monoWav(4800));
+    final scratch = Directory(p.join(root.path, 'waveform_cache'));
+    await scratch.create(recursive: true);
+    final stale = File(p.join(scratch.path, 'interrupted.wave'));
+    await stale.writeAsBytes(List.filled(64, 1));
+
+    // Recovery analyzes through the same scratch folder: its intermediate
+    // must be left alone for as long as its analysis runs.
+    var sawOwnScratch = false;
+    Future<WaveformResult> analyzeWithScratch(String path) async {
+      final own = File(p.join(scratch.path, 'recovering.wave'));
+      await own.writeAsBytes(List.filled(64, 2));
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      sawOwnScratch = await own.exists();
+      await own.delete();
+      return fakeAnalyze(path);
+    }
+
+    final persistence = await Persistence.open(
+      dir: root,
+      analyze: analyzeWithScratch,
+    );
+    addTearDown(persistence.db.close);
+    expect(sawOwnScratch, isTrue);
+    expect(await stale.exists(), isFalse);
+  });
+
   test('a systemic analyzer failure exempts staged takes from this boot\'s '
       'sweep, so the next boot retries and recovers them', () async {
     final practiceId = await createPracticeAndClose();
