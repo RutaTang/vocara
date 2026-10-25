@@ -271,20 +271,26 @@ pub fn input_device_channels(uid: &str) -> u32 {
     let Some(device) = device else {
         return 0;
     };
-    // The widest supported config: on macOS it counts the channels of every input stream, where
-    // the default config is the FIRST stream's format — an aggregate device or a multi-stream
-    // interface read as mono there, and the panel hid the choice.
-    device
+    let default = || {
+        device
+            .default_input_config()
+            .ok()
+            .map(|c| u32::from(c.channels()))
+    };
+    // On macOS the widest supported config counts the channels of every input stream, where the
+    // default config is the FIRST stream's format — an aggregate device or a multi-stream
+    // interface read as mono there, and the panel hid the choice. Elsewhere (ALSA) the supported
+    // configs are channel RANGES up to 64, so the widest says nothing about the mic: the default
+    // config is what the input stream opens with.
+    #[cfg(target_vendor = "apple")]
+    let count = device
         .supported_input_configs()
         .ok()
         .and_then(|cs| cs.map(|c| u32::from(c.channels())).max())
-        .or_else(|| {
-            device
-                .default_input_config()
-                .ok()
-                .map(|c| u32::from(c.channels()))
-        })
-        .unwrap_or(0)
+        .or_else(default);
+    #[cfg(not(target_vendor = "apple"))]
+    let count = default();
+    count.unwrap_or(0)
 }
 
 /// Output-boundary sample-rate converter: the engine renders at `ENGINE_SR`; the device
