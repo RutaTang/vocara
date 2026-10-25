@@ -290,13 +290,18 @@ class _FakeMic extends Fake implements MicRecordingController {
   @override
   bool get isStarting => _starting;
 
+  /// Set by [invalidatePendingStart] (a Stop in the arm window).
+  bool _invalidated = false;
+
   @override
   Future<MicRecordingStart> start(RecordingPathStrategy destination) async {
     _starting = true;
+    _invalidated = false;
     try {
       _path = await destination.create();
       final r = ready;
       if (r != null) await r.future;
+      if (_invalidated) return const MicRecordingStart.invalidated();
       _recording = true;
       return MicRecordingStart.started(_path!);
     } finally {
@@ -314,7 +319,7 @@ class _FakeMic extends Fake implements MicRecordingController {
   @override
   Future<void> guardStopFinalize(Future<void> Function() work) => work();
   @override
-  void invalidatePendingStart() {}
+  void invalidatePendingStart() => _invalidated = true;
   @override
   void dispose() {}
 }
@@ -557,6 +562,25 @@ void main() {
         expect(vm.practice!.vocalTracks.map((t) => t.id), ['take1']);
       },
     );
+
+    test('a REC cancelled while arming leaves no empty take behind', () async {
+      final mic = _FakeMic()..ready = Completer<void>();
+      final vm = await pumpVm(
+        seed: _seed(accompaniment: _backing()),
+        engine: _FakeGraphEngine(),
+        mic: mic,
+      );
+      expect(vm.recording.recordTargetId, isNull); // nothing armed
+      final start = vm.recording.startRecording();
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(vm.practice!.vocalTracks, hasLength(2), reason: 'REC made one');
+      await vm.stopRecording();
+      mic.ready!.complete();
+      await start;
+      expect(vm.isRecording, isFalse);
+      expect(vm.practice!.vocalTracks.map((t) => t.id), ['take1']);
+      expect(repo.stored.vocalTracks.map((t) => t.id), ['take1']);
+    });
   });
 
   group('a take that becomes selected replaces a bus selection', () {

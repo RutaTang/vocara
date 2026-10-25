@@ -44,6 +44,10 @@ class _FakePlayback extends Fake implements PlaybackController {
   @override
   PlaybackEngine get engine => _engine;
 
+  /// The transport Stop: logged as one call (the real one pauses and seeks).
+  @override
+  Future<void> stop() async => _engine.calls.add('stop');
+
   @override
   final ValueNotifier<Duration> position = ValueNotifier(Duration.zero);
 
@@ -253,7 +257,12 @@ void main() {
   // Swappable save so a test can park the finalize tail mid-save.
   late Future<bool> Function() saveImpl;
 
-  RecordingController build(MicRecordingController recorder) {
+  RecordingController build(
+    MicRecordingController recorder, {
+    String? Function()? selectedTrackId,
+    Future<String?> Function()? createEmptyVocalTake,
+    Future<void> Function(String)? discardEmptyTake,
+  }) {
     final graph = _FakeGraph();
     return RecordingController(
       graphEngine: () => graph,
@@ -267,13 +276,14 @@ void main() {
       practiceId: 'p1',
       finalizer: RecordingFinalizer.instance,
       practice: () => practice,
-      selectedTrackId: () => 't1',
+      selectedTrackId: selectedTrackId ?? () => 't1',
       trackById: (id) =>
           practice.vocalTracks.where((t) => t.id == id).firstOrNull,
       updateTrack: (id, fn) {},
       appendVocal: ({required path, required analysis, required startMs}) =>
           't1',
-      createEmptyVocalTake: () async => null,
+      createEmptyVocalTake: createEmptyVocalTake ?? () async => null,
+      discardEmptyTake: discardEmptyTake ?? (_) async {},
       selectRecordedClip: (t, c) {},
       save: () => saveImpl(),
       toast: (_) {},
@@ -488,6 +498,7 @@ void main() {
       appendVocal: ({required path, required analysis, required startMs}) =>
           't1',
       createEmptyVocalTake: () async => null,
+      discardEmptyTake: (_) async {},
       selectRecordedClip: (t, c) {},
       save: () async {
         saves++;
@@ -540,6 +551,60 @@ void main() {
     expect(arming.startCalls, 1);
     await start;
     expect(engine.calls, isNot(contains('play')));
+  });
+
+  test('Stop while REC is arming stops the transport too', () async {
+    // Before it cancelled the take, Stop in this window stopped the
+    // transport; a REC pressed over a playing backing (a punch on the fly)
+    // then left the backing playing on after the cancel.
+    final arming = _ArmingMic();
+    final c = build(arming);
+    addTearDown(c.dispose);
+    final start = c.startRecording();
+    await pumpUntil(() => c.isStartingTake);
+    await c.stopRecording();
+    expect(engine.calls, contains('stop'));
+    arming.ready.complete();
+    await start;
+  });
+
+  test('a REC that never arms drops the empty take it created', () async {
+    // With nothing armed, REC creates (and saves) an empty "Take N" to record
+    // into; a start cancelled by Stop, or one that fails, left it behind.
+    final arming = _ArmingMic();
+    final discarded = <String>[];
+    final c = build(
+      arming,
+      selectedTrackId: () => null,
+      createEmptyVocalTake: () async => 'fresh',
+      discardEmptyTake: (id) async => discarded.add(id),
+    );
+    addTearDown(c.dispose);
+    final start = c.startRecording();
+    await pumpUntil(() => c.isStartingTake);
+    await c.stopRecording();
+    arming.ready.complete();
+    await start;
+    expect(discarded, ['fresh']);
+  });
+
+  test('a REC that arms keeps the take it created', () async {
+    final arming = _ArmingMic()..ready.complete();
+    final discarded = <String>[];
+    final c = build(
+      arming,
+      selectedTrackId: () => null,
+      createEmptyVocalTake: () async => 'fresh',
+      discardEmptyTake: (id) async => discarded.add(id),
+    );
+    addTearDown(c.dispose);
+    final start = c.startRecording();
+    await pumpUntil(() => mixer.gates.isNotEmpty);
+    mixer.gates.single.complete();
+    await start;
+    expect(c.isRecording, isTrue);
+    expect(discarded, isEmpty);
+    await c.stopRecording();
   });
 
   test('a REC after a cancelled arm records normally', () async {

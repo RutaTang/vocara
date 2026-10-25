@@ -56,6 +56,7 @@ class RecordingController extends ChangeNotifier {
     })
     appendVocal,
     required Future<String?> Function() createEmptyVocalTake,
+    required Future<void> Function(String trackId) discardEmptyTake,
     required void Function(String trackId, String? clipId) selectRecordedClip,
     required Future<bool> Function() save,
     required void Function(String) toast,
@@ -78,6 +79,7 @@ class RecordingController extends ChangeNotifier {
        _updateTrack = updateTrack,
        _appendVocal = appendVocal,
        _createEmptyVocalTake = createEmptyVocalTake,
+       _discardEmptyTake = discardEmptyTake,
        _selectRecordedClip = selectRecordedClip,
        _save = save,
        _toast = toast,
@@ -126,6 +128,15 @@ class RecordingController extends ChangeNotifier {
   /// Creates the empty take REC records into when nothing is armed; returns
   /// its id once its save landed, or null when it did not.
   final Future<String?> Function() _createEmptyVocalTake;
+
+  /// Removes a take REC created for itself when nothing was recorded into it
+  /// (see [_createdEmptyTake]); the host leaves a take that has clips alone.
+  final Future<void> Function(String trackId) _discardEmptyTake;
+
+  /// The empty take the start in flight created to record into, until the
+  /// take arms. A start that never arms (cancelled by Stop, denied the mic,
+  /// failed to open it or its file) left that empty "Take N" lane behind.
+  String? _createdEmptyTake;
 
   /// Selects the lane (and, when non-null, the clip) the recording landed on.
   /// A null clip id leaves the host's clip selection untouched (new-take case).
@@ -201,6 +212,7 @@ class RecordingController extends ChangeNotifier {
         // abort (the save already said so).
         targetId = await _createEmptyVocalTake();
         if (targetId == null) throw const _TakeSetupFailed();
+        _createdEmptyTake = targetId;
       }
       _takeGeneration++;
       _recordingTargetId = targetId;
@@ -404,6 +416,8 @@ class RecordingController extends ChangeNotifier {
       // Invalidated mid-await (Stop, route popped / disposed): a silent
       // no-op.
       if (!r.started) return;
+      // Armed: the take is recording into its lane, which is no longer empty.
+      _createdEmptyTake = null;
 
       // The take is armed, which means the user can STOP it right now — every
       // await below must re-check, or a continuation resuming after the stop
@@ -460,6 +474,11 @@ class RecordingController extends ChangeNotifier {
       if (_mic.isRecording && _takeGeneration == takeGen) _mic.stop();
       if (e is! _TakeSetupFailed) _toast(_friendlyError(e));
       notifyListeners();
+    } finally {
+      // Never armed: drop the empty take this start created for itself.
+      final created = _createdEmptyTake;
+      _createdEmptyTake = null;
+      if (created != null && !_disposed) await _discardEmptyTake(created);
     }
   }
 
@@ -477,6 +496,10 @@ class RecordingController extends ChangeNotifier {
         _mic.invalidatePendingStart();
         _cancellingStart = true;
         notifyListeners();
+        // Stop stops the transport too, as it did in this window before it
+        // cancelled the take: a REC pressed over a playing backing (a punch
+        // on the fly) otherwise left the backing playing on.
+        await _playback.stop();
       }
       return;
     }

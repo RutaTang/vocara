@@ -223,6 +223,11 @@ class SongPracticeDetailViewModel extends ChangeNotifier
             startMs: startMs,
           ),
       createEmptyVocalTake: createEmptyVocalTake,
+      discardEmptyTake: (trackId) async {
+        if (_trackById(trackId)?.clips.isEmpty ?? false) {
+          await deleteTrack(trackId);
+        }
+      },
       selectRecordedClip: _selectRecordedClip,
       save: _save,
       toast: _toast,
