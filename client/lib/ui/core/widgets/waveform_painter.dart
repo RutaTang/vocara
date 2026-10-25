@@ -19,6 +19,10 @@ int niceTimeIntervalMs(int durationMs, double width, {double minPx = 72}) {
     120000,
     300000,
     600000,
+    // Multi-hour audio: capped at 10 minutes, a long backing at fit-all on a
+    // narrow timeline packed its labels a few pixels apart.
+    1800000,
+    3600000,
   ];
   for (final c in candidates) {
     if (c >= minMs) return c;
