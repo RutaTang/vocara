@@ -376,16 +376,21 @@ class AppSettingsService extends ChangeNotifier {
     if (changed) notifyListeners();
   }
 
-  // Re-read the engine's rendering device into [_actualOutputUid]; true when it moved. Never
-  // notifies — callers that already run outside a build own that.
+  // Re-read the engine's rendering device into [_actualOutputUid]; true when what it is judged
+  // as changed: the device moved, or a fresh read resolved one the lists do not know (a read
+  // that missed it on an earlier tick left the selection judged meanwhile). Never notifies —
+  // callers that already run outside a build own that.
   bool _refreshActualOutput() {
     final actual = _engine?.actualOutputDevice() ?? '';
     final known =
         actual.isEmpty ||
         _byUid(_outputDevices, actual) != null ||
         _unlistedOutput?.uid == actual;
+    final unlisted = _unlistedOutput;
     if (!known) _unlistedOutput = _byUid(_enumerateOutputs(), actual);
-    if (actual == _actualOutputUid) return false;
+    if (actual == _actualOutputUid) {
+      return !identical(unlisted, _unlistedOutput);
+    }
     _actualOutputUid = actual;
     return true;
   }
@@ -400,7 +405,11 @@ class AppSettingsService extends ChangeNotifier {
   void _applyOutputRoute() {
     _applyMonitorGain();
     // Named only on a change (and on every attach): the engine re-checks it against what renders
-    // at each of its own polls, so repeating it each tick adds nothing.
+    // at each of its own polls, so repeating it each tick adds nothing. Nor is it withdrawn while
+    // the engine reports nothing rendering (the mic opening): the engine applies it only while
+    // that very device renders, so keeping it is safe, and withdrawing it left the canceller
+    // adapting on the earbuds once the unit bound, until the next tick named them again.
+    if (_actualOutputUid.isEmpty && _echoFreePushed != null) return;
     final echoFree = echoFreeOutput;
     if (echoFree != _echoFreePushed) {
       _echoFreePushed = echoFree;

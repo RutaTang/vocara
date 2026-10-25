@@ -413,6 +413,82 @@ void main() {
       },
     );
 
+    test('a tick while the mic opens keeps the earbuds named', () async {
+      // Opening the mic hands the output to the duplex unit, and the engine reports nothing
+      // rendering until it binds. Taken as "not headphones", that withdrew the earbuds: once the
+      // unit bound, the canceller adapted on them until the next tick named them again.
+      const airpods = AudioDevice(
+        uid: 'airpods',
+        name: 'AirPods Pro',
+        rate: 48000,
+        isDefault: true,
+        isBluetooth: true,
+      );
+      outs = [
+        const AudioDevice(
+          uid: 'built-in-out',
+          name: 'MacBook Pro Speakers',
+          rate: 48000,
+        ),
+        airpods,
+      ];
+      await service.load();
+      final engine = _FakeEngine()..actualOutput = airpods.uid;
+      service.attachEngine(engine);
+      expect(engine.echoFree, [airpods.uid]);
+      engine.actualOutput = '';
+      service.reconcileMonitorSafety();
+      engine.actualOutput = airpods.uid;
+      service.reconcileMonitorSafety();
+      expect(engine.echoFree, [airpods.uid]);
+      // A new engine reporting nothing yet is still told something.
+      final next = _FakeEngine();
+      service.attachEngine(next);
+      expect(next.echoFree, ['']);
+    });
+
+    test(
+      'the MON fader hears of a rendering device resolved on a later tick',
+      () async {
+        // The default moved to a speaker turned on since the lists were read, and the first fresh
+        // read came back without it: the selection (the earbuds) was judged meanwhile. When the
+        // next read found the speaker, the engine's gain went to 0 but the fader was never told.
+        const airpods = AudioDevice(
+          uid: 'airpods',
+          name: 'AirPods Pro',
+          rate: 48000,
+          isDefault: true,
+          isBluetooth: true,
+        );
+        outs = [airpods];
+        await service.load();
+        final engine = _FakeEngine()..actualOutput = airpods.uid;
+        service.attachEngine(engine);
+        service.setMonitorGainLive(0.5);
+        outs = [];
+        engine.actualOutput = 'boom';
+        service.reconcileMonitorSafety();
+        outs = [
+          airpods,
+          const AudioDevice(
+            uid: 'boom',
+            name: 'UE BOOM 3',
+            rate: 48000,
+            isBluetooth: true,
+          ),
+        ];
+        var notified = 0;
+        service.addListener(() => notified++);
+        service.reconcileMonitorSafety();
+        expect(service.monitorAllowed, isFalse);
+        expect(engine.monitorGains.last, 0.0);
+        expect(notified, 1);
+        // Nothing new on the next tick: no notify.
+        service.reconcileMonitorSafety();
+        expect(notified, 1);
+      },
+    );
+
     test('a Bluetooth speaker never allows the monitor', () async {
       // macOS reports only the transport: a Bluetooth speaker taken for
       // headphones fed the monitor straight back into the mic.
