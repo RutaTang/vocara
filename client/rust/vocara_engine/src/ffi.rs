@@ -983,7 +983,12 @@ pub extern "C" fn ve_start_input_recording(e: *mut VeEngine, path: *const c_char
         if !eng.writer.start(p) {
             return -1;
         }
-        begin_take(&eng.rec_dropped, &eng.rec_written, &eng.device_event);
+        begin_take(
+            &eng.rec_dropped,
+            &eng.rec_written,
+            &eng.device_event,
+            &eng.input_state,
+        );
         eng.rec_active.store(true, Ordering::Release);
         sync_input(eng);
         0
@@ -996,21 +1001,28 @@ pub extern "C" fn ve_start_input_recording(e: *mut VeEngine, path: *const c_char
 /// the limit until the stop lands, so a take that hit it leaves it latched after its own
 /// poller claimed it — and the next take's first poll would stop it on the spot.
 ///
-/// An input loss or fallback still pending at the arm is stale the same way: it was raised for
-/// a stream that closed, or never opened (a failed open with no take running), and the take is
-/// about to record from whatever the host opens next. The technique page's engine is polled
-/// only while a take runs, so such a bit waited there for the next take, whose first tick stopped
-/// a delivering mic as "disconnected". Clearing them cannot hide a dead stream: the arm's ready
-/// handshake demands recorded progress, and a stream the arm opens raises its own loss or
-/// fallback after this (a warm stream's fallback was announced when it opened). The output
-/// events and the AEC-bypass notice keep their own consumers.
-fn begin_take(dropped: &AtomicU64, written: &AtomicU64, event: &AtomicU32) {
+/// An input loss or fallback pending at the arm is stale too — when no input stream is running
+/// then (`input_state`'s running bit, see `ve_input_stream_state`). It was raised for a stream
+/// that closed or never opened, and the stream the arm opens raises its own after this. The
+/// technique page's engine is polled only while a take runs, so such a bit waited for the next
+/// take, whose first tick stopped a delivering mic as "disconnected"; clearing it cannot hide a
+/// dead stream, because the arm's ready handshake demands recorded progress. With a stream
+/// RUNNING, the arm keeps it and the take records from it, so its bits are this take's: a warm
+/// stream on the default mic raised its fallback once, when it opened. The output events and the
+/// AEC-bypass notice keep their own consumers.
+fn begin_take(
+    dropped: &AtomicU64,
+    written: &AtomicU64,
+    event: &AtomicU32,
+    input_state: &AtomicU64,
+) {
     dropped.store(0, Ordering::Release);
     written.store(0, Ordering::Release);
-    event.fetch_and(
-        !(device::EVENT_RECORD_LIMIT | device::EVENT_INPUT_LOST | device::EVENT_INPUT_FELL_BACK),
-        Ordering::AcqRel,
-    );
+    let mut stale = device::EVENT_RECORD_LIMIT;
+    if input_state.load(Ordering::Acquire) & 1 == 0 {
+        stale |= device::EVENT_INPUT_LOST | device::EVENT_INPUT_FELL_BACK;
+    }
+    event.fetch_and(!stale, Ordering::AcqRel);
 }
 
 /// Stop the input recording (finalizes the WAV); closes the input stream if nothing else needs
@@ -3324,10 +3336,35 @@ mod begin_take_tests {
         let kept = EVENT_OUTPUT_LOST | EVENT_OUTPUT_REROUTED | EVENT_AEC_BYPASSED;
         let event =
             AtomicU32::new(EVENT_RECORD_LIMIT | EVENT_INPUT_LOST | EVENT_INPUT_FELL_BACK | kept);
-        super::begin_take(&dropped, &written, &event);
+        // No input stream running at the arm: generation 3, running bit clear.
+        let input_state = AtomicU64::new(3 << 1);
+        super::begin_take(&dropped, &written, &event, &input_state);
         assert_eq!(dropped.load(Ordering::Relaxed), 0);
         assert_eq!(written.load(Ordering::Relaxed), 0);
         assert_eq!(event.load(Ordering::Relaxed), kept);
+    }
+
+    /// With an input stream RUNNING at the arm (the song page's warm monitoring stream), the take
+    /// records from that very stream — the arm keeps it — so a fallback or loss pending for it is
+    /// this take's: a stream on the system default because the chosen mic is unavailable raises
+    /// INPUT_FELL_BACK only when it opens, and nothing would raise it again. Cleared here, the take
+    /// recorded from the default mic with no notice, and a dead warm stream failed as "input not
+    /// delivering" instead of "disconnected". Only the record-limit bit is the last take's.
+    #[test]
+    fn a_take_on_a_running_stream_keeps_that_streams_loss_and_fallback() {
+        use crate::device::{EVENT_INPUT_FELL_BACK, EVENT_INPUT_LOST, EVENT_RECORD_LIMIT};
+        let dropped = AtomicU64::new(7);
+        let written = AtomicU64::new(9);
+        let event = AtomicU32::new(EVENT_RECORD_LIMIT | EVENT_INPUT_LOST | EVENT_INPUT_FELL_BACK);
+        // Generation 3, running.
+        let input_state = AtomicU64::new((3 << 1) | 1);
+        super::begin_take(&dropped, &written, &event, &input_state);
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
+        assert_eq!(written.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            event.load(Ordering::Relaxed),
+            EVENT_INPUT_LOST | EVENT_INPUT_FELL_BACK
+        );
     }
 }
 
