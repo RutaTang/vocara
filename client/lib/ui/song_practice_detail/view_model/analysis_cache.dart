@@ -10,6 +10,7 @@ import '../../../data/services/spectrogram_service.dart';
 import '../../../domain/models/audio_track.dart';
 import '../../../domain/models/spectrogram.dart';
 import '../../../domain/models/voice_metrics.dart';
+import '../../../utils/analysis_gate.dart';
 import '../../../utils/lru_bytes_cache.dart';
 import 'analysis_source.dart';
 
@@ -235,6 +236,16 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   /// declared stale, so it is neither cached nor latched, and the lane is
   /// merged again if a view still shows it (see [_showsLane]).
   final Set<String> _aggDisowned = {};
+
+  /// The lane merge in flight per lane (track id → its key). A lane's key
+  /// moves with every tick of a clip drag (it embeds the clip starts), and
+  /// the inspector asks for each new one: every frame started a merge of its
+  /// own, copying all the lane's clip analyses into a fresh isolate. One runs
+  /// per lane; an ask for a newer key waits in [_aggQueued] (loading
+  /// meanwhile) and is answered by ONE rerun for the lane as it is when the
+  /// running merge lands.
+  final Map<String, String> _aggInFlight = {};
+  final Map<String, ({String key, Completer<void> done})> _aggQueued = {};
 
   /// Everything memoized FROM a per-path analysis: the profile and register
   /// map derive from the metrics, the LTAS from the spectrogram and metrics.
@@ -979,6 +990,16 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
         _aggUnavailable.contains(key)) {
       return;
     }
+    if (_aggInFlight.containsKey(track.id)) {
+      final queued = _aggQueued[track.id];
+      if (queued != null) _aggLoading.remove(queued.key);
+      final done = queued?.done ?? Completer<void>();
+      _aggQueued[track.id] = (key: key, done: done);
+      _aggLoading.add(key);
+      notifyListeners();
+      return done.future;
+    }
+    _aggInFlight[track.id] = key;
     _aggLoading.add(key);
     notifyListeners();
     try {
@@ -1035,7 +1056,7 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
       // Off the UI isolate: the merges and the views derived from them are
       // lane-length work (a 10-minute lane's LTAS and profile alone ran
       // ~250 ms in the dock's getters).
-      final lane = await Isolate.run(() => _mergeLane(metrics, specs));
+      final lane = await _mergeLaneInGate(metrics, specs);
       if (_disposed) return;
       final mergedMetrics = lane.metrics;
       final mergedSpec = lane.spectrogram;
@@ -1075,17 +1096,31 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
       if (!_aggDisowned.contains(key)) _aggUnavailable.add(key);
     } finally {
       _aggLoading.remove(key);
+      _aggInFlight.remove(track.id);
       final disowned = _aggDisowned.remove(key);
+      // A queued ask never started: its key leaves with it, and the rerun
+      // below answers it for wherever the lane is now.
+      final queued = _aggQueued.remove(track.id);
+      if (queued != null) {
+        _aggLoading.remove(queued.key);
+        _aggDisowned.remove(queued.key);
+      }
       notifyListeners();
-      // The discarded merge left the lane with no result and no spinner, and
-      // nothing else asks again (the folded-out lanes compute only on these
-      // pushes): merge the lane as it is now, if a view still shows it.
-      if (disowned && !_disposed && _showsLane(track.id)) {
+      // Merge the lane as it is now for a queued ask, and for a disowned
+      // merge a view still shows: it left the lane with no result and no
+      // spinner, and nothing else asks again (the folded-out lanes compute
+      // only on these pushes).
+      var rerun = Future<void>.value();
+      if (!_disposed &&
+          (queued != null || (disowned && _showsLane(track.id)))) {
         final live = _trackById(track.id);
         if (live != null && live.clips.length > 1) {
-          unawaited(_ensureAggregateAnalysis(live));
+          rerun = _ensureAggregateAnalysis(live);
         }
       }
+      unawaited(
+        queued == null ? rerun : rerun.whenComplete(queued.done.complete),
+      );
     }
   }
 
@@ -1230,16 +1265,28 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
 }
 
 /// A lane's merged analysis plus the LTAS and voice profile the dock derives
-/// from it, exactly as its getters would ([AnalysisCache.selectedLtas] needs
-/// the spectrogram, [AnalysisCache.selectedProfile] the metrics). Pure, so it
-/// runs on a worker isolate.
-({
+/// from it (see [_mergeLane]).
+typedef _MergedLane = ({
   VoiceMetrics? metrics,
   Spectrogram? spectrogram,
   Ltas? ltas,
   VoiceProfile? profile,
-})
-_mergeLane(
+});
+
+/// Runs [_mergeLane] on a worker isolate, holding one of the app-wide
+/// analysis slots like every other heavy compute: its input is every clip's
+/// analysis, copied into the isolate. Top-level, so the isolate's closure
+/// captures the two lists and nothing of the cache.
+Future<_MergedLane> _mergeLaneInGate(
+  List<({int offsetMs, VoiceMetrics metrics})> metrics,
+  List<({int offsetMs, Spectrogram spectrogram})> specs,
+) => analysisGate.run(() => Isolate.run(() => _mergeLane(metrics, specs)));
+
+/// A lane's merged analysis plus the LTAS and voice profile the dock derives
+/// from it, exactly as its getters would ([AnalysisCache.selectedLtas] needs
+/// the spectrogram, [AnalysisCache.selectedProfile] the metrics). Pure, so it
+/// runs on a worker isolate.
+_MergedLane _mergeLane(
   List<({int offsetMs, VoiceMetrics metrics})> metrics,
   List<({int offsetMs, Spectrogram spectrogram})> specs,
 ) {

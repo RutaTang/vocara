@@ -9,6 +9,7 @@ import 'package:vocara/domain/models/audio_track.dart';
 import 'package:vocara/domain/models/spectrogram.dart';
 import 'package:vocara/domain/models/voice_metrics.dart';
 import 'package:vocara/ui/song_practice_detail/view_model/analysis_cache.dart';
+import 'package:vocara/utils/analysis_gate.dart';
 import 'package:vocara/utils/lru_bytes_cache.dart';
 
 class _FakeSpectrograms extends Fake implements SpectrogramService {}
@@ -212,8 +213,8 @@ Spectrogram _spec(int frames, {int bins = 2}) => Spectrogram(
 
 /// Lets the event loop run (the lane merge is a real isolate) until [done]
 /// holds, bounded; the caller's expectations then say what went wrong.
-Future<void> _settled(bool Function() done) async {
-  for (var i = 0; i < 400 && !done(); i++) {
+Future<void> _settled(bool Function() done, {int tries = 400}) async {
+  for (var i = 0; i < tries && !done(); i++) {
     await Future<void>.delayed(const Duration(milliseconds: 5));
   }
 }
@@ -859,6 +860,81 @@ void main() {
       expect(merged, isNotNull, reason: 'the lane is analyzed again');
       // The re-analyzed c2 (20 frames from 2000 ms) now ends the lane span.
       expect(merged!.frames, 40);
+    });
+  });
+
+  group('lane merge admission', () {
+    _StubSpectrograms stub() => _StubSpectrograms(
+      metricsByPath: {'c1.wav': _metrics(10), 'c2.wav': _metrics(10)},
+      specsByPath: {'c1.wav': _spec(10), 'c2.wav': _spec(10)},
+    );
+
+    test('dragging a clip of a lane selected by its header merges the lane '
+        'once more for where it lands, not once per frame', () async {
+      // The key embeds the clip starts, so every drag tick is a new key, and
+      // the inspector asks for each one: every frame started its own merge,
+      // copying all the lane's clip analyses into a fresh isolate.
+      AudioTrack at(int ms) => _lane([_clip('c1', 0), _clip('c2', ms)]);
+      var track = at(2000);
+      final cache = _cache(
+        spectrograms: stub(),
+        selectedTrack: () => track,
+        trackById: (id) => id == track.id ? track : null,
+      );
+      addTearDown(cache.dispose);
+
+      // A real lane merge outlasts many frames; holding the analysis slots
+      // for the drag stands in for that, deterministically.
+      final busy = Completer<void>();
+      final slots = [
+        for (var i = 0; i < analysisGate.limit; i++)
+          analysisGate.run(() => busy.future),
+      ];
+      final ticks = [for (var i = 0; i < 20; i++) at(2000 + 100 * i)];
+      final asks = <Future<void>>[];
+      for (final t in ticks) {
+        track = t;
+        asks.add(cache.ensureSelectedSpectrogram());
+        await Future<void>.delayed(Duration.zero);
+      }
+      busy.complete();
+      await Future.wait(slots);
+      await Future.wait(asks);
+
+      var merged = 0;
+      for (final t in ticks) {
+        track = t;
+        if (cache.selectedMetrics != null) merged++;
+      }
+      expect(cache.selectedMetrics, isNotNull, reason: 'where it landed');
+      expect(merged, lessThanOrEqualTo(2), reason: 'the first + one rerun');
+    });
+
+    test('a lane merge waits for an analysis slot like any heavy '
+        'compute', () async {
+      // Its input is every clip's analysis, copied into the isolate: outside
+      // the app-wide gate any number of them ran at once.
+      final track = _lane([_clip('c1', 0), _clip('c2', 2000)]);
+      final cache = _cache(spectrograms: stub(), selectedTrack: () => track);
+      addTearDown(cache.dispose);
+      final release = Completer<void>();
+      final slots = [
+        for (var i = 0; i < analysisGate.limit; i++)
+          analysisGate.run(() => release.future),
+      ];
+      addTearDown(() {
+        if (!release.isCompleted) release.complete();
+      });
+
+      final merging = cache.ensureSelectedSpectrogram();
+      await _settled(() => cache.selectedMetrics != null, tries: 40);
+      expect(cache.selectedMetrics, isNull, reason: 'no slot was free');
+      expect(cache.spectrogramLoading, isTrue);
+
+      release.complete();
+      await Future.wait(slots);
+      await merging;
+      expect(cache.selectedMetrics, isNotNull);
     });
   });
 
