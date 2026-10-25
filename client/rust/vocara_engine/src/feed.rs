@@ -28,9 +28,10 @@
 //! A discarding replan makes everything still queued stale, so the feeder
 //! takes it back (`TrackFeeder::discard_queued`) and lands the new fence at
 //! the node's head with the whole ring behind it. The ring is SPSC, so the
-//! node has to stay clear of the slots being rewritten: it brackets every
-//! block in [`StreamCtrl::node_seq`] (odd while inside) and pops nothing at
-//! or past [`StreamCtrl::pop_limit`], read once at the block's start. The
+//! node has to stay clear of the slots being rewritten: it counts every block
+//! it enters and leaves ([`StreamCtrl::node_entered`], [`StreamCtrl::node_left`])
+//! and pops nothing at or past [`StreamCtrl::pop_limit`], read once at the
+//! block's start. The
 //! feeder raises the limit to the node's head, waits out a block that began
 //! before it (the only one that can have missed it), takes the queue back,
 //! pushes the new fence, and lifts the limit.
@@ -69,17 +70,23 @@ pub struct StreamCtrl {
     /// renders and clears it while stopped; the feeder reads it to catch a
     /// park that a loop wrap has stranded (see `TrackFeeder::node_stranded`).
     pub parked: std::sync::atomic::AtomicU64,
-    /// The node's block counter: bumped as it enters `process`/`idle` and
-    /// again as it leaves, so odd while it is inside one (see the module doc).
-    pub node_seq: AtomicU32,
+    /// Blocks the node has entered (`process`/`idle`), and blocks it has left
+    /// (see the module doc). Two counters, not one bumped on entry and exit:
+    /// a block that never left — a panic the callback caught mid-block, after
+    /// which the engine renders on — flipped a single counter's odd/even
+    /// reading for good, and the next take-back then rewrote slots under a
+    /// LIVE block. Here such a block just reads as still inside: the feeder
+    /// waits it out or falls back to stacking, never retracting under it.
+    pub(crate) node_entered: AtomicU32,
+    pub(crate) node_left: AtomicU32,
     /// The ring index the node may neither pop nor peek at or past, read at
     /// the start of each block; [`NO_POP_LIMIT`] when free. Raised only while
     /// the feeder takes the queue back (see the module doc).
-    pub pop_limit: AtomicUsize,
+    pub(crate) pop_limit: AtomicUsize,
     /// The node has taken a fence's first frame and still waits for its base
     /// frame, the next one it pops (written at the end of each block): taking
     /// the queue back must leave that frame in place.
-    pub fence_open: AtomicBool,
+    pub(crate) fence_open: AtomicBool,
 }
 
 /// [`StreamCtrl::pop_limit`] when the node may pop freely.
@@ -97,7 +104,8 @@ impl StreamCtrl {
             flush_seq: AtomicU32::new(0),
             xruns: std::sync::atomic::AtomicU64::new(0),
             parked: std::sync::atomic::AtomicU64::new(0),
-            node_seq: AtomicU32::new(0),
+            node_entered: AtomicU32::new(0),
+            node_left: AtomicU32::new(0),
             pop_limit: AtomicUsize::new(NO_POP_LIMIT),
             fence_open: AtomicBool::new(false),
         })
@@ -110,12 +118,16 @@ impl StreamCtrl {
         // SeqCst against the node's SeqCst entry bump and limit read: either
         // this load sees the bump (and waits for that block to end) or the
         // block's limit read sees the limit stored before it.
-        let entered = self.node_seq.load(Ordering::SeqCst);
-        if entered.is_multiple_of(2) {
+        let entered = self.node_entered.load(Ordering::SeqCst);
+        // Every block entered by then has left (Acquire against the node's
+        // Release exit: its head and fence flag are visible). Wrapping: the
+        // counters only ever differ by the blocks in flight.
+        let done = || self.node_left.load(Ordering::Acquire).wrapping_sub(entered) as i32 >= 0;
+        if done() {
             return true;
         }
         let deadline = Instant::now() + BLOCK_WAIT;
-        while self.node_seq.load(Ordering::Acquire) == entered {
+        while !done() {
             if Instant::now() >= deadline {
                 return false;
             }
@@ -790,6 +802,28 @@ mod tests {
     use std::collections::HashMap;
 
     const FRAMES: usize = 20_000;
+
+    /// A block the node entered and never left (a panic the callback caught
+    /// mid-block; the engine renders on) must read as still inside for good,
+    /// so no take-back ever rewrites slots under the block after it. With one
+    /// counter bumped on entry and exit, that block's lost exit flipped its
+    /// odd/even reading: the next block, running, read as outside.
+    #[test]
+    fn a_block_that_never_left_keeps_the_feeder_from_taking_the_queue_back() {
+        let ctrl = StreamCtrl::new();
+        // Clean blocks: entered and left.
+        for _ in 0..3 {
+            ctrl.node_entered.fetch_add(1, Ordering::SeqCst);
+            ctrl.node_left.fetch_add(1, Ordering::Release);
+        }
+        assert!(ctrl.wait_out_block(), "nothing in flight");
+        // A block enters and never leaves; the next one enters and runs.
+        ctrl.node_entered.fetch_add(1, Ordering::SeqCst);
+        ctrl.node_entered.fetch_add(1, Ordering::SeqCst);
+        let t = Instant::now();
+        assert!(!ctrl.wait_out_block(), "read the running block as outside");
+        assert!(t.elapsed() >= BLOCK_WAIT, "it must wait, then fall back");
+    }
 
     fn value(i: usize) -> Smp {
         (i as Smp * 1e-3).sin() * 0.5 + 0.25

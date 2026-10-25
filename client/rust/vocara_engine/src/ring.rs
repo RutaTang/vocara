@@ -19,7 +19,9 @@ struct Inner<T> {
 
 // SAFETY: access is disciplined SPSC — only the producer writes `tail` and the slot at
 // `tail`, only the consumer writes `head` and reads the slot at `head`, with release/acquire
-// fences ordering the data write before the index publish.
+// fences ordering the data write before the index publish. The one exception, the producer
+// taking back and rewriting unconsumed slots, is `Producer::retract`'s, under its own
+// contract (the consumer kept clear of them by a protocol on top).
 unsafe impl<T: Send> Sync for Inner<T> {}
 
 pub struct Producer<T> {

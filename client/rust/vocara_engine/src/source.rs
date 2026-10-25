@@ -131,7 +131,7 @@ impl StreamingSource {
     #[inline]
     fn enter_block(&mut self) {
         use std::sync::atomic::Ordering;
-        self.ctrl.node_seq.fetch_add(1, Ordering::SeqCst);
+        self.ctrl.node_entered.fetch_add(1, Ordering::SeqCst);
         self.limit = self.ctrl.pop_limit.load(Ordering::SeqCst);
     }
 
@@ -144,7 +144,7 @@ impl StreamingSource {
         self.ctrl
             .fence_open
             .store(self.pending_fence.is_some(), Ordering::Relaxed);
-        self.ctrl.node_seq.fetch_add(1, Ordering::Release);
+        self.ctrl.node_left.fetch_add(1, Ordering::Release);
     }
 
     /// Whether this block's pop limit stops the node at its ring head.
