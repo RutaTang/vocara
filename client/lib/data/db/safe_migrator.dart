@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:path/path.dart' as p;
 import 'package:sqlite3/sqlite3.dart';
 
@@ -103,7 +104,7 @@ class SafeMigrator {
 
     // 1. Checkpoint the live WAL, then VACUUM INTO a clean, consistent copy
     //    (one file, no -wal/-shm sidecars to coordinate).
-    final src = sqlite3.open(dbPath);
+    final src = openLive(dbPath);
     try {
       src.execute('PRAGMA wal_checkpoint(TRUNCATE)');
       src.execute("VACUUM INTO '${_sqlLit(copyPath)}'");
@@ -150,6 +151,52 @@ class SafeMigrator {
     await File(copyPath).rename(dbPath);
     await fs.fsyncDir(dir);
     await _writeMarker(marker, 'done', targetVersion);
+  }
+
+  /// Opens a read-write connection to the LIVE database for the migrator's
+  /// own writes to it, with `fullfsync` on, like AppDatabase's connection.
+  ///
+  /// The only such write is step 1's `wal_checkpoint(TRUNCATE)`: it copies
+  /// the WAL's frames into the live file and then truncates the WAL. With a
+  /// plain fsync the drive may keep the truncate and lose the page writes,
+  /// and the live file (or its .bak) is then left torn with nothing to redo
+  /// it from. The migration COPY needs no such connection: it is disposable
+  /// until the swap and is flushed whole with F_FULLFSYNC before it is
+  /// renamed in. [readUserVersion] opens read-only and never writes.
+  @visibleForTesting
+  static Database openLive(String dbPath) {
+    final db = sqlite3.open(dbPath);
+    try {
+      db.execute('PRAGMA fullfsync = ON');
+    } catch (_) {
+      db.close();
+      rethrow;
+    }
+    return db;
+  }
+
+  /// Deletes the pre-migration rollback copy ([_bakName]) next to [dbPath].
+  /// Returns whether one was deleted.
+  ///
+  /// The .bak is the way back while a freshly swapped-in database is still
+  /// unproven. Call this only after the live database has answered real
+  /// reads on a boot (Persistence.open runs it once its readability probe
+  /// and staged-take recovery have both succeeded). Until then the copy
+  /// stays. Never while a migration is unfinished: a marker in any state but
+  /// 'done' belongs to [recoverIfNeeded], which may yet roll back to the
+  /// .bak. ('done' is what a migration that completed during THIS boot
+  /// leaves; the next boot's [recoverIfNeeded] clears it.)
+  Future<bool> discardBackup(String dbPath) async {
+    final dir = p.dirname(dbPath);
+    final marker = File(p.join(dir, _markerName));
+    if (await marker.exists() &&
+        _markerState(await marker.readAsString()) != 'done') {
+      return false;
+    }
+    final bak = File(p.join(dir, _bakName));
+    if (!await bak.exists()) return false;
+    await bak.delete();
+    return true;
   }
 
   /// Brings the on-disk database at [dbPath] up to [targetVersion] by running
@@ -265,11 +312,9 @@ class SafeMigrator {
       default:
         await marker.delete();
     }
-    // The .bak is retained intentionally (a generous rollback window); a janitor
-    // prunes it after the new db proves healthy.
-    if (await File(bakPath).exists()) {
-      // left in place on purpose
-    }
+    // The .bak is kept here on purpose: the migrated database has not yet
+    // answered a real read. Persistence.open discards it (discardBackup)
+    // once that boot's readability probe and recovery have succeeded.
   }
 
   void _validateCore(Database copy, int target) {

@@ -58,6 +58,23 @@ class AssetStore {
       gate.shared(() => _importFile(sourcePath, kind: kind));
 
   Future<String> _importFile(String sourcePath, {required String kind}) async {
+    // Listed as in flight until it returns, landed or failed: the quit reads
+    // this list's progress to tell a save still landing a file from a wedged
+    // one (see [bytesBeingCopied]).
+    final token = Object();
+    _inFlight[token] = null;
+    try {
+      return await _importListed(sourcePath, kind: kind, token: token);
+    } finally {
+      _inFlight.remove(token);
+    }
+  }
+
+  Future<String> _importListed(
+    String sourcePath, {
+    required String kind,
+    required Object token,
+  }) async {
     final ext = p.extension(sourcePath).replaceFirst('.', '');
     // ONE streaming pass produces the staged bytes, the hash AND the byte
     // count together, so all three provably describe the same content. The
@@ -65,8 +82,9 @@ class AssetStore {
     // awaits between them: a source modified mid-import could put one file's
     // bytes under another file's hash with a third file's recorded size.
     final before = await _sizeAndMtime(sourcePath);
-    final staged = await _stageToPool(File(sourcePath));
+    final staged = await _stageToPool(File(sourcePath), token);
     await _rememberStagedHash(sourcePath, before, staged);
+    _stepLanded();
     try {
       // Promote BEFORE the row work: idempotent by content address, and it
       // replaces a truncated crash leftover with the verified bytes whichever
@@ -75,7 +93,7 @@ class AssetStore {
       // Dedup lookup and insert share ONE transaction so concurrent imports
       // of the same bytes serialize at the database: check-then-insert across
       // interleaved async flows minted one asset row per caller.
-      return await db.transaction<String>(() async {
+      final assetId = await db.transaction<String>(() async {
         // content_hash is intentionally NON-unique: identical bytes under two
         // asset ULIDs across devices is the normal content-addressed steady
         // state, so there can be MORE THAN ONE live row for a hash. Take the
@@ -133,6 +151,8 @@ class AssetStore {
         );
         return id;
       });
+      _stepLanded(); // the row committed
+      return assetId;
     } finally {
       // The promote path renames the staging file away; on every other exit
       // (dedup hit, promote failure, DB failure) it must not linger.
@@ -302,44 +322,72 @@ class AssetStore {
   /// The pass runs in a background isolate ([_copyAndHash]): sha256 is pure
   /// Dart, and on the UI isolate a 10-minute take (115 MB) cost ~3 s of
   /// main-isolate time in ~45 ms stalls, right as a recording stops.
-  Future<_StagedImport> _stageToPool(File src) async {
+  Future<_StagedImport> _stageToPool(File src, Object token) async {
     final stagingDir = Directory(p.join(root.path, 'assets', '.staging'));
     // Durably: on the first import this also creates the pool dir itself,
     // which every pooled file's directory entry hangs off.
     await _createDirDurably(stagingDir);
     final tmpPath = p.join(stagingDir.path, '${newId()}.part');
     final srcPath = src.path;
-    _copying.add(tmpPath);
+    _inFlight[token] = tmpPath;
     try {
       final (:hash, :size) = await Isolate.run(
         () => _copyAndHash(srcPath, tmpPath),
       );
+      // The finished copy's bytes move from the live file length into the
+      // banked total in one synchronous step, so the reading neither drops
+      // nor double-counts them.
+      _progressBanked += size;
       return _StagedImport(hash: hash, size: size, tmpPath: tmpPath);
     } finally {
-      _copying.remove(tmpPath);
+      if (_inFlight.containsKey(token)) _inFlight[token] = null;
     }
   }
 
-  /// Staging files being written right now, by every store (see
+  /// The imports in flight in every store, from the start of [_importFile]
+  /// until it returns. Each maps to the staging file its copy is writing
+  /// right now, or null outside the copy (before it, and while the copied
+  /// file is flushed, placed and its row committed).
+  static final Map<Object, String?> _inFlight = {};
+
+  /// The settled part of the [bytesBeingCopied] reading: the bytes of every
+  /// finished copy plus one for every finished landing step. Only grows.
+  static int _progressBanked = 0;
+
+  /// One step of landing an import finished (a flush, the rename into the
+  /// pool, the row commit): the reading moves.
+  static void _stepLanded() => _progressBanked++;
+
+  /// How many imports are in flight right now, copying or landing (see
   /// [bytesBeingCopied]).
-  static final Set<String> _copying = {};
-
-  /// How many imports are copying right now (see [bytesBeingCopied]).
   @visibleForTesting
-  static int get copiesInFlight => _copying.length;
+  static int get copiesInFlight => _inFlight.length;
 
-  /// How many bytes the imports in flight have written to staging so far.
-  /// The copy runs in a background isolate, so its progress is read off the
-  /// growing files: a quit waiting on a save that is pooling a large file
-  /// keeps waiting while this moves (see RecordingFinalizer). It falls when an
-  /// import lands and its file leaves staging.
+  /// A reading that moves while imports do real work, which a quit uses to
+  /// tell a save that is past its budget but still pooling a file from a
+  /// wedged one (see RecordingFinalizer). Only the change between two
+  /// readings means anything; the value itself does not.
+  ///
+  /// It counts the bytes each copy has written to staging so far (read off
+  /// the growing file, since the copy runs in a background isolate), and it
+  /// keeps moving after the copy: every step that lands the file (each
+  /// directory flush, the file flush, the rename into the pool, the row
+  /// commit) adds one as it finishes. Before, the reading stopped with the
+  /// copy, so the F_FULLFSYNC and commit of a large file read as a wedge and
+  /// a quit could exit while the save was still landing. It never goes
+  /// down. One step that alone outlasts the quit's window still reads as a
+  /// stall: the reading can only report steps that have finished.
   static Future<int> bytesBeingCopied() async {
-    var total = 0;
-    for (final path in List.of(_copying)) {
+    // Banked first: a copy that finishes during the awaits below moves its
+    // bytes into the bank, and reading the bank afterwards would count them
+    // twice.
+    var total = _progressBanked;
+    for (final path in List.of(_inFlight.values)) {
+      if (path == null) continue;
       try {
         total += await File(path).length();
       } catch (_) {
-        // Not created yet, or already renamed into the pool.
+        // Not created yet.
       }
     }
     return total;
@@ -432,10 +480,13 @@ class AssetStore {
     }
     await _createDirDurably(dest.parent);
     await fs.fsyncFile(staged.tmpPath);
+    _stepLanded();
     // A concurrent import of the same hash may have placed it first; rename
     // is idempotent enough (overwrites with identical bytes).
     await fs.atomicRename(staged.tmpPath, dest.path);
+    _stepLanded();
     await fs.fsyncDir(dest.parent.path);
+    _stepLanded();
     return rel;
   }
 
@@ -453,6 +504,7 @@ class AssetStore {
     await _createDirDurably(dir.parent);
     await dir.create(); // an EEXIST from a concurrent creator is success
     await fs.fsyncDir(dir.parent.path);
+    _stepLanded();
   }
 
   /// Clears the transient staging trees (`audio/`, `technique_media/`) where
@@ -579,8 +631,8 @@ class AssetStore {
   ///    reclaimed by the next sweep once it ages past the window.
   ///
   /// The transport-seen / pending-journal / never-synced guards are read
-  /// TWICE: coarsely in the candidate scan below, and again ATOMICALLY inside
-  /// each asset's tombstone transaction (as conditions of the UPDATE itself).
+  /// TWICE: coarsely in the candidate scan below, and again ATOMICALLY in
+  /// each asset's tombstone (as conditions of its UPDATE itself).
   /// The scan alone is racy: the first-ever push can run concurrently with a
   /// user-triggered repairLibrary sweep, and the durable transport marker,
   /// the asset's journal entry, or its sync-state columns can change between
@@ -592,10 +644,19 @@ class AssetStore {
   /// fate changed hands mid-sweep, and it is skipped whole — no tombstone,
   /// no journal entry, no file trash.
   ///
+  /// Every tombstone of one sweep commits in ONE transaction. Each used to
+  /// commit on its own, and with the store's F_FULLFSYNC every commit is a
+  /// full drive flush: the first boot after deleting a practice with dozens
+  /// of takes paid one per take before the window showed. One transaction
+  /// keeps each asset's re-verification exactly as atomic (it is still a
+  /// condition of that asset's own UPDATE), and the bytes are reclaimed after
+  /// the commit, as before: a crash in between leaves pool files no live row
+  /// owns, which [sweepOrphanPoolFiles] reclaims.
+  ///
   /// [debugBeforeTombstone] is a test-only seam (same pattern as
   /// SyncEngine's debugBeforePageCommit): it runs after the candidate scan
-  /// decided to sweep an asset and before that asset's tombstone
-  /// transaction — exactly the window the atomic re-verification protects.
+  /// decided to sweep an asset and before the tombstone transaction, exactly
+  /// the window the atomic re-verification protects.
   Future<int> sweepUnreferenced({
     Duration minAge = const Duration(hours: 24),
     Future<void> Function(String assetId)? debugBeforeTombstone,
@@ -651,7 +712,7 @@ class AssetStore {
 
     final nowMs = DateTime.now().millisecondsSinceEpoch;
     final minAgeMs = minAge.inMilliseconds;
-    var removed = 0;
+    final candidates = <({String id, String hash})>[];
     for (final a in live) {
       final id = a.read<String>('id');
       if (referenced.contains(id)) continue;
@@ -663,23 +724,29 @@ class AssetStore {
       if (nowMs - newest < minAgeMs) continue;
 
       if (debugBeforeTombstone != null) await debugBeforeTombstone(id);
+      candidates.add((id: id, hash: a.read<String>('content_hash')));
+    }
+    if (candidates.isEmpty) return 0;
 
-      final s = writer.stamp();
-      // The tombstone UPDATE and its oplog entry MUST commit together (a row
-      // mutation and its journal entry in the SAME transaction), exactly as
-      // importFile does; otherwise a crash between them would tombstone a synced
-      // asset with no journal entry and the delete would never propagate.
-      //
-      // The WHERE clause RE-VERIFIES, atomically with the write, every guard
-      // the candidate scan read in a separate step (see the doc comment): the
-      // row must still be live, still never-synced on both per-device
-      // columns, and still clear of the pending-journal guard — expressed as
-      // "no transport marker OR no pending oplog entry", the exact predicate
-      // the scan applies (the guard engages only once a transport has ever
-      // existed). A first push racing this sweep flips one of those between
-      // the scan and here; the UPDATE then matches 0 rows and the asset is
-      // skipped whole.
-      final tombstoned = await db.transaction(() async {
+    // Each tombstone UPDATE and its oplog entry MUST commit together (a row
+    // mutation and its journal entry in the SAME transaction), exactly as
+    // importFile does; otherwise a crash between them would tombstone a
+    // synced asset with no journal entry and the delete would never
+    // propagate. One transaction holds them all (see the doc comment).
+    //
+    // Each WHERE clause RE-VERIFIES, atomically with its write, every guard
+    // the candidate scan read in a separate step (see the doc comment): the
+    // row must still be live, still never-synced on both per-device
+    // columns, and still clear of the pending-journal guard — expressed as
+    // "no transport marker OR no pending oplog entry", the exact predicate
+    // the scan applies (the guard engages only once a transport has ever
+    // existed). A first push racing this sweep flips one of those between
+    // the scan and here; that UPDATE then matches 0 rows and the asset is
+    // skipped whole.
+    final tombstonedHashes = await db.transaction(() async {
+      final hashes = <String>[];
+      for (final c in candidates) {
+        final s = writer.stamp();
         final changed = await db.customUpdate(
           'UPDATE assets SET deleted_at = ?, updated_at = ?, hlc_wall = ?, '
           'hlc_ctr = ?, hlc_node = ?, hlc_packed = ? WHERE id = ? '
@@ -697,30 +764,31 @@ class AssetStore {
             Variable.withInt(s.hlc.counter),
             Variable.withString(s.hlc.node),
             Variable.withString(s.hlc.packed),
-            Variable.withString(id),
+            Variable.withString(c.id),
           ],
           updates: {db.assets},
         );
-        if (changed == 0) return false;
+        // Fate changed hands mid-sweep (first push landed, repair raced us):
+        // not removed, and the file-trash step below must not run for it.
+        if (changed == 0) continue;
         // The journal entry is written ONLY when the row actually tombstoned:
         // a journaled tombstone for a row the conditional UPDATE refused
         // would broadcast a fleet-wide delete for a row that is still live.
         await writer.journal(
           table: 'assets',
-          id: id,
+          id: c.id,
           op: 'tombstone',
           hlc: s.hlc,
           payloadHash: '',
         );
-        return true;
-      });
-      // Fate changed hands mid-sweep (first push landed, repair raced us):
-      // not removed, and the file-trash step below must not run either.
-      if (!tombstoned) continue;
-      removed++;
+        hashes.add(c.hash);
+      }
+      return hashes;
+    });
 
-      // Reclaim the file only if no surviving asset still maps to this hash.
-      final hash = a.read<String>('content_hash');
+    // Reclaim the bytes of every hash no surviving asset still maps to.
+    final reclaimed = <String>[];
+    for (final hash in tombstonedHashes.toSet()) {
       final shared = await db
           .customSelect(
             'SELECT COUNT(*) AS n FROM assets WHERE content_hash = ? '
@@ -728,19 +796,27 @@ class AssetStore {
             variables: [Variable.withString(hash)],
           )
           .getSingle();
-      if (shared.read<int>('n') == 0) {
-        // No live asset maps to this hash anymore. Trash EVERY pooled file for it,
-        // not just this row's local_rel_path: identical bytes imported under a
-        // different extension on another device produce `<hash>.wav` AND `<hash>.mp3`
-        // as distinct files, so reclaiming only the current row's path would leak the
-        // rest. All files for a hash live in one shard dir (assets/<h0:2>/<h2:4>).
-        await _trashPoolFilesForHash(hash);
-        await (db.delete(
-          db.waveformCache,
-        )..where((w) => w.contentHash.equals(hash))).go();
-      }
+      if (shared.read<int>('n') != 0) continue;
+      // No live asset maps to this hash anymore. Trash EVERY pooled file for it,
+      // not just this row's local_rel_path: identical bytes imported under a
+      // different extension on another device produce `<hash>.wav` AND `<hash>.mp3`
+      // as distinct files, so reclaiming only the current row's path would leak the
+      // rest. All files for a hash live in one shard dir (assets/<h0:2>/<h2:4>).
+      await _trashPoolFilesForHash(hash);
+      reclaimed.add(hash);
     }
-    return removed;
+    if (reclaimed.isNotEmpty) {
+      // Their cached peaks go too, in one transaction rather than one commit
+      // per hash.
+      await db.transaction(() async {
+        for (final chunk in inChunks(reclaimed)) {
+          await (db.delete(
+            db.waveformCache,
+          )..where((w) => w.contentHash.isIn(chunk))).go();
+        }
+      });
+    }
+    return tombstonedHashes.length;
   }
 
   /// Asset ids referenced by row payloads parked in the sync quarantine.
