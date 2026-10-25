@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:drift/drift.dart' show Value;
 import 'package:drift/native.dart';
@@ -305,10 +306,36 @@ void main() {
     // A quit waits on a Save that is still pooling a large file, judged by
     // this count moving (see RecordingFinalizer): a staging file left in it
     // would read as a copy in progress for the rest of the session.
-    expect(await AssetStore.bytesBeingCopied(), 0);
+    expect(AssetStore.copiesInFlight, 0);
     final src = await makeSrc('big.wav', List<int>.filled(512 * 1024, 7));
     await store.importFile(src.path);
-    expect(await AssetStore.bytesBeingCopied(), 0);
+    // The set itself, not the byte count: a path left in it names a file
+    // already renamed into the pool, which reads as 0 bytes either way.
+    expect(AssetStore.copiesInFlight, 0);
+  });
+
+  test('a copy in flight is counted while its bytes land', () async {
+    // The quit's only evidence that a Save past its budget is still working.
+    final src = await makeSrc(
+      'huge.wav',
+      Uint8List(32 << 20)..fillRange(0, 32 << 20, 7),
+    );
+    var copying = false;
+    var seenBytes = 0;
+    final import = store.importFile(src.path);
+    while (!copying || seenBytes == 0) {
+      final done = await import
+          .then((_) => true)
+          .timeout(const Duration(milliseconds: 1), onTimeout: () => false);
+      if (done) break;
+      copying |= AssetStore.copiesInFlight == 1;
+      final bytes = await AssetStore.bytesBeingCopied();
+      if (bytes > seenBytes) seenBytes = bytes;
+    }
+    await import;
+    expect(copying, isTrue, reason: 'the copy was never listed');
+    expect(seenBytes, greaterThan(0), reason: 'its bytes were never counted');
+    expect(AssetStore.copiesInFlight, 0);
   });
 
   group('a staged recording remembers the hash its import measured', () {

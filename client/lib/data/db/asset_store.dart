@@ -324,6 +324,10 @@ class AssetStore {
   /// [bytesBeingCopied]).
   static final Set<String> _copying = {};
 
+  /// How many imports are copying right now (see [bytesBeingCopied]).
+  @visibleForTesting
+  static int get copiesInFlight => _copying.length;
+
   /// How many bytes the imports in flight have written to staging so far.
   /// The copy runs in a background isolate, so its progress is read off the
   /// growing files: a quit waiting on a save that is pooling a large file
