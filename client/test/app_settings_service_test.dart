@@ -114,6 +114,12 @@ const _interface = AudioDevice(
   rate: 48000,
   isInput: true,
 );
+const _otherInterface = AudioDevice(
+  uid: 'usb-other',
+  name: 'Another Interface',
+  rate: 48000,
+  isInput: true,
+);
 
 void main() {
   // Mutable live device lists the injected enumerators read from, so tests can
@@ -581,12 +587,104 @@ void main() {
     });
 
     test('a corrupt stored choice is ignored, not applied', () async {
+      ins = [_builtInMic, _interface, _otherInterface];
       storage.doc = {
         'inputDeviceUid': _interface.uid,
-        'inputChannelByUid': {_interface.uid: 7, _builtInMic.uid: 'two'},
+        'inputChannelByUid': {
+          _interface.uid: 7,
+          _builtInMic.uid: 'two',
+          _otherInterface.uid: 1,
+        },
       };
       await service.load();
       expect(service.inputChannel, GraphAudioPlaybackService.inputChannelAuto);
+      final engine = _FakeEngine();
+      service.attachEngine(engine);
+      expect(engine.inputChannelCalls, [0], reason: 'the bad value never ran');
+      // One bad entry costs only that device's choice.
+      await service.setInputDevice(_otherInterface.uid);
+      expect(service.inputChannel, GraphAudioPlaybackService.inputChannel1);
+    });
+
+    test("the technique page's own engine gets the input's device and "
+        'channel', () async {
+      // It is never attached here; a new engine starts on Auto, and its takes
+      // blended in the input the singer had picked to keep out.
+      ins = [_builtInMic, _interface];
+      storage.doc = {
+        'inputDeviceUid': _interface.uid,
+        'inputChannelByUid': {_interface.uid: 1},
+      };
+      await service.load();
+      final engine = _FakeEngine();
+      service.applyInputTo(engine);
+      expect(engine.inputCalls, [_interface.uid]);
+      expect(engine.inputChannelCalls, [1]);
+    });
+
+    test(
+      'System Default keeps each default device on its own choice',
+      () async {
+        // Keyed by the selection, a choice made while one interface was the
+        // default followed the default onto the next.
+        const builtInNotDefault = AudioDevice(
+          uid: 'built-in-mic',
+          name: 'MacBook Pro Microphone',
+          rate: 48000,
+          isInput: true,
+        );
+        const interfaceDefault = AudioDevice(
+          uid: 'usb-2in',
+          name: 'USB Audio Interface',
+          rate: 48000,
+          isDefault: true,
+          isInput: true,
+        );
+        ins = [_builtInMic, _interface];
+        await service.load();
+        final engine = _FakeEngine();
+        service.attachEngine(engine);
+        channels[_builtInMic.uid] = 2;
+        await service.setInputChannel(GraphAudioPlaybackService.inputChannel2);
+
+        ins = [builtInNotDefault, interfaceDefault];
+        service.refreshDevices();
+        expect(
+          service.inputChannel,
+          GraphAudioPlaybackService.inputChannelAuto,
+        );
+        expect(engine.inputChannelCalls.last, 0, reason: 'the new default');
+        expect(service.inputChannelCount, 2, reason: "the new default's");
+
+        ins = [_builtInMic, _interface];
+        service.refreshDevices();
+        expect(service.inputChannel, GraphAudioPlaybackService.inputChannel2);
+        expect(engine.inputChannelCalls.last, 2);
+      },
+    );
+
+    test('an unplugged choice gives way to the device the engine falls back '
+        'to', () async {
+      ins = [_builtInMic, _interface];
+      storage.doc = {
+        'inputDeviceUid': _interface.uid,
+        'inputChannelByUid': {_interface.uid: 2},
+      };
+      await service.load();
+      final engine = _FakeEngine();
+      service.attachEngine(engine);
+      expect(engine.inputChannelCalls.last, 2);
+
+      ins = [_builtInMic];
+      service.refreshDevices();
+      expect(service.inputChannel, GraphAudioPlaybackService.inputChannelAuto);
+      expect(engine.inputChannelCalls.last, 0, reason: 'the fallback mic');
+      expect(service.inputChannelCount, 1, reason: 'the fallback mic');
+
+      ins = [_builtInMic, _interface];
+      service.refreshDevices();
+      expect(service.inputChannel, GraphAudioPlaybackService.inputChannel2);
+      expect(engine.inputChannelCalls.last, 2, reason: 'it came back');
     });
   });
 }

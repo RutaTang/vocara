@@ -67,10 +67,9 @@ class AppSettingsService extends ChangeNotifier {
   List<AudioDevice> _inputDevices = const [];
   GraphAudioPlaybackService? _engine;
 
-  /// The input-channel choice (a [GraphAudioPlaybackService] `inputChannel*` mode) per input
-  /// device uid, '' standing for "follow the system default input". A device with no entry is on
-  /// Auto. Per device because it describes how THAT device is wired: input 2 of one interface is
-  /// not input 2 of the next.
+  /// The input-channel choice (a [GraphAudioPlaybackService] `inputChannel*` mode) per uid of the
+  /// device capturing (see [_inputKey]). A device with no entry is on Auto. Per device because it
+  /// describes how THAT device is wired: input 2 of one interface is not input 2 of the next.
   final Map<String, int> _inputChannelByUid = {};
 
   /// The uids whose choice the user made this session (see [_userChosen]): [load] adopts the
@@ -131,8 +130,20 @@ class AppSettingsService extends ChangeNotifier {
         AudioDevice(uid: uid, name: _inputDeviceName ?? '');
   }
 
-  // The current input's key in [_inputChannelByUid].
-  String get _inputKey => _inputDeviceUid ?? '';
+  /// The device the mic captures from, as the key of its input-channel choice: the chosen one
+  /// while it is connected, else the system default — what the engine records from when the
+  /// selection is System Default, or when the chosen device is unplugged. Keyed by the selection
+  /// instead, a choice made for one interface followed the default onto the next.
+  String get _inputKey {
+    final uid = _inputDeviceUid;
+    if (uid != null && uid.isNotEmpty && !_isMissing(_inputDevices, uid)) {
+      return uid;
+    }
+    for (final d in _inputDevices) {
+      if (d.isDefault) return d.uid;
+    }
+    return uid ?? '';
+  }
 
   /// Which input(s) of the current input device the engine records and monitors: a
   /// [GraphAudioPlaybackService] `inputChannel*` mode, Auto unless chosen for this device.
@@ -389,28 +400,33 @@ class AppSettingsService extends ChangeNotifier {
     final changed =
         _deviceSig(outs) != _deviceSig(_outputDevices) ||
         _deviceSig(ins) != _deviceSig(_inputDevices);
-    // Polled with the lists: a device plugged in, or one whose input format changed, can change
-    // whether the panel offers the input-channel choice without any device set changing.
-    final channelsChanged = _refreshInputChannelCount();
-    if (channelsChanged && !changed) notifyListeners();
-    if (changed) {
-      // A persisted device coming back after an unplug: the engine fell back to
-      // the system default meanwhile, so switch it back to the user's choice live.
-      final outReturned = _returned(_outputDevices, outs, _outputDeviceUid);
-      final inReturned = _returned(_inputDevices, ins, _inputDeviceUid);
-      _outputDevices = outs;
-      _inputDevices = ins;
-      if (outReturned) _engine?.setOutputDevice(_outputDeviceUid!);
-      if (inReturned) _engine?.setInputDevice(_inputDeviceUid!);
-      _syncLastKnownNames();
-      // monitorAllowed is derived from the output set, so reconcile the engine's
-      // monitor gain whenever it changes — the initial attach can run before the
-      // (microtask-deferred) device list is populated and force the gain to 0;
-      // without this re-apply the MON fader reads up but the engine stays muted.
-      _refreshActualOutput();
-      _applyMonitorGain();
-      notifyListeners();
+    if (!changed) {
+      // Polled with the lists: a device whose input format changed can change whether the
+      // panel offers the input-channel choice without any device set changing.
+      if (_refreshInputChannelCount()) notifyListeners();
+      return;
     }
+    final capturingBefore = _inputKey;
+    // A persisted device coming back after an unplug: the engine fell back to
+    // the system default meanwhile, so switch it back to the user's choice live.
+    final outReturned = _returned(_outputDevices, outs, _outputDeviceUid);
+    final inReturned = _returned(_inputDevices, ins, _inputDeviceUid);
+    _outputDevices = outs;
+    _inputDevices = ins;
+    if (outReturned) _engine?.setOutputDevice(_outputDeviceUid!);
+    if (inReturned) _engine?.setInputDevice(_inputDeviceUid!);
+    // The mic moved under the same selection (the system default changed, or the chosen
+    // device left or came back): it runs on ITS input-channel choice.
+    if (_inputKey != capturingBefore) _engine?.setInputChannel(inputChannel);
+    _refreshInputChannelCount();
+    _syncLastKnownNames();
+    // monitorAllowed is derived from the output set, so reconcile the engine's
+    // monitor gain whenever it changes — the initial attach can run before the
+    // (microtask-deferred) device list is populated and force the gain to 0;
+    // without this re-apply the MON fader reads up but the engine stays muted.
+    _refreshActualOutput();
+    _applyMonitorGain();
+    notifyListeners();
   }
 
   // A change signature over a device set (the fields the panel renders) to skip no-op rebuilds.
@@ -522,6 +538,16 @@ class AppSettingsService extends ChangeNotifier {
     _refreshInputChannelCount();
     notifyListeners();
     await _persist();
+  }
+
+  /// Points [engine], one this service does not track (the technique page owns its own), at the
+  /// user's input choice: the device, and which of its inputs to record. A new engine starts on
+  /// Auto, so without the second a singer who picked Input 1 to keep a guitar on input 2 out got
+  /// it blended into those takes.
+  void applyInputTo(GraphAudioPlaybackService engine) {
+    final uid = _inputDeviceUid;
+    if (uid != null && uid.isNotEmpty) engine.setInputDevice(uid);
+    engine.setInputChannel(inputChannel);
   }
 
   /// Choose which input(s) of the current input device the engine records and monitors (a

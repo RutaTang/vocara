@@ -642,12 +642,12 @@ class TechniqueDetailViewModel extends ChangeNotifier
       MicRecordingController(
         acquireEngine: () {
           final engine = _engine ??= GraphAudioPlaybackService();
-          // Record from the input device the user chose in Settings (this VM owns
-          // its own engine, so without this it would capture from the OS default
-          // and silently contradict the global selection). No-op when the engine
-          // is unavailable.
-          final inUid = _appSettings?.inputDeviceUid;
-          if (inUid != null && inUid.isNotEmpty) engine.setInputDevice(inUid);
+          // Record from the input the user chose in Settings, device and channel
+          // (this VM owns its own engine, so without this it would capture from
+          // the OS default and silently contradict the global selection). Read
+          // per take, so a choice changed between takes applies to the next.
+          // No-op when the engine is unavailable.
+          _appSettings?.applyInputTo(engine);
           return engine;
         },
         monitor: _monitor,
