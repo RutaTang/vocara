@@ -53,16 +53,20 @@ class _FixedGuard implements LibraryGuard {
 /// reclaiming needs it EXCLUSIVE, which no process can get while any other
 /// one holds it at all:
 ///
-///  * at boot, [forLibrary] first tries for it EXCLUSIVE from nothing — of
-///    launches racing on an idle library exactly one wins (taking shared
-///    first, then upgrading, let two simultaneous launches refuse each other,
-///    leaving the library unowned and a pending upgrade refused by both).
-///    The winner is the boot's owner ([tryExclusive] hands it that claim):
-///    it runs recovery and the sweeps, then hands the lock back to shared.
-///    Every other launch waits for its shared hold — however long an owner's
-///    boot takes, telling the app once the wait runs long, but NEVER going
-///    on without it: an instance with no hold is one the owner's sweeps
-///    cannot see, and they trashed the take it was recording;
+///  * at boot, [forLibrary] takes it shared and at once tries to upgrade it,
+///    both while holding a separate LAUNCH GATE (byte 1 of the file, held
+///    only for those two non-blocking calls): so no other launch can take
+///    shared between this one's shared and its upgrade. Without the gate two
+///    launches racing for a library nobody held — at the same moment, or
+///    both waiting on an owner's boot that died — each refused the other's
+///    upgrade, leaving the library unowned and a pending upgrade refused by
+///    both. A launch that upgrades is the boot's owner ([tryExclusive] hands
+///    it that claim): it runs recovery and the sweeps, then hands the lock
+///    back to shared. One that can't take shared at all (an owner is mid
+///    boot) waits — however long that boot takes, telling the app once the
+///    wait runs long, but NEVER going on without a hold: an instance with no
+///    hold is one the owner's sweeps cannot see, and they trashed the take it
+///    was recording;
 ///  * Repair library tries the same upgrade and reclaims nothing without it.
 ///
 /// An instance that started second keeps its shared hold, so it still guards
@@ -70,9 +74,11 @@ class _FixedGuard implements LibraryGuard {
 /// either. (Holding the lock only in the first process left every later
 /// instance unguarded the moment the first one exited.)
 ///
-/// The lock is a POSIX record lock ([RandomAccessFile.lock]): a conversion
-/// between shared and exclusive on the same descriptor is atomic, and a
-/// refused upgrade leaves the shared hold in place. Record locks belong to
+/// The lock is a POSIX record lock ([RandomAccessFile.lock]) on byte 0 of the
+/// file, the launch gate one on byte 1 (locks on different bytes never
+/// conflict): a conversion between shared and exclusive on the same
+/// descriptor is atomic, and a refused upgrade leaves the shared hold in
+/// place. Record locks belong to
 /// the PROCESS: two requests from this process never conflict, and closing
 /// ANY descriptor this process holds on the file drops them all. So the file
 /// is opened once per library (read and write, which a shared and an
@@ -93,6 +99,11 @@ class LibraryLock implements LibraryGuard {
 
   /// How often a wait for the shared hold retries.
   static const Duration defaultPoll = Duration(milliseconds: 100);
+
+  /// The byte the library lock covers, and the launch gate's (see the class
+  /// doc).
+  static const int _libraryByte = 0;
+  static const int _gateByte = 1;
 
   /// This process's guards by canonical lock-file path, registered before
   /// the first await so two opens racing on one library share one guard.
@@ -191,13 +202,19 @@ class LibraryLock implements LibraryGuard {
     final slow = DateTime.now().add(wait);
     var told = false;
     while (true) {
-      // The claim first on EVERY try, not only the first: an owner whose boot
-      // ends by dying goes from exclusive straight to nothing, and waiters
-      // that all took shared at that moment refused each other's upgrade —
-      // the library unowned, its crashed takes unrecovered.
-      if (await lock._locked(lock._tryBootClaim)) return lock;
-      if (lock._unsupported) return lock;
-      if (await lock._locked(lock._tryShared)) return lock;
+      // Shared, then the upgrade, both inside the launch gate (see the class
+      // doc). Refused shared means an owner is mid boot: let the gate go and
+      // wait for it.
+      if (await lock._locked(lock._tryGate)) {
+        try {
+          if (await lock._locked(lock._tryShared)) {
+            await lock._locked(lock._tryBootClaim);
+            return lock;
+          }
+        } finally {
+          await lock._locked(lock._releaseGate);
+        }
+      }
       if (lock._unsupported) return lock;
       if (!told && !DateTime.now().isBefore(slow)) {
         told = true;
@@ -212,13 +229,29 @@ class LibraryLock implements LibraryGuard {
     }
   }
 
-  /// The whole library from nothing, never waiting: refused while any other
-  /// process holds the lock at all. Call only through [_locked].
+  /// The upgrade of a fresh shared hold that makes this launch the boot's
+  /// owner, never waiting: refused while any other process holds the lock at
+  /// all. Call only through [_locked], inside the launch gate.
   Future<bool> _tryBootClaim() async {
     if (!await _lock(FileLock.exclusive)) return false;
     _exclusiveHolds = 1;
     _bootClaim = true;
     return true;
+  }
+
+  /// The launch gate, never waiting. Call only through [_locked].
+  Future<bool> _tryGate() async {
+    if (_unsupported) return false;
+    return _lock(FileLock.exclusive, byte: _gateByte);
+  }
+
+  /// Lets the launch gate go. Call only through [_locked].
+  Future<void> _releaseGate() async {
+    try {
+      await _file!.unlock(_gateByte, _gateByte + 1);
+    } on FileSystemException catch (_) {
+      // Nothing to let go of; the kernel drops it with the process anyway.
+    }
   }
 
   /// One non-blocking attempt at the shared hold. Call only through
@@ -259,12 +292,12 @@ class LibraryLock implements LibraryGuard {
     _shared = await _lock(FileLock.shared);
   });
 
-  /// One non-blocking lock call on the whole file. Returns false when
-  /// another process holds a conflicting lock; any other refusal marks the
-  /// guard [_unsupported].
-  Future<bool> _lock(FileLock mode) async {
+  /// One non-blocking lock call on [byte] (the library's unless told). Returns
+  /// false when another process holds a conflicting lock; any other refusal
+  /// marks the guard [_unsupported].
+  Future<bool> _lock(FileLock mode, {int byte = _libraryByte}) async {
     try {
-      await _file!.lock(mode);
+      await _file!.lock(mode, byte, byte + 1);
       return true;
     } on FileSystemException catch (e) {
       final code = e.osError?.errorCode;

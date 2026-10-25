@@ -40,7 +40,8 @@ const _noPython = 'needs python3 to hold the lock from another process';
 const _helperTimeout = Duration(seconds: 20);
 
 /// Another Vocara process, as far as the lock can tell: a python3 helper
-/// holding an fcntl lock on the lock file until [release]d. It also exits
+/// holding an fcntl lock on the lock file's library byte (byte 0) until
+/// [release]d. It also exits
 /// on its own after a minute, so a crashed test can never leave it behind.
 class _OtherProcess {
   _OtherProcess._(this._process);
@@ -52,16 +53,17 @@ class _OtherProcess {
       'import fcntl, os, signal, sys, time\n'
       'signal.alarm(60)\n'
       'fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT)\n'
-      'modes = {"sh": fcntl.LOCK_SH, "ex": fcntl.LOCK_EX}\n'
+      'modes = {"sh": fcntl.LOCK_SH, "ex": fcntl.LOCK_EX, "gate": fcntl.LOCK_EX}\n'
+      'byte = 1 if sys.argv[2] == "gate" else 0\n'
       'try:\n'
-      '    fcntl.lockf(fd, modes[sys.argv[2]] | fcntl.LOCK_NB)\n'
+      '    fcntl.lockf(fd, modes[sys.argv[2]] | fcntl.LOCK_NB, 1, byte)\n'
       'except OSError as e:\n'
       '    print("refused", e.errno, flush=True)\n'
       '    sys.exit(1)\n'
       'print("locked", flush=True)\n'
       'if len(sys.argv) > 3:\n'
       '    time.sleep(int(sys.argv[3]) / 1000)\n'
-      '    fcntl.lockf(fd, fcntl.LOCK_SH)\n'
+      '    fcntl.lockf(fd, fcntl.LOCK_SH, 1, 0)\n'
       'sys.stdin.read()\n';
 
   /// Holds the lock on [path] shared (a running instance) or exclusive (an
@@ -71,12 +73,13 @@ class _OtherProcess {
     String path, {
     required bool shared,
     Duration? downgradeAfter,
+    bool gate = false,
   }) async {
     final process = await Process.start('python3', [
       '-c',
       _holdScript,
       path,
-      shared ? 'sh' : 'ex',
+      gate ? 'gate' : (shared ? 'sh' : 'ex'),
       if (downgradeAfter != null) '${downgradeAfter.inMilliseconds}',
     ]);
     unawaited(process.stderr.drain<void>());
@@ -121,7 +124,7 @@ class _OtherProcess {
           'fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT)\n'
           'mode = fcntl.LOCK_SH if sys.argv[2] == "sh" else fcntl.LOCK_EX\n'
           'try:\n'
-          '    fcntl.lockf(fd, mode | fcntl.LOCK_NB)\n'
+          '    fcntl.lockf(fd, mode | fcntl.LOCK_NB, 1, 0)\n'
           '    print("got")\n'
           'except OSError:\n'
           '    print("held")\n',
@@ -388,6 +391,37 @@ void main() {
     await lock.releaseExclusive();
     expect(await _OtherProcess.couldTake(lockPath(), shared: false), isFalse);
   }, skip: _hasPython ? false : _noPython);
+
+  test(
+    'a launch decides only inside the launch gate',
+    () async {
+      // Its shared hold and its upgrade happen while it holds the gate, so no
+      // other launch can take shared in between: two launches racing for a
+      // library nobody held refused each other's upgrade, leaving it unowned.
+      final other = await _OtherProcess.hold(
+        lockPath(),
+        shared: false,
+        gate: true,
+      );
+      addTearDown(other.release);
+      LibraryLock? opened;
+      final launch = LibraryLock.forLibrary(
+        root,
+        poll: const Duration(milliseconds: 20),
+      ).then((l) => opened = l);
+      await Future<void>.delayed(const Duration(milliseconds: 400));
+      expect(
+        opened,
+        isNull,
+        reason: 'decided while another launch held the gate',
+      );
+      await other.release();
+      final lock = await launch.timeout(_helperTimeout);
+      expect(await lock.tryExclusive(), isTrue, reason: 'alone: the owner');
+      await lock.releaseExclusive();
+    },
+    skip: _hasPython ? false : _noPython,
+  );
 
   test('a launch on an idle library takes it exclusive from nothing, so of '
       'launches racing there exactly one owns it', () async {
