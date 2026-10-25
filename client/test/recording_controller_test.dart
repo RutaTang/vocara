@@ -171,6 +171,40 @@ class _HandFedGraph extends _FakeGraph {
   double inputLevel() => 0;
 }
 
+/// Enough engine for the REAL recorder to arm: a converged, running input
+/// stream whose take ring grows on every read, so its ready handshake passes
+/// at once and its level timer drives the take's clock.
+class _RollingGraph extends _FakeGraph {
+  int _written = 0;
+
+  @override
+  int inputIntentSeq() => 1;
+
+  @override
+  int inputAppliedState() => (1 << 24) | 7;
+
+  @override
+  int inputStreamState() => (7 << 1) | 1;
+
+  @override
+  int recordWrittenFrames() => _written += 480;
+
+  @override
+  int inputFramesReceived() => _written;
+
+  @override
+  bool startInputRecording(String path) => true;
+
+  @override
+  bool stopInputRecording() => true;
+
+  @override
+  int recordDroppedFrames() => 0;
+
+  @override
+  double inputLevel() => 0.5;
+}
+
 /// Recorder double faithful to the real one where the controller depends on
 /// it: [start] runs the destination's create() (that is where the VM take
 /// setup — including the generation bump — lives), and [stop] flips the
@@ -286,8 +320,9 @@ void main() {
   // Swappable save so a test can park the finalize tail mid-save.
   late Future<bool> Function() saveImpl;
 
+  /// A null [recorder] records through the real [MicRecordingController].
   RecordingController build(
-    MicRecordingController recorder, {
+    MicRecordingController? recorder, {
     String? Function()? selectedTrackId,
     Future<String?> Function()? createEmptyVocalTake,
     Future<void> Function(String)? discardEmptyTake,
@@ -713,6 +748,40 @@ void main() {
     }
     expect(graph.polls, greaterThanOrEqualTo(n), reason: 'the watch stalled');
   }
+
+  test('the record clock keeps real time through a stalled tick', () async {
+    // The clock counted level ticks, and a periodic timer skips the ticks a
+    // stalled isolate overran (a long frame, a GC pause): the playhead, the
+    // clock and the forming waveform fell behind the backing for the rest of
+    // the take.
+    final c = build(null, graph: _RollingGraph());
+    addTearDown(c.dispose);
+    playback.position.value = const Duration(seconds: 10);
+    final start = c.startRecording();
+    await pumpUntil(() => mixer.gates.isNotEmpty);
+    mixer.gates.single.complete();
+    await start;
+    expect(c.isRecording, isTrue);
+    final wall = Stopwatch()..start();
+    final clock0 = c.recordingDurationMs;
+
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    final stall = Stopwatch()..start();
+    while (stall.elapsedMilliseconds < 400) {} // the isolate stalls
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+
+    final elapsed = wall.elapsedMilliseconds;
+    final clock = c.recordingDurationMs - clock0;
+    final head = playback.position.value.inMilliseconds;
+    await c.stopRecording();
+    expect(clock, inInclusiveRange(elapsed - 150, elapsed + 150));
+    expect(head - 10000, inInclusiveRange(elapsed - 150, elapsed + 150));
+    expect(
+      c.recordingPeaks.value,
+      isEmpty,
+      reason: 'the stop clears the forming waveform',
+    );
+  });
 
   test('monitoring outlasts a mic still warming up', () async {
     // A Bluetooth headset switching to its headset profile delivers nothing

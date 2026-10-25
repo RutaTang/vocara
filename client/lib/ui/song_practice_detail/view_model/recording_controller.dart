@@ -308,6 +308,15 @@ class RecordingController extends ChangeNotifier {
   int get recordingDurationMs =>
       recordingPeaks.value.length * _recordIntervalMs;
 
+  /// Real time since the armed take started rolling, which the peaks (and so
+  /// [recordingDurationMs], the record clock) keep up with. The clock used to
+  /// count level ticks, and a periodic timer skips the ticks a stalled isolate
+  /// overran (a long frame, a GC pause) instead of delivering them late: the
+  /// playhead, the clock and the forming waveform fell behind the backing for
+  /// the rest of the take, and a lyric stamped or a note added at the
+  /// playhead mid-take saved that late time.
+  final Stopwatch _takeClock = Stopwatch();
+
   /// The take REC will record into: the selected lane if it's a recordable vocal
   /// take in the active interpretation, else null (→ REC creates a new take).
   /// Drives the "armed" record-dot; frozen into [_recordingTargetId] while a
@@ -345,7 +354,12 @@ class RecordingController extends ChangeNotifier {
     recordLevel.value = _meterFromPeak(peak);
     // Also drive the mixer's MIC meter while recording (it shares this notifier with monitoring).
     inputLevel.value = _meterFromPeak(peak);
-    _recPeaks.add(peak);
+    // One peak per level interval of real time: the intervals a skipped tick
+    // missed take this tick's peak.
+    final due = _takeClock.elapsedMilliseconds ~/ _recordIntervalMs;
+    do {
+      _recPeaks.add(peak);
+    } while (_recPeaks.length < due);
     recordingPeaks.value = UnmodifiableListView(_recPeaks);
     _playback.setRecordingPosition(
       Duration(milliseconds: _recordingStartMs + recordingDurationMs),
@@ -437,6 +451,11 @@ class RecordingController extends ChangeNotifier {
       if (!r.started) return;
       // Armed: the take is recording into its lane, which is no longer empty.
       _createdEmptyTake = null;
+      // Its level ticks start now (the recorder armed its timer just before
+      // returning, and the first tick lands an interval later).
+      _takeClock
+        ..reset()
+        ..start();
 
       // The take is armed, which means the user can STOP it right now — every
       // await below must re-check, or a continuation resuming after the stop
