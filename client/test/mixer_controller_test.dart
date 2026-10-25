@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -8,6 +9,7 @@ import 'package:vocara/domain/models/audio_track.dart';
 import 'package:vocara/domain/models/fx_bus.dart';
 import 'package:vocara/domain/models/practice_note.dart';
 import 'package:vocara/domain/models/song_practice.dart';
+import 'package:vocara/domain/models/take_version.dart';
 import 'package:vocara/ui/song_practice_detail/view_model/mixer_controller.dart';
 
 /// Engine fake that records what the mixer pushes: per-source levels/mutes,
@@ -56,6 +58,10 @@ class _FakeEngine extends Fake implements PlaybackEngine {
 
   @override
   void setBusPan(String busId, double pan) {}
+  @override
+  void setTrackSendLevel(String trackId, int slot, double levelDb) {}
+  @override
+  void setBusSendLevel(String busId, int slot, double levelDb) {}
 }
 
 /// A live host harness mirroring the view model's wiring: the practice model
@@ -763,6 +769,251 @@ void main() {
         ),
       );
       expect(host.mixer.busWaveformPeaks('rev')[500], closeTo(0.8, 1e-9));
+    });
+  });
+
+  // The lane envelopes are cached, keyed on what they read (see
+  // MixerController._envelope). A key that misses an input serves a stale
+  // envelope; this walk checks the cache against a fresh fold — a new host on
+  // the same state — after every one of thousands of random edits.
+  group('the envelope cache', () {
+    test('equals a fresh fold through a random walk of edits', () async {
+      for (var seed = 0; seed < 40; seed++) {
+        final r = math.Random(seed);
+        List<double> pk() => [
+          for (var i = 0; i < 1 + r.nextInt(30); i++) r.nextDouble(),
+        ];
+        AudioTrack vocal(String id, String version) => AudioTrack(
+          id: id,
+          kind: AudioTrackKind.vocal,
+          displayName: id,
+          createdAt: DateTime(2026),
+          versionId: version,
+          clips: [
+            for (var c = 0; c < 1 + r.nextInt(3); c++)
+              AudioClip(
+                id: '$id-c$c',
+                audioFilePath: '$id-$c.wav',
+                durationMs: 500 + r.nextInt(4000),
+                startMs: r.nextInt(8000),
+                waveformPeaks: pk(),
+              ),
+          ],
+        );
+        AudioTrack backing(String id, AudioTrackKind k) => AudioTrack(
+          id: id,
+          kind: k,
+          displayName: id,
+          createdAt: DateTime(2026),
+          audioFilePath: '$id.wav',
+          durationMs: 10000,
+          waveformPeaks: pk(),
+        );
+        var n = 0;
+        final host = _Host(
+          SongPractice(
+            id: 'p1',
+            title: 'S',
+            createdAt: DateTime(2026),
+            updatedAt: DateTime(2026),
+            accompaniment: backing('acc', AudioTrackKind.accompaniment),
+            reference: backing('ref', AudioTrackKind.reference),
+            versions: [
+              TakeVersion(id: 'v1', name: 'a', createdAt: DateTime(2026)),
+              TakeVersion(id: 'v2', name: 'b', createdAt: DateTime(2026)),
+            ],
+            activeVersionId: 'v1',
+            vocalTracks: [
+              for (var i = 0; i < 4; i++)
+                vocal('t${n++}', i.isEven ? 'v1' : 'v2'),
+            ],
+            fxBuses: [_bus('b0'), _bus('b1'), _bus('b2')],
+            timelineDurationMs: 12000,
+          ),
+        );
+        List<String> tracks() => [for (final t in host.allTracks()) t.id];
+        List<String> vocals() => [
+          for (final t in host.practice!.vocalTracks) t.id,
+        ];
+        List<String> buses() => [for (final b in host.mixer.fxBuses) b.id];
+        String pick(List<String> l) => l[r.nextInt(l.length)];
+        String? pickOrNull(List<String> l) =>
+            r.nextInt(3) == 0 || l.isEmpty ? null : pick(l);
+
+        final ops = <String, FutureOr<void> Function()>{
+          'vol': () {
+            if (tracks().isNotEmpty) {
+              host.mixer.setTrackVolumeLive(pick(tracks()), r.nextDouble());
+            }
+          },
+          'mute': () async {
+            if (tracks().isNotEmpty) {
+              await host.mixer.toggleMute(pick(tracks()));
+            }
+          },
+          'solo': () async {
+            if (tracks().isNotEmpty) {
+              await host.mixer.toggleSolo(pick(tracks()));
+            }
+          },
+          'master': () => host.mixer.setMasterVolumeLive(r.nextDouble()),
+          'ab': () => host.mixer.setPlayReference(r.nextBool()),
+          'route': () async {
+            if (vocals().isNotEmpty) {
+              await host.mixer.setTrackBus(pick(vocals()), pickOrNull(buses()));
+            }
+          },
+          'busOut': () async {
+            if (buses().isNotEmpty) {
+              await host.mixer.setBusOutput(pick(buses()), pickOrNull(buses()));
+            }
+          },
+          'busMute': () async {
+            if (buses().isNotEmpty) {
+              await host.mixer.toggleBusMute(pick(buses()));
+            }
+          },
+          'busSolo': () async {
+            if (buses().isNotEmpty) {
+              await host.mixer.toggleBusSolo(pick(buses()));
+            }
+          },
+          'send': () async {
+            if (vocals().isNotEmpty && buses().isNotEmpty) {
+              await host.mixer.addTrackSend(pick(vocals()), pick(buses()));
+            }
+          },
+          'sendLvl': () {
+            final withSends = [
+              for (final t in host.practice!.vocalTracks)
+                if (t.sends.isNotEmpty) t,
+            ];
+            if (withSends.isEmpty) return;
+            final t = withSends[r.nextInt(withSends.length)];
+            host.mixer.setTrackSendLevelLive(
+              t.id,
+              r.nextInt(t.sends.length),
+              -40 + r.nextDouble() * 40,
+            );
+          },
+          'busSend': () async {
+            if (buses().length > 1) {
+              await host.mixer.addBusSend(pick(buses()), pick(buses()));
+            }
+          },
+          'busSendLvl': () {
+            final withSends = [
+              for (final b in host.mixer.fxBuses)
+                if (b.sends.isNotEmpty) b,
+            ];
+            if (withSends.isEmpty) return;
+            final b = withSends[r.nextInt(withSends.length)];
+            host.mixer.setBusSendLevelLive(
+              b.id,
+              r.nextInt(b.sends.length),
+              -40 + r.nextDouble() * 40,
+            );
+          },
+          'clipMove': () {
+            if (vocals().isEmpty) return;
+            host.updateTrack(
+              pick(vocals()),
+              (t) => t.copyWith(
+                clips: [
+                  for (final c in t.clips) c.copyWith(startMs: r.nextInt(9000)),
+                ],
+              ),
+            );
+          },
+          'clipDel': () {
+            if (vocals().isEmpty) return;
+            host.updateTrack(
+              pick(vocals()),
+              (t) => t.copyWith(
+                clips: t.clips.length > 1 ? t.clips.sublist(1) : t.clips,
+              ),
+            );
+          },
+          'addTake': () {
+            final p = host.practice!;
+            host.practice = p.copyWith(
+              vocalTracks: [
+                ...p.vocalTracks,
+                vocal('t${n++}', r.nextBool() ? 'v1' : 'v2'),
+              ],
+            );
+          },
+          'delTake': () {
+            final p = host.practice!;
+            if (p.vocalTracks.isEmpty) return;
+            final id = pick(vocals());
+            host.practice = p.copyWith(
+              vocalTracks: [
+                for (final t in p.vocalTracks)
+                  if (t.id != id) t,
+              ],
+            );
+          },
+          'interp': () {
+            final p = host.practice!;
+            host.practice = p.copyWith(
+              activeVersionId: p.activeVersionId == 'v1' ? 'v2' : 'v1',
+            );
+          },
+          'timeline': () {
+            final p = host.practice!;
+            host.practice = p.copyWith(
+              timelineDurationMs: 8000 + r.nextInt(8000),
+            );
+          },
+          'recStart': () {
+            host
+              ..recording = true
+              ..recordingTarget = pickOrNull(vocals())
+              ..recStartMs = r.nextInt(5000)
+              ..recPeaks = List.unmodifiable(pk())
+              ..recDurationMs = host.recPeaks.length * 50;
+          },
+          'recTick': () {
+            if (!host.recording) return;
+            host
+              ..recPeaks = List.unmodifiable([...host.recPeaks, r.nextDouble()])
+              ..recDurationMs = host.recPeaks.length * 50;
+          },
+          'recStop': () {
+            host
+              ..recording = false
+              ..recPeaks = const [];
+          },
+          'selectWhileRec': () {
+            host.recordingTarget = pickOrNull(vocals());
+          },
+        };
+        final names = ops.keys.toList();
+        for (var step = 0; step < 150; step++) {
+          final name = names[r.nextInt(names.length)];
+          await ops[name]!();
+          final fresh = _Host(host.practice)
+            ..recording = host.recording
+            ..recordingTarget = host.recordingTarget
+            ..recPeaks = host.recPeaks
+            ..recStartMs = host.recStartMs
+            ..recDurationMs = host.recDurationMs;
+          fresh.mixer.setPlayReferenceSilently(host.mixer.playReference);
+          expect(
+            host.mixer.masterWaveformPeaks,
+            fresh.mixer.masterWaveformPeaks,
+            reason: 'seed $seed step $step $name master',
+          );
+          for (final b in buses()) {
+            expect(
+              host.mixer.busWaveformPeaks(b),
+              fresh.mixer.busWaveformPeaks(b),
+              reason: 'seed $seed step $step $name bus $b',
+            );
+          }
+        }
+      }
     });
   });
 }

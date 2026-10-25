@@ -1,19 +1,14 @@
-// The detail screen keeps unchanged subtrees across rebuilds (StableSubtree,
-// the mixer's envelope cache): a kept row, strip or panel skips its build.
-// Each keep is only sound if its comparator sees every input the subtree
-// shows or acts on. These walks change the screen one edit at a time and, at
-// each step, compare the kept tree with a fresh build of the same state (both
-// memoizations switched off by their test flags): pixel for pixel and text
-// for text. A comparator that misses an input shows up as a stale step.
+// The detail screen keeps unchanged subtrees across rebuilds. These walks
+// change it one edit at a time, with the mixer dock open, and check each
+// step's kept screen against a fresh build (see FreshBuildOracle); a first
+// test drives kept rows' and strips' callbacks through the UI.
 
 import 'dart:async';
 import 'dart:math' as math;
 import 'dart:typed_data';
-import 'dart:ui' as ui;
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
 import 'package:vocara/data/repositories/song_practice_repository.dart';
@@ -32,12 +27,12 @@ import 'package:vocara/domain/models/audio_track.dart';
 import 'package:vocara/domain/models/song_practice.dart';
 import 'package:vocara/domain/models/spectrogram.dart';
 import 'package:vocara/domain/models/voice_metrics.dart';
-import 'package:vocara/ui/core/widgets/stable_subtree.dart';
-import 'package:vocara/ui/song_practice_detail/view_model/mixer_controller.dart';
 import 'package:vocara/ui/song_practice_detail/view_model/song_practice_detail_view_model.dart';
 import 'package:vocara/ui/song_practice_detail/widgets/song_practice_detail_screen.dart';
 import 'package:vocara/ui/song_practice_detail/widgets/track_row.dart';
 import 'package:vocara/utils/result.dart';
+
+import 'support/fresh_build_oracle.dart';
 
 class _FakeRepo extends Fake implements SongPracticeRepository {
   _FakeRepo(this.stored);
@@ -274,13 +269,12 @@ SongPractice _practice(int lanes) {
   );
 }
 
-final _root = GlobalKey();
-
 Future<SongPracticeDetailViewModel> _pumpScreen(
   WidgetTester tester, {
   int lanes = 4,
   Size size = const Size(1800, 1100),
   bool effects = true,
+  FreshBuildOracle? oracle,
 }) async {
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
@@ -307,122 +301,19 @@ Future<SongPracticeDetailViewModel> _pumpScreen(
   }
   expect(vm.practice, isNotNull);
   vm.toggleLyricsPanel();
-  await tester.pumpWidget(
-    RepaintBoundary(
-      key: _root,
-      child: MaterialApp(
-        home: ChangeNotifierProvider.value(
-          value: vm,
-          child: const SongPracticeDetailScreen(),
-        ),
-      ),
+  final app = MaterialApp(
+    home: ChangeNotifierProvider.value(
+      value: vm,
+      child: const SongPracticeDetailScreen(),
     ),
   );
+  await tester.pumpWidget(oracle?.wrap(app) ?? app);
   await tester.pump(const Duration(milliseconds: 50));
   addTearDown(() async {
-    StableSubtree.debugNeverKeep = false;
-    MixerController.debugNoEnvelopeCache = false;
     await tester.pumpWidget(const SizedBox());
     vm.dispose();
   });
   return vm;
-}
-
-Future<Uint8List> _shot(WidgetTester tester) async {
-  final ro = _root.currentContext!.findRenderObject()! as RenderRepaintBoundary;
-  final bytes = await tester.runAsync(() async {
-    final img = await ro.toImage();
-    final bd = await img.toByteData(format: ui.ImageByteFormat.rawRgba);
-    img.dispose();
-    return bd!.buffer.asUint8List();
-  });
-  return bytes!;
-}
-
-List<String> _texts(WidgetTester tester) => [
-  for (final p in tester.allRenderObjects.whereType<RenderParagraph>())
-    p.text.toPlainText(),
-];
-
-void _rebuildAll(WidgetTester tester) {
-  void mark(Element e) {
-    e.markNeedsBuild();
-    e.visitChildren(mark);
-  }
-
-  tester.binding.rootElement!.visitChildren(mark);
-}
-
-int _diff(Uint8List a, Uint8List b) {
-  if (a.length != b.length) return -1;
-  var n = 0;
-  for (var i = 0; i < a.length; i += 4) {
-    if (a[i] != b[i] || a[i + 1] != b[i + 1] || a[i + 2] != b[i + 2]) n++;
-  }
-  return n;
-}
-
-final _failures = <String>[];
-
-Future<void> _expectFresh(WidgetTester tester, String what) async {
-  for (var i = 0; i < 20; i++) {
-    await tester.pump(const Duration(milliseconds: 100));
-  }
-  // Two kept shots that agree: a screenshot runs real async, in which work
-  // still in flight (a lane's analysis) can land and change the screen.
-  late Uint8List kept;
-  late List<String> keptTexts;
-  var noise = 0;
-  for (var attempt = 0; attempt < 5; attempt++) {
-    _rebuildAll(tester);
-    await tester.pump(const Duration(milliseconds: 16));
-    final first = await _shot(tester);
-    final firstTexts = _texts(tester);
-    _rebuildAll(tester);
-    await tester.pump(const Duration(milliseconds: 16));
-    kept = await _shot(tester);
-    keptTexts = _texts(tester);
-    noise = _diff(first, kept);
-    if (noise == 0 && firstTexts.join('|') == keptTexts.join('|')) break;
-  }
-  StableSubtree.debugNeverKeep = true;
-  MixerController.debugNoEnvelopeCache = true;
-  Uint8List fresh;
-  List<String> freshTexts;
-  try {
-    _rebuildAll(tester);
-    await tester.pump(const Duration(milliseconds: 16));
-    fresh = await _shot(tester);
-    freshTexts = _texts(tester);
-  } finally {
-    StableSubtree.debugNeverKeep = false;
-    MixerController.debugNoEnvelopeCache = false;
-  }
-  _rebuildAll(tester);
-  await tester.pump(const Duration(milliseconds: 16));
-  final d = _diff(kept, fresh);
-  final textsEqual = keptTexts.join('|') == freshTexts.join('|');
-  if (d != 0 || !textsEqual) {
-    final a = keptTexts.toSet(), b = freshTexts.toSet();
-    _failures.add(
-      '$what: $d pixels differ (run-to-run noise $noise); '
-      'kept-only texts ${a.difference(b)}, fresh-only ${b.difference(a)}',
-    );
-  }
-}
-
-Future<void> _step(
-  WidgetTester tester,
-  String what,
-  FutureOr<void> Function() change,
-) async {
-  final r = change();
-  if (r is Future) {
-    unawaited(r.catchError((Object e) => _failures.add('$what threw: $e')));
-  }
-  await tester.pump(const Duration(milliseconds: 50));
-  await tester.pump(const Duration(milliseconds: 50));
-  await _expectFresh(tester, what);
 }
 
 void main() {
@@ -504,139 +395,107 @@ void main() {
   testWidgets('kept subtrees equal a fresh build across edits (mixer dock)', (
     tester,
   ) async {
-    _failures.clear();
-    final vm = await _pumpScreen(tester);
+    final oracle = FreshBuildOracle(tester);
+    final vm = await _pumpScreen(tester, oracle: oracle);
     final m = vm.mixer;
     final pb = vm.playback;
     vm.analysis.showDockTab(DockTab.mixer);
     vm.analysis.setDockHeight(330);
     await tester.pump(const Duration(milliseconds: 50));
-    await _expectFresh(tester, 'baseline');
-    await _step(tester, 'select t1', () => vm.selectTrack('t1'));
-    await _step(
-      tester,
-      'select clip t2-c1',
-      () => vm.selectClip('t2', 't2-c1'),
-    );
-    await _step(
-      tester,
-      'select clip t2-c0',
-      () => vm.selectClip('t2', 't2-c0'),
-    );
-    await _step(tester, 'mute t0', () => m.toggleMute('t0'));
-    await _step(tester, 'solo t1', () => m.toggleSolo('t1'));
-    await _step(tester, 'unsolo t1', () => m.toggleSolo('t1'));
-    await _step(tester, 'fader t3', () => m.setTrackVolumeLive('t3', 0.3));
-    await _step(tester, 'pan t3', () => m.setTrackPanLive('t3', -0.5));
-    await _step(
-      tester,
+    await oracle.expectFresh('baseline');
+    await oracle.step('select t1', () => vm.selectTrack('t1'));
+    await oracle.step('select clip t2-c1', () => vm.selectClip('t2', 't2-c1'));
+    await oracle.step('select clip t2-c0', () => vm.selectClip('t2', 't2-c0'));
+    await oracle.step('mute t0', () => m.toggleMute('t0'));
+    await oracle.step('solo t1', () => m.toggleSolo('t1'));
+    await oracle.step('unsolo t1', () => m.toggleSolo('t1'));
+    await oracle.step('fader t3', () => m.setTrackVolumeLive('t3', 0.3));
+    await oracle.step('pan t3', () => m.setTrackPanLive('t3', -0.5));
+    await oracle.step(
       'rename t2',
       () => vm.renameTrack('t2', 'Renamed take two'),
     );
-    await _step(tester, 'color t2', () => vm.setTrackColor('t2', 0xFF22CC44));
-    await _step(
-      tester,
+    await oracle.step('color t2', () => vm.setTrackColor('t2', 0xFF22CC44));
+    await oracle.step(
       'move clip t1-c1',
       () => vm.moveClipStartLive('t1', 't1-c1', 41000),
     );
-    await _step(tester, 'commit move', vm.commitTrackMove);
-    await _step(tester, 'zoom', () => pb.setTimelineZoomLive(0.5));
-    await _step(tester, 'pan view', () => pb.panView(3000));
-    await _step(tester, 'zoom back', () => pb.setTimelineZoomLive(1.0));
-    await _step(tester, 'note t0', () => vm.addNote('t0', 10000, null, 'hi'));
-    await _step(
-      tester,
-      'expand t1',
-      () => vm.analysis.toggleTrackExpanded('t1'),
-    );
-    await _step(
-      tester,
+    await oracle.step('commit move', vm.commitTrackMove);
+    await oracle.step('zoom', () => pb.setTimelineZoomLive(0.5));
+    await oracle.step('pan view', () => pb.panView(3000));
+    await oracle.step('zoom back', () => pb.setTimelineZoomLive(1.0));
+    await oracle.step('note t0', () => vm.addNote('t0', 10000, null, 'hi'));
+    await oracle.step('expand t1', () => vm.analysis.toggleTrackExpanded('t1'));
+    await oracle.step(
       'collapse t1',
       () => vm.analysis.toggleTrackExpanded('t1'),
     );
-    await _step(tester, 'master', () => m.setMasterVolumeLive(0.4));
-    await _step(tester, 'A/B on', () => m.setPlayReference(true));
-    await _step(tester, 'A/B off', () => m.setPlayReference(false));
-    await _step(
-      tester,
+    await oracle.step('master', () => m.setMasterVolumeLive(0.4));
+    await oracle.step('A/B on', () => m.setPlayReference(true));
+    await oracle.step('A/B off', () => m.setPlayReference(false));
+    await oracle.step(
       'reorder t3->t0',
       () => vm.moveVocalTrackToLaneOf('t3', 't0'),
     );
     late String bus1, bus2;
-    await _step(
-      tester,
+    await oracle.step(
       'create bus',
       () async => bus1 = await m.createBus('Verb'),
     );
-    await _step(tester, 'route t0->bus', () => m.setTrackBus('t0', bus1));
-    await _step(
-      tester,
+    await oracle.step('route t0->bus', () => m.setTrackBus('t0', bus1));
+    await oracle.step(
       'rename bus',
       () => m.renameBus(bus1, 'A much longer bus'),
     );
-    await _step(tester, 'bus mute', () => m.toggleBusMute(bus1));
-    await _step(tester, 'bus solo', () => m.toggleBusSolo(bus1));
-    await _step(tester, 'bus unsolo', () => m.toggleBusSolo(bus1));
-    await _step(tester, 'bus fader', () => m.setBusVolumeLive(bus1, 0.2));
-    await _step(tester, 'bus pan', () => m.setBusPanLive(bus1, 0.7));
-    await _step(
-      tester,
+    await oracle.step('bus mute', () => m.toggleBusMute(bus1));
+    await oracle.step('bus solo', () => m.toggleBusSolo(bus1));
+    await oracle.step('bus unsolo', () => m.toggleBusSolo(bus1));
+    await oracle.step('bus fader', () => m.setBusVolumeLive(bus1, 0.2));
+    await oracle.step('bus pan', () => m.setBusPanLive(bus1, 0.7));
+    await oracle.step(
       'create bus2',
       () async => bus2 = await m.createBus('Dly'),
     );
-    await _step(tester, 'bus1 out->bus2', () => m.setBusOutput(bus1, bus2));
-    await _step(tester, 'rename bus2', () => m.renameBus(bus2, 'Delay return'));
-    await _step(tester, 'send t1->bus2', () => m.addTrackSend('t1', bus2));
-    await _step(
-      tester,
-      'send level',
-      () => m.setTrackSendLevelLive('t1', 0, -3),
-    );
-    await _step(tester, 'select bus1', () => vm.selectBus(bus1));
-    await _step(
-      tester,
+    await oracle.step('bus1 out->bus2', () => m.setBusOutput(bus1, bus2));
+    await oracle.step('rename bus2', () => m.renameBus(bus2, 'Delay return'));
+    await oracle.step('send t1->bus2', () => m.addTrackSend('t1', bus2));
+    await oracle.step('send level', () => m.setTrackSendLevelLive('t1', 0, -3));
+    await oracle.step('select bus1', () => vm.selectBus(bus1));
+    await oracle.step(
       'bus fx',
       () => m.setBusFxLive(bus1, TrackFx.flat().copyWith(compOn: true)),
     );
-    await _step(tester, 'select t0', () => vm.selectTrack('t0'));
-    await _step(
-      tester,
+    await oracle.step('select t0', () => vm.selectTrack('t0'));
+    await oracle.step(
       'fx t0',
       () => m.setTrackFxLive('t0', TrackFx.flat().copyWith(compOn: true)),
     );
-    await _step(tester, 'select t2', () => vm.selectTrack('t2'));
-    await _step(tester, 'unroute t0', () => m.setTrackBus('t0', null));
-    await _step(tester, 'delete bus2', () => m.deleteBus(bus2));
-    await _step(tester, 'loop', pb.toggleLoop);
-    await _step(tester, 'dock height', () => vm.analysis.setDockHeight(260));
-    await _step(tester, 'resize window', () {
+    await oracle.step('select t2', () => vm.selectTrack('t2'));
+    await oracle.step('unroute t0', () => m.setTrackBus('t0', null));
+    await oracle.step('delete bus2', () => m.deleteBus(bus2));
+    await oracle.step('loop', pb.toggleLoop);
+    await oracle.step('dock height', () => vm.analysis.setDockHeight(260));
+    await oracle.step('resize window', () {
       tester.view.physicalSize = const Size(1500, 1000);
     });
-    await _step(tester, 'inspector off', vm.toggleInspectorPanel);
-    await _step(tester, 'inspector on', vm.toggleInspectorPanel);
-    await _step(tester, 'delete t3', () => vm.deleteTrack('t3'));
-    await _step(
-      tester,
-      'new interpretation',
-      () => vm.versions.create('Second'),
-    );
-    await _step(
-      tester,
+    await oracle.step('inspector off', vm.toggleInspectorPanel);
+    await oracle.step('inspector on', vm.toggleInspectorPanel);
+    await oracle.step('delete t3', () => vm.deleteTrack('t3'));
+    await oracle.step('new interpretation', () => vm.versions.create('Second'));
+    await oracle.step(
       'back to first',
       () => vm.versions.setActive(vm.practice!.versions.first.id),
     );
-    await _step(
-      tester,
+    await oracle.step(
       'pitch tab',
       () => vm.analysis.showDockTab(DockTab.pitch),
     );
-    await _step(tester, 'close dock', vm.analysis.toggleDock);
-    await _step(tester, 'open dock', vm.analysis.toggleDock);
-    await _step(
-      tester,
+    await oracle.step('close dock', vm.analysis.toggleDock);
+    await oracle.step('open dock', vm.analysis.toggleDock);
+    await oracle.step(
       'mixer tab',
       () => vm.analysis.showDockTab(DockTab.mixer),
     );
-    expect(_failures, isEmpty);
+    expect(oracle.failures, isEmpty);
   });
 }
