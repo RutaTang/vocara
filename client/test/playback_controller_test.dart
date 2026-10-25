@@ -304,6 +304,104 @@ void main() {
       expect(c.loopEndMs, c.loopStartMs + PlaybackController.minLoopMs);
     });
 
+    // Regression guard: ensureLoopRange only ever pulled the end BACK. A new
+    // practice opens on the 20 s placeholder timeline, so the first import (or
+    // a first take) left the region — and every pass of the loop — on the
+    // first 20 seconds of a three-minute song.
+    group('as the content grows', () {
+      late SongPractice live;
+      PlaybackController growing({required int contentMs}) {
+        engine = _FakeEngine();
+        recording = false;
+        live = _practice(contentMs);
+        final c = PlaybackController(
+          engine: engine,
+          practice: () => live,
+          isRecording: () => recording,
+        );
+        addTearDown(() async {
+          c.dispose();
+          await engine.close();
+        });
+        return c;
+      }
+
+      void grow(int contentMs) => live = _practice(contentMs);
+
+      test('a default end follows the content end upward', () {
+        final c = growing(contentMs: 20000)..ensureLoopRange();
+        expect(c.loopEndMs, 20000);
+
+        grow(180000); // a 3-minute backing lands
+        c.ensureLoopRange();
+
+        expect(c.loopEndMs, 180000);
+        expect(engine.calls.last, 'loop:false:0:180000');
+      });
+
+      test('an empty practice\'s placeholder end gives way to the first '
+          'content', () {
+        engine = _FakeEngine();
+        recording = false;
+        live = SongPractice(
+          id: 'p1',
+          title: 'Song',
+          createdAt: DateTime(2026),
+          updatedAt: DateTime(2026),
+          timelineDurationMs: 20000,
+        );
+        final c = PlaybackController(
+          engine: engine,
+          practice: () => live,
+          isRecording: () => recording,
+        );
+        addTearDown(() async {
+          c.dispose();
+          await engine.close();
+        });
+        c.ensureLoopRange();
+        expect(c.loopEndMs, 20000, reason: 'no content: the timeline');
+
+        grow(180000);
+        c.ensureLoopRange();
+        expect(c.loopEndMs, 180000);
+      });
+
+      test('an end the user dragged is never moved by growth', () {
+        final c = growing(contentMs: 60000)..ensureLoopRange();
+        c.setLoopEnd(45000);
+
+        grow(180000);
+        c.ensureLoopRange();
+        expect(c.loopEndMs, 45000);
+
+        // Dragged all the way to the end is still the user's end.
+        c.setLoopEnd(1 << 30);
+        expect(c.loopEndMs, 180000);
+        grow(240000);
+        c.ensureLoopRange();
+        expect(c.loopEndMs, 180000);
+      });
+
+      test('a dragged start leaves the default end following', () {
+        final c = growing(contentMs: 60000)..ensureLoopRange();
+        c.setLoopStart(30000);
+
+        grow(180000);
+        c.ensureLoopRange();
+        expect((c.loopStartMs, c.loopEndMs), (30000, 180000));
+      });
+
+      test('shrinking content still pulls the end back, dragged or not', () {
+        final c = growing(contentMs: 180000)..ensureLoopRange();
+        c.setLoopEnd(150000);
+
+        grow(100000); // the longest take was deleted
+        c.ensureLoopRange();
+        expect(c.loopEndMs, 100000);
+      });
+    });
+
     test('enabling the loop snaps a playhead sitting outside it inside', () {
       final c = controller(timelineMs: 60000)..ensureLoopRange();
       c.setLoopStart(20000);
