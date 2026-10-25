@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -19,6 +21,9 @@ class _FakeVm extends Fake implements SongPracticeDetailViewModel {
 
   /// False makes the persist fail, as a full disk / lost DB would.
   bool saveSucceeds = true;
+
+  /// Holds the persist until completed, as a save queued behind others does.
+  Completer<void>? saveGate;
 
   @override
   bool get lyricsOpen => open;
@@ -80,6 +85,7 @@ class _FakeVm extends Fake implements SongPracticeDetailViewModel {
   @override
   Future<bool> applyEditedLyrics(String t) async {
     applied = t;
+    await saveGate?.future;
     if (!saveSucceeds) return false;
     text = t;
     return true;
@@ -250,6 +256,37 @@ void main() {
       reason: 'the unsaved draft must survive for a retry',
     );
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('text typed while the save waits stays in the open editor', (
+    tester,
+  ) async {
+    // Save closed the editor when its write landed, dropping whatever was
+    // typed after the tap with nothing to show for it.
+    final vm = _FakeVm()..saveGate = Completer<void>();
+    await _pumpPanel(tester, vm);
+
+    await tester.enterText(find.byType(TextField), 'first verse');
+    await tester.tap(find.text('Save'));
+    await tester.pump();
+    await tester.enterText(find.byType(TextField), 'first verse\nsecond');
+    vm.saveGate!.complete();
+    await tester.pump();
+    await tester.pump();
+
+    expect(vm.applied, 'first verse');
+    expect(vm.mode, LyricsMode.edit);
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      'first verse\nsecond',
+    );
+
+    // Saved again with nothing typed after, it closes.
+    await tester.tap(find.text('Save'));
+    await tester.pump();
+    await tester.pump();
+    expect(vm.applied, 'first verse\nsecond');
+    expect(vm.mode, LyricsMode.read);
   });
 
   // Regression guard: the edit lived only in the editor's own state, which a

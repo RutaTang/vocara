@@ -180,6 +180,21 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     m.remove(path);
   }
 
+  /// Waits out [path]'s compute in [inFlight], then whatever replaced it as
+  /// it ended. A compute evicted mid-flight lands empty and, for a
+  /// re-analyze, starts its rerun as it ends (see [_recomputeOnStale]): a
+  /// caller that joined it read the hole the dropped compute left, and a lane
+  /// merge asked for in that window was left blank with no spinner — nothing
+  /// asked again.
+  static Future<void> _joinInFlight(
+    Map<String, Future<void>> inFlight,
+    String path,
+  ) async {
+    for (var p = inFlight[path]; p != null; p = inFlight[path]) {
+      await p;
+    }
+  }
+
   /// Bumped by [evictAnalysis] per path (the lane merges folding that path
   /// are disowned through [_aggDisowned]). A compute captures the generation
   /// it started under and, if it changed by the time the result lands, that
@@ -716,8 +731,9 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     // Already computing (possibly as half of a paired clip compute): wait for
     // it. Returning here as if there were nothing pending is what let the
     // aggregate merge see a hole that no one would ever fill.
-    final pending = _metricsInFlight[path];
-    if (pending != null) return pending;
+    if (_metricsInFlight.containsKey(path)) {
+      return _joinInFlight(_metricsInFlight, path);
+    }
     final done = Completer<void>();
     final generation = _generationOf(path);
     _metricsInFlight[path] = done.future;
@@ -782,8 +798,9 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     }
     // Join an in-flight compute rather than skipping it — see
     // [_ensureMetricsForPath].
-    final pending = _spectrogramInFlight[path];
-    if (pending != null) return pending;
+    if (_spectrogramInFlight.containsKey(path)) {
+      return _joinInFlight(_spectrogramInFlight, path);
+    }
     final done = Completer<void>();
     final generation = _generationOf(path);
     _spectrogramInFlight[path] = done.future;

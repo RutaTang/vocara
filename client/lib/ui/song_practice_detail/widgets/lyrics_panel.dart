@@ -1046,9 +1046,13 @@ class _LyricsEditorState extends State<_LyricsEditor> {
                   // Leave edit mode only once the text is on disk: a failed
                   // write reverts the model, so closing regardless would drop
                   // the draft with nothing but a toast to show for it.
-                  if (await vm.applyEditedLyrics(_c.text)) {
-                    vm.setLyricsMode(LyricsMode.read);
-                  }
+                  final text = _c.text;
+                  if (!await vm.applyEditedLyrics(text)) return;
+                  // Nor over text typed while the write waited (it queues
+                  // behind other saves, a slow import's copy among them):
+                  // that is still the draft, and closing dropped it.
+                  final now = mounted ? _c.text : (vm.lyricsDraft ?? text);
+                  if (now == text) vm.setLyricsMode(LyricsMode.read);
                 },
               ),
             ],

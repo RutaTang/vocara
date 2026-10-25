@@ -1156,4 +1156,37 @@ void main() {
       },
     );
   });
+
+  test('a lane merge asked for after a re-analyze eviction, while the stale '
+      'clip compute is still in flight, is not left blank', () async {
+    // The merge joined the superseded compute and read its hole; the rerun
+    // started only after, and nothing asked for the lane again.
+    final laneC = _lane([_clip('c1', 0), _clip('c2', 2000)], id: 'C');
+    final s = _StubSpectrograms(
+      metricsByPath: {'c1.wav': _metrics(10), 'c2.wav': _metrics(10)},
+      specsByPath: {'c1.wav': _spec(10), 'c2.wav': _spec(10)},
+    );
+    s.hold['c2.wav'] = Completer<void>();
+    final cache = _cache(
+      spectrograms: s,
+      selectedTrack: () => laneC,
+      selectedClipId: () => 'c2',
+      trackById: (id) => id == 'C' ? laneC : null,
+    );
+    addTearDown(cache.dispose);
+    // The dock analyzes the selected clip c2 (a long file: still computing).
+    unawaited(cache.ensureSelectedSpectrogram());
+    await pumpEventQueue();
+    // Re-analyze lane C: each clip evicted for recompute.
+    cache.evictAnalysis('c1.wav', recompute: true);
+    cache.evictAnalysis('c2.wav', recompute: true);
+    s.metricsByPath['c2.wav'] = _metrics(20);
+    // The lane is folded out (or re-analyze's onTrackAudioChanged asks for it)
+    // while c2's superseded compute is still running.
+    cache.toggleTrackExpanded('C');
+    await pumpEventQueue();
+    s.hold.remove('c2.wav')!.complete();
+    await _settled(() => cache.metricsFor('C') != null);
+    expect(cache.metricsFor('C'), isNotNull);
+  });
 }
