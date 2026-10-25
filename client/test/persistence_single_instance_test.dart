@@ -376,6 +376,14 @@ void main() {
     final lock = await launch.timeout(_helperTimeout);
     expect(lock.holdsLock, isTrue);
     expect(told, 1);
+    // The owner went from exclusive straight to nothing (its boot died): the
+    // waiter claimed the library outright, not shared-then-upgrade, which
+    // two waiters taking shared at that moment refused each other.
+    expect(
+      await _OtherProcess.couldTake(lockPath(), shared: true),
+      isFalse,
+      reason: 'the waiter took shared, leaving the library to be raced for',
+    );
     expect(await lock.tryExclusive(), isTrue, reason: 'alone now');
     await lock.releaseExclusive();
     expect(await _OtherProcess.couldTake(lockPath(), shared: false), isFalse);
@@ -426,6 +434,35 @@ void main() {
     final guard = await LibraryLock.forLibrary(root);
     expect(await guard.tryExclusive(), isTrue);
     await guard.releaseExclusive();
+  });
+
+  test('a non-owner refuses a library whose owner died mid-migration', () async {
+    // Its live file may be missing (moved to the backup, the migrated copy not
+    // yet in): opened as it stood, that became a new EMPTY library, and the
+    // next owner's recovery took it for the migrated one and dropped the
+    // backup — the data left only in an orphaned copy.
+    final practiceId = await createPracticeAndClose();
+    final dbPath = p.join(root.path, 'vocara.db');
+    final bak = p.join(root.path, 'vocara.pre-migrate.bak');
+    await File(dbPath).copy(p.join(root.path, 'vocara.migrating.db'));
+    await File(dbPath).rename(bak);
+    await File(
+      p.join(root.path, 'migration.json'),
+    ).writeAsString('{"state":"swapping","to":99}');
+
+    await expectLater(
+      boot(guard: LibraryGuard.fixed(exclusive: false)),
+      throwsA(isA<LibraryInUseException>()),
+    );
+    expect(await File(dbPath).exists(), isFalse, reason: 'nothing created');
+
+    // The owner's recovery promotes the migrated copy: the data is there.
+    final owner = await boot(guard: LibraryGuard.fixed(exclusive: true));
+    addTearDown(owner.db.close);
+    expect(
+      await owner.songRepo.getPractice(practiceId),
+      isA<Ok<SongPractice>>(),
+    );
   });
 
   test('a library that needs an upgrade is not migrated under another '

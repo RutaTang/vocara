@@ -101,8 +101,10 @@ class LibraryLock implements LibraryGuard {
 
   /// Errno values a non-blocking lock attempt fails with when another
   /// process holds a conflicting lock: EACCES, and EAGAIN (11 on Linux, 35
-  /// on macOS).
-  static const Set<int> _heldElsewhere = {13, 11, 35};
+  /// on macOS) — and EINTR, a call interrupted before it decided anything,
+  /// which is a retry, not a filesystem without locks (that turned the guard
+  /// off, and a waiter then owned the library another process held).
+  static const Set<int> _heldElsewhere = {13, 11, 35, 4};
 
   final String path;
 
@@ -186,10 +188,16 @@ class LibraryLock implements LibraryGuard {
       lock._unsupported = true;
       return lock;
     }
-    if (await lock._locked(lock._tryBootClaim)) return lock;
     final slow = DateTime.now().add(wait);
     var told = false;
-    while (!await lock._locked(lock._tryShared)) {
+    while (true) {
+      // The claim first on EVERY try, not only the first: an owner whose boot
+      // ends by dying goes from exclusive straight to nothing, and waiters
+      // that all took shared at that moment refused each other's upgrade —
+      // the library unowned, its crashed takes unrecovered.
+      if (await lock._locked(lock._tryBootClaim)) return lock;
+      if (lock._unsupported) return lock;
+      if (await lock._locked(lock._tryShared)) return lock;
       if (lock._unsupported) return lock;
       if (!told && !DateTime.now().isBefore(slow)) {
         told = true;
@@ -202,7 +210,6 @@ class LibraryLock implements LibraryGuard {
       }
       await Future<void>.delayed(poll);
     }
-    return lock;
   }
 
   /// The whole library from nothing, never waiting: refused while any other

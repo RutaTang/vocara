@@ -710,12 +710,26 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// whatever stands next (this text, or the disk's if the write fails). Forced, not left to
   /// [_cursor]'s words check: the same words re-imported without their times are a new text
   /// too, and the cursor left at line d stamped it while a–c had lost theirs.
-  Future<bool> _replaceLyrics(List<LyricLine> lines) {
+  ///
+  /// A write that fails re-seeds once more, on the disk's text it reverted to (unless a newer
+  /// text was set meanwhile): a frame drawn while the write was in flight had already seeded on
+  /// this text, and the same words came back with their times — the cursor stayed on line a
+  /// and the next Space overwrote its good time.
+  Future<bool> _replaceLyrics(List<LyricLine> lines) async {
+    final text = ++_lyricsText;
     final saved = _setLyrics(lines);
     _syncWords = null;
     notifyListeners();
-    return saved;
+    final ok = await saved;
+    if (!ok && text == _lyricsText) {
+      _syncWords = null;
+      notifyListeners();
+    }
+    return ok;
   }
+
+  /// Bumped by each [_replaceLyrics], so a failed write re-seeds only for the latest text.
+  int _lyricsText = 0;
 
   /// Imports lyrics from a DROPPED file: validates the type + size, reads, and
   /// replaces the lyrics — with feedback on every failure path so the drop never

@@ -175,6 +175,23 @@ class SafeMigrator {
     return db;
   }
 
+  /// Whether a migration was left unfinished next to [dbPath]: a marker in any
+  /// state but 'done', or no live file while the migrated copy or the backup
+  /// is there. Only [recoverIfNeeded] may touch such a library — opened as it
+  /// stands, a missing live file became a new EMPTY database, and the next
+  /// recovery then took that for the migrated one and dropped the backup.
+  Future<bool> migrationPending(String dbPath) async {
+    final dir = p.dirname(dbPath);
+    final marker = File(p.join(dir, _markerName));
+    if (await marker.exists() &&
+        _markerState(await marker.readAsString()) != 'done') {
+      return true;
+    }
+    if (await File(dbPath).exists()) return false;
+    return await File(p.join(dir, _copyName)).exists() ||
+        await File(p.join(dir, _bakName)).exists();
+  }
+
   /// Deletes the pre-migration rollback copy ([_bakName]) next to [dbPath].
   /// Returns whether one was deleted.
   ///

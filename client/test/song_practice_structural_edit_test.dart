@@ -1374,6 +1374,32 @@ void main() {
     );
 
     test(
+      'a failed same-words re-import read mid-save restores the cursor',
+      () async {
+        final vm = await pumpVm();
+        await vm.setLyricsText('a\nb\nc\nd\ne\nf');
+        vm.setLyricsMode(LyricsMode.sync);
+        vm.playback.position.value = const Duration(milliseconds: 1000);
+        for (var i = 0; i < 3; i++) {
+          await vm.stampNextLyric();
+        }
+        expect(vm.syncIndex, 3);
+        repo.failSaves = true;
+        final landed = vm.importLyrics('a\nb\nc\nd\ne\nf');
+        // The import's notify rebuilds the Sync view on the next frame, which
+        // reads the cursor while the write is still in flight.
+        expect(vm.syncIndex, 0);
+        expect(await landed, isFalse);
+        repo.failSaves = false;
+        expect(vm.lyrics.take(3).every((l) => l.timeMs == 1000), isTrue);
+        vm.playback.position.value = const Duration(milliseconds: 7000);
+        await vm.stampNextLyric();
+        expect(vm.lyrics[0].timeMs, 1000, reason: 'Space re-stamped line a');
+        expect(vm.lyrics[3].timeMs, 7000, reason: 'd never got the tap');
+      },
+    );
+
+    test(
       'a failed import puts the cursor back on the restored words',
       () async {
         final vm = await pumpVm();

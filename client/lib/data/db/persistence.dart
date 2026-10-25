@@ -272,6 +272,12 @@ class Persistence {
     if (ownsLibrary) {
       await SafeMigrator().recoverIfNeeded(dbPath);
     } else {
+      // A migration another process left unfinished (it died mid-swap) is
+      // the owner's to recover; opened as it stands, a missing live file
+      // became an empty library.
+      if (await SafeMigrator().migrationPending(dbPath)) {
+        throw const LibraryInUseException();
+      }
       DiagnosticsLog.instance.log(
         'persistence',
         'another Vocara process holds this library; skipping migration '
