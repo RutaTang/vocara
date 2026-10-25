@@ -988,4 +988,47 @@ void main() {
     );
     expect(take1.displayName, 'Lead');
   });
+
+  test(
+    'a reopen during an import on the old screen catches up on it',
+    () async {
+      // Back is allowed while an import analyzes, and the import writes when it
+      // ends. Listed as landing only at that closing save, the reopen neither
+      // waited nor re-read: it showed the practice without the take, and its
+      // next save fought the import's.
+      repo = _FakeRepo(_seed());
+      waveforms = _FakeWaveforms();
+      spectrograms = _FakeSpectrograms();
+      final finalizer = RecordingFinalizer.forTesting();
+      final first = openVm(finalizer: finalizer);
+      for (var i = 0; i < 400 && first.practice == null; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+      final takesBefore = first.practice!.vocalTracks.length;
+      waveforms.gate = Completer<void>(); // the import is being analyzed
+      final import = first.addVocalTake('/src/song.wav');
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(first.busy, isTrue, reason: 'still importing');
+      first.dispose();
+
+      final reopened = openVm(finalizer: finalizer);
+      addTearDown(reopened.dispose);
+      for (var i = 0; i < 400 && reopened.practice == null; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+      expect(reopened.catchingUp, isTrue, reason: 'takes no edits yet');
+
+      waveforms.gate!.complete();
+      await import;
+      for (var i = 0; i < 400 && reopened.catchingUp; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+      expect(reopened.catchingUp, isFalse);
+      expect(
+        reopened.practice!.vocalTracks,
+        hasLength(takesBefore + 1),
+        reason: 'the imported take shows',
+      );
+    },
+  );
 }

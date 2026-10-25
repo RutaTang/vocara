@@ -149,7 +149,15 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     }
 
     // --- Controller wiring. Each closure names the invariant it serves. ---
-    _busyGate = BusyGate(onError: (e) => _toast(_friendlyError(e)));
+    _busyGate = BusyGate(
+      onError: (e) => _toast(_friendlyError(e)),
+      // Every guarded edit (an import, a split, a merge, a take's finalize)
+      // outlives this screen if the user leaves mid-way, and writes when it
+      // ends: listed from its start, a screen reopened meanwhile catches up on
+      // it (see [_load]). Listed only at its closing save, the reopen missed it
+      // and later saved over it.
+      around: (action) => _finalizer.landing(_practiceId, action),
+    );
     playback = PlaybackController(
       engine: _playback,
       practice: () => _practice,
@@ -927,7 +935,9 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       try {
         // A fresh screen's gate is free; if anything held it, the guarded
         // reload stays out of that work's way.
-        if (!await _busyGate.run(reread)) {
+        // Unlisted: it waits for everything landing on this practice, itself
+        // included if it were listed.
+        if (!await _busyGate.run(reread, wrapped: false)) {
           await Future.wait([_finalizer.settled(_practiceId), adopted]);
           await _reloadIfUnchanged();
         }
