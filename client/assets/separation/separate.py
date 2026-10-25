@@ -6,7 +6,7 @@ vocal stem (a reference), using a Mel-Band Roformer model via `audio-separator`.
 
 Contract with the Dart side (ProcessSourceSeparationService):
     args:   --input <song>  --instrumental <out.wav>  --vocal <out.wav>
-            [--model <model_filename>]
+            [--model <model_filename>]  [--model-dir <dir>]
     stdout: lines "PROGRESS <0..1>" drive the progress bar
     output: two 16-bit PCM WAV files at the requested paths (the analysis
             pipeline only accepts 16-bit PCM WAV)
@@ -111,6 +111,10 @@ def main():
         "--model",
         default=os.environ.get("VOCARA_SEP_MODEL", DEFAULT_MODEL),
     )
+    # Where checkpoints are cached. audio-separator defaults to
+    # /tmp/audio-separator-models/, which macOS clears at reboot, so the Dart
+    # side passes a directory under app support.
+    parser.add_argument("--model-dir")
     args = parser.parse_args()
 
     emit(0.02)
@@ -127,7 +131,8 @@ def main():
     # The workdir holds full-length raw stem WAVs (tens of MB); always remove it,
     # on success/failure/crash alike, so it doesn't leak into the temp directory.
     try:
-        separator = Separator(output_dir=workdir, output_format="WAV")
+        options = {"model_file_dir": args.model_dir} if args.model_dir else {}
+        separator = Separator(output_dir=workdir, output_format="WAV", **options)
         emit(0.05)
 
         try:

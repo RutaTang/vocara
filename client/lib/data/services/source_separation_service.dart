@@ -437,6 +437,10 @@ class ProcessSourceSeparationService implements SourceSeparationService {
     final instTmp = File('${inst.path}.$nonce.tmp');
     final vocTmp = File('${voc.path}.$nonce.tmp');
     final script = await _ensureScript();
+    // The checkpoint (hundreds of MB) lives in app support: audio-separator's
+    // default is /tmp, which macOS clears at reboot, so the first separation
+    // after each one re-downloaded the model.
+    final modelDir = await _storage.assetDir(p.join('separation', 'models'));
     final args = <String>[
       script,
       '--input',
@@ -447,6 +451,8 @@ class ProcessSourceSeparationService implements SourceSeparationService {
       vocTmp.path,
       '--model',
       model,
+      '--model-dir',
+      modelDir.path,
     ];
 
     // A quit (or cancel) that arrived during the hashing/resolution phase must

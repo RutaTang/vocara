@@ -201,6 +201,21 @@ exit 0''';
       expect(starts(), 1);
     });
 
+    test('the sidecar keeps its model checkpoint in app support', () async {
+      // audio-separator's default model dir is /tmp, which macOS clears at
+      // reboot: every first separation after one re-downloaded the model.
+      final stub = await writeStub(successBody);
+      await buildService(stub).separate(await writeSource());
+
+      final argv = (await File(
+        p.join(root.path, 'argv'),
+      ).readAsLines()).single.split(' ');
+      final i = argv.indexOf('--model-dir');
+      expect(i, isNonNegative, reason: argv.join(' '));
+      expect(argv[i + 1], p.join(root.path, 'separation', 'models'));
+      expect(Directory(argv[i + 1]).existsSync(), isTrue);
+    });
+
     test(
       'a second separate() cancels the draining old run; the old run reports '
       'cancelled and the new run stays registered and cancellable',
