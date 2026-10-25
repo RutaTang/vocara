@@ -519,6 +519,9 @@ class RecordingController extends ChangeNotifier {
     if (!_disposed) recordingPeaks.value = const [];
     notifyListeners();
 
+    // Whether the finalize reached the host's save, whose resync is what
+    // makes the punched take audible again (see the finally below).
+    var saveRan = false;
     Future<void> finalize() async {
       WaveformResult analysis;
       if (recordingClean) {
@@ -588,6 +591,7 @@ class RecordingController extends ChangeNotifier {
         landedOn = target.id;
       }
       await _save();
+      saveRan = true;
       // Only AFTER the save: it re-reads the clip at its pooled path, which is
       // the key the analysis caches look it up by. Refreshed before it, the
       // dock analyzed the staging path nothing shows — and, computing only on
@@ -603,8 +607,17 @@ class RecordingController extends ChangeNotifier {
     // the off-chance an action still holds the gate, wait it out and retry.
     // Even once the screen is disposed: the host's save still writes after
     // dispose (it only skips the UI resync), and every gate holder finishes.
-    while (!await _busyGate.run(finalize)) {
-      await Future<void>.delayed(const Duration(milliseconds: 50));
+    try {
+      while (!await _busyGate.run(finalize)) {
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      }
+    } finally {
+      // The take punched into was silent in the engine for the whole
+      // recording, and only the save's resync lifted that. A finalize that
+      // drops an unreadable partial returns before saving, and one that throws
+      // (a file too short to decode) never gets there: without this the lane
+      // played silent, its M button unlit, until some later edit saved.
+      if (!saveRan && !_disposed) await _mixer.resyncPlayback();
     }
   }
 

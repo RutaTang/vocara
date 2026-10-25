@@ -104,6 +104,10 @@ class _FakeWaveforms extends Fake implements WaveformService {
 class _FakeSettings extends Fake implements AppSettingsService {
   @override
   bool get bluetoothInOutConflict => false;
+
+  // The 1 s device watch calls this on every tick, like streamXruns below.
+  @override
+  void reconcileMonitorSafety() {}
 }
 
 /// Minimal native-engine double: only what the recording flow and the 1 s
@@ -140,6 +144,9 @@ class _FakeMic extends Fake implements MicRecordingController {
   int stopCalls = 0;
   String? lastPath;
 
+  /// What the next [stop] reports for the writer: false = it hit an IO error.
+  bool clean = true;
+
   @override
   final ValueNotifier<double> level = ValueNotifier(0);
 
@@ -163,7 +170,7 @@ class _FakeMic extends Fake implements MicRecordingController {
     if (!recording) return null;
     stopCalls++;
     recording = false;
-    return (path: lastPath!, clean: true, droppedFrames: 0);
+    return (path: lastPath!, clean: clean, droppedFrames: 0);
   }
 
   /// Faithful to the real guard where the controller depends on it: the
@@ -338,6 +345,32 @@ void main() {
 
       await controller.stopRecording();
       expect(playback.loopRearms, 1);
+    },
+  );
+
+  test(
+    'a take that never lands still unmutes the take it punched into',
+    () async {
+      // The armed take is silent in the engine for the whole recording, and
+      // only the finalize's save resynced it. A disk error that leaves an
+      // unreadable partial drops the take before that save, so the lane stayed
+      // silent on playback with its M button unlit.
+      var saves = 0;
+      saveImpl = () async {
+        saves++;
+        return true;
+      };
+      mic.clean = false; // the partial is not even on disk here
+      final a = controller.startRecording();
+      await pumpUntil(() => mixer.gates.length == 1);
+      mixer.gates[0].complete();
+      await a;
+
+      final stopping = controller.stopRecording();
+      await pumpUntil(() => mixer.gates.length == 2);
+      mixer.gates[1].complete();
+      await stopping;
+      expect(saves, 0, reason: 'nothing landed to save');
     },
   );
 
