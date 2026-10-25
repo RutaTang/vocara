@@ -45,4 +45,9 @@ impl Smoothed {
     pub fn current(&self) -> f32 {
         self.cur
     }
+
+    #[inline]
+    pub fn target(&self) -> f32 {
+        self.target
+    }
 }

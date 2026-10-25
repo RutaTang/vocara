@@ -14,6 +14,9 @@ const ALLPASS_TUNING: [usize; 4] = [556, 441, 341, 225];
 const STEREO_SPREAD: usize = 23;
 const FIXED_GAIN: f32 = 0.015;
 const ALLPASS_FEEDBACK: f32 = 0.5;
+/// A wet gain this small (-120 dB) is silence: once the wet target is 0 and the ramp has
+/// fallen below it, the reverb goes idle (see `process`).
+const WET_IDLE: f32 = 1.0e-6;
 
 pub mod param {
     pub const ROOM_SIZE: u16 = 0;
@@ -198,6 +201,24 @@ impl Node for ReverbNode {
         // (Outputs and inputs are distinct buffers, so read input first.)
         let mut feed = [0.0f32; 2];
         match inp {
+            Some(inp) if self.wet.target() == 0.0 && self.wet.current() <= WET_IDLE => {
+                // Idle: nothing of the wet path is audible. Every vocal clip carries a
+                // reverb insert whose "off" is wet 0, and running its 16 combs + 8
+                // allpasses per frame for silence was pure cost — pass the dry blend only.
+                // The lines are dropped on the way in, so turning the wet back up starts a
+                // fresh tail instead of resuming one frozen at this moment.
+                self.wet.snap(0.0);
+                if self.dirty {
+                    self.left.clear();
+                    self.right.clear();
+                    self.dirty = false;
+                }
+                for i in 0..frames {
+                    let dry = self.dry.next();
+                    out[CHANNELS * i] = inp[CHANNELS * i] * dry;
+                    out[CHANNELS * i + 1] = inp[CHANNELS * i + 1] * dry;
+                }
+            }
             Some(inp) => {
                 self.dirty = true;
                 for i in 0..frames {
@@ -269,18 +290,21 @@ impl Node for ReverbNode {
 mod tests {
     use super::*;
 
-    fn run_block(r: &mut ReverbNode, input: &[f32]) {
+    fn run_block(r: &mut ReverbNode, input: &[f32]) -> Vec<f32> {
         let mut out = vec![0.0; input.len()];
-        let inputs: [&[f32]; 1] = [input];
-        let mut outs: [&mut [f32]; 1] = [&mut out[..]];
-        let mut io = ProcessIo {
-            inputs: &inputs,
-            outputs: &mut outs[..],
-            frames: input.len() / CHANNELS,
-            tl: 0,
-            sr: 48_000.0,
-        };
-        r.process(&mut io);
+        {
+            let inputs: [&[f32]; 1] = [input];
+            let mut outs: [&mut [f32]; 1] = [&mut out[..]];
+            let mut io = ProcessIo {
+                inputs: &inputs,
+                outputs: &mut outs[..],
+                frames: input.len() / CHANNELS,
+                tl: 0,
+                sr: 48_000.0,
+            };
+            r.process(&mut io);
+        }
+        out
     }
 
     #[test]
@@ -307,5 +331,34 @@ mod tests {
             all_zero(&r.left) && all_zero(&r.right),
             "reset must clear a used reverb"
         );
+    }
+
+    #[test]
+    fn an_insert_at_wet_zero_does_no_reverb_work_and_wakes_without_a_stale_tail() {
+        // Every vocal clip carries a reverb insert, and "off" is wet 0: it used to run the
+        // full 16 combs + 8 allpasses per frame regardless, with nothing audible.
+        let mut r = ReverbNode::new(0.5, 0.5, 0.0, 1.0, 1.0); // build.rs's insert default
+        r.prepare(48_000.0, 256);
+        let tone: Vec<f32> = (0..9600).map(|i| 0.5 * (i as f32 * 0.05).sin()).collect();
+        let out = run_block(&mut r, &tone);
+        assert_eq!(out, tone, "wet 0 / dry 1 must pass the input through");
+        assert!(
+            r.left.combs.iter().all(|c| c.buf.iter().all(|&s| s == 0.0)),
+            "the combs ran with the wet path silenced"
+        );
+
+        // Wet up, build a tail, then back to 0 long enough to go idle: turning it up again
+        // over silence must not resume the tail frozen at the moment it went idle.
+        r.set_param(param::WET, 0.5);
+        run_block(&mut r, &tone);
+        r.set_param(param::WET, 0.0);
+        for _ in 0..30 {
+            run_block(&mut r, &[0.0; 960]); // 0.3 s: the wet smoother settles to idle
+        }
+        r.set_param(param::WET, 0.5);
+        let tail = (0..10)
+            .flat_map(|_| run_block(&mut r, &[0.0; 960]))
+            .fold(0.0f32, |m, x| m.max(x.abs()));
+        assert!(tail < 1e-9, "a stale tail replayed on waking: peak {tail}");
     }
 }
