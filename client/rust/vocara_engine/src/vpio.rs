@@ -1233,6 +1233,22 @@ fn tune_io_and_round_trip(device_uid: Option<&str>) -> u32 {
 
 // ---- UID → AudioDeviceID via the HAL ----------------------------------------------------------
 
+/// The HAL's transport type for the device with `uid`; `None` when it can't be read. Not RT —
+/// device enumeration only.
+pub(crate) fn device_transport(uid: &str) -> Option<crate::device::Transport> {
+    use objc2_core_audio::{kAudioDevicePropertyTransportType, kAudioObjectPropertyScopeGlobal};
+    let id = device_id_for_uid(uid)?;
+    // SAFETY: a plain u32 property read on a live device id; failures come back as None.
+    let code = unsafe {
+        dev_get_u32(
+            id,
+            kAudioDevicePropertyTransportType,
+            kAudioObjectPropertyScopeGlobal,
+        )
+    }?;
+    Some(crate::device::Transport::from_core_audio(code))
+}
+
 /// Resolve a CoreAudio device UID to an `AudioDeviceID`. `None` on any failure, including the
 /// ordinary "the device is gone" case. `start` treats that as an error rather than binding the
 /// default behind the user's back. Not RT — called only during `start`.

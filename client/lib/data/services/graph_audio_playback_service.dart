@@ -94,6 +94,7 @@ List<AudioDevice> _enumDevices({required bool input}) {
             isDefault: info.is_default != 0,
             isInput: input,
             isBluetooth: info.is_bluetooth != 0,
+            transport: AudioTransport.fromCode(info.transport),
           );
         }(),
     ];
@@ -433,8 +434,9 @@ class GraphAudioPlaybackService implements PlaybackEngine {
   bool get isAvailable => _available;
   double get sampleRate => _sampleRate;
 
-  /// Switch the active output device by UID. Returns true on success (the engine falls back to
-  /// the default output if the requested device can't be opened). No-op if the engine is down.
+  /// Switch the active output device by UID. True when something is playing — the device asked
+  /// for, or the default output when that one could not be opened ([actualOutputDevice] says
+  /// which); false when nothing could be opened. No-op if the engine is down.
   bool setOutputDevice(String uid) {
     if (!_available) return false;
     final cuid = uid.toNativeUtf8();

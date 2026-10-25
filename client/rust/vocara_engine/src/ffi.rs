@@ -683,6 +683,8 @@ pub struct VeDeviceInfo {
     pub is_default: u8,
     pub is_input: u8,
     pub is_bluetooth: u8,
+    /// [`device::Transport`] discriminant (in what was the struct's tail padding).
+    pub transport: u8,
 }
 
 /// Copy `s` (truncated) into a fixed C char buffer, NUL-terminated and zero-padded.
@@ -714,7 +716,8 @@ fn fill_device_info(
             dst.rate = d.rate;
             dst.is_default = d.is_default as u8;
             dst.is_input = is_input;
-            dst.is_bluetooth = d.is_bluetooth as u8;
+            dst.is_bluetooth = (d.transport == device::Transport::Bluetooth) as u8;
+            dst.transport = d.transport as u8;
         }
     }
     devices.len()
@@ -740,8 +743,9 @@ pub extern "C" fn ve_enum_input_devices(out: *mut VeDeviceInfo, cap: usize) -> u
     .unwrap_or(0)
 }
 
-/// Switch the active output device by UID. 0 = ok, negative = failure (the engine falls back to
-/// the default output if the requested device can't be opened).
+/// Switch the active output device by UID. 0 = something is playing: the device asked for, or the
+/// default output when that one could not be opened (`ve_actual_output_device` says which);
+/// negative = nothing could be opened.
 #[no_mangle]
 pub extern "C" fn ve_set_output_device(e: *mut VeEngine, uid: *const c_char) -> c_int {
     with_engine(e, -1, |eng| {
@@ -3080,24 +3084,70 @@ fn raise_open_file_limit() {
 #[cfg(test)]
 mod device_info_tests {
     use super::{copy_cstr, fill_device_info, VeDeviceInfo};
-    use crate::device::DeviceDesc;
+    use crate::device::{DeviceDesc, Transport};
     use std::ffi::{c_char, CStr};
 
-    fn listed_uid(uid: &str) -> String {
+    fn filled(uid: &str, transport: Transport) -> VeDeviceInfo {
         let desc = DeviceDesc {
             uid: uid.to_string(),
             name: "Device".to_string(),
             rate: 48_000,
             is_default: false,
-            is_bluetooth: false,
+            transport,
         };
         // SAFETY: VeDeviceInfo is plain old data; all-zero is a valid value.
         let mut info: VeDeviceInfo = unsafe { std::mem::zeroed() };
         assert_eq!(fill_device_info(&mut info, 1, &[desc], 0), 1);
+        info
+    }
+
+    fn listed_uid(uid: &str) -> String {
+        let info = filled(uid, Transport::Usb);
         // SAFETY: copy_cstr always NUL-terminates inside the array.
         unsafe { CStr::from_ptr(info.uid.as_ptr()) }
             .to_string_lossy()
             .into_owned()
+    }
+
+    #[test]
+    fn the_transport_crosses_with_its_bluetooth_flag() {
+        let bt = filled("bt", Transport::Bluetooth);
+        assert_eq!((bt.transport, bt.is_bluetooth), (3, 1));
+        let usb = filled("usb", Transport::Usb);
+        assert_eq!((usb.transport, usb.is_bluetooth), (2, 0));
+    }
+
+    /// The header and the Dart struct mirror this layout byte for byte.
+    #[test]
+    fn the_layout_matches_the_header() {
+        use std::mem::{offset_of, size_of};
+        assert_eq!(size_of::<VeDeviceInfo>(), 392);
+        assert_eq!(offset_of!(VeDeviceInfo, name), 256);
+        assert_eq!(offset_of!(VeDeviceInfo, rate), 384);
+        assert_eq!(offset_of!(VeDeviceInfo, is_bluetooth), 390);
+        assert_eq!(offset_of!(VeDeviceInfo, transport), 391);
+    }
+
+    #[test]
+    fn core_audio_transport_codes_map() {
+        for (code, t) in [
+            (*b"bltn", Transport::BuiltIn),
+            (*b"usb ", Transport::Usb),
+            (*b"blue", Transport::Bluetooth),
+            (*b"blea", Transport::Bluetooth),
+            (*b"hdmi", Transport::Hdmi),
+            (*b"dprt", Transport::DisplayPort),
+            (*b"airp", Transport::Network),
+            (*b"thun", Transport::Thunderbolt),
+            (*b"1394", Transport::FireWire),
+            (*b"pci ", Transport::Pci),
+            (*b"grup", Transport::Aggregate),
+            (*b"virt", Transport::Virtual),
+            (*b"ccwd", Transport::Other),
+            ([0; 4], Transport::Unknown),
+        ] {
+            assert_eq!(Transport::from_core_audio(u32::from_be_bytes(code)), t);
+        }
     }
 
     /// What the host's 256-byte readers (`ve_actual_output_device`) hand back for `uid`.

@@ -178,7 +178,12 @@ void main() {
     tester,
   ) async {
     var outs = const [
-      AudioDevice(uid: 'scarlett', name: 'Scarlett 2i2 USB', isDefault: true),
+      AudioDevice(
+        uid: 'scarlett',
+        name: 'Scarlett 2i2 USB',
+        isDefault: true,
+        transport: AudioTransport.usb,
+      ),
     ];
     final settings = AppSettingsService(
       storage: LocalStorageService(),
@@ -190,7 +195,7 @@ void main() {
     await tester.pump(); // the screen's first device refresh lands
 
     expect(find.text('Headphones only'), findsOneWidget);
-    expect(find.textContaining('Scarlett 2i2 USB — Turn on'), findsOneWidget);
+    expect(find.textContaining('Scarlett 2i2 USB — turn on'), findsOneWidget);
     expect(settings.monitorAllowed, isFalse);
     // Real file I/O behind the persist: let it land outside the fake async zone.
     await tester.runAsync(() async {
@@ -203,7 +208,12 @@ void main() {
 
     // The built-in speakers never take the mark.
     outs = const [
-      AudioDevice(uid: 'spk', name: 'MacBook Pro Speakers', isDefault: true),
+      AudioDevice(
+        uid: 'spk',
+        name: 'MacBook Pro Speakers',
+        isDefault: true,
+        transport: AudioTransport.builtIn,
+      ),
     ];
     settings.refreshDevices();
     await tester.pump();

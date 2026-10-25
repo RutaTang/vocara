@@ -300,22 +300,34 @@ class AppSettingsService extends ChangeNotifier {
   /// selection. Null when neither is known.
   AudioDevice? get outputToMark => _renderingDevice;
 
-  /// Whether [outputToMark] can be marked as headphones: a device its name already tells as
-  /// earbuds needs no mark, and one named as a speaker never takes one — nor an Intel Mac's
-  /// "Built-in Output", ONE device for the speakers and the jack: unplugging the headphones moves
-  /// the sound to the speakers under the same uid, mark and all.
+  /// Whether [outputToMark] can be marked as headphones: see [_canCarryMark]; and a device its
+  /// name already tells as earbuds needs no mark.
   bool get outputMarkable {
     final d = _renderingDevice;
-    if (d == null || _isSurelyHeadphones(d)) return false;
-    final n = d.name.toLowerCase();
-    return !_speakerNames.any(n.contains) && !n.contains('built-in output');
+    return d != null && _canCarryMark(d) && !_isSurelyHeadphones(d);
   }
 
   /// Whether the user has marked [outputToMark] as headphones.
   bool get outputMarkedHeadphones => _markedHeadphones(_renderingDevice);
 
+  /// A mark counts only where the panel can show it, so one nobody could see to clear never
+  /// stays in force: a device since renamed as a speaker, or newly on [_speakerNames].
   bool _markedHeadphones(AudioDevice? d) =>
-      d != null && _headphoneOutputs.contains(d.uid);
+      d != null && _headphoneOutputs.contains(d.uid) && _canCarryMark(d);
+
+  /// Whether [d] can carry a headphones mark at all. Decided by its TRANSPORT (see
+  /// [AudioTransport.canCarryHeadphonesMark]): its name is translated by the system, so a name
+  /// rule let a German Mac's built-in speakers ("MacBook Pro-Lautsprecher") or its one device for
+  /// speakers and jack ("Integrierte Ausgabe") be marked — and after the headphones came out,
+  /// every take recorded the whole backing and the monitor fed the speakers. A device named as a
+  /// speaker is refused on top.
+  static bool _canCarryMark(AudioDevice d) =>
+      d.transport.canCarryHeadphonesMark && !_namedSpeaker(d);
+
+  static bool _namedSpeaker(AudioDevice d) {
+    final n = d.name.toLowerCase();
+    return _speakerNames.any(n.contains);
+  }
 
   /// The device to judge feedback safety on: what the engine is actually rendering to, else the
   /// effective selection. Null (judged unsafe) while the device list cannot be read at all: the
@@ -359,9 +371,8 @@ class AppSettingsService extends ChangeNotifier {
   String _actualOutputUid = '';
 
   static bool _isSurelyHeadphones(AudioDevice? out) {
-    if (out == null) return false;
+    if (out == null || _namedSpeaker(out)) return false;
     final n = out.name.toLowerCase();
-    if (_speakerNames.any(n.contains)) return false;
     return n.contains('airpod') ||
         n.contains('earpod') ||
         n.contains('earbud') ||
@@ -369,17 +380,17 @@ class AppSettingsService extends ChangeNotifier {
   }
 
   static bool _isHeadphoneLike(AudioDevice? out) {
-    if (out == null) return false; // unknown → safe default: off
+    // Unknown → the safe default: off.
+    if (out == null || _namedSpeaker(out)) return false;
     final n = out.name.toLowerCase();
-    // A device named as a speaker never is, Bluetooth or not: macOS reports
-    // only the transport, and a Bluetooth speaker taken for headphones fed the
-    // monitor straight back into the mic (it is kept out of the AEC
-    // reference, so nothing cancels it).
-    if (_speakerNames.any(n.contains)) return false;
-    if (out.isBluetooth) return true; // otherwise Bluetooth ≈ headphones
-    return n.contains('headphone') ||
-        n.contains('earphone') ||
-        n.contains('airpod');
+    // Only a name that says so. Not "any Bluetooth device": Bluetooth is speakers as often as
+    // headphones, a speaker missing from [_speakerNames] fed the monitor straight back into the
+    // mic (it is kept out of the AEC reference, so nothing cancels it), and on macOS the
+    // transport was never even read until the headphones mark needed it. Anything else is the
+    // user's to mark ([setOutputIsHeadphones]).
+    return _isSurelyHeadphones(out) ||
+        n.contains('headphone') ||
+        n.contains('earphone');
   }
 
   /// Name fragments of loudspeakers: the generic words, and the common
@@ -458,7 +469,10 @@ class AppSettingsService extends ChangeNotifier {
     // the engine reports nothing rendering (the mic opening): the engine applies it only while
     // that very device renders, so keeping it is safe, and withdrawing it left the canceller
     // adapting on the earbuds once the unit bound, until the next tick named them again.
-    if (_actualOutputUid.isEmpty && _echoFreePushed != null) return;
+    final held = _echoFreePushed;
+    if (_actualOutputUid.isEmpty && held != null && _stillEchoFree(held)) {
+      return;
+    }
     final echoFree = echoFreeOutput;
     if (echoFree != _echoFreePushed) {
       _echoFreePushed = echoFree;
@@ -468,6 +482,16 @@ class AppSettingsService extends ChangeNotifier {
 
   // The echo-free output last named to the attached engine; null = not named yet.
   String? _echoFreePushed;
+
+  /// Whether the output [uid] last named echo-free would still be judged so if it rendered: a
+  /// name held through a mic open must not outlive the mark it came from.
+  bool _stillEchoFree(String uid) {
+    if (uid.isEmpty) return true;
+    final d =
+        _byUid(_outputDevices, uid) ??
+        (_unlistedOutput?.uid == uid ? _unlistedOutput : null);
+    return d != null && (_markedHeadphones(d) || _isSurelyHeadphones(d));
+  }
 
   static String? _loadedString(Object? v) => v is String ? v : null;
 
@@ -670,7 +694,15 @@ class AppSettingsService extends ChangeNotifier {
 
   /// Detach the active engine (e.g. its screen closed).
   void detachEngine(GraphAudioPlaybackService engine) {
-    if (identical(_engine, engine)) _engine = null;
+    if (!identical(_engine, engine)) return;
+    _engine = null;
+    // What that engine rendered to is not what anything renders to now. Kept, it had Settings
+    // (opened from Home, after the song page let go) offer or hide the headphones mark for the
+    // last song's output instead of the user's choice. No notify: this runs from a disposing
+    // page, and whatever reads these next builds afresh.
+    _actualOutputUid = '';
+    _unlistedOutput = null;
+    _unlistedUnreadable = false;
   }
 
   /// Select an output device by UID (or null = system default). Applies it live to the active

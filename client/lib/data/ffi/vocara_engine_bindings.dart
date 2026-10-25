@@ -2031,6 +2031,10 @@ final class VeDeviceInfo extends ffi.Struct {
   /// 1 if on a Bluetooth transport (same-device in+out degrades output)
   @ffi.Uint8()
   external int is_bluetooth;
+
+  /// how it is attached (an AudioTransport index; in what was the struct's tail padding)
+  @ffi.Uint8()
+  external int transport;
 }
 
 const int VE_DECODE_OK = 0;

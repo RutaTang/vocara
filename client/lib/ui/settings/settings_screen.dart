@@ -740,10 +740,12 @@ class _MonitorReverbCard extends StatelessWidget {
   }
 }
 
-/// Whether only headphones play from the current output — wired ones on the jack or an audio
-/// interface, or a pair whose name does not say so. On a marked output, takes skip echo
-/// cancelling (which dulled held in-key notes on an echo the mic never heard) and the monitor is
-/// allowed. Same chrome as the input-channel card.
+/// Whether only headphones play from the current output — wired ones on an audio interface, or
+/// a pair whose name does not say so. On a marked output, takes skip echo cancelling (which
+/// dulled held in-key notes on an echo the mic never heard) and the monitor is allowed. Offered
+/// only for a device that can be headphones of its own (see
+/// AppSettingsService.outputMarkable), and plain about what goes wrong on speakers. Same chrome
+/// as the input-channel card.
 class _HeadphonesCard extends StatelessWidget {
   const _HeadphonesCard({
     required this.device,
@@ -779,20 +781,30 @@ class _HeadphonesCard extends StatelessWidget {
                 ),
                 const SizedBox(height: 2),
                 Text(
-                  '$device — Turn on if only headphones play from this '
-                  'output: takes keep held notes full, and you can hear '
-                  'yourself. Leave off if speakers do.',
+                  '$device — turn on if you always listen on headphones '
+                  'here. Recordings then skip echo cancelling, which keeps '
+                  'long notes clear, and hearing yourself is allowed. '
+                  'Remembered for this output.',
                   style: const TextStyle(color: Studio.textFaint, fontSize: 11),
+                ),
+                const SizedBox(height: 2),
+                const Text(
+                  'Leave it off if speakers ever play from it: takes would '
+                  'pick up the backing track, and hearing yourself could howl.',
+                  style: TextStyle(color: Studio.textSecondary, fontSize: 11),
                 ),
               ],
             ),
           ),
           const SizedBox(width: 12),
-          Switch(
-            value: marked,
-            onChanged: onChanged,
-            activeTrackColor: Studio.accent,
-            inactiveTrackColor: Studio.inset,
+          Semantics(
+            label: 'Headphones only on $device',
+            child: Switch(
+              value: marked,
+              onChanged: onChanged,
+              activeTrackColor: Studio.accent,
+              inactiveTrackColor: Studio.inset,
+            ),
           ),
         ],
       ),

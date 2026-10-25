@@ -614,20 +614,31 @@ class _MicInputChannel extends StatelessWidget {
                     ),
                     const SizedBox(width: 8),
                     Expanded(
-                      child: _FaderColumn(
-                        label: 'MON',
-                        enabled: settings.monitorAllowed,
-                        value: settings.monitorAllowed
-                            ? settings.monitorGain
-                            : 0.0,
-                        accent: Studio.accent,
-                        readout: !settings.monitorAllowed
-                            ? 'spkr'
-                            : (settings.monitorGain <= 0.001
-                                  ? 'off'
-                                  : '${(settings.monitorGain * 100).round()}%'),
-                        onChanged: settings.setMonitorGainLive,
-                        onEnd: settings.commitAudioGains,
+                      // A locked MON says why, and where to unlock it when it can be.
+                      child: Tooltip(
+                        message: settings.monitorAllowed
+                            ? ''
+                            : settings.outputMarkable
+                            ? 'Hearing yourself is off here so speakers can\'t '
+                                  'feed back. Listening on headphones? Turn on '
+                                  '"Headphones only" in Settings.'
+                            : 'Hearing yourself is off on this output so '
+                                  'speakers can\'t feed back.',
+                        child: _FaderColumn(
+                          label: 'MON',
+                          enabled: settings.monitorAllowed,
+                          value: settings.monitorAllowed
+                              ? settings.monitorGain
+                              : 0.0,
+                          accent: Studio.accent,
+                          readout: !settings.monitorAllowed
+                              ? 'spkr'
+                              : (settings.monitorGain <= 0.001
+                                    ? 'off'
+                                    : '${(settings.monitorGain * 100).round()}%'),
+                          onChanged: settings.setMonitorGainLive,
+                          onEnd: settings.commitAudioGains,
+                        ),
                       ),
                     ),
                   ],

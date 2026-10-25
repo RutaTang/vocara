@@ -120,8 +120,72 @@ pub struct DeviceDesc {
     /// Native sample rate (0 if unavailable).
     pub rate: u32,
     pub is_default: bool,
-    /// Bluetooth transport — a same-device in+out pick degrades output to HFP (hardware limit).
-    pub is_bluetooth: bool,
+    /// How the device is attached. Bluetooth matters twice: a same-device in+out pick degrades
+    /// output to HFP (hardware limit), and only some transports can carry a headphones mark.
+    pub transport: Transport,
+}
+
+/// How a device is attached (on macOS, the HAL's transport type). It decides which outputs the
+/// user may mark as headphones-only: a port or a sink with its own speakers (built-in, HDMI,
+/// DisplayPort, AirPlay) never, whatever is plugged in or however the system names it. The
+/// discriminants cross the FFI as `VeDeviceInfo::transport`.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Transport {
+    #[default]
+    Unknown = 0,
+    BuiltIn = 1,
+    Usb = 2,
+    Bluetooth = 3,
+    Hdmi = 4,
+    DisplayPort = 5,
+    Network = 6,
+    Thunderbolt = 7,
+    FireWire = 8,
+    Pci = 9,
+    Aggregate = 10,
+    Virtual = 11,
+    Other = 12,
+}
+
+impl Transport {
+    /// From CoreAudio's `kAudioDevicePropertyTransportType` four-char code.
+    pub fn from_core_audio(code: u32) -> Self {
+        match &code.to_be_bytes() {
+            b"bltn" => Self::BuiltIn,
+            b"usb " => Self::Usb,
+            b"blue" | b"blea" => Self::Bluetooth,
+            b"hdmi" => Self::Hdmi,
+            b"dprt" => Self::DisplayPort,
+            b"airp" | b"eavb" => Self::Network,
+            b"thun" => Self::Thunderbolt,
+            b"1394" => Self::FireWire,
+            b"pci " => Self::Pci,
+            b"grup" | b"fgrp" => Self::Aggregate,
+            b"virt" => Self::Virtual,
+            [0, 0, 0, 0] => Self::Unknown,
+            _ => Self::Other,
+        }
+    }
+
+    fn from_cpal(t: cpal::InterfaceType) -> Self {
+        use cpal::InterfaceType as I;
+        match t {
+            I::BuiltIn => Self::BuiltIn,
+            I::Usb => Self::Usb,
+            I::Bluetooth => Self::Bluetooth,
+            I::Hdmi => Self::Hdmi,
+            I::DisplayPort => Self::DisplayPort,
+            I::Network => Self::Network,
+            I::Thunderbolt => Self::Thunderbolt,
+            I::FireWire => Self::FireWire,
+            I::Pci => Self::Pci,
+            I::Aggregate => Self::Aggregate,
+            I::Virtual => Self::Virtual,
+            I::Unknown => Self::Unknown,
+            _ => Self::Other,
+        }
+    }
 }
 
 /// The CoreAudio device UID for a cpal device (stable across reconnects / duplicate names).
@@ -129,15 +193,21 @@ fn device_uid(device: &cpal::Device) -> Option<String> {
     device.id().ok().map(|id| id.id().to_string())
 }
 
-/// The human name + whether the device is on a Bluetooth transport.
-fn device_meta(device: &cpal::Device) -> (String, bool) {
-    match device.description() {
+/// The human name + how the device with `uid` is attached. cpal's CoreAudio backend names no
+/// transport but Aggregate — every Mac device read as not Bluetooth — so there the HAL is asked.
+fn device_meta(device: &cpal::Device, uid: &str) -> (String, Transport) {
+    let (name, transport) = match device.description() {
         Ok(desc) => (
             desc.name().to_string(),
-            desc.interface_type() == cpal::InterfaceType::Bluetooth,
+            Transport::from_cpal(desc.interface_type()),
         ),
-        Err(_) => (device.to_string(), false),
-    }
+        Err(_) => (device.to_string(), Transport::Unknown),
+    };
+    #[cfg(target_vendor = "apple")]
+    let transport = crate::vpio::device_transport(uid).unwrap_or(transport);
+    #[cfg(not(target_vendor = "apple"))]
+    let _ = uid;
+    (name, transport)
 }
 
 /// The system default output device.
@@ -175,7 +245,7 @@ pub fn enum_output_devices() -> Vec<DeviceDesc> {
     };
     for d in devices {
         let Some(uid) = device_uid(&d) else { continue };
-        let (name, is_bluetooth) = device_meta(&d);
+        let (name, transport) = device_meta(&d, &uid);
         let rate = d
             .default_output_config()
             .map(|c| c.sample_rate())
@@ -186,7 +256,7 @@ pub fn enum_output_devices() -> Vec<DeviceDesc> {
             name,
             rate,
             is_default,
-            is_bluetooth,
+            transport,
         });
     }
     out
@@ -218,7 +288,7 @@ fn input_config(device: &cpal::Device) -> Result<(cpal::StreamConfig, f64, usize
     // Diagnostic: which device + format cpal actually opened for input (shows in the run console).
     eprintln!(
         "vocara: input device='{}' rate={} channels={} format={:?}",
-        device_meta(device).0,
+        device_meta(device, "").0,
         default.sample_rate(),
         channels,
         default.sample_format(),
@@ -241,7 +311,7 @@ pub fn enum_input_devices() -> Vec<DeviceDesc> {
     };
     for d in devices {
         let Some(uid) = device_uid(&d) else { continue };
-        let (name, is_bluetooth) = device_meta(&d);
+        let (name, transport) = device_meta(&d, &uid);
         let rate = d
             .default_input_config()
             .map(|c| c.sample_rate())
@@ -252,7 +322,7 @@ pub fn enum_input_devices() -> Vec<DeviceDesc> {
             name,
             rate,
             is_default,
-            is_bluetooth,
+            transport,
         });
     }
     out
@@ -819,20 +889,40 @@ impl OutputBinding {
     /// Whether playback is on the output the host judged echo-free. Never while a VPIO unit is
     /// opening (nothing known renders yet).
     fn echo_free_with(&self, serves_output: &dyn Fn(&str) -> bool) -> bool {
-        !self.echo_free_uid.is_empty()
-            && self.actual_uid_given(self.renders_to_default(serves_output)) == self.echo_free_uid
+        self.route_verdicts(serves_output).echo_free
     }
 
     fn rerouted_with(&self, serves_output: &dyn Fn(&str) -> bool) -> bool {
-        let to_default = self.renders_to_default(serves_output);
-        // Following the default as asked: resolving the default once per side could straddle a
-        // default change and fire a false reroute (and a monitor mute) for one poll.
-        if self.requested.is_empty() && to_default {
-            return false;
-        }
-        let actual = self.actual_uid_given(to_default);
-        !actual.is_empty() && actual != self.requested_uid()
+        self.route_verdicts(serves_output).rerouted
     }
+
+    /// Both verdicts a reconcile needs, from ONE read of the route. Asked separately, a poll paid
+    /// two hardware reads (each a uid lookup and an output-streams query on the UI thread), and a
+    /// headset switching profile between them had the monitor mute and the echo-free flag judge
+    /// different routes.
+    fn route_verdicts(&self, serves_output: &dyn Fn(&str) -> bool) -> RouteVerdicts {
+        let to_default = self.renders_to_default(serves_output);
+        // Following the default as asked is never a reroute: resolving the default once per side
+        // could straddle a default change and fire a false one (and a monitor mute) for one poll.
+        let following = self.requested.is_empty() && to_default;
+        let actual = if following && self.echo_free_uid.is_empty() {
+            String::new() // nothing below needs it
+        } else {
+            self.actual_uid_given(to_default)
+        };
+        RouteVerdicts {
+            rerouted: !following && !actual.is_empty() && actual != self.requested_uid(),
+            echo_free: !self.echo_free_uid.is_empty() && actual == self.echo_free_uid,
+        }
+    }
+}
+
+/// What one read of the output route says (see [`OutputBinding::route_verdicts`]).
+struct RouteVerdicts {
+    /// Playback is open, but not on the device the user asked for.
+    rerouted: bool,
+    /// Playback is on the output the host judged echo-free.
+    echo_free: bool,
 }
 
 /// The rate (Hz) the system default output device runs at now, or None when it cannot be read.
@@ -921,9 +1011,12 @@ fn reconcile_output_safety_with(
         transport.set_echo_free(false);
         return true;
     }
-    let rerouted = b.rerouted_with(serves_output);
+    let RouteVerdicts {
+        rerouted,
+        echo_free,
+    } = b.route_verdicts(serves_output);
     transport.set_monitor_muted(rerouted);
-    transport.set_echo_free(b.echo_free_with(serves_output));
+    transport.set_echo_free(echo_free);
     b.rerouted_polls = if rerouted {
         b.rerouted_polls.saturating_add(1)
     } else {
@@ -4491,6 +4584,31 @@ mod output_safety_tests {
             assert_eq!(h.transport().echo_free(), t != 3, "tick {t}");
         }
         assert_eq!(event.load(Ordering::Relaxed) & EVENT_OUTPUT_REROUTED, 0);
+    }
+
+    /// One reconcile reads the route once: the monitor mute and the echo-free flag are judged
+    /// from the same answer, so a headset's output list flickering between two reads can't split
+    /// them (and the poll pays one hardware read, not two).
+    #[test]
+    fn one_reconcile_reads_the_route_once() {
+        let h = engine();
+        let event = AtomicU32::new(0);
+        let b = Mutex::new(OutputBinding {
+            requested: "dev-headset".into(),
+            vpio: VpioOutput::Bound("dev-headset".into()),
+            echo_free_uid: "dev-headset".into(),
+            ..Default::default()
+        });
+        let reads = std::cell::Cell::new(0u32);
+        // Serves output on the first read only: a second read would see the default instead.
+        let serves = |_: &str| {
+            reads.set(reads.get() + 1);
+            reads.get() == 1
+        };
+        reconcile_output_safety_with(h.transport(), &b, &event, &serves, &|| None);
+        assert_eq!(reads.get(), 1);
+        assert!(!h.transport().monitor_muted());
+        assert!(h.transport().echo_free());
     }
 
     /// The requested device could not be opened and the fallback took the default: the UI still

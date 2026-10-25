@@ -35,6 +35,9 @@ typedef struct VeDeviceInfo {
   uint8_t is_default;   /* 1 if the system default */
   uint8_t is_input;     /* 1 = input device, 0 = output */
   uint8_t is_bluetooth; /* 1 if on a Bluetooth transport (same-device in+out degrades output) */
+  uint8_t transport;    /* how it is attached: 0 unknown, 1 built-in, 2 USB, 3 Bluetooth, 4 HDMI,
+                         * 5 DisplayPort, 6 network/AirPlay, 7 Thunderbolt, 8 FireWire, 9 PCI,
+                         * 10 aggregate, 11 virtual, 12 other */
 } VeDeviceInfo;
 
 /* Create the engine: build the graph at the fixed engine rate (48 kHz) and spawn the audio-
@@ -47,7 +50,9 @@ void ve_destroy(VeEngine *e);
  * through the audio-host thread that owns the stream. */
 /* Fill up to `cap` entries into `out`; returns the total device count (may exceed `cap`). */
 size_t ve_enum_output_devices(VeDeviceInfo *out, size_t cap);
-/* Switch the active output device by UID. 0 = ok, negative = failure (falls back to default). */
+/* Switch the active output device by UID. 0 = something is playing — the device asked for, or the
+ * default when it could not be opened (read ve_actual_output_device for which); negative = nothing
+ * could be opened. */
 int ve_set_output_device(VeEngine *e, const char *uid);
 /* Write the active output UID into `buf` (<= cap, NUL-terminated); returns its byte length. */
 size_t ve_current_output_device(VeEngine *e, char *buf, size_t cap);

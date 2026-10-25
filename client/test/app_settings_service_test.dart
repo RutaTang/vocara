@@ -523,8 +523,9 @@ void main() {
     });
 
     test('a Bluetooth speaker never allows the monitor', () async {
-      // macOS reports only the transport: a Bluetooth speaker taken for
-      // headphones fed the monitor straight back into the mic.
+      // A Bluetooth speaker taken for headphones fed the monitor straight back
+      // into the mic. Bluetooth alone allows nothing: only a name that says
+      // headphones does, or the user's mark.
       await service.load();
       Future<bool> allowedOn(String name, {bool bluetooth = true}) async {
         final device = AudioDevice(
@@ -532,6 +533,9 @@ void main() {
           name: name,
           rate: 48000,
           isBluetooth: bluetooth,
+          transport: bluetooth
+              ? AudioTransport.bluetooth
+              : AudioTransport.builtIn,
         );
         outs = [_builtInOut, device];
         service.refreshDevices();
@@ -548,9 +552,20 @@ void main() {
       ]) {
         expect(await allowedOn(speaker), isFalse, reason: speaker);
       }
-      for (final headphones in ['AirPods Pro', 'WH-1000XM5', 'Bose QC45']) {
+      for (final headphones in [
+        'AirPods Pro',
+        'Galaxy Buds2',
+        'Sony Headphones',
+      ]) {
         expect(await allowedOn(headphones), isTrue, reason: headphones);
       }
+      // Headphones whose name does not say so: the user's to mark.
+      for (final unnamed in ['WH-1000XM5', 'Bose QC45', 'Marshall Emberton']) {
+        expect(await allowedOn(unnamed), isFalse, reason: unnamed);
+      }
+      expect(await allowedOn('WH-1000XM5'), isFalse);
+      await service.setOutputIsHeadphones('bt-WH-1000XM5', true);
+      expect(service.monitorAllowed, isTrue);
       expect(
         await allowedOn('MacBook Pro Speakers', bluetooth: false),
         isFalse,
@@ -846,11 +861,13 @@ void main() {
       name: 'Scarlett 2i2 USB',
       rate: 48000,
       isDefault: true,
+      transport: AudioTransport.usb,
     );
     const speakers = AudioDevice(
       uid: 'built-in-out',
       name: 'MacBook Pro Speakers',
       rate: 48000,
+      transport: AudioTransport.builtIn,
     );
 
     test('a marked output is echo-free and allows the monitor', () async {
@@ -887,40 +904,119 @@ void main() {
       expect(storage.lastWrite!['headphoneOutputUids'], isEmpty);
     });
 
-    test('speakers and earbuds named as such take no mark', () async {
-      outs = [
-        const AudioDevice(
-          uid: 'built-in-out',
-          name: 'MacBook Pro Speakers',
-          rate: 48000,
-          isDefault: true,
-        ),
-      ];
-      await service.load();
-      expect(service.outputMarkable, isFalse);
-      outs = [
-        const AudioDevice(
-          uid: 'airpods',
-          name: 'AirPods Pro',
+    test(
+      'only a device of its own transport takes a mark, whatever its name',
+      () async {
+        // The system translates device names, so no name rule can tell a port or a sink with
+        // speakers of its own: on a German Mac the built-in speakers and an Intel Mac's one
+        // device for speakers AND jack passed every English check.
+        Future<bool> markable(String name, AudioTransport transport) async {
+          outs = [
+            AudioDevice(
+              uid: 'out-$name',
+              name: name,
+              rate: 48000,
+              isDefault: true,
+              isBluetooth: transport == AudioTransport.bluetooth,
+              transport: transport,
+            ),
+          ];
+          service.refreshDevices();
+          return service.outputMarkable;
+        }
+
+        await service.load();
+        for (final (name, transport) in [
+          ('MacBook Pro Speakers', AudioTransport.builtIn),
+          ('MacBook Pro-Lautsprecher', AudioTransport.builtIn),
+          ('Haut-parleurs MacBook Pro', AudioTransport.builtIn),
+          ('Integrierte Ausgabe', AudioTransport.builtIn),
+          ('Built-in Output', AudioTransport.builtIn),
+          ('External Headphones', AudioTransport.builtIn),
+          ('LG UltraFine Display Audio', AudioTransport.hdmi),
+          ('Studio Display', AudioTransport.displayPort),
+          ('Living Room TV', AudioTransport.network),
+          ('BlackHole 2ch', AudioTransport.virtual),
+          ('Multi-Output Device', AudioTransport.aggregate),
+          ('Unknown Device', AudioTransport.unknown),
+          ('UE BOOM 3', AudioTransport.bluetooth),
+          ('AirPods Pro', AudioTransport.bluetooth),
+        ]) {
+          expect(await markable(name, transport), isFalse, reason: name);
+        }
+        for (final (name, transport) in [
+          ('Scarlett 2i2 USB', AudioTransport.usb),
+          ('WH-1000XM5', AudioTransport.bluetooth),
+          ('Apollo Twin', AudioTransport.thunderbolt),
+        ]) {
+          expect(await markable(name, transport), isTrue, reason: name);
+        }
+      },
+    );
+
+    test(
+      'a stored mark on a device that now reads as a speaker is not in force',
+      () async {
+        // Renamed since it was marked: the card is not shown for it, so a mark still in force
+        // would be one nobody could see to clear.
+        const renamed = AudioDevice(
+          uid: 'bt-out',
+          name: 'Party Speaker',
           rate: 48000,
           isDefault: true,
           isBluetooth: true,
-        ),
-      ];
-      service.refreshDevices();
-      expect(service.outputMarkable, isFalse);
-      // An Intel Mac's one device for the speakers and the jack: unplugging the headphones
-      // moves the sound to the speakers under the same uid, so no mark can be trusted on it.
-      outs = [
-        const AudioDevice(
-          uid: 'AppleHDAEngineOutput:1B,0,1,1:0',
-          name: 'Built-in Output',
-          rate: 48000,
-          isDefault: true,
-        ),
-      ];
-      service.refreshDevices();
-      expect(service.outputMarkable, isFalse);
+          transport: AudioTransport.bluetooth,
+        );
+        outs = [renamed];
+        storage.doc = {
+          'headphoneOutputUids': [renamed.uid],
+        };
+        await service.load();
+        final engine = _FakeEngine()..actualOutput = renamed.uid;
+        service.attachEngine(engine);
+        service.setMonitorGainLive(0.5);
+        expect(service.outputMarkable, isFalse);
+        expect(service.monitorAllowed, isFalse);
+        expect(engine.monitorGains.last, 0.0);
+        expect(engine.echoFree.last, '');
+      },
+    );
+
+    test(
+      'Settings judges the choice, not what the last song played through',
+      () async {
+        // Settings opens from Home, after the song page let its engine go: what that engine
+        // rendered to stayed cached, so the card offered (or hid) the mark for the wrong output.
+        outs = [speakers, scarlett];
+        storage.doc = {'outputDeviceUid': scarlett.uid};
+        await service.load();
+        final engine = _FakeEngine()..actualOutput = speakers.uid;
+        service.attachEngine(engine);
+        expect(service.outputToMark?.uid, speakers.uid);
+        service.detachEngine(engine);
+        expect(service.outputToMark?.uid, scarlett.uid);
+        expect(service.outputMarkable, isTrue);
+      },
+    );
+
+    test('clearing a mark during a mic open withdraws the name at once', () async {
+      // A name is held while the engine reports nothing rendering (the mic opening), but not
+      // past the mark it came from: the engine would act on it the moment the device bound.
+      outs = [speakers, scarlett];
+      await service.load();
+      final engine = _FakeEngine()..actualOutput = scarlett.uid;
+      service.attachEngine(engine);
+      await service.setOutputIsHeadphones(scarlett.uid, true);
+      expect(engine.echoFree.last, scarlett.uid);
+      engine.actualOutput = '';
+      service.reconcileMonitorSafety();
+      expect(
+        engine.echoFree.last,
+        scarlett.uid,
+        reason: 'held through the open',
+      );
+      await service.setOutputIsHeadphones(scarlett.uid, false);
+      expect(engine.echoFree.last, '');
     });
 
     test(
