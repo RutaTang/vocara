@@ -1570,11 +1570,21 @@ fn writer_run(mut rec: Consumer<[Smp; CHANNELS]>, rx: mpsc::Receiver<WriterCmd>)
     // failure and reported through Stop's ack, so the caller learns the take is damaged
     // instead of the UI silently reporting success (disk full, revoked permission).
     let mut failed = false;
+    // A command the idle wait below already took off the channel, applied first.
+    let mut next: Option<WriterCmd> = None;
     loop {
         // Apply any pending commands.
         loop {
-            match rx.try_recv() {
-                Ok(WriterCmd::Start(path, ack)) => {
+            let cmd = match next.take() {
+                Some(cmd) => cmd,
+                None => match rx.try_recv() {
+                    Ok(cmd) => cmd,
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => return,
+                },
+            };
+            match cmd {
+                WriterCmd::Start(path, ack) => {
                     // A Start while already recording finalizes the previous take first,
                     // draining its buffered tail into it (mirroring Stop) so those frames
                     // land in the take they belong to. IO errors on that drain/finalize are
@@ -1619,7 +1629,7 @@ fn writer_run(mut rec: Consumer<[Smp; CHANNELS]>, rx: mpsc::Receiver<WriterCmd>)
                         }
                     }
                 }
-                Ok(WriterCmd::Stop(ack)) => {
+                WriterCmd::Stop(ack) => {
                     // Drain any buffered tail into the file before finalizing.
                     if let Some(w) = wav.as_mut() {
                         while let Some(f) = rec.pop() {
@@ -1636,14 +1646,12 @@ fn writer_run(mut rec: Consumer<[Smp; CHANNELS]>, rx: mpsc::Receiver<WriterCmd>)
                     let _ = ack.send(!failed);
                     failed = false;
                 }
-                Ok(WriterCmd::Shutdown) => {
+                WriterCmd::Shutdown => {
                     if let Some(w) = wav.take() {
                         let _ = w.finalize();
                     }
                     return;
                 }
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => return,
             }
         }
         // Drain available frames; write the left channel (mono) when recording. A write
@@ -1671,6 +1679,15 @@ fn writer_run(mut rec: Consumer<[Smp; CHANNELS]>, rx: mpsc::Receiver<WriterCmd>)
                 if w.sync_header_if_due().is_err() {
                     failed = true;
                 }
+            }
+        } else if wav.is_none() {
+            // Not recording: nothing reaches the ring until a Start arms the next take (the
+            // fan-out is gated on `rec_active`, and a late tail is swept by that Start), so park
+            // on the command channel. Polling here woke the thread every 5 ms for the engine's
+            // whole life, take or no take.
+            match rx.recv() {
+                Ok(cmd) => next = Some(cmd),
+                Err(_) => return,
             }
         } else {
             std::thread::sleep(std::time::Duration::from_millis(5));
@@ -3190,6 +3207,35 @@ mod record_writer_tests {
             w.stop(),
             "a later clean recording must report success again"
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Not recording, the writer has nothing to do until a command arrives, so it parks on its
+    /// command channel. It used to wake every 5 ms for the engine's whole life (twice that with
+    /// the technique page's engine alive) to drain a ring nothing writes to between takes.
+    /// Observable from the producer side: what an idle writer would have drained stays in the
+    /// ring until the next Start sweeps it, as a stale tail always has been.
+    #[test]
+    fn an_idle_writer_parks_instead_of_polling() {
+        let (mut prod, cons) = spsc::<[Smp; CHANNELS]>(64);
+        let w = RecordWriter::spawn(cons);
+        std::thread::sleep(std::time::Duration::from_millis(50)); // reach the idle wait
+        for _ in 0..10 {
+            assert!(prod.push([0.5, 0.0]));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(
+            prod.free(),
+            prod.capacity() - 10,
+            "an idle writer woke up and drained the ring"
+        );
+        // A command still wakes it at once; the take's Start sweeps the stale frames.
+        let path = temp_wav("idle_parks");
+        assert!(w.start(path.to_str().unwrap()));
+        assert!(w.stop());
+        assert_eq!(prod.free(), prod.capacity());
+        let bytes = std::fs::read(&path).expect("recorded WAV must exist");
+        assert_eq!(bytes.len(), 44, "stale frames must not lead the take");
         let _ = std::fs::remove_file(&path);
     }
 
