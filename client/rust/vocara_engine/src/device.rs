@@ -16,6 +16,7 @@ use std::thread::JoinHandle;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
+use crate::capture_layout::{InputChannelMix, INPUT_CHANNEL_AUTO};
 use crate::live::{RtCell, Shared};
 use crate::ring::{Consumer, Producer};
 use crate::sample::{Smp, CHANNELS, ENGINE_SR};
@@ -838,6 +839,10 @@ pub struct InputCell {
     state: UnsafeCell<InputState>,
     owner: AtomicU64,
     busy: AtomicBool,
+    /// Which of a multi-channel mic's inputs make the mono capture (`ve_set_input_channel`; see
+    /// [`InputChannelMix`]). Outside the single-accessor state: the control thread writes it, and
+    /// the VPIO input callback reads it for its own downmix before it feeds the cell.
+    channel_mode: AtomicU32,
 }
 
 // SAFETY: see the type doc — the owner epoch plus the `busy` compare-exchange admit at most one
@@ -867,6 +872,9 @@ struct InputState {
     cap_active: Arc<AtomicBool>,
     rec_active: Arc<AtomicBool>,
     in_channels: usize,
+    /// The device's channels to the ONE mono mic signal (under [`InputCell::channel_mode`]),
+    /// carried on both stereo lanes, so the monitor, meter and take hear the chosen input centred.
+    mix: InputChannelMix,
     /// Push-based linear resampler: input-position advance per engine output frame
     /// (`in_rate / ENGINE_SR`). `1.0` → identity passthrough.
     step: f64,
@@ -970,6 +978,7 @@ impl InputCell {
                 cap_active,
                 rec_active,
                 in_channels: 1,
+                mix: InputChannelMix::new(ENGINE_SR),
                 step: 1.0,
                 drift_ratio_bits,
                 pos: 0.0,
@@ -987,7 +996,21 @@ impl InputCell {
             // accident. See [`RtCell`].
             owner: AtomicU64::new(0),
             busy: AtomicBool::new(false),
+            channel_mode: AtomicU32::new(INPUT_CHANNEL_AUTO),
         })
+    }
+
+    /// Choose which input(s) make the mono capture: [`INPUT_CHANNEL_AUTO`], or
+    /// `capture_layout::INPUT_CHANNEL_1` / `INPUT_CHANNEL_2`. Takes effect on the next callback,
+    /// gliding (see [`InputChannelMix`]). Any thread.
+    pub fn set_channel_mode(&self, mode: u32) {
+        self.channel_mode.store(mode, Ordering::Relaxed);
+    }
+
+    /// The input-channel mode in force (see [`Self::set_channel_mode`]). RT-safe: one load.
+    #[inline]
+    pub fn channel_mode(&self) -> u32 {
+        self.channel_mode.load(Ordering::Relaxed)
     }
 
     /// Take the next input-stream generation. Call on the AUDIO-HOST THREAD, immediately before
@@ -1060,6 +1083,7 @@ impl InputCell {
         // older generation is retired.
         let st = unsafe { &mut *self.state.get() };
         st.in_channels = in_channels.max(1);
+        st.mix = InputChannelMix::new(in_rate);
         st.step = in_rate / ENGINE_SR;
         st.pos = 0.0;
         st.primed = false;
@@ -1087,8 +1111,9 @@ impl InputCell {
         );
     }
 
-    /// Feed one input callback's interleaved samples: downmix to stereo, resample to `ENGINE_SR`,
-    /// fan out to the mic / capture / recording rings, and update the peak meter.
+    /// Feed one input callback's interleaved samples: mix the device's channels down to the mono
+    /// mic signal (carried as L = R), resample to `ENGINE_SR`, fan out to the mic / capture /
+    /// recording rings, and update the peak meter.
     ///
     /// # Safety
     /// Only the single active input callback may call this.
@@ -1100,6 +1125,7 @@ impl InputCell {
         }
         let cap = st.cap_active.load(Ordering::Relaxed);
         let rec = st.rec_active.load(Ordering::Relaxed);
+        let mode = self.channel_mode();
         let frames = data.len() / ch;
         // Clock-drift compensation: the estimator's published ratio scales
         // the position advance, so emission tracks the OUTPUT clock instead
@@ -1116,9 +1142,11 @@ impl InputCell {
         let mut emitted: u64 = 0;
         for fi in 0..frames {
             let base = fi * ch;
-            let l = data[base];
-            let r = if ch > 1 { data[base + 1] } else { l };
-            peak = peak.max(l.abs()).max(r.abs());
+            // Inputs 1 and 2 used to travel as left and right, and the writer keeps the left: a
+            // mic on input 2 recorded silence, monitored hard right.
+            let m = st.mix.mix(mode, &data[base..base + ch]);
+            let (l, r) = (m, m);
+            peak = peak.max(m.abs());
             if identity {
                 st.emit([l, r], cap, rec);
                 emitted += 1;
@@ -4069,6 +4097,50 @@ mod input_cell_tests {
         assert_eq!(c.rec_dropped.load(Ordering::Relaxed), 0);
         assert_eq!(c.rec_written.load(Ordering::Relaxed), 32);
         assert_eq!(c.frames_in.load(Ordering::Relaxed), 64);
+    }
+
+    /// The cpal input path: on a 2-input interface with the mic on INPUT 2 and Input 2 chosen,
+    /// input 2 is what the take records — and the monitor hears it in the middle. The feed used to
+    /// carry inputs 1 and 2 as left and right and the writer keeps the left channel, so a mic on
+    /// input 2 recorded silence and was monitored hard right.
+    #[test]
+    fn input_2_is_what_gets_recorded() {
+        let (mic_prod, mut mic_cons) = spsc::<[Smp; CHANNELS]>(1 << 12);
+        let (cap_prod, _cap_cons) = spsc::<[Smp; CHANNELS]>(8);
+        let (rec_prod, mut rec_cons) = spsc::<[Smp; CHANNELS]>(1 << 12);
+        let cell = InputCell::new(
+            mic_prod,
+            cap_prod,
+            rec_prod,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(true)),
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(1.0f64.to_bits())),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU32::new(0)),
+        );
+        cell.reconfigure(crate::sample::ENGINE_SR, 2);
+        cell.set_channel_mode(crate::capture_layout::INPUT_CHANNEL_2);
+        // Input 1 idle (silence), the voice on input 2.
+        let voice = |n: usize| 0.3 * (n as f32 * 0.05).sin();
+        let block: Vec<f32> = (0..512).flat_map(|n| [0.0, voice(n)]).collect();
+        cell.feed_test(&block);
+
+        let mut n = 0;
+        while let Some(f) = rec_cons.pop() {
+            assert_eq!(f[0], voice(n), "the take's frame {n} is input 2");
+            n += 1;
+        }
+        assert_eq!(n, 512);
+        while let Some(f) = mic_cons.pop() {
+            assert_eq!(
+                f[0], f[1],
+                "the monitor hears the mic centred, not hard right"
+            );
+        }
     }
 }
 

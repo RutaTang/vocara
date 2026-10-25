@@ -5,9 +5,11 @@
 //! `AudioBufferList` with one single-channel buffer per channel, and rejects the one interleaved
 //! buffer the input callback used to hand it every time — a mic that renders nothing, flagged
 //! lost after the failure streak. [`CaptureLayout`] says which list to build; [`downmix_to_mono`]
-//! turns whatever the render filled into the mono stream the AEC consumes; [`DeadCaptureStreak`]
-//! decides when cycles that captured nothing mean the mic is gone. All are RT-safe (no
-//! alloc / lock / syscall; bounded work).
+//! turns whatever the render filled into the mono stream the AEC consumes, through the
+//! [`InputChannelMix`] that also serves the cpal input path (`device::InputCell`), so a
+//! multi-channel mic is heard the same way on both; [`DeadCaptureStreak`] decides when cycles
+//! that captured nothing mean the mic is gone. All are RT-safe (no alloc / lock / syscall;
+//! bounded work).
 
 /// Most channels the mic path provisions buffers for (mic captures are mono or stereo).
 pub const MAX_CAPTURE_CH: usize = 2;
@@ -51,20 +53,23 @@ impl CaptureLayout {
     }
 }
 
-/// Downmix one render's capture to mono into `out`; returns the frames written (at most `frames`
-/// and `out.len()`). `bufs` are the list's buffers in order, each cut to the samples its
-/// `mDataByteSize` reports.
+/// Mix one render's capture down to the mono mic signal into `out`; returns the frames written
+/// (at most `frames` and `out.len()`). `bufs` are the list's buffers in order, each cut to the
+/// samples its `mDataByteSize` reports. Which channels make the mono, and how, is `mix`'s job
+/// under `mode` (see [`InputChannelMix`]); this only reads the channels each frame delivered.
 ///
 /// * Interleaved: the channel count is read off what came back, `samples / frames`, not the
 ///   format: VPIO often fills a buffer it described as stereo with mono, and reading mono samples
 ///   as L/R pairs halves the frame count (the monitored voice an octave up).
-/// * Non-interleaved: frame `i` of every buffer that delivered anything is averaged; a channel
-///   left empty is skipped rather than averaged in as silence.
+/// * Non-interleaved: the buffers that delivered anything are the channels, in order; a channel
+///   left empty is skipped rather than read as silence.
 pub fn downmix_to_mono(
     layout: CaptureLayout,
     bufs: &[&[f32]],
     frames: usize,
     out: &mut [f32],
+    mix: &mut InputChannelMix,
+    mode: u32,
 ) -> usize {
     let frames = frames.min(out.len());
     if frames == 0 {
@@ -77,32 +82,140 @@ pub fn downmix_to_mono(
         let ch = (buf.len() / frames).clamp(1, MAX_CAPTURE_CH);
         let n = (buf.len() / ch).min(frames);
         for (i, o) in out[..n].iter_mut().enumerate() {
-            *o = if ch == 1 {
-                buf[i]
-            } else {
-                0.5 * (buf[i * ch] + buf[i * ch + 1])
-            };
+            *o = mix.mix(mode, &buf[i * ch..i * ch + ch]);
         }
         return n;
     }
+    let mut planes: [&[f32]; MAX_CAPTURE_CH] = [&[]; MAX_CAPTURE_CH];
     let mut live = 0usize;
     let mut n = frames;
     for buf in bufs.iter().take(MAX_CAPTURE_CH).filter(|b| !b.is_empty()) {
+        planes[live] = buf;
         live += 1;
         n = n.min(buf.len());
     }
     if live == 0 {
         return 0;
     }
-    let scale = 1.0 / live as f32;
+    let mut frame = [0.0f32; MAX_CAPTURE_CH];
     for (i, o) in out[..n].iter_mut().enumerate() {
-        let mut s = 0.0;
-        for buf in bufs.iter().take(MAX_CAPTURE_CH).filter(|b| !b.is_empty()) {
-            s += buf[i];
+        for (c, plane) in planes[..live].iter().enumerate() {
+            frame[c] = plane[i];
         }
-        *o = s * scale;
+        *o = mix.mix(mode, &frame[..live]);
     }
     n
+}
+
+/// `ve_set_input_channel`: the mono mic signal is a level-weighted mix of the device's inputs
+/// (see [`InputChannelMix`]).
+pub const INPUT_CHANNEL_AUTO: u32 = 0;
+/// `ve_set_input_channel`: the mono mic signal is input 1 alone.
+pub const INPUT_CHANNEL_1: u32 = 1;
+/// `ve_set_input_channel`: the mono mic signal is input 2 alone (input 1 on a device without one).
+pub const INPUT_CHANNEL_2: u32 = 2;
+
+/// Rise time constant of the per-channel level the Auto weights come from (s).
+const LEVEL_RISE_S: f64 = 0.15;
+/// Fall time constant of that level (s). Longer than the rise so a breath or an instrumental
+/// break does not hand the weight back to an input idling at its noise floor: the next phrase
+/// would then start at the even split's -6 dB and glide up.
+const LEVEL_FALL_S: f64 = 1.0;
+/// Time constant the weights glide toward their target with (s): short enough that a voice
+/// arriving on an input is at full level within tens of milliseconds, long enough that no sample
+/// moves further than the voice's own slope (the target can jump within a few samples when the
+/// other input sits at its noise floor), and that a change of choice is a glide, not a click.
+const WEIGHT_GLIDE_S: f64 = 0.01;
+/// Bias added to every level so it never decays into subnormals and the Auto split is always
+/// defined (digital silence on every input splits evenly). Far below any real noise floor.
+const LEVEL_FLOOR: f32 = 1.0e-18;
+
+/// Turns one frame of a mic's channels into the ONE mono signal everything downstream hears — the
+/// monitor, the AEC, the meter and the take — under the input-channel mode.
+///
+/// * Input 1 / Input 2: that channel alone (Input 2 on a device without one is Input 1).
+/// * Auto: each channel weighted by its share of the summed level (mean square, smoothed — see
+///   [`LEVEL_RISE_S`] / [`LEVEL_FALL_S`]). An input idling at its noise floor holds a share of
+///   about a millionth next to a sung voice, so a mic on either input records at full level; two
+///   live inputs blend in proportion to their levels, and equal ones average. Only the first
+///   [`MAX_CAPTURE_CH`] channels of a wider device are weighed.
+///
+/// The weights glide toward their target ([`WEIGHT_GLIDE_S`]) and always sum to 1. A 1-channel
+/// device passes through untouched. RT-safe: no alloc / lock / syscall, a few multiply-adds per
+/// channel per frame.
+pub struct InputChannelMix {
+    /// Per-sample one-pole coefficients for the level's rise and fall, and the weights' glide.
+    rise: f32,
+    fall: f32,
+    glide: f32,
+    /// Smoothed mean-square level per channel (the Auto weights' basis), tracked in every mode so
+    /// a switch to Auto starts from a settled estimate.
+    level: [f32; MAX_CAPTURE_CH],
+    /// The gain each channel enters the mono with.
+    weight: [f32; MAX_CAPTURE_CH],
+    /// Whether a frame has been mixed: an explicit choice applies from the first frame instead of
+    /// gliding in from the even split the weights start at.
+    primed: bool,
+}
+
+impl InputChannelMix {
+    /// A mixer for a mic element running at `rate` Hz.
+    pub fn new(rate: f64) -> InputChannelMix {
+        let rate = if rate.is_finite() && rate > 0.0 {
+            rate
+        } else {
+            48_000.0
+        };
+        let coef = |secs: f64| (1.0 - (-1.0 / (secs * rate)).exp()) as f32;
+        InputChannelMix {
+            rise: coef(LEVEL_RISE_S),
+            fall: coef(LEVEL_FALL_S),
+            glide: coef(WEIGHT_GLIDE_S),
+            level: [LEVEL_FLOOR; MAX_CAPTURE_CH],
+            weight: [1.0 / MAX_CAPTURE_CH as f32; MAX_CAPTURE_CH],
+            primed: false,
+        }
+    }
+
+    /// One frame's channel samples (`frame`, the device's channels in order) to the mono signal
+    /// under `mode`; an unknown mode is Auto.
+    pub fn mix(&mut self, mode: u32, frame: &[f32]) -> f32 {
+        let ch = frame.len().min(MAX_CAPTURE_CH);
+        if ch <= 1 {
+            return frame.first().copied().unwrap_or(0.0);
+        }
+        let mut total = 0.0f32;
+        for (level, &x) in self.level[..ch].iter_mut().zip(frame) {
+            let p = x * x + LEVEL_FLOOR;
+            let a = if p > *level { self.rise } else { self.fall };
+            *level += a * (p - *level);
+            total += *level;
+        }
+        let mut target = [0.0f32; MAX_CAPTURE_CH];
+        match mode {
+            INPUT_CHANNEL_1 => target[0] = 1.0,
+            INPUT_CHANNEL_2 => target[1] = 1.0,
+            _ => {
+                for (t, &level) in target[..ch].iter_mut().zip(&self.level) {
+                    *t = level / total;
+                }
+            }
+        }
+        if !self.primed {
+            self.primed = true;
+            if matches!(mode, INPUT_CHANNEL_1 | INPUT_CHANNEL_2) {
+                self.weight = target;
+            }
+        }
+        let mut y = 0.0f32;
+        for (c, (w, t)) in self.weight.iter_mut().zip(target).enumerate() {
+            *w += self.glide * (t - *w);
+            if c < ch {
+                y += *w * frame[c];
+            }
+        }
+        y
+    }
 }
 
 /// Consecutive dead mic cycles (a failed `AudioUnitRender`, or a success that delivered nothing)
@@ -162,7 +275,10 @@ impl DeadCaptureStreak {
 
 #[cfg(test)]
 mod tests {
-    use super::{downmix_to_mono, CaptureLayout, DeadCaptureStreak};
+    use super::{
+        downmix_to_mono, CaptureLayout, DeadCaptureStreak, InputChannelMix, INPUT_CHANNEL_1,
+        INPUT_CHANNEL_2, INPUT_CHANNEL_AUTO,
+    };
 
     const FRAMES: usize = 8;
 
@@ -189,18 +305,34 @@ mod tests {
         assert_eq!(CaptureLayout::new(4, true).buffers(), 2);
     }
 
-    /// Non-interleaved stereo: L and R arrive in separate buffers and every frame is their mean.
-    /// Read as one interleaved buffer instead, buffer 0's consecutive LEFT samples would pair up
-    /// as L/R — half the frames, each averaging two different instants, and no right channel.
+    /// `downmix_to_mono` with a fresh mixer at 48 kHz.
+    fn downmix(layout: CaptureLayout, bufs: &[&[f32]], out: &mut [f32], mode: u32) -> usize {
+        let mut mix = InputChannelMix::new(48_000.0);
+        downmix_to_mono(layout, bufs, FRAMES, out, &mut mix, mode)
+    }
+
+    /// Non-interleaved stereo: L and R arrive in separate buffers, plane 1 being input 1. Read as
+    /// one interleaved buffer instead, buffer 0's consecutive LEFT samples would pair up as L/R —
+    /// half the frames, each mixing two different instants, and no right channel.
     #[test]
-    fn non_interleaved_stereo_averages_the_two_planes() {
+    fn non_interleaved_stereo_reads_the_two_planes() {
         let l: Vec<f32> = (0..FRAMES).map(left).collect();
         let r: Vec<f32> = (0..FRAMES).map(right).collect();
+        let planar = CaptureLayout::new(2, true);
         let mut out = [f32::NAN; FRAMES];
-        let n = downmix_to_mono(CaptureLayout::new(2, true), &[&l, &r], FRAMES, &mut out);
-        assert_eq!(n, FRAMES);
+        assert_eq!(
+            downmix(planar, &[&l, &r], &mut out, INPUT_CHANNEL_1),
+            FRAMES
+        );
         for (i, &o) in out.iter().enumerate() {
-            assert_eq!(o, 0.5 * (left(i) + right(i)), "frame {i}");
+            assert_eq!(o, left(i), "input 1, frame {i}");
+        }
+        assert_eq!(
+            downmix(planar, &[&l, &r], &mut out, INPUT_CHANNEL_2),
+            FRAMES
+        );
+        for (i, &o) in out.iter().enumerate() {
+            assert_eq!(o, right(i), "input 2, frame {i}");
         }
     }
 
@@ -210,38 +342,44 @@ mod tests {
         let l: Vec<f32> = (0..FRAMES).map(left).collect();
         let r: Vec<f32> = (0..FRAMES - 3).map(right).collect();
         let mut out = [0.0f32; FRAMES];
-        let n = downmix_to_mono(CaptureLayout::new(2, true), &[&l, &r], FRAMES, &mut out);
+        let n = downmix(
+            CaptureLayout::new(2, true),
+            &[&l, &r],
+            &mut out,
+            INPUT_CHANNEL_2,
+        );
         assert_eq!(n, FRAMES - 3);
-        assert_eq!(out[n - 1], 0.5 * (left(n - 1) + right(n - 1)));
+        assert_eq!(out[n - 1], right(n - 1));
     }
 
-    /// A plane the render left empty is skipped, not averaged in as silence (which would drop the
+    /// A plane the render left empty is skipped, not mixed in as silence (which would drop the
     /// captured voice by 6 dB), and nothing delivered means nothing written.
     #[test]
     fn an_empty_plane_is_skipped() {
         let l: Vec<f32> = (0..FRAMES).map(left).collect();
         let mut out = [0.0f32; FRAMES];
-        let n = downmix_to_mono(CaptureLayout::new(2, true), &[&l, &[]], FRAMES, &mut out);
+        let planar = CaptureLayout::new(2, true);
+        let n = downmix(planar, &[&l, &[]], &mut out, INPUT_CHANNEL_AUTO);
         assert_eq!(n, FRAMES);
         assert_eq!(out[5], left(5));
         assert_eq!(
-            downmix_to_mono(CaptureLayout::new(2, true), &[&[], &[]], FRAMES, &mut out),
+            downmix(planar, &[&[], &[]], &mut out, INPUT_CHANNEL_AUTO),
             0
         );
     }
 
-    /// Interleaved stereo averages each L/R pair; a buffer described as stereo that came back
-    /// holding one sample per frame is mono, read sample by sample.
+    /// Interleaved stereo reads each L/R pair as inputs 1 and 2; a buffer described as stereo that
+    /// came back holding one sample per frame is mono, read sample by sample.
     #[test]
     fn interleaved_reads_its_channel_count_off_the_delivered_size() {
         let lr: Vec<f32> = (0..FRAMES).flat_map(|i| [left(i), right(i)]).collect();
         let mut out = [0.0f32; FRAMES];
         let packed = CaptureLayout::new(2, false);
-        assert_eq!(downmix_to_mono(packed, &[&lr], FRAMES, &mut out), FRAMES);
-        assert_eq!(out[3], 0.5 * (left(3) + right(3)));
+        assert_eq!(downmix(packed, &[&lr], &mut out, INPUT_CHANNEL_2), FRAMES);
+        assert_eq!(out[3], right(3));
 
         let mono: Vec<f32> = (0..FRAMES).map(left).collect();
-        assert_eq!(downmix_to_mono(packed, &[&mono], FRAMES, &mut out), FRAMES);
+        assert_eq!(downmix(packed, &[&mono], &mut out, INPUT_CHANNEL_2), FRAMES);
         assert_eq!(out[6], left(6));
     }
 
@@ -251,8 +389,177 @@ mod tests {
         let l: Vec<f32> = (0..FRAMES).map(left).collect();
         let r: Vec<f32> = (0..FRAMES).map(right).collect();
         let mut out = [0.0f32; 4];
-        let n = downmix_to_mono(CaptureLayout::new(2, true), &[&l, &r], FRAMES, &mut out);
+        let mut mix = InputChannelMix::new(48_000.0);
+        let planar = CaptureLayout::new(2, true);
+        let n = downmix_to_mono(
+            planar,
+            &[&l, &r],
+            FRAMES,
+            &mut out,
+            &mut mix,
+            INPUT_CHANNEL_1,
+        );
         assert_eq!(n, 4);
+    }
+
+    // ---- the input-channel mix -------------------------------------------------------------
+
+    const SR: f64 = 48_000.0;
+
+    /// A sung-level tone (RMS -20 dBFS) at `hz`, sample `n`.
+    fn tone(hz: f64, n: usize) -> f32 {
+        (0.1 * std::f64::consts::SQRT_2 * (std::f64::consts::TAU * hz * n as f64 / SR).sin()) as f32
+    }
+
+    /// A deterministic noise floor at about -90 dBFS RMS: an input with nothing plugged in.
+    struct Floor(u32);
+    impl Floor {
+        fn next(&mut self) -> f32 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            self.0 = x;
+            ((x as f32 / u32::MAX as f32) * 2.0 - 1.0) * 5.5e-5
+        }
+    }
+
+    fn rms(s: &[f32]) -> f64 {
+        (s.iter().map(|&v| (v as f64).powi(2)).sum::<f64>() / s.len() as f64).sqrt()
+    }
+
+    /// Auto: a mic on either input of a 2-input interface records at full level — the idle input
+    /// at its noise floor gets essentially no weight. The averaging downmix put such a mic 6 dB
+    /// down with the idle input's noise mixed in, and the cpal path kept input 1 alone (silence
+    /// for a mic on input 2).
+    #[test]
+    fn auto_takes_a_mic_on_either_input_at_full_level() {
+        for live in 0..2 {
+            let mut mix = InputChannelMix::new(SR);
+            let mut floor = Floor(7);
+            let (mut voice, mut out) = (Vec::new(), Vec::new());
+            for n in 0..SR as usize {
+                let v = tone(220.0, n);
+                let mut frame = [floor.next(), floor.next()];
+                frame[live] = v;
+                let y = mix.mix(INPUT_CHANNEL_AUTO, &frame);
+                if n >= SR as usize / 2 {
+                    voice.push(v);
+                    out.push(y);
+                }
+            }
+            let db = 20.0 * (rms(&out) / rms(&voice)).log10();
+            assert!(db.abs() <= 0.5, "mic on input {}: {db:+.2} dB", live + 1);
+        }
+    }
+
+    /// Auto: equal channels give their average — the same signal on both inputs comes through
+    /// as itself, and two different signals at the same level blend half and half.
+    #[test]
+    fn auto_gives_equal_channels_their_average() {
+        let mut mix = InputChannelMix::new(SR);
+        for n in 0..SR as usize / 4 {
+            let v = tone(220.0, n);
+            let y = mix.mix(INPUT_CHANNEL_AUTO, &[v, v]);
+            assert!((y - v).abs() <= 1e-6, "frame {n}: {y} vs {v}");
+        }
+        let mut mix = InputChannelMix::new(SR);
+        let (mut err, mut avg) = (Vec::new(), Vec::new());
+        for n in 0..SR as usize {
+            let (a, b) = (tone(220.0, n), tone(330.0, n));
+            let y = mix.mix(INPUT_CHANNEL_AUTO, &[a, b]);
+            if n >= SR as usize / 2 {
+                err.push(y - 0.5 * (a + b));
+                avg.push(0.5 * (a + b));
+            }
+        }
+        let off = 20.0 * (rms(&err) / rms(&avg)).log10();
+        assert!(off <= -26.0, "the blend is off the average by {off:.1} dB");
+    }
+
+    /// Auto: a voice starting on input 2 after a long silence (both inputs at their noise floor,
+    /// so the weights sit at an even split) glides to full level without a step — no sample moves
+    /// further than the voice's own steepest slope — and gets there within 100 ms.
+    #[test]
+    fn a_voice_starting_on_input_2_glides_in_without_a_step() {
+        for phase in [0.0, 0.25] {
+            let mut mix = InputChannelMix::new(SR);
+            let mut floor = Floor(11);
+            let onset = SR as usize;
+            let (mut slope, mut step) = (0.0f32, 0.0f32);
+            let (mut prev_x, mut prev_y) = (0.0f32, 0.0f32);
+            let (mut voice, mut out) = (Vec::new(), Vec::new());
+            for n in 0..(onset + SR as usize / 2) {
+                let v = if n >= onset {
+                    // A tone starting at `phase` of its cycle (0.25: at its crest, a hard onset).
+                    let k = n - onset + (phase * SR / 220.0) as usize;
+                    tone(220.0, k)
+                } else {
+                    0.0
+                };
+                let x = v + floor.next();
+                let y = mix.mix(INPUT_CHANNEL_AUTO, &[floor.next(), x]);
+                if n > onset - 10 {
+                    slope = slope.max((x - prev_x).abs());
+                    step = step.max((y - prev_y).abs());
+                }
+                if n >= onset + SR as usize / 10 {
+                    voice.push(v);
+                    out.push(y);
+                }
+                (prev_x, prev_y) = (x, y);
+            }
+            assert!(
+                step <= slope * 1.0001,
+                "phase {phase}: the output moved {step} in a sample, the voice at most {slope}"
+            );
+            let db = 20.0 * (rms(&out) / rms(&voice)).log10();
+            assert!(db.abs() <= 0.5, "phase {phase}: {db:+.2} dB 100 ms in");
+        }
+    }
+
+    /// Input 1 and Input 2 pick their channel from the first frame, whatever the other carries.
+    #[test]
+    fn explicit_inputs_pick_their_channel() {
+        let mut one = InputChannelMix::new(SR);
+        let mut two = InputChannelMix::new(SR);
+        for n in 0..1000 {
+            let (a, b) = (tone(220.0, n), 0.5 * tone(330.0, n));
+            assert_eq!(one.mix(INPUT_CHANNEL_1, &[a, b]), a, "input 1, frame {n}");
+            assert_eq!(two.mix(INPUT_CHANNEL_2, &[a, b]), b, "input 2, frame {n}");
+        }
+        // A wider device: Input 2 is still the second channel.
+        let mut wide = InputChannelMix::new(SR);
+        assert_eq!(wide.mix(INPUT_CHANNEL_2, &[0.1, 0.2, 0.3, 0.4]), 0.2);
+    }
+
+    /// A 1-channel device is untouched in every mode; Input 2 there means input 1.
+    #[test]
+    fn a_mono_device_is_untouched() {
+        for mode in [INPUT_CHANNEL_AUTO, INPUT_CHANNEL_1, INPUT_CHANNEL_2] {
+            let mut mix = InputChannelMix::new(SR);
+            for n in 0..1000 {
+                let v = tone(220.0, n);
+                assert_eq!(mix.mix(mode, &[v]), v, "mode {mode}, frame {n}");
+            }
+        }
+    }
+
+    /// Changing the choice mid-stream glides from one input to the other instead of stepping
+    /// between their levels (a click in the monitor and the take).
+    #[test]
+    fn switching_inputs_glides_instead_of_stepping() {
+        let mut mix = InputChannelMix::new(SR);
+        let mut prev = mix.mix(INPUT_CHANNEL_1, &[0.5, -0.5]);
+        assert_eq!(prev, 0.5);
+        let mut biggest = 0.0f32;
+        for _ in 0..SR as usize / 10 {
+            let y = mix.mix(INPUT_CHANNEL_2, &[0.5, -0.5]);
+            biggest = biggest.max((y - prev).abs());
+            prev = y;
+        }
+        assert!(biggest < 0.01, "a {biggest} step on the switch");
+        assert!((prev + 0.5).abs() < 1e-3, "settled at {prev}, not input 2");
     }
 
     const LIMIT: u32 = 20;

@@ -45,7 +45,9 @@ use objc2_core_audio_types::{
 };
 
 use crate::aec::Aec;
-use crate::capture_layout::{downmix_to_mono, CaptureLayout, DeadCaptureStreak, MAX_CAPTURE_CH};
+use crate::capture_layout::{
+    downmix_to_mono, CaptureLayout, DeadCaptureStreak, InputChannelMix, MAX_CAPTURE_CH,
+};
 use crate::device::InputCell;
 use crate::dsp::capture_cleanup::HighPass;
 use crate::live::RtCell;
@@ -219,6 +221,9 @@ struct InCtx {
     /// [`DuplexRateCheck::BypassAec`]). The mic passes through the same high-pass + gain path;
     /// all far-end ring/`ref_sync` work is skipped (`output_cb` leaves the ring unpumped).
     aec_bypass: bool,
+    /// The mic's channels to the ONE mono signal the AEC and everything after it hear, under the
+    /// input cell's channel mode (`ve_set_input_channel`). Built for the negotiated rate.
+    mix: InputChannelMix,
     /// Mono AEC scratch (mic-in / far-end / clean-out), `MAX_FRAMES` each.
     mic_mono: Vec<f32>,
     far_mono: Vec<f32>,
@@ -434,6 +439,7 @@ impl Vpio {
                 ref_cons,
                 ref_sync: RefRingSync::new(baseline_cap(io_round_trip, MAX_FRAMES)),
                 aec_bypass: false,
+                mix: InputChannelMix::new(VPIO_RATE),
                 mic_mono: vec![0.0; MAX_FRAMES],
                 far_mono: vec![0.0; MAX_FRAMES],
                 clean_mono: vec![0.0; MAX_FRAMES],
@@ -501,6 +507,7 @@ impl Vpio {
                 .map(|a| Layout::from(&a))
                 .unwrap_or(placeholder);
             in_ctx.layout = in_layout;
+            in_ctx.mix = InputChannelMix::new(in_layout.rate);
             // Dead cycles count the mic element's own frames, at the rate it negotiated.
             in_ctx.dead =
                 DeadCaptureStreak::new(INPUT_LOST_STREAK, input_warmup_frames(in_layout.rate));
@@ -826,8 +833,17 @@ unsafe extern "C-unwind" fn input_cb(
         // Reset only on a real, non-empty capture (a healthy mic delivers frames every cycle).
         ctx.dead.on_capture();
 
-        // Downmix the RAW mic to mono. `n` = captured frames.
-        let n = downmix_to_mono(cap, &got[..nbuf], frames, &mut ctx.mic_mono[..frames]);
+        // Mix the RAW mic down to its mono signal (the chosen input, or Auto's level-weighted mix).
+        // `n` = captured frames.
+        let mode = ctx.input.channel_mode();
+        let n = downmix_to_mono(
+            cap,
+            &got[..nbuf],
+            frames,
+            &mut ctx.mic_mono[..frames],
+            &mut ctx.mix,
+            mode,
+        );
         if ctx.aec_bypass {
             // AEC bypassed (mismatched element rates): no far-end pairing exists, the ref
             // ring is unpumped. The raw mic takes the same high-pass + gain path below.
