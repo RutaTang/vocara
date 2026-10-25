@@ -368,9 +368,34 @@ class Persistence {
   /// as the pull run took to finish, and every save, import and take stalled
   /// behind it. Neither order deadlocks — the engine never takes [writeGate],
   /// and nothing holding the gate waits on a pump.
-  Future<RepairReport> repairLibrary() {
+  ///
+  /// The pool's content check ([AssetStore.verifyPoolIntegrity]) runs after
+  /// both, outside them: it only reads, and inside the gate a re-hash of the
+  /// whole pool held every save — the one that arms REC included — for as long
+  /// as it took, minutes for a large library.
+  Future<RepairReport> repairLibrary() async {
     final sync = _sync;
-    return sync == null ? _repairPass() : sync.runExclusive(_repairPass);
+    final repaired = await (sync == null
+        ? _repairPass()
+        : sync.runExclusive(_repairPass));
+    // After the sweeps, so files on their way out are not re-hashed; one a
+    // later sweep takes mid-pass reads as unreadable, not corrupt. Reports
+    // only — see AssetStore.verifyPoolIntegrity for why nothing is touched.
+    final corrupt = await assets.verifyPoolIntegrity();
+    for (final path in corrupt) {
+      DiagnosticsLog.instance.log(
+        'persistence',
+        'pooled file does not match its content address: $path',
+      );
+    }
+    final report = RepairReport(
+      violationsFound: repaired.violationsFound,
+      violationsRepaired: repaired.violationsRepaired,
+      assetsSwept: repaired.assetsSwept,
+      corruptPoolFiles: corrupt.length,
+    );
+    DiagnosticsLog.instance.log('persistence', 'repairLibrary: $report');
+    return report;
   }
 
   Future<RepairReport> _repairPass() => writeGate.exclusive(() async {
@@ -389,23 +414,11 @@ class Persistence {
     final repaired = (found.length - unrepaired.length).clamp(0, found.length);
     final tombstoned = await assets.sweepUnreferenced();
     final orphaned = await assets.sweepOrphanPoolFiles();
-    // After the sweeps, so files on their way out are not re-hashed. Reports
-    // only — see AssetStore.verifyPoolIntegrity for why nothing is touched.
-    final corrupt = await assets.verifyPoolIntegrity();
-    for (final path in corrupt) {
-      DiagnosticsLog.instance.log(
-        'persistence',
-        'pooled file does not match its content address: $path',
-      );
-    }
-    final report = RepairReport(
+    return RepairReport(
       violationsFound: found.length,
       violationsRepaired: repaired,
       assetsSwept: tombstoned + orphaned,
-      corruptPoolFiles: corrupt.length,
     );
-    DiagnosticsLog.instance.log('persistence', 'repairLibrary: $report');
-    return report;
   });
 
   /// Compacts the oplog: for every (entity_table, entity_id), keeps only the
