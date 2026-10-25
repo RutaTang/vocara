@@ -21,11 +21,35 @@ import 'package:vocara/data/services/audio_dsp.dart';
 import 'package:vocara/data/services/waveform_service.dart';
 import 'package:vocara/data/sync/hlc.dart';
 import 'package:vocara/data/sync/oplog_drain.dart';
+import 'package:vocara/data/sync/sync_row.dart';
 import 'package:vocara/data/sync/sync_state_store.dart';
+import 'package:vocara/data/sync/sync_transport.dart';
 import 'package:vocara/domain/models/audio_track.dart';
 import 'package:vocara/domain/models/song_practice.dart';
 import 'package:vocara/utils/id.dart';
 import 'package:vocara/utils/result.dart';
+
+import 'support/fake_sync_transport.dart';
+
+/// Holds a pull run between two pages: fetch number [pauseAfter] + 1 signals
+/// [paused] and waits on [resume] before serving its page.
+class _PausingTransport extends FakeSyncTransport {
+  _PausingTransport(super.cloud);
+
+  int? pauseAfter;
+  final paused = Completer<void>();
+  final resume = Completer<void>();
+
+  @override
+  Future<FetchPage> fetchChanges(String? sinceToken) async {
+    if (pauseAfter != null && fetchCalls == pauseAfter) {
+      pauseAfter = null;
+      paused.complete();
+      await resume.future;
+    }
+    return super.fetchChanges(sinceToken);
+  }
+}
 
 void main() {
   late Directory root;
@@ -317,6 +341,106 @@ void main() {
     expect(events, ['imported', 'save-committed', 'repair-done']);
     // Once the repair does run, the committed clip row references the asset.
     expect(await assetLive(assetId!), isTrue);
+  });
+
+  test('repairLibrary started between two pages of a pull run waits for the '
+      'run, so it never repairs a half-delivered aggregate', () async {
+    final persistence = Persistence.memory();
+    final transport = _PausingTransport(FakeCloud())..pageSize = 1;
+    persistence.attachSync(transport);
+    addTearDown(() async {
+      persistence.sync!.dispose();
+      await persistence.db.close();
+      final dir = persistence.assets.root;
+      if (await dir.exists()) await dir.delete(recursive: true);
+    });
+    final peer = 'PEER'.padRight(26, '0');
+    final t = DateTime.now().millisecondsSinceEpoch - 100000;
+    Map<String, Object?> cols(int wall, {required bool live}) => {
+      'created_at': t,
+      'updated_at': wall,
+      'deleted_at': live ? null : wall,
+      'hlc_wall': wall,
+      'hlc_ctr': 0,
+      'hlc_node': peer,
+      'hlc_packed': Hlc(wallMs: wall, counter: 0, node: peer).packed,
+      'schema_v': 1,
+    };
+    final practiceId = newId();
+    final interpId = newId();
+    SyncRow practice(int wall, {required bool live}) => SyncRow(
+      table: 'practices',
+      fields: {
+        'id': practiceId,
+        'title': 'song',
+        'timeline_duration_ms': 0,
+        'master_volume': 1.0,
+        'active_interpretation_id': null,
+        'separation_asset_id': null,
+        'reverb_json': null,
+        'lyrics_json': null,
+        ...cols(wall, live: live),
+      },
+    );
+    SyncRow interp(int wall, {required bool live}) => SyncRow(
+      table: 'interpretations',
+      fields: {
+        'id': interpId,
+        'practice_id': practiceId,
+        'name': 'take',
+        'order_index': 0,
+        ...cols(wall, live: live),
+      },
+    );
+    Future<Object?> interpDeletedAt() async =>
+        (await persistence.db
+                .customSelect(
+                  'SELECT deleted_at AS d FROM interpretations WHERE id = ?',
+                  variables: [Variable.withString(interpId)],
+                )
+                .getSingle())
+            .data['d'];
+
+    // Shared history: the practice and its interpretation, then deleted.
+    final cloud = transport.cloud;
+    cloud.accept(practice(t + 1, live: true));
+    cloud.accept(interp(t + 2, live: true));
+    cloud.accept(practice(t + 3, live: false));
+    cloud.accept(interp(t + 4, live: false));
+    expect((await persistence.sync!.pumpPull()).failed, isFalse);
+
+    // A peer revives both. The interpretation's revive lands on one page,
+    // the practice's on the next — between them the store holds a live
+    // interpretation under a tombstoned practice, which is pending, not
+    // broken.
+    cloud.accept(interp(t + 5, live: true));
+    cloud.accept(practice(t + 6, live: true));
+    final events = <String>[];
+    transport.pauseAfter = transport.fetchCalls + 1;
+    final pull = persistence.sync!.pumpPull().whenComplete(
+      () => events.add('pull-done'),
+    );
+    await transport.paused.future;
+    expect(await interpDeletedAt(), isNull, reason: 'page 1 landed');
+
+    final repair = persistence.repairLibrary().whenComplete(
+      () => events.add('repair-done'),
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 25));
+    expect(events, isEmpty, reason: 'the repair must wait for the run');
+
+    transport.resume.complete();
+    expect((await pull).failed, isFalse);
+    await repair;
+    expect(events, ['pull-done', 'repair-done']);
+    expect(
+      await interpDeletedAt(),
+      isNull,
+      reason:
+          'the revived interpretation must not be tombstoned on a verdict '
+          'about a half-delivered aggregate',
+    );
+    expect(await persistence.db.select(persistence.db.oplog).get(), isEmpty);
   });
 
   test('device node id survives restarts', () async {

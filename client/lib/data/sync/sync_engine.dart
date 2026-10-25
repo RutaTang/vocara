@@ -240,6 +240,13 @@ class SyncEngine {
     return run;
   }
 
+  /// Runs [op] in the same serial section as [pumpPush] and [pumpPull], so it
+  /// can never interleave with a pull run's pages. For maintenance that
+  /// judges the whole store — Persistence.repairLibrary's integrity pass —
+  /// which must not see a run's half-delivered aggregate (see [pumpPull] for
+  /// why repairing one manufactures intent). [op] must not pump this engine.
+  Future<T> runExclusive<T>(Future<T> Function() op) => _exclusive(op);
+
   // --- Automatic mode (production wiring; optional) -------------------------
 
   /// Subscribes the debounced push to oplog inserts. Drift defers table-update
