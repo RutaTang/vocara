@@ -5,7 +5,14 @@ import 'package:flutter/material.dart';
 import 'package:forui/forui.dart';
 import 'package:media_kit/media_kit.dart';
 
+import '../../../../data/db/asset_store.dart';
 import '../../../core/themes/studio.dart';
+
+/// Builds the media_kit [Player] behind every example clip's inline player
+/// (audio and video). Production never reassigns it: it is the seam a widget
+/// test, which cannot initialize media_kit, swaps a fake through to observe
+/// what the players are asked to do (and whether each one is disposed).
+Player Function() createExamplePlayer = Player.new;
 
 /// A compact inline audio player: a play/pause button, a scrubbable progress
 /// bar, and a time readout. Backed by a media_kit [Player] it owns and disposes.
@@ -48,11 +55,22 @@ class _TechniqueAudioPlayerState extends State<TechniqueAudioPlayer> {
   bool _dragging = false;
   double _dragValue = 0;
 
+  /// True when the clip's bytes are not on this device (the repository's
+  /// `asset://` placeholder for a missing pooled file): nothing can play it,
+  /// and media_kit would mistake the scheme for a bundled Flutter asset.
+  late final bool _unavailable = AssetStore.assetIdOf(widget.path) != null;
+
   @override
   void initState() {
     super.initState();
+    if (_unavailable) return;
+    Player? built;
     try {
-      final player = Player();
+      // Media first: its constructor resolves the URI and can throw, and a
+      // player built before it was leaked — the catch dropped the only
+      // reference, so nothing ever disposed it.
+      final media = Media(widget.path);
+      final player = built = createExamplePlayer();
       _player = player;
       _subs.add(
         player.stream.playing.listen((v) {
@@ -77,8 +95,13 @@ class _TechniqueAudioPlayerState extends State<TechniqueAudioPlayer> {
       );
       // Open paused so the duration loads up front and a scrub can seek before
       // the first play.
-      player.open(Media(widget.path), play: false);
+      player.open(media, play: false);
     } catch (_) {
+      for (final s in _subs) {
+        s.cancel();
+      }
+      _subs.clear();
+      built?.dispose();
       _player = null;
     }
     widget.seekSignal?.addListener(_onSeekSignal);
@@ -133,6 +156,7 @@ class _TechniqueAudioPlayerState extends State<TechniqueAudioPlayer> {
 
   @override
   Widget build(BuildContext context) {
+    if (_unavailable) return const _UnavailableClip();
     final total = _duration.inMilliseconds;
     final pos = _dragging
         ? (_dragValue * total).round()
@@ -186,6 +210,43 @@ class _TechniqueAudioPlayerState extends State<TechniqueAudioPlayer> {
     );
   }
 }
+
+/// The player row for a clip whose file is not on this device: same footprint
+/// as the live player, with nothing to press.
+class _UnavailableClip extends StatelessWidget {
+  const _UnavailableClip();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 48,
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      decoration: BoxDecoration(
+        color: Studio.inset,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: Studio.border),
+      ),
+      child: const Row(
+        children: [
+          Icon(FIcons.fileX, size: 15, color: Studio.textFaint),
+          SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              unavailableClipMessage,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(color: Studio.textFaint, fontSize: 12),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// What an example whose file is missing on this device says instead of
+/// playing (shared by the audio and video players).
+const String unavailableClipMessage = "This clip's file isn't on this device.";
 
 /// A small coral play/pause disc.
 class _RoundIconButton extends StatelessWidget {
