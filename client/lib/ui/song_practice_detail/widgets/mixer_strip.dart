@@ -132,8 +132,12 @@ class MixerStrip extends StatelessWidget {
           color: Studio.border,
         ),
         StableSubtree<_MasterChannel>(
-          // Its callbacks are the mixer's own methods.
-          sameAs: (next, shown) => next.value == shown.value,
+          // Its callbacks are the mixer's own methods: their tear-offs compare
+          // equal only for the same mixer, which pins it.
+          sameAs: (next, shown) =>
+              next.value == shown.value &&
+              next.onVolume == shown.onVolume &&
+              next.onVolumeCommit == shown.onVolumeCommit,
           child: _MasterChannel(
             value: vm.mixer.masterVolume,
             onVolume: vm.mixer.setMasterVolumeLive,

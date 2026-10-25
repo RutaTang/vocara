@@ -254,6 +254,48 @@ class _StudioFaderState extends State<StudioFader> {
   }
 }
 
+/// A fader's level in dB ("-14.0 dB"), right-aligned in the fixed width
+/// beside a horizontal fader, so the fader keeps its length as the level
+/// moves. One line always: in 40 px, every level below -10 dB wrapped onto two
+/// ("-14.0" over "dB") in a font as wide as the system one, and a wider font
+/// still scales the reading down rather than wrap it.
+class FaderDbReadout extends StatelessWidget {
+  const FaderDbReadout(this.volume, {super.key});
+
+  /// The fader's linear gain.
+  final double volume;
+
+  static String format(double v) {
+    if (v <= 0.0001) return '-∞';
+    final db = 20 * math.log(v) / math.ln10;
+    return db >= -0.05 ? '0.0' : db.toStringAsFixed(1);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 46,
+      child: Align(
+        alignment: Alignment.centerRight,
+        heightFactor: 1,
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Text(
+            '${format(volume)} dB',
+            maxLines: 1,
+            style: const TextStyle(
+              color: Studio.textSecondary,
+              fontSize: 10,
+              fontWeight: FontWeight.w600,
+              fontFeatures: [FontFeature.tabularFigures()],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// A horizontal drag that wins its pointer on contact (see [StudioFader]).
 class _ClaimingHorizontalDrag extends HorizontalDragGestureRecognizer {
   _ClaimingHorizontalDrag({super.supportedDevices});

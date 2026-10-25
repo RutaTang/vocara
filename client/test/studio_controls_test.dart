@@ -1,6 +1,7 @@
 import 'package:flutter/gestures.dart'
     show PointerDeviceKind, kDoubleTapTimeout;
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show RenderParagraph;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vocara/ui/core/widgets/studio_controls.dart';
 
@@ -152,6 +153,45 @@ void main() {
       await tester.pump();
       expect(changes.single, closeTo(0.25, 0.01));
       expect(ends, 1);
+    });
+  });
+
+  group('FaderDbReadout', () {
+    // In its 40 px box every level below -10 dB wrapped onto two lines
+    // ("-14.0" over "dB") in a font as wide as the system one; the test font,
+    // a square em per glyph, wrapped it onto three and overflowed the lane
+    // headers it sits in.
+    testWidgets('reads on one line, inside its width, at any level', (
+      tester,
+    ) async {
+      for (final (volume, text) in [
+        (1.0, '0.0 dB'),
+        (0.2, '-14.0 dB'),
+        (0.00011, '-79.2 dB'),
+        (0.0, '-∞ dB'),
+      ]) {
+        await tester.pumpWidget(
+          Directionality(
+            textDirection: TextDirection.ltr,
+            child: Center(child: FaderDbReadout(volume)),
+          ),
+        );
+        final line = find.text(text);
+        expect(line, findsOneWidget);
+        final paragraph = tester.renderObject<RenderParagraph>(line);
+        final oneLine = TextPainter(
+          text: paragraph.text,
+          textDirection: TextDirection.ltr,
+          maxLines: 1,
+        )..layout();
+        addTearDown(oneLine.dispose);
+        expect(paragraph.size.height, oneLine.height, reason: text);
+        final box = tester.getRect(find.byType(FaderDbReadout));
+        final drawn = tester.getRect(line);
+        expect(box.width, 46);
+        expect(drawn.left, greaterThanOrEqualTo(box.left - 0.01), reason: text);
+        expect(drawn.right, closeTo(box.right, 0.01), reason: text);
+      }
     });
   });
 }

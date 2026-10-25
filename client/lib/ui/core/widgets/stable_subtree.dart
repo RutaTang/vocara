@@ -18,6 +18,13 @@ import 'package:flutter/widgets.dart';
 class StableSubtree<T extends Widget> extends StatefulWidget {
   const StableSubtree({required this.child, required this.sameAs, super.key});
 
+  /// Turns keeping off everywhere: every subtree shows the child it is
+  /// handed. The oracle for tests that check a kept screen shows exactly
+  /// what a freshly built one does — the only guard a comparator that misses
+  /// a value has (counting rebuilds can't see what is shown).
+  @visibleForTesting
+  static bool debugNeverKeep = false;
+
   final T child;
 
   /// Whether [next] shows exactly what [shown], the child on screen, does.
@@ -30,12 +37,30 @@ class StableSubtree<T extends Widget> extends StatefulWidget {
 class _StableSubtreeState<T extends Widget> extends State<StableSubtree<T>> {
   late T _shown = widget.child;
 
+  /// A hot reload changed code [StableSubtree.sameAs] doesn't look at (a
+  /// callback, a label): the next child is adopted whatever it says.
+  bool _reassembled = false;
+
   @override
-  void didUpdateWidget(StableSubtree<T> old) {
-    super.didUpdateWidget(old);
-    if (!widget.sameAs(widget.child, _shown)) _shown = widget.child;
+  void reassemble() {
+    super.reassemble();
+    _reassembled = true;
   }
 
   @override
-  Widget build(BuildContext context) => _shown;
+  void didUpdateWidget(StableSubtree<T> old) {
+    super.didUpdateWidget(old);
+    if (_reassembled ||
+        StableSubtree.debugNeverKeep ||
+        !widget.sameAs(widget.child, _shown)) {
+      _shown = widget.child;
+    }
+    _reassembled = false;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (StableSubtree.debugNeverKeep) _shown = widget.child;
+    return _shown;
+  }
 }

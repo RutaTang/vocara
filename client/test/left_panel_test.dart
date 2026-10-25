@@ -509,6 +509,40 @@ void main() {
       expect(vm.fakeMixer.trackBusRoutes, [('t1', 'a')]);
     });
 
+    // A bus name has no length cap, and the chip sat after a Spacer with no
+    // bound: a long name ran the chip past the inspector's edge.
+    const long = 'A return bus with a name well past the chip';
+
+    void expectInsidePanel(WidgetTester tester) {
+      expect(tester.takeException(), isNull);
+      final panel = tester.getRect(find.byType(LeftPanel));
+      expect(tester.getRect(find.text(long)).right, lessThan(panel.right));
+    }
+
+    testWidgets("a long bus name stays inside a take's OUTPUT row", (
+      tester,
+    ) async {
+      await pump(
+        tester,
+        track: _vocal(busId: 'a'),
+        buses: [_bus('a', long)],
+      );
+      expectInsidePanel(tester);
+    });
+
+    testWidgets("a long bus name stays inside a bus's OUTPUT row", (
+      tester,
+    ) async {
+      final routed = FxBus(
+        id: 'b',
+        name: 'Delay',
+        fx: TrackFx.flat(),
+        outputBusId: 'a',
+      );
+      await pump(tester, bus: routed, buses: [_bus('a', long), routed]);
+      expectInsidePanel(tester);
+    });
+
     testWidgets("a bus's own output never offers itself", (tester) async {
       await pump(
         tester,

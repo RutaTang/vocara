@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:math' as math;
 
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_selector/file_selector.dart' show XTypeGroup, openFiles;
@@ -1339,12 +1338,6 @@ class _MasterRow extends StatelessWidget {
 
   final SongPracticeDetailViewModel vm;
 
-  static String _formatDb(double v) {
-    if (v <= 0.0001) return '-∞';
-    final db = 20 * math.log(v) / math.ln10;
-    return db >= -0.05 ? '0.0' : db.toStringAsFixed(1);
-  }
-
   @override
   Widget build(BuildContext context) {
     final vol = vm.mixer.masterVolume;
@@ -1477,19 +1470,7 @@ class _MasterHeaderStrip extends StatelessWidget {
                         ),
                       ),
                       const SizedBox(width: 8),
-                      SizedBox(
-                        width: 40,
-                        child: Text(
-                          '${_MasterRow._formatDb(volume)} dB',
-                          textAlign: TextAlign.right,
-                          style: const TextStyle(
-                            color: Studio.textSecondary,
-                            fontSize: 10,
-                            fontWeight: FontWeight.w600,
-                            fontFeatures: [FontFeature.tabularFigures()],
-                          ),
-                        ),
-                      ),
+                      FaderDbReadout(volume),
                     ],
                   ),
                 ],
@@ -1567,12 +1548,6 @@ class _BusRow extends StatelessWidget {
 
   final SongPracticeDetailViewModel vm;
   final FxBus bus;
-
-  static String _formatDb(double v) {
-    if (v <= 0.0001) return '-∞';
-    final db = 20 * math.log(v) / math.ln10;
-    return db >= -0.05 ? '0.0' : db.toStringAsFixed(1);
-  }
 
   void _showMenu(BuildContext context, Offset position) {
     showBusContextMenu(
@@ -1691,21 +1666,7 @@ class _BusRow extends StatelessWidget {
                                     ),
                                   ),
                                   const SizedBox(width: 8),
-                                  SizedBox(
-                                    width: 40,
-                                    child: Text(
-                                      '${_formatDb(bus.volume)} dB',
-                                      textAlign: TextAlign.right,
-                                      style: const TextStyle(
-                                        color: Studio.textSecondary,
-                                        fontSize: 10,
-                                        fontWeight: FontWeight.w600,
-                                        fontFeatures: [
-                                          FontFeature.tabularFigures(),
-                                        ],
-                                      ),
-                                    ),
-                                  ),
+                                  FaderDbReadout(bus.volume),
                                 ],
                               ),
                             ],

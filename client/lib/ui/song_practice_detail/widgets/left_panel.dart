@@ -1,5 +1,3 @@
-import 'dart:math' as math;
-
 import 'package:flutter/material.dart';
 import 'package:forui/forui.dart' show FIcons;
 
@@ -276,12 +274,6 @@ class _BusChannelFooter extends StatelessWidget {
   final SongPracticeDetailViewModel vm;
   final FxBus bus;
 
-  static String _formatDb(double v) {
-    if (v <= 0.0001) return '-∞';
-    final db = 20 * math.log(v) / math.ln10;
-    return db >= -0.05 ? '0.0' : db.toStringAsFixed(1);
-  }
-
   @override
   Widget build(BuildContext context) {
     final buses = vm.mixer.fxBuses;
@@ -316,55 +308,63 @@ class _BusChannelFooter extends StatelessWidget {
             children: [
               const _StripLabel('OUTPUT'),
               const Spacer(),
-              MouseRegion(
-                cursor: SystemMouseCursors.click,
-                child: Builder(
-                  builder: (anchor) => GestureDetector(
-                    // The chip's own context: the footer's anchored the menu
-                    // below the whole footer instead of under the chip.
-                    onTap: () =>
-                        showStudioMenu(anchor, menuAnchorBelow(anchor), [
-                          StudioMenuItem(
-                            label: 'Stereo Out',
-                            selected: bus.outputBusId == null,
-                            onTap: () => vm.mixer.setBusOutput(bus.id, null),
-                          ),
-                          for (final b in buses)
-                            if (b.id != bus.id)
-                              StudioMenuItem(
-                                label: b.name,
-                                selected: bus.outputBusId == b.id,
-                                onTap: () =>
-                                    vm.mixer.setBusOutput(bus.id, b.id),
-                              ),
-                        ], width: 180),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 9,
-                        vertical: 5,
-                      ),
-                      decoration: BoxDecoration(
-                        color: Studio.inset,
-                        borderRadius: BorderRadius.circular(6),
-                        border: Border.all(color: Studio.border),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(
-                            dest,
-                            style: const TextStyle(
-                              color: Studio.textSecondary,
-                              fontSize: 11,
+              // Bounded by the row: a long bus name ellipsizes in the chip
+              // instead of running past the inspector's edge.
+              Flexible(
+                child: MouseRegion(
+                  cursor: SystemMouseCursors.click,
+                  child: Builder(
+                    builder: (anchor) => GestureDetector(
+                      // The chip's own context: the footer's anchored the menu
+                      // below the whole footer instead of under the chip.
+                      onTap: () =>
+                          showStudioMenu(anchor, menuAnchorBelow(anchor), [
+                            StudioMenuItem(
+                              label: 'Stereo Out',
+                              selected: bus.outputBusId == null,
+                              onTap: () => vm.mixer.setBusOutput(bus.id, null),
                             ),
-                          ),
-                          const SizedBox(width: 4),
-                          const Icon(
-                            Icons.expand_more,
-                            size: 14,
-                            color: Studio.textFaint,
-                          ),
-                        ],
+                            for (final b in buses)
+                              if (b.id != bus.id)
+                                StudioMenuItem(
+                                  label: b.name,
+                                  selected: bus.outputBusId == b.id,
+                                  onTap: () =>
+                                      vm.mixer.setBusOutput(bus.id, b.id),
+                                ),
+                          ], width: 180),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 9,
+                          vertical: 5,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Studio.inset,
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(color: Studio.border),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Flexible(
+                              child: Text(
+                                dest,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: Studio.textSecondary,
+                                  fontSize: 11,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 4),
+                            const Icon(
+                              Icons.expand_more,
+                              size: 14,
+                              color: Studio.textFaint,
+                            ),
+                          ],
+                        ),
                       ),
                     ),
                   ),
@@ -410,19 +410,7 @@ class _BusChannelFooter extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 8),
-              SizedBox(
-                width: 40,
-                child: Text(
-                  '${_formatDb(bus.volume)} dB',
-                  textAlign: TextAlign.right,
-                  style: const TextStyle(
-                    color: Studio.textSecondary,
-                    fontSize: 10,
-                    fontWeight: FontWeight.w600,
-                    fontFeatures: [FontFeature.tabularFigures()],
-                  ),
-                ),
-              ),
+              FaderDbReadout(bus.volume),
             ],
           ),
         ],
@@ -545,12 +533,6 @@ class _TrackChannelFooter extends StatelessWidget {
   final AudioTrack track;
   final bool showRouting;
 
-  static String _formatDb(double v) {
-    if (v <= 0.0001) return '-∞';
-    final db = 20 * math.log(v) / math.ln10;
-    return db >= -0.05 ? '0.0' : db.toStringAsFixed(1);
-  }
-
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -578,7 +560,9 @@ class _TrackChannelFooter extends StatelessWidget {
               children: [
                 const _StripLabel('OUTPUT'),
                 const Spacer(),
-                _OutputChip(vm: vm, track: track),
+                Flexible(
+                  child: _OutputChip(vm: vm, track: track),
+                ),
               ],
             ),
             const SizedBox(height: 10),
@@ -620,19 +604,7 @@ class _TrackChannelFooter extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 8),
-              SizedBox(
-                width: 40,
-                child: Text(
-                  '${_formatDb(track.volume)} dB',
-                  textAlign: TextAlign.right,
-                  style: const TextStyle(
-                    color: Studio.textSecondary,
-                    fontSize: 10,
-                    fontWeight: FontWeight.w600,
-                    fontFeatures: [FontFeature.tabularFigures()],
-                  ),
-                ),
-              ),
+              FaderDbReadout(track.volume),
             ],
           ),
         ],
@@ -882,11 +854,15 @@ class _OutputChip extends StatelessWidget {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Text(
-                dest,
-                style: const TextStyle(
-                  color: Studio.textSecondary,
-                  fontSize: 11,
+              Flexible(
+                child: Text(
+                  dest,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Studio.textSecondary,
+                    fontSize: 11,
+                  ),
                 ),
               ),
               const SizedBox(width: 4),

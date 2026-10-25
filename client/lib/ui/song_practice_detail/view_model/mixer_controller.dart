@@ -922,11 +922,17 @@ class MixerController extends ChangeNotifier {
   /// over 12 three-clip lanes, ~0.5 ms in a debug build.
   final Map<String?, ({List<Object?> key, List<double> peaks})> _envelopes = {};
 
+  /// Turns the envelope cache off (every read folds afresh): the oracle for
+  /// tests that check the cache returns what a fresh fold would.
+  @visibleForTesting
+  static bool debugNoEnvelopeCache = false;
+
   /// [fold]'s envelope for [busId], refolded only when what it reads changed:
   /// the timeline length, the master gain, the A/B backing, the buses (solo
   /// and routing), every track the mix holds — compared by identity, as any
   /// edit replaces it — and the take being recorded.
   List<double> _envelope(String? busId, List<double> Function() fold) {
+    if (debugNoEnvelopeCache) return List<double>.unmodifiable(fold());
     final recording = _isRecording();
     final key = <Object?>[
       _practiceOf()?.timelineDurationMs,
