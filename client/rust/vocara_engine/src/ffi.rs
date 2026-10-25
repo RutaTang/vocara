@@ -170,10 +170,11 @@ pub struct VeEngine {
     bus_gr_meters: Vec<Option<Arc<AtomicU32>>>,
     /// Streaming-track feeders for the LIVE graph (swapped whole on commit).
     /// Pumped by [`VeEngine::ensure_feeder_thread`]'s thread every ~10 ms.
-    /// Each feeder sits behind its own mutex so one slow disk read (an
-    /// iCloud-evicted file, a spun-down USB volume) blocks only its own
-    /// track — the old single Vec ran every track's I/O under one lock,
-    /// which the commit path and the xruns getter also contended on. A pump
+    /// Each feeder sits behind its own mutex so the pump reads outside the
+    /// set's lock — the old single Vec ran every track's I/O under one lock,
+    /// which the commit path and the xruns getter also contended on. The one
+    /// pump thread still reads the tracks in turn, so a read that stalls
+    /// holds up every other track's top-up for as long as it lasts. A pump
     /// error is retried with a reopened handle for [`MAX_FEEDER_FAILS`]
     /// consecutive pumps before the feeder is dropped (one transient EIO
     /// used to permanently silence the track).
