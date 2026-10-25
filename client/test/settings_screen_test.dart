@@ -14,6 +14,7 @@ import 'package:provider/provider.dart';
 import 'package:vocara/data/db/persistence.dart';
 import 'package:vocara/data/services/app_settings_service.dart';
 import 'package:vocara/data/services/diagnostics_log.dart';
+import 'package:vocara/data/services/graph_audio_playback_service.dart';
 import 'package:vocara/data/services/local_storage_service.dart';
 import 'package:vocara/data/services/update_check_service.dart';
 import 'package:vocara/ui/settings/licenses.dart';
@@ -24,6 +25,7 @@ Future<Persistence> _pumpSettings(
   UpdateCheckService? updates,
   Future<String?> Function(String suggestedName)? pickSavePath,
   Future<String> Function()? exportDiagnostics,
+  AppSettingsService? settings,
 }) async {
   // Tall window so every settings section is on screen without scrolling.
   tester.view.physicalSize = const Size(1400, 2600);
@@ -31,10 +33,11 @@ Future<Persistence> _pumpSettings(
   addTearDown(tester.view.reset);
 
   final persistence = Persistence.memory();
-  final settings = AppSettingsService(
+  settings ??= AppSettingsService(
     storage: LocalStorageService(),
     enumerateOutputs: () => const [],
     enumerateInputs: () => const [],
+    inputChannelCount: (_) => 0,
   );
   await tester.pumpWidget(
     MultiProvider(
@@ -106,6 +109,35 @@ void main() {
     expect(find.text('Licenses'), findsOneWidget);
     expect(find.text('Repair library'), findsOneWidget);
     expect(find.text('Export diagnostics…'), findsOneWidget);
+
+    await _teardown(tester, persistence);
+  });
+
+  testWidgets('offers the input-channel choice for a 2-channel input only', (
+    tester,
+  ) async {
+    var channels = 2;
+    final settings = AppSettingsService(
+      storage: LocalStorageService(),
+      enumerateOutputs: () => const [],
+      enumerateInputs: () => const [],
+      inputChannelCount: (_) => channels,
+    );
+    final persistence = await _pumpSettings(tester, settings: settings);
+    await tester.pump(); // the screen's first device refresh lands
+
+    expect(find.text('Input channel'), findsOneWidget);
+    expect(find.text('Auto'), findsOneWidget);
+    expect(settings.inputChannel, GraphAudioPlaybackService.inputChannelAuto);
+    await tester.tap(find.text('Input 2'));
+    await tester.pump();
+    expect(settings.inputChannel, GraphAudioPlaybackService.inputChannel2);
+
+    // A mono input has nothing to choose between.
+    channels = 1;
+    settings.refreshDevices();
+    await tester.pump();
+    expect(find.text('Input channel'), findsNothing);
 
     await _teardown(tester, persistence);
   });

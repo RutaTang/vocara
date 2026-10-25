@@ -9,6 +9,7 @@ import 'package:provider/provider.dart';
 import '../../data/db/persistence.dart';
 import '../../data/services/app_settings_service.dart';
 import '../../data/services/diagnostics_log.dart';
+import '../../data/services/graph_audio_playback_service.dart';
 import '../../data/services/update_check_service.dart';
 import '../../domain/models/audio_device.dart';
 import '../../routing/navigation.dart';
@@ -151,6 +152,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   onSelect: settings.setInputDevice,
                   onRefresh: settings.refreshDevices,
                 ),
+                // Only a device with more than one input has a choice to make.
+                if (settings.inputChannelCount >= 2) ...[
+                  const SizedBox(height: 12),
+                  _InputChannelCard(
+                    mode: settings.inputChannel,
+                    onSelect: settings.setInputChannel,
+                  ),
+                ],
                 if (settings.bluetoothInOutConflict) ...[
                   const SizedBox(height: 12),
                   const _WarningBanner(
@@ -712,6 +721,96 @@ class _MonitorReverbCard extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Which input(s) of a multi-input device (an audio interface) are the voice: Auto follows the
+/// live one — a mic on either input records at full level, two live inputs blend — while Input 1
+/// or Input 2 keeps the other out (say, a guitar DI on input 2). Same chrome as the reverb card;
+/// the segmented control matches the backing-track toggle.
+class _InputChannelCard extends StatelessWidget {
+  const _InputChannelCard({required this.mode, required this.onSelect});
+
+  /// A GraphAudioPlaybackService `inputChannel*` mode.
+  final int mode;
+  final ValueChanged<int> onSelect;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Studio.surfaceRaised,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: Studio.border),
+      ),
+      padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+      child: Row(
+        children: [
+          const Icon(FIcons.mic, size: 16, color: Studio.textFaint),
+          const SizedBox(width: 12),
+          const Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Input channel',
+                  style: TextStyle(color: Studio.textSecondary, fontSize: 13),
+                ),
+                SizedBox(height: 2),
+                Text(
+                  'Auto follows whichever input you sing into.',
+                  style: TextStyle(color: Studio.textFaint, fontSize: 11),
+                ),
+              ],
+            ),
+          ),
+          Container(
+            padding: const EdgeInsets.all(2),
+            decoration: BoxDecoration(
+              color: Studio.inset,
+              borderRadius: BorderRadius.circular(7),
+              border: Border.all(color: Studio.border),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _seg('Auto', GraphAudioPlaybackService.inputChannelAuto),
+                _seg('Input 1', GraphAudioPlaybackService.inputChannel1),
+                _seg('Input 2', GraphAudioPlaybackService.inputChannel2),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _seg(String label, int value) {
+    final active = mode == value;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: () => onSelect(value),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          decoration: BoxDecoration(
+            color: active
+                ? Studio.accent.withValues(alpha: 0.18)
+                : Colors.transparent,
+            borderRadius: BorderRadius.circular(5),
+          ),
+          child: Text(
+            label,
+            style: TextStyle(
+              color: active ? Studio.accentBright : Studio.textSecondary,
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.3,
+            ),
+          ),
+        ),
       ),
     );
   }

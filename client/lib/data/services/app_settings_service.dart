@@ -13,19 +13,22 @@ import 'local_storage_service.dart';
 /// currently-active engine: enumeration is static (works with no song open), while applying a
 /// choice is forwarded to the attached engine and persisted for the next engine.
 class AppSettingsService extends ChangeNotifier {
-  /// [enumerateOutputs] / [enumerateInputs] are injectable for tests; they
-  /// default to the live CoreAudio enumeration.
+  /// [enumerateOutputs] / [enumerateInputs] / [inputChannelCount] are injectable for tests; they
+  /// default to the live CoreAudio queries.
   AppSettingsService({
     required LocalStorageService storage,
     List<AudioDevice> Function()? enumerateOutputs,
     List<AudioDevice> Function()? enumerateInputs,
+    int Function(String uid)? inputChannelCount,
   }) : _storage = storage,
        _enumerateOutputs = enumerateOutputs ?? enumerateOutputDevices,
-       _enumerateInputs = enumerateInputs ?? enumerateInputDevices;
+       _enumerateInputs = enumerateInputs ?? enumerateInputDevices,
+       _channelsOf = inputChannelCount ?? inputDeviceChannelCount;
 
   final LocalStorageService _storage;
   final List<AudioDevice> Function() _enumerateOutputs;
   final List<AudioDevice> Function() _enumerateInputs;
+  final int Function(String uid) _channelsOf;
 
   // One JSON document under the app-support `settings` collection.
   static const _collection = 'settings';
@@ -37,6 +40,7 @@ class AppSettingsService extends ChangeNotifier {
   static const _kReverbWet = 'monitorReverbWet';
   static const _kRecordGainDb = 'recordGainDb';
   static const _kMonitorGain = 'monitorGain';
+  static const _kInputChannels = 'inputChannelByUid';
 
   // Fixed monitor-reverb character; the user controls only the wet amount.
   static const _monitorReverbRoom = 0.6;
@@ -63,13 +67,25 @@ class AppSettingsService extends ChangeNotifier {
   List<AudioDevice> _inputDevices = const [];
   GraphAudioPlaybackService? _engine;
 
+  /// The input-channel choice (a [GraphAudioPlaybackService] `inputChannel*` mode) per input
+  /// device uid, '' standing for "follow the system default input". A device with no entry is on
+  /// Auto. Per device because it describes how THAT device is wired: input 2 of one interface is
+  /// not input 2 of the next.
+  final Map<String, int> _inputChannelByUid = {};
+
+  /// The uids whose choice the user made this session (see [_userChosen]): [load] adopts the
+  /// stored choice of every other device.
+  final Set<String> _inputChannelsChosen = {};
+
+  int _inputChannelCount = 0;
+
   /// The persisted keys the user has already chosen this session. [load] is
   /// fire-and-forget (the provider graph starts it and drops the future), so
   /// it can resolve at ANY moment — including after the singer has moved a
   /// fader. A field the user set is never adopted from the document:
   /// otherwise the change is reverted on screen, re-pushed to the engine, and
   /// then written back as the old value by the next [_persist], which
-  /// serializes all seven fields at once. Keyed by the same `_kXxx` constants
+  /// serializes every field at once. Keyed by the same `_kXxx` constants
   /// the document uses, so a setter and its load guard cannot drift apart.
   final Set<String> _userChosen = {};
 
@@ -113,6 +129,28 @@ class AppSettingsService extends ChangeNotifier {
     if (uid == null || uid.isEmpty) return null;
     return _byUid(_inputDevices, uid) ??
         AudioDevice(uid: uid, name: _inputDeviceName ?? '');
+  }
+
+  // The current input's key in [_inputChannelByUid].
+  String get _inputKey => _inputDeviceUid ?? '';
+
+  /// Which input(s) of the current input device the engine records and monitors: a
+  /// [GraphAudioPlaybackService] `inputChannel*` mode, Auto unless chosen for this device.
+  int get inputChannel =>
+      _inputChannelByUid[_inputKey] ??
+      GraphAudioPlaybackService.inputChannelAuto;
+
+  /// The current input device's channel count (0 = unknown) — the panel offers the input-channel
+  /// choice only from 2. Read from the device itself, so it is known with no song open and no mic
+  /// running; refreshed with the device list.
+  int get inputChannelCount => _inputChannelCount;
+
+  // Re-read the current input's channel count; true when it changed. Never notifies.
+  bool _refreshInputChannelCount() {
+    final count = _channelsOf(_inputKey);
+    if (count == _inputChannelCount) return false;
+    _inputChannelCount = count;
+    return true;
   }
 
   /// Monitor reverb amount (0..1) — how much space the singer hears on their own voice.
@@ -255,6 +293,20 @@ class AppSettingsService extends ChangeNotifier {
 
   static String? _loadedString(Object? v) => v is String ? v : null;
 
+  /// The stored per-device input-channel choices, keeping only well-formed entries (a known mode
+  /// under a string uid): one corrupt entry costs that device's choice, not the others'.
+  static Map<String, int> _loadedChannels(Object? v) {
+    if (v is! Map) return const {};
+    return {
+      for (final MapEntry(:key, :value) in v.entries)
+        if (key is String &&
+            value is int &&
+            value >= GraphAudioPlaybackService.inputChannelAuto &&
+            value <= GraphAudioPlaybackService.inputChannel2)
+          key: value,
+    };
+  }
+
   /// Non-finite is not a preference: `num.clamp` resolves NaN/Infinity through
   /// compareTo and returns the range MAXIMUM, so a corrupt `1e400` would arrive
   /// as 40 dB of input gain or a fully-open monitor rather than the default.
@@ -309,6 +361,9 @@ class AppSettingsService extends ChangeNotifier {
     if (!_userChosen.contains(_kMonitorGain)) {
       _monitorGain = _loadedDouble(doc?[_kMonitorGain], 0.0).clamp(0.0, 1.0);
     }
+    _loadedChannels(doc?[_kInputChannels]).forEach((uid, mode) {
+      if (!_inputChannelsChosen.contains(uid)) _inputChannelByUid[uid] = mode;
+    });
     // If a screen attached the engine before this load() resolved, it adopted
     // constructor defaults — re-push the now-loaded values to it.
     _applyAllToEngine();
@@ -334,6 +389,10 @@ class AppSettingsService extends ChangeNotifier {
     final changed =
         _deviceSig(outs) != _deviceSig(_outputDevices) ||
         _deviceSig(ins) != _deviceSig(_inputDevices);
+    // Polled with the lists: a device plugged in, or one whose input format changed, can change
+    // whether the panel offers the input-channel choice without any device set changing.
+    final channelsChanged = _refreshInputChannelCount();
+    if (channelsChanged && !changed) notifyListeners();
     if (changed) {
       // A persisted device coming back after an unplug: the engine fell back to
       // the system default meanwhile, so switch it back to the user's choice live.
@@ -414,6 +473,7 @@ class AppSettingsService extends ChangeNotifier {
       _monitorReverbWet,
     );
     engine.setInputGain(_dbToLinear(_recordGainDb));
+    engine.setInputChannel(inputChannel);
     _refreshActualOutput();
     _applyMonitorGain();
   }
@@ -457,6 +517,23 @@ class AppSettingsService extends ChangeNotifier {
     // default input, so a System Default pick actually switches the mic instead of leaving the
     // engine on the previously-selected device until restart.
     _engine?.setInputDevice(uid ?? '');
+    // The choice is per device: the new input runs on ITS choice (Auto unless made).
+    _engine?.setInputChannel(inputChannel);
+    _refreshInputChannelCount();
+    notifyListeners();
+    await _persist();
+  }
+
+  /// Choose which input(s) of the current input device the engine records and monitors (a
+  /// [GraphAudioPlaybackService] `inputChannel*` mode). Applies live and persists for this device.
+  Future<void> setInputChannel(int mode) async {
+    final key = _inputKey;
+    _inputChannelsChosen.add(key);
+    _inputChannelByUid[key] = mode.clamp(
+      GraphAudioPlaybackService.inputChannelAuto,
+      GraphAudioPlaybackService.inputChannel2,
+    );
+    _engine?.setInputChannel(inputChannel);
     notifyListeners();
     await _persist();
   }
@@ -511,7 +588,7 @@ class AppSettingsService extends ChangeNotifier {
   /// showing a value the disk had refused. The outcome belongs in state that
   /// the UI can render, not in a Future no call site can hold.
   Future<void> _persist() async {
-    // The document is all seven fields from memory, and while [load] is parked
+    // The document is every field from memory, and while [load] is parked
     // in its read the fields the user has not touched still hold constructor
     // defaults: writing then put those defaults on disk, and load() never
     // wrote again (a read racing the write could even adopt them). Hold the
@@ -529,6 +606,7 @@ class AppSettingsService extends ChangeNotifier {
         _kReverbWet: _monitorReverbWet,
         _kRecordGainDb: _recordGainDb,
         _kMonitorGain: _monitorGain,
+        _kInputChannels: Map.of(_inputChannelByUid),
       });
       _setPersistFailed(false);
     } catch (e) {

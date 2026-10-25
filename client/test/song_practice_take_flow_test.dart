@@ -257,6 +257,8 @@ class _FakeGraphEngine extends _FakeEngine
   @override
   void setInputGain(double gain) {}
   @override
+  void setInputChannel(int mode) {}
+  @override
   void setMonitorGain(double gain) {}
   @override
   String actualOutputDevice() => '';

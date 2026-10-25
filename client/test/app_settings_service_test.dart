@@ -82,6 +82,12 @@ class _FakeEngine extends Fake implements GraphAudioPlaybackService {
 
   @override
   void setMonitorReverb(double room, double damping, double wet) {}
+
+  /// Every input-channel mode pushed, in order.
+  final inputChannelCalls = <int>[];
+
+  @override
+  void setInputChannel(int mode) => inputChannelCalls.add(mode);
 }
 
 const _builtInOut = AudioDevice(
@@ -102,6 +108,12 @@ const _builtInMic = AudioDevice(
   isDefault: true,
   isInput: true,
 );
+const _interface = AudioDevice(
+  uid: 'usb-2in',
+  name: 'USB Audio Interface',
+  rate: 48000,
+  isInput: true,
+);
 
 void main() {
   // Mutable live device lists the injected enumerators read from, so tests can
@@ -111,15 +123,20 @@ void main() {
   late _FakeStorage storage;
   late AppSettingsService service;
 
+  // Input channel counts by device uid ('' = the system default input).
+  late Map<String, int> channels;
+
   AppSettingsService build() => AppSettingsService(
     storage: storage,
     enumerateOutputs: () => List.of(outs),
     enumerateInputs: () => List.of(ins),
+    inputChannelCount: (uid) => channels[uid] ?? 0,
   );
 
   setUp(() {
     outs = [_builtInOut];
     ins = [_builtInMic];
+    channels = {'': 1, _builtInMic.uid: 1, _interface.uid: 2};
     storage = _FakeStorage();
     service = build();
   });
@@ -495,6 +512,81 @@ void main() {
 
       expect(service.recordGainDb, 12.0);
       expect(service.monitorGain, 0.0);
+    });
+  });
+
+  group('input channel', () {
+    test('is chosen per input device and persisted with it', () async {
+      ins = [_builtInMic, _interface];
+      await service.load();
+      expect(service.inputChannel, GraphAudioPlaybackService.inputChannelAuto);
+
+      await service.setInputDevice(_interface.uid);
+      await service.setInputChannel(GraphAudioPlaybackService.inputChannel2);
+      expect(service.inputChannel, GraphAudioPlaybackService.inputChannel2);
+
+      // Another device has its own choice, Auto until made.
+      await service.setInputDevice(_builtInMic.uid);
+      expect(service.inputChannel, GraphAudioPlaybackService.inputChannelAuto);
+      await service.setInputChannel(GraphAudioPlaybackService.inputChannel1);
+
+      await service.setInputDevice(_interface.uid);
+      expect(service.inputChannel, GraphAudioPlaybackService.inputChannel2);
+      expect(storage.lastWrite?['inputChannelByUid'], {
+        _interface.uid: 2,
+        _builtInMic.uid: 1,
+      });
+
+      // A fresh start reads both back.
+      storage.doc = storage.lastWrite;
+      final restarted = build();
+      await restarted.load();
+      expect(restarted.inputChannel, GraphAudioPlaybackService.inputChannel2);
+      await restarted.setInputDevice(_builtInMic.uid);
+      expect(restarted.inputChannel, GraphAudioPlaybackService.inputChannel1);
+    });
+
+    test('reaches the engine on attach, on a change, and with the input '
+        'device', () async {
+      ins = [_builtInMic, _interface];
+      storage.doc = {
+        'inputDeviceUid': _interface.uid,
+        'inputChannelByUid': {_interface.uid: 2},
+      };
+      await service.load();
+
+      final engine = _FakeEngine();
+      service.attachEngine(engine);
+      expect(engine.inputChannelCalls, [2], reason: 'applied on attach');
+
+      await service.setInputChannel(GraphAudioPlaybackService.inputChannel1);
+      expect(engine.inputChannelCalls.last, 1, reason: 'applied on change');
+
+      // Switching the input device applies THAT device's choice.
+      await service.setInputDevice(_builtInMic.uid);
+      expect(engine.inputChannelCalls.last, 0);
+      expect(engine.inputCalls.last, _builtInMic.uid);
+    });
+
+    test('the channel count follows the current input', () async {
+      ins = [_builtInMic, _interface];
+      await service.load();
+      expect(service.inputChannelCount, 1, reason: 'the system default mic');
+      await service.setInputDevice(_interface.uid);
+      expect(service.inputChannelCount, 2);
+      // A device that changes its format is seen on the next device poll.
+      channels[_interface.uid] = 1;
+      service.refreshDevices();
+      expect(service.inputChannelCount, 1);
+    });
+
+    test('a corrupt stored choice is ignored, not applied', () async {
+      storage.doc = {
+        'inputDeviceUid': _interface.uid,
+        'inputChannelByUid': {_interface.uid: 7, _builtInMic.uid: 'two'},
+      };
+      await service.load();
+      expect(service.inputChannel, GraphAudioPlaybackService.inputChannelAuto);
     });
   });
 }
