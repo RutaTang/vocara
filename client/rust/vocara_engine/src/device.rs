@@ -256,9 +256,9 @@ pub fn enum_input_devices() -> Vec<DeviceDesc> {
     out
 }
 
-/// The input channel count of the device with `uid` (empty = the system default input), read off
-/// its current input stream format; 0 when the device is absent or unreadable. What the settings
-/// panel decides on whether to offer an input-channel choice — with no engine and no open mic.
+/// The input channel count of the device with `uid` (empty = the system default input), across
+/// all its input streams; 0 when the device is absent or unreadable. What the settings panel
+/// decides on whether to offer an input-channel choice — with no engine and no open mic.
 pub fn input_device_channels(uid: &str) -> u32 {
     let host = cpal::default_host();
     let device = if uid.is_empty() {
@@ -268,9 +268,23 @@ pub fn input_device_channels(uid: &str) -> u32 {
             .ok()
             .and_then(|mut ds| ds.find(|d| device_uid(d).as_deref() == Some(uid)))
     };
+    let Some(device) = device else {
+        return 0;
+    };
+    // The widest supported config: on macOS it counts the channels of every input stream, where
+    // the default config is the FIRST stream's format — an aggregate device or a multi-stream
+    // interface read as mono there, and the panel hid the choice.
     device
-        .and_then(|d| d.default_input_config().ok())
-        .map_or(0, |c| u32::from(c.channels()))
+        .supported_input_configs()
+        .ok()
+        .and_then(|cs| cs.map(|c| u32::from(c.channels())).max())
+        .or_else(|| {
+            device
+                .default_input_config()
+                .ok()
+                .map(|c| u32::from(c.channels()))
+        })
+        .unwrap_or(0)
 }
 
 /// Output-boundary sample-rate converter: the engine renders at `ENGINE_SR`; the device
