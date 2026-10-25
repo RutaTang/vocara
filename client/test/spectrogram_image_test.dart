@@ -218,7 +218,13 @@ void main() {
       }
 
       await showAndLeave();
-      await _collectGarbage();
+      // Up to a bounded number of collections: under load a callback still in
+      // flight can hold it past the first two, but a cache that kept it holds
+      // it through every one.
+      for (var i = 0; i < 10 && weak.target != null; i++) {
+        await _collectGarbage();
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
       expect(weak.target, isNull);
     });
   });
