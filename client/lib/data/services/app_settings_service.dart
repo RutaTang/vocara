@@ -41,6 +41,7 @@ class AppSettingsService extends ChangeNotifier {
   static const _kRecordGainDb = 'recordGainDb';
   static const _kMonitorGain = 'monitorGain';
   static const _kInputChannels = 'inputChannelByUid';
+  static const _kHeadphoneOutputs = 'headphoneOutputUids';
 
   // Fixed monitor-reverb character; the user controls only the wet amount.
   static const _monitorReverbRoom = 0.6;
@@ -77,6 +78,13 @@ class AppSettingsService extends ChangeNotifier {
   final Set<String> _inputChannelsChosen = {};
 
   int _inputChannelCount = 0;
+
+  /// The outputs the user has said only headphones play from (see [setOutputIsHeadphones]), by
+  /// uid: what no name can tell, as with wired headphones on the jack or an audio interface.
+  final Set<String> _headphoneOutputs = {};
+
+  /// The uids whose mark the user set or cleared this session: [load] adopts only the others'.
+  final Set<String> _headphoneMarksChosen = {};
 
   /// The persisted keys the user has already chosen this session. [load] is
   /// fire-and-forget (the provider graph starts it and drops the future), so
@@ -266,7 +274,10 @@ class AppSettingsService extends ChangeNotifier {
   /// The engine hard-mutes the monitor in that case anyway (its `EVENT_OUTPUT_REROUTED`); this
   /// keeps the fader honest about it. Falls back to the selection when the engine reports nothing
   /// or names a device the panel cannot enumerate — never worse than judging the selection alone.
-  bool get monitorAllowed => _isHeadphoneLike(_renderingDevice);
+  bool get monitorAllowed {
+    final d = _renderingDevice;
+    return _markedHeadphones(d) || _isHeadphoneLike(d);
+  }
 
   /// The device the engine reports rendering to when it is surely headphones, so the mic hears
   /// none of the backing; '' otherwise. The engine's echo canceller then passes the mic through
@@ -275,19 +286,46 @@ class AppSettingsService extends ChangeNotifier {
   ///  * only the device the engine REPORTS counts — never the selection, and never a device the
   ///    lists do not know;
   ///  * only a PRODUCT named as earbuds counts, not any Bluetooth device and not a headphone
-  ///    PORT ("External Headphones" is the jack, whatever is plugged in). A speaker taken for
-  ///    headphones here would leave its whole echo in every take.
+  ///    PORT ("External Headphones" is the jack, whatever is plugged in) — or an output the user
+  ///    marked as headphones-only ([setOutputIsHeadphones]). A speaker taken for headphones here
+  ///    would leave its whole echo in every take.
   String get echoFreeOutput {
     final d = _knownRendering;
-    return d != null && _isSurelyHeadphones(d) ? d.uid : '';
+    return d != null && (_markedHeadphones(d) || _isSurelyHeadphones(d))
+        ? d.uid
+        : '';
   }
 
+  /// The output a headphones mark would apply to: the device the engine renders to, else the
+  /// selection. Null when neither is known.
+  AudioDevice? get outputToMark => _renderingDevice;
+
+  /// Whether [outputToMark] can be marked as headphones: a device its name already tells as
+  /// earbuds needs no mark, and one named as a speaker never takes one — nor an Intel Mac's
+  /// "Built-in Output", ONE device for the speakers and the jack: unplugging the headphones moves
+  /// the sound to the speakers under the same uid, mark and all.
+  bool get outputMarkable {
+    final d = _renderingDevice;
+    if (d == null || _isSurelyHeadphones(d)) return false;
+    final n = d.name.toLowerCase();
+    return !_speakerNames.any(n.contains) && !n.contains('built-in output');
+  }
+
+  /// Whether the user has marked [outputToMark] as headphones.
+  bool get outputMarkedHeadphones => _markedHeadphones(_renderingDevice);
+
+  bool _markedHeadphones(AudioDevice? d) =>
+      d != null && _headphoneOutputs.contains(d.uid);
+
   /// The device to judge feedback safety on: what the engine is actually rendering to, else the
-  /// effective selection.
+  /// effective selection. Null (judged unsafe) while the device list cannot be read at all: the
+  /// selection is then no stand-in for what renders — on System Default it is the device the
+  /// default has just LEFT, and the engine's own mute does not cover a default that moves.
   AudioDevice? get _renderingDevice {
     if (_actualOutputUid.isNotEmpty) {
       final d = _knownRendering;
       if (d != null) return d;
+      if (_unlistedUnreadable) return null;
     }
     return _effective(_outputDevices, _outputDeviceUid);
   }
@@ -308,6 +346,10 @@ class AppSettingsService extends ChangeNotifier {
   /// adopting it would be [refreshDevices], whose switches (a persisted device back, the input
   /// channel) on the 1 s monitor tick reopened the mic in the middle of a take.
   AudioDevice? _unlistedOutput;
+
+  /// The fresh read for an unlisted rendering device came back empty: the list could not be read
+  /// (the engine renders to SOMETHING), so nothing is known about that device.
+  bool _unlistedUnreadable = false;
 
   /// Last uid the engine reported rendering to. CACHED, not read per access: [monitorAllowed] is
   /// read from widget builds (the MON fader's enabled state), and resolving it natively walks the
@@ -377,8 +419,8 @@ class AppSettingsService extends ChangeNotifier {
   }
 
   // Re-read the engine's rendering device into [_actualOutputUid]; true when what it is judged
-  // as changed: the device moved, or a fresh read resolved one the lists do not know (a read
-  // that missed it on an earlier tick left the selection judged meanwhile). Never notifies —
+  // as changed: the device moved, or a fresh read of one the lists do not know came out
+  // differently from the last (found it, or could read the list again). Never notifies —
   // callers that already run outside a build own that.
   bool _refreshActualOutput() {
     final actual = _engine?.actualOutputDevice() ?? '';
@@ -387,10 +429,17 @@ class AppSettingsService extends ChangeNotifier {
         _byUid(_outputDevices, actual) != null ||
         _unlistedOutput?.uid == actual;
     final unlisted = _unlistedOutput;
-    if (!known) _unlistedOutput = _byUid(_enumerateOutputs(), actual);
-    if (actual == _actualOutputUid) {
-      return !identical(unlisted, _unlistedOutput);
+    var unreadable = false;
+    if (!known) {
+      final fresh = _enumerateOutputs();
+      _unlistedOutput = _byUid(fresh, actual);
+      unreadable = fresh.isEmpty;
     }
+    final rejudged =
+        !identical(unlisted, _unlistedOutput) ||
+        unreadable != _unlistedUnreadable;
+    _unlistedUnreadable = unreadable;
+    if (actual == _actualOutputUid) return rejudged;
     _actualOutputUid = actual;
     return true;
   }
@@ -493,6 +542,12 @@ class AppSettingsService extends ChangeNotifier {
     _loadedChannels(doc?[_kInputChannels]).forEach((uid, mode) {
       if (!_inputChannelsChosen.contains(uid)) _inputChannelByUid[uid] = mode;
     });
+    final marks = doc?[_kHeadphoneOutputs];
+    if (marks is List) {
+      for (final uid in marks.whereType<String>()) {
+        if (!_headphoneMarksChosen.contains(uid)) _headphoneOutputs.add(uid);
+      }
+    }
     // If a screen attached the engine before this load() resolved, it adopted
     // constructor defaults — re-push the now-loaded values to it.
     _applyAllToEngine();
@@ -701,6 +756,24 @@ class AppSettingsService extends ChangeNotifier {
     await _persist();
   }
 
+  /// Mark the output [uid] (the [outputToMark] the panel showed — not whatever renders by the
+  /// time the tap lands) as one only headphones play from, or clear the mark. Takes on a marked
+  /// output skip echo cancelling, which pulled held in-key notes under on an echo the mic never
+  /// heard, and the monitor is allowed on it. A speaker playing from a marked output would leave
+  /// its whole echo in every take, so the mark is the user's alone to make.
+  Future<void> setOutputIsHeadphones(String uid, bool on) async {
+    if (uid.isEmpty) return;
+    _headphoneMarksChosen.add(uid);
+    if (on) {
+      _headphoneOutputs.add(uid);
+    } else {
+      _headphoneOutputs.remove(uid);
+    }
+    _applyOutputRoute();
+    notifyListeners();
+    await _persist();
+  }
+
   /// Set the record/input gain in dB and apply it live (no persist — call [commitAudioGains] on
   /// the fader's release). Use for continuous fader drags.
   void setRecordGainDbLive(double db) {
@@ -757,6 +830,7 @@ class AppSettingsService extends ChangeNotifier {
         _kRecordGainDb: _recordGainDb,
         _kMonitorGain: _monitorGain,
         _kInputChannels: Map.of(_inputChannelByUid),
+        _kHeadphoneOutputs: _headphoneOutputs.toList(),
       });
       _setPersistFailed(false);
     } catch (e) {

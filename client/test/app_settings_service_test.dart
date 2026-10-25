@@ -451,7 +451,7 @@ void main() {
       'the MON fader hears of a rendering device resolved on a later tick',
       () async {
         // The default moved to a speaker turned on since the lists were read, and the first fresh
-        // read came back without it: the selection (the earbuds) was judged meanwhile. When the
+        // read did not list it yet: the selection (the earbuds) was judged meanwhile. When the
         // next read found the speaker, the engine's gain went to 0 but the fader was never told.
         const airpods = AudioDevice(
           uid: 'airpods',
@@ -465,9 +465,9 @@ void main() {
         final engine = _FakeEngine()..actualOutput = airpods.uid;
         service.attachEngine(engine);
         service.setMonitorGainLive(0.5);
-        outs = [];
         engine.actualOutput = 'boom';
         service.reconcileMonitorSafety();
+        expect(service.monitorAllowed, isTrue);
         outs = [
           airpods,
           const AudioDevice(
@@ -488,6 +488,39 @@ void main() {
         expect(notified, 1);
       },
     );
+
+    test('a device list that cannot be read judges the monitor unsafe', () async {
+      // System Default on the earbuds; the default moves to a speaker the lists never saw, and
+      // the fresh read fails (an empty list). The engine's mute covers a pick it is not
+      // rendering, not a default that moves, so judging the selection here fed the monitor into
+      // the speaker for as long as the reads kept failing.
+      const airpods = AudioDevice(
+        uid: 'airpods',
+        name: 'AirPods Pro',
+        rate: 48000,
+        isDefault: true,
+        isBluetooth: true,
+      );
+      outs = [airpods];
+      await service.load();
+      final engine = _FakeEngine()..actualOutput = airpods.uid;
+      service.attachEngine(engine);
+      service.setMonitorGainLive(0.5);
+      var notified = 0;
+      service.addListener(() => notified++);
+      outs = [];
+      engine.actualOutput = 'boom';
+      service.reconcileMonitorSafety();
+      expect(service.monitorAllowed, isFalse);
+      expect(engine.monitorGains.last, 0.0);
+      expect(notified, 1);
+      // The read recovers without the device (one the panel can never list): back to judging
+      // the selection, as for any unenumerable device, and the fader is told.
+      outs = [airpods];
+      service.reconcileMonitorSafety();
+      expect(service.monitorAllowed, isTrue);
+      expect(notified, 2);
+    });
 
     test('a Bluetooth speaker never allows the monitor', () async {
       // macOS reports only the transport: a Bluetooth speaker taken for
@@ -804,6 +837,114 @@ void main() {
       expect(service.recordGainDb, 12.0);
       expect(service.monitorGain, 0.0);
     });
+  });
+
+  group('headphones mark', () {
+    // Wired headphones on an audio interface: no name can tell them from monitors.
+    const scarlett = AudioDevice(
+      uid: 'scarlett-out',
+      name: 'Scarlett 2i2 USB',
+      rate: 48000,
+      isDefault: true,
+    );
+    const speakers = AudioDevice(
+      uid: 'built-in-out',
+      name: 'MacBook Pro Speakers',
+      rate: 48000,
+    );
+
+    test('a marked output is echo-free and allows the monitor', () async {
+      outs = [speakers, scarlett];
+      await service.load();
+      final engine = _FakeEngine()..actualOutput = scarlett.uid;
+      service.attachEngine(engine);
+      service.setMonitorGainLive(0.5);
+      expect(service.outputMarkable, isTrue);
+      expect(service.outputToMark?.uid, scarlett.uid);
+      expect(service.monitorAllowed, isFalse);
+      expect(engine.echoFree.last, '');
+
+      await service.setOutputIsHeadphones(scarlett.uid, true);
+      expect(service.outputMarkedHeadphones, isTrue);
+      expect(service.monitorAllowed, isTrue);
+      expect(engine.monitorGains.last, 0.5);
+      expect(engine.echoFree.last, scarlett.uid);
+      expect(storage.lastWrite!['headphoneOutputUids'], [scarlett.uid]);
+
+      // The mark is the device's: the speakers taking over are judged as themselves.
+      engine.actualOutput = speakers.uid;
+      service.reconcileMonitorSafety();
+      expect(service.monitorAllowed, isFalse);
+      expect(engine.echoFree.last, '');
+
+      engine.actualOutput = scarlett.uid;
+      service.reconcileMonitorSafety();
+      expect(engine.echoFree.last, scarlett.uid);
+      await service.setOutputIsHeadphones(scarlett.uid, false);
+      expect(service.monitorAllowed, isFalse);
+      expect(engine.monitorGains.last, 0.0);
+      expect(engine.echoFree.last, '');
+      expect(storage.lastWrite!['headphoneOutputUids'], isEmpty);
+    });
+
+    test('speakers and earbuds named as such take no mark', () async {
+      outs = [
+        const AudioDevice(
+          uid: 'built-in-out',
+          name: 'MacBook Pro Speakers',
+          rate: 48000,
+          isDefault: true,
+        ),
+      ];
+      await service.load();
+      expect(service.outputMarkable, isFalse);
+      outs = [
+        const AudioDevice(
+          uid: 'airpods',
+          name: 'AirPods Pro',
+          rate: 48000,
+          isDefault: true,
+          isBluetooth: true,
+        ),
+      ];
+      service.refreshDevices();
+      expect(service.outputMarkable, isFalse);
+      // An Intel Mac's one device for the speakers and the jack: unplugging the headphones
+      // moves the sound to the speakers under the same uid, so no mark can be trusted on it.
+      outs = [
+        const AudioDevice(
+          uid: 'AppleHDAEngineOutput:1B,0,1,1:0',
+          name: 'Built-in Output',
+          rate: 48000,
+          isDefault: true,
+        ),
+      ];
+      service.refreshDevices();
+      expect(service.outputMarkable, isFalse);
+    });
+
+    test(
+      'a stored mark is loaded, but not over one changed while loading',
+      () async {
+        outs = [speakers, scarlett];
+        storage.doc = {
+          'headphoneOutputUids': [scarlett.uid, 7, 'other-out'],
+        };
+        await service.load();
+        expect(service.outputMarkedHeadphones, isTrue);
+
+        final again = build();
+        final gate = Completer<void>();
+        storage.readGate = gate;
+        final loading = again.load();
+        again.refreshDevices();
+        await again.setOutputIsHeadphones(scarlett.uid, false);
+        gate.complete();
+        await loading;
+        expect(again.outputMarkedHeadphones, isFalse);
+        expect(storage.lastWrite!['headphoneOutputUids'], ['other-out']);
+      },
+    );
   });
 
   group('input channel', () {

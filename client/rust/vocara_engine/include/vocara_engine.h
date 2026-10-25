@@ -28,7 +28,8 @@ typedef struct VePcm {
 /* Audio device descriptor (ve_enum_output_devices). Fixed-size NUL-terminated strings keep
  * it POD across the ABI. */
 typedef struct VeDeviceInfo {
-  char uid[128];        /* stable CoreAudio device UID — the persist key */
+  char uid[256];        /* stable CoreAudio device UID — the persist key (as wide as the
+                         * uid readers' buffers, so both truncate alike) */
   char name[128];       /* human-readable name */
   uint32_t rate;        /* native sample rate (0 if unknown) */
   uint8_t is_default;   /* 1 if the system default */

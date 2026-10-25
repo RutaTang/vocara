@@ -174,6 +174,44 @@ void main() {
     await _teardown(tester, persistence);
   });
 
+  testWidgets('offers the headphones mark for an output no name can tell', (
+    tester,
+  ) async {
+    var outs = const [
+      AudioDevice(uid: 'scarlett', name: 'Scarlett 2i2 USB', isDefault: true),
+    ];
+    final settings = AppSettingsService(
+      storage: LocalStorageService(),
+      enumerateOutputs: () => outs,
+      enumerateInputs: () => const [],
+      inputChannelCount: (_) => 0,
+    );
+    final persistence = await _pumpSettings(tester, settings: settings);
+    await tester.pump(); // the screen's first device refresh lands
+
+    expect(find.text('Headphones only'), findsOneWidget);
+    expect(find.textContaining('Scarlett 2i2 USB — Turn on'), findsOneWidget);
+    expect(settings.monitorAllowed, isFalse);
+    // Real file I/O behind the persist: let it land outside the fake async zone.
+    await tester.runAsync(() async {
+      await tester.tap(find.byType(Switch));
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    });
+    await tester.pump();
+    expect(settings.outputMarkedHeadphones, isTrue);
+    expect(settings.monitorAllowed, isTrue);
+
+    // The built-in speakers never take the mark.
+    outs = const [
+      AudioDevice(uid: 'spk', name: 'MacBook Pro Speakers', isDefault: true),
+    ];
+    settings.refreshDevices();
+    await tester.pump();
+    expect(find.text('Headphones only'), findsNothing);
+
+    await _teardown(tester, persistence);
+  });
+
   testWidgets('manual update check surfaces a newer release and its dialog', (
     tester,
   ) async {

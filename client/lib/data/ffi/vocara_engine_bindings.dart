@@ -2007,8 +2007,9 @@ final class VePcm extends ffi.Struct {
 /// Audio device descriptor (ve_enum_output_devices). Fixed-size NUL-terminated strings keep
 /// it POD across the ABI.
 final class VeDeviceInfo extends ffi.Struct {
-  /// stable CoreAudio device UID — the persist key
-  @ffi.Array.multi([128])
+  /// stable CoreAudio device UID — the persist key (as wide as the uid readers' buffers, so
+  /// both truncate alike)
+  @ffi.Array.multi([256])
   external ffi.Array<ffi.Char> uid;
 
   /// human-readable name

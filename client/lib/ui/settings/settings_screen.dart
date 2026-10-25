@@ -113,6 +113,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Widget build(BuildContext context) {
     final settings = context.watch<AppSettingsService>();
     final updates = context.watch<UpdateCheckService>();
+    // Only an output no name can tell takes the headphones mark: earbuds need none, speakers
+    // take none.
+    final toMark = settings.outputMarkable ? settings.outputToMark : null;
     return Scaffold(
       backgroundColor: Studio.background,
       body: Column(
@@ -141,6 +144,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   onSelect: settings.setOutputDevice,
                   onRefresh: settings.refreshDevices,
                 ),
+                if (toMark != null) ...[
+                  const SizedBox(height: 12),
+                  _HeadphonesCard(
+                    device: toMark.name,
+                    marked: settings.outputMarkedHeadphones,
+                    // The device this card shows, not whatever renders when the tap lands.
+                    onChanged: (on) =>
+                        settings.setOutputIsHeadphones(toMark.uid, on),
+                  ),
+                ],
                 const SizedBox(height: 24),
                 const _SectionLabel('Audio Input'),
                 const SizedBox(height: 10),
@@ -720,6 +733,66 @@ class _MonitorReverbCard extends StatelessWidget {
               textAlign: TextAlign.right,
               style: const TextStyle(color: Studio.textFaint, fontSize: 12),
             ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Whether only headphones play from the current output — wired ones on the jack or an audio
+/// interface, or a pair whose name does not say so. On a marked output, takes skip echo
+/// cancelling (which dulled held in-key notes on an echo the mic never heard) and the monitor is
+/// allowed. Same chrome as the input-channel card.
+class _HeadphonesCard extends StatelessWidget {
+  const _HeadphonesCard({
+    required this.device,
+    required this.marked,
+    required this.onChanged,
+  });
+
+  /// The output the mark applies to.
+  final String device;
+  final bool marked;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Studio.surfaceRaised,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: Studio.border),
+      ),
+      padding: const EdgeInsets.fromLTRB(14, 10, 10, 10),
+      child: Row(
+        children: [
+          const Icon(FIcons.headphones, size: 16, color: Studio.textFaint),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Headphones only',
+                  style: TextStyle(color: Studio.textSecondary, fontSize: 13),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  '$device — Turn on if only headphones play from this '
+                  'output: takes keep held notes full, and you can hear '
+                  'yourself. Leave off if speakers do.',
+                  style: const TextStyle(color: Studio.textFaint, fontSize: 11),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          Switch(
+            value: marked,
+            onChanged: onChanged,
+            activeTrackColor: Studio.accent,
+            inactiveTrackColor: Studio.inset,
           ),
         ],
       ),

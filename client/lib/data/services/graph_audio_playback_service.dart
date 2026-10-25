@@ -56,6 +56,10 @@ class SyncChain {
 /// Max devices read in one `ve_enum_output_devices` call (generous; real systems have < 16).
 const int _kDeviceEnumCap = 32;
 
+/// Width of every device uid read from the engine: `VeDeviceInfo.uid` and the uid readers'
+/// buffers alike, so a listed uid and a reported one truncate the same way.
+const int _kUidCap = 256;
+
 /// Read a fixed-size C char array (NUL-terminated, UTF-8) into a Dart string. Device names
 /// can be non-ASCII (e.g. a Chinese AirPlay/Continuity device), so decode as UTF-8 — and
 /// tolerate a sequence truncated by the fixed buffer.
@@ -84,7 +88,7 @@ List<AudioDevice> _enumDevices({required bool input}) {
         () {
           final info = (buf + i).ref;
           return AudioDevice(
-            uid: _charArrayToString(info.uid, 128),
+            uid: _charArrayToString(info.uid, _kUidCap),
             name: _charArrayToString(info.name, 128),
             rate: info.rate,
             isDefault: info.is_default != 0,
@@ -453,12 +457,11 @@ class GraphAudioPlaybackService implements PlaybackEngine {
     int Function(ffi.Pointer<VeEngine>, ffi.Pointer<ffi.Char>, int) read,
   ) {
     if (!_available) return '';
-    const cap = 256;
-    final buf = malloc<ffi.Char>(cap);
+    final buf = malloc<ffi.Char>(_kUidCap);
     try {
-      read(_engine, buf, cap);
+      read(_engine, buf, _kUidCap);
       final bytes = <int>[];
-      for (var i = 0; i < cap; i++) {
+      for (var i = 0; i < _kUidCap; i++) {
         final c = buf[i];
         if (c == 0) break;
         bytes.add(c & 0xff);

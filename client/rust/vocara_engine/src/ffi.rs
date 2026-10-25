@@ -671,9 +671,13 @@ fn with_engine<T>(e: *mut VeEngine, default: T, f: impl FnOnce(&mut VeEngine) ->
 
 /// Device descriptor across the FFI boundary. Fixed-size char arrays keep it POD (no Rust
 /// ownership crosses the ABI); strings are NUL-terminated and truncated to fit.
+///
+/// The uid is as wide as the host's uid buffers (`ve_actual_output_device` and the like) so a
+/// listed uid and a reported one truncate alike: at half their width, a 128-255 byte uid was
+/// never found in the lists, and could not be picked back by the uid the panel listed.
 #[repr(C)]
 pub struct VeDeviceInfo {
-    pub uid: [c_char; 128],
+    pub uid: [c_char; 256],
     pub name: [c_char; 128],
     pub rate: u32,
     pub is_default: u8,
@@ -3070,6 +3074,52 @@ fn raise_open_file_limit() {
             rl.rlim_cur = target;
             let _ = libc::setrlimit(libc::RLIMIT_NOFILE, &rl);
         }
+    }
+}
+
+#[cfg(test)]
+mod device_info_tests {
+    use super::{copy_cstr, fill_device_info, VeDeviceInfo};
+    use crate::device::DeviceDesc;
+    use std::ffi::{c_char, CStr};
+
+    fn listed_uid(uid: &str) -> String {
+        let desc = DeviceDesc {
+            uid: uid.to_string(),
+            name: "Device".to_string(),
+            rate: 48_000,
+            is_default: false,
+            is_bluetooth: false,
+        };
+        // SAFETY: VeDeviceInfo is plain old data; all-zero is a valid value.
+        let mut info: VeDeviceInfo = unsafe { std::mem::zeroed() };
+        assert_eq!(fill_device_info(&mut info, 1, &[desc], 0), 1);
+        // SAFETY: copy_cstr always NUL-terminates inside the array.
+        unsafe { CStr::from_ptr(info.uid.as_ptr()) }
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// What the host's 256-byte readers (`ve_actual_output_device`) hand back for `uid`.
+    fn reported_uid(uid: &str) -> String {
+        let mut buf = [0 as c_char; 256];
+        copy_cstr(&mut buf, uid);
+        // SAFETY: as above.
+        unsafe { CStr::from_ptr(buf.as_ptr()) }
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[test]
+    fn a_long_uid_is_listed_whole() {
+        let uid = format!("AppleUSBAudioEngine:{}:1,2", "x".repeat(170));
+        assert_eq!(listed_uid(&uid), uid);
+    }
+
+    #[test]
+    fn listed_and_reported_uids_truncate_alike() {
+        let uid = "y".repeat(400);
+        assert_eq!(listed_uid(&uid), reported_uid(&uid));
     }
 }
 
