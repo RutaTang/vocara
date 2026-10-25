@@ -84,6 +84,8 @@ pub struct DeviceHandle {
     /// on a DefaultOutput unit, which follows the system default by itself — so the device it
     /// renders to is whatever the default is NOW, not the uid resolved when it was built.
     follows_default: bool,
+    /// The stream's sample rate (Hz).
+    rate: u32,
 }
 
 impl Drop for DeviceHandle {
@@ -622,6 +624,7 @@ fn build_stream(
     Ok(DeviceHandle {
         _stream: stream,
         follows_default: false,
+        rate: config.sample_rate,
     })
 }
 
@@ -717,6 +720,11 @@ pub struct OutputBinding {
     /// fires once, on the poll that makes it [`REROUTE_ANNOUNCE_POLLS`], instead of on every
     /// poll.
     rerouted_polls: u8,
+    /// The open cpal stream's sample rate; 0 = none open.
+    cpal_rate: u32,
+    /// Consecutive reconciles that found a default-following stream stuck at a call-profile
+    /// rate (see [`CALL_PROFILE_RATE_MAX`]).
+    slow_rate_polls: u8,
 }
 
 /// Consecutive rerouted polls before [`EVENT_OUTPUT_REROUTED`] is raised. The monitor mutes on
@@ -724,6 +732,16 @@ pub struct OutputBinding {
 /// headset's output list is briefly empty while VPIO switches it to its headset profile, a
 /// transient HAL error — and every blip toasted "playback moved off your selected output".
 const REROUTE_ANNOUNCE_POLLS: u8 = 2;
+
+/// Rates (Hz) below this are a Bluetooth headset's call profile. A stream following the system
+/// default that was built at one — the output restored the moment the mic closed, before the
+/// headset had switched back — stays at it when the headset returns to its music profile:
+/// nothing reports a rate change for a stream on the default (cpal watches only a bound device),
+/// and the converter in front of the device band-limits playback to the call profile's, muffled
+/// until something rebuilt the output. Once the default device has run faster for
+/// [`REROUTE_ANNOUNCE_POLLS`] polls in a row (a profile switch passes through rates), the output
+/// is reported lost, which the host's device watch answers by reopening it at the device's rate.
+const CALL_PROFILE_RATE_MAX: u32 = 32_000;
 
 impl OutputBinding {
     /// The device the engine is ACTUALLY rendering to; empty = nothing open (or unknowable, as
@@ -798,6 +816,14 @@ impl OutputBinding {
     }
 }
 
+/// The rate (Hz) the system default output device runs at now, or None when it cannot be read.
+fn system_default_output_rate() -> Option<u32> {
+    default_output_device()?
+        .default_output_config()
+        .ok()
+        .map(|c| c.sample_rate())
+}
+
 /// The system default output device's uid, or empty when it cannot be resolved.
 fn system_default_output_uid() -> String {
     default_output_device()
@@ -831,15 +857,23 @@ pub fn reconcile_output_safety(
     binding: &Mutex<OutputBinding>,
     event: &AtomicU32,
 ) -> bool {
-    reconcile_output_safety_with(transport, binding, event, &bound_mic_serves_output)
+    reconcile_output_safety_with(
+        transport,
+        binding,
+        event,
+        &bound_mic_serves_output,
+        &system_default_output_rate,
+    )
 }
 
-/// [`reconcile_output_safety`], asking `serves_output` about a bound mic (tests pass their own).
+/// [`reconcile_output_safety`], asking `serves_output` about a bound mic and `default_rate` for
+/// the system default output's current rate (tests pass their own).
 fn reconcile_output_safety_with(
     transport: &Shared,
     binding: &Mutex<OutputBinding>,
     event: &AtomicU32,
     serves_output: &dyn Fn(&str) -> bool,
+    default_rate: &dyn Fn() -> Option<u32>,
 ) -> bool {
     let Ok(mut b) = binding.lock() else {
         return false;
@@ -857,6 +891,20 @@ fn reconcile_output_safety_with(
     };
     if b.rerouted_polls == REROUTE_ANNOUNCE_POLLS {
         event.fetch_or(EVENT_OUTPUT_REROUTED, Ordering::Release);
+    }
+    // See CALL_PROFILE_RATE_MAX. The device is asked only while a stream sits at such a rate.
+    let stuck = b.vpio == VpioOutput::Off
+        && b.cpal_follows_default
+        && b.cpal_rate > 0
+        && b.cpal_rate < CALL_PROFILE_RATE_MAX
+        && default_rate().is_some_and(|r| r > b.cpal_rate);
+    b.slow_rate_polls = if stuck {
+        b.slow_rate_polls.saturating_add(1)
+    } else {
+        0
+    };
+    if b.slow_rate_polls == REROUTE_ANNOUNCE_POLLS {
+        event.fetch_or(EVENT_OUTPUT_LOST, Ordering::Release);
     }
     rerouted
 }
@@ -1895,6 +1943,7 @@ fn build_input_stream(
     Ok(DeviceHandle {
         _stream: stream,
         follows_default: false,
+        rate: config.sample_rate,
     })
 }
 
@@ -2097,6 +2146,7 @@ fn audio_host_run(
     let begin_vpio_open = |b: &mut OutputBinding| {
         b.cpal_uid.clear();
         b.cpal_follows_default = false;
+        b.cpal_rate = 0;
         b.vpio = VpioOutput::Opening;
     };
     let rebind_output = |mutate: &dyn Fn(&mut OutputBinding)| {
@@ -2140,6 +2190,7 @@ fn audio_host_run(
                 b.requested.clear();
                 b.cpal_uid = uid.clone();
                 b.cpal_follows_default = handle.follows_default;
+                b.cpal_rate = handle.rate;
                 b.vpio = VpioOutput::Off;
             });
             let _ = ready_tx.send(Ok(uid));
@@ -2193,12 +2244,14 @@ fn audio_host_run(
                         // what is playing against what was asked for.
                         Ok((handle, resolved)) => {
                             let follows = handle.follows_default;
+                            let rate = handle.rate;
                             out_stream = Some(handle);
                             cur_out_uid = Some(uid.clone());
                             rebind_output(&|b| {
                                 b.requested = uid.clone();
                                 b.cpal_uid = resolved.clone();
                                 b.cpal_follows_default = follows;
+                                b.cpal_rate = rate;
                                 b.vpio = VpioOutput::Off;
                             });
                             let _ = reply.send(0);
@@ -2211,6 +2264,7 @@ fn audio_host_run(
                                 b.requested = uid.clone();
                                 b.cpal_uid.clear();
                                 b.cpal_follows_default = false;
+                                b.cpal_rate = 0;
                                 b.vpio = VpioOutput::Off;
                             });
                             event.fetch_or(EVENT_OUTPUT_LOST, Ordering::Release);
@@ -2277,6 +2331,7 @@ fn audio_host_run(
                                 rebind_output(&|b| {
                                     b.cpal_uid.clear();
                                     b.cpal_follows_default = false;
+                                    b.cpal_rate = 0;
                                     b.vpio = VpioOutput::Bound(bound.clone());
                                 });
                             }
@@ -2296,9 +2351,11 @@ fn audio_host_run(
                                 out_stream = built;
                                 let follows =
                                     out_stream.as_ref().is_some_and(|h| h.follows_default);
+                                let rate = out_stream.as_ref().map_or(0, |h| h.rate);
                                 rebind_output(&|b| {
                                     b.cpal_uid = resolved.clone();
                                     b.cpal_follows_default = follows;
+                                    b.cpal_rate = rate;
                                     b.vpio = VpioOutput::Off;
                                 });
                             }
@@ -2323,11 +2380,13 @@ fn audio_host_run(
                             });
                         out_stream = built;
                         let follows = out_stream.as_ref().is_some_and(|h| h.follows_default);
+                        let rate = out_stream.as_ref().map_or(0, |h| h.rate);
                         // Playback is back on the user's device, so the safety mute clears
                         // itself here — nobody else has to remember to lift it.
                         rebind_output(&|b| {
                             b.cpal_uid = resolved.clone();
                             b.cpal_follows_default = follows;
+                            b.cpal_rate = rate;
                             b.vpio = VpioOutput::Off;
                         });
                     }
@@ -2390,6 +2449,7 @@ fn audio_host_run(
                                 rebind_output(&|b| {
                                     b.cpal_uid.clear();
                                     b.cpal_follows_default = false;
+                                    b.cpal_rate = 0;
                                     b.vpio = VpioOutput::Bound(bound.clone());
                                 });
                             }
@@ -2420,9 +2480,11 @@ fn audio_host_run(
                                 out_stream = built;
                                 let follows =
                                     out_stream.as_ref().is_some_and(|h| h.follows_default);
+                                let rate = out_stream.as_ref().map_or(0, |h| h.rate);
                                 rebind_output(&|b| {
                                     b.cpal_uid = resolved.clone();
                                     b.cpal_follows_default = follows;
+                                    b.cpal_rate = rate;
                                     b.vpio = VpioOutput::Off;
                                 });
                             }
@@ -2442,6 +2504,7 @@ fn audio_host_run(
                 rebind_output(&|b| {
                     b.cpal_uid.clear();
                     b.cpal_follows_default = false;
+                    b.cpal_rate = 0;
                     b.vpio = VpioOutput::Off;
                 });
                 break;
@@ -4284,6 +4347,8 @@ mod output_safety_tests {
             cpal_follows_default: false,
             vpio: VpioOutput::Off,
             rerouted_polls: 0,
+            cpal_rate: 0,
+            slow_rate_polls: 0,
         });
         assert!(!reconcile_output_safety(h.transport(), &b, &event));
         assert!(!h.transport().monitor_muted());
@@ -4303,6 +4368,8 @@ mod output_safety_tests {
             cpal_follows_default: false,
             vpio: VpioOutput::Off,
             rerouted_polls: 0,
+            cpal_rate: 0,
+            slow_rate_polls: 0,
         });
         // Muted at once; announced once the reroute has held for a second poll.
         assert!(reconcile_output_safety(h.transport(), &b, &event));
@@ -4333,6 +4400,8 @@ mod output_safety_tests {
             cpal_follows_default: false,
             vpio: VpioOutput::Bound("dev-headset".into()),
             rerouted_polls: 0,
+            cpal_rate: 0,
+            slow_rate_polls: 0,
         });
         let blip = std::cell::Cell::new(0u32);
         let probe = |_: &str| {
@@ -4341,7 +4410,7 @@ mod output_safety_tests {
         };
         let mut muted_polls = 0;
         for _ in 0..20 {
-            reconcile_output_safety_with(h.transport(), &b, &event, &probe);
+            reconcile_output_safety_with(h.transport(), &b, &event, &probe, &|| None);
             if h.transport().monitor_muted() {
                 muted_polls += 1;
             }
@@ -4362,6 +4431,8 @@ mod output_safety_tests {
             cpal_follows_default: false,
             vpio: VpioOutput::Off,
             rerouted_polls: 0,
+            cpal_rate: 0,
+            slow_rate_polls: 0,
         });
         assert!(!reconcile_output_safety(h.transport(), &b, &event));
         assert!(!h.transport().monitor_muted());
@@ -4381,6 +4452,8 @@ mod output_safety_tests {
             cpal_follows_default: true,
             vpio: VpioOutput::Off,
             rerouted_polls: 0,
+            cpal_rate: 0,
+            slow_rate_polls: 0,
         };
         assert_eq!(following_default.requested_pick(), "");
 
@@ -4392,6 +4465,8 @@ mod output_safety_tests {
             cpal_follows_default: false,
             vpio: VpioOutput::Off,
             rerouted_polls: 0,
+            cpal_rate: 0,
+            slow_rate_polls: 0,
         };
         assert_eq!(explicit.requested_pick(), "dev-A");
     }
@@ -4411,6 +4486,8 @@ mod output_safety_tests {
             cpal_follows_default: true,
             vpio: VpioOutput::Off,
             rerouted_polls: 0,
+            cpal_rate: 0,
+            slow_rate_polls: 0,
         };
         assert_eq!(following.actual_uid(), system_default_output_uid());
         assert!(!following.rerouted());
@@ -4431,6 +4508,8 @@ mod output_safety_tests {
             cpal_follows_default: false,
             vpio: VpioOutput::Off,
             rerouted_polls: 0,
+            cpal_rate: 0,
+            slow_rate_polls: 0,
         });
         assert!(!reconcile_output_safety(h.transport(), &b, &event));
         assert!(!h.transport().monitor_muted());
@@ -4481,6 +4560,8 @@ mod output_safety_tests {
             cpal_follows_default: false,
             vpio: VpioOutput::Bound("dev-headset".into()),
             rerouted_polls: 0,
+            cpal_rate: 0,
+            slow_rate_polls: 0,
         });
         assert_eq!(b.lock().unwrap().actual_uid(), system_default_output_uid());
         assert!(reconcile_output_safety(h.transport(), &b, &event));
@@ -4507,13 +4588,16 @@ mod output_safety_tests {
             cpal_follows_default: false,
             vpio: VpioOutput::Bound("dev-headset".into()),
             rerouted_polls: 0,
+            cpal_rate: 0,
+            slow_rate_polls: 0,
         });
         // Mid profile switch: no outputs yet, so playback is on the default for now.
         assert!(reconcile_output_safety_with(
             h.transport(),
             &b,
             &event,
-            &probe
+            &probe,
+            &|| None
         ));
         assert!(h.transport().monitor_muted());
         // The switch completed: the headset serves both legs, which is what the user picked.
@@ -4522,7 +4606,8 @@ mod output_safety_tests {
             h.transport(),
             &b,
             &event,
-            &probe
+            &probe,
+            &|| None
         ));
         assert!(!h.transport().monitor_muted());
         assert!(!b.lock().unwrap().rerouted_with(&probe));
@@ -4532,9 +4617,53 @@ mod output_safety_tests {
             h.transport(),
             &b,
             &event,
-            &probe
+            &probe,
+            &|| None
         ));
         assert!(h.transport().monitor_muted());
+    }
+
+    /// A stream following the default that was built at a Bluetooth headset's call-profile rate
+    /// (the mic just closed, the headset not yet back on its music profile) is reported lost once
+    /// the default has run faster for two polls, so the device watch reopens it at the device's
+    /// rate: nothing else ever did, and playback stayed band-limited to the call profile's. A
+    /// stream at a music rate, or bound to its device (cpal watches those itself), is left alone.
+    #[test]
+    fn a_default_output_stuck_at_a_call_profile_rate_is_reopened() {
+        let h = engine();
+        let binding = |rate: u32, follows: bool| {
+            Mutex::new(OutputBinding {
+                requested: if follows {
+                    String::new()
+                } else {
+                    "dev-headset".into()
+                },
+                cpal_uid: "dev-headset".into(),
+                cpal_follows_default: follows,
+                vpio: VpioOutput::Off,
+                cpal_rate: rate,
+                ..Default::default()
+            })
+        };
+        let lost_after = |b: &Mutex<OutputBinding>, polls: usize, now: u32| {
+            let event = AtomicU32::new(0);
+            let mut lost = Vec::new();
+            for _ in 0..polls {
+                reconcile_output_safety_with(h.transport(), b, &event, &|_| false, &|| Some(now));
+                lost.push(event.swap(0, Ordering::Relaxed) & EVENT_OUTPUT_LOST != 0);
+            }
+            lost
+        };
+        // Stuck at 16 kHz on a default now at 48 kHz: reported on the second poll, and once.
+        assert_eq!(
+            lost_after(&binding(16_000, true), 4, 48_000),
+            [false, true, false, false]
+        );
+        // Still in its call profile: nothing to rebuild.
+        assert_eq!(lost_after(&binding(16_000, true), 3, 16_000), [false; 3]);
+        // A music rate, or a stream bound to its device.
+        assert_eq!(lost_after(&binding(44_100, true), 3, 48_000), [false; 3]);
+        assert_eq!(lost_after(&binding(16_000, false), 3, 48_000), [false; 3]);
     }
 
     /// An open does not reset the reroute edge: playback that was already off the chosen device
@@ -4549,6 +4678,8 @@ mod output_safety_tests {
             cpal_follows_default: false,
             vpio: VpioOutput::Off,
             rerouted_polls: 0,
+            cpal_rate: 0,
+            slow_rate_polls: 0,
         });
         assert!(reconcile_output_safety(h.transport(), &b, &event));
         assert!(reconcile_output_safety(h.transport(), &b, &event));
@@ -4584,6 +4715,8 @@ mod output_safety_tests {
             cpal_follows_default: false,
             vpio: VpioOutput::Off,
             rerouted_polls: 0,
+            cpal_rate: 0,
+            slow_rate_polls: 0,
         });
         reconcile_output_safety(h.transport(), &b, &event);
         assert!(h.transport().monitor_muted());
