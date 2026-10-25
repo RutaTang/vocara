@@ -388,7 +388,26 @@ void main() {
       await insertPractice(
         id: _id('P'),
         hlc: rowHlc,
-        activeInterpretationId: _id('GONE'), // dangling: no such interp
+        activeInterpretationId: _id('GONE'), // dangling: a deleted interp
+      );
+      // Tombstoned, not absent: an absent target is still in flight and is
+      // never healed (see IntegrityChecker's scalar heals).
+      await db.customStatement(
+        'INSERT INTO interpretations (id, practice_id, name, order_index, '
+        'created_at, updated_at, deleted_at, hlc_wall, hlc_ctr, hlc_node, '
+        'hlc_packed, schema_v) VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, 1)',
+        [
+          _id('GONE'),
+          _id('P'),
+          'old',
+          rowHlc.wallMs,
+          rowHlc.wallMs,
+          rowHlc.wallMs,
+          rowHlc.wallMs,
+          rowHlc.counter,
+          rowHlc.node,
+          rowHlc.packed,
+        ],
       );
 
       final violations = await checker.repair();

@@ -154,6 +154,73 @@ void main() {
     expect(await checker.check(), isEmpty);
   });
 
+  test('an active_interpretation_id whose target is ABSENT is pending: not '
+      'reported, not healed, nothing journaled', () async {
+    // A half-uploaded push: the practice reached this device one request
+    // before the interpretation it points at. Absent is not dangling.
+    final pr = await seed();
+    await db.customUpdate(
+      'UPDATE practices SET active_interpretation_id = ? WHERE id = ?',
+      variables: [Variable.withString(newId()), Variable.withString(pr.id)],
+    );
+    final opsBefore = await oplogCount();
+
+    expect(await checker.check(), isEmpty);
+    expect(await db.transaction(() => checker.repair()), isEmpty);
+    expect(await oplogCount(), opsBefore);
+  });
+
+  test('a bus route is nulled when its target is tombstoned or in another '
+      'practice, and left pending while the target is absent', () async {
+    final base = await seed();
+    final a = FxBus(id: newId(), name: 'A', fx: TrackFx.flat());
+    final b = FxBus(id: newId(), name: 'B', fx: TrackFx.flat());
+    await repo.savePractice(base.copyWith(fxBuses: [a, b]));
+    Future<String?> routeOfA() async =>
+        (await db
+                    .customSelect(
+                      'SELECT output_bus_id AS o FROM fx_buses WHERE id = ?',
+                      variables: [Variable.withString(a.id)],
+                    )
+                    .getSingle())
+                .data['o']
+            as String?;
+    Future<void> routeA(String to) => db.customUpdate(
+      'UPDATE fx_buses SET output_bus_id = ? WHERE id = ?',
+      variables: [Variable.withString(to), Variable.withString(a.id)],
+    );
+
+    // Absent: pending.
+    final absent = newId();
+    await routeA(absent);
+    expect(await checker.check(), isEmpty);
+    await checker.repair();
+    expect(await routeOfA(), absent);
+
+    // Tombstoned: dangling.
+    await routeA(b.id);
+    await rawTombstone('fx_buses', b.id);
+    expect(
+      (await checker.check()).map((v) => v.invariant),
+      contains('bus-output'),
+    );
+    expect(await checker.repair(), isEmpty);
+    expect(await routeOfA(), isNull);
+
+    // Live, but another practice's bus: dangling.
+    final other =
+        (await repo.createPractice('Other') as Ok<SongPractice>).value;
+    final foreign = FxBus(id: newId(), name: 'F', fx: TrackFx.flat());
+    await repo.savePractice(other.copyWith(fxBuses: [foreign]));
+    await routeA(foreign.id);
+    expect(
+      (await checker.check()).map((v) => v.invariant),
+      contains('bus-output'),
+    );
+    expect(await checker.repair(), isEmpty);
+    expect(await routeOfA(), isNull);
+  });
+
   test('a clip whose asset was tombstoned is repaired', () async {
     await seed();
     await rawTombstone('assets', await firstId('assets'));

@@ -154,6 +154,16 @@ class IntegrityChecker {
     //    is nulled (foreign_key_check passes it, so we must catch it here) —
     //    unless the target's newer state is still parked (deferred, see
     //    [_parkedNewer]; every query below carries that guard).
+    //
+    //    The two FK-less pointers (active interpretation, bus output) heal
+    //    only once their target EXISTS — tombstoned, or another practice's.
+    //    An ABSENT target has not arrived yet: the pusher uploads in drain
+    //    windows and chunks, and compaction leaves each row only its latest
+    //    op, so the pointing row can reach a puller one request ahead of the
+    //    row it names. Healing then would journal a derived null above the
+    //    author's own row and reset the pointer fleet-wide; left alone, the
+    //    late arrival simply satisfies it. (FK pointers never get here
+    //    absent: the applier's FK sweep parks the row instead.)
     out.addAll(
       await _scalar(
         repair: repair,
@@ -163,6 +173,8 @@ class IntegrityChecker {
             'p.deleted_at IS NULL AND p.active_interpretation_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM '
             'interpretations i WHERE i.id = p.active_interpretation_id AND '
             'i.deleted_at IS NULL AND i.practice_id = p.id) '
+            'AND EXISTS (SELECT 1 FROM interpretations i '
+            'WHERE i.id = p.active_interpretation_id) '
             'AND NOT ${_parkedNewer('interpretations', 'p.active_interpretation_id')}',
         table: 'practices',
         column: 'active_interpretation_id',
@@ -214,7 +226,9 @@ class IntegrityChecker {
       ),
     );
     // A bus->bus output route must point at a live fx_bus of the same practice;
-    // otherwise null it (falls back to master, same as an absent route).
+    // otherwise null it (falls back to master, same as an absent route). An
+    // absent target is pending, not dangling (see above); playback already
+    // routes a route it cannot resolve to master meanwhile.
     out.addAll(
       await _scalar(
         repair: repair,
@@ -224,6 +238,7 @@ class IntegrityChecker {
             'b.deleted_at IS NULL AND b.output_bus_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fx_buses o '
             'WHERE o.id = b.output_bus_id AND o.deleted_at IS NULL AND '
             'o.practice_id = b.practice_id) '
+            'AND EXISTS (SELECT 1 FROM fx_buses o WHERE o.id = b.output_bus_id) '
             'AND NOT ${_parkedNewer('fx_buses', 'b.output_bus_id')}',
         table: 'fx_buses',
         column: 'output_bus_id',

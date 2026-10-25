@@ -1791,6 +1791,104 @@ void main() {
     });
   });
 
+  group('a pointer whose target has not arrived yet is pending, not '
+      'dangling (a half-uploaded push)', () {
+    // The pusher uploads its backlog in drain windows and chunks, and boot
+    // compaction leaves each row only its latest op, so a row can reach the
+    // server one request before the row its FK-less pointer names. A puller
+    // that catches up in between must not "heal" that pointer: the derived
+    // null out-ranks the author's own row and would reach every device.
+    final author = _id('AUTHOR');
+    Hlc byA(int wall) => Hlc(wallMs: wall, counter: 0, node: author);
+
+    SyncRow practiceWithActive(String interpId, Hlc h) => SyncRow(
+      table: 'practices',
+      fields: {
+        ...remotePractice('P', 'song', h).fields,
+        'active_interpretation_id': _id(interpId),
+      },
+    );
+
+    SyncRow interp(String id, Hlc h) => SyncRow(
+      table: 'interpretations',
+      fields: {
+        'id': _id(id),
+        'practice_id': _id('P'),
+        'name': 'take 2',
+        'order_index': 0,
+        ...syncCols(h),
+      },
+    );
+
+    SyncRow bus(String id, Hlc h, {String? outputBusId}) => SyncRow(
+      table: 'fx_buses',
+      fields: {
+        'id': _id(id),
+        'practice_id': _id('P'),
+        'name': id,
+        'color_value': null,
+        'volume': 1.0,
+        'pan': 0.0,
+        'muted': 0,
+        'soloed': 0,
+        'output_bus_id': outputBusId == null ? null : _id(outputBusId),
+        'fx_json': null,
+        'sends_json': null,
+        'order_index': 0,
+        ...syncCols(h),
+      },
+    );
+
+    Future<Object?> column(String table, String id, String column) async =>
+        (await db
+                .customSelect(
+                  'SELECT $column AS v FROM $table WHERE id = ?',
+                  variables: [Variable.withString(_id(id))],
+                )
+                .getSingle())
+            .data['v'];
+
+    test(
+      'an active interpretation that lands on a later upload keeps the '
+      'practice pointing at it — nothing journaled, nothing to redo',
+      () async {
+        cloud.accept(practiceWithActive('I', byA(t0 - 2000)));
+        expect((await engine.pumpPull()).failed, isFalse);
+        expect(
+          await column('practices', 'P', 'active_interpretation_id'),
+          _id('I'),
+        );
+        expect(await oplogCount(), 0, reason: 'no heal may be journaled');
+
+        cloud.accept(interp('I', byA(t0 - 1000)));
+        expect((await engine.pumpPull()).failed, isFalse);
+        expect(
+          await column('practices', 'P', 'active_interpretation_id'),
+          _id('I'),
+        );
+        expect(await oplogCount(), 0);
+        expect(await IntegrityChecker(db, writer).check(), isEmpty);
+      },
+    );
+
+    test(
+      'a bus route to a bus that lands on a later upload survives',
+      () async {
+        cloud.accept(remotePractice('P', 'song', byA(t0 - 3000)));
+        cloud.accept(bus('X', byA(t0 - 2000), outputBusId: 'Y'));
+        expect((await engine.pumpPull()).failed, isFalse);
+        expect(await column('fx_buses', 'X', 'output_bus_id'), _id('Y'));
+        expect(await oplogCount(), 0, reason: 'no heal may be journaled');
+
+        cloud.accept(bus('Y', byA(t0 - 1000)));
+        expect((await engine.pumpPull()).failed, isFalse);
+        expect(await column('fx_buses', 'X', 'output_bus_id'), _id('Y'));
+        expect(await oplogCount(), 0);
+        expect(await IntegrityChecker(db, writer).check(), isEmpty);
+      },
+    );
+  });
+
   group('poke wiring', () {
     test('pokes fire only AFTER a transaction completes, and a rolled-back '
         'write drains to a no-op push', () async {
