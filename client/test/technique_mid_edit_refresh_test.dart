@@ -214,6 +214,32 @@ void main() {
     expect(vm.technique!.summary, 'remote summary');
   });
 
+  testWidgets('Edit tapped before the reload repaints seeds the form from the '
+      'reloaded technique', (tester) async {
+    // Regression: the header's Edit carried the technique of its last build.
+    // A click landing after a reload but before the next frame seeded the
+    // form from the pre-reload text while the base hashes had already moved
+    // to the remote row, so a Save with nothing typed wrote the old text back
+    // over the remote change.
+    final (vm, repo, remote) = await _pump(tester);
+    addTearDown(remote.close);
+
+    _remoteEdit(repo, remote);
+    // Let the reload land without rendering a frame.
+    for (var i = 0; i < 10; i++) {
+      await Future<void>.value();
+    }
+    expect(vm.technique!.summary, 'remote summary');
+
+    await tester.tap(find.text('Edit').first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Save').first);
+    await tester.pumpAndSettle();
+
+    expect(repo.savedTechniques.single.summary, 'remote summary');
+    expect(repo.savedWithBase.single['t1'], 'REMOTE-HASH');
+  });
+
   testWidgets('outside an edit session a remote change still refreshes', (
     tester,
   ) async {

@@ -107,10 +107,17 @@ class _TechniqueDetailScreenState extends State<TechniqueDetailScreen> {
   /// session from `dispose()` too, where a `context.read` is not allowed.
   TechniqueDetailViewModel? _vm;
 
-  void _enterEdit(TechniqueDetailViewModel vm, Technique t) {
+  void _enterEdit(TechniqueDetailViewModel vm) {
     // A practice take recording (or still starting) would be stranded in the
     // editor, which has no practice Stop. See TechniqueDetailViewModel.canEdit.
     if (!vm.canEdit) return;
+    // Seed from the technique as of THIS tap, not the one the header was last
+    // built with: a click landing after a remote reload but before the next
+    // frame used to seed the pre-reload text while the base hashes already
+    // described the remote row, and a Save with nothing typed then wrote the
+    // old text back over the remote change.
+    final t = vm.technique;
+    if (t == null) return;
     _vm = vm;
     vm.beginMediaDraft();
     // Tell the VM the form is open BEFORE seeding it: from here until
@@ -264,7 +271,7 @@ class _TechniqueDetailScreenState extends State<TechniqueDetailScreen> {
             canEdit: technique != null,
             editBlocked: !vm.canEdit,
             onBack: _handleBack,
-            onEdit: technique == null ? null : () => _enterEdit(vm, technique),
+            onEdit: technique == null ? null : () => _enterEdit(vm),
             onDelete: () => _delete(vm),
             onCancel: () => _cancelEdit(vm),
             onSave: () => _save(vm),
