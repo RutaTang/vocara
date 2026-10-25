@@ -9,6 +9,7 @@ import 'package:vocara/data/services/local_storage_service.dart';
 import 'package:vocara/data/services/media_analysis_service.dart';
 import 'package:vocara/data/services/mic_recording_controller.dart';
 import 'package:vocara/data/services/technique_media_service.dart';
+import 'package:vocara/data/sync/sync_engine.dart';
 import 'package:vocara/data/sync/sync_hashes.dart';
 import 'package:vocara/domain/models/spectrogram.dart';
 import 'package:vocara/domain/models/technique.dart';
@@ -225,6 +226,8 @@ void main() {
   late _FakeRecorder recorder;
   late _FixedAnalysis analysis;
   late TechniqueDetailViewModel vm;
+  late _FakeRepo repo;
+  late StreamController<RemoteApplied> remote;
 
   setUp(() async {
     tmp = await Directory.systemTemp.createTemp('vocara_practice_generation');
@@ -237,20 +240,23 @@ void main() {
     );
     recorder = _FakeRecorder();
     analysis = _FixedAnalysis(_analysis());
-    vm = TechniqueDetailViewModel(
-      repository: _FakeRepo(
-        Technique(
-          id: _techniqueId,
-          name: 'Twang',
-          createdAt: now,
-          updatedAt: now,
-          media: [example('E1'), example('E2')],
-        ),
+    repo = _FakeRepo(
+      Technique(
+        id: _techniqueId,
+        name: 'Twang',
+        createdAt: now,
+        updatedAt: now,
+        media: [example('E1'), example('E2')],
       ),
+    );
+    remote = StreamController<RemoteApplied>.broadcast();
+    vm = TechniqueDetailViewModel(
+      repository: repo,
       mediaService: TechniqueMediaService(storage: _TempStorage(tmp)),
       techniqueId: _techniqueId,
       analysisService: analysis,
       recorder: recorder,
+      remoteApplied: remote.stream,
     );
     for (var i = 0; i < 200 && vm.technique == null; i++) {
       await Future<void>.delayed(const Duration(milliseconds: 5));
@@ -261,6 +267,7 @@ void main() {
 
   tearDown(() async {
     vm.dispose();
+    await remote.close();
     if (await tmp.exists()) await tmp.delete(recursive: true);
   });
 
@@ -333,4 +340,90 @@ void main() {
     expect(vm.practiceAnalysis, isNull);
     expect(vm.analysisSubject, TechniqueAnalysisSubject.reference);
   });
+
+  // The page opens on the first example with no example ever tapped, so the
+  // reference is the first one by fallback, not by selection. Every media
+  // re-normalization then "selected" it and read that as a reference
+  // change: the take recorded against it was dropped although its reference
+  // never moved.
+  void remoteChange() => remote.add(
+    RemoteApplied(
+      rows: const [],
+      practiceIds: const {},
+      techniqueIds: {_techniqueId},
+    ),
+  );
+
+  test('Edit then Cancel keeps a take recorded against the default '
+      'example', () async {
+    expect(await vm.startPractice(), isNull);
+    await vm.stopPractice();
+    expect(vm.practiceAnalysis, isNotNull);
+
+    vm.beginMediaDraft();
+    vm.beginEdit();
+    await vm.discardMediaDraft();
+    vm.endEdit();
+    await pumpEventQueue();
+
+    expect(vm.referenceMedia!.id, 'E1');
+    expect(vm.practiceAnalysis, isNotNull);
+  });
+
+  test('a text-only Save keeps a take recorded against the default '
+      'example', () async {
+    expect(await vm.startPractice(), isNull);
+    await vm.stopPractice();
+
+    vm.beginMediaDraft();
+    vm.beginEdit();
+    expect(await vm.save(vm.technique!.copyWith(summary: 'edited')), isTrue);
+    vm.endEdit();
+    await pumpEventQueue();
+
+    expect(vm.practiceAnalysis, isNotNull);
+  });
+
+  test('a remote change to the technique keeps a take whose reference it '
+      'left alone', () async {
+    expect(await vm.startPractice(), isNull);
+    await vm.stopPractice();
+
+    remoteChange();
+    await pumpEventQueue();
+
+    expect(vm.referenceMedia!.id, 'E1');
+    expect(vm.practiceAnalysis, isNotNull);
+    expect(vm.analysisSubject, TechniqueAnalysisSubject.practice);
+  });
+
+  test('a remote change during the take, replayed at Stop, does not discard '
+      'the take being analyzed', () async {
+    expect(await vm.startPractice(), isNull);
+    remoteChange();
+    await pumpEventQueue();
+    await vm.stopPractice();
+    await pumpEventQueue();
+
+    expect(analysis.analyzed, hasLength(1));
+    expect(vm.practiceAnalysis, isNotNull);
+  });
+
+  test(
+    'a remote change that removes the reference still drops the take',
+    () async {
+      expect(await vm.startPractice(), isNull);
+      await vm.stopPractice();
+
+      repo.technique = repo.technique.copyWith(
+        media: [repo.technique.media.last],
+      );
+      remoteChange();
+      await pumpEventQueue();
+
+      expect(vm.referenceMedia!.id, 'E2');
+      expect(vm.practiceAnalysis, isNull);
+      expect(vm.analysisSubject, TechniqueAnalysisSubject.reference);
+    },
+  );
 }

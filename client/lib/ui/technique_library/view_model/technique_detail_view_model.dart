@@ -263,9 +263,10 @@ class TechniqueDetailViewModel extends ChangeNotifier
     if (_disposed || epoch != _reloadEpoch) return;
     if (_holdsEditorState()) return;
     if (result is! Ok<Loaded<Technique>>) return; // e.g. deleted remotely
+    final referenceBefore = referenceMedia?.id;
     _technique = result.value.aggregate;
     _baseHashes = result.value.baseHashes;
-    _fixSelectionAfterMediaChange();
+    _fixSelectionAfterMediaChange(referenceBefore);
     notifyListeners();
   }
 
@@ -381,6 +382,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
       _recordingExample = false;
       _exampleTempPath = null;
     }
+    final referenceBefore = referenceMedia?.id;
     final orphans = List<TechniqueMedia>.from(_draftAdds);
     _draftAdds.clear();
     _draftRemoves.clear();
@@ -392,7 +394,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
       _loadingPaths.remove(m.path);
       await _mediaService.deleteMedia(m.path);
     }
-    _fixSelectionAfterMediaChange();
+    _fixSelectionAfterMediaChange(referenceBefore);
     notifyListeners();
   }
 
@@ -1173,6 +1175,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
       for (final m in current.media) m.id: m.path,
       staged.id: staged.path,
     };
+    final referenceBefore = referenceMedia?.id;
     final ok = await _commit(
       current.copyWith(media: [...current.media, staged]),
     );
@@ -1186,7 +1189,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
       return;
     }
     _draftAdds.removeWhere((m) => m.id == staged.id);
-    _remapMediaAfterCommit(oldPathById);
+    _remapMediaAfterCommit(oldPathById, referenceBefore);
   }
 
   // --- AnalysisSource ------------------------------------------------------
@@ -1488,13 +1491,14 @@ class TechniqueDetailViewModel extends ChangeNotifier
       }
       // The staged additions are now part of the persisted technique; clear the
       // draft so their files aren't treated as orphans.
+      final referenceBefore = referenceMedia?.id;
       _draftAdds.clear();
       _draftRemoves.clear();
       _draftLabels.clear();
       // The analysis caches key on paths the commit just rewrote to pool
       // paths; carry them onto the persisted aggregate so the shown example's
       // analysis isn't recomputed (or its failure verdict forgotten).
-      _remapMediaAfterCommit(oldPathById);
+      _remapMediaAfterCommit(oldPathById, referenceBefore);
     }
     return ok;
   }
@@ -1612,6 +1616,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
     // Worse, removing a staged ADDITION would delete a file the commit is
     // persisting a row for.
     if (_saving) return;
+    final referenceBefore = referenceMedia?.id;
     final draftIndex = _draftAdds.indexWhere((m) => m.id == mediaId);
     if (draftIndex >= 0) {
       final m = _draftAdds.removeAt(draftIndex);
@@ -1620,7 +1625,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
       _refFailed.remove(m.path);
       _refFailedMessage.remove(m.path);
       _loadingPaths.remove(m.path);
-      _fixSelectionAfterMediaChange();
+      _fixSelectionAfterMediaChange(referenceBefore);
       notifyListeners();
       await _mediaService.deleteMedia(m.path);
       return;
@@ -1628,7 +1633,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
     if ((_technique?.media ?? const []).any((m) => m.id == mediaId)) {
       _draftRemoves.add(mediaId);
       _draftLabels.remove(mediaId);
-      _fixSelectionAfterMediaChange();
+      _fixSelectionAfterMediaChange(referenceBefore);
       notifyListeners();
     }
   }
@@ -1649,8 +1654,13 @@ class TechniqueDetailViewModel extends ChangeNotifier
   /// from the sandbox comes back under a different path while its id stays
   /// stable; without the remap the just-computed analysis is orphaned under
   /// the old path. (The selection is keyed by id, so it needs no carrying.)
-  /// [oldPathById] maps each committed clip's id to its pre-commit path.
-  void _remapMediaAfterCommit(Map<String, String> oldPathById) {
+  /// [oldPathById] maps each committed clip's id to its pre-commit path;
+  /// [referenceBefore] is the reference shown before the commit (see
+  /// [_fixSelectionAfterMediaChange]).
+  void _remapMediaAfterCommit(
+    Map<String, String> oldPathById,
+    String? referenceBefore,
+  ) {
     for (final m in _technique?.media ?? const <TechniqueMedia>[]) {
       final old = oldPathById[m.id];
       if (old == null || old == m.path) continue;
@@ -1673,19 +1683,28 @@ class TechniqueDetailViewModel extends ChangeNotifier
     }
     // Re-normalize like every other media-mutating path (e.g. the selected
     // example was staged for removal by this very save).
-    _fixSelectionAfterMediaChange();
+    _fixSelectionAfterMediaChange(referenceBefore);
   }
 
   /// Re-selects a valid example after the current one was removed.
-  void _fixSelectionAfterMediaChange() {
+  /// [referenceBefore] is [referenceMedia]'s id as it was before the media
+  /// changed.
+  ///
+  /// The practice take is dropped only when the reference ITSELF moved. This
+  /// used to compare the raw selection instead, and an example nobody had
+  /// tapped — the first one, the reference by fallback, which the page opens
+  /// on — went from null to its own id here: read as a reference change, it
+  /// dropped the take on Edit then Cancel, on a text-only Save and on every
+  /// remote change to the technique, and a remote change replayed at Stop
+  /// discarded the take being analyzed without a word.
+  void _fixSelectionAfterMediaChange(String? referenceBefore) {
     final audio = audioExamples;
-    final before = _selectedExampleId;
     if (audio.isEmpty) {
       _selectedExampleId = null;
     } else if (!audio.any((m) => m.id == _selectedExampleId)) {
       _selectedExampleId = audio.first.id;
     }
-    if (_selectedExampleId != before) {
+    if (referenceMedia?.id != referenceBefore) {
       // The reference example changed — drop the practice take, matching selectExample.
       _resetToReferenceSubject();
     }
