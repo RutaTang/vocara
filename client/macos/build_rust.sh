@@ -19,8 +19,11 @@ build_one() {
   # An explicit --target-dir: a CARGO_TARGET_DIR or build.target-dir set in the
   # environment would otherwise build elsewhere while the path below copied a
   # stale dylib from an earlier build (or failed when there was none).
+  # `|| exit 1`: this runs inside `$(...)`, where bash ignores `set -e`, so a
+  # failed build would otherwise fall through to the echo and package the
+  # previous build's dylib.
   cargo build --release --locked --features device --target "$target" \
-    --target-dir "$CRATE/target" >&2
+    --target-dir "$CRATE/target" >&2 || exit 1
   echo "$CRATE/target/$target/release/$LIB"
 }
 
