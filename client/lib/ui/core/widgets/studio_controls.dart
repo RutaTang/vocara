@@ -1,8 +1,24 @@
 import 'dart:math' as math;
 
+import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart';
 
 import '../themes/studio.dart';
+
+/// Pointer devices a timeline-area drag (a clip move, a marker range, a loop
+/// edge, a lane fader) responds to — every kind except
+/// [PointerDeviceKind.trackpad]. A two-finger trackpad swipe is how the
+/// timeline pans, and drag recognizers accept a trackpad pan-zoom by default,
+/// so the swipe also dragged whatever the cursor rested on: it moved (and
+/// saved) a clip, opened the add-note editor, shifted the loop or jumped a
+/// take's volume.
+const Set<PointerDeviceKind> kPointerDragDevices = {
+  PointerDeviceKind.touch,
+  PointerDeviceKind.mouse,
+  PointerDeviceKind.stylus,
+  PointerDeviceKind.invertedStylus,
+  PointerDeviceKind.unknown,
+};
 
 /// A compact rotary pan knob ([-1, 1]; 0 = center). Drag horizontally to pan,
 /// double-tap to re-center; optionally shows an L##/C/R## label below.
@@ -160,6 +176,7 @@ class StudioFader extends StatelessWidget {
           cursor: SystemMouseCursors.resizeLeftRight,
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
+            supportedDevices: kPointerDragDevices,
             onTapDown: (d) => update(d.localPosition.dx),
             onTapUp: (_) => onChangeEnd(),
             onHorizontalDragUpdate: (d) => update(d.localPosition.dx),

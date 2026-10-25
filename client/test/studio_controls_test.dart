@@ -81,4 +81,62 @@ void main() {
       await tester.pump(kDoubleTapTimeout);
     });
   });
+
+  group('StudioFader', () {
+    Future<List<double>> pumpFader(WidgetTester tester) async {
+      final changes = <double>[];
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Center(
+              child: SizedBox(
+                width: 200,
+                child: StudioFader(
+                  value: 0.5,
+                  accent: Colors.red,
+                  onChanged: changes.add,
+                  onChangeEnd: () {},
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      return changes;
+    }
+
+    // A two-finger trackpad swipe pans the timeline; with the cursor over a
+    // lane header's fader it reached the fader as a pan-zoom gesture and
+    // jumped the take's volume.
+    testWidgets('a two-finger trackpad swipe leaves the level alone', (
+      tester,
+    ) async {
+      final changes = await pumpFader(tester);
+      final at = tester.getCenter(find.byType(StudioFader));
+      final g = await tester.createGesture(kind: PointerDeviceKind.trackpad);
+      await g.panZoomStart(at);
+      await tester.pump();
+      await g.panZoomUpdate(at, pan: const Offset(-40, 0));
+      await tester.pump();
+      await g.panZoomUpdate(at, pan: const Offset(-80, 0));
+      await tester.pump();
+      await g.panZoomEnd();
+      await tester.pump();
+      expect(changes, isEmpty);
+    });
+
+    testWidgets('a mouse drag still sets the level', (tester) async {
+      final changes = await pumpFader(tester);
+      final at = tester.getCenter(find.byType(StudioFader));
+      final g = await tester.startGesture(at, kind: PointerDeviceKind.mouse);
+      await g.moveBy(const Offset(20, 0)); // wins the gesture
+      await tester.pump();
+      await g.moveBy(const Offset(20, 0));
+      await tester.pump();
+      await g.up();
+      await tester.pump();
+      expect(changes, isNotEmpty);
+      expect(changes.last, greaterThan(0.5));
+    });
+  });
 }

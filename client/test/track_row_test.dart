@@ -1,6 +1,7 @@
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vocara/domain/models/audio_track.dart';
@@ -308,6 +309,68 @@ void main() {
       expect(selected, 'a');
       expect(starts['a'], 4000);
       expect(commits, 0);
+    });
+
+    // A two-finger trackpad swipe is how the timeline pans, and it reaches
+    // the clip under the cursor as a pan-zoom gesture — which a drag
+    // recognizer accepts unless told otherwise. It moved, and saved, the clip
+    // the cursor happened to rest on.
+    testWidgets('a two-finger trackpad swipe over a clip never moves it', (
+      tester,
+    ) async {
+      final starts = {'a': 4000};
+      final liveIds = <String>[];
+      var commits = 0;
+      await pumpClipLane(
+        tester,
+        starts: starts,
+        liveIds: liveIds,
+        onCommit: () => commits++,
+      );
+
+      final at = clipCenter(4000);
+      final g = await tester.createGesture(kind: PointerDeviceKind.trackpad);
+      await g.panZoomStart(at);
+      await tester.pump();
+      await g.panZoomUpdate(at, pan: const Offset(-60, 0));
+      await tester.pump();
+      await g.panZoomUpdate(at, pan: const Offset(-200, 0));
+      await tester.pump();
+      await g.panZoomEnd();
+      await tester.pump();
+
+      expect(liveIds, isEmpty, reason: 'a swipe pans the view, not the clip');
+      expect(starts['a'], 4000);
+      expect(commits, 0);
+    });
+
+    testWidgets('a mouse drag still moves and commits the clip', (
+      tester,
+    ) async {
+      final starts = {'a': 4000};
+      final liveIds = <String>[];
+      var commits = 0;
+      await pumpClipLane(
+        tester,
+        starts: starts,
+        liveIds: liveIds,
+        onCommit: () => commits++,
+      );
+
+      final g = await tester.startGesture(
+        clipCenter(4000),
+        kind: PointerDeviceKind.mouse,
+      );
+      await g.moveBy(const Offset(30, 0));
+      await tester.pump();
+      await g.moveBy(const Offset(50, 0));
+      await tester.pump();
+      await g.up();
+      await tester.pump();
+
+      expect(liveIds, isNotEmpty);
+      expect(starts['a'], greaterThan(4000));
+      expect(commits, 1);
     });
   });
 

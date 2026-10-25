@@ -9,6 +9,7 @@ import '../../../domain/models/technique_marker.dart';
 import '../../../domain/models/voice_metrics.dart';
 import '../../core/themes/studio.dart';
 import '../../core/widgets/spectrogram_painter.dart';
+import '../../core/widgets/studio_controls.dart';
 import '../../core/widgets/studio_hint.dart';
 import '../../core/widgets/waveform_painter.dart';
 import '../view_model/song_practice_detail_view_model.dart';
@@ -775,6 +776,9 @@ class _MarkerLaneState extends State<_MarkerLane> {
             Positioned.fill(
               child: GestureDetector(
                 behavior: HitTestBehavior.opaque,
+                // A two-finger trackpad swipe pans the timeline; taken as a
+                // range drag it opened the editor for a range nobody drew.
+                supportedDevices: kPointerDragDevices,
                 onTapUp: (d) =>
                     widget.onAdd(msOf(d.localPosition.dx.clamp(0.0, w)), null),
                 onHorizontalDragStart: (d) => setState(() {

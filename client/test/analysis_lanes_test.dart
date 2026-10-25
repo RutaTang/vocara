@@ -11,6 +11,7 @@
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vocara/data/services/audio_dsp.dart';
@@ -304,6 +305,38 @@ void main() {
         beforeRelease: () => viewStart.value = 7800,
       );
       expect(added.single, dragged);
+    });
+
+    // A two-finger trackpad swipe pans the timeline. Over a marker lane it
+    // reached the range drag as a pan-zoom gesture and, on lift, opened the
+    // add-note (or technique) editor for a range nobody drew.
+    testWidgets('a two-finger trackpad swipe adds nothing', (tester) async {
+      final (_, added) = await pumpNotes(tester);
+      final at = tester.getCenter(find.byType(NotesLane));
+      final g = await tester.createGesture(kind: PointerDeviceKind.trackpad);
+      await g.panZoomStart(at);
+      await tester.pump();
+      await g.panZoomUpdate(at, pan: const Offset(-60, 0));
+      await tester.pump();
+      await g.panZoomUpdate(at, pan: const Offset(-240, 0));
+      await tester.pump();
+      await g.panZoomEnd();
+      await tester.pumpAndSettle();
+      expect(added, isEmpty);
+    });
+
+    testWidgets('a mouse drag still adds its range', (tester) async {
+      final (_, added) = await pumpNotes(tester);
+      final at = tester.getCenter(find.byType(NotesLane));
+      final g = await tester.startGesture(at, kind: PointerDeviceKind.mouse);
+      await g.moveBy(const Offset(120, 0));
+      await tester.pump();
+      await g.moveBy(const Offset(120, 0));
+      await tester.pump();
+      await g.up();
+      await tester.pumpAndSettle();
+      final (start, end) = added.single;
+      expect(end, greaterThan(start));
     });
   });
 }

@@ -832,6 +832,9 @@ class _ClipRegionState extends State<_ClipRegion> {
       cursor: SystemMouseCursors.grab,
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
+        // A two-finger trackpad swipe pans the timeline; taken as a move it
+        // slid (and saved) whichever clip the cursor rested on.
+        supportedDevices: kPointerDragDevices,
         onTap: widget.onTap,
         onSecondaryTapDown: (d) => widget.onContextMenu(d.globalPosition),
         onHorizontalDragStart: (_) {

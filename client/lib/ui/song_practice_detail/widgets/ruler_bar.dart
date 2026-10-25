@@ -1,23 +1,13 @@
 import 'package:flutter/foundation.dart';
-import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
 import '../../core/themes/studio.dart';
+import '../../core/widgets/studio_controls.dart';
 import '../../core/widgets/waveform_painter.dart';
 import '../view_model/song_practice_detail_view_model.dart';
 import 'track_row.dart';
 
 const double rulerHeight = 28;
-
-/// Pointer devices allowed to scrub the ruler — every kind except [trackpad],
-/// so a two-finger trackpad swipe over the ruler isn't consumed as a scrub drag.
-const Set<PointerDeviceKind> _scrubDevices = {
-  PointerDeviceKind.touch,
-  PointerDeviceKind.mouse,
-  PointerDeviceKind.stylus,
-  PointerDeviceKind.invertedStylus,
-  PointerDeviceKind.unknown,
-};
 
 /// The interactive time ruler. It is split like a track row: an empty corner
 /// over the track-header column, then the timeline ticks. Dragging the ruler
@@ -112,7 +102,7 @@ class RulerBar extends StatelessWidget {
             Positioned.fill(
               child: GestureDetector(
                 behavior: HitTestBehavior.opaque,
-                supportedDevices: _scrubDevices,
+                supportedDevices: kPointerDragDevices,
                 onTapUp: (d) =>
                     vm.seek(Duration(milliseconds: msAt(d.localPosition.dx))),
                 onHorizontalDragUpdate: (d) =>
@@ -167,6 +157,9 @@ class _LoopHandle extends StatelessWidget {
         cursor: SystemMouseCursors.resizeLeftRight,
         child: GestureDetector(
           behavior: HitTestBehavior.opaque,
+          // Not a trackpad swipe either: with the cursor on a handle, the
+          // swipe meant to pan moved the loop edge.
+          supportedDevices: kPointerDragDevices,
           onHorizontalDragUpdate: (d) => onDelta(d.primaryDelta ?? 0),
           child: Center(
             child: Container(
