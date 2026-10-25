@@ -99,10 +99,23 @@ class RecordingFinalizer {
   }
 
   void unregister(Future<void> Function() finalize) {
+    // A take armed during a quit's wait and stopped by the user before the
+    // next run: its stop-and-save carries on under waits that are not marked
+    // startsWork, and with the take's own finalizer gone that run found the
+    // budget spent and exited mid-save. Its budget outlives the Stop.
+    if (_quitClock != null &&
+        _startsWork.contains(finalize) &&
+        !_invoked.contains(finalize)) {
+      _uncountedWork = true;
+    }
     _pending.remove(finalize);
     _invoked.remove(finalize);
     _startsWork.remove(finalize);
   }
+
+  /// Set when a `startsWork` finalizer this quit never called was
+  /// unregistered (see [unregister]): the next run gets a budget of its own.
+  bool _uncountedWork = false;
 
   /// The registered finalizers marked `startsWork` (see [register]).
   final _startsWork = <Future<void> Function()>{};
@@ -224,11 +237,13 @@ class RecordingFinalizer {
         progressCeiling + perFinalizerBudget) {
       _quitClock = null;
       _invoked.clear();
+      _uncountedWork = false;
     }
     final clock = _quitClock ??= Stopwatch()..start();
-    final fresh = pending.any(
-      (f) => _startsWork.contains(f) && !_invoked.contains(f),
-    );
+    final fresh =
+        _uncountedWork ||
+        pending.any((f) => _startsWork.contains(f) && !_invoked.contains(f));
+    _uncountedWork = false;
     var window = fresh
         ? perFinalizerBudget
         : _shorter(perFinalizerBudget, totalBudget - clock.elapsed);

@@ -111,6 +111,42 @@ void main() {
     expect(stops, 2, reason: 'take 2 was never stopped');
   });
 
+  test('a take armed during the wait and stopped by the user keeps its own '
+      'budget', () async {
+    // Its stop-and-save carries on under waits not marked startsWork; with
+    // the take's own finalizer gone, the exit request's run found the budget
+    // spent and exited mid-save.
+    final finalizer = RecordingFinalizer.forTesting(
+      perFinalizerBudget: const Duration(milliseconds: 100),
+      totalBudget: const Duration(milliseconds: 60),
+    );
+    final never = Completer<void>();
+    addTearDown(() {
+      if (!never.isCompleted) never.complete();
+    });
+    unawaited(finalizer.hold(() => never.future)); // a wedged save
+    final close = finalizer.finalizeAll();
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    late Future<void> Function() finalizeOnQuit;
+    finalizeOnQuit = () async {};
+    finalizer.register(finalizeOnQuit, startsWork: true); // REC
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    // The user's Stop: the take's finalizer goes, its save holds the quit.
+    finalizer.unregister(finalizeOnQuit);
+    var saved = false;
+    unawaited(
+      finalizer.hold(
+        () => Future<void>.delayed(
+          const Duration(milliseconds: 50),
+          () => saved = true,
+        ),
+      ),
+    );
+    await close.timeout(const Duration(seconds: 2));
+    await finalizer.finalizeAll().timeout(const Duration(seconds: 2));
+    expect(saved, isTrue, reason: "take 2's save at exit");
+  });
+
   test("a stop's tail added during the wait is waited on by the next "
       'run', () async {
     // Reusing the first call's future, the exit request's run waited only on

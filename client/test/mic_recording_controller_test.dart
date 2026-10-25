@@ -469,6 +469,51 @@ void main() {
     controller.dispose();
   });
 
+  // Real time, not testWidgets: the quit's clock is a Stopwatch, which fake
+  // time never advances, so the budget would never run out.
+  test('a take re-armed while a cut-off quit waited is stopped by the exit '
+      'request', () async {
+    // The controller registers the same tear-off for every take, marked as
+    // work no quit has budgeted: unmarked, the exit request's run found the
+    // budget spent and left take 2 recording.
+    final finalizer = RecordingFinalizer.forTesting(
+      perFinalizerBudget: const Duration(milliseconds: 50),
+      totalBudget: const Duration(milliseconds: 60),
+    );
+    final engine = _FakeEngine();
+    final dest = _FakeDestination();
+    var stops = 0;
+    late final MicRecordingController controller;
+    controller = MicRecordingController(
+      acquireEngine: () => engine,
+      requestPermission: () async => true,
+      finalizer: finalizer,
+      onQuitFinalize: () async {
+        if (!controller.isRecording) return;
+        stops++;
+        controller.stop();
+      },
+    );
+    addTearDown(controller.dispose);
+    final never = Completer<void>();
+    addTearDown(() {
+      if (!never.isCompleted) never.complete();
+    });
+    unawaited(finalizer.hold(() => never.future)); // a wedged save
+
+    await controller.start(dest.strategy); // take 1
+    final close = finalizer.finalizeAll(); // stops take 1, then waits
+    await Future<void>.delayed(Duration.zero);
+    await controller.start(dest.strategy); // REC again while it waits
+    expect(controller.isRecording, isTrue);
+    await close.timeout(const Duration(seconds: 2)); // cut off
+    await Future<void>.delayed(const Duration(milliseconds: 40)); // spent
+    await finalizer.finalizeAll().timeout(const Duration(seconds: 2));
+
+    expect(stops, 2, reason: "the exit request's run left take 2 armed");
+    expect(controller.isRecording, isFalse);
+  });
+
   testWidgets('guardStopFinalize holds the quit gate over the post-stop '
       'finalize tail and releases it once the tail completes', (tester) async {
     final engine = _FakeEngine();
