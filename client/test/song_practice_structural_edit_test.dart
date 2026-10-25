@@ -1221,4 +1221,117 @@ void main() {
       },
     );
   });
+
+  group('lyrics sync cursor', () {
+    test('a leading blank line never takes a tap', () async {
+      // Pasted lyrics often open on a blank line, which the Sync view draws as
+      // a gap with no highlight. After Clear (or re-entering Sync with every
+      // line timed) the cursor sat on it, and every stamp landed a line late.
+      final vm = await pumpVm();
+      await vm.setLyricsText('\nfirst line\nsecond line');
+      vm.setLyricsMode(LyricsMode.sync);
+      await vm.clearLyricTimes();
+      vm.playback.position.value = const Duration(milliseconds: 1500);
+      await vm.stampNextLyric();
+      expect(vm.lyrics[0].timeMs, isNull);
+      expect(vm.lyrics[1].timeMs, 1500);
+
+      vm.playback.position.value = const Duration(milliseconds: 2500);
+      await vm.stampNextLyric();
+      expect(vm.lyrics[2].timeMs, 2500);
+      // Every line timed: Sync starts over from the first words.
+      vm.setLyricsMode(LyricsMode.read);
+      vm.setLyricsMode(LyricsMode.sync);
+      expect(vm.syncIndex, 1);
+    });
+
+    test(
+      're-timing a line by click, then Space, stamps the next line',
+      () async {
+        final vm = await pumpVm();
+        await vm.setLyricsText('one\n\ntwo\nthree');
+        vm.setLyricsMode(LyricsMode.sync);
+        vm.playback.position.value = const Duration(milliseconds: 4000);
+        await vm.stampLyricAt(2);
+        vm.playback.position.value = const Duration(milliseconds: 6000);
+        await vm.stampNextLyric();
+        expect(
+          vm.lyrics[2].timeMs,
+          4000,
+          reason: 'the click time was overwritten',
+        );
+        expect(vm.lyrics[3].timeMs, 6000);
+      },
+    );
+
+    test('a click whose write fails leaves the cursor on that line', () async {
+      final vm = await pumpVm();
+      await vm.setLyricsText('one\ntwo\nthree');
+      vm.setLyricsMode(LyricsMode.sync);
+      repo.failSaves = true;
+      await vm.stampLyricAt(1);
+      expect(vm.lyrics[1].timeMs, isNull);
+      expect(vm.syncIndex, 1);
+    });
+
+    test('lyrics dropped in Sync mode restart the cursor', () async {
+      final vm = await pumpVm();
+      await vm.setLyricsText('a\nb\nc\nd\ne\nf');
+      vm.setLyricsMode(LyricsMode.sync);
+      vm.playback.position.value = const Duration(milliseconds: 1000);
+      for (var i = 0; i < 5; i++) {
+        await vm.stampNextLyric();
+      }
+      expect(vm.syncIndex, 5);
+      await vm.importLyrics('x\ny');
+      expect(vm.syncIndex, 0);
+      vm.playback.position.value = const Duration(milliseconds: 2000);
+      await vm.stampNextLyric();
+      expect(vm.lyrics[0].timeMs, 2000, reason: 'Space did nothing');
+    });
+
+    test(
+      'new words from another device restart the cursor; new times do not',
+      () async {
+        final remote = StreamController<RemoteApplied>.broadcast();
+        addTearDown(remote.close);
+        final vm = await pumpVm(remoteApplied: remote.stream);
+        await vm.setLyricsText('a\nb\nc\nd');
+        vm.setLyricsMode(LyricsMode.sync);
+        vm.playback.position.value = const Duration(milliseconds: 1000);
+        await vm.stampNextLyric();
+        await vm.stampNextLyric();
+        expect(vm.syncIndex, 2);
+
+        Future<void> reloadWith(List<LyricLine> lines) async {
+          repo.stored = repo.stored.copyWith(lyrics: lines);
+          remote.add(
+            RemoteApplied(
+              rows: const [],
+              practiceIds: const {'p1'},
+              techniqueIds: const {},
+            ),
+          );
+          for (var i = 0; i < 400 && !_sameLyrics(vm.lyrics, lines); i++) {
+            await Future<void>.delayed(const Duration(milliseconds: 5));
+          }
+          expect(_sameLyrics(vm.lyrics, lines), isTrue);
+        }
+
+        // A peer stamped line d: the same words, so the cursor stays on c.
+        await reloadWith([
+          ...vm.lyrics.take(3),
+          vm.lyrics[3].copyWith(timeMs: 9000),
+        ]);
+        expect(vm.syncIndex, 2);
+        // A peer replaced the words: the cursor's place in the old ones means nothing.
+        await reloadWith(const [LyricLine(text: 'x'), LyricLine(text: 'y')]);
+        expect(vm.syncIndex, 0);
+      },
+    );
+  });
 }
+
+bool _sameLyrics(List<LyricLine> a, List<LyricLine> b) =>
+    a.length == b.length &&
+    [for (var i = 0; i < a.length; i++) a[i] == b[i]].every((e) => e);

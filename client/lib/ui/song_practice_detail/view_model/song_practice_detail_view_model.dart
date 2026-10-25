@@ -690,7 +690,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         next.add(line); // parsed plain line carries no time
       }
     }
-    return _setLyrics(next);
+    return _replaceLyrics(next);
   }
 
   /// Imports pasted/dropped lyrics — `.lrc` if it has time tags, else plain.
@@ -703,7 +703,17 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       _toast("That file didn't contain any lyrics.");
       return false;
     }
-    return _setLyrics(lines);
+    return _replaceLyrics(lines);
+  }
+
+  /// Persists NEW words (an import, an edit) and re-seeds the sync cursor on them: its place in
+  /// the old words means nothing in these. A file dropped mid-sync left it past the end of a
+  /// shorter one (Space did nothing) or in the middle of a longer one.
+  Future<bool> _replaceLyrics(List<LyricLine> lines) {
+    final saved = _setLyrics(lines);
+    _syncIndex = _firstUnsyncedIndex();
+    notifyListeners();
+    return saved;
   }
 
   /// Imports lyrics from a DROPPED file: validates the type + size, reads, and
@@ -758,21 +768,43 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     for (var i = 0; i < lyrics.length; i++) {
       if (!lyrics[i].isBlank && !lyrics[i].isSynced) return i;
     }
-    return 0;
+    // Every line is timed: start over from the first WORDS, not line 0 — pasted lyrics often
+    // open on a blank line, and stamping it shifted every time one line late.
+    return _wordsFrom(0);
+  }
+
+  /// The first line from [from] on that carries words (a blank line takes no time); the line
+  /// count when none does.
+  int _wordsFrom(int from) {
+    var i = from;
+    while (i < lyrics.length && lyrics[i].isBlank) {
+      i++;
+    }
+    return i;
   }
 
   /// Stamps the next line at the playhead, then advances past blank lines.
   Future<void> stampNextLyric() async {
-    final index = _syncIndex;
+    if (_syncIndex < 0) return;
+    // A cursor on a blank line stamps the words it stands before.
+    await _stampAndAdvance(_wordsFrom(_syncIndex));
+  }
+
+  /// Stamps a specific line at the current playhead (a re-time, or a line the taps passed), then
+  /// carries on from the line after it, as a tap would: parked on the clicked line, the next
+  /// Space re-stamped it with the following line's time.
+  Future<void> stampLyricAt(int index) async {
     if (index < 0 || index >= lyrics.length) return;
+    await _stampAndAdvance(index);
+  }
+
+  Future<void> _stampAndAdvance(int index) async {
+    if (index >= lyrics.length) return;
     // Advance the cursor BEFORE awaiting the write. Two taps land faster than
     // one save round-trip, and computing the advance afterwards reads a cursor
     // the other tap already moved: both would stamp this line and the cursor
     // would jump a line past them, leaving it unstamped.
-    var next = index + 1;
-    while (next < lyrics.length && lyrics[next].isBlank) {
-      next++;
-    }
+    final next = _wordsFrom(index + 1);
     _syncIndex = next;
     notifyListeners();
     if (!await _stampAt(index) && _syncIndex == next) {
@@ -781,13 +813,6 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       _syncIndex = index;
       notifyListeners();
     }
-  }
-
-  /// Stamps a specific line at the current playhead, parking the cursor on it.
-  Future<void> stampLyricAt(int index) async {
-    if (index < 0 || index >= lyrics.length) return;
-    _syncIndex = index;
-    await _stampAt(index);
   }
 
   /// Writes the playhead onto [index] WITHOUT touching the sync cursor — its
@@ -801,7 +826,8 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   }
 
   Future<void> clearLyricTimes() async {
-    _syncIndex = 0;
+    // Every line is untimed now: the cursor starts on the first words.
+    _syncIndex = _wordsFrom(0);
     await _setLyrics([for (final l in lyrics) l.copyWith(clearTime: true)]);
   }
 
@@ -970,6 +996,11 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     final before = _practice;
     _practice = loaded.aggregate;
     _baseHashes = loaded.baseHashes;
+    // New words from elsewhere re-seed the sync cursor, as an import does (see
+    // [_replaceLyrics]); times alone stamped on another device leave it be.
+    if (!_sameWords(before?.lyrics, loaded.aggregate.lyrics)) {
+      _syncIndex = _firstUnsyncedIndex();
+    }
     _ensureSelection();
     _ensureTimeline();
     playback.ensureLoopRange();
@@ -2419,6 +2450,14 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     } else {
       _baseHashes = saved.sentHashes ?? saved.baseHashes;
     }
+  }
+
+  static bool _sameWords(List<LyricLine>? a, List<LyricLine> b) {
+    if (a == null || a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i].text != b[i].text) return false;
+    }
+    return true;
   }
 
   /// Persists [_practice]. Returns whether the write succeeded — callers that
