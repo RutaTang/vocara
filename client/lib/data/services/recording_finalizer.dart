@@ -70,9 +70,10 @@ class RecordingFinalizer {
   final Duration totalBudget;
   final Duration progressCeiling;
 
-  /// A reading that moves while finalizers do real work (the bytes the
-  /// imports in flight have copied so far): the quit's evidence that a
-  /// finalizer past its budget is still working.
+  /// A reading that moves while finalizers do real work (the asset store's
+  /// import counter: bytes copied, plus a tick per finished landing step —
+  /// flush, rename, commit): the quit's evidence that a finalizer past its
+  /// budget is still working. Only a change between readings means anything.
   final Future<int> Function() _progress;
 
   final _pending = <Future<void> Function()>{};
