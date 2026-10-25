@@ -413,3 +413,54 @@ fn re_enabling_a_compressor_does_not_duck_with_a_stale_envelope() {
         "below-threshold audio must pass at ~unity right after re-enabling, got {g}"
     );
 }
+
+/// Steady-state level change (dB) of a `freq` sine of amplitude `amp` through a fresh
+/// de-esser, measured over the settled second half.
+fn deesser_gain_db(freq: f64, amp: f32, threshold_db: f32, range_db: f32) -> f32 {
+    use vocara_engine::dsp::deesser::{param as deparam, DeEsserNode};
+    let block = 256;
+    let mut de = DeEsserNode::new();
+    de.prepare(SR, block);
+    de.set_param(deparam::FREQ, 6500.0);
+    de.set_param(deparam::THRESHOLD_DB, threshold_db);
+    de.set_param(deparam::RANGE_DB, range_db);
+    de.set_param(deparam::BYPASS, 0.0);
+    let input = to_stereo(&sine_mono(freq, SR, 24_000, amp));
+    let out = run_phase(&mut de, &input, SR, block);
+    let h = input.len() / 2;
+    20.0 * (rms(&out[h..]) / rms(&input[h..])).log10()
+}
+
+#[test]
+fn a_de_esser_reduction_never_boosts_any_frequency() {
+    // The high band used to be split off as `x - HP2(x)`: the 2nd-order high-pass's phase
+    // shift made that "low band" peak around the crossover, so cutting the high band BOOSTED
+    // 3–7 kHz by up to ~2 dB. At full reduction (every tone far over the threshold), no
+    // frequency may come out louder than it went in; below the threshold the response is
+    // flat in magnitude (the crossover is allowed an allpass phase).
+    let mut f = 1000.0;
+    while f <= 16_000.0 {
+        let cut = deesser_gain_db(f, 0.3, -120.0, 24.0);
+        assert!(
+            cut <= 0.1,
+            "full reduction boosted {f:.0} Hz by {cut:+.2} dB"
+        );
+        let flat = deesser_gain_db(f, 0.01, 0.0, 24.0);
+        assert!(
+            flat.abs() <= 0.1,
+            "below threshold {f:.0} Hz moved {flat:+.2} dB"
+        );
+        f *= 1.19;
+    }
+}
+
+#[test]
+fn a_de_esser_cuts_a_loud_sibilant_by_most_of_its_range() {
+    // A loud "ess" above the 6.5 kHz crossover (the default/preset settings) must actually
+    // come down. Before the phase-coherent split a 10 kHz tone lost only 2 dB of a 12 dB
+    // range and a 7 kHz one came out LOUDER.
+    let at_10k = deesser_gain_db(10_000.0, 0.3, -28.0, 12.0);
+    assert!(at_10k <= -8.0, "10 kHz sibilant only moved {at_10k:+.2} dB");
+    let at_7k = deesser_gain_db(7_000.0, 0.3, -28.0, 12.0);
+    assert!(at_7k <= -4.0, "7 kHz sibilant only moved {at_7k:+.2} dB");
+}

@@ -1,9 +1,12 @@
 //! De-esser: a split-band dynamic high-frequency reducer for sibilance.
 //!
-//! The signal is split into a high band (a high-pass detector/processing path) and its
-//! complementary low band (`x - high`, phase-coherent). When the high band's level exceeds
-//! the threshold, only the high band is attenuated (clamped to `range`), so the body of the
-//! voice is untouched. No recursive audio path → stable.
+//! The signal is split by a Linkwitz-Riley (4th-order) crossover at the detector frequency.
+//! When the high band's level exceeds the threshold, only the high band is attenuated
+//! (clamped to `range`), so the body of the voice is untouched. LR4's two bands are in phase
+//! at every frequency and sum to an allpass, so `low + g·high` stays between g and unity: a
+//! reduction never boosts anything. (The old `x - HP2(x)` low band was NOT phase-coherent —
+//! it peaked around the crossover, so de-essing lifted 3–7 kHz by up to ~2 dB and barely cut
+//! the sibilance itself.) No recursive audio path → stable.
 
 use crate::dsp::biquad::{BandKind, BandSpec, Biquad, Coeffs};
 use crate::dsp::smooth::Smoothed;
@@ -22,13 +25,60 @@ pub mod param {
 /// `Band` cross-fade in `biquad.rs`.
 const XFADE_FRAMES: f32 = 256.0;
 
+/// One channel's crossover. The detector reads the first 2nd-order high-pass stage — the
+/// signal the de-esser has always detected on, so thresholds and presets keep their
+/// calibration — and the processing bands are the 4th-order (squared Butterworth)
+/// completions of the same corner. `Copy` so seeding a cross-fade target from the current
+/// filters is a value copy that keeps their history.
+#[derive(Clone, Copy)]
+struct Split {
+    hp1: Biquad,
+    hp2: Biquad,
+    lp1: Biquad,
+    lp2: Biquad,
+}
+
+impl Split {
+    fn new() -> Self {
+        Split {
+            hp1: Biquad::new(Coeffs::PASS),
+            hp2: Biquad::new(Coeffs::PASS),
+            lp1: Biquad::new(Coeffs::PASS),
+            lp2: Biquad::new(Coeffs::PASS),
+        }
+    }
+
+    fn set_coeffs(&mut self, hp: Coeffs, lp: Coeffs) {
+        self.hp1.set_coeffs(hp);
+        self.hp2.set_coeffs(hp);
+        self.lp1.set_coeffs(lp);
+        self.lp2.set_coeffs(lp);
+    }
+
+    /// (detector, low band, high band) for one input sample.
+    #[inline]
+    fn tick(&mut self, x: f32) -> (f32, f32, f32) {
+        let det = self.hp1.tick(x);
+        let high = self.hp2.tick(det);
+        let low = self.lp2.tick(self.lp1.tick(x));
+        (det, low, high)
+    }
+
+    fn reset_state(&mut self) {
+        self.hp1.reset_state();
+        self.hp2.reset_state();
+        self.lp1.reset_state();
+        self.lp2.reset_state();
+    }
+}
+
 pub struct DeEsserNode {
-    hp_l: Biquad,
-    hp_r: Biquad,
-    // Target high-pass filters, valid while `xfading`: seeded from the current filters
-    // (copies their history) with the new coefficients, then blended in over XFADE_FRAMES.
-    hp_l2: Biquad,
-    hp_r2: Biquad,
+    split_l: Split,
+    split_r: Split,
+    // Target crossovers, valid while `xfading`: seeded from the current ones (copies their
+    // history) with the new coefficients, then blended in over XFADE_FRAMES.
+    split_l2: Split,
+    split_r2: Split,
     xfading: bool,
     xmix: f32,
     xinc: f32,
@@ -47,10 +97,10 @@ pub struct DeEsserNode {
 impl DeEsserNode {
     pub fn new() -> Self {
         let mut d = DeEsserNode {
-            hp_l: Biquad::new(Coeffs::PASS),
-            hp_r: Biquad::new(Coeffs::PASS),
-            hp_l2: Biquad::new(Coeffs::PASS),
-            hp_r2: Biquad::new(Coeffs::PASS),
+            split_l: Split::new(),
+            split_r: Split::new(),
+            split_l2: Split::new(),
+            split_r2: Split::new(),
             xfading: false,
             xmix: 0.0,
             xinc: 1.0 / XFADE_FRAMES,
@@ -68,24 +118,29 @@ impl DeEsserNode {
         d
     }
 
-    fn hp_coeffs(&self) -> Coeffs {
-        BandSpec {
-            kind: BandKind::HighPass,
-            freq: self.freq,
-            q: 0.707,
-            gain_db: 0.0,
-            enabled: true,
-        }
-        .coeffs(self.sr)
+    /// Butterworth (Q 0.707, the detector's long-standing value) high- and low-pass
+    /// coefficients at the crossover; each band cascades two of its stage, which is LR4.
+    fn split_coeffs(&self) -> (Coeffs, Coeffs) {
+        let stage = |kind| {
+            BandSpec {
+                kind,
+                freq: self.freq,
+                q: 0.707,
+                gain_db: 0.0,
+                enabled: true,
+            }
+            .coeffs(self.sr)
+        };
+        (stage(BandKind::HighPass), stage(BandKind::LowPass))
     }
 
     /// Immediate retune (pre-roll: new/prepare) — no cross-fade.
     fn retune_now(&mut self) {
-        let c = self.hp_coeffs();
-        self.hp_l.set_coeffs(c);
-        self.hp_r.set_coeffs(c);
-        self.hp_l2.set_coeffs(c);
-        self.hp_r2.set_coeffs(c);
+        let (hp, lp) = self.split_coeffs();
+        self.split_l.set_coeffs(hp, lp);
+        self.split_r.set_coeffs(hp, lp);
+        self.split_l2.set_coeffs(hp, lp);
+        self.split_r2.set_coeffs(hp, lp);
         self.xfading = false;
         self.xmix = 0.0;
     }
@@ -93,18 +148,18 @@ impl DeEsserNode {
     /// Retune with an output cross-fade — used for a runtime FREQ change so the
     /// coefficient swap on a stateful filter does not click.
     fn retune_xfade(&mut self) {
-        let c = self.hp_coeffs();
+        let (hp, lp) = self.split_coeffs();
         // Collapse an in-flight fade into the current filters so the new fade starts
         // from a defined state.
         if self.xfading {
-            self.hp_l = self.hp_l2;
-            self.hp_r = self.hp_r2;
+            self.split_l = self.split_l2;
+            self.split_r = self.split_r2;
         }
         // Seed the target filters from the current ones (copies history), then retune.
-        self.hp_l2 = self.hp_l;
-        self.hp_r2 = self.hp_r;
-        self.hp_l2.set_coeffs(c);
-        self.hp_r2.set_coeffs(c);
+        self.split_l2 = self.split_l;
+        self.split_r2 = self.split_r;
+        self.split_l2.set_coeffs(hp, lp);
+        self.split_r2.set_coeffs(hp, lp);
         self.xfading = true;
         self.xmix = 0.0;
     }
@@ -136,21 +191,21 @@ impl Node for DeEsserNode {
 
     fn reset(&mut self) {
         // Seek clears every node's state. Without this override (inherited no-op)
-        // the high-pass biquads' filter tails and the held sibilance envelope
+        // the crossover biquads' filter tails and the held sibilance envelope
         // carry pre-seek history across the discontinuity (click + wrong gain
         // reduction). Clear filter state (coeffs intact) and the envelope to its
         // idle value — matching Band::reset and the delay/doubler/reverb resets.
         // Commit a pending coefficient cross-fade into the current filters first,
         // otherwise reset would revert to the OLD coeffs and desync from `freq`.
         if self.xfading {
-            self.hp_l = self.hp_l2;
-            self.hp_r = self.hp_r2;
+            self.split_l = self.split_l2;
+            self.split_r = self.split_r2;
             self.xfading = false;
         }
-        self.hp_l.reset_state();
-        self.hp_r.reset_state();
-        self.hp_l2.reset_state();
-        self.hp_r2.reset_state();
+        self.split_l.reset_state();
+        self.split_r.reset_state();
+        self.split_l2.reset_state();
+        self.split_r2.reset_state();
         self.xmix = 0.0;
         self.env_db = -120.0;
     }
@@ -175,27 +230,32 @@ impl Node for DeEsserNode {
         for i in 0..frames {
             let l = out[CHANNELS * i];
             let r = out[CHANNELS * i + 1];
-            // Cross-fade the high-pass output on a freq change so a coefficient swap
-            // on the stateful biquads doesn't click.
-            let (hl, hr) = if self.xfading {
+            // Cross-fade the crossover outputs on a freq change so a coefficient swap on
+            // the stateful biquads doesn't click.
+            let ((dl, low_l, hl), (dr, low_r, hr)) = if self.xfading {
                 let m = self.xmix;
-                let hl = self.hp_l.tick(l) * (1.0 - m) + self.hp_l2.tick(l) * m;
-                let hr = self.hp_r.tick(r) * (1.0 - m) + self.hp_r2.tick(r) * m;
+                let blend = |a: (f32, f32, f32), b: (f32, f32, f32)| {
+                    (
+                        a.0 * (1.0 - m) + b.0 * m,
+                        a.1 * (1.0 - m) + b.1 * m,
+                        a.2 * (1.0 - m) + b.2 * m,
+                    )
+                };
+                let sl = blend(self.split_l.tick(l), self.split_l2.tick(l));
+                let sr = blend(self.split_r.tick(r), self.split_r2.tick(r));
                 self.xmix += self.xinc;
                 if self.xmix >= 1.0 {
                     self.xmix = 1.0;
-                    self.hp_l = self.hp_l2;
-                    self.hp_r = self.hp_r2;
+                    self.split_l = self.split_l2;
+                    self.split_r = self.split_r2;
                     self.xfading = false;
                 }
-                (hl, hr)
+                (sl, sr)
             } else {
-                (self.hp_l.tick(l), self.hp_r.tick(r))
+                (self.split_l.tick(l), self.split_r.tick(r))
             };
-            let low_l = l - hl;
-            let low_r = r - hr;
 
-            let peak = hl.abs().max(hr.abs());
+            let peak = dl.abs().max(dr.abs());
             let x_db = 20.0 * (peak + 1.0e-12).log10();
             let coef = if x_db > self.env_db {
                 self.attack_coef
