@@ -675,10 +675,17 @@ pub struct OutputBinding {
     cpal_follows_default: bool,
     /// Duplex VPIO's share of the output (see [`VpioOutput`]).
     vpio: VpioOutput,
-    /// Whether [`Self::rerouted`] was true the last time safety was reconciled. Kept so the
-    /// event fires on the transition instead of on every poll.
-    was_rerouted: bool,
+    /// Consecutive reconciles that found playback rerouted (see [`Self::rerouted`]). The event
+    /// fires once, on the poll that makes it [`REROUTE_ANNOUNCE_POLLS`], instead of on every
+    /// poll.
+    rerouted_polls: u8,
 }
+
+/// Consecutive rerouted polls before [`EVENT_OUTPUT_REROUTED`] is raised. The monitor mutes on
+/// the first (safety does not wait), but one poll's answer alone can be a blip — a Bluetooth
+/// headset's output list is briefly empty while VPIO switches it to its headset profile, a
+/// transient HAL error — and every blip toasted "playback moved off your selected output".
+const REROUTE_ANNOUNCE_POLLS: u8 = 2;
 
 impl OutputBinding {
     /// The device the engine is ACTUALLY rendering to; empty = nothing open (or unknowable, as
@@ -805,10 +812,14 @@ fn reconcile_output_safety_with(
     }
     let rerouted = b.rerouted_with(serves_output);
     transport.set_monitor_muted(rerouted);
-    if rerouted && !b.was_rerouted {
+    b.rerouted_polls = if rerouted {
+        b.rerouted_polls.saturating_add(1)
+    } else {
+        0
+    };
+    if b.rerouted_polls == REROUTE_ANNOUNCE_POLLS {
         event.fetch_or(EVENT_OUTPUT_REROUTED, Ordering::Release);
     }
-    b.was_rerouted = rerouted;
     rerouted
 }
 
@@ -4105,7 +4116,7 @@ mod output_safety_tests {
             cpal_uid: "dev-A".into(),
             cpal_follows_default: false,
             vpio: VpioOutput::Off,
-            was_rerouted: false,
+            rerouted_polls: 0,
         });
         assert!(!reconcile_output_safety(h.transport(), &b, &event));
         assert!(!h.transport().monitor_muted());
@@ -4124,10 +4135,13 @@ mod output_safety_tests {
             cpal_uid: "dev-B".into(),
             cpal_follows_default: false,
             vpio: VpioOutput::Off,
-            was_rerouted: false,
+            rerouted_polls: 0,
         });
+        // Muted at once; announced once the reroute has held for a second poll.
         assert!(reconcile_output_safety(h.transport(), &b, &event));
         assert!(h.transport().monitor_muted());
+        assert_eq!(event.load(Ordering::Relaxed) & EVENT_OUTPUT_REROUTED, 0);
+        assert!(reconcile_output_safety(h.transport(), &b, &event));
         assert_eq!(
             event.load(Ordering::Relaxed) & EVENT_OUTPUT_REROUTED,
             EVENT_OUTPUT_REROUTED
@@ -4136,6 +4150,36 @@ mod output_safety_tests {
         // would re-toast for as long as the reroute lasts.
         event.store(0, Ordering::Relaxed);
         assert!(reconcile_output_safety(h.transport(), &b, &event));
+        assert_eq!(event.load(Ordering::Relaxed) & EVENT_OUTPUT_REROUTED, 0);
+    }
+
+    /// One poll's reroute can be a blip — a Bluetooth headset's output list is briefly empty while
+    /// VPIO switches its profile — so it mutes the monitor but is not announced; every blip used
+    /// to toast "playback moved".
+    #[test]
+    fn a_one_poll_blip_mutes_the_monitor_without_announcing_it() {
+        let h = engine();
+        let event = AtomicU32::new(0);
+        let b = Mutex::new(OutputBinding {
+            requested: "dev-headset".into(),
+            cpal_uid: String::new(),
+            cpal_follows_default: false,
+            vpio: VpioOutput::Bound("dev-headset".into()),
+            rerouted_polls: 0,
+        });
+        let blip = std::cell::Cell::new(0u32);
+        let probe = |_: &str| {
+            blip.set(blip.get() + 1);
+            blip.get() != 3 && blip.get() != 11
+        };
+        let mut muted_polls = 0;
+        for _ in 0..20 {
+            reconcile_output_safety_with(h.transport(), &b, &event, &probe);
+            if h.transport().monitor_muted() {
+                muted_polls += 1;
+            }
+        }
+        assert_eq!(muted_polls, 2, "each blip mutes its own poll");
         assert_eq!(event.load(Ordering::Relaxed) & EVENT_OUTPUT_REROUTED, 0);
     }
 
@@ -4150,7 +4194,7 @@ mod output_safety_tests {
             cpal_uid: String::new(),
             cpal_follows_default: false,
             vpio: VpioOutput::Off,
-            was_rerouted: false,
+            rerouted_polls: 0,
         });
         assert!(!reconcile_output_safety(h.transport(), &b, &event));
         assert!(!h.transport().monitor_muted());
@@ -4169,7 +4213,7 @@ mod output_safety_tests {
             cpal_uid: "whatever-the-default-resolved-to".into(),
             cpal_follows_default: true,
             vpio: VpioOutput::Off,
-            was_rerouted: false,
+            rerouted_polls: 0,
         };
         assert_eq!(following_default.requested_pick(), "");
 
@@ -4180,7 +4224,7 @@ mod output_safety_tests {
             cpal_uid: "dev-B".into(),
             cpal_follows_default: false,
             vpio: VpioOutput::Off,
-            was_rerouted: false,
+            rerouted_polls: 0,
         };
         assert_eq!(explicit.requested_pick(), "dev-A");
     }
@@ -4199,7 +4243,7 @@ mod output_safety_tests {
             cpal_uid: "the-default-when-the-stream-was-built".into(),
             cpal_follows_default: true,
             vpio: VpioOutput::Off,
-            was_rerouted: false,
+            rerouted_polls: 0,
         };
         assert_eq!(following.actual_uid(), system_default_output_uid());
         assert!(!following.rerouted());
@@ -4219,7 +4263,7 @@ mod output_safety_tests {
             cpal_uid: "dev-A".into(),
             cpal_follows_default: false,
             vpio: VpioOutput::Off,
-            was_rerouted: false,
+            rerouted_polls: 0,
         });
         assert!(!reconcile_output_safety(h.transport(), &b, &event));
         assert!(!h.transport().monitor_muted());
@@ -4269,7 +4313,7 @@ mod output_safety_tests {
             cpal_uid: String::new(),
             cpal_follows_default: false,
             vpio: VpioOutput::Bound("dev-headset".into()),
-            was_rerouted: false,
+            rerouted_polls: 0,
         });
         assert_eq!(b.lock().unwrap().actual_uid(), system_default_output_uid());
         assert!(reconcile_output_safety(h.transport(), &b, &event));
@@ -4295,7 +4339,7 @@ mod output_safety_tests {
             cpal_uid: String::new(),
             cpal_follows_default: false,
             vpio: VpioOutput::Bound("dev-headset".into()),
-            was_rerouted: false,
+            rerouted_polls: 0,
         });
         // Mid profile switch: no outputs yet, so playback is on the default for now.
         assert!(reconcile_output_safety_with(
@@ -4337,8 +4381,9 @@ mod output_safety_tests {
             cpal_uid: "dev-B".into(),
             cpal_follows_default: false,
             vpio: VpioOutput::Off,
-            was_rerouted: false,
+            rerouted_polls: 0,
         });
+        assert!(reconcile_output_safety(h.transport(), &b, &event));
         assert!(reconcile_output_safety(h.transport(), &b, &event));
         assert_eq!(
             event.swap(0, Ordering::Relaxed) & EVENT_OUTPUT_REROUTED,
@@ -4371,7 +4416,7 @@ mod output_safety_tests {
             cpal_uid: "dev-B".into(),
             cpal_follows_default: false,
             vpio: VpioOutput::Off,
-            was_rerouted: false,
+            rerouted_polls: 0,
         });
         reconcile_output_safety(h.transport(), &b, &event);
         assert!(h.transport().monitor_muted());
