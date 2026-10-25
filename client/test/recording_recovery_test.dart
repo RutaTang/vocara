@@ -22,6 +22,29 @@ import 'package:vocara/domain/models/song_practice.dart';
 import 'package:vocara/utils/id.dart';
 import 'package:vocara/utils/result.dart';
 
+/// Whether the suite runs as root, which reads a file whatever its permission
+/// bits: a `chmod 000` makes nothing unreadable then (a container's default).
+final bool _runsAsRoot =
+    !Platform.isWindows &&
+    (Process.runSync('id', ['-u']).stdout as String).trim() == '0';
+
+/// A real file whose `open()` fails after a successful stat — what a
+/// permission bit does to anyone but root.
+class _OpenFails implements File {
+  _OpenFails(this._real);
+  final File _real;
+
+  @override
+  Future<int> length() => _real.length();
+
+  @override
+  Future<RandomAccessFile> open({FileMode mode = FileMode.read}) =>
+      throw const FileSystemException('simulated permission denied', 'open');
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
 /// A real file whose `length()` (stat) fails — the hardware-fault shape no
 /// permission bit can produce, and the one `probeWav` used to answer "null,
 /// so: not a recording" for.
@@ -446,20 +469,27 @@ void main() {
       final f = File(p.join(root.path, 'unreadable.wav'));
       await f.parent.create(recursive: true);
       await f.writeAsBytes(monoWav(4800), flush: true);
-      await Process.run('chmod', ['000', f.path]);
-      addTearDown(() => Process.run('chmod', ['644', f.path]));
+      if (!_runsAsRoot) {
+        await Process.run('chmod', ['000', f.path]);
+        addTearDown(() => Process.run('chmod', ['644', f.path]));
+        await expectLater(
+          AudioFileService.probeWav(f),
+          throwsA(isA<FileSystemException>()),
+        );
+      }
 
-      await expectLater(
-        AudioFileService.probeWav(f),
-        throwsA(isA<FileSystemException>()),
-      );
-
-      // The permission case above fails at open(). The stat and the header read
-      // are the two steps that used to swallow their errors, and no permission
-      // bit reaches them — only a real fault does (EIO, a bad sector, a volume
-      // pulled between the directory listing and the probe). Inject each.
+      // The permission case above fails at open() — injected too, for a run as
+      // root. The stat and the header read are the two steps that used to
+      // swallow their errors, and no permission bit reaches them — only a real
+      // fault does (EIO, a bad sector, a volume pulled between the directory
+      // listing and the probe). Inject each.
       final good = File(p.join(root.path, 'good.wav'));
       await good.writeAsBytes(monoWav(4800), flush: true);
+      await expectLater(
+        AudioFileService.probeWav(_OpenFails(good)),
+        throwsA(isA<FileSystemException>()),
+        reason: 'a file that cannot be opened is not shown to be junk',
+      );
       await expectLater(
         AudioFileService.probeWav(_StatFails(good)),
         throwsA(isA<FileSystemException>()),
@@ -515,6 +545,11 @@ void main() {
       );
       expect((await reload(practice.id)).vocalTracks, hasLength(1));
     },
+    // Only a permission bit makes a real file in the staging tree unreadable
+    // here, and root reads it anyway.
+    skip: _runsAsRoot
+        ? 'root reads a file whatever its permission bits'
+        : false,
   );
 
   test(
