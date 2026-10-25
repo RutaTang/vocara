@@ -147,6 +147,36 @@ void main() {
     expect(saved, isTrue, reason: "take 2's save at exit");
   });
 
+  test(
+    'a take stopped during the wait with nothing to save earns no budget',
+    () async {
+      // A practice take holds nothing once stopped: counted as uncounted work
+      // anyway, it gave the exit request's run a full wait on nothing.
+      final finalizer = RecordingFinalizer.forTesting(
+        perFinalizerBudget: const Duration(milliseconds: 100),
+        totalBudget: const Duration(milliseconds: 60),
+      );
+      final never = Completer<void>();
+      addTearDown(() {
+        if (!never.isCompleted) never.complete();
+      });
+      unawaited(finalizer.hold(() => never.future)); // a wedged save
+      final close = finalizer.finalizeAll();
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      Future<void> practiceTake() async {}
+      finalizer.register(practiceTake, startsWork: true); // REC
+      finalizer.unregister(practiceTake); // Stop: nothing to save
+      await close.timeout(const Duration(seconds: 2));
+      final sw = Stopwatch()..start();
+      await finalizer.finalizeAll().timeout(const Duration(seconds: 2));
+      expect(
+        sw.elapsedMilliseconds,
+        lessThan(50),
+        reason: 'the budget is spent',
+      );
+    },
+  );
+
   test("a stop's tail added during the wait is waited on by the next "
       'run', () async {
     // Reusing the first call's future, the exit request's run waited only on

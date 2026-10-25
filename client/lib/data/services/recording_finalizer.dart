@@ -240,8 +240,11 @@ class RecordingFinalizer {
       _uncountedWork = false;
     }
     final clock = _quitClock ??= Stopwatch()..start();
+    // The uncounted take's budget only while it left work behind (a song take's stop-and-save
+    // registers it): a practice take stopped with nothing to save earned the exit request's run
+    // a full wait on nothing.
     final fresh =
-        _uncountedWork ||
+        (_uncountedWork && pending.any((f) => !_invoked.contains(f))) ||
         pending.any((f) => _startsWork.contains(f) && !_invoked.contains(f));
     _uncountedWork = false;
     var window = fresh
