@@ -766,4 +766,65 @@ void main() {
       expect(commits, 1);
     },
   );
+
+  // A lane laid out with no room for its body (the window narrower than the
+  // panels around the lanes) clamped each clip's box to [1 px, 0 px] and threw
+  // in build.
+  testWidgets('a lane with no room for its body builds without its clips', (
+    tester,
+  ) async {
+    final pos = ValueNotifier<Duration>(Duration.zero);
+    addTearDown(pos.dispose);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Align(
+            alignment: Alignment.topLeft,
+            child: SizedBox(
+              width: kTrackHeaderW,
+              child: TrackRow(
+                track: AudioTrack(
+                  id: 't1',
+                  kind: AudioTrackKind.vocal,
+                  displayName: 'Take 1',
+                  createdAt: DateTime(2026),
+                  clips: const [
+                    AudioClip(
+                      id: 'c1',
+                      audioFilePath: '/c1.wav',
+                      durationMs: 1000,
+                      startMs: 0,
+                      waveformPeaks: [0.4, 0.8, 0.4],
+                    ),
+                  ],
+                ),
+                label: 'Take 1',
+                timelineDurationMs: 10000,
+                position: pos,
+                selected: false,
+                reorderable: false,
+                onSelect: () {},
+                onClipMoveLive: (_, _) {},
+                onMoveCommit: () {},
+                onSelectClip: (_) {},
+                onClipContextMenu: (_, _) {},
+                onCrossLaneMove: (_) {},
+                onContextMenu: (_) {},
+                onAddNote: () {},
+                onEditNote: (_) {},
+                onAddTechnique: () {},
+                onToggleMute: () {},
+                onToggleSolo: () {},
+                onVolume: (_) {},
+                onVolumeCommit: () {},
+                onDelete: () {},
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    expect(tester.takeException(), isNull);
+    expect(find.byKey(const ValueKey('c1')), findsNothing);
+  });
 }

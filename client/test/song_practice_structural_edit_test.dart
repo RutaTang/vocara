@@ -1344,6 +1344,16 @@ void main() {
           vm.lyrics[3].copyWith(timeMs: 9000),
         ]);
         expect(vm.syncIndex, 2);
+        // A peer cleared every time: start over on the first words, as a clear
+        // here does — left on c, the next tap timed c with a and b untimed.
+        await reloadWith([
+          for (final l in vm.lyrics) l.copyWith(clearTime: true),
+        ]);
+        expect(vm.syncIndex, 0);
+        vm.playback.position.value = const Duration(milliseconds: 1500);
+        await vm.stampNextLyric();
+        expect(vm.lyrics[0].timeMs, 1500);
+        expect(vm.syncIndex, 1);
         // A peer replaced the words: the cursor's place in the old ones means nothing.
         await reloadWith(const [LyricLine(text: 'x'), LyricLine(text: 'y')]);
         expect(vm.syncIndex, 0);

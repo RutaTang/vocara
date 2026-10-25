@@ -778,8 +778,14 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   int get _cursor {
     final now = lyrics;
     if (!identical(_syncWords, now)) {
-      // New times on the same words (a stamp, a peer's) leave it where it is.
-      if (!_sameWords(_syncWords, now)) _syncIndex = _firstUnsyncedIndex();
+      final was = _syncWords;
+      if (!_sameWords(was, now)) {
+        _syncIndex = _firstUnsyncedIndex();
+      } else if (was != null && _anyTimed(was) && !_anyTimed(now)) {
+        // Every time gone from the same words (a peer's clear): start over on the first words,
+        // as a clear here does. Other new times (a stamp, a peer's) leave it where it is.
+        _syncIndex = _wordsFrom(0);
+      }
       _syncWords = now;
     }
     if (_wordsFrom(_syncIndex) >= now.length) {
@@ -788,6 +794,8 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     }
     return _syncIndex;
   }
+
+  static bool _anyTimed(List<LyricLine> lines) => lines.any((l) => l.isSynced);
 
   void _placeCursor(int index) {
     _syncIndex = index;

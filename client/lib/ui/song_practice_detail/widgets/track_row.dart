@@ -637,7 +637,9 @@ class _BodyState extends State<_Body> {
           double peakSpan,
         })?
         visible(int spanStart, int spanDur, List<double> peaks) {
-          if (dur <= 0 || spanDur <= 0) return null;
+          // A lane laid out narrower than a pixel shows no clip (and its box
+          // clamp below, 1 px up to the lane's width, would throw).
+          if (dur <= 0 || spanDur <= 0 || width < 1) return null;
           final spanEnd = spanStart + spanDur;
           final vs = spanStart > viewStart ? spanStart : viewStart;
           final ve = spanEnd < viewStart + dur ? spanEnd : viewStart + dur;
