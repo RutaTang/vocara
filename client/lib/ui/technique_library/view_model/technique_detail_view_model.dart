@@ -173,8 +173,8 @@ class TechniqueDetailViewModel extends ChangeNotifier
   /// recorder (so no Stop for the take), [save] refuses while the mic is hot
   /// (every Save would fail), and Cancel's [discardMediaDraft] would abort the
   /// take with no prompt. The user stops the take first. The screen disables
-  /// Edit on this and also checks it at tap time, since a pending start
-  /// notifies nothing and the button can still look live.
+  /// Edit on this and also checks it at tap time, since a tap can land
+  /// between a start going pending and the rebuild that announces it.
   bool get canEdit => !isRecordingPractice && !_recorder.isStarting;
 
   /// Open an edit session. Pairs with [endEdit]; the screen calls this when it
@@ -420,11 +420,15 @@ class TechniqueDetailViewModel extends ChangeNotifier
 
   /// Toggles a card's inline analysis (by media id): collapse/expand the
   /// selected one, or select-and-expand a different one. While a practice
-  /// take records, its Stop lives in the selected card: collapsing that card
+  /// take records — or its start is still pending, when it arms into this
+  /// same card — its Stop lives in the selected card: collapsing that card
   /// hid it (until re-expanded), so the card stays open.
   void toggleExampleExpanded(String mediaId) {
     if (referenceMedia?.id == mediaId) {
-      if (isRecordingPractice && !_analysisCollapsed) return;
+      if ((isRecordingPractice || _recorder.isStarting) &&
+          !_analysisCollapsed) {
+        return;
+      }
       _analysisCollapsed = !_analysisCollapsed;
       notifyListeners();
     } else {
@@ -677,6 +681,23 @@ class TechniqueDetailViewModel extends ChangeNotifier
     notifyListeners();
   }
 
+  /// Runs the recorder's start, announcing both edges of its pending window.
+  /// [MicRecordingController.isStarting] flips synchronously at the call and
+  /// can then pend behind the permission prompt and the mic open, but the
+  /// screen only sees what this view model notifies: without these, Save and
+  /// the example cards looked live for the whole window (a Save tap toasted
+  /// "Couldn't save", a collapsed card armed the take with its Stop hidden),
+  /// and a failed start left them looking busy until something else rebuilt.
+  Future<MicRecordingStart> _startRecorder(
+    RecordingPathStrategy destination,
+  ) async {
+    final pending = _recorder.start(destination);
+    notifyListeners();
+    final r = await pending;
+    if (!r.started) notifyListeners();
+    return r;
+  }
+
   /// The message the screen toasts for a failed recording start.
   String _startFailureMessage(MicRecordingFailure failure) => switch (failure) {
     MicRecordingFailure.permissionDenied =>
@@ -750,7 +771,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
   /// Starts an ephemeral practice recording. Returns an error to show, or null.
   Future<String?> startPractice() async {
     if (!canRecordPractice) return null;
-    final r = await _recorder.start(
+    final r = await _startRecorder(
       RecordingPathStrategy.tempDir('vocara_practice'),
     );
     final failure = r.failure;
@@ -923,7 +944,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
   /// Returns an error to surface, or null.
   Future<String?> startExampleRecording() async {
     if (!canRecordExample) return null;
-    final r = await _recorder.start(
+    final r = await _startRecorder(
       RecordingPathStrategy.tempDir('vocara_example'),
     );
     final failure = r.failure;
