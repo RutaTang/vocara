@@ -8,12 +8,22 @@ import 'audio_dsp.dart';
 import 'graph_audio_playback_service.dart'
     show MediaTooLongException, decodeMediaToMono;
 
+/// Decodes the media at a path to mono PCM, at most [maxDuration] long:
+/// [decodeMediaToMono]'s shape.
+typedef MediaDecoder =
+    Future<PcmAudio?> Function(String path, {Duration? maxDuration});
+
 /// Computes the full take-style analysis bundle for an arbitrary media file (any
 /// format the engine can decode), for the technique library's reference "ground
 /// truth" and the ephemeral practice comparison. The heavy DSP runs off the UI
 /// thread.
 class MediaAnalysisService {
-  const MediaAnalysisService();
+  /// [decode] is the native engine's decode; a VM test, which cannot load the
+  /// engine, passes its own.
+  const MediaAnalysisService({MediaDecoder decode = decodeMediaToMono})
+    : _decode = decode;
+
+  final MediaDecoder _decode;
 
   /// Longest media the analysis path will decode. The whole file materializes
   /// as Float32 PCM and is copied again across the isolate boundaries (see
@@ -58,16 +68,20 @@ class MediaAnalysisService {
     // their analyses were serialized.
     return analysisGate.run(() async {
       if (wanted != null && !wanted()) return null;
-      final pcm = await decodeMediaToMono(
-        path,
-        maxDuration: maxAnalysisDuration,
-      );
+      final pcm = await _decode(path, maxDuration: maxAnalysisDuration);
       if (pcm == null || pcm.samples.isEmpty) return null;
-      final samples = pcm.samples;
-      final rate = pcm.sampleRate;
-      return Isolate.run(() => _analyze(samples, rate));
+      return _analyzeOffThread(pcm.samples, pcm.sampleRate);
     });
   }
+
+  /// The hop into the analysis isolate, in a scope of its own: a closure
+  /// built inside [analyze] carries its enclosing contexts along, [wanted]
+  /// among them — and with it the caller's whole view model, which the isolate
+  /// message cannot hold, so every reference analysis threw.
+  static Future<TechniqueAnalysis?> _analyzeOffThread(
+    Float32List samples,
+    int rate,
+  ) => Isolate.run(() => _analyze(samples, rate));
 
   static TechniqueAnalysis? _analyze(Float32List samples, int sampleRate) {
     if (samples.isEmpty || sampleRate <= 0) return null;
