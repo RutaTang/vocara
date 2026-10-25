@@ -1400,6 +1400,161 @@ void main() {
     );
 
     test(
+      'a tap landed while a failed import was in flight keeps its cursor',
+      () async {
+        final vm = await pumpVm();
+        await vm.setLyricsText('a\nb\nc\nd');
+        vm.setLyricsMode(LyricsMode.sync);
+        // A transient failure: the import's write fails, the tap's lands.
+        repo.failNextSave = true;
+        final landed = vm.importLyrics(
+          '[00:01.00]a\n[00:02.00]b\n[00:03.00]c\n[00:04.00]d',
+        );
+        // Every line timed: the cursor starts over on the first words.
+        expect(vm.syncIndex, 0);
+        await Future<void>.delayed(Duration.zero); // the write is in flight
+        // The user re-times from the top while the import's write is in flight.
+        vm.playback.position.value = const Duration(milliseconds: 1500);
+        final tap = vm.stampNextLyric();
+        expect(vm.syncIndex, 1);
+        expect(await landed, isFalse);
+        await tap;
+        expect(vm.lyrics[0].timeMs, 1500);
+        expect(
+          vm.syncIndex,
+          1,
+          reason: 'the failed import re-seeded over the tap',
+        );
+        vm.playback.position.value = const Duration(milliseconds: 2500);
+        await vm.stampNextLyric();
+        expect(vm.lyrics[0].timeMs, 1500, reason: 'Space re-stamped line a');
+        expect(vm.lyrics[1].timeMs, 2500, reason: 'b never got the tap');
+      },
+    );
+
+    test(
+      'a click landed while a failed import was in flight keeps its cursor',
+      () async {
+        final vm = await pumpVm();
+        await vm.setLyricsText('a\nb\nc\nd\ne');
+        vm.setLyricsMode(LyricsMode.sync);
+        repo.failNextSave = true;
+        final landed = vm.importLyrics('a\nb\nc\nd\ne');
+        expect(vm.syncIndex, 0);
+        await Future<void>.delayed(Duration.zero); // the write is in flight
+        vm.playback.position.value = const Duration(milliseconds: 3000);
+        final click = vm.stampLyricAt(2);
+        expect(vm.syncIndex, 3);
+        expect(await landed, isFalse);
+        await click;
+        expect(
+          vm.syncIndex,
+          3,
+          reason: 'the failed import re-seeded over the click',
+        );
+      },
+    );
+
+    test(
+      'a failed re-import and a failed tap never put the cursor on a timed line',
+      () async {
+        final vm = await pumpVm();
+        await vm.setLyricsText('a\nb\nc\nd\ne\nf');
+        vm.setLyricsMode(LyricsMode.sync);
+        vm.playback.position.value = const Duration(milliseconds: 1000);
+        for (var i = 0; i < 3; i++) {
+          await vm.stampNextLyric();
+        }
+        expect(vm.syncIndex, 3);
+        repo.failSaves = true;
+        final landed = vm.importLyrics('a\nb\nc\nd\ne\nf');
+        expect(vm.syncIndex, 0); // a frame mid-write
+        await Future<void>.delayed(Duration.zero); // the write is in flight
+        vm.playback.position.value = const Duration(milliseconds: 2000);
+        final tap = vm.stampNextLyric(); // Space while the import is in flight
+        expect(await landed, isFalse);
+        vm.syncIndex; // a frame drawn after the import's failure
+        await tap;
+        repo.failSaves = false;
+        expect(vm.lyrics.take(3).every((l) => l.timeMs == 1000), isTrue);
+        vm.playback.position.value = const Duration(milliseconds: 7000);
+        await vm.stampNextLyric();
+        expect(vm.lyrics[0].timeMs, 1000, reason: 'Space re-stamped line a');
+        expect(vm.lyrics[3].timeMs, 7000, reason: 'd never got the tap');
+      },
+    );
+
+    test('the same, with no frame drawn between the two failures', () async {
+      final vm = await pumpVm();
+      await vm.setLyricsText('a\nb\nc\nd\ne\nf');
+      vm.setLyricsMode(LyricsMode.sync);
+      vm.playback.position.value = const Duration(milliseconds: 1000);
+      for (var i = 0; i < 3; i++) {
+        await vm.stampNextLyric();
+      }
+      repo.failSaves = true;
+      final landed = vm.importLyrics('a\nb\nc\nd\ne\nf');
+      expect(vm.syncIndex, 0);
+      await Future<void>.delayed(Duration.zero); // the write is in flight
+      vm.playback.position.value = const Duration(milliseconds: 2000);
+      final tap = vm.stampNextLyric();
+      expect(await landed, isFalse);
+      await tap;
+      repo.failSaves = false;
+      vm.playback.position.value = const Duration(milliseconds: 7000);
+      await vm.stampNextLyric();
+      expect(vm.lyrics[0].timeMs, 1000, reason: 'Space re-stamped line a');
+      expect(vm.lyrics[3].timeMs, 7000, reason: 'd never got the tap');
+    });
+
+    test(
+      'a failed import under a newer one leaves the newer cursor alone',
+      () async {
+        final vm = await pumpVm();
+        await vm.setLyricsText('a\nb\nc');
+        vm.setLyricsMode(LyricsMode.sync);
+        repo.failNextSave = true;
+        final first = vm.importLyrics('x\ny\nz');
+        await Future<void>.delayed(Duration.zero);
+        final second = vm.importLyrics('p\nq\nr');
+        expect(vm.syncIndex, 0);
+        vm.playback.position.value = const Duration(milliseconds: 1000);
+        final tap = vm.stampLyricAt(1);
+        expect(vm.syncIndex, 2);
+        expect(await first, isFalse);
+        expect(await second, isTrue);
+        await tap;
+        expect(vm.lyrics.map((l) => '${l.text}@${l.timeMs}').toList(), [
+          'p@null',
+          'q@1000',
+          'r@null',
+        ]);
+        expect(vm.syncIndex, 2);
+      },
+    );
+
+    test(
+      'an edit and an import both failing leave the cursor on the restored text',
+      () async {
+        final vm = await pumpVm();
+        await vm.setLyricsText('a\nb\nc');
+        vm.setLyricsMode(LyricsMode.sync);
+        vm.playback.position.value = const Duration(milliseconds: 1000);
+        await vm.stampNextLyric();
+        expect(vm.syncIndex, 1);
+        repo.failSaves = true;
+        final edit = vm.applyEditedLyrics('a\nb\nc\nd');
+        final imp = vm.importLyrics('x\ny');
+        expect(vm.syncIndex, 0);
+        expect(await edit, isFalse);
+        expect(await imp, isFalse);
+        repo.failSaves = false;
+        expect(vm.lyrics.map((l) => l.text).toList(), ['a', 'b', 'c']);
+        expect(vm.syncIndex, 1);
+      },
+    );
+
+    test(
       'a failed import puts the cursor back on the restored words',
       () async {
         final vm = await pumpVm();

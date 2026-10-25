@@ -715,13 +715,18 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// text was set meanwhile): a frame drawn while the write was in flight had already seeded on
   /// this text, and the same words came back with their times — the cursor stayed on line a
   /// and the next Space overwrote its good time.
+  ///
+  /// Not when the cursor was placed on the text since (a tap or click while the write was in
+  /// flight): that placement stands, and re-seeding put a fully timed text's cursor back on
+  /// line a, so every later tap landed a line late.
   Future<bool> _replaceLyrics(List<LyricLine> lines) async {
     final text = ++_lyricsText;
     final saved = _setLyrics(lines);
     _syncWords = null;
+    final moves = _cursorMoves;
     notifyListeners();
     final ok = await saved;
-    if (!ok && text == _lyricsText) {
+    if (!ok && text == _lyricsText && moves == _cursorMoves) {
       _syncWords = null;
       notifyListeners();
     }
@@ -797,7 +802,11 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   void _placeCursor(int index) {
     _syncIndex = index;
     _syncWords = lyrics;
+    _cursorMoves++;
   }
+
+  /// Bumped by each [_placeCursor] (see [_replaceLyrics]).
+  int _cursorMoves = 0;
 
   int _firstUnsyncedIndex() {
     for (var i = 0; i < lyrics.length; i++) {
@@ -841,15 +850,20 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     // the other tap already moved: both would stamp this line and the cursor
     // would jump a line past them, leaving it unstamped.
     final next = _wordsFrom(index + 1);
+    final before = lyrics[index].timeMs;
     _placeCursor(next);
     notifyListeners();
-    if (!await _stampAt(index) &&
-        _syncIndex == next &&
-        _sameWords(_syncWords, lyrics)) {
-      // The write failed and the model reverted to disk, so this line carries
-      // no time: put the cursor back on it (unless a later tap moved past, or
-      // the disk held other words — then the cursor re-seeds on those).
-      _placeCursor(index);
+    if (!await _stampAt(index) && _syncIndex == next) {
+      if (_sameWords(_syncWords, lyrics) && lyrics[index].timeMs == before) {
+        // The write failed and the model reverted to disk, where this line
+        // stands as it did before the tap: put the cursor back on it.
+        _placeCursor(index);
+      } else {
+        // The disk held another text — other words, or these words with
+        // times a failed re-import had cleared (a good time on this very
+        // line): re-seed on it, never back onto a timed line.
+        _syncWords = null;
+      }
       notifyListeners();
     }
   }

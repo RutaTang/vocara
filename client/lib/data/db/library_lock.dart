@@ -101,9 +101,9 @@ class LibraryLock implements LibraryGuard {
 
   /// Errno values a non-blocking lock attempt fails with when another
   /// process holds a conflicting lock: EACCES, and EAGAIN (11 on Linux, 35
-  /// on macOS) — and EINTR, a call interrupted before it decided anything,
-  /// which is a retry, not a filesystem without locks (that turned the guard
-  /// off, and a waiter then owned the library another process held).
+  /// on macOS). Plus EINTR, belt and braces: the Dart VM retries an
+  /// interrupted fcntl itself, but should one ever surface it is a retry, not
+  /// a filesystem without locks (which turns the guard off).
   static const Set<int> _heldElsewhere = {13, 11, 35, 4};
 
   final String path;
