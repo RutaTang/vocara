@@ -553,19 +553,43 @@ void main() {
     expect(engine.calls, isNot(contains('play')));
   });
 
-  test('Stop while REC is arming stops the transport too', () async {
-    // Before it cancelled the take, Stop in this window stopped the
-    // transport; a REC pressed over a playing backing (a punch on the fly)
-    // then left the backing playing on after the cancel.
+  test('Stop while REC is arming pauses the transport where it is', () async {
+    // A REC pressed over a playing backing (a punch on the fly) left the
+    // backing playing on after the cancel. Like stopping an armed take, the
+    // cancel pauses without rewinding the playhead.
     final arming = _ArmingMic();
     final c = build(arming);
     addTearDown(c.dispose);
     final start = c.startRecording();
     await pumpUntil(() => c.isStartingTake);
+    engine.calls.clear();
     await c.stopRecording();
-    expect(engine.calls, contains('stop'));
+    expect(engine.calls, ['pause']);
     arming.ready.complete();
     await start;
+  });
+
+  test('a start dropping its empty take still reads as starting', () async {
+    // The drop is a structural edit holding the busy gate: a REC in that
+    // moment is refused, so the transport must show the take as in flight.
+    final arming = _ArmingMic();
+    final dropping = Completer<void>();
+    final c = build(
+      arming,
+      selectedTrackId: () => null,
+      createEmptyVocalTake: () async => 'fresh',
+      discardEmptyTake: (_) => dropping.future,
+    );
+    addTearDown(c.dispose);
+    final start = c.startRecording();
+    await pumpUntil(() => c.isStartingTake);
+    await c.stopRecording();
+    arming.ready.complete();
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    expect(c.isStartingTake, isTrue, reason: 'the empty take is being dropped');
+    dropping.complete();
+    await start;
+    expect(c.isStartingTake, isFalse);
   });
 
   test('a REC that never arms drops the empty take it created', () async {

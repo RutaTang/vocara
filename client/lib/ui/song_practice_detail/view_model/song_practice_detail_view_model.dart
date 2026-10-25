@@ -223,11 +223,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
             startMs: startMs,
           ),
       createEmptyVocalTake: createEmptyVocalTake,
-      discardEmptyTake: (trackId) async {
-        if (_trackById(trackId)?.clips.isEmpty ?? false) {
-          await deleteTrack(trackId);
-        }
-      },
+      discardEmptyTake: _discardEmptyTake,
       selectRecordedClip: _selectRecordedClip,
       save: _save,
       toast: _toast,
@@ -891,6 +887,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// subject's spectrogram, or nothing at all when [_ensureSelection] moved the
   /// selection because the selected take was deleted remotely).
   void _adoptLoaded(Loaded<SongPractice> loaded) {
+    final before = _practice;
     _practice = loaded.aggregate;
     _baseHashes = loaded.baseHashes;
     _ensureSelection();
@@ -902,7 +899,27 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     // A re-read can move a clip to another path (a synced clip's bytes landed:
     // its `asset://` ref became the pool path), which re-keys its lane's
     // analysis; folded-out lanes compute only when pushed, and sat blank.
-    analysis.refreshExpandedLanes();
+    if (_clipPathsMoved(before, loaded.aggregate)) {
+      analysis.refreshExpandedLanes();
+    }
+  }
+
+  /// Whether a clip [from] holds sits at another path in [to] — a re-read
+  /// re-keying its lane's analysis (see [_adoptLoaded]). Only then are the
+  /// folded-out lanes refreshed: refreshing on every save recomputed lanes
+  /// the analysis budget had evicted, a full decode per fader release.
+  static bool _clipPathsMoved(SongPractice? from, SongPractice to) {
+    if (from == null) return false;
+    Iterable<AudioClip> clipsOf(SongPractice p) => [
+      ...?p.accompaniment?.clips,
+      ...?p.reference?.clips,
+      for (final t in p.vocalTracks) ...t.clips,
+    ];
+    final paths = {for (final c in clipsOf(from)) c.id: c.audioFilePath};
+    return clipsOf(to).any((c) {
+      final was = paths[c.id];
+      return was != null && was != c.audioFilePath;
+    });
   }
 
   // --- Importing audio -----------------------------------------------------
@@ -1435,9 +1452,43 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     _practice = practice.copyWith(
       vocalTracks: [...practice.vocalTracks, track],
     );
+    _selectionBeforeEmptyTake = (track: _selectedTrackId, bus: _selectedBusId);
     _selectedTrackId = track.id;
     _selectedBusId = null; // track and bus selection are exclusive
     return await _save() ? track.id : null;
+  }
+
+  /// What was selected before [createEmptyVocalTake] selected its take.
+  ({String? track, String? bus})? _selectionBeforeEmptyTake;
+
+  /// Drops the empty take a REC created for itself when the start never armed
+  /// (cancelled by Stop, or failing), and gives back the selection it took:
+  /// the selection otherwise fell back to the first lane, losing a selected
+  /// bus or the Original lane the user was on.
+  Future<void> _discardEmptyTake(String trackId) async {
+    final before = _selectionBeforeEmptyTake;
+    _selectionBeforeEmptyTake = null;
+    // Not [deleteTrack]: it refuses while a take is in flight, which the
+    // recorder reports this drop as (a REC meanwhile would be refused by the
+    // gate). An empty take has no audio to delete.
+    await _busyGate.run(() async {
+      final cur = _practice;
+      if (cur == null) return;
+      final take = cur.vocalTracks.where((t) => t.id == trackId).firstOrNull;
+      if (take == null || take.clips.isNotEmpty) return;
+      _practice = cur.copyWith(
+        vocalTracks: cur.vocalTracks.where((t) => t.id != trackId).toList(),
+      );
+      if (await _save()) analysis.dropLaneState(trackId);
+    });
+    if (before == null || _trackById(trackId) != null) return;
+    final bus = before.bus;
+    final track = before.track;
+    if (bus != null && mixer.fxBuses.any((b) => b.id == bus)) {
+      selectBus(bus);
+    } else if (track != null && _trackById(track) != null) {
+      selectTrack(track);
+    }
   }
 
   String _appendVocal({
@@ -2279,7 +2330,9 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       _practice = saved.aggregate;
       _baseHashes = saved.baseHashes;
       // The re-read may move clips to other paths (see [_adoptLoaded]).
-      analysis.refreshExpandedLanes();
+      if (_clipPathsMoved(sent, saved.aggregate)) {
+        analysis.refreshExpandedLanes();
+      }
     } else {
       _baseHashes = saved.sentHashes ?? saved.baseHashes;
     }

@@ -235,13 +235,19 @@ class RecordingController extends ChangeNotifier {
   /// view treats it like recording: the capture already belongs to the
   /// incoming take. So does the transport: a Stop here cancels the take (see
   /// [stopRecording]), and the window lasts until a cancelled start unwound.
-  bool get isStartingTake => _mic.isStarting || _cancellingStart;
+  bool get isStartingTake =>
+      _mic.isStarting || _cancellingStart || _discardingTake;
 
   /// Set when Stop cancels a start still arming, until that start returns:
   /// its take setup (the empty take's save) may still be finishing, and a
   /// fast re-arm's setup interleaving with it would bump the take generation
   /// under the new take and move its start position.
   bool _cancellingStart = false;
+
+  /// Set while a start that never armed drops the empty take it created (see
+  /// [_createdEmptyTake]): the drop is a structural edit holding the busy
+  /// gate, so a REC in that moment would be refused without a sign of why.
+  bool _discardingTake = false;
 
   /// Synchronous Stop latch: set at [stopRecording]'s entry (before its pause/
   /// finalize awaits) and cleared when the finalize completes. During those
@@ -478,7 +484,16 @@ class RecordingController extends ChangeNotifier {
       // Never armed: drop the empty take this start created for itself.
       final created = _createdEmptyTake;
       _createdEmptyTake = null;
-      if (created != null && !_disposed) await _discardEmptyTake(created);
+      if (created != null && !_disposed) {
+        _discardingTake = true;
+        notifyListeners();
+        try {
+          await _discardEmptyTake(created);
+        } finally {
+          _discardingTake = false;
+          if (!_disposed) notifyListeners();
+        }
+      }
     }
   }
 
@@ -496,10 +511,10 @@ class RecordingController extends ChangeNotifier {
         _mic.invalidatePendingStart();
         _cancellingStart = true;
         notifyListeners();
-        // Stop stops the transport too, as it did in this window before it
-        // cancelled the take: a REC pressed over a playing backing (a punch
-        // on the fly) otherwise left the backing playing on.
-        await _playback.stop();
+        // Stop pauses the transport too, where it is, as stopping an armed
+        // take does: a REC pressed over a playing backing (a punch on the
+        // fly) otherwise left the backing playing on after the cancel.
+        await _playback.engine.pause();
       }
       return;
     }

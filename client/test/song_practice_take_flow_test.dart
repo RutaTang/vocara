@@ -563,6 +563,23 @@ void main() {
       },
     );
 
+    test('a REC cancelled while arming gives the selection back', () async {
+      // REC selected the empty take it made (and cleared a bus selection);
+      // dropping the take fell back to the first lane instead.
+      final mic = _FakeMic()..ready = Completer<void>();
+      final vm = await pumpVm(engine: _FakeGraphEngine(), mic: mic);
+      final busId = await vm.mixer.createBus();
+      expect(vm.selectedBusId, busId);
+      final start = vm.recording.startRecording();
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(vm.selectedBusId, isNull, reason: 'the empty take took it');
+      await vm.stopRecording();
+      mic.ready!.complete();
+      await start;
+      expect(vm.practice!.vocalTracks.map((t) => t.id), ['take1']);
+      expect(vm.selectedBusId, busId);
+    });
+
     test('a REC cancelled while arming leaves no empty take behind', () async {
       final mic = _FakeMic()..ready = Completer<void>();
       final vm = await pumpVm(
