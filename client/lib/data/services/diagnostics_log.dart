@@ -248,8 +248,14 @@ class DiagnosticsLog {
 
   static const String _roots =
       '/(?:Users|private|var|tmp|Volumes|Library|Applications|home|etc|opt)';
-  static final RegExp _absolutePath = RegExp('$_roots(?:/[^\'"\\n]+)+');
-  static final RegExp _nextRoot = RegExp('\\s(?=$_roots/)');
+  // An apostrophe ends the path only where it reads as the closing quote of
+  // Dart's `path = '…'` (line end, punctuation, or ` (OS Error`); inside a
+  // name ("Don't Stop.m4a", "Guns N' Roses/…") it is part of the path, and
+  // stopping there leaked the rest of the name unscrubbed.
+  static final RegExp _absolutePath = RegExp(
+    '$_roots(?:/(?:[^\'"\\n]|\'(?!\\s*\$|\\s+\\(|\\n|[,;:)\\]}.]))+)+',
+  );
+  static final RegExp _nextRoot = RegExp('\\s\'?(?=$_roots/)');
   static final Set<String> _knownExtensions = {
     ...'wav wave aif aiff aifc caf mp3 m4a aac flac ogg oga opus mp4 m4v mov '
             'webm mkv json db sqlite sqlite3 ckpt pth onnx yaml txt log zip '
@@ -258,7 +264,7 @@ class DiagnosticsLog {
   };
   static final RegExp _numericRun = RegExp(r'^\.\d');
   static final RegExp _extensionInside = RegExp(
-    r'\.[A-Za-z0-9]{1,8}(?=[\s.,;:)\]}]|$)',
+    r"\.[A-Za-z0-9]{1,8}(?=[\s.,;:)\]}']|$)",
   );
 
   /// The running bundle's version (CFBundleShortVersionString + build +

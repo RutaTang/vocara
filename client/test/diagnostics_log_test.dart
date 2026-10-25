@@ -172,6 +172,38 @@ void main() {
       );
     });
 
+    test('an apostrophe inside a name does not end the scrub early', () {
+      // The match stopped at the first `'`, so everything after it in the
+      // name was logged verbatim.
+      expect(
+        DiagnosticsLog.scrubPaths(
+          'FileSystemException: Cannot open file, path = '
+          "'/Users/a/Music/Don't Stop Believin.m4a' (OS Error: x, errno = 2)",
+        ),
+        'FileSystemException: Cannot open file, path = '
+        "'<path>.m4a' (OS Error: x, errno = 2)",
+      );
+      for (final message in [
+        "path = '/Users/a/Guns N' Roses/Sweet Child O' Mine.mp3' (OS Error)",
+        "path = '/Users/a/Rock 'n' Roll/Take 2.wav'",
+        "copy '/Users/a/x.wav' to '/Users/a/O' Mine.wav', failed",
+      ]) {
+        final out = DiagnosticsLog.scrubPaths(message);
+        for (final leak in ['Roses', 'Mine', 'Roll', 'Take 2']) {
+          expect(out, isNot(contains(leak)), reason: out);
+        }
+      }
+      // The closing quote still ends the path, so what follows survives.
+      expect(
+        DiagnosticsLog.scrubPaths("open '/Users/a/Don't.wav', retrying"),
+        "open '<path>.wav', retrying",
+      );
+      expect(
+        DiagnosticsLog.scrubPaths("copy '/Users/a/x.wav' to '/Users/b/y.aiff'"),
+        "copy '<path>.wav' to '<path>.aiff'",
+      );
+    });
+
     test('a dotted number in the prose after a path is not taken for its '
         'extension', () {
       // Taking the LAST extension-looking run in the final component cut
