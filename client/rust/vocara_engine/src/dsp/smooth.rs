@@ -29,8 +29,16 @@ impl Smoothed {
     /// graph starts every node at its build defaults and the host then pushes each live
     /// value; ramping those in made the first ~30 ms after every rebuild glide from the
     /// defaults (a quarter-volume master at up to +12 dB, pans sweeping in from the centre).
+    ///
+    /// A non-finite `t` is ignored (the current target stands): the one-pole recurrence never
+    /// recovers from one — a NaN stays NaN, and an infinity turns into NaN on the next finite
+    /// target (`inf + (x - inf) * c`) — so a single bad value used to silence the node, or
+    /// poison everything downstream, for the rest of the session.
     #[inline]
     pub fn set_target(&mut self, t: f32) {
+        if !t.is_finite() {
+            return;
+        }
         self.target = t;
         if !self.live {
             self.cur = t;

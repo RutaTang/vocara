@@ -50,7 +50,8 @@ pub struct StreamCtrl {
     /// counter is that instrument.
     pub xruns: std::sync::atomic::AtomicU64,
     /// Where the RT node sits parked AHEAD of the transport — armed at a ring
-    /// position the render has not reached, no fence at the ring head — as a
+    /// position the render has not reached (before the track's span: past the
+    /// span's first frame), no fence at the ring head — as a
     /// [`parked_word`], or 0. The node rewrites it after every block it
     /// renders and clears it while stopped; the feeder reads it to catch a
     /// park that a loop wrap has stranded (see `TrackFeeder::node_stranded`).
@@ -65,6 +66,32 @@ impl StreamCtrl {
             xruns: std::sync::atomic::AtomicU64::new(0),
             parked: std::sync::atomic::AtomicU64::new(0),
         })
+    }
+}
+
+/// The most engine frames one device callback renders out of a stream before
+/// the pump can refill it: a 4096-frame device buffer (VPIO's slice ceiling,
+/// and the largest buffer an output is expected to run) on a 44.1 kHz device.
+/// The output resampler fills its FIFO in whole 1024-frame render blocks, and
+/// 4096 x 48/44.1 frames plus its kernel's reach round up to five of them. At
+/// the engine rate the same buffer renders exactly 4096.
+pub const MAX_CALLBACK_FRAMES: usize = 5 * 1024;
+
+/// The slots a ring of `capacity` frames keeps free (see
+/// [`TrackFeeder::fill_reserve`]): one callback's demand plus a replan's fence
+/// and one more, so the audio a replan lands behind its fence covers the whole
+/// first callback after it. The production ring (16384 frames) then fills
+/// 11260 frames ahead of the render (~235 ms) where a quarter's reserve
+/// filled 12288 (256 ms): the pump tops it up every 10 ms, and nothing else
+/// reads the depth. A ring too small to keep that much free and still hold as
+/// much again (the test rings) keeps a quarter of itself free.
+fn ring_reserve(capacity: usize) -> usize {
+    let quarter = (capacity / 4).max(2);
+    let need = MAX_CALLBACK_FRAMES + 4;
+    if quarter < need && need <= capacity / 2 {
+        need
+    } else {
+        quarter
     }
 }
 
@@ -306,8 +333,13 @@ impl TrackFeeder {
     }
 
     /// The slots the fill leaves free: room for a discarding replan's fence
-    /// AND fresh audio behind it — a quarter of the ring, which covers the
-    /// largest device callback (VPIO's 4096 frames). The node drops the whole
+    /// AND fresh audio behind it — enough for the largest device callback
+    /// ([`MAX_CALLBACK_FRAMES`]) after both fences (see [`ring_reserve`]). A
+    /// quarter of the ring used to be the rule: on the production ring that
+    /// put 4092 frames behind a replan, four short of a 4096-frame callback
+    /// and 1028 short of the resampler's 5120 — silence at the end of the
+    /// first callback after every seek on a large device buffer, since no
+    /// pump can add anything until the node drains. The node drops the whole
     /// stale backlog at once when it adopts the fence; with only the fence's
     /// two slots to spare, the fill behind it got just what the node had
     /// consumed since the last pump, and the node ran dry before the next one
@@ -330,7 +362,7 @@ impl TrackFeeder {
                 self.since_flush = None;
             }
         }
-        let reserve = (self.producer.capacity() / 4).max(2);
+        let reserve = ring_reserve(self.producer.capacity());
         match self.since_flush {
             Some(n) => reserve.saturating_sub(used - n).max(2),
             None => reserve,
@@ -465,8 +497,10 @@ impl TrackFeeder {
     /// edit a callback short of loop end, its audio landing late), or the ring
     /// ran dry short of loop end. The node then waits, over the pre-wrap rest
     /// of its run, for the transport to come round to it — a whole pass of
-    /// silence. The one legitimate park is on a seek still pending to that
-    /// very base, which `planned_pos` reports as its target.
+    /// silence. A wrap into a loop's stretch before the track's span strands
+    /// it the same way (the clip's head would play silent), and the node
+    /// reports that park too. The one legitimate park is on a seek still
+    /// pending to that very base, which `planned_pos` reports as its target.
     fn node_stranded(&self, t: &Shared, basis: &PlanBasis) -> bool {
         let parked = self.ctrl.parked.load(Ordering::Acquire);
         if parked == 0 {
@@ -622,5 +656,26 @@ impl TrackFeeder {
                 return Ok(());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ring_reserve, MAX_CALLBACK_FRAMES};
+
+    #[test]
+    fn the_production_ring_reserves_a_whole_callback_behind_both_fences() {
+        // ffi streams every track through a 16384-frame ring.
+        let r = ring_reserve(16_384);
+        assert!(r - 4 >= MAX_CALLBACK_FRAMES, "reserve {r}");
+        assert!(
+            16_384 - r >= MAX_CALLBACK_FRAMES * 2,
+            "lookahead {}",
+            16_384 - r
+        );
+        // Small (test) rings keep their quarter.
+        assert_eq!(ring_reserve(8192), 2048);
+        assert_eq!(ring_reserve(2048), 512);
+        assert_eq!(ring_reserve(32_768), 8192);
     }
 }
