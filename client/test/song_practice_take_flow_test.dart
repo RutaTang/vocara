@@ -43,6 +43,9 @@ class _FakeRepo extends Fake implements SongPracticeRepository {
   /// Fails only the NEXT save, then heals.
   bool failNextSave = false;
 
+  /// Fails the next this-many saves, then heals.
+  int failSaves = 0;
+
   /// Models the asset pool: a save re-reads every vocal clip at its POOL path,
   /// as SongPracticeRepositoryDrift's hydrate does.
   bool pooling = false;
@@ -73,8 +76,9 @@ class _FakeRepo extends Fake implements SongPracticeRepository {
     await Future<void>.delayed(Duration.zero);
     final gate = saveGate;
     if (gate != null) await gate.future;
-    if (failNextSave) {
+    if (failNextSave || failSaves > 0) {
       failNextSave = false;
+      if (failSaves > 0) failSaves--;
       return Result.error(Exception('save failed'));
     }
     stored = pooling
@@ -561,6 +565,45 @@ void main() {
       expect(
         repo.stored.vocalTracks.singleWhere((t) => t.id == 'take1').clips,
         hasLength(2),
+      );
+    });
+  });
+
+  group('a take whose save fails', () {
+    // The stop's finalize ignored its save's outcome. A failed save reverts
+    // the model to the store's, so the take vanished from the screen and no
+    // later save brought it back: only the next launch's recovery re-adopted
+    // its file, as a new take at 0:00 off its lane.
+    test('once is saved again and lands on its lane', () async {
+      final vm = await pumpVm(engine: _FakeGraphEngine(), mic: _FakeMic());
+      vm.selectTrack('take1');
+      await vm.recording.startRecording();
+      vm.position.value = const Duration(milliseconds: 500);
+      repo.failNextSave = true;
+      await vm.stopRecording();
+      final take1 = repo.stored.vocalTracks.singleWhere((t) => t.id == 'take1');
+      expect(take1.clips, hasLength(2));
+      expect(
+        vm.practice!.vocalTracks.singleWhere((t) => t.id == 'take1').clips,
+        hasLength(2),
+      );
+    });
+
+    test('twice says it will be recovered at the next launch', () async {
+      final vm = await pumpVm(engine: _FakeGraphEngine(), mic: _FakeMic());
+      final toasts = <String>[];
+      final sub = vm.toasts.listen(toasts.add);
+      addTearDown(sub.cancel);
+      vm.selectTrack('take1');
+      await vm.recording.startRecording();
+      repo.failSaves = 2;
+      await vm.stopRecording();
+      await Future<void>.delayed(Duration.zero);
+      expect(repo.stored.vocalTracks.single.clips, hasLength(1));
+      expect(
+        toasts.last,
+        "Couldn't save the take. It will be recovered the next time Vocara "
+        'opens.',
       );
     });
   });

@@ -679,17 +679,19 @@ class RecordingController extends ChangeNotifier {
           'was busy. The take has small gaps.',
         );
       }
-      final target = targetId == null ? null : _trackById(targetId);
-      final String landedOn;
-      if (target == null || target.kind != AudioTrackKind.vocal) {
-        // No armed take → the recording becomes a new take at the cursor.
-        landedOn = _appendVocal(
-          path: path,
-          analysis: analysis,
-          startMs: startMs,
-        );
-        _selectRecordedClip(landedOn, null);
-      } else {
+      // Puts the recording into the model; returns the lane it landed on.
+      String stage() {
+        final target = targetId == null ? null : _trackById(targetId);
+        if (target == null || target.kind != AudioTrackKind.vocal) {
+          // No armed take → the recording becomes a new take at the cursor.
+          final landedOn = _appendVocal(
+            path: path,
+            analysis: analysis,
+            startMs: startMs,
+          );
+          _selectRecordedClip(landedOn, null);
+          return landedOn;
+        }
         // Drop the recording onto the armed take as its own clip at the cursor —
         // a separate clip, never merged into existing audio (Logic / Cubase).
         final clip = AudioClip(
@@ -705,9 +707,26 @@ class RecordingController extends ChangeNotifier {
         // recording, leaving the lane selection stale would pair this clip id with
         // the wrong lane and the inspector would analyze the wrong subject.
         _selectRecordedClip(target.id, clip.id);
-        landedOn = target.id;
+        return target.id;
       }
-      await _save();
+
+      var landedOn = stage();
+      if (!await _save()) {
+        // A failed save reverts the model to the store's, which never held the
+        // take: it vanished from the screen and no later save brought it back,
+        // only the next launch's recovery of its file, as a new take at 0:00
+        // off its lane. Stage it again — unless the model kept it, a newer
+        // edit's queued save carrying it — and retry once.
+        if (!(_practiceOf()?.referencesAudio(path) ?? false)) {
+          landedOn = stage();
+        }
+        if (!await _save()) {
+          _toast(
+            "Couldn't save the take. It will be recovered the next time "
+            'Vocara opens.',
+          );
+        }
+      }
       saveRan = true;
       // Only AFTER the save: it re-reads the clip at its pooled path, which is
       // the key the analysis caches look it up by. Refreshed before it, the
