@@ -294,15 +294,18 @@ impl FeederSlot {
 /// each ring topped up. One pass filled each ring to the brim before even
 /// replanning the next, so after a seek with many streamed tracks the last
 /// ones missed the first callback (≈0.4 ms per full ring against a ~10 ms
-/// callback) and opened on silence. Returns whether a feeder was retired.
+/// callback) and opened on silence. Returns whether the round met a retired
+/// feeder still in the set, for [`sweep_dead`]: not only in the round it died,
+/// since the sweep keeps a slot the other worker holds at that moment.
 fn pump_round(slots: &[Arc<std::sync::Mutex<FeederSlot>>], transport: &Shared) -> bool {
     let (mut any_dead, failed) = pump_heads(slots, transport);
     any_dead |= top_up(slots, transport, &failed);
     any_dead
 }
 
-/// [`pump_round`]'s first pass. Returns whether a feeder was retired and which
-/// slots failed (the top-up skips those, so a failure counts once per round).
+/// [`pump_round`]'s first pass. Returns whether it met a retired feeder and
+/// which slots failed (the top-up skips those, so a failure counts once per
+/// round).
 fn pump_heads(
     slots: &[Arc<std::sync::Mutex<FeederSlot>>],
     transport: &Shared,
@@ -316,6 +319,7 @@ fn pump_heads(
             continue;
         };
         if slot.dead {
+            any_dead = true;
             continue;
         }
         if let Err(e) = slot.feeder.pump_at_most(transport, PAUSED_PRIME_FRAMES) {
@@ -347,6 +351,19 @@ fn top_up(
         any_dead |= slot.record_pump(result);
     }
     any_dead
+}
+
+/// Drops the retired feeders from the set. A slot the other worker holds is
+/// kept for now: waiting on it here would block the set (and the commit)
+/// behind that worker's read. It is still dead next round, and swept then.
+fn sweep_dead(feeders: &std::sync::Mutex<Vec<Arc<std::sync::Mutex<FeederSlot>>>>) {
+    if let Ok(mut set) = feeders.lock() {
+        set.retain(|s| match s.try_lock() {
+            Ok(g) => !g.dead,
+            Err(std::sync::TryLockError::WouldBlock) => true,
+            Err(std::sync::TryLockError::Poisoned(_)) => false,
+        });
+    }
 }
 
 impl VeEngine {
@@ -384,18 +401,8 @@ impl VeEngine {
                         Ok(set) => set.clone(),
                         Err(_) => break,
                     };
-                    let any_dead = pump_round(&slots, &transport);
-                    if any_dead {
-                        if let Ok(mut set) = feeders.lock() {
-                            // A slot the other worker holds is kept for now:
-                            // waiting on it here would block the set (and the
-                            // commit) behind that worker's read.
-                            set.retain(|s| match s.try_lock() {
-                                Ok(g) => !g.dead,
-                                Err(std::sync::TryLockError::WouldBlock) => true,
-                                Err(std::sync::TryLockError::Poisoned(_)) => false,
-                            });
-                        }
+                    if pump_round(&slots, &transport) {
+                        sweep_dead(&feeders);
                     }
                     // Woken early by a transport command (see `wake_feeders`).
                     std::thread::park_timeout(std::time::Duration::from_millis(10));
@@ -3171,6 +3178,66 @@ mod feeder_slot_tests {
         assert!(finished, "the round waited on the stuck slot");
         assert_ne!(rings[1].len(), 0, "the free slot was pumped");
         assert_eq!(rings[0].len(), 0, "the held slot was left to its worker");
+    }
+
+    #[test]
+    fn a_dead_slot_held_at_its_sweep_is_swept_on_a_later_round() {
+        use crate::graph::{GraphDesc, NodeEntry};
+        use std::sync::{Arc, Mutex};
+        // The sweep keeps a slot the other worker holds; it used to run only in
+        // the round the slot died, so one held then stayed until the next
+        // commit (its file handle and ring with it).
+        let graph = GraphDesc {
+            nodes: vec![NodeEntry::new(
+                1,
+                Box::new(crate::dsp::master::MasterNode::unity()),
+            )],
+            edges: vec![],
+            master: 1,
+        }
+        .compile(48_000.0, 128)
+        .unwrap();
+        let (_mic, mic_cons) = spsc::<[Smp; CHANNELS]>(256);
+        let (handle, _rt) =
+            crate::live::spawn(graph, std::collections::HashMap::new(), mic_cons, 256);
+        let path =
+            std::env::temp_dir().join(format!("vocara_pump_sweep_{}.wav", std::process::id()));
+        crate::wav::write_wav_f32(
+            &path,
+            &vec![0.25 as Smp; 10_000 * CHANNELS],
+            CHANNELS as u16,
+            48_000,
+        )
+        .unwrap();
+        let slots: Vec<_> = (0..2)
+            .map(|_| {
+                let (prod, _cons) = spsc::<[Smp; CHANNELS]>(1024);
+                let reader = WavTrackReader::open(path.to_str().unwrap()).unwrap();
+                let feeder = TrackFeeder::new(StreamCtrl::new(), prod, reader, 0);
+                Arc::new(Mutex::new(FeederSlot::new(feeder)))
+            })
+            .collect();
+        slots[0].lock().unwrap().dead = true;
+        let feeders = Mutex::new(slots.clone());
+        let transport = Arc::clone(handle.shared_arc());
+
+        // The round it died in: the other worker holds it at the sweep.
+        {
+            let _held = slots[0].lock().unwrap();
+            super::sweep_dead(&feeders);
+        }
+        assert_eq!(feeders.lock().unwrap().len(), 2, "kept while held");
+
+        // A later round still sees it, and its sweep takes it.
+        assert!(
+            super::pump_round(&slots, &transport),
+            "a round meeting a retired slot asks for the sweep"
+        );
+        super::sweep_dead(&feeders);
+        let _ = std::fs::remove_file(&path);
+        let left = feeders.lock().unwrap();
+        assert_eq!(left.len(), 1, "swept once free");
+        assert!(Arc::ptr_eq(&left[0], &slots[1]));
     }
 
     #[test]
