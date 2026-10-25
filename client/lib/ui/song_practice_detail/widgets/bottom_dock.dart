@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:forui/forui.dart';
 
@@ -34,12 +36,31 @@ class BottomDock extends StatelessWidget {
     required this.vm,
     required this.tracks,
     required this.onDeleteTrack,
+    this.maxHeight = double.infinity,
     super.key,
   });
 
   final SongPracticeDetailViewModel vm;
   final List<AudioTrack> tracks;
   final ValueChanged<AudioTrack> onDeleteTrack;
+
+  /// The most the whole dock may take: what the workspace has left once the
+  /// timeline keeps a usable height. The dragged height is clamped to a
+  /// fixed range, not to the window, so on a window shorter than the dock at
+  /// its tallest a drag up (or a window shrunk under a tall dock) overflowed
+  /// the workspace, collapsed the timeline and cut off the dock's bottom.
+  final double maxHeight;
+
+  /// The dock's chrome over its content: the top border, the resize grabber
+  /// and the tab bar.
+  static const double _chromeHeight = 1 + 10 + 34;
+
+  /// The content height on screen: as dragged, but never more than the
+  /// workspace has room for (see [maxHeight]).
+  double get _contentHeight => math.max(
+    0.0,
+    math.min(vm.analysis.dockHeight, maxHeight - _chromeHeight),
+  );
 
   @override
   Widget build(BuildContext context) {
@@ -55,8 +76,10 @@ class BottomDock extends StatelessWidget {
         children: [
           if (open)
             _ResizeHandle(
-              onDrag: (dy) =>
-                  vm.analysis.setDockHeight(vm.analysis.dockHeight - dy),
+              // From the height on screen, so a drag down from a capped dock
+              // moves it at once — read per move, not per build, or two
+              // moves inside one frame would both start from the same value.
+              onDrag: (dy) => vm.analysis.setDockHeight(_contentHeight - dy),
             ),
           SizedBox(
             height: 34,
@@ -121,7 +144,7 @@ class BottomDock extends StatelessWidget {
           ),
           if (open)
             SizedBox(
-              height: vm.analysis.dockHeight,
+              height: _contentHeight,
               child: DecoratedBox(
                 decoration: const BoxDecoration(
                   border: Border(top: BorderSide(color: Studio.border)),

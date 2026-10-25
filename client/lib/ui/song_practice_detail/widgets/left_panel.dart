@@ -111,15 +111,22 @@ class _Rail extends StatelessWidget {
               SizedBox(height: 12),
               Icon(FIcons.panelLeftOpen, size: 15, color: Studio.textSecondary),
               SizedBox(height: 18),
-              RotatedBox(
-                quarterTurns: 1,
-                child: Text(
-                  'INSPECTOR',
-                  style: TextStyle(
-                    color: Studio.textSecondary,
-                    fontSize: 11,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 1.5,
+              // Clipped, not overflowing, where the dock leaves the panels
+              // less height than the label.
+              Flexible(
+                child: RotatedBox(
+                  quarterTurns: 1,
+                  child: Text(
+                    'INSPECTOR',
+                    maxLines: 1,
+                    softWrap: false,
+                    overflow: TextOverflow.clip,
+                    style: TextStyle(
+                      color: Studio.textSecondary,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 1.5,
+                    ),
                   ),
                 ),
               ),

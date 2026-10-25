@@ -668,15 +668,22 @@ class _Rail extends StatelessWidget {
                 color: Studio.textSecondary,
               ),
               const SizedBox(height: 18),
-              const RotatedBox(
-                quarterTurns: 1,
-                child: Text(
-                  'LYRICS   NOTES   TECHNIQUES',
-                  style: TextStyle(
-                    color: Studio.textSecondary,
-                    fontSize: 11,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 1.5,
+              // Clipped, not overflowing, where the dock leaves the panels
+              // less height than the label.
+              const Flexible(
+                child: RotatedBox(
+                  quarterTurns: 1,
+                  child: Text(
+                    'LYRICS   NOTES   TECHNIQUES',
+                    maxLines: 1,
+                    softWrap: false,
+                    overflow: TextOverflow.clip,
+                    style: TextStyle(
+                      color: Studio.textSecondary,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 1.5,
+                    ),
                   ),
                 ),
               ),

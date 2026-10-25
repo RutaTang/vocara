@@ -32,6 +32,8 @@ import 'package:vocara/domain/models/spectrogram.dart';
 import 'package:vocara/domain/models/voice_metrics.dart';
 import 'package:vocara/ui/core/widgets/waveform_painter.dart';
 import 'package:vocara/ui/song_practice_detail/view_model/song_practice_detail_view_model.dart';
+import 'package:vocara/ui/song_practice_detail/widgets/bottom_dock.dart';
+import 'package:vocara/ui/song_practice_detail/widgets/ruler_bar.dart';
 import 'package:vocara/ui/song_practice_detail/widgets/song_practice_detail_screen.dart';
 import 'package:vocara/utils/result.dart';
 
@@ -232,8 +234,9 @@ SongPractice _practice(int lanes) {
 Future<SongPracticeDetailViewModel> _pumpScreen(
   WidgetTester tester, {
   int lanes = 8,
+  Size size = const Size(1800, 1100),
 }) async {
-  tester.view.physicalSize = const Size(1800, 1100);
+  tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.reset);
   final vm = SongPracticeDetailViewModel(
@@ -515,5 +518,51 @@ void main() {
     for (final w in elsewhere) {
       expect(flip, isNot(contains(w)), reason: 'a follow page-flip rebuilt $w');
     }
+  });
+
+  // The dock's height was clamped to a fixed range, not to the window: on a
+  // window shorter than the dock at its tallest (any laptop screen), dragging
+  // the dock up — or shrinking the window under a tall dock — overflowed the
+  // workspace, collapsed the timeline to nothing and cut off the dock's
+  // bottom.
+  testWidgets('a dock taller than the window leaves the timeline whole', (
+    tester,
+  ) async {
+    final vm = await _pumpScreen(tester, size: const Size(1800, 700));
+    vm.analysis.showDockTab(DockTab.analysisSummary);
+    vm.analysis.setDockHeight(760);
+    await tester.pump(const Duration(milliseconds: 50));
+
+    expect(tester.takeException(), isNull);
+    expect(
+      tester.getSize(find.byType(RulerBar)).height,
+      greaterThan(0),
+      reason: 'the timeline keeps its place',
+    );
+    final dock = tester.getRect(find.byType(BottomDock));
+    expect(dock.bottom, lessThanOrEqualTo(700));
+    expect(dock.top, greaterThan(tester.getRect(find.byType(RulerBar)).bottom));
+  });
+
+  testWidgets('a dock resize counts every move, even several in one frame', (
+    tester,
+  ) async {
+    final vm = await _pumpScreen(tester);
+    vm.analysis.showDockTab(DockTab.analysisSummary);
+    await tester.pump(const Duration(milliseconds: 50));
+    final grabber = find.byWidgetPredicate(
+      (w) => w is MouseRegion && w.cursor == SystemMouseCursors.resizeUpDown,
+    );
+    final g = await tester.startGesture(tester.getCenter(grabber));
+    await g.moveBy(const Offset(0, -30)); // wins the gesture
+    await tester.pump();
+    final before = vm.analysis.dockHeight;
+
+    // A fast mouse: two moves land before the dock rebuilds.
+    await g.moveBy(const Offset(0, -10));
+    await g.moveBy(const Offset(0, -10));
+    await tester.pump();
+    await g.up();
+    expect(vm.analysis.dockHeight, before + 20);
   });
 }

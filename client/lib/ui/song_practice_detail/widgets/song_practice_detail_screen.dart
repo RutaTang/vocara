@@ -51,6 +51,11 @@ const _audioExtensions = {
   '.wma',
 };
 
+/// The least height the timeline (and the side panels beside it) keeps
+/// however tall the dock is dragged: the ruler, the scrollbar and most of a
+/// lane.
+const double _kMinTimelineHeight = 120;
+
 bool _isAudioPath(String path) {
   final dot = path.lastIndexOf('.');
   if (dot < 0) return false;
@@ -452,38 +457,52 @@ class _WorkspaceState extends State<_Workspace> {
           },
         ),
         Expanded(
-          child: Row(
-            children: [
-              LeftPanel(vm: vm),
-              Expanded(
-                child: _Center(
-                  vm: vm,
-                  practice: practice,
-                  onDropBacking: _dropBacking,
-                  onDropNewTake: _dropNewTake,
-                  onDropClipToTake: _dropClipToTake,
-                  onAddNote: _addNote,
-                  onAddNoteAt: _addNoteAt,
-                  onEditNote: _editNote,
-                  onAddTechnique: _addTechnique,
-                  onAddTechniqueAt: _addTechniqueAt,
-                  onEditTechnique: _editTechnique,
-                  onDeleteTrack: _deleteTrack,
-                  onContextMenu: _showTrackMenu,
-                  onClipContextMenu: _showClipMenu,
+          child: LayoutBuilder(
+            builder: (context, constraints) => Column(
+              children: [
+                Expanded(
+                  child: Row(
+                    children: [
+                      LeftPanel(vm: vm),
+                      Expanded(
+                        child: _Center(
+                          vm: vm,
+                          practice: practice,
+                          onDropBacking: _dropBacking,
+                          onDropNewTake: _dropNewTake,
+                          onDropClipToTake: _dropClipToTake,
+                          onAddNote: _addNote,
+                          onAddNoteAt: _addNoteAt,
+                          onEditNote: _editNote,
+                          onAddTechnique: _addTechnique,
+                          onAddTechniqueAt: _addTechniqueAt,
+                          onEditTechnique: _editTechnique,
+                          onDeleteTrack: _deleteTrack,
+                          onContextMenu: _showTrackMenu,
+                          onClipContextMenu: _showClipMenu,
+                        ),
+                      ),
+                      RightPanel(
+                        vm: vm,
+                        onAddNote: _addNote,
+                        onEditNote: _editNote,
+                        onAddTechnique: _addTechnique,
+                        onEditTechnique: _editTechnique,
+                      ),
+                    ],
+                  ),
                 ),
-              ),
-              RightPanel(
-                vm: vm,
-                onAddNote: _addNote,
-                onEditNote: _editNote,
-                onAddTechnique: _addTechnique,
-                onEditTechnique: _editTechnique,
-              ),
-            ],
+                BottomDock(
+                  vm: vm,
+                  tracks: _orderedTracks,
+                  onDeleteTrack: _deleteTrack,
+                  // However tall it is dragged, the timeline keeps its place.
+                  maxHeight: constraints.maxHeight - _kMinTimelineHeight,
+                ),
+              ],
+            ),
           ),
         ),
-        BottomDock(vm: vm, tracks: _orderedTracks, onDeleteTrack: _deleteTrack),
       ],
     );
     return Stack(
