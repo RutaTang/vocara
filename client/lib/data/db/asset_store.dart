@@ -327,7 +327,8 @@ class AssetStore {
   /// How many bytes the imports in flight have written to staging so far.
   /// The copy runs in a background isolate, so its progress is read off the
   /// growing files: a quit waiting on a save that is pooling a large file
-  /// keeps waiting while this moves (see RecordingFinalizer).
+  /// keeps waiting while this moves (see RecordingFinalizer). It falls when an
+  /// import lands and its file leaves staging.
   static Future<int> bytesBeingCopied() async {
     var total = 0;
     for (final path in List.of(_copying)) {

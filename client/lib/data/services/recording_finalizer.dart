@@ -68,9 +68,9 @@ class RecordingFinalizer {
   final Duration totalBudget;
   final Duration progressCeiling;
 
-  /// A counter that rises while finalizers do real work (the bytes imports
-  /// have copied so far): the quit's evidence that a finalizer past its
-  /// budget is still working.
+  /// A reading that moves while finalizers do real work (the bytes the
+  /// imports in flight have copied so far): the quit's evidence that a
+  /// finalizer past its budget is still working.
   final Future<int> Function() _progress;
 
   final _pending = <Future<void> Function()>{};
@@ -139,9 +139,13 @@ class RecordingFinalizer {
   }
 
   /// Waits for [work] for [budget] — and for another [budget] each time the
-  /// last one ended with [_progress] advanced past [mark] (the finalizer is
-  /// still moving bytes), up to [progressCeiling] since the quit began. A finalizer making
+  /// last one ended with [_progress] moved off [mark] (bytes are still being
+  /// copied), up to [progressCeiling] since the quit began. A finalizer making
   /// no progress for a whole [budget] is wedged, and times out as before.
+  ///
+  /// Moved, not risen: the reading is the staging files in flight, so it DROPS
+  /// when one of two concurrent copies lands and leaves staging while the other
+  /// is still copying — and reading that drop as a stall cut the other off.
   Future<void> _settle(
     Future<void> work,
     Duration budget,
@@ -154,7 +158,7 @@ class RecordingFinalizer {
         return;
       } on TimeoutException {
         final now = await _progress();
-        if (now <= mark || spent.elapsed >= progressCeiling) rethrow;
+        if (now == mark || spent.elapsed >= progressCeiling) rethrow;
         mark = now;
         DiagnosticsLog.instance.log(
           'quit',

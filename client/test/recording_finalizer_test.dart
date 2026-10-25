@@ -88,6 +88,30 @@ void main() {
     },
   );
 
+  test('a save still copying is not cut off when another copy lands', () async {
+    // The reading is the staging files in flight, so it DROPS when another
+    // import finishes and leaves staging: that is progress, not a stall.
+    var copied = 100 << 20; // another import's 100 MB already in staging
+    final finalizer = RecordingFinalizer.forTesting(
+      perFinalizerBudget: const Duration(milliseconds: 40),
+      totalBudget: const Duration(milliseconds: 60),
+      progressCeiling: const Duration(seconds: 5),
+      progress: () async => copied,
+    );
+    var landed = false;
+    final save = finalizer.hold(() async {
+      for (var i = 0; i < 15; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        copied += 1 << 20;
+        if (i == 3) copied -= 100 << 20; // the other import landed
+      }
+      landed = true;
+    });
+    await finalizer.finalizeAll().timeout(const Duration(seconds: 2));
+    expect(landed, isTrue, reason: 'the drop was read as a stalled save');
+    await save;
+  });
+
   test('a held save that stops progressing is still cut off', () async {
     final finalizer = RecordingFinalizer.forTesting(
       perFinalizerBudget: const Duration(milliseconds: 40),
