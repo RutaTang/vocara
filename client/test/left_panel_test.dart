@@ -246,12 +246,19 @@ void main() {
     AudioTrack? track,
     FxBus? bus,
     List<FxBus> buses = const [],
+    double? height,
   }) async {
     final vm = _FakeVm(fakeMixer: _FakeMixer(buses), track: track, bus: bus);
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
-          body: Row(children: [LeftPanel(vm: vm)]),
+          body: Align(
+            alignment: Alignment.topLeft,
+            child: SizedBox(
+              height: height,
+              child: Row(children: [LeftPanel(vm: vm)]),
+            ),
+          ),
         ),
       ),
     );
@@ -262,6 +269,45 @@ void main() {
     await pump(tester);
     expect(find.text('Select a take or bus to inspect it.'), findsOneWidget);
     expect(tester.takeException(), isNull);
+  });
+
+  // A short window with the dock open (or dragged tall) leaves the inspector
+  // a sliver of height. The take strip scrolls there; the bus strip kept its
+  // pinned layout, overflowed, and pushed its fader, mute/solo and pan under
+  // the dock where nothing could reach them.
+  group('a short inspector', () {
+    testWidgets('a bus strip scrolls instead of overflowing', (tester) async {
+      final buses = [_bus('a', 'Reverb'), _bus('b', 'Delay')];
+      final vm = await pump(
+        tester,
+        bus: buses.first,
+        buses: buses,
+        height: 200,
+      );
+      expect(tester.takeException(), isNull);
+
+      await tester.ensureVisible(find.text('M'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('M'));
+      await tester.pump();
+      expect(vm.fakeMixer.busMutes, ['a']);
+    });
+
+    testWidgets('a take strip scrolls too', (tester) async {
+      final vm = await pump(
+        tester,
+        track: _vocal(),
+        buses: [_bus('a', 'Reverb')],
+        height: 200,
+      );
+      expect(tester.takeException(), isNull);
+
+      await tester.ensureVisible(find.text('M'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('M'));
+      await tester.pump();
+      expect(vm.fakeMixer.trackMutes, ['t1']);
+    });
   });
 
   testWidgets('a selected take renders its channel strip', (tester) async {

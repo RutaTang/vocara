@@ -173,60 +173,86 @@ class _BusBody extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(14, 12, 14, 0),
-          child: Row(
-            children: [
-              Container(
-                width: 9,
-                height: 9,
-                decoration: BoxDecoration(
-                  color: bus.colorValue != null
-                      ? Color(bus.colorValue!)
-                      : Studio.accent,
-                  shape: BoxShape.circle,
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  bus.name,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Studio.textPrimary,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ),
-              const Text(
-                'FX BUS',
-                style: TextStyle(
-                  color: Studio.textFaint,
-                  fontSize: 9,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 0.8,
-                ),
-              ),
-            ],
+    final header = Padding(
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 0),
+      child: Row(
+        children: [
+          Container(
+            width: 9,
+            height: 9,
+            decoration: BoxDecoration(
+              color: bus.colorValue != null
+                  ? Color(bus.colorValue!)
+                  : Studio.accent,
+              shape: BoxShape.circle,
+            ),
           ),
-        ),
-        Expanded(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(14, 12, 14, 0),
-            // Keyed per channel (here and in _BodyContent): unkeyed, selecting
-            // another bus or take reused the panel's element tree, carrying
-            // the EQ analyzer's smoothed spectrum, adaptive ceiling and
-            // latched "has signal" over from the previous channel.
-            child: FxPanel(key: ValueKey(bus.id), vm: vm, bus: bus),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              bus.name,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: Studio.textPrimary,
+                fontSize: 15,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
           ),
-        ),
-        _BusChannelFooter(vm: vm, bus: bus),
-      ],
+          const Text(
+            'FX BUS',
+            style: TextStyle(
+              color: Studio.textFaint,
+              fontSize: 9,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.8,
+            ),
+          ),
+        ],
+      ),
+    );
+    // Keyed per channel (here and in _BodyContent): unkeyed, selecting
+    // another bus or take reused the panel's element tree, carrying the EQ
+    // analyzer's smoothed spectrum, adaptive ceiling and latched "has signal"
+    // over from the previous channel.
+    final fx = FxPanel(key: ValueKey(bus.id), vm: vm, bus: bus);
+    final footer = _BusChannelFooter(vm: vm, bus: bus);
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // The take strip's degenerate-height fallback, for the same reason:
+        // pinned, the header and footer overflowed a short panel and pushed
+        // the bus's fader, mute/solo and pan under the dock.
+        if (constraints.maxHeight < _BodyContent._kMinPinnedHeight) {
+          return SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                header,
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(14, 12, 14, 0),
+                  child: SizedBox(height: 220, child: fx),
+                ),
+                footer,
+              ],
+            ),
+          );
+        }
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            header,
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(14, 12, 14, 0),
+                child: fx,
+              ),
+            ),
+            footer,
+          ],
+        );
+      },
     );
   }
 }
