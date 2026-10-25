@@ -22,11 +22,24 @@
 //! per-frame coordination exists beyond the ring itself. Underrun emits
 //! counted silence WITHOUT advancing, so the stream self-heals when the
 //! feeder catches up.
+//!
+//! ## Taking the queue back
+//!
+//! A discarding replan makes everything still queued stale, so the feeder
+//! takes it back (`TrackFeeder::discard_queued`) and lands the new fence at
+//! the node's head with the whole ring behind it. The ring is SPSC, so the
+//! node has to stay clear of the slots being rewritten: it brackets every
+//! block in [`StreamCtrl::node_seq`] (odd while inside) and pops nothing at
+//! or past [`StreamCtrl::pop_limit`], read once at the block's start. The
+//! feeder raises the limit to the node's head, waits out a block that began
+//! before it (the only one that can have missed it), takes the queue back,
+//! pushes the new fence, and lifts the limit.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::live::Shared;
 use crate::ring::Producer;
@@ -56,7 +69,26 @@ pub struct StreamCtrl {
     /// renders and clears it while stopped; the feeder reads it to catch a
     /// park that a loop wrap has stranded (see `TrackFeeder::node_stranded`).
     pub parked: std::sync::atomic::AtomicU64,
+    /// The node's block counter: bumped as it enters `process`/`idle` and
+    /// again as it leaves, so odd while it is inside one (see the module doc).
+    pub node_seq: AtomicU32,
+    /// The ring index the node may neither pop nor peek at or past, read at
+    /// the start of each block; [`NO_POP_LIMIT`] when free. Raised only while
+    /// the feeder takes the queue back (see the module doc).
+    pub pop_limit: AtomicUsize,
+    /// The node has taken a fence's first frame and still waits for its base
+    /// frame, the next one it pops (written at the end of each block): taking
+    /// the queue back must leave that frame in place.
+    pub fence_open: AtomicBool,
 }
+
+/// [`StreamCtrl::pop_limit`] when the node may pop freely.
+pub const NO_POP_LIMIT: usize = usize::MAX;
+
+/// The longest the feeder waits for a node block that began before its pop
+/// limit. A block is one device callback's render; past this the audio
+/// thread is stalled, and the replan stacks behind the queue instead.
+const BLOCK_WAIT: Duration = Duration::from_millis(50);
 
 impl StreamCtrl {
     pub fn new() -> Arc<Self> {
@@ -65,7 +97,31 @@ impl StreamCtrl {
             flush_seq: AtomicU32::new(0),
             xruns: std::sync::atomic::AtomicU64::new(0),
             parked: std::sync::atomic::AtomicU64::new(0),
+            node_seq: AtomicU32::new(0),
+            pop_limit: AtomicUsize::new(NO_POP_LIMIT),
+            fence_open: AtomicBool::new(false),
         })
+    }
+
+    /// Feeder side: return once no node block that may have begun before the
+    /// current pop limit is still running. False when one outlasts
+    /// [`BLOCK_WAIT`].
+    fn wait_out_block(&self) -> bool {
+        // SeqCst against the node's SeqCst entry bump and limit read: either
+        // this load sees the bump (and waits for that block to end) or the
+        // block's limit read sees the limit stored before it.
+        let entered = self.node_seq.load(Ordering::SeqCst);
+        if entered.is_multiple_of(2) {
+            return true;
+        }
+        let deadline = Instant::now() + BLOCK_WAIT;
+        while self.node_seq.load(Ordering::Acquire) == entered {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::yield_now();
+        }
+        true
     }
 }
 
@@ -353,6 +409,11 @@ impl TrackFeeder {
     /// replan's fence fell to two, and the fill took the whole ring — so the
     /// replan after that found room for two frames of audio, and the first
     /// callback into the clip played them and then silence.
+    ///
+    /// A replan normally takes the stale queue back first
+    /// ([`Self::discard_queued`]) and has the whole ring behind its fence;
+    /// the reserve is what one still has when a node block outlasts the wait
+    /// and the fence stacks behind the queue.
     fn fill_reserve(&mut self) -> usize {
         let used = self.producer.capacity() - self.producer.free();
         if let Some(n) = self.since_flush {
@@ -419,6 +480,44 @@ impl TrackFeeder {
         }
     }
 
+    /// Takes back everything still queued — all of it stale once a
+    /// discarding replan starts — so the replan's fence lands at the node's
+    /// head with the whole ring behind it. Left queued, the stale lookahead
+    /// held the ring until the node drained it in its next callback (popping
+    /// it frame by frame on the audio thread), and a second replan before
+    /// that callback — a ruler drag, two quick seeks — found the first
+    /// replan's audio in the room it needed: its fence landed with nothing
+    /// behind it, and the whole callback was silent.
+    ///
+    /// Returns whether it raised the pop limit, which the caller lifts once
+    /// the new fence is pushed. Nothing is taken back (and the replan stacks
+    /// behind the queue as before) when a node block outlasts the wait.
+    fn discard_queued(&mut self) -> bool {
+        let head = self.producer.consumer_pos();
+        if head == self.producer.producer_pos() {
+            return false; // nothing queued
+        }
+        // The node stops at `head` from its next block on; a block already
+        // running may still pass it, so wait that one out.
+        self.ctrl.pop_limit.store(head, Ordering::SeqCst);
+        if !self.ctrl.wait_out_block() {
+            self.ctrl.pop_limit.store(NO_POP_LIMIT, Ordering::Release);
+            return false;
+        }
+        // Stable now: every later block stops at the limit, at or below it.
+        let head = self.producer.consumer_pos();
+        // A fence's first frame already taken: its base is the next pop.
+        let keep = usize::from(self.ctrl.fence_open.load(Ordering::Acquire));
+        // SAFETY: the pop limit (at or below `head`) keeps the node from every
+        // slot at `head + keep` and beyond until the caller lifts it, after the
+        // new fence is published; no block that missed the limit is running.
+        if unsafe { self.producer.retract(head.wrapping_add(keep)) } {
+            // Nothing of the old plans remains but a kept base frame.
+            self.since_flush = None;
+        }
+        true
+    }
+
     /// Re-plan from the CURRENT transport position after a DISCARDING
     /// discontinuity (flush / loop-param / play state change): bump
     /// flush_seq so the node discards to this fence, then start the run.
@@ -431,7 +530,12 @@ impl TrackFeeder {
         } else {
             i64::MAX
         };
-        if self.push_fence(next_gen, pos, true) {
+        let limited = self.discard_queued();
+        let pushed = self.push_fence(next_gen, pos, true);
+        if limited {
+            self.ctrl.pop_limit.store(NO_POP_LIMIT, Ordering::Release);
+        }
+        if pushed {
             self.generation = next_gen;
             self.next_tl = pos;
             self.plan_pos = pos;
@@ -512,16 +616,21 @@ impl TrackFeeder {
         on_this_plan && Self::planned_pos(t, basis) < (parked & 0xffff_ffff) as i64
     }
 
-    /// Brings the plan up to date with the transport (a replan on any
-    /// discontinuity): what every fill does first.
-    fn sync_plan(&mut self, t: &Shared) -> PlanBasis {
-        let basis = PlanBasis {
+    /// The transport facts a plan made now would rest on.
+    fn basis_of(t: &Shared) -> PlanBasis {
+        PlanBasis {
             flush_gen: t.out_flush_gen(),
             playing: t.is_playing(),
             loop_on: t.loop_enabled(),
             ls: t.loop_start(),
             le: t.loop_end(),
-        };
+        }
+    }
+
+    /// Brings the plan up to date with the transport (a replan on any
+    /// discontinuity): what every fill does first.
+    fn sync_plan(&mut self, t: &Shared) -> PlanBasis {
+        let basis = Self::basis_of(t);
         if self.basis != Some(basis) {
             if self.resumes_held_plan(t, &basis) || self.holds_pre_span_plan(t, &basis) {
                 self.basis = Some(basis);
@@ -562,6 +671,12 @@ impl TrackFeeder {
         // up here as `pos > next_tl` like any other starvation once the
         // transport is past the plan's position again. Short of it, the node
         // is parked ahead of the transport instead: `node_stranded` above.
+        // The one moment the model hides a starved plan is the render clock
+        // standing exactly AT loop end (a block ended there): `pos` is loop
+        // start, behind the plan, while the render has run past the plan
+        // this pass and is about to wrap to a node stuck where the ring ran
+        // dry — the next pass silent up to there. So the test is on the
+        // render's own position, and the jump lands on the modelled one.
         // The ring must actually be DRAINED: right after a wrap fence the
         // plan restarts at loop_start while the transport is still playing
         // the pre-wrap tail out of the ring, so `pos > next_tl` alone would
@@ -569,7 +684,11 @@ impl TrackFeeder {
         // non-looped track's end the node never pops the one jump fence, so
         // the same check keeps every later pump from minting another.
         let pos = Self::planned_pos(t, &basis);
-        if basis.playing && pos > self.next_tl && self.producer.free() == self.producer.capacity() {
+        let render = t.render_pos().max(0);
+        if basis.playing
+            && render > self.next_tl
+            && self.producer.free() == self.producer.capacity()
+        {
             let next_gen = self.generation.wrapping_add(1);
             if self.push_fence(next_gen, pos, false) {
                 self.generation = next_gen;
@@ -661,7 +780,124 @@ impl TrackFeeder {
 
 #[cfg(test)]
 mod tests {
-    use super::{ring_reserve, MAX_CALLBACK_FRAMES};
+    use super::*;
+    use crate::dsp::master::MasterNode;
+    use crate::graph::{Edge, GraphDesc, NodeEntry};
+    use crate::live::{spawn, EngineHandle};
+    use crate::node::{Node, ProcessIo};
+    use crate::ring::spsc;
+    use crate::source::StreamingSource;
+    use std::collections::HashMap;
+
+    const FRAMES: usize = 20_000;
+
+    fn value(i: usize) -> Smp {
+        (i as Smp * 1e-3).sin() * 0.5 + 0.25
+    }
+
+    /// A transport to plan from (its render never runs: `render_pos` is the
+    /// seek target the test sets), a streamed track at 0, and its node.
+    fn rig(
+        tag: &str,
+    ) -> (
+        EngineHandle,
+        TrackFeeder,
+        StreamingSource,
+        std::path::PathBuf,
+    ) {
+        let path =
+            std::env::temp_dir().join(format!("vocara_feed_{tag}_{}.wav", std::process::id()));
+        let pcm: Vec<Smp> = (0..FRAMES).flat_map(|i| [value(i), -value(i)]).collect();
+        crate::wav::write_wav_f32(
+            &path,
+            &pcm,
+            CHANNELS as u16,
+            crate::sample::ENGINE_SR as u32,
+        )
+        .unwrap();
+        let desc = GraphDesc {
+            nodes: vec![NodeEntry::new(1, Box::new(MasterNode::unity()))],
+            edges: Vec::<Edge>::new(),
+            master: 1,
+        };
+        let g = desc.compile(crate::sample::ENGINE_SR, 512).unwrap();
+        let (_mic, mic_cons) = spsc::<[Smp; CHANNELS]>(16);
+        let (h, _rt) = spawn(g, HashMap::new(), mic_cons, 16);
+        let ctrl = StreamCtrl::new();
+        let (prod, cons) = spsc::<[Smp; CHANNELS]>(4096);
+        let reader = WavTrackReader::open(path.to_str().unwrap()).unwrap();
+        let node = StreamingSource::new(Arc::clone(&ctrl), cons, 0, FRAMES as i64);
+        (h, TrackFeeder::new(ctrl, prod, reader, 0), node, path)
+    }
+
+    fn block(node: &mut StreamingSource, tl: i64, frames: usize) -> Vec<Smp> {
+        let mut out = vec![0.0; frames * CHANNELS];
+        let inputs: [&[Smp]; 0] = [];
+        let mut outs: [&mut [Smp]; 1] = [&mut out[..]];
+        let mut io = ProcessIo {
+            inputs: &inputs,
+            outputs: &mut outs[..],
+            frames,
+            tl,
+            sr: crate::sample::ENGINE_SR,
+        };
+        node.process(&mut io);
+        out
+    }
+
+    #[test]
+    fn taking_the_queue_back_keeps_the_base_of_a_half_taken_fence() {
+        // The node can take a fence's first frame in the moment before its base is pushed,
+        // and wait for the base on its next pop. Taking the queue back from the node's head
+        // would hand it the NEW fence's first frame as that base: an armed position read
+        // from a NaN's bits, the new fence consumed by the misreading, and every frame after
+        // it drained to silence for want of a fence that never comes again.
+        let (h, mut f, mut node, path) = rig("halffence");
+        h.play();
+        f.pump(h.transport()).unwrap();
+        let mut tl = 0i64;
+        while f.producer.free() < f.producer.capacity() {
+            block(&mut node, tl, 512); // play out the whole queue
+            tl += 512;
+        }
+        // An in-band fence's first frame alone, as the node can find it mid-push.
+        let gen = f.generation.wrapping_add(1);
+        f.generation = gen;
+        let [first, base] = fence_frames(gen, tl);
+        assert!(f.producer.push(first));
+        block(&mut node, tl, 512);
+        assert!(
+            f.ctrl.fence_open.load(Ordering::Acquire),
+            "the node holds the fence"
+        );
+        assert!(f.producer.push(base));
+        f.pushed(2);
+        tl += 512;
+
+        // A seek's replan, with a node block landing after the queue was taken back and the
+        // new fence pushed but before the flush is announced.
+        h.seek(10_000);
+        let basis = TrackFeeder::basis_of(h.transport());
+        let next_gen = f.generation.wrapping_add(1);
+        assert!(f.discard_queued(), "the queue is taken back");
+        assert!(f.push_fence(next_gen, 10_000, true));
+        f.ctrl.pop_limit.store(NO_POP_LIMIT, Ordering::Release);
+        f.basis = Some(basis);
+        f.generation = next_gen;
+        f.next_tl = 10_000;
+        f.plan_pos = 10_000;
+        f.run_end = i64::MAX;
+        block(&mut node, tl, 512);
+        f.ctrl.flush_seq.fetch_add(1, Ordering::Release);
+        f.pump(h.transport()).unwrap();
+
+        // The render jumps to the seek target: every frame there plays.
+        let out = block(&mut node, 10_000, 512);
+        let _ = std::fs::remove_file(&path);
+        for (i, fr) in out.chunks(2).enumerate() {
+            assert_eq!(fr[0], value(10_000 + i), "frame {i} after the seek");
+        }
+    }
 
     #[test]
     fn the_production_ring_reserves_a_whole_callback_behind_both_fences() {

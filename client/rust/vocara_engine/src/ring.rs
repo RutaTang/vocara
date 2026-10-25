@@ -84,6 +84,40 @@ impl<T: Copy> Producer<T> {
     pub fn capacity(&self) -> usize {
         self.inner.buf.len()
     }
+
+    /// Index (monotonic, wrapping) of the next element the consumer will pop.
+    #[inline]
+    pub fn consumer_pos(&self) -> usize {
+        self.inner.head.load(Ordering::Acquire)
+    }
+
+    /// Index (monotonic, wrapping) the next push lands at.
+    #[inline]
+    pub fn producer_pos(&self) -> usize {
+        self.inner.tail.load(Ordering::Relaxed)
+    }
+
+    /// Take back every element pushed at or after index `to` that the consumer has not popped:
+    /// the next push lands at `to` again. Returns false, changing nothing, unless `to` lies in
+    /// the unconsumed span (between [`consumer_pos`](Self::consumer_pos) and
+    /// [`producer_pos`](Self::producer_pos)).
+    ///
+    /// # Safety
+    /// The consumer must not read the slots at `to` and beyond while they are taken back and
+    /// rewritten: from before this call until the elements pushed in their place are
+    /// published, it must neither pop nor peek at any index at or past `to`. The ring cannot
+    /// see that; a protocol on top of it must guarantee it (the streaming feeder's pop limit,
+    /// see `feed::StreamCtrl::pop_limit`).
+    pub unsafe fn retract(&mut self, to: usize) -> bool {
+        let inner = &*self.inner;
+        let tail = inner.tail.load(Ordering::Relaxed);
+        let head = inner.head.load(Ordering::Acquire);
+        if to.wrapping_sub(head) > tail.wrapping_sub(head) {
+            return false;
+        }
+        inner.tail.store(to, Ordering::Release);
+        true
+    }
 }
 
 impl<T: Copy> Consumer<T> {
@@ -128,5 +162,11 @@ impl<T: Copy> Consumer<T> {
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Index (monotonic, wrapping) of the next element [`pop`](Self::pop) returns.
+    #[inline]
+    pub fn position(&self) -> usize {
+        self.inner.head.load(Ordering::Relaxed)
     }
 }
