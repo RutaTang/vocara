@@ -777,3 +777,154 @@ fn a_singer_alone_passes_untouched() {
     eprintln!("singer alone: output SNR {snr:.1} dB");
     assert!(snr >= 60.0, "near-end-only voice altered: SNR {snr:.1} dB");
 }
+
+// ---------------------------------------------------------------------------------------------
+// No echo to cancel. The canceller runs on every macOS mic open whatever the output is, so on
+// headphones the mic hears the singer and none of the backing it is handed as the reference.
+// ---------------------------------------------------------------------------------------------
+
+/// Runs a fresh canceller over `mic` against `far` in production-sized callbacks.
+fn cancel(mic: &[f32], far: &[f32]) -> Vec<f32> {
+    let mut out = vec![0.0f32; mic.len()];
+    let mut aec = Aec::new(SR, TAIL_MS);
+    let mut i = 0;
+    while i < mic.len() {
+        let end = (i + CHUNK).min(mic.len());
+        aec.process(&mic[i..end], &far[i..end], &mut out[i..end]);
+        i = end;
+    }
+    out
+}
+
+/// The bench singer over [from, to), scaled to `level` RMS over its voiced samples.
+fn singer_at(total: usize, from: usize, to: usize, seed: u32, level: f32) -> Vec<f32> {
+    let mut voice = singer(total, from, to, seed);
+    let voiced: Vec<f32> = voice[from..to]
+        .iter()
+        .copied()
+        .filter(|v| v.abs() > 1e-4)
+        .collect();
+    let g = level / rms(&voiced).max(1e-9);
+    voice.iter_mut().for_each(|v| *v *= g);
+    voice
+}
+
+/// The voice's level in the output over [lo, hi) (projection, 1.0 = full level), and everything
+/// else the output holds there in dB re the voice.
+fn voice_in(voice: &[f32], out: &[f32], lo: usize, hi: usize) -> (f64, f64) {
+    let (mut vv, mut vo, mut rr) = (0.0f64, 0.0f64, 0.0f64);
+    for n in (lo + LAT)..(hi + LAT) {
+        let v = voice[n - LAT] as f64;
+        let o = out[n] as f64;
+        vv += v * v;
+        vo += o * v;
+        rr += (o - v) * (o - v);
+    }
+    (vo / vv, 10.0 * (rr / vv).log10())
+}
+
+/// Headphones from the start: the cold filter has nothing to converge on, and its bootstrap kept
+/// adapting into the in-key voice for the whole take while the foreground adopted every background
+/// that "cancelled" a partial of it (old: 0.83-0.94 of the voice over these singers, single
+/// seconds down to 0.60).
+#[test]
+fn a_headphone_take_keeps_the_voice() {
+    let total = secs(10.0);
+    let far = backing_music(total);
+    let t0 = secs(1.0);
+    for &seed in &[SINGER, 0x1234, 0x7777] {
+        let voice = singer_at(total, t0, total, seed, 0.06);
+        let mut rng = Rng::new(0x0BAD_5EED);
+        let mic: Vec<f32> = (0..total).map(|n| voice[n] + 3e-4 * rng.gauss()).collect();
+        let out = cancel(&mic, &far);
+        // The first second is the canceller finding out there is no echo (its bootstrap budget).
+        let (whole, _) = voice_in(&voice, &out, t0 + secs(1.0), total - LAT);
+        eprintln!("headphones, singer {seed:#x}: retention {whole:.3}");
+        assert!(
+            whole >= 0.97,
+            "singer {seed:#x}: the voice pulled under on headphones: {whole:.3}"
+        );
+        // Once the canceller has given the cold filter up, every second keeps the voice.
+        let mut s = t0 + secs(2.0);
+        while s + secs(1.0) <= total - LAT {
+            let (r, _) = voice_in(&voice, &out, s, s + secs(1.0));
+            assert!(
+                r >= 0.95,
+                "singer {seed:#x}: {:.0}-{:.0} s keeps {r:.3} of the voice",
+                s as f32 / SR,
+                s as f32 / SR + 1.0
+            );
+            s += secs(1.0);
+        }
+    }
+}
+
+/// Speakers, then headphones mid-take (AirPods connect: VPIO's output follows the default device
+/// and the canceller is not reset). The converged filter kept subtracting an echo that was gone,
+/// adapting at full step into any singer quieter than it had been (old: single seconds down to 0.40
+/// of the voice, the subtracted backing 1.4-8.5 dB under it).
+#[test]
+fn moving_to_headphones_mid_take_stops_cancelling() {
+    let total = secs(10.0);
+    let far = backing_music(total);
+    let echo = convolve(&far, &path_a());
+    let sw = secs(4.0);
+    for &level in &[0.03f32, 0.06, 0.15] {
+        let voice = singer_at(total, sw, total, SINGER, level);
+        let mut rng = Rng::new(0x0BAD_5EED);
+        let mic: Vec<f32> = (0..total)
+            .map(|n| if n < sw { echo[n] } else { 0.0 } + voice[n] + 3e-4 * rng.gauss())
+            .collect();
+        let out = cancel(&mic, &far);
+        let mut s = sw + secs(3.0);
+        while s + secs(1.0) <= total - LAT {
+            let (r, junk) = voice_in(&voice, &out, s, s + secs(1.0));
+            eprintln!(
+                "headphones from 4 s, singer at {level}: {:.0} s retention {r:.3}, the rest {junk:.1} dB",
+                s as f32 / SR
+            );
+            assert!(r >= 0.98, "singer at {level}: {r:.3} of the voice");
+            assert!(
+                junk <= -20.0,
+                "singer at {level}: output holds {junk:.1} dB of junk"
+            );
+            s += secs(1.0);
+        }
+    }
+}
+
+/// The guard above must not cost the echo a canceller did not start with: headphones then the
+/// speakers mid-take, and a singer already singing when the music starts on the speakers. Both
+/// echoes are learned, if less deeply in the first seconds: the unproven canceller only adopts a
+/// background that has cancelled 6 dB for a quarter second (old: 19.6 and 20.1 dB after the singer;
+/// now 15.9 and 18.9).
+#[test]
+fn an_echo_that_arrives_late_is_still_learned() {
+    let total = secs(13.0);
+    let far = backing_music(total);
+    let full = convolve(&far, &path_a());
+    for &(name, echo_from, voice_from) in &[
+        ("speakers from 4 s", 4.0f32, 1.0f32),
+        ("voice first", 0.0, 0.2),
+    ] {
+        let ef = secs(echo_from);
+        let echo: Vec<f32> = (0..total)
+            .map(|n| if n >= ef { full[n] } else { 0.0 })
+            .collect();
+        let voice = singer_at(
+            total,
+            secs(voice_from),
+            secs(9.0),
+            SINGER,
+            rms(&full[secs(2.0)..secs(6.0)]),
+        );
+        let mut rng = Rng::new(0x0BAD_5EED);
+        let mic: Vec<f32> = (0..total)
+            .map(|n| echo[n] + voice[n] + 3e-4 * rng.gauss())
+            .collect();
+        let out = cancel(&mic, &far);
+        let after = erle(&echo, &out, secs(10.0), total);
+        eprintln!("{name}: far-only ERLE after the singer {after:.1} dB");
+        assert!(after >= 10.0, "{name}: echo not learned: {after:.1} dB");
+    }
+}
