@@ -320,6 +320,19 @@ class VocaraEngineBindings {
   late final _ve_set_input_gain = _ve_set_input_gainPtr
       .asFunction<int Function(ffi.Pointer<VeEngine>, double)>();
 
+  /// Mark the output route echo-free (on != 0: headphones): the echo canceller passes the mic
+  /// through untouched instead of adapting to a reference the mic never hears. 0 = ok.
+  int ve_set_echo_free(ffi.Pointer<VeEngine> e, int on) {
+    return _ve_set_echo_free(e, on);
+  }
+
+  late final _ve_set_echo_freePtr =
+      _lookup<
+        ffi.NativeFunction<ffi.Int Function(ffi.Pointer<VeEngine>, ffi.Int)>
+      >('ve_set_echo_free');
+  late final _ve_set_echo_free = _ve_set_echo_freePtr
+      .asFunction<int Function(ffi.Pointer<VeEngine>, int)>();
+
   /// Choose which input(s) of a multi-channel mic make the mono capture: 0 = Auto (the input
   /// carrying the mic), 1 = Input 1, 2 = Input 2 (input 1 on a device without one). 0 = ok, -1 =
   /// unknown mode.

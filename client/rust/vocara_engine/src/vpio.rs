@@ -124,6 +124,16 @@ pub(crate) fn set_input_gain(linear: f32) {
     INPUT_GAIN.store(linear.max(0.0).to_bits(), Ordering::Relaxed);
 }
 
+/// Whether playback is on a route with no acoustic path back to the mic (headphones), set by the
+/// host from the device the engine renders to. Read by the input callback every cycle and handed
+/// to the echo canceller (see [`Aec::set_echo_free`]).
+static ECHO_FREE: AtomicBool = AtomicBool::new(false);
+
+/// Mark the output route echo-free (headphones) or not.
+pub(crate) fn set_echo_free(on: bool) {
+    ECHO_FREE.store(on, Ordering::Relaxed);
+}
+
 const ELEM_OUTPUT: u32 = 0; // speaker (AEC reference lives here)
 const ELEM_INPUT: u32 = 1; // microphone
 
@@ -876,7 +886,9 @@ unsafe extern "C-unwind" fn input_cb(
             for _ in 0..ctx.ref_sync.on_success(depth) {
                 let _ = ctx.ref_cons.pop();
             }
-            // Cancel the loudspeaker echo from the mic, preserving the singing voice.
+            // Cancel the loudspeaker echo from the mic, preserving the singing voice — or, on an
+            // echo-free route, pass it through untouched with the same one-block latency.
+            ctx.aec.set_echo_free(ECHO_FREE.load(Ordering::Relaxed));
             ctx.aec.process(
                 &ctx.mic_mono[..n],
                 &ctx.far_mono[..n],

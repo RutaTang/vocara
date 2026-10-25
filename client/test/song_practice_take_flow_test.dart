@@ -292,6 +292,8 @@ class _FakeGraphEngine extends _FakeEngine
   @override
   void setMonitorGain(double gain) {}
   @override
+  void setEchoFree(bool on) {}
+  @override
   String actualOutputDevice() => '';
   @override
   String currentOutputDevice() => '';

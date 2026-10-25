@@ -77,6 +77,12 @@ class _FakeEngine extends Fake implements GraphAudioPlaybackService {
   @override
   void setMonitorGain(double gain) => monitorGains.add(gain);
 
+  /// Every route the settings told the echo canceller, in call order.
+  final List<bool> echoFree = [];
+
+  @override
+  void setEchoFree(bool on) => echoFree.add(on);
+
   /// Every input gain pushed (linear), in order.
   final inputGainCalls = <double>[];
 
@@ -215,6 +221,66 @@ void main() {
       engine.actualOutput = _headphones.uid;
       service.reconcileMonitorSafety();
       expect(service.monitorAllowed, isTrue);
+    });
+
+    test('the echo canceller hears the route the engine RENDERS to', () async {
+      // On headphones the mic hears none of the backing the canceller is handed: it adapted into
+      // the in-key voice. Judged, like the monitor, on the device actually rendering.
+      outs = [_builtInOut, _headphones];
+      storage.doc = {'outputDeviceUid': _headphones.uid};
+      await service.load();
+      final engine = _FakeEngine();
+      service.attachEngine(engine);
+      expect(engine.echoFree.last, isTrue, reason: 'on the chosen headphones');
+
+      engine.actualOutput = _builtInOut.uid;
+      service.reconcileMonitorSafety();
+      expect(
+        engine.echoFree.last,
+        isFalse,
+        reason: 'the speakers carry an echo',
+      );
+
+      engine.actualOutput = _headphones.uid;
+      service.reconcileMonitorSafety();
+      expect(engine.echoFree.last, isTrue);
+    });
+
+    test('only a device named as headphones is echo-free', () async {
+      // Stricter than the monitor: a Bluetooth speaker taken for headphones here would leave
+      // its whole echo in the take, so the transport alone never counts.
+      await service.load();
+      final engine = _FakeEngine();
+      service.attachEngine(engine);
+      Future<bool> echoFreeOn(String name, {bool bluetooth = true}) async {
+        final device = AudioDevice(
+          uid: 'out-$name',
+          name: name,
+          rate: 48000,
+          isBluetooth: bluetooth,
+        );
+        outs = [_builtInOut, device];
+        service.refreshDevices();
+        engine.actualOutput = device.uid;
+        await service.setOutputDevice(device.uid);
+        return engine.echoFree.last;
+      }
+
+      for (final name in ['AirPods Pro', 'Galaxy Buds2', 'Beats Studio Buds']) {
+        expect(await echoFreeOn(name), isTrue, reason: name);
+      }
+      expect(
+        await echoFreeOn('External Headphones', bluetooth: false),
+        isTrue,
+        reason: 'the jack on Apple-silicon Macs',
+      );
+      for (final name in ['WH-1000XM5', 'UE BOOM 3', 'Speaker Buds Box']) {
+        expect(await echoFreeOn(name), isFalse, reason: name);
+      }
+      expect(
+        await echoFreeOn('MacBook Pro Speakers', bluetooth: false),
+        isFalse,
+      );
     });
 
     test('a Bluetooth speaker never allows the monitor', () async {

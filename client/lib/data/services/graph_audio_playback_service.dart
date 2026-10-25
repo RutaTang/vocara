@@ -543,6 +543,12 @@ class GraphAudioPlaybackService implements PlaybackEngine {
     if (_available) _bindings.ve_set_monitor_gain(_engine, gain);
   }
 
+  /// Tell the echo canceller whether playback is on a route with no acoustic path back to the mic
+  /// (headphones): it then passes the mic through untouched (see [AppSettingsService.echoFree]).
+  void setEchoFree(bool on) {
+    if (_available) _bindings.ve_set_echo_free(_engine, on ? 1 : 0);
+  }
+
   /// Set the record/input gain (linear): the mic-input fader's makeup gain applied to the captured
   /// voice before recording/analysis.
   void setInputGain(double gain) {

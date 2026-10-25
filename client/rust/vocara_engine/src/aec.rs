@@ -398,46 +398,6 @@ const DIV_SHRINK: f32 = 0.5;
 /// Consecutive diverging blocks before a full filter reset (~341 ms persistent => give up).
 const DIV_RESET_HOLD: u32 = 64;
 
-// --- Echo-presence guard (headphones) ---
-//
-// The canceller runs on every macOS mic open, whatever the output is. On headphones the mic hears
-// the singer and no echo, yet the backing plays: the cold filter never converges (there is nothing
-// to converge on), so the bootstrap's ignition floor kept adapting into the in-key voice for the
-// whole take, and the foreground adopted every background that "cancelled" a voice partial. And a
-// mid-take switch to headphones left a CONVERGED filter subtracting an echo that was no longer
-// there, adapting at full step into any singer quieter than the old echo.
-/// Far-active bootstrap blocks the double-talk hangover may hold the cold filter at the ignition
-/// floor (~0.5 s) before the canceller concludes it has no echo to learn: it cold-restarts and
-/// marks the echo unproven. A clean cold start converges long before (coherence climbs within a
-/// fraction of a second); a voice-first opening over a real echo converges at the singer's first
-/// pause, which the unproven mode still allows.
-const UNPROVEN_BUDGET: u32 = 94;
-/// While the echo is unproven, the foreground adopts the background only once it cancels most of
-/// the mic: its residual under this share of the mic power (6 dB). A background that only
-/// "cancels" the in-key partials of a voice rarely gets there (see UNPROVEN_HOLD); one that learned
-/// a real echo does in the next far-only passage.
-const UNPROVEN_COPY: f32 = 0.25;
-/// The strict copy test must hold this many consecutive blocks (~0.25 s) while the echo is
-/// unproven: a background can briefly fit one held in-key note of the singer, never the echo of a
-/// whole passage the way a real echo path does.
-const UNPROVEN_HOLD: u32 = 47;
-/// The ignition floor while the echo is unproven: slower than BOOTSTRAP_IGNITE, so a held note
-/// gives the background less time to fit it, while an echo the mic carries is still learned in
-/// the next far-only passage.
-const UNPROVEN_IGNITE: f32 = 0.1;
-/// While the echo is unproven, a foreground whose residual is this much over the mic power (+1 dB)
-/// is making the output worse than the raw mic: whatever it modelled is gone (the note it fitted
-/// ended), and it is wiped rather than kept subtracting.
-const UNPROVEN_WIPE: f32 = 1.25;
-/// Converged: a far-active block whose mic power is this far under the echo the shaped path model
-/// predicts (-10 dB) is evidence the echo is gone. A real echo falls that far under its own model
-/// only on the odd transient (far-only blocks read ~1); the output having moved to headphones, or a
-/// muted speaker, keeps it there.
-const VANISH_RATIO: f32 = 0.1;
-/// Such blocks, counted since the last block of far-only evidence, before the canceller
-/// cold-restarts with the echo unproven (~0.25 s: about one breath between phrases).
-const VANISH_HOLD: u32 = 48;
-
 // --- Optional residual-echo suppressor (default OFF; voice preservation beats cancellation) ---
 //
 // OFF by default. The linear AEC plus the frequency-shaped double-talk detector already reduce the
@@ -617,7 +577,6 @@ pub struct Aec {
     p_de: f32,     // smoothed cross power <mic, echo>
     p_err_fg: f32, // residual power of the foreground filter (copy decision)
     p_err_bg: f32, // residual power of the background filter (copy decision)
-    p_mic_cp: f32, // mic power on the copy decision's smoothing (FG_BG_SMOOTH)
     /// Running estimate of the linear echo gain (||echo||/||far||), used by the Geigel test so
     /// it works before the filter is fully converged. Tracks toward observed mic/far on adapt.
     echo_gain: f32,
@@ -634,15 +593,9 @@ pub struct Aec {
     /// Diagnostic: how many times the path-change deadlock breaker has fired since construction
     /// or `reset()`. Read by tests/telemetry; never used by the algorithm.
     path_change_fires: u32,
-    /// No echo has been learned since the canceller gave a cold filter up (see UNPROVEN_BUDGET) or
-    /// saw a converged echo vanish (see VANISH_RATIO). Cleared when the filter converges.
-    echo_unproven: bool,
-    /// Far-active bootstrap blocks spent in the double-talk hangover (see UNPROVEN_BUDGET).
-    unproven_blocks: u32,
-    /// Converged blocks read as the echo gone since the last far-only evidence (see VANISH_HOLD).
-    vanish_count: u32,
-    /// Consecutive blocks the unproven-mode copy test has held (see UNPROVEN_HOLD).
-    unproven_streak: u32,
+    /// The output carries no echo to cancel (headphones): the far end is taken as silent, so
+    /// nothing adapts and the mic passes through (see [`Aec::set_echo_free`]).
+    echo_free: bool,
 
     // ---- optional suppressor state ----
     sup_gain: Box<[f32]>, // length half
@@ -731,7 +684,6 @@ impl Aec {
             p_de: 0.0,
             p_err_fg: 0.0,
             p_err_bg: 0.0,
-            p_mic_cp: 0.0,
             echo_gain: 0.0,
             converged: false,
             g_adapt: 0.0, // start frozen/cautious: never adapt into a voice-first opening
@@ -739,10 +691,7 @@ impl Aec {
             div_count: 0,
             path_change_streak: 0,
             path_change_fires: 0,
-            echo_unproven: false,
-            unproven_blocks: 0,
-            vanish_count: 0,
-            unproven_streak: 0,
+            echo_free: false,
 
             sup_gain: vec![1.0f32; half].into_boxed_slice(),
         }
@@ -761,7 +710,11 @@ impl Aec {
         for i in 0..n {
             // Stage one sample into the block accumulators.
             self.in_mic[self.in_fill] = sanitize(mic[i]);
-            self.in_far[self.in_fill] = sanitize(farend[i]);
+            self.in_far[self.in_fill] = if self.echo_free {
+                0.0
+            } else {
+                sanitize(farend[i])
+            };
             self.in_fill += 1;
 
             if self.in_fill == self.block {
@@ -849,7 +802,6 @@ impl Aec {
         self.p_de = 0.0;
         self.p_err_fg = 0.0;
         self.p_err_bg = 0.0;
-        self.p_mic_cp = 0.0;
         self.echo_gain = 0.0;
         self.converged = false;
         self.g_adapt = 0.0;
@@ -857,10 +809,73 @@ impl Aec {
         self.div_count = 0;
         self.path_change_streak = 0;
         self.path_change_fires = 0;
-        self.echo_unproven = false;
-        self.unproven_blocks = 0;
-        self.vanish_count = 0;
-        self.unproven_streak = 0;
+    }
+
+    /// Whether the output route carries an echo to cancel. On headphones (`true`) the mic hears the
+    /// singer and none of the backing, yet the canceller still saw the backing as its reference: a
+    /// cold filter never converged and kept adapting into the in-key voice at its bootstrap floor,
+    /// and a filter converged on the speakers kept subtracting an echo that was gone. With
+    /// `echo_free` the reference is taken as silent, so nothing adapts and the mic passes through
+    /// untouched, one block late as always (the take's latency compensation counts that block).
+    /// Every change restarts the filters from cold: what they learned belongs to the other route.
+    ///
+    /// Real-time safe; meant to be called every callback with the route's current state.
+    pub fn set_echo_free(&mut self, on: bool) {
+        if on == self.echo_free {
+            return;
+        }
+        self.echo_free = on;
+        self.restart();
+        if on {
+            // The delay line still holds up to a tail of the backing: drop it too, so the mic
+            // passes through from the next block on rather than once it has drained.
+            for v in self.x_re.iter_mut() {
+                *v = 0.0;
+            }
+            for v in self.x_im.iter_mut() {
+                *v = 0.0;
+            }
+            for v in self.far_prev.iter_mut() {
+                *v = 0.0;
+            }
+            self.p_far = 0.0;
+        }
+    }
+
+    /// Zero both filters and re-bootstrap the double-talk state and path model from cold, keeping
+    /// the far-end delay line and the block rings, so the audio keeps flowing without a gap (unlike
+    /// [`reset`](Aec::reset), which re-primes the output). Real-time safe: no allocation.
+    pub fn restart(&mut self) {
+        for v in self.wfg_re.iter_mut() {
+            *v = 0.0;
+        }
+        for v in self.wfg_im.iter_mut() {
+            *v = 0.0;
+        }
+        for v in self.wbg_re.iter_mut() {
+            *v = 0.0;
+        }
+        for v in self.wbg_im.iter_mut() {
+            *v = 0.0;
+        }
+        for v in self.pxx.iter_mut() {
+            *v = 0.0;
+        }
+        // Cold-restart the DTD / path model too, exactly as reset() does. Zeroing only the
+        // weights leaves gxx/echo_gain/converged/hang describing the OLD path, so if the restart
+        // followed a path change the stale model strands the re-started filter: zero weights =>
+        // ~0 echo estimate => ~0 coherence => far_only_evidence can never fire => gxx can never
+        // refresh, and the stale shaped near-end test pins the freeze (the same deadlock
+        // mechanism the path-change breaker guards against).
+        self.clear_path_model();
+        self.echo_gain = 0.0;
+        self.converged = false;
+        self.hang = 0;
+        self.p_err_fg = 0.0;
+        self.p_err_bg = 0.0;
+        self.path_change_streak = 0;
+        self.div_count = 0;
+        self.g_adapt = 0.0;
     }
 
     /// Diagnostic: how many times the path-change deadlock breaker has fired since construction
@@ -1047,7 +1062,6 @@ impl Aec {
         self.p_de = leaky(self.p_de, m_de, STAT_SMOOTH);
         self.p_err_fg = leaky(self.p_err_fg, m_err, FG_BG_SMOOTH);
         self.p_err_bg = leaky(self.p_err_bg, m_err_bg, FG_BG_SMOOTH);
-        self.p_mic_cp = leaky(self.p_mic_cp, m_mic, FG_BG_SMOOTH);
 
         // ----- 5) Double-talk detection -> smooth adaptation gate g_adapt in [0,1] -----
         // Far-end activity is judged on the REFERENCE input power (not the echo estimate),
@@ -1105,7 +1119,6 @@ impl Aec {
             // far-only evidence that gates `echo_gain`, so voice can never contaminate the path
             // model. The first block seeds it directly (avoid a chronic under-estimate).
             self.track_path_model(!self.gxx_valid);
-            self.vanish_count = 0;
         }
 
         // Frequency-shaped near-end (double-talk) measure: compare the actual mic power against the
@@ -1133,8 +1146,6 @@ impl Aec {
         // and we have a usable echo-gain estimate to police double-talk with.
         if far_active && rho < 0.5 && self.echo_gain > 0.0 {
             self.converged = true;
-            self.echo_unproven = false;
-            self.unproven_blocks = 0;
         }
 
         // ----- Path-change deadlock breaker (sudden echo-path GAIN INCREASE) -----
@@ -1189,14 +1200,6 @@ impl Aec {
             self.path_change_fires = self.path_change_fires.saturating_add(1);
         }
 
-        // A converged model whose echo the mic does not carry: the mic far under the echo the model
-        // predicts. A real echo reads ~1 far-only and a singer only adds, so only the odd transient
-        // of drum-and-noise backing reads this low; enough such blocks with no far-only evidence
-        // between them end the model (see VANISH_HOLD). The block still adapts: freezing on those
-        // transients slowed convergence.
-        let echo_absent =
-            self.converged && far_active && self.gxx_valid && nearend_ratio < VANISH_RATIO;
-
         // The full DTD (Geigel + coherence + rho) only applies AFTER convergence — before that
         // the echo-GAIN-based Geigel test is unreliable (the path gain is still unknown) and the
         // coherence/rho tests divide by the ~0 echo estimate. But "adapt freely" during bootstrap
@@ -1232,11 +1235,7 @@ impl Aec {
             // energy. A truly cold filter (p_echo ~ 0) yields no evidence, so the ignition trickle
             // is allowed to proceed and build the very coherence this test then relies on.
             dt_evidence = self.p_echo > ECHO_FLOOR && coh < COH_LO;
-            g_coh.max(if self.echo_unproven {
-                UNPROVEN_IGNITE
-            } else {
-                BOOTSTRAP_IGNITE
-            })
+            g_coh.max(BOOTSTRAP_IGNITE)
         } else {
             // FREQUENCY-SHAPED Geigel: how much the mic exceeds the echo the shaped path model
             // predicts for the current reference. Robust to chord changes (see `nearend_ratio`).
@@ -1291,9 +1290,8 @@ impl Aec {
         // bootstrap it instead holds at the ignition floor: a transient false double-talk suspicion
         // (coherence still climbing out of cold) must not fully stall the cold start, yet a real
         // voice-first opening is still limited to the same bounded trickle that protects the voice.
-        // Once the echo is unproven the bootstrap's leniency is spent: a hangover freezes outright.
         let g_target = if self.hang > 0 {
-            if self.converged || self.echo_unproven {
+            if self.converged {
                 0.0
             } else {
                 BOOTSTRAP_IGNITE
@@ -1316,22 +1314,10 @@ impl Aec {
         } else {
             self.div_count = 0;
         }
-        // ----- Echo-presence guard (see UNPROVEN_BUDGET / VANISH_RATIO) -----
-        if echo_absent {
-            self.vanish_count = self.vanish_count.saturating_add(1);
-        }
-        if !self.converged && far_active && self.hang > 0 && !self.echo_unproven {
-            self.unproven_blocks = self.unproven_blocks.saturating_add(1);
-        }
-        let wipe = self.echo_unproven && self.p_err_fg > UNPROVEN_WIPE * self.p_mic_cp;
-        if wipe || self.vanish_count >= VANISH_HOLD || self.unproven_blocks >= UNPROVEN_BUDGET {
-            // Whatever the filters learned is not an echo the mic carries: drop it, so the output
-            // is the mic, and wait for one that proves itself.
-            self.cold_restart();
-            self.echo_unproven = true;
-        } else if self.div_count >= DIV_RESET_HOLD {
-            // Persistent divergence: give up and cold-reset the filters and power state.
-            self.cold_restart();
+        if self.div_count >= DIV_RESET_HOLD {
+            // Persistent divergence: give up and cold-restart the filters and the DTD (see
+            // [`Aec::restart`]: a give-up must genuinely re-bootstrap from cold).
+            self.restart();
         } else if self.div_count >= DIV_SHRINK_HOLD {
             // Shrink weights and freeze briefly to bleed off a runaway.
             for v in self.wfg_re.iter_mut() {
@@ -1393,18 +1379,7 @@ impl Aec {
         // copying before the update instead (so the copy is exactly the scored weights, as in MDF)
         // moved every metric on the bench in tests/aec_bench.rs by 0.2 dB or less, so this order
         // stays.
-        let better = self.p_err_bg < COPY_MARGIN * self.p_err_fg;
-        let adopt = if self.echo_unproven {
-            if better && self.p_err_bg < UNPROVEN_COPY * self.p_mic_cp {
-                self.unproven_streak = self.unproven_streak.saturating_add(1);
-            } else {
-                self.unproven_streak = 0;
-            }
-            self.unproven_streak >= UNPROVEN_HOLD
-        } else {
-            better
-        };
-        if adopt {
+        if self.p_err_bg < COPY_MARGIN * self.p_err_fg {
             self.wfg_re.copy_from_slice(&self.wbg_re);
             self.wfg_im.copy_from_slice(&self.wbg_im);
             self.p_err_fg = self.p_err_bg;
@@ -1631,48 +1606,6 @@ impl Aec {
         } else {
             (self.gxx_age + 1).min(GXX_MATURE_BLOCKS)
         };
-    }
-
-    /// Zero both filters and re-bootstrap the DTD from cold, keeping the far-end delay line and
-    /// the block rings (the audio keeps flowing through).
-    fn cold_restart(&mut self) {
-        for v in self.wfg_re.iter_mut() {
-            *v = 0.0;
-        }
-        for v in self.wfg_im.iter_mut() {
-            *v = 0.0;
-        }
-        for v in self.wbg_re.iter_mut() {
-            *v = 0.0;
-        }
-        for v in self.wbg_im.iter_mut() {
-            *v = 0.0;
-        }
-        for v in self.pxx.iter_mut() {
-            *v = 0.0;
-        }
-        // Cold-restart the DTD / path model too, exactly as reset() does. Zeroing only the
-        // weights leaves gxx/echo_gain/converged/hang describing the OLD path, so if the restart
-        // followed a path change the stale model strands the re-started filter: zero weights =>
-        // ~0 echo estimate => ~0 coherence => far_only_evidence can never fire => gxx can never
-        // refresh, and the stale shaped near-end test pins the freeze (the same deadlock mechanism
-        // the path-change breaker guards against). A give-up must genuinely re-bootstrap from cold.
-        self.clear_path_model();
-        self.echo_gain = 0.0;
-        self.converged = false;
-        self.hang = 0;
-        self.p_err_fg = 0.0;
-        self.p_err_bg = 0.0;
-        // The estimate is gone with the weights: stale echo/cross powers would read as an estimate
-        // the mic does not cohere with (double-talk evidence) until they decayed.
-        self.p_echo = 0.0;
-        self.p_de = 0.0;
-        self.path_change_streak = 0;
-        self.div_count = 0;
-        self.g_adapt = 0.0;
-        self.unproven_blocks = 0;
-        self.vanish_count = 0;
-        self.unproven_streak = 0;
     }
 
     /// Forget the path model entirely (cold start / give-up reset).

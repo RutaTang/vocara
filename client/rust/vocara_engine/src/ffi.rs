@@ -1137,6 +1137,23 @@ pub extern "C" fn ve_set_input_gain(_e: *mut VeEngine, gain: c_float) -> c_int {
     0
 }
 
+/// Mark the output route echo-free (`on` != 0: headphones, no acoustic path back to the mic) or
+/// not. The echo canceller then passes the mic through untouched instead of adapting to a
+/// reference the mic never hears, which pulled the in-key voice under; each change restarts it
+/// from cold. Applies to the open stream at once and to every stream opened after. 0 = ok.
+#[no_mangle]
+pub extern "C" fn ve_set_echo_free(_e: *mut VeEngine, on: c_int) -> c_int {
+    #[cfg(target_vendor = "apple")]
+    {
+        crate::vpio::set_echo_free(on != 0);
+    }
+    #[cfg(not(target_vendor = "apple"))]
+    {
+        let _ = on;
+    }
+    0
+}
+
 /// Choose which input(s) of a multi-channel mic make the mono capture that the monitor, the echo
 /// canceller, the meter and the recording all hear: 0 = Auto (the input carrying the mic — a mic
 /// on either input of a 2-input interface at full level, the idle input left out; see
