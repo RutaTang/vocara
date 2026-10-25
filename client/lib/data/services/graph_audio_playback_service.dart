@@ -525,8 +525,8 @@ class GraphAudioPlaybackService implements PlaybackEngine {
     if (_available) _bindings.ve_set_input_gain(_engine, gain);
   }
 
-  /// [setInputChannel] modes (`ve_set_input_channel`): a level-weighted mix of the device's inputs
-  /// (a mic on either input of a 2-input interface records at full level), or one input alone.
+  /// [setInputChannel] modes (`ve_set_input_channel`): Auto, the input carrying the mic (a mic on
+  /// either input of a 2-input interface records at full level), or one input alone.
   static const int inputChannelAuto = 0;
   static const int inputChannel1 = 1;
   static const int inputChannel2 = 2;

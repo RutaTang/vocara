@@ -1138,10 +1138,11 @@ pub extern "C" fn ve_set_input_gain(_e: *mut VeEngine, gain: c_float) -> c_int {
 }
 
 /// Choose which input(s) of a multi-channel mic make the mono capture that the monitor, the echo
-/// canceller, the meter and the recording all hear: 0 = Auto (a level-weighted mix — a mic on
-/// either input of a 2-input interface at full level, an idle input contributing essentially
-/// nothing), 1 = Input 1, 2 = Input 2 (input 1 on a device without one). Applies to the open
-/// stream at once, gliding, and to every stream opened after. 0 = ok, -1 = an unknown mode.
+/// canceller, the meter and the recording all hear: 0 = Auto (the input carrying the mic — a mic
+/// on either input of a 2-input interface at full level, the idle input left out; see
+/// `capture_layout::InputChannelMix`), 1 = Input 1, 2 = Input 2 (input 1 on a device without
+/// one). Applies to the open stream at once, gliding, and to every stream opened after. 0 = ok,
+/// -1 = an unknown mode.
 #[no_mangle]
 pub extern "C" fn ve_set_input_channel(e: *mut VeEngine, mode: u32) -> c_int {
     with_engine(e, -1, |eng| {

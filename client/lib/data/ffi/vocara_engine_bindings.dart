@@ -320,8 +320,9 @@ class VocaraEngineBindings {
   late final _ve_set_input_gain = _ve_set_input_gainPtr
       .asFunction<int Function(ffi.Pointer<VeEngine>, double)>();
 
-  /// Choose which input(s) of a multi-channel mic make the mono capture: 0 = Auto (level-weighted
-  /// mix), 1 = Input 1, 2 = Input 2 (input 1 on a device without one). 0 = ok, -1 = unknown mode.
+  /// Choose which input(s) of a multi-channel mic make the mono capture: 0 = Auto (the input
+  /// carrying the mic), 1 = Input 1, 2 = Input 2 (input 1 on a device without one). 0 = ok, -1 =
+  /// unknown mode.
   int ve_set_input_channel(ffi.Pointer<VeEngine> e, int mode) {
     return _ve_set_input_channel(e, mode);
   }

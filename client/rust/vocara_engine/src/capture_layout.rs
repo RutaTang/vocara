@@ -107,50 +107,90 @@ pub fn downmix_to_mono(
     n
 }
 
-/// `ve_set_input_channel`: the mono mic signal is a level-weighted mix of the device's inputs
-/// (see [`InputChannelMix`]).
+/// `ve_set_input_channel`: the mono mic signal is the input carrying the mic, or an even blend of
+/// comparable live inputs (see [`InputChannelMix`]).
 pub const INPUT_CHANNEL_AUTO: u32 = 0;
 /// `ve_set_input_channel`: the mono mic signal is input 1 alone.
 pub const INPUT_CHANNEL_1: u32 = 1;
 /// `ve_set_input_channel`: the mono mic signal is input 2 alone (input 1 on a device without one).
 pub const INPUT_CHANNEL_2: u32 = 2;
 
-/// Rise time constant of the per-channel level the Auto weights come from (s).
-const LEVEL_RISE_S: f64 = 0.15;
-/// Fall time constant of that level (s). Longer than the rise so a breath or an instrumental
-/// break does not hand the weight back to an input idling at its noise floor: the next phrase
-/// would then start at the even split's -6 dB and glide up.
-const LEVEL_FALL_S: f64 = 1.0;
+/// Time constant of the per-channel level Auto decides on (s): short, so a burst on the other
+/// input is out of the decision within tens of milliseconds of ending.
+const LEVEL_TAU_S: f64 = 0.01;
+/// Rise time constant of each channel's noise-floor estimate (s); it falls at once. A level has to
+/// stand [`LIVE_OVER_FLOOR`] above its floor to count as live, so a steady hum or hiss on an
+/// empty input is never taken for a mic.
+const FLOOR_RISE_S: f64 = 20.0;
+/// How long after the mixer starts the floor follows the level both ways (s): a hum present from
+/// the first frame is the floor from the start, not a live signal for the seconds the slow rise
+/// would take to reach it.
+const FLOOR_WARMUP_S: f64 = 0.1;
+/// A live channel stands this far above its floor (power ratio: 10 dB)...
+const LIVE_OVER_FLOOR: f32 = 10.0;
+/// ...and above this level (mean square: -60 dBFS).
+const LIVE_MIN: f32 = 1.0e-6;
+/// A live channel this far above every other live one (power ratio: 12 dB) is THE input; closer,
+/// both are in use, and Auto blends them evenly.
+const DOMINANCE: f32 = 15.85;
+/// How long a new pick must hold before Auto takes it while the input it has picked carries
+/// nothing (s): a mic moved to the other input is followed this soon...
+const SWITCH_SOON_S: f64 = 0.15;
+/// ...and while the picked input is still live (s): a pop, a bumped mic or a knocked guitar on
+/// the other input is over before this, and never reaches the take.
+const SWITCH_LATE_S: f64 = 0.4;
 /// Time constant the weights glide toward their target with (s): short enough that a voice
-/// arriving on an input is at full level within tens of milliseconds, long enough that no sample
-/// moves further than the voice's own slope (the target can jump within a few samples when the
-/// other input sits at its noise floor), and that a change of choice is a glide, not a click.
+/// arriving on an input is at full level within tens of milliseconds, long enough that a change
+/// of input — Auto's or the user's — is a glide, not a click.
 const WEIGHT_GLIDE_S: f64 = 0.01;
-/// Bias added to every level so it never decays into subnormals and the Auto split is always
-/// defined (digital silence on every input splits evenly). Far below any real noise floor.
+/// Bias added to every level so it never decays into subnormals. Far below any real noise floor.
 const LEVEL_FLOOR: f32 = 1.0e-18;
+
+/// What Auto takes the mono from: the device's inputs blended evenly, or one of them alone.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Pick {
+    Even,
+    One(usize),
+}
 
 /// Turns one frame of a mic's channels into the ONE mono signal everything downstream hears — the
 /// monitor, the AEC, the meter and the take — under the input-channel mode.
 ///
 /// * Input 1 / Input 2: that channel alone (Input 2 on a device without one is Input 1).
-/// * Auto: each channel weighted by its share of the summed level (mean square, smoothed — see
-///   [`LEVEL_RISE_S`] / [`LEVEL_FALL_S`]). An input idling at its noise floor holds a share of
-///   about a millionth next to a sung voice, so a mic on either input records at full level; two
-///   live inputs blend in proportion to their levels, and equal ones average. Only the first
-///   [`MAX_CAPTURE_CH`] channels of a wider device are weighed.
+/// * Auto: the input carrying the mic. An input is live while its level (mean square over
+///   [`LEVEL_TAU_S`]) stands above [`LIVE_MIN`] and [`LIVE_OVER_FLOOR`] above its own noise floor.
+///   One live input, or one [`DOMINANCE`] above the others, is picked alone, so a mic on either
+///   input of a 2-input interface records at full level with the idle input's noise left out.
+///   Comparable live inputs (a stereo mic, two sources) blend evenly. Nothing live (a pause) keeps
+///   the pick. A new pick is taken only once it has held [`SWITCH_LATE_S`] while the picked input
+///   is still live — a pop, a thump or a knocked guitar on the other input never reaches the take
+///   or ducks the voice — or [`SWITCH_SOON_S`] while it carries nothing, the inputs blending evenly
+///   meanwhile so a mic moved to the other input is never cut. A blend following each input's
+///   share of the level instead ducked the voice by 12 dB for seconds after a pop on the idle
+///   input. The price: a second source joining a live one is left out for [`SWITCH_LATE_S`] —
+///   Input 1 / Input 2 are for two sources. Only the first [`MAX_CAPTURE_CH`] channels of a wider
+///   device are weighed.
 ///
-/// The weights glide toward their target ([`WEIGHT_GLIDE_S`]) and always sum to 1. A 1-channel
-/// device passes through untouched. RT-safe: no alloc / lock / syscall, a few multiply-adds per
-/// channel per frame.
+/// A non-finite sample is silence. The weights glide toward their target ([`WEIGHT_GLIDE_S`]) and
+/// always sum to 1. A 1-channel device passes through untouched. RT-safe: no alloc / lock /
+/// syscall, a few multiply-adds per channel per frame.
 pub struct InputChannelMix {
-    /// Per-sample one-pole coefficients for the level's rise and fall, and the weights' glide.
-    rise: f32,
-    fall: f32,
+    /// Per-sample one-pole coefficients: the level, the floor's rise, the weights' glide.
+    level_coef: f32,
+    floor_coef: f32,
     glide: f32,
-    /// Smoothed mean-square level per channel (the Auto weights' basis), tracked in every mode so
-    /// a switch to Auto starts from a settled estimate.
+    /// [`FLOOR_WARMUP_S`], [`SWITCH_SOON_S`] and [`SWITCH_LATE_S`] in frames; `warmup` counts down.
+    warmup: u32,
+    soon: u32,
+    late: u32,
+    /// Smoothed mean-square level and noise floor per channel, tracked in every mode so a switch to
+    /// Auto starts from a settled estimate.
     level: [f32; MAX_CAPTURE_CH],
+    floor: [f32; MAX_CAPTURE_CH],
+    /// Auto's pick, the pick it is considering instead, and for how many frames it has held.
+    picked: Pick,
+    pending: Pick,
+    pending_frames: u32,
     /// The gain each channel enters the mono with.
     weight: [f32; MAX_CAPTURE_CH],
     /// Whether a frame has been mixed: an explicit choice applies from the first frame instead of
@@ -167,11 +207,19 @@ impl InputChannelMix {
             48_000.0
         };
         let coef = |secs: f64| (1.0 - (-1.0 / (secs * rate)).exp()) as f32;
+        let frames = |secs: f64| (secs * rate).round() as u32;
         InputChannelMix {
-            rise: coef(LEVEL_RISE_S),
-            fall: coef(LEVEL_FALL_S),
+            level_coef: coef(LEVEL_TAU_S),
+            floor_coef: coef(FLOOR_RISE_S),
             glide: coef(WEIGHT_GLIDE_S),
+            warmup: frames(FLOOR_WARMUP_S),
+            soon: frames(SWITCH_SOON_S),
+            late: frames(SWITCH_LATE_S),
             level: [LEVEL_FLOOR; MAX_CAPTURE_CH],
+            floor: [LEVEL_FLOOR; MAX_CAPTURE_CH],
+            picked: Pick::Even,
+            pending: Pick::Even,
+            pending_frames: 0,
             weight: [1.0 / MAX_CAPTURE_CH as f32; MAX_CAPTURE_CH],
             primed: false,
         }
@@ -181,25 +229,25 @@ impl InputChannelMix {
     /// under `mode`; an unknown mode is Auto.
     pub fn mix(&mut self, mode: u32, frame: &[f32]) -> f32 {
         let ch = frame.len().min(MAX_CAPTURE_CH);
+        // A driver or virtual device passing garbage through: in the recursive level a NaN stayed
+        // NaN for good, and so did every later output — a silent mic until the stream reopened.
+        let mut x = [0.0f32; MAX_CAPTURE_CH];
+        for (x, &s) in x.iter_mut().zip(&frame[..ch]) {
+            *x = if s.is_finite() { s } else { 0.0 };
+        }
         if ch <= 1 {
-            return frame.first().copied().unwrap_or(0.0);
+            return x[0];
         }
-        let mut total = 0.0f32;
-        for (level, &x) in self.level[..ch].iter_mut().zip(frame) {
-            let p = x * x + LEVEL_FLOOR;
-            let a = if p > *level { self.rise } else { self.fall };
-            *level += a * (p - *level);
-            total += *level;
-        }
+        let live = self.track(&x[..ch], self.picked);
+        let auto = self.auto_pick(&live[..ch]);
         let mut target = [0.0f32; MAX_CAPTURE_CH];
         match mode {
             INPUT_CHANNEL_1 => target[0] = 1.0,
             INPUT_CHANNEL_2 => target[1] = 1.0,
-            _ => {
-                for (t, &level) in target[..ch].iter_mut().zip(&self.level) {
-                    *t = level / total;
-                }
-            }
+            _ => match auto {
+                Pick::One(c) => target[c] = 1.0,
+                Pick::Even => target[..ch].fill(1.0 / ch as f32),
+            },
         }
         if !self.primed {
             self.primed = true;
@@ -211,10 +259,73 @@ impl InputChannelMix {
         for (c, (w, t)) in self.weight.iter_mut().zip(target).enumerate() {
             *w += self.glide * (t - *w);
             if c < ch {
-                y += *w * frame[c];
+                y += *w * x[c];
             }
         }
         y
+    }
+
+    /// Advance every channel's level and floor by one frame; returns which channels are live.
+    /// The `picked` input's floor only falls: a note held for seconds is as steady as a hum, and
+    /// with its floor rising to meet it the voice stopped counting as live mid-note — and a knock
+    /// on the other input then took the take over.
+    fn track(&mut self, x: &[f32], picked: Pick) -> [bool; MAX_CAPTURE_CH] {
+        let warming = self.warmup > 0;
+        self.warmup = self.warmup.saturating_sub(1);
+        let mut live = [false; MAX_CAPTURE_CH];
+        for (c, &s) in x.iter().enumerate() {
+            let level = &mut self.level[c];
+            *level += self.level_coef * (s * s + LEVEL_FLOOR - *level);
+            let floor = &mut self.floor[c];
+            if warming || *level < *floor {
+                *floor = *level;
+            } else if picked != Pick::One(c) {
+                *floor += self.floor_coef * (*level - *floor);
+            }
+            live[c] = *level > LIVE_MIN && *level > LIVE_OVER_FLOOR * *floor;
+        }
+        live
+    }
+
+    /// Advance Auto's pick by one frame (see the type doc); returns what Auto mixes this frame.
+    fn auto_pick(&mut self, live: &[bool]) -> Pick {
+        let loudest = (0..live.len())
+            .filter(|&c| live[c])
+            .max_by(|&a, &b| self.level[a].total_cmp(&self.level[b]));
+        let candidate = loudest.map(|l| {
+            let dominant = (0..live.len())
+                .all(|c| c == l || !live[c] || self.level[l] >= DOMINANCE * self.level[c]);
+            if dominant {
+                Pick::One(l)
+            } else {
+                Pick::Even
+            }
+        });
+        let picked_live = matches!(self.picked, Pick::One(c) if live[c]);
+        match candidate {
+            Some(p) if p != self.picked => {
+                if p != self.pending {
+                    self.pending = p;
+                    self.pending_frames = 0;
+                }
+                self.pending_frames += 1;
+                let hold = if picked_live { self.late } else { self.soon };
+                if self.pending_frames >= hold {
+                    self.picked = p;
+                }
+            }
+            _ => {
+                self.pending = self.picked;
+                self.pending_frames = 0;
+            }
+        }
+        // Considering another pick while the picked input carries nothing (a mic moved to the
+        // other input): blend, so the mic is not cut while Auto makes up its mind.
+        if self.pending != self.picked && !picked_live {
+            Pick::Even
+        } else {
+            self.picked
+        }
     }
 }
 
@@ -428,29 +539,60 @@ mod tests {
         (s.iter().map(|&v| (v as f64).powi(2)).sum::<f64>() / s.len() as f64).sqrt()
     }
 
-    /// Auto: a mic on either input of a 2-input interface records at full level — the idle input
-    /// at its noise floor gets essentially no weight. The averaging downmix put such a mic 6 dB
-    /// down with the idle input's noise mixed in, and the cpal path kept input 1 alone (silence
-    /// for a mic on input 2).
+    /// Auto: a mic on either input of a 2-input interface records at full level, the idle input's
+    /// noise left out. The averaging downmix put such a mic 6 dB down with the idle input's noise
+    /// mixed in, and the cpal path kept input 1 alone (silence for a mic on input 2).
     #[test]
     fn auto_takes_a_mic_on_either_input_at_full_level() {
         for live in 0..2 {
             let mut mix = InputChannelMix::new(SR);
             let mut floor = Floor(7);
+            let onset = SR as usize / 2; // the stream opens, then the singer starts
             let (mut voice, mut out) = (Vec::new(), Vec::new());
-            for n in 0..SR as usize {
-                let v = tone(220.0, n);
+            for n in 0..2 * SR as usize {
+                let v = if n >= onset { tone(220.0, n) } else { 0.0 };
                 let mut frame = [floor.next(), floor.next()];
-                frame[live] = v;
+                frame[live] += v;
                 let y = mix.mix(INPUT_CHANNEL_AUTO, &frame);
-                if n >= SR as usize / 2 {
+                if n >= onset + SR as usize / 2 {
                     voice.push(v);
                     out.push(y);
                 }
             }
+            let err: Vec<f32> = out.iter().zip(&voice).map(|(y, v)| y - v).collect();
             let db = 20.0 * (rms(&out) / rms(&voice)).log10();
-            assert!(db.abs() <= 0.5, "mic on input {}: {db:+.2} dB", live + 1);
+            assert!(db.abs() <= 0.1, "mic on input {}: {db:+.2} dB", live + 1);
+            let left = 20.0 * (rms(&err) / rms(&voice)).log10();
+            assert!(
+                left <= -40.0,
+                "input {}: the rest at {left:.1} dB",
+                live + 1
+            );
         }
+    }
+
+    /// Auto: a voice already sounding when the stream opens is as steady as a floor until it
+    /// pauses, so it blends evenly until then — and is picked at its first breath.
+    #[test]
+    fn a_voice_sounding_from_the_first_frame_is_picked_at_its_first_pause() {
+        let mut mix = InputChannelMix::new(SR);
+        let mut floor = Floor(3);
+        let gap = SR as usize..SR as usize + SR as usize / 5;
+        let (mut voice, mut out) = (Vec::new(), Vec::new());
+        for n in 0..3 * SR as usize {
+            let v = if gap.contains(&n) {
+                0.0
+            } else {
+                tone(220.0, n)
+            };
+            let y = mix.mix(INPUT_CHANNEL_AUTO, &[floor.next(), v + floor.next()]);
+            if n >= gap.end + SR as usize / 2 {
+                voice.push(v);
+                out.push(y);
+            }
+        }
+        let db = 20.0 * (rms(&out) / rms(&voice)).log10();
+        assert!(db.abs() <= 0.1, "after the pause: {db:+.2} dB");
     }
 
     /// Auto: equal channels give their average — the same signal on both inputs comes through
@@ -479,7 +621,7 @@ mod tests {
 
     /// Auto: a voice starting on input 2 after a long silence (both inputs at their noise floor,
     /// so the weights sit at an even split) glides to full level without a step — no sample moves
-    /// further than the voice's own steepest slope — and gets there within 100 ms.
+    /// further than the voice's own steepest slope — and gets there within 200 ms.
     #[test]
     fn a_voice_starting_on_input_2_glides_in_without_a_step() {
         for phase in [0.0, 0.25] {
@@ -503,7 +645,7 @@ mod tests {
                     slope = slope.max((x - prev_x).abs());
                     step = step.max((y - prev_y).abs());
                 }
-                if n >= onset + SR as usize / 10 {
+                if n >= onset + SR as usize / 5 {
                     voice.push(v);
                     out.push(y);
                 }
@@ -514,7 +656,7 @@ mod tests {
                 "phase {phase}: the output moved {step} in a sample, the voice at most {slope}"
             );
             let db = 20.0 * (rms(&out) / rms(&voice)).log10();
-            assert!(db.abs() <= 0.5, "phase {phase}: {db:+.2} dB 100 ms in");
+            assert!(db.abs() <= 0.5, "phase {phase}: {db:+.2} dB 200 ms in");
         }
     }
 
@@ -560,6 +702,179 @@ mod tests {
         }
         assert!(biggest < 0.01, "a {biggest} step on the switch");
         assert!((prev + 0.5).abs() < 1e-3, "settled at {prev}, not input 2");
+    }
+
+    /// Seconds to frames at [`SR`].
+    fn at(secs: f64) -> usize {
+        (secs * SR) as usize
+    }
+
+    /// A sine at `hz` with RMS `rms`, sample `n`.
+    fn sine(hz: f64, rms: f64, n: usize) -> f32 {
+        (rms * std::f64::consts::SQRT_2 * (std::f64::consts::TAU * hz * n as f64 / SR).sin()) as f32
+    }
+
+    /// 20·log10 of `err`'s RMS against `reference`'s.
+    fn db_off(err: &[f32], reference: &[f32]) -> f64 {
+        20.0 * (rms(err) / rms(reference)).log10()
+    }
+
+    /// Auto: a pop, a thump or a knocked guitar on the idle input never reaches the take nor
+    /// ducks the voice. Each input's share of the level put the voice 12 dB down for two seconds
+    /// after a 30 ms pop.
+    #[test]
+    fn a_burst_on_the_idle_input_does_not_duck_the_voice() {
+        let mut mix = InputChannelMix::new(SR);
+        let mut floor = Floor(5);
+        let pop = at(1.0)..at(1.03); // -6 dBFS
+        let thump = at(2.0)..at(2.2); // -12 dBFS
+        let knock = at(3.0)..at(3.35); // -3 dBFS, a guitar knocked and ringing
+        let (mut voice, mut err) = (Vec::new(), Vec::new());
+        for n in 0..at(4.5) {
+            let v = if n >= at(0.3) { tone(220.0, n) } else { 0.0 };
+            let mut other = floor.next();
+            if pop.contains(&n) {
+                other += sine(1000.0, 0.5, n);
+            }
+            if thump.contains(&n) {
+                other += sine(60.0, 0.25, n);
+            }
+            if knock.contains(&n) {
+                other += sine(110.0, 0.7, n);
+            }
+            let y = mix.mix(INPUT_CHANNEL_AUTO, &[v, other]);
+            if n >= at(0.6) {
+                voice.push(v);
+                err.push(y - v);
+            }
+        }
+        let off = db_off(&err, &voice);
+        assert!(off <= -40.0, "the bursts reached the take at {off:.1} dB");
+    }
+
+    /// Auto holds its pick through a pause, even over an idle input humming louder than the mic's
+    /// own floor: the next phrase is at full level from its first syllable, the hum left out.
+    #[test]
+    fn the_pick_holds_through_a_pause_over_a_humming_idle_input() {
+        let mut mix = InputChannelMix::new(SR);
+        let mut floor = Floor(13);
+        let sung = |n: usize| (at(0.3)..at(1.3)).contains(&n) || n >= at(4.3);
+        let (mut voice, mut err) = (Vec::new(), Vec::new());
+        for n in 0..at(5.3) {
+            let v = if sung(n) { tone(220.0, n) } else { 0.0 };
+            let hum = sine(50.0, 0.0032, n); // -50 dBFS
+            let y = mix.mix(INPUT_CHANNEL_AUTO, &[hum, v + floor.next()]);
+            if n >= at(4.3) {
+                voice.push(v);
+                err.push(y - v);
+            }
+        }
+        let off = db_off(&err, &voice);
+        assert!(off <= -40.0, "the second phrase is off by {off:.1} dB");
+    }
+
+    /// Auto follows a mic moved to the other input, and never cuts it while deciding: an even
+    /// blend first, then that input alone.
+    #[test]
+    fn a_mic_moved_to_the_other_input_is_followed() {
+        let mut mix = InputChannelMix::new(SR);
+        let mut floor = Floor(17);
+        let moved = at(1.8);
+        let (mut deciding, mut deciding_voice) = (Vec::new(), Vec::new());
+        let (mut voice, mut err) = (Vec::new(), Vec::new());
+        for n in 0..at(3.0) {
+            let v = tone(220.0, n);
+            let frame = if n < at(1.3) && n >= at(0.3) {
+                [v, floor.next()]
+            } else if n >= moved {
+                [floor.next(), v]
+            } else {
+                [floor.next(), floor.next()]
+            };
+            let y = mix.mix(INPUT_CHANNEL_AUTO, &frame);
+            if (moved..moved + at(0.15)).contains(&n) {
+                deciding.push(y);
+                deciding_voice.push(v);
+            }
+            if n >= moved + at(0.25) {
+                voice.push(v);
+                err.push(y - v);
+            }
+        }
+        let while_deciding = 20.0 * (rms(&deciding) / rms(&deciding_voice)).log10();
+        assert!(
+            while_deciding >= -6.5,
+            "cut while deciding: {while_deciding:.1} dB"
+        );
+        let off = db_off(&err, &voice);
+        assert!(off <= -40.0, "on its new input, off by {off:.1} dB");
+    }
+
+    /// Auto: two live inputs at comparable levels — a voice and a guitar 6 dB above it — blend
+    /// evenly and hold still, where each one's share of the level put the voice 14 dB down. Once
+    /// the guitar stops, the voice is alone again within a quarter second.
+    #[test]
+    fn comparable_live_inputs_blend_evenly() {
+        let mut mix = InputChannelMix::new(SR);
+        let mut floor = Floor(19);
+        let guitar_ends = at(2.0);
+        let (mut blend, mut blend_err) = (Vec::new(), Vec::new());
+        let (mut voice, mut err) = (Vec::new(), Vec::new());
+        for n in 0..at(3.0) {
+            let v = if n >= at(0.3) { tone(220.0, n) } else { 0.0 };
+            let g = if (at(0.3)..guitar_ends).contains(&n) {
+                sine(330.0, 0.2, n)
+            } else {
+                floor.next()
+            };
+            let y = mix.mix(INPUT_CHANNEL_AUTO, &[v, g]);
+            if (at(0.8)..guitar_ends).contains(&n) {
+                blend.push(0.5 * (v + g));
+                blend_err.push(y - 0.5 * (v + g));
+            }
+            if n >= guitar_ends + at(0.25) {
+                voice.push(v);
+                err.push(y - v);
+            }
+        }
+        let off = db_off(&blend_err, &blend);
+        assert!(off <= -40.0, "the blend is off the even mix by {off:.1} dB");
+        let off = db_off(&err, &voice);
+        assert!(off <= -40.0, "after the guitar, off by {off:.1} dB");
+    }
+
+    /// A NaN or infinite sample is silence, and the mic carries on in every mode: in the recursive
+    /// level one stayed NaN for good, and every later output with it.
+    #[test]
+    fn a_non_finite_sample_does_not_silence_the_mic() {
+        for (mode, live) in [
+            (INPUT_CHANNEL_AUTO, 1),
+            (INPUT_CHANNEL_1, 0),
+            (INPUT_CHANNEL_2, 1),
+        ] {
+            let mut mix = InputChannelMix::new(SR);
+            let mut floor = Floor(23);
+            let (mut voice, mut out) = (Vec::new(), Vec::new());
+            for n in 0..at(2.0) {
+                let v = if n >= at(0.3) { tone(220.0, n) } else { 0.0 };
+                let mut frame = [floor.next(), floor.next()];
+                frame[live] += v;
+                if n == at(1.0) {
+                    frame[1 - live] = f32::NAN;
+                }
+                if n == at(1.2) {
+                    frame[live] = f32::INFINITY;
+                }
+                let y = mix.mix(mode, &frame);
+                assert!(y.is_finite(), "mode {mode}: frame {n} is {y}");
+                if n >= at(1.3) {
+                    voice.push(v);
+                    out.push(y);
+                }
+            }
+            let db = 20.0 * (rms(&out) / rms(&voice)).log10();
+            assert!(db.abs() <= 0.1, "mode {mode}: {db:+.2} dB after");
+        }
     }
 
     const LIMIT: u32 = 20;

@@ -833,7 +833,7 @@ unsafe extern "C-unwind" fn input_cb(
         // Reset only on a real, non-empty capture (a healthy mic delivers frames every cycle).
         ctx.dead.on_capture();
 
-        // Mix the RAW mic down to its mono signal (the chosen input, or Auto's level-weighted mix).
+        // Mix the RAW mic down to its mono signal (the chosen input, or the one Auto picked).
         // `n` = captured frames.
         let mode = ctx.input.channel_mode();
         let n = downmix_to_mono(

@@ -760,7 +760,8 @@ class _InputChannelCard extends StatelessWidget {
                 ),
                 SizedBox(height: 2),
                 Text(
-                  'Auto follows whichever input you sing into.',
+                  'Auto follows the input you sing into. Pick one to keep '
+                  'a second source out.',
                   style: TextStyle(color: Studio.textFaint, fontSize: 11),
                 ),
               ],
