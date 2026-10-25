@@ -4,6 +4,7 @@ import 'package:drift/drift.dart';
 
 import '../db/app_database.dart';
 import '../services/diagnostics_log.dart';
+import 'hlc.dart';
 import 'integrity_checker.dart';
 import 'oplog_drain.dart';
 import 'sync_applier.dart';
@@ -889,7 +890,8 @@ class SyncEngine {
   ///    runs after the apply's commit; a crash in between just re-replays it
   ///    as another clean skip next run.)
   ///  * quarantined / failed — still rejected; the applier itself re-parked
-  ///    the latest state, so the entry stays for a later cycle.
+  ///    the latest state, so the entry stays for a later cycle. A stamp still
+  ///    past the drift bound is not even applied: it could only re-park.
   ///  * settled but unremovable — the apply committed and only the bookkeeping
   ///    delete failed; the entry stays parked and the run continues, because
   ///    the replay is idempotent and next cycle settles it as a clean skip.
@@ -927,6 +929,16 @@ class SyncEngine {
         row = SyncRow.decode(q.payload);
       } on FormatException {
         continue; // undecodable: keep parked (see doc comment)
+      }
+      // Still past the drift bound: the apply could only park it again, so
+      // spare it the transaction (and the rewrite). It cannot have lost LWW
+      // meanwhile either — the drift reference covers every stamp the tables
+      // hold (the clock merges each one it stores, and boot seeds from them),
+      // so a stamp beyond it out-ranks whatever is held for its row.
+      try {
+        _applier.clock.assertPlausible(row.hlc);
+      } on HlcDriftException {
+        continue;
       }
       final result = await _applier.apply([row]);
       if (!result.committed) break; // storage trouble — retry next run

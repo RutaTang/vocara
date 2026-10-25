@@ -497,12 +497,20 @@ class SyncApplier {
           result.failed++;
           await _parkUndecodable(reject);
         }
-        await _sweepFkOrphans(
-          result,
-          insertedThisBatch,
-          updatedThisBatch,
-          slotResolutions,
-        );
+        // foreign_key_check scans the WHOLE store, but only a row this batch
+        // wrote can dangle: every earlier commit left the store FK-clean
+        // (foreign_keys is ON, and deferred checks still run at commit). So
+        // a batch that only parked or skipped — every quarantine replay that
+        // re-parks — skips the scan. result.applied counts exactly the
+        // records whose savepoint wrote (slot resolutions ride inside them).
+        if (result.applied > 0) {
+          await _sweepFkOrphans(
+            result,
+            insertedThisBatch,
+            updatedThisBatch,
+            slotResolutions,
+          );
+        }
         // Durably record what the in-memory clock is about to merge, inside
         // this transaction so the mark can never claim stamps a rollback threw
         // away. The advance itself still happens only post-commit; this is the

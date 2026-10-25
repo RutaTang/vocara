@@ -96,6 +96,67 @@ class _StuckTokenTransport implements SyncTransport {
       throw UnimplementedError();
 }
 
+/// Counts what the store is asked to do: transactions opened, every
+/// statement run, and the writing ones apart.
+class _Cost extends QueryInterceptor {
+  int transactions = 0;
+  final List<String> sql = [];
+  final List<String> writes = [];
+
+  int matching(String fragment) =>
+      sql.where((s) => s.contains(fragment)).length;
+
+  void reset() {
+    transactions = 0;
+    sql.clear();
+    writes.clear();
+  }
+
+  @override
+  TransactionExecutor beginTransaction(QueryExecutor parent) {
+    transactions++;
+    return super.beginTransaction(parent);
+  }
+
+  @override
+  Future<List<Map<String, Object?>>> runSelect(
+    QueryExecutor e,
+    String s,
+    List<Object?> a,
+  ) {
+    sql.add(s);
+    return super.runSelect(e, s, a);
+  }
+
+  @override
+  Future<int> runInsert(QueryExecutor e, String s, List<Object?> a) {
+    sql.add(s);
+    writes.add(s);
+    return super.runInsert(e, s, a);
+  }
+
+  @override
+  Future<int> runUpdate(QueryExecutor e, String s, List<Object?> a) {
+    sql.add(s);
+    writes.add(s);
+    return super.runUpdate(e, s, a);
+  }
+
+  @override
+  Future<int> runDelete(QueryExecutor e, String s, List<Object?> a) {
+    sql.add(s);
+    writes.add(s);
+    return super.runDelete(e, s, a);
+  }
+
+  @override
+  Future<void> runCustom(QueryExecutor e, String s, List<Object?> a) {
+    sql.add(s);
+    writes.add(s);
+    return super.runCustom(e, s, a);
+  }
+}
+
 /// Stands in for a process that dies after a pull run's pages committed but
 /// before its end-of-run repair transaction ran.
 class _DyingChecker extends IntegrityChecker {
@@ -1203,6 +1264,41 @@ void main() {
       );
       expect(e.practiceIds, {_id('P')});
       expect(e.techniqueIds, isEmpty);
+    });
+  });
+
+  group('quarantine replay cost', () {
+    late _Cost cost;
+
+    setUp(() async {
+      engine.dispose();
+      await db.close();
+      cost = _Cost();
+      db = AppDatabase(NativeDatabase.memory().interceptWith(cost));
+      writer = SyncWriter(db, clock);
+      state = SyncStateStore(db);
+      quarantine = QuarantineStore(db);
+      engine = buildEngine();
+    });
+
+    test('a park still past the drift bound is not re-applied by every pull: '
+        'no transaction, no whole-store FK sweep, no rewrite', () async {
+      // A peer whose clock runs 6 minutes fast: every row it writes parks
+      // here until real time catches up — and every pull replays the lot.
+      cloud.accept(remotePractice('P', 'ahead', remoteHlc(t0 + 6 * 60 * 1000)));
+      expect((await engine.pumpPull()).quarantined, 1);
+
+      cost.reset();
+      expect((await engine.pumpPull()).failed, isFalse);
+      expect(cost.transactions, 0);
+      expect(cost.matching('foreign_key_check'), 0);
+      expect(cost.writes, isEmpty);
+      expect(await quarantine.list(), hasLength(1), reason: 'still parked');
+
+      nowMs += 2 * 60 * 1000; // real time catches up: the replay lands it
+      expect((await engine.pumpPull()).failed, isFalse);
+      expect(await practiceTitle('P'), 'ahead');
+      expect(await quarantine.list(), isEmpty);
     });
   });
 

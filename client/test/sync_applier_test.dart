@@ -61,6 +61,21 @@ class _FlakyQuarantineStore extends QuarantineStore {
   }
 }
 
+/// Records every SELECT the store runs (PRAGMA reads included).
+class _Selects extends QueryInterceptor {
+  final List<String> sql = [];
+
+  @override
+  Future<List<Map<String, Object?>>> runSelect(
+    QueryExecutor e,
+    String s,
+    List<Object?> a,
+  ) {
+    sql.add(s);
+    return super.runSelect(e, s, a);
+  }
+}
+
 void main() {
   late AppDatabase db;
   late SyncApplier applier;
@@ -818,6 +833,43 @@ void main() {
         quarantine: store,
       );
     });
+
+    test(
+      'the whole-store sweep runs only for a batch that WROTE a row: a '
+      'batch that only parked or skipped cannot have left one dangling',
+      () async {
+        final selects = _Selects();
+        final counted = AppDatabase(
+          NativeDatabase.memory().interceptWith(selects),
+        );
+        addTearDown(counted.close);
+        final a = SyncApplier(
+          counted,
+          HlcClock(node: _id('LOCAL'), now: () => 1000),
+          builder: SyncRowBuilder(counted),
+          quarantine: QuarantineStore(counted),
+        );
+        int sweeps() =>
+            selects.sql.where((s) => s.contains('foreign_key_check')).length;
+
+        // Past the drift bound: parked, nothing written.
+        final parked = await a.apply([
+          practice('P', 'ahead', hlc(1000 + 6 * 60 * 1000)),
+        ]);
+        expect(parked.quarantined, 1);
+        expect(sweeps(), 0);
+
+        // A write keeps the sweep.
+        final written = await a.apply([practice('Q', 'now', hlc(900))]);
+        expect(written.applied, 1);
+        expect(sweeps(), 1);
+
+        // A clean LWW skip writes nothing either.
+        final skipped = await a.apply([practice('Q', 'stale', hlc(800))]);
+        expect(skipped.skipped, 1);
+        expect(sweeps(), 1);
+      },
+    );
 
     test(
       'a child arriving BEFORE its parent within a batch applies fine',

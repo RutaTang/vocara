@@ -27,6 +27,7 @@ class QuarantineStore {
   ///    reason/payload for the SAME record state — the fk-orphan re-park flow
   ///    re-parks the identical snapshot every replay cycle and must keep
   ///    working, and a replay whose verdict changed relabels the entry);
+  ///    a re-park identical word for word is a no-op, not a rewrite;
   ///  * between two states of the same replay class (see below), the strictly
   ///    newer [hlcPacked] wins and a strictly OLDER park is a deliberate
   ///    no-op. Parks are not ordered by arrival: a page can legally deliver
@@ -84,7 +85,10 @@ class QuarantineStore {
             // stored row (packed HLCs compare lexically): within a replay
             // class the stored state must not be newer than the incoming
             // one; across classes the replayable state wins outright, and
-            // an equal stamp (same record state) always refreshes.
+            // an equal stamp (same record state) always refreshes — unless
+            // the re-park is the SAME entry word for word (every replay
+            // cycle of a row its gate still refuses), which rewrites nothing
+            // and keeps the time the entry was first parked.
             where: (old) {
               final equal = old.remoteHlcPacked.equals(hlcPacked);
               final notNewer = old.remoteHlcPacked.isSmallerOrEqualValue(
@@ -93,9 +97,14 @@ class QuarantineStore {
               final storedUnreplayable = _unreplayablePrefixes
                   .map((p) => old.reason.like('$p%'))
                   .reduce((a, b) => a | b);
-              return isReplayable(reason)
-                  ? notNewer | storedUnreplayable
-                  : equal | (notNewer & storedUnreplayable);
+              final unchanged =
+                  equal &
+                  old.payload.equals(payload) &
+                  old.reason.equals(reason);
+              return (isReplayable(reason)
+                      ? notNewer | storedUnreplayable
+                      : equal | (notNewer & storedUnreplayable)) &
+                  unchanged.not();
             },
           ),
         );

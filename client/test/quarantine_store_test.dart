@@ -108,6 +108,17 @@ void main() {
     expect(rows.single.quarantinedAt, 200);
   });
 
+  test('an IDENTICAL re-park (same stamp, payload and reason) rewrites '
+      'nothing: the entry keeps the time it was first parked', () async {
+    // Every replay cycle re-parks a row its gate still refuses (an fk-orphan
+    // whose parent is still missing): the same state, word for word.
+    await put('practices', 'P1', reason: 'fk-orphan: parent missing', at: 100);
+    await put('practices', 'P1', reason: 'fk-orphan: parent missing', at: 200);
+    final changed = await db.customSelect('SELECT changes() AS n').getSingle();
+    expect(changed.read<int>('n'), 0, reason: 'no row was rewritten');
+    expect((await store.list()).single.quarantinedAt, 100);
+  });
+
   group('replay-class retention (a permanently-unreplayable park must never '
       'displace or block a replayable one)', () {
     test('a NEWER unreplayable park does not displace a stored fk-orphan '
