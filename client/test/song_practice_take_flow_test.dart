@@ -583,6 +583,38 @@ void main() {
     });
   });
 
+  test('a folded-out lane re-reads a clip whose path a save moved', () async {
+    // A synced clip opens at its `asset://` ref; once its bytes land, a save
+    // re-reads it at the pool path, which re-keys the lane's analysis. The
+    // folded-out lane computes only when pushed, so it sat blank with no
+    // spinner until it was folded again.
+    final take = AudioTrack(
+      id: 'take1',
+      kind: AudioTrackKind.vocal,
+      displayName: 'Take 1',
+      clips: const [
+        AudioClip(id: 'c1', audioFilePath: '/pool/a.wav', durationMs: 1000),
+        AudioClip(
+          id: 'c2',
+          audioFilePath: 'asset://b.wav',
+          durationMs: 1000,
+          startMs: 2000,
+        ),
+      ],
+      createdAt: DateTime(2026),
+      versionId: 'v1',
+    );
+    final vm = await pumpVm(seed: _seed(vocalTracks: [take]));
+    vm.analysis.toggleTrackExpanded('take1');
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    repo.pooling = true;
+    spectrograms.requested.clear();
+
+    await vm.renameTrack('take1', 'Lead'); // any save re-reads the practice
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(spectrograms.requested, contains('/pool/b.wav'));
+  });
+
   group('a take that becomes selected replaces a bus selection', () {
     test('REC with a bus selected: the new take, not the bus, owns the '
         'inspector', () async {

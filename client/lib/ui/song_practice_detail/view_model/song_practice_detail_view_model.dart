@@ -899,6 +899,10 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     if ((analysis.dockOpen && analysis.dockShowsTake) || _inspectorOpen) {
       unawaited(analysis.ensureSelectedSpectrogram());
     }
+    // A re-read can move a clip to another path (a synced clip's bytes landed:
+    // its `asset://` ref became the pool path), which re-keys its lane's
+    // analysis; folded-out lanes compute only when pushed, and sat blank.
+    analysis.refreshExpandedLanes();
   }
 
   // --- Importing audio -----------------------------------------------------
@@ -2274,6 +2278,8 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     if (identical(_practice, sent)) {
       _practice = saved.aggregate;
       _baseHashes = saved.baseHashes;
+      // The re-read may move clips to other paths (see [_adoptLoaded]).
+      analysis.refreshExpandedLanes();
     } else {
       _baseHashes = saved.sentHashes ?? saved.baseHashes;
     }
