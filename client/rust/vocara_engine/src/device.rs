@@ -1081,11 +1081,20 @@ impl InputCell {
     /// producer by construction.
     #[inline]
     pub fn try_feed(&self, epoch: u64, data: &[f32]) -> bool {
+        self.try_feed_gained(epoch, data, 1.0)
+    }
+
+    /// [`try_feed`](Self::try_feed), scaling the mono mic signal by `gain` after the channel
+    /// mix — the record gain, which the mix's guard against garbage samples (past +24 dBFS)
+    /// must never see: applied ahead of it, every peak a hot gain lifted past that was recorded
+    /// as silence.
+    #[inline]
+    pub fn try_feed_gained(&self, epoch: u64, data: &[f32], gain: f32) -> bool {
         let Some(_g) = self.try_enter(epoch) else {
             return false;
         };
         // SAFETY: the guard is the cell's single-accessor proof for this call.
-        unsafe { self.feed(data) };
+        unsafe { self.feed(data, gain) };
         true
     }
 
@@ -1149,12 +1158,12 @@ impl InputCell {
     }
 
     /// Feed one input callback's interleaved samples: mix the device's channels down to the mono
-    /// mic signal (carried as L = R), resample to `ENGINE_SR`, fan out to the mic / capture /
-    /// recording rings, and update the peak meter.
+    /// mic signal (carried as L = R) and scale it by `gain`, resample to `ENGINE_SR`, fan out to
+    /// the mic / capture / recording rings, and update the peak meter.
     ///
     /// # Safety
     /// Only the single active input callback may call this.
-    unsafe fn feed(&self, data: &[f32]) {
+    unsafe fn feed(&self, data: &[f32], gain: f32) {
         let st = &mut *self.state.get();
         let ch = st.in_channels;
         if ch == 0 {
@@ -1181,7 +1190,7 @@ impl InputCell {
             let base = fi * ch;
             // Inputs 1 and 2 used to travel as left and right, and the writer keeps the left: a
             // mic on input 2 recorded silence, monitored hard right.
-            let m = st.mix.mix(mode, &data[base..base + ch]);
+            let m = st.mix.mix(mode, &data[base..base + ch]) * gain;
             let (l, r) = (m, m);
             peak = peak.max(m.abs());
             if identity {
@@ -1501,6 +1510,55 @@ mod drift_tests {
             "steady-state emission must match the output clock \
              (residual {residual_ppm:.2} ppm; the old feedback left ~{:.1})",
             ppm / 2.0
+        );
+    }
+
+    /// The record gain lands after the channel mix, so a hot gain keeps every peak of the take:
+    /// applied ahead of the mix (as VPIO did), each gained sample past +24 dBFS met its guard
+    /// against garbage samples and was recorded as silence — at +40 dB, anything over -16 dBFS.
+    /// A garbage sample from the device is still left out.
+    #[test]
+    fn a_hot_record_gain_keeps_every_peak_of_the_take() {
+        use crate::ring::spsc;
+        use crate::sample::{Smp, CHANNELS};
+        use std::sync::atomic::{AtomicBool, AtomicU32};
+        let (mic_prod, _mic_cons) = spsc::<[Smp; CHANNELS]>(1 << 14);
+        let (cap_prod, _cap_cons) = spsc::<[Smp; CHANNELS]>(8);
+        let (rec_prod, mut rec_cons) = spsc::<[Smp; CHANNELS]>(1 << 14);
+        let level = Arc::new(AtomicU32::new(0));
+        let cell = super::InputCell::new(
+            mic_prod,
+            cap_prod,
+            rec_prod,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(true)),
+            Arc::clone(&level),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(1.0f64.to_bits())),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU32::new(0)),
+        );
+        // What VPIO's input callback hands the cell: its clean mono voice, one channel.
+        let epoch = cell.reconfigure(crate::sample::ENGINE_SR, 1);
+        let gain = 100.0; // +40 dB, the top of the Settings slider
+        let mut voice: Vec<f32> = (0..4800)
+            .map(|n| 0.25 * (std::f32::consts::TAU * 220.0 * n as f32 / 48_000.0).sin())
+            .collect();
+        voice[2400] = 2.0e19; // garbage from a driver
+        assert!(cell.try_feed_gained(epoch, &voice, gain));
+        let mut worst = 0.0f32;
+        for (n, &v) in voice.iter().enumerate() {
+            let got = rec_cons.pop().expect("one recorded frame per input frame")[0];
+            let want = if n == 2400 { 0.0 } else { v * gain };
+            worst = worst.max((got - want).abs());
+        }
+        assert!(worst < 1e-3, "the take is off by up to {worst}");
+        let peak = f32::from_bits(level.load(Ordering::Relaxed));
+        assert!(
+            (peak - 25.0).abs() < 0.1,
+            "the meter reads {peak}, not the gained peak"
         );
     }
 

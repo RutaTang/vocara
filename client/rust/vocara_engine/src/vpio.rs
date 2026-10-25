@@ -205,7 +205,7 @@ struct InCtx {
     /// here but never set mData, so `feed` never ran. Non-interleaved captures use one
     /// `MAX_FRAMES` plane of it per channel.
     render_buf: Vec<f32>,
-    /// Interleaved-stereo scratch handed to `InputCell` (mono is duplicated up; `MAX_FRAMES*MAX_CH`).
+    /// The clean mono voice handed to `InputCell` (`MAX_FRAMES*MAX_CH`).
     scratch: Vec<f32>,
     /// Custom acoustic echo canceller: removes the backing-track echo (loudspeaker→mic) from the raw
     /// mic while preserving the singing voice. VPIO's own AEC is bypassed (it ducked the sung voice).
@@ -511,11 +511,12 @@ impl Vpio {
             // Dead cycles count the mic element's own frames, at the rate it negotiated.
             in_ctx.dead =
                 DeadCaptureStreak::new(INPUT_LOST_STREAK, input_warmup_frames(in_layout.rate));
-            // input_cb always hands InputCell interleaved STEREO (mono captures are duplicated up),
-            // so configure for identity stereo at the captured rate. Reconfigure retires every
-            // older generation and mints the one bound to this format — adopt it, or this unit's
-            // own callbacks would be denied as zombies. No callback has fired yet (start below).
-            in_ctx.epoch = in_ctx.input.reconfigure(in_layout.rate, CHANNELS);
+            // input_cb always hands InputCell the clean MONO voice (its own mix has already taken
+            // the device's channels down), so configure for one channel at the captured rate.
+            // Reconfigure retires every older generation and mints the one bound to this format —
+            // adopt it, or this unit's own callbacks would be denied as zombies. No callback has
+            // fired yet (start below).
+            in_ctx.epoch = in_ctx.input.reconfigure(in_layout.rate, 1);
             if let Some(oc) = out_ctx.as_mut() {
                 let out_layout = get_asbd(unit, kAudioUnitScope_Input, ELEM_OUTPUT)
                     .map(|a| Layout::from(&a))
@@ -882,18 +883,17 @@ unsafe extern "C-unwind" fn input_cb(
                 &mut ctx.clean_mono[..n],
             );
         }
-        // High-pass (DC/rumble) then apply the (user-adjustable) record gain — a pure linear
-        // scale (the float take stores over-0 dBFS losslessly; the master limiter guards
-        // playback) — and duplicate the clean mono voice up to the interleaved-stereo feed.
-        let gain = f32::from_bits(INPUT_GAIN.load(Ordering::Relaxed));
+        // High-pass (DC/rumble) the clean mono voice and feed it as the cell's one channel, which
+        // applies the (user-adjustable) record gain after its mix — a pure linear scale (the
+        // float take stores over-0 dBFS losslessly; the master limiter guards playback).
         for i in 0..n {
-            let s = ctx.hp.process(ctx.clean_mono[i]) * gain;
-            ctx.scratch[2 * i] = s;
-            ctx.scratch[2 * i + 1] = s;
+            ctx.scratch[i] = ctx.hp.process(ctx.clean_mono[i]);
         }
+        let gain = f32::from_bits(INPUT_GAIN.load(Ordering::Relaxed));
         // A denied feed drops the block rather than racing a second producer into rings that
         // have exactly one producer by construction.
-        ctx.input.try_feed(ctx.epoch, &ctx.scratch[..n * CHANNELS]);
+        ctx.input
+            .try_feed_gained(ctx.epoch, &ctx.scratch[..n], gain);
         0
     }));
     res.unwrap_or(-1)
