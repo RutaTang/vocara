@@ -456,6 +456,98 @@ fn build_sinc_table(step: f64) -> Vec<f32> {
     table
 }
 
+/// Where one device frame's kernel reads: the polyphase row pair for its sub-phase (rows
+/// `r0`, `r0 + 1`, linearly interpolated by `rw`) and the FIFO index of its first tap.
+#[derive(Clone, Copy)]
+struct KernelAt {
+    row0: usize,
+    rw: f32,
+    base: usize,
+}
+
+impl KernelAt {
+    #[inline(always)]
+    fn at(pos: f64, origin: i64) -> KernelAt {
+        let ip = pos.floor();
+        let frac = pos - ip;
+        // Polyphase row pair for this sub-phase, linearly interpolated.
+        let rf = frac * SINC_OVERSAMPLE as f64;
+        let r0 = rf.floor() as usize;
+        KernelAt {
+            row0: r0 * SINC_TAPS,
+            rw: (rf - r0 as f64) as f32,
+            base: (ip as i64 - origin) as usize - (SINC_HALF - 1),
+        }
+    }
+}
+
+/// The polyphase kernel for `out.len() / CHANNELS` consecutive device frames, read from `fifo`
+/// (content index of `fifo[0]` = `origin`) starting at read position `*pos`, which advances by
+/// `step` per frame.
+///
+/// Each frame's two sums run over the taps in order, from zero — a chain of 64 dependent adds,
+/// so one frame at a time the converter waited on its own accumulator. Four frames are summed
+/// side by side instead (eight independent chains), their interpolated weights formed first in
+/// one vectorizable pass; every frame still forms exactly the weights, the products and the
+/// sums, in exactly the order, it always did, from the same positions.
+fn sinc_run(
+    table: &[f32],
+    fifo: &[[Smp; CHANNELS]],
+    origin: i64,
+    pos: &mut f64,
+    step: f64,
+    out: &mut [Smp],
+) {
+    let frames = out.len() / CHANNELS;
+    let mut quads = out[..frames * CHANNELS].chunks_exact_mut(4 * CHANNELS);
+    for o in &mut quads {
+        let mut w = [[0.0f32; SINC_TAPS]; 4];
+        let mut f: [&[[Smp; CHANNELS]]; 4] = [&[]; 4];
+        for (wj, fj) in w.iter_mut().zip(f.iter_mut()) {
+            let a = KernelAt::at(*pos, origin);
+            *pos += step;
+            let r0 = &table[a.row0..a.row0 + SINC_TAPS];
+            let r1 = &table[a.row0 + SINC_TAPS..a.row0 + 2 * SINC_TAPS];
+            for t in 0..SINC_TAPS {
+                wj[t] = r0[t] + (r1[t] - r0[t]) * a.rw;
+            }
+            *fj = &fifo[a.base..a.base + SINC_TAPS];
+        }
+        let ([w0, w1, w2, w3], [f0, f1, f2, f3]) = (&w, f);
+        let (mut l0, mut l1, mut l2, mut l3) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+        let (mut r0, mut r1, mut r2, mut r3) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+        for t in 0..SINC_TAPS {
+            l0 += f0[t][0] * w0[t];
+            r0 += f0[t][1] * w0[t];
+            l1 += f1[t][0] * w1[t];
+            r1 += f1[t][1] * w1[t];
+            l2 += f2[t][0] * w2[t];
+            r2 += f2[t][1] * w2[t];
+            l3 += f3[t][0] * w3[t];
+            r3 += f3[t][1] * w3[t];
+        }
+        o.copy_from_slice(&[l0, r0, l1, r1, l2, r2, l3, r3]);
+    }
+    for o in quads.into_remainder().chunks_exact_mut(CHANNELS) {
+        let a = KernelAt::at(*pos, origin);
+        let (r0, r1) = (
+            &table[a.row0..a.row0 + SINC_TAPS],
+            &table[a.row0 + SINC_TAPS..a.row0 + 2 * SINC_TAPS],
+        );
+        let f = &fifo[a.base..a.base + SINC_TAPS];
+        let mut l = 0.0f32;
+        let mut r = 0.0f32;
+        for t in 0..SINC_TAPS {
+            let w = r0[t] + (r1[t] - r0[t]) * a.rw;
+            l += f[t][0] * w;
+            r += f[t][1] * w;
+        }
+        o[0] = l;
+        o[1] = r;
+        *pos += step;
+    }
+}
+
 impl OutResampler {
     fn new(device_rate: f64, max_block: usize, rt: Arc<RtCell>, epoch: u64) -> Self {
         let step = ENGINE_SR / device_rate;
@@ -566,30 +658,14 @@ impl OutResampler {
                     return;
                 }
             }
-            for k in 0..chunk {
-                let ip = self.pos.floor();
-                let frac = self.pos - ip;
-                // Polyphase row pair for this sub-phase, linearly interpolated.
-                let rf = frac * SINC_OVERSAMPLE as f64;
-                let r0 = rf.floor() as usize;
-                let rw = (rf - r0 as f64) as f32;
-                let row0 = r0 * SINC_TAPS;
-                let row1 = (r0 + 1) * SINC_TAPS;
-                let base = (ip as i64 - self.origin) as usize - (SINC_HALF - 1);
-                let mut l = 0.0f32;
-                let mut r = 0.0f32;
-                for t in 0..SINC_TAPS {
-                    let w =
-                        self.table[row0 + t] + (self.table[row1 + t] - self.table[row0 + t]) * rw;
-                    let f = self.fifo[base + t];
-                    l += f[0] * w;
-                    r += f[1] * w;
-                }
-                let o = (done + k) * CHANNELS;
-                out[o] = l;
-                out[o + 1] = r;
-                self.pos += self.step;
-            }
+            sinc_run(
+                &self.table,
+                &self.fifo,
+                self.origin,
+                &mut self.pos,
+                self.step,
+                &mut out[done * CHANNELS..(done + chunk) * CHANNELS],
+            );
             // Consumed cursor: the read position's integer progression over CONTENT
             // frames — identical semantics to the linear kernel, so every transport
             // test holds unchanged.
@@ -3985,6 +4061,117 @@ mod out_resampler_tests {
         let cell = RtCell::new(rt);
         let res = OutResampler::new(device_rate, BLOCK, Arc::clone(&cell), cell.claim());
         (h, res)
+    }
+
+    /// The kernel loop as it was first written (one device frame at a time), kept as the
+    /// reference [`super::sinc_run`] is held to bit for bit.
+    fn sinc_run_reference(
+        table: &[f32],
+        fifo: &[[Smp; CHANNELS]],
+        origin: i64,
+        pos: &mut f64,
+        step: f64,
+        out: &mut [Smp],
+    ) {
+        use super::{SINC_HALF, SINC_OVERSAMPLE, SINC_TAPS};
+        for k in 0..out.len() / CHANNELS {
+            let ip = pos.floor();
+            let frac = *pos - ip;
+            let rf = frac * SINC_OVERSAMPLE as f64;
+            let r0 = rf.floor() as usize;
+            let rw = (rf - r0 as f64) as f32;
+            let row0 = r0 * SINC_TAPS;
+            let row1 = (r0 + 1) * SINC_TAPS;
+            let base = (ip as i64 - origin) as usize - (SINC_HALF - 1);
+            let mut l = 0.0f32;
+            let mut r = 0.0f32;
+            for t in 0..SINC_TAPS {
+                let w = table[row0 + t] + (table[row1 + t] - table[row0 + t]) * rw;
+                let f = fifo[base + t];
+                l += f[0] * w;
+                r += f[1] * w;
+            }
+            out[k * CHANNELS] = l;
+            out[k * CHANNELS + 1] = r;
+            *pos += step;
+        }
+    }
+
+    #[test]
+    fn the_interleaved_kernel_matches_the_frame_by_frame_loop_bit_for_bit() {
+        // Every rate the boundary meets (up- and downsampling), ragged run lengths (the
+        // four-frame groups and the remainder), a far-advanced read position (uptime), and
+        // signed zeros in the FIFO.
+        let mut x = 0x5EEDu32;
+        let mut rnd = move || {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            (x as f32 / u32::MAX as f32) - 0.5
+        };
+        for device_rate in [
+            44_100.0f64,
+            88_200.0,
+            96_000.0,
+            32_000.0,
+            22_050.0,
+            192_000.0,
+        ] {
+            let step = ENGINE_SR / device_rate;
+            let table = super::build_sinc_table(step);
+            let fifo: Vec<[Smp; CHANNELS]> = (0..4096)
+                .map(|i| match i % 17 {
+                    3 => [-0.0, 0.0],
+                    _ => [rnd(), rnd()],
+                })
+                .collect();
+            for (start, frames) in [(40.0f64, 1usize), (40.25, 3), (40.5, 4), (100.125, 517)] {
+                for origin in [0i64, 1_000_000] {
+                    let mut p_new = start + origin as f64 + 0.3 * step;
+                    let mut p_ref = p_new;
+                    let mut out_new = vec![0.0f32; frames * CHANNELS];
+                    let mut out_ref = vec![1.0f32; frames * CHANNELS];
+                    super::sinc_run(&table, &fifo, origin, &mut p_new, step, &mut out_new);
+                    sinc_run_reference(&table, &fifo, origin, &mut p_ref, step, &mut out_ref);
+                    assert_eq!(
+                        p_new.to_bits(),
+                        p_ref.to_bits(),
+                        "position, rate {device_rate}"
+                    );
+                    for (k, (a, b)) in out_new.iter().zip(&out_ref).enumerate() {
+                        assert_eq!(a.to_bits(), b.to_bits(), "rate {device_rate} sample {k}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Timing loop (ignored): the 48 kHz -> 44.1 kHz output boundary, 512-frame device
+    /// callbacks. `cargo test --release --features device -- --ignored --nocapture
+    /// bench_output_resampler`.
+    #[test]
+    #[ignore]
+    fn bench_output_resampler() {
+        let (h, mut res) = tone_engine(1_000.0, 44_100.0);
+        h.play();
+        let frames = 512usize;
+        let mut out = vec![0.0; frames * CHANNELS];
+        for _ in 0..50 {
+            res.process(&mut out, frames);
+        }
+        let mut best = f64::MAX;
+        for _ in 0..25 {
+            let t = std::time::Instant::now();
+            for _ in 0..40 {
+                res.process(&mut out, frames);
+            }
+            best = best.min(t.elapsed().as_nanos() as f64 / 40.0);
+        }
+        println!(
+            "output resampler 48k->44.1k, 512-frame callback (incl. render): {:.2} us ({:.2}% of real time)",
+            best / 1e3,
+            100.0 * best / (frames as f64 / 44_100.0 * 1e9)
+        );
     }
 
     #[test]

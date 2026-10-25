@@ -114,14 +114,25 @@ fn sanitize(v: f32) -> f32 {
 /// In-place complex FFT over split real/imaginary `f32` arrays. All twiddle factors and the
 /// bit-reversal permutation are precomputed in [`Fft::new`]; [`Fft::transform`] allocates
 /// nothing and is safe to call from the audio thread.
+///
+/// The AEC runs ~53 of these per 256-frame block on the speaker path, so the layout is built for
+/// speed without changing a single output bit: every butterfly computes exactly what the
+/// textbook loop computes (same operands, same operation order, same twiddle VALUES), but the
+/// twiddles each stage reads are stored contiguously per stage, so a stage is a plain
+/// slice-to-slice loop the compiler vectorizes instead of a strided table walk behind bounds
+/// checks. Butterflies within one stage are independent, so visiting them in any order is the
+/// same arithmetic. (The tests hold this to a verbatim copy of the old loop, bit for bit.)
 struct Fft {
     n: usize,
-    /// Bit-reversal permutation table: `rev[i]` is the index `i` should be swapped with.
-    rev: Box<[u32]>,
-    /// Forward twiddle real part: `cos(-2*pi*j/n)` for `j in 0..n/2`.
-    cos: Box<[f32]>,
-    /// Forward twiddle imaginary part: `sin(-2*pi*j/n)` for `j in 0..n/2`.
-    sin: Box<[f32]>,
+    /// The bit-reversal permutation as the `(i, rev(i))` pairs with `rev(i) > i` (each swapped
+    /// once, in increasing `i`).
+    swaps: Box<[(u32, u32)]>,
+    /// Per-stage twiddles: the stage of half-length `h` (h = 1, 2, 4, ..., n/2) reads entries
+    /// `h - 1 .. 2h - 1`, i.e. `cos/sin(-2*pi*j*(n/2h)/n)` for `j in 0..h`. `wi_inv` holds the
+    /// imaginary parts times -1 (the conjugate twiddle of the inverse transform).
+    wr: Box<[f32]>,
+    wi_fwd: Box<[f32]>,
+    wi_inv: Box<[f32]>,
 }
 
 impl Fft {
@@ -132,8 +143,8 @@ impl Fft {
         );
         let log2n = n.trailing_zeros();
 
-        // Bit-reversal table.
-        let mut rev = vec![0u32; n].into_boxed_slice();
+        // Bit-reversal swap pairs.
+        let mut swaps = Vec::with_capacity(n / 2);
         for i in 0..n {
             let mut x = i as u32;
             let mut r = 0u32;
@@ -141,20 +152,43 @@ impl Fft {
                 r = (r << 1) | (x & 1);
                 x >>= 1;
             }
-            rev[i] = r;
+            if r as usize > i {
+                swaps.push((i as u32, r));
+            }
         }
 
-        // Forward twiddle tables (length n/2). exp(-i*2*pi*j/n).
+        // Forward twiddles exp(-i*2*pi*j/n), j in 0..n/2, then laid out per stage.
         let half = n / 2;
-        let mut cos = vec![0.0f32; half].into_boxed_slice();
-        let mut sin = vec![0.0f32; half].into_boxed_slice();
+        let mut cos = vec![0.0f32; half];
+        let mut sin = vec![0.0f32; half];
         for j in 0..half {
             let ang = -2.0 * std::f64::consts::PI * (j as f64) / (n as f64);
             cos[j] = ang.cos() as f32;
             sin[j] = ang.sin() as f32;
         }
+        let mut wr = vec![0.0f32; n - 1];
+        let mut wi_fwd = vec![0.0f32; n - 1];
+        let mut wi_inv = vec![0.0f32; n - 1];
+        let mut h = 1;
+        while h < n {
+            let stride = n / (2 * h);
+            for j in 0..h {
+                wr[h - 1 + j] = cos[j * stride];
+                // The products the butterfly used to form per use (`sin * isign`, isign = ±1),
+                // which for these finite values are the value and its negation exactly.
+                wi_fwd[h - 1 + j] = sin[j * stride];
+                wi_inv[h - 1 + j] = -sin[j * stride];
+            }
+            h *= 2;
+        }
 
-        Fft { n, rev, cos, sin }
+        Fft {
+            n,
+            swaps: swaps.into_boxed_slice(),
+            wr: wr.into_boxed_slice(),
+            wi_fwd: wi_fwd.into_boxed_slice(),
+            wi_inv: wi_inv.into_boxed_slice(),
+        }
     }
 
     /// In-place radix-2 DIT FFT. `inverse = true` conjugates the twiddles and scales by `1/n`.
@@ -162,57 +196,89 @@ impl Fft {
     #[inline]
     fn transform(&self, re: &mut [f32], im: &mut [f32], inverse: bool) {
         let n = self.n;
+        let re = &mut re[..n];
+        let im = &mut im[..n];
 
         // 1) Bit-reversal permutation (swap each pair once).
-        for i in 0..n {
-            let j = self.rev[i] as usize;
-            if j > i {
-                re.swap(i, j);
-                im.swap(i, j);
-            }
+        for &(i, j) in self.swaps.iter() {
+            re.swap(i as usize, j as usize);
+            im.swap(i as usize, j as usize);
         }
 
         // 2) Iterative butterflies. Stage length doubles: 2, 4, ..., n.
-        let isign = if inverse { -1.0f32 } else { 1.0f32 };
-        let mut len = 2usize;
-        while len <= n {
-            let half = len / 2;
-            let stride = n / len; // twiddle index step for this stage
-            let mut base = 0usize;
-            while base < n {
-                let mut tw = 0usize; // index into cos/sin tables
-                for j in 0..half {
-                    let wr = self.cos[tw];
-                    let wi = self.sin[tw] * isign; // conjugate twiddle for inverse
-                    let a = base + j;
-                    let b = a + half;
-                    let xr = re[b];
-                    let xi = im[b];
+        let wi_all: &[f32] = if inverse { &self.wi_inv } else { &self.wi_fwd };
+        // The first two stages (one and two twiddles) run fused, per group of four: the same
+        // four butterflies, kept in registers between the stages.
+        let (a0r, a0i) = (self.wr[0], wi_all[0]);
+        if n >= 4 {
+            let (b0r, b0i, b1r, b1i) = (self.wr[1], wi_all[1], self.wr[2], wi_all[2]);
+            for (rc, ic) in re.chunks_exact_mut(4).zip(im.chunks_exact_mut(4)) {
+                let [mut r0, mut r1, mut r2, mut r3] = [rc[0], rc[1], rc[2], rc[3]];
+                let [mut i0, mut i1, mut i2, mut i3] = [ic[0], ic[1], ic[2], ic[3]];
+                butterfly(&mut r0, &mut i0, &mut r1, &mut i1, a0r, a0i);
+                butterfly(&mut r2, &mut i2, &mut r3, &mut i3, a0r, a0i);
+                butterfly(&mut r0, &mut i0, &mut r2, &mut i2, b0r, b0i);
+                butterfly(&mut r1, &mut i1, &mut r3, &mut i3, b1r, b1i);
+                rc.copy_from_slice(&[r0, r1, r2, r3]);
+                ic.copy_from_slice(&[i0, i1, i2, i3]);
+            }
+        } else {
+            let [mut r0, mut r1, mut i0, mut i1] = [re[0], re[1], im[0], im[1]];
+            butterfly(&mut r0, &mut i0, &mut r1, &mut i1, a0r, a0i);
+            re.copy_from_slice(&[r0, r1]);
+            im.copy_from_slice(&[i0, i1]);
+        }
+        let mut h = 4usize;
+        while h < n {
+            let len = 2 * h;
+            let wr = &self.wr[h - 1..len - 1];
+            let wi = &wi_all[h - 1..len - 1];
+            for (rc, ic) in re.chunks_exact_mut(len).zip(im.chunks_exact_mut(len)) {
+                let (ra, rb) = rc.split_at_mut(h);
+                let (ia, ib) = ic.split_at_mut(h);
+                for j in 0..h {
+                    let (wr, wi) = (wr[j], wi[j]);
+                    let xr = rb[j];
+                    let xi = ib[j];
                     // t = w * x
                     let tr = wr * xr - wi * xi;
                     let ti = wr * xi + wi * xr;
-                    let ur = re[a];
-                    let ui = im[a];
-                    re[a] = ur + tr;
-                    im[a] = ui + ti;
-                    re[b] = ur - tr;
-                    im[b] = ui - ti;
-                    tw += stride;
+                    let ur = ra[j];
+                    let ui = ia[j];
+                    ra[j] = ur + tr;
+                    ia[j] = ui + ti;
+                    rb[j] = ur - tr;
+                    ib[j] = ui - ti;
                 }
-                base += len;
             }
-            len <<= 1;
+            h = len;
         }
 
         // 3) Inverse scaling.
         if inverse {
             let inv = 1.0f32 / (n as f32);
-            for i in 0..n {
-                re[i] *= inv;
-                im[i] *= inv;
+            for v in re.iter_mut() {
+                *v *= inv;
+            }
+            for v in im.iter_mut() {
+                *v *= inv;
             }
         }
     }
+}
+
+/// One radix-2 butterfly `(u, x) -> (u + w*x, u - w*x)` with twiddle `w = wr + i*wi`, in the
+/// operation order of the stage loop in [`Fft::transform`].
+#[inline(always)]
+fn butterfly(ur: &mut f32, ui: &mut f32, xr: &mut f32, xi: &mut f32, wr: f32, wi: f32) {
+    // t = w * x
+    let tr = wr * *xr - wi * *xi;
+    let ti = wr * *xi + wi * *xr;
+    let (u_r, u_i) = (*ur, *ui);
+    *ur = u_r + tr;
+    *ui = u_i + ti;
+    *xr = u_r - tr;
+    *xi = u_i - ti;
 }
 
 // ===========================================================================================
@@ -502,6 +568,7 @@ pub struct Aec {
     g_im: Box<[f32]>,    // length N
     q_re: Box<[f32]>,    // length half: the second gradient of a constraint pair
     q_im: Box<[f32]>,    // length half
+    norm: Box<[f32]>,    // length half: this block's per-bin NLMS step (see compute_norm)
     eblk_fg: Box<[f32]>, // length B: foreground residual (the output candidate)
     eblk_bg: Box<[f32]>, // length B: background residual (for the copy decision)
 
@@ -651,6 +718,7 @@ impl Aec {
             g_im: zeros(fftn),
             q_re: zeros(half),
             q_im: zeros(half),
+            norm: zeros(half),
             eblk_fg: zeros(block),
             eblk_bg: zeros(block),
 
@@ -892,12 +960,12 @@ impl Aec {
     #[inline]
     fn push_out(&mut self, v: f32) {
         self.out_ring[self.out_w] = v;
-        self.out_w = (self.out_w + 1) % self.out_cap;
+        self.out_w = ring_next(self.out_w, self.out_cap);
         if self.out_count < self.out_cap {
             self.out_count += 1;
         } else {
             // Overflow guard: drop the oldest (should never happen with the chosen capacity).
-            self.out_r = (self.out_r + 1) % self.out_cap;
+            self.out_r = ring_next(self.out_r, self.out_cap);
         }
     }
 
@@ -907,7 +975,7 @@ impl Aec {
             return 0.0;
         }
         let v = self.out_ring[self.out_r];
-        self.out_r = (self.out_r + 1) % self.out_cap;
+        self.out_r = ring_next(self.out_r, self.out_cap);
         self.out_count -= 1;
         v
     }
@@ -981,20 +1049,25 @@ impl Aec {
         for p in 0..parts {
             let xs = ((self.head + p) % parts) * half;
             let ws = p * half;
-            for k in 0..half {
-                let xr = self.x_re[xs + k];
-                let xi = self.x_im[xs + k];
-                // foreground
-                let fr = self.wfg_re[ws + k];
-                let fi = self.wfg_im[ws + k];
-                self.y_re[k] += fr * xr - fi * xi;
-                self.y_im[k] += fr * xi + fi * xr;
-                // background
-                let br = self.wbg_re[ws + k];
-                let bi = self.wbg_im[ws + k];
-                self.g_re[k] += br * xr - bi * xi;
-                self.g_im[k] += br * xi + bi * xr;
-            }
+            let (xr, xi) = (&self.x_re[xs..xs + half], &self.x_im[xs..xs + half]);
+            // foreground
+            complex_mac(
+                &mut self.y_re[..half],
+                &mut self.y_im[..half],
+                &self.wfg_re[ws..ws + half],
+                &self.wfg_im[ws..ws + half],
+                xr,
+                xi,
+            );
+            // background
+            complex_mac(
+                &mut self.g_re[..half],
+                &mut self.g_im[..half],
+                &self.wbg_re[ws..ws + half],
+                &self.wbg_im[ws..ws + half],
+                xr,
+                xi,
+            );
         }
 
         // Snapshot the foreground echo-estimate magnitude-squared per bin BEFORE the IFFT
@@ -1351,16 +1424,18 @@ impl Aec {
 
             // Per-bin far-end power over the partition span (running, leaky) + normalization.
             // Accumulate the current sum-of-partition power per bin.
+            // Each bin's sum runs over the partitions in age order (p = 0, 1, ...) exactly as a
+            // per-bin loop over p would, but partition-major: contiguous rows, no index modulo
+            // per (bin, partition).
+            let sp = &mut self.q_re[..half]; // scratch: free until the background update
+            sp.fill(0.0);
+            for p in 0..parts {
+                let xs = ((self.head + p) % parts) * half;
+                accumulate_power(sp, &self.x_re[xs..xs + half], &self.x_im[xs..xs + half]);
+            }
             let mut mean_pow = 0.0f64;
             for k in 0..half {
-                let mut sp = 0.0f32;
-                for p in 0..parts {
-                    let xs = ((self.head + p) % parts) * half;
-                    let xr = self.x_re[xs + k];
-                    let xi = self.x_im[xs + k];
-                    sp += xr * xr + xi * xi;
-                }
-                self.pxx[k] = PWR_SMOOTH * self.pxx[k] + (1.0 - PWR_SMOOTH) * sp + ANTI_DENORMAL;
+                self.pxx[k] = PWR_SMOOTH * self.pxx[k] + (1.0 - PWR_SMOOTH) * sp[k] + ANTI_DENORMAL;
                 mean_pow += self.pxx[k] as f64;
             }
             let mean_pow = (mean_pow / half as f64) as f32;
@@ -1417,19 +1492,28 @@ impl Aec {
     /// partition; only the rounding differs. With an odd partition count, partition 0 is
     /// constrained on its own.
     fn update_background(&mut self, mu_eff: f32, delta: f32) {
+        self.compute_norm(mu_eff, delta);
         let mut p = 0;
         if self.parts % 2 == 1 {
-            self.update_background_one(0, mu_eff, delta);
+            self.update_background_one(0);
             p = 1;
         }
         while p < self.parts {
-            self.update_background_pair(p, p + 1, mu_eff, delta);
+            self.update_background_pair(p, p + 1);
             p += 2;
         }
     }
 
+    /// The per-bin NLMS step `mu_eff / (pxx[k] + delta)` into `norm`: the same for every
+    /// partition, so it is divided out once per block instead of once per partition.
+    fn compute_norm(&mut self, mu_eff: f32, delta: f32) {
+        for (n, &p) in self.norm.iter_mut().zip(self.pxx.iter()) {
+            *n = mu_eff / (p + delta);
+        }
+    }
+
     /// One partition's update with its own constraint transforms (see [`Self::update_background`]).
-    fn update_background_one(&mut self, p: usize, mu_eff: f32, delta: f32) {
+    fn update_background_one(&mut self, p: usize) {
         let (b, n, half) = (self.block, self.fftn, self.half);
         let xs = ((self.head + p) % self.parts) * half;
         let ws = p * half;
@@ -1438,9 +1522,7 @@ impl Aec {
             &self.x_im[xs..xs + half],
             &self.e_re[..half],
             &self.e_im[..half],
-            &self.pxx,
-            mu_eff,
-            delta,
+            &self.norm,
             &mut self.g_re[..half],
             &mut self.g_im[..half],
         );
@@ -1467,7 +1549,7 @@ impl Aec {
 
     /// Partitions `p` and `q` updated through ONE constraint transform pair (see
     /// [`Self::update_background`]). G_p is built in g_re/g_im, G_q in q_re/q_im.
-    fn update_background_pair(&mut self, p: usize, q: usize, mu_eff: f32, delta: f32) {
+    fn update_background_pair(&mut self, p: usize, q: usize) {
         let (b, n, half, parts) = (self.block, self.fftn, self.half, self.parts);
         let xp = ((self.head + p) % parts) * half;
         let xq = ((self.head + q) % parts) * half;
@@ -1476,9 +1558,7 @@ impl Aec {
             &self.x_im[xp..xp + half],
             &self.e_re[..half],
             &self.e_im[..half],
-            &self.pxx,
-            mu_eff,
-            delta,
+            &self.norm,
             &mut self.g_re[..half],
             &mut self.g_im[..half],
         );
@@ -1487,9 +1567,7 @@ impl Aec {
             &self.x_im[xq..xq + half],
             &self.e_re[..half],
             &self.e_im[..half],
-            &self.pxx,
-            mu_eff,
-            delta,
+            &self.norm,
             &mut self.q_re,
             &mut self.q_im,
         );
@@ -1518,7 +1596,7 @@ impl Aec {
         // Split Z' = G_p' + i*G_q' by conjugate symmetry, straight into the leaky update.
         let (wp, wq) = (p * half, q * half);
         for k in 0..half {
-            let m = (n - k) % n;
+            let m = if k == 0 { 0 } else { n - k }; // (n - k) mod n, without a division
             let (ar, ai) = (self.g_re[k], self.g_im[k]);
             let (cr, ci) = (self.g_re[m], self.g_im[m]);
             let wr = LEAK * self.wbg_re[wp + k] + 0.5 * (ar + cr);
@@ -1536,8 +1614,9 @@ impl Aec {
     /// equivalence test holds [`Self::update_background`] to.
     #[cfg(test)]
     fn update_background_unpaired(&mut self, mu_eff: f32, delta: f32) {
+        self.compute_norm(mu_eff, delta);
         for p in 0..self.parts {
-            self.update_background_one(p, mu_eff, delta);
+            self.update_background_one(p);
         }
     }
 
@@ -1551,16 +1630,12 @@ impl Aec {
     fn update_far_ref(&mut self) {
         let half = self.half;
         let parts = self.parts;
+        // Each partition's energy is a sequential sum over its bins; four partitions' sums run
+        // side by side (each still in bin order) so the adds overlap instead of queueing on one
+        // accumulator.
+        partition_energies(&self.wfg_re, &self.wfg_im, half, &mut self.part_pow);
         let mut total = 0.0f32;
-        for p in 0..parts {
-            let ws = p * half;
-            let mut e = 0.0f32;
-            for k in 0..half {
-                let wr = self.wfg_re[ws + k];
-                let wi = self.wfg_im[ws + k];
-                e += wr * wr + wi * wi;
-            }
-            self.part_pow[p] = e;
+        for &e in self.part_pow.iter() {
             total += e;
         }
         if total <= EPS {
@@ -1578,11 +1653,12 @@ impl Aec {
                 continue;
             }
             let xs = ((self.head + p) % parts) * half;
-            for k in 0..half {
-                let xr = self.x_re[xs + k];
-                let xi = self.x_im[xs + k];
-                self.x_ref[k] += w * (xr * xr + xi * xi);
-            }
+            accumulate_weighted_power(
+                &mut self.x_ref,
+                &self.x_re[xs..xs + half],
+                &self.x_im[xs..xs + half],
+                w,
+            );
         }
     }
 
@@ -1715,30 +1791,128 @@ impl Aec {
 /// The frequency-domain NLMS gradient conj(X) * E of one partition, power-normalized per bin,
 /// into `re`/`im` (half bins). The DC and Nyquist imaginary parts are zeroed, as for any real
 /// signal's spectrum (what `hermitian_expand` enforces before an inverse FFT).
-#[allow(clippy::too_many_arguments)]
+///
+/// `norm[k]` is the per-bin step `mu_eff / (pxx[k] + delta)` ([`Aec::compute_norm`]).
 #[inline]
 fn normalized_gradient(
     x_re: &[f32],
     x_im: &[f32],
     e_re: &[f32],
     e_im: &[f32],
-    pxx: &[f32],
-    mu_eff: f32,
-    delta: f32,
+    norm: &[f32],
     re: &mut [f32],
     im: &mut [f32],
 ) {
     let half = re.len();
+    let (x_re, x_im, e_re, e_im, norm) = (
+        &x_re[..half],
+        &x_im[..half],
+        &e_re[..half],
+        &e_im[..half],
+        &norm[..half],
+    );
+    let im = &mut im[..half];
     for k in 0..half {
         let (xr, xi) = (x_re[k], x_im[k]);
         let (er, ei) = (e_re[k], e_im[k]);
-        let norm = mu_eff / (pxx[k] + delta);
+        let norm = norm[k];
         // conj(X) * E = (xr - i xi)(er + i ei)
         re[k] = norm * (xr * er + xi * ei);
         im[k] = norm * (xr * ei - xi * er);
     }
     im[0] = 0.0;
     im[half - 1] = 0.0;
+}
+
+/// `acc += w * x` per bin (complex, split re/im) — one partition's term of the partitioned
+/// convolution `Y[k] = sum_p W_p[k] * X_p[k]`, accumulated in partition order.
+#[inline]
+fn complex_mac(
+    acc_re: &mut [f32],
+    acc_im: &mut [f32],
+    w_re: &[f32],
+    w_im: &[f32],
+    x_re: &[f32],
+    x_im: &[f32],
+) {
+    let n = acc_re.len();
+    let (acc_im, w_re, w_im, x_re, x_im) = (
+        &mut acc_im[..n],
+        &w_re[..n],
+        &w_im[..n],
+        &x_re[..n],
+        &x_im[..n],
+    );
+    for k in 0..n {
+        let (xr, xi) = (x_re[k], x_im[k]);
+        let (fr, fi) = (w_re[k], w_im[k]);
+        acc_re[k] += fr * xr - fi * xi;
+        acc_im[k] += fr * xi + fi * xr;
+    }
+}
+
+/// `out[p] = sum_k |W_p[k]|^2` for every partition `p` of the flat `parts * half` weight arrays,
+/// each sum taken sequentially over `k` (the order a plain per-partition loop adds in), four
+/// partitions at a time.
+fn partition_energies(w_re: &[f32], w_im: &[f32], half: usize, out: &mut [f32]) {
+    let parts = out.len();
+    let mut p = 0;
+    while p + 4 <= parts {
+        let rows = |q: usize| {
+            (
+                &w_re[q * half..(q + 1) * half],
+                &w_im[q * half..(q + 1) * half],
+            )
+        };
+        let ((r0, i0), (r1, i1), (r2, i2), (r3, i3)) =
+            (rows(p), rows(p + 1), rows(p + 2), rows(p + 3));
+        let (mut e0, mut e1, mut e2, mut e3) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+        for k in 0..half {
+            e0 += r0[k] * r0[k] + i0[k] * i0[k];
+            e1 += r1[k] * r1[k] + i1[k] * i1[k];
+            e2 += r2[k] * r2[k] + i2[k] * i2[k];
+            e3 += r3[k] * r3[k] + i3[k] * i3[k];
+        }
+        out[p] = e0;
+        out[p + 1] = e1;
+        out[p + 2] = e2;
+        out[p + 3] = e3;
+        p += 4;
+    }
+    while p < parts {
+        let (r, i) = (
+            &w_re[p * half..(p + 1) * half],
+            &w_im[p * half..(p + 1) * half],
+        );
+        let mut e = 0.0f32;
+        for k in 0..half {
+            e += r[k] * r[k] + i[k] * i[k];
+        }
+        out[p] = e;
+        p += 1;
+    }
+}
+
+/// `acc[k] += w * |x[k]|^2` per bin.
+#[inline]
+fn accumulate_weighted_power(acc: &mut [f32], x_re: &[f32], x_im: &[f32], w: f32) {
+    let n = acc.len();
+    let (x_re, x_im) = (&x_re[..n], &x_im[..n]);
+    for k in 0..n {
+        let (xr, xi) = (x_re[k], x_im[k]);
+        acc[k] += w * (xr * xr + xi * xi);
+    }
+}
+
+/// `acc[k] += |x[k]|^2` per bin.
+#[inline]
+fn accumulate_power(acc: &mut [f32], x_re: &[f32], x_im: &[f32]) {
+    let n = acc.len();
+    let (x_re, x_im) = (&x_re[..n], &x_im[..n]);
+    for k in 0..n {
+        let (xr, xi) = (x_re[k], x_im[k]);
+        acc[k] += xr * xr + xi * xi;
+    }
 }
 
 #[inline(always)]
@@ -1755,6 +1929,18 @@ fn leaky(prev: f32, x: f32, smooth: f32) -> f32 {
 #[allow(clippy::manual_clamp)]
 fn clamp01(x: f32) -> f32 {
     x.max(0.0).min(1.0)
+}
+
+/// `(i + 1) % cap` for an index `i < cap` — without the integer division the runtime `cap`
+/// would cost on every sample.
+#[inline(always)]
+fn ring_next(i: usize, cap: usize) -> usize {
+    let j = i + 1;
+    if j >= cap {
+        0
+    } else {
+        j
+    }
 }
 
 // ===========================================================================================
@@ -1825,6 +2011,230 @@ mod tests {
 
     fn rms(s: &[f32]) -> f32 {
         (energy(s) / s.len().max(1) as f64).sqrt() as f32
+    }
+
+    /// The FFT as it was first written: the textbook iterative radix-2 loop, twiddles read with
+    /// a stride from one table. Kept verbatim as the reference [`Fft`] is held to bit for bit.
+    struct TextbookFft {
+        n: usize,
+        rev: Box<[u32]>,
+        cos: Box<[f32]>,
+        sin: Box<[f32]>,
+    }
+
+    impl TextbookFft {
+        fn new(n: usize) -> TextbookFft {
+            let log2n = n.trailing_zeros();
+            let mut rev = vec![0u32; n].into_boxed_slice();
+            for i in 0..n {
+                let mut x = i as u32;
+                let mut r = 0u32;
+                for _ in 0..log2n {
+                    r = (r << 1) | (x & 1);
+                    x >>= 1;
+                }
+                rev[i] = r;
+            }
+            let half = n / 2;
+            let mut cos = vec![0.0f32; half].into_boxed_slice();
+            let mut sin = vec![0.0f32; half].into_boxed_slice();
+            for j in 0..half {
+                let ang = -2.0 * std::f64::consts::PI * (j as f64) / (n as f64);
+                cos[j] = ang.cos() as f32;
+                sin[j] = ang.sin() as f32;
+            }
+            TextbookFft { n, rev, cos, sin }
+        }
+
+        fn transform(&self, re: &mut [f32], im: &mut [f32], inverse: bool) {
+            let n = self.n;
+            for i in 0..n {
+                let j = self.rev[i] as usize;
+                if j > i {
+                    re.swap(i, j);
+                    im.swap(i, j);
+                }
+            }
+            let isign = if inverse { -1.0f32 } else { 1.0f32 };
+            let mut len = 2usize;
+            while len <= n {
+                let half = len / 2;
+                let stride = n / len;
+                let mut base = 0usize;
+                while base < n {
+                    let mut tw = 0usize;
+                    for j in 0..half {
+                        let wr = self.cos[tw];
+                        let wi = self.sin[tw] * isign;
+                        let a = base + j;
+                        let b = a + half;
+                        let xr = re[b];
+                        let xi = im[b];
+                        let tr = wr * xr - wi * xi;
+                        let ti = wr * xi + wi * xr;
+                        let ur = re[a];
+                        let ui = im[a];
+                        re[a] = ur + tr;
+                        im[a] = ui + ti;
+                        re[b] = ur - tr;
+                        im[b] = ui - ti;
+                        tw += stride;
+                    }
+                    base += len;
+                }
+                len <<= 1;
+            }
+            if inverse {
+                let inv = 1.0f32 / (n as f32);
+                for i in 0..n {
+                    re[i] *= inv;
+                    im[i] *= inv;
+                }
+            }
+        }
+    }
+
+    /// The restructured FFT (per-stage contiguous twiddles, fused first stages) computes
+    /// exactly what the textbook loop computes: identical bits, forward and inverse, every
+    /// size the stage code distinguishes, on frames carrying signed zeros the way the AEC's
+    /// zero-padded frames do.
+    #[test]
+    fn fft_matches_the_textbook_loop_bit_for_bit() {
+        let mut rng = Rng::new(0xFF7);
+        for n in [2usize, 4, 8, 16, 512] {
+            let fast = Fft::new(n);
+            let reference = TextbookFft::new(n);
+            for trial in 0..200 {
+                let mut re: Vec<f32> = (0..n).map(|_| rng.next_f32()).collect();
+                let mut im: Vec<f32> = (0..n).map(|_| rng.next_f32()).collect();
+                match trial % 4 {
+                    // A real frame zero-padded in its upper half (overlap-save).
+                    0 => {
+                        im.fill(0.0);
+                        re[n / 2..].fill(0.0);
+                    }
+                    // Signed zeros scattered through both parts.
+                    1 => {
+                        for k in (0..n).step_by(3) {
+                            re[k] = -0.0;
+                            im[(k + 1) % n] = if k % 2 == 0 { -0.0 } else { 0.0 };
+                        }
+                    }
+                    // Large dynamic range.
+                    2 => {
+                        for (k, v) in re.iter_mut().enumerate() {
+                            *v *= if k % 5 == 0 { 1.0e6 } else { 1.0e-6 };
+                        }
+                    }
+                    _ => {}
+                }
+                let inverse = trial % 2 == 1;
+                let (mut re2, mut im2) = (re.clone(), im.clone());
+                fast.transform(&mut re, &mut im, inverse);
+                reference.transform(&mut re2, &mut im2, inverse);
+                for k in 0..n {
+                    assert_eq!(
+                        re[k].to_bits(),
+                        re2[k].to_bits(),
+                        "n={n} trial={trial} re[{k}]"
+                    );
+                    assert_eq!(
+                        im[k].to_bits(),
+                        im2[k].to_bits(),
+                        "n={n} trial={trial} im[{k}]"
+                    );
+                }
+            }
+        }
+    }
+
+    /// FNV-1a over the bit patterns of `vals`, folded into `h`.
+    fn fnv(mut h: u64, vals: &[f32]) -> u64 {
+        for v in vals {
+            for b in v.to_bits().to_le_bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x0000_0100_0000_01B3);
+            }
+        }
+        h
+    }
+
+    /// Pins the canceller's exact output — and its final filter state — on a deterministic run
+    /// through every block-path branch: converging on far-end-only audio, double-talk, a silent
+    /// far end, an echo-free stretch, a restart, odd and even partition counts (one partition
+    /// constrained alone, then pairs) and ragged call sizes. The constants were recorded on the
+    /// code before the AEC's loops were restructured for speed (contiguous FFT twiddles,
+    /// partition-major power sums, one normalizer division per bin per block, no index
+    /// modulo), so they prove those rewrites changed no output bit.
+    ///
+    /// Only IEEE-exact arithmetic feeds this (the signals use no libm), so the one platform
+    /// input is the FFT twiddle table — f64 `cos`/`sin` rounded to f32, which every libm in
+    /// practice agrees on. If the ALGORITHM is changed on purpose, re-record the constants.
+    #[test]
+    fn speaker_path_output_is_pinned() {
+        // Colored "music" from filtered xorshift noise, and a sparse echo path: + - * / only.
+        let total = 48_000 * 3;
+        let mut rng = Rng::new(0xA11CE);
+        let (mut lp, mut lp2) = (0.0f32, 0.0f32);
+        let far: Vec<f32> = (0..total)
+            .map(|i| {
+                lp = 0.95 * lp + 0.05 * rng.next_f32();
+                lp2 = 0.6 * lp2 + 0.4 * rng.next_f32();
+                let x = 2.0 * lp + 0.1 * lp2;
+                if (60_000..75_000).contains(&i) {
+                    0.0 // a silent far end (transport stopped)
+                } else {
+                    x
+                }
+            })
+            .collect();
+        let taps: [(usize, f32); 4] = [(700, 0.5), (780, -0.3), (1500, 0.12), (4000, 0.05)];
+        let mut vrng = Rng::new(0xB0B);
+        let mut v_lp = 0.0f32;
+        let mic: Vec<f32> = (0..total)
+            .map(|i| {
+                let echo: f32 = taps
+                    .iter()
+                    .map(|&(d, g)| if i >= d { g * far[i - d] } else { 0.0 })
+                    .sum();
+                v_lp = 0.8 * v_lp + 0.2 * vrng.next_f32();
+                let voice = if (40_000..55_000).contains(&i) || (100_000..110_000).contains(&i) {
+                    0.3 * v_lp
+                } else {
+                    0.0
+                };
+                echo + voice
+            })
+            .collect();
+
+        let mut digests = Vec::new();
+        for tail_ms in [250.0f32, 200.0] {
+            let mut aec = Aec::new(48_000.0, tail_ms);
+            let sizes = [256usize, 173, 512, 1, 1024, 100];
+            let (mut pos, mut k) = (0usize, 0usize);
+            let mut h = 0xcbf2_9ce4_8422_2325u64;
+            let mut out = vec![0.0f32; 1024];
+            while pos < total {
+                let n = sizes[k % sizes.len()].min(total - pos);
+                aec.set_echo_free((80_000..90_000).contains(&pos));
+                if k == 700 {
+                    aec.restart();
+                }
+                aec.process(&mic[pos..pos + n], &far[pos..pos + n], &mut out[..n]);
+                h = fnv(h, &out[..n]);
+                pos += n;
+                k += 1;
+            }
+            for state in [&aec.wfg_re, &aec.wfg_im, &aec.wbg_re, &aec.wbg_im, &aec.pxx] {
+                h = fnv(h, state);
+            }
+            digests.push(h);
+        }
+        assert_eq!(
+            digests,
+            [0x4c7b_8e58_e3dd_1658, 0x4902_e7d5_728e_675a],
+            "the AEC's output changed"
+        );
     }
 
     /// FFT sanity: forward then inverse recovers the input.

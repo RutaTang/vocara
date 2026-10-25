@@ -8,7 +8,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use crate::node::{Node, ProcessIo};
-use crate::sample::{add_into, clear, Smp, CHANNELS};
+use crate::sample::{add_into, clear, sum_first, Smp, CHANNELS};
 
 pub type NodeId = u32;
 
@@ -230,13 +230,20 @@ impl Graph {
                 ..
             } = &mut rest[0];
 
-            // Fan-in: sum every incoming edge into the destination port's scratch buffer.
+            // Fan-in: sum every incoming edge into the destination port's scratch buffer (the
+            // first edge lands in the same pass that would have cleared it).
             for (port, sources) in in_edges.iter().enumerate() {
                 let scratch = &mut in_scratch[port];
-                clear(scratch, frames);
-                for &(src_idx, src_port) in sources {
-                    debug_assert_eq!(src_port, 0);
-                    add_into(scratch, &done[src_idx].output, frames);
+                match sources.split_first() {
+                    None => clear(scratch, frames),
+                    Some((&(first, first_port), rest)) => {
+                        debug_assert_eq!(first_port, 0);
+                        sum_first(scratch, &done[first].output, frames);
+                        for &(src_idx, src_port) in rest {
+                            debug_assert_eq!(src_port, 0);
+                            add_into(scratch, &done[src_idx].output, frames);
+                        }
+                    }
                 }
             }
 

@@ -2,6 +2,7 @@
 //! change (gain, pan, threshold, makeup, wet) never steps instantaneously → no zipper. Plus
 //! the short cross-fade every insert's bypass switch uses ([`BypassFade`]).
 
+#[derive(Clone)]
 pub struct Smoothed {
     cur: f32,
     target: f32,
@@ -61,6 +62,28 @@ impl Smoothed {
         self.cur
     }
 
+    /// The value every [`next`](Self::next) of a coming `frames`-frame block returns, when that
+    /// is one value: the ramp has landed — a step leaves it bit for bit where it is (exactly at
+    /// the target, or where rounding stalls it within an ulp or so of it), so it stays there
+    /// for the whole block. The caller then applies it as a constant instead of stepping per
+    /// sample, which is the same arithmetic without the per-sample dependency chain (a
+    /// subtract, a multiply and an add, ~12 cycles of latency per sample, set the speed of
+    /// every gain, pan and send). Marks the value used, as `next` would. `None` while the ramp
+    /// is still moving, or for an empty block (no `next` would run at all).
+    #[inline]
+    pub fn settled(&mut self, frames: usize) -> Option<f32> {
+        if frames == 0 {
+            return None;
+        }
+        let step = self.cur + (self.target - self.cur) * self.coef;
+        if step.to_bits() == self.cur.to_bits() {
+            self.live = true;
+            Some(self.cur)
+        } else {
+            None
+        }
+    }
+
     #[inline]
     pub fn current(&self) -> f32 {
         self.cur
@@ -95,6 +118,7 @@ const BYPASS_FADE_S: f32 = 0.005;
 ///
 /// Like [`Smoothed`], a switch set before the node has processed any audio applies at once:
 /// there is nothing audible to fade from.
+#[derive(Clone)]
 pub struct BypassFade {
     /// 1 = fully processed, 0 = fully dry.
     mix: f32,
@@ -156,11 +180,106 @@ impl BypassFade {
     #[allow(clippy::should_implement_trait)]
     #[inline]
     pub fn next(&mut self) -> f32 {
-        self.mix = if self.on {
+        self.mix = self.stepped();
+        self.mix
+    }
+
+    /// The share every [`next`](Self::next) of the coming block returns, when the fade has
+    /// landed (see [`Smoothed::settled`]); `None` while it is moving.
+    #[inline]
+    pub fn settled(&self) -> Option<f32> {
+        (self.stepped().to_bits() == self.mix.to_bits()).then_some(self.mix)
+    }
+
+    #[inline]
+    fn stepped(&self) -> f32 {
+        if self.on {
             (self.mix + self.step).min(1.0)
         } else {
             (self.mix - self.step).max(0.0)
-        };
-        self.mix
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `settled` answers exactly "would `next` leave the value where it is": whenever it holds
+    /// a value, every `next` returns that value bit for bit and moves nothing; whenever it does
+    /// not, the very next step moves the value. Ramps up, down, to the bit-adjacent value,
+    /// between signed zeros, and onto values where rounding stalls the ramp short of its target.
+    #[test]
+    fn settled_holds_exactly_what_next_returns() {
+        let cases: [(f32, f32, f32); 9] = [
+            (0.0, 1.0, 0.01),
+            (1.0, 0.0, 0.01),
+            (0.25, f32::from_bits(0.25f32.to_bits() + 1), 0.01),
+            (-3.0, 7.5, 0.002),
+            (1.0, 1.0, 0.01),
+            (0.0, -0.0, 0.01),
+            (-0.0, 0.0, 0.01),
+            (1.0e-30, 1.0, 0.03),
+            (0.707, 0.708, 0.5),
+        ];
+        for (start, target, tau) in cases {
+            let mut s = Smoothed::new(start);
+            s.set_time(tau, 48_000.0);
+            let _ = s.next(); // heard: a later target ramps instead of jumping
+            s.set_target(target);
+            let mut landed = false;
+            for _ in 0..200_000 {
+                let mut probe = s.clone();
+                match probe.settled(64) {
+                    Some(v) => {
+                        assert!(probe.live, "settled must mark the value used, as next does");
+                        let mut stepped = s.clone();
+                        for _ in 0..64 {
+                            assert_eq!(stepped.next().to_bits(), v.to_bits());
+                        }
+                        assert_eq!(stepped.cur.to_bits(), s.cur.to_bits());
+                        landed = true;
+                        break;
+                    }
+                    None => {
+                        let before = s.cur;
+                        assert_ne!(s.next().to_bits(), before.to_bits(), "None, yet it held");
+                    }
+                }
+            }
+            assert!(landed, "{start} -> {target} never landed");
+        }
+        // An empty block runs no step, so it claims nothing (and does not mark the value used).
+        let mut s = Smoothed::new(0.5);
+        assert_eq!(s.settled(0), None);
+        assert!(!s.live);
+    }
+
+    #[test]
+    fn bypass_settled_holds_exactly_what_next_returns() {
+        for (bypassed_at_start, switch_to) in [(false, true), (true, false), (false, false)] {
+            let mut f = BypassFade::new(bypassed_at_start);
+            f.prepare(48_000.0);
+            let _ = f.begin_block();
+            f.set_bypass(switch_to);
+            let mut landed = false;
+            for _ in 0..10_000 {
+                match f.settled() {
+                    Some(v) => {
+                        let mut stepped = f.clone();
+                        for _ in 0..64 {
+                            assert_eq!(stepped.next().to_bits(), v.to_bits());
+                        }
+                        landed = true;
+                        break;
+                    }
+                    None => {
+                        let before = f.mix;
+                        assert_ne!(f.next().to_bits(), before.to_bits());
+                    }
+                }
+            }
+            assert!(landed);
+        }
     }
 }

@@ -187,6 +187,44 @@ impl Biquad {
         self.y1 = 0.0;
         self.y2 = 0.0;
     }
+
+    #[inline(always)]
+    fn history(&self) -> History {
+        History {
+            x1: self.x1,
+            x2: self.x2,
+            y1: self.y1,
+            y2: self.y2,
+        }
+    }
+
+    #[inline(always)]
+    fn set_history(&mut self, h: History) {
+        (self.x1, self.x2, self.y1, self.y2) = (h.x1, h.x2, h.y1, h.y2);
+    }
+}
+
+/// A [`Biquad`]'s history, held in registers by [`Band::process_pair`].
+#[derive(Clone, Copy)]
+struct History {
+    x1: f32,
+    x2: f32,
+    y1: f32,
+    y2: f32,
+}
+
+impl History {
+    /// [`Biquad::tick`] with the coefficients passed in: the same expression, term for term.
+    #[inline(always)]
+    fn tick(&mut self, c: &Coeffs, x: f32) -> f32 {
+        let y = c.b0 * x + c.b1 * self.x1 + c.b2 * self.x2 - c.a1 * self.y1 - c.a2 * self.y2;
+        let y = sanitize(y);
+        self.x2 = self.x1;
+        self.x1 = x;
+        self.y2 = self.y1;
+        self.y1 = y;
+        y
+    }
 }
 
 /// Cross-fade length when a band's coefficients change (avoids zipper/instability).
@@ -291,6 +329,36 @@ impl Band {
                 buf[CHANNELS * i + 1] = self.r.tick(buf[CHANNELS * i + 1]);
             }
         }
+    }
+
+    /// Whether [`process_pair`](Self::process_pair) may run this band: no cross-fade in flight,
+    /// and both channels on the same coefficients (they are only ever set together, so the
+    /// pair loop reads one set for both).
+    #[inline]
+    fn pairable(&self) -> bool {
+        !self.xfading && self.l.c == self.r.c
+    }
+
+    /// `a` then `b` over the block — exactly [`process`](Self::process) on `a`, then on `b` —
+    /// with the two bands interleaved frame by frame. Each filter sees the same inputs in the
+    /// same order (band `b`'s input at a frame is band `a`'s output at that frame either way),
+    /// but four independent recursions are in flight instead of two, which is what bounds a
+    /// cascade: every biquad output waits on the previous one through `a1 * y1`. Both bands must
+    /// be [`pairable`](Self::pairable).
+    fn process_pair(a: &mut Band, b: &mut Band, buf: &mut [Smp], frames: usize) {
+        let (ca, cb) = (a.l.c, b.l.c);
+        let (mut al, mut ar) = (a.l.history(), a.r.history());
+        let (mut bl, mut br) = (b.l.history(), b.r.history());
+        for f in buf[..frames * CHANNELS].chunks_exact_mut(CHANNELS) {
+            let l = al.tick(&ca, f[0]);
+            let r = ar.tick(&ca, f[1]);
+            f[0] = bl.tick(&cb, l);
+            f[1] = br.tick(&cb, r);
+        }
+        a.l.set_history(al);
+        a.r.set_history(ar);
+        b.l.set_history(bl);
+        b.r.set_history(br);
     }
 
     /// Clear all filter history and end any in-flight cross-fade so a seek does
@@ -405,8 +473,18 @@ impl Node for EqNode {
             }
         }
         self.heard = true;
-        for band in &mut self.bands {
-            band.process(out, frames);
+        // The cascade in order, two bands per pass where both allow it (see `process_pair`).
+        let count = self.bands.len();
+        let mut i = 0;
+        while i < count {
+            if i + 1 < count && self.bands[i].pairable() && self.bands[i + 1].pairable() {
+                let (done, rest) = self.bands.split_at_mut(i + 1);
+                Band::process_pair(&mut done[i], &mut rest[0], out, frames);
+                i += 2;
+            } else {
+                self.bands[i].process(out, frames);
+                i += 1;
+            }
         }
     }
 
@@ -429,6 +507,69 @@ impl Node for EqNode {
     fn reset(&mut self) {
         for band in &mut self.bands {
             band.reset();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dsp::test_support::assert_matches_reference;
+
+    /// The cascade as it ran before band pairing: each band over the whole block in turn.
+    fn reference(eq: &mut EqNode, inp: &[f32], out: &mut [f32]) {
+        out.copy_from_slice(inp);
+        eq.heard = true;
+        for band in &mut eq.bands {
+            band.process(out, inp.len() / CHANNELS);
+        }
+    }
+
+    fn id(band: u16, field: u16) -> u16 {
+        (band << param::FIELD_BITS) | field
+    }
+
+    /// Two bands per pass render exactly what one band per pass renders: the flat default
+    /// strip, boosts and cuts, a band switched off, cross-fades on some bands while their
+    /// neighbours pair (and a second edit landing mid-fade), and an odd band count.
+    #[test]
+    fn paired_bands_match_the_band_by_band_cascade_bit_for_bit() {
+        let edits = [
+            (0, id(2, param::GAIN_DB), 4.0), // before anything is heard: applies directly
+            (4, id(0, param::GAIN_DB), -6.0),
+            (4, id(3, param::GAIN_DB), 9.0),
+            (5, id(3, param::Q), 4.0), // mid-fade on band 3
+            (12, id(4, param::ENABLED), 0.0),
+            (13, id(1, param::FREQ), 180.0),
+            (30, id(5, param::GAIN_DB), -12.0),
+            (31, id(2, param::GAIN_DB), 0.0),
+        ];
+        let five = || {
+            EqNode::new(&[
+                BandSpec {
+                    kind: BandKind::HighPass,
+                    freq: 80.0,
+                    q: 0.7,
+                    gain_db: 0.0,
+                    enabled: true,
+                },
+                BandSpec::peaking(400.0, 2.0, -3.0),
+                BandSpec::peaking(1_500.0, 0.8, 2.0),
+                BandSpec::peaking(5_000.0, 1.0, 0.0),
+                BandSpec {
+                    kind: BandKind::LowPass,
+                    freq: 15_000.0,
+                    q: 0.7,
+                    gain_db: 0.0,
+                    enabled: true,
+                },
+            ])
+        };
+        for fresh in [EqNode::default_strip as fn() -> EqNode, five] {
+            let (mut fast, mut slow) = (fresh(), fresh());
+            fast.prepare(48_000.0, 1024);
+            slow.prepare(48_000.0, 1024);
+            assert_matches_reference(&mut fast, &mut slow, reference, &edits, 60);
         }
     }
 }
