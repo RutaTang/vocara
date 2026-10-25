@@ -1,4 +1,5 @@
-import 'package:flutter/gestures.dart' show kSecondaryButton;
+import 'package:flutter/gestures.dart'
+    show PointerDeviceKind, PointerScrollEvent, kSecondaryButton;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:forui/forui.dart' show FIcons;
@@ -39,8 +40,10 @@ class _FakeMixer extends Fake implements MixerController {
   void setTrackVolumeLive(String trackId, double volume) =>
       trackVolumes.add(volume);
 
+  int trackCommits = 0;
+
   @override
-  Future<void> commitTrackVolume() async {}
+  Future<void> commitTrackVolume() async => trackCommits++;
 
   @override
   void setMasterVolumeLive(double gain) => masterVolumes.add(gain);
@@ -80,11 +83,13 @@ class _FakeRecording extends Fake implements RecordingController {
   final ValueNotifier<double> inputLevel = ValueNotifier(0);
 }
 
-AudioTrack _track() => AudioTrack(
-  id: 't1',
+AudioTrack _track() => _trackN(1);
+
+AudioTrack _trackN(int n) => AudioTrack(
+  id: 't$n',
   kind: AudioTrackKind.vocal,
-  displayName: 'Take 1',
-  audioFilePath: '/x.wav',
+  displayName: 'Take $n',
+  audioFilePath: '/x$n.wav',
   durationMs: 5000,
   createdAt: DateTime(2026),
 );
@@ -241,5 +246,54 @@ void main() {
       final item = tester.getRect(find.text('Rename'));
       expect((item.top - click.dy).abs(), lessThan(40));
     });
+  });
+
+  testWidgets('a strip fader scrolled away mid-drag still saves its level', (
+    tester,
+  ) async {
+    // A sideways wheel during the drag unmounts the strip from the lazy strip list, and a
+    // disposed recognizer fires no end: the level the engine played was never saved.
+    final vm = _FakeVm();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Align(
+            alignment: Alignment.topLeft,
+            child: SizedBox(
+              height: 400,
+              width: 600,
+              child: MixerStrip(
+                vm: vm,
+                tracks: [for (var i = 0; i < 30; i++) _trackN(i)],
+                onDeleteTrack: (_) {},
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    final g = await tester.startGesture(
+      tester.getRect(_faders.first).center,
+      kind: PointerDeviceKind.mouse,
+    );
+    await tester.pump();
+    await g.moveBy(const Offset(0, -30));
+    await tester.pump();
+    await g.moveBy(const Offset(0, -10));
+    await tester.pump();
+    expect(vm.fakeMixer.trackVolumes, isNotEmpty);
+    tester.binding.handlePointerEvent(
+      PointerScrollEvent(
+        position: const Offset(300, 200),
+        kind: PointerDeviceKind.mouse,
+        scrollDelta: const Offset(2500, 0),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('Take 0'), findsNothing);
+    await g.up();
+    await tester.pumpAndSettle();
+    expect(vm.fakeMixer.trackCommits, 1);
   });
 }

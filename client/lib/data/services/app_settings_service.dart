@@ -268,13 +268,20 @@ class AppSettingsService extends ChangeNotifier {
   /// or names a device the panel cannot enumerate — never worse than judging the selection alone.
   bool get monitorAllowed => _isHeadphoneLike(_renderingDevice);
 
-  /// Whether the device the engine renders to is surely headphones, so the mic hears none of the
-  /// backing: the echo canceller then passes the mic through instead of adapting to a reference
-  /// the mic never hears, which pulled an in-key voice under (a cold filter never converged and
-  /// kept fitting the singer; one converged on the speakers kept subtracting a gone echo). Stricter
-  /// than [monitorAllowed]: only a device NAMED as headphones counts, not any Bluetooth one — a
-  /// speaker taken for headphones here would leave its whole echo in the take.
-  bool get echoFree => _isSurelyHeadphones(_renderingDevice);
+  /// The device the engine reports rendering to when it is surely headphones, so the mic hears
+  /// none of the backing; '' otherwise. The engine's echo canceller then passes the mic through
+  /// (only while that device still renders) instead of adapting to a reference the mic never
+  /// hears, which pulled an in-key voice under. Stricter than [monitorAllowed], twice over:
+  ///  * only the device the engine REPORTS counts — never the selection, and never a device the
+  ///    lists do not know;
+  ///  * only a PRODUCT named as earbuds counts, not any Bluetooth device and not a headphone
+  ///    PORT ("External Headphones" is the jack, whatever is plugged in). A speaker taken for
+  ///    headphones here would leave its whole echo in every take.
+  String get echoFreeOutput {
+    final uid = _actualOutputUid;
+    if (uid.isEmpty) return '';
+    return _isSurelyHeadphones(_byUid(_outputDevices, uid)) ? uid : '';
+  }
 
   /// The device to judge feedback safety on: what the engine is actually rendering to, else the
   /// effective selection.
@@ -297,10 +304,8 @@ class AppSettingsService extends ChangeNotifier {
     if (out == null) return false;
     final n = out.name.toLowerCase();
     if (_speakerNames.any(n.contains)) return false;
-    // "External Headphones" (the jack on Apple-silicon Macs), AirPods, any earbuds.
-    return n.contains('headphone') ||
-        n.contains('earphone') ||
-        n.contains('airpod') ||
+    return n.contains('airpod') ||
+        n.contains('earpod') ||
         n.contains('earbud') ||
         n.contains('buds');
   }
@@ -350,6 +355,13 @@ class AppSettingsService extends ChangeNotifier {
   /// without any device set changing, so [refreshDevices] alone would not notice.
   void reconcileMonitorSafety() {
     final changed = _refreshActualOutput();
+    // A device the lists have never seen (a speaker turned on since this page enumerated, which
+    // the system default then moved to): re-read them, so it is judged as itself rather than as
+    // the selection it would otherwise fall back to.
+    if (_actualOutputUid.isNotEmpty &&
+        _byUid(_outputDevices, _actualOutputUid) == null) {
+      refreshDevices();
+    }
     _applyOutputRoute();
     // The MON fader's enabled state is derived from this, so a change has to reach the panel.
     if (changed) notifyListeners();
@@ -370,10 +382,10 @@ class AppSettingsService extends ChangeNotifier {
       _engine?.setMonitorGain(monitorAllowed ? _monitorGain : 0.0);
 
   // Everything the engine derives from the rendering device: the monitor's feedback safety and
-  // the echo canceller's route ([echoFree]).
+  // the echo canceller's route ([echoFreeOutput]).
   void _applyOutputRoute() {
     _applyMonitorGain();
-    _engine?.setEchoFree(echoFree);
+    _engine?.setEchoFree(echoFreeOutput);
   }
 
   static String? _loadedString(Object? v) => v is String ? v : null;

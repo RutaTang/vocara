@@ -77,11 +77,11 @@ class _FakeEngine extends Fake implements GraphAudioPlaybackService {
   @override
   void setMonitorGain(double gain) => monitorGains.add(gain);
 
-  /// Every route the settings told the echo canceller, in call order.
-  final List<bool> echoFree = [];
+  /// Every output the settings named echo-free ('' = none), in call order.
+  final List<String> echoFree = [];
 
   @override
-  void setEchoFree(bool on) => echoFree.add(on);
+  void setEchoFree(String uid) => echoFree.add(uid);
 
   /// Every input gain pushed (linear), in order.
   final inputGainCalls = <double>[];
@@ -223,36 +223,47 @@ void main() {
       expect(service.monitorAllowed, isTrue);
     });
 
-    test('the echo canceller hears the route the engine RENDERS to', () async {
-      // On headphones the mic hears none of the backing the canceller is handed: it adapted into
-      // the in-key voice. Judged, like the monitor, on the device actually rendering.
-      outs = [_builtInOut, _headphones];
-      storage.doc = {'outputDeviceUid': _headphones.uid};
+    test(
+      'the echo canceller is told only the device the engine RENDERS to',
+      () async {
+        // On earbuds the mic hears none of the backing the canceller is handed: it adapted into
+        // the in-key voice. Judged on the device actually rendering, never the selection.
+        const airpods = AudioDevice(
+          uid: 'airpods',
+          name: 'AirPods Pro',
+          rate: 48000,
+          isBluetooth: true,
+        );
+        outs = [_builtInOut, airpods];
+        storage.doc = {'outputDeviceUid': airpods.uid};
+        await service.load();
+        final engine = _FakeEngine();
+        service.attachEngine(engine);
+        expect(
+          engine.echoFree.last,
+          '',
+          reason:
+              'the engine reports nothing yet: the selection is not evidence',
+        );
+
+        engine.actualOutput = airpods.uid;
+        service.reconcileMonitorSafety();
+        expect(engine.echoFree.last, airpods.uid);
+
+        engine.actualOutput = _builtInOut.uid;
+        service.reconcileMonitorSafety();
+        expect(engine.echoFree.last, '', reason: 'the speakers carry an echo');
+      },
+    );
+
+    test('only a product named as earbuds is echo-free', () async {
+      // A speaker taken for headphones would leave its whole echo in every take: not a device
+      // merely on Bluetooth, and not a headphone PORT — "External Headphones" is the jack of an
+      // Apple-silicon Mac whatever is plugged into it, desk speakers included.
       await service.load();
       final engine = _FakeEngine();
       service.attachEngine(engine);
-      expect(engine.echoFree.last, isTrue, reason: 'on the chosen headphones');
-
-      engine.actualOutput = _builtInOut.uid;
-      service.reconcileMonitorSafety();
-      expect(
-        engine.echoFree.last,
-        isFalse,
-        reason: 'the speakers carry an echo',
-      );
-
-      engine.actualOutput = _headphones.uid;
-      service.reconcileMonitorSafety();
-      expect(engine.echoFree.last, isTrue);
-    });
-
-    test('only a device named as headphones is echo-free', () async {
-      // Stricter than the monitor: a Bluetooth speaker taken for headphones here would leave
-      // its whole echo in the take, so the transport alone never counts.
-      await service.load();
-      final engine = _FakeEngine();
-      service.attachEngine(engine);
-      Future<bool> echoFreeOn(String name, {bool bluetooth = true}) async {
+      Future<String> echoFreeOn(String name, {bool bluetooth = true}) async {
         final device = AudioDevice(
           uid: 'out-$name',
           name: name,
@@ -266,21 +277,79 @@ void main() {
         return engine.echoFree.last;
       }
 
-      for (final name in ['AirPods Pro', 'Galaxy Buds2', 'Beats Studio Buds']) {
-        expect(await echoFreeOn(name), isTrue, reason: name);
+      for (final name in [
+        'AirPods Pro',
+        'AirPods Max',
+        'Galaxy Buds2',
+        'Beats Studio Buds',
+      ]) {
+        expect(await echoFreeOn(name), 'out-$name', reason: name);
       }
       expect(
-        await echoFreeOn('External Headphones', bluetooth: false),
-        isTrue,
-        reason: 'the jack on Apple-silicon Macs',
+        await echoFreeOn('EarPods (USB-C)', bluetooth: false),
+        'out-EarPods (USB-C)',
       );
       for (final name in ['WH-1000XM5', 'UE BOOM 3', 'Speaker Buds Box']) {
-        expect(await echoFreeOn(name), isFalse, reason: name);
+        expect(await echoFreeOn(name), '', reason: name);
       }
-      expect(
-        await echoFreeOn('MacBook Pro Speakers', bluetooth: false),
-        isFalse,
+      for (final port in [
+        'External Headphones',
+        'USB-C to 3.5mm Headphone Jack Adapter',
+        'MacBook Pro Speakers',
+      ]) {
+        expect(await echoFreeOn(port, bluetooth: false), '', reason: port);
+      }
+    });
+
+    test('a speaker the default moves to is judged as itself, not as the '
+        'selection', () async {
+      // The page enumerated with earbuds as the default; a Bluetooth speaker turned on since
+      // became the default and the engine follows it. Judged against the stale list, it fell
+      // back to the selection — the earbuds — and the monitor and the canceller both took it
+      // for headphones.
+      const airpods = AudioDevice(
+        uid: 'airpods',
+        name: 'AirPods Pro',
+        rate: 48000,
+        isDefault: true,
+        isBluetooth: true,
       );
+      const speakers = AudioDevice(
+        uid: 'built-in-out',
+        name: 'MacBook Pro Speakers',
+        rate: 48000,
+      );
+      outs = [speakers, airpods];
+      await service.load();
+      final engine = _FakeEngine()..actualOutput = airpods.uid;
+      service.attachEngine(engine);
+      service.setMonitorGainLive(0.5);
+      expect(service.monitorAllowed, isTrue);
+      expect(engine.echoFree.last, airpods.uid);
+
+      const boom = AudioDevice(
+        uid: 'boom',
+        name: 'UE BOOM 3',
+        rate: 48000,
+        isDefault: true,
+        isBluetooth: true,
+      );
+      outs = [
+        speakers,
+        const AudioDevice(
+          uid: 'airpods',
+          name: 'AirPods Pro',
+          rate: 48000,
+          isBluetooth: true,
+        ),
+        boom,
+      ];
+      engine.actualOutput = boom.uid;
+      engine.monitorGains.clear();
+      service.reconcileMonitorSafety();
+      expect(service.monitorAllowed, isFalse);
+      expect(engine.monitorGains.last, 0.0);
+      expect(engine.echoFree.last, '');
     });
 
     test('a Bluetooth speaker never allows the monitor', () async {

@@ -62,9 +62,15 @@ class _FakeVm extends Fake implements SongPracticeDetailViewModel {
   String? lyricsDraft;
 
   @override
+  int lyricsEditSession = 0;
+
+  @override
   void setLyricsMode(LyricsMode m) {
-    // As the real VM: leaving the editor (Save, Cancel) drops its draft.
+    // As the real VM: leaving the editor (Save, Cancel) drops its draft, and opening it starts
+    // a new editing session.
+    if (m == mode) return;
     if (m != LyricsMode.edit) lyricsDraft = null;
+    if (m == LyricsMode.edit) lyricsEditSession++;
     mode = m;
   }
 
@@ -320,6 +326,26 @@ void main() {
     await tester.pump();
     await tester.pump();
     expect(vm.mode, LyricsMode.sync);
+  });
+
+  testWidgets('a late save leaves an editor opened again in the meantime', (
+    tester,
+  ) async {
+    // Save, then Sync, then Edit before the write landed: the old Save closed the editor the
+    // user had just reopened.
+    final vm = _FakeVm()..saveGate = Completer<void>();
+    await _pumpPanel(tester, vm, textScale: 0.5);
+    await tester.enterText(find.byType(TextField), 'first verse');
+    await tester.tap(find.text('Save'));
+    await tester.pump();
+    vm.setLyricsMode(LyricsMode.sync);
+    await _pumpPanel(tester, vm, textScale: 0.5);
+    vm.setLyricsMode(LyricsMode.edit);
+    await _pumpPanel(tester, vm, textScale: 0.5);
+    vm.saveGate!.complete();
+    await tester.pump();
+    await tester.pump();
+    expect(vm.mode, LyricsMode.edit);
   });
 
   // Regression guard: the edit lived only in the editor's own state, which a

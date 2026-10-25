@@ -81,6 +81,10 @@ pub struct Shared {
     /// mon_target`]: the fader writes that one continuously, so a safety decision stored there
     /// would be stomped by the next drag.
     mon_muted: AtomicBool,
+    /// Playback is on an output with no acoustic path back to the mic (headphones): the echo
+    /// canceller passes the mic through. Owned by `device::reconcile_output_safety`, which sets it
+    /// only while the output the host judged echo-free is the one rendering.
+    echo_free: AtomicBool,
     /// Monitor reverb params (f32 bits): room size, damping, wet amount.
     mon_rev_room: AtomicU32,
     mon_rev_damping: AtomicU32,
@@ -132,6 +136,7 @@ impl Shared {
             seek_req: AtomicI64::new(-1),
             mon_target: AtomicU32::new(0), // 0.0f32 bits
             mon_muted: AtomicBool::new(false),
+            echo_free: AtomicBool::new(false),
             mon_rev_room: AtomicU32::new(0.6f32.to_bits()),
             mon_rev_damping: AtomicU32::new(0.5f32.to_bits()),
             mon_rev_wet: AtomicU32::new(0.2f32.to_bits()),
@@ -304,6 +309,18 @@ impl Shared {
     /// Whether the host's monitor safety mute is engaged.
     pub fn monitor_muted(&self) -> bool {
         self.mon_muted.load(Ordering::Acquire)
+    }
+
+    /// Mark playback echo-free (see [`Shared::echo_free`]). Owned by
+    /// `device::reconcile_output_safety`.
+    pub fn set_echo_free(&self, on: bool) {
+        self.echo_free.store(on, Ordering::Release);
+    }
+
+    /// Whether playback is echo-free (see [`Shared::echo_free`]). RT-safe: one load.
+    #[inline]
+    pub fn echo_free(&self) -> bool {
+        self.echo_free.load(Ordering::Acquire)
     }
 
     // Plan-basis reads for the streaming feeders (crate::feed): a change in

@@ -1047,14 +1047,17 @@ class _LyricsEditorState extends State<_LyricsEditor> {
                   // write reverts the model, so closing regardless would drop
                   // the draft with nothing but a toast to show for it.
                   final text = _c.text;
+                  final session = vm.lyricsEditSession;
                   if (!await vm.applyEditedLyrics(text)) return;
                   // Nor over text typed while the write waited (it queues
                   // behind other saves, a slow import's copy among them):
-                  // that is still the draft, and closing dropped it.
-                  // And only out of edit mode: the user may have moved on to
-                  // Sync while it waited.
+                  // that is still the draft, and closing dropped it. And only
+                  // the editing session Save was tapped in: the user may have
+                  // moved on to Sync, or left and opened the editor again.
                   final now = mounted ? _c.text : (vm.lyricsDraft ?? text);
-                  if (now == text && vm.lyricsMode == LyricsMode.edit) {
+                  if (now == text &&
+                      vm.lyricsMode == LyricsMode.edit &&
+                      vm.lyricsEditSession == session) {
                     vm.setLyricsMode(LyricsMode.read);
                   }
                 },

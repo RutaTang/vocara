@@ -725,6 +725,12 @@ pub struct OutputBinding {
     /// Consecutive reconciles that found a default-following stream stuck at a call-profile
     /// rate (see [`CALL_PROFILE_RATE_MAX`]).
     slow_rate_polls: u8,
+    /// The output the host judged echo-free (headphones; `ve_set_echo_free`); empty = none. The
+    /// echo canceller passes the mic through only while this is the device ACTUALLY rendering
+    /// (see [`Self::echo_free_with`]): the host judges at its own pace and from its own device
+    /// list, and a judgement left over from before the mic opened, or from before the default
+    /// output moved to a speaker, would leave a whole echo in the take.
+    echo_free_uid: String,
 }
 
 /// Consecutive rerouted polls before [`EVENT_OUTPUT_REROUTED`] is raised. The monitor mutes on
@@ -804,6 +810,19 @@ impl OutputBinding {
     }
 
     /// [`Self::rerouted`], asking `serves_output` about a bound mic (once).
+    /// Record the output the host judged echo-free (empty = none); applied at the next reconcile.
+    pub fn set_echo_free_uid(&mut self, uid: &str) {
+        self.echo_free_uid.clear();
+        self.echo_free_uid.push_str(uid);
+    }
+
+    /// Whether playback is on the output the host judged echo-free. Never while a VPIO unit is
+    /// opening (nothing known renders yet).
+    fn echo_free_with(&self, serves_output: &dyn Fn(&str) -> bool) -> bool {
+        !self.echo_free_uid.is_empty()
+            && self.actual_uid_given(self.renders_to_default(serves_output)) == self.echo_free_uid
+    }
+
     fn rerouted_with(&self, serves_output: &dyn Fn(&str) -> bool) -> bool {
         let to_default = self.renders_to_default(serves_output);
         // Following the default as asked: resolving the default once per side could straddle a
@@ -880,10 +899,12 @@ fn reconcile_output_safety_with(
     };
     if b.vpio == VpioOutput::Opening {
         transport.set_monitor_muted(true);
+        transport.set_echo_free(false);
         return true;
     }
     let rerouted = b.rerouted_with(serves_output);
     transport.set_monitor_muted(rerouted);
+    transport.set_echo_free(b.echo_free_with(serves_output));
     b.rerouted_polls = if rerouted {
         b.rerouted_polls.saturating_add(1)
     } else {
@@ -4377,10 +4398,55 @@ mod output_safety_tests {
             rerouted_polls: 0,
             cpal_rate: 0,
             slow_rate_polls: 0,
+            echo_free_uid: String::new(),
         });
         assert!(!reconcile_output_safety(h.transport(), &b, &event));
         assert!(!h.transport().monitor_muted());
         assert_eq!(event.load(Ordering::Relaxed) & EVENT_OUTPUT_REROUTED, 0);
+    }
+
+    /// The canceller passes the mic through only while the output the host judged echo-free is
+    /// the one rendering: a judgement from before the output moved (a fallback, the mic opening)
+    /// left a whole speaker echo in the take until the host's next look.
+    #[test]
+    fn echo_free_holds_only_on_the_judged_output() {
+        let h = engine();
+        let event = AtomicU32::new(0);
+        let b = Mutex::new(OutputBinding {
+            requested: "airpods".into(),
+            cpal_uid: "airpods".into(),
+            vpio: VpioOutput::Off,
+            ..Default::default()
+        });
+        reconcile_output_safety(h.transport(), &b, &event);
+        assert!(!h.transport().echo_free(), "nothing judged yet");
+
+        b.lock().unwrap().set_echo_free_uid("airpods");
+        reconcile_output_safety(h.transport(), &b, &event);
+        assert!(h.transport().echo_free());
+
+        // A mic opening: nothing known renders until the unit is up.
+        b.lock().unwrap().vpio = VpioOutput::Opening;
+        reconcile_output_safety(h.transport(), &b, &event);
+        assert!(!h.transport().echo_free());
+
+        // Playback lands on another device (here a fallback output): the speaker's echo is
+        // cancelled whatever the host last judged.
+        {
+            let mut g = b.lock().unwrap();
+            g.vpio = VpioOutput::Off;
+            g.cpal_uid = "desk-speakers".into();
+        }
+        reconcile_output_safety(h.transport(), &b, &event);
+        assert!(!h.transport().echo_free());
+
+        // Back on the judged output it holds again, and the host clearing it ends it.
+        b.lock().unwrap().cpal_uid = "airpods".into();
+        reconcile_output_safety(h.transport(), &b, &event);
+        assert!(h.transport().echo_free());
+        b.lock().unwrap().set_echo_free_uid("");
+        reconcile_output_safety(h.transport(), &b, &event);
+        assert!(!h.transport().echo_free());
     }
 
     /// The requested device could not be opened and the fallback took the default: the UI still
@@ -4398,6 +4464,7 @@ mod output_safety_tests {
             rerouted_polls: 0,
             cpal_rate: 0,
             slow_rate_polls: 0,
+            echo_free_uid: String::new(),
         });
         // Muted at once; announced once the reroute has held for a second poll.
         assert!(reconcile_output_safety(h.transport(), &b, &event));
@@ -4430,6 +4497,7 @@ mod output_safety_tests {
             rerouted_polls: 0,
             cpal_rate: 0,
             slow_rate_polls: 0,
+            echo_free_uid: String::new(),
         });
         let blip = std::cell::Cell::new(0u32);
         let probe = |_: &str| {
@@ -4461,6 +4529,7 @@ mod output_safety_tests {
             rerouted_polls: 0,
             cpal_rate: 0,
             slow_rate_polls: 0,
+            echo_free_uid: String::new(),
         });
         assert!(!reconcile_output_safety(h.transport(), &b, &event));
         assert!(!h.transport().monitor_muted());
@@ -4482,6 +4551,7 @@ mod output_safety_tests {
             rerouted_polls: 0,
             cpal_rate: 0,
             slow_rate_polls: 0,
+            echo_free_uid: String::new(),
         };
         assert_eq!(following_default.requested_pick(), "");
 
@@ -4495,6 +4565,7 @@ mod output_safety_tests {
             rerouted_polls: 0,
             cpal_rate: 0,
             slow_rate_polls: 0,
+            echo_free_uid: String::new(),
         };
         assert_eq!(explicit.requested_pick(), "dev-A");
     }
@@ -4516,6 +4587,7 @@ mod output_safety_tests {
             rerouted_polls: 0,
             cpal_rate: 0,
             slow_rate_polls: 0,
+            echo_free_uid: String::new(),
         };
         assert_eq!(following.actual_uid(), system_default_output_uid());
         assert!(!following.rerouted());
@@ -4538,6 +4610,7 @@ mod output_safety_tests {
             rerouted_polls: 0,
             cpal_rate: 0,
             slow_rate_polls: 0,
+            echo_free_uid: String::new(),
         });
         assert!(!reconcile_output_safety(h.transport(), &b, &event));
         assert!(!h.transport().monitor_muted());
@@ -4590,6 +4663,7 @@ mod output_safety_tests {
             rerouted_polls: 0,
             cpal_rate: 0,
             slow_rate_polls: 0,
+            echo_free_uid: String::new(),
         });
         assert_eq!(b.lock().unwrap().actual_uid(), system_default_output_uid());
         assert!(reconcile_output_safety(h.transport(), &b, &event));
@@ -4618,6 +4692,7 @@ mod output_safety_tests {
             rerouted_polls: 0,
             cpal_rate: 0,
             slow_rate_polls: 0,
+            echo_free_uid: String::new(),
         });
         // Mid profile switch: no outputs yet, so playback is on the default for now.
         assert!(reconcile_output_safety_with(
@@ -4708,6 +4783,7 @@ mod output_safety_tests {
             rerouted_polls: 0,
             cpal_rate: 0,
             slow_rate_polls: 0,
+            echo_free_uid: String::new(),
         });
         assert!(reconcile_output_safety(h.transport(), &b, &event));
         assert!(reconcile_output_safety(h.transport(), &b, &event));
@@ -4745,6 +4821,7 @@ mod output_safety_tests {
             rerouted_polls: 0,
             cpal_rate: 0,
             slow_rate_polls: 0,
+            echo_free_uid: String::new(),
         });
         reconcile_output_safety(h.transport(), &b, &event);
         assert!(h.transport().monitor_muted());

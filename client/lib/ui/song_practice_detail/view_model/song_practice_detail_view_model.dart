@@ -613,9 +613,16 @@ class SongPracticeDetailViewModel extends ChangeNotifier
 
   LyricsMode _lyricsMode = LyricsMode.read;
   LyricsMode get lyricsMode => _lyricsMode;
+
+  /// Bumped each time the lyrics editor opens, so a Save whose write lands late closes only the
+  /// editing session it was tapped in — not one the user opened again in the meantime.
+  int get lyricsEditSession => _lyricsEditSession;
+  int _lyricsEditSession = 0;
+
   void setLyricsMode(LyricsMode mode) {
     if (_lyricsMode == mode) return;
     _lyricsMode = mode;
+    if (mode == LyricsMode.edit) _lyricsEditSession++;
     if (mode != LyricsMode.edit) lyricsDraft = null;
     if (mode == LyricsMode.sync) _syncIndex = _firstUnsyncedIndex();
     notifyListeners();

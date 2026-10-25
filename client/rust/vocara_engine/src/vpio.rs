@@ -124,16 +124,6 @@ pub(crate) fn set_input_gain(linear: f32) {
     INPUT_GAIN.store(linear.max(0.0).to_bits(), Ordering::Relaxed);
 }
 
-/// Whether playback is on a route with no acoustic path back to the mic (headphones), set by the
-/// host from the device the engine renders to. Read by the input callback every cycle and handed
-/// to the echo canceller (see [`Aec::set_echo_free`]).
-static ECHO_FREE: AtomicBool = AtomicBool::new(false);
-
-/// Mark the output route echo-free (headphones) or not.
-pub(crate) fn set_echo_free(on: bool) {
-    ECHO_FREE.store(on, Ordering::Relaxed);
-}
-
 const ELEM_OUTPUT: u32 = 0; // speaker (AEC reference lives here)
 const ELEM_INPUT: u32 = 1; // microphone
 
@@ -220,6 +210,9 @@ struct InCtx {
     /// Custom acoustic echo canceller: removes the backing-track echo (loudspeaker→mic) from the raw
     /// mic while preserving the singing voice. VPIO's own AEC is bypassed (it ducked the sung voice).
     aec: Aec,
+    /// The engine's render cell, read here only for its transport atomics: whether playback is
+    /// echo-free (headphones), handed to the canceller every cycle.
+    rt: Arc<RtCell>,
     /// Far-end reference (the rendered backing, mono) produced by `output_cb`.
     ref_cons: Consumer<f32>,
     /// Keeps the reference ring's depth healthy across input glitches (see `ring_sync.rs`):
@@ -446,6 +439,7 @@ impl Vpio {
                 render_buf: vec![0.0; MAX_FRAMES * MAX_CH],
                 scratch: vec![0.0; MAX_FRAMES * MAX_CH],
                 aec,
+                rt: Arc::clone(&rt),
                 ref_cons,
                 ref_sync: RefRingSync::new(baseline_cap(io_round_trip, MAX_FRAMES)),
                 aec_bypass: false,
@@ -888,7 +882,7 @@ unsafe extern "C-unwind" fn input_cb(
             }
             // Cancel the loudspeaker echo from the mic, preserving the singing voice — or, on an
             // echo-free route, pass it through untouched with the same one-block latency.
-            ctx.aec.set_echo_free(ECHO_FREE.load(Ordering::Relaxed));
+            ctx.aec.set_echo_free(ctx.rt.transport().echo_free());
             ctx.aec.process(
                 &ctx.mic_mono[..n],
                 &ctx.far_mono[..n],

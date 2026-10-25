@@ -1137,21 +1137,33 @@ pub extern "C" fn ve_set_input_gain(_e: *mut VeEngine, gain: c_float) -> c_int {
     0
 }
 
-/// Mark the output route echo-free (`on` != 0: headphones, no acoustic path back to the mic) or
-/// not. The echo canceller then passes the mic through untouched instead of adapting to a
-/// reference the mic never hears, which pulled the in-key voice under; each change restarts it
-/// from cold. Applies to the open stream at once and to every stream opened after. 0 = ok.
+/// Name the output the host judged echo-free (headphones: no acoustic path back to the mic), or
+/// clear it with an empty string or NULL. While that device is the one ACTUALLY rendering, the
+/// echo canceller passes the mic through untouched instead of adapting to a reference the mic
+/// never hears, which pulled the in-key voice under; anywhere else (a speaker the default moved
+/// to, the mic's own endpoint once it opens) it cancels as always. Each change restarts it from
+/// cold. 0 = ok.
 #[no_mangle]
-pub extern "C" fn ve_set_echo_free(_e: *mut VeEngine, on: c_int) -> c_int {
-    #[cfg(target_vendor = "apple")]
-    {
-        crate::vpio::set_echo_free(on != 0);
-    }
-    #[cfg(not(target_vendor = "apple"))]
-    {
-        let _ = on;
-    }
-    0
+pub extern "C" fn ve_set_echo_free(e: *mut VeEngine, uid: *const c_char) -> c_int {
+    with_engine(e, -1, |eng| {
+        let uid = if uid.is_null() {
+            ""
+        } else {
+            match unsafe { CStr::from_ptr(uid) }.to_str() {
+                Ok(s) => s,
+                Err(_) => return -1,
+            }
+        };
+        if let Ok(mut b) = eng.output_binding.lock() {
+            b.set_echo_free_uid(uid);
+        }
+        device::reconcile_output_safety(
+            eng.handle.transport(),
+            &eng.output_binding,
+            &eng.device_event,
+        );
+        0
+    })
 }
 
 /// Choose which input(s) of a multi-channel mic make the mono capture that the monitor, the echo

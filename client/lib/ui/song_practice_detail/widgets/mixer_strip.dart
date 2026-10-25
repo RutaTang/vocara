@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -876,7 +877,7 @@ class _Channel extends StatelessWidget {
 
 /// A console-style vertical volume fader: a grooved track with tick marks and a
 /// draggable cap. Drag up for louder, down for quieter.
-class _VerticalFader extends StatelessWidget {
+class _VerticalFader extends StatefulWidget {
   const _VerticalFader({
     required this.value,
     required this.accent,
@@ -888,6 +889,26 @@ class _VerticalFader extends StatelessWidget {
   final Color accent;
   final ValueChanged<double> onChanged;
   final VoidCallback onChangeEnd;
+
+  @override
+  State<_VerticalFader> createState() => _VerticalFaderState();
+}
+
+class _VerticalFaderState extends State<_VerticalFader> {
+  /// A drag in flight: it has moved the level and owes its [onChangeEnd].
+  bool _active = false;
+
+  @override
+  void dispose() {
+    // Unmounted mid-drag (a sideways wheel scrolled its strip out of the lazy strip list): a
+    // disposed recognizer fires no end, so the level the engine already plays was never saved.
+    // Deferred past this frame (the save notifies listeners), as for [StudioFader].
+    if (_active) {
+      _active = false;
+      scheduleMicrotask(widget.onChangeEnd);
+    }
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -902,22 +923,34 @@ class _VerticalFader extends StatelessWidget {
           // its upperLimit and throw ArgumentError (release too). Identical to the
           // old clamp at usable sizes (h - 2*pad >= 1).
           final span = math.max(1.0, h - 2 * pad);
-          onChanged((1 - (dy - pad) / span).clamp(0.0, 1.0));
+          widget.onChanged((1 - (dy - pad) / span).clamp(0.0, 1.0));
         }
 
         return MouseRegion(
           cursor: SystemMouseCursors.resizeUpDown,
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
-            onTapDown: (d) => update(d.localPosition.dy),
-            onTapUp: (_) => onChangeEnd(),
-            onVerticalDragUpdate: (d) => update(d.localPosition.dy),
-            onVerticalDragEnd: (_) => onChangeEnd(),
+            onTapDown: (d) {
+              _active = true;
+              update(d.localPosition.dy);
+            },
+            onTapUp: (_) {
+              _active = false;
+              widget.onChangeEnd();
+            },
+            onVerticalDragUpdate: (d) {
+              _active = true;
+              update(d.localPosition.dy);
+            },
+            onVerticalDragEnd: (_) {
+              _active = false;
+              widget.onChangeEnd();
+            },
             child: CustomPaint(
               size: Size.infinite,
               painter: _VFaderPainter(
-                value: value.clamp(0.0, 1.0),
-                accent: accent,
+                value: widget.value.clamp(0.0, 1.0),
+                accent: widget.accent,
               ),
             ),
           ),

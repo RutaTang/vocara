@@ -57,6 +57,17 @@ class _StudioPanKnobState extends State<StudioPanKnob> {
   // stale value, and the first would be lost. Seeded from value per drag.
   double? _drag;
 
+  @override
+  void dispose() {
+    // Unmounted mid-drag (its strip scrolled away): a disposed recognizer fires no end, so the
+    // pan the engine already plays was never saved. See [StudioFader]'s dispose.
+    if (_drag != null) {
+      _drag = null;
+      scheduleMicrotask(widget.onCommit);
+    }
+    super.dispose();
+  }
+
   String get _label {
     final p = (widget.value * 100).round();
     if (p == 0) return 'C';

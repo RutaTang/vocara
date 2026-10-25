@@ -97,9 +97,9 @@ int ve_stop_monitor(VeEngine *e);
 int ve_set_monitor_gain(VeEngine *e, float gain);
 /* Set the record/input gain (linear): makeup applied to the captured voice before record/analysis. */
 int ve_set_input_gain(VeEngine *e, float gain);
-/* Mark the output route echo-free (on != 0: headphones): the echo canceller passes the mic
-   through untouched instead of adapting to a reference the mic never hears. 0 = ok. */
-int ve_set_echo_free(VeEngine *e, int on);
+/* Name the output judged echo-free (headphones), or clear it with "" / NULL: while that device is
+   the one actually rendering, the echo canceller passes the mic through untouched. 0 = ok. */
+int ve_set_echo_free(VeEngine *e, const char *uid);
 /* Choose which input(s) of a multi-channel mic make the mono capture: 0 = Auto (the input
    carrying the mic), 1 = Input 1, 2 = Input 2 (input 1 on a device without one). 0 = ok,
    -1 = unknown mode. */
