@@ -102,9 +102,15 @@ pub struct WavStream {
     sample_rate: u32,
     /// Value of [`samples`] at the last in-place header patch (0 = header still says empty).
     patched_at: u64,
+    /// A header patch failed and the append cursor could not be put back after the data (see
+    /// [`sync_header`](Self::sync_header)): no sample is written until it is.
+    cursor_lost: bool,
     /// See [`TEST_FAIL_FIRST_WRITE`].
     #[cfg(test)]
     fail_next_write: bool,
+    /// Test-only: fail the next header patch between its two size writes.
+    #[cfg(test)]
+    fail_header_patch: bool,
 }
 
 impl WavStream {
@@ -152,8 +158,11 @@ impl WavStream {
             samples: 0,
             sample_rate,
             patched_at: 0,
+            cursor_lost: false,
             #[cfg(test)]
             fail_next_write: false,
+            #[cfg(test)]
+            fail_header_patch: false,
         })
     }
 
@@ -172,6 +181,9 @@ impl WavStream {
         if self.fail_next_write {
             self.fail_next_write = false;
             return Err(io::Error::other("injected disk-full write failure"));
+        }
+        if self.cursor_lost {
+            return Err(io::Error::other("the WAV append position was lost"));
         }
         if self.samples >= MAX_F32_SAMPLES {
             return Ok(false);
@@ -201,17 +213,40 @@ impl WavStream {
     /// that were not actually handed to the OS. No fsync: the target failure is a killed
     /// PROCESS (the page cache survives it), not power loss, so an fsync per patch would cost
     /// latency for nothing.
+    ///
+    /// The cursor goes back after a FAILED patch too. One that failed between its seeks (a
+    /// transient EIO, or ENOSPC on a copy-on-write overwrite) left it inside the header, and the
+    /// next drain flushed its samples over "WAVEfmt " and the format fields: the take no longer
+    /// parsed, while every later patch and the finalize reported success. Patch bytes still
+    /// buffered land where they belong on the way (`BufWriter` flushes before it seeks); if
+    /// even that fails, [`write_sample`](Self::write_sample) refuses until a later patch puts
+    /// the cursor back.
     fn sync_header(&mut self) -> io::Result<()> {
+        let patched = self.patch_sizes();
+        // Back to the end of the 44-byte header + data payload for the next append.
+        let end = 44 + self.samples.saturating_mul(F32_BYTES);
+        if let Err(e) = self.w.seek(SeekFrom::Start(end)) {
+            self.cursor_lost = true;
+            return Err(e);
+        }
+        self.cursor_lost = false;
+        patched?;
+        self.patched_at = self.samples;
+        Ok(())
+    }
+
+    /// Writes the RIFF and data sizes for [`samples`](Self::samples), leaving the cursor
+    /// wherever the last step left it.
+    fn patch_sizes(&mut self) -> io::Result<()> {
         let (riff_size, data_size) = Self::header_sizes(self.samples);
         self.w.seek(SeekFrom::Start(4))?;
         self.w.write_all(&riff_size.to_le_bytes())?;
+        #[cfg(test)]
+        if std::mem::take(&mut self.fail_header_patch) {
+            return Err(io::Error::other("injected header-patch failure"));
+        }
         self.w.seek(SeekFrom::Start(40))?;
-        self.w.write_all(&data_size.to_le_bytes())?;
-        // Back to the end of the 44-byte header + data payload for the next append.
-        self.w
-            .seek(SeekFrom::Start(44 + self.samples.saturating_mul(F32_BYTES)))?;
-        self.patched_at = self.samples;
-        Ok(())
+        self.w.write_all(&data_size.to_le_bytes())
     }
 
     /// Patch the header in place (see [`sync_header`](Self::sync_header)) once at least ~1 s of
@@ -221,7 +256,8 @@ impl WavStream {
     /// WAV covering the take up to the last patch. `finalize` keeps stamping the exact final
     /// sizes on every graceful path.
     pub fn sync_header_if_due(&mut self) -> io::Result<()> {
-        if self.samples - self.patched_at >= u64::from(self.sample_rate.max(1)) {
+        if self.cursor_lost || self.samples - self.patched_at >= u64::from(self.sample_rate.max(1))
+        {
             self.sync_header()?;
         }
         Ok(())
@@ -329,5 +365,47 @@ mod tests {
 
         let _ = std::fs::remove_file(&link);
         let _ = std::fs::remove_file(&target);
+    }
+
+    #[test]
+    fn a_failed_header_patch_does_not_let_samples_overwrite_the_header() {
+        // The patch failed after its RIFF size was buffered and before its next seek: the
+        // cursor stayed at offset 4, and the next drain wrote the size plus its samples over
+        // the header. The take no longer parsed, though the next patch and the finalize both
+        // returned Ok.
+        let path = std::env::temp_dir().join(format!(
+            "vocara_wav_failed_patch_{}.wav",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut w = WavStream::create(&path, 1, 48_000).unwrap();
+        for i in 0..48_000 {
+            w.write_sample(0.25 + i as f32 * 1e-6).unwrap();
+        }
+        w.fail_header_patch = true;
+        assert!(w.sync_header_if_due().is_err());
+        // The writer thread marks the take damaged and keeps draining (~5 ms batches).
+        for i in 0..240 {
+            w.write_sample(-0.5 - i as f32 * 1e-6).unwrap();
+        }
+        w.sync_header_if_due().unwrap();
+        for i in 0..48_000 {
+            w.write_sample(-0.75 - i as f32 * 1e-6).unwrap();
+        }
+        w.finalize().unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(&bytes[0..4], b"RIFF");
+        assert_eq!(&bytes[8..16], b"WAVEfmt ");
+        let n = 48_000 + 240 + 48_000;
+        assert_eq!(bytes.len(), 44 + n * 4);
+        let sample =
+            |i: usize| f32::from_le_bytes(bytes[44 + i * 4..48 + i * 4].try_into().unwrap());
+        assert_eq!(sample(0), 0.25);
+        assert_eq!(sample(48_000), -0.5);
+        assert_eq!(sample(n - 1), -0.75 - 47_999.0 * 1e-6);
+        let data_size = u32::from_le_bytes(bytes[40..44].try_into().unwrap());
+        assert_eq!(data_size as usize, n * 4);
     }
 }

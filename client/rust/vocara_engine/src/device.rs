@@ -2731,23 +2731,26 @@ pub fn decode_file(
     if max_src_rate > 0 && src_rate > max_src_rate {
         return Err(DecodeError::TooBig);
     }
-    // The effective frame budget: the duration-derived bound AND the caller's absolute
-    // memory budget, whichever is tighter (u64::MAX = unbounded).
-    let duration_frames: u64 = if max_secs > 0.0 {
-        (max_secs * src_rate as f64).ceil() as u64
-    } else {
-        u64::MAX
+    // The effective frame budget at `rate`: the duration-derived bound AND the caller's
+    // absolute memory budget, whichever is tighter (u64::MAX = unbounded).
+    let budgets = |rate: u32| -> (u64, u64) {
+        let duration_frames: u64 = if max_secs > 0.0 {
+            (max_secs * rate as f64).ceil() as u64
+        } else {
+            u64::MAX
+        };
+        let absolute = if max_src_frames > 0 {
+            max_src_frames
+        } else {
+            u64::MAX
+        };
+        (duration_frames, duration_frames.min(absolute))
     };
-    let absolute = if max_src_frames > 0 {
-        max_src_frames
-    } else {
-        u64::MAX
-    };
-    let max_frames = duration_frames.min(absolute);
+    let (mut duration_frames, mut max_frames) = budgets(src_rate);
     // Which budget actually tripped decides the DIAGNOSIS: over the duration
     // bound is "too long"; under it but over the absolute source-frame cap is
     // "too big" (a short, dense file the memory budget refuses).
-    let budget_err = |frames: u64| -> DecodeError {
+    let budget_err = |frames: u64, duration_frames: u64| -> DecodeError {
         if frames > duration_frames {
             DecodeError::TooLong
         } else {
@@ -2759,7 +2762,7 @@ pub fn decode_file(
     // (the count is clamped by the budget first — a lying header must not drive a huge
     // allocation on its own).
     let mut out: Vec<[Smp; CHANNELS]> = match track.codec_params.n_frames {
-        Some(n) if n > max_frames => return Err(budget_err(n)),
+        Some(n) if n > max_frames => return Err(budget_err(n, duration_frames)),
         Some(n) => Vec::with_capacity(n.min(max_frames) as usize),
         None => Vec::new(),
     };
@@ -2778,6 +2781,11 @@ pub fn decode_file(
     // first chain link.
     let mut track_id = track_id;
     let mut skipped_packets: u64 = 0;
+    // The rate the decoder PRODUCES, which the container can misstate: symphonia has no SBR,
+    // so an HE-AAC track decodes its AAC-LC core at half the rate its sample entry declares.
+    // Labelled with the container's rate, such an import played an octave up at double speed,
+    // and was baked that way into the library WAV that replaced the original.
+    let mut out_rate: Option<u32> = None;
     loop {
         let packet = match format.next_packet() {
             Ok(p) => p,
@@ -2833,6 +2841,26 @@ pub fn decode_file(
             Err(e) => return Err(err(format!("decode: {e}"))),
         };
         let spec = *decoded.spec();
+        match out_rate {
+            None => {
+                out_rate = Some(spec.rate);
+                if spec.rate != src_rate {
+                    if !(MIN_SRC_RATE..=MAX_SRC_RATE).contains(&spec.rate) {
+                        return Err(DecodeError::RateUnsupported);
+                    }
+                    if max_src_rate > 0 && spec.rate > max_src_rate {
+                        return Err(DecodeError::TooBig);
+                    }
+                    (duration_frames, max_frames) = budgets(spec.rate);
+                }
+            }
+            Some(r) if r != spec.rate => {
+                return Err(err(format!(
+                    "mid-stream sample-rate change in {path} is unsupported"
+                )));
+            }
+            Some(_) => {}
+        }
         let ch = spec.channels.count();
         let mut sbuf = SampleBuffer::<f32>::new(decoded.capacity() as u64, spec);
         sbuf.copy_interleaved_ref(decoded);
@@ -2845,7 +2873,7 @@ pub fn decode_file(
         // packet by packet.
         let needed = out.len() + packet_frames;
         if needed as u64 > max_frames {
-            return Err(budget_err(needed as u64));
+            return Err(budget_err(needed as u64, duration_frames));
         }
         if needed > out.capacity() {
             // Amortized geometric growth, capped at the budget so capacity can never
@@ -2874,7 +2902,7 @@ pub fn decode_file(
             "decoded no audio from {path} ({skipped_packets} corrupt packets skipped)"
         )));
     }
-    Ok((out, src_rate))
+    Ok((out, out_rate.unwrap_or(src_rate)))
 }
 
 /// Absolute source-sample-rate envelope for every decoded file, mirroring the Dart analysis
