@@ -48,6 +48,49 @@ void main() {
     await save;
   });
 
+  test('a take armed while a cut-off quit waited is still finalized by the '
+      'exit request', () async {
+    final finalizer = RecordingFinalizer.forTesting(
+      perFinalizerBudget: const Duration(milliseconds: 50),
+      totalBudget: const Duration(milliseconds: 80),
+    );
+    final never = Completer<void>();
+    addTearDown(() {
+      if (!never.isCompleted) never.complete();
+    });
+    unawaited(finalizer.hold(() => never.future));
+    final close = finalizer.finalizeAll(); // the close button's run
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    var stopped = 0;
+    finalizer.register(() async {
+      stopped++;
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+    });
+    await close.timeout(const Duration(seconds: 2));
+    await Future<void>.delayed(const Duration(milliseconds: 40)); // spent
+    await finalizer.finalizeAll().timeout(const Duration(seconds: 2));
+    expect(stopped, 1, reason: "the exit request's run skipped the new take");
+  });
+
+  test('a quit the app survived leaves the next one a fresh budget', () async {
+    final finalizer = RecordingFinalizer.forTesting(
+      perFinalizerBudget: const Duration(milliseconds: 30),
+      totalBudget: const Duration(milliseconds: 40),
+      progressCeiling: const Duration(milliseconds: 60),
+    );
+    final never = Completer<void>();
+    addTearDown(() {
+      if (!never.isCompleted) never.complete();
+    });
+    finalizer.register(() => never.future);
+    await finalizer.finalizeAll().timeout(const Duration(seconds: 2));
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+    var ran = false;
+    finalizer.register(() async => ran = true);
+    await finalizer.finalizeAll().timeout(const Duration(seconds: 2));
+    expect(ran, isTrue, reason: 'the old quit left the budget spent for good');
+  });
+
   test('several wedged finalizers cost the quit one budget, not one '
       'each', () async {
     final finalizer = RecordingFinalizer.forTesting(
