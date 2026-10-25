@@ -680,4 +680,90 @@ void main() {
       expect(volume, closeTo(0.3 + 20 / box.width, 0.01));
     });
   }
+
+  testWidgets(
+    'a take fader whose lane scrolls out mid-drag commits its level',
+    (tester) async {
+      // A disposed recognizer fires no end: the level the engine played was
+      // never saved, as for a clip move (see above).
+      final pos = ValueNotifier<Duration>(Duration.zero);
+      addTearDown(pos.dispose);
+      var volume = 0.8;
+      var lives = 0;
+      var commits = 0;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: StatefulBuilder(
+              builder: (context, setState) => ListView(
+                children: [
+                  TrackRow(
+                    key: const ValueKey('t1'),
+                    track: AudioTrack(
+                      id: 't1',
+                      kind: AudioTrackKind.vocal,
+                      displayName: 'Take 1',
+                      audioFilePath: '/x.wav',
+                      durationMs: 5000,
+                      createdAt: DateTime(2026),
+                      volume: volume,
+                    ),
+                    label: 'Take 1',
+                    timelineDurationMs: 10000,
+                    position: pos,
+                    selected: false,
+                    reorderable: true,
+                    onSelect: () {},
+                    onClipMoveLive: (_, _) {},
+                    onMoveCommit: () {},
+                    onSelectClip: (_) {},
+                    onClipContextMenu: (_, _) {},
+                    onCrossLaneMove: (_) {},
+                    onContextMenu: (_) {},
+                    onAddNote: () {},
+                    onEditNote: (_) {},
+                    onAddTechnique: () {},
+                    onToggleMute: () {},
+                    onToggleSolo: () {},
+                    onVolume: (v) => setState(() {
+                      lives++;
+                      volume = v;
+                    }),
+                    onVolumeCommit: () => commits++,
+                    onDelete: () {},
+                  ),
+                  for (var i = 0; i < 30; i++) const SizedBox(height: 74),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+      final box = tester.getRect(find.byType(StudioFader));
+      final g = await tester.startGesture(
+        Offset(box.left + box.width * 0.5, box.center.dy),
+        kind: PointerDeviceKind.mouse,
+      );
+      await tester.pump();
+      await g.moveBy(const Offset(-20, 0));
+      await tester.pump();
+      expect(lives, greaterThan(0));
+      final shown = volume;
+      tester.binding.handlePointerEvent(
+        PointerScrollEvent(
+          position: const Offset(400, 300),
+          kind: PointerDeviceKind.mouse,
+          scrollDelta: const Offset(0, 1500),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+      expect(find.byKey(const ValueKey('t1')), findsNothing);
+      await g.up();
+      await tester.pumpAndSettle();
+      expect(volume, shown);
+      expect(volume, lessThan(0.8));
+      expect(commits, 1);
+    },
+  );
 }

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/gestures.dart'
@@ -157,7 +158,7 @@ class _PanKnobPainter extends CustomPainter {
 }
 
 /// A thin horizontal volume fader (track line + filled portion + thumb).
-class StudioFader extends StatelessWidget {
+class StudioFader extends StatefulWidget {
   const StudioFader({
     required this.value,
     required this.accent,
@@ -172,11 +173,33 @@ class StudioFader extends StatelessWidget {
   final VoidCallback onChangeEnd;
 
   @override
+  State<StudioFader> createState() => _StudioFaderState();
+}
+
+class _StudioFaderState extends State<StudioFader> {
+  /// A drag in flight: it has moved the level and owes its [onChangeEnd].
+  bool _active = false;
+
+  @override
+  void dispose() {
+    // Unmounted mid-drag (a mouse wheel scrolled its lane out of the lazy lane
+    // list): a disposed recognizer fires no end, so the level the engine
+    // already plays was never saved. Deferred past this frame, like a clip
+    // move's (the save notifies listeners).
+    if (_active) {
+      _active = false;
+      scheduleMicrotask(widget.onChangeEnd);
+    }
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (context, constraints) {
         final width = constraints.maxWidth;
-        void update(double dx) => onChanged((dx / width).clamp(0.0, 1.0));
+        void update(double dx) =>
+            widget.onChanged((dx / width).clamp(0.0, 1.0));
         return MouseRegion(
           cursor: SystemMouseCursors.resizeLeftRight,
           // The fader takes its pointer on contact: a click jumps the level,
@@ -193,17 +216,23 @@ class StudioFader extends StatelessWidget {
                       supportedDevices: kPointerDragDevices,
                     ),
                     (r) => r
-                      ..onStart = ((d) => update(d.localPosition.dx))
+                      ..onStart = ((d) {
+                        _active = true;
+                        update(d.localPosition.dx);
+                      })
                       ..onUpdate = ((d) => update(d.localPosition.dx))
-                      ..onEnd = ((_) => onChangeEnd()),
+                      ..onEnd = ((_) {
+                        _active = false;
+                        widget.onChangeEnd();
+                      }),
                   ),
             },
             child: SizedBox(
               height: 16,
               child: CustomPaint(
                 painter: _FaderPainter(
-                  value: value.clamp(0.0, 1.0),
-                  accent: accent,
+                  value: widget.value.clamp(0.0, 1.0),
+                  accent: widget.accent,
                 ),
               ),
             ),
