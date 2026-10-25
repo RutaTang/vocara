@@ -1563,18 +1563,31 @@ Float64List yinDifference(Float32List frame, int tauMax, int w) {
     for (var t = tauMin + 1; t <= tauMax; t++) {
       if (dn[t] < dn[best]) best = t;
     }
-    tau = best;
-  } else if (sampleRate / _yinVertex(dn, tau, tauMax).lag > fmax * 1.03) {
-    // The first dip lies ABOVE the band. For an above-band tone that is its
-    // period, and the range gate below answers NaN, as it must. But a real
-    // in-band note whose 2nd harmonic dominates — a bright high vowel, H2
-    // 16 dB over H1/H3 — repeats almost exactly at T/2, so its first dip
-    // sits there and the note read NaN (every such note above ~605 Hz once
-    // the scan began below the band). It is only NEARLY periodic at T/2
-    // (H1/H3 don't cancel there) and truly periodic at T: an in-band double
-    // whose dip is clearly deeper, and whose fundamental is really in the
-    // frame, is the period. An above-band tone is periodic at every multiple
-    // and has nothing at f/2, so it still reads NaN.
+    // The shortest period nearly as strong as the deepest (YIN's own
+    // preference, which the threshold scan applies above): a breathy or noisy
+    // voiced frame dips almost equally at T, 2T and 3T, and the deepest of
+    // them was an octave or a twelfth low about half the time — at a
+    // confidence the voicing gate passes.
+    var pick = best;
+    for (var k = 2; k <= 4; k++) {
+      final c = (best / k).round();
+      if (c - 1 < tauMin) break;
+      var m = c;
+      if (dn[c - 1] < dn[m]) m = c - 1;
+      if (dn[c + 1] < dn[m]) m = c + 1;
+      if (dn[m] <= dn[best] + 0.1 && m < pick) pick = m;
+    }
+    tau = pick;
+  } else {
+    // A note whose 2nd harmonic dominates — a bright vowel or a belt with F1
+    // on H2, 16 dB over H1/H3 — repeats almost exactly at T/2, so its first
+    // dip sits there. Above the band it read NaN (every such note above
+    // ~605 Hz once the scan began below the band); in it, below ~567 Hz, an
+    // octave high. It is only NEARLY periodic at T/2 (H1/H3 don't cancel
+    // there) and truly periodic at T: an in-band double whose dip is clearly
+    // deeper, and whose fundamental is really in the frame, is the period.
+    // An ordinary note has nothing at f/2, and an above-band tone is periodic
+    // at every multiple, so it still reads NaN.
     tau = _deeperInBandMultiple(frame, dn, tau, tauMin, tauMax) ?? tau;
   }
 
