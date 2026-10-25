@@ -470,6 +470,11 @@ class _SpectrogramImageState extends State<SpectrogramImage> {
   void didUpdateWidget(SpectrogramImage old) {
     super.didUpdateWidget(old);
     if (!identical(old.spectrogram, widget.spectrogram)) {
+      // The old take's image must not stand in meanwhile: build would place
+      // it over the NEW take's frames, under the new take's overlays, for as
+      // long as the render takes (hundreds of ms for a long take).
+      _image?.dispose();
+      _image = null;
       _render();
     }
   }

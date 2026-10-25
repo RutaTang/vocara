@@ -11,6 +11,7 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vocara/domain/models/spectrogram.dart';
 import 'package:vocara/ui/core/widgets/spectrogram_painter.dart';
@@ -159,6 +160,49 @@ void main() {
         }
       }
     });
+  });
+
+  // Regression guard: switching the dock to another take kept painting the
+  // PREVIOUS take's image — stretched over the new take's frames, under its
+  // F0 and formant dots — until the new render landed, which is hundreds of
+  // ms for a long take that has fallen out of the image cache.
+  testWidgets('a new take shows nothing until its own image is ready', (
+    tester,
+  ) async {
+    Finder painted() => find.descendant(
+      of: find.byType(SpectrogramImage),
+      matching: find.byType(CustomPaint),
+    );
+    Future<void> show(Spectrogram s) => tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: SpectrogramImage(spectrogram: s, timelineDurationMs: 2000),
+      ),
+    );
+    Future<void> settleRender() async {
+      for (var i = 0; i < 100 && painted().evaluate().isEmpty; i++) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 10)),
+        );
+        await tester.pump();
+      }
+    }
+
+    final first = _spec(60, 8, (f, b) => (f + b) % 60.0);
+    await show(first);
+    await settleRender();
+    expect(painted(), findsOneWidget, reason: 'the first take renders');
+
+    final second = _spec(90, 8, (f, b) => (f * b) % 60.0);
+    await show(second);
+    expect(
+      painted(),
+      findsNothing,
+      reason: 'the first take must not stand in while the second renders',
+    );
+
+    await settleRender();
+    expect(painted(), findsOneWidget, reason: 'then the second take shows');
   });
 
   testWidgets('the cache does not keep a spectrogram alive', (tester) async {
