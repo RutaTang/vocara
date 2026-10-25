@@ -53,9 +53,10 @@ fn render(rt: &Arc<RtCell>) -> Vec<Smp> {
     out
 }
 
-/// The real pump round (ffi::pump_round): a head pass of 4096 frames, then a top-up.
+/// The real pump round (ffi::pump_round): a head pass of one largest callback, then a top-up.
 fn pump_round(f: &mut TrackFeeder, h: &EngineHandle) {
-    f.pump_at_most(h.transport(), 4096).unwrap();
+    f.pump_at_most(h.transport(), vocara_engine::feed::MAX_CALLBACK_FRAMES)
+        .unwrap();
     f.pump(h.transport()).unwrap();
 }
 

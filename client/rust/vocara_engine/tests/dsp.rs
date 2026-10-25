@@ -1174,3 +1174,27 @@ fn a_doubler_delay_or_depth_jump_keeps_the_doubled_copy_in_tune() {
         );
     }
 }
+
+#[test]
+fn a_smoothed_parameter_recovers_from_a_non_finite_value() {
+    // The one-pole smoother never recovers from a NaN (it stays NaN) or an infinity (the next
+    // finite target turns it into NaN): one bad value muted the node for good.
+    for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        let mut n = GainPanNode::unity();
+        n.prepare(SR, 128);
+        let input = vec![0.25f32; 128 * CHANNELS];
+        run_phase(&mut n, &input, SR, 128);
+        n.set_param(gparam::GAIN, bad);
+        run_phase(&mut n, &input, SR, 128);
+        n.set_param(gparam::GAIN, 1.0);
+        let mut out = Vec::new();
+        for _ in 0..100 {
+            out = run_phase(&mut n, &input, SR, 128);
+        }
+        assert!(
+            out.iter().all(|&s| (s - 0.25).abs() < 1e-4),
+            "gain stuck after {bad}: {}",
+            out[0]
+        );
+    }
+}

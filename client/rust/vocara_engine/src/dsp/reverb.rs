@@ -176,6 +176,13 @@ impl ReverbNode {
     pub fn default_bus() -> Self {
         ReverbNode::new(0.5, 0.5, 1.0, 0.0, 1.0)
     }
+
+    /// Whether the lines have run on audio since they were last cleared (tests: proves a
+    /// skipped reverb never ran).
+    #[cfg(test)]
+    pub(crate) fn lines_dirty(&self) -> bool {
+        self.dirty
+    }
 }
 
 impl Node for ReverbNode {

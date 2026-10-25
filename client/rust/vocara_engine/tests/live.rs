@@ -521,3 +521,83 @@ fn commands_queued_for_the_old_graph_never_reach_the_new_one() {
         );
     }
 }
+
+#[test]
+fn a_non_finite_monitor_reverb_value_never_reaches_the_output() {
+    // `f32::clamp` passes NaN through: a NaN wet made the monitor reverb's output NaN for
+    // good, and the monitor is ADDED to the playback mix even at gain 0 (NaN * 0 = NaN) — so
+    // every sample after it was NaN, monitoring off, valid values restored or not.
+    let (mut h, mut rt, src) = one_source_engine();
+    h.push_pcm(src, &frames_dc(0.5, 8192));
+    h.play();
+    h.set_monitor_gain(0.0); // monitoring OFF
+    let mut out = vec![0.0; BLOCK * CHANNELS];
+    rt.process(&mut out, BLOCK);
+    h.set_monitor_reverb(0.6, 0.5, f32::NAN);
+    rt.process(&mut out, BLOCK);
+    h.set_monitor_reverb(f32::INFINITY, f32::NEG_INFINITY, 0.2);
+    rt.process(&mut out, BLOCK);
+    h.set_monitor_gain(f32::INFINITY);
+    for _ in 0..20 {
+        rt.process(&mut out, BLOCK);
+    }
+    let bad = out.iter().filter(|s| !s.is_finite()).count();
+    assert_eq!(bad, 0, "{bad} of {} samples non-finite", out.len());
+    assert!(
+        (rms(&out) - 0.5).abs() < 1e-3,
+        "playback untouched, got {}",
+        rms(&out)
+    );
+}
+
+#[test]
+fn a_non_finite_parameter_never_reaches_a_node() {
+    // One infinite master gain: the smoother ran to infinity, and the next finite target
+    // turned it into NaN (inf + (x - inf) * c) for the rest of the graph's life.
+    let (mut h, mut rt, src) = one_source_engine();
+    h.push_pcm(src, &frames_dc(0.5, 8192));
+    h.play();
+    let mut out = vec![0.0; BLOCK * CHANNELS];
+    rt.process(&mut out, BLOCK);
+    for bad in [f32::INFINITY, f32::NAN, f32::NEG_INFINITY] {
+        h.set_param(2, mparam::GAIN, bad);
+        h.flush();
+        rt.process(&mut out, BLOCK);
+    }
+    h.set_param(2, mparam::GAIN, 0.5);
+    h.flush();
+    for _ in 0..40 {
+        rt.process(&mut out, BLOCK);
+    }
+    assert!(
+        out.iter().all(|s| s.is_finite()),
+        "master output non-finite"
+    );
+    assert!(
+        (rms(&out) - 0.25).abs() < 1e-3,
+        "gain 0.5 applied, got {}",
+        rms(&out)
+    );
+
+    // The graph boundary drops it too (the staged-commit path sets params on the graph
+    // directly, and the command ring lands on it through the same call).
+    let desc = GraphDesc {
+        nodes: vec![
+            NodeEntry::new(
+                1,
+                Box::new(vocara_engine::BufferSource::new(vec![0.5; 2 * BLOCK], 0)),
+            ),
+            NodeEntry::new(2, Box::new(MasterNode::unity())),
+        ],
+        edges: vec![Edge::simple(1, 2)],
+        master: 2,
+    };
+    let mut g = desc.compile(SR, BLOCK).unwrap();
+    g.set_param(2, mparam::GAIN, f32::NAN);
+    let mut out = vec![0.0; BLOCK * CHANNELS];
+    g.render(BLOCK, 0, &mut out);
+    assert!(
+        out.iter().all(|&s| s == 0.5),
+        "graph-level NaN reached the node"
+    );
+}

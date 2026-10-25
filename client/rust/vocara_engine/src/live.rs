@@ -356,7 +356,14 @@ pub struct RtProcessor {
     mon_reverb: ReverbNode,
     mon_in: Vec<Smp>,
     mon_out: Vec<Smp>,
+    /// The monitor is off and silent (see [`Self::mix_monitor`]): its reverb and mix are
+    /// skipped, and the reverb restarts clean when the gain comes back.
+    mon_idle: bool,
 }
+
+/// A monitor gain this small (-120 dB) is silence: once the target is 0 and the ramp has fallen
+/// below it, the monitor goes idle (see `RtProcessor::mix_monitor`).
+const MON_IDLE: f32 = 1.0e-6;
 
 impl RtProcessor {
     /// Render `frames` of interleaved stereo into `out`, including the live-input monitor.
@@ -509,8 +516,14 @@ impl RtProcessor {
 
     /// Add the live-input monitor on top of the playback mix. The mic frames (already at
     /// `ENGINE_SR`, resampled in the input callback) pass through the monitor reverb, then a
-    /// smoothed gain so arming/disarming never clicks. The ring is empty (→ silence) whenever
-    /// the input stream is closed, so this is cheap when monitoring is off.
+    /// smoothed gain so arming/disarming never clicks.
+    ///
+    /// Monitoring off — the gain's target 0 (the default, and forced on a speaker) and its ramp
+    /// down to -120 dB — the monitor adds nothing, so it does nothing: the mic ring is still
+    /// drained (no stale backlog when monitoring resumes) but the reverb and the mix are
+    /// skipped. Running the reverb's 16 combs and 8 allpasses over silence on every callback
+    /// cost as much as the whole rest of an idle graph. The reverb is reset when the gain comes
+    /// back, so a re-armed monitor never resumes a tail frozen at the moment it went idle.
     #[inline]
     fn mix_monitor(&mut self, out: &mut [Smp], frames: usize) {
         // The host's safety mute wins over the fader (see `Shared::mon_muted`), and goes through
@@ -521,6 +534,23 @@ impl RtProcessor {
             f32::from_bits(self.shared.mon_target.load(Ordering::Relaxed))
         };
         self.mon_gain.set_target(target);
+
+        if target == 0.0 && self.mon_gain.current() <= MON_IDLE {
+            // Off and silent: land the ramp on exact zero, keep the ring drained, add nothing.
+            self.mon_gain.snap(0.0);
+            self.mon_idle = true;
+            for _ in 0..frames {
+                if self.mic_rx.pop().is_none() {
+                    break;
+                }
+            }
+            return;
+        }
+        if self.mon_idle {
+            // Coming back: start the reverb clean (its lines last ran before it went idle).
+            self.mon_reverb.reset();
+            self.mon_idle = false;
+        }
 
         // Drain the mic ring into the monitor input buffer.
         for i in 0..frames {
@@ -823,23 +853,31 @@ impl EngineHandle {
     /// Set the live-input monitor gain (linear; 0 = muted). The audio thread ramps to it. This is
     /// the FADER's value; it does not override the host's safety mute (see
     /// [`Shared::set_monitor_muted`]).
+    ///
+    /// A non-finite gain is dropped (the previous one stands): an infinite target ramps the
+    /// monitor to infinity, and every sample after it is NaN.
     pub fn set_monitor_gain(&self, gain: f32) {
+        if !gain.is_finite() {
+            return;
+        }
         self.shared
             .mon_target
             .store(gain.max(0.0).to_bits(), Ordering::Release);
     }
 
-    /// Set the monitor reverb (room/damping/wet, each 0..1). The audio thread applies them.
+    /// Set the monitor reverb (room/damping/wet, each 0..1). The audio thread applies them. A
+    /// non-finite value is dropped (that parameter keeps its previous value): `f32::clamp`
+    /// passes NaN through, and a NaN wet made the monitor's output NaN — which is ADDED to the
+    /// playback mix even at monitor gain 0 (NaN * 0 is NaN), so every later sample was NaN.
     pub fn set_monitor_reverb(&self, room: f32, damping: f32, wet: f32) {
-        self.shared
-            .mon_rev_room
-            .store(room.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
-        self.shared
-            .mon_rev_damping
-            .store(damping.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
-        self.shared
-            .mon_rev_wet
-            .store(wet.clamp(0.0, 1.0).to_bits(), Ordering::Release);
+        let store = |cell: &AtomicU32, v: f32| {
+            if v.is_finite() {
+                cell.store(v.clamp(0.0, 1.0).to_bits(), Ordering::Release);
+            }
+        };
+        store(&self.shared.mon_rev_room, room);
+        store(&self.shared.mon_rev_damping, damping);
+        store(&self.shared.mon_rev_wet, wet);
     }
     /// Current playhead in samples: the CONSUMED-frames cursor mapped back to
     /// the timeline — what the listener is hearing, exactly, including
@@ -858,8 +896,12 @@ impl EngineHandle {
 
     /// Queue a parameter change (coalesced). Call [`flush`](Self::flush) to publish. While a
     /// graph is staged the change lands on it directly instead (see
-    /// [`stage_graph`](Self::stage_graph)).
+    /// [`stage_graph`](Self::stage_graph)). A non-finite value is dropped here, before it can
+    /// coalesce over (and so erase) the last good value still pending for the same parameter.
     pub fn set_param(&mut self, node: NodeId, param: u16, value: f32) {
+        if !value.is_finite() {
+            return;
+        }
         match self.staged.as_mut() {
             Some(g) => g.set_param(node, param, value),
             None => self.cmd_tx.set(node, param, value),
@@ -1038,6 +1080,7 @@ pub fn spawn(
         mon_reverb,
         mon_in: vec![0.0; max_block * CHANNELS],
         mon_out: vec![0.0; max_block * CHANNELS],
+        mon_idle: true,
     };
     (handle, rt)
 }
@@ -1134,6 +1177,143 @@ mod rt_cell_guard_tests {
             c.transport().blocks.load(Ordering::Acquire),
             blocks,
             "and must not have entered the processor at all"
+        );
+    }
+}
+
+#[cfg(test)]
+mod monitor_tests {
+    //! The live-input monitor: skipped while off and silent, identical output either way.
+
+    use super::*;
+    use crate::dsp::master::MasterNode;
+    use crate::graph::{Edge, GraphDesc, NodeEntry};
+    use crate::ring::{spsc, Producer};
+    use crate::source::BufferSource;
+    use std::collections::HashMap;
+
+    const BLOCK: usize = 128;
+
+    /// A playing engine over a deterministic source, and its mic ring's producer.
+    fn engine() -> (EngineHandle, RtProcessor, Producer<[Smp; CHANNELS]>) {
+        let pcm: Vec<Smp> = (0..48_000 * 4 * CHANNELS)
+            .map(|i| ((i / 2) as f32 * 0.013).sin() * 0.3)
+            .collect();
+        let desc = GraphDesc {
+            nodes: vec![
+                NodeEntry::new(1, Box::new(BufferSource::new(pcm, 0))),
+                NodeEntry::new(2, Box::new(MasterNode::unity())),
+            ],
+            edges: vec![Edge::simple(1, 2)],
+            master: 2,
+        };
+        let g = desc.compile(ENGINE_SR, BLOCK).unwrap();
+        let (mic_prod, mic_cons) = spsc::<[Smp; CHANNELS]>(1 << 14);
+        let (h, rt) = spawn(g, HashMap::new(), mic_cons, 256);
+        h.play();
+        (h, rt, mic_prod)
+    }
+
+    fn feed(mic: &mut Producer<[Smp; CHANNELS]>, frames: usize) {
+        for i in 0..frames {
+            let v = (i as f32 * 0.05).sin() * 0.5;
+            if !mic.push([v, v]) {
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn a_silent_monitor_does_no_reverb_work_and_keeps_the_mic_ring_drained() {
+        // Monitor off (gain 0, the default): the reverb ran its combs and allpasses over
+        // silence on every callback anyway.
+        let (_h, mut rt, mut mic) = engine();
+        let mut out = vec![0.0; BLOCK * CHANNELS];
+        for _ in 0..50 {
+            feed(&mut mic, BLOCK);
+            rt.process(&mut out, BLOCK);
+        }
+        assert!(
+            !rt.mon_reverb.lines_dirty(),
+            "the monitor reverb ran while off"
+        );
+        assert_eq!(
+            mic.free(),
+            mic.capacity(),
+            "the mic ring was left to back up"
+        );
+    }
+
+    #[test]
+    fn the_output_is_identical_whether_or_not_the_monitor_is_skipped() {
+        // Off from the start, and again once a disarm has ramped out: the monitor path's output
+        // equals the playback-only render, sample for sample.
+        let (h, mut rt, mut mic) = engine();
+        let (_h2, mut twin, _mic2) = engine();
+        let mut a = vec![0.0; BLOCK * CHANNELS];
+        let mut b = vec![0.0; BLOCK * CHANNELS];
+        let same = |a: &[Smp], b: &[Smp]| a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits());
+        for _ in 0..40 {
+            rt.process(&mut a, BLOCK);
+            twin.process_playback(&mut b, BLOCK);
+            assert!(same(&a, &b), "a monitor that is off changed the output");
+        }
+        // Arm with a voice, then disarm: once the 10 ms ramp has fallen to -120 dB (~140 ms)
+        // the monitor adds nothing again.
+        h.set_monitor_gain(1.0);
+        for _ in 0..40 {
+            feed(&mut mic, BLOCK);
+            rt.process(&mut a, BLOCK);
+            twin.process_playback(&mut b, BLOCK);
+        }
+        assert!(!same(&a, &b), "the armed monitor must be heard");
+        h.set_monitor_gain(0.0);
+        for k in 0..200 {
+            feed(&mut mic, BLOCK);
+            rt.process(&mut a, BLOCK);
+            twin.process_playback(&mut b, BLOCK);
+            if k >= 60 {
+                assert!(
+                    same(&a, &b),
+                    "block {k} after the disarm still carries the monitor"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_re_armed_monitor_starts_its_reverb_clean() {
+        // A tail that rang out while the monitor was off must not come back frozen at the
+        // moment the monitor went idle: re-armed over a silent mic, nothing but silence plays.
+        let desc = GraphDesc {
+            nodes: vec![NodeEntry::new(2, Box::new(MasterNode::unity()))],
+            edges: Vec::new(),
+            master: 2,
+        };
+        let g = desc.compile(ENGINE_SR, BLOCK).unwrap();
+        let (mut mic, mic_cons) = spsc::<[Smp; CHANNELS]>(1 << 14);
+        let (h, mut rt) = spawn(g, HashMap::new(), mic_cons, 256);
+        h.set_monitor_reverb(0.9, 0.2, 1.0); // a long, loud tail
+        h.set_monitor_gain(1.0);
+        let mut out = vec![0.0; BLOCK * CHANNELS];
+        for _ in 0..200 {
+            feed(&mut mic, BLOCK);
+            rt.process(&mut out, BLOCK);
+        }
+        // Off for 20 s: a reverb left running decays to nothing, one skipped keeps its lines.
+        h.set_monitor_gain(0.0);
+        for _ in 0..(20 * 48_000 / BLOCK) {
+            rt.process(&mut out, BLOCK);
+        }
+        h.set_monitor_gain(1.0);
+        let mut peak = 0.0f32;
+        for _ in 0..100 {
+            rt.process(&mut out, BLOCK);
+            peak = out.iter().fold(peak, |m, s| m.max(s.abs()));
+        }
+        assert!(
+            peak < 1e-9,
+            "a stale tail replayed on re-arming: peak {peak}"
         );
     }
 }

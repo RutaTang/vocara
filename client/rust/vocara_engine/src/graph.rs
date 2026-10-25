@@ -265,8 +265,13 @@ impl Graph {
         out[..n].copy_from_slice(&self.schedule[self.master_idx].output[..n]);
     }
 
-    /// Apply a parameter change to a node by id (control plane / command ring).
+    /// Apply a parameter change to a node by id (control plane / command ring). A non-finite
+    /// value is dropped: no node parameter has a meaning for NaN or ±∞, and one that reached a
+    /// smoother or a recursive filter left the node producing NaN until the graph was rebuilt.
     pub fn set_param(&mut self, node: NodeId, param: u16, value: f32) {
+        if !value.is_finite() {
+            return;
+        }
         if let Some(&i) = self.index.get(&node) {
             self.schedule[i].node.set_param(param, value);
         }

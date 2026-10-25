@@ -1412,6 +1412,180 @@ fn a_commit_primed_just_before_a_loop_wrap_plays_the_next_pass() {
     assert_eq!(differing_frames(&streamed[from..], &arc[from..]), 0);
 }
 
+/// Where a clip that starts INSIDE the loop begins on the timeline (the loop is [0, 12_000)).
+const CLIP_IN_LOOP: i64 = 3000;
+
+/// `a - b` from frame `from` on, as "first..last differing rendered frame" for a message.
+fn diff_span(a: &[Smp], b: &[Smp], from: usize) -> String {
+    let n = a.len() / 2;
+    let first = (from..n).find(|&i| a[2 * i] != b[2 * i]);
+    let last = (from..n).rev().find(|&i| a[2 * i] != b[2 * i]);
+    format!("rendered frames {first:?}..{last:?} differ")
+}
+
+#[test]
+fn a_stream_starved_across_a_loop_wrap_plays_the_head_of_a_clip_inside_the_loop() {
+    // As above, but the clip starts inside the loop. The recovery pump lands
+    // while the wrapped render is in the loop's stretch BEFORE the clip, where
+    // the node published no park: nothing replanned, and the node waited at
+    // its pre-starvation position while the clip's head played silent.
+    let pcm = offset_pcm(40_000);
+    let path = write_pcm("wrapstarve_in", &pcm);
+    let run = |streamed: bool| {
+        let (h, rt, mut feeder) = streamed_pair(&path, CLIP_IN_LOOP, 4096);
+        let (h2, rt2) = engine_with(Box::new(BufferSource::new(pcm.clone(), CLIP_IN_LOOP)));
+        let (h, rt) = if streamed { (h, rt) } else { (h2, rt2) };
+        h.set_loop(true, 0, 12_000);
+        h.play();
+        let mut rendered = 0u64;
+        let mut out = Vec::new();
+        for b in 0..200 {
+            let pump = streamed && !(47..111).contains(&b);
+            let f = pump.then_some(&mut feeder);
+            out.extend(lagged_block(&h, &rt, f, 0, &mut rendered));
+        }
+        out
+    };
+    let (streamed, arc) = (run(true), run(false));
+    let _ = std::fs::remove_file(&path);
+    let from = 111 * BLOCK; // the first pump after the stall
+    let bad = differing_frames(&streamed[from * CHANNELS..], &arc[from * CHANNELS..]);
+    assert_eq!(bad, 0, "{}", diff_span(&streamed, &arc, from));
+}
+
+#[test]
+fn a_commit_primed_just_before_a_loop_wrap_plays_the_head_of_a_clip_inside_the_loop() {
+    // As above, with the clip starting inside the loop: the new node is parked
+    // on a base the render has just left, and the wrapped render sits in the
+    // loop's stretch before the clip, where the node published no park — so
+    // the clip's head played silent on the next pass.
+    let pcm = offset_pcm(40_000);
+    let path = write_pcm("wrapcommit_in", &pcm);
+    let run = |streamed: bool| {
+        let (h, rt, mut feeder) = streamed_pair(&path, CLIP_IN_LOOP, 16_384);
+        let (h2, rt2) = engine_with(Box::new(BufferSource::new(pcm.clone(), CLIP_IN_LOOP)));
+        let (mut h, rt) = if streamed { (h, rt) } else { (h2, rt2) };
+        h.set_loop(true, 0, 12_000);
+        h.play();
+        let mut rendered = 0u64;
+        let mut out = Vec::new();
+        for _ in 0..93 {
+            let f = streamed.then_some(&mut feeder);
+            out.extend(lagged_block(&h, &rt, f, 0, &mut rendered));
+        }
+        let (node, mut next) = streamed_source(&path, CLIP_IN_LOOP, 16_384);
+        let graph = if streamed {
+            next.pump(h.transport()).unwrap();
+            source_graph(Box::new(node))
+        } else {
+            source_graph(Box::new(BufferSource::new(pcm.clone(), CLIP_IN_LOOP)))
+        };
+        out.extend(lagged_block(&h, &rt, None, 0, &mut rendered));
+        h.publish_graph(graph);
+        for _ in 0..100 {
+            let f = streamed.then_some(&mut next);
+            out.extend(lagged_block(&h, &rt, f, 0, &mut rendered));
+        }
+        out
+    };
+    let (streamed, arc) = (run(true), run(false));
+    let _ = std::fs::remove_file(&path);
+    let from = 95 * BLOCK;
+    let bad = differing_frames(&streamed[from * CHANNELS..], &arc[from * CHANNELS..]);
+    assert_eq!(bad, 0, "{}", diff_span(&streamed, &arc, from));
+}
+
+#[test]
+fn a_wrap_with_its_fence_queued_is_not_reported_as_a_park() {
+    // The pre-span park report must not fire on an ordinary pass: there the
+    // wrap's fence is already queued behind the clip's in-loop audio, and a
+    // park (read by the pump as a stranded node) would replan — discarding
+    // and re-reading the ring — on every pass of the loop.
+    let pcm = offset_pcm(40_000);
+    let path = write_pcm("wrapqueued", &pcm);
+    let (h, rt, mut feeder) = streamed_pair(&path, CLIP_IN_LOOP, 16_384);
+    let (h2, rt2) = engine_with(Box::new(BufferSource::new(pcm.clone(), CLIP_IN_LOOP)));
+    for e in [&h, &h2] {
+        e.set_loop(true, 0, 12_000);
+        e.play();
+    }
+    let ctrl = Arc::clone(&feeder.ctrl);
+    let (mut r1, mut r2) = (0u64, 0u64);
+    let (mut a, mut b) = (Vec::new(), Vec::new());
+    let mut plan_gen = None;
+    for _ in 0..12_000 * 5 / BLOCK {
+        a.extend(lagged_block(&h, &rt, Some(&mut feeder), 0, &mut r1));
+        b.extend(lagged_block(&h2, &rt2, None, 0, &mut r2));
+        assert_eq!(
+            ctrl.parked.load(std::sync::atomic::Ordering::Acquire),
+            0,
+            "parked reported at render position {}",
+            h.transport().render_pos()
+        );
+        // No discarding replan after the first plan: five passes, one plan.
+        let g = ctrl.gen.load(std::sync::atomic::Ordering::Acquire);
+        assert_eq!(*plan_gen.get_or_insert(g), g, "the feeder replanned");
+    }
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(differing_frames(&a, &b), 0, "{}", diff_span(&a, &b, 0));
+}
+
+#[test]
+fn the_first_callback_after_a_seek_is_whole_on_the_largest_device_buffer() {
+    // Steady playback keeps the production ring filled up to its reserve, so a
+    // seek's replan lands behind a ring of stale audio: no pump can add a frame
+    // until the node drains it in the next callback, which therefore has only
+    // what the replan put behind its fence. A quarter of the ring left 4092
+    // frames there — silence at the end of a 4096-frame callback, and over
+    // 1000 frames of it in the 5120 the output resampler renders for a
+    // 4096-frame buffer at 44.1 kHz.
+    let frames = 400_000usize;
+    let path = write_track(frames);
+    for cb in [1024usize, 4096, vocara_engine::feed::MAX_CALLBACK_FRAMES] {
+        let (h, rt, mut feeder) = streamed_pair(&path, 0, 16_384);
+        let (h2, rt2) = engine_with(Box::new(BufferSource::new(ramp_pcm(frames), 0)));
+        h.play();
+        h2.play();
+        let mut a = vec![0.0; cb * CHANNELS];
+        let mut b = vec![0.0; cb * CHANNELS];
+        for _ in 0..30 {
+            // The pump runs every 10 ms: several rounds per large callback.
+            for _ in 0..8 {
+                feeder.pump(h.transport()).unwrap();
+            }
+            rt.render_offline(&mut a, cb);
+            rt.transport().sync_consumed_to_rendered();
+            rt2.render_offline(&mut b, cb);
+            rt2.transport().sync_consumed_to_rendered();
+        }
+        assert_eq!(
+            differing_frames(&a, &b),
+            0,
+            "steady playback, {cb}-frame callback"
+        );
+        for _ in 0..4 {
+            feeder.pump(h.transport()).unwrap(); // the ring is topped up when the seek lands
+        }
+        h.seek(200_000);
+        h2.seek(200_000);
+        for _ in 0..8 {
+            feeder
+                .pump_at_most(h.transport(), vocara_engine::feed::MAX_CALLBACK_FRAMES)
+                .unwrap();
+            feeder.pump(h.transport()).unwrap();
+        }
+        rt.render_offline(&mut a, cb);
+        rt2.render_offline(&mut b, cb);
+        let bad = differing_frames(&a, &b);
+        let first = (0..cb).find(|&i| a[2 * i] != b[2 * i]);
+        assert_eq!(
+            bad, 0,
+            "{cb}-frame callback after the seek: {bad} frames silent from {first:?}"
+        );
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
 /// Loop-plays [0, 12_000), pumping before every block, except that at block
 /// `at` it applies `edit` and lets only the replan's FENCE reach the ring
 /// before that block renders: the audio behind it lands after.

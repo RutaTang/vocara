@@ -432,12 +432,12 @@ impl Drop for VeEngine {
 }
 
 const MAX_BLOCK: usize = 1024;
-/// One device callback's worth of a stream, the largest there is (VPIO's
-/// 4096-frame slice): what a commit made while paused primes into each new
+/// One device callback's worth of a stream, the largest there is
+/// ([`crate::feed::MAX_CALLBACK_FRAMES`]): what a commit made while paused primes into each new
 /// ring, and what each pump round gives every stream before topping any up
 /// (see [`pump_round`]), so the first callback after Play or a seek finds
 /// audio on every track.
-const PAUSED_PRIME_FRAMES: usize = 4096;
+const PAUSED_PRIME_FRAMES: usize = crate::feed::MAX_CALLBACK_FRAMES;
 const RING_FRAMES: usize = 1 << 16; // ~1.4 s @ 48k of headroom
 const MIC_RING_FRAMES: usize = 1 << 12; // 4096 frames ≈ 85 ms @ 48k (monitor jitter buffer)
 const CAP_RING_FRAMES: usize = 1 << 13; // analysis capture (Dart polls ve_input_frames)

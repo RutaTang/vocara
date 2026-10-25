@@ -178,6 +178,14 @@ impl StreamingSource {
             None => None,
         }
     }
+
+    /// Whether the next thing the node takes is a fence: one parked by an
+    /// earlier pop, or a fence frame at the ring head (peeked, not consumed).
+    #[inline]
+    fn head_is_fence(&self) -> bool {
+        self.pending_fence.is_some() || self.rx.peek().is_some_and(|f| Self::fence_gen(f).is_some())
+    }
+
     /// Drain to the newest discarding fence (see `process`). Also runs while the
     /// transport is stopped, so a paused replan's stale backlog leaves the ring.
     fn take_flush(&mut self) {
@@ -261,6 +269,8 @@ impl Node for StreamingSource {
         // Whether the frame just rendered left the node parked AHEAD of the
         // transport (published as StreamCtrl::parked after the block).
         let mut parked = false;
+        // Whether that frame lay BEFORE the track's span (see the end of the block).
+        let mut pre_span = false;
         for i in 0..io.frames {
             // Complete a fence parked by an earlier pop (its base frame was
             // not visible yet — the two pushes publish separately). Every
@@ -278,8 +288,10 @@ impl Node for StreamingSource {
                 out[o] = 0.0;
                 out[o + 1] = 0.0;
                 parked = false;
+                pre_span = tl < self.start_frame;
                 continue;
             }
+            pre_span = false;
             // The feeder pushes NOTHING for pre-span positions: advance the
             // position without popping, mirroring its skip exactly.
             if self.ring_pos < self.start_frame {
@@ -301,9 +313,7 @@ impl Node for StreamingSource {
             // head instead, which must wait untouched; peek tells them
             // apart without consuming anything.
             while self.armed && self.ring_pos > tl {
-                let head_is_fence = self.pending_fence.is_some()
-                    || self.rx.peek().is_some_and(|f| Self::fence_gen(f).is_some());
-                if head_is_fence {
+                if self.head_is_fence() {
                     let _ = self.pop_audio(); // adopts; updates ring_pos
                 } else {
                     break;
@@ -344,6 +354,17 @@ impl Node for StreamingSource {
                     }
                 }
             }
+        }
+        // Before the span the next position this node needs is the span's
+        // FIRST frame, so armed past it with no fence at the ring head it is
+        // parked ahead of the transport exactly as an in-span park is: a loop
+        // that starts before the clip wraps the render into that stretch, and
+        // reporting nothing there left a node stranded mid-clip waiting out
+        // the clip's head on the next pass. A wrap whose fence is already
+        // queued is not a park (the fence re-arms the node before the span).
+        // Checked once, for the frame the word describes.
+        if pre_span && self.armed && self.ring_pos > self.start_frame && !self.head_is_fence() {
+            parked = true;
         }
         // The feeder replans a park the render has wrapped past (it can tell
         // a stranded park from a pending seek's; the node cannot).
