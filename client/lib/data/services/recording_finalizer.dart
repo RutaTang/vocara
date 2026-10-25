@@ -47,19 +47,21 @@ class RecordingFinalizer {
   /// The single app-wide instance (recordings are bound to the one main window).
   static final RecordingFinalizer instance = RecordingFinalizer._();
 
-  /// How long ONE finalizer may hold the quit. A legitimate finalize is a
-  /// hardware stop, one waveform extraction and one database write — a second
-  /// or two even for a long take on a busy disk. Past that it is wedged, which
+  /// How long the quit waits on its finalizers, which run together, with
+  /// nothing being copied. A legitimate finalize is a hardware stop, one
+  /// waveform extraction and one database write — a second or two even for a
+  /// long take on a busy disk. Past that it is wedged, which
   /// is reachable without any bug: a save retries behind the busy gate for as
   /// long as it takes, because dropping it would be worse.
   static const Duration _defaultPerFinalizer = Duration(seconds: 5);
 
-  /// Ceiling across ALL registered finalizers, so several wedged recordings
-  /// cannot serialize their budgets into a quit macOS ends on its own terms.
+  /// Ceiling on that wait since the quit began, across both quit paths' runs
+  /// (see [_quitClock]), so a quit macOS would end on its own terms never
+  /// happens without bytes still moving.
   static const Duration _defaultTotal = Duration(seconds: 8);
 
   /// How long a quit keeps waiting, all told, on a finalizer that is still
-  /// making progress past its budget (see [_settle]): a save pooling a large
+  /// making progress past its budget (see [finalizeAll]): a save pooling a large
   /// file — a 1 GB technique video copies for well over 5 s — is working, not
   /// wedged, and cutting it off lost the user's Save outright.
   static const Duration _defaultProgressCeiling = Duration(seconds: 60);
@@ -156,86 +158,88 @@ class RecordingFinalizer {
     }
   }
 
-  /// Waits for [work] for [budget] — and for another [budget] each time the
-  /// last one ended with [_progress] moved off [mark] (bytes are still being
-  /// copied), up to [progressCeiling] since the quit began. A finalizer making
-  /// no progress for a whole [budget] is wedged, and times out as before.
-  ///
-  /// Moved, not risen: the reading is the staging files in flight, so it DROPS
-  /// when one of two concurrent copies lands and leaves staging while the other
-  /// is still copying — and reading that drop as a stall cut the other off.
-  Future<void> _settle(
-    Future<void> work,
-    Duration budget,
-    Stopwatch spent,
-    int mark,
-  ) async {
-    while (true) {
-      try {
-        await work.timeout(budget);
-        return;
-      } on TimeoutException {
-        final now = await _progress();
-        if (now == mark || spent.elapsed >= progressCeiling) rethrow;
-        mark = now;
-        DiagnosticsLog.instance.log(
-          'quit',
-          'a finalizer past its budget is still copying; waiting on',
-        );
-      }
-    }
-  }
-
   /// Runs every registered finalizer (best-effort; one failure never blocks the
   /// rest or the quit). Iterates a snapshot, so a finalizer that unregisters
   /// itself mid-run is safe. Concurrent calls (e.g. a close click racing a
   /// Cmd+Q exit request) await the SAME in-flight run instead of double-running
   /// finalizers; once a run completes, a later call starts a fresh one.
   ///
-  /// BOUNDED: each finalizer gets [perFinalizerBudget] and the whole run
-  /// [totalBudget]; only a finalizer still making progress waits on past its
-  /// budget, and never past [progressCeiling]. Both quit paths gate the app's
-  /// exit on this future, and an exit macOS ends on its own terms is worse
-  /// than a skipped save — a take left behind is recovered on the next boot, a
-  /// force-killed process finalizes nothing at all.
+  /// The finalizers run TOGETHER, and the quit waits for all of them at once.
+  /// One after another, a save queued behind a long one (a mute behind a large
+  /// import) found the budget spent and was never waited on. And a copy that
+  /// kept the quit waiting could belong to a save it was not waiting on yet.
+  ///
+  /// BOUNDED: the quit waits [perFinalizerBudget], never past [totalBudget]
+  /// since the quit began, and on past that only while bytes are still being
+  /// copied ([_progress] moved during the last window), never past
+  /// [progressCeiling]. Both quit paths gate the app's exit on this future, and
+  /// an exit macOS ends on its own terms is worse than a skipped save — a take
+  /// left behind is recovered on the next boot, a force-killed process
+  /// finalizes nothing at all.
   Future<void> finalizeAll() =>
       _inFlight ??= _finalizeAll().whenComplete(() => _inFlight = null);
 
+  /// When the quit began, kept across runs while one cut a finalizer off: the
+  /// close button runs [finalizeAll], and the destroy() after it is an exit
+  /// request that runs it again for whatever is still pending — timed afresh,
+  /// a wedged save held the quit for twice every limit. A run whose finalizers
+  /// all settled clears it.
+  Stopwatch? _quitClock;
+
   Future<void> _finalizeAll() async {
     final pending = _pending.toList();
-    final spent = Stopwatch()..start();
-    for (var i = 0; i < pending.length; i++) {
-      final left = totalBudget - spent.elapsed;
-      if (left <= Duration.zero) {
-        DiagnosticsLog.instance.log(
-          'quit',
-          'finalize budget spent; ${pending.length - i} not run',
-        );
-        return;
-      }
-      final budget = left < perFinalizerBudget ? left : perFinalizerBudget;
+    if (pending.isEmpty) return;
+    final clock = _quitClock ??= Stopwatch()..start();
+    var window = _shorter(perFinalizerBudget, totalBudget - clock.elapsed);
+    if (window <= Duration.zero) {
+      DiagnosticsLog.instance.log(
+        'quit',
+        'finalize budget spent; ${pending.length} not run',
+      );
+      return;
+    }
+    // Read before the finalizers start: the wait must attach to them at once,
+    // or one failing straight away escapes as an unhandled error.
+    var mark = await _progress();
+    var running = pending.length;
+    final all = Future.wait([
+      for (final finalize in pending)
+        Future.sync(finalize)
+            // Best-effort by contract: one failure never blocks the rest.
+            .then<void>((_) {}, onError: (_) {})
+            .whenComplete(() => running--),
+    ]);
+    while (true) {
       try {
-        // Read before the finalizer starts: [_settle] must attach to its
-        // future at once, or a finalizer failing straight away escapes as an
-        // unhandled error.
-        final mark = await _progress();
-        await _settle(pending[i](), budget, spent, mark);
+        await all.timeout(window);
+        _quitClock = null;
+        return;
       } on TimeoutException {
-        // Quitting past a wedged finalize loses strictly LESS than being
-        // force-killed while still waiting: the streaming WAV's header is
-        // patched in place about once a second, so the staged take is
-        // recovered on the next boot either way (see the force-quit note
-        // above). Future.timeout also absorbs a late failure from the
-        // abandoned callback, so no unhandled async error escapes into the
-        // exiting process.
+        // Moved, not risen: the reading is the staging files in flight, so it
+        // DROPS when one of two concurrent copies lands while the other is
+        // still copying.
+        final now = await _progress();
+        window = _shorter(perFinalizerBudget, progressCeiling - clock.elapsed);
+        if (now == mark || window <= Duration.zero) break;
+        mark = now;
         DiagnosticsLog.instance.log(
           'quit',
-          'finalizer ${i + 1}/${pending.length} exceeded '
-              '${budget.inMilliseconds} ms; left for boot recovery',
+          'still copying past the budget; waiting on',
         );
-      } catch (_) {
-        // Best-effort by contract: one failure never blocks the rest.
       }
     }
+    // Quitting past a wedged finalize loses strictly LESS than being
+    // force-killed while still waiting: the streaming WAV's header is patched
+    // in place about once a second, so the staged take is recovered on the
+    // next boot either way (see the force-quit note above). The finalizers'
+    // own failures are absorbed above, so none escapes into the exiting
+    // process.
+    DiagnosticsLog.instance.log(
+      'quit',
+      '$running of ${pending.length} finalizers still running after '
+          '${clock.elapsed.inMilliseconds} ms; left for boot recovery',
+    );
   }
+
+  static Duration _shorter(Duration a, Duration b) => a < b ? a : b;
 }

@@ -29,38 +29,141 @@ void main() {
     expect(ran, 1, reason: 'the wedged callback must not starve the next one');
   });
 
+  test('a quit whose finalizers all settled leaves the next one its full '
+      'budget', () async {
+    final finalizer = RecordingFinalizer.forTesting(
+      perFinalizerBudget: const Duration(milliseconds: 100),
+      totalBudget: const Duration(milliseconds: 150),
+    );
+    finalizer.register(() async {});
+    await finalizer.finalizeAll();
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    var landed = false;
+    final save = finalizer.hold(() async {
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      landed = true;
+    });
+    await finalizer.finalizeAll().timeout(const Duration(seconds: 2));
+    expect(landed, isTrue, reason: 'the earlier quit spent its budget');
+    await save;
+  });
+
+  test('several wedged finalizers cost the quit one budget, not one '
+      'each', () async {
+    final finalizer = RecordingFinalizer.forTesting(
+      perFinalizerBudget: const Duration(milliseconds: 100),
+      totalBudget: const Duration(seconds: 5),
+    );
+    final parked = <Completer<void>>[];
+    addTearDown(() {
+      for (final c in parked) {
+        if (!c.isCompleted) c.complete();
+      }
+    });
+    var entered = 0;
+    for (var i = 0; i < 5; i++) {
+      finalizer.register(() {
+        entered++;
+        final c = Completer<void>();
+        parked.add(c);
+        return c.future;
+      });
+    }
+
+    final sw = Stopwatch()..start();
+    await finalizer.finalizeAll().timeout(const Duration(seconds: 2));
+
+    expect(entered, 5, reason: 'every finalizer runs');
+    // Five budgets one after another would be 500 ms.
+    expect(sw.elapsedMilliseconds, lessThan(400));
+  });
+
   test(
-    'the total budget stops handing out fresh per-finalizer budgets',
+    'a save queued behind a long copy lands before the quit exits',
     () async {
+      // One after another, the copy used up the total budget and the mute
+      // queued behind it was never waited on: it needs only milliseconds, but
+      // only once the copy is done.
+      var copied = 0;
       final finalizer = RecordingFinalizer.forTesting(
         perFinalizerBudget: const Duration(milliseconds: 40),
         totalBudget: const Duration(milliseconds: 60),
+        progressCeiling: const Duration(seconds: 5),
+        progress: () async => copied,
       );
-      final parked = <Completer<void>>[];
-      addTearDown(() {
-        for (final c in parked) {
-          if (!c.isCompleted) c.complete();
+      final copy = finalizer.hold(() async {
+        for (var i = 0; i < 10; i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+          copied += 1 << 20;
         }
       });
-      var entered = 0;
-      for (var i = 0; i < 5; i++) {
-        finalizer.register(() {
-          entered++;
-          final c = Completer<void>();
-          parked.add(c);
-          return c.future;
-        });
-      }
-
+      var muted = false;
+      final mute = finalizer.hold(() async {
+        await copy;
+        await Future<void>.delayed(const Duration(milliseconds: 10)); // write
+        muted = true;
+      });
       await finalizer.finalizeAll().timeout(const Duration(seconds: 2));
-
-      // Asserting on how many callbacks were ENTERED (not on elapsed wall
-      // clock) keeps this deterministic: five 40 ms budgets would be 200 ms,
-      // well past the 60 ms total.
-      expect(entered, greaterThanOrEqualTo(1));
-      expect(entered, lessThan(5));
+      expect(muted, isTrue, reason: 'the quit exited under the queued save');
+      await mute;
     },
   );
+
+  test('a copy keeps the quit waiting for the save it belongs to, then a '
+      'wedged one is cut off', () async {
+    // The copy is evidence for the save it belongs to, which the quit waits
+    // on alongside the wedged one; once it lands nothing moves, and the
+    // wedged save is cut off one budget later.
+    var copied = 0;
+    final finalizer = RecordingFinalizer.forTesting(
+      perFinalizerBudget: const Duration(milliseconds: 40),
+      totalBudget: const Duration(milliseconds: 60),
+      progressCeiling: const Duration(seconds: 5),
+      progress: () async => copied,
+    );
+    final never = Completer<void>();
+    addTearDown(() {
+      if (!never.isCompleted) never.complete();
+    });
+    unawaited(finalizer.hold(() => never.future));
+    var landed = false;
+    final copy = finalizer.hold(() async {
+      for (var i = 0; i < 10; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        copied += 1 << 20;
+      }
+      landed = true;
+    });
+    final sw = Stopwatch()..start();
+    await finalizer.finalizeAll().timeout(const Duration(seconds: 2));
+    expect(landed, isTrue, reason: 'the copying save was not waited on');
+    expect(sw.elapsedMilliseconds, lessThan(1000), reason: 'the wedge is cut');
+    await copy;
+  });
+
+  test('the exit request after a close-button quit does not wait it all over '
+      'again', () async {
+    // The close button runs the quit, then destroy() raises an exit request
+    // that runs it again for whatever is still pending.
+    final finalizer = RecordingFinalizer.forTesting(
+      perFinalizerBudget: const Duration(milliseconds: 100),
+      totalBudget: const Duration(milliseconds: 150),
+    );
+    final never = Completer<void>();
+    addTearDown(() {
+      if (!never.isCompleted) never.complete();
+    });
+    unawaited(finalizer.hold(() => never.future));
+    await finalizer.finalizeAll().timeout(const Duration(seconds: 2));
+    await Future<void>.delayed(const Duration(milliseconds: 60));
+    final sw = Stopwatch()..start();
+    await finalizer.finalizeAll().timeout(const Duration(seconds: 2));
+    expect(
+      sw.elapsedMilliseconds,
+      lessThan(50),
+      reason: 'budget already spent',
+    );
+  });
 
   test(
     'a held save still copying past its budget keeps the quit waiting',
