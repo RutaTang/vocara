@@ -21,6 +21,7 @@ import 'package:vocara/data/services/audio_edit_service.dart';
 import 'package:vocara/data/services/audio_file_service.dart';
 import 'package:vocara/data/services/local_storage_service.dart';
 import 'package:vocara/data/services/playback_engine.dart';
+import 'package:vocara/data/services/recording_finalizer.dart';
 import 'package:vocara/data/services/source_separation_service.dart';
 import 'package:vocara/data/services/spectrogram_service.dart';
 import 'package:vocara/data/services/waveform_service.dart';
@@ -235,6 +236,7 @@ Future<SongPracticeDetailViewModel> _pumpScreen(
   WidgetTester tester, {
   int lanes = 8,
   Size size = const Size(1800, 1100),
+  RecordingFinalizer? finalizer,
 }) async {
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
@@ -255,8 +257,9 @@ Future<SongPracticeDetailViewModel> _pumpScreen(
     playbackEngine: _FakeEngine(),
     editService: _FakeEdits(),
     probeDuration: (_) => null,
+    finalizer: finalizer,
   );
-  for (var i = 0; i < 50 && vm.practice == null; i++) {
+  for (var i = 0; i < 100 && vm.practice == null; i++) {
     await tester.pump(const Duration(milliseconds: 5));
   }
   expect(vm.practice, isNotNull, reason: 'the practice should load');
@@ -564,5 +567,36 @@ void main() {
     await tester.pump();
     await g.up();
     expect(vm.analysis.dockHeight, before + 20);
+  });
+
+  // Reuses this file's screen harness; not a repaint pin.
+  testWidgets('a reopen behind a landing save shows the workspace but takes '
+      'no input until it lands', (tester) async {
+    final finalizer = RecordingFinalizer.forTesting();
+    final save = Completer<void>();
+    unawaited(finalizer.landing('p1', () => save.future));
+    final vm = await _pumpScreen(tester, finalizer: finalizer);
+    bool absorbing() => tester
+        .widget<AbsorbPointer>(
+          find
+              .ancestor(
+                of: find.byType(BottomDock),
+                matching: find.byType(AbsorbPointer),
+              )
+              .first,
+        )
+        .absorbing;
+
+    expect(vm.catchingUp, isTrue);
+    expect(find.byType(BottomDock), findsOneWidget, reason: 'shown at once');
+    expect(absorbing(), isTrue, reason: 'an edit here would lose a save');
+    expect(find.text('Finishing your last save…'), findsOneWidget);
+
+    save.complete();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(vm.catchingUp, isFalse);
+    expect(absorbing(), isFalse);
+    expect(find.text('Finishing your last save…'), findsNothing);
   });
 }

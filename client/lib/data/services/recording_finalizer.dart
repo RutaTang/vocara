@@ -138,6 +138,24 @@ class RecordingFinalizer {
     ]).timeout(perFinalizerBudget, onTimeout: () => const []);
   }
 
+  /// Completes once nothing of [practiceId] is landing: every tail landing
+  /// now, and any listed while this waits, has settled. No budget — what a
+  /// reopened screen waits on before it takes edits, since its edits merge
+  /// row by row against what it read, and a save landing underneath them
+  /// would win or lose against them outright.
+  Future<void> settled(String practiceId) async {
+    for (
+      var tails = _landing[practiceId];
+      tails != null;
+      tails = _landing[practiceId]
+    ) {
+      await Future.wait([
+        for (final tail in List.of(tails))
+          tail.then<void>((_) {}, onError: (_) {}),
+      ]);
+    }
+  }
+
   /// Waits for [work] for [budget] — and for another [budget] each time the
   /// last one ended with [_progress] moved off [mark] (bytes are still being
   /// copied), up to [progressCeiling] since the quit began. A finalizer making

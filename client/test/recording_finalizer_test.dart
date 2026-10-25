@@ -112,6 +112,32 @@ void main() {
     await save;
   });
 
+  test('settled waits out a landing past the budget, and one listed while '
+      'it waits', () async {
+    final finalizer = RecordingFinalizer.forTesting(
+      perFinalizerBudget: const Duration(milliseconds: 20),
+    );
+    final first = Completer<void>();
+    final second = Completer<void>();
+    unawaited(finalizer.landing('p', () => first.future));
+    var done = false;
+    final settled = finalizer.settled('p').whenComplete(() => done = true);
+    await Future<void>.delayed(const Duration(milliseconds: 60));
+    expect(done, isFalse, reason: 'no budget caps it');
+
+    // landing() hands the finalize's own error back to its caller.
+    final secondLanding = finalizer.landing('p', () => second.future);
+    first.complete();
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(done, isFalse, reason: 'the take listed meanwhile still lands');
+
+    final secondFails = expectLater(secondLanding, throwsStateError);
+    second.completeError(StateError('a failed finalize still settles'));
+    await settled;
+    await secondFails;
+    expect(finalizer.isLanding('p'), isFalse);
+  });
+
   test('a held save that stops progressing is still cut off', () async {
     final finalizer = RecordingFinalizer.forTesting(
       perFinalizerBudget: const Duration(milliseconds: 40),

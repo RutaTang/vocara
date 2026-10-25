@@ -457,49 +457,52 @@ class _WorkspaceState extends State<_Workspace> {
           },
         ),
         Expanded(
-          child: LayoutBuilder(
-            builder: (context, constraints) => Column(
-              children: [
-                Expanded(
-                  child: Row(
-                    children: [
-                      LeftPanel(vm: vm),
-                      Expanded(
-                        child: _Center(
+          child: _CatchUpGuard(
+            catchingUp: vm.catchingUp,
+            child: LayoutBuilder(
+              builder: (context, constraints) => Column(
+                children: [
+                  Expanded(
+                    child: Row(
+                      children: [
+                        LeftPanel(vm: vm),
+                        Expanded(
+                          child: _Center(
+                            vm: vm,
+                            practice: practice,
+                            onDropBacking: _dropBacking,
+                            onDropNewTake: _dropNewTake,
+                            onDropClipToTake: _dropClipToTake,
+                            onAddNote: _addNote,
+                            onAddNoteAt: _addNoteAt,
+                            onEditNote: _editNote,
+                            onAddTechnique: _addTechnique,
+                            onAddTechniqueAt: _addTechniqueAt,
+                            onEditTechnique: _editTechnique,
+                            onDeleteTrack: _deleteTrack,
+                            onContextMenu: _showTrackMenu,
+                            onClipContextMenu: _showClipMenu,
+                          ),
+                        ),
+                        RightPanel(
                           vm: vm,
-                          practice: practice,
-                          onDropBacking: _dropBacking,
-                          onDropNewTake: _dropNewTake,
-                          onDropClipToTake: _dropClipToTake,
                           onAddNote: _addNote,
-                          onAddNoteAt: _addNoteAt,
                           onEditNote: _editNote,
                           onAddTechnique: _addTechnique,
-                          onAddTechniqueAt: _addTechniqueAt,
                           onEditTechnique: _editTechnique,
-                          onDeleteTrack: _deleteTrack,
-                          onContextMenu: _showTrackMenu,
-                          onClipContextMenu: _showClipMenu,
                         ),
-                      ),
-                      RightPanel(
-                        vm: vm,
-                        onAddNote: _addNote,
-                        onEditNote: _editNote,
-                        onAddTechnique: _addTechnique,
-                        onEditTechnique: _editTechnique,
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
-                ),
-                BottomDock(
-                  vm: vm,
-                  tracks: _orderedTracks,
-                  onDeleteTrack: _deleteTrack,
-                  // However tall it is dragged, the timeline keeps its place.
-                  maxHeight: constraints.maxHeight - _kMinTimelineHeight,
-                ),
-              ],
+                  BottomDock(
+                    vm: vm,
+                    tracks: _orderedTracks,
+                    onDeleteTrack: _deleteTrack,
+                    // However tall it is dragged, the timeline keeps its place.
+                    maxHeight: constraints.maxHeight - _kMinTimelineHeight,
+                  ),
+                ],
+              ),
             ),
           ),
         ),
@@ -514,6 +517,41 @@ class _WorkspaceState extends State<_Workspace> {
             child: _SeparationOverlay(
               progress: vm.separationProgress,
               onCancel: vm.cancelSeparation,
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+/// The workspace under the transport while the screen catches up on a save an
+/// earlier screen on this practice left landing (see the view model's
+/// `catchingUp`): shown, dimmed, and taking no input — an edit made on the
+/// read from before that save lands loses either itself or the save. The
+/// transport above stays live, so Back and playback still work.
+class _CatchUpGuard extends StatelessWidget {
+  const _CatchUpGuard({required this.catchingUp, required this.child});
+
+  final bool catchingUp;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      children: [
+        // One subtree either way, so the workspace keeps its state when the
+        // guard lifts.
+        AbsorbPointer(absorbing: catchingUp, child: child),
+        if (catchingUp)
+          const Positioned.fill(
+            child: ColoredBox(
+              color: Color(0x800A0A0E),
+              child: Center(
+                child: Text(
+                  'Finishing your last save…',
+                  style: TextStyle(color: Studio.textSecondary, fontSize: 13),
+                ),
+              ),
             ),
           ),
       ],

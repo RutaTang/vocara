@@ -11,6 +11,7 @@ import 'package:vocara/data/services/graph_audio_playback_service.dart';
 import 'package:vocara/data/services/local_storage_service.dart';
 import 'package:vocara/data/services/mic_recording_controller.dart';
 import 'package:vocara/data/services/playback_engine.dart';
+import 'package:vocara/data/services/recording_finalizer.dart';
 import 'package:vocara/data/services/source_separation_service.dart';
 import 'package:vocara/data/services/spectrogram_service.dart';
 import 'package:vocara/data/services/waveform_service.dart';
@@ -374,6 +375,7 @@ void main() {
   SongPracticeDetailViewModel openVm({
     PlaybackEngine? engine,
     MicRecordingController? mic,
+    RecordingFinalizer? finalizer,
   }) => SongPracticeDetailViewModel(
     repository: repo,
     techniqueRepository: _FakeTechRepo(),
@@ -390,6 +392,7 @@ void main() {
     playbackEngine: engine ?? _FakeEngine(),
     editService: _FakeEdits(),
     mic: mic,
+    finalizer: finalizer,
   );
 
   Future<SongPracticeDetailViewModel> pumpVm({
@@ -931,12 +934,58 @@ void main() {
         .singleWhere((t) => t.id == 'take1')
         .displayName;
     expect(name(), 'Take 1', reason: 'the save has not landed yet');
+    // An edit made on this read would merge against a base from before the
+    // landing save, and lose either itself or the rename.
+    expect(reopened.catchingUp, isTrue, reason: 'takes no edits yet');
+    expect(reopened.busy, isTrue, reason: 'the gate refuses guarded edits');
 
     repo.saveGate!.complete();
     await rename;
-    for (var i = 0; i < 400 && name() != 'Lead'; i++) {
+    for (var i = 0; i < 400 && reopened.catchingUp; i++) {
       await Future<void>.delayed(const Duration(milliseconds: 5));
     }
     expect(name(), 'Lead', reason: 'the landed edit shows without a reopen');
+    expect(reopened.catchingUp, isFalse);
+    expect(reopened.busy, isFalse, reason: 'edits open once caught up');
+  });
+
+  test('a reopen catches up on a save that lands after the finalizer '
+      'budget', () async {
+    // The budget caps a QUIT's wait; capped here too, the screen re-read
+    // before the save landed and never again, showing the old name for good
+    // while its next save fought the landed one.
+    repo = _FakeRepo(_seed());
+    waveforms = _FakeWaveforms();
+    spectrograms = _FakeSpectrograms();
+    final finalizer = RecordingFinalizer.forTesting(
+      perFinalizerBudget: const Duration(milliseconds: 50),
+    );
+    final first = openVm(finalizer: finalizer);
+    for (var i = 0; i < 400 && first.practice == null; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+    repo.saveGate = Completer<void>();
+    final rename = first.renameTrack('take1', 'Lead');
+    await Future<void>.delayed(const Duration(milliseconds: 5));
+    first.dispose();
+
+    final reopened = openVm(finalizer: finalizer);
+    addTearDown(reopened.dispose);
+    for (var i = 0; i < 400 && reopened.practice == null; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+    // Well past the budget, and past the reopen's grace.
+    await Future<void>.delayed(const Duration(milliseconds: 400));
+    expect(reopened.catchingUp, isTrue, reason: 'still landing');
+
+    repo.saveGate!.complete();
+    await rename;
+    for (var i = 0; i < 400 && reopened.catchingUp; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+    final take1 = reopened.practice!.vocalTracks.singleWhere(
+      (t) => t.id == 'take1',
+    );
+    expect(take1.displayName, 'Lead');
   });
 }

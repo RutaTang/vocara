@@ -862,27 +862,29 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   Future<Result<SongPractice>> _load() async {
     // A take stopped, or an edit made, just before the last screen on this
     // practice closed may still be landing (its finalize or save outlives that
-    // screen). A short grace covers an ordinary save; past it the screen
-    // opens on what the store holds now and re-reads once the rest landed —
-    // waiting it all out held every reopen behind a wedged save for the
-    // finalizer's whole budget.
-    Future<void>? stillLanding;
+    // screen). A short grace covers an ordinary save; past it the screen opens
+    // on what the store holds now, but catches up before it takes an edit
+    // (see [_catchUp]) — waiting it all out held every reopen behind a slow
+    // save on a loading spinner.
+    Completer<void>? adopted;
     if (_finalizer.isLanding(_practiceId)) {
-      final landing = _finalizer.landed(_practiceId);
       try {
-        await landing.timeout(_landingGrace);
+        await _finalizer.settled(_practiceId).timeout(_landingGrace);
       } on TimeoutException {
-        stillLanding = landing;
+        adopted = Completer<void>();
+        _catchUp(adopted.future);
       }
     }
     // Load through the base-hash path: the hashes captured here are what every
     // later save three-way merges against (see [_baseHashes]).
     final loaded = await _repository.loadPractice(_practiceId);
     if (loaded is! Ok<Loaded<SongPractice>>) {
+      adopted?.complete();
       return Result.error((loaded as Error<Loaded<SongPractice>>).error);
     }
     final practice = loaded.value.aggregate;
     _adoptLoaded(loaded.value);
+    adopted?.complete();
     // Render the workspace as soon as the project DATA is ready (tracks + cached waveforms), so
     // there is no blank loading screen; the audio engine sync below continues in the background.
     notifyListeners();
@@ -890,17 +892,51 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     analysis.applyDemoHooks(practice.vocalTracks);
     await mixer.resyncPlayback();
     notifyListeners();
-    // The completion runs after this load has settled, so the reload's
-    // `load.running` guard no longer refuses it.
-    if (stillLanding != null) {
-      unawaited(stillLanding.then((_) => _reloadIfUnchanged()));
-    }
     return Result.ok(practice);
   }
 
   /// How long a reopen waits for what the last screen on this practice left
   /// landing before it opens on the store as it is (see [_load]).
   static const Duration _landingGrace = Duration(milliseconds: 300);
+
+  /// True while this screen shows the practice but waits for a save of an
+  /// earlier screen on it to land (see [_catchUp]). Takes no edits meanwhile:
+  /// the screen dims its workspace, and the busy gate refuses recording,
+  /// imports and structural edits.
+  bool get catchingUp => _catchingUp;
+  bool _catchingUp = false;
+
+  /// Holds the busy gate from now until what is landing on this practice has
+  /// settled — however long that takes — then re-reads and adopts the store,
+  /// once [adopted] says the first read was adopted. Every save merges against
+  /// what the screen read, and the merge settles a row both sides changed
+  /// wholesale: an edit made on the read from before the landing save lost
+  /// either itself or the landed change.
+  void _catchUp(Future<void> adopted) {
+    _catchingUp = true;
+    Future<void> reread() async {
+      await Future.wait([_finalizer.settled(_practiceId), adopted]);
+      if (_disposed || _practice == null) return;
+      final loaded = await _repository.loadPractice(_practiceId);
+      if (_disposed || loaded is! Ok<Loaded<SongPractice>>) return;
+      _adoptLoaded(loaded.value);
+      await mixer.resyncPlayback();
+    }
+
+    unawaited(() async {
+      try {
+        // A fresh screen's gate is free; if anything held it, the guarded
+        // reload stays out of that work's way.
+        if (!await _busyGate.run(reread)) {
+          await Future.wait([_finalizer.settled(_practiceId), adopted]);
+          await _reloadIfUnchanged();
+        }
+      } finally {
+        _catchingUp = false;
+        notifyListeners();
+      }
+    }());
+  }
 
   /// Adopts a freshly-read aggregate as the live model: the base hashes the
   /// next save merges against, plus every normalization the model needs before
