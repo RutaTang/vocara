@@ -735,7 +735,11 @@ class SyncApplier {
   (String, String) _deadLetter(SyncRow rec) {
     final safe = <String, Object?>{};
     rec.fields.forEach((k, v) {
-      safe[k] = (v == null || v is num || v is String || v is bool)
+      // A non-finite double is spelled out too: jsonEncode refuses it, and
+      // it is exactly what makes such a record un-encodable in the first
+      // place (see checkColumnTypes).
+      safe[k] =
+          (v == null || (v is num && v.isFinite) || v is String || v is bool)
           ? v
           : v.toString();
     });

@@ -90,6 +90,11 @@ class SyncRow {
           value is! bool) {
         throw FormatException('SyncRow: field "$key" is not a scalar');
       }
+      // jsonDecode spells an overflowing literal (1e999) as ±Infinity, which
+      // no column can hold and no peer can re-encode (see checkColumnTypes).
+      if (value is double && !value.isFinite) {
+        throw FormatException('SyncRow: field "$key" is not a finite number');
+      }
       fields[key] = value;
     }
     if (fields['id'] is! String ||
@@ -408,6 +413,10 @@ void _decodeStringList(Object? body) => List<String>.from(body! as List);
 /// and threw inside a view model — rather than at the door where the record
 /// could still be quarantined with its evidence. `*_json` columns are parsed
 /// too: a malformed body is only detectable there, and it fails the same way.
+/// A REAL must be finite: SQLite stores ±Infinity happily, but the content
+/// hash every repository computes on load refuses it (the practice could no
+/// longer be opened) and no row carrying it can be JSON-encoded again (the
+/// FK sweep's park, a re-push).
 ///
 /// Blob and datetime columns are refused outright: the v1 wire format encodes
 /// scalars only ([SyncRow.fromJson]), so a synced table gaining such a column
@@ -424,7 +433,7 @@ void checkColumnTypes(
     final ok = switch (column.type) {
       DriftSqlType.int || DriftSqlType.bigInt => value is int,
       DriftSqlType.bool => value is bool || value is int,
-      DriftSqlType.double => value is num,
+      DriftSqlType.double => value is num && value.isFinite,
       DriftSqlType.string => value is String,
       _ => false,
     };

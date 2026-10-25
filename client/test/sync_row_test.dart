@@ -124,6 +124,21 @@ void main() {
       expect(() => SyncRow.fromJson(nested), throwsFormatException);
     });
 
+    test('decode rejects a number JSON can only spell as an overflow', () {
+      // jsonDecode turns 1e999 into Infinity: a "scalar" no column can hold
+      // and no peer can re-encode.
+      final json = SyncRow(
+        table: 'practices',
+        fields: _practiceFields('P1', hlc),
+      ).encode();
+      final overflowed = json.replaceFirst(
+        '"master_volume":0.5',
+        '"master_volume":1e999',
+      );
+      expect(overflowed, isNot(json));
+      expect(() => SyncRow.decode(overflowed), throwsFormatException);
+    });
+
     test('decode rejects a payload missing the identity trio in fields', () {
       final fields = _practiceFields('P1', hlc)..remove('hlc_packed');
       final json = {

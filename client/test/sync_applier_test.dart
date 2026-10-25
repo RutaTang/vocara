@@ -940,6 +940,47 @@ void main() {
       );
     });
 
+    test('a non-finite REAL is refused at the value gate (an invalid-value '
+        'dead letter), not landed as a row no repository can hash or the wire '
+        'can encode — and the page still commits', () async {
+      // JSON's 1e999 decodes to Infinity. Landed, it made the practice
+      // unloadable (content hashing refuses non-finite doubles) and, as an
+      // FK orphan, its sweep snapshot could not be encoded — the page rolled
+      // back and the same page failed every pull from then on.
+      final res = await applier.apply([
+        RemoteRecord(
+          table: 'practices',
+          columns: {
+            ...practice('P', 'loud', hlc(900)).columns,
+            'master_volume': double.infinity,
+          },
+        ),
+        practice('Q', 'kept', hlc(901)),
+        RemoteRecord(
+          table: 'tracks',
+          columns: {
+            ...track('T', 'NEVER', hlc(910)).columns,
+            'volume': double.negativeInfinity,
+          },
+        ),
+      ]);
+      expect(res.committed, isTrue, reason: 'the page must still commit');
+      expect(res.applied, 1);
+      expect(res.failed, 2);
+      expect(await row('P'), isNull);
+      expect((await row('Q'))!['title'], 'kept');
+      expect(await trackRow('T'), isNull);
+      // Refused by the value gate, and parked as dead letters: the payload
+      // cannot be JSON-encoded under its own id, so the evidence is kept
+      // spelled out instead (unreplayable either way).
+      final parked = await store.list();
+      expect(parked, hasLength(2));
+      for (final q in parked) {
+        expect(q.reason, startsWith('dead-letter(invalid-value:'));
+        expect(q.payload, contains('Infinity'));
+      }
+    });
+
     test('a CHECK-violating newer state cannot void the FK sweep\'s park — the '
         'row\'s only surviving copy', () async {
       // The audited black hole: an honest clip C@H1 (asset not yet
