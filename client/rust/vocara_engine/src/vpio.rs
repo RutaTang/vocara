@@ -76,7 +76,11 @@ const AEC_BLOCK_FRAMES: u32 = 256;
 const INPUT_LOST_STREAK: u32 = 20;
 /// How long a unit that has not delivered its first frame may fail or come back empty before it
 /// is flagged lost: comfortably longer than a Bluetooth headset's switch to its headset profile,
-/// so a warming-up mic is never a "disconnected" one (see [`DeadCaptureStreak`]).
+/// so a warming-up mic is never a "disconnected" one (see [`DeadCaptureStreak`]). Deliberately
+/// longer than a take arm's ~2 s ready check too: an arm whose mic never delivers is refused by
+/// that check ("not delivering") before this runs out, and a shorter allowance would raise a
+/// loss under a slow-but-healthy warm-up that the take's first poll then stopped. This covers a
+/// unit opened with no arm waiting on it (a selected mic that came back mid-session).
 const INPUT_WARMUP_SECS: f64 = 2.5;
 
 /// The warm-up allowance in frames of the mic element at `rate` (what each dead cycle counts).
