@@ -713,6 +713,8 @@ pub struct EngineHandle {
     /// elapse, since `blocks` only advances while a callback renders). Defaults to `true`
     /// (conservative: without a host the grace-epoch path behaves exactly as before).
     renderer_gate: Arc<Mutex<bool>>,
+    /// A compiled graph held back from the audio thread (see [`stage_graph`](Self::stage_graph)).
+    staged: Option<Box<Graph>>,
     sr: f64,
     max_block: usize,
 }
@@ -837,9 +839,14 @@ impl EngineHandle {
         self.sr
     }
 
-    /// Queue a parameter change (coalesced). Call [`flush`](Self::flush) to publish.
+    /// Queue a parameter change (coalesced). Call [`flush`](Self::flush) to publish. While a
+    /// graph is staged the change lands on it directly instead (see
+    /// [`stage_graph`](Self::stage_graph)).
     pub fn set_param(&mut self, node: NodeId, param: u16, value: f32) {
-        self.cmd_tx.set(node, param, value);
+        match self.staged.as_mut() {
+            Some(g) => g.set_param(node, param, value),
+            None => self.cmd_tx.set(node, param, value),
+        }
     }
     pub fn flush(&mut self) {
         self.cmd_tx.flush();
@@ -867,8 +874,37 @@ impl EngineHandle {
     /// Hot-swap the live graph (e.g. after adding a send or a track). The old graph is freed
     /// on this (control) thread after a one-block grace epoch — never on the audio thread.
     pub fn publish_graph(&mut self, graph: Graph) {
+        self.publish_boxed(Box::new(graph));
+    }
+
+    /// Hold `graph` back from the audio thread while its parameters are set: until
+    /// [`publish_staged`](Self::publish_staged), [`set_param`](Self::set_param) applies to it
+    /// right here on the control thread instead of crossing the command ring. A rebuilt graph
+    /// starts every node at its build defaults and the host re-pushes each live value right
+    /// after the commit; published first, the audio thread rendered those defaults for the
+    /// blocks the storm took to land, and every smoother then ramped away from them. Staged,
+    /// the first rendered block already carries every value (and each smoother snaps to it —
+    /// nothing has been heard yet). The previously live graph keeps playing meanwhile.
+    pub fn stage_graph(&mut self, graph: Graph) {
+        debug_assert!(self.staged.is_none(), "publish the staged graph first");
+        self.staged = Some(Box::new(graph));
+    }
+
+    /// Hot-swap the staged graph in (see [`publish_graph`](Self::publish_graph)). Returns
+    /// whether one was staged.
+    pub fn publish_staged(&mut self) -> bool {
+        match self.staged.take() {
+            Some(g) => {
+                self.publish_boxed(g);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn publish_boxed(&mut self, graph: Box<Graph>) {
         debug_assert_eq!(graph.max_block(), self.max_block);
-        let retired = self.cell.publish(Box::new(graph));
+        let retired = self.cell.publish(graph);
         let safe_after = self.shared.blocks.load(Ordering::Acquire) + 2;
         self.retired.push((retired, safe_after));
         self.reap();
@@ -963,6 +999,7 @@ pub fn spawn(
         sources: producers,
         retired: Vec::new(),
         renderer_gate: Arc::new(Mutex::new(true)),
+        staged: None,
         sr,
         max_block,
     };

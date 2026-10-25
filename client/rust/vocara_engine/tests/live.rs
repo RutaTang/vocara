@@ -184,6 +184,10 @@ fn a_post_commit_parameter_storm_reaches_the_graph_within_a_few_blocks() {
         let (mut h, mut rt) = spawn(g, producers, mic_cons, CMD_RING_CAPACITY);
         h.push_pcm(1, &frames_dc(0.8, 65536));
         h.play();
+        // One block first, so the master is live in both runs: a smoother that has not been
+        // heard yet snaps to its first target, which would make the lone mute instant.
+        let mut out = vec![0.0; BLOCK * CHANNELS];
+        rt.process(&mut out, BLOCK);
         for clip in 0..storm_clips {
             for p in 0..58u16 {
                 // Unknown params (RingSource ignores them): padding in the storm's shape.
@@ -193,7 +197,6 @@ fn a_post_commit_parameter_storm_reaches_the_graph_within_a_few_blocks() {
         }
         h.set_param(2, mparam::GAIN, 0.0); // the storm's LAST command
         h.flush();
-        let mut out = vec![0.0; BLOCK * CHANNELS];
         for blocks in 1..=400 {
             rt.process(&mut out, BLOCK);
             if rms(&out) < 1e-3 {
@@ -409,4 +412,49 @@ fn a_parameter_sent_after_a_publish_reaches_the_new_graph() {
         lost, 0,
         "{lost}/{rounds} post-publish parameters hit the retired graph"
     );
+}
+
+#[test]
+fn a_staged_graph_goes_live_with_its_parameters_already_in_place() {
+    // A commit's graph used to be published first and its live values pushed after it, so
+    // the audio thread rendered the build defaults — and every smoother ramped away from
+    // them — for the blocks that re-push took to land. Staged, the values land on the graph
+    // itself, the live graph keeps playing meanwhile, and the first block it renders after
+    // going live already carries them.
+    use vocara_engine::BufferSource;
+    let (mut h, mut rt, src) = one_source_engine();
+    h.push_pcm(src, &frames_dc(0.5, 8192));
+    h.play();
+    let mut out = vec![0.0; BLOCK * CHANNELS];
+    rt.process(&mut out, BLOCK);
+
+    let desc = GraphDesc {
+        nodes: vec![
+            NodeEntry::new(1, Box::new(BufferSource::new(vec![0.5; 16_384], 0))),
+            NodeEntry::new(2, Box::new(MasterNode::unity())), // build default: unity
+        ],
+        edges: vec![Edge::simple(1, 2)],
+        master: 2,
+    };
+    h.stage_graph(desc.compile(SR, BLOCK).unwrap());
+    h.set_param(2, mparam::GAIN, 0.25); // the host's post-commit re-push
+    h.flush();
+
+    rt.process(&mut out, BLOCK);
+    assert!(
+        out.iter().all(|&x| (x - 0.5).abs() < 1e-6),
+        "the live graph keeps playing, untouched, while the new one is staged"
+    );
+
+    assert!(h.publish_staged());
+    rt.process(&mut out, BLOCK);
+    let worst = out
+        .iter()
+        .map(|&x| (x - 0.125).abs())
+        .fold(0.0f32, f32::max);
+    assert!(
+        worst < 1e-6,
+        "the first live block must already play the staged gain (worst error {worst})"
+    );
+    assert!(!h.publish_staged(), "nothing left to publish");
 }

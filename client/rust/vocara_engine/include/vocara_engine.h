@@ -167,6 +167,12 @@ int ve_tracks_begin(VeEngine *e);
 int ve_tracks_add(VeEngine *e, const char *path, int64_t start_ms, float gain, int muted,
                   int is_vocal, int bus);
 int ve_tracks_commit(VeEngine *e);
+/* ve_tracks_commit, but the new graph is held back from the audio thread until
+ * ve_tracks_publish: every ve_set_* in between applies to it directly, so its first rendered
+ * block already carries the re-pushed live values instead of the build defaults. The previous
+ * graph keeps playing meanwhile. ve_tracks_publish is a no-op when nothing is staged. */
+int ve_tracks_commit_staged(VeEngine *e);
+int ve_tracks_publish(VeEngine *e);
 int ve_set_track_volume(VeEngine *e, int index, float gain, int muted);
 /* Live stereo pan for a committed track ([-1, 1]; 0 = center). */
 int ve_set_pan(VeEngine *e, int index, float pan);

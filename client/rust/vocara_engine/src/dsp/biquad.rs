@@ -326,6 +326,9 @@ pub mod param {
 pub struct EqNode {
     bands: Vec<Band>,
     sr: f64,
+    /// Whether any audio has run through the bands. Until then a band edit applies directly:
+    /// a rebuilt graph's re-pushed EQ must not cross-fade in from the flat build default.
+    heard: bool,
 }
 
 impl EqNode {
@@ -335,6 +338,7 @@ impl EqNode {
         EqNode {
             bands: specs.iter().map(|s| Band::new(*s, sr)).collect(),
             sr,
+            heard: false,
         }
     }
 
@@ -366,8 +370,13 @@ impl EqNode {
 
     /// Reconfigure a band (used by tests and the control plane).
     pub fn set_band(&mut self, index: usize, spec: BandSpec) {
+        let (heard, sr) = (self.heard, self.sr);
         if let Some(b) = self.bands.get_mut(index) {
-            b.set_spec(spec);
+            if heard {
+                b.set_spec(spec);
+            } else {
+                *b = Band::new(spec, sr);
+            }
         }
     }
 }
@@ -395,6 +404,7 @@ impl Node for EqNode {
                 }
             }
         }
+        self.heard = true;
         for band in &mut self.bands {
             band.process(out, frames);
         }
@@ -403,7 +413,7 @@ impl Node for EqNode {
     fn set_param(&mut self, param: u16, value: f32) {
         let idx = (param >> param::FIELD_BITS) as usize;
         let field = param & ((1 << param::FIELD_BITS) - 1);
-        if let Some(b) = self.bands.get_mut(idx) {
+        if let Some(b) = self.bands.get(idx) {
             let mut spec = b.spec;
             match field {
                 param::FREQ => spec.freq = value,
@@ -412,7 +422,7 @@ impl Node for EqNode {
                 param::ENABLED => spec.enabled = value >= 0.5,
                 _ => return,
             }
-            b.set_spec(spec);
+            self.set_band(idx, spec);
         }
     }
 

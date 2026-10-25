@@ -533,3 +533,114 @@ fn saturation_matches_its_waveshaper_formula() {
         );
     }
 }
+
+#[test]
+fn a_freshly_built_node_starts_from_its_first_values_instead_of_ramping_from_defaults() {
+    // A rebuilt graph starts every node at its build defaults (master 1.0, pans centred,
+    // compressor makeup 0, flat EQ, shared-reverb wet 1) and the host then pushes each live
+    // value. set_param only moved a smoother's TARGET, so the first ~30 ms of audio after
+    // every rebuild glided in from the defaults — a quarter-volume master played at up to
+    // +12 dB, pans swept in from the centre. Nothing had been heard yet to glide from.
+    use vocara_engine::dsp::biquad::param as eqparam;
+    use vocara_engine::dsp::gain_pan::PanNode;
+    use vocara_engine::dsp::master::{param as mparam, MasterNode};
+    use vocara_engine::dsp::reverb::param as rparam;
+    let block = 256;
+    let input = to_stereo(&sine_mono(700.0, SR, 16 * block, 0.5));
+    // The first 8 blocks: long enough for the reverb's combs (~1200+ frames) to speak while
+    // a 10 ms ramp from the default would still be audible.
+    let first = |node: &mut dyn Node| {
+        let out = run_phase(node, &input, SR, block);
+        out[..8 * block * CHANNELS].to_vec()
+    };
+    let max_diff = |a: &[f32], b: &[f32]| {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0f32, f32::max)
+    };
+    // (what, set after the build, built with the value)
+    type Pair = (&'static str, Box<dyn Node>, Box<dyn Node>);
+    let pairs: Vec<Pair> = vec![
+        (
+            "master gain",
+            {
+                let mut m = MasterNode::new(1.0, false);
+                m.prepare(SR, block);
+                m.set_param(mparam::GAIN, 0.25);
+                Box::new(m)
+            },
+            {
+                let mut m = MasterNode::new(0.25, false);
+                m.prepare(SR, block);
+                Box::new(m)
+            },
+        ),
+        (
+            "pan",
+            {
+                let mut p = PanNode::new(0.0);
+                p.prepare(SR, block);
+                p.set_param(gparam::PAN, -0.8);
+                Box::new(p)
+            },
+            {
+                let mut p = PanNode::new(-0.8);
+                p.prepare(SR, block);
+                Box::new(p)
+            },
+        ),
+        (
+            "compressor makeup",
+            {
+                let mut c = CompressorNode::new(0.0, 1.0, 0.0, 10.0, 100.0, 0.0);
+                c.prepare(SR, block);
+                c.set_param(cparam::MAKEUP_DB, 6.0);
+                Box::new(c)
+            },
+            {
+                let mut c = CompressorNode::new(0.0, 1.0, 0.0, 10.0, 100.0, 6.0);
+                c.prepare(SR, block);
+                Box::new(c)
+            },
+        ),
+        (
+            "eq band",
+            {
+                let mut e = EqNode::default_strip();
+                e.prepare(SR, block);
+                e.set_param((2 << eqparam::FIELD_BITS) | eqparam::GAIN_DB, 9.0);
+                Box::new(e)
+            },
+            {
+                let mut e = EqNode::default_strip();
+                e.set_band(2, BandSpec::peaking(700.0, 1.0, 9.0));
+                e.prepare(SR, block);
+                Box::new(e)
+            },
+        ),
+        (
+            "shared reverb wet",
+            {
+                let mut r = ReverbNode::default_bus();
+                r.prepare(SR, block);
+                r.set_param(rparam::WET, 0.25);
+                Box::new(r)
+            },
+            {
+                let mut r = ReverbNode::new(0.5, 0.5, 0.25, 0.0, 1.0);
+                r.prepare(SR, block);
+                Box::new(r)
+            },
+        ),
+    ];
+    for (name, mut set_after_build, mut built_with) in pairs {
+        let a = first(set_after_build.as_mut());
+        let b = first(built_with.as_mut());
+        let d = max_diff(&a, &b);
+        assert!(
+            d < 1e-5,
+            "{name}: the first blocks glided from the default (diff {d})"
+        );
+    }
+}

@@ -702,6 +702,32 @@ class VocaraEngineBindings {
   late final _ve_tracks_commit = _ve_tracks_commitPtr
       .asFunction<int Function(ffi.Pointer<VeEngine>)>();
 
+  /// ve_tracks_commit, but the new graph is held back from the audio thread until
+  /// ve_tracks_publish: every ve_set_* in between applies to it directly, so its first rendered
+  /// block already carries the re-pushed live values instead of the build defaults. The previous
+  /// graph keeps playing meanwhile. ve_tracks_publish is a no-op when nothing is staged.
+  int ve_tracks_commit_staged(ffi.Pointer<VeEngine> e) {
+    return _ve_tracks_commit_staged(e);
+  }
+
+  late final _ve_tracks_commit_stagedPtr =
+      _lookup<ffi.NativeFunction<ffi.Int Function(ffi.Pointer<VeEngine>)>>(
+        've_tracks_commit_staged',
+      );
+  late final _ve_tracks_commit_staged = _ve_tracks_commit_stagedPtr
+      .asFunction<int Function(ffi.Pointer<VeEngine>)>();
+
+  int ve_tracks_publish(ffi.Pointer<VeEngine> e) {
+    return _ve_tracks_publish(e);
+  }
+
+  late final _ve_tracks_publishPtr =
+      _lookup<ffi.NativeFunction<ffi.Int Function(ffi.Pointer<VeEngine>)>>(
+        've_tracks_publish',
+      );
+  late final _ve_tracks_publish = _ve_tracks_publishPtr
+      .asFunction<int Function(ffi.Pointer<VeEngine>)>();
+
   int ve_set_track_volume(
     ffi.Pointer<VeEngine> e,
     int index,

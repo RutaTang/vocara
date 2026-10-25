@@ -23,7 +23,7 @@ import 'package:vocara/data/ffi/vocara_engine_bindings.dart';
 import 'package:vocara/data/services/graph_audio_playback_service.dart';
 import 'package:vocara/data/services/playback_engine.dart';
 
-/// Fake engine bindings: records what each `ve_tracks_commit` committed (as
+/// Fake engine bindings: records what each `ve_tracks_commit_staged` committed (as
 /// the staged file paths, in staging order) and feeds scripted degraded
 /// masks. Anything the sync pipeline calls beyond these stubs throws via
 /// [Fake], so an unexpected FFI call fails the test instead of hiding.
@@ -38,13 +38,16 @@ class _FakeBindings extends Fake implements VocaraEngineBindings {
   /// (empty = 0, the healthy answer).
   final List<int> degradedMasks = [];
 
-  /// Scripted `ve_tracks_commit` results, consumed front-first (empty = 0,
+  /// Scripted `ve_tracks_commit_staged` results, consumed front-first (empty = 0,
   /// accepted). A non-zero result models the engine REJECTING the topology
   /// and keeping its old graph; only accepted commits land in [commits].
   final List<int> commitResults = [];
 
   /// Decoded buffers handed back through `ve_free_decoded`.
   int frees = 0;
+
+  /// Commit, publish and live-value calls in call order.
+  final List<String> events = [];
 
   final List<String> _staging = [];
 
@@ -101,10 +104,17 @@ class _FakeBindings extends Fake implements VocaraEngineBindings {
   }
 
   @override
-  int ve_tracks_commit(ffi.Pointer<VeEngine> e) {
+  int ve_tracks_commit_staged(ffi.Pointer<VeEngine> e) {
     final result = commitResults.isEmpty ? 0 : commitResults.removeAt(0);
     if (result == 0) commits.add(List.of(_staging));
+    events.add('commit');
     return result;
+  }
+
+  @override
+  int ve_tracks_publish(ffi.Pointer<VeEngine> e) {
+    events.add('publish');
+    return 0;
   }
 
   @override
@@ -117,7 +127,10 @@ class _FakeBindings extends Fake implements VocaraEngineBindings {
     int index,
     double gain,
     int muted,
-  ) => 0;
+  ) {
+    events.add('volume');
+    return 0;
+  }
 
   @override
   int ve_set_bus_volume(
@@ -134,7 +147,10 @@ class _FakeBindings extends Fake implements VocaraEngineBindings {
   int ve_set_bus_pan(ffi.Pointer<VeEngine> e, int bus, double pan) => 0;
 
   @override
-  int ve_set_master(ffi.Pointer<VeEngine> e, double gain) => 0;
+  int ve_set_master(ffi.Pointer<VeEngine> e, double gain) {
+    events.add('master');
+    return 0;
+  }
 
   @override
   void ve_free_decoded(ffi.Pointer<ffi.Float> ptr, int frames) => frees++;
@@ -159,6 +175,31 @@ void main() {
       expect(GraphAudioPlaybackService.bitCount((1 << 63) | 0x3), 3);
       expect(GraphAudioPlaybackService.bitCount(-1), 64);
     });
+  });
+
+  test('a rebuild sets its live values on the staged graph before it goes '
+      'live', () async {
+    // A rebuilt graph starts every node at its build defaults. Published at
+    // the commit, the engine rendered those defaults (and every smoother ramped
+    // away from them) for the blocks the re-push took to land; staged, the
+    // graph goes live only once each value is already set.
+    final fake = _FakeBindings()..cachedPaths.add('a.wav');
+    final svc = GraphAudioPlaybackService.withBindings(
+      fake,
+      decode: (path, rate) async => (0x1000, 10),
+    );
+    addTearDown(svc.dispose);
+
+    await svc.sync(const [TrackPlayback(id: 'a', path: 'a.wav')], const []);
+    expect(fake.events, ['commit', 'volume', 'master', 'publish']);
+
+    // A rejected topology stages nothing, so there is nothing to publish.
+    fake.events.clear();
+    fake.commitResults.add(-1);
+    await svc.sync(const [
+      TrackPlayback(id: 'a', path: 'a.wav', startMs: 10),
+    ], const []);
+    expect(fake.events, ['commit']);
   });
 
   group('per-track staging skip', () {

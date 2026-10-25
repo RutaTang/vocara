@@ -5,6 +5,8 @@ pub struct Smoothed {
     cur: f32,
     target: f32,
     coef: f32,
+    /// Whether the value has been used for audio yet (any [`next`](Self::next) call).
+    live: bool,
 }
 
 impl Smoothed {
@@ -13,6 +15,7 @@ impl Smoothed {
             cur: v,
             target: v,
             coef: 1.0,
+            live: false,
         }
     }
 
@@ -21,9 +24,16 @@ impl Smoothed {
         self.coef = 1.0 - (-1.0 / (tau_s.max(1.0e-5) * sr as f32)).exp();
     }
 
+    /// Ramp toward `t` — or jump straight to it while nothing has been heard yet. A rebuilt
+    /// graph starts every node at its build defaults and the host then pushes each live
+    /// value; ramping those in made the first ~30 ms after every rebuild glide from the
+    /// defaults (a quarter-volume master at up to +12 dB, pans sweeping in from the centre).
     #[inline]
     pub fn set_target(&mut self, t: f32) {
         self.target = t;
+        if !self.live {
+            self.cur = t;
+        }
     }
 
     /// Jump immediately to `v` (used during pre-roll / reset, no ramp).
@@ -37,6 +47,7 @@ impl Smoothed {
     #[allow(clippy::should_implement_trait)]
     #[inline]
     pub fn next(&mut self) -> f32 {
+        self.live = true;
         self.cur += (self.target - self.cur) * self.coef;
         self.cur
     }

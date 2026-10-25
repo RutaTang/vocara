@@ -85,6 +85,12 @@ struct PendingBus {
     sends: Vec<(i32, f32)>,
 }
 
+/// A staged commit's feeders and their stream control blocks.
+type StagedFeeders = (
+    Vec<crate::feed::TrackFeeder>,
+    Vec<Arc<crate::feed::StreamCtrl>>,
+);
+
 pub struct VeEngine {
     // Declared first so it drops first: dropping `host` stops the stream and joins the audio
     // thread (the RT side is gone) before `handle` reclaims any retired graphs.
@@ -179,6 +185,10 @@ pub struct VeEngine {
     /// consecutive pumps before the feeder is dropped (one transient EIO
     /// used to permanently silence the track).
     feeders: Arc<std::sync::Mutex<Vec<Arc<std::sync::Mutex<FeederSlot>>>>>,
+    /// The feeders (and their control blocks) of a commit staged by
+    /// `ve_tracks_commit_staged`: installed when its graph goes live, while the live
+    /// graph's own keep streaming.
+    staged_feeders: Option<StagedFeeders>,
     /// The live graph's stream control blocks, kept SEPARATE from the
     /// feeders: `ve_stream_xruns` sums these, so a dropped feeder's
     /// underruns stay in the total — removal used to make the aggregate
@@ -573,6 +583,7 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
             gr_meters: Vec::new(),
             bus_gr_meters: Vec::new(),
             feeders: Arc::new(std::sync::Mutex::new(Vec::new())),
+            staged_feeders: None,
             stream_ctrls: Vec::new(),
             retired_xruns: 0,
             degraded_mask: 0,
@@ -1495,9 +1506,63 @@ fn stage_sends(
 
 /// Build the multi-source graph from the staged tracks and hot-swap it in (transport state
 /// preserved). Each track: Source(@start) -> Gain -> Pan -> Master. Returns 0 / negative.
+/// Parameters set afterwards reach the live graph through the command ring; a host that
+/// re-pushes every live value after a commit wants [`ve_tracks_commit_staged`] instead.
 #[no_mangle]
 pub extern "C" fn ve_tracks_commit(e: *mut VeEngine) -> c_int {
+    let r = ve_tracks_commit_staged(e);
+    ve_tracks_publish(e);
+    r
+}
+
+/// Put the graph [`ve_tracks_commit_staged`] built live. A no-op when nothing is staged.
+#[no_mangle]
+pub extern "C" fn ve_tracks_publish(e: *mut VeEngine) -> c_int {
     with_engine(e, -1, |eng| {
+        publish_staged_commit(eng);
+        0
+    })
+}
+
+/// Put a staged commit live: hot-swap its graph in, then hand its feeders the streaming.
+fn publish_staged_commit(eng: &mut VeEngine) {
+    if !eng.handle.publish_staged() {
+        return;
+    }
+    let (new_feeders, new_ctrls) = eng.staged_feeders.take().unwrap_or_default();
+    // Swap the feeder set; the pump thread exists only while needed. The
+    // control blocks are recorded separately so ve_stream_xruns keeps
+    // counting a track whose feeder is later dropped.
+    let retired: u64 = eng
+        .stream_ctrls
+        .iter()
+        .map(|c| c.xruns.load(std::sync::atomic::Ordering::Relaxed))
+        .sum();
+    eng.retired_xruns = eng.retired_xruns.saturating_add(retired);
+    eng.stream_ctrls = new_ctrls;
+    let slots: Vec<_> = new_feeders
+        .into_iter()
+        .map(|f| Arc::new(std::sync::Mutex::new(FeederSlot::new(f))))
+        .collect();
+    let mut feeders = eng.feeders.lock().unwrap();
+    *feeders = slots;
+    let active = !feeders.is_empty();
+    drop(feeders);
+    if active {
+        eng.ensure_feeder_thread();
+        eng.wake_feeders();
+    }
+}
+
+/// [`ve_tracks_commit`], but the new graph is held back from the audio thread until
+/// [`ve_tracks_publish`]: every ve_set_* in between applies to it directly, so its first
+/// rendered block already carries the re-pushed live values instead of the build defaults
+/// (see `EngineHandle::stage_graph`). The previous graph keeps playing meanwhile.
+#[no_mangle]
+pub extern "C" fn ve_tracks_commit_staged(e: *mut VeEngine) -> c_int {
+    with_engine(e, -1, |eng| {
+        // A staged commit the host never published goes live before its successor builds.
+        publish_staged_commit(eng);
         let rate = eng.handle.sample_rate();
         let mut new_feeders: Vec<crate::feed::TrackFeeder> = Vec::new();
         let mut new_ctrls: Vec<Arc<crate::feed::StreamCtrl>> = Vec::new();
@@ -1646,39 +1711,19 @@ pub extern "C" fn ve_tracks_commit(e: *mut VeEngine) -> c_int {
                 f.pump_at_most(&transport, PAUSED_PRIME_FRAMES)
             };
         }
-        eng.handle.publish_graph(graph);
-        // Swap the feeder set; the pump thread exists only while needed. The
-        // control blocks are recorded separately so ve_stream_xruns keeps
-        // counting a track whose feeder is later dropped.
-        let retired: u64 = eng
-            .stream_ctrls
-            .iter()
-            .map(|c| c.xruns.load(std::sync::atomic::Ordering::Relaxed))
-            .sum();
-        eng.retired_xruns = eng.retired_xruns.saturating_add(retired);
-        eng.stream_ctrls = new_ctrls;
+        // Staged, not yet live: the setters' node lookups below must already address the
+        // new graph, while the old one (and its feeders) keeps playing until the publish.
+        eng.handle.stage_graph(graph);
+        eng.staged_feeders = Some((new_feeders, new_ctrls));
         eng.degraded_mask = degraded;
-        {
-            let slots: Vec<_> = new_feeders
-                .into_iter()
-                .map(|f| Arc::new(std::sync::Mutex::new(FeederSlot::new(f))))
-                .collect();
-            let mut feeders = eng.feeders.lock().unwrap();
-            *feeders = slots;
-            let active = !feeders.is_empty();
-            drop(feeders);
-            if active {
-                eng.ensure_feeder_thread();
-                eng.wake_feeders();
-            }
-        }
         eng.track_gain_nodes = (0..n).map(|i| build::gain_id((i + 1) as u32)).collect();
         eng.gr_meters = meters;
         eng.bus_gr_meters = bus_meters;
-        // The new graph is live: evict cached PCM for paths no longer in it (with a bounded
-        // keep-alive for quick re-staging), so the cache can't grow unbounded across a
-        // session. Only on success — a rejected topology keeps the OLD graph, whose paths
-        // must stay cached.
+        // The new graph is committed: evict cached PCM for paths no longer in it (with a
+        // bounded keep-alive for quick re-staging), so the cache can't grow unbounded across
+        // a session. Only on success — a rejected topology keeps the OLD graph, whose paths
+        // must stay cached. (The old graph pins its own samples through its Arcs until it
+        // retires, so evicting here never pulls audio from under it.)
         let live: std::collections::HashSet<&str> =
             eng.pending.iter().map(|p| p.path.as_str()).collect();
         cache_retain(&mut eng.cache, &live, CACHE_KEEP_BYTES);

@@ -839,7 +839,7 @@ class GraphAudioPlaybackService implements PlaybackEngine {
     // index maps — otherwise an identical re-sync short-circuits on _committedSig
     // and never retries, and the cached indices diverge from the live graph.
     // Leave the prior committed state intact so a corrected topology rebuilds.
-    if (_bindings.ve_tracks_commit(_engine) != 0) return;
+    if (_bindings.ve_tracks_commit_staged(_engine) != 0) return;
     _trackIndex
       ..clear()
       ..addAll(newIndex);
@@ -887,8 +887,15 @@ class GraphAudioPlaybackService implements PlaybackEngine {
       _committedSig = sig;
     }
 
-    // The rebuild reset every node to defaults — re-apply persisted effects + levels.
-    _pushLiveParams(tracks, buses);
+    // The rebuild reset every node to defaults — re-apply persisted effects + levels. The
+    // new graph is still staged, so these land on it before it renders anything (its first
+    // block already plays the mix as set, instead of the build defaults ramping into it),
+    // and only then does it go live.
+    try {
+      _pushLiveParams(tracks, buses);
+    } finally {
+      _bindings.ve_tracks_publish(_engine);
+    }
   }
 
   /// Pushes every parameter the engine can change WITHOUT rebuilding the graph: track and bus

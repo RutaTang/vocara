@@ -82,6 +82,9 @@ pub struct DeEsserNode {
     xfading: bool,
     xmix: f32,
     xinc: f32,
+    /// Whether the crossover has run on audio. Until then a FREQ change retunes directly:
+    /// there is no filter history to cross-fade from.
+    heard: bool,
     freq: f32,
     // Smoothed so a threshold/range knob drag or automation ramps the high-band reduction
     // instead of stepping it per block (zipper/click). Mirrors the compressor's threshold.
@@ -104,6 +107,7 @@ impl DeEsserNode {
             xfading: false,
             xmix: 0.0,
             xinc: 1.0 / XFADE_FRAMES,
+            heard: false,
             freq: 6500.0,
             threshold: Smoothed::new(-28.0),
             range: Smoothed::new(12.0),
@@ -226,6 +230,7 @@ impl Node for DeEsserNode {
         if self.bypass {
             return;
         }
+        self.heard = true;
 
         for i in 0..frames {
             let l = out[CHANNELS * i];
@@ -282,7 +287,11 @@ impl Node for DeEsserNode {
         match param {
             param::FREQ => {
                 self.freq = value.clamp(2000.0, 16000.0);
-                self.retune_xfade();
+                if self.heard {
+                    self.retune_xfade();
+                } else {
+                    self.retune_now();
+                }
             }
             param::THRESHOLD_DB => self.threshold.set_target(value),
             param::RANGE_DB => self.range.set_target(value.max(0.0)),
