@@ -500,6 +500,8 @@ pub struct Aec {
     e_im: Box<[f32]>,    // length N
     g_re: Box<[f32]>,    // length N: per-partition gradient scratch (time<->freq for constraint)
     g_im: Box<[f32]>,    // length N
+    q_re: Box<[f32]>,    // length half: the second gradient of a constraint pair
+    q_im: Box<[f32]>,    // length half
     eblk_fg: Box<[f32]>, // length B: foreground residual (the output candidate)
     eblk_bg: Box<[f32]>, // length B: background residual (for the copy decision)
 
@@ -644,6 +646,8 @@ impl Aec {
             e_im: zeros(fftn),
             g_re: zeros(fftn),
             g_im: zeros(fftn),
+            q_re: zeros(half),
+            q_im: zeros(half),
             eblk_fg: zeros(block),
             eblk_bg: zeros(block),
 
@@ -1317,42 +1321,7 @@ impl Aec {
             let delta = REG_REL * mean_pow + REG_ABS;
 
             // Update each partition of the BACKGROUND filter, then gradient-constrain it.
-            for p in 0..parts {
-                let xs = ((self.head + p) % parts) * half;
-                let ws = p * half;
-
-                // Frequency-domain gradient: conj(X) * E, power-normalized per bin.
-                // Build the full-N gradient spectrum into g_re/g_im (reused scratch).
-                for k in 0..half {
-                    let xr = self.x_re[xs + k];
-                    let xi = self.x_im[xs + k];
-                    let er = self.e_re[k];
-                    let ei = self.e_im[k];
-                    let norm = mu_eff / (self.pxx[k] + delta);
-                    // conj(X) * E = (xr - i xi)(er + i ei)
-                    self.g_re[k] = norm * (xr * er + xi * ei);
-                    self.g_im[k] = norm * (xr * ei - xi * er);
-                }
-                Self::hermitian_expand(&mut self.g_re, &mut self.g_im, n, half);
-
-                // Gradient constraint: IFFT, keep only the first B taps (causal length-B),
-                // zero the last B, FFT back. This is the "constrained FDAF" step that removes
-                // circular-convolution leakage and is what keeps the filter stable.
-                self.fft.transform(&mut self.g_re, &mut self.g_im, true);
-                for i in b..n {
-                    self.g_re[i] = 0.0;
-                    self.g_im[i] = 0.0;
-                }
-                self.fft.transform(&mut self.g_re, &mut self.g_im, false);
-
-                // Leaky update of the background weights.
-                for k in 0..half {
-                    let wr = LEAK * self.wbg_re[ws + k] + self.g_re[k];
-                    let wi = LEAK * self.wbg_im[ws + k] + self.g_im[k];
-                    self.wbg_re[ws + k] = sanitize(wr);
-                    self.wbg_im[ws + k] = sanitize(wi);
-                }
-            }
+            self.update_background(mu_eff, delta);
         }
 
         // ----- 8) Dual-filter copy logic -----
@@ -1387,6 +1356,143 @@ impl Aec {
         // Save this block's mic as the next block's overlap-save history for the suppressor's
         // [mic_prev | mic_cur] framing. (Done last; the suppressor above consumed the OLD mic_prev.)
         self.mic_prev.copy_from_slice(&self.in_mic[..b]);
+    }
+
+    /// Step 7's update of every BACKGROUND partition from the error spectrum in e_re/e_im:
+    /// the power-normalized gradient conj(X_p) * E, constrained back to a causal length-B filter,
+    /// then a leaky weight update.
+    ///
+    /// The constraint (IFFT, zero the last B taps, FFT) is two FFTs per partition: 94 of the ~99
+    /// a block cost at the 250 ms tail, most of the AEC's time on the audio thread. Every gradient
+    /// is the spectrum of a REAL signal, so one complex transform pair constrains two of them:
+    /// Z = G_p + i*G_q transforms to g_p + i*g_q, the truncation acts on the two parts separately,
+    /// and the conjugate-symmetry split takes G_p' = (Z'[k] + conj(Z'[N-k])) / 2 and G_q' =
+    /// (Z'[k] - conj(Z'[N-k])) / 2i back out. The maths is that of one transform pair per
+    /// partition; only the rounding differs. With an odd partition count, partition 0 is
+    /// constrained on its own.
+    fn update_background(&mut self, mu_eff: f32, delta: f32) {
+        let mut p = 0;
+        if self.parts % 2 == 1 {
+            self.update_background_one(0, mu_eff, delta);
+            p = 1;
+        }
+        while p < self.parts {
+            self.update_background_pair(p, p + 1, mu_eff, delta);
+            p += 2;
+        }
+    }
+
+    /// One partition's update with its own constraint transforms (see [`Self::update_background`]).
+    fn update_background_one(&mut self, p: usize, mu_eff: f32, delta: f32) {
+        let (b, n, half) = (self.block, self.fftn, self.half);
+        let xs = ((self.head + p) % self.parts) * half;
+        let ws = p * half;
+        normalized_gradient(
+            &self.x_re[xs..xs + half],
+            &self.x_im[xs..xs + half],
+            &self.e_re[..half],
+            &self.e_im[..half],
+            &self.pxx,
+            mu_eff,
+            delta,
+            &mut self.g_re[..half],
+            &mut self.g_im[..half],
+        );
+        Self::hermitian_expand(&mut self.g_re, &mut self.g_im, n, half);
+
+        // Gradient constraint: IFFT, keep only the first B taps (causal length-B), zero the last
+        // B, FFT back. This is the "constrained FDAF" step that removes circular-convolution
+        // leakage and is what keeps the filter stable.
+        self.fft.transform(&mut self.g_re, &mut self.g_im, true);
+        for i in b..n {
+            self.g_re[i] = 0.0;
+            self.g_im[i] = 0.0;
+        }
+        self.fft.transform(&mut self.g_re, &mut self.g_im, false);
+
+        // Leaky update of the background weights.
+        for k in 0..half {
+            let wr = LEAK * self.wbg_re[ws + k] + self.g_re[k];
+            let wi = LEAK * self.wbg_im[ws + k] + self.g_im[k];
+            self.wbg_re[ws + k] = sanitize(wr);
+            self.wbg_im[ws + k] = sanitize(wi);
+        }
+    }
+
+    /// Partitions `p` and `q` updated through ONE constraint transform pair (see
+    /// [`Self::update_background`]). G_p is built in g_re/g_im, G_q in q_re/q_im.
+    fn update_background_pair(&mut self, p: usize, q: usize, mu_eff: f32, delta: f32) {
+        let (b, n, half, parts) = (self.block, self.fftn, self.half, self.parts);
+        let xp = ((self.head + p) % parts) * half;
+        let xq = ((self.head + q) % parts) * half;
+        normalized_gradient(
+            &self.x_re[xp..xp + half],
+            &self.x_im[xp..xp + half],
+            &self.e_re[..half],
+            &self.e_im[..half],
+            &self.pxx,
+            mu_eff,
+            delta,
+            &mut self.g_re[..half],
+            &mut self.g_im[..half],
+        );
+        normalized_gradient(
+            &self.x_re[xq..xq + half],
+            &self.x_im[xq..xq + half],
+            &self.e_re[..half],
+            &self.e_im[..half],
+            &self.pxx,
+            mu_eff,
+            delta,
+            &mut self.q_re,
+            &mut self.q_im,
+        );
+
+        // Pack Z = G_p + i*G_q over all N bins, each spectrum's upper half its mirror's conjugate.
+        // The upper half goes first, while the lower half of g still holds G_p.
+        for k in half..n {
+            let m = n - k;
+            self.g_re[k] = self.g_re[m] + self.q_im[m];
+            self.g_im[k] = self.q_re[m] - self.g_im[m];
+        }
+        for k in 0..half {
+            let (pr, pi) = (self.g_re[k], self.g_im[k]);
+            self.g_re[k] = pr - self.q_im[k];
+            self.g_im[k] = pi + self.q_re[k];
+        }
+
+        // The constraint on both at once: z = g_p + i*g_q, and zeroing a tap zeroes it in both.
+        self.fft.transform(&mut self.g_re, &mut self.g_im, true);
+        for i in b..n {
+            self.g_re[i] = 0.0;
+            self.g_im[i] = 0.0;
+        }
+        self.fft.transform(&mut self.g_re, &mut self.g_im, false);
+
+        // Split Z' = G_p' + i*G_q' by conjugate symmetry, straight into the leaky update.
+        let (wp, wq) = (p * half, q * half);
+        for k in 0..half {
+            let m = (n - k) % n;
+            let (ar, ai) = (self.g_re[k], self.g_im[k]);
+            let (cr, ci) = (self.g_re[m], self.g_im[m]);
+            let wr = LEAK * self.wbg_re[wp + k] + 0.5 * (ar + cr);
+            let wi = LEAK * self.wbg_im[wp + k] + 0.5 * (ai - ci);
+            self.wbg_re[wp + k] = sanitize(wr);
+            self.wbg_im[wp + k] = sanitize(wi);
+            let wr = LEAK * self.wbg_re[wq + k] + 0.5 * (ai + ci);
+            let wi = LEAK * self.wbg_im[wq + k] + 0.5 * (cr - ar);
+            self.wbg_re[wq + k] = sanitize(wr);
+            self.wbg_im[wq + k] = sanitize(wi);
+        }
+    }
+
+    /// The pre-pairing update, one constraint transform pair per partition: the reference the
+    /// equivalence test holds [`Self::update_background`] to.
+    #[cfg(test)]
+    fn update_background_unpaired(&mut self, mu_eff: f32, delta: f32) {
+        for p in 0..self.parts {
+            self.update_background_one(p, mu_eff, delta);
+        }
     }
 
     // -------------------------------------------------------------------------------------
@@ -1560,6 +1666,35 @@ impl Aec {
     }
 }
 
+/// The frequency-domain NLMS gradient conj(X) * E of one partition, power-normalized per bin,
+/// into `re`/`im` (half bins). The DC and Nyquist imaginary parts are zeroed, as for any real
+/// signal's spectrum (what `hermitian_expand` enforces before an inverse FFT).
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn normalized_gradient(
+    x_re: &[f32],
+    x_im: &[f32],
+    e_re: &[f32],
+    e_im: &[f32],
+    pxx: &[f32],
+    mu_eff: f32,
+    delta: f32,
+    re: &mut [f32],
+    im: &mut [f32],
+) {
+    let half = re.len();
+    for k in 0..half {
+        let (xr, xi) = (x_re[k], x_im[k]);
+        let (er, ei) = (e_re[k], e_im[k]);
+        let norm = mu_eff / (pxx[k] + delta);
+        // conj(X) * E = (xr - i xi)(er + i ei)
+        re[k] = norm * (xr * er + xi * ei);
+        im[k] = norm * (xr * ei - xi * er);
+    }
+    im[0] = 0.0;
+    im[half - 1] = 0.0;
+}
+
 #[inline(always)]
 fn leaky(prev: f32, x: f32, smooth: f32) -> f32 {
     smooth * prev + (1.0 - smooth) * x
@@ -1661,6 +1796,50 @@ mod tests {
         for i in 0..n {
             assert!((re[i] - orig_re[i]).abs() < 1e-3, "re[{i}] roundtrip");
             assert!((im[i] - orig_im[i]).abs() < 1e-3, "im[{i}] roundtrip");
+        }
+    }
+
+    /// Constraining two partitions' gradients through one complex transform pair is the same
+    /// maths as one pair per partition: on the same random far-end history, error spectrum and
+    /// normalization, both paths land the same background weights to rounding. Run for an odd
+    /// partition count (the production 250 ms tail: partition 0 alone, then pairs) and an even
+    /// one (pairs only).
+    #[test]
+    fn paired_constraints_match_one_transform_pair_per_partition() {
+        for (tail_ms, parts) in [(250.0, 47), (200.0, 38)] {
+            let fill = |seed: u32| {
+                let mut aec = Aec::new(48_000.0, tail_ms);
+                assert_eq!(aec.parts, parts);
+                let mut rng = Rng::new(seed);
+                for v in aec.x_re.iter_mut().chain(aec.x_im.iter_mut()) {
+                    *v = 10.0 * rng.next_f32();
+                }
+                for k in 0..aec.half {
+                    aec.e_re[k] = rng.next_f32();
+                    aec.e_im[k] = rng.next_f32();
+                    aec.pxx[k] = 50.0 * (1.5 + rng.next_f32());
+                }
+                aec.head = 5;
+                aec
+            };
+            let mut paired = fill(0xC0DE);
+            let mut reference = fill(0xC0DE);
+            paired.update_background(0.37, 1.0e-3);
+            reference.update_background_unpaired(0.37, 1.0e-3);
+
+            let pairs = paired.wbg_re.iter().zip(reference.wbg_re.iter());
+            let pairs = pairs.chain(paired.wbg_im.iter().zip(reference.wbg_im.iter()));
+            let (mut diff, mut scale) = (0.0f32, 0.0f32);
+            for (&a, &r) in pairs {
+                diff = diff.max((a - r).abs());
+                scale = scale.max(r.abs());
+            }
+            assert!(scale > 0.0, "the update must move the weights");
+            let rel = diff / scale;
+            assert!(
+                rel <= 1.0e-5,
+                "{parts} partitions: paired update off by {rel:.2e} of the weights' scale"
+            );
         }
     }
 
