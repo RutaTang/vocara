@@ -25,11 +25,13 @@ impl SaturationNode {
         }
     }
 
-    #[inline]
-    fn shape(&self, x: f32) -> f32 {
+    /// The waveshaper's constants for the current drive: the linear drive gain `d` and the
+    /// normaliser `1 / tanh(d)` that keeps a full-scale input ~full-scale. Evaluated once per
+    /// block — computing the `powf` and the extra `tanh` per sample made this the costliest
+    /// insert in the chain.
+    fn shape_consts(&self) -> (f32, f32) {
         let d = db_to_lin(self.drive_db).max(1.0);
-        // Normalize so a full-scale input stays ~full-scale (tanh(d) at x = 1).
-        (d * x).tanh() / d.tanh()
+        (d, 1.0 / d.tanh())
     }
 }
 
@@ -59,9 +61,10 @@ impl Node for SaturationNode {
             return;
         }
         let mix = self.mix.clamp(0.0, 1.0);
+        let (d, norm) = self.shape_consts();
         for s in &mut out[..n] {
             let dry = *s;
-            *s = dry * (1.0 - mix) + self.shape(dry) * mix;
+            *s = dry * (1.0 - mix) + (d * dry).tanh() * norm * mix;
         }
     }
 

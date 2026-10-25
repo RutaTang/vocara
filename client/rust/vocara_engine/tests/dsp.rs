@@ -506,3 +506,30 @@ fn the_master_safety_clip_leaves_normal_levels_untouched() {
     let peak = out.iter().fold(0.0f32, |m, &x| m.max(x.abs()));
     assert!(peak <= 1.0, "+12 dBFS escaped the ceiling: {peak}");
 }
+
+#[test]
+fn saturation_matches_its_waveshaper_formula() {
+    // Pins the output to `dry*(1-mix) + tanh(d*x)/tanh(d)*mix` (d = drive as a linear gain)
+    // across drives, so hoisting the per-block constants out of the sample loop cannot
+    // change what the user hears.
+    use vocara_engine::dsp::saturation::{param as sparam, SaturationNode};
+    let input = to_stereo(&sine_mono(220.0, SR, 4096, 0.6));
+    for &(drive_db, mix) in &[(0.0f32, 1.0f32), (9.0, 0.3), (20.0, 0.65), (36.0, 1.0)] {
+        let mut sat = SaturationNode::new();
+        sat.prepare(SR, 256);
+        sat.set_param(sparam::DRIVE_DB, drive_db);
+        sat.set_param(sparam::MIX, mix);
+        sat.set_param(sparam::BYPASS, 0.0);
+        let out = run_phase(&mut sat, &input, SR, 256);
+        let d = 10f32.powf(drive_db / 20.0).max(1.0);
+        let max_err = input
+            .iter()
+            .zip(&out)
+            .map(|(&x, &y)| (x * (1.0 - mix) + (d * x).tanh() / d.tanh() * mix - y).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_err < 1e-6,
+            "drive {drive_db} dB mix {mix}: err {max_err}"
+        );
+    }
+}
