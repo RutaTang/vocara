@@ -371,7 +371,18 @@ impl Node for DeEsserNode {
             }
             param::THRESHOLD_DB => self.threshold.set_target(value),
             param::RANGE_DB => self.range.set_target(value.max(0.0)),
-            param::BYPASS => self.fade.set_bypass(value >= 0.5),
+            param::BYPASS => {
+                let bypass = value >= 0.5;
+                // The sibilance envelope and detector tails froze with whatever the material was doing when the
+                // node went fully bypassed; switched back on over a quieter passage it
+                // ducked that by the stale state for a release time. Start idle, as
+                // after a seek, like the compressor. (Switched back on mid-fade-out,
+                // the state is still live and is kept.)
+                if !bypass && self.fade.idle() {
+                    self.reset();
+                }
+                self.fade.set_bypass(bypass);
+            }
             _ => {}
         }
     }

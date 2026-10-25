@@ -416,6 +416,74 @@ fn re_enabling_a_compressor_does_not_duck_with_a_stale_envelope() {
     );
 }
 
+/// The level a node applies 20-120 ms after it is switched back on over `quiet`, having been
+/// switched off after `loud`, and the same for a fresh node fed `quiet` alone (dB).
+fn reenabled_vs_fresh_db(
+    mk: &dyn Fn() -> Box<dyn Node>,
+    bypass: u16,
+    loud: &[f32],
+    quiet: &[f32],
+) -> (f32, f32) {
+    let block = 256;
+    let db = |out: &[f32]| {
+        let w = 960 * CHANNELS..5760 * CHANNELS;
+        20.0 * (rms(&out[w.clone()]) / rms(&quiet[w])).log10()
+    };
+    let mut node = mk();
+    node.prepare(SR, block);
+    node.set_param(bypass, 0.0);
+    let _ = run_phase(node.as_mut(), loud, SR, block);
+    node.set_param(bypass, 1.0);
+    let _ = run_phase(node.as_mut(), quiet, SR, block);
+    node.set_param(bypass, 0.0);
+    let reenabled = db(&run_phase(node.as_mut(), quiet, SR, block));
+    let mut fresh = mk();
+    fresh.prepare(SR, block);
+    fresh.set_param(bypass, 0.0);
+    (reenabled, db(&run_phase(fresh.as_mut(), quiet, SR, block)))
+}
+
+#[test]
+fn re_enabling_a_limiter_or_de_esser_does_not_resume_its_frozen_reduction() {
+    // Switched off during a loud phrase and back on over a quiet one, each picked up the gain
+    // reduction it froze with: the limiter ducked the quiet phrase by 2-4 dB for a release
+    // time, the de-esser by about 1 dB — as the compressor did before it started idle.
+    use vocara_engine::dsp::deesser::{param as dparam, DeEsserNode};
+    use vocara_engine::dsp::limiter::{param as lparam, LimiterNode};
+    let loud = to_stereo(&sine_mono(440.0, SR, 9600, 2.0)); // over the limiter's ceiling
+    let quiet = to_stereo(&sine_mono(440.0, SR, 9600, 0.1));
+    let (lim, lim_fresh) = reenabled_vs_fresh_db(
+        &|| {
+            let mut l = LimiterNode::new();
+            l.set_param(lparam::RELEASE_MS, 300.0);
+            Box::new(l)
+        },
+        lparam::BYPASS,
+        &loud,
+        &quiet,
+    );
+    assert!(
+        (lim - lim_fresh).abs() < 0.3,
+        "the limiter came back at {lim:+.2} dB, a fresh one at {lim_fresh:+.2} dB"
+    );
+    let ess = to_stereo(&sine_mono(7000.0, SR, 9600, 0.8));
+    let soft = to_stereo(&sine_mono(7000.0, SR, 9600, 0.02));
+    let (de, de_fresh) = reenabled_vs_fresh_db(
+        &|| {
+            let mut d = DeEsserNode::new();
+            d.set_param(dparam::THRESHOLD_DB, -30.0);
+            Box::new(d)
+        },
+        dparam::BYPASS,
+        &ess,
+        &soft,
+    );
+    assert!(
+        (de - de_fresh).abs() < 0.3,
+        "the de-esser came back at {de:+.2} dB, a fresh one at {de_fresh:+.2} dB"
+    );
+}
+
 /// Steady-state level change (dB) of a `freq` sine of amplitude `amp` through a fresh
 /// de-esser, measured over the settled second half.
 fn deesser_gain_db(freq: f64, amp: f32, threshold_db: f32, range_db: f32) -> f32 {

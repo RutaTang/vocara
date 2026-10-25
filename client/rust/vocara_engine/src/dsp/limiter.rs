@@ -111,7 +111,18 @@ impl Node for LimiterNode {
                 self.release_ms = value;
                 self.recompute_release();
             }
-            param::BYPASS => self.fade.set_bypass(value >= 0.5),
+            param::BYPASS => {
+                let bypass = value >= 0.5;
+                // The gain reduction froze with whatever the material was doing when the
+                // node went fully bypassed; switched back on over a quieter passage it
+                // ducked that by the stale state for a release time. Start idle, as
+                // after a seek, like the compressor. (Switched back on mid-fade-out,
+                // the state is still live and is kept.)
+                if !bypass && self.fade.idle() {
+                    self.reset();
+                }
+                self.fade.set_bypass(bypass);
+            }
             _ => {}
         }
     }
