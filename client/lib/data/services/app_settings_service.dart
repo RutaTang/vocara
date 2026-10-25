@@ -261,7 +261,11 @@ class AppSettingsService extends ChangeNotifier {
     final out = _effective(_outputDevices, _outputDeviceUid);
     final inp = _effective(_inputDevices, _inputDeviceUid);
     if (out == null || inp == null) return false;
-    return out.uid == inp.uid && (out.isBluetooth || inp.isBluetooth);
+    if (!out.isBluetooth && !inp.isBluetooth) return false;
+    // One device in both lists — or, should the system list a headset's two
+    // directions under two uids, one Bluetooth product named alike in both.
+    return out.uid == inp.uid ||
+        (out.isBluetooth && inp.isBluetooth && out.name == inp.name);
   }
 
   /// Whether the audible monitor (hear-yourself) is allowed: only when the device actually
@@ -309,6 +313,19 @@ class AppSettingsService extends ChangeNotifier {
 
   /// Whether the user has marked [outputToMark] as headphones.
   bool get outputMarkedHeadphones => _markedHeadphones(_renderingDevice);
+
+  /// Whether a locked monitor should point to the headphones mark in Settings: only when the
+  /// device playing is the one Settings will offer it for — the selection. (Settings opens from
+  /// Home, where nothing renders; while the mic unit has moved playback to its own device, the
+  /// card there would be for another output, and the engine mutes the moved monitor anyway.)
+  bool get suggestHeadphonesMark {
+    final playing = _renderingDevice;
+    final chosen = _effective(_outputDevices, _outputDeviceUid);
+    return outputMarkable &&
+        playing != null &&
+        chosen != null &&
+        playing.uid == chosen.uid;
+  }
 
   /// A mark counts only where the panel can show it, so one nobody could see to clear never
   /// stays in force: a device since renamed as a speaker, or newly on [_speakerNames].
@@ -383,15 +400,27 @@ class AppSettingsService extends ChangeNotifier {
     // Unknown → the safe default: off.
     if (out == null || _namedSpeaker(out)) return false;
     final n = out.name.toLowerCase();
-    // Only a name that says so. Not "any Bluetooth device": Bluetooth is speakers as often as
-    // headphones, a speaker missing from [_speakerNames] fed the monitor straight back into the
-    // mic (it is kept out of the AEC reference, so nothing cancels it), and on macOS the
-    // transport was never even read until the headphones mark needed it. Anything else is the
-    // user's to mark ([setOutputIsHeadphones]).
+    // Only a name that says so — or the uid of Apple silicon's headphone jack, which (unlike its
+    // name, "Externe Kopfhörer" on a German Mac) is never translated. Not "any Bluetooth
+    // device": Bluetooth is speakers as often as headphones, a speaker missing from
+    // [_speakerNames] fed the monitor straight back into the mic (it is kept out of the AEC
+    // reference, so nothing cancels it), and on macOS the transport was never even read until
+    // the headphones mark needed it. Other headphones are the user's to mark
+    // ([setOutputIsHeadphones]) — all but the jack's: see [_isHeadphoneJack].
     return _isSurelyHeadphones(out) ||
+        _isHeadphoneJack(out) ||
         n.contains('headphone') ||
         n.contains('earphone');
   }
+
+  /// Apple silicon's built-in headphone jack, listed as a device of its own while something is
+  /// plugged in. The monitor is allowed on it (as on its English name, "External Headphones"),
+  /// but it can never carry a headphones mark: it can't tell headphones from desk speakers
+  /// plugged into it, and an unplug-and-swap can happen while the app isn't looking, so a mark
+  /// kept for it would one day apply to speakers.
+  static bool _isHeadphoneJack(AudioDevice d) =>
+      d.transport == AudioTransport.builtIn &&
+      d.uid.toLowerCase().contains('headphone');
 
   /// Name fragments of loudspeakers: the generic words, and the common
   /// Bluetooth speaker lines whose names never say so (UE BOOM, JBL Flip…).
@@ -416,6 +445,9 @@ class AppSettingsService extends ChangeNotifier {
     'soundlink color',
     'beosound',
     'echo dot',
+    // A display's own speakers ("LG UltraFine Display Audio", Apple's "Display Audio"), which
+    // can come in over USB and so pass the transport rule.
+    'display audio',
   ];
 
   /// Re-evaluate monitor feedback safety against the device the engine is CURRENTLY rendering to

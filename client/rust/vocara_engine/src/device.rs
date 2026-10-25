@@ -2132,8 +2132,9 @@ pub struct AudioHost {
 }
 
 impl AudioHost {
-    /// Switch the active output device by UID. Returns 0 on success, negative on failure (the
-    /// host falls back to the default device if the requested one can't be opened).
+    /// Switch the active output device by UID. 0 = the pick was acted on: playback is on it, or
+    /// on the default when it could not be opened, or — while the mic unit owns the output — the
+    /// pick is recorded for when the mic closes. Negative = nothing could be opened.
     pub fn set_output_device(&self, uid: &str) -> i32 {
         self.request(|reply| HostCmd::SetOutput {
             uid: uid.to_string(),

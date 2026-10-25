@@ -50,9 +50,10 @@ void ve_destroy(VeEngine *e);
  * through the audio-host thread that owns the stream. */
 /* Fill up to `cap` entries into `out`; returns the total device count (may exceed `cap`). */
 size_t ve_enum_output_devices(VeDeviceInfo *out, size_t cap);
-/* Switch the active output device by UID. 0 = something is playing — the device asked for, or the
- * default when it could not be opened (read ve_actual_output_device for which); negative = nothing
- * could be opened. */
+/* Switch the active output device by UID. 0 = the pick was acted on: playback is on it, or on the
+ * default when it could not be opened, or (while the mic unit owns the output) the pick is recorded
+ * for when the mic closes — ve_actual_output_device says what renders. Negative = nothing could be
+ * opened. */
 int ve_set_output_device(VeEngine *e, const char *uid);
 /* Write the active output UID into `buf` (<= cap, NUL-terminated); returns its byte length. */
 size_t ve_current_output_device(VeEngine *e, char *buf, size_t cap);

@@ -434,9 +434,10 @@ class GraphAudioPlaybackService implements PlaybackEngine {
   bool get isAvailable => _available;
   double get sampleRate => _sampleRate;
 
-  /// Switch the active output device by UID. True when something is playing — the device asked
-  /// for, or the default output when that one could not be opened ([actualOutputDevice] says
-  /// which); false when nothing could be opened. No-op if the engine is down.
+  /// Switch the active output device by UID. True when the pick was acted on: playback is on it,
+  /// or on the default output when it could not be opened, or (while the mic unit owns the
+  /// output) the pick is recorded for when the mic closes — [actualOutputDevice] says what
+  /// renders. False when nothing could be opened. No-op if the engine is down.
   bool setOutputDevice(String uid) {
     if (!_available) return false;
     final cuid = uid.toNativeUtf8();

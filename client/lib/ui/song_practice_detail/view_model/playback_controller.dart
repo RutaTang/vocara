@@ -141,8 +141,9 @@ class PlaybackController extends ChangeNotifier {
   /// rather than an edge the user dragged. A default end follows the content
   /// as it grows: a new practice opens on the 20 s placeholder timeline, and
   /// the first import or take left the region (and every loop pass) stuck on
-  /// those 20 seconds of a three-minute song. Set once the user drags the end
-  /// handle; a dragged start leaves the end the default. Transient, like the
+  /// those 20 seconds of a three-minute song. Cleared when the user drags the
+  /// end handle short of the content's end, set again when they drag it back
+  /// to it; a dragged start leaves the end the default. Transient, like the
   /// region itself (neither is saved), so a reopen starts from the default.
   bool _loopEndFollowsContent = true;
   int get loopStartMs => _loopStartMs;
@@ -350,8 +351,10 @@ class PlaybackController extends ChangeNotifier {
     // Guard the lower bound symmetrically: for sub-minLoopMs content
     // `_loopStartMs + minLoopMs` can exceed _loopMaxMs (lower > upper).
     final lo = math.min(_loopStartMs + minLoopMs, _loopMaxMs);
-    // The user's own end from here on: content growth no longer moves it.
-    _loopEndFollowsContent = false;
+    // The user's own end from here on, so content growth no longer moves it —
+    // unless they put it back AT the content's end, which is the default end
+    // again ("to the end"), not a pin there for the rest of the session.
+    _loopEndFollowsContent = ms >= _loopMaxMs;
     _loopEndMs = ms.clamp(lo, _loopMaxMs);
     _pushLoop();
     _snapPlayheadIntoLoop();

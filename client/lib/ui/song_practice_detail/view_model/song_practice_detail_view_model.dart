@@ -624,7 +624,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     _lyricsMode = mode;
     if (mode == LyricsMode.edit) _lyricsEditSession++;
     if (mode != LyricsMode.edit) lyricsDraft = null;
-    if (mode == LyricsMode.sync) _syncIndex = _firstUnsyncedIndex();
+    if (mode == LyricsMode.sync) _placeCursor(_firstUnsyncedIndex());
     notifyListeners();
   }
 
@@ -706,12 +706,10 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     return _replaceLyrics(lines);
   }
 
-  /// Persists NEW words (an import, an edit) and re-seeds the sync cursor on them: its place in
-  /// the old words means nothing in these. A file dropped mid-sync left it past the end of a
-  /// shorter one (Space did nothing) or in the middle of a longer one.
+  /// Persists NEW words (an import, an edit), shown at once: the sync cursor re-seeds on them
+  /// by itself (see [_cursor]).
   Future<bool> _replaceLyrics(List<LyricLine> lines) {
     final saved = _setLyrics(lines);
-    _syncIndex = _firstUnsyncedIndex();
     notifyListeners();
     return saved;
   }
@@ -760,9 +758,29 @@ class SongPracticeDetailViewModel extends ChangeNotifier
 
   String lyricsAsText() => lyricsToPlainText(lyrics);
 
-  // Tap-to-time sync.
+  // Tap-to-time sync. The cursor indexes [_syncWords], the lyrics it was placed on, and is read
+  // through [_cursor], which re-seeds it whenever the words under it changed — however they
+  // changed. Re-seeding at each write that brings new words missed some: a failed import's
+  // revert left it seeded on the words the disk refused, and a save that merged a peer's two
+  // lines left it at 5 of 2 (Space did nothing).
   int _syncIndex = 0;
-  int get syncIndex => _syncIndex;
+  List<LyricLine>? _syncWords;
+  int get syncIndex => _cursor;
+
+  int get _cursor {
+    final now = lyrics;
+    if (!identical(_syncWords, now)) {
+      // New times on the same words (a stamp, a peer's) leave it where it is.
+      if (!_sameWords(_syncWords, now)) _syncIndex = _firstUnsyncedIndex();
+      _syncWords = now;
+    }
+    return _syncIndex;
+  }
+
+  void _placeCursor(int index) {
+    _syncIndex = index;
+    _syncWords = lyrics;
+  }
 
   int _firstUnsyncedIndex() {
     for (var i = 0; i < lyrics.length; i++) {
@@ -785,9 +803,10 @@ class SongPracticeDetailViewModel extends ChangeNotifier
 
   /// Stamps the next line at the playhead, then advances past blank lines.
   Future<void> stampNextLyric() async {
-    if (_syncIndex < 0) return;
+    final at = _cursor;
+    if (at < 0) return;
     // A cursor on a blank line stamps the words it stands before.
-    await _stampAndAdvance(_wordsFrom(_syncIndex));
+    await _stampAndAdvance(_wordsFrom(at));
   }
 
   /// Stamps a specific line at the current playhead (a re-time, or a line the taps passed), then
@@ -805,12 +824,15 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     // the other tap already moved: both would stamp this line and the cursor
     // would jump a line past them, leaving it unstamped.
     final next = _wordsFrom(index + 1);
-    _syncIndex = next;
+    _placeCursor(next);
     notifyListeners();
-    if (!await _stampAt(index) && _syncIndex == next) {
+    if (!await _stampAt(index) &&
+        _syncIndex == next &&
+        _sameWords(_syncWords, lyrics)) {
       // The write failed and the model reverted to disk, so this line carries
-      // no time: put the cursor back on it (unless a later tap moved past).
-      _syncIndex = index;
+      // no time: put the cursor back on it (unless a later tap moved past, or
+      // the disk held other words — then the cursor re-seeds on those).
+      _placeCursor(index);
       notifyListeners();
     }
   }
@@ -827,7 +849,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
 
   Future<void> clearLyricTimes() async {
     // Every line is untimed now: the cursor starts on the first words.
-    _syncIndex = _wordsFrom(0);
+    _placeCursor(_wordsFrom(0));
     await _setLyrics([for (final l in lyrics) l.copyWith(clearTime: true)]);
   }
 
@@ -996,11 +1018,6 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     final before = _practice;
     _practice = loaded.aggregate;
     _baseHashes = loaded.baseHashes;
-    // New words from elsewhere re-seed the sync cursor, as an import does (see
-    // [_replaceLyrics]); times alone stamped on another device leave it be.
-    if (!_sameWords(before?.lyrics, loaded.aggregate.lyrics)) {
-      _syncIndex = _firstUnsyncedIndex();
-    }
     _ensureSelection();
     _ensureTimeline();
     playback.ensureLoopRange();
@@ -1225,25 +1242,29 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   ///
   /// [atMs] is where the clip goes when the caller took the playhead earlier
   /// than this call: at the tap that opened a file picker (the picker can stay
-  /// up for seconds while playback runs on), or at a drop of several files
-  /// (each one's import waits for the one before).
-  Future<void> addClipToTake(
+  /// up for seconds while playback runs on), or for the next file of a drop of
+  /// several (each one's import waits for the one before).
+  ///
+  /// Returns where the placed clip ENDS, or null when nothing was added — so a
+  /// multi-file drop can lay its files end to end, as a DAW does.
+  Future<int?> addClipToTake(
     String trackId,
     String sourcePath, {
     int? atMs,
   }) async {
     final practice = _practice;
-    if (practice == null) return;
+    if (practice == null) return null;
     final target = _trackById(trackId);
-    if (target == null || target.kind != AudioTrackKind.vocal) return;
+    if (target == null || target.kind != AudioTrackKind.vocal) return null;
     if (busy || isSeparating || takeInFlight) {
-      return;
+      return null;
     } // no concurrent structural edit
-    if (!_admitImportDuration(sourcePath)) return;
+    if (!_admitImportDuration(sourcePath)) return null;
     // The playhead at the DROP: copying, transcoding and analyzing take
     // seconds, and during playback (or a scrub meanwhile) a read after them
     // placed the clip wherever the playhead had moved on to.
     final startMs = math.max(0, atMs ?? position.value.inMilliseconds);
+    int? endMs;
     await _busyGate.run(() async {
       await _withImportedAudio(sourcePath, (dest) async {
         final waveform = await _waveforms.analyze(dest);
@@ -1262,9 +1283,11 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         // After the save, which re-reads the clip at its pooled path — the key
         // the analysis caches use (see RecordingController's finalize).
         analysis.onTrackAudioChanged(target.id);
+        if (saved) endMs = startMs + waveform.durationMs;
         return saved;
       });
     });
+    return endMs;
   }
 
   // --- Source separation -----------------------------------------------------

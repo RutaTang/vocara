@@ -933,7 +933,10 @@ void main() {
           ('Integrierte Ausgabe', AudioTransport.builtIn),
           ('Built-in Output', AudioTransport.builtIn),
           ('External Headphones', AudioTransport.builtIn),
-          ('LG UltraFine Display Audio', AudioTransport.hdmi),
+          // Displays' own speakers come in over USB as often as not.
+          ('LG UltraFine Display Audio', AudioTransport.usb),
+          ('Display Audio', AudioTransport.usb),
+          ('Studio Display Speakers', AudioTransport.usb),
           ('Studio Display', AudioTransport.displayPort),
           ('Living Room TV', AudioTransport.network),
           ('BlackHole 2ch', AudioTransport.virtual),
@@ -951,6 +954,92 @@ void main() {
         ]) {
           expect(await markable(name, transport), isTrue, reason: name);
         }
+      },
+    );
+
+    test(
+      'the headphone jack allows the monitor in any language, but takes no mark',
+      () async {
+        // Its uid, unlike its name, is never translated. No mark: it can't tell headphones from
+        // desk speakers plugged into it, and a mark kept for it would one day apply to those.
+        for (final name in [
+          'External Headphones',
+          'Externe Kopfhörer',
+          '外部ヘッドフォン',
+        ]) {
+          outs = [
+            AudioDevice(
+              uid: 'BuiltInHeadphoneOutputDevice',
+              name: name,
+              rate: 48000,
+              isDefault: true,
+              transport: AudioTransport.builtIn,
+            ),
+          ];
+          await service.load();
+          final engine = _FakeEngine()
+            ..actualOutput = 'BuiltInHeadphoneOutputDevice';
+          service.attachEngine(engine);
+          expect(service.monitorAllowed, isTrue, reason: name);
+          expect(service.outputMarkable, isFalse, reason: name);
+          expect(engine.echoFree.last, '', reason: name);
+          service.detachEngine(engine);
+        }
+      },
+    );
+
+    test(
+      'a locked monitor points to the mark only for the output Settings will show',
+      () async {
+        // The mic unit moved playback to a USB headset while the selection (the default) is the
+        // speakers: Settings would show no card, so the fader must not send the user there.
+        const headset = AudioDevice(
+          uid: 'usb-headset',
+          name: 'USB Headset',
+          rate: 48000,
+          transport: AudioTransport.usb,
+        );
+        outs = [
+          const AudioDevice(
+            uid: 'built-in-out',
+            name: 'MacBook Pro Speakers',
+            rate: 48000,
+            isDefault: true,
+            transport: AudioTransport.builtIn,
+          ),
+          headset,
+        ];
+        await service.load();
+        final engine = _FakeEngine()..actualOutput = headset.uid;
+        service.attachEngine(engine);
+        expect(service.outputMarkable, isTrue);
+        expect(service.suggestHeadphonesMark, isFalse);
+        // On the chosen output itself, it does.
+        await service.setOutputDevice(headset.uid);
+        expect(service.suggestHeadphonesMark, isTrue);
+      },
+    );
+
+    test(
+      'the same Bluetooth headset listed under two uids is still one device',
+      () async {
+        AudioDevice bt(String uid, String name, {bool input = false}) =>
+            AudioDevice(
+              uid: uid,
+              name: name,
+              rate: 48000,
+              isDefault: true,
+              isInput: input,
+              isBluetooth: true,
+              transport: AudioTransport.bluetooth,
+            );
+        outs = [bt('aa:output', 'AirPods Pro')];
+        ins = [bt('aa:input', 'AirPods Pro', input: true)];
+        await service.load();
+        expect(service.bluetoothInOutConflict, isTrue);
+        ins = [bt('bb:input', 'Jabra Evolve2', input: true)];
+        service.refreshDevices();
+        expect(service.bluetoothInOutConflict, isFalse);
       },
     );
 

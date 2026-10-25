@@ -197,7 +197,7 @@ class RecordingController extends ChangeNotifier {
       if (_appSettings.bluetoothInOutConflict) {
         _toast(
           'Recording from the Bluetooth headset lowers playback quality. '
-          'pick a different mic in Settings.',
+          'Pick a different mic in Settings.',
         );
       }
       // Record onto the armed take (the selected vocal lane) at the playhead, so

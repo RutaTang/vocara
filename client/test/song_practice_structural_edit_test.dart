@@ -40,6 +40,9 @@ class _FakeRepo extends Fake implements SongPracticeRepository {
   /// When set, loads park on it — a remote reload's read held in flight.
   Completer<void>? loadGate;
 
+  /// When set, the next save comes back merged with these words from a peer.
+  List<LyricLine>? peerWordsOnNextSave;
+
   @override
   Future<Result<Loaded<SongPractice>>> loadPractice(String id) async {
     final gate = loadGate;
@@ -62,6 +65,20 @@ class _FakeRepo extends Fake implements SongPracticeRepository {
       failNextSave = false;
       events.add('save-failed');
       return Result.error(Exception('save failed'));
+    }
+    final peer = peerWordsOnNextSave;
+    if (peer != null) {
+      peerWordsOnNextSave = null;
+      // A concurrent writer's lyrics, kept by the three-way merge.
+      stored = practice.copyWith(lyrics: peer);
+      events.add('save-merged');
+      return Result.ok(
+        Loaded(
+          stored,
+          const {'lyrics': 'peer'},
+          sentHashes: const {'lyrics': 'mine'},
+        ),
+      );
     }
     stored = practice;
     events.add('save');
@@ -1327,6 +1344,109 @@ void main() {
         // A peer replaced the words: the cursor's place in the old ones means nothing.
         await reloadWith(const [LyricLine(text: 'x'), LyricLine(text: 'y')]);
         expect(vm.syncIndex, 0);
+      },
+    );
+  });
+
+  group('the sync cursor follows the words under it', () {
+    test(
+      'a failed import puts the cursor back on the restored words',
+      () async {
+        final vm = await pumpVm();
+        await vm.setLyricsText('a\nb\nc\nd\ne\nf');
+        vm.setLyricsMode(LyricsMode.sync);
+        vm.playback.position.value = const Duration(milliseconds: 1000);
+        for (var i = 0; i < 5; i++) {
+          await vm.stampNextLyric();
+        }
+        expect(vm.syncIndex, 5);
+        repo.failSaves = true;
+        expect(await vm.importLyrics('x\ny'), isFalse);
+        repo.failSaves = false;
+        expect(vm.lyrics.map((l) => l.text).toList(), [
+          'a',
+          'b',
+          'c',
+          'd',
+          'e',
+          'f',
+        ]);
+        vm.playback.position.value = const Duration(milliseconds: 7000);
+        await vm.stampNextLyric();
+        // The restored words are timed through e: the tap belongs on f.
+        expect(vm.lyrics[0].timeMs, 1000, reason: 'Space re-stamped line a');
+        expect(vm.lyrics[5].timeMs, 7000, reason: 'f never got the tap');
+      },
+    );
+
+    test('a failed import never leaves the cursor past the end', () async {
+      final vm = await pumpVm();
+      await vm.setLyricsText('a');
+      vm.setLyricsMode(LyricsMode.sync);
+      expect(vm.syncIndex, 0);
+      repo.failSaves = true;
+      expect(await vm.importLyrics('\n\nx'), isFalse);
+      repo.failSaves = false;
+      expect(vm.lyrics.map((l) => l.text).toList(), ['a']);
+      vm.playback.position.value = const Duration(milliseconds: 3000);
+      await vm.stampNextLyric();
+      expect(vm.syncIndex, lessThanOrEqualTo(vm.lyrics.length));
+      expect(vm.lyrics[0].timeMs, 3000, reason: 'Space did nothing');
+    });
+
+    test('peer words merged into an ordinary save re-seed the cursor', () async {
+      final vm = await pumpVm();
+      await vm.setLyricsText('a\nb\nc\nd\ne\nf');
+      vm.setLyricsMode(LyricsMode.sync);
+      vm.playback.position.value = const Duration(milliseconds: 1000);
+      for (var i = 0; i < 5; i++) {
+        await vm.stampNextLyric();
+      }
+      expect(vm.syncIndex, 5);
+      repo.peerWordsOnNextSave = const [
+        LyricLine(text: 'x'),
+        LyricLine(text: 'y'),
+      ];
+      await vm.commitTrackMove(); // any non-lyrics save (a drag released)
+      expect(vm.lyrics.map((l) => l.text).toList(), ['x', 'y']);
+      vm.playback.position.value = const Duration(milliseconds: 2000);
+      await vm.stampNextLyric();
+      expect(
+        vm.lyrics[0].timeMs,
+        2000,
+        reason:
+            'Space did nothing: cursor ${vm.syncIndex} of ${vm.lyrics.length}',
+      );
+    });
+
+    test(
+      'a failed stamp reverting onto a peer\'s words re-seeds the cursor',
+      () async {
+        final vm = await pumpVm();
+        await vm.setLyricsText('a\nb\nc\nd\ne\nf');
+        vm.setLyricsMode(LyricsMode.sync);
+        vm.playback.position.value = const Duration(milliseconds: 1000);
+        for (var i = 0; i < 5; i++) {
+          await vm.stampNextLyric();
+        }
+        // A peer's new words reached the disk; this tap's write fails and the model reverts to them.
+        repo.stored = repo.stored.copyWith(
+          lyrics: const [
+            LyricLine(text: 'x'),
+            LyricLine(text: 'y'),
+          ],
+        );
+        repo.failNextSave = true;
+        await vm.stampNextLyric();
+        expect(vm.lyrics.map((l) => l.text).toList(), ['x', 'y']);
+        vm.playback.position.value = const Duration(milliseconds: 2000);
+        await vm.stampNextLyric();
+        expect(
+          vm.lyrics[0].timeMs,
+          2000,
+          reason:
+              'Space did nothing: cursor ${vm.syncIndex} of ${vm.lyrics.length}',
+        );
       },
     );
   });

@@ -160,13 +160,18 @@ class DiagnosticsLog {
       buffer.writeln('===== buffered (no log directory bound) =====');
       _pending.forEach(buffer.write);
     }
-    final out = File(
-      p.join(
-        (await Directory.systemTemp.createTemp('vocara-diagnostics-')).path,
-        'vocara-diagnostics.txt',
-      ),
-    );
-    await out.writeAsString(buffer.toString(), flush: true);
+    final tmp = await Directory.systemTemp.createTemp('vocara-diagnostics-');
+    final out = File(p.join(tmp.path, 'vocara-diagnostics.txt'));
+    try {
+      await out.writeAsString(buffer.toString(), flush: true);
+    } catch (_) {
+      // A write that fails (a full disk) hands the caller no path to discard:
+      // the folder, and whatever part of the bundle landed, are ours to remove.
+      try {
+        await tmp.delete(recursive: true);
+      } catch (_) {}
+      rethrow;
+    }
     return out.path;
   }
 

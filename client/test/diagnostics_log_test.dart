@@ -2,6 +2,7 @@
 // size budget, pre-bind buffering, global hook forwarding, and the export
 // bundle (log files + version metadata, never user content).
 
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -283,6 +284,24 @@ void main() {
     );
   });
 
+  test(
+    'a bundle whose write fails leaves no temporary folder behind',
+    () async {
+      // A full disk: the write throws, the caller gets no path to discard, and
+      // the folder (with whatever part of the bundle landed) stayed in tmp.
+      final log = DiagnosticsLog.forTesting(directory: dir);
+      final temp = Directory(p.join(dir.path, 'tmp'))..createSync();
+      await IOOverrides.runWithIOOverrides(
+        () => expectLater(
+          log.exportArchive(),
+          throwsA(isA<FileSystemException>()),
+        ),
+        _FailingBundleWrites(temp),
+      );
+      expect(temp.listSync(), isEmpty);
+    },
+  );
+
   test('discardArchive removes the bundle and its own temp folder, never '
       'a folder that holds anything else', () async {
     final log = DiagnosticsLog.forTesting(directory: dir);
@@ -299,4 +318,40 @@ void main() {
     expect(await neighbour.exists(), isTrue);
     expect(await dir.exists(), isTrue);
   });
+}
+
+/// Routes the system temp folder into the test's own, and fails the bundle's
+/// write after part of it landed, like a disk filling up mid-write.
+final class _FailingBundleWrites extends IOOverrides {
+  _FailingBundleWrites(this.temp);
+
+  final Directory temp;
+
+  @override
+  Directory getSystemTempDirectory() => temp;
+
+  @override
+  File createFile(String path) => path.endsWith('vocara-diagnostics.txt')
+      ? _UnwritableFile(super.createFile(path))
+      : super.createFile(path);
+}
+
+class _UnwritableFile extends Fake implements File {
+  _UnwritableFile(this._real);
+
+  final File _real;
+
+  @override
+  String get path => _real.path;
+
+  @override
+  Future<File> writeAsString(
+    String contents, {
+    FileMode mode = FileMode.write,
+    Encoding encoding = utf8,
+    bool flush = false,
+  }) async {
+    await _real.writeAsString('partial');
+    throw const FileSystemException('No space left on device');
+  }
 }

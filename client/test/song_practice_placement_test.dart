@@ -299,8 +299,9 @@ void main() {
 
     // Regression guard: each file's import read the playhead when it began —
     // after the file before it had been copied, analyzed and saved — so a
-    // drop during playback spread its clips across the song.
-    testWidgets('every file of a drop lands at the drop playhead', (
+    // drop during playback spread its clips across the song. The files lay
+    // end to end from the drop's playhead instead (each 1 s long here).
+    testWidgets('a drop lays its files end to end from the drop playhead', (
       tester,
     ) async {
       final waves = _GatedWaveforms();
@@ -328,7 +329,7 @@ void main() {
       waves.gates.last.complete();
       await settle(tester);
 
-      expect(_addedStarts(vm), [5000, 5000]);
+      expect(_addedStarts(vm), [5000, 6000]);
     });
 
     // Regression guard: "Add audio clip at playhead…" read the playhead only

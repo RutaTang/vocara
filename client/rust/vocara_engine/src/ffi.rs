@@ -743,9 +743,10 @@ pub extern "C" fn ve_enum_input_devices(out: *mut VeDeviceInfo, cap: usize) -> u
     .unwrap_or(0)
 }
 
-/// Switch the active output device by UID. 0 = something is playing: the device asked for, or the
-/// default output when that one could not be opened (`ve_actual_output_device` says which);
-/// negative = nothing could be opened.
+/// Switch the active output device by UID. 0 = the pick was acted on: playback is on it, or on the
+/// default output when it could not be opened, or (while the mic unit owns the output) the pick is
+/// recorded for when the mic closes — `ve_actual_output_device` says what renders. Negative =
+/// nothing could be opened.
 #[no_mangle]
 pub extern "C" fn ve_set_output_device(e: *mut VeEngine, uid: *const c_char) -> c_int {
     with_engine(e, -1, |eng| {

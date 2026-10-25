@@ -278,19 +278,23 @@ class _WorkspaceState extends State<_Workspace> {
       });
 
   /// Drop onto an existing vocal take's lane: each file is added as a new clip on that
-  /// take at the playhead (never merged into the existing clips) — the playhead at the
-  /// drop, or [atMs] when the caller took it earlier. Every file lands there: each import
-  /// waits for the one before, and read per file, playback running on meanwhile spread a
-  /// multi-file drop across the song.
+  /// take (never merged into the existing clips), the first at the playhead — the playhead
+  /// at the drop, or [atMs] when the caller took it earlier — and each next one where the
+  /// one before it ends, as a DAW lays out a multi-file drop on one track. Positions come
+  /// from the drop, not from the playhead per file: each import waits for the one before,
+  /// and read per file, playback running on meanwhile spread the files across the song.
+  /// (Stacked at one spot instead, they hid each other, and the lane's analysis kept only
+  /// the last.)
   Future<void> _dropClipToTake(
     String trackId,
     List<String> paths, {
     int? atMs,
   }) {
-    final at = atMs ?? vm.position.value.inMilliseconds;
+    var at = atMs ?? vm.position.value.inMilliseconds;
     return _guardedAudioDrop(paths, (audio) async {
       for (final a in audio) {
-        await vm.addClipToTake(trackId, a, atMs: at);
+        final end = await vm.addClipToTake(trackId, a, atMs: at);
+        if (end != null) at = end;
       }
     });
   }

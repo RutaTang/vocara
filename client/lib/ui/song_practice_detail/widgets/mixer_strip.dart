@@ -618,7 +618,7 @@ class _MicInputChannel extends StatelessWidget {
                       child: Tooltip(
                         message: settings.monitorAllowed
                             ? ''
-                            : settings.outputMarkable
+                            : settings.suggestHeadphonesMark
                             ? 'Hearing yourself is off here so speakers can\'t '
                                   'feed back. Listening on headphones? Turn on '
                                   '"Headphones only" in Settings.'

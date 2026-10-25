@@ -375,12 +375,13 @@ void main() {
         c.ensureLoopRange();
         expect(c.loopEndMs, 45000);
 
-        // Dragged all the way to the end is still the user's end.
+        // Dragged back all the way to the end is the default end again: it
+        // follows the content from there instead of pinning it.
         c.setLoopEnd(1 << 30);
         expect(c.loopEndMs, 180000);
         grow(240000);
         c.ensureLoopRange();
-        expect(c.loopEndMs, 180000);
+        expect(c.loopEndMs, 240000);
       });
 
       test('a dragged start leaves the default end following', () {
