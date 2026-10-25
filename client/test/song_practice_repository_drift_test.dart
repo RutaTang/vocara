@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:drift/drift.dart' show Table, TableInfo, Variable;
@@ -1217,6 +1218,152 @@ void main() {
         for (final t in legacy) t.id,
         fourth.id,
       ]);
+    });
+  });
+
+  group('a row whose stored JSON this build reads differently', () {
+    // Hydration decodes the JSON columns into the model (clamping values out
+    // of range, dropping keys it doesn't know), but the base hash was the
+    // stored string's. Any save then saw such a row as edited: it rewrote it
+    // as a change nobody made, stripping what another build had written, and
+    // a concurrent edit of that row by another device was reverted.
+    final now = DateTime(2026);
+    Future<Loaded<SongPractice>> load(String id) async =>
+        (await repo.loadPractice(id) as Ok<Loaded<SongPractice>>).value;
+    Future<int> ops(String table, String id) async =>
+        (await db
+                .customSelect(
+                  'SELECT COUNT(*) AS n FROM oplog '
+                  'WHERE entity_table = ? AND entity_id = ?',
+                  variables: [
+                    Variable.withString(table),
+                    Variable.withString(id),
+                  ],
+                )
+                .getSingle())
+            .read<int>('n');
+    Future<String?> column(String table, String col, String id) async =>
+        (await db
+                .customSelect(
+                  'SELECT $col AS v FROM $table WHERE id = ?',
+                  variables: [Variable.withString(id)],
+                )
+                .getSingle())
+            .read<String?>('v');
+
+    test('the practice row: reverb and lyrics', () async {
+      final base = ok(await repo.createPractice('S'));
+      final take = AudioTrack(
+        id: newId(),
+        kind: AudioTrackKind.vocal,
+        displayName: 'Take 1',
+        createdAt: now,
+        versionId: base.versions.single.id,
+      );
+      final pr = ok(
+        await repo.savePractice(base.copyWith(vocalTracks: [take])),
+      );
+      final reverb = jsonEncode({
+        ...const ReverbSettings().toJson(),
+        'roomSize': 1.5,
+      });
+      final lyrics = jsonEncode([
+        {'text': 'la', 'timeMs': 10, 'style': 'bold'},
+      ]);
+      await db.customStatement(
+        'UPDATE practices SET reverb_json = ?, lyrics_json = ? WHERE id = ?',
+        [reverb, lyrics, pr.id],
+      );
+      final loaded = await load(pr.id);
+      final before = await ops('practices', pr.id);
+      await db.customStatement(
+        "UPDATE practices SET title = 'Remote title', hlc_packed = 'zzzz' "
+        'WHERE id = ?',
+        [pr.id],
+      );
+      final saved = await repo.savePracticeWithBase(
+        loaded.aggregate.copyWith(
+          vocalTracks: [loaded.aggregate.vocalTracks.single.copyWith(pan: 0.5)],
+        ),
+        baseHashes: loaded.baseHashes,
+      );
+      expect(saved, isA<Ok<Loaded<SongPractice>>>());
+      expect(await column('practices', 'title', pr.id), 'Remote title');
+      expect(await column('practices', 'reverb_json', pr.id), reverb);
+      expect(await column('practices', 'lyrics_json', pr.id), lyrics);
+      expect(await ops('practices', pr.id), before);
+
+      // A real edit of the row is still written, as the model holds it.
+      final next = (saved as Ok<Loaded<SongPractice>>).value;
+      final edited = next.aggregate.copyWith(
+        reverb: next.aggregate.reverb!.copyWith(wet: 0.5),
+      );
+      expect(
+        await repo.savePracticeWithBase(edited, baseHashes: next.baseHashes),
+        isA<Ok<Loaded<SongPractice>>>(),
+      );
+      expect(
+        await column('practices', 'reverb_json', pr.id),
+        jsonEncode(edited.reverb!.toJson()),
+      );
+      expect(await ops('practices', pr.id), before + 1);
+    });
+
+    test('a take and an FX bus: their chains and sends', () async {
+      final base = ok(await repo.createPractice('S'));
+      final bus = FxBus(id: newId(), name: 'Bus', fx: TrackFx.flat());
+      AudioTrack take(String name) => AudioTrack(
+        id: newId(),
+        kind: AudioTrackKind.vocal,
+        displayName: name,
+        createdAt: now,
+        versionId: base.versions.single.id,
+        fx: TrackFx.flat(),
+        sends: [TrackSend(busId: bus.id, levelDb: -9)],
+      );
+      final held = take('Take 1');
+      final other = take('Take 2');
+      final pr = ok(
+        await repo.savePractice(
+          base.copyWith(vocalTracks: [held, other], fxBuses: [bus]),
+        ),
+      );
+      final fx = jsonEncode({...TrackFx.flat().toJson(), 'future': 1});
+      final sends = jsonEncode([
+        {...TrackSend(busId: bus.id, levelDb: -9).toJson(), 'future': 1},
+      ]);
+      await db.customStatement(
+        'UPDATE tracks SET fx_json = ?, sends_json = ? WHERE id = ?',
+        [fx, sends, held.id],
+      );
+      await db.customStatement('UPDATE fx_buses SET fx_json = ? WHERE id = ?', [
+        fx,
+        bus.id,
+      ]);
+      final loaded = await load(pr.id);
+      final heldOps = await ops('tracks', held.id);
+      final busOps = await ops('fx_buses', bus.id);
+      await db.customStatement(
+        "UPDATE tracks SET display_name = 'Remote name', hlc_packed = 'zzzz' "
+        'WHERE id = ?',
+        [held.id],
+      );
+      final saved = await repo.savePracticeWithBase(
+        loaded.aggregate.copyWith(
+          vocalTracks: [
+            for (final t in loaded.aggregate.vocalTracks)
+              t.id == other.id ? t.copyWith(volume: 0.3) : t,
+          ],
+        ),
+        baseHashes: loaded.baseHashes,
+      );
+      expect(saved, isA<Ok<Loaded<SongPractice>>>());
+      expect(await column('tracks', 'display_name', held.id), 'Remote name');
+      expect(await column('tracks', 'fx_json', held.id), fx);
+      expect(await column('tracks', 'sends_json', held.id), sends);
+      expect(await column('fx_buses', 'fx_json', bus.id), fx);
+      expect(await ops('tracks', held.id), heldOps);
+      expect(await ops('fx_buses', bus.id), busOps);
     });
   });
 }

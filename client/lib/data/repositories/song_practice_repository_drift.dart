@@ -50,7 +50,14 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
   // --- save-side content-hash projections -------------------------------------
   // The MINE side of every three-way merge. The reconcile passes and
   // [_sentHashes] both hash through these, so "what a save sent" can never
-  // drift from what its merge compared.
+  // drift from what its merge compared. Hydration records the BASE side of
+  // the JSON-carrying rows through them too (see [_hydrate]).
+
+  /// The practice's JSON columns exactly as a save writes them.
+  static String? _reverbJsonOf(SongPractice p) =>
+      p.reverb == null ? null : jsonEncode(p.reverb!.toJson());
+  static String _lyricsJsonOf(SongPractice p) =>
+      jsonEncode(p.lyrics.map((l) => l.toJson()).toList());
 
   static String _practiceHash(
     SongPractice p, {
@@ -403,12 +410,8 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
       }
 
       final now = _ms(DateTime.now());
-      final reverbJson = practice.reverb == null
-          ? null
-          : jsonEncode(practice.reverb!.toJson());
-      final lyricsJson = jsonEncode(
-        practice.lyrics.map((l) => l.toJson()).toList(),
-      );
+      final reverbJson = _reverbJsonOf(practice);
+      final lyricsJson = _lyricsJsonOf(practice);
 
       await db.transaction(() async {
         await db.customStatement('PRAGMA defer_foreign_keys = ON');
@@ -1224,11 +1227,20 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
   /// live child row, whether or not it survives domain-level dedup) is
   /// recorded — the base side of a later three-way save. The projections come
   /// from sync_hashes.dart, the SAME functions the save path hashes with.
+  ///
+  /// A row with JSON columns (the practice's reverb and lyrics, a track's or
+  /// bus's chain and sends) is hashed as READ INTO THE MODEL — decoded and
+  /// re-encoded the way a save sends it — not as stored. Decoding clamps
+  /// out-of-range values and drops keys this build doesn't know, so a stored
+  /// form the model can't reproduce (another build's, a hand edit) made every
+  /// save see the row as edited: rewritten as a change nobody made, and a
+  /// concurrent edit of it by another device reverted. Its own order index
+  /// stays the stored one: a renumbering must be written, or the rows it
+  /// skipped would interleave stale indices with the ones it wrote.
   Future<SongPractice> _hydrate(
     PracticeRow row, {
     Map<String, String>? baseHashes,
   }) async {
-    baseHashes?[row.id] = practiceRowHash(row);
     final interpRows =
         await (db.select(db.interpretations)
               ..where((i) => i.practiceId.equals(row.id) & i.deletedAt.isNull())
@@ -1271,8 +1283,8 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
     AudioTrack? reference;
     final vocals = <AudioTrack>[];
     for (final tr in trackRows) {
-      baseHashes?[tr.id] = trackRowHash(tr);
       final track = _hydrateTrack(tr, children, baseHashes: baseHashes);
+      baseHashes?[tr.id] = _trackHash(track, tr.orderIndex);
       switch (tr.kind) {
         case 'accompaniment':
           accompaniment ??= track;
@@ -1293,11 +1305,6 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
                 ), // stable tie-break; see interpretations
               ]))
             .get();
-    if (baseHashes != null) {
-      for (final b in busRows) {
-        baseHashes[b.id] = fxBusRowHash(b);
-      }
-    }
     final buses = [
       for (final b in busRows)
         FxBus(
@@ -1315,8 +1322,13 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
           sends: _sendsFrom(b.sendsJson),
         ),
     ];
+    if (baseHashes != null) {
+      for (var i = 0; i < busRows.length; i++) {
+        baseHashes[busRows[i].id] = _busHash(buses[i], busRows[i].orderIndex);
+      }
+    }
 
-    return SongPractice(
+    final practice = SongPractice(
       id: row.id,
       title: row.title,
       createdAt: _dt(row.createdAt),
@@ -1340,6 +1352,13 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
       masterVolume: row.masterVolume,
       fxBuses: buses,
     );
+    baseHashes?[row.id] = _practiceHash(
+      practice,
+      separationAssetId: row.separationAssetId,
+      reverbJson: _reverbJsonOf(practice),
+      lyricsJson: _lyricsJsonOf(practice),
+    );
+    return practice;
   }
 
   AudioTrack _hydrateTrack(

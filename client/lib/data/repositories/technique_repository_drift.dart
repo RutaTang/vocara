@@ -34,6 +34,29 @@ class TechniqueRepositoryDrift implements TechniqueRepository {
   static int _ms(DateTime d) => d.millisecondsSinceEpoch;
   static DateTime _dt(int ms) => DateTime.fromMillisecondsSinceEpoch(ms);
 
+  // The MINE side of the three-way merge, and — over the hydrated model —
+  // the base side too (see [_hydrate]): one projection each, so what a load
+  // recorded and what a save compares can never encode differently.
+
+  static String _techniqueHash(Technique t) => techniqueContentHash(
+    name: t.name,
+    aliasesJson: jsonEncode(t.aliases),
+    tagsJson: jsonEncode(t.tags),
+    summary: t.summary,
+    description: t.description,
+    cues: t.cues,
+    exercises: t.exercises,
+    acousticSignature: t.acousticSignature,
+  );
+
+  static String _mediaHash(TechniqueMedia m, String assetId, int order) =>
+      techniqueMediaContentHash(
+        assetId: assetId,
+        kind: m.isVideo ? 'video' : 'audio',
+        label: m.label,
+        orderIndex: order,
+      );
+
   @override
   Future<Result<List<Technique>>> listTechniques() async {
     try {
@@ -178,16 +201,7 @@ class TechniqueRepositoryDrift implements TechniqueRepository {
             'technique ${technique.id} is deleted; refusing to save over it',
           );
         }
-        final desiredHash = techniqueContentHash(
-          name: technique.name,
-          aliasesJson: aliasesJson,
-          tagsJson: tagsJson,
-          summary: technique.summary,
-          description: technique.description,
-          cues: technique.cues,
-          exercises: technique.exercises,
-          acousticSignature: technique.acousticSignature,
-        );
+        final desiredHash = _techniqueHash(technique);
         // Tracks whether the technique ROW itself was written, so a media-only
         // edit (row hash unchanged) can still bump updatedAt for list ordering.
         var techniqueWritten = false;
@@ -297,12 +311,7 @@ class TechniqueRepositoryDrift implements TechniqueRepository {
           currentHashes: currentHashes,
           desired: desired,
           idOf: (d) => d.media.id,
-          hashOf: (d) => techniqueMediaContentHash(
-            assetId: d.assetId,
-            kind: d.media.isVideo ? 'video' : 'audio',
-            label: d.media.label,
-            orderIndex: d.order,
-          ),
+          hashOf: (d) => _mediaHash(d.media, d.assetId, d.order),
           insert: (d, s) => db
               .into(db.techniqueMedia)
               .insertOnConflictUpdate(
@@ -440,32 +449,34 @@ class TechniqueRepositoryDrift implements TechniqueRepository {
   /// Builds a domain [Technique] from a row + its live media (paths resolved).
   /// When [baseHashes] is given, the content hash of every row this read
   /// returns is recorded — the base side of a later three-way save, hashed
-  /// with the SAME sync_hashes.dart projections the save path uses.
+  /// with the SAME projections the save path uses, over the row AS READ INTO
+  /// THE MODEL: the alias/tag JSON re-encoded as a save sends it, an example
+  /// kind this build doesn't know as the audio it loads as. A stored form the
+  /// model can't reproduce (another build's encoding, a newer kind) would
+  /// otherwise make every save rewrite the row as an edit nobody made.
   Future<Technique> _hydrate(
     TechniqueRow row, {
     _MediaRows? media,
     Map<String, String>? baseHashes,
   }) async {
-    baseHashes?[row.id] = techniqueRowHash(row);
     final read = media ?? await _readMedia([row.id]);
     final out = <TechniqueMedia>[];
     for (final m in read.media[row.id] ?? const <TechniqueMediaRow>[]) {
-      baseHashes?[m.id] = techniqueMediaRowHash(m);
-      out.add(
-        TechniqueMedia(
-          id: m.id,
-          // Keep the media even if its bytes are missing locally (carry an
-          // `asset://` ref) so a reload + save never drops the example.
-          path: read.paths[m.assetId] ?? AssetStore.refFor(m.assetId),
-          kind: m.kind == 'video'
-              ? TechniqueMediaKind.video
-              : TechniqueMediaKind.audio,
-          label: m.label,
-          addedAt: _dt(m.createdAt),
-        ),
+      final example = TechniqueMedia(
+        id: m.id,
+        // Keep the media even if its bytes are missing locally (carry an
+        // `asset://` ref) so a reload + save never drops the example.
+        path: read.paths[m.assetId] ?? AssetStore.refFor(m.assetId),
+        kind: m.kind == 'video'
+            ? TechniqueMediaKind.video
+            : TechniqueMediaKind.audio,
+        label: m.label,
+        addedAt: _dt(m.createdAt),
       );
+      baseHashes?[m.id] = _mediaHash(example, m.assetId, m.orderIndex);
+      out.add(example);
     }
-    return Technique(
+    final technique = Technique(
       id: row.id,
       name: row.name,
       aliases: (jsonDecode(row.aliasesJson ?? '[]') as List).cast<String>(),
@@ -479,6 +490,8 @@ class TechniqueRepositoryDrift implements TechniqueRepository {
       createdAt: _dt(row.createdAt),
       updatedAt: _dt(row.updatedAt),
     );
+    baseHashes?[row.id] = _techniqueHash(technique);
+    return technique;
   }
 
   /// The live media of [techniqueIds] grouped by technique, each group in

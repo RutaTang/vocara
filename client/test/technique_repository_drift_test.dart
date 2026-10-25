@@ -9,6 +9,7 @@ import 'package:vocara/data/db/app_database.dart';
 import 'package:vocara/data/db/asset_store.dart';
 import 'package:vocara/data/repositories/technique_repository_drift.dart';
 import 'package:vocara/data/sync/hlc.dart';
+import 'package:vocara/data/sync/sync_hashes.dart';
 import 'package:vocara/data/sync/sync_writer.dart';
 import 'package:vocara/domain/models/technique.dart';
 import 'package:vocara/domain/models/technique_media.dart';
@@ -271,4 +272,61 @@ void main() {
     expect(await listCost(8), few);
     expect(few, 3);
   });
+
+  test(
+    'a row whose stored JSON or kind this build reads differently is no '
+    'edit: an untouched save leaves it, and keeps a concurrent rename',
+    () async {
+      // Hydration decodes the alias/tag JSON and folds an example kind it does
+      // not know into audio, but the base hash was the stored row's: any save
+      // rewrote such rows as edits nobody made, reverting a concurrent edit.
+      final saved =
+          (await repo.saveTechnique(
+                    technique(
+                      media: [
+                        await media('a.wav', [1]),
+                      ],
+                    ),
+                  )
+                  as Ok<Technique>)
+              .value;
+      final mediaId = saved.media.single.id;
+      await db.customStatement(
+        'UPDATE techniques SET aliases_json = ?, tags_json = ? WHERE id = ?',
+        ['["belt", "call"]', '[ "EVT" ]', saved.id],
+      );
+      await db.customStatement(
+        "UPDATE technique_media SET kind = 'image' WHERE id = ?",
+        [mediaId],
+      );
+      final loaded =
+          (await repo.loadTechnique(saved.id) as Ok<Loaded<Technique>>).value;
+      Future<int> ops() async =>
+          (await db.customSelect('SELECT COUNT(*) AS n FROM oplog').getSingle())
+              .read<int>('n');
+      final before = await ops();
+      await db.customStatement(
+        "UPDATE techniques SET name = 'Remote', hlc_packed = 'zzzz' WHERE id = ?",
+        [saved.id],
+      );
+      expect(
+        await repo.saveTechniqueWithBase(
+          loaded.aggregate,
+          baseHashes: loaded.baseHashes,
+        ),
+        isA<Ok<Loaded<Technique>>>(),
+      );
+      final row = await (db.select(
+        db.techniques,
+      )..where((t) => t.id.equals(saved.id))).getSingle();
+      expect(row.name, 'Remote');
+      expect(row.aliasesJson, '["belt", "call"]');
+      expect(row.tagsJson, '[ "EVT" ]');
+      final m = await (db.select(
+        db.techniqueMedia,
+      )..where((x) => x.id.equals(mediaId))).getSingle();
+      expect(m.kind, 'image');
+      expect(await ops(), before);
+    },
+  );
 }
