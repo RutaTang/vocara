@@ -297,6 +297,13 @@ class SpectrogramService {
           fftSize: fftSize,
           hop: hop,
           maxHz: maxHz,
+          // The header gave the frame count: the image is sized once instead
+          // of held twice (see StreamingSpectrogramBuilder).
+          expectedFrames: stftFrameCount(
+            admission.frames,
+            fftSize: fftSize,
+            hop: hop,
+          ),
         );
         var any = false;
         readWavMonoChunked(path, admission, (chunk) {
@@ -323,11 +330,11 @@ class SpectrogramService {
     return analysisGate.run(
       () => Isolate.run(() {
         // Windowed like computeBothFromFile, minus the spectrogram.
-        final expectedFrames = admission.frames == 0
-            ? 0
-            : (admission.frames <= fftSize
-                  ? 1
-                  : ((admission.frames - fftSize + hop - 1) ~/ hop) + 1);
+        final expectedFrames = stftFrameCount(
+          admission.frames,
+          fftSize: fftSize,
+          hop: hop,
+        );
         final analyzer = StreamingTakeAnalyzer(
           admission.sampleRate,
           fftSize: fftSize,
@@ -370,11 +377,11 @@ class SpectrogramService {
         // bit-identical by test) — neither the whole-track sample buffer nor
         // the full decimated copies ever exist. The resident set is a few
         // analysis windows plus the RESULTS.
-        final expectedFrames = admission.frames == 0
-            ? 0
-            : (admission.frames <= fftSize
-                  ? 1
-                  : ((admission.frames - fftSize + hop - 1) ~/ hop) + 1);
+        final expectedFrames = stftFrameCount(
+          admission.frames,
+          fftSize: fftSize,
+          hop: hop,
+        );
         final analyzer = StreamingTakeAnalyzer(
           admission.sampleRate,
           fftSize: fftSize,

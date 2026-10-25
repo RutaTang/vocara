@@ -404,6 +404,42 @@ void main() {
     await _teardown(tester, persistence);
   });
 
+  testWidgets('Export diagnostics leaves no temporary bundle behind', (
+    tester,
+  ) async {
+    // The bundle is built in a fresh temp folder and then copied to the
+    // picked path; every export used to leave that folder and its copy of the
+    // logs behind.
+    final dir = Directory.systemTemp.createTempSync('vocara_diag_test');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    final log = DiagnosticsLog.forTesting(
+      directory: Directory(p.join(dir.path, 'log'))..createSync(),
+    )..log('settings-test', 'one entry for the bundle');
+    String? bundle;
+
+    final persistence = await _pumpSettings(
+      tester,
+      pickSavePath: (_) async => p.join(dir.path, 'vocara-diagnostics.txt'),
+      exportDiagnostics: () async => bundle = await log.exportArchive(),
+    );
+
+    await tester.tap(find.text('Export diagnostics…'));
+    await tester.pump();
+    await _pumpUntilFound(tester, find.textContaining('Diagnostics saved'));
+
+    expect(bundle, isNotNull);
+    await tester.runAsync(() async {
+      expect(await File(bundle!).exists(), isFalse, reason: 'temp bundle');
+      expect(
+        await File(bundle!).parent.exists(),
+        isFalse,
+        reason: 'its temp folder',
+      );
+    });
+
+    await _teardown(tester, persistence);
+  });
+
   testWidgets('Export diagnostics does nothing when the save panel is '
       'cancelled', (tester) async {
     final persistence = await _pumpSettings(

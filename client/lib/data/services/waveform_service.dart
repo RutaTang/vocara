@@ -17,17 +17,46 @@ class WaveformService {
 
   final LocalStorageService _storage;
 
+  /// The app-support folder [analyze] writes its throwaway `.wave`
+  /// intermediates to.
+  static const scratchDirName = 'waveform_cache';
+
+  /// Deletes the `.wave` intermediates left under [root]'s [scratchDirName]
+  /// by analyses that never reached their own cleanup: the app quit or was
+  /// killed mid-analysis (a quit's budget cuts a stop's finalize off right
+  /// there). They are derived scratch, never the only copy of anything, but
+  /// nothing else ever looked in the folder again. Boot-only, AFTER the boot's
+  /// own analyses (staged-recording recovery) and before any screen can start
+  /// one: nothing may be in flight. Best-effort; never throws. Returns how
+  /// many it removed.
+  static Future<int> sweepScratch(Directory root) async {
+    var removed = 0;
+    try {
+      final dir = Directory(p.join(root.path, scratchDirName));
+      if (!await dir.exists()) return 0;
+      await for (final e in dir.list()) {
+        if (e is! File || p.extension(e.path) != '.wave') continue;
+        try {
+          await e.delete();
+          removed++;
+        } catch (_) {}
+      }
+    } catch (_) {}
+    return removed;
+  }
+
   /// Analyzes [audioFilePath]. Returns up to [targetBuckets] peaks in [0, 1]
   /// and the audio duration in milliseconds. Throws if decoding fails.
   Future<WaveformResult> analyze(
     String audioFilePath, {
     int targetBuckets = 1000,
   }) async {
-    final cacheDir = await _storage.assetDir('waveform_cache');
+    final cacheDir = await _storage.assetDir(scratchDirName);
     // The .wave is a throwaway intermediate (the real cache is the content-hash
     // DB table): give it a per-call unique name so concurrent extractions can't
     // collide on a path-derived name, and delete it in the finally so it doesn't
-    // accumulate on disk forever.
+    // accumulate on disk forever (what a quit or kill leaves before the finally
+    // runs is cleared at the next boot, see [sweepScratch]).
     final waveOut = File(p.join(cacheDir.path, '${newId()}.wave'));
 
     try {

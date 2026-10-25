@@ -270,10 +270,10 @@ void main() {
       final m = computeVoiceMetrics(silence, _sr);
       // Framing still produces frames, but nothing should voice.
       expect(_voiced(m.f0), isEmpty, reason: 'silence has no pitch');
-      // Voiced-only averages collapse to 0 (no voiced frames) — finite, no NaN.
-      expect(m.ringAvg.isFinite, isTrue);
-      expect(m.tiltAvg.isFinite, isTrue);
-      expect(m.cppAvg.isFinite, isTrue);
+      // Voiced-only averages have nothing to average: NaN, shown as "—".
+      expect(m.ringAvg, isNaN);
+      expect(m.tiltAvg, isNaN);
+      expect(m.cppAvg, isNaN);
 
       final spec = computeSpectrogram(silence, _sr);
       expect(spec.frames, m.frames, reason: 'silence framing still aligns');
@@ -341,7 +341,7 @@ void main() {
     test('truly empty input yields zero frames', () {
       final m = computeVoiceMetrics(Float32List(0), _sr);
       expect(m.frames, 0);
-      expect(m.ringAvg, 0);
+      expect(m.ringAvg, isNaN);
       final spec = computeSpectrogram(Float32List(0), _sr);
       expect(spec.frames, 0);
       expect(analyzeVoiceProfile(m).hasRange, isFalse);

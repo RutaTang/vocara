@@ -16,6 +16,7 @@ import 'package:path/path.dart' as p;
 import 'package:vocara/data/db/persistence.dart';
 import 'package:vocara/data/services/audio_dsp.dart';
 import 'package:vocara/data/services/audio_file_service.dart';
+import 'package:vocara/data/services/local_storage_service.dart';
 import 'package:vocara/data/services/waveform_service.dart';
 import 'package:vocara/domain/models/audio_track.dart';
 import 'package:vocara/domain/models/song_practice.dart';
@@ -94,6 +95,24 @@ class _FailingRead implements RandomAccessFile {
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+/// Storage rooted at the persistence root, the way production shares one
+/// application-support directory between the store and the file services.
+class _RootedStorage extends LocalStorageService {
+  _RootedStorage(this.root);
+  final Directory root;
+
+  @override
+  Future<Directory> assetDir(String collection) async {
+    final dir = Directory(p.join(root.path, collection));
+    await dir.create(recursive: true);
+    return dir;
+  }
+
+  @override
+  Future<String> assetPath(String collection) async =>
+      p.join(root.path, collection);
 }
 
 void main() {
@@ -697,4 +716,65 @@ void main() {
       }
     },
   );
+
+  test('an import cut off before its save is not adopted as a take, and '
+      'still pools and sweeps', () async {
+    // A mono 48 kHz WAV with the canonical header is exactly the recorder's
+    // shape, and ensureStreamableWav passes it through unchanged, so the staged
+    // copy IS the track's file until the save pools it. A quit or crash in that
+    // window (the quit does not wait for an import) left it where recovery
+    // adopts orphans: the next boot showed it as "Take N (recovered)".
+    final practice = await createPractice();
+    final ext = await Directory.systemTemp.createTemp('vocara_import_src');
+    addTearDown(() => ext.delete(recursive: true));
+    final src = File(p.join(ext.path, 'guide vocal.wav'));
+    await src.writeAsBytes(monoWav(48000));
+    final files = AudioFileService(storage: _RootedStorage(root));
+
+    final staged = await files.importAudio(
+      practiceId: practice.id,
+      sourcePath: src.path,
+    );
+    expect(await File(staged).exists(), isTrue);
+    expect(
+      p.isWithin(p.join(root.path, 'audio', practice.id), staged),
+      isTrue,
+      reason: 'imports still stage inside the practice tree',
+    );
+
+    // The app quits here, before the save. Next boot:
+    expect(await persistence.recoverStagedRecordings(analyze: fakeAnalyze), 0);
+    expect((await reload(practice.id)).vocalTracks, isEmpty);
+    expect(persistence.recoveryRetryPaths, isEmpty);
+
+    // Had the save run instead, it pools the staged file as usual.
+    final pooled = await files.importAudio(
+      practiceId: practice.id,
+      sourcePath: src.path,
+    );
+    final saved = await persistence.songRepo.savePractice(
+      practice.copyWith(
+        vocalTracks: [
+          AudioTrack(
+            id: newId(),
+            kind: AudioTrackKind.vocal,
+            displayName: 'Guide',
+            audioFilePath: pooled,
+            durationMs: 1000,
+            waveformPeaks: const [0.1],
+            createdAt: DateTime.now(),
+            versionId: practice.activeVersion?.id,
+          ),
+        ],
+      ),
+    );
+    expect(saved, isA<Ok<SongPractice>>());
+    final clip = (await reload(practice.id)).vocalTracks.single.primaryClip!;
+    expect(p.isWithin(p.join(root.path, 'assets'), clip.audioFilePath), isTrue);
+
+    // And the boot sweep still reclaims every staged import.
+    await persistence.assets.sweepStaging();
+    expect(await File(staged).exists(), isFalse);
+    expect(await File(pooled).exists(), isFalse);
+  });
 }

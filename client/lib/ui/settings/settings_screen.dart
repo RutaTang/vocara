@@ -40,7 +40,8 @@ class SettingsScreen extends StatefulWidget {
   final Future<bool> Function(String url)? openUrl;
 
   /// Test seam for producing the diagnostics bundle (defaults to
-  /// [DiagnosticsLog.instance]'s exportArchive): returns the bundle's path.
+  /// [DiagnosticsLog.instance]'s exportArchive): returns the path of a
+  /// temporary bundle, which the screen deletes once it has copied it.
   final Future<String> Function()? exportDiagnostics;
 
   @override
@@ -324,17 +325,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final destination = await pick('vocara-diagnostics.txt');
     if (destination == null || !mounted) return;
     setState(() => _exporting = true);
+    String? bundle;
     try {
       final export =
           widget.exportDiagnostics ?? DiagnosticsLog.instance.exportArchive;
-      final bundle = await export();
+      bundle = await export();
       await File(bundle).copy(destination);
+      // The bundle was only the copy's source: drop it and its temp folder.
+      await DiagnosticsLog.discardArchive(bundle);
       if (!mounted) return;
       _showToast(
         'Diagnostics saved. The file holds technical logs only, '
         'never your audio.',
       );
     } catch (_) {
+      // A failed copy leaves the temp bundle as much as a good one did.
+      if (bundle != null) await DiagnosticsLog.discardArchive(bundle);
       if (!mounted) return;
       _showToast('Could not save the diagnostics file.');
     } finally {

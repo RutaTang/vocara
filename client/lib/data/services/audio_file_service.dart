@@ -19,8 +19,9 @@ typedef WavProbe = ({
 });
 
 /// Owns audio files on disk. Imported files are copied into the app sandbox
-/// (under `audio/<practiceId>/`) so a practice owns its media and never loses
-/// a reference to an external file. Recordings are written straight here.
+/// (under `audio/<practiceId>/imports/`) so a practice owns its media and never
+/// loses a reference to an external file. Recordings are written straight into
+/// `audio/<practiceId>/`.
 class AudioFileService {
   AudioFileService({required LocalStorageService storage}) : _storage = storage;
 
@@ -39,15 +40,31 @@ class AudioFileService {
     }
   }
 
-  Future<Directory> _audioDir(String practiceId) async {
+  Future<Directory> _audioDir(String practiceId, {String? subdir}) async {
     _checkPathComponent(practiceId);
     final base = await _storage.assetDir('audio');
-    final dir = Directory(p.join(base.path, practiceId));
+    final dir = Directory(
+      subdir == null
+          ? p.join(base.path, practiceId)
+          : p.join(base.path, practiceId, subdir),
+    );
     if (!await dir.exists()) {
       await dir.create(recursive: true);
     }
     return dir;
   }
+
+  /// Where imports stage: a subdirectory of the practice's staging tree, NOT
+  /// the tree itself. Boot recovery (Persistence.recoverStagedRecordings)
+  /// adopts every recorder-shaped WAV lying DIRECTLY under
+  /// `audio/<practiceId>/`, and an import of a mono 48 kHz canonical WAV has
+  /// exactly that shape (ensureStreamableWav keeps it as the track's file
+  /// until the save pools it). A quit or crash before that save brought it
+  /// back as a phantom "(recovered)" take. One level down it is invisible to
+  /// recovery, which skips subdirectories, and the boot staging sweep still
+  /// reclaims it with the rest of `audio/` (the same rule edit outputs follow
+  /// under `edits/`, see AudioEditService).
+  static const importsSubdir = 'imports';
 
   /// Hard ceiling on any single imported file. Derivation: the longest media
   /// playback will ever decode is 60 minutes, and the fattest legal 60-minute
@@ -57,10 +74,11 @@ class AudioFileService {
   /// analyze here anyway — copying it first was pure disk burn.
   static const int maxImportBytes = 4 * 1000 * 1000 * 1000;
 
-  /// Copies [sourcePath] into the practice's audio directory and returns the
-  /// new sandbox path. Throws [FormatException] when the source exceeds
-  /// [maxImportBytes] — judged from a stat before any bytes move, and
-  /// re-enforced during the copy itself (see [copyBounded]).
+  /// Copies [sourcePath] into the practice's import staging directory (see
+  /// [importsSubdir]) and returns the new sandbox path. Throws
+  /// [FormatException] when the source exceeds [maxImportBytes] — judged from
+  /// a stat before any bytes move, and re-enforced during the copy itself
+  /// (see [copyBounded]).
   Future<String> importAudio({
     required String practiceId,
     required String sourcePath,
@@ -74,7 +92,7 @@ class AudioFileService {
         'supported.',
       );
     }
-    final dir = await _audioDir(practiceId);
+    final dir = await _audioDir(practiceId, subdir: importsSubdir);
     final ext = p.extension(sourcePath);
     final dest = p.join(dir.path, '${newId()}$ext');
     await copyBounded(sourcePath, dest);
