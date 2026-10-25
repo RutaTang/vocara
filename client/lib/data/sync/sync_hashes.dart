@@ -124,8 +124,10 @@ String fxBusContentHash({
 
 /// Row projection. The null fallbacks are the pre-existing row-side semantics:
 /// a NULL sends_json equals the save side's empty-list encoding ('[]'), while
-/// a NULL fx_json ('' here) can never equal a save-side encoding, so such a
-/// legacy/remote row is rewritten once on its next save.
+/// a NULL fx_json ('' here) can never equal a save-side encoding. A load
+/// records such a row's BASE over the model it hydrates to, not this
+/// projection, so an untouched legacy/remote row is still skipped by a save;
+/// only the current side of a three-way merge reads it this way.
 String fxBusRowHash(FxBusRow r) => fxBusContentHash(
   name: r.name,
   colorValue: r.colorValue,
