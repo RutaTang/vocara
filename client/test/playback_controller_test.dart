@@ -204,6 +204,11 @@ void main() {
         reason: 'the fit-all view must reach the record head',
       );
       expect(relayouts, greaterThan(0), reason: 'the timeline must relayout');
+      expect(
+        c.extentMs,
+        greaterThan(26000),
+        reason: 'the scrollbar pans over the same extent as the view',
+      );
 
       // Zoomed in, follow pages on past the old end.
       unawaited(c.zoomTimeline(0.25));
@@ -218,6 +223,7 @@ void main() {
       c.setRecordingPosition(const Duration(milliseconds: 26000));
       recording = false;
       expect(c.viewSpanMs, 20000, reason: 'the saved timeline takes over');
+      expect(c.extentMs, 20000);
     });
   });
 

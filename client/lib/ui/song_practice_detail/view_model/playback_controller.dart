@@ -172,6 +172,10 @@ class PlaybackController extends ChangeNotifier {
     return c < _viewMinMs ? _viewMinMs : c;
   }
 
+  /// The timeline length the view pans and zooms over: the practice's, or —
+  /// while a take runs past its end — reaching past the record head.
+  int get extentMs => _extentMs;
+
   /// The visible timeline span in ms — between a 1-second window and fit-all.
   int get viewSpanMs {
     final ext = _extentMs;

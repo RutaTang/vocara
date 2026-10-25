@@ -1182,9 +1182,14 @@ class _TimelineScrollbar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final ext = vm.practice?.timelineDurationMs ?? 0;
+    if ((vm.practice?.timelineDurationMs ?? 0) <= 0) {
+      return const SizedBox(height: 14);
+    }
+    // The view's own extent, which reaches past the timeline while a take
+    // runs beyond its end: the practice's alone pinned the thumb at the right
+    // end and panned at the wrong rate.
+    final ext = vm.playback.extentMs;
     final span = vm.playback.viewSpanMs;
-    if (ext <= 0) return const SizedBox(height: 14);
     // Always shown: the thumb fills the groove at fit-all (nothing to scroll)
     // and narrows / becomes draggable once zoomed in. It sits in the timeline
     // area (right of the header column); the left header space is left empty.
