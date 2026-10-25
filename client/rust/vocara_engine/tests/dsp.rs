@@ -891,3 +891,45 @@ fn moving_a_delay_doubler_or_saturation_knob_glides_instead_of_stepping() {
         );
     }
 }
+
+#[test]
+fn a_gate_does_not_chatter_on_a_low_note_near_its_threshold() {
+    // The gate compared each sample's |x| to the threshold, so every zero crossing read as
+    // silence and the envelope started closing: with a short release a low note just over
+    // the threshold came out with ~9% THD (100 Hz) to ~13% (80 Hz) of gating buzz.
+    use vocara_engine::dsp::gate::{param as gp, GateNode};
+    let gate = |input: &[f32]| {
+        let mut g = GateNode::new();
+        g.prepare(SR, 256);
+        for (p, v) in [
+            (gp::THRESHOLD_DB, -45.0),
+            (gp::RANGE_DB, 60.0),
+            (gp::ATTACK_MS, 2.0),
+            (gp::RELEASE_MS, 10.0),
+            (gp::BYPASS, 0.0),
+        ] {
+            g.set_param(p, v);
+        }
+        left(&run_phase(&mut g, input, SR, 256))
+    };
+    for (f, peak_db) in [(100.0, -42.0f32), (80.0, -43.0)] {
+        let amp = 10f32.powf(peak_db / 20.0);
+        let out = gate(&to_stereo(&sine_mono(f, SR, 48_000, amp)));
+        let settled = &out[24_000..]; // 0.5 s: a whole number of periods
+        let fund = harmonic_amp(settled, f, 1);
+        let harm: f64 = (2..=10)
+            .map(|k| harmonic_amp(settled, f, k).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let thd = 100.0 * harm / fund;
+        assert!(thd < 0.5, "{f} Hz at {peak_db} dBFS: gating THD {thd:.2}%");
+    }
+    // ...and it still gates: a tone 20 dB under the threshold comes out at least 40 dB down.
+    let quiet = to_stereo(&sine_mono(200.0, SR, 48_000, 10f32.powf(-65.0 / 20.0)));
+    let out = gate(&quiet);
+    let cut = 20.0 * (rms(&out[24_000..]) / rms(&left(&quiet)[24_000..])).log10();
+    assert!(
+        cut < -40.0,
+        "a tone under the threshold only moved {cut:.1} dB"
+    );
+}

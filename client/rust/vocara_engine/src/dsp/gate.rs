@@ -1,6 +1,6 @@
 //! Noise gate / downward expander: attenuates the signal when its level falls below the
-//! threshold (cleans breaths / room tone between phrases). Stereo-linked peak detector with
-//! attack/release ballistics on the gain-reduction envelope. No recursive audio path.
+//! threshold (cleans breaths / room tone between phrases). Stereo-linked peak-hold detector
+//! with attack/release ballistics on the gain-reduction envelope. No recursive audio path.
 
 use crate::dsp::denormals::sanitize;
 use crate::dsp::smooth::BypassFade;
@@ -17,6 +17,14 @@ pub mod param {
 
 const RATIO: f32 = 3.0; // expander slope below the threshold
 
+/// The detector holds each peak this long before letting it fall: longer than half a period
+/// of the lowest sung fundamentals (~50 Hz), so the level the threshold sees no longer drops
+/// to silence at every zero crossing. Comparing each sample's |x| directly made a low note
+/// just over the threshold chatter (~9% THD at 100 Hz with a short release).
+const HOLD_S: f64 = 0.010;
+/// Decay time constant of the held peak once its hold has lapsed.
+const DETECT_DECAY_S: f64 = 0.005;
+
 pub struct GateNode {
     threshold_db: f32,
     range_db: f32,
@@ -25,6 +33,12 @@ pub struct GateNode {
     attack_coef: f32,
     release_coef: f32,
     env_db: f32, // current gain reduction (dB, <= 0)
+    /// The held peak level (linear), the frames its hold has left, and the hold length and
+    /// per-sample decay derived from the sample rate.
+    det: f32,
+    hold: usize,
+    hold_frames: usize,
+    det_decay: f32,
     fade: BypassFade,
     sr: f64,
 }
@@ -39,6 +53,10 @@ impl GateNode {
             attack_coef: 1.0,
             release_coef: 1.0,
             env_db: 0.0,
+            det: 0.0,
+            hold: 0,
+            hold_frames: 0,
+            det_decay: 0.0,
             fade: BypassFade::new(true),
             sr: 48_000.0,
         };
@@ -51,6 +69,8 @@ impl GateNode {
         let r = self.release_ms.max(0.01) * 0.001 * self.sr as f32;
         self.attack_coef = 1.0 - (-1.0 / a).exp();
         self.release_coef = 1.0 - (-1.0 / r).exp();
+        self.hold_frames = (HOLD_S * self.sr) as usize;
+        self.det_decay = (-1.0 / (DETECT_DECAY_S * self.sr)).exp() as f32;
     }
 }
 
@@ -66,6 +86,8 @@ impl Node for GateNode {
         self.recompute_ballistics();
         self.fade.prepare(sample_rate);
         self.env_db = 0.0;
+        self.det = 0.0;
+        self.hold = 0;
     }
 
     fn reset(&mut self) {
@@ -74,6 +96,8 @@ impl Node for GateNode {
         // recovers only over the attack/release time — an audible momentary wrong
         // level right after a seek. Matches CompressorNode/DeEsserNode::reset.
         self.env_db = 0.0;
+        self.det = 0.0;
+        self.hold = 0;
     }
 
     fn process(&mut self, io: &mut ProcessIo) {
@@ -97,7 +121,18 @@ impl Node for GateNode {
             let l = out[CHANNELS * i];
             let r = out[CHANNELS * i + 1];
             let peak = l.abs().max(r.abs());
-            let x_db = 20.0 * (peak + 1.0e-12).log10();
+            // Peak-hold: a new peak takes over at once; a lower sample only pulls the level
+            // down after the hold, and then gradually. (Sanitized: an infinite sample must
+            // not pin the gate open for good.)
+            if peak >= self.det {
+                self.det = sanitize(peak);
+                self.hold = self.hold_frames;
+            } else if self.hold > 0 {
+                self.hold -= 1;
+            } else {
+                self.det = peak.max(self.det * self.det_decay);
+            }
+            let x_db = 20.0 * (self.det + 1.0e-12).log10();
 
             // Below threshold → expand downward; clamp to -range.
             let target_db = if x_db >= self.threshold_db {
