@@ -52,11 +52,13 @@ class TechniqueLibraryViewModel extends ChangeNotifier {
     super.notifyListeners();
   }
 
-  /// Freshness-only reload when sync applied remote changes to the techniques
-  /// table. Skipped while any command runs — a skipped reload can never lose
-  /// data (three-way saves merge against base hashes).
+  /// Freshness-only reload when sync applied remote changes to any technique:
+  /// its own row, or only its example clips (which the cards count, and which
+  /// ship without touching the techniques table). Skipped while any command
+  /// runs — a skipped reload can never lose data (three-way saves merge
+  /// against base hashes).
   void _onRemoteApplied(RemoteApplied event) {
-    if (!event.touchesTable('techniques')) return;
+    if (event.techniqueIds.isEmpty) return;
     if (load.running || createTechnique.running || deleteTechnique.running) {
       return;
     }

@@ -49,12 +49,14 @@ class HomeViewModel extends ChangeNotifier {
   List<PracticeSummary> _projects = const [];
   List<PracticeSummary> get projects => _projects;
 
-  /// Freshness-only reload when sync applied remote changes to the practices
-  /// table (a new/renamed/deleted practice). Skipped while any command runs —
-  /// a skipped reload can never lose data (three-way saves merge against base
-  /// hashes); the list simply refreshes on the next event or navigation.
+  /// Freshness-only reload when sync applied remote changes to any practice —
+  /// its own row (a new/renamed/deleted practice) or a child row the cards
+  /// count (a take, a note, a backing track), which ships without touching
+  /// the practices table. Skipped while any command runs — a skipped reload
+  /// can never lose data (three-way saves merge against base hashes); the
+  /// list simply refreshes on the next event or navigation.
   void _onRemoteApplied(RemoteApplied event) {
-    if (!event.touchesTable('practices')) return;
+    if (event.practiceIds.isEmpty) return;
     if (load.running || createProject.running || deleteProject.running) return;
     load.execute();
   }

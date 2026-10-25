@@ -196,10 +196,18 @@ class TechniqueDetailViewModel extends ChangeNotifier
   void endEdit() {
     if (!_editing) return;
     _editing = false;
-    if (_missedRemote) {
-      _missedRemote = false;
-      unawaited(_reloadFromRemote());
-    }
+    _replayMissedRemote();
+  }
+
+  /// Replays a reload skipped while a hold was on (see [_holdsEditorState]),
+  /// once nothing pins the read view any more. Outside an edit session the
+  /// hold is a practice take: stopping it used to replay nothing, so a remote
+  /// change landing mid-take left the read view stale with nothing pending
+  /// to correct it — and a later Edit seeded the form from that stale text.
+  void _replayMissedRemote() {
+    if (_editing || !_missedRemote) return;
+    _missedRemote = false;
+    unawaited(_reloadFromRemote());
   }
 
   /// Freshness-only reload when sync applied remote rows of THIS technique.
@@ -831,6 +839,9 @@ class TechniqueDetailViewModel extends ChangeNotifier
     // is time-compressed (frames missing as silent holes) — never present it
     // as clean.
     final droppedFrames = stopped?.droppedFrames ?? 0;
+    // The take was the hold keeping remote reloads off the read view; a quit
+    // has no view left to refresh.
+    if (!skipAnalysis) _replayMissedRemote();
     final path = _practiceTempPath;
     if (path == null) {
       notifyListeners();

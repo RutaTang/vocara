@@ -10,16 +10,20 @@
 // stale text back over the remote change under a fresh stamp.
 
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
 import 'package:vocara/data/repositories/technique_repository.dart';
 import 'package:vocara/data/services/local_storage_service.dart';
+import 'package:vocara/data/services/media_analysis_service.dart';
+import 'package:vocara/data/services/mic_recording_controller.dart';
 import 'package:vocara/data/services/technique_media_service.dart';
 import 'package:vocara/data/sync/sync_engine.dart';
 import 'package:vocara/data/sync/sync_hashes.dart';
 import 'package:vocara/domain/models/technique.dart';
+import 'package:vocara/domain/models/technique_analysis.dart';
 import 'package:vocara/ui/technique_library/view_model/technique_detail_view_model.dart';
 import 'package:vocara/ui/technique_library/widgets/technique_detail_screen.dart';
 import 'package:vocara/utils/result.dart';
@@ -67,6 +71,54 @@ class _Repo implements TechniqueRepository {
   @override
   Future<Result<void>> deleteTechnique(String id) async =>
       const Result.ok(null);
+}
+
+class _NoAnalysis extends Fake implements MediaAnalysisService {
+  @override
+  Future<TechniqueAnalysis?> analyze(
+    String path, {
+    bool Function()? wanted,
+  }) async => null;
+}
+
+/// Recorder fake: [start] arms a take in its own temp dir (the view model
+/// deletes a take's whole parent dir on cleanup) and [stop] reports it clean.
+class _FakeRecorder extends Fake implements MicRecordingController {
+  bool recording = false;
+  String? _path;
+  final ValueNotifier<double> _level = ValueNotifier(0);
+
+  @override
+  ValueNotifier<double> get level => _level;
+
+  @override
+  bool get isRecording => recording;
+
+  @override
+  bool get isStarting => false;
+
+  @override
+  bool get feedingMonitor => false;
+
+  @override
+  Future<MicRecordingStart> start(RecordingPathStrategy destination) async {
+    final dir = await Directory.systemTemp.createTemp('vocara_fake_take');
+    recording = true;
+    return MicRecordingStart.started(_path = '${dir.path}/take.wav');
+  }
+
+  @override
+  MicRecordingStop? stop() {
+    if (!recording) return null;
+    recording = false;
+    return (path: _path!, clean: true, droppedFrames: 0);
+  }
+
+  @override
+  void invalidatePendingStart() {}
+
+  @override
+  void dispose() => _level.dispose();
 }
 
 Technique _technique({String summary = 'local summary'}) => Technique(
@@ -170,6 +222,38 @@ void main() {
 
     _remoteEdit(repo, remote);
     await tester.pumpAndSettle();
+    expect(vm.technique!.summary, 'remote summary');
+  });
+
+  test('a reload skipped during a practice take is replayed when the take '
+      'stops', () async {
+    // Regression: only endEdit replayed a skipped reload, and a practice take
+    // holds no edit session — the read view stayed stale after Stop with
+    // nothing pending to correct it, and a later Edit seeded the form from
+    // the stale text (whose save then overwrote the remote change).
+    final repo = _Repo(_technique(), {'t1': 'BASE-HASH'});
+    final remote = StreamController<RemoteApplied>.broadcast();
+    addTearDown(remote.close);
+    final vm = TechniqueDetailViewModel(
+      repository: repo,
+      mediaService: TechniqueMediaService(storage: LocalStorageService()),
+      techniqueId: 't1',
+      remoteApplied: remote.stream,
+      analysisService: _NoAnalysis(),
+      recorder: _FakeRecorder(),
+    );
+    addTearDown(vm.dispose);
+    for (var i = 0; i < 200 && vm.technique == null; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+
+    expect(await vm.startPractice(), isNull);
+    _remoteEdit(repo, remote);
+    await pumpEventQueue();
+    expect(vm.technique!.summary, 'local summary', reason: 'held by the take');
+
+    await vm.stopPractice();
+    await pumpEventQueue();
     expect(vm.technique!.summary, 'remote summary');
   });
 }
