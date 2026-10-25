@@ -382,8 +382,15 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// makes the remote edit visible sooner and refreshes the base so the next
   /// save resolves against it.
   Future<void> _onRemoteApplied(RemoteApplied event) async {
-    if (_disposed || _practice == null || load.running) return;
     if (!event.practiceIds.contains(_practiceId)) return;
+    await _reloadIfUnchanged();
+  }
+
+  /// Re-reads the practice and adopts it unless anything is in flight or the
+  /// model changed meanwhile — the freshness reload shared by a remote apply
+  /// and a save that landed after this screen opened (see [_load]).
+  Future<void> _reloadIfUnchanged() async {
+    if (_disposed || _practice == null || load.running) return;
     if (busy || isRecording || isSeparating || _saving) return;
     final epoch = ++_reloadEpoch;
     final before = _practice;
@@ -855,8 +862,19 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   Future<Result<SongPractice>> _load() async {
     // A take stopped, or an edit made, just before the last screen on this
     // practice closed may still be landing (its finalize or save outlives that
-    // screen): read the practice after it, or this screen shows it without.
-    await _finalizer.landed(_practiceId);
+    // screen). A short grace covers an ordinary save; past it the screen
+    // opens on what the store holds now and re-reads once the rest landed —
+    // waiting it all out held every reopen behind a wedged save for the
+    // finalizer's whole budget.
+    Future<void>? stillLanding;
+    if (_finalizer.isLanding(_practiceId)) {
+      final landing = _finalizer.landed(_practiceId);
+      try {
+        await landing.timeout(_landingGrace);
+      } on TimeoutException {
+        stillLanding = landing;
+      }
+    }
     // Load through the base-hash path: the hashes captured here are what every
     // later save three-way merges against (see [_baseHashes]).
     final loaded = await _repository.loadPractice(_practiceId);
@@ -872,8 +890,17 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     analysis.applyDemoHooks(practice.vocalTracks);
     await mixer.resyncPlayback();
     notifyListeners();
+    // The completion runs after this load has settled, so the reload's
+    // `load.running` guard no longer refuses it.
+    if (stillLanding != null) {
+      unawaited(stillLanding.then((_) => _reloadIfUnchanged()));
+    }
     return Result.ok(practice);
   }
+
+  /// How long a reopen waits for what the last screen on this practice left
+  /// landing before it opens on the store as it is (see [_load]).
+  static const Duration _landingGrace = Duration(milliseconds: 300);
 
   /// Adopts a freshly-read aggregate as the live model: the base hashes the
   /// next save merges against, plus every normalization the model needs before

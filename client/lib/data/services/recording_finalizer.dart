@@ -123,6 +123,9 @@ class RecordingFinalizer {
     }
   }
 
+  /// Whether anything of [practiceId] is landing right now (see [landing]).
+  bool isLanding(String practiceId) => _landing.containsKey(practiceId);
+
   /// Completes once every take of [practiceId] landing now has settled,
   /// whatever its outcome (the finalize reports its own) — or after
   /// [perFinalizerBudget], like a quit's wait: a wedged finalize then costs

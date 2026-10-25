@@ -901,4 +901,40 @@ void main() {
     );
     expect(take1.displayName, 'Lead', reason: 'the edit it was reopened on');
   });
+
+  test('a reopen behind a stuck save opens at once and shows the edit once '
+      'it lands', () async {
+    // Waiting out every landing save held each reopen behind a wedged one for
+    // the finalizer's whole budget, only to load the old state anyway.
+    repo = _FakeRepo(_seed());
+    waveforms = _FakeWaveforms();
+    spectrograms = _FakeSpectrograms();
+    final first = openVm();
+    for (var i = 0; i < 400 && first.practice == null; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+    repo.saveGate = Completer<void>();
+    final rename = first.renameTrack('take1', 'Lead');
+    await Future<void>.delayed(const Duration(milliseconds: 5));
+    first.dispose();
+
+    final sw = Stopwatch()..start();
+    final reopened = openVm();
+    addTearDown(reopened.dispose);
+    for (var i = 0; i < 400 && reopened.practice == null; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+    expect(sw.elapsedMilliseconds, lessThan(1500), reason: 'opened at once');
+    String name() => reopened.practice!.vocalTracks
+        .singleWhere((t) => t.id == 'take1')
+        .displayName;
+    expect(name(), 'Take 1', reason: 'the save has not landed yet');
+
+    repo.saveGate!.complete();
+    await rename;
+    for (var i = 0; i < 400 && name() != 'Lead'; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+    expect(name(), 'Lead', reason: 'the landed edit shows without a reopen');
+  });
 }
