@@ -442,8 +442,11 @@ class Persistence {
   });
 
   /// The dependency carry-forward [compactOplog] runs before it collapses
-  /// history. Its correlated subquery runs once per surviving entry, so it
-  /// must resolve through ix_oplog_entity (a test pins the plan).
+  /// history. Its correlated subqueries run once per surviving entry, so they
+  /// must resolve through ix_oplog_entity (a test pins the plan). Only an
+  /// entry that actually inherits something is written (see
+  /// [OplogDrain.ackCarrySql]: an UPDATE rewrites every row it matches, and
+  /// this one used to match the whole surviving ledger on every boot).
   @visibleForTesting
   static const String compactCarrySql =
       'UPDATE oplog SET depends_on_asset_id = ('
@@ -454,7 +457,11 @@ class Persistence {
       'ORDER BY o.seq DESC LIMIT 1'
       ') WHERE depends_on_asset_id IS NULL AND op <> \'tombstone\' '
       'AND seq IN ('
-      'SELECT MAX(seq) FROM oplog GROUP BY entity_table, entity_id)';
+      'SELECT MAX(seq) FROM oplog GROUP BY entity_table, entity_id) '
+      'AND EXISTS (SELECT 1 FROM oplog o '
+      'WHERE o.entity_table = oplog.entity_table '
+      'AND o.entity_id = oplog.entity_id '
+      'AND o.depends_on_asset_id IS NOT NULL)';
 
   /// Boot-time recovery of hard-kill orphaned take recordings. Returns the
   /// number of takes recovered.

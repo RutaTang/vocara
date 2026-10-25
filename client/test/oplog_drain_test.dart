@@ -277,6 +277,27 @@ void main() {
     expect(await oplogCount(), 1); // and acks nothing away
   });
 
+  test('with no dependency anywhere, an ack rewrites no surviving entry: '
+      'only the acked ones go', () async {
+    // Nothing journals an asset dependency in production, so the carry has
+    // nothing to carry — yet it used to rewrite every entry above the
+    // watermark (to the NULL it already held) on every ack: quadratic over
+    // a first push that drains a big ledger window by window.
+    Future<int> totalChanges() async =>
+        (await db.customSelect('SELECT total_changes() AS n').getSingle())
+            .read<int>('n');
+    for (var i = 0; i < 4; i++) {
+      await journal('clips', 'C$i', 'insert');
+    }
+    await journal('clips', 'C0', 'update', payloadHash: 'h2');
+
+    final first = (await drain.readPending(limit: 1)).maxSeq;
+    final before = await totalChanges();
+    expect(await drain.ack(first), 1);
+    expect(await totalChanges() - before, 1, reason: 'the one acked entry');
+    expect(await oplogCount(), 4);
+  });
+
   test(
     'the ack and boot-compaction carry-forward probe each entity through '
     'ix_oplog_entity instead of scanning the whole ledger per entry',

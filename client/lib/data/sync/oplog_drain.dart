@@ -124,8 +124,12 @@ class OplogDrain {
   }
 
   /// The dependency carry-forward [ack] runs before deleting (bound: the
-  /// ack watermark). Its correlated subquery runs once per surviving entry,
-  /// so it must resolve through ix_oplog_entity (a test pins the plan).
+  /// ack watermark). Its correlated subqueries run once per surviving entry,
+  /// so they must resolve through ix_oplog_entity (a test pins the plan).
+  /// Only an entry that actually inherits something is written: SQLite
+  /// rewrites every row an UPDATE matches, even to the value it held, and
+  /// with no dependency anywhere (production today) each ack rewrote the
+  /// whole ledger above its watermark.
   @visibleForTesting
   static const String ackCarrySql =
       'UPDATE oplog SET depends_on_asset_id = ('
@@ -136,7 +140,12 @@ class OplogDrain {
       'AND o.seq <= oplog.seq '
       'ORDER BY o.seq DESC LIMIT 1'
       ') WHERE depends_on_asset_id IS NULL AND op <> \'tombstone\' '
-      'AND seq > ?';
+      'AND seq > ? '
+      'AND EXISTS (SELECT 1 FROM oplog o '
+      'WHERE o.entity_table = oplog.entity_table '
+      'AND o.entity_id = oplog.entity_id '
+      'AND o.depends_on_asset_id IS NOT NULL '
+      'AND o.seq <= oplog.seq)';
 
   /// Deletes every oplog entry with seq <= [uptoSeq], in one transaction.
   /// Call ONLY with a sequence whose entries were durably pushed (or

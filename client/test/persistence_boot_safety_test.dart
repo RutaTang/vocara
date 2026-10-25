@@ -560,6 +560,31 @@ void main() {
       );
     });
 
+    test('with no dependency anywhere, compaction deletes the superseded '
+        'history and rewrites no surviving entry', () async {
+      // The carry has nothing to carry when no entry names an asset — yet it
+      // used to rewrite every surviving entry, on every boot.
+      Future<int> totalChanges() async =>
+          (await persistence.db
+                  .customSelect('SELECT total_changes() AS n')
+                  .getSingle())
+              .read<int>('n');
+      final id1 = 'P1'.padRight(26, '0');
+      final id2 = 'P2'.padRight(26, '0');
+      await journal('practices', id1, 'insert');
+      await journal('practices', id1, 'update');
+      await journal('practices', id2, 'insert');
+
+      final before = await totalChanges();
+      expect(await persistence.compactOplog(), 1);
+      expect(await totalChanges() - before, 1, reason: 'the one deletion');
+      final batch = await OplogDrain(persistence.db).readPending();
+      expect(batch.entries.map((e) => (e.id, e.op)), [
+        (id1, 'update'),
+        (id2, 'insert'),
+      ]);
+    });
+
     test('is idempotent and a no-op on an already-compact ledger', () async {
       final id = 'P1'.padRight(26, '0');
       await journal('practices', id, 'insert');
