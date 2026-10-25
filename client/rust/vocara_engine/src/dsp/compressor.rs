@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use crate::dsp::denormals::sanitize;
-use crate::dsp::smooth::Smoothed;
+use crate::dsp::smooth::{BypassFade, Smoothed};
 use crate::node::{Node, ProcessIo};
 use crate::sample::{db_to_lin, CHANNELS};
 
@@ -34,7 +34,7 @@ pub struct CompressorNode {
     release_coef: f32,
     env_db: f32, // current gain reduction in dB, <= 0
     gr_meter: f32,
-    bypass: bool,
+    fade: BypassFade,
     sr: f64,
     // Publishes the block's peak gain reduction (dB, >= 0, f32 bits) for a UI meter.
     meter: Option<Arc<AtomicU32>>,
@@ -60,7 +60,7 @@ impl CompressorNode {
             release_coef: 1.0,
             env_db: 0.0,
             gr_meter: 0.0,
-            bypass: false,
+            fade: BypassFade::new(false),
             sr: 48_000.0,
             meter: None,
         };
@@ -77,7 +77,7 @@ impl CompressorNode {
     /// A gentle default: light vocal leveling, bypassed until the user dials it.
     pub fn default_vocal() -> Self {
         let mut c = CompressorNode::new(-18.0, 3.0, 6.0, 10.0, 120.0, 0.0);
-        c.bypass = true;
+        c.fade = BypassFade::new(true);
         c
     }
 
@@ -102,6 +102,7 @@ impl Node for CompressorNode {
         self.ratio.set_time(tau, sample_rate);
         self.knee.set_time(tau, sample_rate);
         self.makeup.set_time(tau, sample_rate);
+        self.fade.prepare(sample_rate);
         self.recompute_ballistics();
         self.env_db = 0.0;
     }
@@ -129,9 +130,9 @@ impl Node for CompressorNode {
                 }
             }
         }
-        if self.bypass {
+        if self.fade.begin_block() {
             // The smoothers and envelope hold while bypassed; set_param(BYPASS)
-            // clears the envelope on the transition so re-enabling starts idle.
+            // clears the envelope on re-enabling from here, so it starts idle.
             if let Some(m) = &self.meter {
                 m.store(0, Ordering::Relaxed);
             }
@@ -181,7 +182,8 @@ impl Node for CompressorNode {
             // biquad/reverb invariant in denormals.rs.
             self.env_db = sanitize(self.env_db + (gain_db - self.env_db) * coef);
 
-            let g = db_to_lin(self.env_db + mk);
+            // Blended toward unity while the bypass switch fades.
+            let g = 1.0 + (db_to_lin(self.env_db + mk) - 1.0) * self.fade.next();
             out[CHANNELS * i] = l * g;
             out[CHANNELS * i + 1] = r * g;
 
@@ -212,14 +214,15 @@ impl Node for CompressorNode {
             param::MAKEUP_DB => self.makeup.set_target(value),
             param::BYPASS => {
                 let bypass = value >= 0.5;
-                // The envelope froze at whatever the material was doing when the
-                // bypass engaged; re-enabling over a quieter passage would duck it
+                // The envelope froze at whatever the material was doing when the node
+                // went fully bypassed; re-enabling over a quieter passage would duck it
                 // by that stale reduction for a whole release time. Start idle, as
-                // reset() does after a seek.
-                if bypass != self.bypass {
+                // reset() does after a seek. (Switched back on mid-fade-out, the
+                // envelope is still live and is kept.)
+                if !bypass && self.fade.idle() {
                     self.env_db = 0.0;
                 }
-                self.bypass = bypass;
+                self.fade.set_bypass(bypass);
             }
             _ => {}
         }

@@ -9,7 +9,7 @@
 //! the sibilance itself.) No recursive audio path → stable.
 
 use crate::dsp::biquad::{BandKind, BandSpec, Biquad, Coeffs};
-use crate::dsp::smooth::Smoothed;
+use crate::dsp::smooth::{BypassFade, Smoothed};
 use crate::node::{Node, ProcessIo};
 use crate::sample::{db_to_lin, CHANNELS};
 
@@ -93,7 +93,7 @@ pub struct DeEsserNode {
     env_db: f32,
     attack_coef: f32,
     release_coef: f32,
-    bypass: bool,
+    fade: BypassFade,
     sr: f64,
 }
 
@@ -114,7 +114,7 @@ impl DeEsserNode {
             env_db: -120.0,
             attack_coef: 1.0,
             release_coef: 1.0,
-            bypass: true,
+            fade: BypassFade::new(true),
             sr: 48_000.0,
         };
         d.retune_now();
@@ -190,6 +190,7 @@ impl Node for DeEsserNode {
         let tau = 0.01;
         self.threshold.set_time(tau, sample_rate);
         self.range.set_time(tau, sample_rate);
+        self.fade.prepare(sample_rate);
         self.env_db = -120.0;
     }
 
@@ -227,7 +228,7 @@ impl Node for DeEsserNode {
                 }
             }
         }
-        if self.bypass {
+        if self.fade.begin_block() {
             return;
         }
         self.heard = true;
@@ -278,8 +279,10 @@ impl Node for DeEsserNode {
                 0.0
             };
             let g = db_to_lin(red_db);
-            out[CHANNELS * i] = low_l + hl * g;
-            out[CHANNELS * i + 1] = low_r + hr * g;
+            // Blended toward the dry input while the bypass switch fades.
+            let f = self.fade.next();
+            out[CHANNELS * i] = l + (low_l + hl * g - l) * f;
+            out[CHANNELS * i + 1] = r + (low_r + hr * g - r) * f;
         }
     }
 
@@ -295,7 +298,7 @@ impl Node for DeEsserNode {
             }
             param::THRESHOLD_DB => self.threshold.set_target(value),
             param::RANGE_DB => self.range.set_target(value.max(0.0)),
-            param::BYPASS => self.bypass = value >= 0.5,
+            param::BYPASS => self.fade.set_bypass(value >= 0.5),
             _ => {}
         }
     }

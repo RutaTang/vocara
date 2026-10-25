@@ -2,6 +2,7 @@
 //! thicken and widen the voice. Fractional read with linear interpolation; no feedback.
 //! Buffers sized in `prepare`.
 
+use crate::dsp::smooth::{BypassFade, Smoothed};
 use crate::node::{Node, ProcessIo};
 use crate::sample::{Smp, CHANNELS};
 
@@ -28,11 +29,13 @@ pub struct DoublerNode {
     dirty: bool,
     phase_l: f32,
     phase_r: f32,
-    delay_ms: f32,
-    depth_ms: f32,
+    /// Smoothed (slowly — a read-position glide is a brief pitch bend, so the slower the
+    /// gentler) so a Delay or Depth drag no longer jumps the read position: a click per tick.
+    delay_ms: Smoothed,
+    depth_ms: Smoothed,
     rate_hz: f32,
-    mix: f32,
-    bypass: bool,
+    mix: Smoothed,
+    fade: BypassFade,
     sr: f64,
 }
 
@@ -47,11 +50,11 @@ impl DoublerNode {
             dirty: false,
             phase_l: 0.0,
             phase_r: std::f32::consts::PI, // L/R out of phase for width
-            delay_ms: 18.0,
-            depth_ms: 4.0,
+            delay_ms: Smoothed::new(18.0),
+            depth_ms: Smoothed::new(4.0),
             rate_hz: 0.6,
-            mix: 0.0,
-            bypass: true,
+            mix: Smoothed::new(0.0),
+            fade: BypassFade::new(true),
             sr: 48_000.0,
         }
     }
@@ -83,6 +86,10 @@ impl Node for DoublerNode {
         self.pos = 0;
         self.stale = 0; // freshly zeroed lines
         self.dirty = false;
+        self.delay_ms.set_time(0.05, sample_rate);
+        self.depth_ms.set_time(0.05, sample_rate);
+        self.mix.set_time(0.01, sample_rate);
+        self.fade.prepare(sample_rate);
     }
 
     fn process(&mut self, io: &mut ProcessIo) {
@@ -98,7 +105,7 @@ impl Node for DoublerNode {
                 }
             }
         }
-        if self.bypass {
+        if self.fade.begin_block() {
             // Progressively overwrite the delay lines with silence while bypassed (bounded
             // per-block work; set_param runs on the audio thread, so no unbounded clear
             // there). Re-activating then never replays stale pre-bypass audio as a ghost.
@@ -124,23 +131,25 @@ impl Node for DoublerNode {
             return;
         }
         self.dirty = true;
-        let mix = self.mix.clamp(0.0, 1.0);
-        let base = (self.delay_ms as f64 * 0.001 * self.sr) as f32;
-        let depth = (self.depth_ms as f64 * 0.001 * self.sr) as f32;
+        let per_ms = (0.001 * self.sr) as f32;
         let inc = TWO_PI * self.rate_hz / self.sr as f32;
 
         for i in 0..frames {
             let l = out[CHANNELS * i];
             let r = out[CHANNELS * i + 1];
+            let base = self.delay_ms.next() * per_ms;
+            let depth = self.depth_ms.next() * per_ms;
             let dl = base + depth * self.phase_l.sin();
             let dr = base + depth * self.phase_r.sin();
             let wl = Self::read(&self.buf_l, self.pos, dl);
             let wr = Self::read(&self.buf_r, self.pos, dr);
             self.buf_l[self.pos] = l;
             self.buf_r[self.pos] = r;
-            // Keep the dry mostly intact; the wet copy thickens / widens.
-            out[CHANNELS * i] = l * (1.0 - 0.5 * mix) + wl * mix;
-            out[CHANNELS * i + 1] = r * (1.0 - 0.5 * mix) + wr * mix;
+            // Keep the dry mostly intact; the wet copy thickens / widens. Blended toward the
+            // dry input while the bypass switch fades.
+            let wet = self.mix.next() * self.fade.next();
+            out[CHANNELS * i] = l + (wl - 0.5 * l) * wet;
+            out[CHANNELS * i + 1] = r + (wr - 0.5 * r) * wet;
             self.pos = (self.pos + 1) % len;
             self.phase_l += inc;
             self.phase_r += inc;
@@ -155,17 +164,18 @@ impl Node for DoublerNode {
 
     fn set_param(&mut self, param: u16, value: f32) {
         match param {
-            param::DELAY_MS => self.delay_ms = value.clamp(1.0, 50.0),
-            param::DEPTH_MS => self.depth_ms = value.clamp(0.0, 20.0),
+            param::DELAY_MS => self.delay_ms.set_target(value.clamp(1.0, 50.0)),
+            param::DEPTH_MS => self.depth_ms.set_target(value.clamp(0.0, 20.0)),
             param::RATE_HZ => self.rate_hz = value.clamp(0.05, 8.0),
-            param::MIX => self.mix = value.clamp(0.0, 1.0),
+            param::MIX => self.mix.set_target(value.clamp(0.0, 1.0)),
             param::BYPASS => {
                 let bypass = value >= 0.5;
-                if bypass && !self.bypass {
-                    // Entering bypass: schedule the progressive line clear (see process).
+                if bypass && !self.fade.bypassed() {
+                    // Entering bypass: schedule the progressive line clear (see process),
+                    // which starts once the switch has faded out.
                     self.stale = self.buf_l.len();
                 }
-                self.bypass = bypass;
+                self.fade.set_bypass(bypass);
             }
             _ => {}
         }

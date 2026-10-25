@@ -254,14 +254,16 @@ fn delay_bypass_toggle_does_not_replay_stale_tail() {
     let tone = to_stereo(&sine_mono(440.0, SR, 24_000, 0.8));
     run_phase(&mut d, &tone, SR, block);
 
-    // Phase B (bypassed): dry passthrough must stay bit-exact while the ring is being
-    // cleared. One full line length (2 s at 48 kHz) of bypassed frames cleans it entirely.
+    // Phase B (bypassed): once the switch has faded out (5 ms), dry passthrough must stay
+    // bit-exact while the ring is being cleared. One full line length (2 s at 48 kHz) of
+    // bypassed frames after the fade cleans it entirely.
     d.set_param(dlparam::BYPASS, 1.0);
-    let dry = to_stereo(&sine_mono(440.0, SR, 96_000, 0.8));
+    let fade = block * CHANNELS;
+    let dry = to_stereo(&sine_mono(440.0, SR, 96_000 + block, 0.8));
     let out_b = run_phase(&mut d, &dry, SR, block);
-    let max_err = dry
+    let max_err = dry[fade..]
         .iter()
-        .zip(out_b.iter())
+        .zip(out_b[fade..].iter())
         .map(|(a, b)| (a - b).abs())
         .fold(0.0f32, f32::max);
     assert!(
@@ -641,6 +643,251 @@ fn a_freshly_built_node_starts_from_its_first_values_instead_of_ramping_from_def
         assert!(
             d < 1e-5,
             "{name}: the first blocks glided from the default (diff {d})"
+        );
+    }
+}
+
+/// Frame (a block boundary) at which the click tests below apply their change.
+const T0: usize = 94 * 256;
+
+/// A low tone plus a sibilant-band tone, 2*T0 frames: every insert has something to do.
+fn click_probe_input() -> Vec<f32> {
+    let lo = sine_mono(220.5, SR, 2 * T0, 0.5);
+    let hi = sine_mono(9000.0, SR, 2 * T0, 0.2);
+    to_stereo(&lo.iter().zip(&hi).map(|(a, b)| a + b).collect::<Vec<_>>())
+}
+
+/// Renders `make()`'s (prepared, configured) node over `input` three ways: untouched
+/// (`old`), with `change` applied before the first block (`new`), and with `change`
+/// applied at block boundary `T0` (`changed`). Returns how far the changed run's first 8
+/// frames after T0 moved from `old` toward `new`: ~0 for a click-free change, 1 for a step
+/// straight to the new setting.
+fn jump_at_change(
+    make: &dyn Fn() -> Box<dyn Node>,
+    change: &dyn Fn(&mut dyn Node),
+    input: &[f32],
+) -> f32 {
+    let block = 256;
+    let (pre, post) = input.split_at(T0 * CHANNELS);
+    let render = |at_start: bool, at_t0: bool| {
+        let mut n = make();
+        if at_start {
+            change(n.as_mut());
+        }
+        let mut out = run_phase(n.as_mut(), pre, SR, block);
+        if at_t0 {
+            change(n.as_mut());
+        }
+        out.extend(run_phase(n.as_mut(), post, SR, block));
+        out
+    };
+    let (old, new, changed) = (
+        render(false, false),
+        render(true, false),
+        render(false, true),
+    );
+    let (mut moved, mut span) = (0.0f32, 0.0f32);
+    for k in T0 * CHANNELS..(T0 + 8) * CHANNELS {
+        moved = moved.max((changed[k] - old[k]).abs());
+        span = span.max((new[k] - old[k]).abs());
+    }
+    assert!(
+        span > 1e-3,
+        "the change must be audible at T0 (span {span})"
+    );
+    moved / span
+}
+
+/// Builds a prepared, configured node for a click test.
+type Make = Box<dyn Fn() -> Box<dyn Node>>;
+
+/// A prepared node with `params` applied (BYPASS last, so it can switch the node on).
+fn configured(mut node: Box<dyn Node>, params: &[(u16, f32)]) -> Box<dyn Node> {
+    node.prepare(SR, 256);
+    for &(p, v) in params {
+        node.set_param(p, v);
+    }
+    node
+}
+
+#[test]
+fn switching_an_insert_off_or_on_fades_instead_of_stepping() {
+    // Bypass was a hard switch: turning a working compressor, a driven saturator or a
+    // ringing delay off (or on) stepped the output straight to the other signal — a click
+    // on every A/B toggle.
+    use vocara_engine::dsp::deesser::{param as dep, DeEsserNode};
+    use vocara_engine::dsp::gate::{param as gp, GateNode};
+    use vocara_engine::dsp::limiter::{param as lp, LimiterNode};
+    use vocara_engine::dsp::saturation::{param as sp, SaturationNode};
+    let input = click_probe_input();
+    let inserts: Vec<(&str, Make, u16)> = vec![
+        (
+            "compressor",
+            Box::new(|| {
+                let c = CompressorNode::new(-30.0, 4.0, 6.0, 5.0, 80.0, 6.0);
+                configured(Box::new(c), &[(cparam::BYPASS, 0.0)])
+            }),
+            cparam::BYPASS,
+        ),
+        (
+            "de-esser",
+            Box::new(|| {
+                let p = [(dep::THRESHOLD_DB, -40.0), (dep::BYPASS, 0.0)];
+                configured(Box::new(DeEsserNode::new()), &p)
+            }),
+            dep::BYPASS,
+        ),
+        (
+            "gate",
+            Box::new(|| {
+                let p = [(gp::THRESHOLD_DB, 0.0), (gp::BYPASS, 0.0)];
+                configured(Box::new(GateNode::new()), &p)
+            }),
+            gp::BYPASS,
+        ),
+        (
+            "delay",
+            Box::new(|| {
+                let p = [
+                    (dlparam::TIME_MS, 50.0),
+                    (dlparam::FEEDBACK, 0.3),
+                    (dlparam::MIX, 0.5),
+                    (dlparam::BYPASS, 0.0),
+                ];
+                configured(Box::new(DelayNode::new()), &p)
+            }),
+            dlparam::BYPASS,
+        ),
+        (
+            "saturation",
+            Box::new(|| {
+                let p = [(sp::DRIVE_DB, 20.0), (sp::MIX, 0.65), (sp::BYPASS, 0.0)];
+                configured(Box::new(SaturationNode::new()), &p)
+            }),
+            sp::BYPASS,
+        ),
+        (
+            "doubler",
+            Box::new(|| {
+                let p = [(dbparam::MIX, 1.0), (dbparam::BYPASS, 0.0)];
+                configured(Box::new(DoublerNode::new()), &p)
+            }),
+            dbparam::BYPASS,
+        ),
+        (
+            "limiter",
+            Box::new(|| {
+                let p = [(lp::CEILING_DB, -12.0), (lp::BYPASS, 0.0)];
+                configured(Box::new(LimiterNode::new()), &p)
+            }),
+            lp::BYPASS,
+        ),
+    ];
+    for (name, make, bypass) in &inserts {
+        let off = jump_at_change(make.as_ref(), &|n| n.set_param(*bypass, 1.0), &input);
+        assert!(
+            off < 0.2,
+            "switching the {name} off stepped ({off:.2} of the way)"
+        );
+        // ...and back on from fully bypassed.
+        let make_off = || {
+            let mut n = make();
+            n.set_param(*bypass, 1.0);
+            n
+        };
+        let on = jump_at_change(&make_off, &|n| n.set_param(*bypass, 0.0), &input);
+        assert!(
+            on < 0.2,
+            "switching the {name} on stepped ({on:.2} of the way)"
+        );
+    }
+}
+
+#[test]
+fn moving_a_delay_doubler_or_saturation_knob_glides_instead_of_stepping() {
+    // These knobs were applied as instant steps: a Time drag jumped the delay's read tap, a
+    // Mix or Drive drag stepped the level, a doubler Delay/Depth drag jumped its read
+    // position — zipper noise and clicks while a knob moves.
+    use vocara_engine::dsp::saturation::{param as sp, SaturationNode};
+    let input = click_probe_input();
+    let delay = |p: &[(u16, f32)]| {
+        let mut all = vec![(dlparam::FEEDBACK, 0.0), (dlparam::BYPASS, 0.0)];
+        all.extend_from_slice(p);
+        configured(Box::new(DelayNode::new()), &all)
+    };
+    let sat = |p: &[(u16, f32)]| {
+        let mut all = vec![(sp::BYPASS, 0.0)];
+        all.extend_from_slice(p);
+        configured(Box::new(SaturationNode::new()), &all)
+    };
+    let dbl = |p: &[(u16, f32)]| {
+        let mut all = vec![(dbparam::BYPASS, 0.0)];
+        all.extend_from_slice(p);
+        configured(Box::new(DoublerNode::new()), &all)
+    };
+    let cases: Vec<(&str, Make, u16, f32)> = vec![
+        (
+            "delay time",
+            Box::new(move || delay(&[(dlparam::TIME_MS, 50.0), (dlparam::MIX, 1.0)])),
+            dlparam::TIME_MS,
+            52.3,
+        ),
+        (
+            "delay mix",
+            Box::new(move || delay(&[(dlparam::TIME_MS, 50.0), (dlparam::MIX, 0.0)])),
+            dlparam::MIX,
+            1.0,
+        ),
+        (
+            "saturation drive",
+            Box::new(move || sat(&[(sp::DRIVE_DB, 0.0), (sp::MIX, 1.0)])),
+            sp::DRIVE_DB,
+            36.0,
+        ),
+        (
+            "saturation mix",
+            Box::new(move || sat(&[(sp::DRIVE_DB, 20.0), (sp::MIX, 0.0)])),
+            sp::MIX,
+            1.0,
+        ),
+        (
+            "doubler mix",
+            Box::new(move || dbl(&[(dbparam::MIX, 0.0)])),
+            dbparam::MIX,
+            1.0,
+        ),
+    ];
+    for (name, make, param, value) in &cases {
+        let j = jump_at_change(make.as_ref(), &|n| n.set_param(*param, *value), &input);
+        assert!(j < 0.2, "moving the {name} stepped ({j:.2} of the way)");
+    }
+
+    // A doubler Delay/Depth move is a read-position glide (a brief pitch bend), which by
+    // design departs from the old setting's output quickly — what must not happen is the
+    // jump. On a low tone, no sample-to-sample step right after the move may exceed ~1.5x
+    // the tone's own steepest step (a glide barely changes the read speed in that time).
+    let tone = to_stereo(&sine_mono(220.5, SR, 2 * T0, 0.5));
+    for (name, param, value) in [
+        ("doubler delay", dbparam::DELAY_MS, 40.0),
+        ("doubler depth", dbparam::DEPTH_MS, 20.0),
+    ] {
+        let mut n = dbl(&[(dbparam::DEPTH_MS, 0.0), (dbparam::MIX, 1.0)]);
+        if param == dbparam::DEPTH_MS {
+            n.set_param(dbparam::DELAY_MS, 30.0);
+        }
+        let (pre, post) = tone.split_at(T0 * CHANNELS);
+        let mut out = left(&run_phase(n.as_mut(), pre, SR, 256));
+        n.set_param(param, value);
+        out.extend(left(&run_phase(n.as_mut(), post, SR, 256)));
+        let step = |a: usize, b: usize| {
+            (a..b)
+                .map(|k| (out[k] - out[k - 1]).abs())
+                .fold(0.0f32, f32::max)
+        };
+        let ratio = step(T0, T0 + 8) / step(T0 / 2, T0);
+        assert!(
+            ratio < 1.5,
+            "moving the {name} jumped ({ratio:.1}x the tone's slope)"
         );
     }
 }

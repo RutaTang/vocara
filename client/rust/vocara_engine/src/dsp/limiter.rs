@@ -2,6 +2,7 @@
 //! ceiling, with a smooth release. No look-ahead (brief inter-sample overs possible), so it's
 //! cheap and stable — good as the last insert on a vocal or a bus.
 
+use crate::dsp::smooth::BypassFade;
 use crate::node::{Node, ProcessIo};
 use crate::sample::{db_to_lin, CHANNELS};
 
@@ -16,7 +17,7 @@ pub struct LimiterNode {
     release_ms: f32,
     release_coef: f32,
     gain: f32, // current gain (<= 1)
-    bypass: bool,
+    fade: BypassFade,
     sr: f64,
 }
 
@@ -27,7 +28,7 @@ impl LimiterNode {
             release_ms: 80.0,
             release_coef: 1.0,
             gain: 1.0,
-            bypass: true,
+            fade: BypassFade::new(true),
             sr: 48_000.0,
         };
         l.recompute_release();
@@ -50,6 +51,7 @@ impl Node for LimiterNode {
     fn prepare(&mut self, sample_rate: f64, _max_block: usize) {
         self.sr = sample_rate;
         self.recompute_release();
+        self.fade.prepare(sample_rate);
         self.gain = 1.0;
     }
 
@@ -74,7 +76,7 @@ impl Node for LimiterNode {
                 }
             }
         }
-        if self.bypass {
+        if self.fade.begin_block() {
             return;
         }
 
@@ -94,8 +96,10 @@ impl Node for LimiterNode {
             } else {
                 self.gain += (req - self.gain) * self.release_coef;
             }
-            out[CHANNELS * i] = l * self.gain;
-            out[CHANNELS * i + 1] = r * self.gain;
+            // Blended toward unity while the bypass switch fades.
+            let g = 1.0 + (self.gain - 1.0) * self.fade.next();
+            out[CHANNELS * i] = l * g;
+            out[CHANNELS * i + 1] = r * g;
         }
     }
 
@@ -106,7 +110,7 @@ impl Node for LimiterNode {
                 self.release_ms = value;
                 self.recompute_release();
             }
-            param::BYPASS => self.bypass = value >= 0.5,
+            param::BYPASS => self.fade.set_bypass(value >= 0.5),
             _ => {}
         }
     }

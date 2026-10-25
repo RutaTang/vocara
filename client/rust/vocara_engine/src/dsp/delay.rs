@@ -3,6 +3,7 @@
 //! never on the audio callback.
 
 use crate::dsp::denormals::sanitize;
+use crate::dsp::smooth::{BypassFade, Smoothed};
 use crate::node::{Node, ProcessIo};
 use crate::sample::{Smp, CHANNELS};
 
@@ -14,6 +15,9 @@ pub mod param {
 }
 
 const MAX_SECONDS: f64 = 2.0;
+
+/// How long a Time change cross-fades from the old read tap to the new one.
+const TAP_FADE_S: f64 = 0.01;
 
 pub struct DelayNode {
     buf_l: Vec<Smp>,
@@ -29,9 +33,17 @@ pub struct DelayNode {
     /// delay (~0.75 MB each), and most of them were never switched on.
     dirty: bool,
     time_ms: f32,
+    /// The read tap (frames behind the write head) the output currently plays, and the one
+    /// a Time change is cross-fading to (equal when no fade is running). Jumping the tap
+    /// clicked on every tick of a Time drag; one fade runs at a time, and a drag's newer
+    /// value starts the next fade once this one lands.
+    tap: usize,
+    tap_next: usize,
+    tap_mix: f32,
+    tap_step: f32,
     feedback: f32,
-    mix: f32,
-    bypass: bool,
+    mix: Smoothed,
+    fade: BypassFade,
     sr: f64,
 }
 
@@ -45,11 +57,21 @@ impl DelayNode {
             stale: 0,
             dirty: false,
             time_ms: 300.0,
+            tap: 14_400, // 300 ms at 48 kHz; prepare re-derives it
+            tap_next: 14_400,
+            tap_mix: 0.0,
+            tap_step: 1.0 / (TAP_FADE_S * 48_000.0) as f32,
             feedback: 0.3,
-            mix: 0.0,
-            bypass: true,
+            mix: Smoothed::new(0.0),
+            fade: BypassFade::new(true),
             sr: 48_000.0,
         }
+    }
+
+    /// The read tap for the current Time setting.
+    fn wanted_tap(&self) -> usize {
+        let len = self.buf_l.len().max(2);
+        ((self.time_ms as f64 * 0.001 * self.sr) as usize).clamp(1, len - 1)
     }
 }
 
@@ -68,6 +90,11 @@ impl Node for DelayNode {
         self.pos = 0;
         self.stale = 0; // freshly zeroed line
         self.dirty = false;
+        self.tap = self.wanted_tap();
+        self.tap_next = self.tap;
+        self.tap_step = 1.0 / (TAP_FADE_S * sample_rate) as f32;
+        self.mix.set_time(0.01, sample_rate);
+        self.fade.prepare(sample_rate);
     }
 
     fn process(&mut self, io: &mut ProcessIo) {
@@ -83,7 +110,7 @@ impl Node for DelayNode {
                 }
             }
         }
-        if self.bypass {
+        if self.fade.begin_block() {
             // Progressively overwrite the ring with silence while bypassed (bounded per-block
             // work — set_param runs on the audio thread, so an unbounded clear there would
             // violate RT safety). After one full line length of bypassed frames the ring is
@@ -112,22 +139,35 @@ impl Node for DelayNode {
             return;
         }
         self.dirty = true;
-        let d = ((self.time_ms as f64 * 0.001 * self.sr) as usize).clamp(1, len - 1);
+        let want = self.wanted_tap();
+        if self.tap_next == self.tap && want != self.tap {
+            self.tap_next = want;
+            self.tap_mix = 0.0;
+        }
         let fb = self.feedback.clamp(0.0, 0.98);
-        let mix = self.mix.clamp(0.0, 1.0);
 
         for i in 0..frames {
             let l = out[CHANNELS * i];
             let r = out[CHANNELS * i + 1];
-            let read = (self.pos + len - d) % len;
-            let dl = self.buf_l[read];
-            let dr = self.buf_r[read];
+            let read = (self.pos + len - self.tap) % len;
+            let (mut dl, mut dr) = (self.buf_l[read], self.buf_r[read]);
+            if self.tap_next != self.tap {
+                let next = (self.pos + len - self.tap_next) % len;
+                dl += (self.buf_l[next] - dl) * self.tap_mix;
+                dr += (self.buf_r[next] - dr) * self.tap_mix;
+                self.tap_mix += self.tap_step;
+                if self.tap_mix >= 1.0 {
+                    self.tap = self.tap_next;
+                }
+            }
             // Sanitize the feedback write (like reverb/biquad/compressor/gate): one non-finite
             // input would otherwise re-inject NaN*fb into the ring every `d` samples forever.
             self.buf_l[self.pos] = sanitize(l + dl * fb);
             self.buf_r[self.pos] = sanitize(r + dr * fb);
-            out[CHANNELS * i] = l * (1.0 - mix) + dl * mix;
-            out[CHANNELS * i + 1] = r * (1.0 - mix) + dr * mix;
+            // The wet share, blended toward the dry input while the bypass switch fades.
+            let wet = self.mix.next() * self.fade.next();
+            out[CHANNELS * i] = l + (dl - l) * wet;
+            out[CHANNELS * i + 1] = r + (dr - r) * wet;
             self.pos = (self.pos + 1) % len;
         }
     }
@@ -136,14 +176,15 @@ impl Node for DelayNode {
         match param {
             param::TIME_MS => self.time_ms = value.clamp(1.0, (MAX_SECONDS * 1000.0) as f32),
             param::FEEDBACK => self.feedback = value.clamp(0.0, 0.98),
-            param::MIX => self.mix = value.clamp(0.0, 1.0),
+            param::MIX => self.mix.set_target(value.clamp(0.0, 1.0)),
             param::BYPASS => {
                 let bypass = value >= 0.5;
-                if bypass && !self.bypass {
-                    // Entering bypass: schedule the progressive ring clear (see process).
+                if bypass && !self.fade.bypassed() {
+                    // Entering bypass: schedule the progressive ring clear (see process),
+                    // which starts once the switch has faded out.
                     self.stale = self.buf_l.len();
                 }
-                self.bypass = bypass;
+                self.fade.set_bypass(bypass);
             }
             _ => {}
         }
@@ -164,6 +205,7 @@ impl Node for DelayNode {
         self.pos = 0;
         self.stale = 0;
         self.dirty = false;
+        self.tap = self.tap_next; // the line is silent: land any Time fade at once
     }
 }
 
@@ -207,12 +249,14 @@ mod tests {
             "reset must clear a line that was written"
         );
 
-        // A bypass that has fully swept the line leaves it clean again.
+        // A bypass that has fully swept the line leaves it clean again (the sweep starts
+        // once the switch has faded out).
         d.set_param(param::BYPASS, 0.0);
         run_block(&mut d, &[0.5; 512]);
         d.set_param(param::BYPASS, 1.0);
-        let line = d.buf_l.len() * CHANNELS;
-        run_block(&mut d, &vec![0.0; line]);
+        for _ in 0..d.buf_l.len() / 256 + 2 {
+            run_block(&mut d, &[0.0; 256 * CHANNELS]);
+        }
         d.buf_l[123] = 1.0;
         d.reset();
         assert_eq!(

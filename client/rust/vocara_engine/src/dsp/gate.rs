@@ -3,6 +3,7 @@
 //! attack/release ballistics on the gain-reduction envelope. No recursive audio path.
 
 use crate::dsp::denormals::sanitize;
+use crate::dsp::smooth::BypassFade;
 use crate::node::{Node, ProcessIo};
 use crate::sample::{db_to_lin, CHANNELS};
 
@@ -24,7 +25,7 @@ pub struct GateNode {
     attack_coef: f32,
     release_coef: f32,
     env_db: f32, // current gain reduction (dB, <= 0)
-    bypass: bool,
+    fade: BypassFade,
     sr: f64,
 }
 
@@ -38,7 +39,7 @@ impl GateNode {
             attack_coef: 1.0,
             release_coef: 1.0,
             env_db: 0.0,
-            bypass: true,
+            fade: BypassFade::new(true),
             sr: 48_000.0,
         };
         g.recompute_ballistics();
@@ -63,6 +64,7 @@ impl Node for GateNode {
     fn prepare(&mut self, sample_rate: f64, _max_block: usize) {
         self.sr = sample_rate;
         self.recompute_ballistics();
+        self.fade.prepare(sample_rate);
         self.env_db = 0.0;
     }
 
@@ -87,7 +89,7 @@ impl Node for GateNode {
                 }
             }
         }
-        if self.bypass {
+        if self.fade.begin_block() {
             return;
         }
 
@@ -115,7 +117,8 @@ impl Node for GateNode {
             // invariant in denormals.rs and stay robust to future detector changes.
             self.env_db = sanitize(self.env_db + (target_db - self.env_db) * coef);
 
-            let g = db_to_lin(self.env_db);
+            // Blended toward unity while the bypass switch fades.
+            let g = 1.0 + (db_to_lin(self.env_db) - 1.0) * self.fade.next();
             out[CHANNELS * i] = l * g;
             out[CHANNELS * i + 1] = r * g;
         }
@@ -133,7 +136,7 @@ impl Node for GateNode {
                 self.release_ms = value;
                 self.recompute_ballistics();
             }
-            param::BYPASS => self.bypass = value >= 0.5,
+            param::BYPASS => self.fade.set_bypass(value >= 0.5),
             _ => {}
         }
     }
