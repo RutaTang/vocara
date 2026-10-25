@@ -181,12 +181,13 @@ pub struct VeEngine {
     // Per committed FX bus: the bus compressor's gain-reduction meter.
     bus_gr_meters: Vec<Option<Arc<AtomicU32>>>,
     /// Streaming-track feeders for the LIVE graph (swapped whole on commit).
-    /// Pumped by [`VeEngine::ensure_feeder_thread`]'s thread every ~10 ms.
+    /// Pumped by [`VeEngine::ensure_feeder_thread`]'s threads every ~10 ms.
     /// Each feeder sits behind its own mutex so the pump reads outside the
     /// set's lock — the old single Vec ran every track's I/O under one lock,
-    /// which the commit path and the xruns getter also contended on. The one
-    /// pump thread still reads the tracks in turn, so a read that stalls
-    /// holds up every other track's top-up for as long as it lasts. A pump
+    /// which the commit path and the xruns getter also contended on — and
+    /// lets [`PUMP_WORKERS`] threads pump the set side by side, each skipping
+    /// a slot the other holds, so a read that stalls parks only its own
+    /// worker instead of every other track's top-up. A pump
     /// error is retried with a reopened handle for [`MAX_FEEDER_FAILS`]
     /// consecutive pumps before the feeder is dropped (one transient EIO
     /// used to permanently silence the track).
@@ -213,7 +214,7 @@ pub struct VeEngine {
     /// only evidence the committed graph is not what was staged.
     degraded_mask: u64,
     feeder_stop: Arc<std::sync::atomic::AtomicBool>,
-    feeder_join: Option<std::thread::JoinHandle<()>>,
+    feeder_join: Vec<std::thread::JoinHandle<()>>,
     /// Input-vs-output clock-drift estimator, ticked by the Dart device
     /// watch's 1 s poll (ve_poll_device_event — the process's one poller).
     drift: device::DriftEstimator,
@@ -240,8 +241,12 @@ struct FeederSlot {
     dead: bool,
 }
 
-/// Consecutive failed pumps (10 ms apart, ~5 s) before a feeder is dropped.
-const MAX_FEEDER_FAILS: u32 = 500;
+/// Threads pumping the feeder set (see [`VeEngine::ensure_feeder_thread`]).
+const PUMP_WORKERS: usize = 2;
+
+/// Consecutive failed pumps before a feeder is dropped: ~5 s, each of the
+/// [`PUMP_WORKERS`] pumping a slot about every 10 ms.
+const MAX_FEEDER_FAILS: u32 = 500 * PUMP_WORKERS as u32;
 
 impl FeederSlot {
     fn new(feeder: crate::feed::TrackFeeder) -> Self {
@@ -302,7 +307,9 @@ fn pump_heads(
     let mut any_dead = false;
     let mut failed = vec![false; slots.len()];
     for (i, slot_arc) in slots.iter().enumerate() {
-        let Ok(mut slot) = slot_arc.lock() else {
+        // Held: another worker is pumping it — possibly stuck in a slow read,
+        // which must not hold this round up (see `ensure_feeder_thread`).
+        let Ok(mut slot) = slot_arc.try_lock() else {
             continue;
         };
         if slot.dead {
@@ -327,8 +334,8 @@ fn top_up(
         if failed[i] {
             continue;
         }
-        let Ok(mut slot) = slot_arc.lock() else {
-            continue;
+        let Ok(mut slot) = slot_arc.try_lock() else {
+            continue; // held by the other worker (see `pump_heads`)
         };
         if slot.dead {
             continue;
@@ -354,37 +361,51 @@ impl VeEngine {
     /// only the transport Arc and the feeder set; it exits when
     /// [`feeder_stop`] flips at engine destruction.
     fn ensure_feeder_thread(&mut self) {
-        if self.feeder_join.is_some() {
+        if !self.feeder_join.is_empty() {
             return;
         }
-        let feeders = Arc::clone(&self.feeders);
-        let stop = Arc::clone(&self.feeder_stop);
-        let transport = Arc::clone(self.handle.shared_arc());
-        self.feeder_join = Some(std::thread::spawn(move || {
-            while !stop.load(std::sync::atomic::Ordering::Acquire) {
-                // Snapshot the slot list, then pump OUTSIDE the outer lock:
-                // each track's disk I/O contends only with itself.
-                let slots: Vec<_> = match feeders.lock() {
-                    Ok(set) => set.clone(),
-                    Err(_) => break,
-                };
-                let any_dead = pump_round(&slots, &transport);
-                if any_dead {
-                    if let Ok(mut set) = feeders.lock() {
-                        set.retain(|s| s.lock().map(|g| !g.dead).unwrap_or(false));
+        // [`PUMP_WORKERS`] threads run the same rounds over the whole set, each
+        // skipping a slot the other holds: a read that stalls (a cold page-in,
+        // a busy disk) parks only the worker inside it, while the other keeps
+        // every other track's ring fed. One thread read the tracks in turn, so
+        // one stalled read starved them all.
+        for _ in 0..PUMP_WORKERS {
+            let feeders = Arc::clone(&self.feeders);
+            let stop = Arc::clone(&self.feeder_stop);
+            let transport = Arc::clone(self.handle.shared_arc());
+            self.feeder_join.push(std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Acquire) {
+                    // Snapshot the slot list, then pump OUTSIDE the outer lock:
+                    // each track's disk I/O contends only with itself.
+                    let slots: Vec<_> = match feeders.lock() {
+                        Ok(set) => set.clone(),
+                        Err(_) => break,
+                    };
+                    let any_dead = pump_round(&slots, &transport);
+                    if any_dead {
+                        if let Ok(mut set) = feeders.lock() {
+                            // A slot the other worker holds is kept for now:
+                            // waiting on it here would block the set (and the
+                            // commit) behind that worker's read.
+                            set.retain(|s| match s.try_lock() {
+                                Ok(g) => !g.dead,
+                                Err(std::sync::TryLockError::WouldBlock) => true,
+                                Err(std::sync::TryLockError::Poisoned(_)) => false,
+                            });
+                        }
                     }
+                    // Woken early by a transport command (see `wake_feeders`).
+                    std::thread::park_timeout(std::time::Duration::from_millis(10));
                 }
-                // Woken early by a transport command (see `wake_feeders`).
-                std::thread::park_timeout(std::time::Duration::from_millis(10));
-            }
-        }));
+            }));
+        }
     }
 
     /// Replan the streams NOW rather than at the next 10 ms tick. A seek (or a
     /// loop edit) is resynchronized by the replan's fence: the device callback
     /// that renders first without it plays this track as silence.
     fn wake_feeders(&self) {
-        if let Some(j) = &self.feeder_join {
+        for j in &self.feeder_join {
             j.thread().unpark();
         }
     }
@@ -394,7 +415,7 @@ impl Drop for VeEngine {
     fn drop(&mut self) {
         self.feeder_stop
             .store(true, std::sync::atomic::Ordering::Release);
-        if let Some(j) = self.feeder_join.take() {
+        for j in self.feeder_join.drain(..) {
             let _ = j.join();
         }
     }
@@ -605,7 +626,7 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
             retired_xruns: 0,
             degraded_mask: 0,
             feeder_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            feeder_join: None,
+            feeder_join: Vec::new(),
             drift: device::DriftEstimator::new(drift_ratio),
         })))
     });
@@ -3053,6 +3074,65 @@ mod feeder_slot_tests {
         // Reported dead exactly once, so the sweep runs once.
         assert!(!s.record_pump(Err("EIO".into())));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_round_skips_a_stream_another_worker_is_stuck_on() {
+        use crate::graph::{GraphDesc, NodeEntry};
+        use std::sync::{Arc, Mutex};
+        // A worker inside a slow read holds that slot's lock for the read's
+        // whole length. With one thread reading the tracks in turn, every
+        // other ring starved behind it; a round now skips the held slot.
+        let graph = GraphDesc {
+            nodes: vec![NodeEntry::new(
+                1,
+                Box::new(crate::dsp::master::MasterNode::unity()),
+            )],
+            edges: vec![],
+            master: 1,
+        }
+        .compile(48_000.0, 128)
+        .unwrap();
+        let (_mic, mic_cons) = spsc::<[Smp; CHANNELS]>(256);
+        let (handle, _rt) =
+            crate::live::spawn(graph, std::collections::HashMap::new(), mic_cons, 256);
+        let path =
+            std::env::temp_dir().join(format!("vocara_pump_skip_{}.wav", std::process::id()));
+        crate::wav::write_wav_f32(
+            &path,
+            &vec![0.25 as Smp; 50_000 * CHANNELS],
+            CHANNELS as u16,
+            48_000,
+        )
+        .unwrap();
+        let mut rings = Vec::new();
+        let slots: Vec<_> = (0..2)
+            .map(|_| {
+                let (prod, cons) = spsc::<[Smp; CHANNELS]>(16_384);
+                rings.push(cons);
+                let reader = WavTrackReader::open(path.to_str().unwrap()).unwrap();
+                let feeder = TrackFeeder::new(StreamCtrl::new(), prod, reader, 0);
+                Arc::new(Mutex::new(FeederSlot::new(feeder)))
+            })
+            .collect();
+
+        let stuck = slots[0].lock().unwrap(); // the other worker, mid-read
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let round_slots = slots.clone();
+        let transport = Arc::clone(handle.shared_arc());
+        let worker = std::thread::spawn(move || {
+            super::pump_round(&round_slots, &transport);
+            let _ = done_tx.send(());
+        });
+        let finished = done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .is_ok();
+        drop(stuck);
+        worker.join().unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(finished, "the round waited on the stuck slot");
+        assert_ne!(rings[1].len(), 0, "the free slot was pumped");
+        assert_eq!(rings[0].len(), 0, "the held slot was left to its worker");
     }
 
     #[test]
