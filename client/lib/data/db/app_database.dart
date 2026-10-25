@@ -61,6 +61,26 @@ class AppDatabase extends _$AppDatabase {
       );
     },
     beforeOpen: (details) async {
+      // Commit durability on macOS. SQLite's default sync there is a plain
+      // fsync(), which hands the bytes to the drive and returns while they
+      // still sit in its write cache (see DurableFs). A power cut can then
+      // lose saves that already reported success, and because the drive is
+      // free to reorder what it holds, it can also land a checkpoint's
+      // page writes out of order with the WAL restart that follows them,
+      // which corrupts the library. With fullfsync on, every sync SQLite
+      // issues, checkpoints included, is an F_FULLFSYNC. That is the same
+      // standard the asset pool already holds its files to before a row
+      // may reference them. Per connection, so it is set on every open.
+      // Elsewhere the flag is stored but has no effect.
+      //
+      // Cost: one drive flush per commit that changes pages. A save is one
+      // write transaction (plus one per newly imported file), and a
+      // transaction that changes nothing, like an unchanged waveform-cache
+      // batch, never syncs. Nothing in the app commits in a loop on a user
+      // gesture: live fader/knob drags only touch the model, and the save
+      // chain serializes, so taps arriving faster than a flush simply find
+      // nothing left to write.
+      await customStatement('PRAGMA fullfsync = ON');
       await customStatement('PRAGMA foreign_keys = ON');
       await customStatement('PRAGMA journal_mode = WAL');
       // Derived indexes are VERSIONLESS schema: re-applied idempotently on

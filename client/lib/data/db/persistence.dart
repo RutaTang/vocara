@@ -30,6 +30,7 @@ import '../sync/sync_writer.dart';
 import 'app_database.dart';
 import 'asset_store.dart';
 import 'durable_fs.dart';
+import 'library_lock.dart';
 import 'safe_migrator.dart';
 import 'write_gate.dart';
 
@@ -61,6 +62,19 @@ class NewerLibraryException implements Exception {
   String toString() =>
       'NewerLibraryException: the library schema is v$libraryVersion but this '
       'build understands up to v$appVersion';
+}
+
+/// Thrown by [Persistence.open] when the library needs a schema upgrade but
+/// another Vocara process holds it ([LibraryLock]). The upgrade swaps the
+/// database file, which must never happen under a process that has it open,
+/// and drift cannot open the stale file without it.
+class LibraryInUseException implements Exception {
+  const LibraryInUseException();
+
+  @override
+  String toString() =>
+      'LibraryInUseException: the library needs an upgrade but another '
+      'Vocara is using it';
 }
 
 /// What one [Persistence.repairLibrary] pass found and did.
@@ -120,7 +134,15 @@ class Persistence {
     required this.assets,
     required this.songRepo,
     required this.techRepo,
+    this.ownsLibrary = true,
   });
+
+  /// Whether this process holds the library's single-instance lock
+  /// ([LibraryLock]). When another process holds it, [open] skips boot
+  /// recovery and every boot sweep, and [repairLibrary] reclaims nothing:
+  /// the other process's in-flight recordings and imports look exactly like
+  /// the leftovers those passes reclaim.
+  final bool ownsLibrary;
 
   final AppDatabase db;
   final SyncWriter writer;
@@ -190,19 +212,35 @@ class Persistence {
   /// recovers any half-finished schema migration (a crash mid-swap) so the live
   /// file is always consistent before drift opens it.
   ///
-  /// [dir] and [analyze] are test seams (the store's on-disk root and the
-  /// recovery waveform analyzer); production passes neither.
+  /// [dir], [analyze] and [libraryLock] are test seams (the store's on-disk
+  /// root, the recovery waveform analyzer, and the single-instance lock,
+  /// which cannot conflict within one process); production passes none.
   ///
   /// Throws [NewerLibraryException] when the library was written by a newer
-  /// Vocara; any other throw is a fatal open, surfaced by main() in a
-  /// dedicated error window.
+  /// Vocara, and [LibraryInUseException] when it needs an upgrade while
+  /// another Vocara process holds it; any other throw is a fatal open,
+  /// surfaced by main() in a dedicated error window. A library another
+  /// process holds otherwise opens normally, minus boot recovery and the
+  /// boot sweeps (see [ownsLibrary]).
   static Future<Persistence> open({
     Directory? dir,
     WavAnalyzer? analyze,
+    Future<bool> Function(Directory dir)? libraryLock,
   }) async {
     dir ??= await getApplicationSupportDirectory();
     final dbPath = p.join(dir.path, 'vocara.db');
-    await SafeMigrator().recoverIfNeeded(dbPath);
+    // The single-instance guard comes first: a half-finished migration's
+    // marker may belong to another process that is migrating right now.
+    final ownsLibrary = await (libraryLock ?? LibraryLock.acquire)(dir);
+    if (ownsLibrary) {
+      await SafeMigrator().recoverIfNeeded(dbPath);
+    } else {
+      DiagnosticsLog.instance.log(
+        'persistence',
+        'another Vocara process holds this library; skipping migration '
+            'recovery, boot recovery and every boot sweep',
+      );
+    }
     // Refuse a library from a NEWER Vocara BEFORE building the store: this
     // build cannot understand (let alone migrate) a higher schema, so nothing
     // may touch it — not drift, not the sweeps. A downgrade path does not
@@ -220,17 +258,31 @@ class Persistence {
     // onUpgrade deliberately throws (the copy/validate/swap protocol owns
     // upgrades). A fresh install (no file) is a no-op here — drift's onCreate
     // builds the current schema directly.
-    await SafeMigrator().upgradeIfNeeded(
-      dbPath: dbPath,
-      targetVersion: AppDatabase.currentSchemaVersion,
-    );
+    if (ownsLibrary) {
+      await SafeMigrator().upgradeIfNeeded(
+        dbPath: dbPath,
+        targetVersion: AppDatabase.currentSchemaVersion,
+      );
+    } else if (await File(dbPath).exists()) {
+      final onDiskVersion = SafeMigrator().readUserVersion(dbPath);
+      if (onDiskVersion != 0 &&
+          onDiskVersion < AppDatabase.currentSchemaVersion) {
+        throw const LibraryInUseException();
+      }
+    }
     final db = AppDatabase(NativeDatabase.createInBackground(File(dbPath)));
     final node = await _readOrCreateNode(dir);
     // Restore the HLC clock's monotonicity across restarts BEFORE wiring the
     // writer (the startup sweeps below tick it), so a new local edit can never
     // stamp LOWER than one this install already pushed. See _seedClock.
     final clock = await _seedClock(db, node);
-    final persistence = _wire(db, dir, node, clock: clock);
+    final persistence = _wire(
+      db,
+      dir,
+      node,
+      clock: clock,
+      ownsLibrary: ownsLibrary,
+    );
     // Recover hard-kill orphaned take recordings BEFORE the staging sweep
     // deletes them: a force quit / crash / kill -9 mid-record skips the
     // graceful stop + save, leaving the streamed WAV in staging as the ONLY
@@ -245,13 +297,19 @@ class Persistence {
     // ONLY copy of a take, and sweeping it would be unrecoverable data loss.
     // Skipping every sweep on a sick boot merely leaks disk until a healthy
     // boot; the sweeps themselves remain best-effort and never block launch.
+    //
+    // And only in the process that holds the library ([ownsLibrary]): in
+    // another one's library, a staged WAV with no row is its take still
+    // recording, not a crashed one.
     var sweepGateOpen = false;
     try {
-      await _probeDbReadable(db);
-      final wavAnalyzer =
-          analyze ?? WaveformService(storage: LocalStorageService()).analyze;
-      await persistence.recoverStagedRecordings(analyze: wavAnalyzer);
-      sweepGateOpen = true;
+      if (ownsLibrary) {
+        await _probeDbReadable(db);
+        final wavAnalyzer =
+            analyze ?? WaveformService(storage: LocalStorageService()).analyze;
+        await persistence.recoverStagedRecordings(analyze: wavAnalyzer);
+        sweepGateOpen = true;
+      }
     } catch (e) {
       DiagnosticsLog.instance.log(
         'persistence',
@@ -260,6 +318,17 @@ class Persistence {
       );
     }
     if (sweepGateOpen) {
+      // A migration's rollback copy has served its purpose once the migrated
+      // database has answered real reads and recovery ran on it. Kept on any
+      // boot that got less far.
+      try {
+        await SafeMigrator().discardBackup(dbPath);
+      } catch (e) {
+        DiagnosticsLog.instance.log(
+          'persistence',
+          'pre-migration backup not discarded (${e.runtimeType})',
+        );
+      }
       // The whole boot maintenance pass holds the write gate exclusively.
       // Nothing user-facing is running yet, so this is uncontended today; it
       // exists so the sweeps and a save can structurally never interleave
@@ -412,8 +481,10 @@ class Persistence {
     // A cascade can repair MORE than the initial scan saw; the report never
     // claims a negative remainder.
     final repaired = (found.length - unrepaired.length).clamp(0, found.length);
-    final tombstoned = await assets.sweepUnreferenced();
-    final orphaned = await assets.sweepOrphanPoolFiles();
+    // Another process's in-flight import is an unreferenced asset or a pool
+    // file with no row until its save commits: reclaim nothing then.
+    final tombstoned = ownsLibrary ? await assets.sweepUnreferenced() : 0;
+    final orphaned = ownsLibrary ? await assets.sweepOrphanPoolFiles() : 0;
     return RepairReport(
       violationsFound: found.length,
       violationsRepaired: repaired,
@@ -770,6 +841,7 @@ class Persistence {
     Directory root,
     String node, {
     HlcClock? clock,
+    bool ownsLibrary = true,
   }) {
     final writer = SyncWriter(db, clock ?? HlcClock(node: node));
     final assets = AssetStore(db: db, root: root, writer: writer);
@@ -787,6 +859,7 @@ class Persistence {
         writer: writer,
         assets: assets,
       ),
+      ownsLibrary: ownsLibrary,
     );
   }
 
