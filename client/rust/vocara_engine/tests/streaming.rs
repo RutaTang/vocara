@@ -1496,6 +1496,71 @@ fn a_commit_primed_just_before_a_loop_wrap_plays_the_head_of_a_clip_inside_the_l
 }
 
 #[test]
+fn a_stream_starved_until_exactly_loop_end_plays_the_next_pass() {
+    // The ring runs dry mid-pass and the stall ends with the render clock exactly at loop end,
+    // about to wrap. The plan's position models the wrap (loop start), which is behind the
+    // plan, so the starvation jump never fired — and the node, behind the render rather than
+    // ahead of it, reported no park. The next pass played silent up to where the ring ran dry.
+    let pcm = offset_pcm(40_000);
+    let path = write_pcm("wrapstarve_exact", &pcm);
+    let loop_end = 94 * BLOCK as i64; // a block boundary
+    let run = |streamed: bool| {
+        let (h, rt, mut feeder) = streamed_pair(&path, 0, 4096);
+        let (h2, rt2) = engine_with(Box::new(BufferSource::new(pcm.clone(), 0)));
+        let (h, rt) = if streamed { (h, rt) } else { (h2, rt2) };
+        h.set_loop(true, 0, loop_end);
+        h.play();
+        let mut rendered = 0u64;
+        let mut out = Vec::new();
+        for b in 0..250 {
+            // No pump from frame 6016 to loop end: the ring runs dry near 9k.
+            let pump = streamed && !(47..94).contains(&b);
+            let f = pump.then_some(&mut feeder);
+            out.extend(lagged_block(&h, &rt, f, 0, &mut rendered));
+        }
+        out
+    };
+    let (streamed, arc) = (run(true), run(false));
+    let _ = std::fs::remove_file(&path);
+    let from = 94 * BLOCK; // the first pump after the stall
+    let bad = differing_frames(&streamed[from * CHANNELS..], &arc[from * CHANNELS..]);
+    assert_eq!(bad, 0, "{}", diff_span(&streamed, &arc, from));
+}
+
+#[test]
+fn a_stream_starved_until_loop_end_plays_a_clip_that_ends_inside_the_loop() {
+    // The clip ends inside the loop, the ring runs dry mid-clip, and the stall ends with the
+    // render exactly at loop end — past the clip, so the node's last frame reported no park,
+    // and about to wrap, so the plan's position modelled the wrap and showed no starvation.
+    // Nothing replanned: the node waited at its starved position while the next pass played
+    // the clip's head as silence.
+    let pcm = offset_pcm(8_000);
+    let path = write_pcm("wrapstarve_end", &pcm);
+    let loop_end = 94 * BLOCK as i64; // a block boundary
+    let run = |streamed: bool| {
+        let (h, rt, mut feeder) = streamed_pair(&path, 0, 4096);
+        let (h2, rt2) = engine_with(Box::new(BufferSource::new(pcm.clone(), 0)));
+        let (h, rt) = if streamed { (h, rt) } else { (h2, rt2) };
+        h.set_loop(true, 0, loop_end);
+        h.play();
+        let mut rendered = 0u64;
+        let mut out = Vec::new();
+        for b in 0..250 {
+            // No pump from frame 2560 to loop end: the ring runs dry near 5.6k.
+            let pump = streamed && !(20..94).contains(&b);
+            let f = pump.then_some(&mut feeder);
+            out.extend(lagged_block(&h, &rt, f, 0, &mut rendered));
+        }
+        out
+    };
+    let (streamed, arc) = (run(true), run(false));
+    let _ = std::fs::remove_file(&path);
+    let from = 94 * BLOCK; // the first pump after the stall
+    let bad = differing_frames(&streamed[from * CHANNELS..], &arc[from * CHANNELS..]);
+    assert_eq!(bad, 0, "{}", diff_span(&streamed, &arc, from));
+}
+
+#[test]
 fn a_wrap_with_its_fence_queued_is_not_reported_as_a_park() {
     // The pre-span park report must not fire on an ordinary pass: there the
     // wrap's fence is already queued behind the clip's in-loop audio, and a
@@ -1584,6 +1649,167 @@ fn the_first_callback_after_a_seek_is_whole_on_the_largest_device_buffer() {
         );
     }
     let _ = std::fs::remove_file(&path);
+}
+
+/// Steady playback of a streamed track and its in-memory twin with `cb`-frame callbacks and
+/// eight pump rounds per callback (the production ring stays topped up), then `edits` applied
+/// between two callbacks, each followed by a pump round as the woken pump gives it. Returns
+/// the frames of the next callback that differ.
+fn burst_between_callbacks(cb: usize, edits: &[&dyn Fn(&EngineHandle)]) -> (usize, Option<usize>) {
+    let frames = 400_000usize;
+    let path = write_track(frames);
+    let (h, rt, mut feeder) = streamed_pair(&path, 0, 16_384);
+    let (h2, rt2) = engine_with(Box::new(BufferSource::new(ramp_pcm(frames), 0)));
+    h.play();
+    h2.play();
+    let mut a = vec![0.0; cb * CHANNELS];
+    let mut b = vec![0.0; cb * CHANNELS];
+    for _ in 0..20 {
+        for _ in 0..8 {
+            feeder.pump(h.transport()).unwrap();
+        }
+        rt.render_offline(&mut a, cb);
+        rt.transport().sync_consumed_to_rendered();
+        rt2.render_offline(&mut b, cb);
+        rt2.transport().sync_consumed_to_rendered();
+    }
+    assert_eq!(
+        differing_frames(&a, &b),
+        0,
+        "steady playback, {cb}-frame callback"
+    );
+    for edit in edits {
+        edit(&h);
+        edit(&h2);
+        feeder
+            .pump_at_most(h.transport(), vocara_engine::feed::MAX_CALLBACK_FRAMES)
+            .unwrap();
+        feeder.pump(h.transport()).unwrap();
+    }
+    rt.render_offline(&mut a, cb);
+    rt2.render_offline(&mut b, cb);
+    let _ = std::fs::remove_file(&path);
+    (
+        differing_frames(&a, &b),
+        (0..cb).find(|&i| a[2 * i] != b[2 * i]),
+    )
+}
+
+#[test]
+fn several_seeks_between_two_callbacks_leave_the_next_one_whole() {
+    // A ruler drag, or quick seeks: every seek replans, and each replan's fence used to stack
+    // behind the queue the one before it had not yet drained. The first replan's audio filled
+    // the ring's free space, so the second fence landed with nothing behind it and the whole
+    // next callback was silent (1024, 4096 and 5120 frames of it).
+    let seeks: [&dyn Fn(&EngineHandle); 4] = [
+        &|h| h.seek(200_000),
+        &|h| h.seek(201_000),
+        &|h| h.seek(150_000),
+        &|h| h.seek(260_000),
+    ];
+    let mut bad = Vec::new();
+    for cb in [1024usize, 4096, vocara_engine::feed::MAX_CALLBACK_FRAMES] {
+        for n in 2..=seeks.len() {
+            let (diff, first) = burst_between_callbacks(cb, &seeks[..n]);
+            if diff > 0 {
+                bad.push(format!(
+                    "{n} seeks, {cb}-frame callback: {diff} frames differ from {first:?}"
+                ));
+            }
+        }
+    }
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+}
+
+#[test]
+fn a_seek_and_a_loop_edit_between_two_callbacks_leave_the_next_one_whole() {
+    // A loop edit is a discarding replan too.
+    let edits: [&dyn Fn(&EngineHandle); 3] = [
+        &|h| h.seek(100_000),
+        &|h| h.set_loop(true, 99_000, 140_000),
+        &|h| h.set_loop(true, 99_000, 120_000),
+    ];
+    for cb in [1024usize, vocara_engine::feed::MAX_CALLBACK_FRAMES] {
+        let (diff, first) = burst_between_callbacks(cb, &edits);
+        assert_eq!(
+            diff, 0,
+            "{cb}-frame callback: {diff} frames differ from {first:?}"
+        );
+    }
+}
+
+#[test]
+fn a_pump_running_beside_the_render_never_hands_it_a_misplaced_frame() {
+    // Every discarding replan takes the queue back while the node may be rendering on another
+    // thread; the pop limit is all that keeps the two apart. Under a real concurrent pump and
+    // bursts of seeks, every frame the render plays must be the track's own frame for its
+    // timeline position — or an underrun's silence, never another position's audio.
+    let frames = 400_000usize;
+    let path = write_track(frames);
+    let pcm = ramp_pcm(frames);
+    let (h, rt, mut feeder) = streamed_pair(&path, 0, 16_384);
+    let transport = Arc::clone(h.shared_arc());
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let pump = {
+        let stop = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::Acquire) {
+                feeder.pump(&transport).unwrap();
+                std::thread::yield_now();
+            }
+        })
+    };
+    h.play();
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    let mut next = |n: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed % n
+    };
+    let mut tl = 0i64;
+    let (mut played, mut silent, mut misplaced) = (0usize, 0usize, Vec::new());
+    let mut out = vec![0.0; BLOCK * 4 * CHANNELS];
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+    while std::time::Instant::now() < deadline {
+        if next(2) == 0 {
+            for _ in 0..1 + next(4) {
+                tl = next(300_000) as i64;
+                h.seek(tl);
+                std::thread::sleep(std::time::Duration::from_micros(next(300)));
+            }
+        }
+        // As fast as it goes (no real-time pacing): the more blocks overlap the pump's
+        // replans, the more often the limit is put to the test. A debug build's pump falls
+        // behind and much of it is underrun silence, which is fine here: misplaced audio is
+        // what fails.
+        rt.render_offline(&mut out, BLOCK * 4);
+        rt.transport().sync_consumed_to_rendered();
+        for (i, f) in out.chunks(2).enumerate() {
+            let at = tl as usize + i;
+            if f[0] == 0.0 && f[1] == 0.0 {
+                silent += 1;
+            } else if f[0] == pcm[2 * at] && f[1] == pcm[2 * at + 1] {
+                played += 1;
+            } else if misplaced.len() < 5 {
+                misplaced.push(format!(
+                    "tl {at}: {:?} expected {:?}",
+                    f,
+                    &pcm[2 * at..2 * at + 2]
+                ));
+            }
+        }
+        tl += (BLOCK * 4) as i64;
+    }
+    stop.store(true, std::sync::atomic::Ordering::Release);
+    pump.join().unwrap();
+    let _ = std::fs::remove_file(&path);
+    eprintln!("{played} frames played, {silent} silent");
+    assert!(misplaced.is_empty(), "misplaced frames: {misplaced:?}");
+    assert!(
+        played * 50 > played + silent,
+        "the stream barely played: {played} played, {silent} silent"
+    );
 }
 
 /// Loop-plays [0, 12_000), pumping before every block, except that at block

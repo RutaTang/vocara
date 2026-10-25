@@ -99,6 +99,9 @@ pub struct StreamingSource {
     /// visible yet (the two pushes publish separately): finish adoption on
     /// the next pop.
     pending_fence: Option<u32>,
+    /// This block's [`crate::feed::StreamCtrl::pop_limit`]: the ring index
+    /// the node stops at while the feeder takes the queue back.
+    limit: usize,
 }
 
 impl StreamingSource {
@@ -118,7 +121,63 @@ impl StreamingSource {
             ring_pos: 0,
             armed: false,
             pending_fence: None,
+            limit: crate::feed::NO_POP_LIMIT,
         }
+    }
+
+    /// Enters a block (see the `feed` module doc, "Taking the queue back"):
+    /// marks the node inside, then reads the pop limit for the whole block.
+    /// Both SeqCst, against the feeder's limit store and its read of the mark.
+    #[inline]
+    fn enter_block(&mut self) {
+        use std::sync::atomic::Ordering;
+        self.ctrl.node_seq.fetch_add(1, Ordering::SeqCst);
+        self.limit = self.ctrl.pop_limit.load(Ordering::SeqCst);
+    }
+
+    /// Leaves a block: publishes whether a fence is half taken, then marks the
+    /// node outside (Release: the feeder that sees the mark sees the head and
+    /// that flag).
+    #[inline]
+    fn leave_block(&mut self) {
+        use std::sync::atomic::Ordering;
+        self.ctrl
+            .fence_open
+            .store(self.pending_fence.is_some(), Ordering::Relaxed);
+        self.ctrl.node_seq.fetch_add(1, Ordering::Release);
+    }
+
+    /// Whether this block's pop limit stops the node at its ring head.
+    #[inline]
+    fn at_limit(&self) -> bool {
+        self.limit != crate::feed::NO_POP_LIMIT
+            && self.rx.position().wrapping_sub(self.limit) as isize >= 0
+    }
+
+    /// The ring's next frame (consumed), short of the pop limit.
+    #[inline]
+    fn ring_pop(&mut self) -> Option<[Smp; CHANNELS]> {
+        if self.at_limit() {
+            None
+        } else {
+            self.rx.pop()
+        }
+    }
+
+    /// The ring's next frame (not consumed), short of the pop limit.
+    #[inline]
+    fn ring_peek(&self) -> Option<[Smp; CHANNELS]> {
+        if self.at_limit() {
+            None
+        } else {
+            self.rx.peek()
+        }
+    }
+
+    /// Nothing to pop: an empty ring, or the pop limit.
+    #[inline]
+    fn ring_empty(&self) -> bool {
+        self.at_limit() || self.rx.is_empty()
     }
 
     /// Underruns observed so far (mirrors ctrl.xruns for tests).
@@ -141,7 +200,7 @@ impl StreamingSource {
     /// pending when the base is not visible yet. Returns whether armed.
     #[inline]
     fn adopt_fence(&mut self, g: u32) -> bool {
-        match self.rx.pop() {
+        match self.ring_pop() {
             Some(base) => {
                 self.cur_gen = g;
                 self.ring_pos = crate::feed::fence_base_tl(base);
@@ -166,7 +225,7 @@ impl StreamingSource {
             self.adopt_fence(g);
             return None;
         }
-        match self.rx.pop() {
+        match self.ring_pop() {
             Some(f) => {
                 if let Some(g) = Self::fence_gen(f) {
                     self.adopt_fence(g);
@@ -183,7 +242,10 @@ impl StreamingSource {
     /// earlier pop, or a fence frame at the ring head (peeked, not consumed).
     #[inline]
     fn head_is_fence(&self) -> bool {
-        self.pending_fence.is_some() || self.rx.peek().is_some_and(|f| Self::fence_gen(f).is_some())
+        self.pending_fence.is_some()
+            || self
+                .ring_peek()
+                .is_some_and(|f| Self::fence_gen(f).is_some())
     }
 
     /// Drain to the newest discarding fence (see `process`). Also runs while the
@@ -224,7 +286,7 @@ impl StreamingSource {
                         }
                         continue;
                     }
-                    match self.rx.pop() {
+                    match self.ring_pop() {
                         Some(f) => {
                             if let Some(g) = Self::fence_gen(f) {
                                 if reached(g) {
@@ -253,13 +315,24 @@ impl Node for StreamingSource {
     }
 
     fn idle(&mut self) {
+        self.enter_block();
         self.take_flush();
         self.ctrl
             .parked
             .store(0, std::sync::atomic::Ordering::Release);
+        self.leave_block();
     }
 
     fn process(&mut self, io: &mut ProcessIo) {
+        self.enter_block();
+        self.render(io);
+        self.leave_block();
+    }
+}
+
+impl StreamingSource {
+    /// One playing block (see [`Node::process`]).
+    fn render(&mut self, io: &mut ProcessIo) {
         // A DISCARDING discontinuity (flush/loop-change/play-state): drain to
         // the newest fence before rendering anything — the ring's older
         // content predates the transport change. A loop WRAP does not bump
@@ -303,7 +376,7 @@ impl Node for StreamingSource {
             while self.armed && self.ring_pos < tl {
                 if self.pop_audio().is_some() {
                     self.ring_pos += 1;
-                } else if self.pending_fence.is_some() || self.rx.is_empty() {
+                } else if self.pending_fence.is_some() || self.ring_empty() {
                     break; // starved (or mid-fence): retry next frame
                 }
             }
@@ -345,7 +418,7 @@ impl Node for StreamingSource {
                 None => {
                     out[o] = 0.0;
                     out[o + 1] = 0.0;
-                    if self.rx.is_empty() && self.pending_fence.is_none() {
+                    if self.ring_empty() && self.pending_fence.is_none() {
                         // Wait-free health signal, read via the ctrl by the
                         // FFI aggregate (ve_stream_xruns).
                         self.ctrl
