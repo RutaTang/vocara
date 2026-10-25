@@ -1067,10 +1067,10 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// [body] with the playable copy. [body] returns whether the import was
   /// COMMITTED (its save landed): on false — a failed save reports through
   /// _doSave's revert+toast, not an exception — and on any throw, every file
-  /// this call created is deleted before returning. A failed import must not
-  /// strand bytes in the official audio directory: if the leftover happens to
-  /// be a canonical mono WAV, boot recovery would resurrect it as a phantom
-  /// take pointing at a practice whose save never happened.
+  /// this call created is deleted before returning, rather than left for the
+  /// next boot's staging sweep. (Imports stage under `imports/`, which boot
+  /// recovery never adopts, so not even an interrupted one can come back as a
+  /// phantom take.)
   Future<void> _withImportedAudio(
     String sourcePath,
     Future<bool> Function(String dest) body,
