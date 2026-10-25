@@ -1318,10 +1318,10 @@ impl Aec {
         }
         // ----- Echo-presence guard (see UNPROVEN_BUDGET / VANISH_RATIO) -----
         if echo_absent {
-            self.vanish_count += 1;
+            self.vanish_count = self.vanish_count.saturating_add(1);
         }
         if !self.converged && far_active && self.hang > 0 && !self.echo_unproven {
-            self.unproven_blocks += 1;
+            self.unproven_blocks = self.unproven_blocks.saturating_add(1);
         }
         let wipe = self.echo_unproven && self.p_err_fg > UNPROVEN_WIPE * self.p_mic_cp;
         if wipe || self.vanish_count >= VANISH_HOLD || self.unproven_blocks >= UNPROVEN_BUDGET {
@@ -1396,7 +1396,7 @@ impl Aec {
         let better = self.p_err_bg < COPY_MARGIN * self.p_err_fg;
         let adopt = if self.echo_unproven {
             if better && self.p_err_bg < UNPROVEN_COPY * self.p_mic_cp {
-                self.unproven_streak += 1;
+                self.unproven_streak = self.unproven_streak.saturating_add(1);
             } else {
                 self.unproven_streak = 0;
             }
