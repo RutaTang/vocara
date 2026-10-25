@@ -1502,3 +1502,81 @@ fn a_park_on_a_pending_seek_is_left_to_wait() {
     );
     let _ = std::fs::remove_file(&path);
 }
+
+/// A source that pauses the transport from INSIDE the render, between the
+/// block's playing check and its end-of-block clock store — the window a
+/// control-thread pause lands in whenever a callback is rendering.
+struct PausesMidBlock {
+    inner: BufferSource,
+    /// The handle to pause through on the next block (null: none).
+    handle: Arc<std::sync::atomic::AtomicPtr<EngineHandle>>,
+}
+
+impl vocara_engine::node::Node for PausesMidBlock {
+    fn prepare(&mut self, sample_rate: f64, max_block: usize) {
+        self.inner.prepare(sample_rate, max_block);
+    }
+
+    fn num_in(&self) -> usize {
+        0
+    }
+
+    fn process(&mut self, io: &mut vocara_engine::node::ProcessIo) {
+        self.inner.process(io);
+        let h = self
+            .handle
+            .swap(std::ptr::null_mut(), std::sync::atomic::Ordering::AcqRel);
+        // SAFETY: the test thread set it to a live handle it is not using
+        // while the render runs; only Shared atomics are touched.
+        if let Some(h) = unsafe { h.as_ref() } {
+            h.pause();
+        }
+    }
+}
+
+#[test]
+fn a_pause_during_a_render_resumes_where_the_listener_stopped() {
+    // Resampled output path: the device trails the render by LAG frames. A
+    // pause folds the clock back to what was heard, but a callback already
+    // rendering stored ITS block end over the fold, so resume skipped the
+    // unheard backlog the pause's flush had dropped (up to a render block).
+    const LAG: u64 = 1024;
+    let pcm = offset_pcm(100_000);
+    let handle = Arc::new(std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()));
+    let node = PausesMidBlock {
+        inner: BufferSource::new(pcm.clone(), 0),
+        handle: Arc::clone(&handle),
+    };
+    let (h, rt) = engine_with(Box::new(node));
+    let t = rt.transport();
+    let mut rendered = 0u64;
+    let mut block = vec![0.0; BLOCK * CHANNELS];
+    h.play();
+    for _ in 0..100 {
+        rt.render_offline(&mut block, BLOCK);
+        rendered += BLOCK as u64;
+        let target = rendered.saturating_sub(LAG);
+        let cur = t.consumed_frames();
+        if target > cur {
+            t.advance_consumed(target - cur);
+        }
+    }
+    let heard = (rendered - LAG) as i64;
+    handle.store(
+        &h as *const EngineHandle as *mut EngineHandle,
+        std::sync::atomic::Ordering::Release,
+    );
+    rt.render_offline(&mut block, BLOCK); // the pause lands mid-block
+    assert!(!h.is_playing());
+    assert_eq!(h.frame(), heard, "the paused clock must hold the fold");
+    // The callback processes the flush (the cursor skips the dropped FIFO),
+    // then play resumes on the first frame the listener did not hear.
+    t.advance_consumed(rendered + BLOCK as u64 - t.consumed_frames());
+    h.play();
+    rt.render_offline(&mut block, BLOCK);
+    assert_eq!(
+        block[0],
+        pcm[heard as usize * CHANNELS],
+        "resumed elsewhere"
+    );
+}

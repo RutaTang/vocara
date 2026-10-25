@@ -399,7 +399,8 @@ impl RtProcessor {
             let loop_en = self.shared.loop_enabled.load(Ordering::Acquire);
             let ls = self.shared.loop_start.load(Ordering::Relaxed);
             let le = self.shared.loop_end.load(Ordering::Relaxed);
-            let mut frame = self.shared.frame.load(Ordering::Relaxed);
+            let block_start = self.shared.frame.load(Ordering::Relaxed);
+            let mut frame = block_start;
             let mut rendered = self.shared.rendered_total.load(Ordering::Relaxed);
 
             // set_loop publishes the two bounds as separate stores, so this pair
@@ -441,7 +442,16 @@ impl RtProcessor {
                 rendered += chunk as u64;
                 done += chunk;
             }
-            self.shared.frame.store(frame, Ordering::Release);
+            // A pause landing while this block rendered folded the clock back to
+            // what was heard, and its flush drops the rest: resume must start
+            // at the fold, not past audio nobody heard. The control thread
+            // writes the clock only in that fold, so a changed clock is one.
+            let _ = self.shared.frame.compare_exchange(
+                block_start,
+                frame,
+                Ordering::Release,
+                Ordering::Relaxed,
+            );
             self.shared
                 .rendered_total
                 .store(rendered, Ordering::Release);
