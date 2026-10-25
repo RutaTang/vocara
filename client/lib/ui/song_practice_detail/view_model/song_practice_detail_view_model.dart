@@ -852,9 +852,9 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   // --- Loading -------------------------------------------------------------
 
   Future<Result<SongPractice>> _load() async {
-    // A take stopped just before the last screen on this practice closed may
-    // still be landing (its finalize outlives that screen): read the practice
-    // after it, or this screen shows it without the take.
+    // A take stopped, or an edit made, just before the last screen on this
+    // practice closed may still be landing (its finalize or save outlives that
+    // screen): read the practice after it, or this screen shows it without.
     await _finalizer.landed(_practiceId);
     // Load through the base-hash path: the hashes captured here are what every
     // later save three-way merges against (see [_baseHashes]).
@@ -2244,10 +2244,15 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   ///
   /// Each queued persist holds the quit until it lands (its wait in the queue
   /// included): an edit already made in the UI must not be lost to a Cmd+Q
-  /// that exits between the edit and its commit.
+  /// that exits between the edit and its commit. It is listed as landing on
+  /// the practice too, like a stopped take's finalize: the save outlives the
+  /// screen (an edit, then Back on a slow disk), and a screen reopened on the
+  /// practice meanwhile read it from before the edit (see [_load]).
   Future<T> _enqueueSave<T>(Future<T> Function() op) {
     final next = _saveTail.then((_) => op());
-    _saveTail = next.then<void>((_) {}, onError: (_) {});
+    final settled = next.then<void>((_) {}, onError: (_) {});
+    _saveTail = settled;
+    unawaited(_finalizer.landing(_practiceId, () => settled));
     return _finalizer.hold(() => next);
   }
 

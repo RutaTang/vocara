@@ -41,6 +41,9 @@ class _FakeRepo extends Fake implements SongPracticeRepository {
   /// as SongPracticeRepositoryDrift's hydrate does.
   bool pooling = false;
 
+  /// When set, a save parks until it completes (a slow disk).
+  Completer<void>? saveGate;
+
   static AudioTrack _pooled(AudioTrack t) => t.copyWith(
     clips: [
       for (final c in t.clips)
@@ -62,6 +65,8 @@ class _FakeRepo extends Fake implements SongPracticeRepository {
     required Map<String, String> baseHashes,
   }) async {
     await Future<void>.delayed(Duration.zero);
+    final gate = saveGate;
+    if (gate != null) await gate.future;
     if (failNextSave) {
       failNextSave = false;
       return Result.error(Exception('save failed'));
@@ -789,5 +794,38 @@ void main() {
       (t) => t.id == 'take1',
     );
     expect(take1.clips, hasLength(2), reason: 'the take it was reopened on');
+  });
+
+  test('a practice reopened while an edit is still saving shows the '
+      'edit', () async {
+    // An edit's save outlives the screen the same way a take's finalize does
+    // (rename, then Back while the disk is slow): the reopened screen read the
+    // practice from before the edit, and its next save then merged against
+    // that stale base.
+    repo = _FakeRepo(_seed());
+    waveforms = _FakeWaveforms();
+    spectrograms = _FakeSpectrograms();
+    final first = openVm();
+    for (var i = 0; i < 400 && first.practice == null; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+    repo.saveGate = Completer<void>();
+    final rename = first.renameTrack('take1', 'Lead');
+    await Future<void>.delayed(const Duration(milliseconds: 5));
+    first.dispose();
+
+    final reopened = openVm();
+    addTearDown(reopened.dispose);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    repo.saveGate!.complete();
+    await rename;
+    for (var i = 0; i < 400 && reopened.practice == null; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+
+    final take1 = reopened.practice!.vocalTracks.singleWhere(
+      (t) => t.id == 'take1',
+    );
+    expect(take1.displayName, 'Lead', reason: 'the edit it was reopened on');
   });
 }
