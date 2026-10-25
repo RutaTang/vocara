@@ -83,11 +83,94 @@ impl Allpass {
         }
         out
     }
+    /// [`process`](Self::process) over a run of samples, in place.
+    fn process_run(&mut self, io: &mut [f32]) {
+        let mut i = 0;
+        while i < io.len() {
+            // Up to the line's wrap point: a plain slice walk, no per-sample wrap check.
+            let seg = (io.len() - i).min(self.buf.len() - self.idx);
+            let line = &mut self.buf[self.idx..self.idx + seg];
+            for (x, b) in io[i..i + seg].iter_mut().zip(line.iter_mut()) {
+                let input = *x;
+                let bufout = *b;
+                *x = -input + bufout;
+                *b = sanitize(input + bufout * ALLPASS_FEEDBACK);
+            }
+            self.idx += seg;
+            if self.idx >= self.buf.len() {
+                self.idx = 0;
+            }
+            i += seg;
+        }
+    }
     fn clear(&mut self) {
         for s in self.buf.iter_mut() {
             *s = 0.0;
         }
         self.idx = 0;
+    }
+}
+
+/// Four combs over a run of samples at constant feedback/damping: `acc[i] += c0 + c1 + c2 + c3`
+/// (each comb's [`Comb::process`] output, added in that order), the combs' states held in
+/// registers. Four independent damping recursions in one loop keep the FPU busy where one comb
+/// at a time would wait on its own recursion every sample.
+fn comb4_run(
+    cs: &mut [Comb],
+    input: &[f32],
+    acc: &mut [f32],
+    feedback: f32,
+    damp1: f32,
+    damp2: f32,
+) {
+    let [c0, c1, c2, c3] = cs else {
+        unreachable!("comb4_run takes exactly four combs")
+    };
+    let n = input.len();
+    let mut i = 0;
+    while i < n {
+        // Up to the nearest wrap point among the four lines.
+        let seg = (n - i)
+            .min(c0.buf.len() - c0.idx)
+            .min(c1.buf.len() - c1.idx)
+            .min(c2.buf.len() - c2.idx)
+            .min(c3.buf.len() - c3.idx);
+        let b0 = &mut c0.buf[c0.idx..c0.idx + seg];
+        let b1 = &mut c1.buf[c1.idx..c1.idx + seg];
+        let b2 = &mut c2.buf[c2.idx..c2.idx + seg];
+        let b3 = &mut c3.buf[c3.idx..c3.idx + seg];
+        let x = &input[i..i + seg];
+        let o = &mut acc[i..i + seg];
+        let (mut s0, mut s1, mut s2, mut s3) = (c0.store, c1.store, c2.store, c3.store);
+        for j in 0..seg {
+            let xin = x[j];
+            let y0 = b0[j];
+            s0 = sanitize(y0 * damp2 + s0 * damp1);
+            b0[j] = sanitize(xin + (s0 + ANTI_DENORMAL) * feedback);
+            let y1 = b1[j];
+            s1 = sanitize(y1 * damp2 + s1 * damp1);
+            b1[j] = sanitize(xin + (s1 + ANTI_DENORMAL) * feedback);
+            let y2 = b2[j];
+            s2 = sanitize(y2 * damp2 + s2 * damp1);
+            b2[j] = sanitize(xin + (s2 + ANTI_DENORMAL) * feedback);
+            let y3 = b3[j];
+            s3 = sanitize(y3 * damp2 + s3 * damp1);
+            b3[j] = sanitize(xin + (s3 + ANTI_DENORMAL) * feedback);
+            o[j] = o[j] + y0 + y1 + y2 + y3;
+        }
+        for (c, s) in [
+            (&mut *c0, s0),
+            (&mut *c1, s1),
+            (&mut *c2, s2),
+            (&mut *c3, s3),
+        ] {
+            c.store = s;
+            c.idx += seg;
+            if c.idx >= c.buf.len() {
+                c.idx = 0;
+            }
+        }
+        i += seg;
     }
 }
 
@@ -119,6 +202,31 @@ impl Channel {
         }
         out
     }
+    /// [`process`](Self::process) over a run of samples at constant feedback/damping, into
+    /// `out`: the same per-sample arithmetic and the same order of every sum, run comb by comb
+    /// (four at a time) and then allpass by allpass across the run instead of sample by sample.
+    /// Nothing couples the combs but their sum, and each allpass only sees the previous one's
+    /// output, so the reordering visits the same operations on the same values.
+    fn process_run(&mut self, input: &[f32], out: &mut [f32], feedback: f32, d1: f32, d2: f32) {
+        out.fill(0.0);
+        let mut groups = self.combs.chunks_exact_mut(4);
+        for g in &mut groups {
+            comb4_run(g, input, out, feedback, d1, d2);
+        }
+        let rest = groups.into_remainder();
+        if !rest.is_empty() {
+            for (o, &x) in out.iter_mut().zip(input) {
+                let mut acc = *o;
+                for c in rest.iter_mut() {
+                    acc += c.process(x, feedback, d1, d2);
+                }
+                *o = acc;
+            }
+        }
+        for a in &mut self.allpasses {
+            a.process_run(out);
+        }
+    }
     fn clear(&mut self) {
         for c in &mut self.combs {
             c.clear();
@@ -128,6 +236,9 @@ impl Channel {
         }
     }
 }
+
+/// Frames per [`Channel::process_run`] call on the settled path (stack scratch, no allocation).
+const RUN: usize = 128;
 
 pub struct ReverbNode {
     left: Channel,
@@ -183,6 +294,51 @@ impl ReverbNode {
     pub(crate) fn lines_dirty(&self) -> bool {
         self.dirty
     }
+
+    /// The wet path with the room settled (feedback and damping landed — the steady state):
+    /// the tank runs a run of frames at a time ([`Channel::process_run`]); wet, dry and width
+    /// still step per frame unless they have landed too. Same arithmetic as the per-frame loop
+    /// in `process`, frame for frame.
+    fn process_settled(&mut self, inp: &[f32], out: &mut [f32], frames: usize, fb: f32, d1: f32) {
+        let d2 = 1.0 - d1;
+        let held = (
+            self.wet.settled(frames),
+            self.dry.settled(frames),
+            self.width.settled(frames),
+        );
+        let mut start = 0;
+        while start < frames {
+            let m = (frames - start).min(RUN);
+            let (mut in_l, mut in_r) = ([0.0f32; RUN], [0.0f32; RUN]);
+            for (j, f) in inp[CHANNELS * start..CHANNELS * (start + m)]
+                .chunks_exact(CHANNELS)
+                .enumerate()
+            {
+                in_l[j] = f[0] * FIXED_GAIN;
+                in_r[j] = f[1] * FIXED_GAIN;
+            }
+            let (mut wl, mut wr) = ([0.0f32; RUN], [0.0f32; RUN]);
+            self.left.process_run(&in_l[..m], &mut wl[..m], fb, d1, d2);
+            self.right.process_run(&in_r[..m], &mut wr[..m], fb, d1, d2);
+            let o = &mut out[CHANNELS * start..CHANNELS * (start + m)];
+            let x = &inp[CHANNELS * start..CHANNELS * (start + m)];
+            for j in 0..m {
+                let wet = held.0.unwrap_or_else(|| self.wet.next());
+                let dry = held.1.unwrap_or_else(|| self.dry.next());
+                let width = held.2.unwrap_or_else(|| self.width.next());
+                let (il, ir) = (x[CHANNELS * j], x[CHANNELS * j + 1]);
+                let (wl, wr) = (wl[j], wr[j]);
+                // Width in the reverb's own stereo frame.
+                let w1 = width * 0.5 + 0.5;
+                let w2 = (1.0 - width) * 0.5;
+                let out_l = wl * w1 + wr * w2;
+                let out_r = wr * w1 + wl * w2;
+                o[CHANNELS * j] = out_l * wet + il * dry;
+                o[CHANNELS * j + 1] = out_r * wet + ir * dry;
+            }
+            start += m;
+        }
+    }
 }
 
 impl Node for ReverbNode {
@@ -220,14 +376,26 @@ impl Node for ReverbNode {
                     self.right.clear();
                     self.dirty = false;
                 }
-                for i in 0..frames {
-                    let dry = self.dry.next();
-                    out[CHANNELS * i] = inp[CHANNELS * i] * dry;
-                    out[CHANNELS * i + 1] = inp[CHANNELS * i + 1] * dry;
+                if let Some(dry) = self.dry.settled(frames) {
+                    for (o, &x) in out[..n].iter_mut().zip(&inp[..n]) {
+                        *o = x * dry;
+                    }
+                } else {
+                    for i in 0..frames {
+                        let dry = self.dry.next();
+                        out[CHANNELS * i] = inp[CHANNELS * i] * dry;
+                        out[CHANNELS * i + 1] = inp[CHANNELS * i + 1] * dry;
+                    }
                 }
             }
             Some(inp) => {
                 self.dirty = true;
+                if let (Some(fb), Some(d1)) =
+                    (self.feedback.settled(frames), self.damp1.settled(frames))
+                {
+                    self.process_settled(inp, out, frames, fb, d1);
+                    return;
+                }
                 for i in 0..frames {
                     let il = inp[CHANNELS * i];
                     let ir = inp[CHANNELS * i + 1];
@@ -312,6 +480,80 @@ mod tests {
             r.process(&mut io);
         }
         out
+    }
+
+    /// `process` as it was before the settled-room block path: every frame steps all five
+    /// smoothers and runs both tanks sample by sample.
+    fn reference(r: &mut ReverbNode, inp: &[f32], out: &mut [f32]) {
+        let frames = inp.len() / CHANNELS;
+        if r.wet.target() == 0.0 && r.wet.current() <= WET_IDLE {
+            r.wet.snap(0.0);
+            if r.dirty {
+                r.left.clear();
+                r.right.clear();
+                r.dirty = false;
+            }
+            for i in 0..frames {
+                let dry = r.dry.next();
+                out[CHANNELS * i] = inp[CHANNELS * i] * dry;
+                out[CHANNELS * i + 1] = inp[CHANNELS * i + 1] * dry;
+            }
+            return;
+        }
+        r.dirty = true;
+        for i in 0..frames {
+            let il = inp[CHANNELS * i];
+            let ir = inp[CHANNELS * i + 1];
+            let fb = r.feedback.next();
+            let d1 = r.damp1.next();
+            let d2 = 1.0 - d1;
+            let wet = r.wet.next();
+            let dry = r.dry.next();
+            let width = r.width.next();
+            let wl = r.left.process(il * FIXED_GAIN, fb, d1, d2);
+            let wr = r.right.process(ir * FIXED_GAIN, fb, d1, d2);
+            let w1 = width * 0.5 + 0.5;
+            let w2 = (1.0 - width) * 0.5;
+            let out_l = wl * w1 + wr * w2;
+            let out_r = wr * w1 + wl * w2;
+            out[CHANNELS * i] = out_l * wet + il * dry;
+            out[CHANNELS * i + 1] = out_r * wet + ir * dry;
+        }
+    }
+
+    /// The settled-room path (tanks run a run of frames at a time, combs four abreast,
+    /// allpasses one after another; landed wet/dry/width as constants) renders exactly what the
+    /// frame-by-frame loop renders — through room and damping ramps (the per-frame path), wet,
+    /// dry and width ramps over a settled room, the wet-0 idle stretch and its wake-up, both
+    /// tunings' line wraps at every alignment, and ragged blocks.
+    #[test]
+    fn the_settled_room_path_matches_the_frame_by_frame_loop_bit_for_bit() {
+        for (fresh, edits) in [
+            (
+                ReverbNode::default_bus as fn() -> ReverbNode,
+                vec![
+                    (6, param::ROOM_SIZE, 0.9),
+                    (14, param::WET, 0.4),
+                    (15, param::DAMPING, 0.1),
+                    (30, param::WIDTH, 0.2),
+                    (31, param::DRY, 0.5),
+                    (60, param::WET, 0.0),
+                    (140, param::WET, 0.7),
+                    (150, param::ROOM_SIZE, 0.2),
+                ],
+            ),
+            (
+                || ReverbNode::new(0.5, 0.5, 0.0, 1.0, 1.0), // the insert default (wet 0)
+                vec![(5, param::WET, 0.3), (40, param::DRY, 0.0)],
+            ),
+        ] {
+            let (mut fast, mut slow) = (fresh(), fresh());
+            fast.prepare(48_000.0, 1024);
+            slow.prepare(48_000.0, 1024);
+            crate::dsp::test_support::assert_matches_reference(
+                &mut fast, &mut slow, reference, &edits, 200,
+            );
+        }
     }
 
     #[test]

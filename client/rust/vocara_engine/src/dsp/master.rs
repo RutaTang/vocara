@@ -67,6 +67,21 @@ impl Node for MasterNode {
         let n = frames * CHANNELS;
         let inp = io.inputs.first().copied();
         let out = &mut *io.outputs[0];
+        let clip = self.soft_clip;
+        // A landed gain (the steady state of every fader and send) is one value for the whole
+        // block: scale straight from the input, the same products the ramp loop below forms.
+        if let (Some(inp), Some(g)) = (inp, self.gain.settled(frames)) {
+            if clip {
+                for (o, &x) in out[..n].iter_mut().zip(&inp[..n]) {
+                    *o = soft_clip(x * g);
+                }
+            } else {
+                for (o, &x) in out[..n].iter_mut().zip(&inp[..n]) {
+                    *o = x * g;
+                }
+            }
+            return;
+        }
         match inp {
             Some(inp) => out[..n].copy_from_slice(&inp[..n]),
             None => {
@@ -75,7 +90,6 @@ impl Node for MasterNode {
                 }
             }
         }
-        let clip = self.soft_clip;
         for i in 0..frames {
             let g = self.gain.next();
             let mut l = out[CHANNELS * i] * g;
@@ -92,6 +106,47 @@ impl Node for MasterNode {
     fn set_param(&mut self, param: u16, value: f32) {
         if param == param::GAIN {
             self.gain.set_target(value);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dsp::test_support::assert_matches_reference;
+
+    /// The loop `process` used before the settled-gain path: copy, then step the gain per
+    /// sample.
+    fn reference(m: &mut MasterNode, inp: &[f32], out: &mut [f32]) {
+        out.copy_from_slice(inp);
+        for i in 0..inp.len() / CHANNELS {
+            let g = m.gain.next();
+            let mut l = out[CHANNELS * i] * g;
+            let mut r = out[CHANNELS * i + 1] * g;
+            if m.soft_clip {
+                l = soft_clip(l);
+                r = soft_clip(r);
+            }
+            out[CHANNELS * i] = l;
+            out[CHANNELS * i + 1] = r;
+        }
+    }
+
+    #[test]
+    fn a_landed_gain_scales_exactly_like_the_per_sample_ramp() {
+        for clip in [false, true] {
+            let mut fast = MasterNode::new(0.8, clip);
+            let mut slow = MasterNode::new(0.8, clip);
+            fast.prepare(48_000.0, 1024);
+            slow.prepare(48_000.0, 1024);
+            let edits = [
+                (3, param::GAIN, 1.7),
+                (9, param::GAIN, 0.0),
+                (20, param::GAIN, 0.31),
+                (21, param::GAIN, -0.5),
+                (40, param::GAIN, 1.0),
+            ];
+            assert_matches_reference(&mut fast, &mut slow, reference, &edits, 60);
         }
     }
 }

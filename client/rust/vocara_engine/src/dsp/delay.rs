@@ -3,6 +3,7 @@
 //! never on the audio callback.
 
 use crate::dsp::denormals::sanitize;
+use crate::dsp::ring_index;
 use crate::dsp::smooth::{BypassFade, Smoothed};
 use crate::node::{Node, ProcessIo};
 use crate::sample::{Smp, CHANNELS};
@@ -125,7 +126,7 @@ impl Node for DelayNode {
             for _ in 0..clear {
                 self.buf_l[self.pos] = 0.0;
                 self.buf_r[self.pos] = 0.0;
-                self.pos = (self.pos + 1) % len;
+                self.pos = ring_index::next(self.pos, len);
             }
             self.stale -= clear;
             if self.stale == 0 {
@@ -145,14 +146,17 @@ impl Node for DelayNode {
             self.tap_mix = 0.0;
         }
         let fb = self.feedback.clamp(0.0, 0.98);
+        // A landed mix ramp / on-off fade is one value all block (see `Smoothed::settled`).
+        let (mix_held, fade_held) = (self.mix.settled(frames), self.fade.settled());
 
         for i in 0..frames {
             let l = out[CHANNELS * i];
             let r = out[CHANNELS * i + 1];
-            let read = (self.pos + len - self.tap) % len;
+            // Taps lie in 1..len (wanted_tap clamps them).
+            let read = ring_index::back(self.pos, self.tap, len);
             let (mut dl, mut dr) = (self.buf_l[read], self.buf_r[read]);
             if self.tap_next != self.tap {
-                let next = (self.pos + len - self.tap_next) % len;
+                let next = ring_index::back(self.pos, self.tap_next, len);
                 dl += (self.buf_l[next] - dl) * self.tap_mix;
                 dr += (self.buf_r[next] - dr) * self.tap_mix;
                 self.tap_mix += self.tap_step;
@@ -165,10 +169,11 @@ impl Node for DelayNode {
             self.buf_l[self.pos] = sanitize(l + dl * fb);
             self.buf_r[self.pos] = sanitize(r + dr * fb);
             // The wet share, blended toward the dry input while the bypass switch fades.
-            let wet = self.mix.next() * self.fade.next();
+            let mix = mix_held.unwrap_or_else(|| self.mix.next());
+            let wet = mix * fade_held.unwrap_or_else(|| self.fade.next());
             out[CHANNELS * i] = l + (dl - l) * wet;
             out[CHANNELS * i + 1] = r + (dr - r) * wet;
-            self.pos = (self.pos + 1) % len;
+            self.pos = ring_index::next(self.pos, len);
         }
     }
 
@@ -228,6 +233,87 @@ mod tests {
             sr: 48_000.0,
         };
         d.process(&mut io);
+    }
+
+    /// `process` as it was before the ring-index and landed-mix rewrites (index `%` per
+    /// sample, mix and fade stepped per sample), verbatim.
+    fn reference(d: &mut DelayNode, inp: &[Smp], out: &mut [Smp]) {
+        let frames = inp.len() / CHANNELS;
+        out.copy_from_slice(inp);
+        if d.fade.begin_block() {
+            let len = d.buf_l.len();
+            if len == 0 || d.stale == 0 {
+                return;
+            }
+            let clear = frames.min(d.stale);
+            for _ in 0..clear {
+                d.buf_l[d.pos] = 0.0;
+                d.buf_r[d.pos] = 0.0;
+                d.pos = (d.pos + 1) % len;
+            }
+            d.stale -= clear;
+            if d.stale == 0 {
+                d.dirty = false;
+            }
+            return;
+        }
+        let len = d.buf_l.len();
+        if len == 0 {
+            return;
+        }
+        d.dirty = true;
+        let want = d.wanted_tap();
+        if d.tap_next == d.tap && want != d.tap {
+            d.tap_next = want;
+            d.tap_mix = 0.0;
+        }
+        let fb = d.feedback.clamp(0.0, 0.98);
+        for i in 0..frames {
+            let l = out[CHANNELS * i];
+            let r = out[CHANNELS * i + 1];
+            let read = (d.pos + len - d.tap) % len;
+            let (mut dl, mut dr) = (d.buf_l[read], d.buf_r[read]);
+            if d.tap_next != d.tap {
+                let next = (d.pos + len - d.tap_next) % len;
+                dl += (d.buf_l[next] - dl) * d.tap_mix;
+                dr += (d.buf_r[next] - dr) * d.tap_mix;
+                d.tap_mix += d.tap_step;
+                if d.tap_mix >= 1.0 {
+                    d.tap = d.tap_next;
+                }
+            }
+            d.buf_l[d.pos] = sanitize(l + dl * fb);
+            d.buf_r[d.pos] = sanitize(r + dr * fb);
+            let wet = d.mix.next() * d.fade.next();
+            out[CHANNELS * i] = l + (dl - l) * wet;
+            out[CHANNELS * i + 1] = r + (dr - r) * wet;
+            d.pos = (d.pos + 1) % len;
+        }
+    }
+
+    /// Bit for bit what the old loop rendered: switching on (the fade-in), mix ramps, Time
+    /// fades both ways (down to the shortest tap), feedback, the bypass fade-out and the
+    /// sweep that follows it across the whole line, and re-enabling — over more than one trip
+    /// around the ring.
+    #[test]
+    fn the_rewritten_loop_matches_the_old_one_bit_for_bit() {
+        let edits = [
+            (0, param::BYPASS, 0.0),
+            (0, param::MIX, 0.4),
+            (3, param::FEEDBACK, 0.7),
+            (9, param::TIME_MS, 1.0),
+            (20, param::TIME_MS, 1_900.0),
+            (30, param::MIX, 1.0),
+            (60, param::BYPASS, 1.0),
+            (400, param::BYPASS, 0.0),
+            (410, param::TIME_MS, 250.0),
+        ];
+        let (mut fast, mut slow) = (DelayNode::new(), DelayNode::new());
+        fast.prepare(48_000.0, 1024);
+        slow.prepare(48_000.0, 1024);
+        crate::dsp::test_support::assert_matches_reference(
+            &mut fast, &mut slow, reference, &edits, 460,
+        );
     }
 
     #[test]

@@ -72,13 +72,15 @@ impl Node for SaturationNode {
         let (d0, n0) = shape_consts(self.drive_db.current());
         let (d1, n1) = shape_consts(self.drive_db.advance(frames));
         let step = 1.0 / frames as f32;
+        // Landed mix / on-off fade: one value all block (see `Smoothed::settled`).
+        let (mix_held, fade_held) = (self.mix.settled(frames), self.fade.settled());
         for i in 0..frames {
             let t = (i + 1) as f32 * step;
             let d = d0 + (d1 - d0) * t;
             let norm = n0 + (n1 - n0) * t;
-            let mix = self.mix.next();
+            let mix = mix_held.unwrap_or_else(|| self.mix.next());
             // Blended toward the dry input while the bypass switch fades.
-            let f = self.fade.next();
+            let f = fade_held.unwrap_or_else(|| self.fade.next());
             for s in &mut out[CHANNELS * i..CHANNELS * (i + 1)] {
                 let dry = *s;
                 let wet = dry * (1.0 - mix) + (d * dry).tanh() * norm * mix;
@@ -99,5 +101,53 @@ impl Node for SaturationNode {
             param::BYPASS => self.fade.set_bypass(value >= 0.5),
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `process` as it was before the landed mix/fade constants, verbatim.
+    fn reference(s: &mut SaturationNode, inp: &[f32], out: &mut [f32]) {
+        let frames = inp.len() / CHANNELS;
+        out.copy_from_slice(inp);
+        if s.fade.begin_block() {
+            return;
+        }
+        let (d0, n0) = shape_consts(s.drive_db.current());
+        let (d1, n1) = shape_consts(s.drive_db.advance(frames));
+        let step = 1.0 / frames as f32;
+        for i in 0..frames {
+            let t = (i + 1) as f32 * step;
+            let d = d0 + (d1 - d0) * t;
+            let norm = n0 + (n1 - n0) * t;
+            let mix = s.mix.next();
+            let f = s.fade.next();
+            for x in &mut out[CHANNELS * i..CHANNELS * (i + 1)] {
+                let dry = *x;
+                let wet = dry * (1.0 - mix) + (d * dry).tanh() * norm * mix;
+                *x = dry + (wet - dry) * f;
+            }
+        }
+    }
+
+    #[test]
+    fn landed_controls_render_exactly_like_the_per_sample_ramps() {
+        let edits = [
+            (0, param::BYPASS, 0.0),
+            (0, param::MIX, 0.5),
+            (5, param::DRIVE_DB, 24.0),
+            (12, param::MIX, 1.0),
+            (30, param::BYPASS, 1.0),
+            (36, param::BYPASS, 0.0),
+            (37, param::MIX, 0.2),
+        ];
+        let (mut fast, mut slow) = (SaturationNode::new(), SaturationNode::new());
+        fast.prepare(48_000.0, 1024);
+        slow.prepare(48_000.0, 1024);
+        crate::dsp::test_support::assert_matches_reference(
+            &mut fast, &mut slow, reference, &edits, 50,
+        );
     }
 }

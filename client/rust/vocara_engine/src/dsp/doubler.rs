@@ -2,6 +2,7 @@
 //! thicken and widen the voice. Fractional read with linear interpolation; no feedback.
 //! Buffers sized in `prepare`.
 
+use crate::dsp::ring_index;
 use crate::dsp::smooth::{BypassFade, Smoothed};
 use crate::node::{Node, ProcessIo};
 use crate::sample::{Smp, CHANNELS};
@@ -94,8 +95,9 @@ impl DoublerNode {
         let d = delay_samples.clamp(1.0, (len - 2) as f32);
         let base = d.floor();
         let frac = d - base;
-        let i0 = (pos + len - base as usize) % len;
-        let i1 = (i0 + len - 1) % len;
+        // `base` lies in 0..=len - 2 (0 only for a NaN delay, which `as` saturates to).
+        let i0 = ring_index::back(pos, base as usize, len);
+        let i1 = ring_index::back(i0, 1, len);
         buf[i0] * (1.0 - frac) + buf[i1] * frac
     }
 }
@@ -150,7 +152,7 @@ impl Node for DoublerNode {
             for _ in 0..clear {
                 self.buf_l[self.pos] = 0.0;
                 self.buf_r[self.pos] = 0.0;
-                self.pos = (self.pos + 1) % len;
+                self.pos = ring_index::next(self.pos, len);
             }
             self.stale -= clear;
             if self.stale == 0 {
@@ -171,6 +173,8 @@ impl Node for DoublerNode {
             self.base_mix = 0.0;
         }
         let depth_target = self.depth_ms * self.per_ms();
+        // A landed mix ramp / on-off fade is one value all block (see `Smoothed::settled`).
+        let (mix_held, fade_held) = (self.mix.settled(frames), self.fade.settled());
 
         for i in 0..frames {
             let l = out[CHANNELS * i];
@@ -194,10 +198,11 @@ impl Node for DoublerNode {
             self.buf_r[self.pos] = r;
             // Keep the dry mostly intact; the wet copy thickens / widens. Blended toward the
             // dry input while the bypass switch fades.
-            let wet = self.mix.next() * self.fade.next();
+            let mix = mix_held.unwrap_or_else(|| self.mix.next());
+            let wet = mix * fade_held.unwrap_or_else(|| self.fade.next());
             out[CHANNELS * i] = l + (wl - 0.5 * l) * wet;
             out[CHANNELS * i + 1] = r + (wr - 0.5 * r) * wet;
-            self.pos = (self.pos + 1) % len;
+            self.pos = ring_index::next(self.pos, len);
             self.phase_l += inc;
             self.phase_r += inc;
             if self.phase_l >= TWO_PI {
@@ -281,6 +286,111 @@ mod tests {
             sr: 48_000.0,
         };
         d.process(&mut io);
+    }
+
+    /// The old fractional read, index `%` and all.
+    fn read_reference(buf: &[Smp], pos: usize, delay_samples: f32) -> Smp {
+        let len = buf.len();
+        let d = delay_samples.clamp(1.0, (len - 2) as f32);
+        let base = d.floor();
+        let frac = d - base;
+        let i0 = (pos + len - base as usize) % len;
+        let i1 = (i0 + len - 1) % len;
+        buf[i0] * (1.0 - frac) + buf[i1] * frac
+    }
+
+    /// `process` as it was before the ring-index and landed-mix rewrites, verbatim.
+    fn reference(d: &mut DoublerNode, inp: &[Smp], out: &mut [Smp]) {
+        let frames = inp.len() / CHANNELS;
+        out.copy_from_slice(inp);
+        if d.fade.begin_block() {
+            let len = d.buf_l.len();
+            if len == 0 || d.stale == 0 {
+                return;
+            }
+            let clear = frames.min(d.stale);
+            for _ in 0..clear {
+                d.buf_l[d.pos] = 0.0;
+                d.buf_r[d.pos] = 0.0;
+                d.pos = (d.pos + 1) % len;
+            }
+            d.stale -= clear;
+            if d.stale == 0 {
+                d.dirty = false;
+            }
+            return;
+        }
+        let len = d.buf_l.len();
+        if len < 4 {
+            return;
+        }
+        d.dirty = true;
+        d.heard = true;
+        let inc = TWO_PI * d.rate_hz / d.sr as f32;
+        let want = d.delay_ms * d.per_ms();
+        if d.base_next == d.base && want != d.base {
+            d.base_next = want;
+            d.base_mix = 0.0;
+        }
+        let depth_target = d.depth_ms * d.per_ms();
+        for i in 0..frames {
+            let l = out[CHANNELS * i];
+            let r = out[CHANNELS * i + 1];
+            d.depth += (depth_target - d.depth).clamp(-DEPTH_SLEW, DEPTH_SLEW);
+            let ml = d.depth * d.phase_l.sin();
+            let mr = d.depth * d.phase_r.sin();
+            let mut wl = read_reference(&d.buf_l, d.pos, d.base + ml);
+            let mut wr = read_reference(&d.buf_r, d.pos, d.base + mr);
+            if d.base_next != d.base {
+                let nl = read_reference(&d.buf_l, d.pos, d.base_next + ml);
+                let nr = read_reference(&d.buf_r, d.pos, d.base_next + mr);
+                wl += (nl - wl) * d.base_mix;
+                wr += (nr - wr) * d.base_mix;
+                d.base_mix += d.base_step;
+                if d.base_mix >= 1.0 {
+                    d.base = d.base_next;
+                }
+            }
+            d.buf_l[d.pos] = l;
+            d.buf_r[d.pos] = r;
+            let wet = d.mix.next() * d.fade.next();
+            out[CHANNELS * i] = l + (wl - 0.5 * l) * wet;
+            out[CHANNELS * i + 1] = r + (wr - 0.5 * r) * wet;
+            d.pos = (d.pos + 1) % len;
+            d.phase_l += inc;
+            d.phase_r += inc;
+            if d.phase_l >= TWO_PI {
+                d.phase_l -= TWO_PI;
+            }
+            if d.phase_r >= TWO_PI {
+                d.phase_r -= TWO_PI;
+            }
+        }
+    }
+
+    /// Bit for bit what the old loop rendered: switching on, mix ramps, Delay cross-fades to the
+    /// line's extremes, the deepest and fastest modulation (reads wrapping the ring from both
+    /// sides), the bypass fade-out and sweep, and re-enabling.
+    #[test]
+    fn the_rewritten_loop_matches_the_old_one_bit_for_bit() {
+        let edits = [
+            (0, param::BYPASS, 0.0),
+            (0, param::MIX, 0.6),
+            (4, param::DEPTH_MS, 20.0),
+            (4, param::RATE_HZ, 8.0),
+            (10, param::DELAY_MS, 50.0),
+            (25, param::DELAY_MS, 1.0),
+            (40, param::MIX, 1.0),
+            (60, param::BYPASS, 1.0),
+            (90, param::BYPASS, 0.0),
+            (95, param::DEPTH_MS, 0.0),
+        ];
+        let (mut fast, mut slow) = (DoublerNode::new(), DoublerNode::new());
+        fast.prepare(48_000.0, 1024);
+        slow.prepare(48_000.0, 1024);
+        crate::dsp::test_support::assert_matches_reference(
+            &mut fast, &mut slow, reference, &edits, 130,
+        );
     }
 
     #[test]

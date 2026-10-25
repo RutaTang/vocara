@@ -291,6 +291,12 @@ impl Node for DeEsserNode {
             return;
         }
         self.heard = true;
+        // Landed controls are one value all block (see `Smoothed::settled`).
+        let held = (
+            self.threshold.settled(frames),
+            self.range.settled(frames),
+            self.fade.settled(),
+        );
 
         for i in 0..frames {
             let l = out[CHANNELS * i];
@@ -315,8 +321,8 @@ impl Node for DeEsserNode {
             };
             self.env_db += (x_db - self.env_db) * coef;
 
-            let threshold_db = self.threshold.next();
-            let range_db = self.range.next();
+            let threshold_db = held.0.unwrap_or_else(|| self.threshold.next());
+            let range_db = held.1.unwrap_or_else(|| self.range.next());
             let over = self.env_db - threshold_db;
             let red_db = if over > 0.0 {
                 (-over).max(-range_db)
@@ -353,7 +359,7 @@ impl Node for DeEsserNode {
                 self.bank.shelve(l, r, flat)
             };
             // Blended toward the dry input while the bypass switch fades.
-            let f = self.fade.next();
+            let f = held.2.unwrap_or_else(|| self.fade.next());
             out[CHANNELS * i] = l + (pl - l) * f;
             out[CHANNELS * i + 1] = r + (pr - r) * f;
         }
@@ -385,5 +391,100 @@ impl Node for DeEsserNode {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `process` as it was before the landed threshold/range/fade constants, verbatim.
+    fn reference(d: &mut DeEsserNode, inp: &[f32], out: &mut [f32]) {
+        let frames = inp.len() / CHANNELS;
+        out.copy_from_slice(inp);
+        if d.fade.begin_block() {
+            return;
+        }
+        d.heard = true;
+        for i in 0..frames {
+            let l = out[CHANNELS * i];
+            let r = out[CHANNELS * i + 1];
+            let m = d.xmix;
+            let blend =
+                |a: (f32, f32), b: (f32, f32)| (a.0 + (b.0 - a.0) * m, a.1 + (b.1 - a.1) * m);
+            let (dl, dr) = if d.xfading {
+                blend(d.bank.detect(l, r), d.bank2.detect(l, r))
+            } else {
+                d.bank.detect(l, r)
+            };
+            let peak = dl.abs().max(dr.abs());
+            let x_db = 20.0 * (peak + 1.0e-12).log10();
+            let coef = if x_db > d.env_db {
+                d.attack_coef
+            } else {
+                d.release_coef
+            };
+            d.env_db += (x_db - d.env_db) * coef;
+            let threshold_db = d.threshold.next();
+            let range_db = d.range.next();
+            let over = d.env_db - threshold_db;
+            let red_db = if over > 0.0 {
+                (-over).max(-range_db)
+            } else {
+                0.0
+            };
+            let flat = red_db == 0.0;
+            if red_db != d.red_db {
+                if !flat {
+                    d.bank.set_reduction(red_db);
+                    if d.xfading {
+                        d.bank2.set_reduction(red_db);
+                    }
+                }
+                d.red_db = red_db;
+            }
+            let (pl, pr) = if d.xfading {
+                let a = d.bank.shelve(l, r, flat);
+                let b = d.bank2.shelve(l, r, flat);
+                d.xmix += d.xinc;
+                if d.xmix >= 1.0 {
+                    d.xmix = 1.0;
+                    d.bank = d.bank2;
+                    d.xfading = false;
+                }
+                if flat {
+                    (l, r)
+                } else {
+                    blend(a, b)
+                }
+            } else {
+                d.bank.shelve(l, r, flat)
+            };
+            let f = d.fade.next();
+            out[CHANNELS * i] = l + (pl - l) * f;
+            out[CHANNELS * i + 1] = r + (pr - r) * f;
+        }
+    }
+
+    /// Bit for bit what the old loop rendered: switching on, threshold and range ramps into
+    /// and out of reduction, a retune cross-fade while reducing, and the bypass fade-out.
+    #[test]
+    fn landed_controls_render_exactly_like_the_per_sample_ramps() {
+        let edits = [
+            (0, param::BYPASS, 0.0),
+            (3, param::THRESHOLD_DB, -45.0),
+            (9, param::RANGE_DB, 3.0),
+            (15, param::FREQ, 3_000.0),
+            (16, param::THRESHOLD_DB, -20.0),
+            (30, param::RANGE_DB, 20.0),
+            (45, param::BYPASS, 1.0),
+            (50, param::BYPASS, 0.0),
+        ];
+        let (mut fast, mut slow) = (DeEsserNode::new(), DeEsserNode::new());
+        fast.prepare(48_000.0, 1024);
+        slow.prepare(48_000.0, 1024);
+        crate::dsp::test_support::assert_matches_reference(
+            &mut fast, &mut slow, reference, &edits, 70,
+        );
     }
 }

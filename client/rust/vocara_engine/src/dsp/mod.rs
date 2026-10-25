@@ -12,5 +12,9 @@ pub mod gate;
 pub mod limiter;
 pub mod master;
 pub mod reverb;
+pub mod ring_index;
 pub mod saturation;
 pub mod smooth;
+
+#[cfg(test)]
+pub(crate) mod test_support;

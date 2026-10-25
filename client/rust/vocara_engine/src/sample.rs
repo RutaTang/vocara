@@ -57,14 +57,60 @@ pub fn clear(buf: &mut [Smp], frames: usize) {
 /// Accumulate `src` into `dst` (interleaved, `frames` region). The fan-in sum primitive.
 #[inline]
 pub fn add_into(dst: &mut [Smp], src: &[Smp], frames: usize) {
-    for i in 0..frames * CHANNELS {
-        dst[i] += src[i];
+    let n = frames * CHANNELS;
+    for (d, &s) in dst[..n].iter_mut().zip(&src[..n]) {
+        *d += s;
+    }
+}
+
+/// `dst = 0.0 + src` (interleaved, `frames` region): exactly [`clear`] followed by
+/// [`add_into`], in one pass. Not a copy — the add maps a `-0.0` sample to `+0.0`, as summing
+/// into a cleared buffer always has.
+#[inline]
+pub fn sum_first(dst: &mut [Smp], src: &[Smp], frames: usize) {
+    let n = frames * CHANNELS;
+    for (d, &s) in dst[..n].iter_mut().zip(&src[..n]) {
+        *d = 0.0 + s;
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::frames_at_engine_rate;
+    use super::{add_into, clear, frames_at_engine_rate, sum_first, CHANNELS};
+
+    /// The fan-in gather's fused first edge is exactly clear-then-add — including the `-0.0`
+    /// it maps to `+0.0`, NaN payloads, infinities and subnormals.
+    #[test]
+    fn sum_first_is_clear_then_add_bit_for_bit() {
+        let specials = [
+            0.0f32,
+            -0.0,
+            1.0,
+            -1.0e-40,
+            f32::MIN_POSITIVE,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+            f32::from_bits(0x7FA0_0001), // a signalling NaN
+            f32::from_bits(0xFFC0_1234), // a negative quiet NaN with a payload
+            3.0e38,
+        ];
+        let src: Vec<f32> = specials
+            .iter()
+            .cycle()
+            .take(64 * CHANNELS)
+            .copied()
+            .collect();
+        let frames = src.len() / CHANNELS;
+        let mut fused = vec![7.0f32; src.len()];
+        let mut two_pass = vec![7.0f32; src.len()];
+        sum_first(&mut fused, &src, frames);
+        clear(&mut two_pass, frames);
+        add_into(&mut two_pass, &src, frames);
+        for (a, b) in fused.iter().zip(&two_pass) {
+            assert_eq!(a.to_bits(), b.to_bits());
+        }
+    }
 
     #[test]
     fn frames_scale_to_engine_rate() {

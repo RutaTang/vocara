@@ -589,7 +589,14 @@ impl RtProcessor {
             self.mon_reverb.process(&mut io);
         }
 
-        // Mix the processed monitor into the output with the ramped gain.
+        // Mix the processed monitor into the output with the ramped gain (a landed ramp is one
+        // value for the whole block: see `Smoothed::settled`).
+        if let Some(g) = self.mon_gain.settled(frames) {
+            for (o, &m) in out[..n].iter_mut().zip(&self.mon_out[..n]) {
+                *o += m * g;
+            }
+            return;
+        }
         for i in 0..frames {
             let g = self.mon_gain.next();
             out[CHANNELS * i] += self.mon_out[CHANNELS * i] * g;
@@ -1302,6 +1309,109 @@ mod monitor_tests {
                     same(&a, &b),
                     "block {k} after the disarm still carries the monitor"
                 );
+            }
+        }
+    }
+
+    /// `mix_monitor` as it was before the landed-gain path: the gain stepped per frame.
+    fn mix_reference(rt: &mut RtProcessor, out: &mut [Smp], frames: usize) {
+        let target = if rt.shared.mon_muted.load(Ordering::Relaxed) {
+            0.0
+        } else {
+            f32::from_bits(rt.shared.mon_target.load(Ordering::Relaxed))
+        };
+        rt.mon_gain.set_target(target);
+        if target == 0.0 && rt.mon_gain.current() <= MON_IDLE {
+            rt.mon_gain.snap(0.0);
+            let _ = rt.mon_gain.advance(frames);
+            rt.mon_idle = true;
+            for _ in 0..frames {
+                if rt.mic_rx.pop().is_none() {
+                    break;
+                }
+            }
+            return;
+        }
+        if rt.mon_idle {
+            rt.mon_reverb.reset();
+            rt.mon_idle = false;
+        }
+        for i in 0..frames {
+            let f = rt.mic_rx.pop().unwrap_or([0.0, 0.0]);
+            rt.mon_in[CHANNELS * i] = f[0];
+            rt.mon_in[CHANNELS * i + 1] = f[1];
+        }
+        for (p, v) in [
+            (rparam::ROOM_SIZE, &rt.shared.mon_rev_room),
+            (rparam::DAMPING, &rt.shared.mon_rev_damping),
+            (rparam::WET, &rt.shared.mon_rev_wet),
+        ] {
+            rt.mon_reverb
+                .set_param(p, f32::from_bits(v.load(Ordering::Relaxed)));
+        }
+        let n = frames * CHANNELS;
+        {
+            let inputs: [&[Smp]; 1] = [&rt.mon_in[..n]];
+            let mut out_slot: [&mut [Smp]; 1] = [&mut rt.mon_out[..n]];
+            let mut io = ProcessIo {
+                inputs: &inputs,
+                outputs: &mut out_slot,
+                frames,
+                tl: 0,
+                sr: ENGINE_SR,
+            };
+            rt.mon_reverb.process(&mut io);
+        }
+        for i in 0..frames {
+            let g = rt.mon_gain.next();
+            out[CHANNELS * i] += rt.mon_out[CHANNELS * i] * g;
+            out[CHANNELS * i + 1] += rt.mon_out[CHANNELS * i + 1] * g;
+        }
+    }
+
+    #[test]
+    fn a_landed_monitor_gain_mixes_exactly_like_the_per_sample_ramp() {
+        // Arm, re-level, mute (the host's safety mute), unmute, disarm: ramping blocks take the
+        // per-sample path, landed ones the constant — the mix must be the old one bit for bit.
+        let (h, mut rt, mut mic) = engine();
+        let (h2, mut twin, mut mic2) = engine();
+        let mut a = vec![0.0; BLOCK * CHANNELS];
+        let mut b = vec![0.0; BLOCK * CHANNELS];
+        for k in 0..400 {
+            match k {
+                5 => {
+                    h.set_monitor_gain(0.8);
+                    h2.set_monitor_gain(0.8);
+                }
+                60 => {
+                    h.set_monitor_reverb(0.8, 0.3, 0.6);
+                    h2.set_monitor_reverb(0.8, 0.3, 0.6);
+                }
+                90 => {
+                    h.set_monitor_gain(0.3);
+                    h2.set_monitor_gain(0.3);
+                }
+                150 => {
+                    rt.shared.set_monitor_muted(true);
+                    twin.shared.set_monitor_muted(true);
+                }
+                200 => {
+                    rt.shared.set_monitor_muted(false);
+                    twin.shared.set_monitor_muted(false);
+                }
+                300 => {
+                    h.set_monitor_gain(0.0);
+                    h2.set_monitor_gain(0.0);
+                }
+                _ => {}
+            }
+            feed(&mut mic, BLOCK);
+            feed(&mut mic2, BLOCK);
+            rt.process(&mut a, BLOCK);
+            twin.process_playback(&mut b, BLOCK);
+            mix_reference(&mut twin, &mut b, BLOCK);
+            for (i, (x, y)) in a.iter().zip(&b).enumerate() {
+                assert_eq!(x.to_bits(), y.to_bits(), "block {k} sample {i}");
             }
         }
     }
