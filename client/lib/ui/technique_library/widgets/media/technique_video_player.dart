@@ -14,10 +14,14 @@ import 'technique_audio_player.dart'
 /// lightweight poster is shown until then. media_kit's hover controls handle
 /// play/seek/volume/fullscreen once started.
 class TechniqueVideoPlayer extends StatefulWidget {
-  const TechniqueVideoPlayer({required this.path, super.key});
+  const TechniqueVideoPlayer({required this.path, this.pauseSignal, super.key});
 
   /// Absolute sandbox path to the video file.
   final String path;
+
+  /// Fires when playback must stop (the mic armed for a take): the player
+  /// pauses where it is.
+  final Listenable? pauseSignal;
 
   @override
   State<TechniqueVideoPlayer> createState() => _TechniqueVideoPlayerState();
@@ -52,7 +56,25 @@ class _TechniqueVideoPlayerState extends State<TechniqueVideoPlayer> {
   }
 
   @override
+  void initState() {
+    super.initState();
+    widget.pauseSignal?.addListener(_onPauseSignal);
+  }
+
+  @override
+  void didUpdateWidget(TechniqueVideoPlayer old) {
+    super.didUpdateWidget(old);
+    if (!identical(old.pauseSignal, widget.pauseSignal)) {
+      old.pauseSignal?.removeListener(_onPauseSignal);
+      widget.pauseSignal?.addListener(_onPauseSignal);
+    }
+  }
+
+  void _onPauseSignal() => _player?.pause();
+
+  @override
   void dispose() {
+    widget.pauseSignal?.removeListener(_onPauseSignal);
     _player?.dispose();
     super.dispose();
   }

@@ -47,6 +47,11 @@ class _SeekSignal extends ChangeNotifier implements ValueListenable<Duration> {
   }
 }
 
+/// A bare "it happened" signal for the example players (see [micArmed]).
+class _Signal extends ChangeNotifier {
+  void fire() => notifyListeners();
+}
+
 /// ViewModel for a single technique's detail page: view/edit its text fields,
 /// manage its audio/video example clips, compute the reference "ground truth"
 /// analysis from a selected example, and run an ephemeral practice recording to
@@ -757,6 +762,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
     _practiceTakeGeneration = _practiceGeneration;
     _recordingExample = false;
     _practiceFailed = false;
+    _micArmed.fire();
     notifyListeners();
     return null;
   }
@@ -927,6 +933,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
     if (!r.started) return null;
     _exampleTempPath = r.path;
     _recordingExample = true;
+    _micArmed.fire();
     notifyListeners();
     return null;
   }
@@ -1127,6 +1134,13 @@ class TechniqueDetailViewModel extends ChangeNotifier
   final _SeekSignal _scrub = _SeekSignal();
   ValueListenable<Duration> get analysisScrub => _scrub;
 
+  /// Fired when a take arms (practice or example), so every example player
+  /// pauses. They play through media_kit, not the engine, so the engine's
+  /// echo canceller has no reference to subtract: a clip left playing on
+  /// speakers was recorded into the very take it is compared against.
+  final _Signal _micArmed = _Signal();
+  Listenable get micArmed => _micArmed;
+
   /// Which analysis dimension (Spectrogram / Power / …) is shown. Held here so it
   /// persists when the panel moves between cards or in/out of the live slot.
   int _analysisDim = 0;
@@ -1285,6 +1299,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
     unawaited(_engine?.dispose());
     position.dispose();
     _scrub.dispose();
+    _micArmed.dispose();
     _monitor.dispose();
     super.dispose();
   }

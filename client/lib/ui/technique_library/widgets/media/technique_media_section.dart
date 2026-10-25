@@ -31,6 +31,7 @@ class TechniqueMediaSection extends StatelessWidget {
     this.analyzedId,
     this.onPlaybackPosition,
     this.analysisScrub,
+    this.pauseSignal,
     this.expandedId,
     this.onToggleExpand,
     this.analysisBuilder,
@@ -54,6 +55,10 @@ class TechniqueMediaSection extends StatelessWidget {
   /// Pushes analysis-scrub times into the analyzed clip's player so scrubbing
   /// the spectrogram also moves playback (bidirectional sync).
   final ValueListenable<Duration>? analysisScrub;
+
+  /// Fires when the mic arms for a take: every clip's player pauses, so no
+  /// example plays into the recording.
+  final Listenable? pauseSignal;
 
   /// Media id of the example whose inline analysis is expanded (accordion),
   /// or null.
@@ -153,6 +158,7 @@ class TechniqueMediaSection extends StatelessWidget {
             // (both directions).
             onPosition: m.id == analyzedId ? onPlaybackPosition : null,
             seekSignal: m.id == analyzedId ? analysisScrub : null,
+            pauseSignal: pauseSignal,
             // Pair each audio example with a collapsible analysis. While
             // recording an example the live preview shows under the record
             // control instead, so the card's static analysis is hidden then.
@@ -220,6 +226,7 @@ class _MediaTile extends StatefulWidget {
     required this.onRename,
     this.onPosition,
     this.seekSignal,
+    this.pauseSignal,
     this.canExpand = false,
     this.expanded = false,
     this.onToggleExpand,
@@ -233,6 +240,7 @@ class _MediaTile extends StatefulWidget {
   final ValueChanged<String> onRename;
   final ValueChanged<Duration>? onPosition;
   final ValueListenable<Duration>? seekSignal;
+  final Listenable? pauseSignal;
 
   /// Whether this card offers an expandable analysis (audio clips only).
   final bool canExpand;
@@ -347,12 +355,17 @@ class _MediaTileState extends State<_MediaTile>
             ),
             const SizedBox(height: 8),
             m.isVideo
-                ? TechniqueVideoPlayer(key: ValueKey(m.id), path: m.path)
+                ? TechniqueVideoPlayer(
+                    key: ValueKey(m.id),
+                    path: m.path,
+                    pauseSignal: widget.pauseSignal,
+                  )
                 : TechniqueAudioPlayer(
                     key: ValueKey(m.id),
                     path: m.path,
                     onPosition: widget.onPosition,
                     seekSignal: widget.seekSignal,
+                    pauseSignal: widget.pauseSignal,
                   ),
             if (widget.analysis != null) ...[
               const SizedBox(height: 14),

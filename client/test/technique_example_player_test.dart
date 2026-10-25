@@ -5,6 +5,7 @@
 // survives the page around it scrolling or changing.
 
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -13,6 +14,7 @@ import 'package:provider/provider.dart';
 import 'package:vocara/data/repositories/technique_repository.dart';
 import 'package:vocara/data/services/local_storage_service.dart';
 import 'package:vocara/data/services/media_analysis_service.dart';
+import 'package:vocara/data/services/mic_recording_controller.dart';
 import 'package:vocara/data/services/technique_media_service.dart';
 import 'package:vocara/data/sync/sync_hashes.dart';
 import 'package:vocara/domain/models/technique.dart';
@@ -112,6 +114,38 @@ class _NoAnalysis extends Fake implements MediaAnalysisService {
   Future<TechniqueAnalysis?> analyze(String path) async => null;
 }
 
+/// Recorder fake: [start] arms a take in its own temp dir (the view model
+/// deletes a take's whole parent dir on cleanup).
+class _FakeRecorder extends Fake implements MicRecordingController {
+  bool recording = false;
+  final ValueNotifier<double> _level = ValueNotifier(0);
+
+  @override
+  ValueNotifier<double> get level => _level;
+
+  @override
+  bool get isRecording => recording;
+
+  @override
+  bool get isStarting => false;
+
+  @override
+  bool get feedingMonitor => false;
+
+  @override
+  Future<MicRecordingStart> start(RecordingPathStrategy destination) async {
+    final dir = await Directory.systemTemp.createTemp('vocara_fake_take');
+    recording = true;
+    return MicRecordingStart.started('${dir.path}/take.wav');
+  }
+
+  @override
+  void invalidatePendingStart() {}
+
+  @override
+  void dispose() => _level.dispose();
+}
+
 const _techniqueId = 'T1000000000000000000000000';
 
 /// A technique with two audio examples (M0, M1) and a description long
@@ -137,7 +171,10 @@ Technique _technique() {
   );
 }
 
-Future<TechniqueDetailViewModel> _pumpScreen(WidgetTester tester) async {
+Future<TechniqueDetailViewModel> _pumpScreen(
+  WidgetTester tester, {
+  MicRecordingController? recorder,
+}) async {
   tester.view.physicalSize = const Size(1200, 900);
   tester.view.devicePixelRatio = 1.0;
   addTearDown(tester.view.resetPhysicalSize);
@@ -146,6 +183,7 @@ Future<TechniqueDetailViewModel> _pumpScreen(WidgetTester tester) async {
     mediaService: TechniqueMediaService(storage: LocalStorageService()),
     techniqueId: _techniqueId,
     analysisService: _NoAnalysis(),
+    recorder: recorder,
   );
   await tester.pumpWidget(
     MaterialApp(
@@ -267,5 +305,22 @@ void main() {
 
     expect(identical(tester.state(_playerOf('M1')), player), isTrue);
     expect(live.where((p) => p.disposed), hasLength(1), reason: 'only M0');
+  });
+
+  testWidgets('starting a practice take pauses every example player', (
+    tester,
+  ) async {
+    // Regression: the examples play through media_kit, not the engine, so the
+    // engine's echo canceller has no reference to subtract — a clip left
+    // playing on speakers was recorded into the take it was compared with.
+    final built = _fakePlayers();
+    final vm = await _pumpScreen(tester, recorder: _FakeRecorder());
+    expect(built, hasLength(2));
+
+    expect(await tester.runAsync(vm.startPractice), isNull);
+    await tester.pump();
+
+    expect(vm.isRecordingPractice, isTrue);
+    expect(built.every((p) => p.pauses > 0), isTrue);
   });
 }

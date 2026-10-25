@@ -24,6 +24,7 @@ class TechniqueAudioPlayer extends StatefulWidget {
     required this.path,
     this.onPosition,
     this.seekSignal,
+    this.pauseSignal,
     super.key,
   });
 
@@ -38,6 +39,10 @@ class TechniqueAudioPlayer extends StatefulWidget {
   /// player seeks to match (bidirectional sync). Null when this clip doesn't
   /// drive analysis.
   final ValueListenable<Duration>? seekSignal;
+
+  /// Fires when playback must stop (the mic armed for a take): the player
+  /// pauses where it is.
+  final Listenable? pauseSignal;
 
   @override
   State<TechniqueAudioPlayer> createState() => _TechniqueAudioPlayerState();
@@ -105,6 +110,7 @@ class _TechniqueAudioPlayerState extends State<TechniqueAudioPlayer> {
       _player = null;
     }
     widget.seekSignal?.addListener(_onSeekSignal);
+    widget.pauseSignal?.addListener(_onPauseSignal);
   }
 
   @override
@@ -114,7 +120,13 @@ class _TechniqueAudioPlayerState extends State<TechniqueAudioPlayer> {
       old.seekSignal?.removeListener(_onSeekSignal);
       widget.seekSignal?.addListener(_onSeekSignal);
     }
+    if (!identical(old.pauseSignal, widget.pauseSignal)) {
+      old.pauseSignal?.removeListener(_onPauseSignal);
+      widget.pauseSignal?.addListener(_onPauseSignal);
+    }
   }
+
+  void _onPauseSignal() => _player?.pause();
 
   /// The analysis was scrubbed → move playback to match.
   void _onSeekSignal() {
@@ -128,6 +140,7 @@ class _TechniqueAudioPlayerState extends State<TechniqueAudioPlayer> {
   @override
   void dispose() {
     widget.seekSignal?.removeListener(_onSeekSignal);
+    widget.pauseSignal?.removeListener(_onPauseSignal);
     for (final s in _subs) {
       s.cancel();
     }
