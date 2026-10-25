@@ -135,14 +135,21 @@ class Persistence {
     required this.songRepo,
     required this.techRepo,
     this.ownsLibrary = true,
-  });
+    LibraryGuard? guard,
+  }) : _guard = guard ?? LibraryGuard.fixed(exclusive: true);
 
-  /// Whether this process holds the library's single-instance lock
-  /// ([LibraryLock]). When another process holds it, [open] skips boot
-  /// recovery and every boot sweep, and [repairLibrary] reclaims nothing:
-  /// the other process's in-flight recordings and imports look exactly like
-  /// the leftovers those passes reclaim.
+  /// Whether this instance booted as the library's owner: it had the
+  /// single-instance lock ([LibraryLock]) exclusively, so no other Vocara
+  /// process had the library open. Only then did [open] run boot recovery
+  /// and the boot sweeps: in a library another process has open, its
+  /// in-flight recordings and imports look exactly like the leftovers those
+  /// passes reclaim.
   final bool ownsLibrary;
+
+  /// The single-instance guard [repairLibrary] asks again before it
+  /// reclaims anything: another instance may have opened the library since
+  /// boot, or the one that was open then may have quit.
+  final LibraryGuard _guard;
 
   final AppDatabase db;
   final SyncWriter writer;
@@ -225,13 +232,31 @@ class Persistence {
   static Future<Persistence> open({
     Directory? dir,
     WavAnalyzer? analyze,
-    Future<bool> Function(Directory dir)? libraryLock,
+    Future<LibraryGuard> Function(Directory dir)? libraryLock,
   }) async {
     dir ??= await getApplicationSupportDirectory();
-    final dbPath = p.join(dir.path, 'vocara.db');
     // The single-instance guard comes first: a half-finished migration's
-    // marker may belong to another process that is migrating right now.
-    final ownsLibrary = await (libraryLock ?? LibraryLock.acquire)(dir);
+    // marker may belong to another process that is migrating right now. This
+    // instance holds the lock shared from here on (see [LibraryLock]); it
+    // boots as the owner only if it can upgrade to exclusive, which no
+    // process can while any other has the library open, and hands the lock
+    // back to shared when the boot is done.
+    final guard = await (libraryLock ?? LibraryLock.forLibrary)(dir);
+    final ownsLibrary = await guard.tryExclusive();
+    try {
+      return await _open(dir, analyze, guard, ownsLibrary);
+    } finally {
+      if (ownsLibrary) await guard.releaseExclusive();
+    }
+  }
+
+  static Future<Persistence> _open(
+    Directory dir,
+    WavAnalyzer? analyze,
+    LibraryGuard guard,
+    bool ownsLibrary,
+  ) async {
+    final dbPath = p.join(dir.path, 'vocara.db');
     if (ownsLibrary) {
       await SafeMigrator().recoverIfNeeded(dbPath);
     } else {
@@ -282,6 +307,7 @@ class Persistence {
       node,
       clock: clock,
       ownsLibrary: ownsLibrary,
+      guard: guard,
     );
     // Recover hard-kill orphaned take recordings BEFORE the staging sweep
     // deletes them: a force quit / crash / kill -9 mid-record skips the
@@ -320,8 +346,10 @@ class Persistence {
     // Waveform intermediates an analysis left when the app quit or was killed
     // mid-way. Derived scratch, never a copy of anything, so it needs no gate;
     // but only now, once recovery's own analyses (which write there too) are
-    // done, and before any screen can start one.
-    await WaveformService.sweepScratch(dir);
+    // done, and before any screen can start one. And only as the owner: in a
+    // library another instance has open, a .wave there is its analysis in
+    // flight (a take's stop-and-save among them).
+    if (ownsLibrary) await WaveformService.sweepScratch(dir);
     if (sweepGateOpen) {
       // A migration's rollback copy has served its purpose once the migrated
       // database has answered real reads and recovery ran on it. Kept on any
@@ -486,10 +514,21 @@ class Persistence {
     // A cascade can repair MORE than the initial scan saw; the report never
     // claims a negative remainder.
     final repaired = (found.length - unrepaired.length).clamp(0, found.length);
-    // Another process's in-flight import is an unreferenced asset or a pool
-    // file with no row until its save commits: reclaim nothing then.
-    final tombstoned = ownsLibrary ? await assets.sweepUnreferenced() : 0;
-    final orphaned = ownsLibrary ? await assets.sweepOrphanPoolFiles() : 0;
+    // Reclaiming needs the library to this process alone, asked NOW, not at
+    // boot: another instance's in-flight import is an unreferenced asset, a
+    // pool file with no row or a `.part` in the pool's staging until its save
+    // commits. Without exclusive, reclaim nothing.
+    final reclaim = await _guard.tryExclusive();
+    var tombstoned = 0;
+    var orphaned = 0;
+    try {
+      if (reclaim) {
+        tombstoned = await assets.sweepUnreferenced();
+        orphaned = await assets.sweepOrphanPoolFiles();
+      }
+    } finally {
+      if (reclaim) await _guard.releaseExclusive();
+    }
     return RepairReport(
       violationsFound: found.length,
       violationsRepaired: repaired,
@@ -850,6 +889,7 @@ class Persistence {
     String node, {
     HlcClock? clock,
     bool ownsLibrary = true,
+    LibraryGuard? guard,
   }) {
     final writer = SyncWriter(db, clock ?? HlcClock(node: node));
     final assets = AssetStore(db: db, root: root, writer: writer);
@@ -868,6 +908,7 @@ class Persistence {
         assets: assets,
       ),
       ownsLibrary: ownsLibrary,
+      guard: guard,
     );
   }
 
