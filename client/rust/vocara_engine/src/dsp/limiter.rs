@@ -61,6 +61,7 @@ impl Node for LimiterNode {
         // recovers only over the release time — an audible dropout right after a
         // seek. Matches CompressorNode/DeEsserNode::reset.
         self.gain = 1.0;
+        self.fade.settle();
     }
 
     fn process(&mut self, io: &mut ProcessIo) {

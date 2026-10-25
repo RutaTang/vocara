@@ -206,6 +206,9 @@ impl Node for DelayNode {
         self.stale = 0;
         self.dirty = false;
         self.tap = self.tap_next; // the line is silent: land any Time fade at once
+                                  // ...and any on/off fade: a fade-out left running would write post-seek audio into
+                                  // the cleared line with no sweep left to clear it (a ghost echo on re-enabling).
+        self.fade.settle();
     }
 }
 

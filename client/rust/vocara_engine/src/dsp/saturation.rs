@@ -87,6 +87,11 @@ impl Node for SaturationNode {
         }
     }
 
+    fn reset(&mut self) {
+        // Memoryless: only the on/off fade carries across a seek; land it.
+        self.fade.settle();
+    }
+
     fn set_param(&mut self, param: u16, value: f32) {
         match param {
             param::DRIVE_DB => self.drive_db.set_target(value.clamp(0.0, 36.0)),

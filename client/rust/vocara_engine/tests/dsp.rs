@@ -933,3 +933,51 @@ fn a_gate_does_not_chatter_on_a_low_note_near_its_threshold() {
         "a tone under the threshold only moved {cut:.1} dB"
     );
 }
+
+#[test]
+fn a_seek_right_after_switching_a_delay_off_leaves_no_ghost_echo() {
+    // Switching a delay (or doubler) off schedules its line sweep for when the 5 ms fade-out
+    // ends, and a seek's reset() clears the line and cancels the sweep. A seek that lands
+    // mid fade-out — stopped, switch it off, seek, play: nothing renders while stopped, so
+    // the fade has not moved — let the rest of the fade-out write post-seek audio into a line
+    // nothing would clear again, and switching it back on later echoed it.
+    let block = 256;
+    let tone = to_stereo(&sine_mono(220.0, SR, 24_000, 0.8));
+    let silence = vec![0.0f32; 48_000 * CHANNELS];
+    let cases: Vec<(&str, Box<dyn Node>, u16)> = vec![
+        (
+            "delay",
+            configured(
+                Box::new(DelayNode::new()),
+                &[
+                    (dlparam::TIME_MS, 300.0),
+                    (dlparam::FEEDBACK, 0.5),
+                    (dlparam::MIX, 0.5),
+                    (dlparam::BYPASS, 0.0),
+                ],
+            ),
+            dlparam::BYPASS,
+        ),
+        (
+            "doubler",
+            configured(
+                Box::new(DoublerNode::new()),
+                &[(dbparam::MIX, 1.0), (dbparam::BYPASS, 0.0)],
+            ),
+            dbparam::BYPASS,
+        ),
+    ];
+    for (name, mut node, bypass) in cases {
+        run_phase(node.as_mut(), &tone, SR, block); // playing, switched on
+        node.set_param(bypass, 1.0); // stopped: switched off...
+        node.reset(); // ...and the playhead moved
+        run_phase(node.as_mut(), &tone, SR, block); // play, still off
+        node.set_param(bypass, 0.0); // later: switched back on, over silence
+        let out = run_phase(node.as_mut(), &silence, SR, block);
+        let ghost = out.iter().fold(0.0f32, |m, &x| m.max(x.abs()));
+        assert!(
+            ghost < 1e-6,
+            "the {name} echoed post-seek audio: peak {ghost}"
+        );
+    }
+}

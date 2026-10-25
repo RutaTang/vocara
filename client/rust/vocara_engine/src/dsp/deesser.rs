@@ -213,6 +213,7 @@ impl Node for DeEsserNode {
         self.split_r2.reset_state();
         self.xmix = 0.0;
         self.env_db = -120.0;
+        self.fade.settle();
     }
 
     fn process(&mut self, io: &mut ProcessIo) {

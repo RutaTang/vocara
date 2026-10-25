@@ -196,6 +196,9 @@ impl Node for DoublerNode {
         self.pos = 0;
         self.stale = 0;
         self.dirty = false;
+        // Land any on/off fade (see DelayNode::reset): a fade-out left running would write
+        // post-seek audio into the cleared lines with no sweep left to clear them.
+        self.fade.settle();
         self.phase_l = 0.0;
         self.phase_r = std::f32::consts::PI;
     }

@@ -98,6 +98,7 @@ impl Node for GateNode {
         self.env_db = 0.0;
         self.det = 0.0;
         self.hold = 0;
+        self.fade.settle();
     }
 
     fn process(&mut self, io: &mut ProcessIo) {

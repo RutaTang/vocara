@@ -122,6 +122,14 @@ impl BypassFade {
         !self.on
     }
 
+    /// Land an in-flight fade at the switch position (a seek: the jump is a discontinuity
+    /// anyway). A node's reset() must call it — a fade-out left running across a seek kept
+    /// processing (and, for a delay, writing post-seek audio into a line the reset had just
+    /// cleared and nothing would clear again).
+    pub fn settle(&mut self) {
+        self.mix = if self.on { 1.0 } else { 0.0 };
+    }
+
     /// Switched off and fully faded out: the node passes its input through untouched.
     pub fn idle(&self) -> bool {
         !self.on && self.mix == 0.0

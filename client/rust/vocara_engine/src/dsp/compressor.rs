@@ -115,6 +115,7 @@ impl Node for CompressorNode {
         // uses (mirrors deesser.rs's reset). gr_meter is recomputed per block and
         // the Smoothed params target-track on seek, so only env_db is stale.
         self.env_db = 0.0;
+        self.fade.settle();
     }
 
     fn process(&mut self, io: &mut ProcessIo) {
