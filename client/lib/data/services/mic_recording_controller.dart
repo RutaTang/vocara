@@ -482,7 +482,7 @@ class MicRecordingController {
         },
       );
       // Finalize this take if the app quits mid-record; unregistered on stop.
-      _finalizer.register(_finalizeOnQuit);
+      _finalizer.register(_finalizeOnQuit, startsWork: true);
       return MicRecordingStart.started(path);
     } finally {
       // Only this start's own outcome clears the flag: after an invalidate a

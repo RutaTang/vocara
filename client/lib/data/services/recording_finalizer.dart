@@ -83,10 +83,29 @@ class RecordingFinalizer {
   /// True while at least one recording is in flight.
   bool get hasActive => _pending.isNotEmpty;
 
-  void register(Future<void> Function() finalize) => _pending.add(finalize);
+  /// Lists [finalize] for the next quit. [startsWork] marks one that begins
+  /// work no quit run has budgeted yet — an armed take's stop-and-save — as
+  /// opposed to a wait on work already under way (a save's [hold], a stop's
+  /// tail): a quit run that finds one registered since its last call gives
+  /// it a budget of its own (see [_finalizeAll]).
+  void register(Future<void> Function() finalize, {bool startsWork = false}) {
+    _pending.add(finalize);
+    _invoked.remove(finalize);
+    if (startsWork) {
+      _startsWork.add(finalize);
+    } else {
+      _startsWork.remove(finalize);
+    }
+  }
 
-  void unregister(Future<void> Function() finalize) =>
-      _pending.remove(finalize);
+  void unregister(Future<void> Function() finalize) {
+    _pending.remove(finalize);
+    _invoked.remove(finalize);
+    _startsWork.remove(finalize);
+  }
+
+  /// The registered finalizers marked `startsWork` (see [register]).
+  final _startsWork = <Future<void> Function()>{};
 
   /// Runs [work] — a save the user already asked for — while holding the
   /// quit: registered from the synchronous start of [work] until it settles,
@@ -187,12 +206,16 @@ class RecordingFinalizer {
   /// quit lasts (one the app survived: a destroy() that threw).
   Stopwatch? _quitClock;
 
-  /// The finalizers this quit has started, each with what the quit waits on
-  /// for it (its outcome absorbed). A later run waits on these again, under
-  /// the quit's own clock, instead of starting them twice; one it has not
-  /// started gets a budget of its own — a take armed while the close button's
-  /// run waited was otherwise never stopped or saved.
-  final _started = <Future<void> Function(), Future<void>>{};
+  /// The finalizers this quit has called since each was registered. Every
+  /// run calls every pending finalizer again — each is safe to: a take's
+  /// stops only a take still recording, a stop's tail and a save's hold wait
+  /// afresh, so a run sees work registered under the same tear-off since
+  /// (a take re-armed on the same screen, a second stop's tail). But only a
+  /// `startsWork` one not in here gets a budget of its own; the rest are on
+  /// the quit's clock, or a take's own stop-and-save — registering its tail
+  /// and holds as it goes — would earn the exit request's run a fresh budget
+  /// every time.
+  final _invoked = <Future<void> Function()>{};
 
   Future<void> _finalizeAll() async {
     final pending = _pending.toList();
@@ -200,16 +223,15 @@ class RecordingFinalizer {
     if ((_quitClock?.elapsed ?? Duration.zero) >
         progressCeiling + perFinalizerBudget) {
       _quitClock = null;
-      _started.clear();
+      _invoked.clear();
     }
     final clock = _quitClock ??= Stopwatch()..start();
-    final fresh = [
-      for (final f in pending)
-        if (!_started.containsKey(f)) f,
-    ];
-    var window = fresh.isEmpty
-        ? _shorter(perFinalizerBudget, totalBudget - clock.elapsed)
-        : perFinalizerBudget;
+    final fresh = pending.any(
+      (f) => _startsWork.contains(f) && !_invoked.contains(f),
+    );
+    var window = fresh
+        ? perFinalizerBudget
+        : _shorter(perFinalizerBudget, totalBudget - clock.elapsed);
     if (window <= Duration.zero) {
       DiagnosticsLog.instance.log(
         'quit',
@@ -220,21 +242,20 @@ class RecordingFinalizer {
     // Read before the finalizers start: the wait must attach to them at once,
     // or one failing straight away escapes as an unhandled error.
     var mark = await _progress();
-    for (final finalize in fresh) {
-      _started[finalize] = Future.sync(finalize)
-          // Best-effort by contract: one failure never blocks the rest.
-          .then<void>((_) {}, onError: (_) {});
-    }
+    _invoked.addAll(pending);
     var running = pending.length;
     final all = Future.wait([
       for (final finalize in pending)
-        _started[finalize]!.whenComplete(() => running--),
+        Future.sync(finalize)
+            // Best-effort by contract: one failure never blocks the rest.
+            .then<void>((_) {}, onError: (_) {})
+            .whenComplete(() => running--),
     ]);
     while (true) {
       try {
         await all.timeout(window);
         _quitClock = null;
-        _started.clear();
+        _invoked.clear();
         return;
       } on TimeoutException {
         // Moved, not risen: the reading is the staging files in flight, so it
