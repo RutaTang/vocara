@@ -45,7 +45,7 @@ use objc2_core_audio_types::{
 };
 
 use crate::aec::Aec;
-use crate::capture_layout::{downmix_to_mono, CaptureLayout, MAX_CAPTURE_CH};
+use crate::capture_layout::{downmix_to_mono, CaptureLayout, DeadCaptureStreak, MAX_CAPTURE_CH};
 use crate::device::InputCell;
 use crate::dsp::capture_cleanup::HighPass;
 use crate::live::RtCell;
@@ -70,8 +70,9 @@ const REF_RING_CAP: usize = 1 << 15; // 32768
 const AEC_TAIL_MS: f32 = 250.0;
 /// The AEC's own algorithmic latency: one internal block (256 samples), added to the IO round-trip.
 const AEC_BLOCK_FRAMES: u32 = 256;
-/// Consecutive `AudioUnitRender` failures before we flag the input device as lost. At the ~10 ms
-/// VPIO slice that is ~200 ms of dead capture — a real disconnect, not a one-off transient.
+/// Consecutive dead capture cycles (after the unit's first capture) before we flag the input device
+/// as lost. At the ~10 ms VPIO slice that is ~200 ms of dead capture — a real disconnect, not a
+/// one-off transient.
 const INPUT_LOST_STREAK: u32 = 20;
 
 /// Estimated record round-trip latency (frames @ ENGINE_SR): output IO (buffer + safety + device
@@ -217,8 +218,9 @@ struct InCtx {
     /// EVENT_INPUT_LOST on a sustained render-failure streak so a mid-session mic disconnect is
     /// observable, matching the cpal `err_cb` path (the VPIO unit itself has no error callback).
     event: Arc<AtomicU32>,
-    /// Consecutive `AudioUnitRender` failures, reset on any success.
-    err_streak: u32,
+    /// Dead capture cycles toward EVENT_INPUT_LOST, counted once the unit has delivered (see
+    /// [`DeadCaptureStreak`]).
+    dead: DeadCaptureStreak,
 }
 
 // SAFETY: built/moved on the AudioHost thread before the unit starts; afterwards only the input
@@ -425,7 +427,7 @@ impl Vpio {
                 hp: HighPass::new(),
                 layout: placeholder,
                 event,
-                err_streak: 0,
+                dead: DeadCaptureStreak::new(INPUT_LOST_STREAK),
             });
             let in_ptr = (&mut *in_ctx as *mut InCtx) as *mut c_void;
 
@@ -770,8 +772,7 @@ unsafe extern "C-unwind" fn input_cb(
             // default-device change): the VPIO unit has no error callback, so flag it for the
             // host's device-event poll (it rebuilds), matching build_input's cpal err_cb.
             // RT-safe: a plain counter plus one atomic OR fired once at the threshold.
-            ctx.err_streak = ctx.err_streak.saturating_add(1);
-            if ctx.err_streak == INPUT_LOST_STREAK {
+            if ctx.dead.on_dead() {
                 ctx.event
                     .fetch_or(crate::device::EVENT_INPUT_LOST, Ordering::Release);
             }
@@ -790,11 +791,11 @@ unsafe extern "C-unwind" fn input_cb(
         if got_samples == 0 {
             // A render that SUCCEEDS (st==0) but delivers zero frames is also a dead mic: the
             // device is alive yet its capture pipeline hands us nothing (a stalled default-device
-            // change, or a device that never produces data). Accumulate toward EVENT_INPUT_LOST
+            // change; a unit that never delivers at all is the arm's ready handshake's to refuse,
+            // see `DeadCaptureStreak`). Accumulate toward EVENT_INPUT_LOST
             // just like a hard render failure — otherwise these empty successes reset the streak
             // and the loss is never flagged. RT-safe: a plain counter plus one atomic OR.
-            ctx.err_streak = ctx.err_streak.saturating_add(1);
-            if ctx.err_streak == INPUT_LOST_STREAK {
+            if ctx.dead.on_dead() {
                 ctx.event
                     .fetch_or(crate::device::EVENT_INPUT_LOST, Ordering::Release);
             }
@@ -808,7 +809,7 @@ unsafe extern "C-unwind" fn input_cb(
             return 0;
         }
         // Reset only on a real, non-empty capture (a healthy mic delivers frames every cycle).
-        ctx.err_streak = 0;
+        ctx.dead.on_capture();
 
         // Downmix the RAW mic to mono. `n` = captured frames.
         let n = downmix_to_mono(cap, &got[..nbuf], frames, &mut ctx.mic_mono[..frames]);

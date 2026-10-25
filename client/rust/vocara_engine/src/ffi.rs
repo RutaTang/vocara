@@ -966,12 +966,23 @@ pub extern "C" fn ve_start_input_recording(e: *mut VeEngine, path: *const c_char
 /// recording (`ve_record_dropped_frames` after stop; `ve_record_written_frames` during it),
 /// and so does the record-limit event. The fan-out re-raises that bit on every frame past
 /// the limit until the stop lands, so a take that hit it leaves it latched after its own
-/// poller claimed it — and the next take's first poll would stop it on the spot. Only that
-/// bit: device-loss events still pending belong to their pollers.
+/// poller claimed it — and the next take's first poll would stop it on the spot.
+///
+/// An input loss or fallback still pending at the arm is stale the same way: it was raised for
+/// a stream that closed, or never opened (a failed open with no take running), and the take is
+/// about to record from whatever the host opens next. The technique page's engine is polled
+/// only while a take runs, so such a bit waited there for the next take, whose first tick stopped
+/// a delivering mic as "disconnected". Clearing them cannot hide a dead stream: the arm's ready
+/// handshake demands recorded progress, and a stream the arm opens raises its own loss or
+/// fallback after this (a warm stream's fallback was announced when it opened). The output
+/// events and the AEC-bypass notice keep their own consumers.
 fn begin_take(dropped: &AtomicU64, written: &AtomicU64, event: &AtomicU32) {
     dropped.store(0, Ordering::Release);
     written.store(0, Ordering::Release);
-    event.fetch_and(!device::EVENT_RECORD_LIMIT, Ordering::AcqRel);
+    event.fetch_and(
+        !(device::EVENT_RECORD_LIMIT | device::EVENT_INPUT_LOST | device::EVENT_INPUT_FELL_BACK),
+        Ordering::AcqRel,
+    );
 }
 
 /// Stop the input recording (finalizes the WAV); closes the input stream if nothing else needs
@@ -3175,19 +3186,25 @@ mod capture_ring_tests {
 mod begin_take_tests {
     use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
+    /// A loss or fallback raised before the arm (a failed open with no take running, say) is
+    /// about a stream this take does not record from. Left latched, the technique page's take
+    /// poller — the only poller its engine has — read it on the new take's first tick and stopped
+    /// a take whose mic was delivering. The output events and the AEC-bypass notice stay.
     #[test]
-    fn a_new_take_drops_the_last_takes_record_limit_but_keeps_device_events() {
+    fn a_new_take_drops_stale_input_loss_and_fallback_but_keeps_the_rest() {
+        use crate::device::{
+            EVENT_AEC_BYPASSED, EVENT_INPUT_FELL_BACK, EVENT_INPUT_LOST, EVENT_OUTPUT_LOST,
+            EVENT_OUTPUT_REROUTED, EVENT_RECORD_LIMIT,
+        };
         let dropped = AtomicU64::new(7);
         let written = AtomicU64::new(9);
+        let kept = EVENT_OUTPUT_LOST | EVENT_OUTPUT_REROUTED | EVENT_AEC_BYPASSED;
         let event =
-            AtomicU32::new(crate::device::EVENT_RECORD_LIMIT | crate::device::EVENT_INPUT_LOST);
+            AtomicU32::new(EVENT_RECORD_LIMIT | EVENT_INPUT_LOST | EVENT_INPUT_FELL_BACK | kept);
         super::begin_take(&dropped, &written, &event);
         assert_eq!(dropped.load(Ordering::Relaxed), 0);
         assert_eq!(written.load(Ordering::Relaxed), 0);
-        assert_eq!(
-            event.load(Ordering::Relaxed),
-            crate::device::EVENT_INPUT_LOST
-        );
+        assert_eq!(event.load(Ordering::Relaxed), kept);
     }
 }
 
