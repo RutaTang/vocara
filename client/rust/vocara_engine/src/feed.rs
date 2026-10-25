@@ -49,6 +49,12 @@ pub struct StreamCtrl {
     /// ever outruns the 10 ms pump is only observable on hardware, and this
     /// counter is that instrument.
     pub xruns: std::sync::atomic::AtomicU64,
+    /// Where the RT node sits parked AHEAD of the transport — armed at a ring
+    /// position the render has not reached, no fence at the ring head — as a
+    /// [`parked_word`], or 0. The node rewrites it after every block it
+    /// renders and clears it while stopped; the feeder reads it to catch a
+    /// park that a loop wrap has stranded (see `TrackFeeder::node_stranded`).
+    pub parked: std::sync::atomic::AtomicU64,
 }
 
 impl StreamCtrl {
@@ -57,7 +63,20 @@ impl StreamCtrl {
             gen: AtomicU32::new(0),
             flush_seq: AtomicU32::new(0),
             xruns: std::sync::atomic::AtomicU64::new(0),
+            parked: std::sync::atomic::AtomicU64::new(0),
         })
+    }
+}
+
+/// Packs a node park (see [`StreamCtrl::parked`]): the generation in the high
+/// half, the parked position in the low one. A park is always ahead of a
+/// non-negative transport, so its position is never 0 and 0 can mean "not
+/// parked"; a position past 32 bits (over a day of timeline) goes unreported.
+#[inline]
+pub fn parked_word(generation: u32, pos: i64) -> u64 {
+    match u32::try_from(pos) {
+        Ok(p) => ((generation as u64) << 32) | p as u64,
+        Err(_) => 0,
     }
 }
 
@@ -397,6 +416,27 @@ impl TrackFeeder {
             && Self::planned_pos(t, basis) == self.plan_pos
     }
 
+    /// Whether the node is parked on THIS plan at a position the transport
+    /// has already passed. A plan starts where the next block renders, and the
+    /// render only moves forward from there — but for a loop wrap. So a node
+    /// parked ahead of the render was overtaken by one: the render left loop
+    /// end after the plan read its position (a commit's prime, a seek or loop
+    /// edit a callback short of loop end, its audio landing late), or the ring
+    /// ran dry short of loop end. The node then waits, over the pre-wrap rest
+    /// of its run, for the transport to come round to it — a whole pass of
+    /// silence. The one legitimate park is on a seek still pending to that
+    /// very base, which `planned_pos` reports as its target.
+    fn node_stranded(&self, t: &Shared, basis: &PlanBasis) -> bool {
+        let parked = self.ctrl.parked.load(Ordering::Acquire);
+        if parked == 0 {
+            return false;
+        }
+        // A park on an older plan drains to the newest one by itself.
+        let newest = self.ctrl.gen.load(Ordering::Relaxed);
+        let on_this_plan = ((parked >> 32) as u32).wrapping_sub(newest) as i32 >= 0;
+        on_this_plan && Self::planned_pos(t, basis) < (parked & 0xffff_ffff) as i64
+    }
+
     /// Brings the plan up to date with the transport (a replan on any
     /// discontinuity): what every fill does first.
     fn sync_plan(&mut self, t: &Shared) -> PlanBasis {
@@ -431,6 +471,9 @@ impl TrackFeeder {
     /// of the reading to the pump thread.
     pub fn pump_at_most(&mut self, t: &Shared, frames: usize) -> Result<(), String> {
         let basis = self.sync_plan(t);
+        if basis.playing && self.node_stranded(t, &basis) {
+            self.replan(t, basis);
+        }
         let mut budget = frames;
         // Paused, the fill still runs: the plan starts where play resumes.
         // Starvation recovery: the transport ran AHEAD of the plan (the ring
@@ -441,7 +484,9 @@ impl TrackFeeder {
         // starved).
         // `planned_pos` models the render-side wrap, so while looping `pos`
         // is always inside [ls, le) — a plan behind a wrapped transport shows
-        // up here as `pos > next_tl` like any other starvation.
+        // up here as `pos > next_tl` like any other starvation once the
+        // transport is past the plan's position again. Short of it, the node
+        // is parked ahead of the transport instead: `node_stranded` above.
         // The ring must actually be DRAINED: right after a wrap fence the
         // plan restarts at loop_start while the transport is still playing
         // the pre-wrap tail out of the ring, so `pos > next_tl` alone would

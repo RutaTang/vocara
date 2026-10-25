@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use vocara_engine::dsp::master::MasterNode;
-use vocara_engine::feed::{fence_frames, StreamCtrl, TrackFeeder, WavTrackReader};
-use vocara_engine::graph::{Edge, GraphDesc, NodeEntry};
+use vocara_engine::feed::{fence_frames, parked_word, StreamCtrl, TrackFeeder, WavTrackReader};
+use vocara_engine::graph::{Edge, Graph, GraphDesc, NodeEntry};
 use vocara_engine::live::{spawn, EngineHandle, RtCell};
 use vocara_engine::ring::{spsc, Producer};
 use vocara_engine::sample::{Smp, CHANNELS, ENGINE_SR};
@@ -44,8 +44,8 @@ fn write_track(frames: usize) -> std::path::PathBuf {
     path
 }
 
-/// A live cell + handle around one source node.
-fn engine_with(node: Box<dyn vocara_engine::node::Node + Send>) -> (EngineHandle, Arc<RtCell>) {
+/// One source node into the master.
+fn source_graph(node: Box<dyn vocara_engine::node::Node + Send>) -> Graph {
     let desc = GraphDesc {
         nodes: vec![
             NodeEntry::new(1, node),
@@ -54,7 +54,12 @@ fn engine_with(node: Box<dyn vocara_engine::node::Node + Send>) -> (EngineHandle
         edges: vec![Edge::simple(1, 2)],
         master: 2,
     };
-    let g = desc.compile(ENGINE_SR, BLOCK).unwrap();
+    desc.compile(ENGINE_SR, BLOCK).unwrap()
+}
+
+/// A live cell + handle around one source node.
+fn engine_with(node: Box<dyn vocara_engine::node::Node + Send>) -> (EngineHandle, Arc<RtCell>) {
+    let g = source_graph(node);
     let (_mic_prod, mic_cons) = spsc::<[Smp; CHANNELS]>(256);
     let (h, rt) = spawn(g, HashMap::new(), mic_cons, 256);
     (h, RtCell::new(rt))
@@ -90,18 +95,27 @@ fn render_arc(_h: &EngineHandle, rt: &Arc<RtCell>, blocks: usize) -> Vec<Smp> {
     out
 }
 
-fn streamed_pair(
+/// A streaming node and the feeder that fills its ring.
+fn streamed_source(
     path: &std::path::Path,
     start_frame: i64,
     ring: usize,
-) -> (EngineHandle, Arc<RtCell>, TrackFeeder) {
+) -> (StreamingSource, TrackFeeder) {
     let ctrl = StreamCtrl::new();
     let (prod, cons) = spsc::<[Smp; CHANNELS]>(ring);
     let reader = WavTrackReader::open(path.to_str().unwrap()).unwrap();
     let len = reader.frames;
     let node = StreamingSource::new(Arc::clone(&ctrl), cons, start_frame, len);
+    (node, TrackFeeder::new(ctrl, prod, reader, start_frame))
+}
+
+fn streamed_pair(
+    path: &std::path::Path,
+    start_frame: i64,
+    ring: usize,
+) -> (EngineHandle, Arc<RtCell>, TrackFeeder) {
+    let (node, feeder) = streamed_source(path, start_frame, ring);
     let (h, rt) = engine_with(Box::new(node));
-    let feeder = TrackFeeder::new(ctrl, prod, reader, start_frame);
     (h, rt, feeder)
 }
 
@@ -984,7 +998,7 @@ fn lagged_block(
 
 /// Random seeks, pause/play, loops (before, across, inside and outside the
 /// track), loop off and feeder stalls, on a streamed track and its in-memory
-/// twin; after each op settles, the two renders must be identical.
+/// twin; from the first pump after each op, the two renders must be identical.
 fn fuzz_case(seed: u64, lag: u64) -> Vec<String> {
     let mut rng = Rng(seed * 2_654_435_761 + 1);
     let frames = 20_000usize;
@@ -1043,24 +1057,22 @@ fn fuzz_case(seed: u64, lag: u64) -> Vec<String> {
             }
             _ => "nothing".into(),
         };
-        // Settle for two loop passes (or a ring) plus slack; the last 8
-        // blocks must match.
+        // Run for two loop passes (or a ring) plus slack, all of it compared:
+        // the settle window opens with a pump, and that one pump must heal
+        // whatever the op did. Comparing only its tail hid a stall across a
+        // loop wrap, which left the track silent for most of the next pass.
         let settle = (2 * loop_len.max(ring as i64)) as usize / BLOCK + 40;
         let (mut a, mut b) = (Vec::new(), Vec::new());
         for i in 0..settle {
             let pump = (i % cadence == 0).then_some(&mut feeder);
-            let x = lagged_block(&h, &rt, pump, lag, &mut r1);
-            let y = lagged_block(&h2, &rt2, None, lag, &mut r2);
-            if i + 8 >= settle {
-                a.extend(x);
-                b.extend(y);
-            }
+            a.extend(lagged_block(&h, &rt, pump, lag, &mut r1));
+            b.extend(lagged_block(&h2, &rt2, None, lag, &mut r2));
         }
         let bad = differing_frames(&a, &b);
         if bad > 0 {
             fails.push(format!(
                 "seed {seed} lag {lag} cadence {cadence} start {start} ring {ring} \
-                 op {op} [{desc}]: {bad} frames differ after settling"
+                 op {op} [{desc}]: {bad} frames differ after its first pump"
             ));
         }
     }
@@ -1320,5 +1332,173 @@ fn play_right_after_a_paused_commit_opens_on_audio() {
         let bad = differing_frames(&run(true, late), &arc);
         assert_eq!(bad, 0, "the pump thread landed {late} callbacks late");
     }
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn a_stream_starved_across_a_loop_wrap_plays_the_next_pass() {
+    // The pump stalled long enough for the ring to run dry short of loop end,
+    // and the render wrapped. The node stayed armed at its pre-wrap position
+    // and waited for the transport to come round to it again — most of a pass
+    // of silence — and the starvation jump never fired: the wrapped transport
+    // sits BEHIND the plan's position, not ahead of it.
+    let pcm = offset_pcm(40_000);
+    let path = write_pcm("wrapstarve", &pcm);
+    let run = |streamed: bool| {
+        let (h, rt, mut feeder) = streamed_pair(&path, 0, 4096);
+        let (h2, rt2) = engine_with(Box::new(BufferSource::new(pcm.clone(), 0)));
+        let (h, rt) = if streamed { (h, rt) } else { (h2, rt2) };
+        h.set_loop(true, 0, 12_000);
+        h.play();
+        let mut rendered = 0u64;
+        let mut out = Vec::new();
+        for b in 0..200 {
+            // No pump from frame 6016 to 14_208: the ring, filled ~3k frames
+            // ahead, runs dry near 9k and the render wraps at 12_000.
+            let pump = streamed && !(47..111).contains(&b);
+            let f = pump.then_some(&mut feeder);
+            out.extend(lagged_block(&h, &rt, f, 0, &mut rendered));
+        }
+        out
+    };
+    let (streamed, arc) = (run(true), run(false));
+    let _ = std::fs::remove_file(&path);
+    let from = 111 * BLOCK * CHANNELS; // the first pump after the stall
+    assert_eq!(differing_frames(&streamed[from..], &arc[from..]), 0);
+}
+
+#[test]
+fn a_commit_primed_just_before_a_loop_wrap_plays_the_next_pass() {
+    // ve_tracks_commit primes every new stream from the render clock, then
+    // publishes the graph. When the render wrapped in between, the new node
+    // adopted a base the transport had just left behind and waited for it to
+    // come round again: the track sat out the whole next pass.
+    let pcm = offset_pcm(40_000);
+    let path = write_pcm("wrapcommit", &pcm);
+    let run = |streamed: bool| {
+        let (h, rt, mut feeder) = streamed_pair(&path, 0, 16_384);
+        let (h2, rt2) = engine_with(Box::new(BufferSource::new(pcm.clone(), 0)));
+        let (mut h, rt) = if streamed { (h, rt) } else { (h2, rt2) };
+        h.set_loop(true, 0, 12_000);
+        h.play();
+        let mut rendered = 0u64;
+        let mut out = Vec::new();
+        for _ in 0..93 {
+            let f = streamed.then_some(&mut feeder);
+            out.extend(lagged_block(&h, &rt, f, 0, &mut rendered));
+        }
+        // The commit, 96 frames short of loop end: the new stream is primed
+        // here, and the block the old graph is still rendering wraps.
+        let (node, mut next) = streamed_source(&path, 0, 16_384);
+        let graph = if streamed {
+            next.pump(h.transport()).unwrap();
+            source_graph(Box::new(node))
+        } else {
+            source_graph(Box::new(BufferSource::new(pcm.clone(), 0)))
+        };
+        out.extend(lagged_block(&h, &rt, None, 0, &mut rendered));
+        h.publish_graph(graph);
+        for _ in 0..100 {
+            let f = streamed.then_some(&mut next);
+            out.extend(lagged_block(&h, &rt, f, 0, &mut rendered));
+        }
+        out
+    };
+    let (streamed, arc) = (run(true), run(false));
+    let _ = std::fs::remove_file(&path);
+    // Only the new node can tell it was overtaken, so the pump learns it from
+    // the graph's first block; from the second on, the track must play.
+    let from = 95 * BLOCK * CHANNELS;
+    assert_eq!(differing_frames(&streamed[from..], &arc[from..]), 0);
+}
+
+/// Loop-plays [0, 12_000), pumping before every block, except that at block
+/// `at` it applies `edit` and lets only the replan's FENCE reach the ring
+/// before that block renders: the audio behind it lands after.
+fn audio_behind_a_late_fence(
+    streamed: bool,
+    path: &std::path::Path,
+    pcm: &[Smp],
+    at: usize,
+    edit: &dyn Fn(&EngineHandle),
+) -> Vec<Smp> {
+    let (h, rt, mut feeder) = streamed_pair(path, 0, 16_384);
+    let (h2, rt2) = engine_with(Box::new(BufferSource::new(pcm.to_vec(), 0)));
+    let (h, rt) = if streamed { (h, rt) } else { (h2, rt2) };
+    h.set_loop(true, 0, 12_000);
+    h.play();
+    let mut rendered = 0u64;
+    let mut out = Vec::new();
+    for b in 0..at + 120 {
+        let mut f = streamed.then_some(&mut feeder);
+        if b == at {
+            edit(&h);
+            if let Some(f) = f.take() {
+                f.pump_at_most(h.transport(), 0).unwrap();
+            }
+        }
+        out.extend(lagged_block(&h, &rt, f, 0, &mut rendered));
+    }
+    out
+}
+
+#[test]
+fn a_replan_a_callback_short_of_loop_end_plays_the_next_pass() {
+    // The replan's fence reached the ring before the callback; the audio
+    // behind it did not. The node adopted the plan's base, ran dry to loop
+    // end, wrapped — and then waited on that base for a whole pass.
+    let pcm = offset_pcm(40_000);
+    let path = write_pcm("lateaudio", &pcm);
+    let check = |at: usize, what: &dyn Fn(&EngineHandle)| {
+        let streamed = audio_behind_a_late_fence(true, &path, &pcm, at, what);
+        let arc = audio_behind_a_late_fence(false, &path, &pcm, at, what);
+        // The edit's own block is the accepted cost of a callback that beats
+        // the audio; every block after it must play.
+        let from = (at + 1) * BLOCK * CHANNELS;
+        let bad = differing_frames(&streamed[from..], &arc[from..]);
+        assert_eq!(bad, 0, "edit at block {at}");
+    };
+    // A seek 50 frames short of loop end, and a loop edit that moves loop end
+    // to 86 frames past the playhead (block 93 starts at 11_904).
+    check(40, &|h| h.seek(11_950));
+    check(93, &|h| h.set_loop(true, 0, 11_990));
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn a_park_on_a_pending_seek_is_left_to_wait() {
+    // A starved node can adopt a seek's fence in band, inside a block that
+    // began before the seek: it then sits parked AHEAD of the transport until
+    // the next block applies the seek. That park is legitimate — replanning it
+    // away would cost the seek its first callback. One the render has passed
+    // is not.
+    use std::sync::atomic::Ordering;
+    let path = write_track(40_000);
+    let (h, rt, mut feeder) = streamed_pair(&path, 0, 16_384);
+    h.play();
+    let _ = render_streamed(&h, &rt, &mut feeder, 4);
+    h.seek(30_000);
+    feeder.pump(h.transport()).unwrap(); // the seek's replan
+    let ctrl = Arc::clone(&feeder.ctrl);
+    let generation = ctrl.gen.load(Ordering::Relaxed);
+    let flushes = ctrl.flush_seq.load(Ordering::Relaxed);
+    // What the node reports from that block: parked at the seek's base.
+    ctrl.parked
+        .store(parked_word(generation, 30_000), Ordering::Release);
+    feeder.pump(h.transport()).unwrap();
+    assert_eq!(
+        ctrl.flush_seq.load(Ordering::Relaxed),
+        flushes,
+        "a park on the pending seek was replanned"
+    );
+    let _ = render_streamed(&h, &rt, &mut feeder, 1); // applies the seek
+    ctrl.parked
+        .store(parked_word(generation, 39_000), Ordering::Release);
+    feeder.pump(h.transport()).unwrap();
+    assert_ne!(
+        ctrl.flush_seq.load(Ordering::Relaxed),
+        flushes,
+        "a park the render has passed must be replanned"
+    );
     let _ = std::fs::remove_file(&path);
 }

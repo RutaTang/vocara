@@ -246,6 +246,9 @@ impl Node for StreamingSource {
 
     fn idle(&mut self) {
         self.take_flush();
+        self.ctrl
+            .parked
+            .store(0, std::sync::atomic::Ordering::Release);
     }
 
     fn process(&mut self, io: &mut ProcessIo) {
@@ -255,6 +258,9 @@ impl Node for StreamingSource {
         // flush_seq; its fence is adopted in band below, after the pre-wrap
         // tail plays out.
         self.take_flush();
+        // Whether the frame just rendered left the node parked AHEAD of the
+        // transport (published as StreamCtrl::parked after the block).
+        let mut parked = false;
         for i in 0..io.frames {
             // Complete a fence parked by an earlier pop (its base frame was
             // not visible yet — the two pushes publish separately). Every
@@ -271,6 +277,7 @@ impl Node for StreamingSource {
             if !in_span || !self.armed {
                 out[o] = 0.0;
                 out[o + 1] = 0.0;
+                parked = false;
                 continue;
             }
             // The feeder pushes NOTHING for pre-span positions: advance the
@@ -313,8 +320,12 @@ impl Node for StreamingSource {
             if !self.armed || self.ring_pos != tl {
                 out[o] = 0.0;
                 out[o + 1] = 0.0;
+                // Armed past `tl` with no fence at the head (the loop above
+                // adopts one): waiting for the transport to arrive.
+                parked = self.armed && self.ring_pos > tl;
                 continue;
             }
+            parked = false;
             match self.pop_audio() {
                 Some(f) => {
                     out[o] = f[0];
@@ -334,6 +345,16 @@ impl Node for StreamingSource {
                 }
             }
         }
+        // The feeder replans a park the render has wrapped past (it can tell
+        // a stranded park from a pending seek's; the node cannot).
+        let word = if parked {
+            crate::feed::parked_word(self.cur_gen, self.ring_pos)
+        } else {
+            0
+        };
+        self.ctrl
+            .parked
+            .store(word, std::sync::atomic::Ordering::Release);
     }
 }
 
