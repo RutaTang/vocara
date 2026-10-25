@@ -707,34 +707,16 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   }
 
   /// Persists a NEW text (an import, an edit), shown at once, and re-seeds the sync cursor on
-  /// whatever stands next (this text, or the disk's if the write fails). Forced, not left to
-  /// [_cursor]'s words check: the same words re-imported without their times are a new text
-  /// too, and the cursor left at line d stamped it while a–c had lost theirs.
-  ///
-  /// A write that fails re-seeds once more, on the disk's text it reverted to (unless a newer
-  /// text was set meanwhile): a frame drawn while the write was in flight had already seeded on
-  /// this text, and the same words came back with their times — the cursor stayed on line a
-  /// and the next Space overwrote its good time.
-  ///
-  /// Not when the cursor was placed on the text since (a tap or click while the write was in
-  /// flight): that placement stands, and re-seeding put a fully timed text's cursor back on
-  /// line a, so every later tap landed a line late.
-  Future<bool> _replaceLyrics(List<LyricLine> lines) async {
-    final text = ++_lyricsText;
+  /// it. Forced, not left to [_cursor]'s words check: the same words re-imported without their
+  /// times are a new text too, and the cursor left at line d stamped it while a–c had lost
+  /// theirs. (Should the write fail, the revert re-seeds on the disk's text: see [_revertTo].)
+  Future<bool> _replaceLyrics(List<LyricLine> lines) {
     final saved = _setLyrics(lines);
     _syncWords = null;
-    final moves = _cursorMoves;
+    _unsavedFrom = 0;
     notifyListeners();
-    final ok = await saved;
-    if (!ok && text == _lyricsText && moves == _cursorMoves) {
-      _syncWords = null;
-      notifyListeners();
-    }
-    return ok;
+    return saved;
   }
-
-  /// Bumped by each [_replaceLyrics], so a failed write re-seeds only for the latest text.
-  int _lyricsText = 0;
 
   /// Imports lyrics from a DROPPED file: validates the type + size, reads, and
   /// replaces the lyrics — with feedback on every failure path so the drop never
@@ -782,9 +764,13 @@ class SongPracticeDetailViewModel extends ChangeNotifier
 
   // Tap-to-time sync. The cursor indexes [_syncWords], the lyrics it was placed on, and is read
   // through [_cursor], which re-seeds it whenever the words under it changed — however they
-  // changed. Re-seeding at each write that brings new words missed some: a failed import's
-  // revert left it seeded on the words the disk refused, and a save that merged a peer's two
-  // lines left it at 5 of 2 (Space did nothing).
+  // changed (a peer's merged lines left it at 5 of 2). Two rules keep it honest through failed
+  // writes, with no per-path bookkeeping (each such patch opened the next interleaving):
+  //  * a failed write that reverts the lyrics to the disk's re-seeds the cursor on them, from
+  //    the earliest line stamped since they were last saved (see [_revertTo]): the stamps, the
+  //    cleared or imported text it was placed on, are gone, and a cursor left there overwrote
+  //    a good time or skipped a lost one;
+  //  * it never rests past the last line while one is still untimed (Space did nothing).
   int _syncIndex = 0;
   List<LyricLine>? _syncWords;
   int get syncIndex => _cursor;
@@ -796,17 +782,44 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       if (!_sameWords(_syncWords, now)) _syncIndex = _firstUnsyncedIndex();
       _syncWords = now;
     }
+    if (_wordsFrom(_syncIndex) >= now.length) {
+      final untimed = _firstUntimedFrom(0);
+      if (untimed != null) _syncIndex = untimed;
+    }
     return _syncIndex;
   }
 
   void _placeCursor(int index) {
     _syncIndex = index;
     _syncWords = lyrics;
-    _cursorMoves++;
   }
 
-  /// Bumped by each [_placeCursor] (see [_replaceLyrics]).
-  int _cursorMoves = 0;
+  /// The earliest line stamped (or 0 for a cleared or new text) since the lyrics were last
+  /// saved with nothing newer behind them; null when nothing is pending. Where a revert's
+  /// re-seed starts ([_revertTo]).
+  int? _unsavedFrom;
+
+  /// Takes the disk's model back after a failed write. When that changes the lyrics, the sync
+  /// cursor re-seeds on the disk's: on the first line still untimed there from [_unsavedFrom]
+  /// on (a lost tap, or the first line a lost clear or import had made untimed), else back on
+  /// that line itself (a lost re-time of a fully timed song).
+  void _revertTo(Loaded<SongPractice> reloaded) {
+    final before = lyrics;
+    _practice = reloaded.aggregate;
+    _baseHashes = reloaded.baseHashes;
+    if (listEquals(before, lyrics)) return;
+    final from = math.min(_unsavedFrom ?? 0, lyrics.length);
+    _unsavedFrom = null;
+    _placeCursor(_firstUntimedFrom(from) ?? _wordsFrom(from));
+  }
+
+  /// The first line from [from] on that carries words and no time; null when none does.
+  int? _firstUntimedFrom(int from) {
+    for (var i = from; i < lyrics.length; i++) {
+      if (!lyrics[i].isBlank && !lyrics[i].isSynced) return i;
+    }
+    return null;
+  }
 
   int _firstUnsyncedIndex() {
     for (var i = 0; i < lyrics.length; i++) {
@@ -849,23 +862,12 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     // one save round-trip, and computing the advance afterwards reads a cursor
     // the other tap already moved: both would stamp this line and the cursor
     // would jump a line past them, leaving it unstamped.
-    final next = _wordsFrom(index + 1);
-    final before = lyrics[index].timeMs;
-    _placeCursor(next);
+    // A write that fails reverts the lyrics and re-seeds the cursor (see [_revertTo]): back on
+    // this line, or on the earliest stamp of a run that write took with it.
+    _unsavedFrom = math.min(_unsavedFrom ?? index, index);
+    _placeCursor(_wordsFrom(index + 1));
     notifyListeners();
-    if (!await _stampAt(index) && _syncIndex == next) {
-      if (_sameWords(_syncWords, lyrics) && lyrics[index].timeMs == before) {
-        // The write failed and the model reverted to disk, where this line
-        // stands as it did before the tap: put the cursor back on it.
-        _placeCursor(index);
-      } else {
-        // The disk held another text — other words, or these words with
-        // times a failed re-import had cleared (a good time on this very
-        // line): re-seed on it, never back onto a timed line.
-        _syncWords = null;
-      }
-      notifyListeners();
-    }
+    await _stampAt(index);
   }
 
   /// Writes the playhead onto [index] WITHOUT touching the sync cursor — its
@@ -881,6 +883,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   Future<void> clearLyricTimes() async {
     // Every line is untimed now: the cursor starts on the first words.
     _placeCursor(_wordsFrom(0));
+    _unsavedFrom = 0;
     await _setLyrics([for (final l in lyrics) l.copyWith(clearTime: true)]);
   }
 
@@ -915,6 +918,8 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       if (_disposed) return false;
       if (result is Ok<Loaded<SongPractice>>) {
         ok = true;
+        // Saved with nothing newer behind it: no stamp is pending any more.
+        if (identical(_practice, sent)) _unsavedFrom = null;
         final saved = result.value;
         final sentHashes = saved.sentHashes;
         if (identical(_practice, sent) &&
@@ -939,8 +944,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         final reloaded = await _repository.loadPractice(sent.id);
         if (reloaded is Ok<Loaded<SongPractice>> &&
             identical(_practice, sent)) {
-          _practice = reloaded.value.aggregate;
-          _baseHashes = reloaded.value.baseHashes;
+          _revertTo(reloaded.value);
         }
         _toast("Couldn't save your changes.");
       }
@@ -2550,6 +2554,8 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       // playback/selection resync below must not touch now-disposed notifiers.
       if (_disposed) return ok;
       if (ok) {
+        // Saved with nothing newer behind it: no stamp is pending any more.
+        if (identical(_practice, sent)) _unsavedFrom = null;
         _adoptSaved(sent, result.value);
       } else {
         // Revert the optimistic in-memory model to what's actually on disk, so the
@@ -2563,8 +2569,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         final reloaded = await _repository.loadPractice(sent.id);
         if (reloaded is Ok<Loaded<SongPractice>> &&
             identical(_practice, sent)) {
-          _practice = reloaded.value.aggregate;
-          _baseHashes = reloaded.value.baseHashes;
+          _revertTo(reloaded.value);
         }
         _toast("Couldn't save your changes.");
       }

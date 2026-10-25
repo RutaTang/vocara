@@ -34,6 +34,8 @@ class _FakeRepo extends Fake implements SongPracticeRepository {
   /// Fails only the NEXT save, then heals — models a transient write error
   /// with later saves succeeding (the queued-edit survival test).
   bool failNextSave = false;
+  int saveNo = 0;
+  Set<int> failAt = {};
   int inFlight = 0;
   int maxInFlight = 0;
 
@@ -61,7 +63,8 @@ class _FakeRepo extends Fake implements SongPracticeRepository {
     // by the in-flight counter.
     await Future<void>.delayed(Duration.zero);
     inFlight--;
-    if (failSaves || failNextSave) {
+    saveNo++;
+    if (failSaves || failNextSave || failAt.contains(saveNo)) {
       failNextSave = false;
       events.add('save-failed');
       return Result.error(Exception('save failed'));
@@ -1649,6 +1652,224 @@ void main() {
         expect(
           vm.lyrics[0].timeMs,
           2000,
+          reason:
+              'Space did nothing: cursor ${vm.syncIndex} of ${vm.lyrics.length}',
+        );
+      },
+    );
+  });
+  group('the sync cursor through failed and queued writes', () {
+    Future<void> waitInFlight() async {
+      for (var i = 0; i < 50 && repo.inFlight == 0; i++) {
+        await Future<void>.microtask(() {});
+      }
+      expect(
+        repo.inFlight,
+        1,
+        reason: 'probe setup: a write should be in flight',
+      );
+    }
+
+    test(
+      'Sync opened while a failed same-words re-import is in flight',
+      () async {
+        final vm = await pumpVm();
+        await vm.setLyricsText('a\nb\nc\nd\ne\nf');
+        vm.setLyricsMode(LyricsMode.sync);
+        vm.playback.position.value = const Duration(milliseconds: 1000);
+        for (var i = 0; i < 3; i++) {
+          await vm.stampNextLyric();
+        }
+        vm.setLyricsMode(LyricsMode.read); // Done
+        repo.failSaves = true;
+        final landed = vm.importLyrics('a\nb\nc\nd\ne\nf'); // drop in Read mode
+        await waitInFlight();
+        vm.setLyricsMode(
+          LyricsMode.sync,
+        ); // the user opens Sync while it writes
+        expect(await landed, isFalse);
+        repo.failSaves = false;
+        expect(vm.lyrics.take(3).every((l) => l.timeMs == 1000), isTrue);
+        vm.playback.position.value = const Duration(milliseconds: 7000);
+        await vm.stampNextLyric();
+        expect(
+          vm.lyrics[0].timeMs,
+          1000,
+          reason: 'Space overwrote line a (cursor was ${vm.syncIndex})',
+        );
+        expect(vm.lyrics[3].timeMs, 7000, reason: 'd never got the tap');
+      },
+    );
+
+    test('the same, with Sync toggled off and on', () async {
+      final vm = await pumpVm();
+      await vm.setLyricsText('a\nb\nc\nd\ne\nf');
+      vm.setLyricsMode(LyricsMode.sync);
+      vm.playback.position.value = const Duration(milliseconds: 1000);
+      for (var i = 0; i < 3; i++) {
+        await vm.stampNextLyric();
+      }
+      repo.failSaves = true;
+      final landed = vm.importLyrics('a\nb\nc\nd\ne\nf');
+      await waitInFlight();
+      vm.setLyricsMode(LyricsMode.read);
+      vm.setLyricsMode(LyricsMode.sync);
+      expect(await landed, isFalse);
+      repo.failSaves = false;
+      vm.playback.position.value = const Duration(milliseconds: 7000);
+      await vm.stampNextLyric();
+      expect(vm.lyrics[0].timeMs, 1000, reason: 'Space overwrote line a');
+      expect(vm.lyrics[3].timeMs, 7000, reason: 'd never got the tap');
+    });
+
+    test(
+      'a failed Clear never leaves Space on a line the disk holds timed',
+      () async {
+        final vm = await pumpVm();
+        await vm.setLyricsText('a\nb\nc\nd\ne\nf');
+        vm.setLyricsMode(LyricsMode.sync);
+        vm.playback.position.value = const Duration(milliseconds: 1000);
+        for (var i = 0; i < 3; i++) {
+          await vm.stampNextLyric();
+        }
+        repo.failSaves = true;
+        await vm.clearLyricTimes();
+        repo.failSaves = false;
+        expect(vm.lyrics.take(3).every((l) => l.timeMs == 1000), isTrue);
+        vm.playback.position.value = const Duration(milliseconds: 7000);
+        await vm.stampNextLyric();
+        expect(
+          vm.lyrics[0].timeMs,
+          1000,
+          reason: 'Space overwrote line a (cursor ${vm.syncIndex})',
+        );
+        expect(vm.lyrics[3].timeMs, 7000);
+      },
+    );
+
+    test('a Clear during a failed same-words re-import, both failing', () async {
+      final vm = await pumpVm();
+      await vm.setLyricsText('a\nb\nc\nd\ne\nf');
+      vm.setLyricsMode(LyricsMode.sync);
+      vm.playback.position.value = const Duration(milliseconds: 1000);
+      for (var i = 0; i < 3; i++) {
+        await vm.stampNextLyric();
+      }
+      repo.failSaves = true;
+      final landed = vm.importLyrics(
+        '[00:01.00]a\n[00:02.00]b\n[00:03.00]c\n[00:04.00]d\n[00:05.00]e\n[00:06.00]f',
+      );
+      await waitInFlight();
+      final clear = vm.clearLyricTimes();
+      expect(await landed, isFalse);
+      await clear;
+      repo.failSaves = false;
+      vm.playback.position.value = const Duration(milliseconds: 7000);
+      await vm.stampNextLyric();
+      expect(vm.lyrics[0].timeMs, 1000, reason: 'Space overwrote line a');
+    });
+
+    test('two taps inside one round-trip whose writes both fail', () async {
+      final vm = await pumpVm();
+      await vm.setLyricsText('a\nb\nc\nd');
+      vm.setLyricsMode(LyricsMode.sync);
+      repo.failSaves = true;
+      vm.playback.position.value = const Duration(milliseconds: 1000);
+      final t1 = vm.stampNextLyric();
+      await waitInFlight(); // tap 1's write is in flight, sent with a stamped
+      vm.playback.position.value = const Duration(milliseconds: 2000);
+      final t2 = vm.stampNextLyric();
+      await Future.wait([t1, t2]);
+      repo.failSaves = false;
+      expect(vm.lyrics.every((l) => l.timeMs == null), isTrue);
+      expect(
+        vm.syncIndex,
+        0,
+        reason: 'cursor on ${vm.syncIndex}: line a lost its tap and is skipped',
+      );
+    });
+
+    test(
+      'three taps in one round-trip whose middle write fails once',
+      () async {
+        final vm = await pumpVm();
+        await vm.setLyricsText('a\nb\nc\nd\ne');
+        vm.setLyricsMode(LyricsMode.sync);
+        vm.playback.position.value = const Duration(milliseconds: 1000);
+        final t0 = vm.stampNextLyric(); // write 0 in flight
+        await waitInFlight();
+        repo.failAt = {repo.saveNo + 2}; // the next write after it fails once
+        vm.playback.position.value = const Duration(milliseconds: 2000);
+        final t1 = vm.stampNextLyric();
+        vm.playback.position.value = const Duration(milliseconds: 3000);
+        final t2 = vm.stampNextLyric();
+        await Future.wait([t0, t1, t2]);
+        await Future<void>.delayed(Duration.zero);
+        expect(repo.stored.lyrics.map((l) => l.timeMs).toList(), [
+          1000,
+          null,
+          null,
+          null,
+          null,
+        ]);
+        expect(
+          vm.syncIndex,
+          1,
+          reason: 'b and c lost their taps, cursor on ${vm.syncIndex}',
+        );
+      },
+    );
+
+    test(
+      'a tap on a re-import whose write fails once behind another save',
+      () async {
+        final vm = await pumpVm();
+        await vm.setLyricsText('a\nb\nc\nd\ne\nf');
+        vm.setLyricsMode(LyricsMode.sync);
+        vm.playback.position.value = const Duration(milliseconds: 1000);
+        for (var i = 0; i < 3; i++) {
+          await vm.stampNextLyric();
+        }
+        final move = vm
+            .commitTrackMove(); // any save in flight (a fader/drag release)
+        await waitInFlight();
+        repo.failAt = {repo.saveNo + 2}; // the import's write fails once
+        final landed = vm.importLyrics('a\nb\nc\nd\ne\nf');
+        expect(vm.syncIndex, 0); // a frame
+        vm.playback.position.value = const Duration(milliseconds: 2000);
+        final tap = vm.stampNextLyric();
+        await move;
+        expect(await landed, isFalse);
+        await tap;
+        await Future<void>.delayed(Duration.zero);
+        expect(
+          repo.stored.lyrics.take(3).every((l) => l.timeMs == 1000),
+          isTrue,
+        );
+        vm.playback.position.value = const Duration(milliseconds: 7000);
+        await vm.stampNextLyric();
+        expect(
+          repo.stored.lyrics[1].timeMs,
+          1000,
+          reason: 'Space overwrote b\'s good time on disk',
+        );
+        expect(repo.stored.lyrics[3].timeMs, 7000);
+      },
+    );
+
+    test(
+      'Space after a click on the last line stamps a line still untimed',
+      () async {
+        final vm = await pumpVm();
+        await vm.setLyricsText('a\nb\nc\nd');
+        vm.setLyricsMode(LyricsMode.sync);
+        vm.playback.position.value = const Duration(milliseconds: 9000);
+        await vm.stampLyricAt(3);
+        vm.playback.position.value = const Duration(milliseconds: 1000);
+        await vm.stampNextLyric();
+        expect(
+          vm.lyrics.where((l) => l.timeMs == 1000),
+          isNotEmpty,
           reason:
               'Space did nothing: cursor ${vm.syncIndex} of ${vm.lyrics.length}',
         );
