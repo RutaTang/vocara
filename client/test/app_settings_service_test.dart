@@ -181,6 +181,42 @@ void main() {
       expect(service.monitorAllowed, isTrue);
     });
 
+    test('a Bluetooth speaker never allows the monitor', () async {
+      // macOS reports only the transport: a Bluetooth speaker taken for
+      // headphones fed the monitor straight back into the mic.
+      await service.load();
+      Future<bool> allowedOn(String name, {bool bluetooth = true}) async {
+        final device = AudioDevice(
+          uid: 'bt-$name',
+          name: name,
+          rate: 48000,
+          isBluetooth: bluetooth,
+        );
+        outs = [_builtInOut, device];
+        service.refreshDevices();
+        await service.setOutputDevice(device.uid);
+        return service.monitorAllowed;
+      }
+
+      for (final speaker in [
+        'UE BOOM 3',
+        'JBL Flip 6',
+        'Living Room Speaker',
+        'Sonos Roam',
+        'Bose SoundLink Flex',
+      ]) {
+        expect(await allowedOn(speaker), isFalse, reason: speaker);
+      }
+      for (final headphones in ['AirPods Pro', 'WH-1000XM5', 'Bose QC45']) {
+        expect(await allowedOn(headphones), isTrue, reason: headphones);
+      }
+      expect(
+        await allowedOn('MacBook Pro Speakers', bluetooth: false),
+        isFalse,
+        reason: 'built-in speakers stay off',
+      );
+    });
+
     test(
       'an unenumerable rendering device falls back to judging the selection',
       () async {

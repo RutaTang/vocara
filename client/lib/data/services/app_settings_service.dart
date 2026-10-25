@@ -191,12 +191,42 @@ class AppSettingsService extends ChangeNotifier {
 
   static bool _isHeadphoneLike(AudioDevice? out) {
     if (out == null) return false; // unknown → safe default: off
-    if (out.isBluetooth) return true; // Bluetooth ≈ headphones
     final n = out.name.toLowerCase();
+    // A device named as a speaker never is, Bluetooth or not: macOS reports
+    // only the transport, and a Bluetooth speaker taken for headphones fed the
+    // monitor straight back into the mic (it is kept out of the AEC
+    // reference, so nothing cancels it).
+    if (_speakerNames.any(n.contains)) return false;
+    if (out.isBluetooth) return true; // otherwise Bluetooth ≈ headphones
     return n.contains('headphone') ||
         n.contains('earphone') ||
         n.contains('airpod');
   }
+
+  /// Name fragments of loudspeakers: the generic words, and the common
+  /// Bluetooth speaker lines whose names never say so (UE BOOM, JBL Flip…).
+  /// Only unambiguous ones — a headphone line sharing a speaker brand's name
+  /// would lose its monitor.
+  static const List<String> _speakerNames = [
+    'speaker',
+    'soundbar',
+    'homepod',
+    'sonos',
+    'boom', // UE BOOM / MEGABOOM / WONDERBOOM / HYPERBOOM
+    'jbl flip',
+    'jbl charge',
+    'jbl clip',
+    'jbl go',
+    'jbl xtreme',
+    'jbl pulse',
+    'partybox',
+    'soundlink flex',
+    'soundlink micro',
+    'soundlink revolve',
+    'soundlink color',
+    'beosound',
+    'echo dot',
+  ];
 
   /// Re-evaluate monitor feedback safety against the device the engine is CURRENTLY rendering to
   /// and push the resulting gain. Cheap; call it from any tick that could have seen the output
