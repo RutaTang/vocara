@@ -17,6 +17,12 @@ pub mod param {
 const MAX_SECONDS: f64 = 0.1;
 const TWO_PI: f32 = std::f32::consts::PI * 2.0;
 
+/// How long a Delay change cross-fades from the old base tap to the new one.
+const BASE_FADE_S: f64 = 0.01;
+/// The fastest the modulation depth may move (frames per frame). A read position moving at
+/// this rate shifts the doubled copy's pitch by this fraction: 1.5%, a quarter of a semitone.
+const DEPTH_SLEW: f32 = 0.015;
+
 pub struct DoublerNode {
     buf_l: Vec<Smp>,
     buf_r: Vec<Smp>,
@@ -29,10 +35,23 @@ pub struct DoublerNode {
     dirty: bool,
     phase_l: f32,
     phase_r: f32,
-    /// Smoothed (slowly — a read-position glide is a brief pitch bend, so the slower the
-    /// gentler) so a Delay or Depth drag no longer jumps the read position: a click per tick.
-    delay_ms: Smoothed,
-    depth_ms: Smoothed,
+    /// Delay and Depth as set (ms).
+    delay_ms: f32,
+    depth_ms: f32,
+    /// The base delay (frames) the doubled copy reads at, and the one a Delay change is
+    /// cross-fading to (equal when no fade runs; one at a time, so a drag's newer value
+    /// follows once this one lands). Jumping the read position clicked on every tick, and
+    /// gliding it bent the copy's pitch hard on any preset recall or click-to-value
+    /// (18 -> 50 ms took a 1 kHz copy down to ~400 Hz); cross-fading two steady reads does
+    /// neither.
+    base: f32,
+    base_next: f32,
+    base_mix: f32,
+    base_step: f32,
+    /// The modulation depth (frames), slewed toward Depth at [`DEPTH_SLEW`].
+    depth: f32,
+    /// Whether the lines have run on audio; until then Delay and Depth apply at once.
+    heard: bool,
     rate_hz: f32,
     mix: Smoothed,
     fade: BypassFade,
@@ -50,13 +69,23 @@ impl DoublerNode {
             dirty: false,
             phase_l: 0.0,
             phase_r: std::f32::consts::PI, // L/R out of phase for width
-            delay_ms: Smoothed::new(18.0),
-            depth_ms: Smoothed::new(4.0),
+            delay_ms: 18.0,
+            depth_ms: 4.0,
+            base: 864.0, // 18 ms at 48 kHz; prepare re-derives it
+            base_next: 864.0,
+            base_mix: 0.0,
+            base_step: 1.0 / (BASE_FADE_S * 48_000.0) as f32,
+            depth: 192.0, // 4 ms
+            heard: false,
             rate_hz: 0.6,
             mix: Smoothed::new(0.0),
             fade: BypassFade::new(true),
             sr: 48_000.0,
         }
+    }
+
+    fn per_ms(&self) -> f32 {
+        (0.001 * self.sr) as f32
     }
 
     #[inline]
@@ -86,8 +115,11 @@ impl Node for DoublerNode {
         self.pos = 0;
         self.stale = 0; // freshly zeroed lines
         self.dirty = false;
-        self.delay_ms.set_time(0.05, sample_rate);
-        self.depth_ms.set_time(0.05, sample_rate);
+        self.base = self.delay_ms * self.per_ms();
+        self.base_next = self.base;
+        self.base_step = 1.0 / (BASE_FADE_S * sample_rate) as f32;
+        self.depth = self.depth_ms * self.per_ms();
+        self.heard = false;
         self.mix.set_time(0.01, sample_rate);
         self.fade.prepare(sample_rate);
     }
@@ -131,18 +163,33 @@ impl Node for DoublerNode {
             return;
         }
         self.dirty = true;
-        let per_ms = (0.001 * self.sr) as f32;
+        self.heard = true;
         let inc = TWO_PI * self.rate_hz / self.sr as f32;
+        let want = self.delay_ms * self.per_ms();
+        if self.base_next == self.base && want != self.base {
+            self.base_next = want;
+            self.base_mix = 0.0;
+        }
+        let depth_target = self.depth_ms * self.per_ms();
 
         for i in 0..frames {
             let l = out[CHANNELS * i];
             let r = out[CHANNELS * i + 1];
-            let base = self.delay_ms.next() * per_ms;
-            let depth = self.depth_ms.next() * per_ms;
-            let dl = base + depth * self.phase_l.sin();
-            let dr = base + depth * self.phase_r.sin();
-            let wl = Self::read(&self.buf_l, self.pos, dl);
-            let wr = Self::read(&self.buf_r, self.pos, dr);
+            self.depth += (depth_target - self.depth).clamp(-DEPTH_SLEW, DEPTH_SLEW);
+            let ml = self.depth * self.phase_l.sin();
+            let mr = self.depth * self.phase_r.sin();
+            let mut wl = Self::read(&self.buf_l, self.pos, self.base + ml);
+            let mut wr = Self::read(&self.buf_r, self.pos, self.base + mr);
+            if self.base_next != self.base {
+                let nl = Self::read(&self.buf_l, self.pos, self.base_next + ml);
+                let nr = Self::read(&self.buf_r, self.pos, self.base_next + mr);
+                wl += (nl - wl) * self.base_mix;
+                wr += (nr - wr) * self.base_mix;
+                self.base_mix += self.base_step;
+                if self.base_mix >= 1.0 {
+                    self.base = self.base_next;
+                }
+            }
             self.buf_l[self.pos] = l;
             self.buf_r[self.pos] = r;
             // Keep the dry mostly intact; the wet copy thickens / widens. Blended toward the
@@ -164,8 +211,19 @@ impl Node for DoublerNode {
 
     fn set_param(&mut self, param: u16, value: f32) {
         match param {
-            param::DELAY_MS => self.delay_ms.set_target(value.clamp(1.0, 50.0)),
-            param::DEPTH_MS => self.depth_ms.set_target(value.clamp(0.0, 20.0)),
+            param::DELAY_MS => {
+                self.delay_ms = value.clamp(1.0, 50.0);
+                if !self.heard {
+                    self.base = self.delay_ms * self.per_ms();
+                    self.base_next = self.base;
+                }
+            }
+            param::DEPTH_MS => {
+                self.depth_ms = value.clamp(0.0, 20.0);
+                if !self.heard {
+                    self.depth = self.depth_ms * self.per_ms();
+                }
+            }
             param::RATE_HZ => self.rate_hz = value.clamp(0.05, 8.0),
             param::MIX => self.mix.set_target(value.clamp(0.0, 1.0)),
             param::BYPASS => {
@@ -199,6 +257,9 @@ impl Node for DoublerNode {
         // Land any on/off fade (see DelayNode::reset): a fade-out left running would write
         // post-seek audio into the cleared lines with no sweep left to clear them.
         self.fade.settle();
+        // The lines are silent: land any Delay fade and Depth slew at once.
+        self.base = self.base_next;
+        self.depth = self.depth_ms * self.per_ms();
         self.phase_l = 0.0;
         self.phase_r = std::f32::consts::PI;
     }

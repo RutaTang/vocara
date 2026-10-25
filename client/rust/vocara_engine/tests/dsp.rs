@@ -1040,3 +1040,69 @@ fn an_idle_de_esser_is_transparent_through_a_toggle_or_a_retune() {
         "retuning an idle de-esser dipped the tone (err {e})"
     );
 }
+
+#[test]
+fn a_doubler_delay_or_depth_jump_keeps_the_doubled_copy_in_tune() {
+    // The doubler's Delay and Depth used to glide (a 50 ms smoother on the read position),
+    // and a moving read position is a pitch bend: on a 1 kHz tone a jump from 18 to 50 ms
+    // dropped the doubled copy to ~400 Hz, 50 -> 1 ms raised it to ~1.9 kHz — on every
+    // preset recall or click-to-value.
+    let block = 256;
+    let amp = 0.5f32;
+    let tone = to_stereo(&sine_mono(1000.0, SR, 2 * T0, amp));
+    let cases = [
+        ("delay 18 -> 50 ms", dbparam::DELAY_MS, 18.0, 50.0),
+        ("delay 50 -> 1 ms", dbparam::DELAY_MS, 50.0, 1.0),
+        ("depth 0 -> 20 ms", dbparam::DEPTH_MS, 0.0, 20.0),
+    ];
+    for (name, param, from, to) in cases {
+        let mut n = configured(
+            Box::new(DoublerNode::new()),
+            &[
+                (dbparam::RATE_HZ, 0.05), // the slowest LFO: its own vibrato stays < 1%
+                (dbparam::DELAY_MS, 18.0),
+                (dbparam::DEPTH_MS, 0.0),
+                (param, from),
+                (dbparam::MIX, 1.0),
+                (dbparam::BYPASS, 0.0),
+            ],
+        );
+        let (pre, post) = tone.split_at(T0 * CHANNELS);
+        let mut out = run_phase(n.as_mut(), pre, SR, block);
+        n.set_param(param, to);
+        out.extend(run_phase(n.as_mut(), post, SR, block));
+        // At mix 1 the output is half the dry plus the whole doubled copy.
+        let wet: Vec<f32> = left(&out)
+            .iter()
+            .zip(left(&tone))
+            .map(|(y, x)| y - 0.5 * x)
+            .collect();
+        let window = &wet[T0 - 480..T0 + 24_000];
+        // Rising zero crossings (linearly interpolated) give the copy's period by period.
+        let mut crossings = Vec::new();
+        for k in 1..window.len() {
+            if window[k - 1] < 0.0 && window[k] >= 0.0 {
+                crossings
+                    .push((k - 1) as f64 + (window[k - 1] / (window[k - 1] - window[k])) as f64);
+            }
+        }
+        let worst = crossings
+            .windows(2)
+            .map(|p| (SR / (p[1] - p[0]) / 1000.0 - 1.0).abs())
+            .fold(0.0f64, f64::max);
+        assert!(
+            worst <= 0.02,
+            "{name}: the doubled copy's pitch moved {:.1}%",
+            100.0 * worst
+        );
+        let slope = amp * (2.0 * std::f32::consts::PI * 1000.0 / SR as f32);
+        let step = window
+            .windows(2)
+            .map(|p| (p[1] - p[0]).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            step <= 1.05 * slope,
+            "{name}: the doubled copy stepped {step:.4} (the tone's own slope {slope:.4})"
+        );
+    }
+}
