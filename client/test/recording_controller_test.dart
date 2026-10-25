@@ -78,6 +78,10 @@ class _FakeAnalysis extends Fake implements AnalysisCache {
 
   @override
   void onTrackAudioChanged(String trackId) {}
+
+  // The 1 s device watch reads this on every tick.
+  @override
+  bool get liveMonitor => false;
 }
 
 class _FakeFiles extends Fake implements AudioFileService {
@@ -204,6 +208,41 @@ class _FakeMic extends Fake implements MicRecordingController {
   }
 }
 
+/// [_FakeMic] whose start parks in its arm window (after the take setup, where
+/// the real recorder waits out the mic's ready handshake) until [ready], and —
+/// like the real one — arms nothing once [invalidatePendingStart] landed
+/// meanwhile.
+class _ArmingMic extends _FakeMic {
+  final ready = Completer<void>();
+  bool starting = false;
+  int _generation = 0;
+
+  @override
+  bool get isStarting => starting;
+
+  @override
+  Future<MicRecordingStart> start(RecordingPathStrategy destination) async {
+    startCalls++;
+    starting = true;
+    final generation = _generation;
+    final path = await destination.create();
+    await ready.future;
+    if (_generation != generation) {
+      return const MicRecordingStart.invalidated();
+    }
+    starting = false;
+    lastPath = path;
+    recording = true;
+    return MicRecordingStart.started(path);
+  }
+
+  @override
+  void invalidatePendingStart() {
+    _generation++;
+    starting = false;
+  }
+}
+
 void main() {
   late _LogEngine engine;
   late _FakePlayback playback;
@@ -213,6 +252,35 @@ void main() {
   late SongPractice practice;
   // Swappable save so a test can park the finalize tail mid-save.
   late Future<bool> Function() saveImpl;
+
+  RecordingController build(MicRecordingController recorder) {
+    final graph = _FakeGraph();
+    return RecordingController(
+      graphEngine: () => graph,
+      playback: playback,
+      mixer: mixer,
+      analysis: _FakeAnalysis(),
+      busyGate: BusyGate(onError: (_) {}),
+      audioFiles: _FakeFiles(),
+      waveforms: _FakeWaveforms(),
+      appSettings: _FakeSettings(),
+      practiceId: 'p1',
+      finalizer: RecordingFinalizer.instance,
+      practice: () => practice,
+      selectedTrackId: () => 't1',
+      trackById: (id) =>
+          practice.vocalTracks.where((t) => t.id == id).firstOrNull,
+      updateTrack: (id, fn) {},
+      appendVocal: ({required path, required analysis, required startMs}) =>
+          't1',
+      createEmptyVocalTake: () async => null,
+      selectRecordedClip: (t, c) {},
+      save: () => saveImpl(),
+      toast: (_) {},
+      friendlyError: (e) => '$e',
+      mic: recorder,
+    );
+  }
 
   setUp(() {
     final now = DateTime(2026, 6, 20);
@@ -238,32 +306,7 @@ void main() {
     playback = _FakePlayback(engine);
     mixer = _FakeMixer();
     mic = _FakeMic();
-    final graph = _FakeGraph();
-    controller = RecordingController(
-      graphEngine: () => graph,
-      playback: playback,
-      mixer: mixer,
-      analysis: _FakeAnalysis(),
-      busyGate: BusyGate(onError: (_) {}),
-      audioFiles: _FakeFiles(),
-      waveforms: _FakeWaveforms(),
-      appSettings: _FakeSettings(),
-      practiceId: 'p1',
-      finalizer: RecordingFinalizer.instance,
-      practice: () => practice,
-      selectedTrackId: () => 't1',
-      trackById: (id) =>
-          practice.vocalTracks.where((t) => t.id == id).firstOrNull,
-      updateTrack: (id, fn) {},
-      appendVocal: ({required path, required analysis, required startMs}) =>
-          't1',
-      createEmptyVocalTake: () async => null,
-      selectRecordedClip: (t, c) {},
-      save: () => saveImpl(),
-      toast: (_) {},
-      friendlyError: (e) => '$e',
-      mic: mic,
-    );
+    controller = build(mic);
   });
 
   tearDown(() {
@@ -470,6 +513,53 @@ void main() {
     await held;
     await stop;
     expect(saves, 1, reason: 'the take never committed');
+  });
+
+  test('Stop while REC is still arming cancels the take', () async {
+    // The arm window (permission, take setup, the mic's ready handshake) can
+    // last a couple of seconds. isRecording is still false there, so Stop only
+    // stopped the transport, and the take then armed and rolled anyway.
+    final arming = _ArmingMic();
+    final c = build(arming);
+    addTearDown(c.dispose);
+    var notified = 0;
+    c.addListener(() => notified++);
+
+    final start = c.startRecording();
+    await pumpUntil(() => c.isStartingTake);
+    expect(notified, greaterThan(0), reason: 'the transport shows the arm');
+
+    await c.stopRecording();
+    // A REC tap while the cancelled start unwinds must not interleave with
+    // its take setup.
+    unawaited(c.startRecording());
+    arming.ready.complete();
+    await pumpUntil(() => !c.isStartingTake);
+
+    expect(c.isRecording, isFalse, reason: 'nothing records after Stop');
+    expect(arming.startCalls, 1);
+    await start;
+    expect(engine.calls, isNot(contains('play')));
+  });
+
+  test('a REC after a cancelled arm records normally', () async {
+    final arming = _ArmingMic();
+    final c = build(arming);
+    addTearDown(c.dispose);
+    final first = c.startRecording();
+    await pumpUntil(() => c.isStartingTake);
+    await c.stopRecording();
+    arming.ready.complete();
+    await pumpUntil(() => !c.isStartingTake);
+    expect(c.isRecording, isFalse);
+    await first;
+
+    final second = c.startRecording();
+    await pumpUntil(() => mixer.gates.isNotEmpty);
+    mixer.gates.single.complete();
+    await second;
+    expect(c.isRecording, isTrue);
+    await c.stopRecording();
   });
 }
 

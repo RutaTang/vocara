@@ -39,6 +39,8 @@ class DetailTransportBar extends StatelessWidget {
         practice.hasReference ||
         practice.activeVocalTracks.isNotEmpty;
     final canPlay = hasTracks && !vm.isRecording;
+    // A take in REC's arm window is a take too: Stop and the pill cancel it.
+    final taking = vm.isRecording || vm.recording.isStartingTake;
 
     // Its own layer: a relayout elsewhere on the screen (the dock's per-tick
     // readouts climb to the Scaffold) repaints the screen's shell, not the
@@ -130,7 +132,7 @@ class DetailTransportBar extends StatelessWidget {
                     size: 34,
                     // Mid-take, Stop ends the take (what Stop means in any DAW);
                     // the transport stop itself is a no-op while recording.
-                    onTap: vm.isRecording
+                    onTap: taking
                         ? vm.stopRecording
                         : (hasTracks ? vm.playback.stop : null),
                   ),
@@ -177,8 +179,8 @@ class DetailTransportBar extends StatelessWidget {
                   ),
                   const SizedBox(width: 12),
                   _RecPill(
-                    isRecording: vm.isRecording,
-                    onTap: () => vm.isRecording
+                    isRecording: taking,
+                    onTap: () => taking
                         ? vm.stopRecording()
                         : vm.recording.startRecording(),
                   ),

@@ -221,8 +221,15 @@ class RecordingController extends ChangeNotifier {
   /// True during REC's arm window — after the user tapped Record but before
   /// the permission/file awaits resolve and [isRecording] flips true. The live
   /// view treats it like recording: the capture already belongs to the
-  /// incoming take.
-  bool get isStartingTake => _mic.isStarting;
+  /// incoming take. So does the transport: a Stop here cancels the take (see
+  /// [stopRecording]), and the window lasts until a cancelled start unwound.
+  bool get isStartingTake => _mic.isStarting || _cancellingStart;
+
+  /// Set when Stop cancels a start still arming, until that start returns:
+  /// its take setup (the empty take's save) may still be finishing, and a
+  /// fast re-arm's setup interleaving with it would bump the take generation
+  /// under the new take and move its start position.
+  bool _cancellingStart = false;
 
   /// Synchronous Stop latch: set at [stopRecording]'s entry (before its pause/
   /// finalize awaits) and cleared when the finalize completes. During those
@@ -337,8 +344,9 @@ class RecordingController extends ChangeNotifier {
     // tail. Without them a fast Stop→Record would start a second take whose
     // createEmptyVocalTake/resyncPlayback interleave with the still-running
     // finalize's save (lost update + graph thrash).
-    // isStarting is the synchronous re-entrancy guard for a fast double-tap.
-    if (_mic.isRecording || _mic.isStarting || _stopping || _busyGate.busy) {
+    // isStartingTake is the synchronous re-entrancy guard for a fast
+    // double-tap (and keeps a cancelled start's setup from interleaving).
+    if (_mic.isRecording || isStartingTake || _stopping || _busyGate.busy) {
       return;
     }
     // Captured after the take arms (see below); -1 = never armed. Declared out
@@ -352,7 +360,17 @@ class RecordingController extends ChangeNotifier {
       await _analysis.setLiveMonitor(false);
       final engine = _graphEngine();
       if (engine == null) return;
-      final r = await _mic.start(_takeDestination);
+      final starting = _mic.start(_takeDestination);
+      // The arm window is open: show it, so Stop reaches [stopRecording].
+      notifyListeners();
+      final MicRecordingStart r;
+      try {
+        r = await starting;
+      } finally {
+        _cancellingStart = false;
+      }
+      // Armed, failed or cancelled: the arm window closed either way.
+      notifyListeners();
       final failure = r.failure;
       if (failure != null) {
         switch (failure) {
@@ -383,9 +401,9 @@ class RecordingController extends ChangeNotifier {
         }
         return;
       }
-      // Invalidated mid-await (route popped / disposed): a silent no-op.
+      // Invalidated mid-await (Stop, route popped / disposed): a silent
+      // no-op.
       if (!r.started) return;
-      notifyListeners();
 
       // The take is armed, which means the user can STOP it right now — every
       // await below must re-check, or a continuation resuming after the stop
@@ -447,11 +465,21 @@ class RecordingController extends ChangeNotifier {
 
   Future<void> stopRecording() async {
     // Stops the hardware + pumps and unregisters the quit finalizer; null means
-    // no take was in flight (incl. a still-pending start). Everything up to the
-    // `_stopping` latch below is synchronous, so the latch is armed before any
-    // await can yield to a racing REC tap.
+    // no take was in flight. Everything up to the `_stopping` latch below is
+    // synchronous, so the latch is armed before any await can yield to a
+    // racing REC tap.
     final stopped = _mic.stop();
-    if (stopped == null) return;
+    if (stopped == null) {
+      // Still arming (permission, take setup, the mic's ready handshake):
+      // cancel the start, which then arms nothing and drops its file. Ignored
+      // before, the take armed and rolled moments after the user's Stop.
+      if (_mic.isStarting) {
+        _mic.invalidatePendingStart();
+        _cancellingStart = true;
+        notifyListeners();
+      }
+      return;
+    }
     _stopping = true;
     try {
       // _mic.stop() above just unregistered the armed-window quit finalizer,

@@ -80,7 +80,14 @@ class _FakePlayback extends Fake implements PlaybackController {
 }
 
 class _FakeRecording extends Fake implements RecordingController {
+  _FakeRecording({required this.arming});
+
+  /// REC's arm window: tapped, but the mic not yet delivering.
+  final bool arming;
   int starts = 0, monitorToggles = 0;
+
+  @override
+  bool get isStartingTake => arming;
 
   @override
   bool get inputMonitorEnabled => false;
@@ -98,11 +105,12 @@ class _FakeVm extends Fake implements SongPracticeDetailViewModel {
     required this.fakeMixer,
     this.recordingNow = false,
     this.busyNow = false,
-  });
+    bool armingNow = false,
+  }) : fakeRecording = _FakeRecording(arming: armingNow);
 
   final _FakePlayback fakePlayback;
   final _FakeMixer fakeMixer;
-  final fakeRecording = _FakeRecording();
+  final _FakeRecording fakeRecording;
   final bool recordingNow;
   final bool busyNow;
   int stopRecordings = 0;
@@ -172,6 +180,7 @@ void main() {
     WidgetTester tester, {
     SongPractice? practice,
     bool recording = false,
+    bool arming = false,
     bool busy = false,
     bool hasLoop = true,
     bool playing = false,
@@ -182,6 +191,7 @@ void main() {
       fakeMixer: _FakeMixer(notes),
       recordingNow: recording,
       busyNow: busy,
+      armingNow: arming,
     );
     await tester.pumpWidget(
       MaterialApp(
@@ -308,6 +318,33 @@ void main() {
 
     expect(idle.fakeRecording.starts + live.stopRecordings, 2);
     expect(live.fakeRecording.starts, 0, reason: 'a live take never restarts');
+  });
+
+  testWidgets('stop and REC while the take is still arming cancel it', (
+    tester,
+  ) async {
+    // isRecording flips only once the mic delivers (permission, take setup
+    // and the ready handshake come first), so a Stop there only stopped the
+    // transport and the take rolled moments later.
+    final stop = await pump(
+      tester,
+      practice: _practice(takes: [_take('t1')]),
+      arming: true,
+    );
+    await tester.tap(button(FIcons.square).first);
+    await tester.pump();
+    expect(stop.stopRecordings, 1);
+    expect(stop.fakePlayback.stops, 0);
+
+    final rec = await pump(
+      tester,
+      practice: _practice(takes: [_take('t1')]),
+      arming: true,
+    );
+    await tester.tap(find.byType(GestureDetector).last);
+    await tester.pump();
+    expect(rec.stopRecordings, 1);
+    expect(rec.fakeRecording.starts, 0);
   });
 
   testWidgets('the zoom icons step the timeline out and in', (tester) async {
