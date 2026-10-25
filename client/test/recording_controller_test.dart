@@ -145,6 +145,32 @@ class _FakeGraph extends Fake implements GraphAudioPlaybackService {
   double recordLatencyMs() => 0;
 }
 
+/// A mic the test feeds by hand: [frames] is the engine's input counter, and
+/// [polls] counts the 1 s device watch's ticks (each polls the events once),
+/// so a test can wait out whole ticks whatever their phase.
+class _HandFedGraph extends _FakeGraph {
+  int frames = 0;
+  int polls = 0;
+
+  @override
+  int pollDeviceEvents(int mask) {
+    polls++;
+    return 0;
+  }
+
+  @override
+  int inputFramesReceived() => frames;
+
+  @override
+  void startMonitor() {}
+
+  @override
+  void stopMonitor() {}
+
+  @override
+  double inputLevel() => 0;
+}
+
 /// Recorder double faithful to the real one where the controller depends on
 /// it: [start] runs the destination's create() (that is where the VM take
 /// setup — including the generation bump — lives), and [stop] flips the
@@ -265,10 +291,12 @@ void main() {
     String? Function()? selectedTrackId,
     Future<String?> Function()? createEmptyVocalTake,
     Future<void> Function(String)? discardEmptyTake,
+    GraphAudioPlaybackService? graph,
+    void Function(String)? toast,
   }) {
-    final graph = _FakeGraph();
+    final engine = graph ?? _FakeGraph();
     return RecordingController(
-      graphEngine: () => graph,
+      graphEngine: () => engine,
       playback: playback,
       mixer: mixer,
       analysis: _FakeAnalysis(),
@@ -289,7 +317,7 @@ void main() {
       discardEmptyTake: discardEmptyTake ?? (_) async {},
       selectRecordedClip: (t, c) {},
       save: () => saveImpl(),
-      toast: (_) {},
+      toast: toast ?? (_) {},
       friendlyError: (e) => '$e',
       mic: recorder,
     );
@@ -652,6 +680,49 @@ void main() {
     await second;
     expect(c.isRecording, isTrue);
     await c.stopRecording();
+  });
+
+  /// Waits until the device watch has ticked [n] times in all.
+  Future<void> untilTicks(_HandFedGraph graph, int n) async {
+    for (var i = 0; i < 400 && graph.polls < n; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+    expect(graph.polls, greaterThanOrEqualTo(n), reason: 'the watch stalled');
+  }
+
+  test('monitoring outlasts a mic still warming up', () async {
+    // A Bluetooth headset switching to its headset profile delivers nothing
+    // for a second or two, which the engine allows for before it reports the
+    // input lost. The 1 s watchdog counted those silent ticks too and, two
+    // ticks after the headphone button, stopped monitoring as "disconnected".
+    final graph = _HandFedGraph();
+    final toasts = <String>[];
+    final c = build(_FakeMic(), graph: graph, toast: toasts.add);
+    addTearDown(c.dispose);
+    await c.toggleInputMonitor();
+    final on = graph.polls;
+    await untilTicks(graph, on + 2);
+    expect(c.inputMonitorEnabled, isTrue, reason: 'the mic is warming up');
+    expect(toasts, isEmpty);
+
+    graph.frames = 4800; // the mic starts delivering
+    await untilTicks(graph, on + 3);
+    expect(c.inputMonitorEnabled, isTrue);
+  });
+
+  test('monitoring still stops when a delivering mic goes silent', () async {
+    final graph = _HandFedGraph();
+    final toasts = <String>[];
+    final c = build(_FakeMic(), graph: graph, toast: toasts.add);
+    addTearDown(c.dispose);
+    await c.toggleInputMonitor();
+    final on = graph.polls;
+    graph.frames = 4800; // delivering by the first tick, then nothing
+    await untilTicks(graph, on + 3);
+    expect(c.inputMonitorEnabled, isFalse);
+    expect(toasts, [
+      'Input monitoring stopped: the input device was disconnected.',
+    ]);
   });
 }
 

@@ -771,6 +771,15 @@ class RecordingController extends ChangeNotifier {
   int _lastStreamXruns = 0;
   int _inputStallTicks = 0;
 
+  /// Whether the input has delivered since capture last went live. Until it
+  /// has, a silent mic is still warming up — a Bluetooth headset switching to
+  /// its headset profile delivers nothing for a second or two — and the
+  /// engine's own warm-up allowance reports one that never starts (input
+  /// lost, bit 2). Counted from the first silent tick, the watchdog stopped
+  /// monitoring or the live view as "disconnected" one to two seconds after
+  /// it was turned on, before that allowance ran out.
+  bool _inputDelivered = false;
+
   /// Watch for lost audio devices and self-heal. The playhead is driven by the output stream's
   /// callback, so if that stream dies (a Bluetooth headset flips to HFP, a device is unplugged),
   /// transport would otherwise freeze. On an output-lost event we re-open the current output.
@@ -863,7 +872,8 @@ class RecordingController extends ChangeNotifier {
         if (frames != _lastInputFrames) {
           _lastInputFrames = frames;
           _inputStallTicks = 0;
-        } else if (++_inputStallTicks >= 2) {
+          _inputDelivered = true;
+        } else if (_inputDelivered && ++_inputStallTicks >= 2) {
           _inputStallTicks = 0;
           _onInputDeviceLost();
         }
@@ -871,6 +881,7 @@ class RecordingController extends ChangeNotifier {
         // Keep the baseline synced while idle so arming starts from the right count.
         _lastInputFrames = engine.inputFramesReceived();
         _inputStallTicks = 0;
+        _inputDelivered = false;
       }
     });
   }
