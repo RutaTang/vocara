@@ -276,9 +276,10 @@ class RecordingFinalizer {
         _invoked.clear();
         return;
       } on TimeoutException {
-        // Moved, not risen: the reading is the staging files in flight, so it
-        // DROPS when one of two concurrent copies lands while the other is
-        // still copying.
+        // Any change counts as movement. The production reading
+        // (AssetStore.bytesBeingCopied) only ever grows, with every byte
+        // copied and every landing step finished; an injected one may move
+        // either way.
         final now = await _progress();
         window = _shorter(perFinalizerBudget, progressCeiling - clock.elapsed);
         if (now == mark || window <= Duration.zero) break;

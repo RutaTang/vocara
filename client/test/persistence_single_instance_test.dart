@@ -1,8 +1,15 @@
-// The single-instance guard: only the process holding `<support>/vocara.lock`
-// runs boot recovery and the destructive boot sweeps. In a library another
-// Vocara process has open, a staged WAV with no row is that process's take
-// still recording, and a pool file with no row is its import still landing.
+// The single-instance guard: every running Vocara holds `<support>/vocara.lock`
+// SHARED for its whole life, and only an instance that can upgrade it to
+// EXCLUSIVE (no other process has the library open) runs boot recovery, the
+// boot sweeps, or Repair library's reclaim. In a library another process has
+// open, a staged WAV with no row is that process's take still recording, and
+// a pool file with no row is its import still landing.
+//
+// POSIX record locks never conflict within one process, so the "other
+// process" is a python3 helper; those tests skip without python3. Every
+// helper call is bounded, so no test can hang on a lock.
 
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -18,7 +25,7 @@ import 'package:vocara/domain/models/song_practice.dart';
 import 'package:vocara/utils/result.dart';
 
 /// Whether a `python3` with fcntl is on PATH, to hold the lock from a
-/// genuinely separate process (POSIX record locks never conflict within one).
+/// genuinely separate process.
 final bool _hasPython = () {
   try {
     return Process.runSync('python3', ['-c', 'import fcntl']).exitCode == 0;
@@ -29,50 +36,115 @@ final bool _hasPython = () {
 
 const _noPython = 'needs python3 to hold the lock from another process';
 
-/// Holds an exclusive fcntl lock on [path] from another process until
-/// [release]d.
+/// The ceiling on every wait for a helper process.
+const _helperTimeout = Duration(seconds: 20);
+
+/// Another Vocara process, as far as the lock can tell: a python3 helper
+/// holding an fcntl lock on the lock file until [release]d. It also exits
+/// on its own after a minute, so a crashed test can never leave it behind.
 class _OtherProcess {
   _OtherProcess._(this._process);
 
   final Process _process;
+  var _released = false;
 
-  static Future<_OtherProcess> lock(String path) async {
+  static const _holdScript =
+      'import fcntl, os, signal, sys, time\n'
+      'signal.alarm(60)\n'
+      'fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT)\n'
+      'modes = {"sh": fcntl.LOCK_SH, "ex": fcntl.LOCK_EX}\n'
+      'try:\n'
+      '    fcntl.lockf(fd, modes[sys.argv[2]] | fcntl.LOCK_NB)\n'
+      'except OSError as e:\n'
+      '    print("refused", e.errno, flush=True)\n'
+      '    sys.exit(1)\n'
+      'print("locked", flush=True)\n'
+      'if len(sys.argv) > 3:\n'
+      '    time.sleep(int(sys.argv[3]) / 1000)\n'
+      '    fcntl.lockf(fd, fcntl.LOCK_SH)\n'
+      'sys.stdin.read()\n';
+
+  /// Holds the lock on [path] shared (a running instance) or exclusive (an
+  /// owner mid-boot). With [downgradeAfter], an exclusive hold turns shared
+  /// after that long, like an owner finishing its boot.
+  static Future<_OtherProcess> hold(
+    String path, {
+    required bool shared,
+    Duration? downgradeAfter,
+  }) async {
     final process = await Process.start('python3', [
       '-c',
-      'import fcntl, sys\n'
-          'f = open(sys.argv[1], "a")\n'
-          'fcntl.lockf(f, fcntl.LOCK_EX | fcntl.LOCK_NB)\n'
-          'print("locked", flush=True)\n'
-          'sys.stdin.read()\n',
+      _holdScript,
       path,
+      shared ? 'sh' : 'ex',
+      if (downgradeAfter != null) '${downgradeAfter.inMilliseconds}',
     ]);
+    unawaited(process.stderr.drain<void>());
+    // Stays subscribed after the first line: cancelling stdout would close
+    // the pipe, and the helper dies of it the next time it writes.
     final first = await process.stdout
         .transform(utf8.decoder)
         .transform(const LineSplitter())
-        .first;
-    expect(first, 'locked', reason: 'the helper process took the lock');
-    return _OtherProcess._(process);
+        .asBroadcastStream()
+        .first
+        .timeout(_helperTimeout, onTimeout: () => 'timed out');
+    final other = _OtherProcess._(process);
+    if (first != 'locked') {
+      await other.release();
+      fail('the helper process could not take the lock: $first');
+    }
+    return other;
   }
 
+  /// Ends the helper and waits (bounded) for it to exit. Idempotent.
   Future<void> release() async {
-    await _process.stdin.close();
-    await _process.exitCode;
+    if (_released) return;
+    _released = true;
+    try {
+      await _process.stdin.close();
+    } catch (_) {}
+    await _process.exitCode.timeout(
+      _helperTimeout,
+      onTimeout: () {
+        _process.kill(ProcessSignal.sigkill);
+        return -1;
+      },
+    );
   }
 
-  /// Whether another process can take the lock on [path] right now.
-  static Future<bool> tryLock(String path) async {
-    final result = await Process.run('python3', [
+  /// Whether a freshly launched process could take the lock on [path] in
+  /// that mode right now (a non-blocking attempt; the helper exits at once).
+  static Future<bool> couldTake(String path, {required bool shared}) async {
+    final process = await Process.start('python3', [
       '-c',
-      'import fcntl, sys\n'
-          'f = open(sys.argv[1], "a")\n'
+      'import fcntl, os, sys\n'
+          'fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT)\n'
+          'mode = fcntl.LOCK_SH if sys.argv[2] == "sh" else fcntl.LOCK_EX\n'
           'try:\n'
-          '    fcntl.lockf(f, fcntl.LOCK_EX | fcntl.LOCK_NB)\n'
+          '    fcntl.lockf(fd, mode | fcntl.LOCK_NB)\n'
           '    print("got")\n'
           'except OSError:\n'
           '    print("held")\n',
       path,
+      shared ? 'sh' : 'ex',
     ]);
-    return (result.stdout as String).trim() == 'got';
+    unawaited(process.stderr.drain<void>());
+    final out = await process.stdout
+        .transform(utf8.decoder)
+        .join()
+        .timeout(_helperTimeout, onTimeout: () => 'timed out');
+    await process.exitCode.timeout(
+      _helperTimeout,
+      onTimeout: () {
+        process.kill(ProcessSignal.sigkill);
+        return -1;
+      },
+    );
+    return switch (out.trim()) {
+      'got' => true,
+      'held' => false,
+      final other => fail('the lock probe did not answer: $other'),
+    };
   }
 }
 
@@ -86,6 +158,8 @@ void main() {
     if (await root.exists()) await root.delete(recursive: true);
   });
 
+  String lockPath() => p.join(root.path, LibraryLock.fileName);
+
   Future<WaveformResult> fakeAnalyze(String path) async =>
       (peaks: <double>[0.1, 0.2], durationMs: 500);
 
@@ -95,17 +169,18 @@ void main() {
     48000,
   );
 
+  Future<Persistence> boot({LibraryGuard? guard}) => Persistence.open(
+    dir: root,
+    analyze: fakeAnalyze,
+    libraryLock: guard == null ? null : (_) async => guard,
+  );
+
   /// Creates the library with one practice and one pooled asset (so the
-  /// orphan-pool sweep has live hashes to judge against), then closes it.
-  /// With [takeLock] false the real lock file is left alone, so another
-  /// process can take it next (this process would otherwise hold it for the
-  /// rest of the run).
-  Future<String> createPracticeAndClose({bool takeLock = true}) async {
-    final persistence = await Persistence.open(
-      dir: root,
-      analyze: fakeAnalyze,
-      libraryLock: takeLock ? null : (_) async => true,
-    );
+  /// orphan-pool sweep has live hashes to judge against), then closes it,
+  /// without touching the real lock file (so this process holds nothing on
+  /// it until a test opens the library for real).
+  Future<String> createPracticeAndClose() async {
+    final persistence = await boot(guard: LibraryGuard.fixed(exclusive: true));
     final res = await persistence.songRepo.createPractice('Song');
     final src = File(p.join(root.path, 'backing.wav'));
     await src.writeAsBytes([9, 8, 7], flush: true);
@@ -115,11 +190,12 @@ void main() {
   }
 
   /// What another process's in-flight work looks like on disk: a take still
-  /// streaming into staging, an import staged but not saved, and a file
-  /// already placed in the pool whose asset row has not committed yet.
-  Future<({File take, File import, File pooled})> plantInFlightWork(
-    String practiceId,
-  ) async {
+  /// streaming into staging, an import staged but not saved, a file already
+  /// placed in the pool whose asset row has not committed yet, a copy still
+  /// being written into the pool's own staging, and a waveform analysis's
+  /// intermediate (a take's stop-and-save analyzes it).
+  Future<({File take, File import, File pooled, File part, File wave})>
+  plantInFlightWork(String practiceId) async {
     final take = File(p.join(root.path, 'audio', practiceId, 'take.wav'));
     await take.parent.create(recursive: true);
     await take.writeAsBytes(monoWav(4800), flush: true);
@@ -130,17 +206,27 @@ void main() {
     final pooled = File(p.join(root.path, 'assets', 'ab', 'ab', '$hash.wav'));
     await pooled.parent.create(recursive: true);
     await pooled.writeAsBytes([4, 5, 6], flush: true);
-    return (take: take, import: import, pooled: pooled);
+    final part = File(p.join(root.path, 'assets', '.staging', 'copy.part'));
+    await part.parent.create(recursive: true);
+    await part.writeAsBytes([7, 8], flush: true);
+    final wave = File(
+      p.join(root.path, WaveformService.scratchDirName, 'analysis.wave'),
+    );
+    await wave.parent.create(recursive: true);
+    await wave.writeAsBytes([1], flush: true);
+    return (take: take, import: import, pooled: pooled, part: part, wave: wave);
   }
 
   Future<void> expectUntouched(
     Persistence persistence,
     String practiceId,
-    ({File take, File import, File pooled}) work,
+    ({File take, File import, File pooled, File part, File wave}) work,
   ) async {
     expect(await work.take.exists(), isTrue, reason: 'take still recording');
     expect(await work.import.exists(), isTrue, reason: 'import not saved yet');
     expect(await work.pooled.exists(), isTrue, reason: 'import still landing');
+    expect(await work.part.exists(), isTrue, reason: 'copy still running');
+    expect(await work.wave.exists(), isTrue, reason: 'analysis in flight');
     final practice =
         (await persistence.songRepo.getPractice(practiceId) as Ok<SongPractice>)
             .value;
@@ -151,59 +237,145 @@ void main() {
     );
   }
 
-  test('a boot that finds the library held by another process recovers and '
-      'sweeps nothing', () async {
+  test('a boot that cannot have the library to itself recovers and sweeps '
+      'nothing, and its Repair library reclaims nothing', () async {
     final practiceId = await createPracticeAndClose();
     final work = await plantInFlightWork(practiceId);
 
-    final persistence = await Persistence.open(
-      dir: root,
-      analyze: fakeAnalyze,
-      libraryLock: (_) async => false,
-    );
+    final persistence = await boot(guard: LibraryGuard.fixed(exclusive: false));
     addTearDown(persistence.db.close);
 
     expect(persistence.ownsLibrary, isFalse);
     await expectUntouched(persistence, practiceId, work);
-    // Repair library reclaims nothing either.
     final report = await persistence.repairLibrary();
     expect(report.assetsSwept, 0);
-    expect(await work.pooled.exists(), isTrue);
+    await expectUntouched(persistence, practiceId, work);
   });
 
-  test('with a real second process holding vocara.lock, boot leaves its '
-      'in-flight take, import and pool file alone', () async {
-    final practiceId = await createPracticeAndClose(takeLock: false);
+  test('with another running instance holding the lock shared, boot leaves its '
+      'in-flight take, imports and pool files alone', () async {
+    final practiceId = await createPracticeAndClose();
     final work = await plantInFlightWork(practiceId);
-    final other = await _OtherProcess.lock(
-      p.join(root.path, LibraryLock.fileName),
-    );
+    final other = await _OtherProcess.hold(lockPath(), shared: true);
     addTearDown(other.release);
 
-    final persistence = await Persistence.open(dir: root, analyze: fakeAnalyze);
+    final persistence = await boot();
     addTearDown(persistence.db.close);
 
     expect(persistence.ownsLibrary, isFalse);
     await expectUntouched(persistence, practiceId, work);
   }, skip: _hasPython ? false : _noPython);
 
+  test('an instance that started second keeps guarding the library after the '
+      'first one quits: a new launch cannot own it while it runs', () async {
+    await createPracticeAndClose();
+    final first = await _OtherProcess.hold(lockPath(), shared: true);
+    addTearDown(first.release);
+
+    final second = await boot();
+    addTearDown(second.db.close);
+    expect(second.ownsLibrary, isFalse);
+
+    await first.release();
+    expect(
+      await _OtherProcess.couldTake(lockPath(), shared: false),
+      isFalse,
+      reason:
+          'this instance is still running, but a relaunch could take the '
+          'library exclusively and run its boot recovery and sweeps under '
+          'it',
+    );
+    // A relaunch still opens alongside it, as a non-owner.
+    expect(await _OtherProcess.couldTake(lockPath(), shared: true), isTrue);
+  }, skip: _hasPython ? false : _noPython);
+
   test(
-    'the lock is taken against other processes and released with them',
+    'an owner hands the lock back to shared once its boot is done',
     () async {
-      final other = await _OtherProcess.lock(
-        p.join(root.path, LibraryLock.fileName),
-      );
-      expect(await LibraryLock.acquire(root), isFalse);
-      await other.release();
-      expect(await LibraryLock.acquire(root), isTrue);
-      // ...and from then on it is this process's.
-      final again = await _OtherProcess.tryLock(
-        p.join(root.path, LibraryLock.fileName),
-      );
-      expect(again, isFalse, reason: 'another process took a held lock');
+      final persistence = await boot();
+      addTearDown(persistence.db.close);
+      expect(persistence.ownsLibrary, isTrue);
+
+      // Another launch can now open alongside it...
+      expect(await _OtherProcess.couldTake(lockPath(), shared: true), isTrue);
+      // ...but never own the library while this instance runs.
+      expect(await _OtherProcess.couldTake(lockPath(), shared: false), isFalse);
     },
     skip: _hasPython ? false : _noPython,
   );
+
+  test(
+    'Repair library in the boot owner reclaims nothing once another instance '
+    'has opened the library, and reclaims again once it is alone',
+    () async {
+      final practiceId = await createPracticeAndClose();
+      final owner = await boot();
+      addTearDown(owner.db.close);
+      expect(owner.ownsLibrary, isTrue);
+
+      // A second instance opens the library and starts an import.
+      final other = await _OtherProcess.hold(lockPath(), shared: true);
+      addTearDown(other.release);
+      final work = await plantInFlightWork(practiceId);
+
+      final held = await owner.repairLibrary();
+      expect(held.assetsSwept, 0);
+      expect(await work.pooled.exists(), isTrue, reason: 'import landing');
+      expect(await work.part.exists(), isTrue, reason: 'copy still running');
+
+      await other.release();
+      final alone = await owner.repairLibrary();
+      expect(alone.assetsSwept, greaterThan(0));
+      expect(await work.pooled.exists(), isFalse, reason: 'a real orphan now');
+    },
+    skip: _hasPython ? false : _noPython,
+  );
+
+  test("a launch during an owner's boot waits for it, then opens shared as a "
+      'non-owner', () async {
+    final owner = await _OtherProcess.hold(
+      lockPath(),
+      shared: false,
+      downgradeAfter: const Duration(milliseconds: 400),
+    );
+    addTearDown(owner.release);
+
+    final sw = Stopwatch()..start();
+    final lock = await LibraryLock.forLibrary(
+      root,
+      wait: const Duration(seconds: 15),
+      poll: const Duration(milliseconds: 20),
+    );
+    expect(lock.holdsLock, isTrue, reason: 'shared, once the boot was done');
+    expect(sw.elapsed, lessThan(const Duration(seconds: 15)));
+    expect(await lock.tryExclusive(), isFalse, reason: 'the owner runs');
+    expect(lock.holdsLock, isTrue, reason: 'a refused upgrade keeps shared');
+  }, skip: _hasPython ? false : _noPython);
+
+  test('a launch gives up waiting on an owner that never finishes booting, '
+      'opens as a non-owner, and takes its shared hold once it can', () async {
+    final owner = await _OtherProcess.hold(lockPath(), shared: false);
+    addTearDown(owner.release);
+
+    final sw = Stopwatch()..start();
+    final lock = await LibraryLock.forLibrary(
+      root,
+      wait: const Duration(milliseconds: 300),
+      poll: const Duration(milliseconds: 20),
+    );
+    expect(sw.elapsed, greaterThanOrEqualTo(const Duration(milliseconds: 300)));
+    expect(sw.elapsed, lessThan(const Duration(seconds: 10)));
+    expect(lock.holdsLock, isFalse);
+    expect(await lock.tryExclusive(), isFalse, reason: 'the owner runs');
+
+    await owner.release();
+    final deadline = DateTime.now().add(_helperTimeout);
+    while (!lock.holdsLock && DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+    }
+    expect(lock.holdsLock, isTrue, reason: 'the background retry took it');
+    expect(await _OtherProcess.couldTake(lockPath(), shared: false), isFalse);
+  }, skip: _hasPython ? false : _noPython);
 
   test('one process opening its own library twice owns it both times, and '
       'boot recovery still runs', () async {
@@ -212,7 +384,7 @@ void main() {
     await take.parent.create(recursive: true);
     await take.writeAsBytes(monoWav(4800), flush: true);
 
-    final first = await Persistence.open(dir: root, analyze: fakeAnalyze);
+    final first = await boot();
     addTearDown(first.db.close);
     expect(first.ownsLibrary, isTrue);
     final practice =
@@ -221,9 +393,14 @@ void main() {
     expect(practice.vocalTracks.single.displayName, 'Take 1 (recovered)');
 
     await first.db.close();
-    final second = await Persistence.open(dir: root, analyze: fakeAnalyze);
+    final second = await boot();
     addTearDown(second.db.close);
     expect(second.ownsLibrary, isTrue);
+    // Both stores live in this process, which still has the library to
+    // itself: its Repair library may reclaim.
+    final guard = await LibraryLock.forLibrary(root);
+    expect(await guard.tryExclusive(), isTrue);
+    await guard.releaseExclusive();
   });
 
   test('a library that needs an upgrade is not migrated under another '
@@ -238,11 +415,7 @@ void main() {
     raw.close();
 
     await expectLater(
-      Persistence.open(
-        dir: root,
-        analyze: fakeAnalyze,
-        libraryLock: (_) async => false,
-      ),
+      boot(guard: LibraryGuard.fixed(exclusive: false)),
       throwsA(isA<LibraryInUseException>()),
     );
     final check = sqlite3.open(dbPath, mode: OpenMode.readOnly);
