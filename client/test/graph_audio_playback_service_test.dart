@@ -54,6 +54,15 @@ class _FakeBindings extends Fake implements VocaraEngineBindings {
   @override
   double ve_sample_rate(ffi.Pointer<VeEngine> e) => 48000.0;
 
+  /// Every `ve_set_input_channel` mode, in call order.
+  final List<int> inputChannels = [];
+
+  @override
+  int ve_set_input_channel(ffi.Pointer<VeEngine> e, int mode) {
+    inputChannels.add(mode);
+    return 0;
+  }
+
   @override
   int ve_buses_begin(ffi.Pointer<VeEngine> e) => 0;
 
@@ -189,6 +198,16 @@ void main() {
       expect(GraphAudioPlaybackService.bitCount((1 << 63) | 0x3), 3);
       expect(GraphAudioPlaybackService.bitCount(-1), 64);
     });
+  });
+
+  test('the input-channel choice reaches the engine as its mode', () {
+    final fake = _FakeBindings();
+    final svc = GraphAudioPlaybackService.withBindings(fake);
+    addTearDown(svc.dispose);
+    svc.setInputChannel(GraphAudioPlaybackService.inputChannel2);
+    svc.setInputChannel(GraphAudioPlaybackService.inputChannel1);
+    svc.setInputChannel(GraphAudioPlaybackService.inputChannelAuto);
+    expect(fake.inputChannels, [2, 1, 0]);
   });
 
   test('a rebuild sets its live values on the staged graph before it goes '

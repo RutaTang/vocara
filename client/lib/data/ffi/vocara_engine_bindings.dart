@@ -320,6 +320,31 @@ class VocaraEngineBindings {
   late final _ve_set_input_gain = _ve_set_input_gainPtr
       .asFunction<int Function(ffi.Pointer<VeEngine>, double)>();
 
+  /// Choose which input(s) of a multi-channel mic make the mono capture: 0 = Auto (level-weighted
+  /// mix), 1 = Input 1, 2 = Input 2 (input 1 on a device without one). 0 = ok, -1 = unknown mode.
+  int ve_set_input_channel(ffi.Pointer<VeEngine> e, int mode) {
+    return _ve_set_input_channel(e, mode);
+  }
+
+  late final _ve_set_input_channelPtr =
+      _lookup<
+        ffi.NativeFunction<ffi.Int Function(ffi.Pointer<VeEngine>, ffi.Uint32)>
+      >('ve_set_input_channel');
+  late final _ve_set_input_channel = _ve_set_input_channelPtr
+      .asFunction<int Function(ffi.Pointer<VeEngine>, int)>();
+
+  /// Input channel count of the device with `uid` ("" = system default input); 0 = unknown.
+  int ve_input_device_channels(ffi.Pointer<ffi.Char> uid) {
+    return _ve_input_device_channels(uid);
+  }
+
+  late final _ve_input_device_channelsPtr =
+      _lookup<ffi.NativeFunction<ffi.Uint32 Function(ffi.Pointer<ffi.Char>)>>(
+        've_input_device_channels',
+      );
+  late final _ve_input_device_channels = _ve_input_device_channelsPtr
+      .asFunction<int Function(ffi.Pointer<ffi.Char>)>();
+
   /// Set the monitor reverb (room / damping / wet, each 0..1). 0 = ok.
   int ve_set_monitor_reverb(
     ffi.Pointer<VeEngine> e,

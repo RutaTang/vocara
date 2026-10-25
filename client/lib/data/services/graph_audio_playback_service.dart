@@ -106,6 +106,23 @@ List<AudioDevice> enumerateOutputDevices() => _enumDevices(input: false);
 /// The available input devices (static; no engine required).
 List<AudioDevice> enumerateInputDevices() => _enumDevices(input: true);
 
+/// The input channel count of the device with [uid] ('' = the system default input); 0 when the
+/// device is absent or unreadable. Static (no engine required), like the enumeration: the settings
+/// panel offers the input-channel choice only for a device with 2+ inputs.
+int inputDeviceChannelCount(String uid) {
+  try {
+    final bindings = VocaraEngineBindings(_openVocaraLibrary());
+    final cuid = uid.toNativeUtf8();
+    try {
+      return bindings.ve_input_device_channels(cuid.cast());
+    } finally {
+      malloc.free(cuid);
+    }
+  } catch (_) {
+    return 0;
+  }
+}
+
 /// Hard duration cap for the PLAYBACK/import decode path. Committed tracks live in memory
 /// as full-length engine-rate stereo f32 (~1.4 GB/hour resident, with a ~2x transient while
 /// decoding), so an arbitrary-length import is an OOM, not a feature. The cap is enforced
@@ -506,6 +523,18 @@ class GraphAudioPlaybackService implements PlaybackEngine {
   /// voice before recording/analysis.
   void setInputGain(double gain) {
     if (_available) _bindings.ve_set_input_gain(_engine, gain);
+  }
+
+  /// [setInputChannel] modes (`ve_set_input_channel`): a level-weighted mix of the device's inputs
+  /// (a mic on either input of a 2-input interface records at full level), or one input alone.
+  static const int inputChannelAuto = 0;
+  static const int inputChannel1 = 1;
+  static const int inputChannel2 = 2;
+
+  /// Choose which input(s) of a multi-channel mic become the mono signal the monitor, the echo
+  /// canceller, the meter and the recording all hear. Input 2 on a device without one is input 1.
+  void setInputChannel(int mode) {
+    if (_available) _bindings.ve_set_input_channel(_engine, mode);
   }
 
   /// Set the monitor reverb (room / damping / wet, each 0..1).

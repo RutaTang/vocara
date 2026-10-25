@@ -97,6 +97,11 @@ int ve_stop_monitor(VeEngine *e);
 int ve_set_monitor_gain(VeEngine *e, float gain);
 /* Set the record/input gain (linear): makeup applied to the captured voice before record/analysis. */
 int ve_set_input_gain(VeEngine *e, float gain);
+/* Choose which input(s) of a multi-channel mic make the mono capture: 0 = Auto (level-weighted
+   mix), 1 = Input 1, 2 = Input 2 (input 1 on a device without one). 0 = ok, -1 = unknown mode. */
+int ve_set_input_channel(VeEngine *e, uint32_t mode);
+/* Input channel count of the device with `uid` ("" = system default input); 0 = unknown. */
+uint32_t ve_input_device_channels(const char *uid);
 /* Set the monitor reverb (room / damping / wet, each 0..1). 0 = ok. */
 int ve_set_monitor_reverb(VeEngine *e, float room, float damping, float wet);
 /* Current live-input peak level (0..1) for a meter; 0 when not capturing. */

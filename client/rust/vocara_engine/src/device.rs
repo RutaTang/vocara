@@ -256,6 +256,23 @@ pub fn enum_input_devices() -> Vec<DeviceDesc> {
     out
 }
 
+/// The input channel count of the device with `uid` (empty = the system default input), read off
+/// its current input stream format; 0 when the device is absent or unreadable. What the settings
+/// panel decides on whether to offer an input-channel choice — with no engine and no open mic.
+pub fn input_device_channels(uid: &str) -> u32 {
+    let host = cpal::default_host();
+    let device = if uid.is_empty() {
+        host.default_input_device()
+    } else {
+        host.input_devices()
+            .ok()
+            .and_then(|mut ds| ds.find(|d| device_uid(d).as_deref() == Some(uid)))
+    };
+    device
+        .and_then(|d| d.default_input_config().ok())
+        .map_or(0, |c| u32::from(c.channels()))
+}
+
 /// Output-boundary sample-rate converter: the engine renders at `ENGINE_SR`; the device
 /// callback demands frames at its native rate. This pulls engine-rate frames from
 /// [`RtProcessor`] into a small pre-allocated FIFO and produces the device-rate output

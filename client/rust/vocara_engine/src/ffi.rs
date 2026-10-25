@@ -107,6 +107,9 @@ pub struct VeEngine {
     /// written; empty = closed or system default). The selection call is
     /// fire-and-forget, so this — not `current_input_uid` — is the truth.
     actual_input_uid: Arc<std::sync::Mutex<String>>,
+    /// The mic input cell (shared with the audio host): kept for the input-channel choice
+    /// (`ve_set_input_channel`), which the capture callbacks read from it.
+    input_cell: Arc<device::InputCell>,
     /// Where playback is bound (host-thread written). Holds BOTH halves of the output story: what
     /// the UI asked for ([`device::OutputBinding::requested_pick`], '' = follow the system default)
     /// and what is actually making sound ([`device::OutputBinding::actual_uid`]). They diverge when
@@ -582,7 +585,7 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
         // pick starts empty ("follow the system default") and lives only in `output_binding`.
         let (host, _opened_output_uid) = device::spawn_audio_host(
             rt_cell,
-            input_cell,
+            Arc::clone(&input_cell),
             Arc::clone(&device_event),
             handle.renderer_gate(),
             Arc::clone(&input_state),
@@ -597,6 +600,7 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
             device_event,
             current_input_uid: String::new(),
             actual_input_uid,
+            input_cell,
             output_binding,
             input_level,
             input_frames_in,
@@ -1124,6 +1128,40 @@ pub extern "C" fn ve_set_input_gain(_e: *mut VeEngine, gain: c_float) -> c_int {
         let _ = gain;
     }
     0
+}
+
+/// Choose which input(s) of a multi-channel mic make the mono capture that the monitor, the echo
+/// canceller, the meter and the recording all hear: 0 = Auto (a level-weighted mix — a mic on
+/// either input of a 2-input interface at full level, an idle input contributing essentially
+/// nothing), 1 = Input 1, 2 = Input 2 (input 1 on a device without one). Applies to the open
+/// stream at once, gliding, and to every stream opened after. 0 = ok, -1 = an unknown mode.
+#[no_mangle]
+pub extern "C" fn ve_set_input_channel(e: *mut VeEngine, mode: u32) -> c_int {
+    with_engine(e, -1, |eng| {
+        if mode > crate::capture_layout::INPUT_CHANNEL_2 {
+            return -1;
+        }
+        eng.input_cell.set_channel_mode(mode);
+        0
+    })
+}
+
+/// The input channel count of the device with UID `uid` (an empty string = the system default
+/// input), from its current input stream format; 0 = absent or unknown. Stateless (no engine
+/// needed), like the device enumeration: the settings panel offers the input-channel choice only
+/// for a device with 2+ inputs.
+#[no_mangle]
+pub extern "C" fn ve_input_device_channels(uid: *const c_char) -> u32 {
+    if uid.is_null() {
+        return 0;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        match unsafe { CStr::from_ptr(uid) }.to_str() {
+            Ok(u) => device::input_device_channels(u),
+            Err(_) => 0,
+        }
+    }))
+    .unwrap_or(0)
 }
 
 /// Set the monitor reverb (room / damping / wet, each 0..1). 0 = ok.
