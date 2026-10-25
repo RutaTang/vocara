@@ -1,88 +1,170 @@
-//! De-esser: a split-band dynamic high-frequency reducer for sibilance.
+//! De-esser: a dynamic high shelf for sibilance.
 //!
-//! The signal is split by a Linkwitz-Riley (4th-order) crossover at the detector frequency.
-//! When the high band's level exceeds the threshold, only the high band is attenuated
-//! (clamped to `range`), so the body of the voice is untouched. LR4's two bands are in phase
-//! at every frequency and sum to an allpass, so `low + g·high` stays between g and unity: a
-//! reduction never boosts anything. (The old `x - HP2(x)` low band was NOT phase-coherent —
-//! it peaked around the crossover, so de-essing lifted 3–7 kHz by up to ~2 dB and barely cut
-//! the sibilance itself.) No recursive audio path → stable.
+//! A 2nd-order high-pass at the detector frequency measures the sibilance band; when its
+//! level exceeds the threshold, a high shelf cornered at the same frequency cuts by the
+//! overshoot (clamped to `range`), so the body of the voice below the corner is left alone.
+//! The shelf is RBJ's with slope S = 1, the steepest that stays monotonic: its response falls
+//! from unity below the corner to the reduction above it, so a reduction never boosts any
+//! frequency. At 0 dB its numerator equals its denominator, so an idle de-esser is exactly
+//! its input: a bypass fade or a Freq change at idle is transparent.
+//!
+//! (The two splits this replaced each broke one of those: `x - HP2(x)` was the input when
+//! idle but lifted 3–7 kHz by up to ~2 dB while cutting, and an LR4 crossover never boosted
+//! but summed to an allpass, not to its input — fades between dry and processed, and Freq
+//! drags, cancelled a tone at the corner by up to ~34 dB even with nothing over threshold.)
 
 use crate::dsp::biquad::{BandKind, BandSpec, Biquad, Coeffs};
+use crate::dsp::denormals::sanitize;
 use crate::dsp::smooth::{BypassFade, Smoothed};
 use crate::node::{Node, ProcessIo};
-use crate::sample::{db_to_lin, CHANNELS};
+use crate::sample::CHANNELS;
 
 pub mod param {
-    pub const FREQ: u16 = 0; // crossover / detector frequency (Hz)
+    pub const FREQ: u16 = 0; // shelf corner / detector frequency (Hz)
     pub const THRESHOLD_DB: u16 = 1;
     pub const RANGE_DB: u16 = 2; // maximum reduction (dB, >= 0)
     pub const BYPASS: u16 = 3;
 }
 
 /// Cross-fade length (frames) when the detector frequency changes, so swapping the
-/// high-pass coefficients in place does not produce a zipper/click. Mirrors the EQ
-/// `Band` cross-fade in `biquad.rs`.
+/// coefficients of the stateful filters in place does not produce a zipper/click. Mirrors
+/// the EQ `Band` cross-fade in `biquad.rs`.
 const XFADE_FRAMES: f32 = 256.0;
 
-/// One channel's crossover. The detector reads the first 2nd-order high-pass stage — the
-/// signal the de-esser has always detected on, so thresholds and presets keep their
-/// calibration — and the processing bands are the 4th-order (squared Butterworth)
-/// completions of the same corner. `Copy` so seeding a cross-fade target from the current
-/// filters is a value copy that keeps their history.
-#[derive(Clone, Copy)]
-struct Split {
-    hp1: Biquad,
-    hp2: Biquad,
-    lp1: Biquad,
-    lp2: Biquad,
+/// One biquad history, driven with coefficients held by its [`Bank`] (shared by L and R).
+#[derive(Clone, Copy, Default)]
+struct History {
+    x1: f32,
+    x2: f32,
+    y1: f32,
+    y2: f32,
 }
 
-impl Split {
+impl History {
+    #[inline]
+    fn tick(&mut self, c: &Coeffs, x: f32) -> f32 {
+        let y = c.b0 * x + c.b1 * self.x1 + c.b2 * self.x2 - c.a1 * self.y1 - c.a2 * self.y2;
+        let y = sanitize(y);
+        self.x2 = self.x1;
+        self.x1 = x;
+        self.y2 = self.y1;
+        self.y1 = y;
+        y
+    }
+
+    /// What the 0 dB shelf computes (numerator equals denominator), without its rounding:
+    /// idle stays bit-exact, and a reduction that starts later continues from the history
+    /// the identity filter would have left.
+    #[inline]
+    fn pass(&mut self, x: f32) -> f32 {
+        self.x2 = self.x1;
+        self.x1 = x;
+        self.y2 = self.y1;
+        self.y1 = x;
+        x
+    }
+}
+
+/// Everything tuned to one corner frequency: both channels' detector high-pass and shelf.
+/// `Copy` so a retune can seed its cross-fade target from the current bank — a value copy
+/// that keeps the filters' history.
+#[derive(Clone, Copy)]
+struct Bank {
+    det_l: Biquad,
+    det_r: Biquad,
+    /// The shelf's corner terms — with S = 1 its alpha does not depend on the gain, so a
+    /// reduction change only recomputes A — and its coefficients at the current reduction.
+    cosw: f32,
+    alpha: f32,
+    shelf: Coeffs,
+    shelf_l: History,
+    shelf_r: History,
+}
+
+impl Bank {
     fn new() -> Self {
-        Split {
-            hp1: Biquad::new(Coeffs::PASS),
-            hp2: Biquad::new(Coeffs::PASS),
-            lp1: Biquad::new(Coeffs::PASS),
-            lp2: Biquad::new(Coeffs::PASS),
+        Bank {
+            det_l: Biquad::new(Coeffs::PASS),
+            det_r: Biquad::new(Coeffs::PASS),
+            cosw: 1.0,
+            alpha: 0.0,
+            shelf: Coeffs::PASS,
+            shelf_l: History::default(),
+            shelf_r: History::default(),
         }
     }
 
-    fn set_coeffs(&mut self, hp: Coeffs, lp: Coeffs) {
-        self.hp1.set_coeffs(hp);
-        self.hp2.set_coeffs(hp);
-        self.lp1.set_coeffs(lp);
-        self.lp2.set_coeffs(lp);
+    fn tune(&mut self, freq: f32, sr: f64, red_db: f32) {
+        // The detector: a Butterworth (Q 0.707) high-pass, the signal the de-esser has
+        // always detected on, so thresholds and presets keep their calibration.
+        let hp = BandSpec {
+            kind: BandKind::HighPass,
+            freq,
+            q: 0.707,
+            gain_db: 0.0,
+            enabled: true,
+        }
+        .coeffs(sr);
+        self.det_l.set_coeffs(hp);
+        self.det_r.set_coeffs(hp);
+        let f0 = (freq as f64).clamp(10.0, sr * 0.45); // BandSpec's own guard
+        let w0 = 2.0 * std::f64::consts::PI * f0 / sr;
+        self.cosw = w0.cos() as f32;
+        self.alpha = (w0.sin() * std::f64::consts::FRAC_1_SQRT_2) as f32; // S = 1
+        self.set_reduction(red_db);
     }
 
-    /// (detector, low band, high band) for one input sample.
+    /// RBJ high-shelf coefficients for a cut of `red_db` (<= 0).
+    fn set_reduction(&mut self, red_db: f32) {
+        let sqrt_a = 10f32.powf(red_db / 80.0);
+        let a = sqrt_a * sqrt_a; // 10^(G/40)
+        let (c, s) = (self.cosw, 2.0 * sqrt_a * self.alpha);
+        let inv_a0 = 1.0 / ((a + 1.0) - (a - 1.0) * c + s);
+        self.shelf = Coeffs {
+            b0: a * ((a + 1.0) + (a - 1.0) * c + s) * inv_a0,
+            b1: -2.0 * a * ((a - 1.0) + (a + 1.0) * c) * inv_a0,
+            b2: a * ((a + 1.0) + (a - 1.0) * c - s) * inv_a0,
+            a1: 2.0 * ((a - 1.0) - (a + 1.0) * c) * inv_a0,
+            a2: ((a + 1.0) - (a - 1.0) * c - s) * inv_a0,
+        };
+    }
+
+    /// The detector signal for one frame.
     #[inline]
-    fn tick(&mut self, x: f32) -> (f32, f32, f32) {
-        let det = self.hp1.tick(x);
-        let high = self.hp2.tick(det);
-        let low = self.lp2.tick(self.lp1.tick(x));
-        (det, low, high)
+    fn detect(&mut self, l: f32, r: f32) -> (f32, f32) {
+        (self.det_l.tick(l), self.det_r.tick(r))
+    }
+
+    /// The shelf's output for one frame; `flat` (no reduction) is the input, exactly.
+    #[inline]
+    fn shelve(&mut self, l: f32, r: f32, flat: bool) -> (f32, f32) {
+        if flat {
+            (self.shelf_l.pass(l), self.shelf_r.pass(r))
+        } else {
+            (
+                self.shelf_l.tick(&self.shelf, l),
+                self.shelf_r.tick(&self.shelf, r),
+            )
+        }
     }
 
     fn reset_state(&mut self) {
-        self.hp1.reset_state();
-        self.hp2.reset_state();
-        self.lp1.reset_state();
-        self.lp2.reset_state();
+        self.det_l.reset_state();
+        self.det_r.reset_state();
+        self.shelf_l = History::default();
+        self.shelf_r = History::default();
     }
 }
 
 pub struct DeEsserNode {
-    split_l: Split,
-    split_r: Split,
-    // Target crossovers, valid while `xfading`: seeded from the current ones (copies their
-    // history) with the new coefficients, then blended in over XFADE_FRAMES.
-    split_l2: Split,
-    split_r2: Split,
+    bank: Bank,
+    // The retune target, valid while `xfading`: seeded from the current bank (copies its
+    // history) at the new corner, then blended in over XFADE_FRAMES.
+    bank2: Bank,
     xfading: bool,
     xmix: f32,
     xinc: f32,
-    /// Whether the crossover has run on audio. Until then a FREQ change retunes directly:
+    /// Whether the filters have run on audio. Until then a FREQ change retunes directly:
     /// there is no filter history to cross-fade from.
     heard: bool,
     freq: f32,
@@ -93,6 +175,8 @@ pub struct DeEsserNode {
     env_db: f32,
     attack_coef: f32,
     release_coef: f32,
+    /// The reduction (dB, <= 0) the banks' shelf coefficients were last computed for.
+    red_db: f32,
     fade: BypassFade,
     sr: f64,
 }
@@ -100,10 +184,8 @@ pub struct DeEsserNode {
 impl DeEsserNode {
     pub fn new() -> Self {
         let mut d = DeEsserNode {
-            split_l: Split::new(),
-            split_r: Split::new(),
-            split_l2: Split::new(),
-            split_r2: Split::new(),
+            bank: Bank::new(),
+            bank2: Bank::new(),
             xfading: false,
             xmix: 0.0,
             xinc: 1.0 / XFADE_FRAMES,
@@ -114,6 +196,7 @@ impl DeEsserNode {
             env_db: -120.0,
             attack_coef: 1.0,
             release_coef: 1.0,
+            red_db: 0.0,
             fade: BypassFade::new(true),
             sr: 48_000.0,
         };
@@ -122,48 +205,26 @@ impl DeEsserNode {
         d
     }
 
-    /// Butterworth (Q 0.707, the detector's long-standing value) high- and low-pass
-    /// coefficients at the crossover; each band cascades two of its stage, which is LR4.
-    fn split_coeffs(&self) -> (Coeffs, Coeffs) {
-        let stage = |kind| {
-            BandSpec {
-                kind,
-                freq: self.freq,
-                q: 0.707,
-                gain_db: 0.0,
-                enabled: true,
-            }
-            .coeffs(self.sr)
-        };
-        (stage(BandKind::HighPass), stage(BandKind::LowPass))
-    }
-
-    /// Immediate retune (pre-roll: new/prepare) — no cross-fade.
+    /// Immediate retune (pre-roll: new/prepare, or nothing heard yet) — no cross-fade.
     fn retune_now(&mut self) {
-        let (hp, lp) = self.split_coeffs();
-        self.split_l.set_coeffs(hp, lp);
-        self.split_r.set_coeffs(hp, lp);
-        self.split_l2.set_coeffs(hp, lp);
-        self.split_r2.set_coeffs(hp, lp);
+        self.bank.tune(self.freq, self.sr, self.red_db);
+        self.bank2 = self.bank;
         self.xfading = false;
         self.xmix = 0.0;
     }
 
     /// Retune with an output cross-fade — used for a runtime FREQ change so the
-    /// coefficient swap on a stateful filter does not click.
+    /// coefficient swap on the stateful filters does not click. (At idle both banks pass
+    /// the input exactly, so the fade is transparent; it matters while reducing.)
     fn retune_xfade(&mut self) {
-        let (hp, lp) = self.split_coeffs();
-        // Collapse an in-flight fade into the current filters so the new fade starts
-        // from a defined state.
+        // Collapse an in-flight fade into the current bank so the new fade starts from a
+        // defined state.
         if self.xfading {
-            self.split_l = self.split_l2;
-            self.split_r = self.split_r2;
+            self.bank = self.bank2;
         }
-        // Seed the target filters from the current ones (copies history), then retune.
-        self.split_l2 = self.split_l;
-        self.split_r2 = self.split_r;
-        self.split_l2.set_coeffs(hp, lp);
-        self.split_r2.set_coeffs(hp, lp);
+        // Seed the target from the current bank (copies history), then retune it.
+        self.bank2 = self.bank;
+        self.bank2.tune(self.freq, self.sr, self.red_db);
         self.xfading = true;
         self.xmix = 0.0;
     }
@@ -196,21 +257,18 @@ impl Node for DeEsserNode {
 
     fn reset(&mut self) {
         // Seek clears every node's state. Without this override (inherited no-op)
-        // the crossover biquads' filter tails and the held sibilance envelope
+        // the detector/shelf filter tails and the held sibilance envelope
         // carry pre-seek history across the discontinuity (click + wrong gain
         // reduction). Clear filter state (coeffs intact) and the envelope to its
         // idle value — matching Band::reset and the delay/doubler/reverb resets.
         // Commit a pending coefficient cross-fade into the current filters first,
         // otherwise reset would revert to the OLD coeffs and desync from `freq`.
         if self.xfading {
-            self.split_l = self.split_l2;
-            self.split_r = self.split_r2;
+            self.bank = self.bank2;
             self.xfading = false;
         }
-        self.split_l.reset_state();
-        self.split_r.reset_state();
-        self.split_l2.reset_state();
-        self.split_r2.reset_state();
+        self.bank.reset_state();
+        self.bank2.reset_state();
         self.xmix = 0.0;
         self.env_db = -120.0;
         self.fade.settle();
@@ -237,29 +295,15 @@ impl Node for DeEsserNode {
         for i in 0..frames {
             let l = out[CHANNELS * i];
             let r = out[CHANNELS * i + 1];
-            // Cross-fade the crossover outputs on a freq change so a coefficient swap on
-            // the stateful biquads doesn't click.
-            let ((dl, low_l, hl), (dr, low_r, hr)) = if self.xfading {
-                let m = self.xmix;
-                let blend = |a: (f32, f32, f32), b: (f32, f32, f32)| {
-                    (
-                        a.0 * (1.0 - m) + b.0 * m,
-                        a.1 * (1.0 - m) + b.1 * m,
-                        a.2 * (1.0 - m) + b.2 * m,
-                    )
-                };
-                let sl = blend(self.split_l.tick(l), self.split_l2.tick(l));
-                let sr = blend(self.split_r.tick(r), self.split_r2.tick(r));
-                self.xmix += self.xinc;
-                if self.xmix >= 1.0 {
-                    self.xmix = 1.0;
-                    self.split_l = self.split_l2;
-                    self.split_r = self.split_r2;
-                    self.xfading = false;
-                }
-                (sl, sr)
+            // Cross-fade the two banks on a freq change so a coefficient swap on the
+            // stateful filters doesn't click.
+            let m = self.xmix;
+            let blend =
+                |a: (f32, f32), b: (f32, f32)| (a.0 + (b.0 - a.0) * m, a.1 + (b.1 - a.1) * m);
+            let (dl, dr) = if self.xfading {
+                blend(self.bank.detect(l, r), self.bank2.detect(l, r))
             } else {
-                (self.split_l.tick(l), self.split_r.tick(r))
+                self.bank.detect(l, r)
             };
 
             let peak = dl.abs().max(dr.abs());
@@ -279,11 +323,39 @@ impl Node for DeEsserNode {
             } else {
                 0.0
             };
-            let g = db_to_lin(red_db);
+            // The shelf follows the reduction sample by sample (the envelope's ballistics
+            // already smooth it); at 0 dB it is not evaluated at all.
+            let flat = red_db == 0.0;
+            if red_db != self.red_db {
+                if !flat {
+                    self.bank.set_reduction(red_db);
+                    if self.xfading {
+                        self.bank2.set_reduction(red_db);
+                    }
+                }
+                self.red_db = red_db;
+            }
+            let (pl, pr) = if self.xfading {
+                let a = self.bank.shelve(l, r, flat);
+                let b = self.bank2.shelve(l, r, flat);
+                self.xmix += self.xinc;
+                if self.xmix >= 1.0 {
+                    self.xmix = 1.0;
+                    self.bank = self.bank2;
+                    self.xfading = false;
+                }
+                if flat {
+                    (l, r)
+                } else {
+                    blend(a, b)
+                }
+            } else {
+                self.bank.shelve(l, r, flat)
+            };
             // Blended toward the dry input while the bypass switch fades.
             let f = self.fade.next();
-            out[CHANNELS * i] = l + (low_l + hl * g - l) * f;
-            out[CHANNELS * i + 1] = r + (low_r + hr * g - r) * f;
+            out[CHANNELS * i] = l + (pl - l) * f;
+            out[CHANNELS * i + 1] = r + (pr - r) * f;
         }
     }
 

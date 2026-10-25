@@ -458,13 +458,17 @@ fn a_de_esser_reduction_never_boosts_any_frequency() {
 
 #[test]
 fn a_de_esser_cuts_a_loud_sibilant_by_most_of_its_range() {
-    // A loud "ess" above the 6.5 kHz crossover (the default/preset settings) must actually
-    // come down. Before the phase-coherent split a 10 kHz tone lost only 2 dB of a 12 dB
-    // range and a 7 kHz one came out LOUDER.
+    // A loud "ess" above the 6.5 kHz corner (the default/preset settings) must actually
+    // come down. With the old `x - HP2(x)` split a 10 kHz tone lost only 2 dB of a 12 dB
+    // range and a 7 kHz one came out LOUDER. The S = 1 shelf is half its depth at the
+    // corner, ~-6.9 dB at 7 kHz and ~-10.4 dB at 10 kHz for a 12 dB range.
     let at_10k = deesser_gain_db(10_000.0, 0.3, -28.0, 12.0);
-    assert!(at_10k <= -8.0, "10 kHz sibilant only moved {at_10k:+.2} dB");
+    assert!(
+        at_10k <= -10.0,
+        "10 kHz sibilant only moved {at_10k:+.2} dB"
+    );
     let at_7k = deesser_gain_db(7_000.0, 0.3, -28.0, 12.0);
-    assert!(at_7k <= -4.0, "7 kHz sibilant only moved {at_7k:+.2} dB");
+    assert!(at_7k <= -6.5, "7 kHz sibilant only moved {at_7k:+.2} dB");
 }
 
 /// Amplitude of the `k`-th harmonic of `f0` in a mono signal spanning a whole number of
@@ -980,4 +984,59 @@ fn a_seek_right_after_switching_a_delay_off_leaves_no_ghost_echo() {
             "the {name} echoed post-seek audio: peak {ghost}"
         );
     }
+}
+
+#[test]
+fn an_idle_de_esser_is_transparent_through_a_toggle_or_a_retune() {
+    // The LR4 split summed to an allpass, not to its input (-180 deg at the corner): the
+    // 5 ms bypass fade between dry and processed cancelled a tone at the crossover by over
+    // 30 dB mid-fade, and a Freq change cross-faded two different allpasses (-34 dB for
+    // 4k -> 12k, 0.3-2 dB on every small drag step), even with nothing over the threshold.
+    use vocara_engine::dsp::deesser::{param as dep, DeEsserNode};
+    let block = 256;
+    let tone = to_stereo(&sine_mono(6500.0, SR, 8 * block, 0.1)); // at the crossover
+    let fresh = || {
+        let mut de = DeEsserNode::new();
+        de.prepare(SR, block);
+        de.set_param(dep::FREQ, 6500.0);
+        de.set_param(dep::THRESHOLD_DB, 0.0); // never reached: no reduction
+        de.set_param(dep::BYPASS, 0.0);
+        de
+    };
+    let max_err = |a: &[f32], b: &[f32]| {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0f32, f32::max)
+    };
+    let (pre, post) = tone.split_at(4 * block * CHANNELS);
+
+    // Idle and switched on: the input, unchanged.
+    let mut de = fresh();
+    let out = run_phase(&mut de, &tone, SR, block);
+    let e = max_err(&out, &tone);
+    assert!(e <= 1e-6, "an idle de-esser altered the signal (err {e})");
+
+    // Switched off mid-tone: the fade between dry and processed must not dip.
+    let mut de = fresh();
+    let mut out = run_phase(&mut de, pre, SR, block);
+    de.set_param(dep::BYPASS, 1.0);
+    out.extend(run_phase(&mut de, post, SR, block));
+    let e = max_err(&out, &tone);
+    assert!(
+        e <= 1e-6,
+        "switching an idle de-esser off dipped the tone (err {e})"
+    );
+
+    // Retuned mid-tone (4 kHz -> 12 kHz, a jump the Freq knob can make in one tick).
+    let mut de = fresh();
+    de.set_param(dep::FREQ, 4000.0);
+    let mut out = run_phase(&mut de, pre, SR, block);
+    de.set_param(dep::FREQ, 12_000.0);
+    out.extend(run_phase(&mut de, post, SR, block));
+    let e = max_err(&out, &tone);
+    assert!(
+        e <= 1e-6,
+        "retuning an idle de-esser dipped the tone (err {e})"
+    );
 }
