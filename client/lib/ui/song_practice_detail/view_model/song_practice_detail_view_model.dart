@@ -2521,9 +2521,16 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   bool get takeInFlight =>
       recording.isRecording || recording.isStartingTake || recording.isStopping;
 
-  // Cross-cutting stop: invoked from both the transport bar and the screen's
-  // back/PopScope path (finalize the in-flight take before leaving the route).
+  // Cross-cutting stop: invoked from the transport bar.
   Future<void> stopRecording() => recording.stopRecording();
+
+  /// Whether leaving the screen must first end a take: one recording, or one
+  /// still in REC's arm window (see [RecordingController.stopBeforeLeaving]).
+  bool get takeHoldsScreen => isRecording || recording.isStartingTake;
+
+  // The screen's back/PopScope path: finalize (or cancel) the take in flight
+  // before leaving the route.
+  Future<void> stopBeforeLeaving() => recording.stopBeforeLeaving();
 
   // The one shared "persist pending live FX/level edits" commit — called from
   // four widget files (fx_panel, mixer_strip, left_panel, screen).

@@ -1,7 +1,9 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart' show ValueNotifier;
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:go_router/go_router.dart';
+import 'package:provider/provider.dart';
 import 'package:vocara/data/repositories/song_practice_repository.dart';
 import 'package:vocara/data/repositories/technique_repository.dart';
 import 'package:vocara/data/services/app_settings_service.dart';
@@ -23,7 +25,9 @@ import 'package:vocara/domain/models/song_practice.dart';
 import 'package:vocara/domain/models/spectrogram.dart';
 import 'package:vocara/domain/models/take_version.dart';
 import 'package:vocara/domain/models/voice_metrics.dart';
+import 'package:vocara/routing/routes.dart';
 import 'package:vocara/ui/song_practice_detail/view_model/song_practice_detail_view_model.dart';
+import 'package:vocara/ui/song_practice_detail/widgets/song_practice_detail_screen.dart';
 import 'package:vocara/utils/result.dart';
 
 // Flows that cross the detail screen's components: a take travelling from the
@@ -196,7 +200,13 @@ class _FakeEngine extends Fake implements PlaybackEngine {
   @override
   Stream<bool> get playing => const Stream.empty();
   @override
+  Duration get currentPosition => Duration.zero;
+  @override
   bool get isPlaying => false;
+  @override
+  void setTrackPan(String id, double pan) {}
+  @override
+  void setTrackFx(String trackId, TrackFx fx) {}
   @override
   bool get supportsEffects => false;
   @override
@@ -614,6 +624,77 @@ void main() {
       expect(vm.practice!.vocalTracks.map((t) => t.id), ['take1']);
       expect(repo.stored.vocalTracks.map((t) => t.id), ['take1']);
     });
+  });
+
+  testWidgets('Back while REC is still arming cancels the take before the '
+      'page leaves', (tester) async {
+    // Back only waited for a take already recording. In REC's arm window the
+    // page popped at once: the mic's handshake could still land during the
+    // exit transition and arm a take (and play the backing) on a page that
+    // was leaving, whose dispose then dropped it for boot recovery — beside
+    // the empty "Take N" REC had saved to record into.
+    tester.view.physicalSize = const Size(1800, 1100);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    repo = _FakeRepo(_seed(accompaniment: _backing()));
+    waveforms = _FakeWaveforms();
+    spectrograms = _FakeSpectrograms();
+    final mic = _FakeMic()..ready = Completer<void>();
+    final vm = openVm(engine: _FakeGraphEngine(), mic: mic);
+    for (var i = 0; i < 20 && vm.practice == null; i++) {
+      await tester.pump(const Duration(milliseconds: 5));
+    }
+    // The lyrics header overflows under the test font (see
+    // playhead_repaint_test); the panel is not what this is about.
+    vm.toggleLyricsPanel();
+    final router = GoRouter(
+      routes: [
+        GoRoute(
+          path: Routes.home,
+          builder: (context, _) => Scaffold(
+            body: TextButton(
+              onPressed: () => context.push(Routes.songPractice('p1')),
+              child: const Text('open'),
+            ),
+          ),
+        ),
+        GoRoute(
+          path: Routes.songPracticePattern,
+          builder: (context, _) => ChangeNotifierProvider.value(
+            value: vm,
+            child: const SongPracticeDetailScreen(),
+          ),
+        ),
+      ],
+    );
+    await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+    await tester.tap(find.text('open'));
+    for (var i = 0; i < 10; i++) {
+      await tester.pump(const Duration(milliseconds: 50));
+    }
+    expect(find.byType(SongPracticeDetailScreen), findsOneWidget);
+
+    unawaited(vm.recording.startRecording());
+    for (var i = 0; i < 20 && repo.stored.vocalTracks.length < 2; i++) {
+      await tester.pump(const Duration(milliseconds: 5));
+    }
+    expect(vm.recording.isStartingTake, isTrue);
+    expect(repo.stored.vocalTracks, hasLength(2), reason: 'REC made a take');
+
+    await tester.binding.handlePopRoute(); // the system Back
+    for (var i = 0; i < 4; i++) {
+      await tester.pump(const Duration(milliseconds: 50));
+    }
+    mic.ready!.complete(); // the handshake lands
+    for (var i = 0; i < 12; i++) {
+      await tester.pump(const Duration(milliseconds: 50));
+    }
+    expect(vm.isRecording, isFalse, reason: 'a take armed on a leaving page');
+    expect(find.byType(SongPracticeDetailScreen), findsNothing);
+    expect(repo.stored.vocalTracks.map((t) => t.id), ['take1']);
+
+    await tester.pumpWidget(const SizedBox());
+    vm.dispose();
   });
 
   test('a folded-out lane re-reads a clip whose path a save moved', () async {

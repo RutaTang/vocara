@@ -367,6 +367,15 @@ class RecordingController extends ChangeNotifier {
     if (_mic.isRecording || isStartingTake || _stopping || _busyGate.busy) {
       return;
     }
+    await (_startInFlight = _armTake());
+  }
+
+  /// The latest [startRecording] past its guard, until it armed, failed or
+  /// unwound (its empty take dropped) — what [stopBeforeLeaving] waits on.
+  Future<void>? _startInFlight;
+
+  /// The body of [startRecording] past its re-arm guard.
+  Future<void> _armTake() async {
     // Captured after the take arms (see below); -1 = never armed. Declared out
     // here so the catch can tell whether the armed take is still OURS — a
     // catch that only checks isRecording is ABA-vulnerable exactly like the
@@ -485,10 +494,13 @@ class RecordingController extends ChangeNotifier {
       if (e is! _TakeSetupFailed) _toast(_friendlyError(e));
       notifyListeners();
     } finally {
-      // Never armed: drop the empty take this start created for itself.
+      // Never armed: drop the empty take this start created for itself. Even
+      // once the screen is gone (Back in the arm window): the host's gate and
+      // save still run after dispose, and skipping it here left the empty
+      // "Take N" in the practice for good.
       final created = _createdEmptyTake;
       _createdEmptyTake = null;
-      if (created != null && !_disposed) {
+      if (created != null) {
         _discardingTake = true;
         notifyListeners();
         try {
@@ -537,6 +549,18 @@ class RecordingController extends ChangeNotifier {
     } finally {
       _stopping = false;
     }
+  }
+
+  /// Ends the take in flight before the screen goes away: an armed take stops
+  /// and lands ([stopRecording]); one still in REC's arm window is cancelled,
+  /// and this also waits for that start to unwind. Leaving only waited for a
+  /// take already recording: in the arm window the page popped at once, and
+  /// a handshake landing during its exit transition armed a take there that
+  /// the dispose then dropped for boot recovery.
+  Future<void> stopBeforeLeaving() async {
+    final start = _startInFlight;
+    await stopRecording();
+    if (start != null) await start;
   }
 
   /// The tail of [stopRecording] (meter reset → pause → gated finalize), split

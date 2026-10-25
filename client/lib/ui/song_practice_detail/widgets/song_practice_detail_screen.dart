@@ -85,15 +85,16 @@ class SongPracticeDetailScreen extends StatelessWidget {
     final vm = context.read<SongPracticeDetailViewModel>();
 
     // Block leaving while recording: finalize (stop + analyze + save) the take
-    // first so navigating away mid-record never loses it. canPop must react to
-    // isRecording, so wrap in a ListenableBuilder on the vm.
+    // first so navigating away mid-record never loses it — and in REC's arm
+    // window cancel the start first, or it could still arm on the leaving
+    // page. canPop must react to both, so wrap in a ListenableBuilder on the vm.
     return ListenableBuilder(
       listenable: vm,
       builder: (context, _) => PopScope(
-        canPop: !vm.isRecording,
+        canPop: !vm.takeHoldsScreen,
         onPopInvokedWithResult: (didPop, _) async {
-          if (didPop || !vm.isRecording) return;
-          await vm.stopRecording();
+          if (didPop) return;
+          await vm.stopBeforeLeaving();
           if (context.mounted) context.pop();
         },
         child: Scaffold(
@@ -447,7 +448,7 @@ class _WorkspaceState extends State<_Workspace> {
           // later card tap was silently ignored. go is only the fallback for
           // a deep link, where nothing lies beneath to pop to.
           onBack: () async {
-            if (vm.isRecording) await vm.stopRecording();
+            if (vm.takeHoldsScreen) await vm.stopBeforeLeaving();
             if (!context.mounted) return;
             if (context.canPop()) {
               context.pop();

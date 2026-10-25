@@ -643,6 +643,30 @@ void main() {
     expect(discarded, ['fresh']);
   });
 
+  test(
+    'a REC cancelled as the screen closes still drops its empty take',
+    () async {
+      // Back in REC's arm window cancels the start, and the page is gone
+      // before that start unwinds: the drop skipped a disposed controller, so
+      // the empty "Take N" REC had saved stayed in the practice for good.
+      final arming = _ArmingMic();
+      final discarded = <String>[];
+      final c = build(
+        arming,
+        selectedTrackId: () => null,
+        createEmptyVocalTake: () async => 'fresh',
+        discardEmptyTake: (id) async => discarded.add(id),
+      );
+      final start = c.startRecording();
+      await pumpUntil(() => c.isStartingTake);
+      await c.stopRecording();
+      c.dispose();
+      arming.ready.complete();
+      await start;
+      expect(discarded, ['fresh']);
+    },
+  );
+
   test('a REC that arms keeps the take it created', () async {
     final arming = _ArmingMic()..ready.complete();
     final discarded = <String>[];
