@@ -252,13 +252,48 @@ void main() {
   );
 
   group('aggregateKeyFor', () {
-    test('embeds the ordered clip ids and their timeline starts', () {
+    test('embeds the ordered clip ids, their timeline starts and files', () {
       final cache = _cache();
       final key = cache.aggregateKeyFor(
         _lane([_clip('c1', 0), _clip('c2', 5000)]),
       );
-      expect(key, 'agg:lane#c1@0,c2@5000');
+      expect(key, 'agg:lane#c1@0:c1.wav,c2@5000:c2.wav');
       cache.dispose();
+    });
+
+    test('a clip whose bytes arrive after its lane was analyzed is analyzed '
+        'again, not left on the missing-audio answer', () async {
+      // A synced clip's row lands before its bytes, so it hydrates with an
+      // asset:// ref that analyzes to nothing. The next save or reload re-reads
+      // it at its pool path, with the same id and start: a key that ignored the
+      // path kept serving the lane without it for the rest of the session.
+      final missing = AudioClip(
+        id: 'c1',
+        audioFilePath: 'asset://a1',
+        durationMs: 1000,
+        startMs: 0,
+      );
+      final c2 = _clip('c2', 2000);
+      var track = _lane([missing, c2]);
+      final stub = _StubSpectrograms(
+        metricsByPath: {'c1.wav': _metrics(10), 'c2.wav': _metrics(10)},
+        specsByPath: {'c1.wav': _spec(10), 'c2.wav': _spec(10)},
+      );
+      final cache = _cache(spectrograms: stub, selectedTrack: () => track);
+      addTearDown(cache.dispose);
+
+      await cache.ensureSelectedSpectrogram();
+      // Only c2 analyzed: c1 is an honest gap while its bytes are missing.
+      expect(cache.selectedMetrics!.active.take(10), everyElement(0));
+
+      // The bytes landed and a re-read hydrated the clip at a real path.
+      track = _lane([missing.copyWith(audioFilePath: 'c1.wav'), c2]);
+      await cache.ensureSelectedSpectrogram();
+      expect(
+        cache.selectedMetrics!.active.take(10).where((a) => a != 0),
+        isNotEmpty,
+        reason: 'the clip that arrived is part of the lane analysis now',
+      );
     });
 
     test('self-invalidates when a clip moves (offsets are baked in)', () {

@@ -423,12 +423,15 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   Future<void> seek(Duration to) => _seek(to);
 
   /// Cache key for a take's whole-lane aggregate analysis. Embeds the ordered
-  /// clip ids AND their timeline starts (with an `agg:` prefix that no file
-  /// path uses) so the key self-invalidates whenever the clip set changes or a
-  /// clip moves — the merged analysis bakes each clip's lane-relative offset
-  /// into its frame placement.
+  /// clip ids, their timeline starts AND their files (with an `agg:` prefix
+  /// that no file path uses) so the key self-invalidates whenever the clip set
+  /// changes, a clip moves — the merged analysis bakes each clip's
+  /// lane-relative offset into its frame placement — or a clip is re-read at
+  /// another path: a synced clip whose bytes had not arrived carries an
+  /// `asset://` ref that analyzes to nothing, and once a re-read hydrates it
+  /// at its pool path a path-blind key kept serving the lane without it.
   String aggregateKeyFor(AudioTrack track) =>
-      'agg:${track.id}#${track.clips.map((c) => '${c.id}@${c.startMs}').join(',')}';
+      'agg:${track.id}#${track.clips.map((c) => '${c.id}@${c.startMs}:${c.audioFilePath}').join(',')}';
 
   /// The subject the inspector analyzes for the current selection: a single
   /// selected clip (analyze that one file), or — when the lane is selected via
