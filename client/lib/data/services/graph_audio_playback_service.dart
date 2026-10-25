@@ -384,8 +384,25 @@ class GraphAudioPlaybackService implements PlaybackEngine {
   }
 
   final Map<String, int> _trackIndex = {};
+  // The committed tracks that play through an earlier clip's chain (see
+  // [TrackPlayback.laneId]). Pan, FX and sends address that chain, so they are
+  // pushed for the lane's leader only: a copy per clip filled the engine's
+  // command ring on a many-clip lane, and each FX drag tick then reached the
+  // audio a few blocks late, holding every other live edit up behind it.
+  final Set<String> _laneFollowers = {};
   // Each FX bus id's index into the committed graph (for live bus FX/volume/meter).
   final Map<String, int> _busIndex = {};
+  // Each live setter's newest value, stamped with [_liveSeq]. A sync job pushes
+  // the model it was handed, which is older than any edit made while the job
+  // waited on the chain or on an isolate decode: the edit was heard at once on
+  // the old graph, then the job's push put the old value back. An A/B backing
+  // flip during the page-open decode stayed wrong for the session, since
+  // nothing saves or resyncs after it. Each job re-applies the edits newer than
+  // its snapshot right after its own push ([_replayLiveEdits]).
+  int _liveSeq = 0;
+  final Map<Object, ({int seq, void Function() apply})> _liveEdits = {};
+  // The [_liveSeq] the model in [_latestTracks] / [_latestBuses] carries.
+  int _latestAsOf = 0;
   // The shared reverb settings, re-applied after every graph rebuild (a rebuild resets nodes).
   ReverbSettings? _reverb;
   // The master bus gain, re-applied after every graph rebuild (a rebuild resets nodes).
@@ -674,7 +691,27 @@ class GraphAudioPlaybackService implements PlaybackEngine {
   Future<void> sync(List<TrackPlayback> tracks, List<BusPlayback> buses) {
     _latestTracks = tracks;
     _latestBuses = buses;
-    return _syncChain.add(() => _doSync(tracks, buses));
+    // Every live edit so far is in this model (the mixer updates its model
+    // before it calls a setter); later ones are replayed over it.
+    final asOf = _latestAsOf = _liveSeq;
+    return _syncChain.add(() => _doSync(tracks, buses, asOf));
+  }
+
+  /// Applies a live edit now and records it under [key] (one entry per
+  /// parameter), for the sync jobs whose snapshot predates it.
+  void _live(Object key, void Function() apply) {
+    _liveEdits[key] = (seq: ++_liveSeq, apply: apply);
+    apply();
+  }
+
+  /// Re-applies the live edits newer than a job's snapshot [asOf], after the
+  /// job pushed that snapshot. The older ones are in it and in every later
+  /// job's (jobs run in the order they were queued), so they are dropped.
+  void _replayLiveEdits(int asOf) {
+    _liveEdits.removeWhere((_, e) => e.seq <= asOf);
+    for (final e in _liveEdits.values) {
+      e.apply();
+    }
   }
 
   /// Queues the single rebuild a degraded commit needs.
@@ -693,7 +730,10 @@ class GraphAudioPlaybackService implements PlaybackEngine {
   void _scheduleDegradedRebuild() {
     unawaited(
       _syncChain
-          .add(() => _doSync(_latestTracks, _latestBuses, retry: true))
+          .add(
+            () =>
+                _doSync(_latestTracks, _latestBuses, _latestAsOf, retry: true),
+          )
           .catchError((_) {}),
     );
   }
@@ -799,9 +839,11 @@ class GraphAudioPlaybackService implements PlaybackEngine {
   /// and cleared only on a later successful one stayed set when a rejected
   /// commit returned early in between, and the NEXT degraded commit then
   /// never got its retry.
+  /// [asOf] is the [_liveSeq] the model carries (see [_replayLiveEdits]).
   Future<void> _doSync(
     List<TrackPlayback> tracks,
-    List<BusPlayback> buses, {
+    List<BusPlayback> buses,
+    int asOf, {
     bool retry = false,
   }) async {
     if (!_available) return;
@@ -816,6 +858,7 @@ class GraphAudioPlaybackService implements PlaybackEngine {
       // UI showed the new value while the engine kept playing the old one until the next
       // structural edit or reopen.
       _pushLiveParams(tracks, buses);
+      _replayLiveEdits(asOf);
       return;
     }
 
@@ -838,6 +881,7 @@ class GraphAudioPlaybackService implements PlaybackEngine {
 
     _bindings.ve_tracks_begin(_engine);
     final newIndex = <String, int>{};
+    final newFollowers = <String>{};
     // Each lane's first clip that staged: its chain is the one every later clip
     // of the lane plays through (see [TrackPlayback.laneId]).
     final laneLeader = <String, int>{};
@@ -872,8 +916,8 @@ class GraphAudioPlaybackService implements PlaybackEngine {
           final leader = laneLeader[lane];
           if (leader == null) {
             laneLeader[lane] = idx;
-          } else {
-            _bindings.ve_track_lane(_engine, idx, leader);
+          } else if (_bindings.ve_track_lane(_engine, idx, leader) == 0) {
+            newFollowers.add(t.id);
           }
         }
       }
@@ -894,6 +938,9 @@ class GraphAudioPlaybackService implements PlaybackEngine {
       _trackIndex
         ..clear()
         ..addAll(newIndex);
+      _laneFollowers
+        ..clear()
+        ..addAll(newFollowers);
       _busIndex
         ..clear()
         ..addAll(newBusIndex);
@@ -943,6 +990,7 @@ class GraphAudioPlaybackService implements PlaybackEngine {
       // block already plays the mix as set, instead of the build defaults ramping into it),
       // and only then does it go live.
       _pushLiveParams(tracks, buses);
+      _replayLiveEdits(asOf);
     } finally {
       _bindings.ve_tracks_publish(_engine);
     }
@@ -960,6 +1008,8 @@ class GraphAudioPlaybackService implements PlaybackEngine {
       final idx = _trackIndex[t.id];
       if (idx == null) continue;
       _bindings.ve_set_track_volume(_engine, idx, t.volume, t.muted ? 1 : 0);
+      // The rest is the lane chain's, set through its leader.
+      if (_laneFollowers.contains(t.id)) continue;
       _bindings.ve_set_pan(_engine, idx, t.pan);
       final fx = t.fx;
       if (fx != null) _applyFxToIndex(idx, fx);
@@ -1040,17 +1090,26 @@ class GraphAudioPlaybackService implements PlaybackEngine {
   @override
   Future<void> setVolume(String id, double volume, {bool muted = false}) async {
     if (!_available) return;
-    final idx = _trackIndex[id];
-    if (idx != null) {
-      _bindings.ve_set_track_volume(_engine, idx, volume, muted ? 1 : 0);
-    }
+    _live(('volume', id), () {
+      final idx = _trackIndex[id];
+      if (idx != null) {
+        _bindings.ve_set_track_volume(_engine, idx, volume, muted ? 1 : 0);
+      }
+    });
   }
+
+  /// [trackId]'s committed index when it owns its chain; null for a lane
+  /// follower (its pan, FX and sends are its leader's) or an unstaged track.
+  int? _chainIndex(String trackId) =>
+      _laneFollowers.contains(trackId) ? null : _trackIndex[trackId];
 
   @override
   void setTrackPan(String id, double pan) {
     if (!_available) return;
-    final idx = _trackIndex[id];
-    if (idx != null) _bindings.ve_set_pan(_engine, idx, pan);
+    _live(('pan', id), () {
+      final idx = _chainIndex(id);
+      if (idx != null) _bindings.ve_set_pan(_engine, idx, pan);
+    });
   }
 
   @override
@@ -1103,31 +1162,39 @@ class GraphAudioPlaybackService implements PlaybackEngine {
   @override
   void setTrackFx(String trackId, TrackFx fx) {
     if (!_available) return;
-    final idx = _trackIndex[trackId];
-    if (idx != null) _applyFxToIndex(idx, fx);
+    _live(('fx', trackId), () {
+      final idx = _chainIndex(trackId);
+      if (idx != null) _applyFxToIndex(idx, fx);
+    });
   }
 
   @override
   void setBusFx(String busId, TrackFx fx) {
     if (!_available) return;
-    final idx = _busIndex[busId];
-    if (idx != null) _applyBusFx(idx, fx);
+    _live(('busFx', busId), () {
+      final idx = _busIndex[busId];
+      if (idx != null) _applyBusFx(idx, fx);
+    });
   }
 
   @override
   void setBusVolume(String busId, double volume, {bool muted = false}) {
     if (!_available) return;
-    final idx = _busIndex[busId];
-    if (idx != null) {
-      _bindings.ve_set_bus_volume(_engine, idx, volume, muted ? 1 : 0);
-    }
+    _live(('busVolume', busId), () {
+      final idx = _busIndex[busId];
+      if (idx != null) {
+        _bindings.ve_set_bus_volume(_engine, idx, volume, muted ? 1 : 0);
+      }
+    });
   }
 
   @override
   void setBusPan(String busId, double pan) {
     if (!_available) return;
-    final idx = _busIndex[busId];
-    if (idx != null) _bindings.ve_set_bus_pan(_engine, idx, pan);
+    _live(('busPan', busId), () {
+      final idx = _busIndex[busId];
+      if (idx != null) _bindings.ve_set_bus_pan(_engine, idx, pan);
+    });
   }
 
   @override
@@ -1140,19 +1207,23 @@ class GraphAudioPlaybackService implements PlaybackEngine {
   @override
   void setTrackSendLevel(String trackId, int slot, double levelDb) {
     if (!_available) return;
-    final idx = _trackIndex[trackId];
-    if (idx != null) {
-      _bindings.ve_set_send_level(_engine, idx, slot, levelDb);
-    }
+    _live(('send', trackId, slot), () {
+      final idx = _chainIndex(trackId);
+      if (idx != null) {
+        _bindings.ve_set_send_level(_engine, idx, slot, levelDb);
+      }
+    });
   }
 
   @override
   void setBusSendLevel(String busId, int slot, double levelDb) {
     if (!_available) return;
-    final idx = _busIndex[busId];
-    if (idx != null) {
-      _bindings.ve_set_bus_send_level(_engine, idx, slot, levelDb);
-    }
+    _live(('busSend', busId, slot), () {
+      final idx = _busIndex[busId];
+      if (idx != null) {
+        _bindings.ve_set_bus_send_level(_engine, idx, slot, levelDb);
+      }
+    });
   }
 
   @override
@@ -1399,7 +1470,9 @@ class GraphAudioPlaybackService implements PlaybackEngine {
       _inputPullBuf = null;
     }
     _trackIndex.clear();
+    _laneFollowers.clear();
     _busIndex.clear();
+    _liveEdits.clear();
     _committedSig = '';
     await _position.close();
     await _playing.close();
