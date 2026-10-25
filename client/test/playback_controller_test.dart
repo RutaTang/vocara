@@ -185,6 +185,40 @@ void main() {
       c.setRecordingPosition(Duration(milliseconds: c.viewSpanMs ~/ 2));
       expect(c.viewStartMs, 0);
     });
+
+    // Regression guard: the timeline only grows when a save sees the take,
+    // and nothing saves mid-take. A take running past the timeline's end (an
+    // a cappella first take on the default 20 s timeline, singing on past the
+    // backing) ran the record head and its forming waveform off the window,
+    // and the view had nowhere to scroll after them.
+    test('a take running past the timeline end stays in view', () {
+      final c = controller(timelineMs: 20000);
+      var relayouts = 0;
+      c.viewport.addListener(() => relayouts++);
+      recording = true;
+
+      c.setRecordingPosition(const Duration(milliseconds: 26000));
+      expect(
+        c.viewStartMs + c.viewSpanMs,
+        greaterThan(26000),
+        reason: 'the fit-all view must reach the record head',
+      );
+      expect(relayouts, greaterThan(0), reason: 'the timeline must relayout');
+
+      // Zoomed in, follow pages on past the old end.
+      unawaited(c.zoomTimeline(0.25));
+      c.setRecordingPosition(const Duration(milliseconds: 40000));
+      expect(c.viewStartMs, lessThan(40000));
+      expect(c.viewStartMs + c.viewSpanMs, greaterThan(40000));
+    });
+
+    test('the record head stretches the extent only while recording', () {
+      final c = controller(timelineMs: 20000);
+      recording = true;
+      c.setRecordingPosition(const Duration(milliseconds: 26000));
+      recording = false;
+      expect(c.viewSpanMs, 20000, reason: 'the saved timeline takes over');
+    });
   });
 
   // A take plays the backing freely from its start and disables the engine's

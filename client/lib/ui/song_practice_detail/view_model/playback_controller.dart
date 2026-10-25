@@ -99,7 +99,11 @@ class PlaybackController extends ChangeNotifier {
   /// stops exactly when it matters most, and the record head (and the live
   /// waveform being drawn under it) runs off the right edge of the window.
   void setRecordingPosition(Duration to) {
+    final extent = _extentMs;
     position.value = to;
+    // Past the timeline's end the extent steps on with the head (see
+    // [_extentMs]): the timeline re-lays itself out over it, follow or not.
+    if (_extentMs != extent) _viewport.changed();
     _maybeFollowCursor(to.inMilliseconds);
   }
 
@@ -147,8 +151,24 @@ class PlaybackController extends ChangeNotifier {
   static const int _viewMinMs = 1000; // most zoomed in: a 1-second window
   int _viewSpanMs = 0; // 0 = fit all (the whole extent)
 
+  /// How far past the record head the extent reaches while a take runs on
+  /// beyond the timeline's end — a page at a time, so a fit-all view
+  /// rescales every few seconds rather than on every record tick.
+  static const int _recordReachStepMs = 10000;
+
   int get _extentMs {
-    final c = _practice()?.timelineDurationMs ?? 0;
+    var c = _practice()?.timelineDurationMs ?? 0;
+    // The timeline only grows when a save sees the take, and nothing saves
+    // mid-take: a take running past its end (an a cappella first take on the
+    // default timeline, singing on past the backing) ran the record head and
+    // its forming waveform off the window, with nowhere to scroll after
+    // them. While recording, [position] is the record head.
+    if (_isRecording()) {
+      final head = position.value.inMilliseconds;
+      if (head > c) {
+        c = (head ~/ _recordReachStepMs + 1) * _recordReachStepMs;
+      }
+    }
     return c < _viewMinMs ? _viewMinMs : c;
   }
 

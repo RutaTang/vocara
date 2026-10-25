@@ -1099,6 +1099,50 @@ class _NewTakeButton extends StatelessWidget {
   );
 }
 
+/// The painter for a whole-timeline envelope — the master or a bus lane's,
+/// [peaks] bucketed over [extentMs] from 0 — in the view [viewStartMs] +
+/// [viewSpanMs]: only the visible slice, anchored through the shared helper
+/// so it lines up with the zoomed lanes, ruler and playhead above.
+///
+/// The view can reach past [extentMs] (a take recording on past the
+/// timeline's end stretches the view until it is saved; a song shorter than
+/// the minimum view span): the slice then fills only the lane's share up to
+/// the timeline's end. Spread over the whole lane, every peak drew late.
+@visibleForTesting
+WaveformPainter timelineEnvelopePainter(
+  List<double> peaks, {
+  required int extentMs,
+  required int viewStartMs,
+  required int viewSpanMs,
+  required Color color,
+}) {
+  if (extentMs <= 0 ||
+      peaks.isEmpty ||
+      (viewStartMs <= 0 && viewSpanMs == extentMs)) {
+    return WaveformPainter(peaks: peaks, color: color);
+  }
+  final end = viewStartMs + viewSpanMs > extentMs
+      ? extentMs
+      : viewStartMs + viewSpanMs;
+  if (end <= viewStartMs) {
+    return WaveformPainter(peaks: const [], color: color);
+  }
+  final cut = visiblePeakSlice(
+    peaks,
+    spanStartMs: 0,
+    spanDurMs: extentMs,
+    visibleStartMs: viewStartMs,
+    visibleEndMs: end,
+  );
+  return WaveformPainter(
+    peaks: cut.peaks,
+    color: color,
+    widthFraction: (end - viewStartMs) / viewSpanMs,
+    indexOffset: cut.indexOffset,
+    indexSpan: cut.indexSpan,
+  );
+}
+
 /// A draggable horizontal scrollbar under the lanes — the reliable way to pan
 /// the timeline (works regardless of trackpad gesture quirks). Hidden at fit-all
 /// zoom (nothing to scroll); aligned to the timeline column (right of headers).
@@ -1317,40 +1361,16 @@ class _MasterRow extends StatelessWidget {
                           child: TickBoundary(
                             child: ValueListenableBuilder<List<double>>(
                               valueListenable: vm.recording.recordingPeaks,
-                              builder: (context, _, _) {
-                                // The master envelope spans the whole extent — show
-                                // only the visible [viewStart, viewStart+span] slice,
-                                // anchored through the shared helper so it lines up
-                                // with the zoomed lanes, ruler and playhead above.
-                                final all = vm.mixer.masterWaveformPeaks;
-                                final ext =
-                                    vm.practice?.timelineDurationMs ?? 0;
-                                var peaks = all;
-                                var indexOffset = 0.0;
-                                double? indexSpan;
-                                if (ext > 0 && tl < ext && all.isNotEmpty) {
-                                  final cut = visiblePeakSlice(
-                                    all,
-                                    spanStartMs: 0,
-                                    spanDurMs: ext,
-                                    visibleStartMs: viewStart,
-                                    visibleEndMs: viewStart + tl > ext
-                                        ? ext
-                                        : viewStart + tl,
-                                  );
-                                  peaks = cut.peaks;
-                                  indexOffset = cut.indexOffset;
-                                  indexSpan = cut.indexSpan;
-                                }
-                                return CustomPaint(
-                                  painter: WaveformPainter(
-                                    peaks: peaks,
-                                    color: Studio.accent,
-                                    indexOffset: indexOffset,
-                                    indexSpan: indexSpan,
-                                  ),
-                                );
-                              },
+                              builder: (context, _, _) => CustomPaint(
+                                painter: timelineEnvelopePainter(
+                                  vm.mixer.masterWaveformPeaks,
+                                  extentMs:
+                                      vm.practice?.timelineDurationMs ?? 0,
+                                  viewStartMs: viewStart,
+                                  viewSpanMs: tl,
+                                  color: Studio.accent,
+                                ),
+                              ),
                             ),
                           ),
                         ),
@@ -1613,36 +1633,16 @@ class _BusRow extends StatelessWidget {
                           child: TickBoundary(
                             child: ValueListenableBuilder<List<double>>(
                               valueListenable: vm.recording.recordingPeaks,
-                              builder: (context, _, _) {
-                                final all = vm.mixer.busWaveformPeaks(bus.id);
-                                final ext =
-                                    vm.practice?.timelineDurationMs ?? 0;
-                                var peaks = all;
-                                var indexOffset = 0.0;
-                                double? indexSpan;
-                                if (ext > 0 && tl < ext && all.isNotEmpty) {
-                                  final cut = visiblePeakSlice(
-                                    all,
-                                    spanStartMs: 0,
-                                    spanDurMs: ext,
-                                    visibleStartMs: viewStart,
-                                    visibleEndMs: viewStart + tl > ext
-                                        ? ext
-                                        : viewStart + tl,
-                                  );
-                                  peaks = cut.peaks;
-                                  indexOffset = cut.indexOffset;
-                                  indexSpan = cut.indexSpan;
-                                }
-                                return CustomPaint(
-                                  painter: WaveformPainter(
-                                    peaks: peaks,
-                                    color: accent,
-                                    indexOffset: indexOffset,
-                                    indexSpan: indexSpan,
-                                  ),
-                                );
-                              },
+                              builder: (context, _, _) => CustomPaint(
+                                painter: timelineEnvelopePainter(
+                                  vm.mixer.busWaveformPeaks(bus.id),
+                                  extentMs:
+                                      vm.practice?.timelineDurationMs ?? 0,
+                                  viewStartMs: viewStart,
+                                  viewSpanMs: tl,
+                                  color: accent,
+                                ),
+                              ),
                             ),
                           ),
                         ),
