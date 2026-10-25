@@ -59,7 +59,10 @@ class _TempStorage extends LocalStorageService {
 /// Analysis fake that decodes nothing (the real one needs the native engine).
 class _NullAnalysis extends Fake implements MediaAnalysisService {
   @override
-  Future<TechniqueAnalysis?> analyze(String path) async => null;
+  Future<TechniqueAnalysis?> analyze(
+    String path, {
+    bool Function()? wanted,
+  }) async => null;
 }
 
 /// Recorder fake: [start] writes a distinct WAV stub into its own temp dir

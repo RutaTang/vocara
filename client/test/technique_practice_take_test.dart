@@ -72,7 +72,10 @@ class _FreshAnalysis extends Fake implements MediaAnalysisService {
   Completer<void>? gate;
 
   @override
-  Future<TechniqueAnalysis?> analyze(String path) async {
+  Future<TechniqueAnalysis?> analyze(
+    String path, {
+    bool Function()? wanted,
+  }) async {
     await gate?.future;
     return _analysis();
   }

@@ -66,7 +66,10 @@ class _FakeRepo implements TechniqueRepository {
 /// the recorded file regardless of any analysis outcome.
 class _NullAnalysis extends Fake implements MediaAnalysisService {
   @override
-  Future<TechniqueAnalysis?> analyze(String path) async => null;
+  Future<TechniqueAnalysis?> analyze(
+    String path, {
+    bool Function()? wanted,
+  }) async => null;
 }
 
 /// A [LocalStorageService] rooted at a test temp dir, so importMedia works

@@ -696,8 +696,10 @@ void main() {
 /// hours-long reference clip would.
 class _CapTrippingAnalysis extends Fake implements MediaAnalysisService {
   @override
-  Future<TechniqueAnalysis?> analyze(String path) async =>
-      throw const MediaTooLongException(Duration(minutes: 30));
+  Future<TechniqueAnalysis?> analyze(
+    String path, {
+    bool Function()? wanted,
+  }) async => throw const MediaTooLongException(Duration(minutes: 30));
 }
 
 /// Recorder fake that touches no disk: [start] hands out a path in a folder

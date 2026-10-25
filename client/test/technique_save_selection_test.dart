@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -76,9 +77,16 @@ class _FixedAnalysis extends Fake implements MediaAnalysisService {
   bool failing = false;
   int analyzeCalls = 0;
 
+  /// While set, every call parks on it (a slow DSP pass).
+  Completer<void>? gate;
+
   @override
-  Future<TechniqueAnalysis?> analyze(String path) async {
+  Future<TechniqueAnalysis?> analyze(
+    String path, {
+    bool Function()? wanted,
+  }) async {
     analyzeCalls++;
+    await gate?.future;
     return failing ? null : result;
   }
 }
@@ -324,5 +332,31 @@ void main() {
     expect(vm.referenceAnalysisFailed, isTrue);
     await vm.ensureReferenceAnalysis();
     expect(analysis.analyzeCalls, analyzeCallsBeforeSave);
+  });
+
+  test('a save landing while the staged clip is still analyzed does not '
+      'start a second analysis of it', () async {
+    // Regression: the in-flight analysis kept its completion keyed on the
+    // staged (sandbox) path, so the saved example read as not loading under
+    // its pool path — the view started a second full decode of the same
+    // bytes, and the first one parked a dead entry in the shared cache.
+    vm.beginMediaDraft();
+    expect(await vm.startExampleRecording(), isNull);
+    await vm.stopExampleRecording();
+    analysis.gate = Completer<void>();
+    final analyzing = vm.ensureReferenceAnalysis();
+    expect(vm.referenceAnalysisLoading, isTrue);
+
+    expect(await vm.save(vm.technique!), isTrue);
+    expect(vm.referenceAnalysisLoading, isTrue, reason: 'the same analysis');
+    unawaited(vm.ensureReferenceAnalysis()); // the screen's post-frame call
+    expect(analysis.analyzeCalls, 1);
+
+    analysis.gate!.complete();
+    await analyzing;
+    expect(vm.referenceAnalysisLoading, isFalse);
+    expect(identical(vm.referenceAnalysis, analysis.result), isTrue);
+    await vm.ensureReferenceAnalysis();
+    expect(analysis.analyzeCalls, 1);
   });
 }

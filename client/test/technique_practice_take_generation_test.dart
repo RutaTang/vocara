@@ -64,7 +64,10 @@ class _FixedAnalysis extends Fake implements MediaAnalysisService {
   final List<String> analyzed = [];
 
   @override
-  Future<TechniqueAnalysis?> analyze(String path) async {
+  Future<TechniqueAnalysis?> analyze(
+    String path, {
+    bool Function()? wanted,
+  }) async {
     analyzed.add(path);
     return result;
   }

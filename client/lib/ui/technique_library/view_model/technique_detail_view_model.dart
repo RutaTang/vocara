@@ -498,6 +498,11 @@ class TechniqueDetailViewModel extends ChangeNotifier
   /// Paths whose analysis is currently in flight.
   final Set<String> _loadingPaths = {};
 
+  /// In-flight analyses whose clip a commit moved to a new (pool) path: the
+  /// old path -> the path the result lands under (see
+  /// [_remapMediaAfterCommit]).
+  final Map<String, String> _inFlightMoves = {};
+
   TechniqueAnalysis? get _selectedReference {
     final path = referenceMedia?.path;
     return path == null ? null : _refCache[path];
@@ -536,34 +541,56 @@ class TechniqueDetailViewModel extends ChangeNotifier
     _loadingPaths.add(path);
     notifyListeners();
 
+    // Where the result lands: [path], unless a commit moved the clip to its
+    // pool path while this was in flight (see [_remapMediaAfterCommit]).
+    var landed = path;
+    var skipped = false;
     // analyze() can THROW (native decode / isolate-spawn failure), not just
     // return null. Without try/finally the path would stay in _loadingPaths
     // forever — the spinner sticks AND the contains-guard above blocks every
     // retry. Always clear the loading flag and latch failure.
     try {
-      final result = await _analysis.analyze(path);
+      final result = await _analysis.analyze(
+        path,
+        // Asked when the app-wide analysis gate admits the call: one queued
+        // behind other computes while the user clicked on to another example
+        // (or left the screen) is dropped before its decode, instead of
+        // delaying the analyses still wanted behind a full pass for nothing.
+        wanted: () {
+          skipped =
+              _disposed ||
+              referenceMedia?.path != (_inFlightMoves[path] ?? path);
+          return !skipped;
+        },
+      );
       // The screen can be gone by now (analysis outlives a quick back-out);
       // its cache has left the shared analysis budget and nothing will read
       // these latches again. The cache drops the write on its own, so this is
       // about not doing pointless work, not about correctness.
       if (_disposed) return;
-      if (result != null) {
-        _refCache[path] = result;
+      landed = _inFlightMoves[path] ?? path;
+      if (skipped) {
+        // Nothing to latch: selecting the example again analyzes it.
+      } else if (result != null) {
+        _refCache[landed] = result;
       } else {
-        _refFailed.add(path);
+        _refFailed.add(landed);
       }
     } catch (e) {
-      _refFailed.add(path);
+      landed = _inFlightMoves[path] ?? path;
+      _refFailed.add(landed);
       // Keep the cause when it is user-presentable (the decode-length cap),
       // so the failure hint can say WHY instead of the generic copy.
       if (e is MediaTooLongException || e is MediaUnsupportedException) {
-        _refFailedMessage[path] = e.toString();
+        _refFailedMessage[landed] = e.toString();
       }
     } finally {
       _loadingPaths.remove(path);
+      final moved = _inFlightMoves.remove(path);
+      if (moved != null) _loadingPaths.remove(moved);
     }
     // Place the playhead if this is still the shown reference.
-    if (referenceMedia?.path == path &&
+    if (referenceMedia?.path == landed &&
         _subject == TechniqueAnalysisSubject.reference) {
       _syncPositionToSubject();
     }
@@ -1603,12 +1630,19 @@ class TechniqueDetailViewModel extends ChangeNotifier
   /// stable; without the remap the just-computed analysis is orphaned under
   /// the old path. (The selection is keyed by id, so it needs no carrying.)
   /// [oldPathById] maps each committed clip's id to its pre-commit path.
-  /// [_loadingPaths] is deliberately left alone: an in-flight analysis keys
-  /// its own completion (cache write + loading clear) on the old path.
   void _remapMediaAfterCommit(Map<String, String> oldPathById) {
     for (final m in _technique?.media ?? const <TechniqueMedia>[]) {
       final old = oldPathById[m.id];
       if (old == null || old == m.path) continue;
+      // An analysis still in flight under the old path lands under the new
+      // one (see [ensureReferenceAnalysis]), and the new path reads as
+      // loading meanwhile: keyed on the old path alone, the saved example
+      // looked unanalyzed, the view started a second full pass over the same
+      // bytes, and the first parked a dead entry in the shared cache.
+      if (_loadingPaths.contains(old) && !_loadingPaths.contains(m.path)) {
+        _loadingPaths.add(m.path);
+        _inFlightMoves[old] = m.path;
+      }
       final cached = _refCache.remove(old);
       if (cached != null) _refCache[m.path] = cached;
       // The pool copy is byte-identical to the staged file, so a latched

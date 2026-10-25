@@ -42,12 +42,22 @@ class MediaAnalysisService {
   /// file can't be decoded or is empty; throws [MediaTooLongException] when it
   /// exceeds [maxAnalysisDuration] (a clear, user-presentable message —
   /// callers already handle analyze() throwing).
-  Future<TechniqueAnalysis?> analyze(String path) async {
+  ///
+  /// [wanted], when given, is asked once the gate admits the call: false
+  /// abandons it before the decode and returns null. A call can wait behind
+  /// other computes long enough to go stale (its example deselected, its
+  /// screen left), and running it anyway only delays the ones still wanted.
+  /// A caller passing it tells such a skip from a failed decode itself.
+  Future<TechniqueAnalysis?> analyze(
+    String path, {
+    bool Function()? wanted,
+  }) async {
     // Gated end to end: the DECODE is the larger peak of this pipeline, so
     // it must sit inside the same admission as the analysis isolate —
     // otherwise two callers could stack full-track decodes while "only"
     // their analyses were serialized.
     return analysisGate.run(() async {
+      if (wanted != null && !wanted()) return null;
       final pcm = await decodeMediaToMono(
         path,
         maxDuration: maxAnalysisDuration,

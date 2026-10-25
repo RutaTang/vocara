@@ -55,7 +55,10 @@ class _FakeRepo implements TechniqueRepository {
 /// irrelevant to the dropped-frames notice under test.
 class _NullAnalysis extends Fake implements MediaAnalysisService {
   @override
-  Future<TechniqueAnalysis?> analyze(String path) async => null;
+  Future<TechniqueAnalysis?> analyze(
+    String path, {
+    bool Function()? wanted,
+  }) async => null;
 }
 
 /// A [LocalStorageService] rooted at a test temp dir, so importMedia works

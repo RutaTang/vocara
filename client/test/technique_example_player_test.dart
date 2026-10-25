@@ -111,7 +111,10 @@ class _FakeRepo implements TechniqueRepository {
 /// so these tests stay off the dock views.
 class _NoAnalysis extends Fake implements MediaAnalysisService {
   @override
-  Future<TechniqueAnalysis?> analyze(String path) async => null;
+  Future<TechniqueAnalysis?> analyze(
+    String path, {
+    bool Function()? wanted,
+  }) async => null;
 }
 
 /// Recorder fake: [start] arms a take in its own temp dir (the view model

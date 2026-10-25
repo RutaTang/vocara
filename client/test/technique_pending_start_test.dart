@@ -56,7 +56,10 @@ class _FakeRepo implements TechniqueRepository {
 
 class _NoAnalysis extends Fake implements MediaAnalysisService {
   @override
-  Future<TechniqueAnalysis?> analyze(String path) async => null;
+  Future<TechniqueAnalysis?> analyze(
+    String path, {
+    bool Function()? wanted,
+  }) async => null;
 }
 
 /// Recorder fake whose [start] parks until the test resolves [pending] —
