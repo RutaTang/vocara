@@ -86,6 +86,16 @@ class _FakeEngine extends Fake implements GraphAudioPlaybackService {
   @override
   void setMonitorReverb(double room, double damping, double wet) {}
 
+  /// The input stream state word and the device it is bound to (see the engine's).
+  int streamState = 0;
+  String boundInput = '';
+
+  @override
+  int inputStreamState() => streamState;
+
+  @override
+  String actualInputDevice() => boundInput;
+
   /// Every input-channel mode pushed, in order.
   final inputChannelCalls = <int>[];
 
@@ -648,6 +658,40 @@ void main() {
       expect(engine.inputChannelCalls, [1]);
       expect(engine.inputGainCalls.single, closeTo(1.0, 1e-9));
     });
+
+    test(
+      'a take start with the mic open keys on the device it is bound to',
+      () async {
+        // The stream retries the chosen device only when it opens: monitoring
+        // that opened on the fallback stays there after the chosen interface
+        // returns, and keyed on the interface the fallback recorded under its
+        // choice.
+        ins = [_builtInMic];
+        storage.doc = {
+          'inputDeviceUid': _interface.uid,
+          'inputChannelByUid': {_interface.uid: 2, _builtInMic.uid: 1},
+        };
+        await service.load();
+        final engine = _FakeEngine();
+        service.attachEngine(engine);
+        ins = [_builtInMic, _interface]; // plugged back in
+
+        engine
+          ..streamState =
+              1 // open, on the fallback
+          ..boundInput = _builtInMic.uid;
+        service.syncInputChannel();
+        expect(engine.inputChannelCalls.last, 1, reason: "the bound mic's");
+
+        engine.boundInput = ''; // open on the system default
+        service.syncInputChannel();
+        expect(engine.inputChannelCalls.last, 1, reason: "the default's");
+
+        engine.streamState = 0; // closed: the next open takes the interface
+        service.syncInputChannel();
+        expect(engine.inputChannelCalls.last, 2, reason: "the interface's");
+      },
+    );
 
     test(
       'a take start re-keys the channel without switching devices',

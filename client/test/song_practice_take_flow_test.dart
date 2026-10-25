@@ -259,6 +259,9 @@ class _FakeGraphEngine extends _FakeEngine
   @override
   void setInputGain(double gain) {}
 
+  @override
+  int inputStreamState() => 0; // closed until a take opens it
+
   /// Every input-channel mode pushed, in order.
   final inputChannels = <int>[];
 

@@ -142,10 +142,8 @@ class AppSettingsService extends ChangeNotifier {
     if (uid != null && uid.isNotEmpty && !_isMissing(devices, uid)) {
       return uid;
     }
-    for (final d in devices) {
-      if (d.isDefault) return d.uid;
-    }
-    return uid ?? '';
+    final fallback = _defaultIn(devices);
+    return fallback.isNotEmpty ? fallback : uid ?? '';
   }
 
   // The choice for the device that [key] names.
@@ -161,7 +159,34 @@ class AppSettingsService extends ChangeNotifier {
   /// now (an interface plugged in, or a default that moved, since the screen opened). Only that —
   /// a full [refreshDevices] there also switched a returned device back synchronously, re-opening
   /// the mic or blocking on the output host right as the take armed.
-  void syncInputChannel() => _engine?.setInputChannel(_channelCapturingNow());
+  ///
+  /// With the mic already open (monitoring), the device capturing is the one the stream is bound
+  /// to: it retries the chosen device only when it opens, so a mic open on the fallback stays
+  /// there after the chosen one returns — and keyed on the returned one, the fallback recorded
+  /// under its choice.
+  void syncInputChannel() {
+    final engine = _engine;
+    if (engine == null) return;
+    final open = GraphAudioPlaybackService.inputStateRunning(
+      engine.inputStreamState(),
+    );
+    final String key;
+    if (!open) {
+      key = _keyIn(_enumerateInputs());
+    } else {
+      final bound = engine.actualInputDevice();
+      key = bound.isNotEmpty ? bound : _defaultIn(_enumerateInputs());
+    }
+    engine.setInputChannel(_channelFor(key));
+  }
+
+  // The system default input in [devices] ('' when none is marked).
+  static String _defaultIn(List<AudioDevice> devices) {
+    for (final d in devices) {
+      if (d.isDefault) return d.uid;
+    }
+    return '';
+  }
 
   /// Which input(s) of the current input device the engine records and monitors: a
   /// [GraphAudioPlaybackService] `inputChannel*` mode, Auto unless chosen for this device.
