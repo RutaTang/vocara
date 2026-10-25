@@ -14,6 +14,7 @@
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show RenderParagraph;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vocara/domain/models/audio_fx.dart';
 import 'package:vocara/domain/models/audio_track.dart';
@@ -541,6 +542,53 @@ void main() {
       );
       await pump(tester, bus: routed, buses: [_bus('a', long), routed]);
       expectInsidePanel(tester);
+    });
+
+    // Bounding the chip with a Flexible beside the row's Spacer split the free
+    // space in half: the chip came off the right edge, and ordinary names
+    // ellipsized with most of the row empty.
+    void expectWholeAndFlushRight(WidgetTester tester, String name) {
+      expect(tester.takeException(), isNull);
+      final text = tester.renderObject<RenderParagraph>(find.text(name));
+      expect(text.didExceedMaxLines, isFalse, reason: '"$name" shows whole');
+      final panel = tester.getRect(find.byType(LeftPanel));
+      // The chip's chevron: in the nearest row around its name.
+      final chip = find
+          .ancestor(of: find.text(name), matching: find.byType(Row))
+          .first;
+      final chevron = tester.getRect(
+        find.descendant(of: chip, matching: find.byIcon(Icons.expand_more)),
+      );
+      // The footer's 14 px padding, then the chip's 9 px padding and border.
+      expect(chevron.right, closeTo(panel.right - 14 - 10, 1.5));
+    }
+
+    testWidgets("a take's OUTPUT chip sits flush right, its name whole", (
+      tester,
+    ) async {
+      await pump(
+        tester,
+        track: _vocal(busId: 'a'),
+        buses: [_bus('a', 'Vocal Reverb')],
+      );
+      expectWholeAndFlushRight(tester, 'Vocal Reverb');
+    });
+
+    testWidgets("a bus's OUTPUT chip sits flush right, its name whole", (
+      tester,
+    ) async {
+      final routed = FxBus(
+        id: 'b',
+        name: 'Delay',
+        fx: TrackFx.flat(),
+        outputBusId: 'a',
+      );
+      await pump(
+        tester,
+        bus: routed,
+        buses: [_bus('a', 'Vocal Reverb'), routed],
+      );
+      expectWholeAndFlushRight(tester, 'Vocal Reverb');
     });
 
     testWidgets("a bus's own output never offers itself", (tester) async {

@@ -307,63 +307,68 @@ class _BusChannelFooter extends StatelessWidget {
           Row(
             children: [
               const _StripLabel('OUTPUT'),
-              const Spacer(),
-              // Bounded by the row: a long bus name ellipsizes in the chip
-              // instead of running past the inspector's edge.
-              Flexible(
-                child: MouseRegion(
-                  cursor: SystemMouseCursors.click,
-                  child: Builder(
-                    builder: (anchor) => GestureDetector(
-                      // The chip's own context: the footer's anchored the menu
-                      // below the whole footer instead of under the chip.
-                      onTap: () =>
-                          showStudioMenu(anchor, menuAnchorBelow(anchor), [
-                            StudioMenuItem(
-                              label: 'Stereo Out',
-                              selected: bus.outputBusId == null,
-                              onTap: () => vm.mixer.setBusOutput(bus.id, null),
-                            ),
-                            for (final b in buses)
-                              if (b.id != bus.id)
-                                StudioMenuItem(
-                                  label: b.name,
-                                  selected: bus.outputBusId == b.id,
-                                  onTap: () =>
-                                      vm.mixer.setBusOutput(bus.id, b.id),
-                                ),
-                          ], width: 180),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 9,
-                          vertical: 5,
-                        ),
-                        decoration: BoxDecoration(
-                          color: Studio.inset,
-                          borderRadius: BorderRadius.circular(6),
-                          border: Border.all(color: Studio.border),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Flexible(
-                              child: Text(
-                                dest,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  color: Studio.textSecondary,
-                                  fontSize: 11,
+              // Flush right in the rest of the row, and bounded by it: a long
+              // bus name ellipsizes in the chip instead of running past the
+              // inspector's edge. (A Spacer beside a Flexible split the space
+              // in half and cut ordinary names short.)
+              Expanded(
+                child: Align(
+                  alignment: Alignment.centerRight,
+                  child: MouseRegion(
+                    cursor: SystemMouseCursors.click,
+                    child: Builder(
+                      builder: (anchor) => GestureDetector(
+                        // The chip's own context: the footer's anchored the menu
+                        // below the whole footer instead of under the chip.
+                        onTap: () =>
+                            showStudioMenu(anchor, menuAnchorBelow(anchor), [
+                              StudioMenuItem(
+                                label: 'Stereo Out',
+                                selected: bus.outputBusId == null,
+                                onTap: () =>
+                                    vm.mixer.setBusOutput(bus.id, null),
+                              ),
+                              for (final b in buses)
+                                if (b.id != bus.id)
+                                  StudioMenuItem(
+                                    label: b.name,
+                                    selected: bus.outputBusId == b.id,
+                                    onTap: () =>
+                                        vm.mixer.setBusOutput(bus.id, b.id),
+                                  ),
+                            ], width: 180),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 9,
+                            vertical: 5,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Studio.inset,
+                            borderRadius: BorderRadius.circular(6),
+                            border: Border.all(color: Studio.border),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Flexible(
+                                child: Text(
+                                  dest,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    color: Studio.textSecondary,
+                                    fontSize: 11,
+                                  ),
                                 ),
                               ),
-                            ),
-                            const SizedBox(width: 4),
-                            const Icon(
-                              Icons.expand_more,
-                              size: 14,
-                              color: Studio.textFaint,
-                            ),
-                          ],
+                              const SizedBox(width: 4),
+                              const Icon(
+                                Icons.expand_more,
+                                size: 14,
+                                color: Studio.textFaint,
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                     ),
@@ -559,9 +564,13 @@ class _TrackChannelFooter extends StatelessWidget {
             Row(
               children: [
                 const _StripLabel('OUTPUT'),
-                const Spacer(),
-                Flexible(
-                  child: _OutputChip(vm: vm, track: track),
+                // Flush right in the rest of the row, and bounded by it (see
+                // the bus footer's).
+                Expanded(
+                  child: Align(
+                    alignment: Alignment.centerRight,
+                    child: _OutputChip(vm: vm, track: track),
+                  ),
                 ),
               ],
             ),
