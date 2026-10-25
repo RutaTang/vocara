@@ -147,9 +147,12 @@ AudioTrack _take(String id) => AudioTrack(
   versionId: 'v1',
 );
 
-SongPractice _practice({List<AudioTrack> takes = const []}) => SongPractice(
+SongPractice _practice({
+  List<AudioTrack> takes = const [],
+  String title = 'Hai Kuo',
+}) => SongPractice(
   id: 'p1',
-  title: 'Hai Kuo',
+  title: title,
   createdAt: DateTime(2026),
   updatedAt: DateTime(2026),
   vocalTracks: takes,
@@ -158,14 +161,10 @@ SongPractice _practice({List<AudioTrack> takes = const []}) => SongPractice(
 
 void main() {
   setUp(() {
-    // A real window, not the 800x600 test default. The bar is a Stack: the
-    // centre transport row paints last and therefore wins the hit test
-    // wherever it overlaps the right-aligned zoom controls. At 800 px the
-    // zoom-out icon's centre (x=645) falls inside the transport row (right
-    // edge 654) and is unclickable; at the app's enforced 960 px minimum
-    // window it clears by 71 px, so the overlap is not reachable in the
-    // shipped app — but a test on the default surface would "prove" the zoom
-    // control broken.
+    // A real window, not the 800x600 test default. The transport is centred
+    // and the title and zoom control get the room either side of it; under
+    // the test font's wide glyphs the 800 px default leaves the zoom control
+    // too little, which the app's enforced 960 px minimum window does not.
     final view =
         TestWidgetsFlutterBinding.instance.platformDispatcher.views.first;
     view.physicalSize = const Size(1440, 900);
@@ -367,6 +366,27 @@ void main() {
       notes: 0,
     );
     expect(find.text('2 takes · 0 notes'), findsOneWidget);
+  });
+
+  // The title had no width of its own: a song title longer than the room
+  // beside the centred transport ran under the play and stop buttons, and a
+  // very long one overflowed the bar.
+  group('a long title', () {
+    const long = 'A Considerably Longer Song Title Than Most';
+
+    testWidgets('ends before the transport', (tester) async {
+      await pump(tester, practice: _practice(title: long));
+      final title = tester.getRect(find.text(long));
+      final play = tester.getRect(button(FIcons.play).first);
+      expect(title.right, lessThanOrEqualTo(play.left));
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('never overflows the bar', (tester) async {
+      await pump(tester, practice: _practice(title: long * 8));
+      expect(tester.takeException(), isNull);
+      expect(find.text('0 takes · 0 notes'), findsOneWidget);
+    });
   });
 
   testWidgets('busy shows the spinner', (tester) async {

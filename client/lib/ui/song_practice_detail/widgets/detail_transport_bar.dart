@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:forui/forui.dart';
@@ -53,22 +55,28 @@ class DetailTransportBar extends StatelessWidget {
           color: Studio.surface,
           border: Border(bottom: BorderSide(color: Studio.border)),
         ),
-        child: Stack(
+        child: CustomMultiChildLayout(
+          delegate: _BarLayout(),
           children: [
             // Left: back + title + counts.
-            Align(
-              alignment: Alignment.centerLeft,
+            LayoutId(
+              id: _BarSlot.left,
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   _BackButton(onTap: onBack),
                   const SizedBox(width: 6),
-                  Text(
-                    practice.title,
-                    style: const TextStyle(
-                      color: Studio.textPrimary,
-                      fontSize: 15,
-                      fontWeight: FontWeight.w700,
+                  // The title gives way first (see [_BarLayout]).
+                  Flexible(
+                    child: Text(
+                      practice.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Studio.textPrimary,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                      ),
                     ),
                   ),
                   const SizedBox(width: 10),
@@ -84,8 +92,8 @@ class DetailTransportBar extends StatelessWidget {
             ),
             // Right: timeline zoom — a horizontal slider flanked by zoom icons,
             // like Logic's zoom control.
-            Align(
-              alignment: Alignment.centerRight,
+            LayoutId(
+              id: _BarSlot.right,
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -114,8 +122,8 @@ class DetailTransportBar extends StatelessWidget {
               ),
             ),
             // Center: the transport, independent of the title width.
-            Align(
-              alignment: Alignment.center,
+            LayoutId(
+              id: _BarSlot.center,
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -205,6 +213,42 @@ class DetailTransportBar extends StatelessWidget {
       ),
     );
   }
+}
+
+enum _BarSlot { left, center, right }
+
+/// Centres the transport on the bar, then gives the title group and the zoom
+/// control the room either side of it. Laid over one another in a Stack, a
+/// title longer than that room ran under the play and stop buttons (and a
+/// very long one overflowed the bar); bounded here, it ellipsizes instead.
+class _BarLayout extends MultiChildLayoutDelegate {
+  /// The least clear space kept between the transport and either side.
+  static const double _gap = 12;
+
+  @override
+  void performLayout(Size size) {
+    final center = layoutChild(_BarSlot.center, BoxConstraints.loose(size));
+    positionChild(
+      _BarSlot.center,
+      Offset(
+        (size.width - center.width) / 2,
+        (size.height - center.height) / 2,
+      ),
+    );
+    final side = BoxConstraints.loose(
+      Size(math.max(0, (size.width - center.width) / 2 - _gap), size.height),
+    );
+    final left = layoutChild(_BarSlot.left, side);
+    positionChild(_BarSlot.left, Offset(0, (size.height - left.height) / 2));
+    final right = layoutChild(_BarSlot.right, side);
+    positionChild(
+      _BarSlot.right,
+      Offset(size.width - right.width, (size.height - right.height) / 2),
+    );
+  }
+
+  @override
+  bool shouldRelayout(_BarLayout oldDelegate) => false;
 }
 
 class _BackButton extends StatelessWidget {

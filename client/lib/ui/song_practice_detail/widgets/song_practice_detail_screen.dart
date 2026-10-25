@@ -849,7 +849,7 @@ class _Center extends StatelessWidget {
                                     ),
                                   ),
                           ),
-                          _TakesHeader(vm: vm),
+                          TakesHeader(vm: vm),
                           if (vm.versions.vocalTakes.isEmpty && !vm.isRecording)
                             _AudioDropZone(
                               onDropPaths: onDropNewTake,
@@ -1018,8 +1018,9 @@ class _BackingToggle extends StatelessWidget {
 /// Header for the vocal-takes section: the "VOCAL TAKES" label plus a dropdown
 /// that switches between the song's interpretations (emotional/technical
 /// readings), each grouping its own takes against the shared backing.
-class _TakesHeader extends StatelessWidget {
-  const _TakesHeader({required this.vm});
+@visibleForTesting
+class TakesHeader extends StatelessWidget {
+  const TakesHeader({required this.vm, super.key});
 
   final SongPracticeDetailViewModel vm;
 
@@ -1038,10 +1039,19 @@ class _TakesHeader extends StatelessWidget {
               letterSpacing: 0.8,
             ),
           ),
-          const Spacer(),
-          _NewTakeButton(onTap: () => vm.createEmptyVocalTake()),
           const SizedBox(width: 10),
-          _InterpretationDropdown(vm: vm),
+          // On a narrow centre pane the dropdown gives way (its name
+          // ellipsizes) rather than overflowing the row off its chevron.
+          Expanded(
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                _NewTakeButton(onTap: () => vm.createEmptyVocalTake()),
+                const SizedBox(width: 10),
+                Flexible(child: _InterpretationDropdown(vm: vm)),
+              ],
+            ),
+          ),
         ],
       ),
     );
@@ -1713,15 +1723,18 @@ class _InterpretationDropdown extends StatelessWidget {
             children: [
               const Icon(FIcons.drama, size: 13, color: Studio.accentBright),
               const SizedBox(width: 7),
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 170),
-                child: Text(
-                  active?.name ?? 'Interpretation',
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Studio.textPrimary,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w700,
+              Flexible(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 170),
+                  child: Text(
+                    active?.name ?? 'Interpretation',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Studio.textPrimary,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                    ),
                   ),
                 ),
               ),
