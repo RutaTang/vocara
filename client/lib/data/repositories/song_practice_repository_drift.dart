@@ -98,6 +98,22 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
     orderIndex: order,
   );
 
+  /// Each of [tracks] (a save's flattened lanes) with the order_index it is
+  /// written at: a vocal take's position among the vocal takes, 0 for the
+  /// accompaniment and reference slots. Hydration orders only the takes by
+  /// it (a slot is placed by its kind), and counting the slots in front of
+  /// the takes renumbered — and so rewrote, under a fresh stamp — every take
+  /// whenever a backing came or went. Indices an earlier build wrote with
+  /// the slots in front still sort the takes the same way.
+  static List<({AudioTrack track, int order})> _trackOrders(
+    List<AudioTrack> tracks,
+  ) {
+    var take = 0;
+    return [
+      for (final t in tracks) (track: t, order: t.isBacking ? 0 : take++),
+    ];
+  }
+
   static String _clipHash(AudioClip c, String assetId, int order) =>
       clipContentHash(
         assetId: assetId,
@@ -140,8 +156,8 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
       p.versions[i].id: _interpretationHash(p.versions[i], i),
     for (var i = 0; i < p.fxBuses.length; i++)
       p.fxBuses[i].id: _busHash(p.fxBuses[i], i),
-    for (var i = 0; i < tracks.length; i++)
-      tracks[i].id: _trackHash(tracks[i], i),
+    for (final d in _trackOrders(tracks))
+      d.track.id: _trackHash(d.track, d.order),
     for (final t in tracks) ...{
       for (var i = 0; i < t.clips.length; i++)
         t.clips[i].id: _clipHash(t.clips[i], clipAsset[t.clips[i].id]!, i),
@@ -718,9 +734,7 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
   ) async {
     final live = await _live(db.tracks, (x) => x.practiceId.equals(p.id));
     final current = {for (final r in live) r.id: trackRowHash(r)};
-    final desired = [
-      for (var i = 0; i < tracks.length; i++) (track: tracks[i], order: i),
-    ];
+    final desired = _trackOrders(tracks);
 
     // A slot MOVE between live rows — the separation flow's rotation (the old
     // accompaniment re-kinded to reference while a fresh instrumental takes

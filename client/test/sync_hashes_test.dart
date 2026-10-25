@@ -225,14 +225,15 @@ void main() {
       );
     }
 
-    // --- tracks, flattened in save order (accompaniment, reference, vocals).
+    // --- tracks, flattened in save order (accompaniment, reference, vocals);
+    // a take's order index is its position among the takes, a slot's is 0.
     final allTracks = <AudioTrack>[
       if (practice.accompaniment != null) practice.accompaniment!,
       if (practice.reference != null) practice.reference!,
       ...practice.vocalTracks,
     ];
-    for (var i = 0; i < allTracks.length; i++) {
-      final t = allTracks[i];
+    for (final t in allTracks) {
+      final i = t.isBacking ? 0 : practice.vocalTracks.indexOf(t);
       expect(
         baseHashes[t.id],
         trackContentHash(

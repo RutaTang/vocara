@@ -1085,6 +1085,140 @@ void main() {
       expect((await trackRow(onX.id)).interpretationId, x.id);
     });
   });
+
+  group('a backing lane coming or going', () {
+    // A take's order_index counted the accompaniment and reference slots in
+    // front of it, so importing or removing a backing renumbered every take:
+    // each was rewritten under a fresh stamp as an edit nobody made, and a
+    // take another device had changed meanwhile was reverted to this
+    // editor's stale copy (both sides "changed", the active editor wins).
+    final now = DateTime(2026);
+    Future<({SongPractice pr, List<AudioTrack> takes})> threeTakes() async {
+      final base = ok(await repo.createPractice('S'));
+      final takes = [
+        for (var i = 1; i <= 3; i++)
+          AudioTrack(
+            id: newId(),
+            kind: AudioTrackKind.vocal,
+            displayName: 'Take $i',
+            createdAt: now,
+            versionId: base.versions.single.id,
+          ),
+      ];
+      final pr = ok(await repo.savePractice(base.copyWith(vocalTracks: takes)));
+      return (pr: pr, takes: takes);
+    }
+
+    Future<Loaded<SongPractice>> load(String id) async =>
+        (await repo.loadPractice(id) as Ok<Loaded<SongPractice>>).value;
+    AudioTrack backing(AudioTrackKind kind) => AudioTrack(
+      id: newId(),
+      kind: kind,
+      displayName: kind.name,
+      createdAt: now,
+    );
+    Future<int> takeUpdates(List<AudioTrack> takes) async =>
+        (await db
+                .customSelect(
+                  'SELECT COUNT(*) AS n FROM oplog WHERE '
+                  "entity_table = 'tracks' AND op = 'update' AND entity_id IN "
+                  '(${[for (final t in takes) "'${t.id}'"].join(', ')})',
+                )
+                .getSingle())
+            .read<int>('n');
+
+    test('leaves every take row as it was', () async {
+      final f = await threeTakes();
+      var loaded = await load(f.pr.id);
+      final added = await repo.savePracticeWithBase(
+        loaded.aggregate.copyWith(
+          accompaniment: backing(AudioTrackKind.accompaniment),
+          reference: backing(AudioTrackKind.reference),
+        ),
+        baseHashes: loaded.baseHashes,
+      );
+      loaded = (added as Ok<Loaded<SongPractice>>).value;
+      expect(await takeUpdates(f.takes), 0, reason: 'backings added');
+      ok(
+        await repo.savePractice(
+          loaded.aggregate.copyWith(
+            clearAccompaniment: true,
+            clearReference: true,
+          ),
+        ),
+      );
+      expect(await takeUpdates(f.takes), 0, reason: 'backings removed');
+      expect((await load(f.pr.id)).aggregate.vocalTracks.map((t) => t.id), [
+        for (final t in f.takes) t.id,
+      ]);
+    });
+
+    test("keeps another device's edit of a take it never touched", () async {
+      final f = await threeTakes();
+      final loaded = await load(f.pr.id);
+      await db.customStatement(
+        "UPDATE tracks SET display_name = 'Remote name', hlc_packed = 'zzzz' "
+        'WHERE id = ?',
+        [f.takes[1].id],
+      );
+      final saved = await repo.savePracticeWithBase(
+        loaded.aggregate.copyWith(reference: backing(AudioTrackKind.reference)),
+        baseHashes: loaded.baseHashes,
+      );
+      expect(saved, isA<Ok<Loaded<SongPractice>>>());
+      final row = await (db.select(
+        db.tracks,
+      )..where((t) => t.id.equals(f.takes[1].id))).getSingle();
+      expect(row.displayName, 'Remote name');
+    });
+
+    test('a practice numbered with the backings in front keeps its take '
+        'order', () async {
+      // What every earlier build wrote: accompaniment 0, reference 1, then
+      // the takes. Their order here is deliberately not their id order.
+      final f = await threeTakes();
+      ok(
+        await repo.savePractice(
+          f.pr.copyWith(
+            accompaniment: backing(AudioTrackKind.accompaniment),
+            reference: backing(AudioTrackKind.reference),
+          ),
+        ),
+      );
+      final legacy = [f.takes[2], f.takes[0], f.takes[1]];
+      for (var i = 0; i < legacy.length; i++) {
+        await db.customStatement(
+          'UPDATE tracks SET order_index = ? WHERE id = ?',
+          [i + 2, legacy[i].id],
+        );
+      }
+      await db.customStatement(
+        "UPDATE tracks SET order_index = 1 WHERE kind = 'reference'",
+      );
+      final loaded = await load(f.pr.id);
+      expect(loaded.aggregate.vocalTracks.map((t) => t.id), [
+        for (final t in legacy) t.id,
+      ]);
+      final fourth = AudioTrack(
+        id: newId(),
+        kind: AudioTrackKind.vocal,
+        displayName: 'Take 4',
+        createdAt: now,
+        versionId: f.pr.versions.single.id,
+      );
+      final saved = await repo.savePracticeWithBase(
+        loaded.aggregate.copyWith(
+          vocalTracks: [...loaded.aggregate.vocalTracks, fourth],
+        ),
+        baseHashes: loaded.baseHashes,
+      );
+      expect(saved, isA<Ok<Loaded<SongPractice>>>());
+      expect((await load(f.pr.id)).aggregate.vocalTracks.map((t) => t.id), [
+        for (final t in legacy) t.id,
+        fourth.id,
+      ]);
+    });
+  });
 }
 
 Future<int> _liveCount(AppDatabase db, TableInfo<Table, dynamic> table) async {
