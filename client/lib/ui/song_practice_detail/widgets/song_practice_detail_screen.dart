@@ -93,8 +93,7 @@ class SongPracticeDetailScreen extends StatelessWidget {
       builder: (context, _) => PopScope(
         canPop: !vm.takeHoldsScreen,
         onPopInvokedWithResult: (didPop, _) async {
-          if (didPop) return;
-          await vm.stopBeforeLeaving();
+          if (didPop || !await vm.stopBeforeLeaving()) return;
           if (context.mounted) context.pop();
         },
         child: Scaffold(
@@ -448,7 +447,7 @@ class _WorkspaceState extends State<_Workspace> {
           // later card tap was silently ignored. go is only the fallback for
           // a deep link, where nothing lies beneath to pop to.
           onBack: () async {
-            if (vm.takeHoldsScreen) await vm.stopBeforeLeaving();
+            if (vm.takeHoldsScreen && !await vm.stopBeforeLeaving()) return;
             if (!context.mounted) return;
             if (context.canPop()) {
               context.pop();

@@ -2529,8 +2529,9 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   bool get takeHoldsScreen => isRecording || recording.isStartingTake;
 
   // The screen's back/PopScope path: finalize (or cancel) the take in flight
-  // before leaving the route.
-  Future<void> stopBeforeLeaving() => recording.stopBeforeLeaving();
+  // before leaving the route. False for a Back pressed while an earlier one
+  // is still doing that: only the first may leave.
+  Future<bool> stopBeforeLeaving() => recording.stopBeforeLeaving();
 
   // The one shared "persist pending live FX/level edits" commit — called from
   // four widget files (fx_panel, mixer_strip, left_panel, screen).

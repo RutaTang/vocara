@@ -576,11 +576,26 @@ class RecordingController extends ChangeNotifier {
   /// take already recording: in the arm window the page popped at once, and
   /// a handshake landing during its exit transition armed a take there that
   /// the dispose then dropped for boot recovery.
-  Future<void> stopBeforeLeaving() async {
-    final start = _startInFlight;
-    await stopRecording();
-    if (start != null) await start;
+  ///
+  /// Returns whether this call is the one that leaves: only the first of
+  /// several Backs pressed while it waits (on the permission prompt, say,
+  /// where nothing visibly happens) does — each queued a pop of its own, and
+  /// the page left one page too far, or threw with nothing beneath to pop.
+  Future<bool> stopBeforeLeaving() async {
+    if (_leaving) return false;
+    _leaving = true;
+    try {
+      final start = _startInFlight;
+      await stopRecording();
+      if (start != null) await start;
+      return true;
+    } finally {
+      _leaving = false;
+    }
   }
+
+  /// A [stopBeforeLeaving] in progress.
+  bool _leaving = false;
 
   /// The tail of [stopRecording] (meter reset → pause → gated finalize), split
   /// out so the `_stopping` latch brackets it in one try/finally.
@@ -679,8 +694,9 @@ class RecordingController extends ChangeNotifier {
           'was busy. The take has small gaps.',
         );
       }
-      // Puts the recording into the model; returns the lane it landed on.
-      String stage() {
+      // Puts the recording into the model; returns the lane it landed on and,
+      // dropped onto an armed take, the clip it became.
+      ({String lane, String? clip}) stage() {
         final target = targetId == null ? null : _trackById(targetId);
         if (target == null || target.kind != AudioTrackKind.vocal) {
           // No armed take → the recording becomes a new take at the cursor.
@@ -690,7 +706,7 @@ class RecordingController extends ChangeNotifier {
             startMs: startMs,
           );
           _selectRecordedClip(landedOn, null);
-          return landedOn;
+          return (lane: landedOn, clip: null);
         }
         // Drop the recording onto the armed take as its own clip at the cursor —
         // a separate clip, never merged into existing audio (Logic / Cubase).
@@ -707,19 +723,25 @@ class RecordingController extends ChangeNotifier {
         // recording, leaving the lane selection stale would pair this clip id with
         // the wrong lane and the inspector would analyze the wrong subject.
         _selectRecordedClip(target.id, clip.id);
-        return target.id;
+        return (lane: target.id, clip: clip.id);
       }
 
-      var landedOn = stage();
+      var staged = stage();
       if (!await _save()) {
         // A failed save reverts the model to the store's, which never held the
         // take: it vanished from the screen and no later save brought it back,
         // only the next launch's recovery of its file, as a new take at 0:00
-        // off its lane. Stage it again — unless the model kept it, a newer
-        // edit's queued save carrying it — and retry once.
-        if (!(_practiceOf()?.referencesAudio(path) ?? false)) {
-          landedOn = stage();
-        }
+        // off its lane. Stage it again — unless the model kept it (a newer
+        // edit's queued save carrying it, or a save that committed and only
+        // failed its re-read) — and retry once. Kept is judged by the lane's
+        // and clip's ids, which survive the commit: the take comes back under
+        // its pooled path, and judged by its staging path it was staged twice
+        // and played doubled.
+        final lane = _trackById(staged.lane);
+        final kept =
+            lane != null &&
+            (staged.clip == null || lane.clips.any((c) => c.id == staged.clip));
+        if (!kept) staged = stage();
         if (!await _save()) {
           _toast(
             "Couldn't save the take. It will be recovered the next time "
@@ -733,7 +755,7 @@ class RecordingController extends ChangeNotifier {
       // dock analyzed the staging path nothing shows — and, computing only on
       // these pushes, then sat on "not available" for the new take while the
       // inspector (when open) analyzed the take a second time.
-      _analysis.onTrackAudioChanged(landedOn);
+      _analysis.onTrackAudioChanged(staged.lane);
     }
 
     // The gate is normally free here — every structural action pre-guards on

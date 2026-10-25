@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:forui/forui.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 import 'package:vocara/data/repositories/song_practice_repository.dart';
@@ -46,6 +47,9 @@ class _FakeRepo extends Fake implements SongPracticeRepository {
   /// Fails the next this-many saves, then heals.
   int failSaves = 0;
 
+  /// The next save commits, then reports failure (its re-read failed).
+  bool commitThenFail = false;
+
   /// Models the asset pool: a save re-reads every vocal clip at its POOL path,
   /// as SongPracticeRepositoryDrift's hydrate does.
   bool pooling = false;
@@ -86,6 +90,10 @@ class _FakeRepo extends Fake implements SongPracticeRepository {
             vocalTracks: [for (final t in practice.vocalTracks) _pooled(t)],
           )
         : practice;
+    if (commitThenFail) {
+      commitThenFail = false;
+      return Result.error(Exception('re-read failed'));
+    }
     return Result.ok(Loaded(stored, const {}));
   }
 }
@@ -1211,4 +1219,213 @@ void main() {
     expect(engine.inputChannels.last, GraphAudioPlaybackService.inputChannel2);
     await vm.stopRecording();
   });
+
+  Future<SongPracticeDetailViewModel> openOnStack(
+    WidgetTester tester,
+    _FakeMic mic,
+  ) async {
+    tester.view.physicalSize = const Size(1800, 1100);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    repo = _FakeRepo(_seed(accompaniment: _backing()));
+    waveforms = _FakeWaveforms();
+    spectrograms = _FakeSpectrograms();
+    final vm = openVm(engine: _FakeGraphEngine(), mic: mic);
+    for (var i = 0; i < 20 && vm.practice == null; i++) {
+      await tester.pump(const Duration(milliseconds: 5));
+    }
+    vm.toggleLyricsPanel();
+    final router = GoRouter(
+      routes: [
+        GoRoute(
+          path: Routes.home,
+          builder: (context, _) => Scaffold(
+            body: TextButton(
+              onPressed: () => context.push('/mid'),
+              child: const Text('HOME'),
+            ),
+          ),
+        ),
+        GoRoute(
+          path: '/mid',
+          builder: (context, _) => Scaffold(
+            body: TextButton(
+              onPressed: () => context.push(Routes.songPractice('p1')),
+              child: const Text('MID'),
+            ),
+          ),
+        ),
+        GoRoute(
+          path: Routes.songPracticePattern,
+          builder: (context, _) => ChangeNotifierProvider.value(
+            value: vm,
+            child: const SongPracticeDetailScreen(),
+          ),
+        ),
+      ],
+    );
+    await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+    await tester.tap(find.text('HOME'));
+    for (var i = 0; i < 10; i++) {
+      await tester.pump(const Duration(milliseconds: 50));
+    }
+    await tester.tap(find.text('MID'));
+    for (var i = 0; i < 10; i++) {
+      await tester.pump(const Duration(milliseconds: 50));
+    }
+    expect(find.byType(SongPracticeDetailScreen), findsOneWidget);
+    unawaited(vm.recording.startRecording());
+    for (var i = 0; i < 20 && repo.stored.vocalTracks.length < 2; i++) {
+      await tester.pump(const Duration(milliseconds: 5));
+    }
+    expect(vm.recording.isStartingTake, isTrue);
+    return vm;
+  }
+
+  testWidgets('two system Backs in REC\'s arm window leave the page once', (
+    tester,
+  ) async {
+    final mic = _FakeMic()..ready = Completer<void>();
+    final vm = await openOnStack(tester, mic);
+    await tester.binding.handlePopRoute();
+    for (var i = 0; i < 12; i++) {
+      await tester.pump(const Duration(milliseconds: 50));
+    }
+    // The page is still there (nothing visibly happened): press Back again.
+    if (find.byType(SongPracticeDetailScreen).evaluate().isNotEmpty) {
+      await tester.binding.handlePopRoute();
+      await tester.pump(const Duration(milliseconds: 50));
+    }
+    mic.ready!.complete();
+    for (var i = 0; i < 20; i++) {
+      await tester.pump(const Duration(milliseconds: 50));
+    }
+    expect(find.byType(SongPracticeDetailScreen), findsNothing);
+    expect(find.text('HOME'), findsNothing, reason: 'double pop: on HOME');
+    expect(find.text('MID'), findsOneWidget, reason: 'double pop');
+    await tester.pumpWidget(const SizedBox());
+    vm.dispose();
+  });
+
+  testWidgets('two back-arrow taps in REC\'s arm window leave the page once', (
+    tester,
+  ) async {
+    final mic = _FakeMic()..ready = Completer<void>();
+    final vm = await openOnStack(tester, mic);
+    final back = find.byIcon(FIcons.chevronLeft);
+    expect(back, findsOneWidget);
+    await tester.tap(back);
+    for (var i = 0; i < 12; i++) {
+      await tester.pump(const Duration(milliseconds: 50));
+    }
+    // The page is still there (nothing visibly happened): tap Back again.
+    if (back.evaluate().isNotEmpty) {
+      await tester.tap(back);
+      await tester.pump(const Duration(milliseconds: 50));
+    }
+    mic.ready!.complete();
+    for (var i = 0; i < 20; i++) {
+      await tester.pump(const Duration(milliseconds: 50));
+    }
+    expect(find.byType(SongPracticeDetailScreen), findsNothing);
+    expect(find.text('HOME'), findsNothing, reason: 'double pop: on HOME');
+    expect(find.text('MID'), findsOneWidget, reason: 'double pop');
+    await tester.pumpWidget(const SizedBox());
+    vm.dispose();
+  });
+
+  for (final systemBack in [false, true]) {
+    testWidgets(
+      'two Backs in REC\'s arm window on the real stack leave the page once '
+      '(systemBack: $systemBack)',
+      (tester) async {
+        tester.view.physicalSize = const Size(1800, 1100);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        repo = _FakeRepo(_seed(accompaniment: _backing()));
+        waveforms = _FakeWaveforms();
+        spectrograms = _FakeSpectrograms();
+        final mic = _FakeMic()..ready = Completer<void>();
+        final vm = openVm(engine: _FakeGraphEngine(), mic: mic);
+        for (var i = 0; i < 20 && vm.practice == null; i++) {
+          await tester.pump(const Duration(milliseconds: 5));
+        }
+        vm.toggleLyricsPanel();
+        var pushDone = 0;
+        final router = GoRouter(
+          routes: [
+            GoRoute(
+              path: Routes.home,
+              builder: (context, _) => Scaffold(
+                body: TextButton(
+                  onPressed: () async {
+                    await context.push(Routes.songPractice('p1'));
+                    pushDone++;
+                  },
+                  child: const Text('HOME'),
+                ),
+              ),
+            ),
+            GoRoute(
+              path: Routes.songPracticePattern,
+              builder: (context, _) => ChangeNotifierProvider.value(
+                value: vm,
+                child: const SongPracticeDetailScreen(),
+              ),
+            ),
+          ],
+        );
+        await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+        await tester.tap(find.text('HOME'));
+        for (var i = 0; i < 10; i++) {
+          await tester.pump(const Duration(milliseconds: 50));
+        }
+        unawaited(vm.recording.startRecording());
+        for (var i = 0; i < 20 && repo.stored.vocalTracks.length < 2; i++) {
+          await tester.pump(const Duration(milliseconds: 5));
+        }
+        expect(vm.recording.isStartingTake, isTrue);
+        final back = find.byIcon(FIcons.chevronLeft);
+        Future<void> press() async {
+          if (systemBack) {
+            await tester.binding.handlePopRoute();
+          } else {
+            await tester.tap(back);
+          }
+        }
+
+        await press();
+        for (var i = 0; i < 12; i++) {
+          await tester.pump(const Duration(milliseconds: 50));
+        }
+        if (find.byType(SongPracticeDetailScreen).evaluate().isNotEmpty) {
+          await press();
+          await tester.pump(const Duration(milliseconds: 50));
+        }
+        mic.ready!.complete();
+        for (var i = 0; i < 20; i++) {
+          await tester.pump(const Duration(milliseconds: 50));
+        }
+        expect(find.byType(SongPracticeDetailScreen), findsNothing);
+        expect(find.text('HOME'), findsOneWidget);
+        expect(pushDone, 1);
+        await tester.pumpWidget(const SizedBox());
+        vm.dispose();
+      },
+    );
+  }
+
+  test(
+    'a take whose save committed but reported failure is not staged twice',
+    () async {
+      final vm = await pumpVm(engine: _FakeGraphEngine(), mic: _FakeMic());
+      repo.pooling = true;
+      vm.selectTrack('take1');
+      await vm.recording.startRecording();
+      repo.commitThenFail = true;
+      await vm.stopRecording();
+      final take1 = repo.stored.vocalTracks.singleWhere((t) => t.id == 'take1');
+      expect(take1.clips, hasLength(2), reason: 'the take was staged twice');
+    },
+  );
 }
