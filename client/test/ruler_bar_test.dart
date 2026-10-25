@@ -13,11 +13,13 @@ import 'package:vocara/ui/song_practice_detail/widgets/ruler_bar.dart';
 import 'package:vocara/ui/song_practice_detail/widgets/track_row.dart';
 
 class _FakePlayback extends Fake implements PlaybackController {
+  _FakePlayback(this.viewStartMs);
+
   final starts = <int>[];
   final ends = <int>[];
 
   @override
-  int get viewStartMs => 0;
+  final int viewStartMs;
 
   @override
   int get loopStartMs => 2000;
@@ -36,7 +38,9 @@ class _FakePlayback extends Fake implements PlaybackController {
 }
 
 class _FakeVm extends Fake implements SongPracticeDetailViewModel {
-  final fakePlayback = _FakePlayback();
+  _FakeVm(int viewStartMs) : fakePlayback = _FakePlayback(viewStartMs);
+
+  final _FakePlayback fakePlayback;
 
   @override
   PlaybackController get playback => fakePlayback;
@@ -50,8 +54,12 @@ void main() {
   const screenW = 800.0;
   const laneW = screenW - 2 * kTimelineHMargin - kTrackHeaderW;
 
-  Future<_FakeVm> pumpRuler(WidgetTester tester) async {
-    final vm = _FakeVm();
+  Future<_FakeVm> pumpRuler(
+    WidgetTester tester, {
+    int viewStartMs = 0,
+    int viewMs = timelineMs,
+  }) async {
+    final vm = _FakeVm(viewStartMs);
     final position = ValueNotifier(Duration.zero);
     addTearDown(position.dispose);
     await tester.pumpWidget(
@@ -63,7 +71,7 @@ void main() {
               width: screenW,
               child: RulerBar(
                 vm: vm,
-                timelineDurationMs: timelineMs,
+                timelineDurationMs: viewMs,
                 position: position,
               ),
             ),
@@ -111,5 +119,31 @@ void main() {
     await tester.pump();
     expect(vm.fakePlayback.ends, isNotEmpty);
     expect(vm.fakePlayback.ends.last, lessThan(8000));
+  });
+
+  testWidgets('a slow drag at deep zoom moves the edge as far as the pointer', (
+    tester,
+  ) async {
+    // Each tick added its own rounded delta: at about 1.3 ms per px a quarter
+    // pixel rounds to nothing, so the handle never moved.
+    const viewMs = 1000;
+    final vm = await pumpRuler(tester, viewStartMs: 7500, viewMs: viewMs);
+    final g = await tester.startGesture(
+      const Offset(
+        kTimelineHMargin + kTrackHeaderW + 500 / viewMs * laneW,
+        rulerHeight / 2,
+      ),
+      kind: PointerDeviceKind.mouse,
+    );
+    await g.moveBy(const Offset(4, 0)); // past the drag slop
+    await tester.pump();
+    final from = vm.fakePlayback.ends.lastOrNull ?? 8000;
+    for (var i = 0; i < 240; i++) {
+      await g.moveBy(const Offset(0.25, 0));
+    }
+    await g.up();
+    await tester.pump();
+    final moved = vm.fakePlayback.ends.last - from;
+    expect(moved, closeTo(60 / laneW * viewMs, 2));
   });
 }

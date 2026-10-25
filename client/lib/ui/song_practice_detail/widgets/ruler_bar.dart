@@ -122,15 +122,15 @@ class RulerBar extends StatelessWidget {
             // Edge handles (only these resize the region).
             _LoopHandle(
               centerX: startX,
-              onDelta: (dx) => vm.playback.setLoopStart(
-                vm.playback.loopStartMs + (dx / w * dur).round(),
-              ),
+              valueMs: vm.playback.loopStartMs,
+              msPerPx: dur / w,
+              onChanged: vm.playback.setLoopStart,
             ),
             _LoopHandle(
               centerX: endX,
-              onDelta: (dx) => vm.playback.setLoopEnd(
-                vm.playback.loopEndMs + (dx / w * dur).round(),
-              ),
+              valueMs: vm.playback.loopEndMs,
+              msPerPx: dur / w,
+              onChanged: vm.playback.setLoopEnd,
             ),
             Positioned.fill(child: playhead),
           ],
@@ -140,16 +140,37 @@ class RulerBar extends StatelessWidget {
   }
 }
 
-class _LoopHandle extends StatelessWidget {
-  const _LoopHandle({required this.centerX, required this.onDelta});
+class _LoopHandle extends StatefulWidget {
+  const _LoopHandle({
+    required this.centerX,
+    required this.valueMs,
+    required this.msPerPx,
+    required this.onChanged,
+  });
 
   final double centerX;
-  final ValueChanged<double> onDelta;
+
+  /// The loop edge this handle drags.
+  final int valueMs;
+  final double msPerPx;
+  final ValueChanged<int> onChanged;
+
+  @override
+  State<_LoopHandle> createState() => _LoopHandleState();
+}
+
+class _LoopHandleState extends State<_LoopHandle> {
+  // The edge where this drag began and how far the pointer has moved since:
+  // each tick sets the edge from the whole distance. Adding each tick's own
+  // rounded delta lost the fraction every time, so at full zoom (about 1.3 ms
+  // per px) a slow drag left the handle trailing the pointer, or not moving.
+  int _baseMs = 0;
+  double _dx = 0;
 
   @override
   Widget build(BuildContext context) {
     return Positioned(
-      left: centerX - 8,
+      left: widget.centerX - 8,
       width: 16,
       top: 0,
       bottom: 0,
@@ -160,7 +181,14 @@ class _LoopHandle extends StatelessWidget {
           // Not a trackpad swipe either: with the cursor on a handle, the
           // swipe meant to pan moved the loop edge.
           supportedDevices: kPointerDragDevices,
-          onHorizontalDragUpdate: (d) => onDelta(d.primaryDelta ?? 0),
+          onHorizontalDragStart: (_) {
+            _baseMs = widget.valueMs;
+            _dx = 0;
+          },
+          onHorizontalDragUpdate: (d) {
+            _dx += d.primaryDelta ?? 0;
+            widget.onChanged(_baseMs + (_dx * widget.msPerPx).round());
+          },
           child: Center(
             child: Container(
               width: 3,

@@ -1,6 +1,11 @@
 import 'dart:math' as math;
 
-import 'package:flutter/gestures.dart' show PointerDeviceKind;
+import 'package:flutter/gestures.dart'
+    show
+        GestureDisposition,
+        HorizontalDragGestureRecognizer,
+        PointerDeviceKind,
+        PointerDownEvent;
 import 'package:flutter/material.dart';
 
 import '../themes/studio.dart';
@@ -174,13 +179,25 @@ class StudioFader extends StatelessWidget {
         void update(double dx) => onChanged((dx / width).clamp(0.0, 1.0));
         return MouseRegion(
           cursor: SystemMouseCursors.resizeLeftRight,
-          child: GestureDetector(
+          // The fader takes its pointer on contact: a click jumps the level,
+          // and a press held still before it slides stays the fader's. As a
+          // tap racing a drag, a hold of half a second on a take's fader lost
+          // both to the lane's long-press reorder — the level had already
+          // jumped on the press, and was never saved.
+          child: RawGestureDetector(
             behavior: HitTestBehavior.opaque,
-            supportedDevices: kPointerDragDevices,
-            onTapDown: (d) => update(d.localPosition.dx),
-            onTapUp: (_) => onChangeEnd(),
-            onHorizontalDragUpdate: (d) => update(d.localPosition.dx),
-            onHorizontalDragEnd: (_) => onChangeEnd(),
+            gestures: {
+              _ClaimingHorizontalDrag:
+                  GestureRecognizerFactoryWithHandlers<_ClaimingHorizontalDrag>(
+                    () => _ClaimingHorizontalDrag(
+                      supportedDevices: kPointerDragDevices,
+                    ),
+                    (r) => r
+                      ..onStart = ((d) => update(d.localPosition.dx))
+                      ..onUpdate = ((d) => update(d.localPosition.dx))
+                      ..onEnd = ((_) => onChangeEnd()),
+                  ),
+            },
             child: SizedBox(
               height: 16,
               child: CustomPaint(
@@ -194,6 +211,17 @@ class StudioFader extends StatelessWidget {
         );
       },
     );
+  }
+}
+
+/// A horizontal drag that wins its pointer on contact (see [StudioFader]).
+class _ClaimingHorizontalDrag extends HorizontalDragGestureRecognizer {
+  _ClaimingHorizontalDrag({super.supportedDevices});
+
+  @override
+  void addAllowedPointer(PointerDownEvent event) {
+    super.addAllowedPointer(event);
+    resolvePointer(event.pointer, GestureDisposition.accepted);
   }
 }
 

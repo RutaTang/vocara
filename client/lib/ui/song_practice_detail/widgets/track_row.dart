@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:forui/forui.dart';
@@ -549,6 +551,7 @@ class _BodyState extends State<_Body> {
   String? _draggingClipId;
 
   void _setDragging(String clipId, bool active) {
+    if (!mounted) return; // the lane went with the clip (see its dispose)
     setState(() {
       if (active) {
         _draggingClipId = clipId;
@@ -824,6 +827,25 @@ class _ClipRegionState extends State<_ClipRegion> {
     _dragging = false;
     widget.onMoveCommit();
     widget.onDragActive(false);
+  }
+
+  @override
+  void dispose() {
+    // Unmounted mid-drag (a mouse wheel scrolled the lane list under the
+    // gesture): a disposed recognizer fires neither end nor cancel, so the
+    // moves already shown were never saved and playback kept the old spot.
+    // Deferred past this frame: the commit notifies listeners, and the tree
+    // being finalized here takes no rebuilds.
+    if (_dragging) {
+      _dragging = false;
+      final commit = widget.onMoveCommit;
+      final active = widget.onDragActive;
+      scheduleMicrotask(() {
+        commit();
+        active(false);
+      });
+    }
+    super.dispose();
   }
 
   @override

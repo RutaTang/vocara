@@ -1702,6 +1702,9 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// ensure calls are cheap no-ops for single-clip takes and cached subjects.
   Future<void> commitTrackMove() async {
     await _save();
+    // A drag whose lane unmounted commits after the frame, which may be the
+    // page closing: the move is saved, and nothing else is left to refresh.
+    if (_disposed) return;
     if ((analysis.dockOpen && analysis.dockShowsTake) || _inspectorOpen) {
       unawaited(analysis.ensureSelectedSpectrogram());
     }
@@ -2524,9 +2527,11 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   // Cross-cutting stop: invoked from the transport bar.
   Future<void> stopRecording() => recording.stopRecording();
 
-  /// Whether leaving the screen must first end a take: one recording, or one
-  /// still in REC's arm window (see [RecordingController.stopBeforeLeaving]).
-  bool get takeHoldsScreen => isRecording || recording.isStartingTake;
+  /// Whether leaving the screen must first end a take: one recording, one
+  /// still in REC's arm window (see [RecordingController.stopBeforeLeaving]),
+  /// or one a Back is already landing ([RecordingController.isLeaving]).
+  bool get takeHoldsScreen =>
+      isRecording || recording.isStartingTake || recording.isLeaving;
 
   // The screen's back/PopScope path: finalize (or cancel) the take in flight
   // before leaving the route. False for a Back pressed while an earlier one

@@ -584,6 +584,7 @@ class RecordingController extends ChangeNotifier {
   Future<bool> stopBeforeLeaving() async {
     if (_leaving) return false;
     _leaving = true;
+    notifyListeners();
     try {
       final start = _startInFlight;
       await stopRecording();
@@ -591,11 +592,18 @@ class RecordingController extends ChangeNotifier {
       return true;
     } finally {
       _leaving = false;
+      notifyListeners();
     }
   }
 
   /// A [stopBeforeLeaving] in progress.
   bool _leaving = false;
+
+  /// Whether a Back is already ending the take on the way out. The take's
+  /// finalize (analysis and save) can take seconds after [isRecording] reads
+  /// false, and a second Back in that time must not leave on its own: it
+  /// popped at once, and the first one popped again when the take landed.
+  bool get isLeaving => _leaving;
 
   /// The tail of [stopRecording] (meter reset → pause → gated finalize), split
   /// out so the `_stopping` latch brackets it in one try/finally.

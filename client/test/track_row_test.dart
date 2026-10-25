@@ -1,10 +1,12 @@
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter/gestures.dart' show PointerDeviceKind;
+import 'package:flutter/gestures.dart'
+    show PointerDeviceKind, PointerScrollEvent;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vocara/domain/models/audio_track.dart';
+import 'package:vocara/ui/core/widgets/studio_controls.dart';
 import 'package:vocara/ui/core/widgets/waveform_painter.dart';
 import 'package:vocara/ui/song_practice_detail/widgets/track_row.dart';
 
@@ -508,4 +510,174 @@ void main() {
       },
     );
   });
+
+  testWidgets('a clip drag whose lane scrolls out of the lane list still '
+      'commits its moves', (tester) async {
+    // A mouse wheel mid-drag scrolls the lazy lane list and unmounts the lane;
+    // a disposed recognizer fires neither end nor cancel, so the move shown
+    // on screen was never saved and playback kept the old position.
+    final pos = ValueNotifier<Duration>(Duration.zero);
+    addTearDown(pos.dispose);
+    var start = 4000;
+    var lives = 0;
+    var commits = 0;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: StatefulBuilder(
+            builder: (context, setState) => ListView(
+              children: [
+                TrackRow(
+                  key: const ValueKey('t1'),
+                  track: AudioTrack(
+                    id: 't1',
+                    kind: AudioTrackKind.vocal,
+                    displayName: 'Take 1',
+                    createdAt: DateTime(2026),
+                    clips: [
+                      AudioClip(
+                        id: 'a',
+                        audioFilePath: '/a.wav',
+                        durationMs: 1000,
+                        startMs: start,
+                        waveformPeaks: const [0.4, 0.8, 0.4],
+                      ),
+                    ],
+                  ),
+                  label: 'Take 1',
+                  timelineDurationMs: 10000,
+                  position: pos,
+                  selected: false,
+                  reorderable: false,
+                  onSelect: () {},
+                  onClipMoveLive: (_, ms) => setState(() {
+                    lives++;
+                    start = ms;
+                  }),
+                  onMoveCommit: () => commits++,
+                  onSelectClip: (_) {},
+                  onClipContextMenu: (_, _) {},
+                  onCrossLaneMove: (_) {},
+                  onContextMenu: (_) {},
+                  onAddNote: () {},
+                  onEditNote: (_) {},
+                  onAddTechnique: () {},
+                  onToggleMute: () {},
+                  onToggleSolo: () {},
+                  onVolume: (_) {},
+                  onVolumeCommit: () {},
+                  onDelete: () {},
+                ),
+                // Other lanes below (an expanded take, more takes, buses).
+                for (var i = 0; i < 30; i++) const SizedBox(height: 74),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+    const laneW = 800.0 - kTrackHeaderW;
+    final clip = Offset(
+      kTrackHeaderW + 4000 / 10000 * laneW + 0.05 * laneW,
+      kTrackRowHeight / 2,
+    );
+    final gesture = await tester.startGesture(
+      clip,
+      kind: PointerDeviceKind.mouse,
+    );
+    await gesture.moveBy(const Offset(30, 0));
+    await tester.pump();
+    await gesture.moveBy(const Offset(40, 0));
+    await tester.pump();
+    expect(lives, greaterThan(0));
+    // The mouse wheel turns mid-drag: the lane list scrolls the take away.
+    tester.binding.handlePointerEvent(
+      PointerScrollEvent(
+        position: const Offset(400, 300),
+        kind: PointerDeviceKind.mouse,
+        scrollDelta: const Offset(0, 1500),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    expect(find.byKey(const ValueKey('t1')), findsNothing);
+    await gesture.moveBy(const Offset(10, 0));
+    await tester.pump();
+    await gesture.up();
+    await tester.pump();
+    expect(commits, 1);
+    expect(start, greaterThan(4000));
+  });
+
+  for (final holdMs in [150, 600]) {
+    testWidgets('a take fader pressed for ${holdMs}ms, then slid, saves its '
+        'level', (tester) async {
+      // Held past the long-press timeout, the press became the lane's reorder
+      // drag: the level had jumped on the press and was never saved.
+      final pos = ValueNotifier<Duration>(Duration.zero);
+      addTearDown(pos.dispose);
+      var volume = 0.8;
+      var lives = 0;
+      var commits = 0;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: StatefulBuilder(
+              builder: (context, setState) => TrackRow(
+                track: AudioTrack(
+                  id: 't1',
+                  kind: AudioTrackKind.vocal,
+                  displayName: 'Take 1',
+                  audioFilePath: '/x.wav',
+                  durationMs: 5000,
+                  createdAt: DateTime(2026),
+                  volume: volume,
+                ),
+                label: 'Take 1',
+                timelineDurationMs: 10000,
+                position: pos,
+                selected: false,
+                reorderable: true, // every vocal take is
+                onSelect: () {},
+                onClipMoveLive: (_, _) {},
+                onMoveCommit: () {},
+                onSelectClip: (_) {},
+                onClipContextMenu: (_, _) {},
+                onCrossLaneMove: (_) {},
+                onContextMenu: (_) {},
+                onAddNote: () {},
+                onEditNote: (_) {},
+                onAddTechnique: () {},
+                onToggleMute: () {},
+                onToggleSolo: () {},
+                onVolume: (v) => setState(() {
+                  lives++;
+                  volume = v;
+                }),
+                onVolumeCommit: () => commits++,
+                onDelete: () {},
+              ),
+            ),
+          ),
+        ),
+      );
+      final fader = find.byType(StudioFader);
+      final box = tester.getRect(fader);
+      final g = await tester.startGesture(
+        Offset(box.left + box.width * 0.3, box.center.dy),
+        kind: PointerDeviceKind.mouse,
+      );
+      await tester.pump(Duration(milliseconds: holdMs));
+      await tester.pump();
+      await g.moveBy(const Offset(10, 0));
+      await tester.pump();
+      await g.moveBy(const Offset(10, 0));
+      await tester.pump();
+      await g.up();
+      await tester.pumpAndSettle();
+      expect(lives, greaterThan(0));
+      expect(commits, 1);
+      expect(volume, closeTo(0.3 + 20 / box.width, 0.01));
+    });
+  }
 }

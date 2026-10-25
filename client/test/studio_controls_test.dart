@@ -83,7 +83,9 @@ void main() {
   });
 
   group('StudioFader', () {
+    var ends = 0;
     Future<List<double>> pumpFader(WidgetTester tester) async {
+      ends = 0;
       final changes = <double>[];
       await tester.pumpWidget(
         MaterialApp(
@@ -95,7 +97,7 @@ void main() {
                   value: 0.5,
                   accent: Colors.red,
                   onChanged: changes.add,
-                  onChangeEnd: () {},
+                  onChangeEnd: () => ends++,
                 ),
               ),
             ),
@@ -137,6 +139,19 @@ void main() {
       await tester.pump();
       expect(changes, isNotEmpty);
       expect(changes.last, greaterThan(0.5));
+      expect(ends, 1);
+    });
+
+    testWidgets('a click jumps the level and commits it', (tester) async {
+      final changes = await pumpFader(tester);
+      final box = tester.getRect(find.byType(StudioFader));
+      await tester.tapAt(
+        Offset(box.left + box.width * 0.25, box.center.dy),
+        kind: PointerDeviceKind.mouse,
+      );
+      await tester.pump();
+      expect(changes.single, closeTo(0.25, 0.01));
+      expect(ends, 1);
     });
   });
 }
