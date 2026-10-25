@@ -300,21 +300,27 @@ impl TrackFeeder {
     /// consumed since the last pump, and the node ran dry before the next one
     /// — a hole after every seek and on every pump of a loop-handle drag.
     /// Until that backlog is gone, though (see [`Self::since_flush`]), its
-    /// space is about to be freed wholesale, so the fill may use all of it but
-    /// one more fence: a further replan must still land before the node next
-    /// drains (a stopped node drains in `idle`, once per device callback).
+    /// space is about to be freed wholesale, so it counts toward the reserve,
+    /// down to one more fence: a further replan must still land before the
+    /// node next drains (a stopped node drains in `idle`, once per device
+    /// callback). Only its own size counts: a clip the playhead had passed
+    /// keeps a two-frame jump fence it never pops, the reserve behind the next
+    /// replan's fence fell to two, and the fill took the whole ring — so the
+    /// replan after that found room for two frames of audio, and the first
+    /// callback into the clip played them and then silence.
     fn fill_reserve(&mut self) -> usize {
+        let used = self.producer.capacity() - self.producer.free();
         if let Some(n) = self.since_flush {
             // FIFO: a frame from before the fence remains exactly while the
             // ring holds more than was pushed since it.
-            if self.producer.capacity() - self.producer.free() <= n {
+            if used <= n {
                 self.since_flush = None;
             }
         }
-        if self.since_flush.is_some() {
-            2
-        } else {
-            (self.producer.capacity() / 4).max(2)
+        let reserve = (self.producer.capacity() / 4).max(2);
+        match self.since_flush {
+            Some(n) => reserve.saturating_sub(used - n).max(2),
+            None => reserve,
         }
     }
 
