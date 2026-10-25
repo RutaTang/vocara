@@ -464,3 +464,45 @@ fn a_de_esser_cuts_a_loud_sibilant_by_most_of_its_range() {
     let at_7k = deesser_gain_db(7_000.0, 0.3, -28.0, 12.0);
     assert!(at_7k <= -4.0, "7 kHz sibilant only moved {at_7k:+.2} dB");
 }
+
+/// Amplitude of the `k`-th harmonic of `f0` in a mono signal spanning a whole number of
+/// periods (plain DFT correlation; no window needed).
+fn harmonic_amp(x: &[f32], f0: f64, k: usize) -> f64 {
+    let w = 2.0 * std::f64::consts::PI * f0 * k as f64 / SR;
+    let (mut re, mut im) = (0.0f64, 0.0f64);
+    for (i, &s) in x.iter().enumerate() {
+        re += s as f64 * (w * i as f64).cos();
+        im += s as f64 * (w * i as f64).sin();
+    }
+    2.0 * (re * re + im * im).sqrt() / x.len() as f64
+}
+
+#[test]
+fn the_master_safety_clip_leaves_normal_levels_untouched() {
+    // The master's soft clip ran every sample through `K*(u - u^3/3)`, which has no linear
+    // region: a -6 dBFS mix picked up ~1% THD and lost 0.3 dB, and a mastered backing
+    // track at -0.1 dBFS ~4% — on every playback, with nothing actually clipping.
+    use vocara_engine::dsp::master::MasterNode;
+    let amp = 10f32.powf(-6.0 / 20.0);
+    let input = to_stereo(&sine_mono(1000.0, SR, 4800, amp)); // 100 whole periods
+    let out = run_node(&mut MasterNode::new(1.0, true), &input, SR, 256);
+    let l = left(&out);
+    let fund = harmonic_amp(&l, 1000.0, 1);
+    let harm: f64 = (2..=10)
+        .map(|k| harmonic_amp(&l, 1000.0, k).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    let thd = 100.0 * harm / fund;
+    assert!(thd < 0.05, "-6 dBFS through the master clip: THD {thd:.3}%");
+    let level_db = 20.0 * (fund / amp as f64).log10();
+    assert!(
+        level_db.abs() < 0.05,
+        "-6 dBFS level moved {level_db:+.3} dB"
+    );
+
+    // A hot input is still held at the ceiling.
+    let hot = to_stereo(&sine_mono(1000.0, SR, 4800, 10f32.powf(12.0 / 20.0)));
+    let out = run_node(&mut MasterNode::new(1.0, true), &hot, SR, 256);
+    let peak = out.iter().fold(0.0f32, |m, &x| m.max(x.abs()));
+    assert!(peak <= 1.0, "+12 dBFS escaped the ceiling: {peak}");
+}

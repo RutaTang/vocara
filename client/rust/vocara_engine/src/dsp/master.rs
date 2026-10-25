@@ -1,6 +1,7 @@
 //! Master node: the final summing bus. A single smoothed master gain applied equally to
-//! both channels (true identity at unity — no pan law), with an optional gentle soft-clip
-//! limiter to tame peaks past 0 dBFS. This is what every track/return edges into.
+//! both channels (true identity at unity — no pan law), with an optional soft-clip safety
+//! ceiling that leaves everything below -3 dBFS untouched and tames peaks toward 0 dBFS.
+//! This is what every track/return edges into.
 
 use crate::dsp::smooth::Smoothed;
 use crate::node::{Node, ProcessIo};
@@ -34,24 +35,26 @@ impl MasterNode {
     }
 }
 
-/// Cubic soft clip with a 0 dBFS ceiling: `K * f(x/K)` where `f(u) = u - u^3/3` is the
-/// classic cubic waveshaper and `K = 1.5` sets the operating point. Small-signal gain is
-/// unity (`f'(0) = 1`), so normal-level material is left ~untouched; peaks are smoothly
-/// saturated and hard-limited to ±1.0 (0 dBFS), since `K * (2/3) = 1.0`. Pre-scaling into
-/// the knee and post-scaling to restore unity keeps the full 0 dBFS headroom (the raw `f`
-/// alone would cap output at 2/3 = -3.5 dBFS and attenuate everything below that).
+/// Where the safety clip starts bending: -3 dBFS. Everything below passes bit-exact, so a
+/// mix (or a mastered backing track) that never reaches the ceiling is never coloured.
+const CLIP_KNEE: f32 = 0.707_945_8; // 10^(-3/20)
+
+/// Soft clip with a 0 dBFS ceiling: exactly linear up to [`CLIP_KNEE`], then
+/// `knee + (1 - knee) * tanh((|x| - knee) / (1 - knee))` above it. Value and slope match the
+/// linear segment at the knee (C¹, no corner), and the curve approaches but never exceeds
+/// ±1.0. The cubic `K * (u - u^3/3)` this replaced had no linear region at all — ~1% THD on
+/// a -6 dBFS mix and ~4% on a track mastered to -0.1 dBFS, on every playback.
 #[inline]
 fn soft_clip(x: f32) -> f32 {
-    const K: f32 = 1.5; // K * (2/3) = 1.0 => ceiling at 0 dBFS
-    let u = x / K;
-    let shaped = if u <= -1.0 {
-        -2.0 / 3.0
-    } else if u >= 1.0 {
-        2.0 / 3.0
-    } else {
-        u - u * u * u / 3.0
-    };
-    K * shaped
+    let a = x.abs();
+    // A NaN passes through unchanged, as it always has (it is not this stage's job to
+    // invent a full-scale sample from it).
+    if a <= CLIP_KNEE || a.is_nan() {
+        return x;
+    }
+    let span = 1.0 - CLIP_KNEE;
+    let y = CLIP_KNEE + span * ((a - CLIP_KNEE) / span).tanh();
+    y.min(1.0).copysign(x)
 }
 
 impl Node for MasterNode {
