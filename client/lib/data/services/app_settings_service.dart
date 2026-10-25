@@ -278,20 +278,36 @@ class AppSettingsService extends ChangeNotifier {
   ///    PORT ("External Headphones" is the jack, whatever is plugged in). A speaker taken for
   ///    headphones here would leave its whole echo in every take.
   String get echoFreeOutput {
-    final uid = _actualOutputUid;
-    if (uid.isEmpty) return '';
-    return _isSurelyHeadphones(_byUid(_outputDevices, uid)) ? uid : '';
+    final d = _knownRendering;
+    return d != null && _isSurelyHeadphones(d) ? d.uid : '';
   }
 
   /// The device to judge feedback safety on: what the engine is actually rendering to, else the
   /// effective selection.
   AudioDevice? get _renderingDevice {
     if (_actualOutputUid.isNotEmpty) {
-      final d = _byUid(_outputDevices, _actualOutputUid);
+      final d = _knownRendering;
       if (d != null) return d;
     }
     return _effective(_outputDevices, _outputDeviceUid);
   }
+
+  /// The device the engine reports rendering to, from the lists or, when they have never seen it
+  /// (a speaker turned on since this page enumerated, which the system default then moved to),
+  /// from the fresh read [_refreshActualOutput] took. Null when neither knows it.
+  AudioDevice? get _knownRendering {
+    final uid = _actualOutputUid;
+    if (uid.isEmpty) return null;
+    final listed = _byUid(_outputDevices, uid);
+    if (listed != null) return listed;
+    final unlisted = _unlistedOutput;
+    return unlisted != null && unlisted.uid == uid ? unlisted : null;
+  }
+
+  /// The rendering device when the lists do not know it, read afresh WITHOUT adopting that read:
+  /// adopting it would be [refreshDevices], whose switches (a persisted device back, the input
+  /// channel) on the 1 s monitor tick reopened the mic in the middle of a take.
+  AudioDevice? _unlistedOutput;
 
   /// Last uid the engine reported rendering to. CACHED, not read per access: [monitorAllowed] is
   /// read from widget builds (the MON fader's enabled state), and resolving it natively walks the
@@ -355,13 +371,6 @@ class AppSettingsService extends ChangeNotifier {
   /// without any device set changing, so [refreshDevices] alone would not notice.
   void reconcileMonitorSafety() {
     final changed = _refreshActualOutput();
-    // A device the lists have never seen (a speaker turned on since this page enumerated, which
-    // the system default then moved to): re-read them, so it is judged as itself rather than as
-    // the selection it would otherwise fall back to.
-    if (_actualOutputUid.isNotEmpty &&
-        _byUid(_outputDevices, _actualOutputUid) == null) {
-      refreshDevices();
-    }
     _applyOutputRoute();
     // The MON fader's enabled state is derived from this, so a change has to reach the panel.
     if (changed) notifyListeners();
@@ -371,6 +380,11 @@ class AppSettingsService extends ChangeNotifier {
   // notifies — callers that already run outside a build own that.
   bool _refreshActualOutput() {
     final actual = _engine?.actualOutputDevice() ?? '';
+    final known =
+        actual.isEmpty ||
+        _byUid(_outputDevices, actual) != null ||
+        _unlistedOutput?.uid == actual;
+    if (!known) _unlistedOutput = _byUid(_enumerateOutputs(), actual);
     if (actual == _actualOutputUid) return false;
     _actualOutputUid = actual;
     return true;
@@ -385,8 +399,17 @@ class AppSettingsService extends ChangeNotifier {
   // the echo canceller's route ([echoFreeOutput]).
   void _applyOutputRoute() {
     _applyMonitorGain();
-    _engine?.setEchoFree(echoFreeOutput);
+    // Named only on a change (and on every attach): the engine re-checks it against what renders
+    // at each of its own polls, so repeating it each tick adds nothing.
+    final echoFree = echoFreeOutput;
+    if (echoFree != _echoFreePushed) {
+      _echoFreePushed = echoFree;
+      _engine?.setEchoFree(echoFree);
+    }
   }
+
+  // The echo-free output last named to the attached engine; null = not named yet.
+  String? _echoFreePushed;
 
   static String? _loadedString(Object? v) => v is String ? v : null;
 
@@ -552,6 +575,7 @@ class AppSettingsService extends ChangeNotifier {
   /// engine adopts the saved choices; refreshes the device lists from the live host.
   void attachEngine(GraphAudioPlaybackService engine) {
     _engine = engine;
+    _echoFreePushed = null;
     _applyAllToEngine();
     // attachEngine runs inside the ViewModel constructor, which is built during a widget build;
     // defer the device refresh so its notifyListeners() doesn't fire mid-build.

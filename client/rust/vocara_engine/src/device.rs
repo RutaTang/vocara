@@ -885,6 +885,25 @@ pub fn reconcile_output_safety(
     )
 }
 
+/// Re-derive only whether playback is echo-free (see [`OutputBinding::echo_free_uid`]), for a
+/// new judgement from the host to apply at once. The counters [`reconcile_output_safety`] keeps
+/// for its two-poll debounces are left alone: running the whole reconcile here made every host
+/// tick count twice (the poll's, then this), and a one-poll blip — a headset's output list empty
+/// while it switches profile — toasted "playback moved".
+pub fn reconcile_echo_free(transport: &Shared, binding: &Mutex<OutputBinding>) {
+    reconcile_echo_free_with(transport, binding, &bound_mic_serves_output);
+}
+
+fn reconcile_echo_free_with(
+    transport: &Shared,
+    binding: &Mutex<OutputBinding>,
+    serves_output: &dyn Fn(&str) -> bool,
+) {
+    if let Ok(b) = binding.lock() {
+        transport.set_echo_free(b.echo_free_with(serves_output));
+    }
+}
+
 /// [`reconcile_output_safety`], asking `serves_output` about a bound mic and `default_rate` for
 /// the system default output's current rate (tests pass their own).
 fn reconcile_output_safety_with(
@@ -4358,9 +4377,9 @@ mod output_safety_tests {
     //! lookups it wraps need real CoreAudio, so every case here fixes both uids explicitly.
 
     use super::{
-        reconcile_output_safety, reconcile_output_safety_with, restore_output_or_flag,
-        system_default_output_uid, OutputBinding, VpioOutput, EVENT_OUTPUT_LOST,
-        EVENT_OUTPUT_REROUTED,
+        reconcile_echo_free_with, reconcile_output_safety, reconcile_output_safety_with,
+        restore_output_or_flag, system_default_output_uid, OutputBinding, VpioOutput,
+        EVENT_OUTPUT_LOST, EVENT_OUTPUT_REROUTED,
     };
     use crate::dsp::master::MasterNode;
     use crate::graph::{Edge, GraphDesc, NodeEntry};
@@ -4447,6 +4466,31 @@ mod output_safety_tests {
         b.lock().unwrap().set_echo_free_uid("");
         reconcile_output_safety(h.transport(), &b, &event);
         assert!(!h.transport().echo_free());
+    }
+
+    /// The host names its echo-free judgement on every tick, right after the tick's poll. That
+    /// must not count as a second poll: a one-tick blip (a headset's output list empty while it
+    /// switches profile) would then be announced as a reroute.
+    #[test]
+    fn a_new_echo_free_judgement_does_not_count_as_a_poll() {
+        let h = engine();
+        let event = AtomicU32::new(0);
+        let b = Mutex::new(OutputBinding {
+            requested: "dev-headset".into(),
+            vpio: VpioOutput::Bound("dev-headset".into()),
+            ..Default::default()
+        });
+        let tick = std::cell::Cell::new(0u32);
+        // The headset's output list is empty during tick 3 only.
+        let serves = |_: &str| tick.get() != 3;
+        for t in 0..10 {
+            tick.set(t);
+            reconcile_output_safety_with(h.transport(), &b, &event, &serves, &|| None);
+            b.lock().unwrap().set_echo_free_uid("dev-headset");
+            reconcile_echo_free_with(h.transport(), &b, &serves);
+            assert_eq!(h.transport().echo_free(), t != 3, "tick {t}");
+        }
+        assert_eq!(event.load(Ordering::Relaxed) & EVENT_OUTPUT_REROUTED, 0);
     }
 
     /// The requested device could not be opened and the fallback took the default: the UI still

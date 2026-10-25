@@ -1157,11 +1157,7 @@ pub extern "C" fn ve_set_echo_free(e: *mut VeEngine, uid: *const c_char) -> c_in
         if let Ok(mut b) = eng.output_binding.lock() {
             b.set_echo_free_uid(uid);
         }
-        device::reconcile_output_safety(
-            eng.handle.transport(),
-            &eng.output_binding,
-            &eng.device_event,
-        );
+        device::reconcile_echo_free(eng.handle.transport(), &eng.output_binding);
         0
     })
 }

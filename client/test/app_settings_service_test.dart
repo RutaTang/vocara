@@ -352,6 +352,67 @@ void main() {
       expect(engine.echoFree.last, '');
     });
 
+    test('the 1 s monitor tick never switches the mic', () async {
+      // The chosen USB mic was unplugged when the page opened, so the engine records from the
+      // built-in one; it is plugged back in, unseen (Settings is closed). Mid-take the default
+      // output moves to earbuds the lists do not know either. Judging them by re-reading the
+      // lists ran refreshDevices' switches on the tick: the mic was reopened on the USB device in
+      // the middle of the take.
+      const usbMic = AudioDevice(
+        uid: 'usb-mic',
+        name: 'USB Microphone',
+        rate: 48000,
+        isInput: true,
+      );
+      storage.doc = {'inputDeviceUid': usbMic.uid};
+      await service.load();
+      final engine = _FakeEngine()..actualOutput = _builtInOut.uid;
+      service.attachEngine(engine);
+      await Future<void>.delayed(Duration.zero);
+      ins = [_builtInMic, usbMic];
+      engine.inputCalls.clear();
+      engine.inputChannelCalls.clear();
+      outs = [
+        const AudioDevice(
+          uid: 'built-in-out',
+          name: 'MacBook Pro Speakers',
+          rate: 48000,
+        ),
+        const AudioDevice(
+          uid: 'airpods',
+          name: 'AirPods Pro',
+          rate: 48000,
+          isDefault: true,
+          isBluetooth: true,
+        ),
+      ];
+      engine.actualOutput = 'airpods';
+      service.reconcileMonitorSafety();
+      expect(engine.inputCalls, isEmpty);
+      expect(engine.inputChannelCalls, isEmpty);
+      // The earbuds are still judged as themselves.
+      expect(engine.echoFree.last, 'airpods');
+      expect(service.monitorAllowed, isTrue);
+    });
+
+    test(
+      'the route is named to the engine on a change, not every tick',
+      () async {
+        await service.load();
+        final engine = _FakeEngine()..actualOutput = _builtInOut.uid;
+        service.attachEngine(engine);
+        final named = engine.echoFree.length;
+        for (var i = 0; i < 5; i++) {
+          service.reconcileMonitorSafety();
+        }
+        expect(engine.echoFree.length, named);
+        // A new engine is always told.
+        final next = _FakeEngine()..actualOutput = _builtInOut.uid;
+        service.attachEngine(next);
+        expect(next.echoFree, ['']);
+      },
+    );
+
     test('a Bluetooth speaker never allows the monitor', () async {
       // macOS reports only the transport: a Bluetooth speaker taken for
       // headphones fed the monitor straight back into the mic.
