@@ -118,59 +118,79 @@ pub const INPUT_CHANNEL_2: u32 = 2;
 /// Time constant of the per-channel level Auto reads (s).
 const LEVEL_TAU_S: f64 = 0.01;
 /// Rise time constant of each channel's noise-floor estimate (s); it falls at once. A level has to
-/// stand [`LIVE_OVER_FLOOR`] above its floor to count as live, so a steady hum or hiss — present
-/// from the start or appearing later — stops counting within about a second...
+/// stand [`VOICED_OVER_FLOOR`] above its floor to count as voiced, so a steady hum or hiss — present
+/// from the start or appearing later — stops counting within about a second.
 const FLOOR_RISE_S: f64 = 10.0;
-/// ...and three times slower on the picked input once it has dipped to near its floor (within
-/// [`DIP_OVER_FLOOR`]) and come back while picked — as a voice does at every consonant and breath,
-/// and a hum never does, however its level ripples around the live line — so a note held for
-/// seconds keeps counting, but a hum that took the pick in a silence does not.
+/// How near its floor a level has to fall to count as a dip (power ratio: 3 dB)...
+const DIP_OVER_FLOOR: f64 = 2.0;
+/// ...and how long after its last dip the picked input's floor holds still, once it has dipped and
+/// come back while picked (s): a voice dips at every consonant and breath, so a legato phrase or a
+/// note held for seconds keeps counting as voiced.
+const PICKED_DIP_HOLD_S: f64 = 20.0;
+/// Before that, the picked input's floor rises this much slower than [`FLOOR_RISE_S`]: a first
+/// phrase sung legato keeps its pick. A hum that took the pick in a silence keeps it no longer than
+/// the voice takes to start — it stops leading the moment a louder input sounds.
 const PICKED_FLOOR_RISE_S: f64 = 30.0;
-/// How near its floor a level has to fall to count as a dip (power ratio: 3 dB).
-const DIP_OVER_FLOOR: f32 = 2.0;
 /// How long after the mixer starts the floor follows the level both ways (s): a hum present from
 /// the first frame is the floor from the start.
 const FLOOR_WARMUP_S: f64 = 0.1;
-/// A live channel stands this far above its floor (power ratio: 10 dB)...
-const LIVE_OVER_FLOOR: f32 = 10.0;
+/// A voiced channel stands this far above its floor (power ratio: 10 dB)...
+const VOICED_OVER_FLOOR: f64 = 10.0;
 /// ...and above this level (mean square: -60 dBFS).
-const LIVE_MIN: f32 = 1.0e-6;
-/// Time constant of each channel's evidence of use (s): the share of recent time it was live. A
-/// singer's syllables keep it high across their gaps; a pop, a knock or a hum that stops counting
-/// leaves a dent that fades.
+const VOICED_MIN: f64 = 1.0e-6;
+/// An input leads while it sounds — voiced, or for the picked one, standing clear of its floor
+/// (within [`DIP_OVER_FLOOR`]), so a held note keeps leading — and is within this of the loudest
+/// input sounding (power ratio: 10 dB). Only a leading input gathers evidence, keeps its pick in
+/// use, or builds sustained activity: a second mic hearing the singer from across the room,
+/// crosstalk, a talkback or a hum under the voice never leads while the voice sounds.
+const LEAD_WITHIN: f64 = 10.0;
+/// Time constant of each input's evidence of use (s): the share of recent time it led.
 const EVIDENCE_S: f64 = 4.0;
-/// Evidence a channel needs to be picked first, with no other input in use (about 0.3 s of
-/// singing)...
-const PICK_MIN: f32 = 0.05;
-/// ...while every other input has at most this share of its evidence.
-const DOMINANT_SHARE: f32 = 0.5;
+/// Evidence an input needs to be picked first (about 0.2 s of singing).
+const PICK_MIN: f64 = 0.05;
+/// Evidence ratios (weakest / strongest) at which an even blend begins and ends; between them
+/// the pick stands. The weakest needs [`BLEND_MIN`] too.
+const BLEND_ENTER: f64 = 0.6;
+const BLEND_LEAVE: f64 = 0.4;
+const BLEND_MIN: f64 = 0.2;
+/// No change of pick but the first comes sooner than this after the last (s): two sources trading
+/// the lead flipped the pick — and the echo path the canceller had settled on — twice a second.
+const PICK_DWELL_S: f64 = 1.0;
 /// How much more evidence another input needs to take the pick while the picked one is in use...
-const SWITCH_MARGIN: f32 = 0.3;
+const SWITCH_MARGIN: f64 = 0.3;
 /// ...and once it has gone quiet (a mic moved to the other input).
-const SWITCH_MARGIN_QUIET: f32 = 0.1;
-/// Evidence on every input, none of them dominant, that makes them all in use (two sources, a
-/// stereo mic): blend evenly. A strummed guitar is live about a quarter of the time.
-const BLEND_MIN: f32 = 0.2;
-/// How long the picked input counts as in use after it was last live, at full evidence (s): it
-/// spans a breath or a held note, so a burst on the other input then is left out. Shorter at
-/// lower evidence, down to a fifth.
+const SWITCH_MARGIN_QUIET: f64 = 0.1;
+/// How long the picked input counts as in use after it last led, at full evidence (s): it spans a
+/// breath, so a burst on the other input then is left out. Shorter at lower evidence, down to a
+/// fifth.
 const HANGOVER_S: f64 = 1.5;
-/// Sustained activity on another input (leaky: one up per live frame, half down per quiet one)
-/// that blends it in while the picked input is quiet (s): a mic moved there is never cut, a pop
-/// is over long before.
+/// Sustained leading on another input (leaky: one up per leading frame, half down per other) that
+/// blends it in once the picked input is out of use (s): a mic moved there is never cut longer, a
+/// pop is over long before...
 const RUN_MIN_S: f64 = 0.25;
+/// ...and that blends it in even while the picked input is in use (s): a singer joining a guitar
+/// already on the other input. A knock or a thump leads for well under half this.
+const JOIN_RUN_S: f64 = 1.0;
+/// An input sounding this far below another leading one is out of use, whatever its hangover
+/// (power ratio: 20 dB): a hum that took the pick in a silence gives way the moment the voice
+/// starts. A knock over a held note is nowhere near this far above it — and in a breath the voice
+/// is not sounding, so its hangover still keeps a pop or a talkback out of the take.
+const OUTCLASSED_BY: f64 = 100.0;
+/// Fall time constant of the peak level that outclassing is judged against (s): a voice in a
+/// consonant gap keeps its last syllable's peak, so a burst then does not outclass it.
+const PEAK_FALL_S: f64 = 0.5;
 /// Time constant of the correlation that tells an even blend to flip input 2 (s): a stereo pair
 /// with one channel's polarity reversed cancelled itself out. Long, so two different sources —
 /// beating against each other — average out near zero instead of flipping each other.
 const CORR_TAU_S: f64 = 0.5;
 /// Correlation below which the blend flips input 2, and above which it stops.
-const FLIP_BELOW: f32 = -0.7;
-const UNFLIP_ABOVE: f32 = -0.2;
+const FLIP_BELOW: f64 = -0.7;
+const UNFLIP_ABOVE: f64 = -0.2;
 /// Time constant the weights glide toward their target with (s): a change of input — Auto's or
 /// the user's — is a glide, not a click.
 const WEIGHT_GLIDE_S: f64 = 0.01;
 /// Bias added to every level so it never decays into subnormals. Far below any real noise floor.
-const LEVEL_FLOOR: f32 = 1.0e-18;
+const LEVEL_FLOOR: f64 = 1.0e-18;
 /// Largest magnitude taken as a sample (+24 dBFS). Past it — or not finite — it is garbage from a
 /// driver or virtual device, and silence: squared, one 2e19 overflowed the level for good.
 const SAMPLE_MAX: f32 = 16.0;
@@ -186,57 +206,81 @@ enum Pick {
 /// monitor, the AEC, the meter and the take — under the input-channel mode.
 ///
 /// * Input 1 / Input 2: that channel alone (Input 2 on a device without one is Input 1).
-/// * Auto: the input in use. An input is live while its level (mean square over [`LEVEL_TAU_S`])
-///   stands above [`LIVE_MIN`] and [`LIVE_OVER_FLOOR`] above its own noise floor, so a steady hum
-///   or noise never counts for long; its evidence is the share of recent time it was live
-///   ([`EVIDENCE_S`]). The pick follows the evidence: the first input with [`PICK_MIN`] while the
-///   others have at most [`DOMINANT_SHARE`] of it; another input once it has [`SWITCH_MARGIN`]
-///   more ([`SWITCH_MARGIN_QUIET`] once the picked one has gone quiet); an even blend while every
-///   input has [`BLEND_MIN`] and none dominates (two sources, a stereo mic — with input 2 flipped
-///   if the pair is in opposite polarity). While the picked input is in use — live within its
-///   [`HANGOVER_S`], across breaths and held notes — the other input is left out: a pop, a thump
-///   or a knocked guitar there never reaches the take. Once it is quiet, another input with
-///   [`RUN_MIN_S`] of sustained activity is blended in, so a mic moved there is never cut for
-///   longer than that while the evidence catches up. A hum that took the pick in a silence stops
-///   counting within about a second, and the voice takes the pick back.
+/// * Auto: the input in use. An input is voiced while its level (mean square over
+///   [`LEVEL_TAU_S`]) stands above [`VOICED_MIN`] and [`VOICED_OVER_FLOOR`] above its own noise
+///   floor, so a steady hum or noise never counts for long, and leads while it is also within
+///   [`LEAD_WITHIN`] of the loudest input sounding, so bleed, crosstalk, a talkback or a hum under
+///   the voice never counts while the voice sounds. Its evidence is the share of recent time it
+///   led ([`EVIDENCE_S`]). The pick follows the evidence, never sooner than [`PICK_DWELL_S`] after
+///   its last change: the first input with [`PICK_MIN`]; another input once it has
+///   [`SWITCH_MARGIN`] more ([`SWITCH_MARGIN_QUIET`] once the picked one is out of use); an even
+///   blend between [`BLEND_ENTER`] and [`BLEND_LEAVE`] of evidence (two sources, a stereo mic —
+///   with input 2 flipped if the pair is in opposite polarity).
 ///
-///   The price of deciding on seconds of evidence: the first quarter second or so of singing, a
-///   mic moved to the other input for a couple of seconds, and a singer joining a guitar already
-///   on the other input after about a second, all blend evenly (6 dB down) before Auto settles —
-///   and with two sources it settles on the one in clearly more use. Input 1 / Input 2 are for
-///   two sources. Only the first [`MAX_CAPTURE_CH`] channels of a wider device are weighed.
+///   While the picked input is in use — it led within its [`HANGOVER_S`], across breaths and
+///   consonants, and a held note keeps leading ([`PICKED_DIP_HOLD_S`]) — another input is left
+///   out: a pop, a thump or a knocked guitar there never reaches the take. Only another input
+///   leading on for [`JOIN_RUN_S`] is blended in then (a singer joining a guitar). Out of use — or
+///   outclassed by [`OUTCLASSED_BY`], as a hum that took the pick in a silence is by the voice —
+///   the picked input lets another input leading on for [`RUN_MIN_S`] blend in, and hands it the
+///   pick after [`PICK_DWELL_S`].
+///
+///   The price of deciding on seconds of evidence: the first fifth of a second or so of singing
+///   blends evenly (6 dB down); a voice after a hum that took the pick in a silence, or a mic
+///   re-plugged into the other input, is cut for about [`RUN_MIN_S`] and blends for a second or
+///   so; a mic moved without a pause, a singer joining a guitar already on the other input, or
+///   one starting right after a talkback, is cut for up to about [`JOIN_RUN_S`] (it looks like a
+///   breath until then — telling a knock's ringing from a first syllable any sooner would cost the
+///   burst protection) and then blends for a second or two; and a source sounding more than
+///   [`LEAD_WITHIN`] above a quiet singer blends in until it stops counting, about a second for a
+///   hum. With two sources Auto settles on the
+///   one in clearly more use — Input 1 / Input 2 are for two sources. Only the first
+///   [`MAX_CAPTURE_CH`] channels of a wider device are weighed.
 ///
 /// A sample past [`SAMPLE_MAX`] or not finite is silence. The weights glide toward their target
 /// ([`WEIGHT_GLIDE_S`]). A 1-channel device passes through untouched. RT-safe: no alloc / lock /
 /// syscall, a few dozen operations per frame.
 pub struct InputChannelMix {
     /// Per-sample one-pole coefficients.
-    level_coef: f32,
-    floor_coef: f32,
-    picked_floor_coef: f32,
-    evidence_coef: f32,
-    corr_coef: f32,
+    level_coef: f64,
+    floor_coef: f64,
+    picked_floor_coef: f64,
+    evidence_coef: f64,
+    peak_coef: f64,
+    corr_coef: f64,
     glide: f32,
     /// Durations in frames; `warmup` counts down.
     warmup: u32,
+    dip_hold: u32,
+    dwell: u32,
     hangover: f32,
     run_min: f32,
-    /// Per channel: smoothed level and noise floor, evidence of use, frames since last live, and
-    /// sustained activity — tracked in every mode so a switch to Auto starts from settled ones.
-    level: [f32; MAX_CAPTURE_CH],
-    floor: [f32; MAX_CAPTURE_CH],
-    evidence: [f32; MAX_CAPTURE_CH],
+    join_run: f32,
+    /// Per channel: smoothed level and noise floor, evidence of use, frames since it last led and
+    /// since it last dipped, and sustained leading — tracked in every mode so a switch to Auto
+    /// starts from settled ones.
+    level: [f64; MAX_CAPTURE_CH],
+    floor: [f64; MAX_CAPTURE_CH],
+    peak: [f64; MAX_CAPTURE_CH],
+    evidence: [f64; MAX_CAPTURE_CH],
     quiet: [u32; MAX_CAPTURE_CH],
+    since_dip: [u32; MAX_CAPTURE_CH],
     run: [f32; MAX_CAPTURE_CH],
+    /// Which inputs sounded and which led this frame.
+    sounding: [bool; MAX_CAPTURE_CH],
+    leading: [bool; MAX_CAPTURE_CH],
     /// Slow powers and cross power of inputs 1 and 2, and whether the even blend flips input 2.
-    power: [f32; 2],
-    cross: f32,
+    power: [f64; 2],
+    cross: f64,
     flip: bool,
-    /// Auto's pick; whether the picked input has dipped and come back since it was picked (see
-    /// [`PICKED_FLOOR_RISE_S`]); and which inputs have dipped since they were last live.
+    /// Auto's pick; frames since it last changed, and since the picked input was last in use;
+    /// whether the picked input has dipped since it was picked, and come back from it (see
+    /// [`PICKED_DIP_HOLD_S`]).
     picked: Pick,
+    since_change: u32,
+    out_of_use: u32,
+    dipped_since_pick: bool,
     proven: bool,
-    dipped: [bool; MAX_CAPTURE_CH],
     /// The gain each channel enters the mono with.
     weight: [f32; MAX_CAPTURE_CH],
     /// Whether a frame has been mixed: an explicit choice applies from the first frame instead of
@@ -252,29 +296,39 @@ impl InputChannelMix {
         } else {
             48_000.0
         };
-        let coef = |secs: f64| (1.0 - (-1.0 / (secs * rate)).exp()) as f32;
+        let coef = |secs: f64| 1.0 - (-1.0 / (secs * rate)).exp();
         let frames = |secs: f64| (secs * rate) as f32;
         InputChannelMix {
             level_coef: coef(LEVEL_TAU_S),
             floor_coef: coef(FLOOR_RISE_S),
             picked_floor_coef: coef(PICKED_FLOOR_RISE_S),
             evidence_coef: coef(EVIDENCE_S),
+            peak_coef: coef(PEAK_FALL_S),
             corr_coef: coef(CORR_TAU_S),
-            glide: coef(WEIGHT_GLIDE_S),
+            glide: coef(WEIGHT_GLIDE_S) as f32,
             warmup: frames(FLOOR_WARMUP_S) as u32,
+            dip_hold: frames(PICKED_DIP_HOLD_S) as u32,
+            dwell: frames(PICK_DWELL_S) as u32,
             hangover: frames(HANGOVER_S),
             run_min: frames(RUN_MIN_S),
+            join_run: frames(JOIN_RUN_S),
             level: [LEVEL_FLOOR; MAX_CAPTURE_CH],
             floor: [LEVEL_FLOOR; MAX_CAPTURE_CH],
+            peak: [LEVEL_FLOOR; MAX_CAPTURE_CH],
             evidence: [0.0; MAX_CAPTURE_CH],
             quiet: [u32::MAX; MAX_CAPTURE_CH],
+            since_dip: [u32::MAX; MAX_CAPTURE_CH],
             run: [0.0; MAX_CAPTURE_CH],
+            sounding: [false; MAX_CAPTURE_CH],
+            leading: [false; MAX_CAPTURE_CH],
             power: [LEVEL_FLOOR; 2],
             cross: 0.0,
             flip: false,
             picked: Pick::Even,
+            since_change: u32::MAX,
+            out_of_use: 0,
+            dipped_since_pick: false,
             proven: false,
-            dipped: [false; MAX_CAPTURE_CH],
             weight: [1.0 / MAX_CAPTURE_CH as f32; MAX_CAPTURE_CH],
             primed: false,
         }
@@ -295,8 +349,8 @@ impl InputChannelMix {
         if ch <= 1 {
             return x[0];
         }
-        let live = self.track(&x[..ch]);
-        let auto = self.auto_pick(&live[..ch]);
+        self.track(&x[..ch]);
+        let auto = self.auto_pick(ch);
         let mut target = [0.0f32; MAX_CAPTURE_CH];
         match mode {
             INPUT_CHANNEL_1 => target[0] = 1.0,
@@ -334,49 +388,83 @@ impl InputChannelMix {
     }
 
     /// Advance every channel's level, floor, evidence and activity by one frame, and the pair's
-    /// correlation; returns which channels are live.
-    fn track(&mut self, x: &[f32]) -> [bool; MAX_CAPTURE_CH] {
+    /// correlation; sets which channels lead.
+    fn track(&mut self, x: &[f32]) {
+        let ch = x.len();
         let warming = self.warmup > 0;
         self.warmup = self.warmup.saturating_sub(1);
-        let mut live = [false; MAX_CAPTURE_CH];
+        let mut voiced = [false; MAX_CAPTURE_CH];
         for (c, &s) in x.iter().enumerate() {
+            let s = f64::from(s);
             let level = &mut self.level[c];
             *level += self.level_coef * (s * s + LEVEL_FLOOR - *level);
+            let peak = &mut self.peak[c];
+            *peak = if *level > *peak {
+                *level
+            } else {
+                *peak + self.peak_coef * (*level - *peak)
+            };
             let floor = &mut self.floor[c];
+            let picked = self.picked == Pick::One(c);
             if warming || *level < *floor {
                 *floor = *level;
-            } else {
-                let rise = if self.proven && self.picked == Pick::One(c) {
+            } else if !(picked && self.proven && self.since_dip[c] < self.dip_hold) {
+                let rise = if picked {
                     self.picked_floor_coef
                 } else {
                     self.floor_coef
                 };
                 *floor += rise * (*level - *floor);
             }
-            live[c] = *level > LIVE_MIN && *level > LIVE_OVER_FLOOR * *floor;
+            voiced[c] = *level > VOICED_MIN && *level > VOICED_OVER_FLOOR * *floor;
             if *level < DIP_OVER_FLOOR * *floor {
-                self.dipped[c] = true;
-            } else if live[c] && self.dipped[c] {
-                self.dipped[c] = false;
-                if self.picked == Pick::One(c) {
+                self.since_dip[c] = 0;
+                if picked {
+                    self.dipped_since_pick = true;
+                }
+            } else {
+                // Back from a dip taken while picked — not the silence its onset rose from, which
+                // a hum has too: the input dips the way a voice does.
+                if voiced[c] && picked && self.dipped_since_pick {
                     self.proven = true;
                 }
+                self.since_dip[c] = self.since_dip[c].saturating_add(1);
             }
-            let hit = if live[c] { 1.0 } else { 0.0 };
+        }
+        // The loudest input sounding: a voiced one, or the picked one while it stands clear of its
+        // floor (a held note).
+        let mut sounding = voiced;
+        if let Pick::One(p) = self.picked {
+            if p < ch && self.level[p] > DIP_OVER_FLOOR * self.floor[p] {
+                sounding[p] = true;
+            }
+        }
+        self.sounding = sounding;
+        let loudest = (0..ch)
+            .filter(|&c| sounding[c])
+            .map(|c| self.level[c])
+            .fold(0.0f64, f64::max);
+        for (c, &sounds) in sounding[..ch].iter().enumerate() {
+            let lead = sounds && self.level[c] * LEAD_WITHIN >= loudest;
+            self.leading[c] = lead;
+            let hit = if lead { 1.0 } else { 0.0 };
             self.evidence[c] += self.evidence_coef * (hit - self.evidence[c]);
-            if live[c] {
+            if lead {
                 self.quiet[c] = 0;
-                self.run[c] = (self.run[c] + 1.0).min(2.0 * self.run_min);
+                self.run[c] = (self.run[c] + 1.0).min(2.0 * self.join_run);
             } else {
                 self.quiet[c] = self.quiet[c].saturating_add(1);
                 self.run[c] = (self.run[c] - 0.5).max(0.0);
             }
         }
         for (p, &s) in self.power.iter_mut().zip(x) {
+            let s = f64::from(s);
             *p += self.corr_coef * (s * s + LEVEL_FLOOR - *p);
         }
-        self.cross += self.corr_coef * (x[0] * x[1] - self.cross);
-        if live[0] && live[1] {
+        self.cross += self.corr_coef * (f64::from(x[0]) * f64::from(x[1]) - self.cross);
+        // Judged whenever both carry signal, voiced or not: a legato pair stops being voiced
+        // mid-note, and the flip went stale with it.
+        if self.level[0] > VOICED_MIN && self.level[1] > VOICED_MIN {
             let corr = self.cross / (self.power[0] * self.power[1]).sqrt();
             if corr < FLIP_BELOW {
                 self.flip = true;
@@ -384,51 +472,90 @@ impl InputChannelMix {
                 self.flip = false;
             }
         }
-        live
+        self.since_change = self.since_change.saturating_add(1);
     }
 
-    /// Whether channel `c` is in use: live within its hangover, which shrinks with its evidence.
+    /// Whether channel `c` is in use: it led within its hangover, which shrinks with its evidence,
+    /// and no leading input outclasses it.
     fn in_use(&self, c: usize) -> bool {
-        let scale = (self.evidence[c] / 0.5).clamp(0.2, 1.0);
-        (self.quiet[c] as f32) < self.hangover * scale
+        let scale = (self.evidence[c] / 0.5).clamp(0.2, 1.0) as f32;
+        let outclassed = self.sounding[c]
+            && (0..self.level.len())
+                .any(|b| b != c && self.leading[b] && self.level[b] > OUTCLASSED_BY * self.peak[c]);
+        !outclassed && (self.quiet[c] as f32) < self.hangover * scale
+    }
+
+    fn set_pick(&mut self, pick: Pick) {
+        self.picked = pick;
+        self.since_change = 0;
+        self.out_of_use = 0;
+        self.dipped_since_pick = false;
+        self.proven = false;
     }
 
     /// Advance Auto's pick by one frame (see the type doc); returns what Auto mixes this frame.
-    fn auto_pick(&mut self, live: &[bool]) -> Pick {
-        let ch = live.len();
-        let e = &self.evidence[..ch];
+    fn auto_pick(&mut self, ch: usize) -> Pick {
+        let e = self.evidence;
+        let e = &e[..ch];
         let strongest = (0..ch).max_by(|&a, &b| e[a].total_cmp(&e[b])).unwrap_or(0);
-        // Dominant and blended are exclusive, so the pick never flips between them frame by frame.
-        let dominant = (0..ch).all(|c| c == strongest || e[c] <= DOMINANT_SHARE * e[strongest]);
-        let blended = !dominant && e.iter().all(|&v| v >= BLEND_MIN);
-        match self.picked {
-            Pick::Even => {
-                if e[strongest] >= PICK_MIN && dominant {
-                    self.picked = Pick::One(strongest);
-                    self.proven = false;
+        let weakest = e.iter().copied().fold(f64::INFINITY, f64::min);
+        let ratio = if e[strongest] > 0.0 {
+            weakest / e[strongest]
+        } else {
+            1.0
+        };
+        if let Pick::One(a) = self.picked {
+            self.out_of_use = if self.in_use(a) {
+                0
+            } else {
+                self.out_of_use.saturating_add(1)
+            };
+        }
+        if self.since_change >= self.dwell {
+            match self.picked {
+                Pick::Even => {
+                    if e[strongest] >= PICK_MIN && ratio <= BLEND_LEAVE {
+                        self.set_pick(Pick::One(strongest));
+                    }
                 }
-            }
-            Pick::One(a) => {
-                let margin = if self.in_use(a) {
-                    SWITCH_MARGIN
-                } else {
-                    SWITCH_MARGIN_QUIET
-                };
-                if blended {
-                    self.picked = Pick::Even;
-                } else if strongest != a && e[strongest] >= e[a] + margin {
-                    self.picked = Pick::One(strongest);
-                    self.proven = false;
+                Pick::One(a) => {
+                    let margin = if self.in_use(a) {
+                        SWITCH_MARGIN
+                    } else {
+                        SWITCH_MARGIN_QUIET
+                    };
+                    // Out of use for a whole dwell while another input leads on: hand it the
+                    // pick rather than wait seconds for the evidence (a moved mic, a voice after a
+                    // hum that took the pick in a silence).
+                    let heir = (0..ch).find(|&b| b != a && self.run[b] >= self.run_min);
+                    if ratio >= BLEND_ENTER && weakest >= BLEND_MIN {
+                        self.set_pick(Pick::Even);
+                    } else if strongest != a && e[strongest] >= e[a] + margin {
+                        self.set_pick(Pick::One(strongest));
+                    } else if let Some(b) = heir.filter(|_| self.out_of_use >= self.dwell) {
+                        self.set_pick(Pick::One(b));
+                    }
                 }
             }
         }
         match self.picked {
-            Pick::One(a)
-                if !self.in_use(a) && (0..ch).any(|b| b != a && self.run[b] >= self.run_min) =>
-            {
-                Pick::Even
+            Pick::One(a) => {
+                let newcomer = (0..ch)
+                    .filter(|&b| b != a)
+                    .map(|b| self.run[b])
+                    .fold(0.0f32, f32::max);
+                let need = if self.in_use(a) {
+                    self.join_run
+                } else {
+                    self.run_min
+                };
+                if newcomer >= need {
+                    Pick::Even
+                } else {
+                    Pick::One(a)
+                }
             }
-            p => p,
+            Pick::Even => Pick::Even,
         }
     }
 }
@@ -838,15 +965,34 @@ mod tests {
 
     impl Singer {
         fn new(len: usize, from: f64, to: f64, rms_db: f64, f0: f64, seed: u32) -> Singer {
+            Singer::phrased(len, from, to, rms_db, f0, seed, 3.0, false)
+        }
+
+        /// A singer in `phrase`-second phrases, legato (one note each, no consonant gaps) or not.
+        #[allow(clippy::too_many_arguments)]
+        fn phrased(
+            len: usize,
+            from: f64,
+            to: f64,
+            rms_db: f64,
+            f0: f64,
+            seed: u32,
+            phrase: f64,
+            legato: bool,
+        ) -> Singer {
             let mut rng = Floor(seed);
             let mut unit = || 0.5 + rng.next() as f64 / 1.1e-4; // 0..1
             let mut env = vec![0.0f32; len];
             let mut t = from;
             while t < to {
-                let phrase_end = (t + 3.0).min(to);
+                let phrase_end = (t + phrase).min(to);
                 let mut s = t;
                 while s < phrase_end {
-                    let end = (s + 0.22 + 0.12 * unit()).min(phrase_end);
+                    let end = if legato {
+                        phrase_end
+                    } else {
+                        (s + 0.22 + 0.12 * unit()).min(phrase_end)
+                    };
                     let level = 10f64.powf((-3.0 + 6.0 * unit()) / 20.0) as f32;
                     let (a, b) = (at(s).min(len), at(end).min(len));
                     let ramp = at(0.008) as f32;
@@ -856,7 +1002,7 @@ mod tests {
                     }
                     s = end + 0.04 + 0.05 * unit();
                 }
-                t = phrase_end + 0.45;
+                t = phrase_end + if legato { 1.0 } else { 0.45 };
             }
             Singer {
                 env,
@@ -1163,6 +1309,102 @@ mod tests {
         });
         let off = off_over(&out, &want, 8.0..secs);
         assert!(off <= -40.0, "the mic moved onto it is off by {off:.1} dB");
+    }
+
+    /// Legato phrases keep their pick over a talkback on the other input: a note held for
+    /// seconds stopped counting once its floor rose to meet it, and anything intermittent there,
+    /// even at -55 dBFS, took the take.
+    #[test]
+    fn legato_phrases_keep_their_pick_over_a_talkback() {
+        let secs = 40.0;
+        let mut singer = Singer::phrased(at(secs), 1.0, secs, -20.0, 220.0, 3, 8.0, true);
+        let mut talk = Singer::phrased(at(secs), 1.7, secs, -45.0, 120.0, 4, 2.0, false);
+        let (mut room1, mut room2) = (Floor(5), Floor(6));
+        let (out, want) = auto_run(secs, |n| {
+            let (v, t) = (singer.at(n), talk.at(n));
+            ([t + 0.25 * room1.next(), v + 0.25 * room2.next()], v)
+        });
+        let worst = min_gain_over(&out, &want, 3.0..secs);
+        assert!(worst >= 0.9, "the singer fell to {worst:.2}");
+    }
+
+    /// A second mic hearing the singer from across the room, or crosstalk onto the other input,
+    /// never holds the take in an even blend: counted at any level, it put the voice 6 dB down
+    /// with that mic's room and a comb filter mixed in, all session.
+    #[test]
+    fn a_mic_hearing_the_singer_from_afar_is_left_out() {
+        for (bleed_db, delay) in [(-18.0f64, 96usize), (-50.0, 0)] {
+            let secs = 20.0;
+            let mut singer = Singer::new(at(secs), 1.0, secs, -12.0, 220.0, 3);
+            let mut room = Floor(5);
+            let mut past = vec![0.0f32; 128];
+            let gain = 10f64.powf(bleed_db / 20.0) as f32;
+            let (out, want) = auto_run(secs, |n| {
+                let v = singer.at(n);
+                past[n % 128] = v;
+                let far = gain * past[(n + 128 - delay) % 128];
+                ([far + 4.0 * room.next(), v], v)
+            });
+            let off = off_over(&out, &want, 3.0..secs);
+            assert!(off <= -40.0, "{bleed_db} dB away: off by {off:.1} dB");
+        }
+    }
+
+    /// Two sources trading the lead hold the pick still: blending and unblending on every strum
+    /// flipped it — and the echo path the canceller had settled on — twice a second.
+    #[test]
+    fn two_sources_do_not_flap_the_pick() {
+        let secs = 30.0;
+        let mut singer = Singer::new(at(secs), 1.0, secs, -20.0, 220.0, 3);
+        let mut mix = InputChannelMix::new(SR);
+        let (mut changes, mut last) = (0, mix.picked);
+        for n in 0..at(secs) {
+            let strum = (n % at(0.5)) as f64 / SR;
+            let guitar = sine(147.0, 0.14 * (-strum / 0.25).exp(), n);
+            mix.mix(INPUT_CHANNEL_AUTO, &[guitar, singer.at(n)]);
+            if mix.picked != last {
+                changes += 1;
+                last = mix.picked;
+            }
+        }
+        assert!(changes <= 3, "{changes} pick changes in {secs} s");
+    }
+
+    /// A hum appearing on the idle input early in the singing is left out of the take — counted
+    /// for its first second, it reached the blend threshold and joined the take mid-phrase.
+    #[test]
+    fn a_hum_appearing_early_in_the_singing_is_left_out() {
+        let secs = 14.0;
+        let mut singer = Singer::new(at(secs), 2.0, secs, -20.0, 196.0, 3);
+        let mut floor = Floor(5);
+        let mut room = Floor(6);
+        let (out, want) = auto_run(secs, |n| {
+            let hum = if n >= at(3.0) {
+                sine(50.0, 0.0032, n)
+            } else {
+                0.0
+            }; // -50 dBFS
+            (
+                [floor.next() + hum, singer.at(n) + 0.25 * room.next()],
+                singer.at_last(),
+            )
+        });
+        let off = off_over(&out, &want, 3.0..secs);
+        assert!(off <= -40.0, "the hum reached the take at {off:.1} dB");
+    }
+
+    /// A legato stereo pair in opposite polarity stays flipped through its notes: judged only
+    /// while both inputs counted as voiced, the flip went stale once a held note stopped counting.
+    #[test]
+    fn a_legato_pair_in_opposite_polarity_stays_flipped() {
+        let secs = 20.0;
+        let mut singer = Singer::phrased(at(secs), 1.0, secs, -20.0, 220.0, 3, 6.0, true);
+        let (out, want) = auto_run(secs, |n| {
+            let v = singer.at(n);
+            ([-v, v], v)
+        });
+        let worst = min_gain_over(&out, &want, 2.0..secs).abs();
+        assert!(worst >= 0.95, "the pair cancelled to {worst:.2}");
     }
 
     /// Once picked, the weights sit exactly on their target: the take is the picked input,
