@@ -818,6 +818,22 @@ class VocaraEngineBindings {
         int Function(ffi.Pointer<VeEngine>, int, ffi.Pointer<ffi.Uint8>, int)
       >();
 
+  /// Play staged `track` through earlier staged `leader`'s chain (the clips of one lane share one
+  /// insert chain, fader, pan and sends); per-track setters on `track` then address the leader's
+  /// chain. Stage after add, before commit.
+  int ve_track_lane(ffi.Pointer<VeEngine> e, int track, int leader) {
+    return _ve_track_lane(e, track, leader);
+  }
+
+  late final _ve_track_lanePtr =
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Int Function(ffi.Pointer<VeEngine>, ffi.Int, ffi.Int)
+        >
+      >('ve_track_lane');
+  late final _ve_track_lane = _ve_track_lanePtr
+      .asFunction<int Function(ffi.Pointer<VeEngine>, int, int)>();
+
   int ve_bus_chain(
     ffi.Pointer<VeEngine> e,
     int bus,

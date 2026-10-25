@@ -17,6 +17,7 @@ class TrackPlayback {
     this.fx,
     this.busId,
     this.sends = const [],
+    this.laneId,
   });
 
   final String id;
@@ -40,6 +41,11 @@ class TrackPlayback {
 
   /// Post-fader aux sends to FX buses.
   final List<TrackSend> sends;
+
+  /// The lane (take) this clip belongs to: every clip of one lane plays through ONE engine
+  /// chain, so a compressor or gate runs across its clip boundaries instead of restarting
+  /// cold on each clip. Null: the clip gets a chain of its own.
+  final String? laneId;
 }
 
 /// Playback spec for one FX bus (group/aux), derived from the domain model.

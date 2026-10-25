@@ -694,6 +694,9 @@ class GraphAudioPlaybackService implements PlaybackEngine {
         ..write(_orderTag(t.fx))
         ..write(';')
         ..write(_sendsTag(t.sends))
+        // The lane a clip shares a chain with is wiring too.
+        ..write('~')
+        ..write(t.laneId ?? '')
         ..write('|');
     }
     b.write('#');
@@ -806,6 +809,9 @@ class GraphAudioPlaybackService implements PlaybackEngine {
 
     _bindings.ve_tracks_begin(_engine);
     final newIndex = <String, int>{};
+    // Each lane's first clip that staged: its chain is the one every later clip
+    // of the lane plays through (see [TrackPlayback.laneId]).
+    final laneLeader = <String, int>{};
     for (final t in tracks) {
       final busIdx = t.busId != null ? (newBusIndex[t.busId] ?? -1) : -1;
       // A track that fails to stage (idx < 0, e.g. a gone/corrupt file) is simply
@@ -832,6 +838,15 @@ class GraphAudioPlaybackService implements PlaybackEngine {
       if (idx >= 0) {
         newIndex[t.id] = idx;
         _pushSends(idx, t.sends, newBusIndex, bus: false);
+        final lane = t.laneId;
+        if (lane != null) {
+          final leader = laneLeader[lane];
+          if (leader == null) {
+            laneLeader[lane] = idx;
+          } else {
+            _bindings.ve_track_lane(_engine, idx, leader);
+          }
+        }
       }
     }
     // A non-zero return means the engine REJECTED this topology (e.g. a routing

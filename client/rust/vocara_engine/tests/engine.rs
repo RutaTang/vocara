@@ -277,3 +277,73 @@ fn builder_assembles_vocal_and_backing_inserts() {
         "expected audible mix from the built graph"
     );
 }
+
+#[test]
+fn a_lanes_clips_share_one_chain_so_its_dynamics_run_across_the_cut() {
+    // A sustained note split into two clips of one lane (a split at the playhead, a punch-in
+    // next to a clip). Through ONE chain the compressor hears one continuous note, exactly as
+    // if it were one clip; a chain per clip restarted the second clip's compressor at 0 dB of
+    // reduction, a gain bump at the cut.
+    use vocara_engine::dsp::compressor::param as cp;
+    const FRAMES: usize = 187 * BLOCK;
+    const CUT: usize = 93 * BLOCK + 100; // mid-block, as a real cut lands
+    let tone = to_stereo(&sine_mono(220.0, SR, FRAMES, 0.3));
+    let (head, tail) = tone.split_at(CUT * CHANNELS);
+    let head = || Box::new(BufferSource::new(head.to_vec(), 0));
+    let tail = || Box::new(BufferSource::new(tail.to_vec(), CUT as i64));
+
+    let render = |tracks: Vec<TrackSpec>, chains: &[u32]| -> Vec<f32> {
+        let mut g = build(ProjectSpec::new(tracks)).compile(SR, BLOCK).unwrap();
+        for &id in chains {
+            g.set_param(build::comp_id(id), cp::BYPASS, 0.0);
+            g.set_param(build::comp_id(id), cp::THRESHOLD_DB, -30.0);
+            g.set_param(build::comp_id(id), cp::RATIO, 4.0);
+        }
+        let mut out = vec![0.0; FRAMES * CHANNELS];
+        for b in 0..FRAMES / BLOCK {
+            let at = b * BLOCK;
+            g.render(
+                BLOCK,
+                at as i64,
+                &mut out[at * CHANNELS..(at + BLOCK) * CHANNELS],
+            );
+        }
+        out
+    };
+    let max_diff = |a: &[f32], b: &[f32]| {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0f32, f32::max)
+    };
+
+    let one_clip = render(
+        vec![TrackSpec::vocal(
+            1,
+            Box::new(BufferSource::new(tone.clone(), 0)),
+        )],
+        &[1],
+    );
+    let one_lane = render(
+        vec![TrackSpec {
+            lane_sources: vec![(2, tail())],
+            ..TrackSpec::vocal(1, head())
+        }],
+        &[1],
+    );
+    assert_eq!(
+        max_diff(&one_lane, &one_clip),
+        0.0,
+        "a lane's two clips must render exactly like the one clip they were cut from"
+    );
+
+    // The layout this replaced, for scale: a chain per clip bumps at the cut.
+    let chain_per_clip = render(
+        vec![TrackSpec::vocal(1, head()), TrackSpec::vocal(2, tail())],
+        &[1, 2],
+    );
+    assert!(
+        max_diff(&chain_per_clip, &one_clip) > 0.02,
+        "a chain per clip restarts its compressor at the cut"
+    );
+}

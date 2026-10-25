@@ -185,6 +185,10 @@ int ve_buses_add(VeEngine *e, float gain, int muted, int output);
 /* Insert-chain order (FxKind tags, e.g. {0,1} = EQ→Comp). Stage after add, before commit. */
 int ve_track_chain(VeEngine *e, int track, const uint8_t *tags, size_t n);
 int ve_bus_chain(VeEngine *e, int bus, const uint8_t *tags, size_t n);
+/* Play staged `track` through earlier staged `leader`'s chain (the clips of one lane share one
+ * insert chain, fader, pan and sends); per-track setters on `track` then address the leader's
+ * chain. Stage after add, before commit. */
+int ve_track_lane(VeEngine *e, int track, int leader);
 /* Post-fader aux sends: parallel target-bus-index + level-dB arrays. Stage before commit;
  * change a level live with ve_set_send_level. */
 int ve_track_sends(VeEngine *e, int track, const int32_t *targets, const float *levels_db, size_t n);

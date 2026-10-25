@@ -1022,8 +1022,10 @@ class MixerController extends ChangeNotifier {
     final allTracks = _allTracksOf();
 
     final solo = _resolveSolo();
-    // Flatten lanes to one engine source per clip (id = clip id); the lane's
-    // volume / mute / FX apply to all of its clips. Empty takes contribute none.
+    // Flatten lanes to one engine source per clip (id = clip id), all of a
+    // lane's clips through the lane's one chain (laneId): its volume / mute /
+    // FX apply to every clip, and its dynamics run across their boundaries.
+    // Empty takes contribute none.
     final tracks = <TrackPlayback>[];
     for (final t in allTracks) {
       final muted = !_audibleTrack(t, solo);
@@ -1042,6 +1044,7 @@ class MixerController extends ChangeNotifier {
             fx: t.fx,
             busId: t.isBacking ? null : t.busId,
             sends: t.isBacking ? const [] : t.sends,
+            laneId: t.id,
           ),
         );
       }

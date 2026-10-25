@@ -85,26 +85,39 @@ fn reverb_insert() -> ReverbNode {
     ReverbNode::new(0.5, 0.5, 0.0, 1.0, 1.0)
 }
 
+/// The node id of a track insert `tag` (FxKind index).
+fn track_insert_id(tid: NodeId, tag: u8) -> NodeId {
+    match tag {
+        1 => comp_id(tid),
+        2 => deesser_id(tid),
+        3 => gate_id(tid),
+        4 => delay_id(tid),
+        5 => saturation_id(tid),
+        6 => doubler_id(tid),
+        7 => limiter_id(tid),
+        8 => reverb_id(tid),
+        _ => eq_id(tid),
+    }
+}
+
 /// Builds the node id + boxed DSP node for a track insert `tag` (FxKind index).
 fn track_insert(
     tid: NodeId,
     tag: u8,
     comp_meter: Option<std::sync::Arc<std::sync::atomic::AtomicU32>>,
 ) -> (NodeId, Box<dyn Node>) {
-    match tag {
-        1 => (
-            comp_id(tid),
-            Box::new(CompressorNode::default_vocal().with_meter(comp_meter)),
-        ),
-        2 => (deesser_id(tid), Box::new(DeEsserNode::new())),
-        3 => (gate_id(tid), Box::new(GateNode::new())),
-        4 => (delay_id(tid), Box::new(DelayNode::new())),
-        5 => (saturation_id(tid), Box::new(SaturationNode::new())),
-        6 => (doubler_id(tid), Box::new(DoublerNode::new())),
-        7 => (limiter_id(tid), Box::new(LimiterNode::new())),
-        8 => (reverb_id(tid), Box::new(reverb_insert())),
-        _ => (eq_id(tid), Box::new(EqNode::default_strip())),
-    }
+    let node: Box<dyn Node> = match tag {
+        1 => Box::new(CompressorNode::default_vocal().with_meter(comp_meter)),
+        2 => Box::new(DeEsserNode::new()),
+        3 => Box::new(GateNode::new()),
+        4 => Box::new(DelayNode::new()),
+        5 => Box::new(SaturationNode::new()),
+        6 => Box::new(DoublerNode::new()),
+        7 => Box::new(LimiterNode::new()),
+        8 => Box::new(reverb_insert()),
+        _ => Box::new(EqNode::default_strip()),
+    };
+    (track_insert_id(tid, tag), node)
 }
 
 // --- FX buses (DAW group/aux tracks) ----------------------------------------
@@ -218,6 +231,11 @@ pub struct TrackSpec {
     pub sends: Vec<Option<(NodeId, f32)>>,
     /// Optional gain-reduction meter the vocal compressor publishes to (for a UI meter).
     pub comp_meter: Option<std::sync::Arc<std::sync::atomic::AtomicU32>>,
+    /// More sources that play through THIS track's chain, each keyed by the track id its
+    /// source node is numbered under (`source_id(id)`): a lane's later clips. One chain per
+    /// lane, not per clip: a compressor, gate or de-esser per clip saw only its own clip,
+    /// so every clip boundary restarted its envelope cold (a bump on a split mid-note).
+    pub lane_sources: Vec<(NodeId, Box<dyn Node>)>,
 }
 
 impl TrackSpec {
@@ -233,6 +251,7 @@ impl TrackSpec {
             chain: vec![0, 1], // EQ → Comp
             sends: Vec::new(),
             comp_meter: None,
+            lane_sources: Vec::new(),
         }
     }
     pub fn backing(id: NodeId, source: Box<dyn Node>) -> Self {
@@ -247,6 +266,7 @@ impl TrackSpec {
             chain: Vec::new(),
             sends: Vec::new(),
             comp_meter: None,
+            lane_sources: Vec::new(),
         }
     }
 }
@@ -369,6 +389,19 @@ pub fn build(spec: ProjectSpec) -> GraphDesc {
         ));
         nodes.push(NodeEntry::new(pan, Box::new(PanNode::new(t.pan))));
         edges.push(Edge::simple(pan, output_target(t.bus))); // dry → master / bus
+
+        // Where the sources enter: the first insert, else the fader. The lane's other
+        // sources sum in at the same node (the graph sums fan-in).
+        let entry = if t.vocal && !t.chain.is_empty() {
+            track_insert_id(tid, t.chain[0])
+        } else {
+            gain
+        };
+        for (lane_tid, source) in t.lane_sources {
+            let lane_src = source_id(lane_tid);
+            nodes.push(NodeEntry::new(lane_src, source));
+            edges.push(Edge::simple(lane_src, entry));
+        }
 
         if t.vocal {
             // Insert chain in configured order: source → inserts → gain.

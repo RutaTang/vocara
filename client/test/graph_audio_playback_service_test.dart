@@ -117,6 +117,15 @@ class _FakeBindings extends Fake implements VocaraEngineBindings {
     return 0;
   }
 
+  /// Every `ve_track_lane` call as (track, leader), in call order.
+  final List<(int, int)> lanes = [];
+
+  @override
+  int ve_track_lane(ffi.Pointer<VeEngine> e, int track, int leader) {
+    lanes.add((track, leader));
+    return 0;
+  }
+
   @override
   int ve_commit_degraded_mask(ffi.Pointer<VeEngine> e) =>
       degradedMasks.isEmpty ? 0 : degradedMasks.removeAt(0);
@@ -200,6 +209,72 @@ void main() {
       TrackPlayback(id: 'a', path: 'a.wav', startMs: 10),
     ], const []);
     expect(fake.events, ['commit']);
+  });
+
+  group('one chain per lane', () {
+    test(
+      'a lane\'s later clips play through its first clip\'s chain',
+      () async {
+        // A chain per clip ran a compressor per clip, each seeing only its own
+        // clip: every clip boundary restarted the envelope cold.
+        final fake = _FakeBindings();
+        final svc = GraphAudioPlaybackService.withBindings(
+          fake,
+          decode: (path, rate) async => (0x1000, 10),
+        );
+        addTearDown(svc.dispose);
+
+        await svc.sync(const [
+          TrackPlayback(id: 'c1', path: 'a.wav', laneId: 'take'),
+          TrackPlayback(id: 'b1', path: 'b.wav', laneId: 'backing'),
+          TrackPlayback(id: 'c2', path: 'c.wav', startMs: 5000, laneId: 'take'),
+          TrackPlayback(id: 'c3', path: 'd.wav', startMs: 9000, laneId: 'take'),
+        ], const []);
+        expect(fake.lanes, [(2, 0), (3, 0)]);
+      },
+    );
+
+    test(
+      'a lane whose first clip cannot stage leads with the next one',
+      () async {
+        final fake = _FakeBindings();
+        final svc = GraphAudioPlaybackService.withBindings(
+          fake,
+          // a.wav decodes to nothing: that clip is left out of the graph.
+          decode: (path, rate) async => path == 'a.wav' ? (0, 0) : (0x1000, 10),
+        );
+        addTearDown(svc.dispose);
+
+        await svc.sync(const [
+          TrackPlayback(id: 'c1', path: 'a.wav', laneId: 'take'),
+          TrackPlayback(id: 'c2', path: 'b.wav', startMs: 5000, laneId: 'take'),
+          TrackPlayback(id: 'c3', path: 'c.wav', startMs: 9000, laneId: 'take'),
+        ], const []);
+        expect(fake.commits.single, ['b.wav', 'c.wav']);
+        expect(fake.lanes, [(1, 0)]);
+      },
+    );
+
+    test('moving a clip to another lane rebuilds the graph', () async {
+      final fake = _FakeBindings();
+      final svc = GraphAudioPlaybackService.withBindings(
+        fake,
+        decode: (path, rate) async => (0x1000, 10),
+      );
+      addTearDown(svc.dispose);
+
+      const a = TrackPlayback(id: 'c1', path: 'a.wav', laneId: 'take1');
+      await svc.sync(const [
+        a,
+        TrackPlayback(id: 'c2', path: 'b.wav', laneId: 'take1'),
+      ], const []);
+      await svc.sync(const [
+        a,
+        TrackPlayback(id: 'c2', path: 'b.wav', laneId: 'take2'),
+      ], const []);
+      expect(fake.commits, hasLength(2));
+      expect(fake.lanes, [(1, 0)]);
+    });
   });
 
   group('per-track staging skip', () {

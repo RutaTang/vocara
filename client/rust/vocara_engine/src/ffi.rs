@@ -71,6 +71,9 @@ struct PendingTrack {
     chain: Vec<u8>,
     /// Post-fader aux sends: (target bus index, level dB).
     sends: Vec<(i32, f32)>,
+    /// The staged track whose chain this one plays through (see [`ve_track_lane`]), or -1
+    /// for its own.
+    lane: i32,
 }
 
 /// An FX bus staged for the next [`ve_tracks_commit`].
@@ -170,6 +173,9 @@ pub struct VeEngine {
     pending: Vec<PendingTrack>,
     pending_buses: Vec<PendingBus>,
     track_gain_nodes: Vec<NodeId>,
+    /// Per committed track, the track id of the chain it plays through: its own, or its lane
+    /// leader's (see [`ve_track_lane`]). Every per-track setter addresses nodes through it.
+    track_chains: Vec<u32>,
     // Per committed track: the vocal compressor's gain-reduction meter (None for backing).
     gr_meters: Vec<Option<Arc<AtomicU32>>>,
     // Per committed FX bus: the bus compressor's gain-reduction meter.
@@ -334,6 +340,16 @@ fn top_up(
 }
 
 impl VeEngine {
+    /// The track id whose nodes a per-track setter on committed track `track` addresses: the
+    /// chain it plays through (see [`ve_track_lane`]). An index past the committed set keeps
+    /// the plain `track + 1`, which names no node of the live graph.
+    fn chain_of(&self, track: c_int) -> u32 {
+        usize::try_from(track)
+            .ok()
+            .and_then(|t| self.track_chains.get(t).copied())
+            .unwrap_or((track + 1) as u32)
+    }
+
     /// Spawns the feeder pump thread once (idempotent). The thread holds
     /// only the transport Arc and the feeder set; it exits when
     /// [`feeder_stop`] flips at engine destruction.
@@ -580,6 +596,7 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
             pending: Vec::new(),
             pending_buses: Vec::new(),
             track_gain_nodes: Vec::new(),
+            track_chains: Vec::new(),
             gr_meters: Vec::new(),
             bus_gr_meters: Vec::new(),
             feeders: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -1293,6 +1310,33 @@ pub extern "C" fn ve_track_chain(
     })
 }
 
+/// Plays staged `track` through staged `leader`'s chain instead of its own: the clips of one
+/// lane share ONE insert chain, fader, pan and sends. A chain per clip ran a compressor, gate
+/// and de-esser per clip, each seeing only its own clip, so every clip boundary restarted
+/// their envelopes cold (a gain bump on a split mid-note), and N clips cost N chains.
+/// `leader` must be an earlier staged track of the same kind that is not itself a follower.
+/// Every per-track setter on `track` then addresses the leader's chain, and its
+/// gain-reduction meter reads the leader's. Call before [`ve_tracks_commit`]; returns 0 / -1.
+#[no_mangle]
+pub extern "C" fn ve_track_lane(e: *mut VeEngine, track: c_int, leader: c_int) -> c_int {
+    with_engine(e, -1, |eng| {
+        if leader < 0 || leader >= track {
+            return -1;
+        }
+        let Some(lead) = eng.pending.get(leader as usize) else {
+            return -1;
+        };
+        let (lead_vocal, lead_is_leader) = (lead.vocal, lead.lane < 0);
+        match eng.pending.get_mut(track as usize) {
+            Some(pt) if lead_is_leader && pt.vocal == lead_vocal => {
+                pt.lane = leader;
+                0
+            }
+            _ => -1,
+        }
+    })
+}
+
 /// Sets a staged FX bus's insert-chain order (FxKind tags). Call after
 /// [`ve_buses_add`] and before [`ve_tracks_commit`].
 #[no_mangle]
@@ -1375,7 +1419,7 @@ pub extern "C" fn ve_set_send_level(
     level_db: f32,
 ) -> c_int {
     with_engine(e, -1, |eng| {
-        let node = build::track_send_id((track + 1) as u32, slot as usize);
+        let node = build::track_send_id(eng.chain_of(track), slot as usize);
         let g = crate::sample::db_to_lin(level_db);
         eng.handle
             .set_param(node, crate::dsp::master::param::GAIN, g);
@@ -1451,6 +1495,7 @@ pub extern "C" fn ve_tracks_add(
                 bus,
                 chain: Vec::new(),
                 sends: Vec::new(),
+                lane: -1,
             });
             return idx;
         }
@@ -1476,6 +1521,7 @@ pub extern "C" fn ve_tracks_add(
             bus,
             chain: Vec::new(),
             sends: Vec::new(),
+            lane: -1,
         });
         idx
     }))
@@ -1502,6 +1548,20 @@ fn stage_sends(
                 .then(|| (t as u32, crate::sample::db_to_lin(db)))
         })
         .collect()
+}
+
+/// Each staged track's lane leader (see [`ve_track_lane`]) from the `lane` the host staged,
+/// or None for a chain of its own: a leader must be an EARLIER track that is not itself a
+/// follower, so every follower's chain is already built when it is reached.
+fn lane_leaders(lanes: impl IntoIterator<Item = i32>) -> Vec<Option<usize>> {
+    let mut leaders: Vec<Option<usize>> = Vec::new();
+    for (i, lane) in lanes.into_iter().enumerate() {
+        let leader = usize::try_from(lane)
+            .ok()
+            .filter(|&l| l < i && leaders[l].is_none());
+        leaders.push(leader);
+    }
+    leaders
 }
 
 /// Build the multi-source graph from the staged tracks and hot-swap it in (transport state
@@ -1604,13 +1664,19 @@ pub extern "C" fn ve_tracks_commit_staged(e: *mut VeEngine) -> c_int {
 
         let mut specs: Vec<TrackSpec> = Vec::with_capacity(eng.pending.len());
         let mut meters: Vec<Option<Arc<AtomicU32>>> = Vec::with_capacity(eng.pending.len());
+        // Per staged track: the track id of the chain it plays through (its own, or its lane
+        // leader's — see ve_track_lane), and where its own spec sits in `specs` (leaders only).
+        let leaders = lane_leaders(eng.pending.iter().map(|p| p.lane));
+        let mut chain_ids: Vec<u32> = Vec::with_capacity(eng.pending.len());
+        let mut spec_at: Vec<Option<usize>> = Vec::with_capacity(eng.pending.len());
         for (i, pt) in eng.pending.iter().enumerate() {
+            let leader = leaders[i];
             // Vocal tracks get EQ -> Comp + a reverb send (effect params pushed after commit)
-            // and a gain-reduction meter; backing is dry.
-            let meter = if pt.vocal {
-                Some(Arc::new(AtomicU32::new(0)))
-            } else {
-                None
+            // and a gain-reduction meter; backing is dry. A lane follower reads its leader's.
+            let meter = match leader {
+                Some(l) => meters[l].clone(),
+                None if pt.vocal => Some(Arc::new(AtomicU32::new(0))),
+                None => None,
             };
             meters.push(meter.clone());
             // Backing never routes to a bus; a vocal routes only to a valid bus.
@@ -1673,6 +1739,16 @@ pub extern "C" fn ve_tracks_commit_staged(e: *mut VeEngine) -> c_int {
             } else {
                 Box::new(BufferSource::from_arc(pt.pcm.clone(), pt.start_frame))
             };
+            if let Some(l) = leader {
+                // Plays through the leader's chain: its source sums in at the chain's entry.
+                let at = spec_at[l].expect("a leader has a spec");
+                specs[at].lane_sources.push(((i + 1) as u32, source));
+                chain_ids.push(chain_ids[l]);
+                spec_at.push(None);
+                continue;
+            }
+            chain_ids.push((i + 1) as u32);
+            spec_at.push(Some(specs.len()));
             specs.push(TrackSpec {
                 id: (i + 1) as u32,
                 source,
@@ -1684,9 +1760,9 @@ pub extern "C" fn ve_tracks_commit_staged(e: *mut VeEngine) -> c_int {
                 chain,
                 sends,
                 comp_meter: meter,
+                lane_sources: Vec::new(),
             });
         }
-        let n = specs.len();
         let mut project = ProjectSpec::new(specs);
         project.buses = bus_specs;
         let desc = build(project);
@@ -1716,7 +1792,8 @@ pub extern "C" fn ve_tracks_commit_staged(e: *mut VeEngine) -> c_int {
         eng.handle.stage_graph(graph);
         eng.staged_feeders = Some((new_feeders, new_ctrls));
         eng.degraded_mask = degraded;
-        eng.track_gain_nodes = (0..n).map(|i| build::gain_id((i + 1) as u32)).collect();
+        eng.track_gain_nodes = chain_ids.iter().map(|&c| build::gain_id(c)).collect();
+        eng.track_chains = chain_ids;
         eng.gr_meters = meters;
         eng.bus_gr_meters = bus_meters;
         // The new graph is committed: evict cached PCM for paths no longer in it (with a
@@ -2208,6 +2285,7 @@ pub extern "C" fn ve_tracks_add_pcm(
             bus,
             chain: Vec::new(),
             sends: Vec::new(),
+            lane: -1,
         });
         idx
     }))
@@ -2281,7 +2359,7 @@ pub extern "C" fn ve_set_track_volume(
 #[no_mangle]
 pub extern "C" fn ve_set_pan(e: *mut VeEngine, index: c_int, pan: f32) -> c_int {
     with_engine(e, -1, |eng| {
-        let node = build::pan_id((index + 1) as u32);
+        let node = build::pan_id(eng.chain_of(index));
         eng.handle
             .set_param(node, crate::dsp::gain_pan::param::PAN, pan);
         eng.handle.flush();
@@ -2346,7 +2424,7 @@ pub extern "C" fn ve_set_eq_band(
 ) -> c_int {
     with_engine(e, -1, |eng| {
         use crate::dsp::biquad::param as p;
-        let node = build::eq_id((track + 1) as u32);
+        let node = build::eq_id(eng.chain_of(track));
         let b = (band as u16) << p::FIELD_BITS;
         let h = &mut eng.handle;
         h.set_param(node, b | p::FREQ, freq);
@@ -2373,7 +2451,7 @@ pub extern "C" fn ve_set_comp(
 ) -> c_int {
     with_engine(e, -1, |eng| {
         use crate::dsp::compressor::param as p;
-        let node = build::comp_id((track + 1) as u32);
+        let node = build::comp_id(eng.chain_of(track));
         let h = &mut eng.handle;
         h.set_param(node, p::THRESHOLD_DB, threshold_db);
         h.set_param(node, p::RATIO, ratio);
@@ -2391,7 +2469,7 @@ pub extern "C" fn ve_set_comp(
 #[no_mangle]
 pub extern "C" fn ve_set_send(e: *mut VeEngine, track: c_int, send_db: f32) -> c_int {
     with_engine(e, -1, |eng| {
-        let node = build::send_id((track + 1) as u32); // the send is a scalar gain node
+        let node = build::send_id(eng.chain_of(track)); // the send is a scalar gain node
         let g = crate::sample::db_to_lin(send_db);
         eng.handle
             .set_param(node, crate::dsp::master::param::GAIN, g);
@@ -2532,7 +2610,7 @@ pub extern "C" fn ve_set_deesser(
 ) -> c_int {
     with_engine(e, -1, |eng| {
         use crate::dsp::deesser::param as p;
-        let node = build::deesser_id((track + 1) as u32);
+        let node = build::deesser_id(eng.chain_of(track));
         let h = &mut eng.handle;
         h.set_param(node, p::FREQ, freq);
         h.set_param(node, p::THRESHOLD_DB, threshold_db);
@@ -2577,7 +2655,7 @@ pub extern "C" fn ve_set_gate(
 ) -> c_int {
     with_engine(e, -1, |eng| {
         use crate::dsp::gate::param as p;
-        let node = build::gate_id((track + 1) as u32);
+        let node = build::gate_id(eng.chain_of(track));
         let h = &mut eng.handle;
         h.set_param(node, p::THRESHOLD_DB, threshold_db);
         h.set_param(node, p::RANGE_DB, range_db);
@@ -2624,7 +2702,7 @@ pub extern "C" fn ve_set_delay(
 ) -> c_int {
     with_engine(e, -1, |eng| {
         use crate::dsp::delay::param as p;
-        let node = build::delay_id((track + 1) as u32);
+        let node = build::delay_id(eng.chain_of(track));
         let h = &mut eng.handle;
         h.set_param(node, p::TIME_MS, time_ms);
         h.set_param(node, p::FEEDBACK, feedback);
@@ -2667,7 +2745,7 @@ pub extern "C" fn ve_set_saturation(
 ) -> c_int {
     with_engine(e, -1, |eng| {
         use crate::dsp::saturation::param as p;
-        let node = build::saturation_id((track + 1) as u32);
+        let node = build::saturation_id(eng.chain_of(track));
         let h = &mut eng.handle;
         h.set_param(node, p::DRIVE_DB, drive_db);
         h.set_param(node, p::MIX, mix);
@@ -2709,7 +2787,7 @@ pub extern "C" fn ve_set_doubler(
 ) -> c_int {
     with_engine(e, -1, |eng| {
         use crate::dsp::doubler::param as p;
-        let node = build::doubler_id((track + 1) as u32);
+        let node = build::doubler_id(eng.chain_of(track));
         let h = &mut eng.handle;
         h.set_param(node, p::DELAY_MS, delay_ms);
         h.set_param(node, p::DEPTH_MS, depth_ms);
@@ -2755,7 +2833,7 @@ pub extern "C" fn ve_set_limiter(
 ) -> c_int {
     with_engine(e, -1, |eng| {
         use crate::dsp::limiter::param as p;
-        let node = build::limiter_id((track + 1) as u32);
+        let node = build::limiter_id(eng.chain_of(track));
         let h = &mut eng.handle;
         h.set_param(node, p::CEILING_DB, ceiling_db);
         h.set_param(node, p::RELEASE_MS, release_ms);
@@ -2798,7 +2876,7 @@ pub extern "C" fn ve_set_reverb_insert(
 ) -> c_int {
     with_engine(e, -1, |eng| {
         use crate::dsp::reverb::param as p;
-        let node = build::reverb_id((track + 1) as u32);
+        let node = build::reverb_id(eng.chain_of(track));
         let h = &mut eng.handle;
         h.set_param(node, p::ROOM_SIZE, room);
         h.set_param(node, p::DAMPING, damping);
@@ -3528,5 +3606,28 @@ mod degraded_mask_tests {
         // it just can no longer say which track.
         assert_eq!(mark_degraded(0, DEGRADED_OVERFLOW_BIT + 1), top);
         assert_eq!(mark_degraded(0, 5000), top);
+    }
+}
+
+#[cfg(test)]
+mod lane_tests {
+    use super::lane_leaders;
+
+    /// A follower plays through an earlier leader; anything else keeps its own chain.
+    #[test]
+    fn a_follower_needs_an_earlier_track_that_leads() {
+        assert_eq!(
+            lane_leaders([-1, 0, 0, -1, 3, 1, 9, 6]),
+            [
+                None,    // 0 leads
+                Some(0), // 1 follows 0
+                Some(0), // 2 follows 0
+                None,    // 3 leads
+                Some(3), // 4 follows 3
+                None,    // 5 names a follower: it gets its own chain
+                None,    // 6 names a track staged after it: its own chain
+                Some(6), // 7 follows 6, which leads
+            ]
+        );
     }
 }
