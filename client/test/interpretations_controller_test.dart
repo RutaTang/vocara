@@ -461,14 +461,18 @@ void main() {
       expect(host.saves, 0);
     });
 
-    test('is silently blocked while separating (structural mutex)', () async {
-      final host = twoVersions();
-      host.separating = true;
-      await host.controller.delete('v1');
-      expect(host.practice!.versions, hasLength(2));
-      expect(host.saves, 0);
-      expect(host.toasts, isEmpty);
-    });
+    test(
+      'is blocked while separating (structural mutex), and says so',
+      () async {
+        // Silent, the confirm dialog's "Delete" did nothing at all.
+        final host = twoVersions();
+        host.separating = true;
+        await host.controller.delete('v1');
+        expect(host.practice!.versions, hasLength(2));
+        expect(host.saves, 0);
+        expect(host.toasts, ['Wait for the current edit to finish.']);
+      },
+    );
 
     test('is guarded while recording', () async {
       final host = twoVersions();

@@ -600,6 +600,31 @@ void main() {
     });
   });
 
+  test('a delete refused while an import runs says why', () async {
+    // The confirm dialog opened, "Delete" was clicked, and the take simply
+    // stayed: the refusal said nothing.
+    final vm = await pumpVm();
+    final gate = waveforms.gate = Completer<void>();
+    addTearDown(() {
+      if (!gate.isCompleted) gate.complete();
+    });
+    final toasts = <String>[];
+    final sub = vm.toasts.listen(toasts.add);
+    addTearDown(sub.cancel);
+    final import = vm.addVocalTake('/src/guide.wav');
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+
+    expect(vm.refuseStructuralEdit(), isTrue);
+    await vm.deleteTrack('take1');
+    await Future<void>.delayed(Duration.zero);
+    expect(toasts, everyElement('Wait for the current edit to finish.'));
+    expect(toasts, hasLength(2));
+    expect(vm.practice!.vocalTracks.map((t) => t.id), contains('take1'));
+    gate.complete();
+    await import;
+    expect(vm.refuseStructuralEdit(), isFalse);
+  });
+
   group('interpretation changes are shown before their save lands', () {
     Future<(SongPracticeDetailViewModel, List<String?>)> watched() async {
       final vm = await pumpVm();

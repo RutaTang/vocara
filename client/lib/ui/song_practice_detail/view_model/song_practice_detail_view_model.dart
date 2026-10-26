@@ -1443,7 +1443,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     final practice = _practice;
     final source = _trackById(trackId);
     if (practice == null || source == null || !source.isBacking) return;
-    if (isSeparating || busy) return; // no concurrent / re-entrant runs
+    if (refuseStructuralEdit()) return; // no concurrent / re-entrant runs
     // Residual race only: the menu item is hidden while unavailable (the
     // availability probe resolves before any menu can be shown), so this
     // guard fires only if a click slipped in before the probe landed.
@@ -1916,12 +1916,29 @@ class SongPracticeDetailViewModel extends ChangeNotifier
 
   // --- Track mutations -----------------------------------------------------
 
+  /// Whether a structural edit (a delete, a separation) has to wait, saying
+  /// why when it does. Asked before a confirm dialog opens as well: the
+  /// dialog asked the user to confirm an edit that was then refused without
+  /// a word, the take still there after "Delete".
+  bool refuseStructuralEdit() {
+    final String why;
+    if (takeInFlight) {
+      why = 'Stop recording first.';
+    } else if (isSeparating) {
+      why = 'Wait for the separation to finish.';
+    } else if (busy) {
+      why = 'Wait for the current edit to finish.';
+    } else {
+      return false;
+    }
+    _toast(why);
+    return true;
+  }
+
   Future<void> deleteTrack(String trackId) async {
     final practice = _practice;
     if (practice == null) return;
-    if (busy || isSeparating || takeInFlight) {
-      return;
-    } // no concurrent structural edit
+    if (refuseStructuralEdit()) return; // no concurrent structural edit
     await _busyGate.run(() async {
       // No awaits happened since the guard, so the model is still live here.
       final cur = _practice;

@@ -366,6 +366,8 @@ class _WorkspaceState extends State<_Workspace> {
   }
 
   Future<void> _deleteTrack(AudioTrack track) async {
+    // Not asked to confirm an edit that would then be refused.
+    if (vm.refuseStructuralEdit()) return;
     final confirmed = await showConfirmDialog(
       context,
       title: 'Delete "${track.displayName}"?',
@@ -380,6 +382,7 @@ class _WorkspaceState extends State<_Workspace> {
   }
 
   Future<void> _separateBacking(AudioTrack track) async {
+    if (vm.refuseStructuralEdit()) return; // as _deleteTrack
     final reseparate = vm.canReseparate;
     final confirmed = await showConfirmDialog(
       context,
@@ -1867,6 +1870,7 @@ class _InterpretationDropdown extends StatelessWidget {
   }
 
   Future<void> _delete(BuildContext context, String id, String name) async {
+    if (vm.refuseStructuralEdit()) return; // not asked, then refused
     final ok = await showConfirmDialog(
       context,
       title: 'Delete "$name"?',

@@ -197,8 +197,11 @@ class InterpretationsController extends ChangeNotifier {
       _toast('Stop recording to delete an interpretation.');
       return;
     }
-    // No concurrent structural edit.
-    if (_busyGate.busy || _isSeparating()) return;
+    // No concurrent structural edit; said, not silently ignored.
+    if (_busyGate.busy || _isSeparating()) {
+      _toast('Wait for the current edit to finish.');
+      return;
+    }
     if (practice.versions.length <= 1) {
       _toast('Keep at least one interpretation.');
       return;
