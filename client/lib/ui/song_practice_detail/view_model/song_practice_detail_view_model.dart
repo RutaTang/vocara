@@ -452,6 +452,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   String? get selectedClipId => _selectedClipId;
 
   void selectTrack(String trackId) {
+    _userSelected();
     if (_selectedTrackId == trackId &&
         _selectedClipId == null &&
         _selectedBusId == null) {
@@ -469,6 +470,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
 
   /// Selects a specific clip (and its lane), so per-clip actions target it.
   void selectClip(String trackId, String clipId) {
+    _userSelected();
     if (_selectedTrackId == trackId &&
         _selectedClipId == clipId &&
         _selectedBusId == null) {
@@ -483,6 +485,17 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     }
   }
 
+  /// Bumped by every selection the user makes (even one re-picking what is
+  /// selected): a restore of a selection taken before an await stands down
+  /// once the user picked something since.
+  int _userSelections = 0;
+
+  void _userSelected() {
+    _userSelections++;
+    // A choice of their own ends a backing-lane detour (see [setPlayReference]).
+    _backingDetour = null;
+  }
+
   /// The bus whose strip is selected for FX editing in the inspector. Null when a
   /// take (or nothing) is selected.
   String? _selectedBusId;
@@ -491,6 +504,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
 
   /// Selecting a bus takes over the inspector FX panel; selecting a track clears it.
   void selectBus(String? busId) {
+    _userSelected();
     if (_selectedBusId == busId) return;
     _selectedBusId = busId;
     // Bus and track selection are mutually exclusive (the inspector owns one or
@@ -1475,6 +1489,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
             track: _selectedTrackId,
             clip: _selectedClipId,
             bus: _selectedBusId,
+            picks: _userSelections,
           );
           mixer.setPlayReferenceSilently(false); // sing over the instrumental
           _practice = cur.copyWith(
@@ -1491,9 +1506,12 @@ class SongPracticeDetailViewModel extends ChangeNotifier
             // save already resynced the engine under the flipped flag, so a
             // silent restore left the toggle and the audible backing apart.
             mixer.setPlayReference(prevPlayRef);
-            _selectedTrackId = prevSelection.track;
-            _selectedClipId = prevSelection.clip;
-            _selectedBusId = prevSelection.bus;
+            // Unless the user picked a lane while the save ran.
+            if (_userSelections == prevSelection.picks) {
+              _selectedTrackId = prevSelection.track;
+              _selectedClipId = prevSelection.clip;
+              _selectedBusId = prevSelection.bus;
+            }
             _ensureSelectionAnalyzed();
             notifyListeners();
             _toast('Could not save the separated track.');
@@ -2528,15 +2546,20 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// (see [MixerController.setPlayReference]), keeping a selection on that
   /// lane on the backing now shown.
   void setPlayReference(bool value) {
+    // The segment already shown, tapped again: nothing changes (a clip
+    // selected on the backing stays, a detour stays pending).
+    if (mixer.playReference == value) return;
     final detour = _backingDetour;
     _backingDetour = null;
     final before = _selectedBusId == null ? _selectedTrackId : null;
     final onBacking = before != null && _trackById(before)?.isBacking == true;
     mixer.setPlayReference(value);
     final shown = mixer.activeBacking;
+    // Still where the detour left it (any pick of the user's own ends it).
     final back =
         detour != null &&
         _selectedBusId == null &&
+        _selectedClipId == null &&
         _selectedTrackId == detour.movedTo;
     if (shown != null && (onBacking || back)) {
       selectTrack(shown.id);

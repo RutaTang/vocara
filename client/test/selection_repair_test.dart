@@ -348,4 +348,36 @@ void main() {
       expect(vm.selectedTrackId, 'acc', reason: 'a glance at the empty slot');
     },
   );
+
+  test('a pick of the user\'s own ends a backing detour, and re-tapping the '
+      'shown backing changes nothing', () async {
+    AudioTrack acc() => AudioTrack(
+      id: 'acc',
+      kind: AudioTrackKind.accompaniment,
+      displayName: 'acc',
+      clips: const [
+        AudioClip(
+          id: 'acc-c',
+          audioFilePath: '/pool/acc.wav',
+          durationMs: 1000,
+          startMs: 0,
+        ),
+      ],
+      createdAt: DateTime(2026),
+    );
+    final vm = await open(practice().copyWith(accompaniment: acc()));
+    vm.selectTrack('acc');
+    vm.setPlayReference(true); // the empty Original slot: off to a take
+    expect(vm.selectedTrackId, 't2');
+    vm.selectClip('t2', vm.practice!.vocalTracks.first.clips.first.id);
+    final clip = vm.selectedClipId;
+    vm.setPlayReference(false);
+    expect(vm.selectedTrackId, 't2', reason: 'the user chose there');
+    expect(vm.selectedClipId, clip);
+
+    vm.selectClip('acc', 'acc-c');
+    vm.setPlayReference(false); // the shown segment, tapped again
+    expect(vm.selectedTrackId, 'acc');
+    expect(vm.selectedClipId, 'acc-c');
+  });
 }

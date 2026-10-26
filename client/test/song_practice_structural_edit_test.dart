@@ -801,6 +801,44 @@ void main() {
       },
     );
 
+    test(
+      'a lane picked while a failed separation saves stays picked',
+      () async {
+        final separation = _GatedSeparation();
+        final reference = AudioTrack(
+          id: 'ref',
+          kind: AudioTrackKind.reference,
+          displayName: 'Original',
+          audioFilePath: '/pool/original.wav',
+          durationMs: 1000,
+          createdAt: DateTime(2026),
+        );
+        final vm = await pumpVm(separation: separation, reference: reference);
+        for (var i = 0; i < 400 && !vm.separationAvailable; i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 5));
+        }
+        vm.setPlayReference(true);
+        vm.selectTrack('ref');
+        final run = vm.separateBacking('ref');
+        await Future<void>.delayed(Duration.zero);
+        repo.failNextSave = true;
+        final saves = repo.saveNo;
+        // The failed save's revert re-reads the store: park it there.
+        final reread = Completer<void>();
+        repo.loadGate = reread;
+        separation.gate.complete();
+        for (var i = 0; i < 200 && repo.saveNo == saves; i++) {
+          await Future<void>.delayed(Duration.zero);
+        }
+        final take = vm.practice!.vocalTracks.first.id;
+        vm.selectTrack(take); // the user picks a lane meanwhile
+        repo.loadGate = null;
+        reread.complete();
+        await run;
+        expect(vm.selectedTrackId, take);
+      },
+    );
+
     test('separating a backing that is NOT yet the reference keeps the '
         'lane\'s mixer state', () async {
       // The ordinary first separation: the full mix sits in the ACCOMPANIMENT
