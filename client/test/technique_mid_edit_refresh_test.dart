@@ -121,6 +121,25 @@ class _FakeRecorder extends Fake implements MicRecordingController {
   void dispose() => _level.dispose();
 }
 
+/// A media import that parks until [gate] completes: a large file's copy.
+class _GatedMedia extends TechniqueMediaService {
+  _GatedMedia() : super(storage: LocalStorageService());
+
+  final gate = Completer<void>();
+
+  @override
+  Future<String> importMedia({
+    required String techniqueId,
+    required String sourcePath,
+  }) async {
+    await gate.future;
+    return '/pool/$techniqueId-imported.wav';
+  }
+
+  @override
+  Future<void> deleteMedia(String path) async {}
+}
+
 Technique _technique({String summary = 'local summary'}) => Technique(
   id: 't1',
   name: 'Twang',
@@ -280,6 +299,47 @@ void main() {
 
     await vm.stopPractice();
     await pumpEventQueue();
+    expect(vm.technique!.summary, 'remote summary');
+  });
+
+  test('a reload skipped while an import outlives its edit is replayed when '
+      'the import ends', () async {
+    // Cancel's replay found the abandoned copy still running and skipped
+    // again; the copy's end replayed nothing, so the read view kept the old
+    // text and the next edit, seeded from it, wrote it over the remote change.
+    final repo = _Repo(_technique(), {'t1': 'BASE-HASH'});
+    final remote = StreamController<RemoteApplied>.broadcast();
+    addTearDown(remote.close);
+    final media = _GatedMedia();
+    final vm = TechniqueDetailViewModel(
+      repository: repo,
+      mediaService: media,
+      techniqueId: 't1',
+      remoteApplied: remote.stream,
+      analysisService: _NoAnalysis(),
+      recorder: _FakeRecorder(),
+    );
+    addTearDown(vm.dispose);
+    for (var i = 0; i < 200 && vm.technique == null; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+
+    vm.beginEdit();
+    final adding = vm.addMedia(['/src/a large take.wav']);
+    await pumpEventQueue();
+    expect(vm.importingMedia, isTrue);
+    _remoteEdit(repo, remote);
+    await pumpEventQueue();
+    // Cancel, Discard: the copy is still running.
+    await vm.discardMediaDraft();
+    vm.endEdit();
+    await pumpEventQueue();
+    expect(vm.technique!.summary, 'local summary', reason: 'held by the copy');
+
+    media.gate.complete();
+    await adding;
+    await pumpEventQueue();
+    expect(vm.importingMedia, isFalse);
     expect(vm.technique!.summary, 'remote summary');
   });
 }

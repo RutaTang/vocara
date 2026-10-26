@@ -213,6 +213,16 @@ class TechniqueDetailViewModel extends ChangeNotifier
   /// hold is a practice take: stopping it used to replay nothing, so a remote
   /// change landing mid-take left the read view stale with nothing pending
   /// to correct it — and a later Edit seeded the form from that stale text.
+  /// An import or an example save that outlived its edit session ended (or
+  /// failed): tell the screen, and replay a remote change skipped while it
+  /// ran. endEdit's replay found it still busy and skipped again, and nothing
+  /// else replayed it: the read view kept the old text, and the next edit,
+  /// seeded from it against the stale base, wrote it over the remote change.
+  void _busyEnded() {
+    notifyListeners();
+    _replayMissedRemote();
+  }
+
   void _replayMissedRemote() {
     if (_editing || !_missedRemote) return;
     _missedRemote = false;
@@ -1077,7 +1087,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
         _exampleTempPath = null;
         _recordingNotice = 'Recording failed. The example could not be saved.';
         _savingExample = false;
-        notifyListeners();
+        _busyEnded();
         return null;
       }
       _recordingNotice =
@@ -1110,7 +1120,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
           "Couldn't save the example recording. The take was kept in a "
           'temporary folder.';
       _savingExample = false;
-      notifyListeners();
+      _busyEnded();
       return null;
     }
     // Import succeeded: the clip lives in the sandbox now, the temp is a
@@ -1123,7 +1133,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
       // orphan — delete it rather than staging it behind the read view.
       _deleteMediaQuietly(added.path);
       _savingExample = false;
-      notifyListeners();
+      _busyEnded();
       return null;
     }
     // A dirty stop already validated the partial take: reuse its analysis
@@ -1581,7 +1591,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
       // The screen last saw importingMedia true (its spinner, and Save/add/
       // Record disabled) and the user may already be in a NEW edit session:
       // tell it the import is over, or that busy state sticks there.
-      notifyListeners();
+      _busyEnded();
       return;
     }
 
