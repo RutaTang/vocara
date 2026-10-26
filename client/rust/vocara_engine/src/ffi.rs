@@ -1544,6 +1544,12 @@ pub extern "C" fn ve_set_send_level(
     slot: c_int,
     level_db: f32,
 ) -> c_int {
+    // A slot past MAX_SENDS addresses another node: `track_send_id(t, 17)` is
+    // `eq_id(t + 1)`, so a corrupt or synced practice holding that many sends set the
+    // next track's EQ gain.
+    if slot < 0 || slot as usize >= build::MAX_SENDS {
+        return -1;
+    }
     with_engine(e, -1, |eng| {
         let node = build::track_send_id(eng.chain_of(track), slot as usize);
         let g = crate::sample::db_to_lin(level_db);
@@ -1562,6 +1568,10 @@ pub extern "C" fn ve_set_bus_send_level(
     slot: c_int,
     level_db: f32,
 ) -> c_int {
+    // As for a track's send (see `ve_set_send_level`).
+    if slot < 0 || slot as usize >= build::MAX_SENDS {
+        return -1;
+    }
     with_engine(e, -1, |eng| {
         let node = build::bus_aux_send_id(bus as u32, slot as usize);
         let g = crate::sample::db_to_lin(level_db);
