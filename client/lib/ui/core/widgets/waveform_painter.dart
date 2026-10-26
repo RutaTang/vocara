@@ -117,7 +117,22 @@ class WaveformPainter extends CustomPainter {
     double idxAt(int i) => steps <= 1 ? 0.0 : i / (steps - 1) * (n - 1);
     double xAt(int i) =>
         span <= 0 ? 0.0 : (idxAt(i) - indexOffset) / span * drawWidth;
-    double ampAt(int i) => peaks[idxAt(i).round().clamp(0, n - 1)];
+    // Each vertex stands for every peak in its bucket when there are more
+    // peaks than vertices: the one peak nearest it alone dropped a burst
+    // that fell between vertices — gone at one zoom, back at the next.
+    final half = steps > 1 && steps < n ? (n - 1) / (steps - 1) / 2 : 0.0;
+    final amps = List<double>.generate(steps, (i) {
+      final c = idxAt(i);
+      var m = peaks[c.round().clamp(0, n - 1)];
+      if (half > 0) {
+        final hi = (c + half).floor().clamp(0, n - 1);
+        for (var k = (c - half).ceil().clamp(0, n - 1); k <= hi; k++) {
+          if (peaks[k] > m) m = peaks[k];
+        }
+      }
+      return m;
+    });
+    double ampAt(int i) => amps[i];
 
     // A slice whose window reaches the clip's END has no peak past its last
     // one to draw to (see [visiblePeakSlice]), so its final bucket — from the

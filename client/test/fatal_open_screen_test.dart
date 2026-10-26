@@ -3,6 +3,7 @@
 // each with working actions. Rendered through FatalOpenApp, the exact wrapper
 // main() uses.
 
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vocara/ui/core/widgets/fatal_open_screen.dart';
 
@@ -88,5 +89,27 @@ void main() {
     await tester.tap(find.text('Quit Vocara'));
     expect(reveals, 1);
     expect(quits, 1);
+
+    // The details are what support needs; as plain text they could not be
+    // selected.
+    String? copied;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async {
+        if (call.method == 'Clipboard.setData') {
+          copied = (call.arguments as Map)['text'] as String?;
+        }
+        return null;
+      },
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        null,
+      ),
+    );
+    await tester.tap(find.text('Copy Details'));
+    await tester.pump();
+    expect(copied, 'SqliteException(11): database disk image is malformed');
   });
 }

@@ -977,10 +977,17 @@ class _Region extends StatelessWidget {
     return Container(
       clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
-        // Fill stays constant; only the outer border brightens when selected
-        // (Logic style) — a lift of the lane's own hue, not pure white — so the
-        // waveform inside reads the same either way.
         color: color.withValues(alpha: 0.14),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      // Fill stays constant; only the outer border brightens when selected
+      // (Logic style) — a lift of the lane's own hue, not pure white — so the
+      // waveform inside reads the same either way. Overlaid, not inset (as
+      // [_FormingClip]): the painter maps the clip's full width, and an inset
+      // drew its edges up to 4 px off the ruler and playhead, shifted the
+      // waveform a pixel on selection, and squeezed a take as recording
+      // stopped.
+      foregroundDecoration: BoxDecoration(
         borderRadius: BorderRadius.circular(4),
         border: Border.all(
           color: selected
@@ -995,7 +1002,7 @@ class _Region extends StatelessWidget {
           Container(height: 4, color: color.withValues(alpha: 0.9)),
           Expanded(
             child: Padding(
-              padding: const EdgeInsets.fromLTRB(2, 3, 2, 3),
+              padding: const EdgeInsets.symmetric(vertical: 3),
               child: analyzing
                   ? const Center(
                       child: Text(

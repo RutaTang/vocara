@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:forui/forui.dart';
 
+import '../../../../data/db/asset_store.dart';
 import '../../../../domain/models/technique_media.dart';
 import '../../../core/themes/studio.dart';
 import '../../../core/widgets/visible_drop_target.dart';
@@ -37,6 +38,7 @@ class TechniqueMediaSection extends StatelessWidget {
     this.onToggleExpand,
     this.analysisBuilder,
     this.liveMonitor = false,
+    this.micLive = false,
     this.enabled = true,
     super.key,
   });
@@ -60,6 +62,9 @@ class TechniqueMediaSection extends StatelessWidget {
   /// Fires when the mic arms for a take: every clip's player pauses, so no
   /// example plays into the recording.
   final Listenable? pauseSignal;
+
+  /// Whether a take is arming or recording: no example can be started then.
+  final bool micLive;
 
   /// Media id of the example whose inline analysis is expanded (accordion),
   /// or null.
@@ -165,6 +170,7 @@ class TechniqueMediaSection extends StatelessWidget {
             onPosition: m.id == analyzedId ? onPlaybackPosition : null,
             seekSignal: m.id == analyzedId ? analysisScrub : null,
             pauseSignal: pauseSignal,
+            playBlocked: micLive,
             // Pair each audio example with a collapsible analysis. While
             // recording an example the live preview shows under the record
             // control instead, so the card's static analysis is hidden then.
@@ -234,6 +240,7 @@ class _MediaTile extends StatefulWidget {
     this.onPosition,
     this.seekSignal,
     this.pauseSignal,
+    this.playBlocked = false,
     this.canExpand = false,
     this.expanded = false,
     this.onToggleExpand,
@@ -248,6 +255,7 @@ class _MediaTile extends StatefulWidget {
   final ValueChanged<Duration>? onPosition;
   final ValueListenable<Duration>? seekSignal;
   final Listenable? pauseSignal;
+  final bool playBlocked;
 
   /// Whether this card offers an expandable analysis (audio clips only).
   final bool canExpand;
@@ -361,18 +369,23 @@ class _MediaTileState extends State<_MediaTile>
               ],
             ),
             const SizedBox(height: 8),
+            // Keyed on whether the clip's bytes are here too: a player reads
+            // that once, at mount, and a reload handing the same clip its real
+            // file kept saying it isn't on this device.
             m.isVideo
                 ? TechniqueVideoPlayer(
-                    key: ValueKey(m.id),
+                    key: ValueKey((m.id, AssetStore.assetIdOf(m.path) != null)),
                     path: m.path,
                     pauseSignal: widget.pauseSignal,
+                    playBlocked: widget.playBlocked,
                   )
                 : TechniqueAudioPlayer(
-                    key: ValueKey(m.id),
+                    key: ValueKey((m.id, AssetStore.assetIdOf(m.path) != null)),
                     path: m.path,
                     onPosition: widget.onPosition,
                     seekSignal: widget.seekSignal,
                     pauseSignal: widget.pauseSignal,
+                    playBlocked: widget.playBlocked,
                   ),
             if (widget.analysis != null) ...[
               const SizedBox(height: 14),

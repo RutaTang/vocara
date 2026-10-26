@@ -193,6 +193,29 @@ void main() {
     expect(vm.all.map((t) => t.id), ['b']);
   });
 
+  test('a return from a technique page while a load runs loads again after '
+      'it', () async {
+    // The return's load was dropped as re-entry, and the running one had read
+    // the list before the delete made on that page: the card stayed.
+    final repo = _HeldTechniqueRepo()
+      ..techniques = [_technique('a', 'A'), _technique('b', 'B')];
+    repo.gate = Completer<void>();
+    final vm = TechniqueLibraryViewModel(
+      repository: repo,
+      mediaService: _NoDiskMedia(),
+    );
+    addTearDown(vm.dispose);
+    await pumpEventQueue();
+    expect(vm.load.running, isTrue);
+    repo.techniques = [_technique('b', 'B')]; // deleted on its page
+    vm.refresh();
+    final held = repo.gate!;
+    repo.gate = null;
+    held.complete();
+    await pumpEventQueue();
+    expect(vm.all.map((t) => t.id), ['b']);
+  });
+
   test('Home reloads when a remote page carries only a practice\'s takes '
       'and notes', () async {
     // Regression: Home filtered on the practices TABLE, and a take recorded

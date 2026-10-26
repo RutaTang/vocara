@@ -9,6 +9,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:forui/forui.dart' show FIcons;
 import 'package:media_kit/media_kit.dart';
 import 'package:provider/provider.dart';
 import 'package:vocara/data/repositories/technique_repository.dart';
@@ -16,6 +17,7 @@ import 'package:vocara/data/services/local_storage_service.dart';
 import 'package:vocara/data/services/media_analysis_service.dart';
 import 'package:vocara/data/services/mic_recording_controller.dart';
 import 'package:vocara/data/services/technique_media_service.dart';
+import 'package:vocara/data/sync/sync_engine.dart';
 import 'package:vocara/data/sync/sync_hashes.dart';
 import 'package:vocara/domain/models/technique.dart';
 import 'package:vocara/domain/models/technique_analysis.dart';
@@ -53,8 +55,10 @@ class _FakePlayer extends Fake implements Player {
   @override
   Future<void> pause() async => pauses++;
 
+  int plays = 0;
+
   @override
-  Future<void> playOrPause() async {}
+  Future<void> playOrPause() async => plays++;
 
   @override
   Future<void> seek(Duration duration) async {}
@@ -201,9 +205,13 @@ Future<TechniqueDetailViewModel> _pumpScreen(
   return vm;
 }
 
-/// The inline audio player of example [id] (its card carries the same key).
+/// The inline audio player of example [id] (keyed by it, and by whether its
+/// file is on this device).
 Finder _playerOf(String id) => find.byWidgetPredicate(
-  (w) => w is TechniqueAudioPlayer && w.key == ValueKey(id),
+  (w) =>
+      w is TechniqueAudioPlayer &&
+      w.key is ValueKey<(String, bool)> &&
+      (w.key! as ValueKey<(String, bool)>).value.$1 == id,
 );
 
 /// The placeholder `asset://` path the repository hydrates an example to when
@@ -290,6 +298,65 @@ void main() {
     expect(built, hasLength(2));
   });
 
+  testWidgets('a clip whose file arrives in a reload gets its player', (
+    tester,
+  ) async {
+    // The player read "not on this device" once, at mount: the same clip
+    // handed its real file by a reload kept saying so.
+    final built = _fakePlayers();
+    final technique = _technique();
+    final missing = technique.copyWith(
+      media: [
+        technique.media.first,
+        TechniqueMedia(
+          id: 'M1',
+          path: _missing,
+          kind: TechniqueMediaKind.audio,
+          label: 'Example 1',
+          addedAt: technique.media.last.addedAt,
+        ),
+      ],
+    );
+    final repo = _FakeRepo(missing);
+    final remote = StreamController<RemoteApplied>.broadcast();
+    addTearDown(remote.close);
+    tester.view.physicalSize = const Size(1200, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    final vm = TechniqueDetailViewModel(
+      repository: repo,
+      mediaService: TechniqueMediaService(storage: LocalStorageService()),
+      techniqueId: _techniqueId,
+      analysisService: _NoAnalysis(),
+      remoteApplied: remote.stream,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ChangeNotifierProvider.value(
+          value: vm,
+          child: const TechniqueDetailScreen(),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    expect(find.text(unavailableClipMessage), findsOneWidget);
+    expect(built, hasLength(1));
+
+    repo.technique = technique; // its bytes arrived
+    remote.add(
+      RemoteApplied(
+        rows: const [],
+        practiceIds: const {},
+        techniqueIds: {_techniqueId},
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    expect(find.text(unavailableClipMessage), findsNothing);
+    expect(built, hasLength(2));
+  });
+
   testWidgets('removing an earlier example keeps a later card\'s player', (
     tester,
   ) async {
@@ -325,5 +392,11 @@ void main() {
 
     expect(vm.isRecordingPractice, isTrue);
     expect(built.every((p) => p.pauses > 0), isTrue);
+
+    // Nor can one be started again until the take ends: paused only at the
+    // arm, an example played on into the take.
+    await tester.tap(find.byIcon(FIcons.play).first);
+    await tester.pump();
+    expect(built.every((p) => p.plays == 0), isTrue);
   });
 }

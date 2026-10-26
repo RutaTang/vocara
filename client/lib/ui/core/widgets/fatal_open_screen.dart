@@ -1,3 +1,6 @@
+import 'dart:async';
+
+import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:flutter/widgets.dart';
 
 import '../themes/studio.dart';
@@ -160,6 +163,15 @@ class FatalOpenScreen extends StatelessWidget {
                     spacing: 12,
                     runSpacing: 8,
                     children: [
+                      // The details are what support needs, and plain text
+                      // here cannot be selected.
+                      if (detail != null)
+                        _FatalButton(
+                          label: 'Copy Details',
+                          onPressed: () => unawaited(
+                            Clipboard.setData(ClipboardData(text: detail!)),
+                          ),
+                        ),
                       if (onRevealLibrary != null)
                         _FatalButton(
                           label: 'Reveal Library Folder',

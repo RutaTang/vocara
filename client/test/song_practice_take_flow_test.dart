@@ -627,6 +627,34 @@ void main() {
     await stopping;
   });
 
+  test(
+    'take and clip menu actions refused while an import runs say why',
+    () async {
+      // Duplicate, Split, Merge, Re-analyze and Delete clip did nothing at all.
+      final vm = await pumpVm();
+      final gate = waveforms.gate = Completer<void>();
+      addTearDown(() {
+        if (!gate.isCompleted) gate.complete();
+      });
+      final toasts = <String>[];
+      final sub = vm.toasts.listen(toasts.add);
+      addTearDown(sub.cancel);
+      final import = vm.addVocalTake('/src/guide.wav');
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      final clipId = vm.practice!.vocalTracks.first.clips.first.id;
+      await vm.duplicateTrack('take1');
+      await vm.splitTrackAtPlayhead('take1');
+      await vm.mergeTrackDown('take1');
+      await vm.reanalyzeTrack('take1');
+      await vm.deleteClip('take1', clipId);
+      await Future<void>.delayed(Duration.zero);
+      expect(toasts, List.filled(5, 'Wait for the current edit to finish.'));
+      gate.complete();
+      await import;
+    },
+  );
+
   test('a delete refused while an import runs says why', () async {
     // The confirm dialog opened, "Delete" was clicked, and the take simply
     // stayed: the refusal said nothing.

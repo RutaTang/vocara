@@ -5,6 +5,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:vocara/ui/core/widgets/waveform_painter.dart';
 
 void main() {
+  _burstTests();
+
   group('visiblePeakSlice', () {
     // 1000 buckets over 180 000 ms: one bucket = 180 ms, the shape of the
     // master/bus mix envelopes (mixer_controller builds n = 1000 over the
@@ -188,6 +190,24 @@ void main() {
       expect(lo, 0);
       expect(hi, size.width - 1);
     });
+  });
+}
+
+/// A burst shorter than one pixel's worth of peaks still draws: decimated to
+/// the peak nearest each vertex, one that fell between vertices vanished.
+void _burstTests() {
+  testWidgets('a burst between decimated vertices still draws', (tester) async {
+    final peaks = List<double>.filled(1000, 0.0);
+    for (var i = 403; i <= 407; i++) {
+      peaks[i] = 1.0;
+    }
+    final (lo, hi) = await _paintedRange(
+      tester,
+      WaveformPainter(peaks: peaks, color: const Color(0xFFFFFFFF)),
+      const Size(100, 40),
+    );
+    expect(lo, inInclusiveRange(38, 42));
+    expect(hi, inInclusiveRange(38, 42));
   });
 }
 

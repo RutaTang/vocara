@@ -76,6 +76,15 @@ class TechniqueLibraryViewModel extends ChangeNotifier {
   bool get _busy =>
       load.running || createTechnique.running || deleteTechnique.running;
 
+  /// Loads again on return from a technique's page, for its edits and
+  /// deletes. A load already running read the list before them, so another
+  /// is owed after it: re-run directly, the Command dropped it as re-entry
+  /// and that older read put a deleted card back on the grid.
+  void refresh() {
+    _missedRemote = true;
+    _replayMissed();
+  }
+
   /// Loads again for what [_missedRemote] owes, once no command runs (each
   /// command asks again as it finishes).
   void _replayMissed() {

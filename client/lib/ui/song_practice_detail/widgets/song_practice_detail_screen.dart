@@ -400,6 +400,18 @@ class _WorkspaceState extends State<_Workspace> {
     if (confirmed) await vm.deleteTrack(track.id);
   }
 
+  /// Asked first, as Delete take is: the clip's audio file goes with it, and
+  /// on a one-clip take that is all the take's audio and its notes.
+  Future<void> _deleteClip(String trackId, String clipId) async {
+    if (vm.refuseStructuralEdit()) return;
+    final confirmed = await showConfirmDialog(
+      context,
+      title: 'Delete this clip?',
+      body: 'This removes the clip, its audio file and the notes inside it.',
+    );
+    if (confirmed) await vm.deleteClip(trackId, clipId);
+  }
+
   Future<void> _renameTrack(AudioTrack track) async {
     final name = await showRenameDialog(context, current: track.displayName);
     if (name != null) await vm.renameTrack(track.id, name);
@@ -460,6 +472,8 @@ class _WorkspaceState extends State<_Workspace> {
         onAddNote: () => _addNote(track.id),
         onAddTechnique: () => _addTechnique(track.id),
         onAddClip: () async {
+          // Refused before the open panel, not after a file was picked in it.
+          if (vm.refuseStructuralEdit()) return;
           // "At playhead" means where it was at the tap: the open panel can
           // stay up for seconds while playback runs on.
           final atMs = vm.position.value.inMilliseconds;
@@ -482,7 +496,7 @@ class _WorkspaceState extends State<_Workspace> {
     showClipContextMenu(
       context,
       position,
-      onDelete: () => vm.deleteClip(track.id, clipId),
+      onDelete: () => _deleteClip(track.id, clipId),
       onExport: () => vm.exportClipAudio(track.id, clipId),
     );
   }

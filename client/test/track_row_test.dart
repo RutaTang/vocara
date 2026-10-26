@@ -98,6 +98,70 @@ void main() {
     expect(select, 0, reason: 'tapping M/S should not select the lane');
   });
 
+  testWidgets("a clip's waveform spans the clip's full width, selected or "
+      'not', (tester) async {
+    // Inset by the border and a side padding while the painter mapped the
+    // clip's full width: the edges drew up to 4 px off the ruler and
+    // playhead, and selecting the clip shifted its waveform a pixel.
+    final pos = ValueNotifier<Duration>(Duration.zero);
+    addTearDown(pos.dispose);
+    final track = AudioTrack(
+      id: 't1',
+      kind: AudioTrackKind.vocal,
+      displayName: 'Take 1',
+      audioFilePath: '/x.wav',
+      durationMs: 5000,
+      waveformPeaks: List.filled(100, 0.5),
+      createdAt: DateTime(2020),
+    );
+    Future<Rect> waveformAt({required bool selected}) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: TrackRow(
+              track: track,
+              label: 'Take 1',
+              timelineDurationMs: 10000,
+              position: pos,
+              selected: selected,
+              reorderable: false,
+              onSelect: () {},
+              onClipMoveLive: (_, _) {},
+              onMoveCommit: () {},
+              onSelectClip: (_) {},
+              onClipContextMenu: (_, _) {},
+              onCrossLaneMove: (_) {},
+              onContextMenu: (_) {},
+              onAddNote: () {},
+              onEditNote: (_) {},
+              onAddTechnique: () {},
+              onToggleMute: () {},
+              onToggleSolo: () {},
+              onVolume: (_) {},
+              onVolumeCommit: () {},
+              onDelete: () {},
+            ),
+          ),
+        ),
+      );
+      return tester.getRect(
+        find.byWidgetPredicate(
+          (w) => w is CustomPaint && w.painter is WaveformPainter,
+        ),
+      );
+    }
+
+    final plain = await waveformAt(selected: false);
+    final clip = tester.getRect(
+      find.byWidgetPredicate((w) => w.runtimeType.toString() == '_ClipRegion'),
+    );
+    expect(plain.left, clip.left);
+    expect(plain.width, clip.width);
+    final picked = await waveformAt(selected: true);
+    expect(picked.left, plain.left);
+    expect(picked.width, plain.width);
+  });
+
   // --- Clip move-drag regression guards -------------------------------------
   //
   // The clip lane culls clips that scroll outside the zoomed viewport. An

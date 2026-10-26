@@ -60,8 +60,9 @@ class _TechniqueLibraryScreenState extends State<TechniqueLibraryScreen> {
     _opening = true;
     try {
       await context.push(Routes.techniqueDetail(id));
-      // Edits/deletes happen on the detail page; refresh on return.
-      if (mounted) await vm.load.execute();
+      // Edits/deletes happen on the detail page; refresh on return. Not
+      // awaited: card taps are open again while it loads.
+      if (mounted) vm.refresh();
     } finally {
       _opening = false;
     }

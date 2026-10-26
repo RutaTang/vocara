@@ -508,6 +508,61 @@ void main() {
     expect(vm.analysis.metricsFor('t0'), isNotNull);
   });
 
+  testWidgets('deleting a clip asks first, as deleting a take does', (
+    tester,
+  ) async {
+    // One click on "Delete clip" removed its audio file (on a one-clip take,
+    // all of the take's audio and its notes) with no question asked.
+    final base = _practice(8);
+    final short = base.vocalTracks.first.copyWith(
+      clips: [
+        AudioClip(
+          id: 'c0',
+          audioFilePath: '/pool/t0.wav',
+          durationMs: 10000,
+          startMs: 0,
+        ),
+      ],
+    );
+    final vm = await _pumpScreen(
+      tester,
+      repository: _FakeRepo(
+        base.copyWith(vocalTracks: [short, ...base.vocalTracks.skip(1)]),
+      ),
+    );
+    final body = find
+        .descendant(
+          of: find.byWidgetPredicate(
+            (w) => w is TrackRow && w.track.id == 't0',
+          ),
+          matching: find.byWidgetPredicate(
+            (w) => w.runtimeType.toString() == '_Body',
+          ),
+        )
+        .first;
+    Future<void> openClipMenu() async {
+      final box = tester.getRect(body);
+      await tester.tapAt(
+        Offset(box.left + 20, box.center.dy),
+        buttons: kSecondaryButton,
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Delete clip'));
+      await tester.pumpAndSettle();
+    }
+
+    await openClipMenu();
+    expect(find.text('Delete this clip?'), findsOneWidget);
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    expect(vm.practice!.vocalTracks.first.clips, hasLength(1));
+
+    await openClipMenu();
+    await tester.tap(find.text('Delete').last);
+    await tester.pumpAndSettle();
+    expect(vm.practice!.vocalTracks.first.clips, isEmpty);
+  });
+
   testWidgets("a lane's menu offers the take as it is now, after a rename", (
     tester,
   ) async {

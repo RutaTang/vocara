@@ -25,6 +25,7 @@ class TechniqueAudioPlayer extends StatefulWidget {
     this.onPosition,
     this.seekSignal,
     this.pauseSignal,
+    this.playBlocked = false,
     super.key,
   });
 
@@ -43,6 +44,11 @@ class TechniqueAudioPlayer extends StatefulWidget {
   /// Fires when playback must stop (the mic armed for a take): the player
   /// pauses where it is.
   final Listenable? pauseSignal;
+
+  /// While a take records: Play is off, or an example started then played
+  /// on speakers into the very take compared against it ([pauseSignal]
+  /// only pauses at the arm).
+  final bool playBlocked;
 
   @override
   State<TechniqueAudioPlayer> createState() => _TechniqueAudioPlayerState();
@@ -188,7 +194,10 @@ class _TechniqueAudioPlayerState extends State<TechniqueAudioPlayer> {
         children: [
           _RoundIconButton(
             icon: _playing ? FIcons.pause : FIcons.play,
-            onTap: () => _player?.playOrPause(),
+            // Pause stays live; Play waits for the take to end.
+            onTap: widget.playBlocked && !_playing
+                ? null
+                : () => _player?.playOrPause(),
           ),
           const SizedBox(width: 12),
           Expanded(
@@ -266,23 +275,30 @@ class _RoundIconButton extends StatelessWidget {
   const _RoundIconButton({required this.icon, required this.onTap});
 
   final IconData icon;
-  final VoidCallback onTap;
+
+  /// Null shows the button off.
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
     return MouseRegion(
-      cursor: SystemMouseCursors.click,
+      cursor: onTap == null
+          ? SystemMouseCursors.basic
+          : SystemMouseCursors.click,
       child: GestureDetector(
         onTap: onTap,
-        child: Container(
-          width: 30,
-          height: 30,
-          decoration: BoxDecoration(
-            color: Studio.accent.withValues(alpha: 0.16),
-            shape: BoxShape.circle,
-            border: Border.all(color: Studio.accent.withValues(alpha: 0.45)),
+        child: Opacity(
+          opacity: onTap == null ? 0.4 : 1,
+          child: Container(
+            width: 30,
+            height: 30,
+            decoration: BoxDecoration(
+              color: Studio.accent.withValues(alpha: 0.16),
+              shape: BoxShape.circle,
+              border: Border.all(color: Studio.accent.withValues(alpha: 0.45)),
+            ),
+            child: Icon(icon, size: 15, color: Studio.accentBright),
           ),
-          child: Icon(icon, size: 15, color: Studio.accentBright),
         ),
       ),
     );

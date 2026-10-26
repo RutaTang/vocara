@@ -14,7 +14,12 @@ import 'technique_audio_player.dart'
 /// lightweight poster is shown until then. media_kit's hover controls handle
 /// play/seek/volume/fullscreen once started.
 class TechniqueVideoPlayer extends StatefulWidget {
-  const TechniqueVideoPlayer({required this.path, this.pauseSignal, super.key});
+  const TechniqueVideoPlayer({
+    required this.path,
+    this.pauseSignal,
+    this.playBlocked = false,
+    super.key,
+  });
 
   /// Absolute sandbox path to the video file.
   final String path;
@@ -22,6 +27,10 @@ class TechniqueVideoPlayer extends StatefulWidget {
   /// Fires when playback must stop (the mic armed for a take): the player
   /// pauses where it is.
   final Listenable? pauseSignal;
+
+  /// While a take records: the poster and the controls take no input, or a
+  /// video started then played on speakers into the take.
+  final bool playBlocked;
 
   @override
   State<TechniqueVideoPlayer> createState() => _TechniqueVideoPlayerState();
@@ -93,13 +102,23 @@ class _TechniqueVideoPlayerState extends State<TechniqueVideoPlayer> {
         ),
         child: AspectRatio(
           aspectRatio: 16 / 9,
-          child: controller == null
-              ? _Poster(onPlay: _start, unavailable: _unavailable)
-              : Video(
-                  controller: controller,
-                  controls: AdaptiveVideoControls,
-                  fill: Colors.black,
-                ),
+          child: IgnorePointer(
+            ignoring: widget.playBlocked,
+            child: controller == null
+                ? _Poster(onPlay: _start, unavailable: _unavailable)
+                // No volume on the wheel (or a drag): the controls' default
+                // turned every scroll of the page that passed over a started
+                // video into a volume change, quietly fading it toward mute.
+                : MaterialDesktopVideoControlsTheme(
+                    normal: _noWheelVolume,
+                    fullscreen: _noWheelVolume,
+                    child: Video(
+                      controller: controller,
+                      controls: AdaptiveVideoControls,
+                      fill: Colors.black,
+                    ),
+                  ),
+          ),
         ),
       ),
     );
@@ -149,3 +168,7 @@ class _Poster extends StatelessWidget {
     );
   }
 }
+
+const _noWheelVolume = MaterialDesktopVideoControlsThemeData(
+  modifyVolumeOnScroll: false,
+);

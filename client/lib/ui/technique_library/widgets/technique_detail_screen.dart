@@ -355,6 +355,7 @@ class _TechniqueDetailScreenState extends State<TechniqueDetailScreen> {
           expandedId: vm.expandedExampleId,
           onToggleExpand: vm.toggleExampleExpanded,
           liveMonitor: vm.liveMonitor,
+          micLive: vm.micLive,
           // Editing builds the examples — analysis shown, no practice recorder.
           analysisBuilder: () =>
               TechniqueExampleAnalysis(vm: vm, allowPractice: false),
@@ -381,6 +382,7 @@ class _TechniqueDetailScreenState extends State<TechniqueDetailScreen> {
         expandedId: vm.expandedExampleId,
         onToggleExpand: vm.toggleExampleExpanded,
         liveMonitor: vm.liveMonitor,
+        micLive: vm.micLive,
         // Read view: each example pairs with its analysis + a practice recorder.
         analysisBuilder: () => TechniqueExampleAnalysis(vm: vm),
       ),

@@ -770,6 +770,10 @@ class TechniqueDetailViewModel extends ChangeNotifier
   void clearRecordingNotice() => _recordingNotice = null;
 
   /// True while recording the ephemeral practice take.
+  /// Whether a take (practice or example) is arming or recording: what the
+  /// example players must not play into.
+  bool get micLive => _recorder.isRecording || _recorder.isStarting;
+
   bool get isRecordingPractice => _recorder.isRecording && !_recordingExample;
 
   /// True while recording a clip to save as a persisted example.
