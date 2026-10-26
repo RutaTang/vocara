@@ -43,7 +43,7 @@ class RangeView extends StatelessWidget {
       listenable: vm,
       builder: (context, _) => _profileGuard(
         vm,
-        'Range is computed from a recorded take. Switch to Take.',
+        'Range is computed from a recorded take, not the live mic.',
         'Sing a passage to map your range.',
         (p, m, track) {
           if (!p.hasRange) {
@@ -119,7 +119,7 @@ class DynamicsView extends StatelessWidget {
         if (vm.liveMonitor) return _LiveDynamicsPanel(monitor: vm.monitor);
         return _profileGuard(
           vm,
-          'Dynamics are computed from a recorded take. Switch to Take.',
+          'Dynamics are computed from a recorded take, not the live mic.',
           'Sing a passage to see your dynamics.',
           (p, m, track) {
             if (m.frames == 0 || !p.hasDynamics) {

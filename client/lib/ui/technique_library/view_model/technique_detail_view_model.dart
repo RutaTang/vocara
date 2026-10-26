@@ -943,7 +943,8 @@ class TechniqueDetailViewModel extends ChangeNotifier
         _practice = result;
         _practiceFailed = result == null;
         _practiceFailedMessage = null;
-        if (result == null) _subject = TechniqueAnalysisSubject.reference;
+        // A failed take stays the subject: its panel is where the failure is
+        // said (switched back to the reference, nothing on screen said it).
       }
       // else: the reference changed mid-analysis; _resetToReferenceSubject already
       // dropped this take — keep it discarded (the temp file is still deleted below).
@@ -959,7 +960,6 @@ class TechniqueDetailViewModel extends ChangeNotifier
         if (e is MediaTooLongException || e is MediaUnsupportedException) {
           _practiceFailedMessage = e.toString();
         }
-        _subject = TechniqueAnalysisSubject.reference;
       }
     } finally {
       await deleteTempRecordingDir(path);

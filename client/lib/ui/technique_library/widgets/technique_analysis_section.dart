@@ -111,7 +111,11 @@ class _Controls extends StatelessWidget {
       children: [
         _SubjectToggle(
           subject: vm.analysisSubject,
-          practiceEnabled: hasPractice || vm.practiceAnalysisLoading,
+          // A failed take too: its panel says why it has no analysis.
+          practiceEnabled:
+              hasPractice ||
+              vm.practiceAnalysisLoading ||
+              vm.practiceAnalysisFailed,
           onSelect: vm.showAnalysisSubject,
         ),
         const Spacer(),
