@@ -89,7 +89,7 @@ class RecordingFinalizer {
   /// save waiting behind it. A backstop: the export part bounds each file
   /// itself (see exportBytesWritten), so a stuck share doesn't hide the pool
   /// imports still moving beside it.
-  Future<int?> _read() => _progress()
+  Future<int?> _read() => Future.sync(_progress)
       .then<int?>((v) => v)
       .timeout(readingLimit, onTimeout: () => null)
       .catchError((Object _) => null);
@@ -277,9 +277,12 @@ class RecordingFinalizer {
       );
       return;
     }
-    // Read before the finalizers start: the wait must attach to them at once,
-    // or one failing straight away escapes as an unhandled error.
-    var mark = await _read();
+    // Taken as the finalizers start, and only awaited once their window runs
+    // out: awaited first, a reading stuck for its whole limit held every save
+    // back that long (and the quit, once they were done). The wait still
+    // attaches to them at once, or one failing straight away escapes as an
+    // unhandled error.
+    var mark = _read();
     _invoked.addAll(pending);
     var running = pending.length;
     final all = Future.wait([
@@ -300,10 +303,11 @@ class RecordingFinalizer {
         // every byte copied and every landing step finished (an export's part
         // drops back when it ends, which is movement too); an injected one
         // may move either way.
+        final before = await mark;
         final now = await _read();
         window = _shorter(perFinalizerBudget, progressCeiling - clock.elapsed);
-        if (now == null || now == mark || window <= Duration.zero) break;
-        mark = now;
+        if (now == null || now == before || window <= Duration.zero) break;
+        mark = Future.value(now);
         DiagnosticsLog.instance.log(
           'quit',
           'still copying past the budget; waiting on',

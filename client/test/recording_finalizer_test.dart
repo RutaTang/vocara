@@ -29,6 +29,23 @@ void main() {
     expect(ran, 1, reason: 'the wedged callback must not starve the next one');
   });
 
+  test('a stuck progress reading holds neither the saves nor a quit they '
+      'finished in time', () async {
+    // Read first, the reading held every save back for its whole limit, and
+    // the quit after they were done.
+    final finalizer = RecordingFinalizer.forTesting(
+      perFinalizerBudget: const Duration(seconds: 1),
+      totalBudget: const Duration(seconds: 3),
+      progress: () => Completer<int>().future,
+    );
+    final clock = Stopwatch()..start();
+    Duration? started;
+    finalizer.register(() async => started = clock.elapsed);
+    await finalizer.finalizeAll().timeout(const Duration(seconds: 5));
+    expect(started, lessThan(const Duration(milliseconds: 500)));
+    expect(clock.elapsed, lessThan(RecordingFinalizer.readingLimit));
+  });
+
   test('a quit whose finalizers all settled leaves the next one its full '
       'budget', () async {
     final finalizer = RecordingFinalizer.forTesting(

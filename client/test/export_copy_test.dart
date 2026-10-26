@@ -207,6 +207,90 @@ void main() {
     },
   );
 
+  /// Starts an export to [name] that holds until [release] completes, once
+  /// its first bytes are written; [done] completes with it.
+  Future<({Future<void> done})> holdExport(
+    String name,
+    Completer<void> release,
+  ) async {
+    final written = Completer<void>();
+    final export = exportCopy(
+      _ProbingSource('audio', () async {
+        written.complete();
+        await release.future;
+      }),
+      p.join(tmp.path, name),
+    );
+    await written.future;
+    return (done: export);
+  }
+
+  test('a share slow to answer every time still reads as moving', () async {
+    // Every stat outlasts the per-file wait. Late answers were dropped, so
+    // each reading counted the last on-time one: frozen while it copied, and
+    // the quit cut the export off.
+    final release = Completer<void>();
+    final export = (await holdExport('take.wav', release)).done;
+    var copied = 0;
+    Future<int> slow(String _) async {
+      final n = copied += 100;
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+      return n;
+    }
+
+    const wait = Duration(milliseconds: 10);
+    final first = await exportBytesWritten(perFile: wait, lengthOf: slow);
+    await Future<void>.delayed(const Duration(milliseconds: 120));
+    final second = await exportBytesWritten(perFile: wait, lengthOf: slow);
+    expect(second, isNot(first));
+    release.complete();
+    await export;
+  });
+
+  test('an answer landing after its export ended is not counted for a later '
+      'export to the same file', () async {
+    final release = Completer<void>();
+    final export = (await holdExport('take.wav', release)).done;
+    final answer = Completer<int>();
+    final reading = exportBytesWritten(
+      perFile: const Duration(seconds: 5),
+      lengthOf: (_) => answer.future,
+    );
+    release.complete();
+    await export; // ended while its length was awaited
+    answer.complete(11);
+    await reading;
+
+    final next = Completer<void>();
+    final again = (await holdExport('take.wav', next)).done;
+    expect(
+      await exportBytesWritten(
+        perFile: const Duration(milliseconds: 20),
+        lengthOf: (_) => Completer<int>().future,
+      ),
+      0,
+      reason: 'nothing on record for this export yet',
+    );
+    next.complete();
+    await again;
+  });
+
+  test('several stuck files cost one wait, not one each', () async {
+    final release = Completer<void>();
+    final exports = [
+      for (final name in ['a.wav', 'b.wav', 'c.wav', 'd.wav'])
+        (await holdExport(name, release)).done,
+    ];
+    final clock = Stopwatch()..start();
+    await exportBytesWritten(
+      perFile: const Duration(milliseconds: 100),
+      lengthOf: (_) => Completer<int>().future,
+    );
+    expect(clock.elapsed, lessThan(const Duration(milliseconds: 300)));
+    release.complete();
+    await Future.wait(exports);
+  });
+
   test('a good copy lands whole', () async {
     final src = File(p.join(tmp.path, 'src.wav'))..writeAsStringSync('audio');
     final dest = p.join(tmp.path, 'out.wav');

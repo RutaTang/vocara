@@ -4,8 +4,9 @@ import 'dart:io';
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:path/path.dart' as p;
 
-/// The files the exports in flight are writing.
-final _writing = <String>{};
+/// The files the exports in flight are writing, each to the export writing
+/// it now.
+final _writing = <String, Object>{};
 
 /// What each export in flight was last seen to have written.
 final _lastWritten = <String, int>{};
@@ -15,29 +16,57 @@ final _lastWritten = <String, int>{};
 /// RecordingFinalizer): a long take copying to a slow stick outlasts the
 /// quit's budget, and cutting it off left the file there cut short.
 ///
-/// Each file gets [perFile] to answer: one on a network share that stopped
-/// answering counts at what it last had (no movement) rather than holding up
-/// the whole reading, and with it the pool imports' movement beside it.
+/// Each file gets [perFile] to answer, all of them at once: one on a network
+/// share that stopped answering counts at what it last had (no movement)
+/// rather than holding up the whole reading, and with it the pool imports'
+/// movement beside it. An answer that comes later still counts for the next
+/// reading: on a share slow to answer every time, each reading timed out and
+/// the export read as frozen while it copied.
 Future<int> exportBytesWritten({
   Duration perFile = const Duration(milliseconds: 250),
   @visibleForTesting Future<int> Function(String path)? lengthOf,
 }) async {
   final measure = lengthOf ?? (String path) => File(path).length();
-  var n = 0;
   // Over a copy: an export ending (or starting) while a length is awaited
-  // changes the set under the loop.
-  for (final path in List.of(_writing)) {
-    try {
-      final written = await measure(path).timeout(perFile);
-      _lastWritten[path] = written;
-      n += written;
-    } on TimeoutException {
-      n += _lastWritten[path] ?? 0;
-    } catch (_) {
-      // Not created yet, or gone: nothing written there to count.
-    }
+  // changes the map under the reading.
+  final counts = await Future.wait([
+    for (final MapEntry(key: path, value: export) in _writing.entries.toList())
+      _written(path, export, measure, perFile),
+  ]);
+  return counts.fold<int>(0, (sum, n) => sum + n);
+}
+
+/// What the export [export] has written to [path], given [perFile] to say.
+Future<int> _written(
+  String path,
+  Object export,
+  Future<int> Function(String path) measure,
+  Duration perFile,
+) async {
+  final Future<int> length;
+  try {
+    length = measure(path);
+  } catch (_) {
+    return 0;
   }
-  return n;
+  // Kept only while this same export is still writing: one that ended (or a
+  // later export to the same file) must not count its length. Never lower:
+  // a late answer can land after a newer one.
+  unawaited(
+    length.then((n) {
+      if (!identical(_writing[path], export)) return;
+      final seen = _lastWritten[path];
+      if (seen == null || n > seen) _lastWritten[path] = n;
+    }, onError: (_) {}),
+  );
+  try {
+    return await length.timeout(perFile);
+  } on TimeoutException {
+    return _lastWritten[path] ?? 0;
+  } catch (_) {
+    // Not created yet, or gone: nothing written there to count.
+    return 0;
+  }
 }
 
 /// Copies [source] to [destPath], as an export does: should the copy fail
@@ -58,7 +87,9 @@ Future<void> exportCopy(File source, String destPath) async {
   } on FileSystemException {
     // Unreadable: judged as absent, so only a file the copy then made goes.
   }
-  _writing.add(dest.path);
+  final export = Object();
+  _writing[dest.path] = export;
+  _lastWritten.remove(dest.path);
   try {
     await source.copy(dest.path);
   } catch (_) {
@@ -76,8 +107,11 @@ Future<void> exportCopy(File source, String destPath) async {
     }
     rethrow;
   } finally {
-    _writing.remove(dest.path);
-    _lastWritten.remove(dest.path);
+    // Only its own entry: a later export to the same file may own it now.
+    if (identical(_writing[dest.path], export)) {
+      _writing.remove(dest.path);
+      _lastWritten.remove(dest.path);
+    }
   }
 }
 
