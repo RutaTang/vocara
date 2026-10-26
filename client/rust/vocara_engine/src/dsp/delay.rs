@@ -28,11 +28,12 @@ pub struct DelayNode {
     /// progressively overwrites them with silence (see the bypass branch). Re-armed to the
     /// full line length on every active→bypassed transition.
     stale: usize,
-    /// Whether the ring may hold non-zero audio: set by the active path's writes, cleared
-    /// once a bypass has swept the whole line (or a reset has). A clean line lets reset()
-    /// skip its O(line) clear — a seek runs it on the audio thread for every vocal clip's
-    /// delay (~0.75 MB each), and most of them were never switched on.
-    dirty: bool,
+    /// Ring entries written since the last reset, counting back from the write head
+    /// (saturating at the line length): a tap reaching further back than this reads silence.
+    /// That is what lets reset() silence the line in O(1). Clearing it, as a seek did on
+    /// the audio thread, wrote ~0.75 MB per active delay: with two dozen lanes echoing, the
+    /// seek's reset alone took most of a small callback's budget.
+    fresh: usize,
     time_ms: f32,
     /// The read tap (frames behind the write head) the output currently plays, and the one
     /// a Time change is cross-fading to (equal when no fade is running). Jumping the tap
@@ -59,7 +60,7 @@ impl DelayNode {
             buf_r: vec![0.0; len],
             pos: 0,
             stale: 0,
-            dirty: false,
+            fresh: len, // a zeroed line is all valid silence
             time_ms: 300.0,
             tap: 14_400, // 300 ms at 48 kHz; prepare re-derives it
             tap_next: 14_400,
@@ -93,7 +94,7 @@ impl Node for DelayNode {
         self.buf_r = vec![0.0; len];
         self.pos = 0;
         self.stale = 0; // freshly zeroed line
-        self.dirty = false;
+        self.fresh = len;
         self.tap = self.wanted_tap();
         self.tap_next = self.tap;
         self.tap_step = 1.0 / (TAP_FADE_S * sample_rate) as f32;
@@ -133,9 +134,8 @@ impl Node for DelayNode {
                 self.pos = ring_index::next(self.pos, len);
             }
             self.stale -= clear;
-            if self.stale == 0 {
-                self.dirty = false; // the sweep has covered the whole line
-            }
+            // Written silence is as current as any write (see `fresh`).
+            self.fresh = (self.fresh + clear).min(len);
             return;
         }
 
@@ -143,7 +143,6 @@ impl Node for DelayNode {
         if len == 0 {
             return;
         }
-        self.dirty = true;
         let want = self.wanted_tap();
         if self.tap_next == self.tap && want != self.tap {
             self.tap_next = want;
@@ -158,12 +157,19 @@ impl Node for DelayNode {
             let l = out[CHANNELS * i];
             let r = out[CHANNELS * i + 1];
             // Taps lie in 1..len (wanted_tap clamps them).
-            let read = ring_index::back(self.pos, self.tap, len);
-            let (mut dl, mut dr) = (self.buf_l[read], self.buf_r[read]);
+            // Past what was written since the last reset is silence (see `fresh`).
+            let tap_at = |tap: usize| -> (Smp, Smp) {
+                if tap > self.fresh {
+                    return (0.0, 0.0);
+                }
+                let i = ring_index::back(self.pos, tap, len);
+                (self.buf_l[i], self.buf_r[i])
+            };
+            let (mut dl, mut dr) = tap_at(self.tap);
             if self.tap_next != self.tap {
-                let next = ring_index::back(self.pos, self.tap_next, len);
-                dl += (self.buf_l[next] - dl) * self.tap_mix;
-                dr += (self.buf_r[next] - dr) * self.tap_mix;
+                let (nl, nr) = tap_at(self.tap_next);
+                dl += (nl - dl) * self.tap_mix;
+                dr += (nr - dr) * self.tap_mix;
                 self.tap_mix += self.tap_step;
                 if self.tap_mix >= 1.0 {
                     self.tap = self.tap_next;
@@ -180,6 +186,9 @@ impl Node for DelayNode {
             out[CHANNELS * i] = l + (dl - l) * wet;
             out[CHANNELS * i + 1] = r + (dr - r) * wet;
             self.pos = ring_index::next(self.pos, len);
+            if self.fresh < len {
+                self.fresh += 1;
+            }
         }
     }
 
@@ -202,20 +211,13 @@ impl Node for DelayNode {
     }
 
     fn reset(&mut self) {
-        // Seek clears the echo buffer so pre-jump audio (up to MAX_SECONDS, plus
-        // accumulated feedback) doesn't bleed across the discontinuity. A line known to be
-        // silent is left alone (see `dirty`).
-        if self.dirty {
-            for s in self.buf_l.iter_mut() {
-                *s = 0.0;
-            }
-            for s in self.buf_r.iter_mut() {
-                *s = 0.0;
-            }
-        }
+        // Seek silences the echo line so pre-jump audio (up to MAX_SECONDS, plus
+        // accumulated feedback) doesn't bleed across the discontinuity: in O(1), by marking
+        // nothing written since (see `fresh`). The old samples stay in the ring, unread,
+        // until the writes walk over them.
         self.pos = 0;
         self.stale = 0;
-        self.dirty = false;
+        self.fresh = 0;
         self.tap = self.tap_next; // the line is silent: land any Time fade at once
                                   // ...and any on/off fade: a fade-out left running would write post-seek audio into
                                   // the cleared line with no sweep left to clear it (a ghost echo on re-enabling).
@@ -226,6 +228,21 @@ impl Node for DelayNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn run_block_out(d: &mut DelayNode, input: &[Smp]) -> Vec<Smp> {
+        let mut out = vec![0.0; input.len()];
+        let inputs: [&[Smp]; 1] = [input];
+        let mut outs: [&mut [Smp]; 1] = [&mut out[..]];
+        let mut io = ProcessIo {
+            inputs: &inputs,
+            outputs: &mut outs[..],
+            frames: input.len() / CHANNELS,
+            tl: 0,
+            sr: 48_000.0,
+        };
+        d.process(&mut io);
+        out
+    }
 
     fn run_block(d: &mut DelayNode, input: &[Smp]) {
         let mut out = vec![0.0; input.len()];
@@ -258,16 +275,13 @@ mod tests {
                 d.pos = (d.pos + 1) % len;
             }
             d.stale -= clear;
-            if d.stale == 0 {
-                d.dirty = false;
-            }
+            d.fresh = (d.fresh + clear).min(len);
             return;
         }
         let len = d.buf_l.len();
         if len == 0 {
             return;
         }
-        d.dirty = true;
         let want = d.wanted_tap();
         if d.tap_next == d.tap && want != d.tap {
             d.tap_next = want;
@@ -276,12 +290,18 @@ mod tests {
         for i in 0..frames {
             let l = out[CHANNELS * i];
             let r = out[CHANNELS * i + 1];
-            let read = (d.pos + len - d.tap) % len;
-            let (mut dl, mut dr) = (d.buf_l[read], d.buf_r[read]);
+            let at = |tap: usize| -> (Smp, Smp) {
+                if tap > d.fresh {
+                    return (0.0, 0.0);
+                }
+                let i = (d.pos + len - tap) % len;
+                (d.buf_l[i], d.buf_r[i])
+            };
+            let (mut dl, mut dr) = at(d.tap);
             if d.tap_next != d.tap {
-                let next = (d.pos + len - d.tap_next) % len;
-                dl += (d.buf_l[next] - dl) * d.tap_mix;
-                dr += (d.buf_r[next] - dr) * d.tap_mix;
+                let (nl, nr) = at(d.tap_next);
+                dl += (nl - dl) * d.tap_mix;
+                dr += (nr - dr) * d.tap_mix;
                 d.tap_mix += d.tap_step;
                 if d.tap_mix >= 1.0 {
                     d.tap = d.tap_next;
@@ -294,6 +314,9 @@ mod tests {
             out[CHANNELS * i] = l + (dl - l) * wet;
             out[CHANNELS * i + 1] = r + (dr - r) * wet;
             d.pos = (d.pos + 1) % len;
+            if d.fresh < len {
+                d.fresh += 1;
+            }
         }
     }
 
@@ -376,40 +399,41 @@ mod tests {
     }
 
     #[test]
-    fn a_seek_does_not_sweep_a_line_nothing_wrote() {
-        // reset() runs on the audio thread for every vocal clip's delay on every seek (a
-        // ruler drag seeks per pointer move), and a never-enabled delay's ~0.75 MB line is
-        // already silent. Plant a sentinel where only a sweep would look: it must survive.
+    fn a_seek_silences_the_line_without_sweeping_it() {
+        // reset() runs on the audio thread for every lane's delay on every seek (a ruler
+        // drag seeks per pointer move): clearing the ~0.75 MB line there, with two dozen
+        // lanes echoing, took most of a small callback's budget. It now silences the line
+        // in O(1): nothing from before the seek is heard after it, though the old samples
+        // stay in the ring until the writes walk over them.
         let mut d = DelayNode::new();
         d.prepare(48_000.0, 256);
-        run_block(&mut d, &[0.5; 512]); // bypassed: nothing reaches the line
-        d.buf_l[123] = 1.0;
-        d.reset();
-        assert_eq!(d.buf_l[123], 1.0, "reset swept a line nothing had written");
-
-        // A line the active path wrote IS cleared.
-        d.buf_l[123] = 0.0;
         d.set_param(param::BYPASS, 0.0);
-        run_block(&mut d, &[0.5; 512]);
-        d.reset();
-        assert!(
-            d.buf_l.iter().chain(d.buf_r.iter()).all(|&s| s == 0.0),
-            "reset must clear a line that was written"
-        );
-
-        // A bypass that has fully swept the line leaves it clean again (the sweep starts
-        // once the switch has faded out).
-        d.set_param(param::BYPASS, 0.0);
-        run_block(&mut d, &[0.5; 512]);
-        d.set_param(param::BYPASS, 1.0);
-        for _ in 0..d.buf_l.len() / 256 + 2 {
-            run_block(&mut d, &[0.0; 256 * CHANNELS]);
+        d.set_param(param::MIX, 1.0);
+        d.set_param(param::FEEDBACK, 0.9);
+        d.set_param(param::TIME_MS, 100.0);
+        for _ in 0..200 {
+            run_block(&mut d, &[0.5; 512]);
         }
-        d.buf_l[123] = 1.0;
+        let before: Vec<Smp> = d.buf_l.clone();
+        assert!(before.iter().any(|&s| s != 0.0), "the line holds an echo");
+
         d.reset();
-        assert_eq!(
-            d.buf_l[123], 1.0,
-            "reset swept a line the bypass had cleaned"
-        );
+        assert_eq!(d.buf_l, before, "reset swept the line");
+        // A full line length of silence after the seek: no pre-seek echo comes out.
+        let silence = vec![0.0; 256 * CHANNELS];
+        for _ in 0..d.buf_l.len() / 256 + 2 {
+            let out = run_block_out(&mut d, &silence);
+            assert!(
+                out.iter().all(|&s| s == 0.0),
+                "a pre-seek echo bled through"
+            );
+        }
+
+        // Signal after the seek echoes as usual.
+        let mut heard = false;
+        for _ in 0..20 {
+            heard |= run_block_out(&mut d, &[0.5; 512]).iter().any(|&s| s != 0.5);
+        }
+        assert!(heard, "the line echoes again after the seek");
     }
 }
