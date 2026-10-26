@@ -336,6 +336,32 @@ exit 0''';
       expect((err as FormatException).message, 'Separation failed (exit 3).');
     });
 
+    test('an error that mentions a percentage keeps its words', () async {
+      final stub = await writeStub(
+        r"printf 'ValueError: shape mismatch at 100%%|x| boundary\n' >&2"
+        '\nexit 1',
+      );
+      final svc = buildService(stub);
+      final err = await outcome(svc.separate(await writeSource()));
+      expect(
+        (err as FormatException).message,
+        'Separation failed: ValueError: shape mismatch at 100%|x| boundary',
+      );
+    });
+
+    test('a bar cut off inside its brackets is no cause', () async {
+      final stub = await writeStub(
+        r"printf 'RuntimeError: model failed\n 45%%|####5 | 17/38 [00:10<00:' >&2"
+        '\nexit 2',
+      );
+      final svc = buildService(stub);
+      final err = await outcome(svc.separate(await writeSource()));
+      expect(
+        (err as FormatException).message,
+        'Separation failed: RuntimeError: model failed',
+      );
+    });
+
     test('a failure names its last line that is not a progress bar', () async {
       final stub = await writeStub(
         r"printf 'loading\nValueError: bad model\n 50%%|#    | 19/38\r' >&2"

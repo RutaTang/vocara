@@ -190,13 +190,15 @@ class ProcessSourceSeparationService implements SourceSeparationService {
   final LocalStorageService _storage;
 
   /// A tqdm progress bar ("Separating:  3%|▎    | 1/38 [00:02<00:12, 1.7it/s]"),
-  /// with whatever label leads it. A bar redraws with \r and no line break,
-  /// so text printed while one was on screen (a native abort mid-inference)
-  /// follows it on the same line: only the bar is cut off, not the line.
+  /// with the short label that may lead it. A bar redraws with \r and no line
+  /// break, so text printed while one was on screen (a native abort
+  /// mid-inference) follows it on the same line: only the bar is cut off,
+  /// not the line. Its count is required, so an error that merely mentions
+  /// "100%|" keeps its words; a bar cut off inside its brackets goes whole.
   static final _progressBar = RegExp(
-    r'^.*?\d{1,3}%\|[^|]*\|'
-    r'(?:\s*[\d.]+[kMGTPEZY]?/(?:[\d.]+[kMGTPEZY]?|\?))?'
-    r'(?:\s*\[[^\]]*\])?',
+    r'^[^%|]{0,60}?\d{1,3}%\|[^|]*\|'
+    r'\s*[\d.]+[kMGTPEZY]?/(?:[\d.]+[kMGTPEZY]?|\?)'
+    r'(?:\s*\[[^\]]*(?:\]|$))?',
   );
 
   /// A Python logging line at DEBUG or INFO ("... - INFO - separator - ..."):
