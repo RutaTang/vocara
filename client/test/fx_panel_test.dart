@@ -300,6 +300,35 @@ void main() {
     expect(vm.commits, 0);
   });
 
+  testWidgets(
+    'a second finger lifting off a held slider commits nothing early',
+    (tester) async {
+      final vm = await pump(
+        tester,
+        track: _track(fx: _fxAllOff().copyWith(compOn: true)),
+      );
+      final at = tester.getRect(byTypeName('_FxSlider')).center;
+      final first = await tester.startGesture(
+        at,
+        kind: PointerDeviceKind.touch,
+        pointer: 1,
+      );
+      await tester.pump(kPressTimeout + const Duration(milliseconds: 20));
+      final second = await tester.startGesture(
+        at + const Offset(20, 0),
+        kind: PointerDeviceKind.touch,
+        pointer: 2,
+      );
+      await tester.pump();
+      await second.up();
+      await tester.pump();
+      expect(vm.commits, 0, reason: 'finger 1 still holds');
+      await first.up();
+      await tester.pump();
+      expect(vm.commits, 1);
+    },
+  );
+
   testWidgets('a slider unmounted mid-pan still commits', (tester) async {
     // Unmounted mid-gesture (the selection changed, the inspector collapsed),
     // a disposed recognizer fires no end: the value already live in the model

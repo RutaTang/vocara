@@ -921,6 +921,7 @@ class _Center extends StatelessWidget {
                             // (Logic / Cubase), so there's no separate REC lane.
                             for (final t in vm.versions.vocalTakes)
                               StableSubtree<_Lane>(
+                                key: ValueKey('take:${t.id}'),
                                 sameAs: _Lane.same,
                                 child: _Lane(
                                   row: _row(t),
@@ -931,7 +932,7 @@ class _Center extends StatelessWidget {
                           // FX BUSES — DAW group lanes (Cubase-style), between the
                           // takes and the master. Only on the native FX engine.
                           if (vm.mixer.supportsEffects) ...[
-                            _BusesHeader(vm: vm),
+                            _BusesHeader(key: const ValueKey('buses'), vm: vm),
                             // Keyed by bus, as the take rows are: unkeyed, a
                             // bus deleted above one whose fader was being
                             // dragged handed the rest of the drag to the next.
@@ -942,8 +943,11 @@ class _Center extends StatelessWidget {
                                 bus: b,
                               ),
                           ],
-                          const _MasterHeader(),
-                          _MasterRow(vm: vm),
+                          // Keyed too: matched by position, a lane added or
+                          // removed above rebuilt the row mid-drag and the
+                          // rest of the master fader's drag did nothing.
+                          const _MasterHeader(key: ValueKey('master-header')),
+                          _MasterRow(key: const ValueKey('master'), vm: vm),
                         ],
                       ),
                     ),
@@ -1317,7 +1321,7 @@ class _TimelineScrollbar extends StatelessWidget {
 
 /// The section label for the master lane (set apart from VOCAL TAKES).
 class _MasterHeader extends StatelessWidget {
-  const _MasterHeader();
+  const _MasterHeader({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -1341,7 +1345,7 @@ class _MasterHeader extends StatelessWidget {
 /// composite of the audible mix — recomputed as tracks/levels change and while
 /// recording (via [recordingPeaks]).
 class _MasterRow extends StatelessWidget {
-  const _MasterRow({required this.vm});
+  const _MasterRow({super.key, required this.vm});
 
   final SongPracticeDetailViewModel vm;
 
@@ -1492,7 +1496,7 @@ class _MasterHeaderStrip extends StatelessWidget {
 
 /// The "FX BUSES" section label + a button to add a bus from the timeline.
 class _BusesHeader extends StatelessWidget {
-  const _BusesHeader({required this.vm});
+  const _BusesHeader({super.key, required this.vm});
 
   final SongPracticeDetailViewModel vm;
 

@@ -27,6 +27,7 @@ import 'package:vocara/domain/models/audio_track.dart';
 import 'package:vocara/domain/models/song_practice.dart';
 import 'package:vocara/domain/models/spectrogram.dart';
 import 'package:vocara/domain/models/voice_metrics.dart';
+import 'package:vocara/ui/core/widgets/studio_controls.dart';
 import 'package:vocara/ui/song_practice_detail/view_model/song_practice_detail_view_model.dart';
 import 'package:vocara/ui/song_practice_detail/widgets/song_practice_detail_screen.dart';
 import 'package:vocara/ui/song_practice_detail/widgets/track_row.dart';
@@ -497,5 +498,106 @@ void main() {
       () => vm.analysis.showDockTab(DockTab.mixer),
     );
     expect(oracle.failures, isEmpty);
+  });
+  group('a timeline fader keeps its own drag when lanes change above it', () {
+    // Matched by position, a lane added or removed above the one whose fader
+    // was being dragged handed that fader's state, and the rest of its drag,
+    // to the next lane (or rebuilt the row, and the drag did nothing more).
+    Finder byTypeName(String name) =>
+        find.byWidgetPredicate((w) => w.runtimeType.toString() == name);
+
+    Future<TestGesture> grab(WidgetTester tester, Finder fader) async {
+      final g = await tester.startGesture(
+        tester.getCenter(fader),
+        kind: PointerDeviceKind.mouse,
+      );
+      await tester.pump();
+      await g.moveBy(const Offset(-20, 0));
+      await tester.pump();
+      await g.moveBy(const Offset(-10, 0));
+      await tester.pump();
+      return g;
+    }
+
+    Future<void> dragOn(WidgetTester tester, TestGesture g) async {
+      await tester.pump(const Duration(milliseconds: 50));
+      await g.moveBy(const Offset(-30, 0));
+      await tester.pump();
+      await g.moveBy(const Offset(-30, 0));
+      await tester.pump();
+    }
+
+    testWidgets('a bus fader, a bus deleted above it', (tester) async {
+      final vm = await _pumpScreen(tester, lanes: 2);
+      final m = vm.mixer;
+      final a = await m.createBus('A');
+      final b = await m.createBus('B');
+      final c = await m.createBus('C');
+      await tester.pump(const Duration(milliseconds: 50));
+      double vol(String id) => m.fxBuses.firstWhere((x) => x.id == id).volume;
+      final c0 = vol(c);
+      final g = await grab(
+        tester,
+        find.descendant(
+          of: byTypeName('_BusRow').at(1),
+          matching: find.byType(StudioFader),
+        ),
+      );
+      await m.deleteBus(a);
+      final bMid = vol(b);
+      await dragOn(tester, g);
+      await g.up();
+      await tester.pump(const Duration(milliseconds: 50));
+
+      expect(vol(c), c0, reason: "C must not take the rest of B's drag");
+      expect(vol(b), lessThan(bMid));
+    });
+
+    testWidgets('the master fader, a bus added above it', (tester) async {
+      final vm = await _pumpScreen(tester, lanes: 2);
+      final m = vm.mixer;
+      await m.createBus('A');
+      await tester.pump(const Duration(milliseconds: 50));
+      final g = await grab(
+        tester,
+        find.descendant(
+          of: byTypeName('_MasterRow'),
+          matching: find.byType(StudioFader),
+        ),
+      );
+      await m.createBus('B');
+      final mid = m.masterVolume;
+      await dragOn(tester, g);
+      final after = m.masterVolume;
+      await g.up();
+      await tester.pump(const Duration(milliseconds: 50));
+
+      expect(after, lessThan(mid), reason: 'the drag still moves the master');
+    });
+
+    testWidgets('a take fader, a take deleted above it', (tester) async {
+      final vm = await _pumpScreen(tester, lanes: 3);
+      final takes = vm.practice!.vocalTracks;
+      double vol(String id) =>
+          vm.practice!.vocalTracks.firstWhere((t) => t.id == id).volume;
+      final last0 = vol(takes[2].id);
+      final g = await grab(
+        tester,
+        find.descendant(
+          of: find.byWidgetPredicate(
+            (w) => w is TrackRow && w.key == ValueKey(takes[1].id),
+          ),
+          matching: find.byType(StudioFader),
+        ),
+      );
+      await vm.deleteTrack(takes[0].id);
+      final mid = vol(takes[1].id);
+      await dragOn(tester, g);
+      await g.up();
+      await tester.pump(const Duration(milliseconds: 50));
+
+      expect(vol(takes[2].id), last0);
+      expect(vol(takes[1].id), lessThan(mid));
+    });
   });
 }
