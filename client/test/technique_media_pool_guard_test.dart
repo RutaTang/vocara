@@ -13,6 +13,7 @@ import 'package:vocara/data/sync/sync_writer.dart';
 import 'package:vocara/domain/models/technique.dart';
 import 'package:vocara/domain/models/technique_media.dart';
 import 'package:vocara/ui/technique_library/view_model/technique_detail_view_model.dart';
+import 'package:vocara/ui/technique_library/view_model/technique_library_view_model.dart';
 import 'package:vocara/utils/id.dart';
 import 'package:vocara/utils/result.dart';
 
@@ -41,9 +42,30 @@ class _TempStorage extends LocalStorageService {
 class _ThrowingDeleteMedia extends TechniqueMediaService {
   _ThrowingDeleteMedia({required super.storage});
 
+  int deletes = 0;
+
   @override
   Future<void> deleteMedia(String path) async {
+    deletes++;
     throw const FileSystemException('injected delete failure');
+  }
+
+  @override
+  Future<void> deleteTechniqueMedia(String techniqueId) async {
+    throw const FileSystemException('injected delete failure');
+  }
+}
+
+/// Refuses every import the way the size cap does, in words for the user.
+class _RefusingImportMedia extends TechniqueMediaService {
+  _RefusingImportMedia({required super.storage});
+
+  @override
+  Future<String> importMedia({
+    required String techniqueId,
+    required String sourcePath,
+  }) async {
+    throw const FormatException('This file is too large to import.');
   }
 }
 
@@ -183,6 +205,104 @@ void main() {
     // Let the unawaited cleanup futures resolve: an escaped error would fail
     // THIS test via the test zone's unhandled-error handler.
     await Future<void>.delayed(const Duration(milliseconds: 50));
+  });
+
+  Future<TechniqueDetailViewModel> openVm(
+    String techniqueId,
+    TechniqueMediaService service,
+  ) async {
+    final vm = TechniqueDetailViewModel(
+      repository: repo,
+      mediaService: service,
+      techniqueId: techniqueId,
+    );
+    for (var i = 0; vm.technique == null && i < 200; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 1));
+    }
+    return vm;
+  }
+
+  test(
+    'a failed delete of a staged clip does not break Cancel half-way',
+    () async {
+      // One IO error stopped the loop with the draft already cleared: no
+      // notify, the other files left behind, and the error thrown out of
+      // Cancel before the screen could leave edit mode.
+      final id = newId();
+      await repo.saveTechnique(
+        techniqueWith(id, newId(), await makeSrc('keep.wav', [1, 2])),
+      );
+      final service = _ThrowingDeleteMedia(storage: _TempStorage(tmp));
+      final vm = await openVm(id, service);
+      addTearDown(vm.dispose);
+      vm.beginMediaDraft();
+      vm.beginEdit();
+      await vm.addMedia([
+        await makeSrc('a.wav', [3]),
+        await makeSrc('b.wav', [4]),
+      ]);
+      expect(vm.hasMediaDraft, isTrue);
+      var notified = 0;
+      vm.addListener(() => notified++);
+
+      await vm.discardMediaDraft();
+
+      expect(service.deletes, 2);
+      expect(vm.hasMediaDraft, isFalse);
+      expect(notified, greaterThan(0));
+    },
+  );
+
+  test('a technique whose files could not all be deleted is still '
+      'deleted', () async {
+    final id = newId();
+    await repo.saveTechnique(
+      techniqueWith(id, newId(), await makeSrc('keep.wav', [1, 2])),
+    );
+    final service = _ThrowingDeleteMedia(storage: _TempStorage(tmp));
+    final vm = await openVm(id, service);
+    addTearDown(vm.dispose);
+    // Thrown, the cleanup's error escaped unhandled and the page stayed on
+    // the deleted technique.
+    expect(await vm.delete(), isTrue);
+    expect(await repo.getTechnique(id), isA<Error<Technique>>());
+
+    final other = newId();
+    await repo.saveTechnique(
+      techniqueWith(other, newId(), await makeSrc('two.wav', [5])),
+    );
+    final library = TechniqueLibraryViewModel(
+      repository: repo,
+      mediaService: service,
+    );
+    addTearDown(library.dispose);
+    // The list said "Couldn't delete the technique." for one it had deleted.
+    await library.deleteTechnique.execute(other);
+    expect(library.deleteTechnique.result, isA<Ok<void>>());
+  });
+
+  test('a lone clip refused for its size says so', () async {
+    final id = newId();
+    await repo.saveTechnique(
+      techniqueWith(id, newId(), await makeSrc('keep.wav', [1, 2])),
+    );
+    final vm = await openVm(
+      id,
+      _RefusingImportMedia(storage: _TempStorage(tmp)),
+    );
+    addTearDown(vm.dispose);
+    vm.beginMediaDraft();
+    vm.beginEdit();
+    await vm.addMedia([
+      await makeSrc('long.wav', [1]),
+    ]);
+    expect(vm.recordingNotice, 'This file is too large to import.');
+
+    await vm.addMedia([
+      await makeSrc('long2.wav', [1]),
+      await makeSrc('long3.wav', [1]),
+    ]);
+    expect(vm.recordingNotice, "2 files couldn't be imported.");
   });
 
   test('removing a persisted example never reclaims shared pool bytes '

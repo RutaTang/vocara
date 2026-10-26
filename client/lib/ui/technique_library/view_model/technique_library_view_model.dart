@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import '../../../data/repositories/technique_repository.dart';
+import '../../../data/services/diagnostics_log.dart';
 import '../../../data/services/technique_media_service.dart';
 import '../../../data/sync/sync_engine.dart';
 import '../../../domain/models/technique.dart';
@@ -237,7 +238,17 @@ class TechniqueLibraryViewModel extends ChangeNotifier {
       _all = _all.where((t) => t.id != id).toList();
       _dropStaleTagFilter();
       notifyListeners();
-      await _mediaService.deleteTechniqueMedia(id);
+      // Best effort: the row is deleted and the card gone, so a failed
+      // cleanup must not report the delete as failed. What it leaves is an
+      // orphan for the boot sweep.
+      try {
+        await _mediaService.deleteTechniqueMedia(id);
+      } catch (e) {
+        DiagnosticsLog.instance.log(
+          'technique',
+          'media cleanup after delete failed: ${e.runtimeType}',
+        );
+      }
     }
     return result;
   }

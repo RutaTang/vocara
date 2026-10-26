@@ -421,7 +421,10 @@ class TechniqueDetailViewModel extends ChangeNotifier
       _refFailed.remove(m.path);
       _refFailedMessage.remove(m.path);
       _loadingPaths.remove(m.path);
-      await _mediaService.deleteMedia(m.path);
+      // Logged, not thrown: one failed delete stopped the loop with the draft
+      // already cleared — no notify, the rest of the files left, and Cancel
+      // stuck in edit mode behind an unhandled error.
+      await _deleteMediaLogged(m.path);
     }
     _fixSelectionAfterMediaChange(referenceBefore);
     notifyListeners();
@@ -510,8 +513,11 @@ class TechniqueDetailViewModel extends ChangeNotifier
     _practiceFailed = false;
     _practiceFailedMessage = null;
     // Invalidate any in-flight stopPractice() analysis: its take was recorded
-    // against the reference we're replacing.
+    // against the reference we're replacing. Its "Analyzing…" goes with it:
+    // left up, it stood for a take that no longer exists and kept Record
+    // disabled until the discarded pass had run to its end.
     _practiceGeneration++;
+    _practiceLoading = false;
     _subject = TechniqueAnalysisSubject.reference;
     _syncPositionToSubject();
   }
@@ -780,6 +786,10 @@ class TechniqueDetailViewModel extends ChangeNotifier
   Future<MicRecordingStart> _startRecorder(
     RecordingPathStrategy destination,
   ) async {
+    // Before the start, not once it resolves: by then capture is running
+    // (the start waits for recorded frames), so a clip still playing on
+    // speakers was already in the take's opening — longest on a cold engine.
+    _micArmed.fire();
     final pending = _recorder.start(destination);
     notifyListeners();
     final r = await pending;
@@ -870,7 +880,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
     _practiceTakeGeneration = _practiceGeneration;
     _recordingExample = false;
     _practiceFailed = false;
-    _micArmed.fire();
+    _practiceFailedMessage = null;
     notifyListeners();
     return null;
   }
@@ -929,8 +939,17 @@ class TechniqueDetailViewModel extends ChangeNotifier
       // masquerading as gapless. A dirty stop surfaces its own notice below.
       _recordingNotice = _droppedFramesMessage(droppedFrames);
     }
+    // The temp path is this call's own from here on: a generation bump
+    // mid-analysis lets a new take arm, whose path the finally below must
+    // not clear.
+    _practiceTempPath = null;
     _practiceLoading = true;
+    // The previous take goes now, not when this one's analysis lands: kept,
+    // its gap table and quality warning showed under "Analyzing your take…"
+    // as if they were this take's.
+    _practice = null;
     _practiceFailed = false;
+    _practiceFailedMessage = null;
     _subject = TechniqueAnalysisSubject.practice;
     // The same generation guards the analysis: if it changes during analyze()
     // (the user selected/added/recorded a different reference, or cleared the
@@ -941,34 +960,39 @@ class TechniqueDetailViewModel extends ChangeNotifier
     // analyze() can THROW (native decode / isolate failure). Without try/finally
     // _practiceLoading would stay true forever — canRecordPractice is then stuck
     // false, blocking EVERY future practice recording, and the temp dir leaks.
+    // A pass whose take was dropped meanwhile (the reference changed, the
+    // take was cleared, the screen left) stops before or after its decode
+    // instead of holding an analysis slot for a result nobody will see.
+    bool ours() => !_disposed && _practiceGeneration == generation;
     try {
       TechniqueAnalysis? result;
       if (recordingClean) {
-        result = await _analysis.analyze(path);
+        result = await _analysis.analyze(path, wanted: ours);
       } else if (await File(path).exists()) {
         // Dirty stop: analyze the partial WAV only if it's still on disk; a
         // missing or undecodable file falls out as a failed take below.
-        result = await _analysis.analyze(path);
-      }
-      if (!recordingClean) {
-        _recordingNotice = result == null
-            ? 'Recording failed. The take could not be saved.'
-            : 'Recording hit a disk error. The take may be incomplete.';
+        result = await _analysis.analyze(path, wanted: ours);
       }
       if (_practiceGeneration == generation) {
+        if (!recordingClean) {
+          _recordingNotice = result == null
+              ? 'Recording failed. The take could not be saved.'
+              : 'Recording hit a disk error. The take may be incomplete.';
+        }
         _practice = result;
         _practiceFailed = result == null;
-        _practiceFailedMessage = null;
         // A failed take stays the subject: its panel is where the failure is
         // said (switched back to the reference, nothing on screen said it).
       }
       // else: the reference changed mid-analysis; _resetToReferenceSubject already
-      // dropped this take — keep it discarded (the temp file is still deleted below).
+      // dropped this take — keep it discarded (the temp file is still deleted
+      // below), and say nothing of a recording failure an analysis skipped
+      // as unwanted would only seem to show.
     } catch (e) {
-      if (!recordingClean) {
-        _recordingNotice = 'Recording failed. The take could not be saved.';
-      }
       if (_practiceGeneration == generation) {
+        if (!recordingClean) {
+          _recordingNotice = 'Recording failed. The take could not be saved.';
+        }
         _practice = null;
         _practiceFailed = true;
         // Keep the cause when it is user-presentable (the decode-length
@@ -979,25 +1003,31 @@ class TechniqueDetailViewModel extends ChangeNotifier
       }
     } finally {
       await deleteTempRecordingDir(path);
-      _practiceTempPath = null;
-      _practiceLoading = false;
-      _syncPositionToSubject();
+      // A bump already cleared the flag, and a take armed since may have
+      // set it again for its own analysis.
+      if (_practiceGeneration == generation) {
+        _practiceLoading = false;
+        _syncPositionToSubject();
+      }
       notifyListeners();
     }
   }
 
   /// Discards the current practice take (and its analysis).
   void clearPractice() {
-    if (_practice == null && !_practiceFailed) return;
+    if (_practice == null && !_practiceFailed && !_practiceLoading) return;
     _practice = null;
     _practiceFailed = false;
     _practiceFailedMessage = null;
     // Invalidate any in-flight stopPractice() analysis so it doesn't resurrect
     // the take the user just discarded. Not while a NEW take is recording: no
-    // analysis can be in flight then (a take only arms with none loading),
-    // and the bump would void that take at its Stop although its reference
-    // never changed (see [stopPractice]).
-    if (!isRecordingPractice) _practiceGeneration++;
+    // live take's analysis can be in flight then (a take only arms with none
+    // loading), and the bump would void that take at its Stop although its
+    // reference never changed (see [stopPractice]).
+    if (!isRecordingPractice) {
+      _practiceGeneration++;
+      _practiceLoading = false;
+    }
     if (_subject == TechniqueAnalysisSubject.practice) {
       _subject = TechniqueAnalysisSubject.reference;
     }
@@ -1044,7 +1074,6 @@ class TechniqueDetailViewModel extends ChangeNotifier
     if (!r.started) return null;
     _exampleTempPath = r.path;
     _recordingExample = true;
-    _micArmed.fire();
     notifyListeners();
     return null;
   }
@@ -1246,8 +1275,8 @@ class TechniqueDetailViewModel extends ChangeNotifier
   final _SeekSignal _scrub = _SeekSignal();
   ValueListenable<Duration> get analysisScrub => _scrub;
 
-  /// Fired when a take arms (practice or example), so every example player
-  /// pauses. They play through media_kit, not the engine, so the engine's
+  /// Fired when a take starts arming (practice or example), so every example
+  /// player pauses. They play through media_kit, not the engine, so the engine's
   /// echo canceller has no reference to subtract: a clip left playing on
   /// speakers was recorded into the very take it is compared against.
   final _Signal _micArmed = _Signal();
@@ -1424,8 +1453,11 @@ class TechniqueDetailViewModel extends ChangeNotifier
   /// dispose and abandoned-draft paths where nothing can await them; an IO
   /// failure (permissions, the storage root itself being torn down) must be
   /// logged, never escape into the root zone as an unhandled async error.
-  void _deleteMediaQuietly(String path) {
-    unawaited(
+  void _deleteMediaQuietly(String path) => unawaited(_deleteMediaLogged(path));
+
+  /// Deletes an orphaned media copy, logging an IO failure instead of
+  /// throwing it: the file is only ever left for the boot sweep.
+  Future<void> _deleteMediaLogged(String path) =>
       _mediaService.deleteMedia(path).catchError((Object e) {
         // No path in the log: DiagnosticsLog's contract forbids media paths
         // (they name user content). The error TYPE is enough to diagnose.
@@ -1433,9 +1465,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
           'technique',
           'draft media delete failed: ${e.runtimeType}',
         );
-      }),
-    );
-  }
+      });
 
   /// Saves edited text fields plus the staged media draft. Returns whether it
   /// persisted. An example take still recording is finalized BY the save —
@@ -1531,8 +1561,10 @@ class TechniqueDetailViewModel extends ChangeNotifier
         _recordingExample = false;
         _exampleTempPath = null;
       }
+      // The removal is committed whatever happens to the files: a failed
+      // delete leaves an orphan for the boot sweep, not a failed save.
       for (final path in removedPaths) {
-        await _mediaService.deleteMedia(path);
+        await _deleteMediaLogged(path);
       }
       // The staged additions are now part of the persisted technique; clear the
       // draft so their files aren't treated as orphans.
@@ -1552,11 +1584,21 @@ class TechniqueDetailViewModel extends ChangeNotifier
   /// (the caller navigates back on success).
   Future<bool> delete() async {
     final result = await _repository.deleteTechnique(techniqueId);
-    if (result is Ok<void>) {
+    if (result is! Ok<void>) return false;
+    // The technique is gone once its row is: a file left behind by a failed
+    // cleanup is an orphan the boot sweep collects, not a failed delete —
+    // thrown, it escaped unhandled and the page stayed on a deleted
+    // technique.
+    try {
       await _mediaService.deleteTechniqueMedia(techniqueId);
-      return true;
+    } catch (e) {
+      // No path in the log (see [_deleteMediaQuietly]).
+      DiagnosticsLog.instance.log(
+        'technique',
+        'media cleanup after delete failed: ${e.runtimeType}',
+      );
     }
-    return false;
+    return true;
   }
 
   /// Imports [sourcePaths] as example clips, copying each into the sandbox and
@@ -1593,6 +1635,9 @@ class TechniqueDetailViewModel extends ChangeNotifier
     final added = <TechniqueMedia>[];
     // Unsupported files are already excluded; count both for one summary notice.
     var skipped = sourcePaths.length - supported.length;
+    // Why a copy was refused, when the service says it in words the user can
+    // act on (the size cap): the count alone hid why a lone file failed.
+    String? reason;
     for (final source in supported) {
       try {
         final dest = await _mediaService.importMedia(
@@ -1611,6 +1656,9 @@ class TechniqueDetailViewModel extends ChangeNotifier
             addedAt: now,
           ),
         );
+      } on FormatException catch (e) {
+        skipped++;
+        reason ??= e.message;
       } on Exception {
         skipped++; // a file that failed to copy; the rest still import
       }
@@ -1632,7 +1680,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
 
     if (skipped > 0) {
       _recordingNotice = skipped == 1
-          ? "1 file couldn't be imported."
+          ? reason ?? "1 file couldn't be imported."
           : "$skipped files couldn't be imported.";
     }
 
@@ -1672,7 +1720,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
       _loadingPaths.remove(m.path);
       _fixSelectionAfterMediaChange(referenceBefore);
       notifyListeners();
-      await _mediaService.deleteMedia(m.path);
+      await _deleteMediaLogged(m.path);
       return;
     }
     if ((_technique?.media ?? const []).any((m) => m.id == mediaId)) {

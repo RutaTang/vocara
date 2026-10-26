@@ -5,6 +5,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:vocara/data/repositories/technique_repository.dart';
+import 'package:vocara/data/services/graph_audio_playback_service.dart'
+    show MediaTooLongException;
 import 'package:vocara/data/services/local_storage_service.dart';
 import 'package:vocara/data/services/media_analysis_service.dart';
 import 'package:vocara/data/services/mic_recording_controller.dart';
@@ -57,12 +59,17 @@ class _FakeRepo implements TechniqueRepository {
 
 /// Analysis fake: every clip analyzes to the same canned result; the take
 /// paths it was asked for are recorded, so a test can tell a take that was
-/// analyzed from one that was discarded unanalyzed.
+/// analyzed from one that was discarded unanalyzed. While [gate] is set an
+/// analysis parks on it (its decode), and like the real service it asks
+/// [wanted] again before it returns a result.
 class _FixedAnalysis extends Fake implements MediaAnalysisService {
   _FixedAnalysis(this.result);
 
   final TechniqueAnalysis result;
   final List<String> analyzed = [];
+  final List<String> skipped = [];
+  Completer<void>? gate;
+  Object? throwNext;
 
   @override
   Future<TechniqueAnalysis?> analyze(
@@ -70,6 +77,17 @@ class _FixedAnalysis extends Fake implements MediaAnalysisService {
     bool Function()? wanted,
   }) async {
     analyzed.add(path);
+    final g = gate;
+    if (g != null) await g.future;
+    final error = throwNext;
+    if (error != null) {
+      throwNext = null;
+      throw error;
+    }
+    if (wanted != null && !wanted()) {
+      skipped.add(path);
+      return null;
+    }
     return result;
   }
 }
@@ -426,4 +444,86 @@ void main() {
       expect(vm.analysisSubject, TechniqueAnalysisSubject.reference);
     },
   );
+
+  test('a re-recorded take shows nothing of the previous one while it '
+      'analyzes', () async {
+    expect(await vm.startPractice(), isNull);
+    await vm.stopPractice();
+    expect(vm.practiceAnalysis, isNotNull);
+
+    expect(await vm.startPractice(), isNull);
+    analysis.gate = Completer<void>();
+    final stopping = vm.stopPractice();
+    await pumpEventQueue();
+    // The old take's gap table and quality warning showed under "Analyzing
+    // your take…" as if they were the new one's.
+    expect(vm.practiceAnalysisLoading, isTrue);
+    expect(vm.analysisSubject, TechniqueAnalysisSubject.practice);
+    expect(vm.practiceAnalysis, isNull);
+    expect(vm.selectedMetrics, isNull);
+
+    analysis.gate!.complete();
+    await stopping;
+    expect(vm.practiceAnalysis, isNotNull);
+  });
+
+  test('a take dropped while it analyzes frees Record at once, and its '
+      'analysis neither runs on nor touches the next take', () async {
+    expect(await vm.startPractice(), isNull);
+    final oldPass = analysis.gate = Completer<void>();
+    final stopping = vm.stopPractice();
+    await pumpEventQueue();
+    expect(vm.practiceAnalysisLoading, isTrue);
+
+    vm.toggleExampleExpanded('E2');
+    // "Analyzing…" stood for a take that no longer existed, with Record
+    // disabled until the discarded pass had run to its end.
+    expect(vm.practiceAnalysisLoading, isFalse);
+    expect(vm.canRecordPractice, isTrue);
+
+    // A new take arms before the old pass is over, and the old pass ends
+    // mid-take.
+    analysis.gate = null;
+    expect(await vm.startPractice(), isNull);
+    oldPass.complete();
+    await stopping;
+    expect(analysis.skipped, hasLength(1), reason: 'dropped, not analyzed');
+    expect(vm.isRecordingPractice, isTrue);
+
+    // The new take kept its temp file through the old pass's cleanup.
+    await vm.stopPractice();
+    expect(vm.practiceAnalysis, isNotNull);
+    expect(vm.referenceMedia!.id, 'E2');
+    expect(vm.practiceAnalysisLoading, isFalse);
+  });
+
+  test('a take that fails for no stated cause does not repeat an earlier '
+      "take's", () async {
+    analysis.throwNext = const MediaTooLongException(Duration(minutes: 10));
+    expect(await vm.startPractice(), isNull);
+    await vm.stopPractice();
+    expect(vm.practiceAnalysisFailed, isTrue);
+    expect(vm.practiceAnalysisFailureMessage, isNotNull);
+
+    analysis.throwNext = StateError('isolate died');
+    expect(await vm.startPractice(), isNull);
+    await vm.stopPractice();
+    expect(vm.practiceAnalysisFailed, isTrue);
+    expect(vm.practiceAnalysisFailureMessage, isNull);
+  });
+
+  test('example players are paused before the mic opens', () async {
+    var paused = 0;
+    vm.micArmed.addListener(() => paused++);
+    recorder.startGate = Completer<void>();
+    final started = vm.startPractice();
+    await pumpEventQueue();
+    expect(vm.starting, isTrue);
+    // Once the start resolved, capture was already running: a clip still
+    // playing on speakers was in the take's opening.
+    expect(paused, 1);
+    recorder.startGate!.complete();
+    await started;
+    expect(paused, 1);
+  });
 }

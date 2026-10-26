@@ -224,7 +224,14 @@ class _TechniqueDetailScreenState extends State<TechniqueDetailScreen> {
     );
     if (!confirmed) return;
     final ok = await vm.delete();
-    if (ok && mounted) popOrGo(context, Routes.techniqueLibrary);
+    if (!mounted) return;
+    if (ok) {
+      popOrGo(context, Routes.techniqueLibrary);
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Couldn't delete the technique.")),
+      );
+    }
   }
 
   Future<void> _removeMedia(TechniqueDetailViewModel vm, String mediaId) async {
