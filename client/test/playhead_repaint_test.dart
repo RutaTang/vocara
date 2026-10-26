@@ -31,6 +31,7 @@ import 'package:vocara/domain/models/audio_track.dart';
 import 'package:vocara/domain/models/song_practice.dart';
 import 'package:vocara/domain/models/spectrogram.dart';
 import 'package:vocara/domain/models/voice_metrics.dart';
+import 'package:vocara/ui/core/widgets/spectrogram_painter.dart';
 import 'package:vocara/ui/core/widgets/waveform_painter.dart';
 import 'package:vocara/ui/song_practice_detail/view_model/song_practice_detail_view_model.dart';
 import 'package:vocara/ui/song_practice_detail/widgets/bottom_dock.dart';
@@ -420,6 +421,31 @@ void main() {
     final r = await _paintedPerTicks(tester, vm.position);
     expect(r.painters.keys, everyElement(PlayheadPainter));
     expect(r.paragraphs, lessThanOrEqualTo(10));
+  });
+
+  // Every notification of the screen rebuilds the dock's tab, and its
+  // LayoutBuilder's re-layout repainted up to the nearest boundary: a fader
+  // tick on any lane re-recorded the formant overlay (~225k dots for a
+  // 10-minute take) at pointer rate.
+  testWidgets('a fader tick leaves the dock spectrogram and its formant '
+      'overlay alone', (tester) async {
+    final vm = await _pumpScreen(tester);
+    vm.selectTrack('t0');
+    vm.analysis.showDockTab(DockTab.spectrogram);
+    await tester.pump(const Duration(milliseconds: 16));
+    await tester.pump(const Duration(milliseconds: 16));
+    expect(vm.selectedMetrics, isNotNull, reason: 'the take should analyze');
+    expect(find.byType(SpectrogramImage), findsOneWidget);
+
+    var v = 0.5;
+    final painted = await _paintsBy(
+      tester,
+      () => vm.mixer.setTrackVolumeLive('t3', v += 0.01),
+    );
+    expect(painted['WaveformPainter'], 1, reason: 'the tick must land');
+    expect(painted, isNot(contains('FormantTrackPainter')));
+    expect(painted, isNot(contains('FrequencyGridPainter')));
+    expect(painted, isNot(contains('_SpectrogramImagePainter')));
   });
 
   testWidgets('the Pitch and Timbre tabs repaint only their playheads per '

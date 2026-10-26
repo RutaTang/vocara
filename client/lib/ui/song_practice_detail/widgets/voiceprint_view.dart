@@ -112,35 +112,39 @@ Widget _takeSpectroStack(
   return LayoutBuilder(
     builder: (context, c) => Stack(
       children: [
-        const Positioned.fill(child: ColoredBox(color: Studio.inset)),
         // The image, the overlay, the seek and the playhead all map the same
         // subject axis [startMs, startMs + spanMs], so a column, its dots, the
         // moment a tap seeks to and the frame the readouts show agree.
+        //
+        // The still layers keep their own layer: every notification of the
+        // screen re-lays-out this LayoutBuilder, and a re-layout repaints up
+        // to the nearest boundary — a fader tick on any lane re-recorded the
+        // overlay, ~225k dots for a 10-minute take, at pointer rate.
         Positioned.fill(
-          child: SpectrogramImage(
-            spectrogram: spec,
-            timelineDurationMs: spanMs,
-          ),
-        ),
-        Positioned.fill(
-          child: IgnorePointer(
-            child: CustomPaint(
-              painter: FrequencyGridPainter(maxHz: spec.maxHz),
-            ),
-          ),
-        ),
-        if (metrics != null)
-          Positioned.fill(
+          child: RepaintBoundary(
             child: IgnorePointer(
-              child: CustomPaint(
-                painter: FormantTrackPainter(
-                  metrics: metrics,
-                  maxHz: spec.maxHz,
-                  timelineDurationMs: spanMs,
-                ),
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  const ColoredBox(color: Studio.inset),
+                  SpectrogramImage(
+                    spectrogram: spec,
+                    timelineDurationMs: spanMs,
+                  ),
+                  CustomPaint(painter: FrequencyGridPainter(maxHz: spec.maxHz)),
+                  if (metrics != null)
+                    CustomPaint(
+                      painter: FormantTrackPainter(
+                        metrics: metrics,
+                        maxHz: spec.maxHz,
+                        timelineDurationMs: spanMs,
+                      ),
+                    ),
+                ],
               ),
             ),
           ),
+        ),
         Positioned.fill(
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
