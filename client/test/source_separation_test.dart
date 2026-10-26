@@ -362,6 +362,35 @@ exit 0''';
       );
     });
 
+    test(
+      'an abort that lands inside the bar\'s brackets keeps its words',
+      () async {
+        final stub = await writeStub(
+          r"printf ' 45%%|####5 | 17/38 [00:10<00:libc++abi: terminating\n' >&2"
+          '\nkill -6 \$\$',
+        );
+        final svc = buildService(stub);
+        final err = await outcome(svc.separate(await writeSource()));
+        expect(
+          (err as FormatException).message,
+          contains('libc++abi: terminating'),
+        );
+      },
+    );
+
+    test('a bar cut off after its bar or mid-count is no cause', () async {
+      final stub = await writeStub(
+        r"printf 'RuntimeError: model failed\n 45%%|####5 |\n 46%%|####6 | 17/' >&2"
+        '\nexit 2',
+      );
+      final svc = buildService(stub);
+      final err = await outcome(svc.separate(await writeSource()));
+      expect(
+        (err as FormatException).message,
+        'Separation failed: RuntimeError: model failed',
+      );
+    });
+
     test('a failure names its last line that is not a progress bar', () async {
       final stub = await writeStub(
         r"printf 'loading\nValueError: bad model\n 50%%|#    | 19/38\r' >&2"

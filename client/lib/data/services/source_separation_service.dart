@@ -197,8 +197,13 @@ class ProcessSourceSeparationService implements SourceSeparationService {
   /// "100%|" keeps its words; a bar cut off inside its brackets goes whole.
   static final _progressBar = RegExp(
     r'^[^%|]{0,60}?\d{1,3}%\|[^|]*\|'
-    r'\s*[\d.]+[kMGTPEZY]?/(?:[\d.]+[kMGTPEZY]?|\?)'
-    r'(?:\s*\[[^\]]*(?:\]|$))?',
+    // Its count (possibly cut off at the line's end), then its brackets:
+    // whole, or cut off with nothing but tqdm's own characters after them,
+    // so an abort that lands inside them keeps its words. Or nothing at all,
+    // when the bar itself was cut off right after its "|".
+    r'(?:\s*[\d.]+[kMGTPEZY]?/(?:[\d.]+[kMGTPEZY]?|\?|$)'
+    r'(?:\s*\[[^\]]*\]|\s*\[[\d:<>,.?\s]*(?:[\d.]*(?:it/s|s/it))?$)?'
+    r'|\s*$)',
   );
 
   /// A Python logging line at DEBUG or INFO ("... - INFO - separator - ..."):
