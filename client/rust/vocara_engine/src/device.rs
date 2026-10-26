@@ -428,8 +428,13 @@ fn build_sinc_table(step: f64) -> Vec<f32> {
         for k in 0..SINC_TAPS {
             // Contribution of content index floor(pos) - (HALF-1) + k at offset x from pos.
             let x = k as f64 - (SINC_HALF as f64 - 1.0) - frac;
+            // At x = 0 the scaled sinc's limit is `fc`, not 1: the centre tap of the phase-0
+            // row stood fc⁻¹ times too tall, and the row's unity-DC normalization then
+            // squashed every other tap under it — that row all but passed its input through
+            // unfiltered, and a downsampling device (a 16-32 kHz call-profile output) heard
+            // the engine's top octave folded down, 8-14 dB under the signal.
             let sinc = if x.abs() < 1e-12 {
-                1.0
+                fc
             } else {
                 let px = std::f64::consts::PI * fc * x;
                 px.sin() / px * fc
@@ -4220,6 +4225,26 @@ mod out_resampler_tests {
             rms < 0.05,
             "alias residue RMS {rms} for a tone above the device Nyquist"
         );
+    }
+
+    #[test]
+    fn a_low_rate_device_hears_nothing_of_the_engines_top_octave() {
+        // 23 kHz is above every call-profile output's Nyquist. With the phase-0 row's centre
+        // tap at 1 instead of fc, that row passed it nearly unfiltered: -14 dBc of alias at
+        // 32 kHz, -9 dBc at 24 kHz.
+        for device in [32_000.0, 24_000.0, 16_000.0] {
+            let (h, mut res) = tone_engine(23_000.0, device);
+            h.play();
+            let frames = 1 << 15;
+            let mut out = vec![0.0; frames * CHANNELS];
+            res.process(&mut out, frames);
+            let skip = 4_096;
+            let sq: f64 = (skip..frames)
+                .map(|i| (out[i * CHANNELS] as f64).powi(2))
+                .sum();
+            let rms = (sq / (frames - skip) as f64).sqrt();
+            assert!(rms < 1e-3, "{device} Hz device: alias residue RMS {rms}");
+        }
     }
 
     #[test]
