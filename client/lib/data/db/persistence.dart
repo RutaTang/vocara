@@ -23,6 +23,7 @@ import '../sync/oplog_drain.dart';
 import '../sync/quarantine_store.dart';
 import '../sync/sync_applier.dart';
 import '../sync/sync_engine.dart';
+import '../sync/sync_hashes.dart' show Loaded;
 import '../sync/sync_row.dart';
 import '../sync/sync_state_store.dart';
 import '../sync/sync_transport.dart';
@@ -799,9 +800,15 @@ class Persistence {
     // into one Result.error, and only the former is proof the file is junk —
     // this select throws on a database failure and holds the file back.
     if (!await _practiceIsLive(practiceId)) return _RecoveryOutcome.junk;
-    final res = await songRepo.getPractice(practiceId);
-    if (res is! Ok<SongPractice>) return _RecoveryOutcome.failed;
-    final practice = res.value;
+    // Loaded with its base, and saved against it as an editor saves: the
+    // base-less save took the store's own rows as the base, so every row this
+    // build re-encodes differently than it was stored (a field another build
+    // wrote) read as a local edit. The practice row and every take's and
+    // bus's chain were rewritten (that field stripped) and journaled, though
+    // only the recovered take was new.
+    final res = await songRepo.loadPractice(practiceId);
+    if (res is! Ok<Loaded<SongPractice>>) return _RecoveryOutcome.failed;
+    final practice = res.value.aggregate;
 
     // Same take construction as a graceful stop with nothing armed: analyze
     // the audio, append a fresh single-clip vocal take to the active
@@ -819,10 +826,11 @@ class Persistence {
       createdAt: DateTime.now(),
       versionId: practice.activeVersion?.id,
     );
-    final saved = await songRepo.savePractice(
+    final saved = await songRepo.savePracticeWithBase(
       practice.copyWith(vocalTracks: [...practice.vocalTracks, track]),
+      baseHashes: res.value.baseHashes,
     );
-    if (saved is! Ok<SongPractice>) return _RecoveryOutcome.failed;
+    if (saved is! Ok<Loaded<SongPractice>>) return _RecoveryOutcome.failed;
 
     // These bytes are now referenced by a committed clip row, so the SAME BOOT
     // must treat a second file carrying them as an already-saved leftover — the

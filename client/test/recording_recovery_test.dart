@@ -11,6 +11,7 @@
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:vocara/data/db/persistence.dart';
@@ -194,6 +195,48 @@ void main() {
     expect(await File(clip.audioFilePath).exists(), isTrue);
     // The staging copy was deleted after the rows committed.
     expect(await orphan.exists(), isFalse);
+  });
+
+  test('recovery leaves every row but the new take as it was stored', () async {
+    // Recovery saved without a base, so the store's own rows stood in as one:
+    // a row this build re-encodes differently than it was stored (a field
+    // another build wrote) read as a local edit, and was rewritten with the
+    // field stripped, and journaled, though nothing touched it.
+    final practice = await createPractice();
+    await persistence.db.customStatement(
+      "UPDATE practices SET reverb_json = json_set(COALESCE(reverb_json, '{}'), '\$.future', 1), "
+      'lyrics_json = ? WHERE id = ?',
+      ['[{"text":"la","timeMs":10,"style":"bold"}]', practice.id],
+    );
+    Future<List<Object?>> row() async {
+      final r = await persistence.db
+          .customSelect(
+            'SELECT reverb_json, lyrics_json FROM practices WHERE id = ?',
+            variables: [Variable.withString(practice.id)],
+          )
+          .getSingle();
+      return [r.data['reverb_json'], r.data['lyrics_json']];
+    }
+
+    Future<int> journaled() async =>
+        (await persistence.db
+                .customSelect(
+                  "SELECT COUNT(*) AS n FROM oplog WHERE entity_table = 'practices' "
+                  'AND entity_id = ?',
+                  variables: [Variable.withString(practice.id)],
+                )
+                .getSingle())
+            .read<int>('n');
+    final before = await row();
+    expect(before[0], contains('"future":1'));
+    final journalBefore = await journaled();
+
+    await stageOrphan(practice.id, monoWav(4800));
+    expect(await persistence.recoverStagedRecordings(analyze: fakeAnalyze), 1);
+
+    expect((await reload(practice.id)).vocalTracks, hasLength(1));
+    expect(await row(), before, reason: 'the practice row is untouched');
+    expect(await journaled(), journalBefore, reason: 'and not journaled');
   });
 
   test('second run is a no-op', () async {
