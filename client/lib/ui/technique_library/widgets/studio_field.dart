@@ -14,6 +14,7 @@ class StudioField extends StatelessWidget {
     this.maxLines = 1,
     this.autofocus = false,
     this.enabled = true,
+    this.onSubmitted,
     super.key,
   });
 
@@ -29,6 +30,9 @@ class StudioField extends StatelessWidget {
   /// and the screen leaves edit mode). Rendered like a disabled StudioButton:
   /// still visible, text dimmed to the faint tone, no edit cursor.
   final bool enabled;
+
+  /// Return in a single-line field (a dialog's name, say).
+  final ValueChanged<String>? onSubmitted;
 
   @override
   Widget build(BuildContext context) {
@@ -58,6 +62,7 @@ class StudioField extends StatelessWidget {
             autofocus: autofocus,
             minLines: minLines,
             maxLines: maxLines,
+            onSubmitted: onSubmitted,
             cursorColor: Studio.accent,
             style: TextStyle(
               color: enabled ? Studio.textPrimary : Studio.textFaint,

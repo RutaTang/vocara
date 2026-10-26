@@ -82,6 +82,8 @@ class _NewTechniqueDialogState extends State<_NewTechniqueDialog> {
                   label: 'Name',
                   hint: 'e.g. Twang, Mixed voice, Curbing',
                   autofocus: true,
+                  // Return creates, as in the app's other name dialogs.
+                  onSubmitted: (_) => _create(),
                 ),
                 const SizedBox(height: 20),
                 Row(
