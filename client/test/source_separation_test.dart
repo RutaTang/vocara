@@ -290,6 +290,52 @@ exit 0''';
       );
     });
 
+    test(
+      'an abort printed while the bar was on screen keeps its reason',
+      () async {
+        // tqdm redraws with \r and no line break, so the native assertion lands
+        // on the bar's own line: dropping the whole line as a bar lost it.
+        final stub = await writeStub(
+          r"printf ' 45%%|####5     | 17/38 [00:10<00:12,  1.70it/s]"
+          r"failed assertion: MPS buffer too large\n' >&2"
+          '\nkill -6 \$\$',
+        );
+        final svc = buildService(stub);
+        final err = await outcome(svc.separate(await writeSource()));
+        expect(
+          (err as FormatException).message,
+          'Separation failed (signal 6): failed assertion: MPS buffer too large',
+        );
+      },
+    );
+
+    test(
+      'a killed run says it was killed, whatever the library last logged',
+      () async {
+        final stub = await writeStub(
+          r"printf '2026-10-26 10:00:00,000 - INFO - separator - Starting "
+          r"separation process for audio_file_path: /x.wav\n' >&2"
+          '\nkill -9 \$\$',
+        );
+        final svc = buildService(stub);
+        final err = await outcome(svc.separate(await writeSource()));
+        final message = (err as FormatException).message;
+        expect(message, contains('possibly for lack of memory'));
+        expect(message, isNot(contains('INFO')));
+      },
+    );
+
+    test('the library narrating its run is not named as the cause', () async {
+      final stub = await writeStub(
+        r"printf 'Separating:  50%%|#    | 19/38 [00:01<00:01, 9.5it/s]\n"
+        r"2026-10-26 10:00:00,000 - INFO - separator - Separation done\n' >&2"
+        '\nexit 3',
+      );
+      final svc = buildService(stub);
+      final err = await outcome(svc.separate(await writeSource()));
+      expect((err as FormatException).message, 'Separation failed (exit 3).');
+    });
+
     test('a failure names its last line that is not a progress bar', () async {
       final stub = await writeStub(
         r"printf 'loading\nValueError: bad model\n 50%%|#    | 19/38\r' >&2"

@@ -189,8 +189,19 @@ class ProcessSourceSeparationService implements SourceSeparationService {
 
   final LocalStorageService _storage;
 
-  /// A tqdm progress line ("  3%|▎    | 1/38 [00:02<...]").
-  static final _progressBar = RegExp(r'^\d{1,3}%\|');
+  /// A tqdm progress bar ("Separating:  3%|▎    | 1/38 [00:02<00:12, 1.7it/s]"),
+  /// with whatever label leads it. A bar redraws with \r and no line break,
+  /// so text printed while one was on screen (a native abort mid-inference)
+  /// follows it on the same line: only the bar is cut off, not the line.
+  static final _progressBar = RegExp(
+    r'^.*?\d{1,3}%\|[^|]*\|'
+    r'(?:\s*[\d.]+[kMGTPEZY]?/(?:[\d.]+[kMGTPEZY]?|\?))?'
+    r'(?:\s*\[[^\]]*\])?',
+  );
+
+  /// A Python logging line at DEBUG or INFO ("... - INFO - separator - ..."):
+  /// the library narrating its run, not why it failed.
+  static final _libraryLog = RegExp(r' - (?:DEBUG|INFO) - ');
 
   /// The interpreter that runs the sidecar. In a shipped build this is swapped
   /// for a bundled, self-contained binary (users never install anything).
@@ -549,24 +560,28 @@ class ProcessSourceSeparationService implements SourceSeparationService {
         // Surface the LAST non-empty stderr line as the cause: the sidecar (and a
         // Python traceback) print the real reason last, after audio-separator's own
         // logs — the first line would just echo a library log, not the failure.
-        // Progress bars redraw with \r and are no cause.
+        // Progress bars and the library's own INFO/DEBUG narration are no cause.
         final cause = detail
             .split(RegExp(r'[\r\n]'))
-            .map((l) => l.trim())
+            .map((l) => l.replaceFirst(_progressBar, '').trim())
             .lastWhere(
-              (l) => l.isNotEmpty && !_progressBar.hasMatch(l),
+              (l) => l.isNotEmpty && !_libraryLog.hasMatch(l),
               orElse: () => '',
             );
         // Ended by a signal (negative on POSIX): say which, with what it
-        // printed. A SIGKILL with nothing to say is most often the system
-        // ending a model run that ran out of memory.
+        // printed. A SIGKILL comes from outside the run, whatever it printed
+        // last, and is most often the system ending a model run that ran out
+        // of memory.
+        if (code == -9) {
+          throw const FormatException(
+            'Separation stopped: the system ended the separation engine '
+            '(signal 9), possibly for lack of memory.',
+          );
+        }
         if (code < 0) {
           throw FormatException(
             cause.isNotEmpty
                 ? 'Separation failed (signal ${-code}): $cause'
-                : code == -9
-                ? 'Separation stopped: the system ended the separation engine '
-                      '(signal 9), possibly for lack of memory.'
                 : 'Separation failed (signal ${-code}).',
           );
         }
