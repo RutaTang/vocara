@@ -844,30 +844,31 @@ class _FxSliderState extends State<_FxSlider> {
           );
         }
 
-        return GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTapDown: (d) => update(d.localPosition.dx),
-          onTapUp: (_) => _commit(),
-          // Cancelled after its tap-down (a dialog opening while held), a
-          // press fires no tap-up: the value it set was never saved. One
-          // turning into a pan lands here too, its start following in this
-          // same event: that pan's end commits, so this stands down.
-          onTapCancel: () => scheduleMicrotask(() {
-            if (!_panning) _commit();
-          }),
-          onPanStart: (_) => _panning = true,
-          onPanUpdate: (d) => update(d.localPosition.dx),
-          onPanEnd: (_) {
-            _panning = false;
-            _commit();
-          },
-          child: SizedBox(
-            height: 20,
-            child: CustomPaint(
-              painter: _SliderPainter(
-                ((widget.value - widget.min) / (widget.max - widget.min)).clamp(
-                  0.0,
-                  1.0,
+        // The pointer gone (up, or cancelled by a dialog opening while the
+        // button was held), a press that set the value commits it, unless a
+        // pan owns it (its end commits, a cancelled one too). Judged on the
+        // pointer, not the tap: the tap is rejected as soon as it moves past
+        // its slop, before a pan has won, and a press the panel's scroll took
+        // ends no gesture of this one at all.
+        return Listener(
+          onPointerUp: (_) => _panning ? null : _commit(),
+          onPointerCancel: (_) => _panning ? null : _commit(),
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTapDown: (d) => update(d.localPosition.dx),
+            onTapUp: (_) => _commit(),
+            onPanStart: (_) => _panning = true,
+            onPanUpdate: (d) => update(d.localPosition.dx),
+            onPanEnd: (_) {
+              _panning = false;
+              _commit();
+            },
+            child: SizedBox(
+              height: 20,
+              child: CustomPaint(
+                painter: _SliderPainter(
+                  ((widget.value - widget.min) / (widget.max - widget.min))
+                      .clamp(0.0, 1.0),
                 ),
               ),
             ),

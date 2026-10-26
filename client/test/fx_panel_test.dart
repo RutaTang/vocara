@@ -252,6 +252,27 @@ void main() {
     expect(vm.commits, 1);
   });
 
+  testWidgets('a touch press that slips past the tap slop commits once', (
+    tester,
+  ) async {
+    final vm = await pump(
+      tester,
+      track: _track(fx: _fxAllOff().copyWith(compOn: true)),
+    );
+    final g = await tester.startGesture(
+      tester.getRect(byTypeName('_FxSlider')).center,
+      kind: PointerDeviceKind.touch,
+    );
+    await tester.pump(kPressTimeout + const Duration(milliseconds: 20));
+    await g.moveBy(const Offset(25, 0)); // past the tap's slop, not the pan's
+    await tester.pump();
+    await g.moveBy(const Offset(20, 0));
+    await tester.pump();
+    await g.up();
+    await tester.pump();
+    expect(vm.commits, 1);
+  });
+
   testWidgets('a slider unmounted mid-pan still commits', (tester) async {
     // Unmounted mid-gesture (the selection changed, the inspector collapsed),
     // a disposed recognizer fires no end: the value already live in the model

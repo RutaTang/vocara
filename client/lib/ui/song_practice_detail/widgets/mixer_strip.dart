@@ -62,8 +62,12 @@ class MixerStrip extends StatelessWidget {
         // Each strip is kept while it shows the same thing: a fader or knob
         // tick changes one strip, and rebuilding the rest re-laid-out and
         // repainted every strip in the desk, at pointer rate.
+        // Keyed by lane: unkeyed, a strip removed before one being dragged
+        // handed that fader's state, and the rest of its drag, to the next
+        // lane's strip.
         for (final t in tracks)
           StableSubtree<_Channel>(
+            key: ValueKey('track:${t.id}'),
             sameAs: (next, shown) => next.showsSameAs(shown),
             child: _Channel(
               track: t,
@@ -92,6 +96,7 @@ class MixerStrip extends StatelessWidget {
           ),
           for (final b in buses)
             StableSubtree<_BusChannel>(
+              key: ValueKey('bus:${b.id}'),
               sameAs: (next, shown) => next.showsSameAs(shown),
               child: _BusChannel(
                 bus: b,
@@ -952,6 +957,13 @@ class _VerticalFaderState extends State<_VerticalFader> {
   /// A vertical drag the press turned into: its end saves.
   bool _dragging = false;
 
+  /// Saves the level a press or drag set, once.
+  void _settle() {
+    if (!_active) return;
+    _active = false;
+    widget.onChangeEnd();
+  }
+
   @override
   void dispose() {
     // Unmounted mid-drag (a sideways wheel scrolled its strip out of the lazy strip list): a
@@ -982,45 +994,38 @@ class _VerticalFaderState extends State<_VerticalFader> {
 
         return MouseRegion(
           cursor: SystemMouseCursors.resizeUpDown,
-          child: GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTapDown: (d) {
-              _active = true;
-              update(d.localPosition.dy);
-            },
-            onTapUp: (_) {
-              _active = false;
-              widget.onChangeEnd();
-            },
-            // A press cancelled after its tap-down (a dialog opening while the
-            // button is held) fires no tap-up: the level it set was never
-            // saved. One turning into a drag lands here too, its start
-            // following in this same event: that drag's end saves, so this
-            // stands down (a cancelled drag still ends through its end).
-            onTapCancel: () {
-              if (!_active) return;
-              final end = widget.onChangeEnd;
-              scheduleMicrotask(() {
-                if (!_active || _dragging) return;
+          // The pointer gone (up, or cancelled by a dialog opening while the
+          // button was held), a press that set the level saves it, unless a
+          // drag owns it (its end saves, a cancelled one too). Judged on the
+          // pointer, not the tap: the tap is rejected as soon as it moves past
+          // its slop, before a drag has won, and a press another gesture took
+          // (a parent's scroll) ends no gesture of this one at all.
+          child: Listener(
+            onPointerUp: (_) => _dragging ? null : _settle(),
+            onPointerCancel: (_) => _dragging ? null : _settle(),
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTapDown: (d) {
+                _active = true;
+                update(d.localPosition.dy);
+              },
+              onTapUp: (_) => _settle(),
+              onVerticalDragStart: (_) => _dragging = true,
+              onVerticalDragUpdate: (d) {
+                _active = true;
+                update(d.localPosition.dy);
+              },
+              onVerticalDragEnd: (_) {
+                _dragging = false;
                 _active = false;
-                end();
-              });
-            },
-            onVerticalDragStart: (_) => _dragging = true,
-            onVerticalDragUpdate: (d) {
-              _active = true;
-              update(d.localPosition.dy);
-            },
-            onVerticalDragEnd: (_) {
-              _dragging = false;
-              _active = false;
-              widget.onChangeEnd();
-            },
-            child: CustomPaint(
-              size: Size.infinite,
-              painter: _VFaderPainter(
-                value: widget.value.clamp(0.0, 1.0),
-                accent: widget.accent,
+                widget.onChangeEnd();
+              },
+              child: CustomPaint(
+                size: Size.infinite,
+                painter: _VFaderPainter(
+                  value: widget.value.clamp(0.0, 1.0),
+                  accent: widget.accent,
+                ),
               ),
             ),
           ),

@@ -373,4 +373,33 @@ void main() {
     await tester.pumpAndSettle();
     expect(vm.fakeMixer.trackCommits, 1);
   });
+
+  for (final kind in [PointerDeviceKind.mouse, PointerDeviceKind.touch]) {
+    testWidgets('a press that slips past the tap slop before its drag wins '
+        'saves once ($kind)', (tester) async {
+      // The tap is rejected at its slop, before the drag has won: saving on
+      // the tap's cancel wrote the level there, and the drag's end again.
+      final vm = await pumpStrip(tester);
+      final g = await tester.startGesture(
+        tester.getRect(_faders.first).center,
+        kind: kind,
+      );
+      await tester.pump(kPressTimeout + const Duration(milliseconds: 20));
+      // Past the tap's slop: sideways with the mouse (no vertical yet for the
+      // drag), a shade too shallow for a touch drag.
+      await g.moveBy(
+        kind == PointerDeviceKind.mouse
+            ? const Offset(20, 0)
+            : const Offset(8, -17),
+      );
+      await tester.pump();
+      await g.moveBy(const Offset(0, -20));
+      await tester.pump();
+      await g.moveBy(const Offset(0, -10));
+      await tester.pump();
+      await g.up();
+      await tester.pumpAndSettle();
+      expect(vm.fakeMixer.trackCommits, 1);
+    });
+  }
 }
