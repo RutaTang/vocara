@@ -10,6 +10,7 @@ import '../../../data/services/app_settings_service.dart';
 import '../../../data/services/diagnostics_log.dart';
 import '../../../data/services/graph_audio_playback_service.dart';
 import '../../../data/services/media_analysis_service.dart';
+import '../../../data/services/mic_permission.dart';
 import '../../../data/services/mic_recording_controller.dart';
 import '../../../data/services/monitor_service.dart';
 import '../../../data/services/recording_finalizer.dart';
@@ -772,9 +773,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
 
   /// The message the screen toasts for a failed recording start.
   String _startFailureMessage(MicRecordingFailure failure) => switch (failure) {
-    MicRecordingFailure.permissionDenied =>
-      'Microphone access is off. Enable it in System Settings › '
-          'Privacy & Security › Microphone.',
+    MicRecordingFailure.permissionDenied => MicPermission.deniedMessage,
     MicRecordingFailure.engineUnavailable =>
       'The audio engine is unavailable. Reconnect an audio device and '
           'try again.',

@@ -9,6 +9,11 @@ import 'package:flutter/services.dart';
 class MicPermission {
   static const _channel = MethodChannel('vocara/mic');
 
+  /// What a mic action says when access is off.
+  static const deniedMessage =
+      'Microphone access is off. Enable it in System Settings › '
+      'Privacy & Security › Microphone.';
+
   /// Request microphone access (prompts on first use). Returns whether it's granted.
   static Future<bool> request() async {
     try {

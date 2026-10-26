@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 
 import '../../../config/app_config.dart';
 import '../../../data/services/graph_audio_playback_service.dart';
+import '../../../data/services/mic_permission.dart';
 import '../../../data/services/monitor_service.dart';
 import '../../../data/services/spectrogram_service.dart';
 import '../../../domain/models/audio_track.dart';
@@ -59,6 +60,9 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     required AudioTrack? Function(String) trackById,
     required ValueListenable<Duration> position,
     required Future<void> Function(Duration) seek,
+    void Function(String)? toast,
+    @visibleForTesting
+    Future<bool> Function() requestMicPermission = MicPermission.request,
     @visibleForTesting LruBytesBudget? cacheBudget,
   }) : _aggAnalysisCache = LruBytesCache.shared(
          cacheBudget ?? analysisCacheBudget,
@@ -86,7 +90,9 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
        _selectedClipId = selectedClipId,
        _trackById = trackById,
        _position = position,
-       _seek = seek {
+       _seek = seek,
+       _toast = toast,
+       _requestMicPermission = requestMicPermission {
     // Derived results are memoized under the SAME key as the entry they came
     // from, so the budget dropping a source leaves them with no owner. Wiring
     // the hooks here (rather than at construction) is what lets them close
@@ -123,6 +129,8 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
 
   final ValueListenable<Duration> _position;
   final Future<void> Function(Duration) _seek;
+  final void Function(String)? _toast;
+  final Future<bool> Function() _requestMicPermission;
 
   /// Set in [dispose]. Guards async cache computes resolving after the view
   /// model (and this cache) are gone: every compute helper refuses to START
@@ -421,6 +429,20 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     if (on) {
       if (_isRecording() || engine == null) return;
       _liveStartPending = true;
+      // Without the grant the capture is fed silence: ask first, as Monitor
+      // and Record do, so a refusal says why the view stays flat (and leaves
+      // the transport playing).
+      if (!await _requestMicPermission()) {
+        if (_liveStartPending && !_disposed) {
+          _toast?.call(MicPermission.deniedMessage);
+        }
+        _liveStartPending = false;
+        return;
+      }
+      if (_disposed || !_liveStartPending || _isRecording()) {
+        _liveStartPending = false;
+        return;
+      }
       if (_isPlaying()) await _pausePlayback();
       // Re-check after EVERY await: a recording start (which owns the
       // capture) or a cancel/dispose during the pause aborts this start —

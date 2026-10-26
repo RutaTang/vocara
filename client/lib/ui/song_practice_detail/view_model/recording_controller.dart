@@ -452,10 +452,7 @@ class RecordingController extends ChangeNotifier {
       if (failure != null) {
         switch (failure) {
           case MicRecordingFailure.permissionDenied:
-            _toast(
-              'Microphone access is off. Enable it in System Settings › '
-              'Privacy & Security › Microphone.',
-            );
+            _toast(MicPermission.deniedMessage);
           case MicRecordingFailure.fileCreateFailed:
             // The writer could not create the WAV (disk full / permissions) and
             // nothing would be recorded — fail loudly instead of "recording"
@@ -869,10 +866,7 @@ class RecordingController extends ChangeNotifier {
         inputLevel.value = 0;
       } else {
         if (!await MicPermission.request()) {
-          _toast(
-            'Microphone access is off. Enable it in System Settings › '
-            'Privacy & Security › Microphone.',
-          );
+          _toast(MicPermission.deniedMessage);
           return;
         }
         // The view could have been disposed during the permission await.

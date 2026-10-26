@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vocara/data/services/graph_audio_playback_service.dart';
+import 'package:vocara/data/services/mic_permission.dart';
 import 'package:vocara/data/services/monitor_service.dart';
 import 'package:vocara/data/services/spectrogram_service.dart';
 import 'package:vocara/domain/models/audio_track.dart';
@@ -153,6 +154,8 @@ AnalysisCache _cache({
   bool Function()? isRecording,
   AudioTrack? Function(String)? trackById,
   LruBytesBudget? cacheBudget,
+  Future<bool> Function()? requestMicPermission,
+  void Function(String)? toast,
 }) => AnalysisCache(
   spectrograms: spectrograms ?? _FakeSpectrograms(),
   monitor: monitor ?? _FakeMonitor(),
@@ -165,6 +168,8 @@ AnalysisCache _cache({
   trackById: trackById ?? (_) => null,
   position: ValueNotifier(Duration.zero),
   seek: (_) async {},
+  toast: toast,
+  requestMicPermission: requestMicPermission ?? () async => true,
   // A private budget by default so tests never evict each other's entries
   // through the app-wide one.
   cacheBudget: cacheBudget ?? LruBytesBudget(1 << 30),
@@ -794,6 +799,53 @@ void main() {
       expect(cache.liveMonitor, isFalse);
       expect(engine.captureStarts, 0);
       expect(monitor.starts, 0);
+      cache.dispose();
+    });
+
+    test('a refused microphone leaves the capture off and the transport '
+        'playing, and says why', () async {
+      final engine = _FakeGraphEngine();
+      final monitor = _FakeMonitor();
+      final toasts = <String>[];
+      var pauses = 0;
+      final cache = _cache(
+        graphEngine: engine,
+        monitor: monitor,
+        isPlaying: () => true,
+        pausePlayback: () async => pauses++,
+        requestMicPermission: () async => false,
+        toast: toasts.add,
+      );
+
+      await cache.setLiveMonitor(true);
+
+      expect(cache.liveMonitor, isFalse);
+      expect(engine.captureStarts, 0);
+      expect(monitor.starts, 0);
+      expect(pauses, 0);
+      expect(toasts, [MicPermission.deniedMessage]);
+      cache.dispose();
+    });
+
+    test('a live start cancelled while the permission prompt is up stays '
+        'off', () async {
+      final engine = _FakeGraphEngine();
+      final answer = Completer<bool>();
+      final toasts = <String>[];
+      final cache = _cache(
+        graphEngine: engine,
+        requestMicPermission: () => answer.future,
+        toast: toasts.add,
+      );
+
+      final start = cache.setLiveMonitor(true);
+      await cache.setLiveMonitor(false);
+      answer.complete(true);
+      await start;
+
+      expect(cache.liveMonitor, isFalse);
+      expect(engine.captureStarts, 0);
+      expect(toasts, isEmpty);
       cache.dispose();
     });
 

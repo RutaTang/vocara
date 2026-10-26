@@ -203,6 +203,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       trackById: _trackById,
       position: playback.position,
       seek: playback.seek,
+      toast: _toast,
     );
     recording = RecordingController(
       graphEngine: () => _graphEngine,
