@@ -178,6 +178,37 @@ void main() {
     }
   }
 
+  // One drawCircle per voiced frame (a Paint and a Color.lerp each) was ~56k
+  // calls per paint of a 10-minute take, on every frame of a dock resize.
+  testWidgets('the register map draws its dots in batches, not one by one', (
+    tester,
+  ) async {
+    final src = _analyzed(_sine(48000, 220, 48000));
+    final voiced = [
+      for (var fr = 0; fr < src.metrics!.frames; fr++)
+        if (src.metrics!.f0[fr] > 0 && !src.register!.score[fr].isNaN) fr,
+    ].length;
+    expect(voiced, greaterThan(50), reason: 'the take must have voiced frames');
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SizedBox(height: 260, child: RegisterTab(vm: src)),
+        ),
+      ),
+    );
+    var circles = 0, batches = 0;
+    expect(
+      find.byType(RegisterTab),
+      paints..everything((method, args) {
+        if (method == #drawCircle) circles++;
+        if (method == #drawRawPoints) batches++;
+        return true;
+      }),
+    );
+    expect(batches, greaterThan(0));
+    expect(circles, lessThan(10), reason: 'no longer one per voiced frame');
+  });
+
   testWidgets('every tab renders a normal take', (tester) async {
     await pumpTabs(tester, _analyzed(_sine(48000, 220, 48000)));
   });

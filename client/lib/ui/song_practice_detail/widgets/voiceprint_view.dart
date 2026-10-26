@@ -1,4 +1,5 @@
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -1278,11 +1279,23 @@ class _RegisterMapPainter extends CustomPainter {
   final int loSemi, hiSemi;
   final int durationMs;
 
+  /// Colour steps along the chest→head gradient: finer than the eye tells
+  /// apart at a 1.4 px dot.
+  static const int _shades = 32;
+
   @override
   void paint(Canvas canvas, Size size) {
     final frames = metrics.frames;
     if (frames == 0 || durationMs <= 0) return;
     final span = (hiSemi - loSemi).clamp(1, 1 << 30);
+    // One point batch per shade: a round-capped point 2.8 px wide is the same
+    // dot as drawCircle, but a 10-minute take is ~56k voiced frames, and as
+    // that many drawCircle calls (a Paint and a Color.lerp each) every paint
+    // of the tab — every frame of a dock resize — cost tens of ms to record.
+    final xy = Float32List(frames * 2);
+    final shade = Uint8List(frames);
+    final count = List<int>.filled(_shades, 0);
+    var n = 0;
     for (var fr = 0; fr < frames; fr++) {
       final hz = metrics.f0[fr];
       final s = register.score[fr];
@@ -1290,15 +1303,41 @@ class _RegisterMapPainter extends CustomPainter {
       final midi = 69 + 12 * (math.log(hz / 440) / math.ln2);
       // Time-based x (matches the playhead), not (fr/frames) — the frame count
       // is ~fftSize/hop short of len/hop, which would drift the dots right.
-      final x =
+      xy[2 * n] =
           (metrics.timeOfFrame(fr) * 1000 / durationMs).clamp(0.0, 1.0) *
           size.width;
-      final y = (1 - (midi - loSemi) / span).clamp(0.0, 1.0) * size.height;
-      canvas.drawCircle(
-        Offset(x, y),
-        1.4,
-        Paint()
-          ..color = Color.lerp(_chestColor, _headColor, s.clamp(0.0, 1.0))!,
+      xy[2 * n + 1] =
+          (1 - (midi - loSemi) / span).clamp(0.0, 1.0) * size.height;
+      final b = (s.clamp(0.0, 1.0) * (_shades - 1)).round();
+      shade[n++] = b;
+      count[b]++;
+    }
+    if (n == 0) return;
+    final start = List<int>.filled(_shades, 0);
+    for (var b = 1; b < _shades; b++) {
+      start[b] = start[b - 1] + count[b - 1];
+    }
+    final at = [...start];
+    final sorted = Float32List(n * 2);
+    for (var i = 0; i < n; i++) {
+      final j = at[shade[i]]++;
+      sorted[2 * j] = xy[2 * i];
+      sorted[2 * j + 1] = xy[2 * i + 1];
+    }
+    final paint = Paint()
+      ..strokeWidth = 2.8
+      ..strokeCap = StrokeCap.round;
+    for (var b = 0; b < _shades; b++) {
+      if (count[b] == 0) continue;
+      paint.color = Color.lerp(_chestColor, _headColor, b / (_shades - 1))!;
+      canvas.drawRawPoints(
+        ui.PointMode.points,
+        Float32List.sublistView(
+          sorted,
+          2 * start[b],
+          2 * (start[b] + count[b]),
+        ),
+        paint,
       );
     }
   }
