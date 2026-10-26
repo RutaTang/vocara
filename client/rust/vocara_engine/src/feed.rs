@@ -631,12 +631,13 @@ impl TrackFeeder {
 
     /// The transport facts a plan made now would rest on.
     fn basis_of(t: &Shared) -> PlanBasis {
+        let (ls, le) = t.loop_bounds();
         PlanBasis {
             flush_gen: t.out_flush_gen(),
             playing: t.is_playing(),
             loop_on: t.loop_enabled(),
-            ls: t.loop_start(),
-            le: t.loop_end(),
+            ls,
+            le,
         }
     }
 

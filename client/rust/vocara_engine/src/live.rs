@@ -69,8 +69,12 @@ pub struct Shared {
     blocks: AtomicU64,
     playing: AtomicBool,
     loop_enabled: AtomicBool,
-    loop_start: AtomicI64,
-    loop_end: AtomicI64,
+    /// The loop bounds as ONE value (start in the high 32 bits, end in the low), so a reader
+    /// always gets a pair [`EngineHandle::set_loop`] published. As two stores a reader could
+    /// see the old start with the new end, usually a valid span: playing at 18 s in [2 s, 20 s)
+    /// and moving the loop to [10 s, 12 s) wrapped to 2 s, eight seconds outside the new loop.
+    /// 32 bits of frames is ~24.8 h at the engine rate.
+    loop_span: AtomicU64,
     seek_req: AtomicI64, // >= 0: pending seek target; -1: none
     /// Live-input monitor gain target (f32 bits). 0 = muted; the audio thread ramps to it.
     mon_target: AtomicU32,
@@ -131,8 +135,7 @@ impl Shared {
             blocks: AtomicU64::new(0),
             playing: AtomicBool::new(false),
             loop_enabled: AtomicBool::new(false),
-            loop_start: AtomicI64::new(0),
-            loop_end: AtomicI64::new(0),
+            loop_span: AtomicU64::new(0),
             seek_req: AtomicI64::new(-1),
             mon_target: AtomicU32::new(0), // 0.0f32 bits
             mon_muted: AtomicBool::new(false),
@@ -331,11 +334,10 @@ impl Shared {
     pub fn loop_enabled(&self) -> bool {
         self.loop_enabled.load(Ordering::Acquire)
     }
-    pub fn loop_start(&self) -> i64 {
-        self.loop_start.load(Ordering::Relaxed)
-    }
-    pub fn loop_end(&self) -> i64 {
-        self.loop_end.load(Ordering::Relaxed)
+    /// The loop's (start, end) frames, read together (see [`Shared::loop_span`]).
+    pub fn loop_bounds(&self) -> (i64, i64) {
+        let span = self.loop_span.load(Ordering::Relaxed);
+        ((span >> 32) as i64, (span & 0xffff_ffff) as i64)
     }
 }
 
@@ -364,6 +366,11 @@ pub struct RtProcessor {
 /// A monitor gain this small (-120 dB) is silence: once the target is 0 and the ramp has fallen
 /// below it, the monitor goes idle (see `RtProcessor::mix_monitor`).
 const MON_IDLE: f32 = 1.0e-6;
+
+/// Mic frames the monitor lets wait beyond the block it drains: room for the input and
+/// output callbacks' jitter (an input burst of a few hundred frames) without holding a
+/// stall's backlog as latency. ~21 ms at the engine rate.
+const MON_BACKLOG_MAX: usize = 1024;
 
 impl RtProcessor {
     /// Render `frames` of interleaved stereo into `out`, including the live-input monitor.
@@ -421,16 +428,13 @@ impl RtProcessor {
 
         if self.shared.playing.load(Ordering::Acquire) {
             let loop_en = self.shared.loop_enabled.load(Ordering::Acquire);
-            let ls = self.shared.loop_start.load(Ordering::Relaxed);
-            let le = self.shared.loop_end.load(Ordering::Relaxed);
+            let (ls, le) = self.shared.loop_bounds();
             let block_start = self.shared.frame.load(Ordering::Relaxed);
             let mut frame = block_start;
             let mut rendered = self.shared.rendered_total.load(Ordering::Relaxed);
 
-            // set_loop publishes the two bounds as separate stores, so this pair
-            // can be torn (new start, old end). It never publishes a span shorter
-            // than MIN_LOOP_FRAMES, so a shorter one is a torn read: treat it as
-            // no active loop for this block rather than render it frame by frame.
+            // set_loop never publishes a span shorter than MIN_LOOP_FRAMES: treat one as no
+            // active loop rather than render it frame by frame.
             let loop_en = loop_en && le - ls >= MIN_LOOP_FRAMES;
             let mut done = 0;
             while done < frames {
@@ -535,6 +539,15 @@ impl RtProcessor {
         };
         self.mon_gain.set_target(target);
 
+        // Shed a backlog first: drained exactly `frames` a block, mic frames that piled up
+        // while the output was not rendering (its stream rebuilt with the input still open)
+        // stayed as monitor latency for good: 80 ms after a 100 ms stall, a minute later
+        // still. What is dropped only ever reached the singer's ears; the take records
+        // through its own ring.
+        let excess = self.mic_rx.len().saturating_sub(frames + MON_BACKLOG_MAX);
+        for _ in 0..excess {
+            let _ = self.mic_rx.pop();
+        }
         if target == 0.0 && self.mon_gain.current() <= MON_IDLE {
             // Off and silent: land the ramp on exact zero, keep the ring drained, add nothing.
             // Still advance the smoother: one never advanced is not yet "live", and its first
@@ -591,16 +604,21 @@ impl RtProcessor {
 
         // Mix the processed monitor into the output with the ramped gain (a landed ramp is one
         // value for the whole block: see `Smoothed::settled`).
+        // The sum goes through the master's safety clip again: added after the master, the
+        // monitor bypassed it, and a sung peak at the default record gain put the device
+        // buffer at +9 dBFS (far more at the top of the gain range), hard-clipped by the
+        // device in the singer's ears. Below -3 dBFS it passes bit-exact, as the master does.
         if let Some(g) = self.mon_gain.settled(frames) {
             for (o, &m) in out[..n].iter_mut().zip(&self.mon_out[..n]) {
-                *o += m * g;
+                *o = crate::dsp::master::soft_clip(*o + m * g);
             }
             return;
         }
         for i in 0..frames {
             let g = self.mon_gain.next();
-            out[CHANNELS * i] += self.mon_out[CHANNELS * i] * g;
-            out[CHANNELS * i + 1] += self.mon_out[CHANNELS * i + 1] * g;
+            let (l, r) = (CHANNELS * i, CHANNELS * i + 1);
+            out[l] = crate::dsp::master::soft_clip(out[l] + self.mon_out[l] * g);
+            out[r] = crate::dsp::master::soft_clip(out[r] + self.mon_out[r] * g);
         }
     }
 }
@@ -855,8 +873,11 @@ impl EngineHandle {
         if end > start && end - start < MIN_LOOP_FRAMES {
             end = start + MIN_LOOP_FRAMES;
         }
-        self.shared.loop_start.store(start, Ordering::Relaxed);
-        self.shared.loop_end.store(end, Ordering::Relaxed);
+        let start = start.min(u32::MAX as i64) as u64;
+        let end = end.min(u32::MAX as i64) as u64;
+        self.shared
+            .loop_span
+            .store((start << 32) | end, Ordering::Relaxed);
         self.shared.loop_enabled.store(enabled, Ordering::Release);
     }
 
@@ -1364,8 +1385,9 @@ mod monitor_tests {
         }
         for i in 0..frames {
             let g = rt.mon_gain.next();
-            out[CHANNELS * i] += rt.mon_out[CHANNELS * i] * g;
-            out[CHANNELS * i + 1] += rt.mon_out[CHANNELS * i + 1] * g;
+            let (l, r) = (CHANNELS * i, CHANNELS * i + 1);
+            out[l] = crate::dsp::master::soft_clip(out[l] + rt.mon_out[l] * g);
+            out[r] = crate::dsp::master::soft_clip(out[r] + rt.mon_out[r] * g);
         }
     }
 
@@ -1507,5 +1529,153 @@ mod segment_ring_tests {
         }
         stop.store(true, Ordering::Release);
         writer.join().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod monitor_and_loop_tests {
+    use super::*;
+    use crate::dsp::master::MasterNode;
+    use crate::graph::{Edge, GraphDesc, NodeEntry};
+    use crate::ring::spsc;
+    use crate::source::BufferSource;
+    use std::collections::HashMap;
+    use std::sync::atomic::AtomicBool;
+
+    const BLOCK: usize = 256;
+    const S: i64 = 48_000;
+
+    #[test]
+    fn the_monitored_mix_stays_within_full_scale() {
+        // The monitor was summed after the master's safety clip: a sung -6 dBFS peak at the
+        // default +12 dB record gain, over a full-scale backing, put the device buffer at
+        // +9 dBFS.
+        let pcm: Vec<Smp> = (0..48_000 * CHANNELS)
+            .map(|i| 0.95 * ((i / 2) as f32 * 0.05).sin())
+            .collect();
+        let desc = GraphDesc {
+            nodes: vec![
+                NodeEntry::new(1, Box::new(BufferSource::new(pcm, 0))),
+                NodeEntry::new(2, Box::new(MasterNode::limited())),
+            ],
+            edges: vec![Edge::simple(1, 2)],
+            master: 2,
+        };
+        let g = desc.compile(ENGINE_SR, BLOCK).unwrap();
+        let (mut mic, mic_cons) = spsc::<[Smp; CHANNELS]>(1 << 14);
+        let (h, mut rt) = spawn(g, HashMap::new(), mic_cons, 256);
+        h.play();
+        h.set_monitor_gain(1.0);
+        h.set_monitor_reverb(0.6, 0.5, 0.0);
+        let voice = 0.5f32 * 3.981;
+        let mut out = vec![0.0; BLOCK * CHANNELS];
+        let mut peak = 0.0f32;
+        for b in 0..200 {
+            for i in 0..BLOCK {
+                let v = voice * ((b * BLOCK + i) as f32 * 0.031).sin();
+                let _ = mic.push([v, v]);
+            }
+            rt.process(&mut out, BLOCK);
+            peak = out.iter().fold(peak, |m, &x| m.max(x.abs()));
+        }
+        assert!(peak <= 1.0, "the device buffer peaked at {peak}");
+        assert!(peak > 0.9, "the monitor is audible ({peak})");
+    }
+
+    #[test]
+    fn the_monitor_sheds_a_backlog_left_by_a_stall() {
+        // Drained exactly a block's worth each block, a backlog built while the output was
+        // not rendering stayed as hear-yourself latency for good.
+        fn latency(
+            rt: &mut RtProcessor,
+            mic: &mut crate::ring::Producer<[Smp; CHANNELS]>,
+        ) -> usize {
+            let mut out = vec![0.0; BLOCK * CHANNELS];
+            let mut sent = false;
+            for b in 0..400 {
+                for i in 0..BLOCK {
+                    let v = if !sent && i == 0 { 1.0 } else { 0.0 };
+                    let _ = mic.push([v, v]);
+                }
+                sent = true;
+                rt.process(&mut out, BLOCK);
+                if let Some(i) = (0..BLOCK).find(|&i| out[CHANNELS * i] > 0.5) {
+                    return b * BLOCK + i;
+                }
+            }
+            usize::MAX
+        }
+        let desc = GraphDesc {
+            nodes: vec![NodeEntry::new(1, Box::new(MasterNode::unity()))],
+            edges: vec![],
+            master: 1,
+        };
+        let g = desc.compile(ENGINE_SR, BLOCK).unwrap();
+        let (mut mic, mic_cons) = spsc::<[Smp; CHANNELS]>(1 << 12);
+        let (h, mut rt) = spawn(g, HashMap::new(), mic_cons, 256);
+        h.set_monitor_gain(1.0);
+        h.set_monitor_reverb(0.6, 0.5, 0.0);
+        let mut out = vec![0.0; BLOCK * CHANNELS];
+        for _ in 0..100 {
+            for _ in 0..BLOCK {
+                let _ = mic.push([0.0, 0.0]);
+            }
+            rt.process(&mut out, BLOCK);
+        }
+        let before = latency(&mut rt, &mut mic);
+        // ~100 ms with no output callback while the input keeps delivering.
+        for _ in 0..4800 {
+            let _ = mic.push([0.0, 0.0]);
+        }
+        for _ in 0..100 {
+            for _ in 0..BLOCK {
+                let _ = mic.push([0.0, 0.0]);
+            }
+            rt.process(&mut out, BLOCK);
+        }
+        let after = latency(&mut rt, &mut mic);
+        assert!(
+            after <= before + MON_BACKLOG_MAX,
+            "latency {before} frames before the stall, {after} after it"
+        );
+    }
+
+    #[test]
+    fn loop_bounds_are_read_as_the_pair_set_loop_published() {
+        // As two stores, a reader could see the old start with the new end: a valid-length
+        // span, playing outside the new loop.
+        let desc = GraphDesc {
+            nodes: vec![NodeEntry::new(1, Box::new(MasterNode::unity()))],
+            edges: vec![],
+            master: 1,
+        };
+        let g = desc.compile(ENGINE_SR, 512).unwrap();
+        let (_p, c) = spsc::<[Smp; CHANNELS]>(16);
+        let (h, _rt) = spawn(g, HashMap::new(), c, 256);
+        h.set_loop(true, 2 * S, 20 * S);
+        assert_eq!(h.shared_arc().loop_bounds(), (2 * S, 20 * S));
+        let shared = Arc::clone(h.shared_arc());
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop2 = Arc::clone(&stop);
+        let reader = std::thread::spawn(move || {
+            let mut torn = 0u64;
+            while !stop2.load(Ordering::Relaxed) {
+                let pair = shared.loop_bounds();
+                if pair != (2 * S, 20 * S) && pair != (10 * S, 12 * S) {
+                    torn += 1;
+                }
+            }
+            torn
+        });
+        let t0 = std::time::Instant::now();
+        while t0.elapsed() < std::time::Duration::from_millis(300) {
+            h.set_loop(true, 10 * S, 12 * S);
+            h.set_loop(true, 2 * S, 20 * S);
+        }
+        stop.store(true, Ordering::Relaxed);
+        assert_eq!(reader.join().unwrap(), 0, "a torn pair was read");
+        // Bounds past what 32 bits hold (~24.8 h) are held at the top, not wrapped.
+        h.set_loop(true, 0, i64::MAX);
+        assert_eq!(h.shared_arc().loop_bounds(), (0, u32::MAX as i64));
     }
 }

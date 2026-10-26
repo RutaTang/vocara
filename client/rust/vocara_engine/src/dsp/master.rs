@@ -45,7 +45,7 @@ const CLIP_KNEE: f32 = 0.707_945_8; // 10^(-3/20)
 /// ±1.0. The cubic `K * (u - u^3/3)` this replaced had no linear region at all — ~1% THD on
 /// a -6 dBFS mix and ~4% on a track mastered to -0.1 dBFS, on every playback.
 #[inline]
-fn soft_clip(x: f32) -> f32 {
+pub(crate) fn soft_clip(x: f32) -> f32 {
     let a = x.abs();
     // A NaN passes through unchanged, as it always has (it is not this stage's job to
     // invent a full-scale sample from it).
