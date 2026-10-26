@@ -85,12 +85,20 @@ void main() {
       expect(alignLines(const [], ['a']), [null]);
     });
 
-    test('a wholly rewritten long text aligns in good time', () {
-      final prev = [for (var k = 0; k < 5000; k++) 'old $k'];
-      final next = [for (var k = 0; k < 5000; k++) 'new $k'];
+    test('a 5000-line middle aligns exactly, in good time', () {
+      // Both ends edited and every seventh line rewritten: all middle, at the
+      // cell limit's edge, every untouched line still found.
+      final prev = [for (var k = 0; k < 5000; k++) 'line $k'];
+      final next = [
+        for (var k = 0; k < 5000; k++)
+          k == 0 || k == 4999 || k % 7 == 3 ? 'new $k' : 'line $k',
+      ];
       final watch = Stopwatch()..start();
-      expect(alignLines(prev, next).every((i) => i == null), isTrue);
+      final out = alignLines(prev, next);
       expect(watch.elapsed, lessThan(const Duration(seconds: 5)));
+      for (var k = 0; k < 5000; k++) {
+        expect(out[k], next[k].startsWith('new') ? isNull : k);
+      }
     });
   });
 

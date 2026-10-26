@@ -1134,6 +1134,20 @@ void main() {
         expect(service.bluetoothInOutConflictNow(), isFalse);
       });
 
+      test('open on a device it names: judged on that device', () async {
+        outs = [bt()];
+        ins = [_builtInMic, bt(input: true)];
+        storage.doc = {'inputDeviceUid': _builtInMic.uid};
+        await service.load();
+        final engine = _FakeEngine()
+          ..streamState = 1
+          ..boundInput = 'airpods';
+        service.attachEngine(engine);
+        expect(service.bluetoothInOutConflictNow(), isTrue);
+        engine.boundInput = _builtInMic.uid;
+        expect(service.bluetoothInOutConflictNow(), isFalse);
+      });
+
       test('fallen back off a Bluetooth pick: not warned', () async {
         outs = [bt()];
         ins = [_builtInMic, bt(input: true)];
