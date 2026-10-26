@@ -1333,31 +1333,58 @@ void main() {
     });
   });
 
-  group('a save failing beside another', () {
-    test(
-      'a failed save whose reload failed too is retried by the next save',
-      () async {
-        // With nothing to revert to, the failed change stays on screen, and the
-        // next save writes it with its own.
-        final vm = await pumpVm();
-        repo.failAt = {repo.saveNo + 1};
-        repo.failNextLoad = true;
-        await vm.renameTrack('single', 'kept');
-        expect(
-          vm.practice!.vocalTracks
-              .firstWhere((t) => t.id == 'single')
-              .displayName,
-          'kept',
-        );
-
-        await vm.renameTrack('multi', 'next');
-
-        String name(String id) =>
-            repo.stored.vocalTracks.firstWhere((t) => t.id == id).displayName;
-        expect(name('single'), 'kept');
-        expect(name('multi'), 'next');
-      },
+  group('a failed save that could not revert', () {
+    // With no store read to revert to, the failed change stays on screen, a
+    // remote reload holds off for it, and the next save writes it with its
+    // own.
+    RemoteApplied event() => RemoteApplied(
+      rows: const [],
+      practiceIds: const {'p1'},
+      techniqueIds: const {},
     );
+
+    test('is kept through a reload and retried by the next save', () async {
+      final remote = StreamController<RemoteApplied>.broadcast();
+      addTearDown(remote.close);
+      final vm = await pumpVm(remoteApplied: remote.stream);
+      repo.failAt = {repo.saveNo + 1};
+      repo.failNextLoad = true;
+      await vm.renameTrack('single', 'kept');
+      repo.stored = repo.stored.copyWith(title: 'Renamed elsewhere');
+      remote.add(event());
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      String name(SongPractice p, String id) =>
+          p.vocalTracks.firstWhere((t) => t.id == id).displayName;
+      expect(name(vm.practice!, 'single'), 'kept');
+
+      await vm.renameTrack('multi', 'next');
+
+      expect(name(repo.stored, 'single'), 'kept');
+      expect(name(repo.stored, 'multi'), 'next');
+    });
+
+    test('a lyric stamp is kept for the next tap', () async {
+      // Replaced by a later reload, the failed stamp went without the sync
+      // cursor moving back, and the next tap stamped the line after it.
+      final remote = StreamController<RemoteApplied>.broadcast();
+      addTearDown(remote.close);
+      final vm = await pumpVm(remoteApplied: remote.stream);
+      await vm.setLyricsText('a\nb\nc\nd');
+      Future<void> tapAt(int ms) async {
+        vm.playback.position.value = Duration(milliseconds: ms);
+        await vm.stampNextLyric();
+      }
+
+      await tapAt(1000);
+      repo.failAt = {repo.saveNo + 1};
+      repo.failNextLoad = true;
+      await tapAt(2000);
+      remote.add(event());
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      await tapAt(3000);
+
+      expect(repo.stored.lyrics.map((l) => l.timeMs), [1000, 2000, 3000, null]);
+    });
 
     test('... and an import it could not revert keeps its file', () async {
       // The import's rollback deleted the file the lane still on screen
@@ -1385,7 +1412,9 @@ void main() {
         expect(events, contains('delete:/import/0.wav'));
       },
     );
+  });
 
+  group('a save failing beside another', () {
     AudioTrack originalRef() => AudioTrack(
       id: 'ref',
       kind: AudioTrackKind.reference,
@@ -1442,7 +1471,6 @@ void main() {
       expect(repo.stored.separationSource, isNull);
       expect(name(repo.stored), 'renamed');
     });
-
     test('... and an edit to the Original lane itself', () async {
       final separation = _GatedSeparation();
       final vm = await pumpVm(separation: separation, reference: originalRef());
