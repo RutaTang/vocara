@@ -776,10 +776,12 @@ class RecordingController extends ChangeNotifier {
             (staged.clip == null || lane.clips.any((c) => c.id == staged.clip));
       }
 
-      // A save that lands has committed the take: a failing save queued behind
-      // it reverts to a store that holds it.
+      // A save that lands has committed the take, unless an edit's save queued
+      // ahead of it carried the take, failed and reverted it away first: this
+      // one then saved the model without it. (A failing save queued behind it
+      // reverts to a store that holds it.)
       var ok = await _save();
-      if (!ok) {
+      if (!ok || !kept()) {
         // A failed save reverts the model to the store's, which never held the
         // take: it vanished from the screen and no later save brought it back,
         // only the next launch's recovery of its file, as a new take at 0:00

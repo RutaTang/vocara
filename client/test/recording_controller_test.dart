@@ -348,7 +348,12 @@ void main() {
       selectedTrackId: selectedTrackId ?? () => 't1',
       trackById: (id) =>
           practice.vocalTracks.where((t) => t.id == id).firstOrNull,
-      updateTrack: (id, fn) {},
+      // Applied, as the host does: the finalize checks the model holds the take.
+      updateTrack: (id, fn) => practice = practice.copyWith(
+        vocalTracks: [
+          for (final t in practice.vocalTracks) t.id == id ? fn(t) : t,
+        ],
+      ),
       appendVocal: ({required path, required analysis, required startMs}) =>
           't1',
       createEmptyVocalTake: createEmptyVocalTake ?? () async => null,
@@ -563,7 +568,12 @@ void main() {
       selectedTrackId: () => 't1',
       trackById: (id) =>
           practice.vocalTracks.where((t) => t.id == id).firstOrNull,
-      updateTrack: (id, fn) {},
+      // Applied, as the host does: the finalize checks the model holds the take.
+      updateTrack: (id, fn) => practice = practice.copyWith(
+        vocalTracks: [
+          for (final t in practice.vocalTracks) t.id == id ? fn(t) : t,
+        ],
+      ),
       appendVocal: ({required path, required analysis, required startMs}) =>
           't1',
       createEmptyVocalTake: () async => null,

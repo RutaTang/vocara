@@ -606,6 +606,39 @@ void main() {
       );
     });
 
+    test(
+      'a take an edit\'s failing save reverted away is staged again',
+      () async {
+        // The take's own save landed, but an edit's save queued ahead of it had
+        // carried the take, failed and reverted it away: the take's save wrote
+        // the model without it, and only a failed take save was checked.
+        final vm = await pumpVm(engine: _FakeGraphEngine(), mic: _FakeMic());
+        vm.selectTrack('take1');
+        await vm.recording.startRecording();
+        vm.position.value = const Duration(milliseconds: 500);
+        repo.saveGate = Completer<void>();
+        repo.failSaves = 2; // both edits' saves fail; the take's lands
+        final first = vm.renameTrack('take1', 'A'); // in flight
+        for (var i = 0; i < 10; i++) {
+          await Future<void>.delayed(Duration.zero);
+        }
+        final second = vm.renameTrack('take1', 'B'); // queued, not started
+        final stop = vm.stopRecording();
+        for (var i = 0; i < 50; i++) {
+          await Future<void>.delayed(Duration.zero);
+        }
+        final gate = repo.saveGate!;
+        repo.saveGate = null;
+        gate.complete();
+        await Future.wait([first, second, stop]);
+
+        AudioTrack take(SongPractice p) =>
+            p.vocalTracks.singleWhere((t) => t.id == 'take1');
+        expect(take(vm.practice!).clips, hasLength(2));
+        expect(take(repo.stored).clips, hasLength(2));
+      },
+    );
+
     test('twice says it will be recovered at the next launch', () async {
       final vm = await pumpVm(engine: _FakeGraphEngine(), mic: _FakeMic());
       final toasts = <String>[];

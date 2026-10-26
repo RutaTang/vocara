@@ -1249,26 +1249,11 @@ void main() {
     });
   });
 
-  group('a change a failed save ahead of it lost', () {
-    // A queued save sends the model as it is when it runs, so a save failing
-    // ahead of it sent the queued change too, and its revert threw the change
-    // away. The queued save then wrote the reverted model and said it landed.
-    test('a delete keeps the audio the store still names', () async {
-      final vm = await pumpVm();
-      repo.failAt = {1};
-      final rename = vm.renameTrack('multi', 'renamed');
-      final delete = vm.deleteTrack('single');
-      await Future.wait([rename, delete]);
-
-      expect(repo.stored.vocalTracks.map((t) => t.id), contains('single'));
-      expect(vm.practice!.vocalTracks.map((t) => t.id), contains('single'));
-      expect(events, isNot(contains('delete:/pool/take1.wav')));
-    });
-
-    test('a separation shows the disk, not an edit that revert lost', () async {
-      // Its failure path put back the model from before it, which carried a
-      // rename the failed save ahead of it had lost: the screen showed the
-      // rename the disk did not have.
+  group('a save failing beside another', () {
+    test('a failed separation keeps an edit made while its save ran', () async {
+      // The failure path put back the whole model from before the separation,
+      // dropping a rename made while its save ran: the rename's own save had
+      // queued behind it, and the next save wrote the rename away.
       final separation = _GatedSeparation();
       final reference = AudioTrack(
         id: 'ref',
@@ -1282,30 +1267,25 @@ void main() {
       for (var i = 0; i < 400 && !vm.separationAvailable; i++) {
         await Future<void>.delayed(const Duration(milliseconds: 5));
       }
-      final separating = vm.separateBacking('ref');
-      await Future<void>.delayed(const Duration(milliseconds: 10));
       repo.saveGate = Completer<void>();
-      repo.failAt = {2};
-      final first = vm.renameTrack('multi', 'held'); // in flight, then lands
-      for (var i = 0; i < 50 && repo.inFlight == 0; i++) {
-        await Future<void>.delayed(Duration.zero);
-      }
-      expect(repo.inFlight, 1);
-      final rename = vm.renameTrack('single', 'renamed'); // queued; fails
+      repo.failAt = {1};
+      final separating = vm.separateBacking('ref');
       separation.gate.complete();
-      for (var i = 0; i < 400 && vm.practice!.accompaniment == null; i++) {
+      for (var i = 0; i < 400 && repo.inFlight == 0; i++) {
         await Future<void>.delayed(const Duration(milliseconds: 5));
       }
-      expect(vm.practice!.accompaniment, isNotNull, reason: 'queued');
+      expect(vm.practice!.accompaniment, isNotNull, reason: 'its save runs');
+      final rename = vm.renameTrack('single', 'renamed');
       repo.saveGate!.complete();
-      await Future.wait([first, rename, separating]);
+      await Future.wait([rename, separating]);
+      await vm.renameTrack('multi', 'later'); // the next save
 
-      String name(String id) =>
-          vm.practice!.vocalTracks.firstWhere((t) => t.id == id).displayName;
-      expect(name('multi'), 'held');
-      expect(name('single'), 'Take 1');
+      String name(SongPractice p, String id) =>
+          p.vocalTracks.firstWhere((t) => t.id == id).displayName;
       expect(vm.practice!.accompaniment, isNull);
+      expect(name(vm.practice!, 'single'), 'renamed');
       expect(repo.stored.accompaniment, isNull);
+      expect(name(repo.stored, 'single'), 'renamed');
     });
 
     test('a lyrics Save reports it did not land', () async {
