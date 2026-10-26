@@ -118,8 +118,9 @@ class LruBytesCache<V> {
 
   /// Holds parts of one result with [other], on the same budget: an insert
   /// under a key never evicts what a partner holds under that key. Only
-  /// partners: an EQ display spectrogram under a clip's path, or another
-  /// screen's entry for the same file, is evicted in its turn like any other.
+  /// partners: another screen's entry for the same file is evicted in its
+  /// turn like any other. Joins [other]'s group: partner every cache of a
+  /// group with the same one.
   void partnerWith(LruBytesCache<Object?> other) {
     assert(identical(other._budget, _budget), 'partners share a budget');
     _partners = other._partners;

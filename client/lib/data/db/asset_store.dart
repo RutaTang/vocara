@@ -217,14 +217,16 @@ class AssetStore {
       final other = r.localRelPath;
       if (other == null) continue;
       if (other == rel) return true;
-      final abs = p.join(root.path, other);
-      // A row whose file is not here holds no other name of this one.
-      if (!await File(abs).exists()) continue;
       try {
-        if (await FileSystemEntity.identical(abs, file)) return true;
+        if (await FileSystemEntity.identical(p.join(root.path, other), file)) {
+          return true;
+        }
+      } on PathNotFoundException {
+        // A file that is not here is no other name of this one.
       } catch (_) {
-        // Unknown is not "another file": a lingering copy is always safer
-        // than a row's only one in the trash.
+        // Unknown (a permission or I/O error; an existence check reads those
+        // as "not here" too) is not "another file": a lingering copy is
+        // always safer than a row's only one in the trash.
         return true;
       }
     }

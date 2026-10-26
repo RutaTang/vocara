@@ -16,9 +16,11 @@
 //!     input and renders the output in one IO cycle, so the drift estimator is
 //!     not run here (`MIC_ON_OUTPUT_CLOCK`; the correction stays exactly 1.0).
 //!     That premise is what this checks on real hardware, whatever the devices
-//!     (a USB mic with the built-in speakers included): over the run, the mic's
-//!     engine frames and the playhead advance together, to within a few IO
-//!     cycles. The difference is printed with the drift it would amount to.
+//!     (a USB mic with the built-in speakers included): sampled every second,
+//!     the mic's engine frames less the playhead must not trend — a straight
+//!     line through them, the drift two clocks would show, slopes by less than
+//!     10 ppm (reads are a cycle off at worst; over the run that resolves a few
+//!     ppm) — and must stay within a few IO cycles end to end.
 //!  3. NO CORRECTION — the published drift correction reads exactly 0.0 ppm,
 //!     with the mic open and after it closes.
 
@@ -70,14 +72,16 @@ fn main() {
     let t0 = Instant::now();
     let mut events: u32 = 0;
     let mut last_report = 0u64;
-    // (mic frames, playhead) once the mic has settled in, for the in-step check.
-    let mut settled: Option<(u64, i64)> = None;
+    // (playhead, mic frames - playhead) every second once the mic has settled
+    // in, for the in-step check.
+    let mut apart_at: Vec<(f64, f64)> = Vec::new();
     while t0.elapsed() < Duration::from_secs(PLAY_SECS) {
         std::thread::sleep(Duration::from_secs(1));
         events |= ve_poll_device_event(e, u32::MAX);
         let s = t0.elapsed().as_secs();
-        if s >= 10 && settled.is_none() {
-            settled = Some((ve_input_frames_received(e), ve_frame_pos(e)));
+        if s >= 10 {
+            let (mic, pos) = (ve_input_frames_received(e), ve_frame_pos(e));
+            apart_at.push((pos as f64, mic as f64 - pos as f64));
         }
         if s / 10 > last_report {
             last_report = s / 10;
@@ -96,9 +100,9 @@ fn main() {
     let pos = ve_frame_pos(e);
     let mic = ve_input_frames_received(e);
     let ppm_playing = ve_drift_ppm(e);
-    let (mic0, pos0) = settled.expect("the run outlasts the settling time");
-    let played = pos - pos0;
-    let apart = (mic - mic0) as i64 - played;
+    let (first, last) = (apart_at[0], apart_at[apart_at.len() - 1]);
+    let apart = last.1 - first.1;
+    let trend_ppm = slope(&apart_at) * 1e6;
 
     assert_eq!(ve_pause(e), 0);
     assert_eq!(ve_stop_monitor(e), 0);
@@ -115,8 +119,8 @@ fn main() {
     let expect_pos = PLAY_SECS as i64 * ENGINE_SR as i64;
     let pos_ok = (pos - expect_pos).abs() < ENGINE_SR as i64 * 2;
     let mic_ok = mic > (PLAY_SECS - 5) * ENGINE_SR as u64;
-    // A few 256-frame IO cycles: each counter is read up to a cycle off its device.
-    let in_step_ok = apart.abs() <= 2048;
+    // A few 256-frame IO cycles end to end: each read is up to a cycle off.
+    let in_step_ok = apart.abs() <= 2048.0 && trend_ppm.abs() < 10.0;
     let none_ok = ppm_playing == 0.0 && ppm_paused == 0.0;
     println!(
         "playback advance : pos={pos} (expected ≈{expect_pos})  {}",
@@ -125,8 +129,8 @@ fn main() {
     println!("stream underruns : {xruns}  {}", ok(xruns == 0));
     println!("mic delivery     : {mic} engine frames  {}", ok(mic_ok));
     println!(
-        "mic vs playhead  : {apart:+} frames apart over {played} ({:+.1} ppm)  {}",
-        apart as f64 / played.max(1) as f64 * 1e6,
+        "mic vs playhead  : {apart:+.0} frames apart over {:.0}, trending {trend_ppm:+.2} ppm  {}",
+        last.0 - first.0,
         ok(in_step_ok)
     );
     println!(
@@ -137,6 +141,22 @@ fn main() {
     let pass = pos_ok && xruns == 0 && mic_ok && in_step_ok && none_ok;
     println!("overall          : {}", if pass { "PASS" } else { "FAIL" });
     std::process::exit(if pass { 0 } else { 1 });
+}
+
+/// The least-squares slope of `y` on `x`.
+fn slope(points: &[(f64, f64)]) -> f64 {
+    let n = points.len() as f64;
+    let (mx, my) = points
+        .iter()
+        .fold((0.0, 0.0), |(sx, sy), &(x, y)| (sx + x / n, sy + y / n));
+    let (sxy, sxx) = points.iter().fold((0.0, 0.0), |(sxy, sxx), &(x, y)| {
+        (sxy + (x - mx) * (y - my), sxx + (x - mx) * (x - mx))
+    });
+    if sxx > 0.0 {
+        sxy / sxx
+    } else {
+        0.0
+    }
 }
 
 fn ok(b: bool) -> &'static str {
