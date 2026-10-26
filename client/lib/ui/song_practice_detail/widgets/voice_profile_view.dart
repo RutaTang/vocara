@@ -21,7 +21,7 @@ Widget _profileGuard(
   if (track == null || track.isBacking) {
     return const StudioHint('Select a recorded take to analyze.');
   }
-  if (vm.spectrogramLoading) {
+  if (vm.metricsLoading) {
     return const StudioHint('Analyzing…', spinner: true);
   }
   final p = vm.selectedProfile;

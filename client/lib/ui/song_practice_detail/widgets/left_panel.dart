@@ -69,8 +69,7 @@ class _LeftPanelState extends State<LeftPanel> {
         !track.isBacking &&
         vm.selectedMetrics == null &&
         !vm.analysis.selectedMetricsUnavailable &&
-        !vm.spectrogramLoading &&
-        !vm.analysis.metricsLoadingFor(track.id)) {
+        !vm.metricsLoading) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) vm.analysis.ensureSelectedSpectrogram();
       });
@@ -1104,10 +1103,9 @@ class _VoiceSummary extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final track = vm.selectedTrack;
-    final loadingMetrics =
-        track != null && vm.analysis.metricsLoadingFor(track.id);
-    if (vm.spectrogramLoading || loadingMetrics) {
+    // The subject's halves, not the lane's: with a clip of a multi-clip lane
+    // selected, the lane's own loading flag is its aggregate's.
+    if (vm.spectrogramLoading || vm.metricsLoading) {
       return const _Empty('Analyzing…', inset: false, spinner: true);
     }
     final m = vm.selectedMetrics;

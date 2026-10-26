@@ -43,8 +43,14 @@ abstract class AnalysisSource implements Listenable {
   Ltas? get selectedLtas;
   RegisterMap? get selectedRegister;
 
-  /// True while the subject's analysis is still computing.
+  /// True while the subject's spectrogram is still computing.
   bool get spectrogramLoading;
+
+  /// True while the subject's voice metrics are still computing. The halves
+  /// are separate: one can be held while the other computes (the byte budget
+  /// drops one, or an analysis lane asked for its own), and a view that
+  /// waited on the other showed a spinner over what it already had.
+  bool get metricsLoading;
 
   /// True when the views should show the live mic instead of the subject.
   bool get liveMonitor;

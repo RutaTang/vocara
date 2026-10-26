@@ -35,8 +35,9 @@ class _Source extends ChangeNotifier implements AnalysisSource {
     this.ltas,
     this.register,
     this.loading = false,
+    bool? metricsLoading,
     this.durationMs = 1000,
-  });
+  }) : _metricsLoading = metricsLoading;
 
   final AudioTrack? track;
   final VoiceMetrics? metrics;
@@ -45,6 +46,7 @@ class _Source extends ChangeNotifier implements AnalysisSource {
   final Ltas? ltas;
   final RegisterMap? register;
   final bool loading;
+  final bool? _metricsLoading;
   final int durationMs;
 
   @override
@@ -73,6 +75,9 @@ class _Source extends ChangeNotifier implements AnalysisSource {
 
   @override
   bool get spectrogramLoading => loading;
+
+  @override
+  bool get metricsLoading => _metricsLoading ?? loading;
 
   /// Set with [live], which also supplies the monitor.
   MonitorService? _monitor;
@@ -258,6 +263,69 @@ void main() {
     tester,
   ) async {
     await pumpTabs(tester, _Source(track: _track(1000), loading: true));
+  });
+
+  testWidgets('each tab waits only on the half of the analysis it reads', (
+    tester,
+  ) async {
+    // The halves compute apart (the byte budget drops one, a folded-out lane
+    // asks for its own): one flag for both hid a held spectrogram behind a
+    // spinner, and split the wrong way the metric tabs said a take still
+    // computing could not be analyzed.
+    final whole = _analyzed(_sine(48000, 220, 48000));
+    final views = <String, Widget Function(_Source)>{
+      'Spectrogram': (s) => SpectrogramTab(vm: s),
+      'Power': (s) => PowerTab(vm: s),
+      'Vowel': (s) => VowelTab(vm: s),
+      'Pitch': (s) => PitchTab(vm: s),
+      'Timbre': (s) => TimbreTab(vm: s),
+      'LTAS': (s) => LtasTab(vm: s),
+      'Vibrato': (s) => VibratoTab(vm: s),
+      'Register': (s) => RegisterTab(vm: s),
+      'Range': (s) => RangeView(vm: s),
+      'Dynamics': (s) => DynamicsView(vm: s),
+    };
+    const readsSpectrogramOnly = {'Spectrogram', 'Power'};
+    Future<bool> spins(Widget view) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(body: SizedBox(height: 260, child: view)),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 32));
+      expect(tester.takeException(), isNull);
+      return find.text('Analyzing…').evaluate().isNotEmpty;
+    }
+
+    final metricsComputing = _Source(
+      track: whole.track,
+      spectrogram: whole.spectrogram,
+      metricsLoading: true,
+      durationMs: whole.durationMs,
+    );
+    final spectrogramComputing = _Source(
+      track: whole.track,
+      metrics: whole.metrics,
+      profile: whole.profile,
+      register: whole.register,
+      loading: true,
+      metricsLoading: false,
+      durationMs: whole.durationMs,
+    );
+    for (final MapEntry(key: name, value: view) in views.entries) {
+      final spectral = readsSpectrogramOnly.contains(name);
+      expect(
+        await spins(view(metricsComputing)),
+        !spectral,
+        reason: '$name, spectrogram held, metrics computing',
+      );
+      if (name == 'LTAS') continue; // reads both halves
+      expect(
+        await spins(view(spectrogramComputing)),
+        spectral,
+        reason: '$name, metrics held, spectrogram computing',
+      );
+    }
   });
 
   testWidgets('outside the take the readouts are empty, not its edge frame', (

@@ -1342,6 +1342,10 @@ class TechniqueDetailViewModel extends ChangeNotifier
       ? _practiceLoading
       : _loadingPaths.contains(referenceMedia?.path);
 
+  /// The halves come from one compute here.
+  @override
+  bool get metricsLoading => spectrogramLoading;
+
   /// Set in [dispose]; guards async callbacks (reference analysis, recording
   /// finalize, draft cleanup) that resume after the view model is gone from
   /// notifying a disposed notifier.

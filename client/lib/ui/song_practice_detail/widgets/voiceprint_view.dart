@@ -56,7 +56,7 @@ Widget _withMetrics(
   if (track == null || track.isBacking) {
     return const StudioHint('Select a recorded take to analyze.');
   }
-  if (vm.spectrogramLoading) {
+  if (vm.metricsLoading) {
     return const StudioHint('Analyzing…', spinner: true);
   }
   final m = vm.selectedMetrics;
@@ -737,6 +737,11 @@ class LtasTab extends StatelessWidget {
       );
     }
     return _withSpectrogram(vm, (spec, metrics, track) {
+      // Read before the metrics land, the LTAS is built without its voiced
+      // gate, then rebuilt with it: a spectrum that changes under the singer.
+      if (vm.metricsLoading) {
+        return const StudioHint('Analyzing…', spinner: true);
+      }
       final ltas = vm.selectedLtas;
       if (ltas == null || !ltas.hasData) {
         return const StudioHint('Sing a passage to see your average spectrum.');

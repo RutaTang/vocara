@@ -551,26 +551,56 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
         : _metricsCache[s.key];
   }
 
-  /// True when the subject's metrics compute already ran and produced nothing
-  /// (e.g. a non-WAV import). The inspector uses this to stop retrying.
   /// Whether the dock would show the subject without part of an analysis it
   /// can still get: a half the byte budget dropped (the halves are separate
   /// entries, and a spectrogram view reads the spectrogram before the metrics,
   /// so under pressure it goes first). Nothing asked for it again, and the
-  /// spectrogram views said the take could not be analyzed.
+  /// spectrogram views said the take could not be analyzed. See
+  /// [healSelectedAnalysis], which the dock asks.
   ///
   /// A clip's own analysis only: a lane aggregate whose parts did not all fit
   /// is left uncached on purpose (see [_ensureAggregateAnalysis]), and asking
   /// again on every build would merge it again and again.
   bool get selectedAnalysisIncomplete {
     final s = _analysisSubject;
-    if (s == null || s.aggregate || spectrogramLoading) return false;
-    return (!_spectrogramCache.containsKey(s.key) &&
-            !_spectrogramUnavailable.contains(s.key)) ||
-        (!_metricsCache.containsKey(s.key) &&
-            !_metricsUnavailable.contains(s.key));
+    if (s == null || s.aggregate || s.key == _healFailed) return false;
+    if (_spectrogramLoading.contains(s.key) ||
+        _metricsLoading.contains(s.key)) {
+      return false;
+    }
+    return !_analysisSettled(s.key);
   }
 
+  /// Whether each half of [path]'s analysis is held, or known not to exist.
+  bool _analysisSettled(String path) =>
+      (_spectrogramCache.containsKey(path) ||
+          _spectrogramUnavailable.contains(path)) &&
+      (_metricsCache.containsKey(path) || _metricsUnavailable.contains(path));
+
+  /// The clip the last [healSelectedAnalysis] left incomplete, which is not
+  /// healed again until a compute leaves it whole or its file changes. When
+  /// the pair does not fit the byte budget together, computing the missing
+  /// half drops the other to make room: the dock asked again after every
+  /// compute, and decoded the whole take over and over for as long as it
+  /// stayed open.
+  String? _healFailed;
+
+  /// Asks again for what [selectedAnalysisIncomplete] says is missing — once
+  /// per subject until a compute leaves it whole (see [_healFailed]).
+  Future<void> healSelectedAnalysis() async {
+    if (!selectedAnalysisIncomplete) return;
+    final path = _analysisSubject!.key;
+    _healFailed = path;
+    await _ensureClipAnalysis(path);
+    _forgiveHealIfSettled(path);
+  }
+
+  void _forgiveHealIfSettled(String path) {
+    if (path == _healFailed && _analysisSettled(path)) _healFailed = null;
+  }
+
+  /// True when the subject's metrics compute already ran and produced nothing
+  /// (e.g. a non-WAV import). The inspector uses this to stop retrying.
   bool get selectedMetricsUnavailable {
     final s = _analysisSubject;
     if (s == null) return false;
@@ -624,17 +654,22 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     return cache[s.key] ??= analyzeRegister(m);
   }
 
-  /// Either half, as the contract says: the metric tabs (pitch, vowel, timbre,
-  /// vibrato, register) read this too, and while only the metrics computed
-  /// they told the singer the take could not be analyzed.
   @override
   bool get spectrogramLoading {
     final s = _analysisSubject;
     if (s == null) return false;
     return s.aggregate
         ? _aggLoading.contains(s.key)
-        : _spectrogramLoading.contains(s.key) ||
-              _metricsLoading.contains(s.key);
+        : _spectrogramLoading.contains(s.key);
+  }
+
+  @override
+  bool get metricsLoading {
+    final s = _analysisSubject;
+    if (s == null) return false;
+    return s.aggregate
+        ? _aggLoading.contains(s.key)
+        : _metricsLoading.contains(s.key);
   }
 
   // --- Per-lane analysis ----------------------------------------------------
@@ -747,14 +782,33 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     final track = _trackById(trackId);
     if (track == null) return;
     if (track.clips.length > 1) return _ensureAggregateAnalysis(track);
-    // The pair, as the dock asks for it: one decode, with the LTAS and voice
-    // profile derived in the analysis isolate. Asked for one half at a time
-    // (the Pitch lane folded out first, the dock opened after), the two came
-    // from two decodes, and the dock's summary built the LTAS and profile on
-    // this isolate — ~0.4 s for a 10-minute take. A half already held or
-    // computing is joined, not redone (see [_ensureClipAnalysis]).
     final clip = track.primaryClip;
-    if (clip != null) await _ensureClipAnalysis(clip.audioFilePath);
+    if (clip != null) await _ensureLaneHalf(clip.audioFilePath, metrics: true);
+  }
+
+  /// One half of a single-clip lane's analysis: the one its sub-lanes show.
+  ///
+  /// With neither half held or computing, both come from the one decode the
+  /// dock would ask for, with the LTAS and voice profile derived in the
+  /// analysis isolate — asked for one at a time (the Pitch lane folded out
+  /// first, the dock opened after), the two took two decodes and the dock's
+  /// summary built the LTAS and profile on this isolate, ~0.4 s for a
+  /// 10-minute take. Otherwise only the lane's own half: the other one may be
+  /// a half the byte budget dropped, which a lane that never shows it asked
+  /// for again after every clip edit.
+  Future<void> _ensureLaneHalf(String path, {required bool metrics}) {
+    final spectrogramAbsent =
+        !_spectrogramCache.containsKey(path) &&
+        !_spectrogramLoading.contains(path) &&
+        !_spectrogramUnavailable.contains(path);
+    final metricsAbsent =
+        !_metricsCache.containsKey(path) &&
+        !_metricsLoading.contains(path) &&
+        !_metricsUnavailable.contains(path);
+    if (spectrogramAbsent && metricsAbsent) return _ensureClipAnalysis(path);
+    return metrics
+        ? _ensureMetricsForPath(path)
+        : _ensureSpectrogramForPath(path);
   }
 
   /// Computes + caches voice metrics for one audio file (lazy, in an isolate;
@@ -822,9 +876,10 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     final track = _trackById(trackId);
     if (track == null) return;
     if (track.clips.length > 1) return _ensureAggregateAnalysis(track);
-    // The pair, as [ensureMetricsFor] asks for it.
     final clip = track.primaryClip;
-    if (clip != null) await _ensureClipAnalysis(clip.audioFilePath);
+    if (clip != null) {
+      await _ensureLaneHalf(clip.audioFilePath, metrics: false);
+    }
   }
 
   /// Computes + caches the spectrogram for one audio file (lazy). Keyed by
@@ -1199,6 +1254,8 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     // BEFORE this eviction, so its result (or its "unavailable" latch) must
     // not land on top of the replacement. See [_pathGeneration].
     _bumpGeneration(path);
+    // New bytes: whether the pair fits is a question to ask again.
+    if (_healFailed == path) _healFailed = null;
     if (recompute) {
       _recomputeOnStale.add(path);
     } else {
@@ -1264,11 +1321,14 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
       final clip = track.clipById(clipId);
       if (clip != null) {
         await _ensureClipAnalysis(clip.audioFilePath);
+        _forgiveHealIfSettled(clip.audioFilePath);
         return;
       }
     }
     if (track.clips.length == 1) {
-      await _ensureClipAnalysis(track.clips.first.audioFilePath);
+      final path = track.clips.first.audioFilePath;
+      await _ensureClipAnalysis(path);
+      _forgiveHealIfSettled(path);
       return;
     }
     await _ensureAggregateAnalysis(track);

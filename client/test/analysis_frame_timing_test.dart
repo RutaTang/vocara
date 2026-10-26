@@ -146,6 +146,9 @@ class _Source extends ChangeNotifier implements AnalysisSource {
   bool get spectrogramLoading => false;
 
   @override
+  bool get metricsLoading => false;
+
+  @override
   bool get liveMonitor => false;
 
   @override

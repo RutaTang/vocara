@@ -2908,6 +2908,8 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   @override
   bool get spectrogramLoading => analysis.spectrogramLoading;
   @override
+  bool get metricsLoading => analysis.metricsLoading;
+  @override
   bool get liveMonitor => analysis.liveMonitor;
 
   // Cross-cutting recording guard: read by the transport bar, the screen's

@@ -196,6 +196,9 @@ class _FakeVm extends Fake implements SongPracticeDetailViewModel {
   bool get spectrogramLoading => false;
 
   @override
+  bool get metricsLoading => false;
+
+  @override
   VoiceMetrics? get selectedMetrics => null;
 
   @override
