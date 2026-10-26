@@ -188,9 +188,11 @@ void main() {
         "path = '/Users/a/Guns N' Roses/Sweet Child O' Mine.mp3' (OS Error)",
         "path = '/Users/a/Rock 'n' Roll/Take 2.wav'",
         "copy '/Users/a/x.wav' to '/Users/a/O' Mine.wav', failed",
+        // Any ` (` after an apostrophe used to read as the closing quote.
+        "path = '/Users/a/The Players' (Club Mix) - Mine.wav' (OS Error: x)",
       ]) {
         final out = DiagnosticsLog.scrubPaths(message);
-        for (final leak in ['Roses', 'Mine', 'Roll', 'Take 2']) {
+        for (final leak in ['Roses', 'Mine', 'Roll', 'Take 2', 'Club Mix']) {
           expect(out, isNot(contains(leak)), reason: out);
         }
       }
@@ -259,6 +261,21 @@ void main() {
         expect(content, contains('<path>.wav'));
       },
     );
+  });
+
+  // Lines an older build wrote stay on disk until rotation, with whatever its
+  // scrubber missed, and the export copied them as they were.
+  test('exportArchive scrubs what is already on disk', () async {
+    await currentFile().writeAsString(
+      "2026-10-01T00:00:00Z [old] cannot open '/Users/jane/Music/Secret.wav'\n",
+    );
+    final log = DiagnosticsLog.forTesting(directory: dir);
+    final path = await log.exportArchive();
+    final bundle = await File(path).readAsString();
+    await DiagnosticsLog.discardArchive(path);
+    expect(bundle, isNot(contains('jane')));
+    expect(bundle, isNot(contains('Secret')));
+    expect(bundle, contains("cannot open '<path>.wav'"));
   });
 
   test('exportArchive bundles both log files with version metadata', () async {

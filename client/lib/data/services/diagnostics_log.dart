@@ -151,9 +151,11 @@ class DiagnosticsLog {
       for (final name in const ['$_fileName.1', _fileName]) {
         final f = File(p.join(dir.path, name));
         if (!await f.exists()) continue;
+        // Scrubbed again on the way out: lines an older build wrote stay on
+        // disk until rotation, written with whatever its scrubber missed.
         buffer
           ..writeln('===== $name =====')
-          ..writeln(await f.readAsString());
+          ..writeln(scrubPaths(await f.readAsString()));
       }
     }
     if (_pending.isNotEmpty) {
@@ -272,10 +274,11 @@ class DiagnosticsLog {
       '/(?:Users|private|var|tmp|Volumes|Library|Applications|home|etc|opt)';
   // An apostrophe ends the path only where it reads as the closing quote of
   // Dart's `path = '…'` (line end, punctuation, or ` (OS Error`); inside a
-  // name ("Don't Stop.m4a", "Guns N' Roses/…") it is part of the path, and
-  // stopping there leaked the rest of the name unscrubbed.
+  // name ("Don't Stop.m4a", "Guns N' Roses/…", "The Players' (Club Mix)") it
+  // is part of the path, and stopping there leaked the rest of the name
+  // unscrubbed. Any ` (` used to count, the last case included.
   static final RegExp _absolutePath = RegExp(
-    '$_roots(?:/(?:[^\'"\\n]|\'(?!\\s*\$|\\s+\\(|\\n|[,;:)\\]}.]))+)+',
+    '$_roots(?:/(?:[^\'"\\n]|\'(?!\\s*\$|\\s+\\(OS Error|\\n|[,;:)\\]}.]))+)+',
   );
   static final RegExp _nextRoot = RegExp('\\s\'?(?=$_roots/)');
   static final Set<String> _knownExtensions = {
