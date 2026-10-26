@@ -936,6 +936,57 @@ class MixerController extends ChangeNotifier {
     return best[targetBusId] ?? 0.0;
   }
 
+  /// The strongest gain with which a take routed to [startBusId] and carrying
+  /// [sends] reaches the master through buses [solo] lets pass — 0 when every
+  /// path is muted. A take routed into a muted bus still drew in the master
+  /// lane, though nothing of it was heard. Bus levels are not modelled, as in
+  /// the bus lanes; a bus id that names no bus counts as the master, as it
+  /// did before.
+  double _routeGainToMaster(
+    String? startBusId,
+    List<TrackSend> sends,
+    SoloResolution solo,
+  ) {
+    final busById = {for (final b in fxBuses) b.id: b};
+    var master = startBusId == null || !busById.containsKey(startBusId)
+        ? 1.0
+        : 0.0;
+    final best = <String, double>{};
+    final queue = <String>[];
+
+    void relax(String? id, double gain) {
+      if (gain <= 0) return;
+      if (id == null) {
+        if (gain > master) master = gain;
+        return;
+      }
+      final b = busById[id];
+      if (b == null || !_audibleBus(b, solo)) return;
+      final prev = best[id];
+      if (prev != null && prev >= gain) return;
+      best[id] = gain;
+      queue.add(id);
+    }
+
+    double sendGain(TrackSend s) =>
+        s.levelDb <= kSendOffDb ? 0.0 : math.pow(10, s.levelDb / 20).toDouble();
+
+    if (startBusId != null) relax(startBusId, 1.0);
+    for (final s in sends) {
+      relax(s.busId, sendGain(s));
+    }
+    while (queue.isNotEmpty) {
+      final id = queue.removeLast();
+      final g = best[id]!;
+      final b = busById[id]!;
+      relax(b.outputBusId, g);
+      for (final s in b.sends) {
+        relax(s.busId, g * sendGain(s));
+      }
+    }
+    return master;
+  }
+
   /// The lane envelopes last folded, by bus id (null: the master), with what
   /// they were folded from. The master and bus lanes rebuild on every
   /// notification of the view model — a fader, knob or clip-drag tick, a pan,
@@ -1056,10 +1107,15 @@ class MixerController extends ChangeNotifier {
 
     for (final t in _allTracksOf()) {
       if (!t.hasClip || !_audibleTrack(t, solo)) continue;
+      // Backing lanes go straight to the master (see resyncPlayback).
+      final gain = t.isBacking
+          ? 1.0
+          : _routeGainToMaster(t.busId, t.sends, solo);
+      if (gain <= 0) continue;
       // Fold every clip of the take (not just the primary), so trailing punched-in
       // clips of a multi-clip take show in the master envelope — matching busWaveformPeaks.
       for (final c in t.clips) {
-        fold(c.waveformPeaks, c.startMs, c.durationMs, t.volume);
+        fold(c.waveformPeaks, c.startMs, c.durationMs, t.volume * gain);
       }
     }
     // The take being laid down isn't a track yet — fold its live envelope in.

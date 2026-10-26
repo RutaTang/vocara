@@ -634,6 +634,32 @@ void main() {
       expect(host.mixer.masterWaveformPeaks[500], 0.0);
     });
 
+    test(
+      'masterWaveformPeaks leaves out a take whose every route is muted',
+      () async {
+        final host = _Host(
+          _practice(
+            vocals: [
+              _vocal('v1', peaks: [0.8], busId: 'busA'),
+            ],
+            buses: [_bus('busA'), _bus('verb')],
+          ),
+        );
+        expect(host.mixer.masterWaveformPeaks[500], closeTo(0.8, 1e-9));
+
+        await host.mixer.toggleBusMute('busA');
+        expect(host.mixer.masterWaveformPeaks[500], 0.0);
+
+        // A send to an unmuted bus still carries it, at the send's level.
+        await host.mixer.addTrackSend('v1', 'verb');
+        host.mixer.setTrackSendLevelLive('v1', 0, -6);
+        expect(
+          host.mixer.masterWaveformPeaks[500],
+          closeTo(0.8 * math.pow(10, -6 / 20), 1e-9),
+        );
+      },
+    );
+
     // The master and bus lanes rebuild on every notification of the view
     // model, and each rebuild folded every clip's peaks again (~0.5 ms over 12
     // three-clip lanes in a debug build). Each envelope is now folded once per
