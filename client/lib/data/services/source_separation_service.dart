@@ -189,6 +189,9 @@ class ProcessSourceSeparationService implements SourceSeparationService {
 
   final LocalStorageService _storage;
 
+  /// A tqdm progress line ("  3%|▎    | 1/38 [00:02<...]").
+  static final _progressBar = RegExp(r'^\d{1,3}%\|');
+
   /// The interpreter that runs the sidecar. In a shipped build this is swapped
   /// for a bundled, self-contained binary (users never install anything).
   final String pythonExecutable;
@@ -543,13 +546,25 @@ class ProcessSourceSeparationService implements SourceSeparationService {
       if (code != 0 || !instOk || !vocOk) {
         await _deleteQuietly(instTmp);
         await _deleteQuietly(vocTmp);
+        // Killed by a signal (negative on POSIX): the system ending a model
+        // run out of memory leaves no traceback, only the progress bar.
+        if (code < 0) {
+          throw FormatException(
+            'Separation stopped: the system ended the separation engine '
+            '(signal ${-code}), possibly for lack of memory.',
+          );
+        }
         // Surface the LAST non-empty stderr line as the cause: the sidecar (and a
         // Python traceback) print the real reason last, after audio-separator's own
         // logs — the first line would just echo a library log, not the failure.
+        // Progress bars redraw with \r and are no cause.
         final cause = detail
-            .split('\n')
+            .split(RegExp(r'[\r\n]'))
             .map((l) => l.trim())
-            .lastWhere((l) => l.isNotEmpty, orElse: () => '');
+            .lastWhere(
+              (l) => l.isNotEmpty && !_progressBar.hasMatch(l),
+              orElse: () => '',
+            );
         throw FormatException(
           cause.isNotEmpty
               ? 'Separation failed: $cause'

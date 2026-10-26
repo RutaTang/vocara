@@ -258,6 +258,38 @@ exit 0''';
       },
     );
 
+    // A model run the system kills (out of memory) leaves no traceback, only
+    // tqdm's \r-redrawn bar: its whole run was the "last line" shown as the
+    // cause, and the exit signal that explains it was dropped.
+    test(
+      'a sidecar killed by a signal says so, not its progress bar',
+      () async {
+        final stub = await writeStub(
+          r"printf '  0%%|          | 0/38\r  3%%|3         | 1/38\r' >&2"
+          '\nkill -9 \$\$',
+        );
+        final svc = buildService(stub);
+        final err = await outcome(svc.separate(await writeSource()));
+        expect(err, isA<FormatException>());
+        final message = (err as FormatException).message;
+        expect(message, contains('signal 9'));
+        expect(message, isNot(contains('%|')));
+      },
+    );
+
+    test('a failure names its last line that is not a progress bar', () async {
+      final stub = await writeStub(
+        r"printf 'loading\nValueError: bad model\n 50%%|#    | 19/38\r' >&2"
+        '\nexit 1',
+      );
+      final svc = buildService(stub);
+      final err = await outcome(svc.separate(await writeSource()));
+      expect(
+        (err as FormatException).message,
+        'Separation failed: ValueError: bad model',
+      );
+    });
+
     test('cancel() right after entry aborts before/at sidecar start', () async {
       final stub = await writeStub(sleepBody);
       final svc = buildService(stub);
