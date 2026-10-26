@@ -66,6 +66,17 @@ class BottomDock extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final open = vm.analysis.dockOpen;
+    // The inspector asks again for metrics the cache let go; the dock does for
+    // the rest of what its take tabs show (see
+    // AnalysisCache.selectedAnalysisIncomplete).
+    if (open &&
+        vm.analysis.dockShowsTake &&
+        !vm.liveMonitor &&
+        vm.analysis.selectedAnalysisIncomplete) {
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => vm.analysis.ensureSelectedSpectrogram(),
+      );
+    }
 
     // Its own layer, like the side panels: the workspace re-lays-out under
     // its LayoutBuilder on every notification of the view model, and that

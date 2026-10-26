@@ -249,7 +249,9 @@ void main() {
       );
       addTearDown(cache.dispose);
 
-      await cache.ensureSpectrogramFor(track.id); // spectrogram only
+      // The spectrogram held alone: the byte budget let the metrics half go.
+      await cache.ensureSpectrogramFor(track.id);
+      cache.debugDropHalf('c1.wav', metrics: true);
       final analyzing = cache.ensureSelectedSpectrogram(); // metrics pending
       await Future<void>.delayed(Duration.zero);
       expect(cache.selectedLtas!.frameCount, 20, reason: 'ungated meanwhile');
@@ -1016,6 +1018,99 @@ void main() {
       );
       cache.dispose();
     });
+  });
+
+  group('a clip\'s analysis halves', () {
+    test('a folded-out lane computes the pair the dock reads, in one decode '
+        'with its LTAS and profile', () async {
+      // The Pitch lane (metrics) folded out first and the dock opened after:
+      // two decodes, and the dock's summary built the LTAS and profile on the
+      // UI isolate (~0.4 s for a 10-minute take).
+      final track = _lane([_clip('c1', 0)]);
+      final metrics = _metrics(10);
+      final spec = _spec(10);
+      final stub = _StubSpectrograms(
+        metricsByPath: {'c1.wav': metrics},
+        specsByPath: {'c1.wav': spec},
+      );
+      final ltas = computeLtas(spec, metrics);
+      final profile = analyzeVoiceProfile(metrics);
+      stub.ltasByPath['c1.wav'] = ltas;
+      stub.profileByPath['c1.wav'] = profile;
+      final cache = _cache(
+        spectrograms: stub,
+        selectedTrack: () => track,
+        trackById: (id) => id == track.id ? track : null,
+      );
+      addTearDown(cache.dispose);
+
+      await cache.ensureMetricsFor(track.id);
+      await cache.ensureSelectedSpectrogram();
+      expect(stub.bothCalls, 1);
+      expect(identical(cache.selectedLtas, ltas), isTrue);
+      expect(identical(cache.selectedProfile, profile), isTrue);
+
+      // The spectrogram lane asks for the same pair, and joins it.
+      await cache.ensureSpectrogramFor(track.id);
+      expect(stub.bothCalls, 1);
+    });
+
+    test('the subject reads as analyzing while either half computes', () async {
+      // The metric tabs (pitch, vowel, timbre, vibrato, register) read this
+      // too: with the spectrogram held and the metrics computing, they said
+      // the take could not be analyzed.
+      final track = _lane([_clip('c1', 0)]);
+      final stub = _GatedMetricsSpectrograms(
+        metricsByPath: {'c1.wav': _metrics(10)},
+        specsByPath: {'c1.wav': _spec(10)},
+      );
+      final cache = _cache(
+        spectrograms: stub,
+        selectedTrack: () => track,
+        trackById: (id) => id == track.id ? track : null,
+      );
+      addTearDown(cache.dispose);
+      await cache.ensureSelectedSpectrogram();
+      cache.debugDropHalf('c1.wav', metrics: true);
+      expect(cache.selectedAnalysisIncomplete, isTrue);
+
+      final analyzing = cache.ensureSelectedSpectrogram();
+      await Future<void>.delayed(Duration.zero);
+      expect(cache.selectedSpectrogram, isNotNull);
+      expect(cache.spectrogramLoading, isTrue);
+      expect(cache.selectedAnalysisIncomplete, isFalse, reason: 'computing');
+
+      stub.metricsGate.complete();
+      await analyzing;
+      expect(cache.spectrogramLoading, isFalse);
+      expect(cache.selectedMetrics, isNotNull);
+      expect(cache.selectedAnalysisIncomplete, isFalse);
+    });
+
+    test(
+      'a half the budget dropped reads as incomplete until asked again',
+      () async {
+        final track = _lane([_clip('c1', 0)]);
+        final stub = _StubSpectrograms(
+          metricsByPath: {'c1.wav': _metrics(10)},
+          specsByPath: {'c1.wav': _spec(10)},
+        );
+        final cache = _cache(
+          spectrograms: stub,
+          selectedTrack: () => track,
+          trackById: (id) => id == track.id ? track : null,
+        );
+        addTearDown(cache.dispose);
+        await cache.ensureSelectedSpectrogram();
+        expect(cache.selectedAnalysisIncomplete, isFalse);
+        cache.debugDropHalf('c1.wav', metrics: false);
+        expect(cache.selectedSpectrogram, isNull);
+        expect(cache.selectedAnalysisIncomplete, isTrue);
+        await cache.ensureSelectedSpectrogram();
+        expect(cache.selectedSpectrogram, isNotNull);
+        expect(cache.selectedAnalysisIncomplete, isFalse);
+      },
+    );
   });
 
   group('shared analysis budget', () {

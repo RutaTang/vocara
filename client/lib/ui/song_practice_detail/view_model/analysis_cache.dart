@@ -282,6 +282,17 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   @visibleForTesting
   int get budgetBytes => _spectrogramCache.budget.bytes;
 
+  /// Drops one half of a clip's analysis, as the shared byte budget does under
+  /// pressure (the halves are separate entries).
+  @visibleForTesting
+  void debugDropHalf(String path, {required bool metrics}) {
+    if (metrics) {
+      _metricsCache.remove(path);
+    } else {
+      _spectrogramCache.remove(path);
+    }
+  }
+
   /// Memoized derived results currently held, for tests pinning that derived
   /// state never outlives its source entry.
   @visibleForTesting
@@ -542,6 +553,24 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
 
   /// True when the subject's metrics compute already ran and produced nothing
   /// (e.g. a non-WAV import). The inspector uses this to stop retrying.
+  /// Whether the dock would show the subject without part of an analysis it
+  /// can still get: a half the byte budget dropped (the halves are separate
+  /// entries, and a spectrogram view reads the spectrogram before the metrics,
+  /// so under pressure it goes first). Nothing asked for it again, and the
+  /// spectrogram views said the take could not be analyzed.
+  ///
+  /// A clip's own analysis only: a lane aggregate whose parts did not all fit
+  /// is left uncached on purpose (see [_ensureAggregateAnalysis]), and asking
+  /// again on every build would merge it again and again.
+  bool get selectedAnalysisIncomplete {
+    final s = _analysisSubject;
+    if (s == null || s.aggregate || spectrogramLoading) return false;
+    return (!_spectrogramCache.containsKey(s.key) &&
+            !_spectrogramUnavailable.contains(s.key)) ||
+        (!_metricsCache.containsKey(s.key) &&
+            !_metricsUnavailable.contains(s.key));
+  }
+
   bool get selectedMetricsUnavailable {
     final s = _analysisSubject;
     if (s == null) return false;
@@ -595,13 +624,17 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     return cache[s.key] ??= analyzeRegister(m);
   }
 
+  /// Either half, as the contract says: the metric tabs (pitch, vowel, timbre,
+  /// vibrato, register) read this too, and while only the metrics computed
+  /// they told the singer the take could not be analyzed.
   @override
   bool get spectrogramLoading {
     final s = _analysisSubject;
     if (s == null) return false;
     return s.aggregate
         ? _aggLoading.contains(s.key)
-        : _spectrogramLoading.contains(s.key);
+        : _spectrogramLoading.contains(s.key) ||
+              _metricsLoading.contains(s.key);
   }
 
   // --- Per-lane analysis ----------------------------------------------------
@@ -714,8 +747,14 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     final track = _trackById(trackId);
     if (track == null) return;
     if (track.clips.length > 1) return _ensureAggregateAnalysis(track);
+    // The pair, as the dock asks for it: one decode, with the LTAS and voice
+    // profile derived in the analysis isolate. Asked for one half at a time
+    // (the Pitch lane folded out first, the dock opened after), the two came
+    // from two decodes, and the dock's summary built the LTAS and profile on
+    // this isolate — ~0.4 s for a 10-minute take. A half already held or
+    // computing is joined, not redone (see [_ensureClipAnalysis]).
     final clip = track.primaryClip;
-    if (clip != null) await _ensureMetricsForPath(clip.audioFilePath);
+    if (clip != null) await _ensureClipAnalysis(clip.audioFilePath);
   }
 
   /// Computes + caches voice metrics for one audio file (lazy, in an isolate;
@@ -783,8 +822,9 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     final track = _trackById(trackId);
     if (track == null) return;
     if (track.clips.length > 1) return _ensureAggregateAnalysis(track);
+    // The pair, as [ensureMetricsFor] asks for it.
     final clip = track.primaryClip;
-    if (clip != null) await _ensureSpectrogramForPath(clip.audioFilePath);
+    if (clip != null) await _ensureClipAnalysis(clip.audioFilePath);
   }
 
   /// Computes + caches the spectrogram for one audio file (lazy). Keyed by

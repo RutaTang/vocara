@@ -460,6 +460,30 @@ void main() {
     expect(painted, isNot(contains('_SpectrogramImagePainter')));
   });
 
+  // Reuses this file's screen harness; not a repaint pin. The two halves of a
+  // clip's analysis are separate cache entries, and under the byte budget's
+  // pressure the spectrogram (read before the metrics) went first: nothing
+  // asked for it again, and the dock said the take could not be analyzed.
+  testWidgets('the dock asks again for a spectrogram the cache let go', (
+    tester,
+  ) async {
+    final vm = await _pumpScreen(tester);
+    vm.selectTrack('t0');
+    vm.analysis.showDockTab(DockTab.spectrogram);
+    await tester.pump(const Duration(milliseconds: 16));
+    await tester.pump(const Duration(milliseconds: 16));
+    expect(vm.selectedSpectrogram, isNotNull);
+
+    vm.analysis.debugDropHalf('/pool/t0.wav', metrics: false);
+    // Any notification rebuilds the dock (here a fader tick on another lane).
+    vm.mixer.setTrackVolumeLive('t3', 0.4);
+    await tester.pump(const Duration(milliseconds: 16));
+    await tester.pump(const Duration(milliseconds: 16));
+    await tester.pump(const Duration(milliseconds: 16));
+    expect(vm.selectedSpectrogram, isNotNull);
+    expect(find.byType(SpectrogramImage), findsOneWidget);
+  });
+
   testWidgets('the Pitch and Timbre tabs repaint only their playheads per '
       'tick', (tester) async {
     final vm = await _pumpScreen(tester);
