@@ -659,6 +659,8 @@ void main() {
         mic: _FakeMic(),
       );
       repo.pooling = true;
+      vm.toggleInspectorPanel(); // closed: the dock alone shows the take
+      expect(vm.inspectorOpen, isFalse);
       vm.analysis.setDockOpen(true); // the Voiceprint dock, on the take
       await vm.recording.startRecording(); // nothing armed: a new take
       final take = vm.selectedTrackId!;
