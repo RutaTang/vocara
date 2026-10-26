@@ -17,6 +17,7 @@ import 'package:vocara/data/sync/sync_hashes.dart';
 import 'package:vocara/domain/models/audio_fx.dart';
 import 'package:vocara/domain/models/audio_track.dart';
 import 'package:vocara/domain/models/lyric_line.dart';
+import 'package:vocara/domain/models/practice_note.dart';
 import 'package:vocara/domain/models/song_practice.dart';
 import 'package:vocara/ui/song_practice_detail/view_model/song_practice_detail_view_model.dart';
 import 'package:vocara/utils/result.dart';
@@ -562,6 +563,71 @@ void main() {
 
       expect(vm.practice!.vocalTracks.length, before + 1);
       expect(events.where((e) => e == 'save'), hasLength(1));
+    });
+  });
+
+  group('deleting a clip from over another', () {
+    // A take's notes are the lane's, at absolute times: deleting a punch-in
+    // from over its original took the notes the original still played under.
+    PracticeNote note(String id, int at, [int? end]) => PracticeNote(
+      id: id,
+      positionMs: at,
+      endMs: end,
+      content: id,
+      createdAt: DateTime(2026),
+      updatedAt: DateTime(2026),
+    );
+
+    test('keeps the notes another clip still covers', () async {
+      final vm = await pumpVm(
+        vocalTracks: [
+          AudioTrack(
+            id: 'lane',
+            kind: AudioTrackKind.vocal,
+            displayName: 'Take 1',
+            createdAt: DateTime(2026),
+            clips: [
+              AudioClip(
+                id: 'orig',
+                audioFilePath: '/pool/o.wav',
+                durationMs: 3000,
+              ),
+              AudioClip(
+                id: 'punch',
+                audioFilePath: '/pool/p.wav',
+                startMs: 1000,
+                durationMs: 3000,
+              ),
+            ],
+            notes: [
+              note('under-both', 1500),
+              note('punch-only', 3500),
+              note('range', 2000, 3800),
+            ],
+          ),
+        ],
+      );
+      await vm.deleteClip('lane', 'punch');
+      final lane = vm.practice!.vocalTracks.single;
+      // 1000..3000 is still the original's; only 3000..4000 falls silent.
+      expect(lane.notes.map((n) => n.id), ['under-both', 'range']);
+      expect(lane.notes.last.endMs, 3000, reason: 'clamped at the gap');
+    });
+
+    test('the uncovered spans of a clip', () {
+      AudioClip clip(int start, int dur) => AudioClip(
+        id: '$start',
+        audioFilePath: '/x',
+        startMs: start,
+        durationMs: dur,
+      );
+      expect(uncoveredSpans(clip(1000, 3000), [clip(0, 3000)]), [(3000, 4000)]);
+      expect(uncoveredSpans(clip(0, 4000), [clip(1000, 1000)]), [
+        (0, 1000),
+        (2000, 4000),
+      ]);
+      expect(uncoveredSpans(clip(0, 1000), [clip(0, 1000)]), isEmpty);
+      expect(uncoveredSpans(clip(0, 1000), [clip(2000, 1000)]), [(0, 1000)]);
     });
   });
 

@@ -85,6 +85,28 @@ PracticeNote clampNoteEnd(PracticeNote n, int boundaryMs) {
       : n.copyWith(endMs: boundaryMs);
 }
 
+/// The parts of [deleted]'s span that no clip in [remaining] still covers:
+/// where the lane falls silent once it goes, in timeline order. A take's
+/// notes are the lane's, at absolute times, so only what lies there goes
+/// with the clip — a punch-in deleted from over its original took the notes
+/// the original still played under.
+@visibleForTesting
+List<(int, int)> uncoveredSpans(AudioClip deleted, List<AudioClip> remaining) {
+  var spans = [(deleted.startMs, deleted.endMs)];
+  for (final c in remaining) {
+    spans = [
+      for (final (s, e) in spans)
+        if (c.endMs <= s || c.startMs >= e)
+          (s, e)
+        else ...[
+          if (c.startMs > s) (s, c.startMs),
+          if (c.endMs < e) (c.endMs, e),
+        ],
+    ];
+  }
+  return spans..sort((a, b) => a.$1.compareTo(b.$1));
+}
+
 /// Like [clampNoteEnd], for a technique marker.
 @visibleForTesting
 TechniqueMarker clampMarkerEnd(TechniqueMarker m, int boundaryMs) {
@@ -1000,7 +1022,12 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         sent,
         baseHashes: _baseHashes,
       );
-      if (_disposed) return false;
+      if (_disposed) {
+        if (result is Ok<Loaded<SongPractice>>) {
+          _adoptSavedBase(sent, result.value);
+        }
+        return false;
+      }
       if (result is Ok<Loaded<SongPractice>>) {
         ok = true;
         // Saved with nothing newer behind it: no stamp is pending any more.
@@ -1987,28 +2014,35 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     if (refuseStructuralEdit()) return;
     await _busyGate.run(() async {
       final remaining = track.clips.where((c) => c.id != clipId).toList();
-      // Drop markers anchored inside the deleted clip; for a range that starts
-      // before the clip, clamp its end to the clip edge so it doesn't overhang the
-      // gap left behind.
-      final keptNotes = track.notes
-          .where(
-            (n) => n.positionMs < clip.startMs || n.positionMs >= clip.endMs,
-          )
-          .map(
-            (n) =>
-                n.positionMs < clip.startMs ? clampNoteEnd(n, clip.startMs) : n,
-          )
-          .toList();
-      final keptMarkers = track.techniqueMarkers
-          .where(
-            (m) => m.positionMs < clip.startMs || m.positionMs >= clip.endMs,
-          )
-          .map(
-            (m) => m.positionMs < clip.startMs
-                ? clampMarkerEnd(m, clip.startMs)
-                : m,
-          )
-          .toList();
+      // Drop markers anchored where the lane falls silent; for a range that
+      // starts before such a gap, clamp its end to the gap's edge so it
+      // doesn't overhang it. Only the gaps: what another clip of the lane
+      // still covers keeps its notes.
+      final gaps = uncoveredSpans(clip, remaining);
+      bool silenced(int ms) => gaps.any((g) => ms >= g.$1 && ms < g.$2);
+      int? nextGap(int ms) {
+        for (final g in gaps) {
+          if (g.$1 > ms) return g.$1;
+        }
+        return null;
+      }
+
+      final keptNotes = [
+        for (final n in track.notes)
+          if (!silenced(n.positionMs))
+            switch (nextGap(n.positionMs)) {
+              final edge? => clampNoteEnd(n, edge),
+              null => n,
+            },
+      ];
+      final keptMarkers = [
+        for (final m in track.techniqueMarkers)
+          if (!silenced(m.positionMs))
+            switch (nextGap(m.positionMs)) {
+              final edge? => clampMarkerEnd(m, edge),
+              null => m,
+            },
+      ];
       _updateTrack(
         trackId,
         (t) => t.copyWith(
@@ -2848,6 +2882,22 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// kept from concurrent writers that the newer model has never seen, and
   /// merging against it would make the queued save tombstone a remote insert,
   /// revert a remote edit and resurrect a remote delete.
+  /// What a save landing after the screen closed still owes the saves queued
+  /// behind it: the fresh base (and, for the model it held, the re-read). They
+  /// run on — they hold the model the user left with — and against the stale
+  /// base the store's skip rules read a change undone since (an unmute after
+  /// a mute, a note added then deleted) as unchanged, and dropped it. Only
+  /// the fields: nothing on screen is left to refresh.
+  void _adoptSavedBase(SongPractice sent, Loaded<SongPractice> saved) {
+    if (identical(_practice, sent)) {
+      _practice = saved.aggregate.sharing(sent);
+      _persisted = _practice;
+      _baseHashes = saved.baseHashes;
+    } else {
+      _baseHashes = saved.sentHashes ?? saved.baseHashes;
+    }
+  }
+
   void _adoptSaved(SongPractice sent, Loaded<SongPractice> saved) {
     if (identical(_practice, sent)) {
       // What the re-read reproduces keeps the objects it was sent as (see
@@ -2954,7 +3004,12 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       // If the route was popped mid-save (e.g. a second back while finalizing a
       // recording), the write above still committed — the take is safe — but the
       // playback/selection resync below must not touch now-disposed notifiers.
-      if (_disposed) return ok;
+      if (_disposed) {
+        if (result is Ok<Loaded<SongPractice>>) {
+          _adoptSavedBase(sent, result.value);
+        }
+        return ok;
+      }
       if (ok) {
         // Saved with nothing newer behind it: no stamp is pending any more.
         final current = identical(_practice, sent);
