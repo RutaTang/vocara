@@ -319,7 +319,8 @@ void main() {
         DropDoneDetails(
           files: [DropItemFile('/src/a.wav'), DropItemFile('/src/b.wav')],
           localPosition: Offset.zero,
-          globalPosition: Offset.zero,
+          // On the lane itself: a drop is taken only where it can be seen.
+          globalPosition: tester.getCenter(lane.first),
         ),
       );
       await settle(tester);

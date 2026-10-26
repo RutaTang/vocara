@@ -199,12 +199,14 @@ Future<void> _pumpPanel(
 
 /// Feeds a file into the panel's DropTarget exactly as desktop_drop would.
 Future<void> _drop(WidgetTester tester, String path) async {
-  final target = tester.widget<DropTarget>(find.byType(DropTarget));
-  target.onDragDone!(
+  final finder = find.byType(DropTarget);
+  // On the target itself: a drop is taken only where it can be seen.
+  final at = tester.getCenter(finder);
+  tester.widget<DropTarget>(finder).onDragDone!(
     DropDoneDetails(
       files: [DropItemFile(path)],
       localPosition: Offset.zero,
-      globalPosition: Offset.zero,
+      globalPosition: at,
     ),
   );
   // Flush the async import and the editor re-seed.

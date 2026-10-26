@@ -252,12 +252,13 @@ void main() {
     await tester.tap(find.text('Edit').first);
     await tester.pump();
 
-    final target = tester.widget<DropTarget>(find.byType(DropTarget));
-    target.onDragDone!(
+    final finder = find.byType(DropTarget);
+    tester.widget<DropTarget>(finder).onDragDone!(
       DropDoneDetails(
         files: [DropItemFile('/tmp/notes.pdf')],
         localPosition: Offset.zero,
-        globalPosition: Offset.zero,
+        // On the zone itself: a drop is taken only where it can be seen.
+        globalPosition: tester.getCenter(finder),
       ),
     );
     await tester.pump();
