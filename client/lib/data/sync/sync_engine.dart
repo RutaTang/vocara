@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:drift/drift.dart';
 
 import '../db/app_database.dart';
+import '../db/asset_store.dart';
 import '../services/diagnostics_log.dart';
 import 'hlc.dart';
 import 'integrity_checker.dart';
@@ -1013,12 +1014,15 @@ class SyncEngine {
           if (tid is String) techniqueIds.add(tid);
       }
     }
-    if (trackIds.isNotEmpty) {
-      final placeholders = List.filled(trackIds.length, '?').join(', ');
+    // Chunked like every other id-set read: one IN over a big page's tracks
+    // passed SQLite's variable limit, and this runs after the commit — the run
+    // failed and the screens never heard of what it had applied.
+    for (final chunk in AssetStore.inChunks(trackIds.toList())) {
+      final placeholders = List.filled(chunk.length, '?').join(', ');
       final trackRows = await _db
           .customSelect(
             'SELECT practice_id FROM tracks WHERE id IN ($placeholders)',
-            variables: [for (final id in trackIds) Variable.withString(id)],
+            variables: [for (final id in chunk) Variable.withString(id)],
           )
           .get();
       for (final r in trackRows) {
