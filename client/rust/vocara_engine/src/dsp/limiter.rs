@@ -2,7 +2,7 @@
 //! ceiling, with a smooth release. No look-ahead (brief inter-sample overs possible), so it's
 //! cheap and stable — good as the last insert on a vocal or a bus.
 
-use crate::dsp::smooth::BypassFade;
+use crate::dsp::smooth::{BypassFade, Smoothed};
 use crate::node::{Node, ProcessIo};
 use crate::sample::{db_to_lin, CHANNELS};
 
@@ -13,7 +13,9 @@ pub mod param {
 }
 
 pub struct LimiterNode {
-    ceiling: f32, // linear
+    /// Linear, ramped: with the instant attack, a ceiling stepped down while the signal sat
+    /// above it cut the gain in one sample (0.9 to 0.25 for a -12 dB drop at a peak).
+    ceiling: Smoothed,
     release_ms: f32,
     release_coef: f32,
     gain: f32, // current gain (<= 1)
@@ -24,7 +26,7 @@ pub struct LimiterNode {
 impl LimiterNode {
     pub fn new() -> Self {
         let mut l = LimiterNode {
-            ceiling: db_to_lin(-0.3),
+            ceiling: Smoothed::new(db_to_lin(-0.3)),
             release_ms: 80.0,
             release_coef: 1.0,
             gain: 1.0,
@@ -51,6 +53,7 @@ impl Node for LimiterNode {
     fn prepare(&mut self, sample_rate: f64, _max_block: usize) {
         self.sr = sample_rate;
         self.recompute_release();
+        self.ceiling.set_time(0.01, sample_rate);
         self.fade.prepare(sample_rate);
         self.gain = 1.0;
     }
@@ -81,13 +84,15 @@ impl Node for LimiterNode {
             return;
         }
 
+        let ceiling_held = self.ceiling.settled(frames);
         for i in 0..frames {
             let l = out[CHANNELS * i];
             let r = out[CHANNELS * i + 1];
             let peak = l.abs().max(r.abs());
+            let ceiling = ceiling_held.unwrap_or_else(|| self.ceiling.next());
             // Gain needed so the peak doesn't exceed the ceiling.
             let req = if peak > 1.0e-9 {
-                (self.ceiling / peak).min(1.0)
+                (ceiling / peak).min(1.0)
             } else {
                 1.0
             };
@@ -106,7 +111,7 @@ impl Node for LimiterNode {
 
     fn set_param(&mut self, param: u16, value: f32) {
         match param {
-            param::CEILING_DB => self.ceiling = db_to_lin(value.min(0.0)),
+            param::CEILING_DB => self.ceiling.set_target(db_to_lin(value.min(0.0))),
             param::RELEASE_MS => {
                 self.release_ms = value;
                 self.recompute_release();
@@ -125,5 +130,70 @@ impl Node for LimiterNode {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lowering_the_ceiling_at_a_peak_does_not_step_the_output() {
+        // With the instant attack, a ceiling stepped down while the signal sat above it cut
+        // the gain in one sample: 0.9 to 0.25 for a -12 dB drop at a peak.
+        let (sr, block) = (48_000.0, 128usize);
+        let mut l = LimiterNode::new();
+        l.prepare(sr, block);
+        l.set_param(param::BYPASS, 0.0);
+        l.set_param(param::CEILING_DB, 0.0);
+        let total = 48_000usize;
+        let input: Vec<f32> = (0..total)
+            .flat_map(|i| {
+                let s = 0.9 * (i as f32 * 220.0 * std::f32::consts::TAU / sr as f32).sin();
+                [s, s]
+            })
+            .collect();
+        // The block whose first frame sits on a peak (220 Hz: a peak every ~218 frames).
+        let edit = (24_000 / block * block..total - block)
+            .step_by(block)
+            .max_by(|&a, &b| input[2 * a].abs().total_cmp(&input[2 * b].abs()))
+            .unwrap();
+        let mut out = vec![0.0; total * CHANNELS];
+        let mut at = 0;
+        while at < total {
+            if at == edit {
+                l.set_param(param::CEILING_DB, -12.0);
+            }
+            let n = block.min(total - at);
+            let inputs: [&[f32]; 1] = [&input[at * CHANNELS..(at + n) * CHANNELS]];
+            let mut outs: [&mut [f32]; 1] = [&mut out[at * CHANNELS..(at + n) * CHANNELS]];
+            let mut io = ProcessIo {
+                inputs: &inputs,
+                outputs: &mut outs[..],
+                frames: n,
+                tl: at as i64,
+                sr,
+            };
+            l.process(&mut io);
+            at += n;
+        }
+        let step = |v: &[f32], i: usize| (v[2 * i] - v[2 * (i - 1)]).abs();
+        let material = (1..total).map(|i| step(&input, i)).fold(0.0, f32::max);
+        let around = (edit.saturating_sub(4)..edit + 4 * block)
+            .map(|i| step(&out, i))
+            .fold(0.0, f32::max);
+        assert!(
+            around < material * 1.5,
+            "a step of {around} at the edit; the material's own largest is {material}"
+        );
+        // And it does come down to the new ceiling.
+        let ceiling = db_to_lin(-12.0);
+        let tail = out[(total - 4_000) * 2..]
+            .iter()
+            .fold(0.0f32, |m, &x| m.max(x.abs()));
+        assert!(
+            tail <= ceiling * 1.0001,
+            "settled at {tail}, ceiling {ceiling}"
+        );
     }
 }

@@ -42,7 +42,10 @@ pub struct DelayNode {
     tap_next: usize,
     tap_mix: f32,
     tap_step: f32,
-    feedback: f32,
+    /// Ramped like the mix: a stepped feedback gain jumped the level of everything
+    /// recirculating in the line — a click one delay after the edit, echoed (and decaying by
+    /// the new feedback) every delay after that.
+    feedback: Smoothed,
     mix: Smoothed,
     fade: BypassFade,
     sr: f64,
@@ -62,7 +65,7 @@ impl DelayNode {
             tap_next: 14_400,
             tap_mix: 0.0,
             tap_step: 1.0 / (TAP_FADE_S * 48_000.0) as f32,
-            feedback: 0.3,
+            feedback: Smoothed::new(0.3),
             mix: Smoothed::new(0.0),
             fade: BypassFade::new(true),
             sr: 48_000.0,
@@ -95,6 +98,7 @@ impl Node for DelayNode {
         self.tap_next = self.tap;
         self.tap_step = 1.0 / (TAP_FADE_S * sample_rate) as f32;
         self.mix.set_time(0.01, sample_rate);
+        self.feedback.set_time(0.01, sample_rate);
         self.fade.prepare(sample_rate);
     }
 
@@ -145,8 +149,9 @@ impl Node for DelayNode {
             self.tap_next = want;
             self.tap_mix = 0.0;
         }
-        let fb = self.feedback.clamp(0.0, 0.98);
-        // A landed mix ramp / on-off fade is one value all block (see `Smoothed::settled`).
+        // A landed feedback / mix ramp or on-off fade is one value all block (see
+        // `Smoothed::settled`).
+        let fb_held = self.feedback.settled(frames);
         let (mix_held, fade_held) = (self.mix.settled(frames), self.fade.settled());
 
         for i in 0..frames {
@@ -166,6 +171,7 @@ impl Node for DelayNode {
             }
             // Sanitize the feedback write (like reverb/biquad/compressor/gate): one non-finite
             // input would otherwise re-inject NaN*fb into the ring every `d` samples forever.
+            let fb = fb_held.unwrap_or_else(|| self.feedback.next());
             self.buf_l[self.pos] = sanitize(l + dl * fb);
             self.buf_r[self.pos] = sanitize(r + dr * fb);
             // The wet share, blended toward the dry input while the bypass switch fades.
@@ -180,7 +186,7 @@ impl Node for DelayNode {
     fn set_param(&mut self, param: u16, value: f32) {
         match param {
             param::TIME_MS => self.time_ms = value.clamp(1.0, (MAX_SECONDS * 1000.0) as f32),
-            param::FEEDBACK => self.feedback = value.clamp(0.0, 0.98),
+            param::FEEDBACK => self.feedback.set_target(value.clamp(0.0, 0.98)),
             param::MIX => self.mix.set_target(value.clamp(0.0, 1.0)),
             param::BYPASS => {
                 let bypass = value >= 0.5;
@@ -236,7 +242,7 @@ mod tests {
     }
 
     /// `process` as it was before the ring-index and landed-mix rewrites (index `%` per
-    /// sample, mix and fade stepped per sample), verbatim.
+    /// sample, mix and fade stepped per sample), with the feedback ramp stepped per sample.
     fn reference(d: &mut DelayNode, inp: &[Smp], out: &mut [Smp]) {
         let frames = inp.len() / CHANNELS;
         out.copy_from_slice(inp);
@@ -267,7 +273,6 @@ mod tests {
             d.tap_next = want;
             d.tap_mix = 0.0;
         }
-        let fb = d.feedback.clamp(0.0, 0.98);
         for i in 0..frames {
             let l = out[CHANNELS * i];
             let r = out[CHANNELS * i + 1];
@@ -282,6 +287,7 @@ mod tests {
                     d.tap = d.tap_next;
                 }
             }
+            let fb = d.feedback.next();
             d.buf_l[d.pos] = sanitize(l + dl * fb);
             d.buf_r[d.pos] = sanitize(r + dr * fb);
             let wet = d.mix.next() * d.fade.next();
@@ -313,6 +319,59 @@ mod tests {
         slow.prepare(48_000.0, 1024);
         crate::dsp::test_support::assert_matches_reference(
             &mut fast, &mut slow, reference, &edits, 460,
+        );
+    }
+
+    /// The largest |second difference| of the left channel over `out[from..to]` (frames).
+    fn curvature(out: &[Smp], from: usize, to: usize) -> f32 {
+        (from.max(2)..to)
+            .map(|i| (out[2 * i] - 2.0 * out[2 * (i - 1)] + out[2 * (i - 2)]).abs())
+            .fold(0.0, f32::max)
+    }
+
+    #[test]
+    fn a_feedback_change_does_not_click_or_echo_a_click() {
+        // Feedback stepped the gain of everything recirculating in the line: one delay after
+        // the edit the output jumped (a click ~400x the material's own curvature), and the
+        // jump came round again every delay, decaying by the new feedback.
+        let (sr, block) = (48_000.0, 128usize);
+        let mut d = DelayNode::new();
+        d.prepare(sr, block);
+        d.set_param(param::BYPASS, 0.0);
+        d.set_param(param::TIME_MS, 113.0);
+        d.set_param(param::MIX, 0.5);
+        d.set_param(param::FEEDBACK, 0.1);
+        let total = 96_000usize;
+        let edit = 48_000usize;
+        let input: Vec<Smp> = (0..total)
+            .flat_map(|i| {
+                let s = 0.5 * (i as f32 * 220.0 * std::f32::consts::TAU / sr as f32).sin();
+                [s, s]
+            })
+            .collect();
+        let mut out = vec![0.0; total * CHANNELS];
+        let mut at = 0;
+        while at < total {
+            if at == edit {
+                d.set_param(param::FEEDBACK, 0.9);
+            }
+            let inputs: [&[Smp]; 1] = [&input[at * CHANNELS..(at + block) * CHANNELS]];
+            let mut outs: [&mut [Smp]; 1] = [&mut out[at * CHANNELS..(at + block) * CHANNELS]];
+            let mut io = ProcessIo {
+                inputs: &inputs,
+                outputs: &mut outs[..],
+                frames: block,
+                tl: at as i64,
+                sr,
+            };
+            d.process(&mut io);
+            at += block;
+        }
+        let steady = curvature(&out, edit - 8_000, edit);
+        let after = curvature(&out, edit, total);
+        assert!(
+            after < steady * 4.0,
+            "curvature {after} after the edit vs {steady} before it"
         );
     }
 
