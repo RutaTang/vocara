@@ -332,20 +332,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final pick = widget.pickSavePath ?? _saveLocationPath;
     final destination = await pick('vocara-diagnostics.txt');
     if (destination == null || !mounted) return;
-    // Into the app's own storage: the bundle replaced one of the library's
-    // files (its database, a take's audio).
-    if (await _intoAppStorage(destination)) {
-      if (!mounted) return;
-      _showToast(
-        "That folder holds Vocara's own files. Save the diagnostics "
-        'somewhere else.',
-      );
-      return;
-    }
-    if (!mounted) return;
     setState(() => _exporting = true);
     String? bundle;
     try {
+      // Into the app's own storage: the bundle replaced one of the library's
+      // files (its database, a take's audio).
+      if (await _intoAppStorage(destination)) {
+        if (!mounted) return;
+        _showToast(
+          "That folder holds Vocara's own files. Save the diagnostics "
+          'somewhere else.',
+        );
+        return;
+      }
       final export =
           widget.exportDiagnostics ?? DiagnosticsLog.instance.exportArchive;
       bundle = await export();
