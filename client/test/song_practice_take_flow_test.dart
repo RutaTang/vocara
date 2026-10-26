@@ -318,6 +318,10 @@ class _FakeMic extends Fake implements MicRecordingController {
   String? _path;
   Completer<void>? ready;
 
+  /// When set, the start parks before any setup until it completes: the
+  /// permission prompt, which a cancelled start leaves without setting up.
+  Completer<void>? permission;
+
   @override
   final ValueNotifier<double> level = ValueNotifier(0);
   @override
@@ -333,6 +337,9 @@ class _FakeMic extends Fake implements MicRecordingController {
     _starting = true;
     _invalidated = false;
     try {
+      final p = permission;
+      if (p != null) await p.future;
+      if (_invalidated) return const MicRecordingStart.invalidated();
       _path = await destination.create();
       final r = ready;
       if (r != null) await r.future;
@@ -731,6 +738,84 @@ void main() {
       expect(vm.isRecording, isFalse);
       expect(repo.stored.vocalTracks.map((t) => t.id), ['take1']);
     });
+
+    test('a quit at the permission prompt leaves at once', () async {
+      // Nothing is set up before the prompt answers, and a cancelled start
+      // sets nothing up after it: waiting on the prompt held the quit for its
+      // whole budget (seconds) for nothing.
+      final mic = _FakeMic()..permission = Completer<void>();
+      repo = _FakeRepo(_seed(accompaniment: _backing()));
+      waveforms = _FakeWaveforms();
+      spectrograms = _FakeSpectrograms();
+      final finalizer = RecordingFinalizer.forTesting();
+      final vm = openVm(
+        engine: _FakeGraphEngine(),
+        mic: mic,
+        finalizer: finalizer,
+      );
+      addTearDown(vm.dispose);
+      for (var i = 0; i < 400 && vm.practice == null; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+      final start = vm.recording.startRecording();
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(vm.recording.isStartingTake, isTrue);
+      var quitDone = false;
+      final quit = finalizer.finalizeAll().whenComplete(() => quitDone = true);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(quitDone, isTrue, reason: 'the quit waited on the prompt');
+      await quit;
+      mic.permission!.complete(); // answered after the quit
+      await start;
+      expect(vm.isRecording, isFalse);
+      expect(repo.stored.vocalTracks.map((t) => t.id), ['take1']);
+    });
+
+    test(
+      'a REC pressed during a quit that spent its budget is still cancelled',
+      () async {
+        // The quit runs again on the exit request after the close click; a
+        // start registered between the two had no budget of its own there (the
+        // first run had spent the quit's), so the exit left at once and the
+        // empty take REC had saved stayed for good.
+        final mic = _FakeMic()..ready = Completer<void>();
+        repo = _FakeRepo(_seed(accompaniment: _backing()));
+        waveforms = _FakeWaveforms();
+        spectrograms = _FakeSpectrograms();
+        final finalizer = RecordingFinalizer.forTesting(
+          perFinalizerBudget: const Duration(milliseconds: 100),
+          totalBudget: const Duration(milliseconds: 100),
+        );
+        final vm = openVm(
+          engine: _FakeGraphEngine(),
+          mic: mic,
+          finalizer: finalizer,
+        );
+        addTearDown(vm.dispose);
+        for (var i = 0; i < 400 && vm.practice == null; i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 5));
+        }
+        // A wedged finalize spends the first run's whole budget.
+        final wedged = Completer<void>();
+        Future<void> wedge() => wedged.future;
+        finalizer.register(wedge);
+        addTearDown(() => finalizer.unregister(wedge));
+        await finalizer.finalizeAll();
+
+        final start = vm.recording.startRecording();
+        for (var i = 0; i < 200 && repo.stored.vocalTracks.length < 2; i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 5));
+        }
+        expect(repo.stored.vocalTracks, hasLength(2), reason: 'REC saved one');
+        final exit = finalizer.finalizeAll(); // the exit request's run
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+        mic.ready!.complete();
+        await exit;
+        await start;
+        expect(vm.isRecording, isFalse);
+        expect(repo.stored.vocalTracks.map((t) => t.id), ['take1']);
+      },
+    );
 
     test('a REC cancelled while arming leaves no empty take behind', () async {
       final mic = _FakeMic()..ready = Completer<void>();

@@ -203,6 +203,7 @@ class RecordingController extends ChangeNotifier {
       // Record onto the armed take (the selected vocal lane) at the playhead, so
       // the live waveform draws on that lane. If nothing recordable is armed,
       // create an empty take to record into — there's no separate REC lane.
+      _takeSetupStarted = true;
       var targetId = recordTargetId;
       if (targetId == null) {
         // The id the take was created with, never a re-read of the selection:
@@ -226,6 +227,12 @@ class RecordingController extends ChangeNotifier {
     // never discarded here (it is kept for the boot sweep on hard kills).
     discard: _audioFiles.deleteAudio,
   );
+
+  /// Set once a start reaches its take setup (the destination's create, which
+  /// may save an empty take), until that start returns: before it, a cancelled
+  /// start sets up nothing (the mic bails at the permission prompt), so a quit
+  /// has nothing to wait for.
+  bool _takeSetupStarted = false;
 
   /// True while a take is armed (WAV being written, pumps running).
   bool get isRecording => _mic.isRecording;
@@ -387,16 +394,21 @@ class RecordingController extends ChangeNotifier {
     // "Take N" REC had saved to record into stayed in the practice for good.
     // The quit cancels the start, as Back does, and waits for it to unwind
     // (which drops that take); a take that armed meanwhile stops and saves.
+    // A start still at the permission prompt set nothing up, so the quit
+    // leaves at once rather than wait out the prompt for its whole budget.
+    // It begins work no running quit has budgeted (REC pressed during a quit
+    // that had spent its own), so it gets a budget of its own.
     Future<void> cancelForQuit() async {
       final start = _startInFlight;
       await stopRecording();
-      if (start != null) await start;
+      if (start != null && _takeSetupStarted) await start;
     }
 
-    _finalizer.register(cancelForQuit);
+    _finalizer.register(cancelForQuit, startsWork: true);
     try {
       await (_startInFlight = _armTake());
     } finally {
+      _takeSetupStarted = false;
       _finalizer.unregister(cancelForQuit);
     }
   }
