@@ -361,7 +361,14 @@ class MixerController extends ChangeNotifier {
 
   /// Live FX edit for a track (model + engine) without persisting — call on every drag
   /// tick; persist once with [commitFx] on release.
+  ///
+  /// In the chain order the model holds now: only [reorderTrackInserts]
+  /// changes it, and an edit built from an FX panel's earlier build (an
+  /// on/off clicked while a reorder's save was landing) wrote the old order
+  /// back — the cards snapped back and the reorder was lost.
   void setTrackFxLive(String trackId, TrackFx fx) {
+    final live = _trackById(trackId)?.fx;
+    if (live != null) fx = fx.copyWith(order: live.order);
     _updateTrack(trackId, (t) => t.copyWith(fx: fx));
     // The lane's FX applies to each of its clip sources in the engine.
     final track = _trackById(trackId);
@@ -382,6 +389,7 @@ class MixerController extends ChangeNotifier {
     if (track == null) return;
     final fx = (track.fx ?? TrackFx.flat()).copyWith(order: order);
     _updateTrack(trackId, (t) => t.copyWith(fx: fx));
+    notifyListeners();
     await _save();
   }
 
@@ -401,6 +409,7 @@ class MixerController extends ChangeNotifier {
         ],
       ),
     );
+    notifyListeners();
     await _save();
   }
 
@@ -423,6 +432,7 @@ class MixerController extends ChangeNotifier {
         ],
       ),
     );
+    notifyListeners();
     await _save();
   }
 
@@ -431,6 +441,10 @@ class MixerController extends ChangeNotifier {
     if (track == null || slot < 0 || slot >= track.sends.length) return;
     final next = [...track.sends]..removeAt(slot);
     _updateTrack(trackId, (t) => t.copyWith(sends: next));
+    // Shown now, as every routing edit here is: the save queues, then
+    // rebuilds the engine graph before it notifies, and a second click on
+    // the same row meanwhile removed the send that had moved into its slot.
+    notifyListeners();
     await _save();
   }
 
@@ -451,6 +465,7 @@ class MixerController extends ChangeNotifier {
     final next = [...track.sends];
     next[slot] = next[slot].copyWith(busId: busId);
     _updateTrack(trackId, (t) => t.copyWith(sends: next));
+    notifyListeners();
     await _save();
   }
 
@@ -499,6 +514,7 @@ class MixerController extends ChangeNotifier {
         ),
       ),
     );
+    notifyListeners();
     await _save();
   }
 
@@ -519,6 +535,7 @@ class MixerController extends ChangeNotifier {
         ),
       ),
     );
+    notifyListeners();
     await _save();
   }
 
@@ -552,6 +569,7 @@ class MixerController extends ChangeNotifier {
         }),
       ),
     );
+    notifyListeners();
     await _save();
   }
 
@@ -610,6 +628,7 @@ class MixerController extends ChangeNotifier {
     );
     _setPractice(practice.copyWith(fxBuses: [...practice.fxBuses, bus]));
     _selectBusAfterMutation(bus.id);
+    notifyListeners();
     await _save();
     return bus.id;
   }
@@ -626,6 +645,7 @@ class MixerController extends ChangeNotifier {
         ],
       ),
     );
+    notifyListeners();
     await _save();
   }
 
@@ -651,6 +671,7 @@ class MixerController extends ChangeNotifier {
     ];
     _clearBusSelectionIf(busId);
     _setPractice(practice.copyWith(vocalTracks: tracks, fxBuses: buses));
+    notifyListeners();
     await _save();
   }
 
@@ -660,6 +681,7 @@ class MixerController extends ChangeNotifier {
       trackId,
       (t) => t.copyWith(busId: busId, clearBus: busId == null),
     );
+    notifyListeners();
     await _save();
   }
 
@@ -711,13 +733,17 @@ class MixerController extends ChangeNotifier {
         ],
       ),
     );
+    notifyListeners();
     await _save();
   }
 
   /// Live bus FX edit (model + engine) without persisting — persist with [commitFx].
+  /// Kept in the chain order the model holds (see [setTrackFxLive]).
   void setBusFxLive(String busId, TrackFx fx) {
     final practice = _practiceOf();
     if (practice == null) return;
+    final live = practice.busById(busId)?.fx;
+    if (live != null) fx = fx.copyWith(order: live.order);
     _setPractice(
       practice.copyWith(
         fxBuses: [
@@ -850,6 +876,7 @@ class MixerController extends ChangeNotifier {
     list.insert(idx < 0 ? list.length : idx + 1, copy);
     _setPractice(practice.copyWith(fxBuses: list));
     _selectBusAfterMutation(copy.id);
+    notifyListeners();
     await _save();
   }
 

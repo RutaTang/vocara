@@ -75,6 +75,9 @@ class _Host {
   final selectedBuses = <String>[];
   final clearedBuses = <String>[];
   int saves = 0;
+
+  /// When set, a save parks until it completes (one queued behind another).
+  Completer<void>? saveGate;
   bool recording = false;
   String? recordingTarget;
   List<double> recPeaks = const [];
@@ -131,6 +134,8 @@ class _Host {
     updateTrack: updateTrack,
     save: () async {
       saves++;
+      final gate = saveGate;
+      if (gate != null) await gate.future;
       // Like the view model's save, whose tail resyncs the engine.
       await mixer.resyncPlayback();
       return true;
@@ -205,6 +210,54 @@ SongPractice _practice({
 );
 
 void main() {
+  group('a structural edit shows before its save lands', () {
+    // The view model notifies only once a save lands, after the engine graph
+    // rebuild; until then the screen showed the old routing, and a second
+    // action used it.
+    test('a removed send leaves its row at once', () async {
+      final host = _Host(
+        _practice(
+          vocals: [
+            _vocal(
+              'v',
+              sends: const [
+                TrackSend(busId: 'a'),
+                TrackSend(busId: 'b'),
+                TrackSend(busId: 'c'),
+              ],
+            ),
+          ],
+          buses: [_bus('a'), _bus('b'), _bus('c')],
+        ),
+      );
+      final gate = host.saveGate = Completer<void>();
+      var notified = 0;
+      host.mixer.addListener(() => notified++);
+
+      final removing = host.mixer.removeTrackSend('v', 1);
+      expect(notified, greaterThan(0), reason: 'the save is still parked');
+      expect(host.host2Sends('v'), ['a', 'c']);
+      gate.complete();
+      await removing;
+    });
+
+    test('an FX edit made from before a reorder keeps the reorder', () async {
+      final host = _Host(_practice(vocals: [_vocal('v')]));
+      final before = host.trackById('v')!.fx ?? TrackFx.flat();
+      final reordered = before.order.reversed.toList();
+      final gate = host.saveGate = Completer<void>();
+
+      final reordering = host.mixer.reorderTrackInserts('v', reordered);
+      // An on/off clicked on the panel as it was built before the reorder.
+      host.mixer.setTrackFxLive('v', before.copyWith(compOn: !before.compOn));
+      final fx = host.trackById('v')!.fx!;
+      expect(fx.order, reordered);
+      expect(fx.compOn, !before.compOn);
+      gate.complete();
+      await reordering;
+    });
+  });
+
   group('backing A/B (playReference)', () {
     test('flips the audible backing and pushes the swap to the engine', () {
       final host = _Host(_practice());
