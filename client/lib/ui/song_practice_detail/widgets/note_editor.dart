@@ -5,6 +5,8 @@ import '../../../domain/models/practice_note.dart';
 import '../../../utils/format.dart';
 import '../../core/themes/studio.dart';
 import '../../core/widgets/studio_button.dart';
+import '../view_model/song_practice_detail_view_model.dart'
+    show normalizeMarkerRange;
 
 /// Outcome of the note editor: either saved [content], or [deleted].
 class NoteEditorResult {
@@ -24,9 +26,13 @@ Future<NoteEditorResult?> showNoteEditor(
   required Duration at,
   Duration? end,
 }) {
-  final positionMs = existing?.positionMs ?? at.inMilliseconds;
-  final endMs = existing?.endMs ?? end?.inMilliseconds;
-  final title = (endMs != null && endMs > positionMs)
+  // As it will be kept: a drag too short for a range is saved as a point,
+  // and was announced as "Note across 00:12 → 00:12".
+  final (positionMs, endMs) = normalizeMarkerRange(
+    existing?.positionMs ?? at.inMilliseconds,
+    existing?.endMs ?? end?.inMilliseconds,
+  );
+  final title = endMs != null
       ? 'Note across ${formatClockMs(positionMs)} → ${formatClockMs(endMs)}'
       : 'Note at ${formatClockMs(positionMs)}';
 
@@ -167,10 +173,16 @@ class _NoteDialogState extends State<_NoteDialog> {
                     onTap: () => Navigator.of(context).pop(),
                   ),
                   const SizedBox(width: 8),
-                  StudioButton(
-                    label: widget.editing ? 'Save' : 'Add',
-                    variant: StudioButtonVariant.accent,
-                    onTap: () => _save(context),
+                  // Not with nothing to save: it closed as if it had saved,
+                  // the note keeping its old text.
+                  ValueListenableBuilder<TextEditingValue>(
+                    valueListenable: controller,
+                    builder: (context, value, _) => StudioButton(
+                      label: widget.editing ? 'Save' : 'Add',
+                      variant: StudioButtonVariant.accent,
+                      enabled: value.text.trim().isNotEmpty,
+                      onTap: () => _save(context),
+                    ),
                   ),
                 ],
               ),

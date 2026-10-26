@@ -265,6 +265,14 @@ class _WorkspaceState extends State<_Workspace> {
           await vm.addAccompaniment(audio.first);
           index = 1;
         }
+        // The lane lit up as the target, and the files then landed as takes
+        // with nothing said.
+        if (index == 0) {
+          _showToast(
+            'The ${vm.mixer.playReference ? 'Original' : 'Accompaniment'} is '
+            'already set, so the drop was added as vocal takes.',
+          );
+        }
         for (var i = index; i < audio.length; i++) {
           await vm.addVocalTake(audio[i]);
         }
@@ -339,10 +347,11 @@ class _WorkspaceState extends State<_Workspace> {
 
   /// Adds a technique at [startMs] (point) or across [startMs]..[endMs] (range).
   Future<void> _addTechniqueAt(String trackId, int startMs, int? endMs) async {
-    final title = (endMs != null && endMs > startMs)
-        ? 'Add technique across ${formatClockMs(startMs)} → '
-              '${formatClockMs(endMs)}'
-        : 'Add technique at ${formatClockMs(startMs)}';
+    // Titled as it will be kept (see showNoteEditor).
+    final (s, e) = normalizeMarkerRange(startMs, endMs);
+    final title = e != null
+        ? 'Add technique across ${formatClockMs(s)} → ${formatClockMs(e)}'
+        : 'Add technique at ${formatClockMs(s)}';
     final picked = await showTechniquePicker(
       context,
       vm.availableTechniques(),
@@ -1932,7 +1941,16 @@ class _DropHint extends StatelessWidget {
         children: [
           Icon(icon, size: 16, color: color),
           const SizedBox(width: 8),
-          Text(text, style: TextStyle(color: color, fontSize: 13)),
+          // Cut short rather than overflowing: at the smallest window with
+          // both side panels open the centre pane is under 400 px wide.
+          Flexible(
+            child: Text(
+              text,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(color: color, fontSize: 13),
+            ),
+          ),
         ],
       ),
     );

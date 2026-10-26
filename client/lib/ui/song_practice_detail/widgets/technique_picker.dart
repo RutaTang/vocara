@@ -10,7 +10,7 @@ import '../../core/themes/studio.dart';
 /// where it lands (a playhead point or a drawn range).
 Future<Technique?> showTechniquePicker(
   BuildContext context,
-  Future<List<Technique>> techniques, {
+  Future<List<Technique>?> techniques, {
   String title = 'Add technique at playhead',
 }) {
   return showDialog<Technique>(
@@ -23,7 +23,8 @@ Future<Technique?> showTechniquePicker(
 class _TechniquePickerDialog extends StatefulWidget {
   const _TechniquePickerDialog({required this.load, required this.title});
 
-  final Future<List<Technique>> load;
+  /// The library, or null when it could not be read.
+  final Future<List<Technique>?> load;
   final String title;
 
   @override
@@ -35,11 +36,18 @@ class _TechniquePickerDialogState extends State<_TechniquePickerDialog> {
   String _query = '';
   List<Technique>? _all;
 
+  /// The library could not be read: said so, not "no techniques yet".
+  bool _failed = false;
+
   @override
   void initState() {
     super.initState();
     widget.load.then((list) {
-      if (mounted) setState(() => _all = list);
+      if (!mounted) return;
+      setState(() {
+        _all = list ?? const [];
+        _failed = list == null;
+      });
     });
   }
 
@@ -137,6 +145,11 @@ class _TechniquePickerDialogState extends State<_TechniquePickerDialog> {
             ),
           ),
         ),
+      );
+    }
+    if (_failed) {
+      return const _Hint(
+        "Couldn't open the technique library. Try again in a moment.",
       );
     }
     if (_all!.isEmpty) {

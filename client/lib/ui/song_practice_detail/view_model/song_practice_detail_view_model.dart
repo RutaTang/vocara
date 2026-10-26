@@ -62,8 +62,8 @@ const int kMinMarkerRangeMs = 120;
 
 /// Orders [startMs]/[endMs] and drops a null or too-short span to a point
 /// marker (endMs null). Returns the normalized (start, end?), with start never
-/// negative. Pure — unit-tested.
-@visibleForTesting
+/// negative. Pure — unit-tested. The editors title a marker by it too, so a
+/// drag too short to keep as a range is not announced as one.
 (int, int?) normalizeMarkerRange(int startMs, int? endMs) {
   if (endMs == null) return (startMs < 0 ? 0 : startMs, null);
   var s = startMs < endMs ? startMs : endMs;
@@ -2587,9 +2587,11 @@ class SongPracticeDetailViewModel extends ChangeNotifier
 
   /// The user's technique library, for the "add technique" picker. Returns an
   /// empty list if it fails to load.
-  Future<List<Technique>> availableTechniques() async {
+  /// The technique library, or null when it could not be read: taken as an
+  /// empty list, the picker told the user to add techniques they had.
+  Future<List<Technique>?> availableTechniques() async {
     final result = await _techniqueRepository.listTechniques();
-    return result is Ok<List<Technique>> ? result.value : const [];
+    return result is Ok<List<Technique>> ? result.value : null;
   }
 
   /// Adds a technique marker at [startMs] (a point), or across
