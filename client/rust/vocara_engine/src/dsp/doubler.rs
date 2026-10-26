@@ -89,6 +89,14 @@ impl DoublerNode {
         (0.001 * self.sr) as f32
     }
 
+    /// The deepest the modulation may go: the delay the taps sit at, less the one frame a read
+    /// needs. Deeper, `base + depth·sin` reached "now", the read clamped to a frame, and for
+    /// that part of every cycle the copy collapsed onto the dry (+3.5 dB at full mix), its
+    /// modulation stopped and its pitch snapping at the edges (Delay below Depth).
+    fn depth_room(&self) -> f32 {
+        (self.base.min(self.base_next) - 1.0).max(0.0)
+    }
+
     #[inline]
     fn read(buf: &[Smp], pos: usize, delay_samples: f32) -> Smp {
         let len = buf.len();
@@ -172,7 +180,7 @@ impl Node for DoublerNode {
             self.base_next = want;
             self.base_mix = 0.0;
         }
-        let depth_target = self.depth_ms * self.per_ms();
+        let depth_target = (self.depth_ms * self.per_ms()).min(self.depth_room());
         // A landed mix ramp / on-off fade is one value all block (see `Smoothed::settled`).
         let (mix_held, fade_held) = (self.mix.settled(frames), self.fade.settled());
 
@@ -221,12 +229,13 @@ impl Node for DoublerNode {
                 if !self.heard {
                     self.base = self.delay_ms * self.per_ms();
                     self.base_next = self.base;
+                    self.depth = (self.depth_ms * self.per_ms()).min(self.depth_room());
                 }
             }
             param::DEPTH_MS => {
                 self.depth_ms = value.clamp(0.0, 20.0);
                 if !self.heard {
-                    self.depth = self.depth_ms * self.per_ms();
+                    self.depth = (self.depth_ms * self.per_ms()).min(self.depth_room());
                 }
             }
             param::RATE_HZ => self.rate_hz = value.clamp(0.05, 8.0),
@@ -332,7 +341,8 @@ mod tests {
             d.base_next = want;
             d.base_mix = 0.0;
         }
-        let depth_target = d.depth_ms * d.per_ms();
+        // The depth cap is new semantics, not part of the rewrite this test pins.
+        let depth_target = (d.depth_ms * d.per_ms()).min(d.depth_room());
         for i in 0..frames {
             let l = out[CHANNELS * i];
             let r = out[CHANNELS * i + 1];
@@ -391,6 +401,25 @@ mod tests {
         crate::dsp::test_support::assert_matches_reference(
             &mut fast, &mut slow, reference, &edits, 130,
         );
+    }
+
+    #[test]
+    fn a_delay_shorter_than_the_depth_never_reads_past_now() {
+        // Delay 2 ms under the default 4 ms depth: the tap swung to "now" for a third of
+        // every cycle, where the read clamps and the copy collapses onto the dry.
+        let mut d = DoublerNode::new();
+        d.prepare(48_000.0, 512);
+        d.set_param(param::BYPASS, 0.0);
+        d.set_param(param::DELAY_MS, 2.0);
+        assert!(d.depth <= d.base - 1.0, "capped before the first block");
+        let input = vec![0.25; 512 * CHANNELS];
+        let mut deepest = 0.0f32;
+        for _ in 0..200 {
+            run_block(&mut d, &input);
+            deepest = deepest.max(d.depth);
+        }
+        assert!(deepest <= d.base - 1.0, "{deepest} > {}", d.base - 1.0);
+        assert!(d.depth > 0.0, "the copy is still modulated");
     }
 
     #[test]
