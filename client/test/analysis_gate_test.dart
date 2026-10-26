@@ -89,8 +89,8 @@ void main() {
       expect(cache.containsKey('next'), isTrue);
     });
 
-    test('an insert never pushes out what its siblings hold under the same '
-        'key', () {
+    test('an insert never pushes out what its partners hold under the same '
+        'key, and only its partners', () {
       // A clip's spectrogram and metrics are one analysis held in two caches.
       // With the pair over the budget, each half's insert dropped the other,
       // and the view showing it computed it again, dropping the first.
@@ -99,12 +99,16 @@ void main() {
         budget,
         (v) => v.length,
       );
-      final metrics = LruBytesCache<List<int>>.shared(budget, (v) => v.length);
+      final metrics = LruBytesCache<List<int>>.shared(budget, (v) => v.length)
+        ..partnerWith(spectrograms);
+      final eq = LruBytesCache<List<int>>.shared(budget, (v) => v.length);
+      eq['take'] = List.filled(2, 0); // the take's EQ display, unread since
       metrics['other'] = List.filled(2, 0);
       spectrograms['take'] = List.filled(8, 0);
       metrics['take'] = List.filled(4, 0);
       expect(spectrograms.containsKey('take'), isTrue);
       expect(metrics.containsKey('take'), isTrue);
+      expect(eq.containsKey('take'), isFalse, reason: 'no partner: oldest');
       expect(metrics.containsKey('other'), isFalse, reason: 'room made');
       expect(budget.bytes, 12, reason: 'the pair alone is over the budget');
 

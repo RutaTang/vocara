@@ -93,6 +93,8 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     // over this cache.
     _spectrogramCache.onEvict = _dropDerived;
     _metricsCache.onEvict = _dropDerived;
+    // A clip's two halves are one analysis: neither insert evicts the other.
+    _metricsCache.partnerWith(_spectrogramCache);
     _aggAnalysisCache.onEvict = _dropAggDerived;
   }
 
@@ -602,7 +604,8 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   /// for again until a merge caches it or a file it folds changes: the
   /// inspector asks on every rebuild, and merged the lane again each time.
   /// A clip needs no such bound: a compute's insert never drops the clip's
-  /// other half (see [LruBytesCache]), so a heal leaves what it asked for.
+  /// other half (see [LruBytesCache.partnerWith]), so a heal leaves what it
+  /// asked for.
   String? _healBlocked;
 
   /// Asks again for what [lacksAnalysis] says the subject lacks: by default

@@ -8,10 +8,11 @@
 /// currently displayed subject is always the most recent and never evicted
 /// under it). The newest entry is kept even when it alone exceeds the budget
 /// — an oversized result is better served once than recomputed forever — and
-/// so is every entry its sibling caches hold under the same key: a clip's
-/// spectrogram and metrics are one analysis held in two caches, and a pair
-/// too big for the budget pushed one half out to make room for the other, so
-/// the view showing that half computed it again, pushing out the other's.
+/// so is every entry its partner caches ([partnerWith]) hold under the same
+/// key: a clip's spectrogram and metrics are one analysis held in two caches,
+/// and a pair too big for the budget pushed one half out to make room for the
+/// other, so the view showing that half computed it again, pushing out the
+/// other's.
 ///
 /// A cache either owns its budget (the plain constructor) or shares one with
 /// its siblings ([LruBytesCache.shared]). Sharing is what makes the process's
@@ -51,15 +52,17 @@ class LruBytesBudget {
   }
 
   /// Evict globally-oldest entries until the total fits, never one under
-  /// [keep] — the key just inserted, in whichever member holds it — so an
-  /// oversized result is still served whole (see the class doc). Called after
-  /// any member's insert.
-  void _trim(String keep) {
+  /// [keep] — the key just inserted — in a cache of the inserter's
+  /// [partners], so an oversized result is still served whole (see the class
+  /// doc). Called after any member's insert.
+  void _trim(String keep, Object partners) {
+    String? keptIn(LruBytesCache<Object?> m) =>
+        identical(m._partners, partners) ? keep : null;
     while (_bytes > maxBytes) {
       LruBytesCache<Object?>? victim;
       var oldest = 0;
       for (final m in _members) {
-        final tick = m._oldestTickExcept(keep);
+        final tick = m._oldestExcept(keptIn(m))?.value.tick;
         if (tick == null) continue;
         if (victim == null || tick < oldest) {
           victim = m;
@@ -68,7 +71,7 @@ class LruBytesBudget {
       }
       // Nothing left to give: only the entries under [keep] remain.
       if (victim == null) return;
-      victim._evictOldestExcept(keep);
+      victim._evictOldestExcept(keptIn(victim));
     }
   }
 }
@@ -110,6 +113,18 @@ class LruBytesCache<V> {
   /// total (tests/diagnostics).
   LruBytesBudget get budget => _budget;
 
+  /// The caches holding parts of one result with this one (see [partnerWith]).
+  Object _partners = Object();
+
+  /// Holds parts of one result with [other], on the same budget: an insert
+  /// under a key never evicts what a partner holds under that key. Only
+  /// partners: an EQ display spectrogram under a clip's path, or another
+  /// screen's entry for the same file, is evicted in its turn like any other.
+  void partnerWith(LruBytesCache<Object?> other) {
+    assert(identical(other._budget, _budget), 'partners share a budget');
+    _partners = other._partners;
+  }
+
   // LinkedHashMap iteration order doubles as this cache's own recency order:
   // re-insertion on read moves an entry to the back (most recent).
   final Map<String, _Entry<V>> _map = {};
@@ -133,16 +148,14 @@ class LruBytesCache<V> {
   /// first or the second), or null. The first in iteration order is the
   /// oldest only because [operator []] re-inserts on read, which also moves
   /// the entry to the back.
-  MapEntry<String, _Entry<V>>? _oldestExcept(String keep) {
+  MapEntry<String, _Entry<V>>? _oldestExcept(String? keep) {
     for (final e in _map.entries) {
       if (e.key != keep) return e;
     }
     return null;
   }
 
-  int? _oldestTickExcept(String keep) => _oldestExcept(keep)?.value.tick;
-
-  void _evictOldestExcept(String keep) {
+  void _evictOldestExcept(String? keep) {
     final oldest = _oldestExcept(keep);
     if (oldest == null) return;
     _map.remove(oldest.key);
@@ -175,7 +188,7 @@ class LruBytesCache<V> {
     _map[key] = _Entry(value, _budget._tick());
     _bytes += byteOf(value);
     _budget._bytes += byteOf(value);
-    _budget._trim(key);
+    _budget._trim(key, _partners);
   }
 
   V? remove(String key) {

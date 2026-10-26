@@ -68,8 +68,9 @@ class _LeftPanelState extends State<LeftPanel> {
         track != null &&
         !track.isBacking &&
         vm.analysis.lacksAnalysis(metrics: true)) {
-      // Only the metrics: asking for the pair computed a spectrogram nothing
-      // here shows.
+      // For the metrics: a spectrogram comes with them only from the same
+      // decode, when neither half is here; one dropped alone is not the
+      // inspector's to ask for again.
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) {
           vm.analysis.healSelectedAnalysis(spectrogram: false, metrics: true);
