@@ -84,6 +84,18 @@ class RecordingFinalizer {
 
   final _pending = <Future<void> Function()>{};
 
+  /// [_progress], given at most [readingLimit], or null: a reading stuck (an
+  /// export's destination on a network share that went away) or failing
+  /// counts as no movement, instead of holding the quit, and every save
+  /// waiting behind it, until the share answers.
+  Future<int?> _read() => _progress()
+      .then<int?>((v) => v)
+      .timeout(readingLimit, onTimeout: () => null)
+      .catchError((Object _) => null);
+
+  /// How long one progress reading may take (see [_read]).
+  static const readingLimit = Duration(milliseconds: 500);
+
   /// The in-flight [finalizeAll] run, shared by concurrent callers.
   Future<void>? _inFlight;
 
@@ -266,7 +278,7 @@ class RecordingFinalizer {
     }
     // Read before the finalizers start: the wait must attach to them at once,
     // or one failing straight away escapes as an unhandled error.
-    var mark = await _progress();
+    var mark = await _read();
     _invoked.addAll(pending);
     var running = pending.length;
     final all = Future.wait([
@@ -287,9 +299,9 @@ class RecordingFinalizer {
         // every byte copied and every landing step finished (an export's part
         // drops back when it ends, which is movement too); an injected one
         // may move either way.
-        final now = await _progress();
+        final now = await _read();
         window = _shorter(perFinalizerBudget, progressCeiling - clock.elapsed);
-        if (now == mark || window <= Duration.zero) break;
+        if (now == null || now == mark || window <= Duration.zero) break;
         mark = now;
         DiagnosticsLog.instance.log(
           'quit',

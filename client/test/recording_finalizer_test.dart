@@ -530,4 +530,33 @@ void main() {
     await finalizer.landed('p1').timeout(const Duration(seconds: 2));
     await finalizer.landed('other').timeout(const Duration(seconds: 2));
   });
+
+  // The quit's progress reading looks at an export's destination, which can sit
+  // on a network share that stopped answering: the quit waited on it, and so
+  // did every save behind it.
+  for (final (name, reading) in <(String, Future<int> Function())>[
+    ('never answers', () => Completer<int>().future),
+    ('throws', () async => throw StateError('gone')),
+  ]) {
+    test(
+      'a progress reading that $name neither holds nor stops the quit',
+      () async {
+        final finalizer = RecordingFinalizer.forTesting(
+          perFinalizerBudget: const Duration(milliseconds: 50),
+          totalBudget: const Duration(milliseconds: 80),
+          progress: reading,
+        );
+        var saved = false;
+        finalizer.register(() async => saved = true, startsWork: true);
+        final clock = Stopwatch()..start();
+        await finalizer.finalizeAll();
+        expect(saved, isTrue);
+        expect(
+          clock.elapsed,
+          lessThan(RecordingFinalizer.readingLimit * 3),
+          reason: 'one bounded reading, then the finalizers',
+        );
+      },
+    );
+  }
 }

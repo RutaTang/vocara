@@ -1,6 +1,7 @@
 // An export copies a take (or the diagnostics bundle) onto the path the save
 // panel picked. A copy failing part-way left a truncated file there.
 
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -155,6 +156,24 @@ void main() {
     );
     expect(during, 5);
     expect(await exportBytesWritten(), 0);
+  });
+
+  test('an export ending while the reading waits on a length leaves the '
+      'reading whole', () async {
+    final release = Completer<void>();
+    final written = Completer<void>();
+    final export = exportCopy(
+      _ProbingSource('audio', () async {
+        written.complete();
+        await release.future;
+      }),
+      p.join(tmp.path, 'take.wav'),
+    );
+    await written.future;
+    final reading = exportBytesWritten(); // waits on the file's length
+    release.complete(); // the copy ends: its path leaves the set
+    await export;
+    expect(await reading, isA<int>());
   });
 
   test('a good copy lands whole', () async {

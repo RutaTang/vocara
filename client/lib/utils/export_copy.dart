@@ -11,11 +11,13 @@ final _writing = <String>{};
 /// quit's budget, and cutting it off left the file there cut short.
 Future<int> exportBytesWritten() async {
   var n = 0;
-  for (final path in _writing) {
+  // Over a copy: an export ending (or starting) while a length is awaited
+  // changes the set under the loop.
+  for (final path in List.of(_writing)) {
     try {
       n += await File(path).length();
-    } on FileSystemException {
-      // Not created yet.
+    } catch (_) {
+      // Not created yet, or gone: nothing written there to count.
     }
   }
   return n;
