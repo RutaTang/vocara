@@ -361,16 +361,24 @@ pub struct RtProcessor {
     /// The monitor is off and silent (see [`Self::mix_monitor`]): its reverb and mix are
     /// skipped, and the reverb restarts clean when the gain comes back.
     mon_idle: bool,
+    /// The fewest mic frames any callback of the current window left in the ring after its
+    /// drain, and how many output frames the window has run (see [`Self::add_monitor`]).
+    mon_slack: usize,
+    mon_window: usize,
 }
 
 /// A monitor gain this small (-120 dB) is silence: once the target is 0 and the ramp has fallen
 /// below it, the monitor goes idle (see `RtProcessor::mix_monitor`).
 const MON_IDLE: f32 = 1.0e-6;
 
-/// Mic frames the monitor lets wait beyond the block it drains: room for the input and
-/// output callbacks' jitter (an input burst of a few hundred frames) without holding a
-/// stall's backlog as latency. ~21 ms at the engine rate.
-const MON_BACKLOG_MAX: usize = 1024;
+/// Output frames over which the monitor watches the mic ring's slack before shedding any
+/// (see `RtProcessor::add_monitor`): one second, longer than any input period, so the low
+/// point every burst runs the ring down to is always seen.
+const MON_SLACK_WINDOW: usize = 48_000;
+
+/// Mic frames the monitor keeps waiting when it sheds a standing backlog: margin for the
+/// callbacks' timing jitter. ~5 ms at the engine rate.
+const MON_SLACK_KEEP: usize = 256;
 
 impl RtProcessor {
     /// Render `frames` of interleaved stereo into `out`, including the live-input monitor.
@@ -516,6 +524,24 @@ impl RtProcessor {
             self.mix_monitor(&mut out[s..e], chunk);
             done += chunk;
         }
+        // Shed a standing backlog. Drained exactly what it plays, the ring kept whatever piled
+        // up while the output was not rendering (its stream rebuilt with the input still open)
+        // as hear-yourself latency for good: 80 ms after a 100 ms stall, a minute later still.
+        // A backlog is what EVERY callback left behind — measured after the drain, over a
+        // window longer than any input period. What one input burst holds is not one: the
+        // ring runs down to its low point once per burst. Judged per block against the ring's
+        // fill instead, a 4096-frame burst played into 512-frame callbacks was cut down every
+        // period and the monitor fell silent half the time. What is dropped only ever reached
+        // the singer's ears; the take records through its own ring.
+        self.mon_slack = self.mon_slack.min(self.mic_rx.len());
+        self.mon_window += frames;
+        if self.mon_window >= MON_SLACK_WINDOW {
+            for _ in 0..self.mon_slack.saturating_sub(MON_SLACK_KEEP) {
+                let _ = self.mic_rx.pop();
+            }
+            self.mon_slack = usize::MAX;
+            self.mon_window = 0;
+        }
     }
 
     /// Add the live-input monitor on top of the playback mix. The mic frames (already at
@@ -539,15 +565,6 @@ impl RtProcessor {
         };
         self.mon_gain.set_target(target);
 
-        // Shed a backlog first: drained exactly `frames` a block, mic frames that piled up
-        // while the output was not rendering (its stream rebuilt with the input still open)
-        // stayed as monitor latency for good: 80 ms after a 100 ms stall, a minute later
-        // still. What is dropped only ever reached the singer's ears; the take records
-        // through its own ring.
-        let excess = self.mic_rx.len().saturating_sub(frames + MON_BACKLOG_MAX);
-        for _ in 0..excess {
-            let _ = self.mic_rx.pop();
-        }
         if target == 0.0 && self.mon_gain.current() <= MON_IDLE {
             // Off and silent: land the ramp on exact zero, keep the ring drained, add nothing.
             // Still advance the smoother: one never advanced is not yet "live", and its first
@@ -604,21 +621,23 @@ impl RtProcessor {
 
         // Mix the processed monitor into the output with the ramped gain (a landed ramp is one
         // value for the whole block: see `Smoothed::settled`).
-        // The sum goes through the master's safety clip again: added after the master, the
-        // monitor bypassed it, and a sung peak at the default record gain put the device
-        // buffer at +9 dBFS (far more at the top of the gain range), hard-clipped by the
-        // device in the singer's ears. Below -3 dBFS it passes bit-exact, as the master does.
+        // Added after the master, the monitor bypassed its safety clip, and a sung peak at the
+        // default record gain put the device buffer at +9 dBFS (far more at the top of the
+        // gain range), hard-clipped by the device in the singer's ears. It is bent into the
+        // headroom the clipped mix leaves instead, which leaves that mix untouched wherever
+        // the monitor adds nothing (see `add_within_full_scale`).
+        use crate::dsp::master::add_within_full_scale as mix;
         if let Some(g) = self.mon_gain.settled(frames) {
             for (o, &m) in out[..n].iter_mut().zip(&self.mon_out[..n]) {
-                *o = crate::dsp::master::soft_clip(*o + m * g);
+                *o = mix(*o, m * g);
             }
             return;
         }
         for i in 0..frames {
             let g = self.mon_gain.next();
             let (l, r) = (CHANNELS * i, CHANNELS * i + 1);
-            out[l] = crate::dsp::master::soft_clip(out[l] + self.mon_out[l] * g);
-            out[r] = crate::dsp::master::soft_clip(out[r] + self.mon_out[r] * g);
+            out[l] = mix(out[l], self.mon_out[l] * g);
+            out[r] = mix(out[r], self.mon_out[r] * g);
         }
     }
 }
@@ -1112,6 +1131,8 @@ pub fn spawn(
         mon_in: vec![0.0; max_block * CHANNELS],
         mon_out: vec![0.0; max_block * CHANNELS],
         mon_idle: true,
+        mon_slack: usize::MAX,
+        mon_window: 0,
     };
     (handle, rt)
 }
@@ -1386,8 +1407,8 @@ mod monitor_tests {
         for i in 0..frames {
             let g = rt.mon_gain.next();
             let (l, r) = (CHANNELS * i, CHANNELS * i + 1);
-            out[l] = crate::dsp::master::soft_clip(out[l] + rt.mon_out[l] * g);
-            out[r] = crate::dsp::master::soft_clip(out[r] + rt.mon_out[r] * g);
+            out[l] = crate::dsp::master::add_within_full_scale(out[l], rt.mon_out[l] * g);
+            out[r] = crate::dsp::master::add_within_full_scale(out[r], rt.mon_out[r] * g);
         }
     }
 
@@ -1627,7 +1648,9 @@ mod monitor_and_loop_tests {
         for _ in 0..4800 {
             let _ = mic.push([0.0, 0.0]);
         }
-        for _ in 0..100 {
+        // Two windows: the backlog is judged over a whole one, and the window the stall fell
+        // in still saw the slack before it.
+        for _ in 0..(2 * MON_SLACK_WINDOW / BLOCK + 1) {
             for _ in 0..BLOCK {
                 let _ = mic.push([0.0, 0.0]);
             }
@@ -1635,9 +1658,133 @@ mod monitor_and_loop_tests {
         }
         let after = latency(&mut rt, &mut mic);
         assert!(
-            after <= before + MON_BACKLOG_MAX,
+            after <= before + MON_SLACK_KEEP,
             "latency {before} frames before the stall, {after} after it"
         );
+    }
+
+    /// Mic frames pushed in bursts of `burst` every `burst` frames of time and rendered in
+    /// callbacks of `callback` frames (input first on a tie, as in a duplex cycle), with the
+    /// production 1024-frame block: the frames the monitor played as silence, and the jumps in
+    /// the mic's sequence it played, over 4 s after a second's warm-up.
+    fn monitor_gaps(burst: usize, callback: usize) -> (usize, usize) {
+        let desc = GraphDesc {
+            nodes: vec![NodeEntry::new(1, Box::new(MasterNode::unity()))],
+            edges: vec![],
+            master: 1,
+        };
+        let g = desc.compile(ENGINE_SR, 1024).unwrap();
+        let (mut mic, mic_cons) = spsc::<[Smp; CHANNELS]>(1 << 13);
+        let (h, mut rt) = spawn(g, HashMap::new(), mic_cons, 1024);
+        h.set_monitor_gain(1.0);
+        h.set_monitor_reverb(0.6, 0.5, 0.0);
+        let mut out = vec![0.0; callback * CHANNELS];
+        let (mut next, mut silent, mut jumps) = (0usize, 0, 0);
+        let mut last: Option<usize> = None;
+        for t in 0..5 * 48_000 {
+            if t % burst == 0 {
+                for _ in 0..burst {
+                    // Each frame carries its position in the sequence.
+                    let v = (next % 3000 + 1) as f32 * 1.0e-4;
+                    let _ = mic.push([v, v]);
+                    next += 1;
+                }
+            }
+            if t % callback != 0 {
+                continue;
+            }
+            rt.process(&mut out, callback);
+            if t < 48_000 {
+                continue;
+            }
+            for i in 0..callback {
+                let s = out[CHANNELS * i];
+                if s == 0.0 {
+                    silent += 1;
+                    last = None;
+                    continue;
+                }
+                let id = (s / 1.0e-4).round() as usize;
+                if last.is_some_and(|p| id != p % 3000 + 1) {
+                    jumps += 1;
+                }
+                last = Some(id);
+            }
+        }
+        (silent, jumps)
+    }
+
+    #[test]
+    fn the_monitor_plays_every_frame_of_a_bursty_input() {
+        // Shed whenever the ring held more than a block plus 1024 frames, a mic delivering
+        // larger bursts than the output asked for at a time (a 4096-frame device buffer, a
+        // 2048-frame USB mic into 512-frame callbacks, a resampled 16 kHz input) lost the
+        // excess every period, and the callbacks after it played silence: half the time.
+        for (burst, callback) in [
+            (256, 256),
+            (1024, 1024),
+            (4096, 4096),
+            (2048, 512),
+            (3072, 512),
+            (1536, 256),
+            (2229, 1024),
+            (1600, 512),
+            (1115, 1024),
+        ] {
+            let (silent, jumps) = monitor_gaps(burst, callback);
+            // Nothing the mic delivered is skipped; the rare silent frame is a callback that
+            // came before its burst (4 in the 1115/1024 run, as with no shedding at all).
+            assert_eq!(
+                jumps, 0,
+                "{burst}-frame bursts into {callback}-frame callbacks"
+            );
+            assert!(
+                silent <= 16,
+                "{silent} silent frames: {burst} into {callback}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_armed_monitor_leaves_the_backing_as_the_master_clipped_it() {
+        // Summed through the master's soft clip a second time, a backing mastered to
+        // -0.1 dBFS came out 0.3 dB quieter and more distorted the moment the monitor was
+        // armed, the mic silent.
+        let pcm: Vec<Smp> = (0..2 * 48_000 * CHANNELS)
+            .map(|i| 0.989 * ((i / 2) as f32 * std::f32::consts::TAU * 220.0 / 48_000.0).sin())
+            .collect();
+        let render = |gain: f32| {
+            let desc = GraphDesc {
+                nodes: vec![
+                    NodeEntry::new(1, Box::new(BufferSource::new(pcm.clone(), 0))),
+                    NodeEntry::new(2, Box::new(MasterNode::limited())),
+                ],
+                edges: vec![Edge::simple(1, 2)],
+                master: 2,
+            };
+            let g = desc.compile(ENGINE_SR, BLOCK).unwrap();
+            let (mut mic, mic_cons) = spsc::<[Smp; CHANNELS]>(1 << 12);
+            let (h, mut rt) = spawn(g, HashMap::new(), mic_cons, 256);
+            h.play();
+            h.set_monitor_gain(gain);
+            let mut all = Vec::new();
+            let mut out = vec![0.0; BLOCK * CHANNELS];
+            for _ in 0..300 {
+                for _ in 0..BLOCK {
+                    let _ = mic.push([0.0, 0.0]);
+                }
+                rt.process(&mut out, BLOCK);
+                all.extend_from_slice(&out);
+            }
+            all
+        };
+        let off = render(0.0);
+        let on = render(1.0);
+        assert!(
+            off.iter().any(|&x| x.abs() > 0.9),
+            "the backing reaches the clip"
+        );
+        assert_eq!(off, on);
     }
 
     #[test]
