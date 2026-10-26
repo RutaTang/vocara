@@ -1,21 +1,38 @@
+import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:path/path.dart' as p;
 
 /// The files the exports in flight are writing.
 final _writing = <String>{};
 
+/// What each export in flight was last seen to have written.
+final _lastWritten = <String, int>{};
+
 /// How much the exports in flight have written so far. A quit holding for an
 /// export reads a change here as the export still working, not wedged (see
 /// RecordingFinalizer): a long take copying to a slow stick outlasts the
 /// quit's budget, and cutting it off left the file there cut short.
-Future<int> exportBytesWritten() async {
+///
+/// Each file gets [perFile] to answer: one on a network share that stopped
+/// answering counts at what it last had (no movement) rather than holding up
+/// the whole reading, and with it the pool imports' movement beside it.
+Future<int> exportBytesWritten({
+  Duration perFile = const Duration(milliseconds: 250),
+  @visibleForTesting Future<int> Function(String path)? lengthOf,
+}) async {
+  final measure = lengthOf ?? (String path) => File(path).length();
   var n = 0;
   // Over a copy: an export ending (or starting) while a length is awaited
   // changes the set under the loop.
   for (final path in List.of(_writing)) {
     try {
-      n += await File(path).length();
+      final written = await measure(path).timeout(perFile);
+      _lastWritten[path] = written;
+      n += written;
+    } on TimeoutException {
+      n += _lastWritten[path] ?? 0;
     } catch (_) {
       // Not created yet, or gone: nothing written there to count.
     }
@@ -60,6 +77,7 @@ Future<void> exportCopy(File source, String destPath) async {
     rethrow;
   } finally {
     _writing.remove(dest.path);
+    _lastWritten.remove(dest.path);
   }
 }
 

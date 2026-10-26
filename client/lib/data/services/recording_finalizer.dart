@@ -84,17 +84,18 @@ class RecordingFinalizer {
 
   final _pending = <Future<void> Function()>{};
 
-  /// [_progress], given at most [readingLimit], or null: a reading stuck (an
-  /// export's destination on a network share that went away) or failing
-  /// counts as no movement, instead of holding the quit, and every save
-  /// waiting behind it, until the share answers.
+  /// [_progress], given at most [readingLimit], or null: a reading stuck or
+  /// failing counts as no movement, instead of holding the quit, and every
+  /// save waiting behind it. A backstop: the export part bounds each file
+  /// itself (see exportBytesWritten), so a stuck share doesn't hide the pool
+  /// imports still moving beside it.
   Future<int?> _read() => _progress()
       .then<int?>((v) => v)
       .timeout(readingLimit, onTimeout: () => null)
       .catchError((Object _) => null);
 
   /// How long one progress reading may take (see [_read]).
-  static const readingLimit = Duration(milliseconds: 500);
+  static const readingLimit = Duration(seconds: 2);
 
   /// The in-flight [finalizeAll] run, shared by concurrent callers.
   Future<void>? _inFlight;

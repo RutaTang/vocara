@@ -176,6 +176,37 @@ void main() {
     expect(await reading, isA<int>());
   });
 
+  // One export on a share that stopped answering held up the whole reading,
+  // so the quit couldn't see a pool import still moving beside it.
+  test(
+    'a file that stops answering counts at what it last had, promptly',
+    () async {
+      final release = Completer<void>();
+      final written = Completer<void>();
+      final export = exportCopy(
+        _ProbingSource('audio', () async {
+          written.complete();
+          await release.future;
+        }),
+        p.join(tmp.path, 'take.wav'),
+      );
+      await written.future;
+      expect(await exportBytesWritten(), 5);
+
+      final clock = Stopwatch()..start();
+      final stuck = await exportBytesWritten(
+        perFile: const Duration(milliseconds: 50),
+        lengthOf: (_) => Completer<int>().future,
+      );
+      expect(stuck, 5);
+      expect(clock.elapsed, lessThan(const Duration(seconds: 1)));
+
+      release.complete();
+      await export;
+      expect(await exportBytesWritten(), 0);
+    },
+  );
+
   test('a good copy lands whole', () async {
     final src = File(p.join(tmp.path, 'src.wav'))..writeAsStringSync('audio');
     final dest = p.join(tmp.path, 'out.wav');
