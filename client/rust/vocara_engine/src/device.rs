@@ -1590,9 +1590,12 @@ impl InputCell {
 ///  * a new input or output stream — a reopened mic, a rebuilt output, maybe
 ///    another device — restarts the history. The published ratio holds until
 ///    the new stream's fit rules it out, or shows a drift of its own more
-///    precisely than the published fit did, for ten minutes at most; then it
-///    counts for nothing, as if the stream had started on 1.0 (a mic reopened
-///    on the same pair, the common case, keeps its correction);
+///    precisely than the published fit did, for the stream's first ten
+///    minutes at most; then it counts for nothing, as if the stream had started
+///    on 1.0. A mic reopened on the same pair, the common case, keeps its
+///    correction; the cost is that takes shorter than that on another pair
+///    keep a ratio up to their fits' tolerance off (8 ppm, from 128-frame
+///    takes of three minutes at 22 ppm after a stream at 30);
 ///  * the correction clamps at ±500 ppm: anything larger is a broken device,
 ///    not drift.
 ///

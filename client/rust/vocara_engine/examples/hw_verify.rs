@@ -12,17 +12,15 @@
 //!  1. STREAM HEALTH — a disk-streamed track playing through the real output
 //!     callback keeps `ve_stream_xruns` at 0 (the feeder pump outpaces real
 //!     device timing, not just the test harness's synchronous pump).
-//!  2. DRIFT ESTIMATOR ON REAL CLOCKS — with the mic open and the transport
-//!     playing, the 1 s poll ticks the estimator against two REAL streams.
-//!     On a shared codec (built-in mic + speakers) the truth is ~0 ppm, so the
-//!     estimator must sit in its deadband (exactly 0.0 ppm published) — the
-//!     "no spurious correction on a healthy chain" half of calibration. An
-//!     independent-clock device pair (e.g. USB mic) would show a stable
-//!     nonzero ppm instead; the report prints whatever is measured.
-//!  3. FREEZE — closing the mic stops the input counter; the published
-//!     correction must hold bit-for-bit afterwards. (A transport PAUSE does
-//!     NOT freeze it: the output keeps delivering silence, both clocks keep
-//!     ticking, and the estimator keeps measuring — by design.)
+//!  2. MIC IN STEP WITH THE OUTPUT — the mic is duplex VPIO, which delivers the
+//!     input and renders the output in one IO cycle, so the drift estimator is
+//!     not run here (`MIC_ON_OUTPUT_CLOCK`; the correction stays exactly 1.0).
+//!     That premise is what this checks on real hardware, whatever the devices
+//!     (a USB mic with the built-in speakers included): over the run, the mic's
+//!     engine frames and the playhead advance together, to within a few IO
+//!     cycles. The difference is printed with the drift it would amount to.
+//!  3. NO CORRECTION — the published drift correction reads exactly 0.0 ppm,
+//!     with the mic open and after it closes.
 
 use std::ffi::CString;
 use std::time::{Duration, Instant};
@@ -72,10 +70,15 @@ fn main() {
     let t0 = Instant::now();
     let mut events: u32 = 0;
     let mut last_report = 0u64;
+    // (mic frames, playhead) once the mic has settled in, for the in-step check.
+    let mut settled: Option<(u64, i64)> = None;
     while t0.elapsed() < Duration::from_secs(PLAY_SECS) {
         std::thread::sleep(Duration::from_secs(1));
-        events |= ve_poll_device_event(e, u32::MAX); // also ticks the drift estimator
+        events |= ve_poll_device_event(e, u32::MAX);
         let s = t0.elapsed().as_secs();
+        if s >= 10 && settled.is_none() {
+            settled = Some((ve_input_frames_received(e), ve_frame_pos(e)));
+        }
         if s / 10 > last_report {
             last_report = s / 10;
             println!(
@@ -93,18 +96,12 @@ fn main() {
     let pos = ve_frame_pos(e);
     let mic = ve_input_frames_received(e);
     let ppm_playing = ve_drift_ppm(e);
+    let (mic0, pos0) = settled.expect("the run outlasts the settling time");
+    let played = pos - pos0;
+    let apart = (mic - mic0) as i64 - played;
 
-    // Freeze check: close the mic → the input counter stops → ticks stop
-    // measuring → the published correction must hold exactly.
     assert_eq!(ve_pause(e), 0);
     assert_eq!(ve_stop_monitor(e), 0);
-    // The first post-close tick may legitimately consume the final partial
-    // second of mic frames; the freeze baseline is taken after it settles.
-    for _ in 0..3 {
-        std::thread::sleep(Duration::from_secs(1));
-        events |= ve_poll_device_event(e, u32::MAX);
-    }
-    let ppm_frozen_base = ve_drift_ppm(e);
     for _ in 0..PAUSE_SECS {
         std::thread::sleep(Duration::from_secs(1));
         events |= ve_poll_device_event(e, u32::MAX);
@@ -118,20 +115,26 @@ fn main() {
     let expect_pos = PLAY_SECS as i64 * ENGINE_SR as i64;
     let pos_ok = (pos - expect_pos).abs() < ENGINE_SR as i64 * 2;
     let mic_ok = mic > (PLAY_SECS - 5) * ENGINE_SR as u64;
-    let freeze_ok = ppm_paused.to_bits() == ppm_frozen_base.to_bits();
+    // A few 256-frame IO cycles: each counter is read up to a cycle off its device.
+    let in_step_ok = apart.abs() <= 2048;
+    let none_ok = ppm_playing == 0.0 && ppm_paused == 0.0;
     println!(
         "playback advance : pos={pos} (expected ≈{expect_pos})  {}",
         ok(pos_ok)
     );
     println!("stream underruns : {xruns}  {}", ok(xruns == 0));
     println!("mic delivery     : {mic} engine frames  {}", ok(mic_ok));
-    println!("drift (playing)  : {ppm_playing:+.3} ppm (deadband = 0.0 on a shared codec)");
     println!(
-        "drift (mic off)  : {ppm_paused:+.3} ppm  freeze {}",
-        ok(freeze_ok)
+        "mic vs playhead  : {apart:+} frames apart over {played} ({:+.1} ppm)  {}",
+        apart as f64 / played.max(1) as f64 * 1e6,
+        ok(in_step_ok)
+    );
+    println!(
+        "drift correction : {ppm_playing:+.3} ppm playing, {ppm_paused:+.3} ppm mic off  {}",
+        ok(none_ok)
     );
     println!("device events    : {events:#b}");
-    let pass = pos_ok && xruns == 0 && mic_ok && freeze_ok;
+    let pass = pos_ok && xruns == 0 && mic_ok && in_step_ok && none_ok;
     println!("overall          : {}", if pass { "PASS" } else { "FAIL" });
     std::process::exit(if pass { 0 } else { 1 });
 }
