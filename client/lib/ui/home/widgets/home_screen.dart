@@ -181,6 +181,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _reloadOnceLanded(HomeViewModel vm, String id) async {
     await RecordingFinalizer.instance.settled(id);
+    if (!mounted) return;
     // A load already running ignores another ask, and may have read before
     // the landing: ask once it is done.
     if (vm.load.running) {
