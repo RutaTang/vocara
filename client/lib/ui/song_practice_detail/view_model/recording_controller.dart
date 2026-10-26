@@ -194,7 +194,7 @@ class RecordingController extends ChangeNotifier {
   /// destination. A permission denial therefore never creates an empty take.
   late final RecordingPathStrategy _takeDestination = RecordingPathStrategy(
     create: () async {
-      if (_appSettings.bluetoothInOutConflict) {
+      if (_appSettings.bluetoothInOutConflictNow()) {
         _toast(
           'Recording from the Bluetooth headset lowers playback quality. '
           'Pick a different mic in Settings.',

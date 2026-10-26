@@ -1021,6 +1021,65 @@ void main() {
     );
 
     test(
+      'an unplugged mic pick is judged as the default it falls back to',
+      () async {
+        // The engine records from the system default while the chosen mic is
+        // unplugged; the check read the missing pick as no device and warned of
+        // nothing, while the take recorded over the headset's call mode.
+        final airpods = AudioDevice(
+          uid: 'airpods',
+          name: 'AirPods Pro',
+          rate: 48000,
+          isDefault: true,
+          isBluetooth: true,
+          transport: AudioTransport.bluetooth,
+        );
+        outs = [airpods];
+        ins = [
+          AudioDevice(
+            uid: 'airpods',
+            name: 'AirPods Pro',
+            rate: 48000,
+            isDefault: true,
+            isInput: true,
+            isBluetooth: true,
+            transport: AudioTransport.bluetooth,
+          ),
+        ];
+        storage.doc = {
+          'inputDeviceUid': 'usb-mic',
+          'inputDeviceName': 'USB Mic',
+        };
+        await service.load();
+        expect(service.inputDeviceMissing, isTrue);
+        expect(service.bluetoothInOutConflict, isTrue);
+      },
+    );
+
+    test('the check at REC reads the devices as they are now', () async {
+      // The lists are polled only while Settings is open: judged by the ones
+      // from when the song opened, a headset connected since went unwarned.
+      AudioDevice bt({bool input = false}) => AudioDevice(
+        uid: 'airpods',
+        name: 'AirPods Pro',
+        rate: 48000,
+        isDefault: true,
+        isInput: input,
+        isBluetooth: true,
+        transport: AudioTransport.bluetooth,
+      );
+      await service.load(); // built-in speakers and mic
+      expect(service.bluetoothInOutConflictNow(), isFalse);
+      outs = [bt()];
+      ins = [bt(input: true)];
+      expect(service.bluetoothInOutConflict, isFalse, reason: 'stale lists');
+      expect(service.bluetoothInOutConflictNow(), isTrue);
+      outs = [_builtInOut];
+      ins = [_builtInMic];
+      expect(service.bluetoothInOutConflictNow(), isFalse);
+    });
+
+    test(
       'the same Bluetooth headset listed under two uids is still one device',
       () async {
         AudioDevice bt(String uid, String name, {bool input = false}) =>

@@ -257,9 +257,30 @@ class AppSettingsService extends ChangeNotifier {
 
   /// True when the effective input and output are the SAME Bluetooth device: opening its mic
   /// forces HFP and degrades the output (a hardware limit — the UI warns to pick another mic).
-  bool get bluetoothInOutConflict {
-    final out = _effective(_outputDevices, _outputDeviceUid);
-    final inp = _effective(_inputDevices, _inputDeviceUid);
+  bool get bluetoothInOutConflict => _conflict(_outputDevices, _inputDevices);
+
+  /// [bluetoothInOutConflict] judged on a fresh enumeration, without adopting it (like
+  /// [syncInputChannel]): the lists are polled only while Settings is open, so a song page judged
+  /// by the lists from when it opened — a headset turned off since was still warned about, one
+  /// connected since recorded in its call mode unwarned.
+  bool bluetoothInOutConflictNow() =>
+      _conflict(_enumerateOutputs(), _enumerateInputs());
+
+  // The device a pick resolves to in [list]: the pick while connected, else the system default
+  // (what the engine uses on System Default, or while the pick is unplugged — which read as no
+  // device at all, and no warning, while the take recorded from a headset's mic).
+  static AudioDevice? _inUse(List<AudioDevice> list, String? uid) {
+    final picked = _byUid(list, uid);
+    if (picked != null) return picked;
+    for (final d in list) {
+      if (d.isDefault) return d;
+    }
+    return null;
+  }
+
+  bool _conflict(List<AudioDevice> outputs, List<AudioDevice> inputs) {
+    final out = _inUse(outputs, _outputDeviceUid);
+    final inp = _inUse(inputs, _inputDeviceUid);
     if (out == null || inp == null) return false;
     if (!out.isBluetooth && !inp.isBluetooth) return false;
     // One device in both lists — or, should the system list a headset's two

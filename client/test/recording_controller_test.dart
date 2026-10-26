@@ -116,6 +116,9 @@ class _FakeSettings extends Fake implements AppSettingsService {
   @override
   bool get bluetoothInOutConflict => false;
 
+  @override
+  bool bluetoothInOutConflictNow() => false;
+
   // The 1 s device watch calls this on every tick, like streamXruns below.
   @override
   void reconcileMonitorSafety() {}
