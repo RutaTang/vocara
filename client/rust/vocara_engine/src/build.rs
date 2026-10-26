@@ -30,6 +30,12 @@ const PER_TRACK: NodeId = 32;
 
 /// Max post-fader aux sends per track / bus (Logic-style).
 pub const MAX_SENDS: usize = 4;
+
+/// Past the most tracks or buses the node-id math addresses. Below it the track band
+/// (`(index + 1) * PER_TRACK + slot`, under 2^26) and the bus band (`BUS_TOP - index *
+/// BUS_STRIDE + slot`, over 2^32 - 2^26) stay apart and never wrap; beyond it an index named
+/// another track's or bus's nodes.
+pub const MAX_INDEX: u32 = 1 << 20;
 /// Node-id offset of the first aux send within a track/bus's slot band.
 const SEND_OFFSET: NodeId = 16;
 

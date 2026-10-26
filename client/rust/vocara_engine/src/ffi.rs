@@ -366,21 +366,30 @@ fn sweep_dead(feeders: &std::sync::Mutex<Vec<Arc<std::sync::Mutex<FeederSlot>>>>
     }
 }
 
-/// [`VeEngine::chain_of`] over `chains`. A negative index names no track: it gets track 0's id
-/// band, which no node uses (track ids start at 1). Cast as it was, -2 became `u32::MAX`, whose
-/// ids wrap around onto the master's and the reverb's.
+/// [`VeEngine::chain_of`] over `chains`. An index the id math cannot address — negative, or
+/// past [`build::MAX_INDEX`] — names no track: it gets track 0's id band, which no node uses
+/// (track ids start at 1). Cast as it was, -2 became `u32::MAX`, whose ids wrap around onto the
+/// master's and the reverb's, and an index past 2^27 wrapped onto a low track's.
 fn chain_for(chains: &[u32], track: c_int) -> u32 {
-    match usize::try_from(track) {
-        Ok(t) => chains.get(t).copied().unwrap_or((track + 1) as u32),
-        Err(_) => 0,
+    match u32::try_from(track) {
+        Ok(t) if t < build::MAX_INDEX => chains.get(t as usize).copied().unwrap_or(t + 1),
+        _ => 0,
     }
 }
 
-/// A host bus index as the node-id math takes it, or None for a negative one: cast as is,
-/// -(t + 8) wrapped around onto the ids of track `t`'s sends and inserts, and a setter for a
-/// bus wrote another track's parameters.
+/// A host bus index as the node-id math takes it, or None for one it cannot address: cast as
+/// is, -(t + 8) wrapped around onto the ids of track `t`'s sends and inserts (and an index
+/// past 2^27 onto a track's from above), and a setter for a bus wrote another track's
+/// parameters.
 fn bus_index(bus: c_int) -> Option<u32> {
-    u32::try_from(bus).ok()
+    u32::try_from(bus).ok().filter(|&b| b < build::MAX_INDEX)
+}
+
+/// Whether `band` is an EQ band index the param encoding can carry: shifted into a `u16` past
+/// the field bits, a band of 8192 or more wrapped onto a low band.
+fn eq_band_fits(band: c_int) -> bool {
+    use crate::dsp::biquad::param as p;
+    (0..1 << (16 - p::FIELD_BITS)).contains(&band)
 }
 
 impl VeEngine {
@@ -2585,6 +2594,9 @@ pub extern "C" fn ve_set_eq_band(
 ) -> c_int {
     with_engine(e, -1, |eng| {
         use crate::dsp::biquad::param as p;
+        if !eq_band_fits(band) {
+            return -1;
+        }
         let node = build::eq_id(eng.chain_of(track));
         let b = (band as u16) << p::FIELD_BITS;
         let h = &mut eng.handle;
@@ -2657,6 +2669,9 @@ pub extern "C" fn ve_set_bus_eq_band(
         let Some(bus) = bus_index(bus) else {
             return -1;
         };
+        if !eq_band_fits(band) {
+            return -1;
+        }
         let node = build::bus_eq_id(bus);
         let b = (band as u16) << p::FIELD_BITS;
         let h = &mut eng.handle;
@@ -3662,6 +3677,20 @@ mod index_guard_tests {
         }
         assert_eq!(bus_index(0), Some(0));
         assert_eq!(bus_index(7), Some(7));
+        // Past the id math's reach, from above onto the tracks' band.
+        assert_eq!(bus_index(build::MAX_INDEX as i32), None);
+        assert_eq!(bus_index(i32::MAX), None);
+        let top = build::MAX_INDEX - 1;
+        assert!(build::bus_sum_id(top) > build::reverb_id(build::MAX_INDEX) + 32);
+    }
+
+    #[test]
+    fn an_eq_band_past_the_encoding_addresses_nothing() {
+        use super::eq_band_fits;
+        assert!(eq_band_fits(0) && eq_band_fits(7) && eq_band_fits(8191));
+        for band in [-1, 8192, 8195, i32::MAX] {
+            assert!(!eq_band_fits(band), "{band}");
+        }
     }
 
     #[test]
@@ -3680,6 +3709,8 @@ mod index_guard_tests {
         );
         assert_eq!(chain_for(&chains, 2), 3);
         assert_eq!(chain_for(&chains, 5), 6, "past the committed set: no node");
+        assert_eq!(chain_for(&chains, build::MAX_INDEX as i32), 0);
+        assert_eq!(chain_for(&chains, i32::MAX), 0);
     }
 }
 
