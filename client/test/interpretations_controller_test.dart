@@ -14,11 +14,15 @@ import 'package:vocara/utils/busy_gate.dart';
 /// committed concurrently.
 class _FakeEngine extends Fake implements PlaybackEngine {
   bool transportRunning = false;
+  Duration at = const Duration(seconds: 5);
   final List<String> log = [];
   void Function()? onPause;
 
   @override
   bool get isPlaying => transportRunning;
+
+  @override
+  Duration get currentPosition => at;
 
   @override
   Future<void> pause() async {
@@ -308,6 +312,30 @@ void main() {
 
       expect(host.engine.log, ['pause', 'play']);
       expect(host.saves, 0, reason: 'nothing changed; no save');
+    });
+
+    test('does not resume over a Stop or a take started while the save '
+        'queued', () async {
+      // The switch played on from where it paused whatever the user had done
+      // meanwhile: Stop pressed, or REC armed.
+      for (final meanwhile in ['stop', 'rec']) {
+        final host = _Host(
+          _practice(
+            versions: [_version('v1', 'One'), _version('v2', 'Two')],
+            activeVersionId: 'v1',
+          ),
+        );
+        host.engine.transportRunning = true;
+        host.onSave = () {
+          if (meanwhile == 'stop') {
+            host.engine.at = Duration.zero;
+          } else {
+            host.recording = true;
+          }
+        };
+        await host.controller.setActive('v2');
+        expect(host.engine.log, ['pause'], reason: meanwhile);
+      }
     });
 
     test('does not resume playback when disposed during the save', () async {

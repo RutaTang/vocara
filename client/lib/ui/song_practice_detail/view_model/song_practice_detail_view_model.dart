@@ -1615,6 +1615,10 @@ class SongPracticeDetailViewModel extends ChangeNotifier
             );
           }
 
+          // Past here nothing reads Cancel: it is taken off the overlay, or
+          // pressed during the save it was ignored and the backing replaced.
+          _separationCommitting = true;
+          notifyListeners();
           // Persist BEFORE deleting any old audio, so a failed save can't leave
           // the JSON pointing at files already gone. On failure
           // _withImportedAudio rolls the imported/transcoded files back.
@@ -1675,14 +1679,21 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         }
       } finally {
         _separationProgress = null;
+        _separationCommitting = false;
         notifyListeners();
       }
     });
   }
 
+  /// Set once the separated backing is being saved: too late to cancel.
+  bool _separationCommitting = false;
+
+  /// Whether Cancel can still stop the separation (see [cancelSeparation]).
+  bool get canCancelSeparation => isSeparating && !_separationCommitting;
+
   /// Aborts an in-flight separation (best-effort).
   void cancelSeparation() {
-    if (!isSeparating) return;
+    if (!canCancelSeparation) return;
     _separationCancelled = true;
     _separation.cancel();
   }
@@ -1862,14 +1873,18 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     _practice = practice.copyWith(
       vocalTracks: [...practice.vocalTracks, track],
     );
-    _selectionBeforeEmptyTake = (track: _selectedTrackId, bus: _selectedBusId);
+    _selectionBeforeEmptyTake = (
+      track: _selectedTrackId,
+      bus: _selectedBusId,
+      picks: _userSelections,
+    );
     _selectedTrackId = track.id;
     _selectedBusId = null; // track and bus selection are exclusive
     return await _save() ? track.id : null;
   }
 
   /// What was selected before [createEmptyVocalTake] selected its take.
-  ({String? track, String? bus})? _selectionBeforeEmptyTake;
+  ({String? track, String? bus, int picks})? _selectionBeforeEmptyTake;
 
   /// Drops the empty take a REC created for itself when the start never armed
   /// (cancelled by Stop, or failing), and gives back the selection it took:
@@ -1892,6 +1907,9 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       if (await _save()) analysis.dropLaneState(trackId);
     });
     if (before == null || _trackById(trackId) != null) return;
+    // Unless the user picked a lane during the arm window: restored over it,
+    // their choice was undone (the separation's restore stands down too).
+    if (_userSelections != before.picks) return;
     final bus = before.bus;
     final track = before.track;
     if (bus != null && mixer.fxBuses.any((b) => b.id == bus)) {
@@ -1971,12 +1989,20 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       final cur = _practice;
       if (cur == null) return;
       final List<AudioClip> doomed;
+      String? staleSource;
       if (cur.accompaniment?.id == trackId) {
         doomed = cur.accompaniment!.clips;
         _practice = cur.copyWith(clearAccompaniment: true);
       } else if (cur.reference?.id == trackId) {
         doomed = cur.reference!.clips;
-        _practice = cur.copyWith(clearReference: true);
+        // The original kept for re-extracting the backing goes with it: only
+        // the Original lane offers that, so left set it held that audio for
+        // good, though the dialog said the audio file is removed.
+        staleSource = cur.separationSource;
+        _practice = cur.copyWith(
+          clearReference: true,
+          clearSeparationSource: true,
+        );
       } else {
         // Delete EVERY clip's file — a multi-clip take would otherwise orphan
         // its trailing clips' audio.
@@ -1997,6 +2023,9 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         for (final c in doomed) {
           _evictUnused(c.audioFilePath);
           await _audioFiles.deleteAudio(c.audioFilePath);
+        }
+        if (staleSource != null && !_holdsAudio(staleSource)) {
+          await _audioFiles.deleteAudio(staleSource);
         }
       }
     });
@@ -2167,6 +2196,8 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       // them for the next healthy boot's sweep.
       Future<void> discardCopies() async {
         for (final c in newClips) {
+          // Not while the model still plays it (see [_discardQuietly]).
+          if (_holdsAudio(c.audioFilePath)) continue;
           await _audioFiles.deleteAudio(c.audioFilePath);
         }
       }
@@ -2680,6 +2711,11 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// harmless (the boot sweep reclaims `edits/`), so failures are swallowed.
   Future<void> _discardQuietly(List<String> paths) async {
     for (final path in paths) {
+      // Never a file the model still plays: a failed save does not revert a
+      // model an edit moved on since, so a split's halves or a merge's output
+      // can stay in it — deleted, the lane pointed at nothing and the next
+      // save failed on it too (as [_withImportedAudio] keeps an import).
+      if (_holdsAudio(path)) continue;
       try {
         await _audioFiles.deleteAudio(path);
       } catch (_) {

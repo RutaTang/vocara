@@ -420,17 +420,28 @@ class _WorkspaceState extends State<_Workspace> {
   Future<void> _separateBacking(AudioTrack track) async {
     if (vm.refuseStructuralEdit()) return; // as _deleteTrack
     final reseparate = vm.canReseparate;
+    // A backing the user imported is replaced too (with its notes and mix),
+    // and the first-extraction copy did not say so.
+    final replacesImport = !reseparate && practice.accompaniment != null;
     final confirmed = await showConfirmDialog(
       context,
       icon: FIcons.wandSparkles,
-      destructive: false,
+      destructive: replacesImport,
       title: reseparate ? 'Re-extract the backing?' : 'Extract the backing?',
       body: reseparate
           ? 'Runs separation on the original again. The instrumental in the '
                 'Accompaniment slot is replaced. This takes a minute or two.'
+          : replacesImport
+          ? 'Pulls the instrumental out of the song into the Accompaniment '
+                'slot, replacing the backing track there, with its notes. '
+                'The Original stays put. This takes a minute or two.'
           : 'Pulls the instrumental out of the song into the Accompaniment slot '
                 'to sing over. The Original stays put. This takes a minute or two.',
-      confirmLabel: reseparate ? 'Re-extract' : 'Extract backing',
+      confirmLabel: reseparate
+          ? 'Re-extract'
+          : replacesImport
+          ? 'Replace backing'
+          : 'Extract backing',
     );
     if (confirmed) await vm.separateBacking(track.id);
   }
@@ -596,7 +607,7 @@ class _WorkspaceState extends State<_Workspace> {
               onDrop: (_) => _showToast('Wait for the separation to finish.'),
               child: _SeparationOverlay(
                 progress: vm.separationProgress,
-                onCancel: vm.cancelSeparation,
+                onCancel: vm.canCancelSeparation ? vm.cancelSeparation : null,
               ),
             ),
           ),
@@ -658,7 +669,9 @@ class _SeparationOverlay extends StatelessWidget {
 
   /// 0..1 progress (driven by the engine's real tqdm progress).
   final double? progress;
-  final VoidCallback onCancel;
+
+  /// Null once the result is being saved: too late to cancel.
+  final VoidCallback? onCancel;
 
   @override
   Widget build(BuildContext context) {
@@ -767,7 +780,11 @@ class _SeparationOverlay extends StatelessWidget {
                 const SizedBox(height: 20),
                 Align(
                   alignment: Alignment.centerRight,
-                  child: StudioButton(label: 'Cancel', onTap: onCancel),
+                  child: StudioButton(
+                    label: 'Cancel',
+                    enabled: onCancel != null,
+                    onTap: onCancel ?? () {},
+                  ),
                 ),
               ],
             ),

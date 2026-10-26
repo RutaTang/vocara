@@ -347,12 +347,14 @@ class _MuteTrackingEngine extends _FakeEngine {
 SongPractice _seedPractice({
   List<AudioTrack>? vocalTracks,
   AudioTrack? reference,
+  String? separationSource,
 }) => SongPractice(
   id: 'p1',
   title: 'Song',
   createdAt: DateTime(2026),
   updatedAt: DateTime(2026),
   reference: reference,
+  separationSource: separationSource,
   lyrics: const [LyricLine(text: 'la la la')],
   vocalTracks:
       vocalTracks ??
@@ -419,12 +421,17 @@ void main() {
     _FakeEdits? edits,
     SourceSeparationService? separation,
     AudioTrack? reference,
+    String? separationSource,
     Stream<RemoteApplied>? remoteApplied,
     PlaybackEngine? engine,
   }) async {
     events = <String>[];
     repo = _FakeRepo(
-      _seedPractice(vocalTracks: vocalTracks, reference: reference),
+      _seedPractice(
+        vocalTracks: vocalTracks,
+        reference: reference,
+        separationSource: separationSource,
+      ),
       events,
     );
     files = _FakeFiles(events);
@@ -564,6 +571,61 @@ void main() {
       expect(vm.practice!.vocalTracks.length, before + 1);
       expect(events.where((e) => e == 'save'), hasLength(1));
     });
+  });
+
+  test(
+    'a split whose save fails keeps the halves the model still plays',
+    () async {
+      // A failed save does not revert a model an edit moved on since: the
+      // split halves stayed in it, their files were deleted anyway, and the
+      // rename's own save then failed on them.
+      final vm = await pumpVm();
+      vm.position.value = const Duration(milliseconds: 500);
+      repo.saveGate = Completer<void>();
+      repo.failNextSave = true;
+      final split = vm.splitTrackAtPlayhead('single');
+      for (var i = 0; i < 100 && repo.inFlight == 0; i++) {
+        await Future<void>.delayed(Duration.zero);
+      }
+      final rename = vm.renameTrack('multi', 'Renamed'); // moves the model on
+      final gate = repo.saveGate!;
+      repo.saveGate = null;
+      gate.complete();
+      await Future.wait([split, rename]);
+
+      expect(
+        events.where((e) => e.startsWith('delete:/edit/')),
+        isEmpty,
+        reason: 'the halves are still in the model',
+      );
+      expect(
+        repo.stored.vocalTracks
+            .expand((t) => t.clips)
+            .map((c) => c.audioFilePath),
+        containsAll(['/edit/first.wav', '/edit/second.wav']),
+      );
+    },
+  );
+
+  test('deleting the Original lets go of the original kept for '
+      're-extraction', () async {
+    // Only the Original lane offers re-extraction: left set, the kept
+    // original held its audio for good, though the dialog said it goes.
+    final vm = await pumpVm(
+      reference: AudioTrack(
+        id: 'orig',
+        kind: AudioTrackKind.reference,
+        displayName: 'Original',
+        audioFilePath: '/pool/orig.wav',
+        durationMs: 1000,
+        createdAt: DateTime(2026),
+      ),
+      separationSource: '/audio/p1/source.wav',
+    );
+    await vm.deleteTrack('orig');
+    expect(repo.stored.reference, isNull);
+    expect(repo.stored.separationSource, isNull);
+    expect(events, contains('delete:/audio/p1/source.wav'));
   });
 
   group('deleting a clip from over another', () {
@@ -931,6 +993,48 @@ void main() {
       expect(events, isNot(contains('save')));
       expect(vm.isSeparating, isFalse);
     });
+
+    test(
+      'once the backing is being saved, Cancel is no longer offered',
+      () async {
+        // Pressed during the commit save, Cancel was ignored: the overlay still
+        // offered it, then the backing was replaced anyway.
+        final separation = _GatedSeparation();
+        final waveforms = _SignalingWaveforms();
+        final vm = await pumpVm(
+          separation: separation,
+          reference: AudioTrack(
+            id: 'ref',
+            kind: AudioTrackKind.reference,
+            displayName: 'Original',
+            audioFilePath: '/pool/original.wav',
+            durationMs: 1000,
+            createdAt: DateTime(2026),
+          ),
+          waveforms: waveforms,
+        );
+        for (var i = 0; i < 400 && !vm.separationAvailable; i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 5));
+        }
+        repo.saveGate = Completer<void>();
+        final run = vm.separateBacking('ref');
+        await Future<void>.delayed(Duration.zero);
+        expect(vm.canCancelSeparation, isTrue);
+        separation.gate.complete();
+        await waveforms.reached.future;
+        waveforms.gate.complete();
+        for (var i = 0; i < 200 && repo.inFlight == 0; i++) {
+          await Future<void>.delayed(Duration.zero);
+        }
+        expect(vm.isSeparating, isTrue);
+        expect(vm.canCancelSeparation, isFalse);
+        final gate = repo.saveGate!;
+        repo.saveGate = null;
+        gate.complete();
+        await run;
+        expect(vm.practice!.accompaniment, isNotNull);
+      },
+    );
 
     test(
       'a separation whose save fails leaves the selection on the Original',

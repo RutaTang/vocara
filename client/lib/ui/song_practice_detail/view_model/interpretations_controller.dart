@@ -125,6 +125,7 @@ class InterpretationsController extends ChangeNotifier {
     if (!practice.versions.any((v) => v.id == versionId)) return;
     final wasPlaying = _playback.isPlaying;
     await _playback.pause();
+    final pausedAt = _playback.currentPosition;
     // Re-read the LIVE practice after the pause await (the rule [delete]
     // follows): a take recorded/imported during it must survive the rebuild,
     // and the target interpretation may have been deleted meanwhile. An early
@@ -152,7 +153,14 @@ class InterpretationsController extends ChangeNotifier {
     // The route can pop while the save is in flight; don't drive the disposed
     // engine wiring back into play.
     if (_disposed) return;
-    if (wasPlaying) await _playback.play();
+    // Nor over what the user did while the save queued: a Stop or a seek
+    // (the playhead moved), a Play of their own, or a take now arming.
+    if (wasPlaying &&
+        !_isRecording() &&
+        !_playback.isPlaying &&
+        _playback.currentPosition == pausedAt) {
+      await _playback.play();
+    }
   }
 
   /// Creates a new (empty) interpretation and switches to it, ready to record a

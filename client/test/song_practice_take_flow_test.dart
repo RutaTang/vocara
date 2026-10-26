@@ -975,6 +975,23 @@ void main() {
       expect(vm.selectedBusId, busId);
     });
 
+    test('a lane picked while REC arms is kept when the REC is '
+        'cancelled', () async {
+      // The give-back restored the pre-REC selection over the user's pick.
+      final mic = _FakeMic()..ready = Completer<void>();
+      final vm = await pumpVm(engine: _FakeGraphEngine(), mic: mic);
+      final busId = await vm.mixer.createBus();
+      expect(vm.selectedBusId, busId);
+      final start = vm.recording.startRecording();
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      vm.selectTrack('take1'); // picked during the arm window
+      await vm.stopRecording();
+      mic.ready!.complete();
+      await start;
+      expect(vm.selectedTrackId, 'take1');
+      expect(vm.selectedBusId, isNull);
+    });
+
     test('a quit while REC is arming leaves no empty take behind', () async {
       // The mic lists a take's quit work only once it arms: a quit in the arm
       // window found nothing to wait for and exited, and the empty "Take N"
