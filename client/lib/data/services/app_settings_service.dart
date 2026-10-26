@@ -711,6 +711,22 @@ class AppSettingsService extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// [refreshDevices] for the outputs alone, for a screen the Settings panel can't be polling
+  /// over (a song): a chosen output unplugged there and plugged back in stayed on the fallback
+  /// until the mic next closed or the song was reopened. Inputs are left to the take's own
+  /// device handling: switching the mic mid-take would splice two mics into it.
+  void refreshOutputDevices() {
+    final outs = _enumerateOutputs();
+    if (_deviceSig(outs) == _deviceSig(_outputDevices)) return;
+    final outReturned = _returned(_outputDevices, outs, _outputDeviceUid);
+    _outputDevices = outs;
+    if (outReturned) _engine?.setOutputDevice(_outputDeviceUid!);
+    _syncLastKnownNames();
+    _refreshActualOutput();
+    _applyOutputRoute();
+    notifyListeners();
+  }
+
   // A change signature over a device set (the fields the panel renders) to skip no-op rebuilds.
   static String _deviceSig(List<AudioDevice> ds) =>
       ds.map((d) => '${d.uid}:${d.isDefault}:${d.rate}:${d.name}').join('|');

@@ -263,6 +263,44 @@ void main() {
       },
     );
 
+    // A song screen can't have the Settings panel polling over it: a chosen output unplugged
+    // there and plugged back in stayed on the fallback.
+    test(
+      'the outputs-only refresh switches back to a chosen output that returns, and '
+      'leaves the mic alone',
+      () async {
+        outs = [_builtInOut, _headphones];
+        ins = [_builtInMic, _interface];
+        storage.doc = {
+          'outputDeviceUid': _headphones.uid,
+          'inputDeviceUid': _interface.uid,
+        };
+        await service.load();
+        final engine = _FakeEngine();
+        service.attachEngine(engine);
+        engine.outputCalls.clear();
+        engine.inputCalls.clear();
+
+        outs = [_builtInOut]; // unplugged mid-song
+        ins = [_builtInMic];
+        service.refreshOutputDevices();
+        expect(engine.outputCalls, isEmpty);
+
+        outs = [_builtInOut, _headphones]; // plugged back in
+        ins = [_builtInMic, _interface];
+        service.refreshOutputDevices();
+        expect(engine.outputCalls, [_headphones.uid]);
+        expect(
+          engine.inputCalls,
+          isEmpty,
+          reason: 'a mid-take mic switch splices',
+        );
+
+        service.refreshOutputDevices(); // nothing changed since
+        expect(engine.outputCalls, [_headphones.uid]);
+      },
+    );
+
     test('only a product named as earbuds is echo-free', () async {
       // A speaker taken for headphones would leave its whole echo in every take: not a device
       // merely on Bluetooth, and not a headphone PORT — "External Headphones" is the jack of an

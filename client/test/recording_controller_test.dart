@@ -119,9 +119,14 @@ class _FakeSettings extends Fake implements AppSettingsService {
   @override
   bool bluetoothInOutConflictNow() => false;
 
-  // The 1 s device watch calls this on every tick, like streamXruns below.
+  // The 1 s device watch calls these on every tick, like streamXruns below.
   @override
   void reconcileMonitorSafety() {}
+
+  int outputRefreshes = 0;
+
+  @override
+  void refreshOutputDevices() => outputRefreshes++;
 }
 
 /// Minimal native-engine double: only what the recording flow and the 1 s
@@ -342,6 +347,7 @@ void main() {
     Future<void> Function(String)? discardEmptyTake,
     GraphAudioPlaybackService? graph,
     void Function(String)? toast,
+    _FakeSettings? settings,
   }) {
     final engine = graph ?? _FakeGraph();
     return RecordingController(
@@ -352,7 +358,7 @@ void main() {
       busyGate: BusyGate(onError: (_) {}),
       audioFiles: _FakeFiles(),
       waveforms: _FakeWaveforms(),
-      appSettings: _FakeSettings(),
+      appSettings: settings ?? _FakeSettings(),
       practiceId: 'p1',
       finalizer: RecordingFinalizer.instance,
       practice: () => practice,
@@ -843,6 +849,18 @@ void main() {
       expect(toasts, [PlaybackController.noDeviceMessage]);
     },
   );
+
+  // The Settings panel can't be open over a song, so a chosen output plugged back in there is
+  // only noticed if the song's own device watch looks.
+  test('the device watch looks for a returning output on every tick', () async {
+    final graph = _HandFedGraph();
+    final settings = _FakeSettings();
+    final c = build(_FakeMic(), graph: graph, settings: settings);
+    addTearDown(c.dispose);
+    final from = graph.polls;
+    await untilTicks(graph, from + 2);
+    expect(settings.outputRefreshes, greaterThanOrEqualTo(2));
+  });
 
   test('monitoring still stops when a delivering mic goes silent', () async {
     final graph = _HandFedGraph();

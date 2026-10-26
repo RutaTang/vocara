@@ -938,6 +938,9 @@ class RecordingController extends ChangeNotifier {
             GraphAudioPlaybackService.eventRecordLimit |
             GraphAudioPlaybackService.eventOutputRerouted,
       );
+      // A chosen output plugged back in is switched back to (the Settings panel, which watches
+      // for that, can't be open over a song).
+      _appSettings.refreshOutputDevices();
       // Opening the mic hands the output to the duplex unit, which can move playback off the
       // selected device without any device SET changing — so monitor safety has to be re-derived
       // on the tick, not only when refreshDevices sees a difference.
