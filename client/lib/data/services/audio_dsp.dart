@@ -675,6 +675,11 @@ class _MetricsPass {
         f2[fr] = double.nan;
         f3[fr] = double.nan;
         h1h2[fr] = double.nan;
+      } else {
+        final (a, b, c) = orderedFormants(f1[fr], f2[fr], f3[fr]);
+        f1[fr] = a;
+        f2[fr] = b;
+        f3[fr] = c;
       }
     }
     // No voiced frame means no timbre average: NaN, the readouts' "—" (and
@@ -1408,6 +1413,25 @@ double _harmonicPeak(List<double> mags, double centerBin, int halfWidth) {
 /// tracks carry NaN on VOICED frames too (LPC / H1−H2 measurement dropouts),
 /// and those one-frame holes should be filled. Keeping unvoiced frames NaN is
 /// the CALLER's job — it re-applies the voicing mask after smoothing.
+/// A frame's formants back in order (F1 < F2 < F3), each missing one left
+/// missing and the measured ones sorted into the measured slots. Each track is
+/// median-smoothed on its own and their gaps differ, so at a vowel change F2
+/// could take a later frame's value and F3 an earlier one: F2 above F3, the
+/// labels swapped on the overlay and on the spectrum's markers.
+@visibleForTesting
+(double, double, double) orderedFormants(double f1, double f2, double f3) {
+  final v = [f1, f2, f3];
+  final measured = [
+    for (final x in v)
+      if (x.isFinite) x,
+  ]..sort();
+  var k = 0;
+  for (var i = 0; i < 3; i++) {
+    if (v[i].isFinite) v[i] = measured[k++];
+  }
+  return (v[0], v[1], v[2]);
+}
+
 void _medianInto(Float32List src, Float32List dst, int half) {
   final n = src.length;
   final buf = <double>[];
@@ -2013,6 +2037,12 @@ class LiveVoiceAnalyzer {
             _db20(_harmonicPeak(mags, 2 * yinF0 / _binHz, hw));
       }
       final h1h2 = _smoothGated(_h1h2H, rawH1h2, h1h2Voiced);
+      // Smoothed one track at a time, like the take's (see [orderedFormants]).
+      final (f1, f2, f3) = orderedFormants(
+        _smoothGated(_f1H, rf1, sustained && voiced),
+        _smoothGated(_f2H, rf2, sustained && voiced),
+        _smoothGated(_f3H, rf3, sustained && voiced),
+      );
 
       onFrame(
         LiveFrame(
@@ -2021,9 +2051,9 @@ class LiveVoiceAnalyzer {
           tilt,
           cpp,
           _smoothGated(_f0H, yinF0, sustained && f0Voiced),
-          _smoothGated(_f1H, rf1, sustained && voiced),
-          _smoothGated(_f2H, rf2, sustained && voiced),
-          _smoothGated(_f3H, rf3, sustained && voiced),
+          f1,
+          f2,
+          f3,
           sustained,
           f0Voiced ? periodicity : 0.0,
           h1h2,

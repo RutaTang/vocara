@@ -170,6 +170,44 @@ Float32List _vibratoTone(
   return out;
 }
 
+/// A sung vowel at [f0]: a band-limited harmonic source at -12 dB/octave through
+/// one resonator per formant (80 Hz bandwidth), normalized to [amp] peak.
+Float32List _sungVowel(
+  double f0, {
+  required List<double> formants,
+  double sec = 1.0,
+  double amp = 0.3,
+}) {
+  final n = (_sr * sec).round();
+  var x = Float64List(n);
+  var phase = 0.0;
+  for (var i = 0; i < n; i++) {
+    phase += 2 * pi * f0 / _sr;
+    var v = 0.0;
+    for (var k = 1; k * f0 < _sr / 2 * 0.95; k++) {
+      v += sin(k * phase) / (k * k);
+    }
+    x[i] = v;
+  }
+  for (final fc in formants) {
+    final r = exp(-pi * 80 / _sr);
+    final a1 = -2 * r * cos(2 * pi * fc / _sr), a2 = r * r;
+    final out = Float64List(n);
+    for (var i = 0; i < n; i++) {
+      out[i] =
+          x[i] -
+          a1 * (i >= 1 ? out[i - 1] : 0) -
+          a2 * (i >= 2 ? out[i - 2] : 0);
+    }
+    x = out;
+  }
+  var peak = 0.0;
+  for (final v in x) {
+    peak = max(peak, v.abs());
+  }
+  return Float32List.fromList([for (final v in x) v / peak * amp]);
+}
+
 void main() {
   test('StreamingTakeAnalyzer equals computeVoiceMetrics BIT-FOR-BIT over '
       'ragged chunk boundaries (batch is the oracle)', () {
@@ -906,5 +944,53 @@ void main() {
         reason: 'len=$len: metrics=${m.frames} spectrogram=${s.frames}',
       );
     }
+  });
+  // Each formant track is median-smoothed on its own and their gaps differ, so
+  // at a vowel change F2 took a later frame's value and F3 an earlier one.
+  test('smoothed formants stay ordered across a vowel change', () {
+    // /E/ (600/1800/2500) into a front rounded /y/ (300/1900/2200), at E4.
+    final a = _sungVowel(330, formants: [600, 1800, 2500], sec: 0.25);
+    final b = _sungVowel(330, formants: [300, 1900, 2200], sec: 0.25);
+    final m = computeVoiceMetrics(Float32List.fromList([...a, ...b]), _sr);
+    var both = 0;
+    for (var fr = 0; fr < m.frames; fr++) {
+      final f1 = m.f1[fr], f2 = m.f2[fr], f3 = m.f3[fr];
+      if (f2.isFinite && f3.isFinite) {
+        both++;
+        expect(f2, lessThan(f3), reason: 'frame $fr: F2=$f2 F3=$f3');
+      }
+      if (f1.isFinite && f2.isFinite) {
+        expect(f1, lessThan(f2), reason: 'frame $fr: F1=$f1 F2=$f2');
+      }
+    }
+    expect(both, greaterThan(10), reason: 'the vowels must be measured');
+  });
+
+  test('orderedFormants sorts the measured ones and keeps the gaps', () {
+    expect(orderedFormants(600, 1900, 1800), (600, 1800, 1900));
+    expect(orderedFormants(2500, 700, 1200), (700, 1200, 2500));
+    final (a, b, c) = orderedFormants(double.nan, 2000, 1900);
+    expect(a.isNaN, isTrue);
+    expect((b, c), (1900, 2000));
+    final (d, e, f) = orderedFormants(1000, double.nan, 900);
+    expect((d, f), (900, 1000));
+    expect(e.isNaN, isTrue);
+  });
+
+  test("a DC offset leaves the singer's-formant reading alone", () {
+    // Soft singing (-30 dBFS peak) on an interface with a -40 dBFS DC offset:
+    // read from bin 0, the offset was taken for the voice's low peak.
+    final clean = _sungVowel(
+      220,
+      formants: [600, 1100, 3000],
+      sec: 2,
+      amp: 0.03,
+    );
+    final offset = Float32List.fromList([for (final v in clean) v + 0.01]);
+    double sf(Float32List s) => computeLtas(
+      computeSpectrogram(s, _sr),
+      computeVoiceMetrics(s, _sr),
+    ).singersFormantDb;
+    expect((sf(clean) - sf(offset)).abs(), lessThan(1.0));
   });
 }

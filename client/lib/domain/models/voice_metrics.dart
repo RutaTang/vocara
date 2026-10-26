@@ -583,7 +583,10 @@ Ltas finalizeLtas(
   }
 
   final sfHi = peakDb(binOf(2600), binOf(3800));
-  final sfLo = peakDb(0, binOf(2000));
+  // From 50 Hz, as the alpha ratio's low band: from bin 0, a DC offset (a
+  // cheap interface's, a mic's bias) was read as the voice's low peak, and the
+  // singer's formant came out several dB low.
+  final sfLo = peakDb(binOf(50), binOf(2000));
   final sf = (sfHi <= -1e8 || sfLo <= -1e8) ? 0.0 : sfHi - sfLo;
 
   return Ltas(
