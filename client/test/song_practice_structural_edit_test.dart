@@ -1205,37 +1205,6 @@ void main() {
       expect(volume(repo.stored), 0.3);
     });
 
-    test('a failed save whose reload failed too still lets a later reload '
-        'show the store', () async {
-      // With no revert and no save queued behind it, the failed change sat
-      // unsaved on screen, and the reload, holding off for it, skipped every
-      // remote change after it until some unrelated save.
-      final remote = StreamController<RemoteApplied>.broadcast();
-      addTearDown(remote.close);
-      final vm = await pumpVm(remoteApplied: remote.stream);
-      repo.failAt = {repo.saveNo + 1};
-      repo.failNextLoad = true;
-      await vm.renameTrack('single', 'lost');
-
-      repo.stored = repo.stored.copyWith(title: 'Renamed elsewhere');
-      remote.add(
-        RemoteApplied(
-          rows: const [],
-          practiceIds: const {'p1'},
-          techniqueIds: const {},
-        ),
-      );
-      await Future<void>.delayed(const Duration(milliseconds: 20));
-
-      expect(vm.practice!.title, 'Renamed elsewhere');
-      expect(
-        vm.practice!.vocalTracks
-            .firstWhere((t) => t.id == 'single')
-            .displayName,
-        'Take 1',
-      );
-    });
-
     test('a reload after a failed save\'s revert shows the store', () async {
       final remote = StreamController<RemoteApplied>.broadcast();
       addTearDown(remote.close);
@@ -1365,6 +1334,58 @@ void main() {
   });
 
   group('a save failing beside another', () {
+    test(
+      'a failed save whose reload failed too is retried by the next save',
+      () async {
+        // With nothing to revert to, the failed change stays on screen, and the
+        // next save writes it with its own.
+        final vm = await pumpVm();
+        repo.failAt = {repo.saveNo + 1};
+        repo.failNextLoad = true;
+        await vm.renameTrack('single', 'kept');
+        expect(
+          vm.practice!.vocalTracks
+              .firstWhere((t) => t.id == 'single')
+              .displayName,
+          'kept',
+        );
+
+        await vm.renameTrack('multi', 'next');
+
+        String name(String id) =>
+            repo.stored.vocalTracks.firstWhere((t) => t.id == id).displayName;
+        expect(name('single'), 'kept');
+        expect(name('multi'), 'next');
+      },
+    );
+
+    test('... and an import it could not revert keeps its file', () async {
+      // The import's rollback deleted the file the lane still on screen
+      // played: the next save stored a lane whose audio was gone.
+      final vm = await pumpVm();
+      repo.failAt = {repo.saveNo + 1};
+      repo.failNextLoad = true;
+      await vm.addAccompaniment('/src/backing.wav');
+      final path = vm.practice!.accompaniment!.primaryClip!.audioFilePath;
+      expect(events, isNot(contains('delete:$path')));
+
+      await vm.renameTrack('single', 'next');
+
+      expect(repo.stored.accompaniment!.primaryClip!.audioFilePath, path);
+    });
+
+    test(
+      '... while an import a revert took back still drops its file',
+      () async {
+        final vm = await pumpVm();
+        repo.failAt = {repo.saveNo + 1};
+        await vm.addAccompaniment('/src/backing.wav');
+
+        expect(vm.practice!.accompaniment, isNull);
+        expect(events, contains('delete:/import/0.wav'));
+      },
+    );
+
     AudioTrack originalRef() => AudioTrack(
       id: 'ref',
       kind: AudioTrackKind.reference,

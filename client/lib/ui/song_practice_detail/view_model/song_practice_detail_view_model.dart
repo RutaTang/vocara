@@ -388,13 +388,6 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// re-read, a revert). Any other [_practice] holds a change not saved yet.
   SongPractice? _persisted;
 
-  /// A failed save that could not re-read the store to revert to: nothing
-  /// queued will save the model on screen, so it is what the next freshness
-  /// reload replaces with the store's, as the revert would have. Held off
-  /// for it as a change not saved yet, the reload skipped every remote
-  /// change until some unrelated save.
-  void _unreadAfterFailure() => _persisted = _practice;
-
   /// Freshness-only reload when sync applied remote rows belonging to THIS
   /// practice. Heavily guarded: skipped while anything is in flight (busy
   /// gate, recording, separating, saving) — skipping is always SAFE because
@@ -1026,8 +1019,6 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         if (reloaded is Ok<Loaded<SongPractice>> &&
             identical(_practice, sent)) {
           _revertTo(reloaded.value);
-        } else if (identical(_practice, sent)) {
-          _unreadAfterFailure();
         }
         _toast("Couldn't save your changes.");
       }
@@ -1228,7 +1219,12 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       }
       committed = await body(dest);
     } finally {
-      if (!committed) {
+      // Kept while the model on screen still points at it: a failed save that
+      // could not revert (its reload failed too, or an edit moved the model on)
+      // leaves the lane there for the next save to retry, which deleted from
+      // under it stored a lane whose audio was gone. The boot sweep reclaims
+      // it should no save ever take it.
+      if (!committed && !_holdsAudio(dest)) {
         try {
           await _audioFiles.deleteAudio(dest);
           if (dest != imported) await _audioFiles.deleteAudio(imported);
@@ -1579,11 +1575,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
             // to be deleted from under. After a revert, nothing is left to
             // take back.
             final live = _practice;
-            if (live != null) {
-              final unread = identical(live, _persisted);
-              _practice = takeBack(live);
-              if (unread) _unreadAfterFailure();
-            }
+            if (live != null) _practice = takeBack(live);
             return false;
           });
           if (!saved) {
@@ -2575,6 +2567,18 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     }
   }
 
+  /// Whether any lane of the model on screen, in any interpretation, plays
+  /// [path].
+  bool _holdsAudio(String path) {
+    final practice = _practice;
+    if (practice == null) return false;
+    return [
+      ?practice.accompaniment,
+      ?practice.reference,
+      ...practice.vocalTracks,
+    ].any((t) => t.clips.any((c) => c.audioFilePath == path));
+  }
+
   List<AudioTrack> get _allTracks {
     final practice = _practice;
     if (practice == null) return const [];
@@ -2854,8 +2858,6 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         if (reloaded is Ok<Loaded<SongPractice>> &&
             identical(_practice, sent)) {
           _revertTo(reloaded.value);
-        } else if (identical(_practice, sent)) {
-          _unreadAfterFailure();
         }
         _toast("Couldn't save your changes.");
       }
