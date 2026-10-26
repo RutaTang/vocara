@@ -72,6 +72,27 @@ void main() {
     expect(await db.select(db.assets).get(), hasLength(1));
   });
 
+  // The copy was promoted before the dedup lookup, and the orphan sweep keeps
+  // every file of a live hash: it stayed for the asset's whole life.
+  test('the same bytes under a second extension keep one pool file', () async {
+    final a = await makeSrc('a.wav', List.filled(1000, 3));
+    final b = await makeSrc('b.m4a', List.filled(1000, 3));
+    final id1 = await store.importFile(a.path);
+    final id2 = await store.importFile(b.path);
+    expect(id2, id1);
+
+    final pooled = [
+      await for (final e in Directory(
+        p.join(tmp.path, 'assets'),
+      ).list(recursive: true))
+        if (e is File && !p.basename(e.path).endsWith('.part'))
+          p.basename(e.path),
+    ];
+    expect(pooled, hasLength(1), reason: '$pooled');
+    expect(pooled.single, endsWith('.wav'), reason: 'the row\'s file stays');
+    expect(File((await store.resolve(id1))!).existsSync(), isTrue);
+  });
+
   test('different bytes produce different assets', () async {
     final id1 = await store.importFile((await makeSrc('a.wav', [1])).path);
     final id2 = await store.importFile((await makeSrc('b.wav', [2])).path);

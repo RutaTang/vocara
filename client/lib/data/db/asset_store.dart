@@ -90,6 +90,9 @@ class AssetStore {
       // replaces a truncated crash leftover with the verified bytes whichever
       // branch below wins.
       final rel = await _promoteStaged(staged, ext);
+      // The copy just promoted, when the bytes turn out to be held already
+      // under another extension and nothing points at it (see below).
+      String? duplicate;
       // Dedup lookup and insert share ONE transaction so concurrent imports
       // of the same bytes serialize at the database: check-then-insert across
       // interleaved async flows minted one asset row per caller.
@@ -118,6 +121,16 @@ class AssetStore {
           if (!present) {
             await (db.update(db.assets)..where((a) => a.id.equals(existing.id)))
                 .write(AssetsCompanion(localRelPath: Value(rel)));
+          } else if (existingRel != rel) {
+            // The same bytes under another extension (a.wav, then b.m4a): the
+            // copy promoted above is no row's file, and the orphan sweep keeps
+            // every file of a live hash — it stayed for the asset's life.
+            final owner =
+                await (db.select(db.assets)
+                      ..where((a) => a.localRelPath.equals(rel))
+                      ..limit(1))
+                    .getSingleOrNull();
+            if (owner == null) duplicate = rel;
           }
           return existing.id;
         }
@@ -152,6 +165,11 @@ class AssetStore {
         return id;
       });
       _stepLanded(); // the row committed
+      // Under the write gate, so no sweep or import runs between the check
+      // above and this move; to the trash, like every pool removal.
+      if (duplicate != null) {
+        await _moveToTrash(File(p.join(root.path, duplicate)));
+      }
       return assetId;
     } finally {
       // The promote path renames the staging file away; on every other exit
