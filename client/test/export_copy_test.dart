@@ -116,6 +116,19 @@ void main() {
     expect(File(target).existsSync(), isFalse);
   });
 
+  test('a chain of links naming nothing yet: the made file goes', () async {
+    final made = p.join(tmp.path, 'final.wav');
+    final first = p.join(tmp.path, 'link1.wav');
+    Link(p.join(tmp.path, 'link2.wav')).createSync('final.wav');
+    Link(first).createSync('link2.wav');
+    await expectLater(
+      exportCopy(_FailingSource('half'), first),
+      throwsA(isA<FileSystemException>()),
+    );
+    expect(File(made).existsSync(), isFalse);
+    expect(Link(p.join(tmp.path, 'link2.wav')).existsSync(), isTrue);
+  });
+
   test('a good copy lands whole', () async {
     final src = File(p.join(tmp.path, 'src.wav'))..writeAsStringSync('audio');
     final dest = p.join(tmp.path, 'out.wav');

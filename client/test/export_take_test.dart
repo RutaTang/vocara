@@ -286,6 +286,30 @@ void main() {
     expect(toasts.single, contains("Vocara's own files"));
   });
 
+  test('... and so is a link that names a new file there', () async {
+    final library = Directory(p.join(tmp.path, 'library'))..createSync();
+    final link = p.join(tmp.path, 'outside.wav');
+    Link(link).createSync(p.join(library.path, 'audio', 'p1', 'x.wav'));
+    Directory(p.join(library.path, 'audio', 'p1')).createSync(recursive: true);
+    final picks = <String>[];
+    final vm = await pumpVm(
+      picks,
+      (_) async => link,
+      storage: _RootedStorage(library),
+    );
+    final toasts = <String>[];
+    vm.toasts.listen(toasts.add);
+
+    await vm.exportTrackAudio(byName(vm, 'Take 1').id);
+    await Future<void>.delayed(Duration.zero);
+
+    expect(
+      File(p.join(library.path, 'audio', 'p1', 'x.wav')).existsSync(),
+      isFalse,
+    );
+    expect(toasts.single, contains("Vocara's own files"));
+  });
+
   test('a cancelled save panel exports nothing and stays silent', () async {
     final picks = <String>[];
     final vm = await pumpVm(picks, (_) async => null);

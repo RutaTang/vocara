@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:path/path.dart' as p;
 
+import '../../utils/export_copy.dart';
 import '../../utils/id.dart';
 import 'local_storage_service.dart';
 
@@ -154,25 +155,18 @@ class AudioFileService {
     return p.join(dir.path, '${newId()}.$extension');
   }
 
-  /// Whether [path] lies inside the app's own storage (the folder holding the
-  /// recordings, the take pool and the library database), links followed: an
-  /// export there overwrote another take's audio, or the library itself. False
-  /// when either side cannot be resolved (the copy then reports its own error).
+  /// Whether an export onto [path] would write inside the app's own storage
+  /// (the folder holding the recordings, the take pool and the library
+  /// database), links followed: it overwrote another take's audio, or the
+  /// library itself.
   Future<bool> isAppStorage(String path) async {
+    final String root;
     try {
-      final root = await Directory(
-        p.dirname(await _storage.assetPath('audio')),
-      ).resolveSymbolicLinks();
-      final target = await File(path).exists()
-          ? await File(path).resolveSymbolicLinks()
-          : p.join(
-              await Directory(p.dirname(path)).resolveSymbolicLinks(),
-              p.basename(path),
-            );
-      return p.isWithin(root, target);
+      root = p.dirname(await _storage.assetPath('audio'));
     } catch (_) {
-      return false;
+      return false; // no storage to resolve (the copy then says what failed)
     }
+    return exportsInto(root, path);
   }
 
   /// Deletes a per-practice working audio file. REFUSES content-addressed pool

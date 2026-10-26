@@ -11,7 +11,7 @@ Future<void> exportCopy(File source, String destPath) async {
   // Onto the file a link names, not the link: the copy writes through it, and
   // a failed copy's cleanup (Dart's own, or the one below) removed the link
   // and left that file half-written.
-  final dest = File(await _throughLink(destPath));
+  final dest = File(await exportTarget(destPath));
   ({DateTime modified, int size})? before;
   try {
     if (await dest.exists()) {
@@ -39,17 +39,39 @@ Future<void> exportCopy(File source, String destPath) async {
   }
 }
 
-/// [path], or the file it names when it is a link (one that names nothing
-/// yet included).
-Future<String> _throughLink(String path) async {
+/// The file a copy onto [path] writes: [path], or the end of the links it
+/// starts (one that names nothing yet included; at most 32 hops).
+Future<String> exportTarget(String path) async {
+  var current = path;
   try {
-    if (!await FileSystemEntity.isLink(path)) return path;
-    if (await File(path).exists()) {
-      return await File(path).resolveSymbolicLinks();
+    for (var hop = 0; hop < 32; hop++) {
+      if (!await FileSystemEntity.isLink(current)) break;
+      final target = await Link(current).target();
+      current = p.isAbsolute(target)
+          ? target
+          : p.join(p.dirname(current), target);
     }
-    final target = await Link(path).target();
-    return p.isAbsolute(target) ? target : p.join(p.dirname(path), target);
   } on FileSystemException {
-    return path;
+    // Unreadable: the copy itself will say so.
+  }
+  return current;
+}
+
+/// Whether the file a copy onto [path] writes lies inside [root], links in
+/// both followed. False when either cannot be resolved (the copy then reports
+/// its own error).
+Future<bool> exportsInto(String root, String path) async {
+  try {
+    final dir = await Directory(root).resolveSymbolicLinks();
+    final target = await exportTarget(path);
+    final file = await File(target).exists()
+        ? await File(target).resolveSymbolicLinks()
+        : p.join(
+            await Directory(p.dirname(target)).resolveSymbolicLinks(),
+            p.basename(target),
+          );
+    return p.isWithin(dir, file);
+  } on FileSystemException {
+    return false;
   }
 }

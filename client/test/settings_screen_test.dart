@@ -26,6 +26,7 @@ Future<Persistence> _pumpSettings(
   UpdateCheckService? updates,
   Future<String?> Function(String suggestedName)? pickSavePath,
   Future<String> Function()? exportDiagnostics,
+  Future<String> Function()? appStorageRoot,
   AppSettingsService? settings,
 }) async {
   // Tall window so every settings section is on screen without scrolling.
@@ -58,6 +59,7 @@ Future<Persistence> _pumpSettings(
       child: MaterialApp(
         home: SettingsScreen(
           pickSavePath: pickSavePath,
+          appStorageRoot: appStorageRoot,
           exportDiagnostics: exportDiagnostics,
         ),
       ),
@@ -400,6 +402,37 @@ void main() {
     final exported = File(destination);
     expect(exported.existsSync(), isTrue);
     expect(exported.readAsStringSync(), contains('Vocara diagnostics bundle'));
+
+    await _teardown(tester, persistence);
+  });
+
+  testWidgets('Export diagnostics refuses the app\'s own storage', (
+    tester,
+  ) async {
+    // The library database and the take pool live there: replacing one of
+    // their files with the bundle broke the library.
+    final dir = Directory.systemTemp.createTempSync('vocara_diag_test');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    final library = Directory(p.join(dir.path, 'library'))..createSync();
+    final db = File(p.join(library.path, 'vocara.db'))..writeAsStringSync('DB');
+    var exports = 0;
+
+    final persistence = await _pumpSettings(
+      tester,
+      pickSavePath: (_) async => db.path,
+      exportDiagnostics: () async {
+        exports++;
+        return p.join(dir.path, 'unused');
+      },
+      appStorageRoot: () async => library.path,
+    );
+
+    await tester.tap(find.text('Export diagnostics…'));
+    await tester.pump();
+    await _pumpUntilFound(tester, find.textContaining("Vocara's own files"));
+
+    expect(db.readAsStringSync(), 'DB');
+    expect(exports, 0);
 
     await _teardown(tester, persistence);
   });

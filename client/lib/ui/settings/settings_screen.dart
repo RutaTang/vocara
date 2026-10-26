@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:file_selector/file_selector.dart' show getSaveLocation;
 import 'package:flutter/material.dart';
 import 'package:forui/forui.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
 
 import '../../data/db/persistence.dart';
@@ -30,6 +31,7 @@ class SettingsScreen extends StatefulWidget {
     this.pickSavePath,
     this.openUrl,
     this.exportDiagnostics,
+    this.appStorageRoot,
   });
 
   /// Test seam for the macOS save panel (defaults to file_selector's
@@ -44,6 +46,10 @@ class SettingsScreen extends StatefulWidget {
   /// [DiagnosticsLog.instance]'s exportArchive): returns the path of a
   /// temporary bundle, which the screen deletes once it has copied it.
   final Future<String> Function()? exportDiagnostics;
+
+  /// Test seam for the app's own storage folder (defaults to the app support
+  /// directory), which the diagnostics export refuses to write into.
+  final Future<String> Function()? appStorageRoot;
 
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
@@ -326,6 +332,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final pick = widget.pickSavePath ?? _saveLocationPath;
     final destination = await pick('vocara-diagnostics.txt');
     if (destination == null || !mounted) return;
+    // Into the app's own storage: the bundle replaced one of the library's
+    // files (its database, a take's audio).
+    if (await _intoAppStorage(destination)) {
+      if (!mounted) return;
+      _showToast(
+        "That folder holds Vocara's own files. Save the diagnostics "
+        'somewhere else.',
+      );
+      return;
+    }
+    if (!mounted) return;
     setState(() => _exporting = true);
     String? bundle;
     try {
@@ -349,6 +366,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
       if (mounted) setState(() => _exporting = false);
     }
   }
+
+  Future<bool> _intoAppStorage(String path) async {
+    try {
+      final root = await (widget.appStorageRoot ?? _supportDir)();
+      return await exportsInto(root, path);
+    } catch (_) {
+      return false; // no folder to judge by: the copy says what failed
+    }
+  }
+
+  static Future<String> _supportDir() async =>
+      (await getApplicationSupportDirectory()).path;
 
   /// The production save panel (file_selector): destination path or null.
   static Future<String?> _saveLocationPath(String suggestedName) async {
