@@ -635,7 +635,7 @@ impl OutResampler {
             // or never count.
             let content_end = self.origin + self.fifo.len() as i64;
             let unconsumed = (content_end - self.consumed_floor).max(0);
-            self.rt.transport().advance_consumed(unconsumed as u64);
+            self.rt.transport().skip_unplayed(unconsumed as u64);
             self.reset_stream();
         }
         let mut done = 0;
@@ -712,7 +712,7 @@ fn build_stream(
     // FIFO: the consumed cursor would lag the render counter forever. This
     // stream starts with an empty (or no) FIFO, so the cursor equals the
     // render counter — sync before any callback can run.
-    rt.transport().sync_consumed_to_rendered();
+    rt.transport().sync_consumed_over_unplayed();
     let err_cb = move |err: cpal::Error| {
         // A stream following the system default reports a default change as DeviceChanged:
         // cpal already rerouted it and documents that it stays active with no rebuild needed.
@@ -1525,15 +1525,27 @@ impl InputCell {
 /// heard — so both absolute crystal errors cancel out of the design.
 ///
 /// Robustness over reactivity, deliberately:
-///  * a tick only measures when BOTH counters advanced ≥ [`MIN_DELTA`]
-///    (a stopped stream — mic closed, output device gone — FREEZES the
-///    estimate, never decays it; a mere transport PAUSE keeps measuring,
+///  * the estimate is the least-squares slope of the input counter over the
+///    output counter across the last [`DRIFT_HISTORY`] samples, taken
+///    ≥ [`DRIFT_SAMPLE_SPAN`] apart (about once a second). Both counters move
+///    in whole callbacks,
+///    so each sample carries up to a callback of quantization: the old
+///    per-tick ratios (100 ms-1 s) carried ~1% of it (480-frame input against
+///    512-frame output callbacks), a ±5000 ppm glitch gate cut it off on one
+///    side only, and the estimate settled at the ±500 ppm clamp — a take
+///    slipping ~0.45 s over 15 minutes, where uncorrected drift is ~27 ms. A
+///    slope over many samples averages the quantization away instead;
+///  * a stopped stream — mic closed, output device gone — FREEZES the
+///    estimate, never decays it (a mere transport PAUSE keeps measuring,
 ///    because the output still delivers silence and both clocks keep
 ///    ticking — verified on hardware);
-///  * instantaneous ratios beyond ±5000 ppm are glitches (a stall, a stream
-///    rebuild) and are discarded, not averaged;
-///  * an EMA (α = 0.05 per tick, ~20 s time constant) smooths the estimate,
-///    so the published ratio slews far below audibility;
+///  * a span the two clocks did not run through together (beyond ±2% over
+///    ≥ [`DRIFT_GATE_SPAN`], where two callbacks of quantization stay inside
+///    it: a stall, a rebuild, a mic reopened) restarts the history, and the
+///    published ratio holds until [`DRIFT_MIN_SAMPLES`] samples are back;
+///  * the output clock is what the device PLAYED ([`Shared::played_frames`]):
+///    a seek's flush advances the consumed cursor over the FIFO's unplayed
+///    frames at once, which read as the output clock leaping ahead;
 ///  * a ±2 ppm deadband publishes EXACTLY 1.0 (keeping the identity fast
 ///    path for healthy 48 kHz chains), and the correction clamps at
 ///    ±500 ppm — anything larger is a broken device, not drift.
@@ -1542,60 +1554,94 @@ impl InputCell {
 /// CALIBRATION (real crystal pairs) remains the follow-up noted in memory.
 pub struct DriftEstimator {
     ratio_bits: Arc<AtomicU64>,
-    last_in: u64,
-    last_out: u64,
-    primed: bool,
-    ema: f64,
+    /// (input, output) counter pairs, oldest first.
+    samples: std::collections::VecDeque<(u64, u64)>,
 }
 
-/// Minimum per-tick advance (engine frames) on each counter before a tick
-/// measures: ~100 ms of audio, enough to average callback jitter away.
-const MIN_DELTA: u64 = 4_800;
+/// The least advance (engine frames) on both counters between samples: 1 s.
+const DRIFT_SAMPLE_SPAN: u64 = 48_000;
+
+/// The span (output frames) a new sample is checked against for a glitch: 10 s.
+const DRIFT_GATE_SPAN: u64 = 480_000;
+
+/// Samples the slope is fitted over: 10 minutes of them.
+const DRIFT_HISTORY: usize = 600;
+
+/// Samples a (re)started history needs before it publishes: half a minute.
+const DRIFT_MIN_SAMPLES: usize = 30;
 
 impl DriftEstimator {
     pub fn new(ratio_bits: Arc<AtomicU64>) -> Self {
         ratio_bits.store(1.0f64.to_bits(), Ordering::Relaxed);
         DriftEstimator {
             ratio_bits,
-            last_in: 0,
-            last_out: 0,
-            primed: false,
-            ema: 1.0,
+            samples: std::collections::VecDeque::with_capacity(DRIFT_HISTORY + 1),
         }
     }
 
-    /// One ~1 s tick with the CURRENT counter values (monotonic totals).
-    /// Publishes the updated ratio; returns it for tests.
+    /// One tick (~1 s, or 50 ms from the technique page) with the CURRENT
+    /// counter values (monotonic totals): the input's nominal emission and the
+    /// frames the output played. Publishes the updated ratio; returns it for
+    /// tests.
     pub fn tick(&mut self, frames_in: u64, frames_out: u64) -> f64 {
-        let din = frames_in.wrapping_sub(self.last_in);
-        let dout = frames_out.wrapping_sub(self.last_out);
-        // Prime on first observation; measure only when both sides moved
-        // enough to mean something (a stopped stream — closed mic, lost
-        // output device — freezes the estimate rather than corrupting it).
-        if !self.primed {
-            self.primed = true;
-            self.last_in = frames_in;
-            self.last_out = frames_out;
+        let Some(&(last_in, last_out)) = self.samples.back() else {
+            self.samples.push_back((frames_in, frames_out));
+            return self.published();
+        };
+        let din = frames_in.wrapping_sub(last_in);
+        let dout = frames_out.wrapping_sub(last_out);
+        // Sample only when both sides moved enough to mean something (a stopped
+        // stream freezes the estimate rather than corrupting it); ticks in between
+        // accumulate into the next sample, whichever page polls and how often.
+        if din < DRIFT_SAMPLE_SPAN || dout < DRIFT_SAMPLE_SPAN {
             return self.published();
         }
-        if din < MIN_DELTA || dout < MIN_DELTA {
+        // Checked against the newest sample ≥ 10 s back (any sample at all when
+        // the gap since the last is that long already): a stalled or rebuilt
+        // stream, a mic reopened.
+        let gate = if dout >= DRIFT_GATE_SPAN {
+            Some((last_in, last_out))
+        } else {
+            self.samples
+                .iter()
+                .rev()
+                .find(|&&(_, o)| frames_out.wrapping_sub(o) >= DRIFT_GATE_SPAN)
+                .copied()
+        };
+        if let Some((gin, gout)) = gate {
+            let ratio = frames_in.wrapping_sub(gin) as f64 / frames_out.wrapping_sub(gout) as f64;
+            if !(0.98..=1.02).contains(&ratio) {
+                // The clocks did not run together over this span: start over here.
+                self.samples.clear();
+                self.samples.push_back((frames_in, frames_out));
+                return self.published();
+            }
+        }
+        self.samples.push_back((frames_in, frames_out));
+        if self.samples.len() > DRIFT_HISTORY {
+            self.samples.pop_front();
+        }
+        if self.samples.len() < DRIFT_MIN_SAMPLES {
             return self.published();
         }
-        self.last_in = frames_in;
-        self.last_out = frames_out;
-        let inst = din as f64 / dout as f64;
-        if !(0.995..=1.005).contains(&inst) {
-            return self.published(); // glitch (stall/rebuild), not drift
-        }
-        // α normalized to the MEASURED interval (0.05 per second of output
-        // clock): early-returned ticks accumulate their deltas into the next
-        // measurement, and the technique page polls at 50 ms while the song
-        // page polls at 1 s — a fixed per-measurement α made the EMA's time
-        // constant depend on which page was open.
-        let seconds = dout as f64 / ENGINE_SR;
-        let alpha = 1.0 - 0.95f64.powf(seconds);
-        self.ema += alpha * (inst - self.ema);
-        let err = self.ema - 1.0;
+        // Centred least squares, relative to the oldest sample (exact in f64).
+        let (in0, out0) = self.samples[0];
+        let n = self.samples.len() as f64;
+        let rel = |(i, o): (u64, u64)| ((o - out0) as f64, (i - in0) as f64);
+        let (sx, sy) = self
+            .samples
+            .iter()
+            .map(|&p| rel(p))
+            .fold((0.0, 0.0), |(a, b), (x, y)| (a + x, b + y));
+        let (mx, my) = (sx / n, sy / n);
+        let (sxy, sxx) = self
+            .samples
+            .iter()
+            .map(|&p| rel(p))
+            .fold((0.0, 0.0), |(a, b), (x, y)| {
+                (a + (x - mx) * (y - my), b + (x - mx) * (x - mx))
+            });
+        let err = sxy / sxx - 1.0;
         let corrected = if err.abs() < 2e-6 {
             1.0 // deadband: exactly 1.0 keeps the identity fast path
         } else {
@@ -1697,6 +1743,57 @@ mod drift_tests {
             "clamped at +500 ppm, got {} ppm",
             (r - 1.0) * 1e6
         );
+    }
+
+    /// Counters as the callbacks leave them: whole callbacks of `cb_in` and
+    /// `cb_out` frames, the mic `ppm` fast, read about every `poll` seconds
+    /// for `seconds` — a timer's tick, so its phase against the callbacks
+    /// wanders (up to 20 ms here). Returns how far (engine frames) the take
+    /// slipped against the output over the run: the published correction's
+    /// error, integrated.
+    fn slip_with_callbacks(cb_in: u64, cb_out: u64, ppm: f64, poll: f64, seconds: f64) -> f64 {
+        let bits = Arc::new(AtomicU64::new(0));
+        let mut est = DriftEstimator::new(Arc::clone(&bits));
+        let truth = 1.0 + ppm * 1e-6;
+        let mut rng = 0x2545_f491_4f6c_dd1du64;
+        let mut jitter = || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            (rng >> 11) as f64 / (1u64 << 53) as f64 * 0.02
+        };
+        let (mut slip, mut k) = (0.0, 1u64);
+        while k as f64 * poll <= seconds {
+            slip += (ratio_of(&bits) - truth) * poll * 48_000.0;
+            let t = k as f64 * poll + jitter();
+            let inn = (t * 48_000.0 * truth) as u64 / cb_in * cb_in;
+            let out = (t * 48_000.0) as u64 / cb_out * cb_out;
+            est.tick(inn, out);
+            k += 1;
+        }
+        slip
+    }
+
+    #[test]
+    fn callback_sized_counters_do_not_bias_the_estimate() {
+        // Over 100 ms-1 s measurements a callback of quantization is ~1%, and
+        // the glitch gate cut it off on one side only: 480-frame input and
+        // 512-frame output callbacks published the -500 ppm clamp, slipping a
+        // take ~0.45 s in 15 minutes, where uncorrected drift is ~27 ms.
+        for (cb_in, cb_out) in [(480, 512), (512, 480), (480, 480), (1024, 1024)] {
+            for poll in [1.0, 0.05] {
+                for ppm in [0.0, 30.0] {
+                    let slip = slip_with_callbacks(cb_in, cb_out, ppm, poll, 900.0);
+                    // 5 ms; the first measurement (10 s at the published 1.0)
+                    // alone accounts for up to 14.4 frames at 30 ppm.
+                    assert!(
+                        slip.abs() < 240.0,
+                        "{cb_in}/{cb_out} callbacks, {poll} s polls, {ppm} ppm: \
+                         the take slipped {slip} frames"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -2304,7 +2401,7 @@ fn open_mic(
     // VPIO renders playback at 48 kHz with no boundary resampler: sync the
     // consumed cursor over anything a dying non-48 kHz cpal stream left in
     // its FIFO (see build_stream).
-    rt.transport().sync_consumed_to_rendered();
+    rt.transport().sync_consumed_over_unplayed();
     crate::vpio::Vpio::start(
         uid,
         Arc::clone(input_cell),
@@ -4225,6 +4322,32 @@ mod out_resampler_tests {
             rms < 0.05,
             "alias residue RMS {rms} for a tone above the device Nyquist"
         );
+    }
+
+    #[test]
+    fn a_flushed_fifo_is_consumed_but_not_played() {
+        // The drift estimator's output clock is what the device played: a seek's
+        // flush jumps the consumed cursor over the FIFO's unplayed frames, which
+        // read as the output clock leaping ahead.
+        let (h, mut res) = tone_engine(1_000.0, 44_100.0);
+        h.play();
+        let mut out = vec![0.0; 441 * CHANNELS];
+        for _ in 0..10 {
+            res.process(&mut out, 441);
+        }
+        let t = Arc::clone(&res.rt);
+        let (consumed, played) = (
+            t.transport().consumed_frames(),
+            t.transport().played_frames(),
+        );
+        assert_eq!(consumed, played, "nothing skipped yet");
+        h.seek(10_000);
+        res.process(&mut out, 441);
+        let skipped = t.transport().consumed_frames() - consumed;
+        let heard = t.transport().played_frames() - played;
+        assert!(skipped > heard, "the flush jumped the cursor ({skipped})");
+        // One 441-frame callback at 44.1 kHz plays 480 engine frames.
+        assert!((479..=481).contains(&heard), "played {heard} engine frames");
     }
 
     #[test]

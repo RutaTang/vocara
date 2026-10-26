@@ -111,6 +111,12 @@ pub struct Shared {
     /// exact at pause (the fold reads the mapping, not a depth estimate).
     rendered_total: AtomicU64,
     consumed_total: AtomicU64,
+    /// Frames `consumed_total` was advanced over without the device playing them: a flush's
+    /// discarded FIFO, a dead stream's leftovers synced over at the next one's start. The
+    /// clock-drift estimator's output clock is what was PLAYED (`consumed - skipped`): the
+    /// jumps read as the output clock leaping ahead, by hundreds of frames per seek on a
+    /// 44.1 kHz device.
+    skipped_total: AtomicU64,
     /// `rendered_total` when the transport last started playing, or the render last
     /// applied a seek: a new run. Spans ending at or before it belong to an EARLIER
     /// run: until the cursor reaches this run's audio, nothing of it has been heard.
@@ -145,6 +151,7 @@ impl Shared {
             mon_rev_wet: AtomicU32::new(0.2f32.to_bits()),
             rendered_total: AtomicU64::new(0),
             consumed_total: AtomicU64::new(0),
+            skipped_total: AtomicU64::new(0),
             play_mark: AtomicU64::new(0),
             seg_head: AtomicU32::new(0),
             segments: std::array::from_fn(|_| RenderSegment {
@@ -239,6 +246,33 @@ impl Shared {
         if n > 0 {
             self.consumed_total.fetch_add(n, Ordering::Release);
         }
+    }
+
+    /// [`Self::advance_consumed`] over `n` frames the device never played (a flushed FIFO).
+    pub fn skip_unplayed(&self, n: u64) {
+        if n > 0 {
+            self.skipped_total.fetch_add(n, Ordering::Relaxed);
+            self.consumed_total.fetch_add(n, Ordering::Release);
+        }
+    }
+
+    /// [`Self::sync_consumed_to_rendered`] at a stream's START, on the host thread before any
+    /// of its callbacks: what the cursor jumps over is a dead stream's unplayed FIFO.
+    pub fn sync_consumed_over_unplayed(&self) {
+        let rendered = self.rendered_total.load(Ordering::Acquire);
+        let consumed = self.consumed_total.swap(rendered, Ordering::AcqRel);
+        self.skipped_total
+            .fetch_add(rendered.saturating_sub(consumed), Ordering::Relaxed);
+    }
+
+    /// Frames the device has actually played: the consumed cursor less what it skipped.
+    pub fn played_frames(&self) -> u64 {
+        // Skipped first: read after the cursor, a skip landing in between would be taken
+        // off a cursor that does not hold it yet.
+        let skipped = self.skipped_total.load(Ordering::Relaxed);
+        self.consumed_total
+            .load(Ordering::Acquire)
+            .saturating_sub(skipped)
     }
 
     /// Identity-path (48 kHz) stream callback: the render IS the delivery, so

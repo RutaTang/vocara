@@ -852,15 +852,16 @@ pub extern "C" fn ve_poll_device_event(e: *mut VeEngine, mask: u32) -> u32 {
         // Piggyback the ~1 s clock-drift tick on the event pollers:
         // it compares the input's NOMINAL emission counter (correction-free —
         // feeding the corrected counter closed the loop on itself and only
-        // half the drift was ever compensated) against the output's consumed
-        // cursor and publishes the input resampler's correction ratio.
+        // half the drift was ever compensated) against the frames the output
+        // played (its consumed cursor less what a flush skipped) and publishes
+        // the input resampler's correction ratio.
         // Self-gating — a closed mic or a paused transport advances one
         // counter only, and the estimator freezes. Ticking from more than
-        // one poller is fine: the estimator accumulates deltas until the
-        // ~100 ms MIN_DELTA and normalizes its alpha to the measured span.
+        // one poller is fine: the estimator accumulates deltas until a
+        // measurement spans 10 s.
         let nominal_in = eng.input_nominal_frames.load(Ordering::Acquire);
-        let consumed = eng.handle.transport().consumed_frames();
-        eng.drift.tick(nominal_in, consumed);
+        let played = eng.handle.transport().played_frames();
+        eng.drift.tick(nominal_in, played);
         // Re-derive the monitor safety mute on the same tick. The host thread reconciles on every
         // command that moves the binding, which covers the sharp edge (the mic opening and taking
         // the output with it), but nothing wakes it when the SYSTEM default output changes under
