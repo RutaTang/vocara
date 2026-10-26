@@ -7,6 +7,7 @@ import '../../domain/models/technique_media.dart';
 import '../../utils/result.dart';
 import '../db/app_database.dart';
 import '../db/asset_store.dart';
+import '../services/diagnostics_log.dart';
 import '../sync/reconcile.dart';
 import '../sync/sync_hashes.dart';
 import '../sync/sync_writer.dart';
@@ -183,6 +184,18 @@ class TechniqueRepositoryDrift implements TechniqueRepository {
       final aliasesJson = jsonEncode(technique.aliases);
       final tagsJson = jsonEncode(technique.tags);
       final now = _ms(DateTime.now());
+      // Every row as this save sends it, hashed as its merge compares it —
+      // before the write, so nothing after the commit can fail the save (see
+      // the re-read below).
+      final sent = <String, String>{
+        technique.id: _techniqueHash(technique),
+        for (var i = 0; i < technique.media.length; i++)
+          technique.media[i].id: _mediaHash(
+            technique.media[i],
+            mediaAssets[i],
+            i,
+          ),
+      };
 
       await db.transaction(() async {
         // --- the technique row (single-entity reconcile) ---
@@ -379,7 +392,29 @@ class TechniqueRepositoryDrift implements TechniqueRepository {
       // Return the saved copy with resolved (pooled) media paths, plus fresh
       // base hashes so the caller's next save merges against what this save
       // actually left in the store.
-      return loadTechnique(technique.id);
+      final reloaded = await loadTechnique(technique.id);
+      if (reloaded is! Ok<Loaded<Technique>>) {
+        // Committed all the same. Reported as a failed write, the editor
+        // reverted to the technique before it and kept the base before it:
+        // its next save then took the stored edit for a remote one and wrote
+        // the old values back over it. What was sent stands in for the
+        // re-read, as for a practice (see SongPracticeRepositoryDrift._save).
+        DiagnosticsLog.instance.log(
+          'save',
+          'technique committed; its re-read failed: '
+              '${(reloaded as Error<Loaded<Technique>>).error.runtimeType}',
+        );
+        return Result.ok(
+          Loaded(technique, sent, sentHashes: sent, reread: false),
+        );
+      }
+      return Result.ok(
+        Loaded(
+          reloaded.value.aggregate,
+          reloaded.value.baseHashes,
+          sentHashes: sent,
+        ),
+      );
     } catch (e) {
       // The data boundary must always return a Result, never throw — a
       // data-layer Error (e.g. a StateError) must still surface as Result.error

@@ -31,6 +31,26 @@ class _Reads extends QueryInterceptor {
   }
 }
 
+/// Its re-read after a save fails once, when [failNextLoad] is set.
+class _FlakyReread extends TechniqueRepositoryDrift {
+  _FlakyReread({
+    required super.db,
+    required super.writer,
+    required super.assets,
+  });
+
+  bool failNextLoad = false;
+
+  @override
+  Future<Result<Loaded<Technique>>> loadTechnique(String id) async {
+    if (failNextLoad) {
+      failNextLoad = false;
+      return Result.error(Exception('re-read failed'));
+    }
+    return super.loadTechnique(id);
+  }
+}
+
 void main() {
   late AppDatabase db;
   late Directory tmp;
@@ -329,4 +349,46 @@ void main() {
       expect(await ops(), before);
     },
   );
+  // Reported as failed, the editor reverted to the technique before the
+  // committed rename and kept the base before it; its next save took the
+  // stored rename for a remote edit and wrote the old name back.
+  test('a save whose re-read fails still reports what it committed', () async {
+    final writer = SyncWriter(db, HlcClock(node: 'NODE'.padRight(26, '0')));
+    final flaky = _FlakyReread(
+      db: db,
+      writer: writer,
+      assets: AssetStore(db: db, root: tmp, writer: writer),
+    );
+    final t = Technique(
+      id: newId(),
+      name: 'Belt',
+      createdAt: DateTime(2026),
+      updatedAt: DateTime(2026),
+    );
+    final first =
+        (await flaky.saveTechniqueWithBase(t, baseHashes: const {})
+                as Ok<Loaded<Technique>>)
+            .value;
+    flaky.failNextLoad = true;
+    final renamed = first.aggregate.copyWith(name: 'Belt 2');
+    final r = await flaky.saveTechniqueWithBase(
+      renamed,
+      baseHashes: first.baseHashes,
+    );
+    expect(r, isA<Ok<Loaded<Technique>>>());
+    final saved = (r as Ok<Loaded<Technique>>).value;
+    expect(saved.reread, isFalse);
+    expect(saved.aggregate.name, 'Belt 2');
+
+    // The next save merges against what was sent: an unrelated edit keeps
+    // the rename.
+    final next = await flaky.saveTechniqueWithBase(
+      saved.aggregate.copyWith(summary: 'Bright, forward'),
+      baseHashes: saved.baseHashes,
+    );
+    expect(next, isA<Ok<Loaded<Technique>>>());
+    final row = await db.select(db.techniques).getSingle();
+    expect(row.name, 'Belt 2');
+    expect(row.summary, 'Bright, forward');
+  });
 }
