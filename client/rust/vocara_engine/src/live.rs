@@ -516,7 +516,10 @@ impl RtProcessor {
         // bursts' phase against the output's, which slides over minutes when the two run on
         // separate clocks, so a trim by level (over a one-second window) cut audio every
         // second and starved the callbacks when the phase wrapped. What is dropped only ever
-        // reached the singer's ears; the take records through its own ring.
+        // reached the singer's ears; the take records through its own ring. Exactly this
+        // callback's frames are kept, not a cushion: where the bursts and the pulls do not line
+        // up, the new stream may starve once and settle at the least latency the two allow,
+        // where a cushion kept would be heard as latency for the rest of the session.
         if self.mon_shed {
             self.mon_shed = false;
             for _ in 0..self.mic_rx.len().saturating_sub(frames) {
@@ -1695,9 +1698,12 @@ mod monitor_and_loop_tests {
         };
         let g = desc.compile(ENGINE_SR, 1024).unwrap();
         let (mut mic, mic_cons) = spsc::<[Smp; CHANNELS]>(1 << 12);
-        let (h, mut rt) = spawn(g, HashMap::new(), mic_cons, 256);
+        let (h, rt) = spawn(g, HashMap::new(), mic_cons, 256);
         h.set_monitor_gain(1.0);
         h.set_monitor_reverb(0.6, 0.5, 0.0);
+        // Through the cell, as one stream: every callback carries the same generation.
+        let cell = RtCell::new(rt);
+        let stream = cell.claim();
         let period = 512.0 / (1.0 - 2000e-6);
         let (mut t_in, mut t_out, mut owed, mut sent) = (0.0f64, 0.0f64, 0.0f64, 0usize);
         let mut out = vec![0.0; 512 * CHANNELS];
@@ -1713,7 +1719,7 @@ mod monitor_and_loop_tests {
                 t_in += period;
                 continue;
             }
-            rt.process(&mut out, 512);
+            assert!(cell.try_render(stream, &mut out, 512));
             if t_out >= 48_000.0 {
                 for i in 0..512 {
                     let s = out[CHANNELS * i];
