@@ -276,16 +276,20 @@ class _WorkspaceState extends State<_Workspace> {
           await vm.addAccompaniment(audio.first);
           index = 1;
         }
-        // The lane lit up as the target, and the files then landed as takes
-        // with nothing said.
-        if (index == 0) {
-          _showToast(
-            'The ${vm.mixer.playReference ? 'Original' : 'Accompaniment'} is '
-            'already set, so the drop was added as vocal takes.',
-          );
-        }
+        final slot = vm.mixer.playReference ? 'Original' : 'Accompaniment';
+        final before = vm.practice?.vocalTracks.length ?? 0;
         for (var i = index; i < audio.length; i++) {
           await vm.addVocalTake(audio[i]);
+        }
+        // The lane lit up as the target, and the files then landed as takes
+        // with nothing said. Said once they have all landed: said first, an
+        // import's own toast replaced it, and a failed import made it untrue
+        // (that import's toast says so instead).
+        final added = (vm.practice?.vocalTracks.length ?? 0) - before;
+        if (index == 0 && added == audio.length) {
+          _showToast(
+            'The $slot is already set, so the drop was added as vocal takes.',
+          );
         }
       });
 
@@ -512,6 +516,8 @@ class _WorkspaceState extends State<_Workspace> {
         Expanded(
           child: _CatchUpGuard(
             catchingUp: vm.catchingUp,
+            onRefusedDrop: () =>
+                _showToast('Wait for your last save to finish.'),
             child: LayoutBuilder(
               builder: (context, constraints) => Column(
                 children: [
@@ -564,12 +570,20 @@ class _WorkspaceState extends State<_Workspace> {
     return Stack(
       children: [
         content,
-        if (vm.lyricsFocus) Positioned.fill(child: LyricsFocusOverlay(vm: vm)),
+        if (vm.lyricsFocus)
+          Positioned.fill(
+            child: LyricsFocusOverlay(vm: vm, onToast: _showToast),
+          ),
         if (vm.isSeparating)
           Positioned.fill(
-            child: _SeparationOverlay(
-              progress: vm.separationProgress,
-              onCancel: vm.cancelSeparation,
+            // Nothing beneath takes a drop through the overlay (see
+            // VisibleDropTarget): said, not silently dropped.
+            child: VisibleDropTarget(
+              onDrop: (_) => _showToast('Wait for the separation to finish.'),
+              child: _SeparationOverlay(
+                progress: vm.separationProgress,
+                onCancel: vm.cancelSeparation,
+              ),
             ),
           ),
       ],
@@ -583,9 +597,17 @@ class _WorkspaceState extends State<_Workspace> {
 /// read from before that save lands loses either itself or the save. The
 /// transport above stays live, so Back and playback still work.
 class _CatchUpGuard extends StatelessWidget {
-  const _CatchUpGuard({required this.catchingUp, required this.child});
+  const _CatchUpGuard({
+    required this.catchingUp,
+    required this.onRefusedDrop,
+    required this.child,
+  });
 
   final bool catchingUp;
+
+  /// A file dropped on the guard: nothing beneath takes it through the
+  /// guard (see VisibleDropTarget), so it is said instead.
+  final VoidCallback onRefusedDrop;
   final Widget child;
 
   @override
@@ -596,13 +618,16 @@ class _CatchUpGuard extends StatelessWidget {
         // guard lifts.
         AbsorbPointer(absorbing: catchingUp, child: child),
         if (catchingUp)
-          const Positioned.fill(
-            child: ColoredBox(
-              color: Color(0x800A0A0E),
-              child: Center(
-                child: Text(
-                  'Finishing your last save…',
-                  style: TextStyle(color: Studio.textSecondary, fontSize: 13),
+          Positioned.fill(
+            child: VisibleDropTarget(
+              onDrop: (_) => onRefusedDrop(),
+              child: const ColoredBox(
+                color: Color(0x800A0A0E),
+                child: Center(
+                  child: Text(
+                    'Finishing your last save…',
+                    style: TextStyle(color: Studio.textSecondary, fontSize: 13),
+                  ),
                 ),
               ),
             ),

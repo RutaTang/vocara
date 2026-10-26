@@ -470,7 +470,7 @@ void main() {
         await host.controller.delete('v1');
         expect(host.practice!.versions, hasLength(2));
         expect(host.saves, 0);
-        expect(host.toasts, ['Wait for the current edit to finish.']);
+        expect(host.toasts, ['Wait for the separation to finish.']);
       },
     );
 

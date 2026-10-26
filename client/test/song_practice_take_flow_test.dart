@@ -600,6 +600,28 @@ void main() {
     });
   });
 
+  test('an edit refused while a stopped take saves says so, not to stop '
+      'recording', () async {
+    final vm = await pumpVm(engine: _FakeGraphEngine(), mic: _FakeMic());
+    final toasts = <String>[];
+    final sub = vm.toasts.listen(toasts.add);
+    addTearDown(sub.cancel);
+    await vm.recording.startRecording();
+    final gate = waveforms.gate = Completer<void>();
+    addTearDown(() {
+      if (!gate.isCompleted) gate.complete();
+    });
+    final stopping = vm.stopRecording();
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    expect(vm.recording.isStopping, isTrue);
+
+    expect(vm.refuseStructuralEdit(), isTrue);
+    await Future<void>.delayed(Duration.zero);
+    expect(toasts, ['Wait for the take to finish saving.']);
+    gate.complete();
+    await stopping;
+  });
+
   test('a delete refused while an import runs says why', () async {
     // The confirm dialog opened, "Delete" was clicked, and the take simply
     // stayed: the refusal said nothing.

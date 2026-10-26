@@ -615,10 +615,19 @@ void main() {
     }
     expect(vm.analysis.metricsFor('t0'), isNull, reason: 'nothing merged');
     expect(vm.analysis.metricsLoadingFor('t0'), isFalse);
+    // The dock and the inspector wait for the merge where it lands: read as
+    // settled, they said the take could not be analyzed for the whole drag.
+    expect(vm.spectrogramLoading, isTrue);
+    expect(vm.metricsLoading, isTrue);
+    expect(
+      find.textContaining('Analysis is available for recorded takes'),
+      findsNothing,
+    );
 
     await vm.commitTrackMove();
     await settle();
     expect(vm.analysis.metricsFor('t0'), isNotNull, reason: 'where it landed');
+    expect(vm.spectrogramLoading, isFalse);
   });
 
   testWidgets('the Pitch and Timbre tabs repaint only their playheads per '

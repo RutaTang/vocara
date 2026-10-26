@@ -116,8 +116,12 @@ class TechniqueMedia {
     '.aiff',
     '.flac',
     '.ogg',
-    // Not '.opus' or '.wma': the engine has no decoder for either (see the
-    // song screen's import list).
+    '.caf',
+    // Played by media_kit, not the engine: an example the engine cannot
+    // decode still plays, and only its analysis fails (unlike a song
+    // import, which the engine must play — see the song screen's list).
+    '.opus',
+    '.wma',
   };
 
   /// Whether [path] looks like an importable audio or video file.

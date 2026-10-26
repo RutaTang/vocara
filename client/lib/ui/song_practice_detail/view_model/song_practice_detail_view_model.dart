@@ -1451,10 +1451,6 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       _toast('Source separation is not available in this version.');
       return;
     }
-    if (takeInFlight) {
-      _toast('Stop recording to separate the backing.');
-      return;
-    }
     // The original to separate + keep: prefer the Reference slot (where the
     // original lives), else the right-clicked track. Backings are single-clip
     // lanes, so the primary clip's file IS the original recording.
@@ -1922,7 +1918,10 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// a word, the take still there after "Delete".
   bool refuseStructuralEdit() {
     final String why;
-    if (takeInFlight) {
+    if (recording.isStopping && !recording.isRecording) {
+      // Stop is already pressed: the take is being saved.
+      why = 'Wait for the take to finish saving.';
+    } else if (takeInFlight) {
       why = 'Stop recording first.';
     } else if (isSeparating) {
       why = 'Wait for the separation to finish.';

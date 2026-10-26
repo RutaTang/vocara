@@ -164,6 +164,7 @@ AnalysisCache _cache({
   LruBytesBudget? cacheBudget,
   Future<bool> Function()? requestMicPermission,
   void Function(String)? toast,
+  DateTime Function()? now,
 }) => AnalysisCache(
   spectrograms: spectrograms ?? _FakeSpectrograms(),
   monitor: monitor ?? _FakeMonitor(),
@@ -181,6 +182,7 @@ AnalysisCache _cache({
   // A private budget by default so tests never evict each other's entries
   // through the app-wide one.
   cacheBudget: cacheBudget ?? LruBytesBudget(1 << 30),
+  now: now ?? DateTime.now,
 );
 
 AudioTrack _lane(List<AudioClip> clips, {String id = 'lane'}) => AudioTrack(
@@ -983,6 +985,35 @@ void main() {
       await tester.pump(const Duration(seconds: 29));
       expect(notified, 0);
       await tester.pump(const Duration(seconds: 2));
+      expect(notified, 1, reason: 'the lanes rebuild and ask again');
+    });
+
+    testWidgets('heals far apart each still earn their retry', (tester) async {
+      // Counted for the life of the screen, three heals an hour apart used
+      // up the retries: the next lane let go just after a heal sat empty on
+      // an idle screen for good.
+      var clock = DateTime(2026);
+      final cache = _cache(
+        spectrograms: stub(),
+        trackById: lanes,
+        now: () => clock,
+      );
+      addTearDown(cache.dispose);
+      cache.toggleTrackExpanded('S');
+      await tester.pump();
+      for (var i = 0; i < 3; i++) {
+        clock = clock.add(const Duration(minutes: 20));
+        cache.debugDropHalf('s1.wav', metrics: true);
+        await cache.healLane('S');
+        expect(cache.metricsFor('S'), isNotNull);
+      }
+      clock = clock.add(const Duration(seconds: 5));
+      cache.debugDropHalf('s1.wav', metrics: true);
+      await cache.healLane('S'); // refused: asked too recently
+      var notified = 0;
+      cache.addListener(() => notified++);
+
+      await tester.pump(const Duration(seconds: 26));
       expect(notified, 1, reason: 'the lanes rebuild and ask again');
     });
 

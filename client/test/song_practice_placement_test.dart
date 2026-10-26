@@ -264,12 +264,13 @@ void main() {
 
     Future<SongPracticeDetailViewModel> pumpScreen(
       WidgetTester tester,
-      _GatedWaveforms waves,
-    ) async {
+      _GatedWaveforms waves, {
+      SongPractice? practice,
+    }) async {
       tester.view.physicalSize = const Size(1800, 1100);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
-      final vm = _vm(_practice(vocalTracks: [_take]), waves);
+      final vm = _vm(practice ?? _practice(vocalTracks: [_take]), waves);
       for (var i = 0; i < 100 && vm.practice == null; i++) {
         await tester.pump(const Duration(milliseconds: 5));
       }
@@ -334,6 +335,50 @@ void main() {
       await settle(tester);
 
       expect(_addedStarts(vm), [5000, 6000]);
+    });
+
+    // Said as the drop began, the notice was replaced by the first import's
+    // own toast, and stood untrue when an import then failed.
+    testWidgets('a drop on a set backing says it became takes once they '
+        'have landed', (tester) async {
+      final waves = _GatedWaveforms();
+      final backing = AudioTrack(
+        id: 'acc',
+        kind: AudioTrackKind.accompaniment,
+        displayName: 'Backing',
+        audioFilePath: '/pool/acc.wav',
+        durationMs: 60000,
+        createdAt: DateTime(2026),
+      );
+      final vm = await pumpScreen(
+        tester,
+        waves,
+        practice: _practice(
+          vocalTracks: [_take],
+        ).copyWith(accompaniment: backing),
+      );
+      final lane = find.ancestor(
+        of: find.byKey(const ValueKey('acc')),
+        matching: find.byType(DropTarget),
+      );
+      tester.widget<DropTarget>(lane.first).onDragDone!(
+        DropDoneDetails(
+          files: [DropItemFile('/src/a.wav'), DropItemFile('/src/b.wav')],
+          localPosition: Offset.zero,
+          globalPosition: tester.getCenter(lane.first),
+        ),
+      );
+      const notice = 'already set, so the drop was added as vocal takes';
+      await settle(tester);
+      expect(waves.gates, hasLength(1), reason: 'the first file analyzing');
+      expect(find.textContaining(notice), findsNothing);
+      waves.gates.last.complete();
+      await settle(tester);
+      waves.gates.last.complete();
+      await settle(tester);
+
+      expect(vm.practice!.vocalTracks, hasLength(3));
+      expect(find.textContaining(notice), findsOneWidget);
     });
 
     // Regression guard: "Add audio clip at playhead…" read the playhead only

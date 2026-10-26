@@ -65,6 +65,7 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     @visibleForTesting
     Future<bool> Function() requestMicPermission = MicPermission.request,
     @visibleForTesting LruBytesBudget? cacheBudget,
+    @visibleForTesting DateTime Function() now = DateTime.now,
   }) : _aggAnalysisCache = LruBytesCache.shared(
          cacheBudget ?? analysisCacheBudget,
          _aggBytes,
@@ -94,7 +95,8 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
        _position = position,
        _seek = seek,
        _toast = toast,
-       _requestMicPermission = requestMicPermission {
+       _requestMicPermission = requestMicPermission,
+       _now = now {
     // Derived results are memoized under the SAME key as the entry they came
     // from, so the budget dropping a source leaves them with no owner. Wiring
     // the hooks here (rather than at construction) is what lets them close
@@ -754,7 +756,7 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     final s = _analysisSubject;
     if (s == null) return false;
     return s.aggregate
-        ? _aggLoading.contains(s.key)
+        ? _aggLoading.contains(s.key) || _mergeAwaitsMove(s.key)
         : _spectrogramLoading.contains(s.key);
   }
 
@@ -763,8 +765,20 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     final s = _analysisSubject;
     if (s == null) return false;
     return s.aggregate
-        ? _aggLoading.contains(s.key)
+        ? _aggLoading.contains(s.key) || _mergeAwaitsMove(s.key)
         : _metricsLoading.contains(s.key);
+  }
+
+  /// Whether the selected take's merge [key] is unasked only because one of
+  /// its clips is being dragged (see [lacksAnalysis]): each tick re-keys it,
+  /// and it is computed once the move lands. Its views wait for it — read as
+  /// settled, they said the take could not be analyzed for the whole drag.
+  bool _mergeAwaitsMove(String key) {
+    final moving = _selectedTrack()?.id;
+    return moving != null &&
+        _isMovingLive(moving) &&
+        !_aggAnalysisCache.containsKey(key) &&
+        !_aggUnavailable.contains(key);
   }
 
   // --- Per-lane analysis ----------------------------------------------------
@@ -911,10 +925,16 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   /// A rebuild of the lanes once a heal the interval refused may run.
   Timer? _laneHealRetry;
 
-  /// How many times [healLane] asked for each subject, and how many of those
-  /// earn a retry of their own (see [healLane]).
-  final Map<String, int> _laneHeals = {};
+  /// How many times in a row [healLane] asked for each subject, each within
+  /// [_laneHealQuiet] of the one before, and when it last did; and how many
+  /// of those earn a retry of their own (see [healLane]). A run of heals the
+  /// quiet ends starts over: counted for the life of the screen, three heals
+  /// an hour apart left the next lane the budget let go empty for good.
+  final Map<String, ({int count, DateTime at})> _laneHeals = {};
   static const _laneHealRetries = 3;
+  static const _laneHealQuiet = Duration(minutes: 2);
+
+  final DateTime Function() _now;
 
   /// How soon [healLane] asks again for the same subject. More analysis on
   /// screen than the byte budget holds would otherwise have the lanes and the
@@ -928,10 +948,11 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     final subject = t.clips.length > 1
         ? aggregateKeyFor(t)
         : t.primaryClip!.audioFilePath;
-    final now = DateTime.now();
+    final now = _now();
     _laneHealedAt.removeWhere(
       (_, at) => now.difference(at) >= _laneHealInterval,
     );
+    _laneHeals.removeWhere((_, h) => now.difference(h.at) >= _laneHealQuiet);
     final last = _laneHealedAt[subject];
     if (last != null) {
       // Asked again once the interval is up: nothing else may rebuild the
@@ -939,7 +960,7 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
       // healed a few times: more analysis on screen than the budget holds
       // has every view evict another's in turn, and an idle screen then
       // decoded something every interval for as long as it stayed open.
-      if ((_laneHeals[subject] ?? 0) < _laneHealRetries) {
+      if ((_laneHeals[subject]?.count ?? 0) < _laneHealRetries) {
         _laneHealRetry ??= Timer(_laneHealInterval - now.difference(last), () {
           _laneHealRetry = null;
           notifyListeners();
@@ -948,7 +969,10 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
       return;
     }
     _laneHealedAt[subject] = now;
-    _laneHeals[subject] = (_laneHeals[subject] ?? 0) + 1;
+    _laneHeals[subject] = (
+      count: (_laneHeals[subject]?.count ?? 0) + 1,
+      at: now,
+    );
     if (t.clips.length > 1) {
       final key = subject;
       // Only lanes as they are now: a key from an earlier layout can never

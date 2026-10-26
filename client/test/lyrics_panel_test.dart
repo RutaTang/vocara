@@ -113,6 +113,15 @@ class _ReaderVm extends Fake implements SongPracticeDetailViewModel {
   @override
   final ValueNotifier<Duration> position = ValueNotifier(Duration.zero);
 
+  LyricsMode mode = LyricsMode.read;
+  final List<String> imported = [];
+
+  @override
+  LyricsMode get lyricsMode => mode;
+
+  @override
+  Future<void> importLyricsFromFile(String path) async => imported.add(path);
+
   @override
   List<LyricLine> lyrics = _timed(stepMs: 1000);
 
@@ -143,13 +152,19 @@ List<LyricLine> _timed({required int stepMs}) => [
   for (var i = 0; i < 80; i++) LyricLine(text: 'line $i', timeMs: i * stepMs),
 ];
 
-Future<void> _pumpFocus(WidgetTester tester, _ReaderVm vm) async {
+Future<void> _pumpFocus(
+  WidgetTester tester,
+  _ReaderVm vm, {
+  void Function(String)? onToast,
+}) async {
   tester.view.physicalSize = const Size(900, 600);
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.reset);
   await tester.pumpWidget(
     MaterialApp(
-      home: Scaffold(body: LyricsFocusOverlay(vm: vm)),
+      home: Scaffold(
+        body: LyricsFocusOverlay(vm: vm, onToast: onToast),
+      ),
     ),
   );
   await tester.pumpAndSettle();
@@ -477,5 +492,28 @@ void main() {
     expect(_onScreen(tester, 'line 50'), isTrue);
     expect(_highlighted(tester, 'line 50'), isTrue);
     expect(tester.takeException(), isNull);
+  });
+
+  // The panel beneath takes no drop through the overlay, so a lyrics file
+  // dropped on the lyrics in focus did nothing at all.
+  testWidgets('a lyrics file dropped on the focus overlay is imported', (
+    tester,
+  ) async {
+    final vm = _ReaderVm();
+    await _pumpFocus(tester, vm);
+    await _drop(tester, '/tmp/song.lrc');
+    expect(vm.imported, ['/tmp/song.lrc']);
+  });
+
+  testWidgets('while editing, the focus overlay says why it takes no drop', (
+    tester,
+  ) async {
+    // The editor kept under the overlay would Save its text over the import.
+    final toasts = <String>[];
+    final vm = _ReaderVm()..mode = LyricsMode.edit;
+    await _pumpFocus(tester, vm, onToast: toasts.add);
+    await _drop(tester, '/tmp/song.lrc');
+    expect(vm.imported, isEmpty);
+    expect(toasts.single, contains('Exit focus'));
   });
 }

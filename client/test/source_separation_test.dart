@@ -391,6 +391,48 @@ exit 0''';
       );
     });
 
+    test('a bar cut off inside its unit, body or count is no cause', () async {
+      final stub = await writeStub(
+        r"printf 'RuntimeError: model failed\n"
+        r' 45%%|####5 | 17/38 [00:10<00:12, 1.7it\n'
+        r'model.bin:  27%%|##7       | 12.3M/45.6M [00:02<00:05, 6.1MiB/\n'
+        r" 45%%|####5\n 46%%|####6 | 17' >&2"
+        '\nexit 2',
+      );
+      final svc = buildService(stub);
+      final err = await outcome(svc.separate(await writeSource()));
+      expect(
+        (err as FormatException).message,
+        'Separation failed: RuntimeError: model failed',
+      );
+    });
+
+    test('an error ending in percentages keeps its words', () async {
+      final stub = await writeStub(
+        r"printf 'ValueError: expected 100%%|got 50%%|\n' >&2"
+        '\nexit 1',
+      );
+      final svc = buildService(stub);
+      final err = await outcome(svc.separate(await writeSource()));
+      expect(
+        (err as FormatException).message,
+        'Separation failed: ValueError: expected 100%|got 50%|',
+      );
+    });
+
+    test('an abort that lands mid-count keeps only its words', () async {
+      final stub = await writeStub(
+        r"printf ' 46%%|####6 | 17/libc++abi: terminating\n' >&2"
+        '\nkill -6 \$\$',
+      );
+      final svc = buildService(stub);
+      final err = await outcome(svc.separate(await writeSource()));
+      expect(
+        (err as FormatException).message,
+        'Separation failed (signal 6): libc++abi: terminating',
+      );
+    });
+
     test('a failure names its last line that is not a progress bar', () async {
       final stub = await writeStub(
         r"printf 'loading\nValueError: bad model\n 50%%|#    | 19/38\r' >&2"

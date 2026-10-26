@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:file_selector/file_selector.dart' show XTypeGroup, openFile;
 import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart';
@@ -1314,12 +1316,36 @@ class _LyricsSyncState extends State<_LyricsSync> {
 
 /// Full-window large-text karaoke for hands-free singing.
 class LyricsFocusOverlay extends StatelessWidget {
-  const LyricsFocusOverlay({required this.vm, super.key});
+  const LyricsFocusOverlay({required this.vm, this.onToast, super.key});
 
   final SongPracticeDetailViewModel vm;
 
+  /// Says why a drop was refused.
+  final void Function(String message)? onToast;
+
   @override
   Widget build(BuildContext context) {
+    // The panel beneath takes no drop through this overlay (see
+    // VisibleDropTarget), so the overlay takes it: a lyrics file dropped on
+    // the lyrics in focus did nothing at all.
+    return VisibleDropTarget(
+      onDrop: (paths) {
+        if (paths.isEmpty) return;
+        // The panel's editor is kept under the overlay with the text it
+        // opened on, and its Save would put that back over the import.
+        if (vm.lyricsMode == LyricsMode.edit) {
+          onToast?.call(
+            'Exit focus to import into the lyrics you are editing.',
+          );
+          return;
+        }
+        unawaited(vm.importLyricsFromFile(paths.first));
+      },
+      child: _focusBody(),
+    );
+  }
+
+  Widget _focusBody() {
     return ColoredBox(
       color: Studio.background.withValues(alpha: 0.97),
       child: Stack(

@@ -193,17 +193,20 @@ class ProcessSourceSeparationService implements SourceSeparationService {
   /// with the short label that may lead it. A bar redraws with \r and no line
   /// break, so text printed while one was on screen (a native abort
   /// mid-inference) follows it on the same line: only the bar is cut off,
-  /// not the line. Its count is required, so an error that merely mentions
-  /// "100%|" keeps its words; a bar cut off inside its brackets goes whole.
+  /// not the line. The bar between its "|"s may hold only tqdm's own glyphs,
+  /// so an error that merely mentions "100%|" keeps its words. A bar cut off
+  /// anywhere — inside its body, its count, or its brackets — goes whole,
+  /// while an abort that lands inside its brackets keeps its words.
   static final _progressBar = RegExp(
-    r'^[^%|]{0,60}?\d{1,3}%\|[^|]*\|'
-    // Its count (possibly cut off at the line's end), then its brackets:
-    // whole, or cut off with nothing but tqdm's own characters after them,
-    // so an abort that lands inside them keeps its words. Or nothing at all,
-    // when the bar itself was cut off right after its "|".
-    r'(?:\s*[\d.]+[kMGTPEZY]?/(?:[\d.]+[kMGTPEZY]?|\?|$)'
-    r'(?:\s*\[[^\]]*\]|\s*\[[\d:<>,.?\s]*(?:[\d.]*(?:it/s|s/it))?$)?'
-    r'|\s*$)',
+    r'^[^%|]{0,60}?\d{1,3}%\|[ #0-9▏▎▍▌▋▊▉█]*'
+    // Its count ("17/38", "12.3M/45.6M", "0/?"), possibly cut off, then its
+    // brackets: whole, or cut off with nothing after them but tqdm's own
+    // characters and part of a rate's unit ("1.7it", "6.1MiB/"). Or nothing
+    // at all, when the bar itself was cut off inside its body.
+    r'(?:\|\s*'
+    r'(?:[\d.]+[kMGTPEZY]?(?:/(?:[\d.]+[kMGTPEZY]?|\?)?)?'
+    r'(?:\s*\[(?:[^\]]*\]|[\d:<>,.?\s]*[kMGTPEZYiBts/]{0,6}$))?)?'
+    r'|$)',
   );
 
   /// A Python logging line at DEBUG or INFO ("... - INFO - separator - ..."):
