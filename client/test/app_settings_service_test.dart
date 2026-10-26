@@ -303,14 +303,14 @@ void main() {
       service.refreshOutputDevices(); // nothing changed since
       expect(engine.outputCalls, [_headphones.uid]);
 
-      // Back as the system default, which the stream already follows: rebuilding
-      // it would only make a gap.
+      // Back as the system default, which the fallback stream already plays on:
+      // still bound to it, or the next default change takes the backing along.
       outs = [_builtInOut];
       service.refreshOutputDevices();
       outs = [_builtInOut, _headphones];
       engine.actualOutput = _headphones.uid;
       service.refreshOutputDevices();
-      expect(engine.outputCalls, [_headphones.uid], reason: 'no second switch');
+      expect(engine.outputCalls, [_headphones.uid, _headphones.uid]);
     });
 
     test('only a product named as earbuds is echo-free', () async {

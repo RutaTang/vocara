@@ -718,15 +718,16 @@ class AppSettingsService extends ChangeNotifier {
   ///
   /// It keeps its own list rather than adopting the read: a Bluetooth headset leaves the list
   /// for a moment while the mic switches it to its headset profile, and adopting that dropped
-  /// the echo-free choice and muted the monitor as a take opened. And it leaves an output the
-  /// engine already plays on alone: one that came back as the system default is followed by
-  /// the stream as it is, and rebuilding it made the gap the engine avoids.
+  /// the echo-free choice and muted the monitor as a take opened.
+  ///
+  /// It switches even when the output came back as the system default and the stream already
+  /// plays there: that stream follows the default, so the next default change (AirPods
+  /// connecting, a display with speakers) took the backing with it, monitor muted, until the mic
+  /// next closed. A brief gap as the headphones reconnect is the lesser cost.
   void refreshOutputDevices() {
     final outs = _enumerateOutputs();
     final uid = _outputDeviceUid;
-    if (uid != null &&
-        _returned(_watchedOutputs, outs, uid) &&
-        _engine?.actualOutputDevice() != uid) {
+    if (uid != null && _returned(_watchedOutputs, outs, uid)) {
       _engine?.setOutputDevice(uid);
     }
     _watchedOutputs = outs;
