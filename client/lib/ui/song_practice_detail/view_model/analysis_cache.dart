@@ -756,7 +756,8 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     final s = _analysisSubject;
     if (s == null) return false;
     return s.aggregate
-        ? _aggLoading.contains(s.key) || _mergeAwaitsMove(s.key)
+        ? _aggLoading.contains(s.key) ||
+              _mergeAwaitsMove(_selectedTrack()?.id, s.key)
         : _spectrogramLoading.contains(s.key);
   }
 
@@ -765,21 +766,21 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     final s = _analysisSubject;
     if (s == null) return false;
     return s.aggregate
-        ? _aggLoading.contains(s.key) || _mergeAwaitsMove(s.key)
+        ? _aggLoading.contains(s.key) ||
+              _mergeAwaitsMove(_selectedTrack()?.id, s.key)
         : _metricsLoading.contains(s.key);
   }
 
-  /// Whether the selected take's merge [key] is unasked only because one of
-  /// its clips is being dragged (see [lacksAnalysis]): each tick re-keys it,
-  /// and it is computed once the move lands. Its views wait for it — read as
-  /// settled, they said the take could not be analyzed for the whole drag.
-  bool _mergeAwaitsMove(String key) {
-    final moving = _selectedTrack()?.id;
-    return moving != null &&
-        _isMovingLive(moving) &&
-        !_aggAnalysisCache.containsKey(key) &&
-        !_aggUnavailable.contains(key);
-  }
+  /// Whether take [trackId]'s merge [key] is unasked only because one of its
+  /// clips is being dragged (see [lacksAnalysis], [laneLacksData]): each
+  /// tick re-keys it, and it is computed once the move lands. Its views wait
+  /// for it — the dock, the inspector and its own lanes, read as settled,
+  /// said the take could not be analyzed for the whole drag.
+  bool _mergeAwaitsMove(String? trackId, String key) =>
+      trackId != null &&
+      _isMovingLive(trackId) &&
+      !_aggAnalysisCache.containsKey(key) &&
+      !_aggUnavailable.contains(key);
 
   // --- Per-lane analysis ----------------------------------------------------
 
@@ -799,7 +800,7 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   bool metricsLoadingFor(String trackId) {
     final t = _trackById(trackId);
     if (t == null) return false;
-    if (t.clips.length > 1) return _aggLoading.contains(aggregateKeyFor(t));
+    if (t.clips.length > 1) return _laneMergeLoading(t);
     final clip = t.primaryClip;
     return clip != null && _metricsLoading.contains(clip.audioFilePath);
   }
@@ -819,9 +820,16 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   bool spectrogramLoadingFor(String trackId) {
     final t = _trackById(trackId);
     if (t == null) return false;
-    if (t.clips.length > 1) return _aggLoading.contains(aggregateKeyFor(t));
+    if (t.clips.length > 1) return _laneMergeLoading(t);
     final clip = t.primaryClip;
     return clip != null && _spectrogramLoading.contains(clip.audioFilePath);
+  }
+
+  /// Whether multi-clip take [t]'s merge is computing, or waits for a clip
+  /// being dragged to land (see [_mergeAwaitsMove]).
+  bool _laneMergeLoading(AudioTrack t) {
+    final key = aggregateKeyFor(t);
+    return _aggLoading.contains(key) || _mergeAwaitsMove(t.id, key);
   }
 
   // --- Inline analysis sub-lanes (Logic-style fold-out) -------------------

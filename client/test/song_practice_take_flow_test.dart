@@ -616,8 +616,13 @@ void main() {
     expect(vm.recording.isStopping, isTrue);
 
     expect(vm.refuseStructuralEdit(), isTrue);
+    // The interpretation menu too: it said to stop recording.
+    await vm.versions.create('Fresh');
     await Future<void>.delayed(Duration.zero);
-    expect(toasts, ['Wait for the take to finish saving.']);
+    expect(toasts, [
+      'Wait for the take to finish saving.',
+      'Wait for the take to finish saving.',
+    ]);
     gate.complete();
     await stopping;
   });

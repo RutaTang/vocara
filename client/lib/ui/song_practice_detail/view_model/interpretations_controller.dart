@@ -31,6 +31,7 @@ class InterpretationsController extends ChangeNotifier {
     required void Function(String) toast,
     required bool Function() isRecording,
     required bool Function() isSeparating,
+    bool Function()? isSavingTake,
   }) : _playback = engine,
        _analysis = analysis,
        _busyGate = busyGate,
@@ -42,7 +43,8 @@ class InterpretationsController extends ChangeNotifier {
        _ensureSelection = ensureSelection,
        _toast = toast,
        _isRecording = isRecording,
-       _isSeparating = isSeparating;
+       _isSeparating = isSeparating,
+       _isSavingTake = isSavingTake ?? _never;
 
   final PlaybackEngine _playback;
   final AnalysisCache _analysis;
@@ -59,6 +61,23 @@ class InterpretationsController extends ChangeNotifier {
   final void Function(String) _toast;
   final bool Function() _isRecording;
   final bool Function() _isSeparating;
+
+  /// Whether the take in flight ([_isRecording]) is one already stopped and
+  /// saving: the user has nothing to stop.
+  final bool Function() _isSavingTake;
+
+  static bool _never() => false;
+
+  /// Refuses [action] while a take is in flight, saying what to wait for.
+  bool _refusedForTake(String action) {
+    if (!_isRecording()) return false;
+    _toast(
+      _isSavingTake()
+          ? 'Wait for the take to finish saving.'
+          : 'Stop recording to $action.',
+    );
+    return true;
+  }
 
   /// Set in [dispose]; guards notifications racing the tear-down.
   bool _disposed = false;
@@ -102,10 +121,7 @@ class InterpretationsController extends ChangeNotifier {
     // falls back from (see SongPractice.activeVersion): picking it is no
     // switch, and must not pause, save and resume playback for nothing.
     if (practice == null || practice.activeVersion?.id == versionId) return;
-    if (_isRecording()) {
-      _toast('Stop recording to switch interpretation.');
-      return;
-    }
+    if (_refusedForTake('switch interpretation')) return;
     if (!practice.versions.any((v) => v.id == versionId)) return;
     final wasPlaying = _playback.isPlaying;
     await _playback.pause();
@@ -144,10 +160,7 @@ class InterpretationsController extends ChangeNotifier {
   Future<void> create([String name = '']) async {
     final practice = _practiceOf();
     if (practice == null) return;
-    if (_isRecording()) {
-      _toast('Stop recording to add an interpretation.');
-      return;
-    }
+    if (_refusedForTake('add an interpretation')) return;
     final trimmed = name.trim();
     await _playback.pause();
     // Re-read the LIVE practice after the pause await (see setActive): a take
@@ -193,10 +206,7 @@ class InterpretationsController extends ChangeNotifier {
   Future<void> delete(String versionId) async {
     final practice = _practiceOf();
     if (practice == null) return;
-    if (_isRecording()) {
-      _toast('Stop recording to delete an interpretation.');
-      return;
-    }
+    if (_refusedForTake('delete an interpretation')) return;
     // No concurrent structural edit; said, not silently ignored, and in the
     // words the take menu's refusals use.
     if (_isSeparating()) {

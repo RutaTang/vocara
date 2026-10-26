@@ -590,8 +590,8 @@ void main() {
     );
     // The merge runs in an isolate: real time for it, then frames, until
     // nothing is computing (bounded, so a loaded machine only waits longer).
-    Future<void> settle() async {
-      for (var i = 0; i < 40; i++) {
+    Future<void> settle({int rounds = 40}) async {
+      for (var i = 0; i < rounds; i++) {
         await tester.pump(const Duration(milliseconds: 16));
         await tester.runAsync(
           () => Future<void>.delayed(const Duration(milliseconds: 25)),
@@ -611,10 +611,15 @@ void main() {
 
     for (var ms = 20100; ms <= 20500; ms += 100) {
       vm.moveClipStartLive('t0', 'c1', ms);
-      await settle();
+      // Long enough for a merge asked for to have started.
+      await settle(rounds: 3);
     }
     expect(vm.analysis.metricsFor('t0'), isNull, reason: 'nothing merged');
-    expect(vm.analysis.metricsLoadingFor('t0'), isFalse);
+    // The take's own lanes wait for the merge where it lands too, rather
+    // than say the take cannot be analyzed.
+    expect(vm.analysis.metricsLoadingFor('t0'), isTrue);
+    expect(vm.analysis.spectrogramLoadingFor('t0'), isTrue);
+    expect(find.textContaining('available for recorded'), findsNothing);
     // The dock and the inspector wait for the merge where it lands: read as
     // settled, they said the take could not be analyzed for the whole drag.
     expect(vm.spectrogramLoading, isTrue);

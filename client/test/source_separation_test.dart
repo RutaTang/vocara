@@ -420,6 +420,32 @@ exit 0''';
       );
     });
 
+    test('an error ending in one percentage keeps its words', () async {
+      final stub = await writeStub(
+        r"printf 'ValueError: expected 100%%|\n' >&2"
+        '\nexit 1',
+      );
+      final svc = buildService(stub);
+      final err = await outcome(svc.separate(await writeSource()));
+      expect(
+        (err as FormatException).message,
+        'Separation failed: ValueError: expected 100%|',
+      );
+    });
+
+    test('an abort right after the count keeps its first letter', () async {
+      final stub = await writeStub(
+        r"printf ' 46%%|####6 | 17Error: CUDA out of memory\n' >&2"
+        '\nexit 1',
+      );
+      final svc = buildService(stub);
+      final err = await outcome(svc.separate(await writeSource()));
+      expect(
+        (err as FormatException).message,
+        contains('Error: CUDA out of memory'),
+      );
+    });
+
     test('an abort that lands mid-count keeps only its words', () async {
       final stub = await writeStub(
         r"printf ' 46%%|####6 | 17/libc++abi: terminating\n' >&2"

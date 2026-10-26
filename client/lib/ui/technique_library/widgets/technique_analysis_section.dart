@@ -415,8 +415,11 @@ class _AnalysisBox extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const StudioHint(
-              "Couldn't analyze this example clip.",
+            StudioHint(
+              // A read error says what to check; a hiccup with no stated
+              // cause gets the generic copy.
+              vm.referenceAnalysisFailureMessage ??
+                  "Couldn't analyze this example clip.",
               fontSize: 12.5,
             ),
             const SizedBox(height: 12),

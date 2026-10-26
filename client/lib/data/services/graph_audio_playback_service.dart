@@ -204,6 +204,13 @@ class MediaUnsupportedException implements Exception {
   String toString() => message;
 }
 
+/// A file that could not be read (the disk, a file being replaced or synced
+/// in): unlike the other refusals, the same file can decode on another try.
+class MediaReadException extends MediaUnsupportedException {
+  const MediaReadException()
+    : super('The file could not be read. Check the disk and try again.');
+}
+
 /// Maps a refusing `ve_decode` status to its typed exception; returns null
 /// for OK and for the generic failure (callers treat that as "not decodable"
 /// without a special message).
@@ -221,9 +228,7 @@ Exception? decodeStatusToException(int status, Duration durationCap) {
         'This file uses an unsupported sample rate.',
       );
     case veDecodeIo:
-      return const MediaUnsupportedException(
-        'The file could not be read. Check the disk and try again.',
-      );
+      return const MediaReadException();
     default:
       return null;
   }

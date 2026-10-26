@@ -419,7 +419,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
     for (final m in orphans) {
       _refCache.remove(m.path);
       _refFailed.remove(m.path);
-      _refFailedMessage.remove(m.path);
+      _refFailedCause.remove(m.path);
       _loadingPaths.remove(m.path);
       // Logged, not thrown: one failed delete stopped the loop with the draft
       // already cleared — no notify, the rest of the files left, and Cancel
@@ -544,10 +544,11 @@ class TechniqueDetailViewModel extends ChangeNotifier
   /// Paths whose analysis was attempted but produced nothing (undecodable file).
   final Set<String> _refFailed = {};
 
-  /// Per-path cause for a [_refFailed] entry when the exception carries a
-  /// user-presentable message (today: the decode-length cap). The failure
-  /// hint shows it instead of the generic "couldn't analyze" copy.
-  final Map<String, String> _refFailedMessage = {};
+  /// Per-path cause for a [_refFailed] entry when there is one to say (the
+  /// decode-length cap, a format the engine cannot decode, a read error):
+  /// the failure hint shows it instead of the generic "couldn't analyze"
+  /// copy. [retryable] says whether another try can succeed.
+  final Map<String, ({String text, bool retryable})> _refFailedCause = {};
 
   /// Paths whose analysis is currently in flight.
   final Set<String> _loadingPaths = {};
@@ -578,17 +579,18 @@ class TechniqueDetailViewModel extends ChangeNotifier
   /// or null when only the generic copy applies.
   String? get referenceAnalysisFailureMessage {
     final path = referenceMedia?.path;
-    return path == null ? null : _refFailedMessage[path];
+    return path == null ? null : _refFailedCause[path]?.text;
   }
 
   /// Whether the selected example's failed analysis may yet succeed: one that
-  /// failed with no stated cause (a decode or isolate hiccup). One refused
-  /// for a cause (too long, an unsupported format) fails the same way again.
+  /// failed with no stated cause (a decode or isolate hiccup) or could not
+  /// read its file. One refused for what the clip is (too long, a format the
+  /// engine cannot decode) fails the same way again.
   bool get canRetryReferenceAnalysis {
     final path = referenceMedia?.path;
     return path != null &&
         _refFailed.contains(path) &&
-        !_refFailedMessage.containsKey(path);
+        (_refFailedCause[path]?.retryable ?? true);
   }
 
   /// Forgets the selected example's failed analysis and runs it again: the
@@ -596,7 +598,9 @@ class TechniqueDetailViewModel extends ChangeNotifier
   /// short of reopening it.
   Future<void> retryReferenceAnalysis() async {
     if (!canRetryReferenceAnalysis) return;
-    _refFailed.remove(referenceMedia!.path);
+    final path = referenceMedia!.path;
+    _refFailed.remove(path);
+    _refFailedCause.remove(path);
     await ensureReferenceAnalysis();
   }
 
@@ -609,6 +613,18 @@ class TechniqueDetailViewModel extends ChangeNotifier
     if (_refCache.containsKey(path) ||
         _refFailed.contains(path) ||
         _loadingPaths.contains(path)) {
+      return;
+    }
+    if (!TechniqueMedia.isAnalyzable(path)) {
+      // It plays (through media_kit), but the engine has no decoder for it:
+      // said, and never decoded — a decode only failed the same way again,
+      // with "Couldn't analyze" offering a retry that could never work.
+      _refFailed.add(path);
+      _refFailedCause[path] = (
+        text: "This clip plays, but its format can't be analyzed.",
+        retryable: false,
+      );
+      notifyListeners();
       return;
     }
     _loadingPaths.add(path);
@@ -655,7 +671,10 @@ class TechniqueDetailViewModel extends ChangeNotifier
       // Keep the cause when it is user-presentable (the decode-length cap),
       // so the failure hint can say WHY instead of the generic copy.
       if (e is MediaTooLongException || e is MediaUnsupportedException) {
-        _refFailedMessage[landed] = e.toString();
+        _refFailedCause[landed] = (
+          text: e.toString(),
+          retryable: e is MediaReadException,
+        );
       }
     } finally {
       _loadingPaths.remove(path);
@@ -1735,7 +1754,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
       _draftLabels.remove(mediaId);
       _refCache.remove(m.path);
       _refFailed.remove(m.path);
-      _refFailedMessage.remove(m.path);
+      _refFailedCause.remove(m.path);
       _loadingPaths.remove(m.path);
       _fixSelectionAfterMediaChange(referenceBefore);
       notifyListeners();
@@ -1795,8 +1814,8 @@ class TechniqueDetailViewModel extends ChangeNotifier
       // The pool copy is byte-identical to the staged file, so a latched
       // failure verdict transfers — recomputing it is doomed.
       if (_refFailed.remove(old)) _refFailed.add(m.path);
-      final message = _refFailedMessage.remove(old);
-      if (message != null) _refFailedMessage[m.path] = message;
+      final cause = _refFailedCause.remove(old);
+      if (cause != null) _refFailedCause[m.path] = cause;
     }
     // Re-normalize like every other media-mutating path (e.g. the selected
     // example was staged for removal by this very save).

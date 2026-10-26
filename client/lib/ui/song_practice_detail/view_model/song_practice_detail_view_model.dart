@@ -261,6 +261,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       // longer looks — no forming waveform, and no take after Stop.
       isRecording: () => takeInFlight,
       isSeparating: () => isSeparating,
+      isSavingTake: () => recording.isStopping && !recording.isRecording,
     );
     // Forward every controller's notifications through this VM so all existing
     // `ListenableBuilder(listenable: vm)` / `Listenable.merge([vm, …])`

@@ -124,6 +124,14 @@ class TechniqueMedia {
     '.wma',
   };
 
+  /// Audio media_kit plays but the engine has no decoder for: an example in
+  /// one plays, and its analysis is never attempted.
+  static const _playOnlyExtensions = {'.opus', '.wma'};
+
+  /// Whether the engine can decode [path] for analysis.
+  static bool isAnalyzable(String path) =>
+      !_playOnlyExtensions.contains(p.extension(path).toLowerCase());
+
   /// Whether [path] looks like an importable audio or video file.
   static bool isSupportedMedia(String path) {
     final ext = p.extension(path).toLowerCase();

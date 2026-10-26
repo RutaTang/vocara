@@ -7,6 +7,8 @@ import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vocara/data/repositories/technique_repository.dart';
+import 'package:vocara/data/services/graph_audio_playback_service.dart'
+    show MediaReadException, MediaTooLongException;
 import 'package:vocara/data/services/local_storage_service.dart';
 import 'package:vocara/data/services/media_analysis_service.dart';
 import 'package:vocara/data/services/technique_media_service.dart';
@@ -55,6 +57,9 @@ class _QueuedAnalysis extends Fake implements MediaAnalysisService {
   final Completer<void> admit = Completer<void>();
   final decoded = <String>[];
 
+  /// Thrown by each decode, as the service throws a refusal it can name.
+  Object? error;
+
   @override
   Future<TechniqueAnalysis?> analyze(
     String path, {
@@ -63,13 +68,18 @@ class _QueuedAnalysis extends Fake implements MediaAnalysisService {
     await admit.future;
     if (wanted != null && !wanted()) return null;
     decoded.add(path);
+    final e = error;
+    if (e != null) throw e;
     return null;
   }
 }
 
 const _techniqueId = 'T1000000000000000000000000';
 
-Future<TechniqueDetailViewModel> _loadedVm(_QueuedAnalysis analysis) async {
+Future<TechniqueDetailViewModel> _loadedVm(
+  _QueuedAnalysis analysis, {
+  String ext = 'wav',
+}) async {
   final now = DateTime(2026, 6, 20);
   final vm = TechniqueDetailViewModel(
     repository: _FakeRepo(
@@ -80,7 +90,7 @@ Future<TechniqueDetailViewModel> _loadedVm(_QueuedAnalysis analysis) async {
           for (final name in ['a', 'b', 'c'])
             TechniqueMedia(
               id: name.toUpperCase(),
-              path: '/tmp/$name.wav',
+              path: '/tmp/$name.$ext',
               kind: TechniqueMediaKind.audio,
               addedAt: now,
             ),
@@ -156,5 +166,38 @@ void main() {
 
     await vm.retryReferenceAnalysis();
     expect(analysis.decoded, ['/tmp/a.wav', '/tmp/a.wav']);
+  });
+
+  test('an example in a format the engine cannot decode says so, is never '
+      'decoded, and offers no retry', () async {
+    // It plays through media_kit; analyzed, it failed with no stated cause
+    // and a "Try again" that could never work, each tap a full decode.
+    final analysis = _QueuedAnalysis()..admit.complete();
+    final vm = await _loadedVm(analysis, ext: 'opus');
+    addTearDown(vm.dispose);
+
+    await vm.ensureReferenceAnalysis();
+    expect(analysis.decoded, isEmpty);
+    expect(vm.referenceAnalysisFailed, isTrue);
+    expect(vm.referenceAnalysisFailureMessage, contains("can't be analyzed"));
+    expect(vm.canRetryReferenceAnalysis, isFalse);
+  });
+
+  test('an example whose file could not be read can be tried again', () async {
+    // Its stated cause hid the retry, while its words said to try again.
+    final analysis = _QueuedAnalysis()
+      ..admit.complete()
+      ..error = const MediaReadException();
+    final vm = await _loadedVm(analysis);
+    addTearDown(vm.dispose);
+
+    await vm.ensureReferenceAnalysis();
+    expect(vm.referenceAnalysisFailureMessage, contains('could not be read'));
+    expect(vm.canRetryReferenceAnalysis, isTrue);
+
+    analysis.error = const MediaTooLongException(Duration(minutes: 10));
+    await vm.retryReferenceAnalysis();
+    expect(analysis.decoded, hasLength(2));
+    expect(vm.canRetryReferenceAnalysis, isFalse, reason: 'too long stays');
   });
 }

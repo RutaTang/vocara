@@ -190,21 +190,25 @@ class ProcessSourceSeparationService implements SourceSeparationService {
   final LocalStorageService _storage;
 
   /// A tqdm progress bar ("Separating:  3%|▎    | 1/38 [00:02<00:12, 1.7it/s]"),
-  /// with the short label that may lead it. A bar redraws with \r and no line
-  /// break, so text printed while one was on screen (a native abort
+  /// with the "desc:" label that may lead it. A bar redraws with \r and no
+  /// line break, so text printed while one was on screen (a native abort
   /// mid-inference) follows it on the same line: only the bar is cut off,
   /// not the line. The bar between its "|"s may hold only tqdm's own glyphs,
-  /// so an error that merely mentions "100%|" keeps its words. A bar cut off
-  /// anywhere — inside its body, its count, or its brackets — goes whole,
-  /// while an abort that lands inside its brackets keeps its words.
+  /// and any label must end in tqdm's ":", so an error that merely mentions
+  /// "100%|" keeps its words. A bar cut off anywhere — inside its body, its
+  /// count, or its brackets — goes whole, while an abort that lands inside
+  /// its brackets or right after its count keeps its words.
   static final _progressBar = RegExp(
-    r'^[^%|]{0,60}?\d{1,3}%\|[ #0-9▏▎▍▌▋▊▉█]*'
-    // Its count ("17/38", "12.3M/45.6M", "0/?"), possibly cut off, then its
-    // brackets: whole, or cut off with nothing after them but tqdm's own
-    // characters and part of a rate's unit ("1.7it", "6.1MiB/"). Or nothing
-    // at all, when the bar itself was cut off inside its body.
+    r'^(?:[^%|]{0,60}?:)?\s*\d{1,3}%\|[ #0-9▏▎▍▌▋▊▉█]*'
+    // Its count ("17/38", "12.3M/45.6M", "0/?"), or one cut off at the
+    // line's end; a count's unit is taken only before its "/" or the line's
+    // end, never as the first letter of what follows. Then its brackets:
+    // whole, or cut off with nothing after them but tqdm's own characters
+    // and part of a rate's unit ("1.7it", "6.1MiB/"). Or nothing at all,
+    // when the bar itself was cut off inside its body.
     r'(?:\|\s*'
-    r'(?:[\d.]+[kMGTPEZY]?(?:/(?:[\d.]+[kMGTPEZY]?|\?)?)?'
+    r'(?:(?:[\d.]+[kMGTPEZY]?/(?:[\d.]+[kMGTPEZY]?(?![\w.])|\?)?'
+    r'|[\d.]+[kMGTPEZY]?$)'
     r'(?:\s*\[(?:[^\]]*\]|[\d:<>,.?\s]*[kMGTPEZYiBts/]{0,6}$))?)?'
     r'|$)',
   );
