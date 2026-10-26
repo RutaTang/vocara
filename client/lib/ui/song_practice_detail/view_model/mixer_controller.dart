@@ -163,6 +163,10 @@ class MixerController extends ChangeNotifier {
   final AudioTrack? Function(String) _trackById;
   final List<AudioTrack> Function() _allTracksOf;
   final void Function(String, AudioTrack Function(AudioTrack)) _updateTrack;
+
+  /// Persists the model. The host's save also resyncs the engine with what
+  /// it saved (its tail runs [resyncPlayback], failed or not), so a routing
+  /// edit here needs no second sync of its own.
   final Future<bool> Function() _save;
   final void Function(String) _toast;
 
@@ -377,7 +381,6 @@ class MixerController extends ChangeNotifier {
     final fx = (track.fx ?? TrackFx.flat()).copyWith(order: order);
     _updateTrack(trackId, (t) => t.copyWith(fx: fx));
     await _save();
-    await resyncPlayback();
   }
 
   /// Reorders an FX bus's insert chain. Persists + rebuilds the graph.
@@ -397,7 +400,6 @@ class MixerController extends ChangeNotifier {
       ),
     );
     await _save();
-    await resyncPlayback();
   }
 
   // --- Aux sends (post-fader, to FX buses) --------------------------------
@@ -420,7 +422,6 @@ class MixerController extends ChangeNotifier {
       ),
     );
     await _save();
-    await resyncPlayback();
   }
 
   Future<void> removeTrackSend(String trackId, int slot) async {
@@ -429,7 +430,6 @@ class MixerController extends ChangeNotifier {
     final next = [...track.sends]..removeAt(slot);
     _updateTrack(trackId, (t) => t.copyWith(sends: next));
     await _save();
-    await resyncPlayback();
   }
 
   Future<void> setTrackSendTarget(
@@ -450,7 +450,6 @@ class MixerController extends ChangeNotifier {
     next[slot] = next[slot].copyWith(busId: busId);
     _updateTrack(trackId, (t) => t.copyWith(sends: next));
     await _save();
-    await resyncPlayback();
   }
 
   /// Live send-level edit (model + engine) without persisting.
@@ -499,7 +498,6 @@ class MixerController extends ChangeNotifier {
       ),
     );
     await _save();
-    await resyncPlayback();
   }
 
   Future<void> removeBusSend(String busId, int slot) async {
@@ -520,7 +518,6 @@ class MixerController extends ChangeNotifier {
       ),
     );
     await _save();
-    await resyncPlayback();
   }
 
   Future<void> setBusSendTarget(
@@ -554,7 +551,6 @@ class MixerController extends ChangeNotifier {
       ),
     );
     await _save();
-    await resyncPlayback();
   }
 
   void setBusSendLevelLive(String busId, int slot, double levelDb) {
@@ -613,7 +609,6 @@ class MixerController extends ChangeNotifier {
     _setPractice(practice.copyWith(fxBuses: [...practice.fxBuses, bus]));
     _selectBusAfterMutation(bus.id);
     await _save();
-    await resyncPlayback();
     return bus.id;
   }
 
@@ -655,7 +650,6 @@ class MixerController extends ChangeNotifier {
     _clearBusSelectionIf(busId);
     _setPractice(practice.copyWith(vocalTracks: tracks, fxBuses: buses));
     await _save();
-    await resyncPlayback();
   }
 
   /// Routes a vocal take's output to [busId] (null = master). Triggers a rebuild.
@@ -665,7 +659,6 @@ class MixerController extends ChangeNotifier {
       (t) => t.copyWith(busId: busId, clearBus: busId == null),
     );
     await _save();
-    await resyncPlayback();
   }
 
   /// Whether routing [fromBusId] into [toBusId] (as its output or an aux send)
@@ -717,7 +710,6 @@ class MixerController extends ChangeNotifier {
       ),
     );
     await _save();
-    await resyncPlayback();
   }
 
   /// Live bus FX edit (model + engine) without persisting — persist with [commitFx].
@@ -857,7 +849,6 @@ class MixerController extends ChangeNotifier {
     _setPractice(practice.copyWith(fxBuses: list));
     _selectBusAfterMutation(copy.id);
     await _save();
-    await resyncPlayback();
   }
 
   /// The bus compressor's current gain reduction (dB, >= 0) — for a meter.

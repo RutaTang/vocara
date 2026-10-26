@@ -292,6 +292,33 @@ void main() {
     },
   );
 
+  test('a routing edit syncs the engine once, through its save', () async {
+    // The save's tail resyncs the engine with what it saved; the mixer's
+    // routing edits used to run a second, identical sync after it.
+    final p = await seed();
+    final vm = await open(p.id);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    final take = p.vocalTracks.single.id;
+
+    var before = engine.syncs;
+    final bus = await vm.mixer.createBus('Verb');
+    expect(engine.syncs - before, 1);
+
+    before = engine.syncs;
+    await vm.mixer.setTrackBus(take, bus);
+    expect(engine.syncs - before, 1);
+    expect(vm.practice!.vocalTracks.single.busId, bus);
+
+    before = engine.syncs;
+    await vm.mixer.addTrackSend(take, bus);
+    expect(engine.syncs - before, 1);
+
+    before = engine.syncs;
+    await vm.mixer.deleteBus(bus);
+    expect(engine.syncs - before, 1);
+    expect(vm.practice!.fxBuses, isEmpty);
+  });
+
   _FlakyReread flaky() {
     final writer = SyncWriter(db, HlcClock(node: 'NODE'.padRight(26, '0')));
     return _FlakyReread(

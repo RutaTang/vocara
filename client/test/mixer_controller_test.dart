@@ -131,6 +131,8 @@ class _Host {
     updateTrack: updateTrack,
     save: () async {
       saves++;
+      // Like the view model's save, whose tail resyncs the engine.
+      await mixer.resyncPlayback();
       return true;
     },
     toast: toasts.add,
