@@ -1467,6 +1467,15 @@ class SongPracticeDetailViewModel extends ChangeNotifier
           oldAccompaniment = cur.accompaniment;
           oldReference = cur.reference;
           final prevPlayRef = mixer.playReference;
+          // The selection goes back with the flag on a failed save: that
+          // save's check ran with the flag flipped, judging the backing lane
+          // by the instrumental's slot, and moved a selection off the
+          // Original on screen.
+          final prevSelection = (
+            track: _selectedTrackId,
+            clip: _selectedClipId,
+            bus: _selectedBusId,
+          );
           mixer.setPlayReferenceSilently(false); // sing over the instrumental
           _practice = cur.copyWith(
             accompaniment: instrumental,
@@ -1482,6 +1491,11 @@ class SongPracticeDetailViewModel extends ChangeNotifier
             // save already resynced the engine under the flipped flag, so a
             // silent restore left the toggle and the audible backing apart.
             mixer.setPlayReference(prevPlayRef);
+            _selectedTrackId = prevSelection.track;
+            _selectedClipId = prevSelection.clip;
+            _selectedBusId = prevSelection.bus;
+            _ensureSelectionAnalyzed();
+            notifyListeners();
             _toast('Could not save the separated track.');
             return false;
           }
@@ -2514,9 +2528,32 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// (see [MixerController.setPlayReference]), keeping a selection on that
   /// lane on the backing now shown.
   void setPlayReference(bool value) {
+    final detour = _backingDetour;
+    _backingDetour = null;
+    final before = _selectedBusId == null ? _selectedTrackId : null;
+    final onBacking = before != null && _trackById(before)?.isBacking == true;
     mixer.setPlayReference(value);
-    if (_ensureSelection()) notifyListeners();
+    final shown = mixer.activeBacking;
+    final back =
+        detour != null &&
+        _selectedBusId == null &&
+        _selectedTrackId == detour.movedTo;
+    if (shown != null && (onBacking || back)) {
+      selectTrack(shown.id);
+      return;
+    }
+    final moved = _selectedTrackId;
+    _ensureSelectionAnalyzed();
+    if (onBacking && shown == null && _selectedTrackId != moved) {
+      _backingDetour = (movedTo: _selectedTrackId);
+    }
+    notifyListeners();
   }
+
+  /// Set when switching the backing lane to an empty slot moved a selection
+  /// on it to [movedTo] (the slot has no lane to select): switching straight
+  /// back puts it on the backing again, rather than losing it to a glance.
+  ({String? movedTo})? _backingDetour;
 
   /// The tail of the save chain (see [_save]): the completion of the latest
   /// queued persist, with its error swallowed (each op surfaces its own).

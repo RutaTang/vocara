@@ -769,6 +769,38 @@ void main() {
       },
     );
 
+    test(
+      'a separation whose save fails leaves the selection on the Original',
+      () async {
+        // The separation flips the backing flag silently while it saves; that
+        // save's selection check judged the backing lane by the instrumental's
+        // slot (empty here) and moved the selection off the Original on screen,
+        // and the failure path put only the flag back.
+        final separation = _GatedSeparation();
+        final reference = AudioTrack(
+          id: 'ref',
+          kind: AudioTrackKind.reference,
+          displayName: 'Original',
+          audioFilePath: '/pool/original.wav',
+          durationMs: 1000,
+          createdAt: DateTime(2026),
+        );
+        final vm = await pumpVm(separation: separation, reference: reference);
+        for (var i = 0; i < 400 && !vm.separationAvailable; i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 5));
+        }
+        vm.setPlayReference(true);
+        vm.selectTrack('ref');
+        final run = vm.separateBacking('ref');
+        await Future<void>.delayed(Duration.zero);
+        repo.failNextSave = true;
+        separation.gate.complete();
+        await run;
+        expect(vm.mixer.playReference, isTrue);
+        expect(vm.selectedTrackId, 'ref');
+      },
+    );
+
     test('separating a backing that is NOT yet the reference keeps the '
         'lane\'s mixer state', () async {
       // The ordinary first separation: the full mix sits in the ACCOMPANIMENT

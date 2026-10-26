@@ -315,4 +315,37 @@ void main() {
       expect(vm.selectedTrackId, 't1');
     },
   );
+
+  test(
+    'a backing switch that moves the selection analyzes the take it lands on, '
+    'and switching back returns it to the backing',
+    () async {
+      // A practice with an accompaniment and no original: switching to the
+      // empty Original slot moves the selection to a take. The dock (open on an
+      // analysis tab) computes only when asked, and nothing asked.
+      final vm = await open(
+        practice().copyWith(
+          accompaniment: AudioTrack(
+            id: 'acc',
+            kind: AudioTrackKind.accompaniment,
+            displayName: 'acc',
+            audioFilePath: '/pool/acc.wav',
+            durationMs: 1000,
+            createdAt: DateTime(2026),
+          ),
+        ),
+      );
+      vm.selectTrack('acc');
+      vm.toggleInspectorPanel();
+      vm.analysis.showDockTab(DockTab.pitch);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      spectro.asked.clear();
+      vm.setPlayReference(true);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(vm.selectedTrackId, 't2');
+      expect(spectro.asked, contains('/pool/t2.wav'));
+      vm.setPlayReference(false);
+      expect(vm.selectedTrackId, 'acc', reason: 'a glance at the empty slot');
+    },
+  );
 }
