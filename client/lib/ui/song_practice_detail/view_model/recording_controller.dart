@@ -300,7 +300,7 @@ class RecordingController extends ChangeNotifier {
   /// The WAV's content sung along to the backing begins this far into the
   /// file, so take placement subtracts it — without this, everything between
   /// arm and play (graph resync, decode, seek) lands as unbounded skew.
-  int _recordingPreRollMs = 0;
+  double _recordingPreRollMs = 0;
 
   /// The vocal take the in-flight recording is punching into (frozen at start);
   /// null when REC is instead creating a brand-new take.
@@ -533,7 +533,9 @@ class RecordingController extends ChangeNotifier {
       final engineNow = _graphEngine();
       if (!stopped() && engineNow != null) {
         final pre = engineNow.recordWrittenFrames();
-        if (pre > 0) _recordingPreRollMs = pre * 1000 ~/ 48000;
+        // Kept fractional: the placement below rounds the whole sum once.
+        // Truncated to whole ms here, every take sat up to 1 ms late.
+        if (pre > 0) _recordingPreRollMs = pre * 1000 / 48000;
       }
     } catch (e) {
       // Setup failed partway (createEmptyVocalTake/save, newRecordingPath I/O,

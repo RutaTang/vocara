@@ -259,6 +259,13 @@ class _FakeEngine extends Fake implements PlaybackEngine {
 
 /// The native engine as far as recording and the settings attach touch it,
 /// with every source's last pushed mute remembered.
+/// A native engine whose take had 47 frames in its ring when the backing
+/// started: the pre-roll.
+class _PreRollEngine extends _FakeGraphEngine {
+  @override
+  int recordWrittenFrames() => 47;
+}
+
 class _FakeGraphEngine extends _FakeEngine
     implements GraphAudioPlaybackService {
   final Map<String, bool> muted = {};
@@ -591,6 +598,19 @@ void main() {
         hasLength(2),
       );
     });
+  });
+
+  test('a take lands where its pre-roll puts it, to the millisecond', () async {
+    // 47 frames of pre-roll are 0.98 ms: truncated to whole ms, the take sat
+    // a millisecond late.
+    final vm = await pumpVm(engine: _PreRollEngine(), mic: _FakeMic());
+    vm.selectTrack('take1');
+    vm.position.value = const Duration(milliseconds: 2000);
+    await vm.recording.startRecording();
+    vm.position.value = const Duration(milliseconds: 2500);
+    await vm.stopRecording();
+    final take1 = repo.stored.vocalTracks.singleWhere((t) => t.id == 'take1');
+    expect(take1.clips.last.startMs, 1999);
   });
 
   group('a take whose save fails', () {
