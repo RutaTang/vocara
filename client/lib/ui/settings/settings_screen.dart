@@ -11,6 +11,7 @@ import '../../data/db/persistence.dart';
 import '../../data/services/app_settings_service.dart';
 import '../../data/services/diagnostics_log.dart';
 import '../../data/services/graph_audio_playback_service.dart';
+import '../../data/services/recording_finalizer.dart';
 import '../../data/services/update_check_service.dart';
 import '../../domain/models/audio_device.dart';
 import '../../routing/navigation.dart';
@@ -348,7 +349,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final export =
           widget.exportDiagnostics ?? DiagnosticsLog.instance.exportArchive;
       bundle = await export();
-      await exportCopy(File(bundle), destination);
+      final from = File(bundle);
+      // Held, as a take's export is: a quit mid-copy cut the file short.
+      await RecordingFinalizer.instance.hold(
+        () => exportCopy(from, destination),
+      );
       // The bundle was only the copy's source: drop it and its temp folder.
       await DiagnosticsLog.discardArchive(bundle);
       if (!mounted) return;

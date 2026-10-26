@@ -13,6 +13,7 @@ import 'package:vocara/data/services/app_settings_service.dart';
 import 'package:vocara/data/services/audio_file_service.dart';
 import 'package:vocara/data/services/local_storage_service.dart';
 import 'package:vocara/data/services/playback_engine.dart';
+import 'package:vocara/data/services/recording_finalizer.dart';
 import 'package:vocara/data/services/source_separation_service.dart';
 import 'package:vocara/data/services/spectrogram_service.dart';
 import 'package:vocara/data/services/waveform_service.dart';
@@ -186,6 +187,7 @@ void main() {
     List<String> picks,
     Future<String?> Function(String suggestedName) pick, {
     LocalStorageService? storage,
+    RecordingFinalizer? finalizer,
   }) async {
     storage ??= LocalStorageService();
     final vm = SongPracticeDetailViewModel(
@@ -198,6 +200,7 @@ void main() {
       appSettings: AppSettingsService(storage: storage),
       practiceId: practiceId,
       playbackEngine: _FakeEngine(),
+      finalizer: finalizer,
       saveLocationPicker: (name) {
         picks.add(name);
         return pick(name);
@@ -213,6 +216,32 @@ void main() {
 
   AudioTrack byName(SongPracticeDetailViewModel vm, String name) =>
       vm.practice!.vocalTracks.firstWhere((t) => t.displayName == name);
+
+  // A quit mid-copy exited under the export and left the file at the picked
+  // path cut short (an old file there already replaced).
+  test('an export holds the quit while it copies', () async {
+    final dest = p.join(tmp.path, 'exported.wav');
+    final finalizer = RecordingFinalizer.forTesting();
+    final vm = await pumpVm(
+      <String>[],
+      (_) async => dest,
+      finalizer: finalizer,
+    );
+
+    var done = false;
+    var held = false;
+    final export = vm
+        .exportTrackAudio(byName(vm, 'Take 1').id)
+        .whenComplete(() => done = true);
+    while (!done) {
+      held |= finalizer.hasActive;
+      await Future<void>.delayed(Duration.zero);
+    }
+    await export;
+    expect(held, isTrue, reason: 'the copy ran with the quit held');
+    expect(finalizer.hasActive, isFalse, reason: 'and released after');
+    expect(File(dest).existsSync(), isTrue);
+  });
 
   test('exports a single-clip take byte-for-byte to the picked path', () async {
     final dest = p.join(tmp.path, 'exported.wav');

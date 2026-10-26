@@ -1755,6 +1755,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       return;
     }
     if (destPath == null) return; // user cancelled
+    final dest = destPath;
     // Onto the clip's own file (the save panel can browse into the app's
     // storage and confirm Replace): the copy truncated it to nothing, the
     // take's audio gone, and said "Exported".
@@ -1769,7 +1770,9 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     }
     try {
       // Overwrite is intentional: the save panel already confirmed replacing.
-      await exportCopy(source, destPath);
+      // Held: a quit mid-copy exited under it and left the destination cut
+      // short (an old file there already replaced).
+      await _finalizer.hold(() => exportCopy(source, dest));
     } catch (_) {
       _toast('Could not export the audio to that location.');
       return;

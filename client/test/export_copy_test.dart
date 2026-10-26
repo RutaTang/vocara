@@ -39,6 +39,21 @@ class _StampKeepingSource extends _FailingSource {
   }
 }
 
+/// A source whose copy writes [content], then runs [probe] before finishing.
+class _ProbingSource extends Fake implements File {
+  _ProbingSource(this.content, this.probe);
+
+  final String content;
+  final Future<void> Function() probe;
+
+  @override
+  Future<File> copy(String newPath) async {
+    await File(newPath).writeAsString(content);
+    await probe();
+    return File(newPath);
+  }
+}
+
 void main() {
   late Directory tmp;
   setUp(() async => tmp = await Directory.systemTemp.createTemp('export_copy'));
@@ -127,6 +142,19 @@ void main() {
     );
     expect(File(made).existsSync(), isFalse);
     expect(Link(p.join(tmp.path, 'link2.wav')).existsSync(), isTrue);
+  });
+
+  // The quit reads this to tell an export still copying from a wedged one.
+  test('an export in flight reports what it has written, and nothing once '
+      'done', () async {
+    final dest = p.join(tmp.path, 'take.wav');
+    int? during;
+    await exportCopy(
+      _ProbingSource('audio', () async => during = await exportBytesWritten()),
+      dest,
+    );
+    expect(during, 5);
+    expect(await exportBytesWritten(), 0);
   });
 
   test('a good copy lands whole', () async {

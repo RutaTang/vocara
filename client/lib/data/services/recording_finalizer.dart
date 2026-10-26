@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import '../../utils/export_copy.dart';
 import '../db/asset_store.dart';
 import 'diagnostics_log.dart';
 
@@ -32,7 +33,11 @@ class RecordingFinalizer {
     : perFinalizerBudget = _defaultPerFinalizer,
       totalBudget = _defaultTotal,
       progressCeiling = _defaultProgressCeiling,
-      _progress = AssetStore.bytesBeingCopied;
+      _progress = _bytesMoving;
+
+  /// The production progress reading: pool imports and exports alike.
+  static Future<int> _bytesMoving() async =>
+      await AssetStore.bytesBeingCopied() + await exportBytesWritten();
 
   /// An isolated instance for tests, with budgets small enough to drive the
   /// expiry paths in real time.
@@ -72,8 +77,9 @@ class RecordingFinalizer {
 
   /// A reading that moves while finalizers do real work (the asset store's
   /// import counter: bytes copied, plus a tick per finished landing step —
-  /// flush, rename, commit): the quit's evidence that a finalizer past its
-  /// budget is still working. Only a change between readings means anything.
+  /// flush, rename, commit; and the bytes exports in flight have written):
+  /// the quit's evidence that a finalizer past its budget is still working.
+  /// Only a change between readings means anything.
   final Future<int> Function() _progress;
 
   final _pending = <Future<void> Function()>{};
@@ -277,10 +283,10 @@ class RecordingFinalizer {
         _invoked.clear();
         return;
       } on TimeoutException {
-        // Any change counts as movement. The production reading
-        // (AssetStore.bytesBeingCopied) only ever grows, with every byte
-        // copied and every landing step finished; an injected one may move
-        // either way.
+        // Any change counts as movement. The production reading grows with
+        // every byte copied and every landing step finished (an export's part
+        // drops back when it ends, which is movement too); an injected one
+        // may move either way.
         final now = await _progress();
         window = _shorter(perFinalizerBudget, progressCeiling - clock.elapsed);
         if (now == mark || window <= Duration.zero) break;

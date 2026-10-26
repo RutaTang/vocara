@@ -2,6 +2,25 @@ import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
+/// The files the exports in flight are writing.
+final _writing = <String>{};
+
+/// How much the exports in flight have written so far. A quit holding for an
+/// export reads a change here as the export still working, not wedged (see
+/// RecordingFinalizer): a long take copying to a slow stick outlasts the
+/// quit's budget, and cutting it off left the file there cut short.
+Future<int> exportBytesWritten() async {
+  var n = 0;
+  for (final path in _writing) {
+    try {
+      n += await File(path).length();
+    } on FileSystemException {
+      // Not created yet.
+    }
+  }
+  return n;
+}
+
 /// Copies [source] to [destPath], as an export does: should the copy fail
 /// part-way (a stick filling up), the half-written destination is removed
 /// rather than left, truncated, where the user will find it. A destination
@@ -20,6 +39,7 @@ Future<void> exportCopy(File source, String destPath) async {
   } on FileSystemException {
     // Unreadable: judged as absent, so only a file the copy then made goes.
   }
+  _writing.add(dest.path);
   try {
     await source.copy(dest.path);
   } catch (_) {
@@ -36,6 +56,8 @@ Future<void> exportCopy(File source, String destPath) async {
       // Best effort: the copy's own error is what the caller reports.
     }
     rethrow;
+  } finally {
+    _writing.remove(dest.path);
   }
 }
 
