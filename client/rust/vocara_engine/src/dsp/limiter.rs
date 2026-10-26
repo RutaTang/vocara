@@ -65,6 +65,16 @@ impl Node for LimiterNode {
         // seek. Matches CompressorNode/DeEsserNode::reset.
         self.gain = 1.0;
         self.fade.settle();
+        // No sound is moving to glide a ceiling edit over (also the re-enable
+        // from bypass, see BYPASS).
+        self.ceiling.snap(self.ceiling.target());
+    }
+
+    fn idle(&mut self) {
+        // The ceiling ramps only while audio runs: an edit made while the
+        // transport was stopped started ramping from the old ceiling on Play,
+        // letting peaks through up to 11 dB over the new one for the first ms.
+        self.ceiling.snap(self.ceiling.target());
     }
 
     fn process(&mut self, io: &mut ProcessIo) {
@@ -194,6 +204,75 @@ mod tests {
         assert!(
             tail <= ceiling * 1.0001,
             "settled at {tail}, ceiling {ceiling}"
+        );
+    }
+
+    /// The largest |sample| of `out` (interleaved).
+    fn peak(out: &[f32]) -> f32 {
+        out.iter().fold(0.0f32, |m, &x| m.max(x.abs()))
+    }
+
+    fn run(l: &mut LimiterNode, input: &[f32]) -> Vec<f32> {
+        let mut out = vec![0.0; input.len()];
+        let inputs: [&[f32]; 1] = [input];
+        let mut outs: [&mut [f32]; 1] = [&mut out[..]];
+        let mut io = ProcessIo {
+            inputs: &inputs,
+            outputs: &mut outs[..],
+            frames: input.len() / CHANNELS,
+            tl: 0,
+            sr: 48_000.0,
+        };
+        l.process(&mut io);
+        out
+    }
+
+    #[test]
+    fn a_ceiling_set_while_stopped_or_bypassed_holds_from_the_first_sample() {
+        // The ramp only moves while audio runs: set while the transport was
+        // stopped (or the limiter bypassed), the new ceiling started ramping from
+        // the old one on Play, and the first peaks went through up to 11 dB over.
+        let loud: Vec<f32> = (0..2 * 512)
+            .map(|i| if i % 4 < 2 { 0.9 } else { -0.9 })
+            .collect();
+        let ceiling = db_to_lin(-12.0);
+
+        let mut l = LimiterNode::new();
+        l.prepare(48_000.0, 512);
+        l.set_param(param::BYPASS, 0.0);
+        for _ in 0..40 {
+            run(&mut l, &loud); // playing: past the switch's fade, ceiling in use
+        }
+        l.idle(); // stopped
+        l.set_param(param::CEILING_DB, -12.0);
+        l.idle();
+        let first = run(&mut l, &loud);
+        assert!(
+            peak(&first) <= ceiling * 1.0001,
+            "after a stop: {}",
+            peak(&first)
+        );
+
+        let mut l = LimiterNode::new();
+        l.prepare(48_000.0, 512);
+        l.set_param(param::BYPASS, 0.0);
+        for _ in 0..40 {
+            run(&mut l, &loud);
+        }
+        l.set_param(param::BYPASS, 1.0);
+        for _ in 0..40 {
+            run(&mut l, &loud); // faded out: bypassed
+        }
+        l.set_param(param::CEILING_DB, -12.0);
+        l.set_param(param::BYPASS, 0.0);
+        // The switch's own short fade in blends toward unity; past it, the new
+        // ceiling holds at once (no ramp from the old one on top).
+        let _fading = run(&mut l, &loud);
+        let after = run(&mut l, &loud);
+        assert!(
+            peak(&after) <= ceiling * 1.0001,
+            "after a bypass: {}",
+            peak(&after)
         );
     }
 }
