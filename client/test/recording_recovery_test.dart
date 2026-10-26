@@ -239,22 +239,39 @@ void main() {
     expect(await journaled(), journalBefore, reason: 'and not journaled');
   });
 
-  test('a recovered take longer than the timeline grows it', () async {
-    // A song an editor has had open stores its timeline (an unset one, 0, is
-    // sized when the song opens).
+  test('a recovered take past the stored timeline still leaves the practice '
+      'row as stored', () async {
+    // Growing the stored timeline to hold the take made the practice row a
+    // local edit again: rewritten (another build's fields stripped) and
+    // journaled at boot. The editor grows the timeline in memory on open.
     final created = await createPractice();
     final stored = await persistence.songRepo.savePractice(
       created.copyWith(timelineDurationMs: 20000),
     );
     final practice = (stored as Ok<SongPractice>).value;
-    expect(practice.timelineDurationMs, 20000);
+    await persistence.db.customStatement(
+      "UPDATE practices SET reverb_json = json_set(COALESCE(reverb_json, '{}'), "
+      "'\$.future', 1) WHERE id = ?",
+      [practice.id],
+    );
+    Future<Object?> reverb() async =>
+        (await persistence.db
+                .customSelect(
+                  'SELECT reverb_json FROM practices WHERE id = ?',
+                  variables: [Variable.withString(practice.id)],
+                )
+                .getSingle())
+            .data['reverb_json'];
+    final before = await reverb();
+    expect(before, contains('"future":1'));
     await stageOrphan(practice.id, monoWav(4800));
     Future<WaveformResult> long(String path) async =>
         (peaks: <double>[0.1, 0.2], durationMs: 600000);
     expect(await persistence.recoverStagedRecordings(analyze: long), 1);
     final after = await reload(practice.id);
     expect(after.contentEndMs, 600000);
-    expect(after.timelineDurationMs, greaterThanOrEqualTo(600000));
+    expect(after.timelineDurationMs, 20000);
+    expect(await reverb(), before);
   });
 
   test('second run is a no-op', () async {

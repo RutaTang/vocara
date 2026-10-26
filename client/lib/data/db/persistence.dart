@@ -826,18 +826,14 @@ class Persistence {
       createdAt: DateTime.now(),
       versionId: practice.activeVersion?.id,
     );
-    var recovered = practice.copyWith(
-      vocalTracks: [...practice.vocalTracks, track],
-    );
-    // A take running past the end of the timeline grows it, as an editor's
-    // save does: otherwise it sat cut off until the song was next edited.
-    final contentEnd = recovered.contentEndMs;
-    if (recovered.timelineDurationMs > 0 &&
-        recovered.timelineDurationMs < contentEnd) {
-      recovered = recovered.copyWith(timelineDurationMs: contentEnd);
-    }
+    // Only the take is new: the practice row is left as stored even when the
+    // take runs past the stored timeline (the editor grows it in memory on
+    // open, and nothing else reads it). Growing it here made the row a local
+    // edit again: rewritten with fields another build wrote stripped, and
+    // journaled at boot, before sync pulls, as a whole-row write that would
+    // override what another device changed in it meanwhile.
     final saved = await songRepo.savePracticeWithBase(
-      recovered,
+      practice.copyWith(vocalTracks: [...practice.vocalTracks, track]),
       baseHashes: res.value.baseHashes,
     );
     if (saved is! Ok<Loaded<SongPractice>>) return _RecoveryOutcome.failed;
