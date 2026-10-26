@@ -34,6 +34,10 @@ class TechniqueLibraryViewModel extends ChangeNotifier {
     load = Command0(_load)..execute();
     createTechnique = Command1(_createTechnique);
     deleteTechnique = Command1(_deleteTechnique);
+    // Each command notifies as it finishes, its running flag already clear.
+    for (final command in [load, createTechnique, deleteTechnique]) {
+      command.addListener(_replayMissed);
+    }
     _remoteSub = remoteApplied?.listen(_onRemoteApplied);
   }
 
@@ -59,11 +63,29 @@ class TechniqueLibraryViewModel extends ChangeNotifier {
   /// against base hashes).
   void _onRemoteApplied(RemoteApplied event) {
     if (event.techniqueIds.isEmpty) return;
-    if (load.running || createTechnique.running || deleteTechnique.running) {
-      return;
-    }
+    _missedRemote = true;
+    _replayMissed();
+  }
+
+  /// A remote change, or a list read overtaken by a create or delete, that a
+  /// fresh load still owes the cards. Skipped and forgotten, a remote rename
+  /// that landed during a load kept its old name until some later reload.
+  bool _missedRemote = false;
+
+  bool get _busy =>
+      load.running || createTechnique.running || deleteTechnique.running;
+
+  /// Loads again for what [_missedRemote] owes, once no command runs (each
+  /// command asks again as it finishes).
+  void _replayMissed() {
+    if (_disposed || !_missedRemote || _busy) return;
+    _missedRemote = false;
     load.execute();
   }
+
+  /// Bumped by a create or delete changing the list: a load that read it
+  /// before them would land over theirs (a deleted card back on the grid).
+  int _listEpoch = 0;
 
   /// Loads all techniques (runs once on creation; re-run on return from detail).
   late final Command0<List<Technique>> load;
@@ -159,8 +181,12 @@ class TechniqueLibraryViewModel extends ChangeNotifier {
   }
 
   Future<Result<List<Technique>>> _load() async {
+    final epoch = _listEpoch;
     final result = await _repository.listTechniques();
-    if (result is Ok<List<Technique>>) {
+    if (epoch != _listEpoch) {
+      // Read before a create or delete landed: owe a fresh one instead.
+      _missedRemote = true;
+    } else if (result is Ok<List<Technique>>) {
       _all = result.value;
       _dropStaleTagFilter();
       notifyListeners();
@@ -197,6 +223,7 @@ class TechniqueLibraryViewModel extends ChangeNotifier {
     );
     final result = await _repository.saveTechnique(technique);
     if (result is Ok<Technique>) {
+      _listEpoch++;
       _all = [result.value, ..._all];
       notifyListeners();
     }
@@ -206,6 +233,7 @@ class TechniqueLibraryViewModel extends ChangeNotifier {
   Future<Result<void>> _deleteTechnique(String id) async {
     final result = await _repository.deleteTechnique(id);
     if (result is Ok<void>) {
+      _listEpoch++;
       _all = _all.where((t) => t.id != id).toList();
       _dropStaleTagFilter();
       notifyListeners();

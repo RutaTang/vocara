@@ -89,7 +89,110 @@ class _TechniqueRepo implements TechniqueRepository {
       const Result.ok(null);
 }
 
+/// Deletes no files.
+class _NoDiskMedia extends TechniqueMediaService {
+  _NoDiskMedia() : super(storage: LocalStorageService());
+
+  @override
+  Future<void> deleteTechniqueMedia(String techniqueId) async {}
+}
+
+/// A library whose list read can be held open ([gate]), over a list a test
+/// edits as another device or this one would.
+class _HeldTechniqueRepo extends _TechniqueRepo {
+  List<Technique> techniques = [];
+  Completer<void>? gate;
+
+  @override
+  Future<Result<List<Technique>>> listTechniques() async {
+    listReads++;
+    final read = List.of(techniques); // read now, returned when let go
+    final g = gate;
+    if (g != null) await g.future;
+    return Result.ok(read);
+  }
+
+  @override
+  Future<Result<void>> deleteTechnique(String id) async {
+    techniques = [
+      for (final t in techniques)
+        if (t.id != id) t,
+    ];
+    return const Result.ok(null);
+  }
+}
+
+Technique _technique(String id, String name) => Technique(
+  id: id,
+  name: name,
+  createdAt: DateTime(2026),
+  updatedAt: DateTime(2026),
+);
+
 void main() {
+  test('a remote change landing during a load is loaded after it', () async {
+    // Skipped while any command ran and forgotten: the card kept its old name
+    // until some later reload.
+    final repo = _HeldTechniqueRepo()..techniques = [_technique('a', 'Twang')];
+    final remote = StreamController<RemoteApplied>.broadcast();
+    addTearDown(remote.close);
+    repo.gate = Completer<void>();
+    final vm = TechniqueLibraryViewModel(
+      repository: repo,
+      mediaService: TechniqueMediaService(storage: LocalStorageService()),
+      remoteApplied: remote.stream,
+    );
+    addTearDown(vm.dispose);
+    await pumpEventQueue();
+    expect(vm.load.running, isTrue);
+    repo.techniques = [_technique('a', 'Twang (renamed)')];
+    remote.add(
+      RemoteApplied(
+        rows: const [],
+        practiceIds: const {},
+        techniqueIds: const {'a'},
+      ),
+    );
+    final first = repo.gate!;
+    repo.gate = null;
+    first.complete();
+    await pumpEventQueue();
+    expect(vm.all.map((t) => t.name), ['Twang (renamed)']);
+  });
+
+  test('a load read before a delete does not bring the card back', () async {
+    final repo = _HeldTechniqueRepo()
+      ..techniques = [_technique('a', 'A'), _technique('b', 'B')];
+    final remote = StreamController<RemoteApplied>.broadcast();
+    addTearDown(remote.close);
+    final vm = TechniqueLibraryViewModel(
+      repository: repo,
+      mediaService: _NoDiskMedia(),
+      remoteApplied: remote.stream,
+    );
+    addTearDown(vm.dispose);
+    await pumpEventQueue();
+    expect(vm.all.map((t) => t.id), ['a', 'b']);
+    // A remote event's reload reads the list, and is held there.
+    repo.gate = Completer<void>();
+    remote.add(
+      RemoteApplied(
+        rows: const [],
+        practiceIds: const {},
+        techniqueIds: const {'b'},
+      ),
+    );
+    await pumpEventQueue();
+    expect(vm.load.running, isTrue);
+    await vm.deleteTechnique.execute('a');
+    expect(vm.all.map((t) => t.id), ['b']);
+    final held = repo.gate!;
+    repo.gate = null;
+    held.complete(); // the older read lands
+    await pumpEventQueue();
+    expect(vm.all.map((t) => t.id), ['b']);
+  });
+
   test('Home reloads when a remote page carries only a practice\'s takes '
       'and notes', () async {
     // Regression: Home filtered on the practices TABLE, and a take recorded
