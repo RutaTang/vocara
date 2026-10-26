@@ -342,6 +342,46 @@ void main() {
     expect(vm.practice!.vocalTracks.single.displayName, 'renamed');
   });
 
+  test('... and then shows what another writer stored meanwhile', () async {
+    // The stand-in holds only what was sent: a note another writer edited,
+    // kept by the merge, stayed off screen as loaded, and the next local edit
+    // of it rolled the other writer's change back.
+    final p = await seed(notes: [note('as loaded')]);
+    final store = flaky();
+    final vm = await open(p.id, repository: store);
+    await concurrently(
+      p.id,
+      (notes) => [notes.single.copyWith(content: 'edited elsewhere')],
+    );
+    store.failNextLoad = true;
+
+    await vm.renameTrack(p.vocalTracks.single.id, 'renamed');
+
+    final take = vm.practice!.vocalTracks.single;
+    expect(take.displayName, 'renamed');
+    expect(take.notes.single.content, 'edited elsewhere');
+  });
+
+  test('... after a lyrics save too, and resyncs the mix it changed', () async {
+    final p = await seed();
+    final store = flaky();
+    final vm = await open(p.id, repository: store);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    final other = await load(p.id);
+    final take = other.aggregate.vocalTracks.single;
+    await repo.savePracticeWithBase(
+      other.aggregate.copyWith(vocalTracks: [take.copyWith(muted: true)]),
+      baseHashes: other.baseHashes,
+    );
+    final syncs = engine.syncs;
+    store.failNextLoad = true;
+
+    expect(await vm.setLyricsText('first line'), isTrue);
+
+    expect(vm.practice!.vocalTracks.single.muted, isTrue);
+    expect(engine.syncs, greaterThan(syncs), reason: 'the mix must follow');
+  });
+
   test(
     'a save reports what it sent in the same hashes a load reports',
     () async {

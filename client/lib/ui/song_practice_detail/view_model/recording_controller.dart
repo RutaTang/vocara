@@ -786,8 +786,7 @@ class RecordingController extends ChangeNotifier {
         // take: it vanished from the screen and no later save brought it back,
         // only the next launch's recovery of its file, as a new take at 0:00
         // off its lane. Stage it again — unless the model kept it (a newer
-        // edit's queued save carrying it, or a save that committed and only
-        // failed its re-read) — and retry once.
+        // edit's queued save carrying it) — and retry once.
         if (!kept()) staged = stage();
         ok = await _save();
         // Saves run one at a time, so every save queued ahead of the retry has

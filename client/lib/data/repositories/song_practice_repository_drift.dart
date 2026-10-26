@@ -17,6 +17,7 @@ import '../../utils/result.dart';
 import '../db/app_database.dart';
 import '../db/asset_store.dart';
 import '../db/tables.dart';
+import '../services/diagnostics_log.dart';
 import '../sync/reconcile.dart';
 import '../sync/sync_hashes.dart';
 import '../sync/sync_writer.dart';
@@ -474,7 +475,14 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
         // (a separation's undo then collided with its own stored backing).
         // What was sent stands in for the re-read: it is what the caller's
         // model derives from, and what the next merge must hold it to.
-        return Result.ok(Loaded(practice, sent, sentHashes: sent));
+        DiagnosticsLog.instance.log(
+          'save',
+          'practice committed; its re-read failed: '
+              '${(reloaded as Error<Loaded<SongPractice>>).error.runtimeType}',
+        );
+        return Result.ok(
+          Loaded(practice, sent, sentHashes: sent, reread: false),
+        );
       }
       return Result.ok(
         Loaded(

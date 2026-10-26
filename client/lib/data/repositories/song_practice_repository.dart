@@ -48,6 +48,10 @@ abstract class SongPracticeRepository {
   /// aggregate re-read from the store together with FRESH base hashes for the
   /// next save — and, as [Loaded.sentHashes], the hashes of [practice] as
   /// sent: the base for a caller that kept a model newer than [practice].
+  ///
+  /// An error means nothing was written. A write that committed but whose
+  /// re-read failed still succeeds, with [practice] itself and its sent hashes
+  /// standing in for the re-read ([Loaded.reread] false).
   Future<Result<Loaded<SongPractice>>> savePracticeWithBase(
     SongPractice practice, {
     required Map<String, String> baseHashes,

@@ -993,6 +993,11 @@ class SongPracticeDetailViewModel extends ChangeNotifier
           await mixer.resyncPlayback();
         } else {
           _adoptSaved(sent, saved);
+          if (!saved.reread) {
+            final differed = await _catchUpOnStore(saved);
+            if (_disposed) return true;
+            if (differed) await mixer.resyncPlayback();
+          }
         }
       } else {
         // Mirror [_doSave]'s failure path: revert the optimistic lyrics to
@@ -2737,6 +2742,25 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     createdAt: t.createdAt,
   );
 
+  /// After a save that committed but could not re-read the store (its result
+  /// stands in what it sent): reads the store once more and takes it in as a
+  /// load does. Judged against the sent state alone, rows the merge kept from
+  /// another writer stayed off screen, and the next edit of one rolled it
+  /// back. Skipped when the model moved on: its own save re-reads. Returns
+  /// whether the store differed from what was sent.
+  Future<bool> _catchUpOnStore(Loaded<SongPractice> saved) async {
+    final adopted = _practice;
+    if (adopted == null) return false;
+    final again = await _repository.loadPractice(adopted.id);
+    if (_disposed ||
+        !identical(_practice, adopted) ||
+        again is! Ok<Loaded<SongPractice>>) {
+      return false;
+    }
+    _adoptLoaded(again.value);
+    return !mapEquals(again.value.baseHashes, saved.sentHashes);
+  }
+
   static bool _sameWords(List<LyricLine>? a, List<LyricLine> b) {
     if (a == null || a.length != b.length) return false;
     for (var i = 0; i < a.length; i++) {
@@ -2778,6 +2802,10 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         // Saved with nothing newer behind it: no stamp is pending any more.
         if (identical(_practice, sent)) _unsavedFrom = null;
         _adoptSaved(sent, result.value);
+        if (!result.value.reread) {
+          await _catchUpOnStore(result.value);
+          if (_disposed) return ok;
+        }
       } else {
         // Revert the optimistic in-memory model to what's actually on disk, so the
         // UI never keeps showing edits a failed write didn't persist. The base

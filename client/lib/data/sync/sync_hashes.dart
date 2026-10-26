@@ -15,7 +15,12 @@ import 'sync_writer.dart';
 /// between load and save, and swap in the freshly returned map after every
 /// successful save.
 class Loaded<T> {
-  const Loaded(this.aggregate, this.baseHashes, {this.sentHashes});
+  const Loaded(
+    this.aggregate,
+    this.baseHashes, {
+    this.sentHashes,
+    this.reread = true,
+  });
 
   final T aggregate;
 
@@ -34,6 +39,12 @@ class Loaded<T> {
   /// base) and resurrect a remote delete. The sent state is exactly what that
   /// model derives from.
   final Map<String, String>? sentHashes;
+
+  /// False on a save that committed but could not re-read the store:
+  /// [aggregate] is the model as sent and [baseHashes] its [sentHashes], so
+  /// rows the merge kept from another writer are in neither. The caller reads
+  /// the store again to show them.
+  final bool reread;
 }
 
 // ---------------------------------------------------------------------------
