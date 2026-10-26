@@ -159,12 +159,19 @@ class _Body extends StatelessWidget {
         children: [
           _Header(onCollapse: vm.toggleInspectorPanel),
           const Divider(height: 1, color: Studio.border),
+          // Keyed by what it shows: a selection that moves under a held
+          // fader or pan knob (an import landing selects its take) gave the
+          // next take the drag's state, and the rest of the drag edited it.
           Expanded(
             child: bus != null
-                ? _BusBody(vm: vm, bus: bus)
+                ? _BusBody(key: ValueKey('bus:${bus.id}'), vm: vm, bus: bus)
                 : track == null
                 ? const _Empty('Select a take or bus to inspect it.')
-                : _BodyContent(vm: vm, track: track),
+                : _BodyContent(
+                    key: ValueKey('take:${track.id}'),
+                    vm: vm,
+                    track: track,
+                  ),
           ),
         ],
       ),
@@ -174,7 +181,7 @@ class _Body extends StatelessWidget {
 
 /// Inspector body for a selected FX bus: a header + the (bus-targeted) FX panel.
 class _BusBody extends StatelessWidget {
-  const _BusBody({required this.vm, required this.bus});
+  const _BusBody({required this.vm, required this.bus, super.key});
 
   final SongPracticeDetailViewModel vm;
   final FxBus bus;
@@ -429,7 +436,7 @@ class _BusChannelFooter extends StatelessWidget {
 /// The body for a selected track: a fixed take header + (for vocal takes, when the engine
 /// supports effects) an Analysis | FX toggle, then the scrollable detail for that mode.
 class _BodyContent extends StatelessWidget {
-  const _BodyContent({required this.vm, required this.track});
+  const _BodyContent({required this.vm, required this.track, super.key});
 
   final SongPracticeDetailViewModel vm;
   final AudioTrack track;

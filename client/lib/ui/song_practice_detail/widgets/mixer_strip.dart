@@ -137,6 +137,10 @@ class MixerStrip extends StatelessWidget {
           color: Studio.border,
         ),
         StableSubtree<_MasterChannel>(
+          // Keyed: it sits after the strips, and matched by position its
+          // fader's state was rebuilt whenever a take or bus came or went —
+          // a master drag stopped following the pointer as an import landed.
+          key: const ValueKey('master'),
           // Its callbacks are the mixer's own methods: their tear-offs compare
           // equal only for the same mixer, which pins it.
           sameAs: (next, shown) =>

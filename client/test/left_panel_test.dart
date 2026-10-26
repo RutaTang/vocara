@@ -350,6 +350,21 @@ void main() {
     expect(vm.fakeAnalysis.heals, [(spectrogram: false, metrics: true)]);
   });
 
+  testWidgets('another take selected under a held fader gets its own', (
+    tester,
+  ) async {
+    // An import landing selects its take. Unkeyed, the inspector handed the
+    // new take the fader the user was still holding, and the rest of the
+    // drag set its volume.
+    await pump(tester, track: _vocal(id: 't1'));
+    final before = tester.state(find.byType(StudioFader).last);
+    await pump(tester, track: _vocal(id: 't2'));
+    expect(
+      identical(tester.state(find.byType(StudioFader).last), before),
+      isFalse,
+    );
+  });
+
   testWidgets('a selected take renders its channel strip', (tester) async {
     await pump(tester, track: _vocal(), buses: [_bus('a', 'Reverb')]);
     expect(find.text('OUTPUT'), findsOneWidget);

@@ -249,6 +249,39 @@ void main() {
     });
   });
 
+  testWidgets('the master fader keeps its state as takes come and go', (
+    tester,
+  ) async {
+    // Matched by position, the master strip's fader was rebuilt from scratch
+    // whenever a take or bus came or went: a master drag stopped following
+    // the pointer as an import landed.
+    final vm = _FakeVm();
+    Future<void> pumpTracks(List<AudioTrack> tracks) => tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SizedBox(
+            height: 400,
+            width: 900,
+            child: MixerStrip(vm: vm, tracks: tracks, onDeleteTrack: (_) {}),
+          ),
+        ),
+      ),
+    );
+    State masterFader() => tester.state(
+      find
+          .ancestor(
+            of: _faders.last,
+            matching: find.byWidgetPredicate((w) => w is StatefulWidget),
+          )
+          .first,
+    );
+
+    await pumpTracks([_trackN(1)]);
+    final before = masterFader();
+    await pumpTracks([_trackN(1), _trackN(2)]);
+    expect(identical(masterFader(), before), isTrue);
+  });
+
   testWidgets('a strip fader scrolled away mid-drag still saves its level', (
     tester,
   ) async {
