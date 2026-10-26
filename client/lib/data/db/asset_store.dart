@@ -99,25 +99,36 @@ class AssetStore {
       final assetId = await db.transaction<String>(() async {
         // content_hash is intentionally NON-unique: identical bytes under two
         // asset ULIDs across devices is the normal content-addressed steady
-        // state, so there can be MORE THAN ONE live row for a hash. Take the
-        // first deterministically (getSingleOrNull would throw on >1 match).
-        final existing =
+        // state, so there can be MORE THAN ONE live row for a hash. The first
+        // whose bytes are here wins, else the first, deterministically by HLC.
+        // Taking the first alone, a synced-in row with no bytes here (another
+        // device's earlier import) was re-pointed at the pool file a local row
+        // already owned: two live rows on one path, and a clip loaded through
+        // that path came back on a save as the other asset — an edit nobody
+        // made, which won over a peer's real one.
+        final rows =
             await (db.select(db.assets)
                   ..where(
                     (a) =>
                         a.contentHash.equals(staged.hash) &
                         a.deletedAt.isNull(),
                   )
-                  ..orderBy([(a) => OrderingTerm(expression: a.hlcPacked)])
-                  ..limit(1))
-                .getSingleOrNull();
+                  ..orderBy([(a) => OrderingTerm(expression: a.hlcPacked)]))
+                .get();
+        AssetRow? held;
+        for (final r in rows) {
+          final rel = r.localRelPath;
+          if (rel != null && await File(p.join(root.path, rel)).exists()) {
+            held = r;
+            break;
+          }
+        }
+        final present = held != null;
+        final existing = held ?? rows.firstOrNull;
         if (existing != null) {
           // Deduped: re-point the (per-device) path if this row's bytes went
           // missing locally — the promote above already re-placed them.
           final existingRel = existing.localRelPath;
-          final present =
-              existingRel != null &&
-              await File(p.join(root.path, existingRel)).exists();
           if (!present) {
             await (db.update(db.assets)..where((a) => a.id.equals(existing.id)))
                 .write(AssetsCompanion(localRelPath: Value(rel)));
