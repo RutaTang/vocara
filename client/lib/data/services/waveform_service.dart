@@ -1,5 +1,8 @@
 import 'dart:io';
+import 'dart:math' as math;
+import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:just_waveform/just_waveform.dart';
 import 'package:path/path.dart' as p;
 
@@ -83,7 +86,7 @@ class WaveformService {
       }
 
       return (
-        peaks: _downsample(waveform, targetBuckets),
+        peaks: downsample(waveform, targetBuckets),
         durationMs: waveform.duration.inMilliseconds,
       );
     } finally {
@@ -95,10 +98,33 @@ class WaveformService {
     }
   }
 
+  /// The `.wave` header: version, flags, sample rate, samples per pixel and
+  /// pixel count, four bytes each; the (min, max) pixel pairs follow.
+  static const _waveHeaderBytes = 20;
+
+  /// The (min, max) pairs of [waveform], read where the file holds them.
+  /// just_waveform 0.0.7 views them at byte 10, not 20
+  /// (`Int16List.view(bytes, headerLength ~/ 2)` takes a BYTE offset), so its
+  /// getPixelMin/Max read the header's last ten bytes as the first pixels and
+  /// every pixel after them two and a half pixels late: each take began with
+  /// a spike (the low half of its pixel count: over half full scale past three
+  /// minutes) and was drawn 25 ms late. Read at byte 20 whatever the package
+  /// does, so a fixed version reads the same.
+  static Int16List _pixelPairs(Waveform waveform) {
+    final data = waveform.data;
+    if (data is! Int16List) return Int16List(0); // the darwin writer is 16-bit
+    final buffer = data.buffer;
+    final held = math.max(0, (buffer.lengthInBytes - _waveHeaderBytes) ~/ 4);
+    final pixels = math.min(waveform.length, held);
+    return Int16List.view(buffer, _waveHeaderBytes, pixels * 2);
+  }
+
   /// Collapses the per-pixel min/max samples into [target] normalized peaks,
   /// taking the largest absolute amplitude in each bucket.
-  List<double> _downsample(Waveform waveform, int target) {
-    final pixels = waveform.length;
+  @visibleForTesting
+  static List<double> downsample(Waveform waveform, int target) {
+    final pairs = _pixelPairs(waveform);
+    final pixels = pairs.length ~/ 2;
     if (pixels <= 0) return const [];
 
     final buckets = target < pixels ? target : pixels;
@@ -109,8 +135,8 @@ class WaveformService {
       final end = ((b + 1) * pixels / buckets).floor().clamp(start + 1, pixels);
       var peak = 0.0;
       for (var i = start; i < end; i++) {
-        final min = waveform.getPixelMin(i).abs();
-        final max = waveform.getPixelMax(i).abs();
+        final min = pairs[2 * i].abs();
+        final max = pairs[2 * i + 1].abs();
         final amplitude = (min > max ? min : max) / 32768.0;
         if (amplitude > peak) peak = amplitude;
       }
