@@ -1545,20 +1545,16 @@ class SongPracticeDetailViewModel extends ChangeNotifier
           // the JSON pointing at files already gone. On failure
           // _withImportedAudio rolls the imported/transcoded files back.
           final saved = await _enqueueSave(() async {
-            final reverts = _reverts;
             if (await _doSave()) return true;
+            // The write stored nothing (one that committed reports success,
+            // its re-read failing or not). Taken back here, inside this save,
+            // before any queued behind it runs: one queued (an edit made while
+            // this ran) sends the model as it is when it starts, and taken
+            // back after, it saved the separation the files below are about
+            // to be deleted from under. After a revert, nothing is left to
+            // take back.
             final live = _practice;
-            if (live == null) return false;
-            // Back on the disk's model: it holds the separation only when the
-            // write committed and its re-read alone failed.
-            if (_reverts != reverts) {
-              return live.accompaniment?.id == instrumental.id;
-            }
-            // Inside this save, before any queued behind it runs: one queued
-            // (an edit made while this ran) sent the model as it is when it
-            // starts, and taken back after, it saved the separation the files
-            // below are about to be deleted from under.
-            _practice = takeBack(live);
+            if (live != null) _practice = takeBack(live);
             return false;
           });
           if (!saved) {

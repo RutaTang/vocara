@@ -48,9 +48,6 @@ class _FakeRepo extends Fake implements SongPracticeRepository {
   /// When set, saves park on it — a write held in flight.
   Completer<void>? saveGate;
 
-  /// The next save commits, then reports failure (its re-read failed).
-  bool commitThenFail = false;
-
   /// The next load fails.
   bool failNextLoad = false;
 
@@ -99,11 +96,6 @@ class _FakeRepo extends Fake implements SongPracticeRepository {
       );
     }
     stored = practice;
-    if (commitThenFail) {
-      commitThenFail = false;
-      events.add('save-committed-failed');
-      return Result.error(Exception('re-read failed'));
-    }
     events.add('save');
     return Result.ok(Loaded(stored, const {}));
   }
@@ -305,8 +297,6 @@ class _FakeEngine extends Fake implements PlaybackEngine {
   Future<void> dispose() async {}
 }
 
-/// Engine that remembers the last mute pushed for each source — through a
-/// full graph sync or a live per-source level push, whichever came last.
 /// Records the file paths of the last graph sync.
 class _SyncRecordingEngine extends _FakeEngine {
   List<String> lastPaths = const [];
@@ -318,6 +308,8 @@ class _SyncRecordingEngine extends _FakeEngine {
   ) async => lastPaths = [for (final t in tracks) t.path];
 }
 
+/// Engine that remembers the last mute pushed for each source — through a
+/// full graph sync or a live per-source level push, whichever came last.
 class _MuteTrackingEngine extends _FakeEngine {
   final Map<String, bool> muted = {};
 
@@ -1372,27 +1364,6 @@ void main() {
         }
       },
     );
-
-    test('a separation whose write committed is kept on screen', () async {
-      // The write committed and only its re-read failed: the revert put back
-      // a store holding the separation, and the take-back then hid it.
-      final separation = _GatedSeparation();
-      final vm = await pumpVm(separation: separation, reference: originalRef());
-      for (var i = 0; i < 400 && !vm.separationAvailable; i++) {
-        await Future<void>.delayed(const Duration(milliseconds: 5));
-      }
-      final toasts = <String>[];
-      vm.toasts.listen(toasts.add);
-      repo.commitThenFail = true;
-      final separating = vm.separateBacking('ref');
-      separation.gate.complete();
-      await separating;
-      await Future<void>.delayed(Duration.zero);
-
-      expect(repo.stored.accompaniment, isNotNull);
-      expect(vm.practice!.accompaniment?.id, repo.stored.accompaniment!.id);
-      expect(toasts, isNot(contains('Could not save the separated track.')));
-    });
 
     test('a taken-back separation leaves the engine without it', () async {
       // With no revert (the reload failed too), the take-back changed the

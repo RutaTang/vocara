@@ -41,6 +41,26 @@ import 'package:vocara/utils/result.dart';
 
 class _FakeTechRepo extends Fake implements TechniqueRepository {}
 
+/// The real store, whose next read fails: a save's re-read after its commit.
+class _FlakyReread extends SongPracticeRepositoryDrift {
+  _FlakyReread({
+    required super.db,
+    required super.writer,
+    required super.assets,
+  });
+
+  bool failNextLoad = false;
+
+  @override
+  Future<Result<Loaded<SongPractice>>> loadPractice(String id) async {
+    if (failNextLoad) {
+      failNextLoad = false;
+      return Result.error(Exception('re-read failed'));
+    }
+    return super.loadPractice(id);
+  }
+}
+
 class _NoopFiles extends Fake implements AudioFileService {
   @override
   Future<void> deleteAudio(String path) async {}
@@ -149,10 +169,13 @@ void main() {
 
   late _FakeEngine engine;
 
-  Future<SongPracticeDetailViewModel> open(String practiceId) async {
+  Future<SongPracticeDetailViewModel> open(
+    String practiceId, {
+    SongPracticeRepositoryDrift? repository,
+  }) async {
     engine = _FakeEngine();
     final vm = SongPracticeDetailViewModel(
-      repository: repo,
+      repository: repository ?? repo,
       techniqueRepository: _FakeTechRepo(),
       audioFileService: _NoopFiles(),
       waveformService: _FakeWaveforms(),
@@ -268,6 +291,56 @@ void main() {
       expect(engine.syncs, greaterThan(quiet), reason: 'the mix must follow');
     },
   );
+
+  _FlakyReread flaky() {
+    final writer = SyncWriter(db, HlcClock(node: 'NODE'.padRight(26, '0')));
+    return _FlakyReread(
+      db: db,
+      writer: writer,
+      assets: AssetStore(db: db, root: tmp, writer: writer),
+    );
+  }
+
+  test('a save whose re-read fails still reports what it committed', () async {
+    // The write had committed, but the failed re-read came back as a failed
+    // save: the caller reverted to a store that held it, or took its change
+    // back over it (a separation's undo then collided with its own backing).
+    final p = await seed();
+    final store = flaky();
+    final loaded = await load(p.id);
+    final take = loaded.aggregate.vocalTracks.single;
+    final renamed = loaded.aggregate.copyWith(
+      vocalTracks: [take.copyWith(displayName: 'renamed')],
+    );
+    store.failNextLoad = true;
+
+    final r = await store.savePracticeWithBase(
+      renamed,
+      baseHashes: loaded.baseHashes,
+    );
+
+    expect(r, isA<Ok<Loaded<SongPractice>>>());
+    final saved = (r as Ok<Loaded<SongPractice>>).value;
+    expect(identical(saved.aggregate, renamed), isTrue);
+    final after = await load(p.id);
+    expect(after.aggregate.vocalTracks.single.displayName, 'renamed');
+    // With nothing concurrent, the base it stands in is a re-read's exactly.
+    expect(saved.baseHashes, after.baseHashes);
+  });
+
+  test('... so the screen says nothing failed', () async {
+    final p = await seed();
+    final store = flaky();
+    final vm = await open(p.id, repository: store);
+    final toasts = <String>[];
+    vm.toasts.listen(toasts.add);
+    store.failNextLoad = true;
+
+    await vm.renameTrack(p.vocalTracks.single.id, 'renamed');
+
+    expect(toasts, isEmpty);
+    expect(vm.practice!.vocalTracks.single.displayName, 'renamed');
+  });
 
   test(
     'a save reports what it sent in the same hashes a load reports',

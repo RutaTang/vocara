@@ -412,6 +412,15 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
       final now = _ms(DateTime.now());
       final reverbJson = _reverbJsonOf(practice);
       final lyricsJson = _lyricsJsonOf(practice);
+      // Before the write, so nothing after the commit can fail the save.
+      final sent = _sentHashes(
+        practice,
+        allTracks,
+        clipAsset,
+        separationAssetId: separationAssetId,
+        reverbJson: reverbJson,
+        lyricsJson: lyricsJson,
+      );
 
       await db.transaction(() async {
         await db.customStatement('PRAGMA defer_foreign_keys = ON');
@@ -459,19 +468,19 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
       // (including any concurrent rows the three-way rules kept) — plus the
       // hashes of what it SENT, for a caller whose model moved on meanwhile.
       final reloaded = await loadPractice(practice.id);
-      if (reloaded is! Ok<Loaded<SongPractice>>) return reloaded;
+      if (reloaded is! Ok<Loaded<SongPractice>>) {
+        // Committed all the same. Reported as a failed write, the caller
+        // reverted to a store that held it, or took its change back over it
+        // (a separation's undo then collided with its own stored backing).
+        // What was sent stands in for the re-read: it is what the caller's
+        // model derives from, and what the next merge must hold it to.
+        return Result.ok(Loaded(practice, sent, sentHashes: sent));
+      }
       return Result.ok(
         Loaded(
           reloaded.value.aggregate,
           reloaded.value.baseHashes,
-          sentHashes: _sentHashes(
-            practice,
-            allTracks,
-            clipAsset,
-            separationAssetId: separationAssetId,
-            reverbJson: reverbJson,
-            lyricsJson: lyricsJson,
-          ),
+          sentHashes: sent,
         ),
       );
     } catch (e) {
