@@ -423,6 +423,75 @@ void main() {
     expect(await leftover.exists(), isFalse);
   });
 
+  Future<String?> fuseTrippedAt() async =>
+      (await db
+                  .customSelect(
+                    'SELECT value FROM sync_state WHERE "key" = ?',
+                    variables: [Variable.withString('pool_fuse_at')],
+                  )
+                  .getSingleOrNull())
+              ?.data['value']
+          as String?;
+
+  test('a pool holding only a Finder file or a cut-off copy is no lost '
+      'library', () async {
+    // Remembered once tripped, a fuse set off by these kept every file older
+    // than the trip for good.
+    final finder = File(p.join(tmp.path, 'assets', '.DS_Store'));
+    await finder.create(recursive: true);
+    final part = File(p.join(tmp.path, 'assets', '.staging', 'x.part'));
+    await part.create(recursive: true);
+
+    expect(await assets.sweepOrphanPoolFiles(), 1); // the cut-off copy
+    expect(await part.exists(), isFalse);
+    expect(await fuseTrippedAt(), isNull);
+  });
+
+  test('a library its user emptied still reclaims its own leftovers, however '
+      'old', () async {
+    // Only tombstoned rows: zero live ones, as after a lost database, but
+    // these rows prove the files were this library's.
+    final id = await assets.importFile(await makeSrc('gone.wav', [4, 5, 6]));
+    final path = (await assets.resolve(id))!;
+    await db.customStatement('UPDATE assets SET deleted_at = 1 WHERE id = ?', [
+      id,
+    ]);
+    File(
+      path,
+    ).setLastModifiedSync(DateTime.now().subtract(const Duration(days: 3)));
+
+    expect(await assets.sweepOrphanPoolFiles(), 1);
+    expect(await File(path).exists(), isFalse);
+    expect(await fuseTrippedAt(), isNull);
+  });
+
+  test('a tripped fuse still lets this library reclaim its own leftovers '
+      'from before the trip', () async {
+    final lost = File(
+      p.join(tmp.path, 'assets', 'aa', 'aa', '${'a' * 64}.wav'),
+    );
+    await lost.create(recursive: true);
+    await lost.writeAsBytes([9, 9, 9]);
+    lost.setLastModifiedSync(DateTime.now().subtract(const Duration(hours: 2)));
+    // This library's own import, tombstoned, its reclaim cut short.
+    final id = await assets.importFile(await makeSrc('own.wav', [1, 2]));
+    final own = (await assets.resolve(id))!;
+    await db.customStatement('UPDATE assets SET deleted_at = 1 WHERE id = ?', [
+      id,
+    ]);
+    File(
+      own,
+    ).setLastModifiedSync(DateTime.now().subtract(const Duration(hours: 1)));
+
+    expect(await assets.sweepOrphanPoolFiles(), 0); // the lost file trips it
+    expect(await fuseTrippedAt(), isNotNull);
+    await assets.importFile(await makeSrc('take.wav', [3, 3, 3])); // a take
+
+    expect(await assets.sweepOrphanPoolFiles(), 1);
+    expect(await File(own).exists(), isFalse);
+    expect(await lost.exists(), isTrue, reason: 'the lost library is kept');
+  });
+
   test(
     'a GC-reclaimed pool file lands in the trash and is recoverable',
     () async {

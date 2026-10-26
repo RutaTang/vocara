@@ -1077,6 +1077,10 @@ class AssetStore {
   /// file older than the trip is never reclaimed; a newer one can only be
   /// this database's own crash leftover.
   ///
+  /// A file whose hash this database holds only in tombstoned rows is its
+  /// own leftover however old (a reclaim cut short, a library emptied by its
+  /// user): it neither trips the fuse nor is kept by it.
+  ///
   /// Meant to run at startup when nothing is in flight. Best-effort; returns the count removed.
   Future<int> sweepOrphanPoolFiles() async {
     final pool = Directory(p.join(root.path, 'assets'));
@@ -1084,33 +1088,39 @@ class AssetStore {
     // Content hashes with a LIVE asset row: a file matching one is legitimately owned.
     // A file matching only a tombstoned hash (or no hash) is an orphan to reclaim.
     final known = <String>{};
+    // Hashes only tombstoned rows hold: their files are this library's own
+    // leftovers, whatever the fuse says (see doc).
+    final tombstoned = <String>{};
     for (final r
         in await db
             .customSelect(
-              'SELECT DISTINCT content_hash AS h FROM assets WHERE deleted_at IS NULL',
+              'SELECT content_hash AS h, MIN(deleted_at IS NOT NULL) AS gone '
+              'FROM assets GROUP BY content_hash',
             )
             .get()) {
       final h = r.data['h'];
-      if (h is String) known.add(h);
+      if (h is! String) continue;
+      (r.data['gone'] == 1 ? tombstoned : known).add(h);
     }
     if (known.isEmpty) {
-      // The fuse (see doc): with no live assets at all, a non-empty pool means
-      // "database lost, bytes survived" — protect the bytes and touch nothing.
+      // The fuse (see doc): with no live assets at all, a pool file this
+      // database never held means "database lost, bytes survived" — protect
+      // the bytes and touch nothing.
       await for (final e in pool.list(recursive: true)) {
-        if (e is File) {
-          debugPrint(
-            'AssetStore.sweepOrphanPoolFiles: skipped — the assets table has '
-            'zero live rows but the pool holds files; protecting the bytes.',
-          );
-          await db.customStatement(
-            'INSERT INTO sync_state ("key", value) VALUES (?, ?) '
-            'ON CONFLICT ("key") DO NOTHING',
-            [_poolFuseKey, '${DateTime.now().millisecondsSinceEpoch}'],
-          );
-          return 0;
-        }
+        if (e is! File) continue;
+        final hash = _poolHash(p.basename(e.path));
+        if (hash == null || tombstoned.contains(hash)) continue;
+        debugPrint(
+          'AssetStore.sweepOrphanPoolFiles: skipped — the assets table has '
+          'zero live rows but the pool holds files; protecting the bytes.',
+        );
+        await db.customStatement(
+          'INSERT INTO sync_state ("key", value) VALUES (?, ?) '
+          'ON CONFLICT ("key") DO NOTHING',
+          [_poolFuseKey, '${DateTime.now().millisecondsSinceEpoch}'],
+        );
+        return 0;
       }
-      return 0; // no live assets AND no pool files: nothing to sweep anyway
     }
     final fuse = await db
         .customSelect(
@@ -1129,20 +1139,29 @@ class AssetStore {
         if (await _moveToTrash(e)) removed++;
         continue;
       }
-      // Pool files are named `<sha256>` or `<sha256>.<ext>`.
-      final dot = name.indexOf('.');
-      final hash = dot < 0 ? name : name.substring(0, dot);
-      if (hash.length == 64 && !known.contains(hash)) {
-        // A file from before the fuse tripped: the lost library's.
-        if (protectUpTo != null &&
-            (await e.lastModified()).millisecondsSinceEpoch <= protectUpTo) {
+      final hash = _poolHash(name);
+      if (hash == null || known.contains(hash)) continue;
+      // A file from before the fuse tripped, that this database never held:
+      // the lost library's. Kept too when its age can't be read.
+      if (protectUpTo != null && !tombstoned.contains(hash)) {
+        try {
+          if ((await e.lastModified()).millisecondsSinceEpoch <= protectUpTo) {
+            continue;
+          }
+        } catch (_) {
           continue;
         }
-        if (await _moveToTrash(e)) removed++;
       }
+      if (await _moveToTrash(e)) removed++;
     }
     return removed;
   }
+
+  /// The content hash a pool file is named for (`<sha256>` or
+  /// `<sha256>.<ext>`), or null for anything else (`.DS_Store`, a `.part`).
+  static String? _poolHash(String name) => _poolName.firstMatch(name)?.group(1);
+
+  static final RegExp _poolName = RegExp(r'^([0-9a-f]{64})(?:\.|$)');
 
   /// The local `sync_state` key recording when [sweepOrphanPoolFiles]' fuse
   /// first tripped (epoch ms).
