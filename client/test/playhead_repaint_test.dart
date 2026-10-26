@@ -779,6 +779,30 @@ void main() {
   // the dock up — or shrinking the window under a tall dock — overflowed the
   // workspace, collapsed the timeline to nothing and cut off the dock's
   // bottom.
+  testWidgets('opening the dock keeps the tab strip where it was scrolled', (
+    tester,
+  ) async {
+    final vm = await _pumpScreen(tester, size: const Size(1300, 1100));
+    ScrollPosition strip() => tester
+        .state<ScrollableState>(
+          find
+              .descendant(
+                of: find.byType(BottomDock),
+                matching: find.byType(Scrollable),
+              )
+              .first,
+        )
+        .position;
+    final end = strip().maxScrollExtent;
+    expect(end, greaterThan(0), reason: 'the strip scrolls at this width');
+    strip().jumpTo(end);
+    await tester.pump();
+
+    vm.analysis.showDockTab(DockTab.dynamics); // a tab at the far end
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(strip().pixels, end);
+  });
+
   testWidgets('a dock taller than the window leaves the timeline whole', (
     tester,
   ) async {

@@ -98,8 +98,12 @@ class BottomDock extends StatelessWidget {
               ),
             // Kept while what it shows is unchanged: every notification of
             // the view model rebuilds the dock, a fader or clip-drag tick
-            // included, and the tab strip is some 70 widgets.
+            // included, and the tab strip is some 70 widgets. Keyed: the
+            // handle above it comes and goes with the dock, and unkeyed the
+            // strip was rebuilt from scratch, its scroll back at the start
+            // just as a tab past the window's edge opened the dock.
             StableSubtree<_TabBar>(
+              key: const ValueKey('dock-tabs'),
               sameAs: _TabBar.same,
               child: _TabBar(
                 vm: vm,
