@@ -118,6 +118,28 @@ void main() {
     return c;
   }
 
+  // An engine that failed to open played nothing, with no word why.
+  test('Play on an engine that failed to open says so and plays nothing', () {
+    engine = _FakeEngine();
+    final toasts = <String>[];
+    final c = PlaybackController(
+      engine: engine,
+      practice: () => _practice(300000),
+      isRecording: () => false,
+      engineAvailable: () => false,
+      toast: toasts.add,
+    );
+    addTearDown(() async {
+      c.dispose();
+      await engine.close();
+    });
+
+    c.togglePlay();
+
+    expect(engine.calls, isNot(contains('play')));
+    expect(toasts, [PlaybackController.noDeviceMessage]);
+  });
+
   group('viewport follow', () {
     test(
       'a playing cursor pages the view forward once it nears the edge',

@@ -15,9 +15,13 @@ class PlaybackController extends ChangeNotifier {
     required PlaybackEngine engine,
     required SongPractice? Function() practice,
     required bool Function() isRecording,
+    bool Function()? engineAvailable,
+    void Function(String)? toast,
   }) : _engine = engine,
        _practice = practice,
-       _isRecording = isRecording {
+       _isRecording = isRecording,
+       _engineAvailable = engineAvailable ?? _always,
+       _toast = toast {
     _playingSub = _engine.playing.listen((playing) {
       _isPlaying = playing;
       notifyListeners();
@@ -75,9 +79,23 @@ class PlaybackController extends ChangeNotifier {
 
   // --- Transport -----------------------------------------------------------
 
+  static bool _always() => true;
+
+  /// Whether the native engine opened. One that failed (no output device when
+  /// the song opened) plays nothing and never opens by itself.
+  final bool Function() _engineAvailable;
+  final void Function(String)? _toast;
+
+  /// What Play and Monitor say on an engine that failed to open: both did
+  /// nothing at all, and Monitor even showed itself on.
+  static const noDeviceMessage =
+      'No audio device is available. Connect one, then reopen this song.';
+
   Future<void> togglePlay() async {
     if (_engine.isPlaying) {
       await _engine.pause();
+    } else if (!_engineAvailable()) {
+      _toast?.call(noDeviceMessage);
     } else {
       await _engine.play();
     }

@@ -174,6 +174,17 @@ class _HandFedGraph extends _FakeGraph {
   double inputLevel() => 0;
 }
 
+/// An engine that failed to open: its calls do nothing.
+class _DeadGraph extends _HandFedGraph {
+  int monitorStarts = 0;
+
+  @override
+  bool get isAvailable => false;
+
+  @override
+  void startMonitor() => monitorStarts++;
+}
+
 /// Enough engine for the REAL recorder to arm: a converged, running input
 /// stream whose take ring grows on every read, so its ready handshake passes
 /// at once and its level timer drives the take's clock.
@@ -815,6 +826,23 @@ void main() {
     await untilTicks(graph, on + 3);
     expect(c.inputMonitorEnabled, isTrue);
   });
+
+  // An engine that failed to open made Monitor a no-op that still showed ON.
+  test(
+    'Monitor on an engine that failed to open stays off and says so',
+    () async {
+      final graph = _DeadGraph();
+      final toasts = <String>[];
+      final c = build(_FakeMic(), graph: graph, toast: toasts.add);
+      addTearDown(c.dispose);
+
+      await c.toggleInputMonitor();
+
+      expect(c.inputMonitorEnabled, isFalse);
+      expect(graph.monitorStarts, 0);
+      expect(toasts, [PlaybackController.noDeviceMessage]);
+    },
+  );
 
   test('monitoring still stops when a delivering mic goes silent', () async {
     final graph = _HandFedGraph();

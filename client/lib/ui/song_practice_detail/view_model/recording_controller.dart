@@ -865,6 +865,10 @@ class RecordingController extends ChangeNotifier {
         _heldInputLevel = 0;
         inputLevel.value = 0;
       } else {
+        if (!engine.isAvailable) {
+          _toast(PlaybackController.noDeviceMessage);
+          return;
+        }
         if (!await MicPermission.request()) {
           _toast(MicPermission.deniedMessage);
           return;
