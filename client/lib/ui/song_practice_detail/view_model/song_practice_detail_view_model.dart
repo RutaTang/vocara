@@ -33,7 +33,6 @@ import '../../../domain/models/technique_marker.dart';
 import '../../../domain/models/voice_metrics.dart';
 import '../../../utils/busy_gate.dart';
 import '../../../utils/command.dart';
-import '../../../utils/export_copy.dart';
 import '../../../utils/id.dart';
 import '../../../utils/lyrics_format.dart';
 import '../../../utils/result.dart';
@@ -1660,14 +1659,31 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       return;
     }
     if (destPath == null) return; // user cancelled
+    // Onto the clip's own file (the save panel can browse into the app's
+    // storage and confirm Replace): the copy truncated it to nothing, the
+    // take's audio gone, and said "Exported".
+    if (await _sameFile(sourcePath, destPath)) {
+      _toast("That is the take's own audio file. Export it somewhere else.");
+      return;
+    }
     try {
       // Overwrite is intentional: the save panel already confirmed replacing.
-      await exportCopy(source, destPath);
+      // (A copy failing part-way removes what it wrote: Dart's own cleanup.)
+      await source.copy(destPath);
     } catch (_) {
       _toast('Could not export the audio to that location.');
       return;
     }
     _toast('Exported to $destPath');
+  }
+
+  /// Whether [a] and [b] are one file (a symlink or hard link to it too).
+  static Future<bool> _sameFile(String a, String b) async {
+    try {
+      return await File(b).exists() && await FileSystemEntity.identical(a, b);
+    } on FileSystemException {
+      return false;
+    }
   }
 
   // --- Takes -----------------------------------------------------------------

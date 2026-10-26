@@ -216,6 +216,26 @@ void main() {
     expect(toasts, contains('Exported to $dest'));
   });
 
+  test(
+    'an export onto the take\'s own file is refused, its audio kept',
+    () async {
+      // The save panel can browse into the app's storage: copying a file onto
+      // itself truncated it to nothing, and the toast said "Exported".
+      final picks = <String>[];
+      late final String own;
+      final vm = await pumpVm(picks, (_) async => own);
+      own = byName(vm, 'Take 1').primaryClip!.audioFilePath;
+      final toasts = <String>[];
+      vm.toasts.listen(toasts.add);
+
+      await vm.exportTrackAudio(byName(vm, 'Take 1').id);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(await File(own).readAsBytes(), takeBytes);
+      expect(toasts.single, contains('own audio file'));
+    },
+  );
+
   test('a cancelled save panel exports nothing and stays silent', () async {
     final picks = <String>[];
     final vm = await pumpVm(picks, (_) async => null);
