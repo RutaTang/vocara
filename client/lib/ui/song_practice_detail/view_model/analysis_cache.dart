@@ -61,6 +61,7 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     required ValueListenable<Duration> position,
     required Future<void> Function(Duration) seek,
     void Function(String)? toast,
+    bool Function(String trackId)? isMovingLive,
     @visibleForTesting
     Future<bool> Function() requestMicPermission = MicPermission.request,
     @visibleForTesting LruBytesBudget? cacheBudget,
@@ -89,6 +90,7 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
        _selectedTrack = selectedTrack,
        _selectedClipId = selectedClipId,
        _trackById = trackById,
+       _isMovingLive = isMovingLive ?? _never,
        _position = position,
        _seek = seek,
        _toast = toast,
@@ -126,6 +128,16 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   final AudioTrack? Function() _selectedTrack;
   final String? Function() _selectedClipId;
   final AudioTrack? Function(String) _trackById;
+
+  /// Whether a clip of the take is being moved live (see
+  /// SongPracticeDetailViewModel.isMovingLive). Each tick of the move re-keys
+  /// a multi-clip lane's merge, and nothing asks for its analysis meanwhile
+  /// ([lacksAnalysis], [laneLacksData]): the lanes, the inspector and the
+  /// dock each merged and cached every position the clip passed through.
+  /// The commit asks for where it landed.
+  final bool Function(String trackId) _isMovingLive;
+
+  static bool _never(String _) => false;
 
   final ValueListenable<Duration> _position;
   final Future<void> Function(Duration) _seek;
@@ -605,6 +617,8 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     final s = _analysisSubject;
     if (s == null || s.key == _healBlocked) return false;
     if (s.aggregate) {
+      final moving = _selectedTrack()?.id;
+      if (moving != null && _isMovingLive(moving)) return false;
       return (spectrogram || metrics) &&
           !_aggLoading.contains(s.key) &&
           !_aggAnalysisCache.containsKey(s.key) &&
@@ -862,7 +876,9 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   /// toggled the lane again. A lane on screen asks [healLane], as the dock
   /// asks [healSelectedAnalysis].
   bool laneLacksData(String trackId) {
-    if (!_expandedTracks.contains(trackId)) return false;
+    if (!_expandedTracks.contains(trackId) || _isMovingLive(trackId)) {
+      return false;
+    }
     final t = _trackById(trackId);
     if (t == null) return false;
     final needs = _laneNeeds(trackId);

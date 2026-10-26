@@ -206,6 +206,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       position: playback.position,
       seek: playback.seek,
       toast: _toast,
+      isMovingLive: isMovingLive,
     );
     recording = RecordingController(
       graphEngine: () => _graphEngine,
@@ -2034,11 +2035,11 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// [commitTrackMove]).
   final Set<String> _movingLive = {};
 
-  /// Whether a clip of [trackId] is being moved live. Its folded-out lanes
-  /// don't ask for their analysis meanwhile (see AnalysisCache.healLane):
-  /// each tick re-keys a multi-clip lane, and they merged every position the
-  /// clip passed through, caching each; the commit computes the one it lands
-  /// on.
+  /// Whether a clip of [trackId] is being moved live. Nothing asks for its
+  /// analysis meanwhile (see AnalysisCache's isMovingLive): each tick re-keys
+  /// a multi-clip lane, and its lanes, the inspector and the dock merged
+  /// every position the clip passed through, caching each; the commit
+  /// computes the one it lands on.
   bool isMovingLive(String trackId) => _movingLive.contains(trackId);
 
   /// Moves a single clip along the timeline live (model only) while dragging.

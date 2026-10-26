@@ -588,18 +588,24 @@ void main() {
         base.copyWith(vocalTracks: [split, ...base.vocalTracks.skip(1)]),
       ),
     );
-    // The merge runs in an isolate: real time for it, then a frame.
+    // The merge runs in an isolate: real time for it, then frames, until
+    // nothing is computing (bounded, so a loaded machine only waits longer).
     Future<void> settle() async {
-      for (var i = 0; i < 3; i++) {
+      for (var i = 0; i < 40; i++) {
         await tester.pump(const Duration(milliseconds: 16));
         await tester.runAsync(
-          () => Future<void>.delayed(const Duration(milliseconds: 50)),
+          () => Future<void>.delayed(const Duration(milliseconds: 25)),
         );
+        if (i >= 2 && !vm.analysis.metricsLoadingFor('t0')) break;
       }
       await tester.pump(const Duration(milliseconds: 16));
     }
 
     vm.analysis.toggleTrackExpanded('t0'); // the pitch lane
+    // Selected with no clip: the inspector and the dock show the lane's merge
+    // too, and ask for it on their own.
+    vm.selectTrack('t0');
+    vm.analysis.showDockTab(DockTab.spectrogram);
     await settle();
     expect(vm.analysis.metricsFor('t0'), isNotNull);
 
