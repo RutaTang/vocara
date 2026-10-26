@@ -1980,3 +1980,70 @@ fn a_pause_during_a_render_resumes_where_the_listener_stopped() {
         "resumed elsewhere"
     );
 }
+
+/// A source counting how often the graph clears its nodes' state.
+struct CountsResets {
+    inner: BufferSource,
+    resets: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl vocara_engine::node::Node for CountsResets {
+    fn prepare(&mut self, sample_rate: f64, max_block: usize) {
+        self.inner.prepare(sample_rate, max_block);
+    }
+
+    fn num_in(&self) -> usize {
+        0
+    }
+
+    fn process(&mut self, io: &mut vocara_engine::node::ProcessIo) {
+        self.inner.process(io);
+    }
+
+    fn reset(&mut self) {
+        self.resets
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Plays `blocks` blocks with the device trailing the render by `lag` frames, then pauses
+/// and renders one more block: how many times the nodes' state was cleared.
+fn resets_after_a_pause(lag: u64) -> usize {
+    let resets = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let node = CountsResets {
+        inner: BufferSource::new(offset_pcm(100_000), 0),
+        resets: Arc::clone(&resets),
+    };
+    let (h, rt) = engine_with(Box::new(node));
+    let t = rt.transport();
+    let mut rendered = 0u64;
+    let mut block = vec![0.0; BLOCK * CHANNELS];
+    h.play();
+    for _ in 0..20 {
+        rt.render_offline(&mut block, BLOCK);
+        rendered += BLOCK as u64;
+        let target = rendered.saturating_sub(lag);
+        let cur = t.consumed_frames();
+        if target > cur {
+            t.advance_consumed(target - cur);
+        }
+    }
+    let before = resets.load(std::sync::atomic::Ordering::Relaxed);
+    h.pause();
+    rt.render_offline(&mut block, BLOCK);
+    resets.load(std::sync::atomic::Ordering::Relaxed) - before
+}
+
+#[test]
+fn a_pause_that_drops_rendered_frames_clears_the_nodes_state() {
+    // Resampled output: the frames rendered past what was heard are rendered again on
+    // resume, and the delay lines and reverb already held them (a doubler or delay click
+    // one delay-length after resume).
+    assert_eq!(resets_after_a_pause(1024), 1);
+}
+
+#[test]
+fn a_pause_with_everything_heard_keeps_the_tails() {
+    // The 48 kHz identity path: nothing is rendered again, so nothing is cleared.
+    assert_eq!(resets_after_a_pause(0), 0);
+}

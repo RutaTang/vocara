@@ -76,6 +76,9 @@ pub struct Shared {
     /// 32 bits of frames is ~24.8 h at the engine rate.
     loop_span: AtomicU64,
     seek_req: AtomicI64, // >= 0: pending seek target; -1: none
+    /// A pause rewound the clock over frames already rendered (see [`EngineHandle::pause`]):
+    /// the audio thread clears the nodes' state at its next block, as for a seek.
+    reset_req: AtomicBool,
     /// Live-input monitor gain target (f32 bits). 0 = muted; the audio thread ramps to it.
     mon_target: AtomicU32,
     /// Hard safety mute for the monitor, owned by the audio host — NOT by the UI. Raised while
@@ -148,6 +151,7 @@ impl Shared {
             loop_enabled: AtomicBool::new(false),
             loop_span: AtomicU64::new(0),
             seek_req: AtomicI64::new(-1),
+            reset_req: AtomicBool::new(false),
             mon_target: AtomicU32::new(0), // 0.0f32 bits
             mon_muted: AtomicBool::new(false),
             echo_free: AtomicBool::new(false),
@@ -472,6 +476,9 @@ impl RtProcessor {
                 Ordering::AcqRel,
                 Ordering::Acquire,
             );
+            g.reset();
+        }
+        if self.shared.reset_req.swap(false, Ordering::AcqRel) {
             g.reset();
         }
 
@@ -920,7 +927,14 @@ impl EngineHandle {
         // this run (since play or a seek) heard yet (None) leaves the render clock:
         // where play() or the seek put it, plus at most the one block rendered since.
         if let Some(heard) = self.shared.map_consumed() {
-            self.shared.frame.store(heard, Ordering::Release);
+            // Frames rendered past what was heard are rendered again on resume, but the
+            // nodes' delay lines, reverb tank and filter histories already hold them: the
+            // resume played on top of its own future, a doubler or delay clicking one
+            // delay-length in. Clear that state, as a seek does. Nothing is rewound on
+            // the 48 kHz identity path (all of it was heard), so tails carry there.
+            if self.shared.frame.swap(heard, Ordering::AcqRel) != heard {
+                self.shared.reset_req.store(true, Ordering::Release);
+            }
         }
         // Drop the FIFO's pre-pause audio so the output falls silent within one callback.
         self.shared.out_flush.fetch_add(1, Ordering::Release);
