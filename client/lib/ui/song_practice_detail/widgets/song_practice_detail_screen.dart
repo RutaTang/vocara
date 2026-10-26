@@ -395,7 +395,20 @@ class _WorkspaceState extends State<_Workspace> {
     if (confirmed) await vm.separateBacking(track.id);
   }
 
-  void _showTrackMenu(AudioTrack track, Offset position) {
+  /// [shown] as the practice holds it now. A lane body is kept while its
+  /// clips and notes are unchanged, so its menu callbacks can hand in the
+  /// take as it was before a rename or recolor: the Rename dialog then
+  /// offered the old name, and accepting it put the old name back.
+  AudioTrack _current(AudioTrack shown) {
+    final p = practice;
+    for (final t in [?p.accompaniment, ?p.reference, ...p.vocalTracks]) {
+      if (t.id == shown.id) return t;
+    }
+    return shown;
+  }
+
+  void _showTrackMenu(AudioTrack shown, Offset position) {
+    final track = _current(shown);
     final vocals = practice.activeVocalTracks;
     final idx = vocals.indexWhere((t) => t.id == track.id);
     showTrackContextMenu(
@@ -436,7 +449,8 @@ class _WorkspaceState extends State<_Workspace> {
     );
   }
 
-  void _showClipMenu(AudioTrack track, String clipId, Offset position) {
+  void _showClipMenu(AudioTrack shown, String clipId, Offset position) {
+    final track = _current(shown);
     showClipContextMenu(
       context,
       position,

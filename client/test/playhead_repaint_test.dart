@@ -11,6 +11,7 @@ import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'package:flutter/gestures.dart' show kSecondaryButton;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -39,6 +40,7 @@ import 'package:vocara/ui/song_practice_detail/widgets/bottom_dock.dart';
 import 'package:vocara/ui/song_practice_detail/widgets/fx_panel.dart';
 import 'package:vocara/ui/song_practice_detail/widgets/ruler_bar.dart';
 import 'package:vocara/ui/song_practice_detail/widgets/song_practice_detail_screen.dart';
+import 'package:vocara/ui/song_practice_detail/widgets/track_row.dart';
 import 'package:vocara/utils/result.dart';
 
 class _FakeRepo extends Fake implements SongPracticeRepository {
@@ -504,6 +506,59 @@ void main() {
     await tester.pump(const Duration(milliseconds: 16));
     await tester.pump(const Duration(milliseconds: 16));
     expect(vm.analysis.metricsFor('t0'), isNotNull);
+  });
+
+  testWidgets("a lane's menu offers the take as it is now, after a rename", (
+    tester,
+  ) async {
+    // The lane body is kept while its clips are unchanged, and its menu
+    // callback handed in the take it was built with: Rename offered the old
+    // name, and accepting it put the old name back.
+    final base = _practice(8);
+    final short = base.vocalTracks.first.copyWith(
+      clips: [
+        AudioClip(
+          id: 'c0',
+          audioFilePath: '/pool/t0.wav',
+          durationMs: 10000,
+          startMs: 0,
+        ),
+      ],
+    );
+    final vm = await _pumpScreen(
+      tester,
+      repository: _FakeRepo(
+        base.copyWith(vocalTracks: [short, ...base.vocalTracks.skip(1)]),
+      ),
+    );
+    await vm.renameTrack('t0', 'Verse');
+    await tester.pump(const Duration(milliseconds: 50));
+
+    // The lane's empty stretch past its clip: the body, not the header.
+    final body = find
+        .descendant(
+          of: find.byWidgetPredicate(
+            (w) => w is TrackRow && w.track.id == 't0',
+          ),
+          matching: find.byWidgetPredicate(
+            (w) => w.runtimeType.toString() == '_Body',
+          ),
+        )
+        .first;
+    final box = tester.getRect(body);
+    await tester.tapAt(
+      Offset(box.left + box.width * 0.9, box.center.dy),
+      buttons: kSecondaryButton,
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Rename'));
+    await tester.pumpAndSettle();
+    expect(
+      find.byWidgetPredicate(
+        (w) => w is EditableText && w.controller.text == 'Verse',
+      ),
+      findsOneWidget,
+    );
   });
 
   testWidgets('a clip dragged on a folded-out multi-clip take is analyzed '

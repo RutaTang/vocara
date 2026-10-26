@@ -587,9 +587,9 @@ class _Body extends StatefulWidget {
   /// pointer rate. Of [track] it reads only the clips and notes, compared by
   /// identity (a copy keeps the lists it does not change), so the lane's own
   /// volume, pan or FX tick leaves it too: compared whole, that repainted
-  /// every clip's waveform in the lane at pointer rate. As with
-  /// [_TrackHeader.showsSameAs], the callbacks are not compared: they capture
-  /// only this lane's ids.
+  /// every clip's waveform in the lane at pointer rate. The callbacks are not
+  /// compared: the menus they open hand the screen the take this body was
+  /// built with, which the screen resolves by id to the take as it is now.
   bool showsSameAs(_Body other) =>
       track.id == other.track.id &&
       identical(track.clips, other.track.clips) &&
