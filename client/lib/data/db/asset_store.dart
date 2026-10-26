@@ -556,16 +556,24 @@ class AssetStore {
   }
 
   /// The sha256 of the bytes an import pooled from the staged file [f],
-  /// whether or not [f] still holds them; null when no import recorded one.
+  /// whether or not [f] still holds them; null when no import recorded one,
+  /// or [f] has grown since.
   ///
   /// The recorder never flushes its file to the drive (it guards against a
   /// killed process, not a power cut), while an import flushes the pooled
   /// copy and this record before its rows commit. A power cut soon after a
   /// save can therefore bring the staging file back holding older bytes than
   /// the save pooled. Their own hash matches nothing saved, so boot recovery
-  /// asks this one too, or the take came back a second time, truncated.
-  static Future<String?> importedHashOf(File f) async =>
-      (await _readHashSidecar(f.path))?.$3;
+  /// asks this one too, or the take came back a second time, truncated. A
+  /// power cut rolls a file back, never forward: one longer than it was
+  /// imported was written to since, and the record no longer speaks for it.
+  static Future<String?> importedHashOf(File f) async {
+    final recorded = await _readHashSidecar(f.path);
+    if (recorded == null) return null;
+    final now = await _sizeAndMtime(f.path);
+    if (now == null || now.$1 > recorded.$1) return null;
+    return recorded.$3;
+  }
 
   /// The sha256 an import measured for the staged file [f], while [f] is
   /// unchanged since (same size and modification time); null otherwise.
@@ -692,8 +700,10 @@ class AssetStore {
   /// recorded) of a file in [keep]: a file held back for another attempt
   /// keeps what that attempt reads beside it.
   static bool _sidecarOfKept(String path, Set<String> keep) {
+    // In the file's own name: a dot in a folder name says nothing.
     final dot = path.lastIndexOf('.');
-    return dot > 0 && keep.contains(path.substring(0, dot));
+    return dot > path.lastIndexOf(p.separator) + 1 &&
+        keep.contains(path.substring(0, dot));
   }
 
   /// Every (table, column) that can reference an asset id — THE single source

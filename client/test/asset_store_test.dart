@@ -392,6 +392,27 @@ void main() {
     },
   );
 
+  test('a kept staging file keeps its sidecars, and only those', () async {
+    final kept = File(p.join(tmp.path, 'audio', 'p1', 'take.wav'));
+    final sidecars = [File('${kept.path}.sha256'), File('${kept.path}.retry')];
+    // A dot in a folder name is not a sidecar's: nothing in it is kept.
+    final inFolder = File(p.join('${kept.path}.d', 'other'));
+    final other = File(p.join(tmp.path, 'audio', 'p1', 'other.wav'));
+    for (final f in [kept, ...sidecars, inFolder, other]) {
+      await f.parent.create(recursive: true);
+      await f.writeAsBytes([0]);
+    }
+
+    await store.sweepStaging(keep: {kept.path});
+
+    expect(await kept.exists(), isTrue);
+    for (final f in sidecars) {
+      expect(await f.exists(), isTrue, reason: f.path);
+    }
+    expect(await inFolder.exists(), isFalse);
+    expect(await other.exists(), isFalse);
+  });
+
   test('a landed import leaves nothing counted as still copying', () async {
     // A quit waits on a Save that is still pooling a large file, judged by
     // this count moving (see RecordingFinalizer): a staging file left in it

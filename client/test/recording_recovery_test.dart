@@ -691,7 +691,8 @@ void main() {
     final stale = await stageOrphan(practice.id, monoWav(4800));
     final stamp = File('${stale.path}.retry');
     final firstFailure = DateTime.now().subtract(const Duration(days: 8));
-    await stamp.writeAsString('${firstFailure.millisecondsSinceEpoch}');
+    // Two boots failed it already; this is the third.
+    await stamp.writeAsString('${firstFailure.millisecondsSinceEpoch} 2');
 
     Future<WaveformResult> brokenAnalyze(String path) async =>
         throw StateError('decoder down');
@@ -729,9 +730,8 @@ void main() {
     // The first failure's time stays with it for the next boot's verdict.
     final stamp = File('${old.path}.retry');
     expect(await stamp.exists(), isTrue);
-    final first = DateTime.fromMillisecondsSinceEpoch(
-      int.parse(await stamp.readAsString()),
-    );
+    final firstMs = int.parse((await stamp.readAsString()).split(' ').first);
+    final first = DateTime.fromMillisecondsSinceEpoch(firstMs);
     expect(
       DateTime.now().difference(first),
       lessThan(const Duration(hours: 1)),
@@ -742,13 +742,69 @@ void main() {
       await persistence.recoverStagedRecordings(analyze: brokenAnalyze),
       0,
     );
-    expect(await stamp.readAsString(), '${first.millisecondsSinceEpoch}');
+    expect(await stamp.readAsString(), '$firstMs 2');
     expect(persistence.recoveryRetryPaths, {old.path});
 
     // Healthy again: recovered normally.
     expect(await persistence.recoverStagedRecordings(analyze: fakeAnalyze), 1);
     expect((await reload(practice.id)).vocalTracks, hasLength(1));
   });
+
+  test('a file that failed once and then waited out the week still gets '
+      'more attempts', () async {
+    // The window alone, measured from the first failure, released the take
+    // on its second attempt when the app then went unopened for a week.
+    final practice = await createPractice();
+    final staged = await stageOrphan(practice.id, monoWav(4800));
+    final stamp = File('${staged.path}.retry');
+    final firstFailure = DateTime.now().subtract(const Duration(days: 8));
+    await stamp.writeAsString('${firstFailure.millisecondsSinceEpoch} 1');
+
+    Future<WaveformResult> brokenAnalyze(String path) async =>
+        throw StateError('decoder down');
+    expect(
+      await persistence.recoverStagedRecordings(analyze: brokenAnalyze),
+      0,
+    );
+    expect(persistence.recoveryRetryPaths, {staged.path});
+    expect(
+      await stamp.readAsString(),
+      '${firstFailure.millisecondsSinceEpoch} 2',
+    );
+  });
+
+  test(
+    'a recorded hash does not speak for a file that grew since its import',
+    () async {
+      // A power cut rolls the staging file back, never forward: a longer file
+      // was written to after the import, and those bytes were never saved.
+      final practice = await createPractice();
+      final staged = await stageOrphan(practice.id, monoWav(2400));
+      final saved = await persistence.songRepo.savePractice(
+        practice.copyWith(
+          vocalTracks: [
+            AudioTrack(
+              id: newId(),
+              kind: AudioTrackKind.vocal,
+              displayName: 'Take 1',
+              audioFilePath: staged.path,
+              durationMs: 50,
+              createdAt: DateTime.now(),
+              versionId: practice.activeVersionId,
+            ),
+          ],
+        ),
+      );
+      expect(saved, isA<Ok<SongPractice>>());
+      await staged.writeAsBytes(monoWav(4800), flush: true);
+
+      expect(
+        await persistence.recoverStagedRecordings(analyze: fakeAnalyze),
+        1,
+      );
+      expect((await reload(practice.id)).vocalTracks, hasLength(2));
+    },
+  );
 
   test('a take whose staging copy lost its last writes to a power cut after '
       'its save is not recovered a second time', () async {

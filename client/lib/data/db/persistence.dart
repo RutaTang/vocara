@@ -723,10 +723,10 @@ class Persistence {
   /// failure is an environmental symptom (decode error, disk error, a store
   /// that could not commit), not proof the file is junk — one systemic
   /// breakage would otherwise funnel EVERY orphan to trash this boot, with
-  /// staging empty next boot so recovery never retries. Bounded in time: a
-  /// file that has kept failing for over 7 days since its first failed
-  /// attempt goes to the sweep after all (the trash then still holds it for
-  /// 30 days).
+  /// staging empty next boot so recovery never retries. Bounded: a file that
+  /// has kept failing for over 7 days since its first failed attempt, and on
+  /// at least [_recoveryRetryMinAttempts] boots, goes to the sweep after all
+  /// (the trash then still holds it for 30 days).
   Future<void> _holdBackForRetry(File f, String why) async {
     if (await _stillRetrying(f)) {
       _recoveryRetryPaths.add(f.path);
@@ -743,34 +743,52 @@ class Persistence {
   /// applies on top).
   static const Duration _recoveryRetryMaxAge = Duration(days: 7);
 
+  /// How many boots must have failed to recover a staged recording before
+  /// [_recoveryRetryMaxAge] can release it.
+  static const int _recoveryRetryMinAttempts = 3;
+
   /// Where a held-back staged recording keeps the time of its first failed
-  /// recovery, in milliseconds since the epoch. The sweep keeps it with the
-  /// file and takes it with the file.
+  /// recovery (milliseconds since the epoch) and how many boots have failed
+  /// it since. The sweep keeps it with the file and takes it with the file.
   static String _firstFailureStamp(String path) => '$path.retry';
 
-  /// Whether [f] first failed to recover less than [_recoveryRetryMaxAge]
-  /// ago, stamping now as its first failure when nothing earlier is on
-  /// record. Measured from the file's modification time instead, a crash
-  /// left untouched for a week (the app not opened since) was released on
-  /// its first failed attempt. A stamp that cannot be read or lies in the
-  /// future starts the window over, and anything that throws keeps the file:
-  /// lingering is always safer than trashing.
+  /// Whether [f] is still held back for another attempt: it first failed to
+  /// recover less than [_recoveryRetryMaxAge] ago, or has failed on fewer
+  /// than [_recoveryRetryMinAttempts] boots, counting this one. Measured
+  /// from the file's modification time, a crash left untouched for a week
+  /// (the app not opened since) was released on its first failed attempt;
+  /// measured by time alone, on its second after another week away.
+  ///
+  /// A stamp that cannot be read or lies in the future starts over, and
+  /// anything that throws keeps the file: lingering is always safer than
+  /// trashing.
   static Future<bool> _stillRetrying(File f) async {
     try {
       final stamp = File(_firstFailureStamp(f.path));
       final now = DateTime.now();
       DateTime? first;
+      var attempts = 0;
       try {
-        final ms = int.tryParse((await stamp.readAsString()).trim());
-        if (ms != null) first = DateTime.fromMillisecondsSinceEpoch(ms);
+        final parts = (await stamp.readAsString()).trim().split(' ');
+        final ms = int.tryParse(parts.first);
+        if (ms != null) {
+          first = DateTime.fromMillisecondsSinceEpoch(ms);
+          attempts = parts.length > 1 ? int.tryParse(parts[1]) ?? 1 : 1;
+        }
       } catch (_) {
         // None yet (this is the first failure), or unreadable.
       }
       if (first == null || first.isAfter(now)) {
         first = now;
-        await stamp.writeAsString('${now.millisecondsSinceEpoch}', flush: true);
+        attempts = 0;
       }
-      return now.difference(first) < _recoveryRetryMaxAge;
+      attempts++;
+      await stamp.writeAsString(
+        '${first.millisecondsSinceEpoch} $attempts',
+        flush: true,
+      );
+      return now.difference(first) < _recoveryRetryMaxAge ||
+          attempts < _recoveryRetryMinAttempts;
     } catch (_) {
       return true;
     }
