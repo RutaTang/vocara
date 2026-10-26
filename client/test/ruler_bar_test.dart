@@ -140,6 +140,29 @@ void main() {
     expect(vm.fakePlayback.ends.last, greaterThan(5100));
   });
 
+  testWidgets('a narrow loop whose start grip shows still shrinks from the '
+      'end', (tester) async {
+    // 12 px wide: the end's handle covers part of the start's, not its grip.
+    final ms = 12 / laneW * timelineMs;
+    final vm = await pumpRuler(
+      tester,
+      loopStartMs: 5000,
+      loopEndMs: (5000 + ms).round(),
+    );
+    final g = await tester.startGesture(
+      at(5000 + ms),
+      kind: PointerDeviceKind.mouse,
+    );
+    await g.moveBy(const Offset(-2, 0)); // past the drag slop
+    await tester.pump();
+    await g.moveBy(const Offset(-3, 0));
+    await tester.pump();
+    await g.up();
+    await tester.pump();
+    expect(vm.fakePlayback.ends, isNotEmpty);
+    expect(vm.fakePlayback.starts, isEmpty);
+  });
+
   testWidgets('a two-finger trackpad swipe over a loop handle leaves it', (
     tester,
   ) async {

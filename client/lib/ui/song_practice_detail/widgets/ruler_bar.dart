@@ -141,10 +141,12 @@ class RulerBar extends StatelessWidget {
               msPerPx: dur / w,
               onChanged: vm.playback.setLoopEnd,
               onTapAt: (dx) => vm.seek(Duration(milliseconds: msAt(dx))),
-              // Drawn over the start's handle when the region is narrower
-              // than a handle: a drag leftward there moves the start, or the
-              // region could only be widened to the right.
-              leftward: (endX - startX).abs() < _LoopHandle.width
+              // Drawn over the start's grip when the region is narrower than
+              // half a handle: a drag leftward there moves the start, or the
+              // region could only be widened to the right. Wider, the start's
+              // grip is still there to take, and a leftward drag on the
+              // end's own grip shrinks the region.
+              leftward: (endX - startX).abs() < _LoopHandle.width / 2
                   ? (
                       valueMs: vm.playback.loopStartMs,
                       onChanged: vm.playback.setLoopStart,
