@@ -557,7 +557,8 @@ class AudioEditService {
   }
 
   /// Concatenates two WAVs end-to-end ([firstPath] then [secondPath]) into one
-  /// new WAV (inverse of [splitWav]). Both must share a sample format.
+  /// new WAV (inverse of [splitWav]). Takes of one format are joined byte for
+  /// byte; any other pair is re-encoded by the engine ([punchIn]).
   Future<String> concatWav({
     required String practiceId,
     required String firstPath,
@@ -581,20 +582,14 @@ class AudioEditService {
     // WAVE_FORMAT_EXTENSIBLE of the same actual format), so compare those three
     // fields rather than byte-equal fmt chunks.
     if (!_compatibleForMerge(wa, wb)) {
-      final sameLayout =
-          wa.sampleRate == wb.sampleRate &&
-          _fmtU16(wa.fmt, 2) == _fmtU16(wb.fmt, 2);
-      if (!sameLayout) {
-        throw const FormatException(
-          'These takes have different audio formats (sample rate or '
-          'channels), so they can\'t be merged without re-encoding.',
-        );
-      }
-      // Same rate/channels, different sample format: the seam between a legacy
-      // 16-bit take and a new 32-bit float recording. Byte-splicing is
-      // impossible, so fall back to the engine's decode → splice → re-encode
-      // path with the split pinned at old's full duration (ceil, so no old
-      // audio is dropped; at most <1 ms of pad). Output is a float WAV.
+      // Different formats can't be byte-spliced: a legacy 16-bit take beside a
+      // 32-bit float recording, or a mono recording beside a stereo import
+      // (or an earlier merge's output). Fall back to the engine's decode →
+      // splice → re-encode path, which resamples both to the engine rate and
+      // makes them stereo, with the split pinned at old's full duration (ceil,
+      // so no old audio is dropped; at most <1 ms of pad). Output is a stereo
+      // float WAV. Refusing a rate or channel mismatch outright made Merge
+      // down fail for a recorded take under an imported one.
       final frames = wa.dataLen ~/ wa.blockAlign;
       final oldMs = (frames * 1000 + wa.sampleRate - 1) ~/ wa.sampleRate;
       final merged = await punchIn(
@@ -605,7 +600,7 @@ class AudioEditService {
       );
       if (merged == null) {
         throw const FormatException(
-          'These takes have different sample formats and merging them by '
+          'These takes have different audio formats and merging them by '
           're-encoding failed.',
         );
       }

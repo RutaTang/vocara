@@ -279,32 +279,39 @@ void main() {
     expect(second.samples.length, sr - 2000);
   });
 
-  test('concatWav rejects takes with mismatched formats instead of corrupting '
-      'the second half', () async {
+  // A rate or channel mismatch used to be refused outright, though the engine's
+  // re-encoding merge handles both: Merge down failed for a mono recording
+  // under a stereo import.
+  test('concatWav re-encodes takes whose rate or channels differ, instead of '
+      'joining them under one header or refusing them', () async {
     final dir = await Directory.systemTemp.createTemp('vocara_concat');
     addTearDown(() => dir.delete(recursive: true));
 
     final tone = Float64List.fromList([
-      for (var i = 0; i < 400; i++) (i % 50) / 50 - 0.5,
+      for (var i = 0; i < 441; i++) (i % 50) / 50 - 0.5,
     ]);
-    final a = '${dir.path}/a.wav';
-    final b = '${dir.path}/b.wav';
-    // Identical content, different sample rate -> different fmt header. Joining
-    // them under a's header would replay b's half at the wrong rate.
+    final a = '${dir.path}/a.wav'; // mono, 44.1 kHz: 441 frames = 10 ms
+    final rate = '${dir.path}/rate.wav'; // mono, 48 kHz
+    final stereo = '${dir.path}/stereo.wav'; // stereo, 44.1 kHz
     await File(a).writeAsBytes(writeWavMono(tone, 44100));
-    await File(b).writeAsBytes(writeWavMono(tone, 48000));
+    await File(rate).writeAsBytes(writeWavMono(tone, 48000));
+    await File(stereo).writeAsBytes(_stereoPcm16(441, 44100));
 
-    final edit = AudioEditService(files: _TempFiles(dir));
-    expect(
-      () => edit.concatWav(
+    final edit = _RecordingPunch(_TempFiles(dir));
+    for (final second in [rate, stereo]) {
+      final out = await edit.concatWav(
         practiceId: 'P0000000000000000000000000',
         firstPath: a,
-        secondPath: b,
-      ),
-      throwsA(isA<FormatException>()),
-    );
+        secondPath: second,
+      );
+      expect(out, 'punched:$second');
+    }
+    expect(edit.punches, [
+      (old: a, neu: rate, splitMs: 10),
+      (old: a, neu: stereo, splitMs: 10),
+    ], reason: 'split at all of the first take');
 
-    // Same format still joins fine.
+    // Same format still joins byte for byte, without the engine.
     final c = '${dir.path}/c.wav';
     await File(c).writeAsBytes(writeWavMono(tone, 44100));
     final out = await edit.concatWav(
@@ -312,7 +319,8 @@ void main() {
       firstPath: a,
       secondPath: c,
     );
-    expect(readWavMono(await File(out).readAsBytes())!.samples.length, 800);
+    expect(readWavMono(await File(out).readAsBytes())!.samples.length, 882);
+    expect(edit.punches, hasLength(2));
   });
 
   test('concatWav merges a plain-PCM take with an EXTENSIBLE take of the same '
@@ -815,4 +823,53 @@ void main() {
       expect(await File(bogus).readAsBytes(), junk, reason: 'left untouched');
     });
   });
+}
+
+/// Stands in for the engine's re-encoding merge (its library doesn't load in
+/// unit tests), recording what it was asked.
+class _RecordingPunch extends AudioEditService {
+  _RecordingPunch(AudioFileService files) : super(files: files);
+
+  final punches = <({String old, String neu, int splitMs})>[];
+
+  @override
+  Future<String?> punchIn({
+    required String practiceId,
+    required String oldPath,
+    required String newPath,
+    required int splitMs,
+  }) async {
+    punches.add((old: oldPath, neu: newPath, splitMs: splitMs));
+    return 'punched:$newPath';
+  }
+}
+
+/// A 16-bit stereo PCM WAV of [frames] frames of a quiet ramp.
+Uint8List _stereoPcm16(int frames, int sampleRate) {
+  final dataLen = frames * 4;
+  final b = ByteData(44 + dataLen);
+  void tag(int at, String s) {
+    for (var i = 0; i < 4; i++) {
+      b.setUint8(at + i, s.codeUnitAt(i));
+    }
+  }
+
+  tag(0, 'RIFF');
+  b.setUint32(4, 36 + dataLen, Endian.little);
+  tag(8, 'WAVE');
+  tag(12, 'fmt ');
+  b.setUint32(16, 16, Endian.little);
+  b.setUint16(20, 1, Endian.little); // PCM
+  b.setUint16(22, 2, Endian.little); // channels
+  b.setUint32(24, sampleRate, Endian.little);
+  b.setUint32(28, sampleRate * 4, Endian.little);
+  b.setUint16(32, 4, Endian.little); // block align
+  b.setUint16(34, 16, Endian.little);
+  tag(36, 'data');
+  b.setUint32(40, dataLen, Endian.little);
+  for (var i = 0; i < frames; i++) {
+    b.setInt16(44 + i * 4, i % 100, Endian.little);
+    b.setInt16(46 + i * 4, -(i % 100), Endian.little);
+  }
+  return b.buffer.asUint8List();
 }
