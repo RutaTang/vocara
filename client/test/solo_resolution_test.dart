@@ -73,6 +73,24 @@ void main() {
       expect(solo.busInSolo('b2'), isFalse);
     });
 
+    test('a send turned all the way down does not carry a source into a '
+        'soloed bus', () {
+      // Counted as a route, soloing the bus un-muted the take's dry path,
+      // though the send fed the bus nothing.
+      final solo = resolveSolo(
+        [
+          _track(
+            't1',
+            sends: const [TrackSend(busId: 'b1', levelDb: kSendOffDb)],
+          ),
+          _track('t2', sends: const [TrackSend(busId: 'b1', levelDb: -12)]),
+        ],
+        [_bus('b1', soloed: true)],
+      );
+      expect(solo.trackInSolo('t1'), isFalse);
+      expect(solo.trackInSolo('t2'), isTrue);
+    });
+
     test('soloing a bus keeps the takes feeding it audible', () {
       final solo = resolveSolo(
         [

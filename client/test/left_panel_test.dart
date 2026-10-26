@@ -21,6 +21,7 @@ import 'package:vocara/domain/models/audio_track.dart';
 import 'package:vocara/domain/models/fx_bus.dart';
 import 'package:vocara/domain/models/take_version.dart';
 import 'package:vocara/domain/models/voice_metrics.dart';
+import 'package:vocara/ui/core/widgets/studio_controls.dart';
 import 'package:vocara/ui/song_practice_detail/view_model/analysis_cache.dart';
 import 'package:vocara/ui/song_practice_detail/view_model/interpretations_controller.dart';
 import 'package:vocara/ui/song_practice_detail/view_model/mixer_controller.dart';
@@ -70,8 +71,11 @@ class _FakeMixer extends Fake implements MixerController {
     String busId,
   ) async => trackRetargets.add((trackId, slot, busId));
 
+  final trackSendLevels = <double>[];
+
   @override
-  void setTrackSendLevelLive(String trackId, int slot, double levelDb) {}
+  void setTrackSendLevelLive(String trackId, int slot, double levelDb) =>
+      trackSendLevels.add(levelDb);
 
   @override
   void setBusSendLevelLive(String busId, int slot, double levelDb) {}
@@ -353,6 +357,26 @@ void main() {
   });
 
   group('aux sends', () {
+    testWidgets('a send pulled all the way down is off, not at -48 dB', (
+      tester,
+    ) async {
+      // The bottom sent at -48 dB under a "-∞" label: still feeding the bus.
+      final vm = await pump(
+        tester,
+        track: _vocal(sends: const [TrackSend(busId: 'a')]),
+        buses: [_bus('a', 'Reverb')],
+      );
+      final fader = find.byType(StudioFader).first;
+      final g = await tester.startGesture(
+        tester.getTopLeft(fader) + const Offset(1, 8),
+      );
+      await g.moveBy(const Offset(-40, 0));
+      await g.up();
+      await tester.pump();
+      expect(vm.fakeMixer.trackSendLevels, isNotEmpty);
+      expect(vm.fakeMixer.trackSendLevels.last, kSendOffDb);
+    });
+
     testWidgets('the add menu offers only buses no slot already feeds', (
       tester,
     ) async {

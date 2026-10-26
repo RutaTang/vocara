@@ -646,7 +646,13 @@ class _SendsSection extends StatelessWidget {
   final void Function(int slot, double levelDb) onLevel;
   final VoidCallback onCommit;
 
-  static String _fmtDb(double db) => db <= -47.5 ? '-∞' : '${db.round()}';
+  static String _fmtDb(double db) => db <= kSendOffDb ? '-∞' : '${db.round()}';
+
+  /// The send level at fader position [v]: -48 dB to 0 dB, and the bottom
+  /// off. The bottom sent at -48 dB under a "-∞" label, so a send pulled all
+  /// the way down still fed the bus — audible through its compression or
+  /// makeup gain, and on a reverb's tail.
+  static double _levelAt(double v) => v <= 0 ? kSendOffDb : v * 48 - 48;
 
   String _name(String id) {
     for (final b in targets) {
@@ -772,7 +778,7 @@ class _SendsSection extends StatelessWidget {
                 child: StudioFader(
                   value: ((sends[i].levelDb + 48) / 48).clamp(0.0, 1.0),
                   accent: Studio.accent,
-                  onChanged: (v) => onLevel(i, v * 48 - 48),
+                  onChanged: (v) => onLevel(i, _levelAt(v)),
                   onChangeEnd: onCommit,
                 ),
               ),

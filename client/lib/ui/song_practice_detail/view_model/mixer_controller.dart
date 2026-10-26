@@ -74,16 +74,18 @@ SoloResolution resolveSolo(List<AudioTrack> tracks, List<FxBus> buses) {
       }
     }
 
-    visit(startBusId);
-    for (final s in sends) {
-      visit(s.busId);
+    // A send turned all the way down routes nothing (see _routeGainToBus):
+    // counted, soloing its bus kept the source's dry path playing too.
+    void send(TrackSend s) {
+      if (s.levelDb > kSendOffDb) visit(s.busId);
     }
+
+    visit(startBusId);
+    sends.forEach(send);
     while (queue.isNotEmpty) {
       final b = busById[queue.removeLast()]!;
       visit(b.outputBusId);
-      for (final s in b.sends) {
-        visit(s.busId);
-      }
+      b.sends.forEach(send);
     }
     return result;
   }
