@@ -1205,6 +1205,57 @@ void main() {
       expect(volume(repo.stored), 0.3);
     });
 
+    test('a failed save whose reload failed too still lets a later reload '
+        'show the store', () async {
+      // With no revert and no save queued behind it, the failed change sat
+      // unsaved on screen, and the reload, holding off for it, skipped every
+      // remote change after it until some unrelated save.
+      final remote = StreamController<RemoteApplied>.broadcast();
+      addTearDown(remote.close);
+      final vm = await pumpVm(remoteApplied: remote.stream);
+      repo.failAt = {repo.saveNo + 1};
+      repo.failNextLoad = true;
+      await vm.renameTrack('single', 'lost');
+
+      repo.stored = repo.stored.copyWith(title: 'Renamed elsewhere');
+      remote.add(
+        RemoteApplied(
+          rows: const [],
+          practiceIds: const {'p1'},
+          techniqueIds: const {},
+        ),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(vm.practice!.title, 'Renamed elsewhere');
+      expect(
+        vm.practice!.vocalTracks
+            .firstWhere((t) => t.id == 'single')
+            .displayName,
+        'Take 1',
+      );
+    });
+
+    test('a reload after a failed save\'s revert shows the store', () async {
+      final remote = StreamController<RemoteApplied>.broadcast();
+      addTearDown(remote.close);
+      final vm = await pumpVm(remoteApplied: remote.stream);
+      repo.failAt = {repo.saveNo + 1};
+      await vm.renameTrack('single', 'lost'); // fails; reverted to the store
+
+      repo.stored = repo.stored.copyWith(title: 'Renamed elsewhere');
+      remote.add(
+        RemoteApplied(
+          rows: const [],
+          practiceIds: const {'p1'},
+          techniqueIds: const {},
+        ),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(vm.practice!.title, 'Renamed elsewhere');
+    });
+
     test('... and a reload after the release shows the store', () async {
       final remote = StreamController<RemoteApplied>.broadcast();
       addTearDown(remote.close);

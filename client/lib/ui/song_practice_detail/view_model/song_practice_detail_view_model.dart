@@ -388,6 +388,13 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// re-read, a revert). Any other [_practice] holds a change not saved yet.
   SongPractice? _persisted;
 
+  /// A failed save that could not re-read the store to revert to: nothing
+  /// queued will save the model on screen, so it is what the next freshness
+  /// reload replaces with the store's, as the revert would have. Held off
+  /// for it as a change not saved yet, the reload skipped every remote
+  /// change until some unrelated save.
+  void _unreadAfterFailure() => _persisted = _practice;
+
   /// Freshness-only reload when sync applied remote rows belonging to THIS
   /// practice. Heavily guarded: skipped while anything is in flight (busy
   /// gate, recording, separating, saving) — skipping is always SAFE because
@@ -1019,6 +1026,8 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         if (reloaded is Ok<Loaded<SongPractice>> &&
             identical(_practice, sent)) {
           _revertTo(reloaded.value);
+        } else if (identical(_practice, sent)) {
+          _unreadAfterFailure();
         }
         _toast("Couldn't save your changes.");
       }
@@ -1570,7 +1579,11 @@ class SongPracticeDetailViewModel extends ChangeNotifier
             // to be deleted from under. After a revert, nothing is left to
             // take back.
             final live = _practice;
-            if (live != null) _practice = takeBack(live);
+            if (live != null) {
+              final unread = identical(live, _persisted);
+              _practice = takeBack(live);
+              if (unread) _unreadAfterFailure();
+            }
             return false;
           });
           if (!saved) {
@@ -2841,6 +2854,8 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         if (reloaded is Ok<Loaded<SongPractice>> &&
             identical(_practice, sent)) {
           _revertTo(reloaded.value);
+        } else if (identical(_practice, sent)) {
+          _unreadAfterFailure();
         }
         _toast("Couldn't save your changes.");
       }
