@@ -849,6 +849,10 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     final before = lyrics;
     _practice = reloaded.aggregate;
     _baseHashes = reloaded.baseHashes;
+    // The stored timeline need not cover the content (a recovered or synced
+    // take past it): grown on load, it shrank back on a failed save's revert,
+    // the take cut off at the right edge.
+    _ensureTimeline();
     if (listEquals(before, lyrics)) return;
     final from = math.min(_unsavedFrom ?? 0, lyrics.length);
     _unsavedFrom = null;

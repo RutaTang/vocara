@@ -1097,6 +1097,35 @@ void main() {
       );
     });
 
+    test('a failed save keeps the timeline over every lane', () async {
+      // A failed save reverts to the stored aggregate, whose timeline need not
+      // cover its takes (one recovered or synced past it): grown on load, it
+      // shrank back on the revert and cut the take off at the right edge.
+      final vm = await pumpVm();
+      repo.stored = repo.stored.copyWith(
+        timelineDurationMs: 1500,
+        vocalTracks: [
+          ...repo.stored.vocalTracks,
+          AudioTrack(
+            id: 'late',
+            kind: AudioTrackKind.vocal,
+            displayName: 'Take 3 (recovered)',
+            audioFilePath: '/pool/late.wav',
+            durationMs: 5000,
+            startMs: 60000,
+            createdAt: DateTime(2026),
+          ),
+        ],
+      );
+      repo.failSaves = true;
+
+      await vm.renameTrack('single', 'renamed');
+
+      final p = vm.practice!;
+      expect(p.vocalTracks.map((t) => t.id), contains('late'));
+      expect(p.timelineDurationMs, greaterThanOrEqualTo(p.contentEndMs));
+    });
+
     test('a live fader edit made while the reload reads survives it', () async {
       // Live edits (fader/pan ticks, clip drags, FX knobs) change the model
       // without saving or bumping the reload epoch, so a reload whose read
