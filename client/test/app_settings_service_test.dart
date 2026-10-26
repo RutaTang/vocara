@@ -20,10 +20,17 @@ class _FakeStorage implements LocalStorageService {
   /// in which a user choice can race the fire-and-forget load().
   Completer<void>? readGate;
 
+  /// Reads that fail before one succeeds again, like a transient I/O error.
+  int failReads = 0;
+
   @override
   Future<Map<String, dynamic>?> read(String collection, String id) async {
     final gate = readGate;
     if (gate != null) await gate.future;
+    if (failReads > 0) {
+      failReads--;
+      throw const FileSystemException('read failed');
+    }
     return doc;
   }
 
@@ -744,6 +751,46 @@ void main() {
       await service.commitAudioGains();
       expect(service.persistFailed, isFalse);
       expect(storage.lastWrite?['inputDeviceUid'], _builtInMic.uid);
+    });
+  });
+
+  group('a document that could not be read', () {
+    // load() runs on defaults when the read fails, and the next change wrote
+    // the whole document from memory: one transient read error cost the
+    // chosen devices, gains, input channels and headphones marks for good.
+    final stored = {
+      'outputDeviceUid': 'headphones',
+      'outputDeviceName': 'Headphones',
+      'recordGainDb': 3.0,
+      'monitorGain': 0.5,
+      'headphoneOutputUids': ['headphones'],
+    };
+
+    test('is read again before a change is written over it', () async {
+      storage.doc = Map.of(stored);
+      storage.failReads = 1;
+      await service.load();
+      expect(service.recordGainDb, 12.0, reason: 'running on defaults');
+
+      await service.setMonitorReverb(0.7);
+      final written = storage.lastWrite!;
+      expect(written['monitorReverbWet'], 0.7);
+      expect(written['outputDeviceUid'], 'headphones');
+      expect(written['recordGainDb'], 3.0);
+      expect(written['monitorGain'], 0.5);
+      expect(written['headphoneOutputUids'], ['headphones']);
+      expect(service.recordGainDb, 3.0, reason: 'adopted once read');
+    });
+
+    test('is left as it is while it still cannot be read', () async {
+      storage.doc = Map.of(stored);
+      storage.failReads = 2;
+      await service.load();
+
+      await service.setMonitorReverb(0.7);
+      expect(storage.writes, 0);
+      expect(service.persistFailed, isTrue, reason: 'the panel says so');
+      expect(service.monitorReverbWet, 0.7, reason: 'the choice is live');
     });
   });
 

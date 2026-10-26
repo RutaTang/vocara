@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:drift/native.dart';
@@ -347,6 +348,21 @@ void main() {
 
     expect(picks.single, 'My Song - Take 2 (clip 2).wav');
     expect(await File(dest).readAsBytes(), clipBBytes);
+  });
+
+  test('a long title is cut to a name the file system takes', () async {
+    // A file name holds 255 bytes; an unbounded title suggested one the copy
+    // then failed on, with only "Could not export" to say why.
+    final practice =
+        (await repo.getPractice(practiceId) as Ok<SongPractice>).value;
+    await repo.savePractice(practice.copyWith(title: '歌' * 120));
+    final picks = <String>[];
+    final vm = await pumpVm(picks, (_) async => null);
+
+    await vm.exportTrackAudio(byName(vm, 'Take 1').id);
+
+    expect(utf8.encode(picks.single).length, lessThanOrEqualTo(255));
+    expect(picks.single, endsWith('歌 - Take 1.wav'));
   });
 
   test('keeps the source extension for a backing export', () async {

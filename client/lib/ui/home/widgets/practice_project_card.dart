@@ -112,8 +112,10 @@ class _PracticeProjectCardState extends State<PracticeProjectCard> {
   String _subtitle(PracticeSummary p) {
     final takes = p.takeCount;
     final takeLabel = takes == 1 ? '1 take' : '$takes takes';
+    final notes = p.noteCount;
+    final noteLabel = notes == 1 ? '1 note' : '$notes notes';
     final accompaniment = p.hasAccompaniment ? 'backing · ' : '';
-    return '$accompaniment$takeLabel · ${p.noteCount} notes';
+    return '$accompaniment$takeLabel · $noteLabel';
   }
 
   String _formatDate(DateTime date) {

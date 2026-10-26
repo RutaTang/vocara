@@ -514,8 +514,10 @@ class TechniqueRepositoryDrift implements TechniqueRepository {
     final technique = Technique(
       id: row.id,
       name: row.name,
-      aliases: (jsonDecode(row.aliasesJson ?? '[]') as List).cast<String>(),
-      tags: (jsonDecode(row.tagsJson ?? '[]') as List).cast<String>(),
+      // Converted here, not cast lazily: a non-string item then fails this row
+      // (which a list skips) instead of every view that later reads its tags.
+      aliases: List<String>.from(jsonDecode(row.aliasesJson ?? '[]') as List),
+      tags: List<String>.from(jsonDecode(row.tagsJson ?? '[]') as List),
       summary: row.summary,
       description: row.description,
       cues: row.cues,

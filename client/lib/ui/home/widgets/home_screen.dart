@@ -5,6 +5,7 @@ import 'package:forui/forui.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
+import '../../../data/services/recording_finalizer.dart';
 import '../../../data/services/update_check_service.dart';
 import '../../../domain/models/practice_summary.dart';
 import '../../../domain/models/song_practice.dart';
@@ -166,9 +167,20 @@ class _HomeScreenState extends State<HomeScreen> {
       await context.push(Routes.songPractice(id));
       if (!mounted) return;
       await vm.load.execute();
+      // A take stopped there (or an import, a delete) can outlive the screen,
+      // and the list just read the practice without it: read it again once it
+      // has landed, without holding the open guard meanwhile.
+      if (RecordingFinalizer.instance.isLanding(id)) {
+        unawaited(_reloadOnceLanded(vm, id));
+      }
     } finally {
       _opening = false;
     }
+  }
+
+  Future<void> _reloadOnceLanded(HomeViewModel vm, String id) async {
+    await RecordingFinalizer.instance.settled(id);
+    if (mounted) await vm.load.execute();
   }
 
   Future<void> _deletePractice(

@@ -603,12 +603,40 @@ class AppSettingsService extends ChangeNotifier {
     _loadsInFlight++;
     try {
       doc = await _storage.read(_collection, _docId);
+      _readFailed = false;
     } catch (_) {
-      doc =
-          null; // never let a read failure abort startup; fall back to defaults
+      // Never let a read failure abort startup: run on defaults meanwhile. The
+      // document is still there, though, and no write may replace its values
+      // with them (see [_persist]).
+      doc = null;
+      _readFailed = true;
     } finally {
       _loadsInFlight--;
     }
+    _adopt(doc);
+    // If a screen attached the engine before this load() resolved, it adopted
+    // constructor defaults — re-push the now-loaded values to it.
+    _applyAllToEngine();
+    refreshDevices();
+    // refreshDevices only notifies when a device SET changed, and by now it
+    // usually has not (attachEngine enumerates first). The loaded gains still
+    // have to reach the panel, so notify unconditionally — always past an
+    // await here, never inside the build that created the service.
+    notifyListeners();
+    // A choice persisted while the read was parked was held back (see
+    // [_persist]); write it now that the untouched fields hold the document.
+    if (_persistDeferred && _loadsInFlight == 0) {
+      _persistDeferred = false;
+      await _persist();
+    }
+  }
+
+  /// The document's last read failed: [load] ran on defaults.
+  bool _readFailed = false;
+
+  /// Takes [doc]'s value for every field the user has not chosen this session
+  /// (null: the defaults).
+  void _adopt(Map<String, dynamic>? doc) {
     // A uid and its last-known display name are ONE choice — adopt or skip
     // them together, or an adopted name would label the user's new device.
     if (!_userChosen.contains(_kOutputUid)) {
@@ -643,21 +671,6 @@ class AppSettingsService extends ChangeNotifier {
       for (final uid in marks.whereType<String>()) {
         if (!_headphoneMarksChosen.contains(uid)) _headphoneOutputs.add(uid);
       }
-    }
-    // If a screen attached the engine before this load() resolved, it adopted
-    // constructor defaults — re-push the now-loaded values to it.
-    _applyAllToEngine();
-    refreshDevices();
-    // refreshDevices only notifies when a device SET changed, and by now it
-    // usually has not (attachEngine enumerates first). The loaded gains still
-    // have to reach the panel, so notify unconditionally — always past an
-    // await here, never inside the build that created the service.
-    notifyListeners();
-    // A choice persisted while the read was parked was held back (see
-    // [_persist]); write it now that the untouched fields hold the document.
-    if (_persistDeferred && _loadsInFlight == 0) {
-      _persistDeferred = false;
-      await _persist();
     }
   }
 
@@ -923,6 +936,30 @@ class AppSettingsService extends ChangeNotifier {
     if (_loadsInFlight > 0) {
       _persistDeferred = true;
       return;
+    }
+    // The document could not be read at load, so every field the user has not
+    // set holds a default: written as they stand, a transient read error cost
+    // the chosen devices, gains, input channels and headphones marks for good.
+    // Read it again first; while it still can't be, leave it as it is.
+    if (_readFailed) {
+      final Map<String, dynamic>? doc;
+      try {
+        doc = await _storage.read(_collection, _docId);
+      } catch (e) {
+        DiagnosticsLog.instance.log(
+          'settings',
+          'settings unreadable (${e.runtimeType}); the choice is live but is '
+              'not written over the stored ones',
+        );
+        _setPersistFailed(true);
+        return;
+      }
+      if (_readFailed) {
+        _readFailed = false;
+        _adopt(doc);
+        _applyAllToEngine();
+        notifyListeners();
+      }
     }
     try {
       await _storage.write(_collection, _docId, {

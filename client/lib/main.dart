@@ -30,22 +30,32 @@ Future<void> main() async {
   // handlers), so a field failure leaves a trace exportArchive can bundle.
   await DiagnosticsLog.instance.attachGlobalHooks();
 
-  // Initialize media_kit, which backs the inline audio/video players used for
-  // technique example clips.
-  MediaKit.ensureInitialized();
-
-  // Frameless window: hide the OS title bar but keep the traffic lights; the
-  // top bar (WindowDragBar) provides an Electron-style drag region. The window
-  // is revealed natively after the first frame (below), not here.
-  await windowManager.ensureInitialized();
-  await windowManager.setTitleBarStyle(TitleBarStyle.hidden);
-  // Suffix the window title in dev/test (blank in prod) so the running
-  // environment is identifiable in ⌘-Tab / Mission Control.
-  await windowManager.setTitle(AppEnvironment.current.windowTitle);
-  // Intercept the OS close so an in-flight recording is finalized (saved) before
-  // the process is torn down, instead of being lost as a 0-length take.
-  await windowManager.setPreventClose(true);
-  windowManager.addListener(_QuitGuard());
+  // Media and window chrome are not worth an invisible window: the window is
+  // revealed natively after the first frame (below), and a throw here ended
+  // main() before it ever was, a launch that looked hung. Each failure is
+  // logged and the app opens without what failed.
+  try {
+    // media_kit backs the inline audio/video players of technique examples.
+    MediaKit.ensureInitialized();
+  } catch (e) {
+    DiagnosticsLog.instance.log('boot', 'media init failed: $e');
+  }
+  try {
+    // Frameless window: hide the OS title bar but keep the traffic lights; the
+    // top bar (WindowDragBar) provides an Electron-style drag region.
+    await windowManager.ensureInitialized();
+    await windowManager.setTitleBarStyle(TitleBarStyle.hidden);
+    // Suffix the window title in dev/test (blank in prod) so the running
+    // environment is identifiable in ⌘-Tab / Mission Control.
+    await windowManager.setTitle(AppEnvironment.current.windowTitle);
+    // Intercept the OS close so an in-flight recording is finalized (saved)
+    // before the process is torn down, instead of being lost as a 0-length
+    // take.
+    await windowManager.setPreventClose(true);
+    windowManager.addListener(_QuitGuard());
+  } catch (e) {
+    DiagnosticsLog.instance.log('boot', 'window setup failed: $e');
+  }
   // The red close button is only one quit path: Cmd+Q, the app-menu Quit, a
   // Dock quit and logout all go through NSApplication.terminate:, which never
   // reaches the window-close listener above. FlutterAppDelegate implements
@@ -165,7 +175,13 @@ class _QuitGuard with WindowListener {
     _closing = true;
     // See onExitRequested: the sidecar would outlive the process otherwise.
     SeparationQuitGuard.instance.killAll();
-    await RecordingFinalizer.instance.finalizeAll();
-    await windowManager.destroy();
+    try {
+      await RecordingFinalizer.instance.finalizeAll();
+    } finally {
+      // Quits whatever happened above: a throw left the guard set and every
+      // later click on the close button did nothing. A destroy() that throws
+      // falls back to exiting (see [_quit]).
+      await _quit();
+    }
   }
 }

@@ -245,6 +245,23 @@ void main() {
     expect(await repo.getTechnique(a.id), isA<Error<Technique>>());
   });
 
+  test('a technique whose tags are not text is left out of the list, not '
+      'handed to the library to fail on', () async {
+    // The hydrator cast the decoded tags lazily: the row built fine, the list
+    // came back Ok with it, and the library threw a TypeError on its first
+    // pass over the tags, taking the whole screen down.
+    await repo.saveTechnique(technique(name: 'Good'));
+    final bad =
+        (await repo.saveTechnique(technique(name: 'Bad')) as Ok<Technique>)
+            .value;
+    await db.customStatement(
+      'UPDATE techniques SET tags_json = ? WHERE id = ?',
+      ['[{"name": "CVT"}]', bad.id],
+    );
+    final listed = (await repo.listTechniques() as Ok<List<Technique>>).value;
+    expect(listed.map((t) => t.name), ['Good']);
+  });
+
   test('the library lists in the same few reads however many techniques and '
       'examples it holds, each example in order with its path', () async {
     final reads = _Reads();

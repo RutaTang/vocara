@@ -38,6 +38,29 @@ void main() {
       expect(gate.running, 0);
     });
 
+    test(
+      'a waiter is not overtaken by a caller arriving as it wakes',
+      () async {
+        final gate = AnalysisGate(1);
+        final order = <String>[];
+        final release = Completer<void>();
+        final loop = () async {
+          for (var i = 0; i < 4; i++) {
+            await gate.run(() async {
+              if (i == 0) await release.future;
+              order.add('L$i');
+            });
+          }
+        }();
+        await Future<void>.delayed(Duration.zero);
+        final waiter = gate.run(() async => order.add('W'));
+        release.complete();
+        await Future.wait([loop, waiter]);
+        expect(order, ['L0', 'W', 'L1', 'L2', 'L3']);
+        expect(gate.running, 0);
+      },
+    );
+
     test('a throwing job frees its slot', () async {
       final gate = AnalysisGate(1);
       await expectLater(

@@ -407,9 +407,8 @@ void _decodeSends(Object? body) {
   }
 }
 
-// Stricter than the hydrator's lazy `.cast<String>()` on purpose: a cast that
-// only throws when the UI later iterates it is the same "fails far away"
-// problem this gate exists to end.
+// Converted, not cast lazily: a cast only throws when the UI later iterates
+// it, the "fails far away" problem this gate exists to end.
 void _decodeStringList(Object? body) => List<String>.from(body! as List);
 
 /// Rejects any wire value that would not BIND to its column, using the live

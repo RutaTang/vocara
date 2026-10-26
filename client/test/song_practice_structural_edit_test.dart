@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vocara/data/repositories/song_practice_repository.dart';
@@ -1741,6 +1742,23 @@ void main() {
       await vm.stampLyricAt(1);
       expect(vm.lyrics[1].timeMs, isNull);
       expect(vm.syncIndex, 1);
+    });
+
+    test('a text file with one bracketed time keeps every line', () async {
+      // Routed as LRC on a single time tag, a .txt kept only that line:
+      // parseLrc drops untimed lines, and the import replaced the lyrics.
+      final vm = await pumpVm();
+      final dir = await Directory.systemTemp.createTemp('vocara_lyrics');
+      addTearDown(() => dir.delete(recursive: true));
+      final file = File('${dir.path}/song.txt')
+        ..writeAsStringSync('Verse one\nVerse two\nGuitar solo [2:30]\nOutro');
+      await vm.importLyricsFromFile(file.path);
+      expect(vm.lyrics.map((l) => l.text), [
+        'Verse one',
+        'Verse two',
+        'Guitar solo [2:30]',
+        'Outro',
+      ]);
     });
 
     test('lyrics dropped in Sync mode restart the cursor', () async {

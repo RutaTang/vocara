@@ -19,6 +19,10 @@ class LocalStorageService {
     return dir;
   }
 
+  /// The document, or null when there is none to keep: no file, or one that
+  /// is not a JSON object. Throws when the file is there but could not be
+  /// read: its values still exist, and a caller that took that as "no
+  /// document" wrote its defaults over them.
   Future<Map<String, dynamic>?> read(String collection, String id) async {
     final dir = await _collectionDir(collection);
     final file = File(p.join(dir.path, '$id.json'));
@@ -26,6 +30,8 @@ class LocalStorageService {
     try {
       final decoded = jsonDecode(await file.readAsString());
       return decoded is Map<String, dynamic> ? decoded : null;
+    } on FileSystemException {
+      rethrow;
     } catch (_) {
       // A truncated / corrupt / non-object file (partial write after a crash,
       // manual edit) must not crash startup — treat it as "no value", so the

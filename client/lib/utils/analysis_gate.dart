@@ -27,18 +27,24 @@ class AnalysisGate {
   int get queued => _waiters.length;
 
   Future<T> run<T>(Future<T> Function() work) async {
-    while (_running >= limit) {
+    if (_running < limit) {
+      _running++;
+    } else {
+      // Woken with the slot of the job that finished, never counted free in
+      // between: counted free, a caller reaching here before the waiter
+      // resumed took it, and the waiter queued again behind everyone after it
+      // (a selected take waited out the lane merges queued after it).
       final c = Completer<void>();
       _waiters.add(c);
       await c.future;
     }
-    _running++;
     try {
       return await work();
     } finally {
-      _running--;
       if (_waiters.isNotEmpty) {
         _waiters.removeAt(0).complete();
+      } else {
+        _running--;
       }
     }
   }

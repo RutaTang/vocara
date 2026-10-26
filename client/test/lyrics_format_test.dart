@@ -141,6 +141,16 @@ void main() {
     },
   );
 
+  test('parseLrc moves every time by an [offset:] tag', () {
+    // A positive offset shows the lines sooner. Ignored, a file carrying one
+    // landed that far off.
+    expect(
+      parseLrc('[offset:+500]\n[00:10.00]a\n[00:00.20]b').map((l) => l.timeMs),
+      [0, 9500],
+    );
+    expect(parseLrc('[offset:-250]\n[00:10.00]a').single.timeMs, 10250);
+  });
+
   test('looksLikeLrc distinguishes lrc from plain text', () {
     expect(looksLikeLrc('[00:01.00]hi'), isTrue);
     expect(looksLikeLrc('just words\nmore words'), isFalse);

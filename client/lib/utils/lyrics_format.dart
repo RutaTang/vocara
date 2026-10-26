@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import '../domain/models/lyric_line.dart';
@@ -124,10 +125,22 @@ bool isLrcDocument(String content) {
   return sawTime;
 }
 
+/// An `[offset:+500]` metadata line: milliseconds to show every line sooner.
+final _lrcOffsetTag = RegExp(
+  r'^\[offset:\s*([+-]?\d+)\s*\]$',
+  caseSensitive: false,
+);
+
 /// Parses an `.lrc` document into timed lines, sorted by time. A line with
 /// several timestamps emits one entry per timestamp; metadata tags (`[ti:]`,
-/// `[ar:]`, …) and untimed lines are skipped.
+/// `[ar:]`, …) and untimed lines are skipped, but an `[offset:]` moves every
+/// time by it (ignored, a file with one landed that much off).
 List<LyricLine> parseLrc(String content) {
+  var offsetMs = 0;
+  for (final raw in content.split('\n')) {
+    final m = _lrcOffsetTag.firstMatch(raw.trim());
+    if (m != null) offsetMs = int.parse(m.group(1)!);
+  }
   final out = <LyricLine>[];
   for (final raw in content.split('\n')) {
     final line = raw.trim();
@@ -147,7 +160,7 @@ List<LyricLine> parseLrc(String content) {
             ? int.parse(frac.substring(0, 3))
             : int.parse(frac) * (frac.length == 1 ? 100 : 10);
       }
-      out.add(LyricLine(text: text, timeMs: ms));
+      out.add(LyricLine(text: text, timeMs: math.max(0, ms - offsetMs)));
     }
   }
   // List.sort is not stable, so pair each line with its original index and use

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 
@@ -737,10 +738,11 @@ class SongPracticeDetailViewModel extends ChangeNotifier
 
   /// Imports pasted/dropped lyrics — `.lrc` if it has time tags, else plain.
   /// Returns whether the write landed.
-  Future<bool> importLyrics(String content) async {
-    final lines = looksLikeLrc(content)
-        ? parseLrc(content)
-        : parsePlainLyrics(content);
+  Future<bool> importLyrics(String content) => _importLyricLines(
+    looksLikeLrc(content) ? parseLrc(content) : parsePlainLyrics(content),
+  );
+
+  Future<bool> _importLyricLines(List<LyricLine> lines) async {
     if (lines.every((l) => l.isBlank)) {
       _toast("That file didn't contain any lyrics.");
       return false;
@@ -782,7 +784,13 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         _toast('That file is too large to be lyrics.');
         return;
       }
-      await importLyrics(await file.readAsString());
+      final text = await file.readAsString();
+      // A .lrc file is LRC wherever its time tags are; a text file only when
+      // every line is timed (see [isLrcDocument]): [parseLrc] drops untimed
+      // lines, so one "Guitar solo [2:30]" kept that line of a .txt alone.
+      await (ext == '.lrc' || isLrcDocument(text)
+          ? importLyrics(text)
+          : _importLyricLines(parsePlainLyrics(text)));
     } catch (_) {
       _toast("Couldn't read that file as lyrics.");
     }
@@ -1695,10 +1703,28 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// `"{practice title} - {track name}{source extension}"`, with path-hostile
   /// characters flattened so the suggestion is a valid file name. The source
   /// extension is kept (an imported mp3 exports as .mp3; recordings are .wav).
+  /// A file name holds 255 bytes, and neither name is bounded: the suggestion
+  /// the copy then failed on is cut to fit, the title first (the take's name
+  /// says which file it is).
   static String _exportName(String title, String trackName, String sourcePath) {
     final ext = p.extension(sourcePath);
-    final base = '$title - $trackName'.replaceAll(RegExp(r'[/\\:]'), '-');
+    String flat(String s) => s.replaceAll(RegExp(r'[/\\:]'), '-');
+    final tail = ' - ${_fitBytes(flat(trackName), 120)}';
+    final base = _fitBytes(flat(title), 200 - utf8.encode(tail).length) + tail;
     return '$base${ext.isEmpty ? '.wav' : ext}';
+  }
+
+  /// [s]'s longest leading run of whole characters within [maxBytes] of UTF-8.
+  static String _fitBytes(String s, int maxBytes) {
+    final out = StringBuffer();
+    var bytes = 0;
+    for (final rune in s.runes) {
+      final c = String.fromCharCode(rune);
+      bytes += utf8.encode(c).length;
+      if (bytes > maxBytes) break;
+      out.write(c);
+    }
+    return out.toString();
   }
 
   /// Copies [sourcePath] to a location picked via [_pickSaveLocation]. A null
