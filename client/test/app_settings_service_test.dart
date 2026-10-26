@@ -69,10 +69,13 @@ class _FakeEngine extends Fake implements GraphAudioPlaybackService {
   @override
   String actualOutputDevice() => actualOutput;
 
+  /// What [setOutputDevice] answers: whether the engine took the device.
+  bool takesOutput = true;
+
   @override
   bool setOutputDevice(String uid) {
     outputCalls.add(uid);
-    return true;
+    return takesOutput;
   }
 
   @override
@@ -312,6 +315,28 @@ void main() {
       service.refreshOutputDevices();
       expect(engine.outputCalls, [_headphones.uid, _headphones.uid]);
     });
+
+    test(
+      'a returning output the engine refuses is not reported as switched',
+      () async {
+        // The song's device watch skips its own re-open of a lost output when
+        // this says it switched; a refused switch must leave that to run.
+        outs = [_builtInOut, _headphones];
+        storage.doc = {'outputDeviceUid': _headphones.uid};
+        await service.load();
+        final engine = _FakeEngine()..takesOutput = false;
+        service.attachEngine(engine);
+        outs = [_builtInOut];
+        service.refreshOutputDevices();
+        outs = [_builtInOut, _headphones];
+        expect(service.refreshOutputDevices(), isFalse);
+        expect(
+          engine.outputCalls.last,
+          _headphones.uid,
+          reason: 'it was asked',
+        );
+      },
+    );
 
     test('a song opened after the chosen output came back elsewhere does not '
         'switch to it again on its first tick', () async {

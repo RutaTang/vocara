@@ -621,7 +621,7 @@ void main() {
       await switching;
     });
 
-    test('a new one, named after the first free number', () async {
+    test('a new one, numbered past the names taken', () async {
       final (vm, seen) = await watched();
       final creating = vm.versions.create();
       await Future<void>.delayed(const Duration(milliseconds: 10));

@@ -725,17 +725,20 @@ class AppSettingsService extends ChangeNotifier {
   /// connecting, a display with speakers) took the backing with it, monitor muted, until the mic
   /// next closed. A brief gap as the headphones reconnect is the lesser cost.
   ///
-  /// Returns whether it switched, so the caller's own re-open of the output
-  /// does not rebuild the stream a second time in the same tick.
+  /// Returns whether the engine switched, so the caller's own re-open of the
+  /// output does not rebuild the stream a second time in the same tick; a
+  /// switch the engine refused leaves that re-open to run.
   bool refreshOutputDevices() {
     final outs = _enumerateOutputs();
     final uid = _outputDeviceUid;
     final engine = _engine;
-    final rebind =
-        engine != null && uid != null && _returned(_watchedOutputs, outs, uid);
-    if (rebind) engine.setOutputDevice(uid);
+    final switched =
+        engine != null &&
+        uid != null &&
+        _returned(_watchedOutputs, outs, uid) &&
+        engine.setOutputDevice(uid);
     _watchedOutputs = outs;
-    return rebind;
+    return switched;
   }
 
   /// The outputs as [refreshOutputDevices] last read them, for the engine
