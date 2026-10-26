@@ -128,7 +128,7 @@ impl Node for DoublerNode {
         self.base = self.delay_ms * self.per_ms();
         self.base_next = self.base;
         self.base_step = 1.0 / (BASE_FADE_S * sample_rate) as f32;
-        self.depth = self.depth_ms * self.per_ms();
+        self.depth = (self.depth_ms * self.per_ms()).min(self.depth_room());
         self.heard = false;
         self.mix.set_time(0.01, sample_rate);
         self.fade.prepare(sample_rate);
@@ -273,7 +273,9 @@ impl Node for DoublerNode {
         self.fade.settle();
         // The lines are silent: land any Delay fade and Depth slew at once.
         self.base = self.base_next;
-        self.depth = self.depth_ms * self.per_ms();
+        // Within the delay too: past it, every seek (and every pause that rewinds) put the
+        // depth back over the delay to slew down for up to a second, clamped meanwhile.
+        self.depth = (self.depth_ms * self.per_ms()).min(self.depth_room());
         self.phase_l = 0.0;
         self.phase_r = std::f32::consts::PI;
     }
@@ -420,6 +422,11 @@ mod tests {
         }
         assert!(deepest <= d.base - 1.0, "{deepest} > {}", d.base - 1.0);
         assert!(d.depth > 0.0, "the copy is still modulated");
+        // A seek, and a pause that rewinds, reset the node; the stream restarting prepares it.
+        d.reset();
+        assert!(d.depth <= d.base - 1.0, "capped after a reset");
+        d.prepare(48_000.0, 512);
+        assert!(d.depth <= d.base - 1.0, "capped after a prepare");
     }
 
     #[test]
