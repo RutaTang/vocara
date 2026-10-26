@@ -1748,6 +1748,12 @@ class TechniqueDetailViewModel extends ChangeNotifier
     if (ok) {
       _technique = result.value.aggregate;
       _baseHashes = result.value.baseHashes;
+      // Committed, but its re-read failed: what was sent stands in for the
+      // store, which may hold rows a concurrent writer kept, and pool paths
+      // where this has its clips' sandbox ones. A reload is owed, as for a
+      // remote change skipped meanwhile — replayed once nothing holds the
+      // editor (a save ends its edit session).
+      if (!result.value.reread) _missedRemote = true;
     } else {
       // Revert to the previous aggregate; _baseHashes stays as-is — it still
       // describes the last state this session loaded or saved, which is what

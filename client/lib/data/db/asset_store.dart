@@ -176,10 +176,21 @@ class AssetStore {
         return id;
       });
       _stepLanded(); // the row committed
-      // Under the write gate, so no sweep or import runs between the check
-      // above and this move; to the trash, like every pool removal.
       if (duplicate != null) {
-        await _moveToTrash(File(p.join(root.path, duplicate)));
+        await debugBeforeTrashingDuplicate?.call();
+        // No sweep runs meanwhile (they take the gate alone), but imports share
+        // it: one of these bytes may have pointed a row at this very path since
+        // the check (the row found above tombstoned in between, its promote
+        // putting the same file here). Ask again right before the move. To the
+        // trash, like every pool removal.
+        final claimed =
+            await (db.select(db.assets)
+                  ..where((a) => a.localRelPath.equals(duplicate!))
+                  ..limit(1))
+                .getSingleOrNull();
+        if (claimed == null) {
+          await _moveToTrash(File(p.join(root.path, duplicate)));
+        }
       }
       return assetId;
     } finally {
@@ -386,6 +397,11 @@ class AssetStore {
   /// One step of landing an import finished (a flush, the rename into the
   /// pool, the row commit): the reading moves.
   static void _stepLanded() => _progressBanked++;
+
+  /// Runs between an import's commit and its move of a duplicate copy to the
+  /// trash (see [_importListed]): where another import can claim that copy.
+  @visibleForTesting
+  Future<void> Function()? debugBeforeTrashingDuplicate;
 
   /// How many imports are in flight right now, copying or landing (see
   /// [bytesBeingCopied]).

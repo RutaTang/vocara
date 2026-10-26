@@ -39,6 +39,10 @@ class _Repo implements TechniqueRepository {
   final savedTechniques = <Technique>[];
   int loadCalls = 0;
 
+  /// When set, a save commits this merge of what it was sent (a concurrent
+  /// writer's row kept) but reports its re-read as failed.
+  Technique Function(Technique sent)? commitWithoutReread;
+
   @override
   Future<Result<Technique>> getTechnique(String id) async => Result.ok(stored);
 
@@ -64,6 +68,18 @@ class _Repo implements TechniqueRepository {
   }) async {
     savedWithBase.add(Map.of(baseHashes));
     savedTechniques.add(t);
+    if (commitWithoutReread case final merge?) {
+      stored = merge(t);
+      storedHashes = {'t1': 'MERGED-HASH'};
+      return Result.ok(
+        Loaded(
+          t,
+          const {'t1': 'SENT-HASH'},
+          sentHashes: const {'t1': 'SENT-HASH'},
+          reread: false,
+        ),
+      );
+    }
     stored = t;
     return Result.ok(Loaded(t, storedHashes));
   }
@@ -342,6 +358,43 @@ void main() {
     expect(vm.importingMedia, isFalse);
     expect(vm.technique!.summary, 'remote summary');
   });
+
+  test(
+    'a save whose re-read failed reloads the store once the edit ends',
+    () async {
+      // The commit stood in what it sent for the re-read: the read view kept
+      // that, not the store, which held a concurrent writer's row (and pool
+      // paths for clips the editor still knew by their sandbox ones), until
+      // some later remote change happened to reload it.
+      final repo = _Repo(_technique(), {'t1': 'BASE-HASH'});
+      final remote = StreamController<RemoteApplied>.broadcast();
+      addTearDown(remote.close);
+      final vm = TechniqueDetailViewModel(
+        repository: repo,
+        mediaService: _GatedMedia(),
+        techniqueId: 't1',
+        remoteApplied: remote.stream,
+        analysisService: _NoAnalysis(),
+        recorder: _FakeRecorder(),
+      );
+      addTearDown(vm.dispose);
+      for (var i = 0; i < 200 && vm.technique == null; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+      repo.commitWithoutReread = (sent) =>
+          sent.copyWith(description: 'a concurrent description');
+
+      vm.beginEdit();
+      final ok = await vm.save(vm.technique!.copyWith(summary: 'edited'));
+      expect(ok, isTrue);
+      expect(vm.technique!.description, 'A description.', reason: 'as sent');
+      vm.endEdit();
+      await pumpEventQueue();
+      expect(vm.technique!.summary, 'edited');
+      expect(vm.technique!.description, 'a concurrent description');
+      expect(vm.hasMediaDraft, isFalse);
+    },
+  );
 
   test('a skipped reload is still owed after Edit reopens', () async {
     // beginEdit cleared the miss: Edit reopened while the abandoned copy still

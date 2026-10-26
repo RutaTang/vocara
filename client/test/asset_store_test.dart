@@ -93,6 +93,31 @@ void main() {
     expect(File((await store.resolve(id1))!).existsSync(), isTrue);
   });
 
+  test('a copy another import claims meanwhile is not trashed under it', () async {
+    // Imports share the write gate: between this import's commit and its move
+    // of the duplicate, the asset it deduped to was deleted and another import
+    // of the same bytes pointed a new row at the copy. Trashed regardless, that
+    // asset was left with no bytes.
+    final a = await makeSrc('a.wav', List.filled(1000, 3));
+    final b = await makeSrc('b.m4a', List.filled(1000, 3));
+    final id1 = await store.importFile(a.path);
+    String? claimed;
+    store.debugBeforeTrashingDuplicate = () async {
+      store.debugBeforeTrashingDuplicate = null;
+      await (db.update(db.assets)..where((r) => r.id.equals(id1))).write(
+        const AssetsCompanion(deletedAt: Value(1)),
+      );
+      claimed = await store.importFile(
+        (await makeSrc('c.m4a', List.filled(1000, 3))).path,
+      );
+    };
+    expect(await store.importFile(b.path), id1);
+    expect(claimed, isNot(id1));
+    final file = await store.resolve(claimed!);
+    expect(file, isNotNull, reason: 'the claiming asset lost its bytes');
+    expect(File(file!).existsSync(), isTrue);
+  });
+
   test('different bytes produce different assets', () async {
     final id1 = await store.importFile((await makeSrc('a.wav', [1])).path);
     final id2 = await store.importFile((await makeSrc('b.wav', [2])).path);
