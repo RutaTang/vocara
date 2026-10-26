@@ -30,6 +30,7 @@ class _StubSpectrograms extends Fake implements SpectrogramService {
     double maxHz = 5000,
   }) async {
     specCalls++;
+    onSingle?.call(path);
     return specsByPath[path];
   }
 
@@ -40,8 +41,12 @@ class _StubSpectrograms extends Fake implements SpectrogramService {
     int hop = 512,
   }) async {
     metricsCalls++;
+    onSingle?.call(path);
     return metricsByPath[path];
   }
+
+  /// Fired as one half alone is computed, before it lands.
+  void Function(String path)? onSingle;
 
   /// How many times each half was computed on its own.
   int specCalls = 0;
@@ -1114,6 +1119,7 @@ void main() {
         );
         addTearDown(cache.dispose);
         await cache.ensureSelectedSpectrogram();
+        cache.showDockTab(DockTab.spectrogram);
         expect(cache.selectedAnalysisIncomplete, isFalse);
         cache.debugDropHalf('c1.wav', metrics: false);
         expect(cache.selectedSpectrogram, isNull);
@@ -1158,11 +1164,13 @@ void main() {
       },
     );
 
-    test('the dock asks again once, not forever, for a pair the budget '
-        'cannot hold together', () async {
-      // Each half's insert drops the other, so every heal left the take
-      // incomplete again and the dock, rebuilt by it, asked again: a decode
-      // of the whole take per frame, for as long as the dock stayed open.
+    test('under a budget that cannot hold a take\'s pair, each view keeps '
+        'the half it shows, and none pushes another\'s out', () async {
+      // Each half's insert drops the other. Healing the pair, the dock on
+      // Pitch pushed out the metrics it showed for a spectrogram it does not;
+      // and the dock on the spectrogram and the inspector on the metrics each
+      // asked again after the other's compute: a decode of the whole take,
+      // back and forth, for as long as both stayed open.
       final track = _lane([_clip('c1', 0)]);
       final stub = _StubSpectrograms(
         metricsByPath: {'c1.wav': _metrics(10)},
@@ -1175,21 +1183,84 @@ void main() {
         cacheBudget: LruBytesBudget(1), // one entry at a time
       );
       addTearDown(cache.dispose);
-      await cache.ensureSelectedSpectrogram();
-      expect(cache.selectedAnalysisIncomplete, isTrue);
-
-      var heals = 0;
-      while (cache.selectedAnalysisIncomplete && heals < 5) {
-        await cache.healSelectedAnalysis();
-        heals++;
+      int decodes() => stub.bothCalls + stub.specCalls + stub.metricsCalls;
+      Future<void> bothViewsAsk() async {
+        for (var i = 0; i < 5; i++) {
+          if (cache.lacksAnalysis(metrics: true)) {
+            await cache.healSelectedAnalysis(spectrogram: false, metrics: true);
+          }
+          if (cache.selectedAnalysisIncomplete) {
+            await cache.healSelectedAnalysis();
+          }
+        }
       }
-      expect(heals, 1);
-      expect(stub.specCalls + stub.metricsCalls, 1);
 
-      // New bytes at the path: worth one more try.
+      cache.showDockTab(DockTab.pitch);
+      await _settled(() => cache.selectedMetrics != null);
+      expect(cache.selectedMetrics, isNotNull);
+      final onPitch = decodes();
+      await bothViewsAsk();
+      expect(decodes(), onPitch, reason: 'Pitch and the inspector are served');
+      expect(cache.selectedMetrics, isNotNull);
+
+      cache.showDockTab(DockTab.spectrogram);
+      await _settled(() => cache.selectedSpectrogram != null);
+      expect(cache.selectedSpectrogram, isNotNull);
+      final onSpectrogram = decodes();
+      await bothViewsAsk();
+      expect(decodes(), onSpectrogram, reason: 'no back and forth');
+      expect(cache.selectedSpectrogram, isNotNull);
+
+      // Switching back is the singer asking: the metrics come again.
+      cache.showDockTab(DockTab.timbre);
+      await _settled(() => cache.selectedMetrics != null);
+      expect(cache.selectedMetrics, isNotNull);
+      // Another metrics tab: nothing it shows is missing, so nothing is asked
+      // for — the missing spectrogram came at the cost of the metrics shown.
+      cache.showDockTab(DockTab.vowel);
+      await _settled(() => !cache.spectrogramLoading && !cache.metricsLoading);
+      expect(cache.selectedMetrics, isNotNull);
+
+      // New bytes at the path: worth asking again.
       cache.evictAnalysis('c1.wav');
       expect(cache.selectedAnalysisIncomplete, isTrue);
     });
+
+    test(
+      'a compute that makes the take whole lets the dock ask again',
+      () async {
+        // A heal that the budget's pressure left short blocks further ones; a
+        // folded-out lane computing the missing half later made the take whole
+        // without lifting it, so the next drop went unasked.
+        final track = _lane([_clip('c1', 0)]);
+        final stub = _StubSpectrograms(
+          metricsByPath: {'c1.wav': _metrics(10)},
+          specsByPath: {'c1.wav': _spec(10)},
+        );
+        late final AnalysisCache cache;
+        cache = _cache(
+          spectrograms: stub,
+          selectedTrack: () => track,
+          trackById: (id) => id == track.id ? track : null,
+        );
+        addTearDown(cache.dispose);
+        await cache.ensureSelectedSpectrogram();
+        cache.showDockTab(DockTab.spectrogram);
+        cache.debugDropHalf('c1.wav', metrics: false);
+        // Pressure while the heal computes: the metrics go meanwhile.
+        stub.onSingle = (_) {
+          stub.onSingle = null;
+          cache.debugDropHalf('c1.wav', metrics: true);
+        };
+        await cache.healSelectedAnalysis();
+        expect(cache.selectedSpectrogram, isNotNull);
+        expect(cache.lacksAnalysis(metrics: true), isFalse, reason: 'blocked');
+
+        await cache.ensureMetricsFor(track.id); // the Pitch lane folds out
+        cache.debugDropHalf('c1.wav', metrics: false);
+        expect(cache.selectedAnalysisIncomplete, isTrue);
+      },
+    );
 
     test('a heal that made the take whole leaves the next one free', () async {
       final track = _lane([_clip('c1', 0)]);
@@ -1204,6 +1275,7 @@ void main() {
       );
       addTearDown(cache.dispose);
       await cache.ensureSelectedSpectrogram();
+      cache.showDockTab(DockTab.spectrogram);
       for (var i = 1; i <= 2; i++) {
         cache.debugDropHalf('c1.wav', metrics: false);
         expect(cache.selectedAnalysisIncomplete, isTrue, reason: 'drop $i');

@@ -274,11 +274,24 @@ class TechniqueDetailViewModel extends ChangeNotifier
     final result = await _repository.loadTechnique(techniqueId);
     if (_disposed || epoch != _reloadEpoch) return;
     if (_holdsEditorState()) return;
-    if (result is! Ok<Loaded<Technique>>) return; // e.g. deleted remotely
+    if (result is! Ok<Loaded<Technique>>) {
+      // Still owed (e.g. deleted remotely, or a read that failed like the
+      // save's own re-read did): the next replay point asks again, where
+      // clearing it here left the read view on what a save had sent.
+      _missedRemote = true;
+      return;
+    }
     final referenceBefore = referenceMedia?.id;
+    // An example can come back under another path (the pool's, for one this
+    // editor still knew by its staging path): the same bytes by id, so its
+    // analysis follows it, as after a commit.
+    final oldPathById = {
+      for (final m in _technique?.media ?? const <TechniqueMedia>[])
+        m.id: m.path,
+    };
     _technique = result.value.aggregate;
     _baseHashes = result.value.baseHashes;
-    _fixSelectionAfterMediaChange(referenceBefore);
+    _remapMediaAfterCommit(oldPathById, referenceBefore);
     notifyListeners();
   }
 

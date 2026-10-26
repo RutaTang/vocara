@@ -67,11 +67,14 @@ class _LeftPanelState extends State<LeftPanel> {
     if (vm.inspectorOpen &&
         track != null &&
         !track.isBacking &&
-        vm.selectedMetrics == null &&
-        !vm.analysis.selectedMetricsUnavailable &&
-        !vm.metricsLoading) {
+        vm.analysis.lacksAnalysis(metrics: true)) {
+      // Bounded with the dock's (see AnalysisCache.healSelectedAnalysis): when
+      // a take's pair does not fit the cache together, the two pushed each
+      // other's half out after every compute.
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) vm.analysis.ensureSelectedSpectrogram();
+        if (mounted) {
+          vm.analysis.healSelectedAnalysis(spectrogram: false, metrics: true);
+        }
       });
     }
 

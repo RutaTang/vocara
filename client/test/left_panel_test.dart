@@ -134,6 +134,12 @@ class _FakeAnalysis extends Fake with ChangeNotifier implements AnalysisCache {
   Future<void> ensureSelectedSpectrogram() async {}
 
   @override
+  bool lacksAnalysis({bool spectrogram = false, bool metrics = false}) => false;
+
+  @override
+  Future<void> healSelectedAnalysis({bool? spectrogram, bool? metrics}) async {}
+
+  @override
   void showDockTab(DockTab tab) {}
 }
 

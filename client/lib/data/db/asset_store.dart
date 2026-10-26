@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
@@ -86,113 +87,118 @@ class AssetStore {
     await _rememberStagedHash(sourcePath, before, staged);
     _stepLanded();
     try {
-      // Promote BEFORE the row work: idempotent by content address, and it
-      // replaces a truncated crash leftover with the verified bytes whichever
-      // branch below wins.
-      final rel = await _promoteStaged(staged, ext);
-      // The copy just promoted, when the bytes turn out to be held already
-      // under another extension and nothing points at it (see below).
-      String? duplicate;
-      // Dedup lookup and insert share ONE transaction so concurrent imports
-      // of the same bytes serialize at the database: check-then-insert across
-      // interleaved async flows minted one asset row per caller.
-      final assetId = await db.transaction<String>(() async {
-        // content_hash is intentionally NON-unique: identical bytes under two
-        // asset ULIDs across devices is the normal content-addressed steady
-        // state, so there can be MORE THAN ONE live row for a hash. The first
-        // whose bytes are here wins, else the first, deterministically by HLC.
-        // Taking the first alone, a synced-in row with no bytes here (another
-        // device's earlier import) was re-pointed at the pool file a local row
-        // already owned: two live rows on one path, and a clip loaded through
-        // that path came back on a save as the other asset — an edit nobody
-        // made, which won over a peer's real one.
-        final rows =
-            await (db.select(db.assets)
-                  ..where(
-                    (a) =>
-                        a.contentHash.equals(staged.hash) &
-                        a.deletedAt.isNull(),
-                  )
-                  ..orderBy([(a) => OrderingTerm(expression: a.hlcPacked)]))
-                .get();
-        AssetRow? held;
-        for (final r in rows) {
-          final rel = r.localRelPath;
-          if (rel != null && await File(p.join(root.path, rel)).exists()) {
-            held = r;
-            break;
+      // One import at a time per pool file, from its promote to its row (and
+      // its move to the trash, for a duplicate): see [_inTurn].
+      return await _inTurn(relPathFor(staged.hash, ext), () async {
+        // Promote BEFORE the row work: idempotent by content address, and it
+        // replaces a truncated crash leftover with the verified bytes whichever
+        // branch below wins.
+        final rel = await _promoteStaged(staged, ext);
+        await debugAfterPromote?.call(rel);
+        // The copy just promoted, when the bytes turn out to be held already
+        // under another extension and nothing points at it (see below).
+        String? duplicate;
+        // Dedup lookup and insert share ONE transaction so concurrent imports
+        // of the same bytes serialize at the database: check-then-insert across
+        // interleaved async flows minted one asset row per caller.
+        final assetId = await db.transaction<String>(() async {
+          // content_hash is intentionally NON-unique: identical bytes under two
+          // asset ULIDs across devices is the normal content-addressed steady
+          // state, so there can be MORE THAN ONE live row for a hash. The first
+          // whose bytes are here wins, else the first, deterministically by HLC.
+          // Taking the first alone, a synced-in row with no bytes here (another
+          // device's earlier import) was re-pointed at the pool file a local row
+          // already owned: two live rows on one path, and a clip loaded through
+          // that path came back on a save as the other asset — an edit nobody
+          // made, which won over a peer's real one.
+          final rows =
+              await (db.select(db.assets)
+                    ..where(
+                      (a) =>
+                          a.contentHash.equals(staged.hash) &
+                          a.deletedAt.isNull(),
+                    )
+                    ..orderBy([(a) => OrderingTerm(expression: a.hlcPacked)]))
+                  .get();
+          AssetRow? held;
+          for (final r in rows) {
+            final rel = r.localRelPath;
+            if (rel != null && await File(p.join(root.path, rel)).exists()) {
+              held = r;
+              break;
+            }
           }
-        }
-        final present = held != null;
-        final existing = held ?? rows.firstOrNull;
-        if (existing != null) {
-          // Deduped: re-point the (per-device) path if this row's bytes went
-          // missing locally — the promote above already re-placed them.
-          final existingRel = existing.localRelPath;
-          if (!present) {
-            await (db.update(db.assets)..where((a) => a.id.equals(existing.id)))
-                .write(AssetsCompanion(localRelPath: Value(rel)));
-          } else if (existingRel != rel) {
-            // The same bytes under another extension (a.wav, then b.m4a): the
-            // copy promoted above is no row's file, and the orphan sweep keeps
-            // every file of a live hash — it stayed for the asset's life.
-            final owner =
-                await (db.select(db.assets)
-                      ..where((a) => a.localRelPath.equals(rel))
-                      ..limit(1))
-                    .getSingleOrNull();
-            if (owner == null) duplicate = rel;
+          final present = held != null;
+          final existing = held ?? rows.firstOrNull;
+          if (existing != null) {
+            // Deduped: re-point the (per-device) path if this row's bytes went
+            // missing locally — the promote above already re-placed them.
+            final existingRel = existing.localRelPath;
+            if (!present) {
+              await (db.update(db.assets)
+                    ..where((a) => a.id.equals(existing.id)))
+                  .write(AssetsCompanion(localRelPath: Value(rel)));
+            } else if (existingRel != rel) {
+              // The same bytes under another extension (a.wav, then b.m4a): the
+              // copy promoted above is no row's file, and the orphan sweep keeps
+              // every file of a live hash — it stayed for the asset's life.
+              final owner =
+                  await (db.select(db.assets)
+                        ..where((a) => a.localRelPath.equals(rel))
+                        ..limit(1))
+                      .getSingleOrNull();
+              if (owner == null) duplicate = rel;
+            }
+            return existing.id;
           }
-          return existing.id;
-        }
 
-        final id = newId();
-        final stamp = writer.stamp();
-        await db
-            .into(db.assets)
-            .insert(
-              AssetsCompanion.insert(
-                id: id,
-                contentHash: staged.hash,
-                byteSize: staged.size,
-                ext: Value(ext),
-                kind: Value(kind),
-                localRelPath: Value(rel),
-                createdAt: stamp.at,
-                updatedAt: stamp.at,
-                hlcWall: stamp.hlc.wallMs,
-                hlcCtr: stamp.hlc.counter,
-                hlcNode: stamp.hlc.node,
-                hlcPacked: stamp.hlc.packed,
-              ),
-            );
-        await writer.journal(
-          table: 'assets',
-          id: id,
-          op: 'insert',
-          hlc: stamp.hlc,
-          payloadHash: staged.hash,
-        );
-        return id;
-      });
-      _stepLanded(); // the row committed
-      if (duplicate != null) {
-        await debugBeforeTrashingDuplicate?.call();
-        // No sweep runs meanwhile (they take the gate alone), but imports share
-        // it: one of these bytes may have pointed a row at this very path since
-        // the check (the row found above tombstoned in between, its promote
-        // putting the same file here). Ask again right before the move. To the
-        // trash, like every pool removal.
-        final claimed =
-            await (db.select(db.assets)
-                  ..where((a) => a.localRelPath.equals(duplicate!))
-                  ..limit(1))
-                .getSingleOrNull();
-        if (claimed == null) {
-          await _moveToTrash(File(p.join(root.path, duplicate)));
+          final id = newId();
+          final stamp = writer.stamp();
+          await db
+              .into(db.assets)
+              .insert(
+                AssetsCompanion.insert(
+                  id: id,
+                  contentHash: staged.hash,
+                  byteSize: staged.size,
+                  ext: Value(ext),
+                  kind: Value(kind),
+                  localRelPath: Value(rel),
+                  createdAt: stamp.at,
+                  updatedAt: stamp.at,
+                  hlcWall: stamp.hlc.wallMs,
+                  hlcCtr: stamp.hlc.counter,
+                  hlcNode: stamp.hlc.node,
+                  hlcPacked: stamp.hlc.packed,
+                ),
+              );
+          await writer.journal(
+            table: 'assets',
+            id: id,
+            op: 'insert',
+            hlc: stamp.hlc,
+            payloadHash: staged.hash,
+          );
+          return id;
+        });
+        _stepLanded(); // the row committed
+        if (duplicate != null) {
+          await debugBeforeTrashingDuplicate?.call();
+          // No sweep runs meanwhile (they take the gate alone), and no other
+          // import of this file ([_inTurn]); but one may have pointed a row at
+          // it before this one's turn and after the check above. Ask again. To
+          // the trash, like every pool removal.
+          final claimed =
+              await (db.select(db.assets)
+                    ..where((a) => a.localRelPath.equals(duplicate!))
+                    ..limit(1))
+                  .getSingleOrNull();
+          if (claimed == null) {
+            await _moveToTrash(File(p.join(root.path, duplicate)));
+          }
         }
-      }
-      return assetId;
+        return assetId;
+      });
     } finally {
       // The promote path renames the staging file away; on every other exit
       // (dedup hit, promote failure, DB failure) it must not linger.
@@ -399,9 +405,35 @@ class AssetStore {
   static void _stepLanded() => _progressBanked++;
 
   /// Runs between an import's commit and its move of a duplicate copy to the
-  /// trash (see [_importListed]): where another import can claim that copy.
+  /// trash (see [_importListed]): where another import could claim that copy.
   @visibleForTesting
   Future<void> Function()? debugBeforeTrashingDuplicate;
+
+  /// Runs between an import's promote and its row work (see [_importListed]).
+  @visibleForTesting
+  Future<void> Function(String rel)? debugAfterPromote;
+
+  /// The import holding each pool file's turn (see [_inTurn]).
+  final Map<String, Completer<void>> _turns = {};
+
+  /// Runs [body] once every import before it of the pool file [rel] is done.
+  /// Imports share the write gate, and a second import of the same bytes
+  /// under the same extension promotes onto the same file: one deduped to a
+  /// row under another extension moved that file to the trash while the other
+  /// had promoted onto it and was about to point its new row there — leaving
+  /// that asset with no bytes. Per file, promote, row and move take turns.
+  Future<T> _inTurn<T>(String rel, Future<T> Function() body) async {
+    final before = _turns[rel];
+    final mine = Completer<void>();
+    _turns[rel] = mine;
+    try {
+      if (before != null) await before.future;
+      return await body();
+    } finally {
+      mine.complete();
+      if (identical(_turns[rel], mine)) _turns.remove(rel);
+    }
+  }
 
   /// How many imports are in flight right now, copying or landing (see
   /// [bytesBeingCopied]).

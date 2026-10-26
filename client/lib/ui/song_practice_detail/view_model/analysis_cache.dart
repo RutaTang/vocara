@@ -265,6 +265,7 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   /// Everything memoized FROM a per-path analysis: the profile and register
   /// map derive from the metrics, the LTAS from the spectrogram and metrics.
   void _dropDerived(String key) {
+    if (_watchedEvictions.containsKey(key)) _watchedEvictions[key] = true;
     _profileCache.remove(key);
     _ltasCache.remove(key);
     _registerCache.remove(key);
@@ -364,7 +365,7 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     _dockOpen = open;
     notifyListeners();
     if (open && dockShowsTake) {
-      ensureSelectedSpectrogram();
+      unawaited(_ensureDockAnalysis());
     } else if (!open && _liveMonitor) {
       unawaited(setLiveMonitor(false));
     }
@@ -377,7 +378,7 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     _dockOpen = true;
     notifyListeners();
     if (dockShowsTake) {
-      ensureSelectedSpectrogram();
+      unawaited(_ensureDockAnalysis());
     }
     if (!activeTabSupportsLive && _liveMonitor) {
       unawaited(setLiveMonitor(false));
@@ -474,7 +475,7 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   /// `asset://` ref that analyzes to nothing, and once a re-read hydrates it
   /// at its pool path a path-blind key kept serving the lane without it.
   String aggregateKeyFor(AudioTrack track) =>
-      'agg:${track.id}#${track.clips.map((c) => '${c.id}@${c.startMs}:${c.audioFilePath}').join(',')}';
+      '$_aggKeyPrefix${track.id}#${track.clips.map((c) => '${c.id}@${c.startMs}:${c.audioFilePath}').join(',')}';
 
   /// The subject the inspector analyzes for the current selection: a single
   /// selected clip (analyze that one file), or — when the lane is selected via
@@ -551,52 +552,150 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
         : _metricsCache[s.key];
   }
 
-  /// Whether the dock would show the subject without part of an analysis it
-  /// can still get: a half the byte budget dropped (the halves are separate
-  /// entries, and a spectrogram view reads the spectrogram before the metrics,
-  /// so under pressure it goes first). Nothing asked for it again, and the
-  /// spectrogram views said the take could not be analyzed. See
-  /// [healSelectedAnalysis], which the dock asks.
-  ///
-  /// A clip's own analysis only: a lane aggregate whose parts did not all fit
-  /// is left uncached on purpose (see [_ensureAggregateAnalysis]), and asking
-  /// again on every build would merge it again and again.
-  bool get selectedAnalysisIncomplete {
+  /// The halves of a clip's analysis the dock's tab cannot show without. The
+  /// spectrogram views overlay formants when the metrics are there, and the
+  /// summary its LTAS, but they show without them.
+  ({bool spectrogram, bool metrics}) get _dockNeeds => switch (_dockTab) {
+    DockTab.mixer => (spectrogram: false, metrics: false),
+    DockTab.spectrogram || DockTab.power => (spectrogram: true, metrics: false),
+    DockTab.ltas => (spectrogram: true, metrics: true),
+    _ => (spectrogram: false, metrics: true),
+  };
+
+  /// Whether the analysis subject lacks a part a view reads ([spectrogram],
+  /// [metrics]) that it can still get, nothing is computing it, and asking
+  /// for it is not blocked (see [_healBlocked]). For a clip, a half the byte
+  /// budget dropped: the halves are separate entries, and nothing asked for
+  /// them again — the spectrogram views said the take could not be analyzed.
+  /// For a lane aggregate, the merge (its parts are one entry).
+  bool lacksAnalysis({bool spectrogram = false, bool metrics = false}) {
     final s = _analysisSubject;
-    if (s == null || s.aggregate || s.key == _healFailed) return false;
+    if (s == null || s.key == _healBlocked) return false;
+    if (s.aggregate) {
+      return (spectrogram || metrics) &&
+          !_aggLoading.contains(s.key) &&
+          !_aggAnalysisCache.containsKey(s.key) &&
+          !_aggUnavailable.contains(s.key);
+    }
     if (_spectrogramLoading.contains(s.key) ||
         _metricsLoading.contains(s.key)) {
       return false;
     }
-    return !_analysisSettled(s.key);
+    return (spectrogram && !_spectrogramSettled(s.key)) ||
+        (metrics && !_metricsSettled(s.key));
   }
 
-  /// Whether each half of [path]'s analysis is held, or known not to exist.
-  bool _analysisSettled(String path) =>
-      (_spectrogramCache.containsKey(path) ||
-          _spectrogramUnavailable.contains(path)) &&
-      (_metricsCache.containsKey(path) || _metricsUnavailable.contains(path));
+  /// [lacksAnalysis] for what the dock's tab shows (see [healSelectedAnalysis],
+  /// which the dock asks).
+  bool get selectedAnalysisIncomplete => lacksAnalysis(
+    spectrogram: _dockNeeds.spectrogram,
+    metrics: _dockNeeds.metrics,
+  );
 
-  /// The clip the last [healSelectedAnalysis] left incomplete, which is not
-  /// healed again until a compute leaves it whole or its file changes. When
-  /// the pair does not fit the byte budget together, computing the missing
-  /// half drops the other to make room: the dock asked again after every
-  /// compute, and decoded the whole take over and over for as long as it
-  /// stayed open.
-  String? _healFailed;
+  bool _spectrogramSettled(String path) =>
+      _spectrogramCache.containsKey(path) ||
+      _spectrogramUnavailable.contains(path);
 
-  /// Asks again for what [selectedAnalysisIncomplete] says is missing — once
-  /// per subject until a compute leaves it whole (see [_healFailed]).
-  Future<void> healSelectedAnalysis() async {
-    if (!selectedAnalysisIncomplete) return;
-    final path = _analysisSubject!.key;
-    _healFailed = path;
-    await _ensureClipAnalysis(path);
-    _forgiveHealIfSettled(path);
+  bool _metricsSettled(String path) =>
+      _metricsCache.containsKey(path) || _metricsUnavailable.contains(path);
+
+  /// The subject a heal could not make whole: what it computed did not stay,
+  /// or its insert dropped the subject's other half. When a clip's pair does
+  /// not fit the byte budget together, each half pushes the other out, and the
+  /// dock and the inspector — one showing the spectrogram, the other the
+  /// metrics — each asked again after the other's compute: a decode of the
+  /// whole take, back and forth, for as long as both stayed open. Healed again
+  /// once a compute leaves it whole, or its file changes.
+  String? _healBlocked;
+
+  /// Asks again for what [lacksAnalysis] says the subject lacks: by default
+  /// what the dock's tab shows, or the parts named. Computes only those, so
+  /// it never pushes out the half a view is showing for one it does not.
+  Future<void> healSelectedAnalysis({bool? spectrogram, bool? metrics}) async {
+    final wantsSpec = spectrogram ?? _dockNeeds.spectrogram;
+    final wantsMetrics = metrics ?? _dockNeeds.metrics;
+    if (!lacksAnalysis(spectrogram: wantsSpec, metrics: wantsMetrics)) return;
+    final s = _analysisSubject!;
+    if (s.aggregate) {
+      final track = selectedTrack;
+      if (track != null) await _ensureAggregateAnalysis(track);
+      if (!_disposed && !_aggAnalysisCache.containsKey(s.key)) {
+        _healBlocked = s.key;
+      }
+      return;
+    }
+    await _fetchForView(
+      s.key,
+      spectrogram: wantsSpec,
+      metrics: wantsMetrics,
+      pairFirst: false,
+    );
   }
 
-  void _forgiveHealIfSettled(String path) {
-    if (path == _healFailed && _analysisSettled(path)) _healFailed = null;
+  /// The clips a view's compute is watching, and whether a half of theirs
+  /// left the cache meanwhile (see [_fetchForView]).
+  final Map<String, bool> _watchedEvictions = {};
+
+  /// Computes the halves of [path]'s analysis a view shows ([spectrogram],
+  /// [metrics]) — with [pairFirst], both in one decode when neither is here —
+  /// and blocks further heals ([_healBlocked]) when a half of the clip left
+  /// the cache meanwhile and the clip is not whole: its pair does not fit
+  /// the budget, and asking again would only push out the half this view
+  /// just got.
+  Future<void> _fetchForView(
+    String path, {
+    required bool spectrogram,
+    required bool metrics,
+    required bool pairFirst,
+  }) async {
+    _watchedEvictions.putIfAbsent(path, () => false);
+    try {
+      if (pairFirst) {
+        await _ensureHalves(path, spectrogram: spectrogram, metrics: metrics);
+      }
+      // A pair whose halves do not fit together keeps only its later half:
+      // the view's own comes again, alone.
+      await Future.wait([
+        if (spectrogram) _ensureSpectrogramForPath(path),
+        if (metrics) _ensureMetricsForPath(path),
+      ]);
+    } finally {
+      final evicted = _watchedEvictions.remove(path) ?? false;
+      final whole = _spectrogramSettled(path) && _metricsSettled(path);
+      final short =
+          (spectrogram && !_spectrogramSettled(path)) ||
+          (metrics && !_metricsSettled(path));
+      if (!_disposed && ((evicted && !whole) || short)) _healBlocked = path;
+    }
+  }
+
+  /// What every [aggregateKeyFor] key starts with, and no file path does.
+  static const String _aggKeyPrefix = 'agg:';
+
+  /// Lifts [_healBlocked] once [key]'s analysis is whole, by any compute.
+  void _forgiveHeal(String key) {
+    if (key != _healBlocked) return;
+    final whole = key.startsWith(_aggKeyPrefix)
+        ? _aggAnalysisCache.containsKey(key) || _aggUnavailable.contains(key)
+        : _spectrogramSettled(key) && _metricsSettled(key);
+    if (whole) _healBlocked = null;
+  }
+
+  /// What the dock's tab shows, as it opens on it: both halves together when
+  /// neither is here (one decode), else only the missing ones it shows — so
+  /// switching tabs never pushes out the half the new tab reads. The user
+  /// asked: a block on heals does not apply, but this may set one.
+  Future<void> _ensureDockAnalysis() async {
+    final s = _analysisSubject;
+    if (s == null) return;
+    if (s.aggregate) return ensureSelectedSpectrogram();
+    final needs = _dockNeeds;
+    await _fetchForView(
+      s.key,
+      spectrogram: needs.spectrogram,
+      metrics: needs.metrics,
+      pairFirst: true,
+    );
   }
 
   /// True when the subject's metrics compute already ran and produced nothing
@@ -783,20 +882,31 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     if (track == null) return;
     if (track.clips.length > 1) return _ensureAggregateAnalysis(track);
     final clip = track.primaryClip;
-    if (clip != null) await _ensureLaneHalf(clip.audioFilePath, metrics: true);
+    if (clip != null) {
+      await _ensureHalves(
+        clip.audioFilePath,
+        spectrogram: false,
+        metrics: true,
+      );
+    }
   }
 
-  /// One half of a single-clip lane's analysis: the one its sub-lanes show.
+  /// The halves of a clip's analysis a view shows ([spectrogram], [metrics]).
   ///
   /// With neither half held or computing, both come from the one decode the
   /// dock would ask for, with the LTAS and voice profile derived in the
   /// analysis isolate — asked for one at a time (the Pitch lane folded out
   /// first, the dock opened after), the two took two decodes and the dock's
   /// summary built the LTAS and profile on this isolate, ~0.4 s for a
-  /// 10-minute take. Otherwise only the lane's own half: the other one may be
+  /// 10-minute take. Otherwise only the halves asked for: the other one may be
   /// a half the byte budget dropped, which a lane that never shows it asked
-  /// for again after every clip edit.
-  Future<void> _ensureLaneHalf(String path, {required bool metrics}) {
+  /// for again after every clip edit, and which a tab switch computed at the
+  /// cost of the half the new tab shows.
+  Future<void> _ensureHalves(
+    String path, {
+    required bool spectrogram,
+    required bool metrics,
+  }) async {
     final spectrogramAbsent =
         !_spectrogramCache.containsKey(path) &&
         !_spectrogramLoading.contains(path) &&
@@ -805,10 +915,14 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
         !_metricsCache.containsKey(path) &&
         !_metricsLoading.contains(path) &&
         !_metricsUnavailable.contains(path);
-    if (spectrogramAbsent && metricsAbsent) return _ensureClipAnalysis(path);
-    return metrics
-        ? _ensureMetricsForPath(path)
-        : _ensureSpectrogramForPath(path);
+    if (spectrogramAbsent && metricsAbsent) {
+      await _ensureClipAnalysis(path);
+      return;
+    }
+    await Future.wait([
+      if (spectrogram) _ensureSpectrogramForPath(path),
+      if (metrics) _ensureMetricsForPath(path),
+    ]);
   }
 
   /// Computes + caches voice metrics for one audio file (lazy, in an isolate;
@@ -860,6 +974,7 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
       _metricsLoading.remove(path);
       _forgetInFlight(_metricsInFlight, path);
       done.complete();
+      _forgiveHeal(path);
       notifyListeners();
       // Redo the discarded work against the current file, now that the
       // in-flight slot is free (a joiner of the dropped compute got nothing)
@@ -878,7 +993,11 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     if (track.clips.length > 1) return _ensureAggregateAnalysis(track);
     final clip = track.primaryClip;
     if (clip != null) {
-      await _ensureLaneHalf(clip.audioFilePath, metrics: false);
+      await _ensureHalves(
+        clip.audioFilePath,
+        spectrogram: true,
+        metrics: false,
+      );
     }
   }
 
@@ -922,6 +1041,7 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
       _spectrogramLoading.remove(path);
       _forgetInFlight(_spectrogramInFlight, path);
       done.complete();
+      _forgiveHeal(path);
       notifyListeners();
       if (stale && _recomputeOnStale.contains(path)) {
         unawaited(_ensureSpectrogramForPath(path));
@@ -1015,6 +1135,7 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
       _forgetInFlight(_spectrogramInFlight, path);
       _forgetInFlight(_metricsInFlight, path);
       done.complete();
+      _forgiveHeal(path);
       notifyListeners();
       if (stale && _recomputeOnStale.contains(path)) {
         unawaited(_ensureClipAnalysis(path));
@@ -1217,6 +1338,7 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
         _aggLoading.remove(queued.key);
         _aggDisowned.remove(queued.key);
       }
+      _forgiveHeal(key);
       notifyListeners();
       // Merge the lane as it is now for a queued ask, and for a disowned
       // merge a view still shows: it left the lane with no result and no
@@ -1255,7 +1377,7 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     // not land on top of the replacement. See [_pathGeneration].
     _bumpGeneration(path);
     // New bytes: whether the pair fits is a question to ask again.
-    if (_healFailed == path) _healFailed = null;
+    if (_healBlocked == path) _healBlocked = null;
     if (recompute) {
       _recomputeOnStale.add(path);
     } else {
@@ -1288,6 +1410,9 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
       if (_aggregateFolds(key, path)) _aggAnalysisCache.remove(key);
     }
     _aggUnavailable.removeWhere((key) => _aggregateFolds(key, path));
+    if (_healBlocked case final key? when _aggregateFolds(key, path)) {
+      _healBlocked = null;
+    }
   }
 
   /// Whether the aggregate [key] (see [aggregateKeyFor]) folds the clip file
@@ -1321,14 +1446,11 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
       final clip = track.clipById(clipId);
       if (clip != null) {
         await _ensureClipAnalysis(clip.audioFilePath);
-        _forgiveHealIfSettled(clip.audioFilePath);
         return;
       }
     }
     if (track.clips.length == 1) {
-      final path = track.clips.first.audioFilePath;
-      await _ensureClipAnalysis(path);
-      _forgiveHealIfSettled(path);
+      await _ensureClipAnalysis(track.clips.first.audioFilePath);
       return;
     }
     await _ensureAggregateAnalysis(track);

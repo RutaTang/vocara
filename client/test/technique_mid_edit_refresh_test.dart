@@ -46,9 +46,16 @@ class _Repo implements TechniqueRepository {
   @override
   Future<Result<Technique>> getTechnique(String id) async => Result.ok(stored);
 
+  /// Loads that fail before the store answers again.
+  int loadFailures = 0;
+
   @override
   Future<Result<Loaded<Technique>>> loadTechnique(String id) async {
     loadCalls++;
+    if (loadFailures > 0) {
+      loadFailures--;
+      return Result.error(Exception('read failed'));
+    }
     return Result.ok(Loaded(stored, storedHashes));
   }
 
@@ -395,6 +402,40 @@ void main() {
       expect(vm.hasMediaDraft, isFalse);
     },
   );
+
+  test('an owed reload that fails stays owed', () async {
+    // Cleared before the reload ran, the debt went with a read that failed
+    // as the save's own had: the read view kept what the save sent.
+    final repo = _Repo(_technique(), {'t1': 'BASE-HASH'});
+    final remote = StreamController<RemoteApplied>.broadcast();
+    addTearDown(remote.close);
+    final vm = TechniqueDetailViewModel(
+      repository: repo,
+      mediaService: _GatedMedia(),
+      techniqueId: 't1',
+      remoteApplied: remote.stream,
+      analysisService: _NoAnalysis(),
+      recorder: _FakeRecorder(),
+    );
+    addTearDown(vm.dispose);
+    for (var i = 0; i < 200 && vm.technique == null; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+    repo.commitWithoutReread = (sent) =>
+        sent.copyWith(description: 'a concurrent description');
+
+    vm.beginEdit();
+    expect(await vm.save(vm.technique!.copyWith(summary: 'edited')), isTrue);
+    repo.loadFailures = 1;
+    vm.endEdit();
+    await pumpEventQueue();
+    expect(vm.technique!.description, 'A description.', reason: 'not yet');
+
+    vm.beginEdit();
+    vm.endEdit();
+    await pumpEventQueue();
+    expect(vm.technique!.description, 'a concurrent description');
+  });
 
   test('a skipped reload is still owed after Edit reopens', () async {
     // beginEdit cleared the miss: Edit reopened while the abandoned copy still

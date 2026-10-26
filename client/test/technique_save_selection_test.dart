@@ -54,12 +54,21 @@ class _PoolRewriteRepo implements TechniqueRepository {
     return Result.ok(t);
   }
 
+  /// A save commits but reports its re-read as failed: what was sent comes
+  /// back, staging paths and all.
+  bool rereadFails = false;
+
   @override
   Future<Result<Loaded<Technique>>> saveTechniqueWithBase(
     Technique t, {
     required Map<String, String> baseHashes,
   }) async {
     technique = t.copyWith(media: [for (final m in t.media) _hydrated(m)]);
+    if (rereadFails) {
+      return Result.ok(
+        Loaded(t, const {}, sentHashes: const {}, reread: false),
+      );
+    }
     return Result.ok(Loaded(technique, const {}));
   }
 
@@ -315,6 +324,31 @@ void main() {
     expect(identical(vm.referenceAnalysis, computed), isTrue);
     await vm.ensureReferenceAnalysis();
     expect(analysis.analyzeCalls, analyzeCallsBeforeSave);
+  });
+
+  test('a save whose re-read failed carries the analysis to the pool path '
+      'once the owed reload lands', () async {
+    repo.rereadFails = true;
+    vm.beginEdit();
+    vm.beginMediaDraft();
+    expect(await vm.startExampleRecording(), isNull);
+    await vm.stopExampleRecording();
+    final recorded = vm.effectiveMedia.last;
+    await vm.ensureReferenceAnalysis();
+    final computed = vm.referenceAnalysis;
+    expect(computed, isNotNull);
+    final analyzeCalls = analysis.analyzeCalls;
+
+    expect(await vm.save(vm.technique!), isTrue);
+    expect(vm.referenceMedia!.path, recorded.path, reason: 'as sent');
+    vm.endEdit();
+    await pumpEventQueue();
+
+    expect(vm.referenceMedia!.id, recorded.id);
+    expect(vm.referenceMedia!.path, isNot(recorded.path), reason: 'pooled');
+    expect(identical(vm.referenceAnalysis, computed), isTrue);
+    await vm.ensureReferenceAnalysis();
+    expect(analysis.analyzeCalls, analyzeCalls);
   });
 
   test('save carries the analysis-failed latch across the path rewrite '
