@@ -108,6 +108,15 @@ FxBus _bus({TrackFx? fx}) =>
     FxBus(id: 'busA', name: 'Lead', fx: fx ?? _fxAllOff());
 
 void main() {
+  test('small rates and times keep a decimal in their readout', () {
+    // The doubler's 0.6 Hz default read "1 Hz"; a 0.2 ms attack "0 ms".
+    expect(fxValueLabel(0.6, 'Hz'), '0.6 Hz');
+    expect(fxValueLabel(0.2, 'ms'), '0.2 ms');
+    expect(fxValueLabel(120, 'Hz'), '120 Hz');
+    expect(fxValueLabel(2500, 'Hz'), '2.5k');
+    expect(fxValueLabel(40, 'ms'), '40 ms');
+  });
+
   /// Pumps the panel at the real inspector width (LeftPanel's `_panelWidth`),
   /// tall enough that the whole ListView builds — an insert scrolled out of
   /// view is simply not there to tap.

@@ -664,7 +664,7 @@ class FxPanel extends StatelessWidget {
           ),
           const SizedBox(width: 8),
           FixedWidthReadout(
-            _fmtVal(value, unit),
+            fxValueLabel(value, unit),
             width: 42,
             style: const TextStyle(color: Studio.textSecondary, fontSize: 10.5),
           ),
@@ -731,18 +731,21 @@ class _InsertChainState extends State<_InsertChain> {
   }
 }
 
-String _fmtVal(double v, String unit) {
+/// An FX parameter's readout. Below 10 Hz or 10 ms it keeps a decimal: the
+/// doubler's rate (0.05–8 Hz) read its 0.6 Hz default as "1 Hz", and anything
+/// under 0.5 as "0 Hz"; the gate's attack (from 0.1 ms) likewise "0 ms".
+@visibleForTesting
+String fxValueLabel(double v, String unit) {
+  String fine(double x) => x < 10 ? x.toStringAsFixed(1) : '${x.round()}';
   switch (unit) {
     case ':1':
       return '${v.toStringAsFixed(1)}:1';
     case 'dB':
       return '${v.round()} dB';
     case 'Hz':
-      return v >= 1000
-          ? '${(v / 1000).toStringAsFixed(1)}k'
-          : '${v.round()} Hz';
+      return v >= 1000 ? '${(v / 1000).toStringAsFixed(1)}k' : '${fine(v)} Hz';
     case 'ms':
-      return '${v.round()} ms';
+      return '${fine(v)} ms';
     default:
       return '${(v * 100).round()}%';
   }
