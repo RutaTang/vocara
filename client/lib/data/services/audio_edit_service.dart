@@ -179,13 +179,15 @@ Future<void> trimWavHeadInPlace(String path, int trimMs) async {
   const fs = DurableFs();
   try {
     await fs.fsyncFile(tmp);
+    await File(tmp).rename(path);
   } catch (_) {
+    // Neither flushed nor in place: the take keeps its head, and the copy
+    // doesn't linger beside it.
     try {
       await File(tmp).delete();
     } catch (_) {}
     rethrow;
   }
-  await File(tmp).rename(path);
   await fs.fsyncDir(p.dirname(path));
 }
 
