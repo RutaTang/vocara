@@ -109,9 +109,9 @@ impl CommandReceiver {
         for _ in 0..max {
             match self.cons.pop() {
                 Some(c) => {
-                    // SAFETY: the reaper's one-block grace epoch keeps any graph loaded
-                    // during this block alive until it ends; the reference is not kept
-                    // past the call.
+                    // SAFETY: a retired graph is freed only two blocks after its swap (see
+                    // `EngineHandle::reap`), so any graph loaded during this block outlives
+                    // it; the reference is not kept past the call.
                     let g = unsafe { &mut *cell.load() };
                     if c.epoch == g.epoch() {
                         g.set_param(c.node, c.param, c.value);

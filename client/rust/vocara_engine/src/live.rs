@@ -448,8 +448,9 @@ impl RtProcessor {
         self.cmd_rx.apply_current(&self.cell, MAX_CMDS_PER_BLOCK);
 
         // Then load the live graph once for this block (RCU; no refcount, nothing to drop).
-        // SAFETY: the control thread's reaper holds a one-block grace epoch before freeing a
-        // retired graph, so the pointee outlives this block; we never cache the reference.
+        // SAFETY: the control thread frees a retired graph only two blocks after its swap
+        // (see `EngineHandle::reap`), so the pointee outlives this block; we never cache the
+        // reference.
         let g: &mut Graph = unsafe { &mut *self.cell.load() };
 
         let seek = self.shared.seek_req.load(Ordering::Acquire);

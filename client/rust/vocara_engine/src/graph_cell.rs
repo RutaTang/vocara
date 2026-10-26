@@ -31,8 +31,8 @@ impl GraphCell {
         self.ptr.load(Ordering::Acquire)
     }
 
-    /// Control thread: install `next`, returning the now-retired raw pointer to hand to the
-    /// reaper. Never freed here.
+    /// Control thread: install `next`, returning the now-retired raw pointer for the caller
+    /// to free after its grace (see `EngineHandle::reap`). Never freed here.
     #[must_use]
     pub fn publish(&self, next: Box<Graph>) -> *mut Graph {
         self.ptr.swap(Box::into_raw(next), Ordering::AcqRel)

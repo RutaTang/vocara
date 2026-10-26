@@ -484,7 +484,7 @@ const CACHE_KEEP_BYTES: usize = 256 * 1024 * 1024;
 /// Evict cached PCM for paths outside `live`, keeping the most recently staged non-live
 /// entries within `keep_bytes` (LRU by stage recency). Live paths are always kept. Dropping
 /// an entry only releases the map's Arc; samples still referenced by a retiring graph free
-/// once the reaper drops that graph.
+/// once `EngineHandle::reap` drops that graph.
 fn cache_retain(
     cache: &mut std::collections::HashMap<String, CachedPcm>,
     live: &std::collections::HashSet<&str>,

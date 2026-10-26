@@ -1,6 +1,10 @@
 # Vocara Real-Time Audio Engine — Rust Implementation Cut
 
-Status: design, greenfield. **No Rust exists in the repo yet.** This doc re-cuts the
+Status: the original design, written before any Rust existed. The engine as built
+differs in places, among them: its SPSC ring is its own (`src/ring.rs`), not `rtrb`, and
+retired graphs are freed on the control thread two blocks after their swap
+(`EngineHandle::reap`), not by a reaper thread after one. Where they disagree, the source
+is the reference. This doc re-cuts the
 *already-settled* DAG audio-engine architecture for a Rust implementation and focuses
 strictly on **what Rust changes**. The language-agnostic design — graph runtime, RCU
 swap at the block boundary, sample-counter clock (`g_frame`), node topology, the three
