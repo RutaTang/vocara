@@ -1164,81 +1164,67 @@ void main() {
       },
     );
 
-    test('under a budget that cannot hold a take\'s pair, each view keeps '
-        'the half it shows, and none pushes another\'s out', () async {
-      // Each half's insert drops the other. Healing the pair, the dock on
-      // Pitch pushed out the metrics it showed for a spectrogram it does not;
-      // and the dock on the spectrogram and the inspector on the metrics each
-      // asked again after the other's compute: a decode of the whole take,
-      // back and forth, for as long as both stayed open.
+    test('under a budget that cannot hold a take\'s pair, the pair stays '
+        'whole: every view is served by one decode', () async {
+      // Each half's insert dropped the other. The dock on the spectrogram and
+      // the inspector on the metrics each asked again after the other's
+      // compute, decoding the take back and forth; bounding that left one of
+      // them blank, and closing the dock, a drag or a re-read pushing the
+      // shown half out left it so for good.
       final track = _lane([_clip('c1', 0)]);
+      final other = _lane([_clip('c2', 0)], id: 'other');
       final stub = _StubSpectrograms(
-        metricsByPath: {'c1.wav': _metrics(10)},
-        specsByPath: {'c1.wav': _spec(10)},
+        metricsByPath: {'c1.wav': _metrics(10), 'c2.wav': _metrics(10)},
+        specsByPath: {'c1.wav': _spec(10), 'c2.wav': _spec(10)},
       );
       final cache = _cache(
         spectrograms: stub,
         selectedTrack: () => track,
-        trackById: (id) => id == track.id ? track : null,
-        cacheBudget: LruBytesBudget(1), // one entry at a time
+        trackById: (id) => switch (id) {
+          'lane' => track,
+          'other' => other,
+          _ => null,
+        },
+        cacheBudget: LruBytesBudget(1), // less than any entry
       );
       addTearDown(cache.dispose);
       int decodes() => stub.bothCalls + stub.specCalls + stub.metricsCalls;
-      Future<void> bothViewsAsk() async {
-        for (var i = 0; i < 5; i++) {
-          if (cache.lacksAnalysis(metrics: true)) {
-            await cache.healSelectedAnalysis(spectrogram: false, metrics: true);
-          }
-          if (cache.selectedAnalysisIncomplete) {
-            await cache.healSelectedAnalysis();
-          }
-        }
-      }
+      bool served() =>
+          cache.selectedSpectrogram != null && cache.selectedMetrics != null;
+      bool anyViewAsks() =>
+          cache.lacksAnalysis(metrics: true) ||
+          cache.selectedAnalysisIncomplete;
 
       cache.showDockTab(DockTab.pitch);
-      await _settled(() => cache.selectedMetrics != null);
-      expect(cache.selectedMetrics, isNotNull);
-      final onPitch = decodes();
-      await bothViewsAsk();
-      expect(decodes(), onPitch, reason: 'Pitch and the inspector are served');
-      expect(cache.selectedMetrics, isNotNull);
-
-      cache.showDockTab(DockTab.spectrogram);
-      await _settled(() => cache.selectedSpectrogram != null);
-      expect(cache.selectedSpectrogram, isNotNull);
-      final onSpectrogram = decodes();
-      await bothViewsAsk();
-      expect(decodes(), onSpectrogram, reason: 'no back and forth');
-      expect(cache.selectedSpectrogram, isNotNull);
-
-      // Switching back is the singer asking: the metrics come again.
-      cache.showDockTab(DockTab.timbre);
-      await _settled(() => cache.selectedMetrics != null);
-      expect(cache.selectedMetrics, isNotNull);
-      // Another metrics tab: nothing it shows is missing, so nothing is asked
-      // for — the missing spectrogram came at the cost of the metrics shown.
-      cache.showDockTab(DockTab.vowel);
       await _settled(() => !cache.spectrogramLoading && !cache.metricsLoading);
-      expect(cache.selectedMetrics, isNotNull);
+      expect(served(), isTrue);
+      expect(decodes(), 1);
+      for (final tab in [DockTab.spectrogram, DockTab.ltas, DockTab.vowel]) {
+        cache.showDockTab(tab);
+        expect(anyViewAsks(), isFalse, reason: '$tab');
+      }
+      cache.setDockOpen(false);
+      await cache.ensureSelectedSpectrogram(); // a drag's commit, a re-read
+      expect(served(), isTrue);
+      expect(decodes(), 1, reason: 'no back and forth');
 
-      // New bytes at the path: worth asking again.
-      cache.evictAnalysis('c1.wav');
-      expect(cache.selectedAnalysisIncomplete, isTrue);
+      // Another take's analysis pushes this one out: asked again, not left
+      // blank.
+      await cache.ensureMetricsFor('other');
+      expect(cache.lacksAnalysis(metrics: true), isTrue);
+      await cache.healSelectedAnalysis(spectrogram: false, metrics: true);
+      expect(cache.selectedMetrics, isNotNull);
     });
 
     test(
-      'a compute that makes the take whole lets the dock ask again',
+      'a half pushed out while a heal computes is asked for again',
       () async {
-        // A heal that the budget's pressure left short blocks further ones; a
-        // folded-out lane computing the missing half later made the take whole
-        // without lifting it, so the next drop went unasked.
         final track = _lane([_clip('c1', 0)]);
         final stub = _StubSpectrograms(
           metricsByPath: {'c1.wav': _metrics(10)},
           specsByPath: {'c1.wav': _spec(10)},
         );
-        late final AnalysisCache cache;
-        cache = _cache(
+        final cache = _cache(
           spectrograms: stub,
           selectedTrack: () => track,
           trackById: (id) => id == track.id ? track : null,
@@ -1254,11 +1240,9 @@ void main() {
         };
         await cache.healSelectedAnalysis();
         expect(cache.selectedSpectrogram, isNotNull);
-        expect(cache.lacksAnalysis(metrics: true), isFalse, reason: 'blocked');
-
-        await cache.ensureMetricsFor(track.id); // the Pitch lane folds out
-        cache.debugDropHalf('c1.wav', metrics: false);
-        expect(cache.selectedAnalysisIncomplete, isTrue);
+        expect(cache.lacksAnalysis(metrics: true), isTrue);
+        await cache.healSelectedAnalysis(spectrogram: false, metrics: true);
+        expect(cache.selectedMetrics, isNotNull);
       },
     );
 

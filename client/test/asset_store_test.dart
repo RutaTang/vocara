@@ -95,6 +95,32 @@ void main() {
   });
 
   test(
+    'another name of a row\'s own file is not trashed as a duplicate',
+    () async {
+      // On a case-insensitive volume (macOS's default) `<hash>.WAV` is the
+      // row's `<hash>.wav`: importing the same bytes as x.WAV reused that file,
+      // found no row on the upper-case path, and moved the row's only copy to
+      // the trash. Where names are case-sensitive, a hard link stands in.
+      final a = await makeSrc('a.wav', List.filled(1000, 3));
+      final b = await makeSrc('b.WAV', List.filled(1000, 3));
+      final id = await store.importFile(a.path);
+      final own = (await store.resolve(id))!;
+      final alias = p.join(
+        p.dirname(own),
+        '${p.basenameWithoutExtension(own)}.WAV',
+      );
+      if (!File(alias).existsSync()) {
+        final ln = await Process.run('ln', [own, alias]);
+        expect(ln.exitCode, 0, reason: '${ln.stderr}');
+      }
+
+      expect(await store.importFile(b.path), id);
+      expect(File(own).existsSync(), isTrue, reason: 'the row lost its bytes');
+      expect(File(alias).existsSync(), isTrue, reason: 'moved to the trash');
+    },
+  );
+
+  test(
     'a copy another import claims meanwhile is not trashed under it',
     () async {
       // Imports share the write gate. This one deduped its .m4a copy to a .wav

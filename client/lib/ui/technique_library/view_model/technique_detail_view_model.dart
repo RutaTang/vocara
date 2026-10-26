@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 
+import '../../../data/db/asset_store.dart';
 import '../../../data/repositories/technique_repository.dart';
 import '../../../data/services/app_settings_service.dart';
 import '../../../data/services/diagnostics_log.dart';
@@ -1692,7 +1693,12 @@ class TechniqueDetailViewModel extends ChangeNotifier
   ) {
     for (final m in _technique?.media ?? const <TechniqueMedia>[]) {
       final old = oldPathById[m.id];
-      if (old == null || old == m.path) continue;
+      // A placeholder for bytes not on this device yet: its verdict was on no
+      // bytes at all, and carried to the file that landed it kept that file
+      // from ever being analyzed.
+      if (old == null || old == m.path || AssetStore.assetIdOf(old) != null) {
+        continue;
+      }
       // An analysis still in flight under the old path lands under the new
       // one (see [ensureReferenceAnalysis]), and the new path reads as
       // loading meanwhile: keyed on the old path alone, the saved example

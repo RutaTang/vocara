@@ -7,7 +7,11 @@
 /// past it evicts least-recently-USED entries (reads refresh recency, so the
 /// currently displayed subject is always the most recent and never evicted
 /// under it). The newest entry is kept even when it alone exceeds the budget
-/// — an oversized result is better served once than recomputed forever.
+/// — an oversized result is better served once than recomputed forever — and
+/// so is every entry its sibling caches hold under the same key: a clip's
+/// spectrogram and metrics are one analysis held in two caches, and a pair
+/// too big for the budget pushed one half out to make room for the other, so
+/// the view showing that half computed it again, pushing out the other's.
 ///
 /// A cache either owns its budget (the plain constructor) or shares one with
 /// its siblings ([LruBytesCache.shared]). Sharing is what makes the process's
@@ -46,26 +50,25 @@ class LruBytesBudget {
     if (_members.remove(cache)) _bytes -= cache.bytes;
   }
 
-  /// Evict globally-oldest entries until the total fits, keeping at least one
-  /// entry alive so a lone oversized result is still served (see the class
-  /// doc). Called after any member's insert.
-  void _trim() {
+  /// Evict globally-oldest entries until the total fits, never one under
+  /// [keep] — the key just inserted, in whichever member holds it — so an
+  /// oversized result is still served whole (see the class doc). Called after
+  /// any member's insert.
+  void _trim(String keep) {
     while (_bytes > maxBytes) {
       LruBytesCache<Object?>? victim;
       var oldest = 0;
       for (final m in _members) {
-        final tick = m._oldestTick;
+        final tick = m._oldestTickExcept(keep);
         if (tick == null) continue;
         if (victim == null || tick < oldest) {
           victim = m;
           oldest = tick;
         }
       }
-      // Nothing left to give: every member is empty, or the only entries left
-      // are the single ones their caches keep by contract.
+      // Nothing left to give: only the entries under [keep] remain.
       if (victim == null) return;
-      if (_members.fold<int>(0, (n, m) => n + m.length) <= 1) return;
-      victim._evictOldest();
+      victim._evictOldestExcept(keep);
     }
   }
 }
@@ -126,18 +129,26 @@ class LruBytesCache<V> {
   /// does not refresh anyone's recency.
   Iterable<String> get keys => _map.keys;
 
-  /// The recency stamp of this cache's oldest entry, or null when empty. Only
-  /// true because [operator []] re-inserts on read, which also moves the entry
-  /// to the back of the iteration order.
-  int? get _oldestTick => _map.isEmpty ? null : _map.values.first.tick;
+  /// This cache's oldest entry not under [keep] (one at most is, so it is the
+  /// first or the second), or null. The first in iteration order is the
+  /// oldest only because [operator []] re-inserts on read, which also moves
+  /// the entry to the back.
+  MapEntry<String, _Entry<V>>? _oldestExcept(String keep) {
+    for (final e in _map.entries) {
+      if (e.key != keep) return e;
+    }
+    return null;
+  }
 
-  void _evictOldest() {
-    if (_map.isEmpty) return;
-    final key = _map.keys.first;
-    final e = _map.remove(key)!;
-    _bytes -= byteOf(e.value);
-    _budget._bytes -= byteOf(e.value);
-    onEvict?.call(key);
+  int? _oldestTickExcept(String keep) => _oldestExcept(keep)?.value.tick;
+
+  void _evictOldestExcept(String keep) {
+    final oldest = _oldestExcept(keep);
+    if (oldest == null) return;
+    _map.remove(oldest.key);
+    _bytes -= byteOf(oldest.value.value);
+    _budget._bytes -= byteOf(oldest.value.value);
+    onEvict?.call(oldest.key);
   }
 
   V? operator [](String key) {
@@ -164,7 +175,7 @@ class LruBytesCache<V> {
     _map[key] = _Entry(value, _budget._tick());
     _bytes += byteOf(value);
     _budget._bytes += byteOf(value);
-    _budget._trim();
+    _budget._trim(key);
   }
 
   V? remove(String key) {

@@ -67,8 +67,7 @@ class BottomDock extends StatelessWidget {
   Widget build(BuildContext context) {
     final open = vm.analysis.dockOpen;
     // The inspector asks again for metrics the cache let go; the dock does for
-    // the rest of what its take tabs show, once until that leaves the take
-    // whole (see AnalysisCache.healSelectedAnalysis).
+    // what its tab shows (see AnalysisCache.healSelectedAnalysis).
     if (open &&
         vm.analysis.dockShowsTake &&
         !vm.liveMonitor &&

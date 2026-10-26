@@ -9,6 +9,7 @@ import 'package:vocara/data/services/local_storage_service.dart';
 import 'package:vocara/data/services/media_analysis_service.dart';
 import 'package:vocara/data/services/mic_recording_controller.dart';
 import 'package:vocara/data/services/technique_media_service.dart';
+import 'package:vocara/data/sync/sync_engine.dart';
 import 'package:vocara/data/sync/sync_hashes.dart';
 import 'package:vocara/domain/models/spectrogram.dart';
 import 'package:vocara/domain/models/technique.dart';
@@ -349,6 +350,64 @@ void main() {
     expect(identical(vm.referenceAnalysis, computed), isTrue);
     await vm.ensureReferenceAnalysis();
     expect(analysis.analyzeCalls, analyzeCalls);
+  });
+
+  test('an example whose bytes land after its analysis failed is analyzed '
+      'once a remote reload brings its pool path', () async {
+    final now = DateTime(2026, 6, 20);
+    final poolRoot = p.join(tmp.path, 'assets');
+    TechniqueMedia example(String path) => TechniqueMedia(
+      id: 'M9',
+      path: path,
+      kind: TechniqueMediaKind.audio,
+      addedAt: now,
+    );
+    final repo = _PoolRewriteRepo(
+      Technique(
+        id: _techniqueId,
+        name: 'Twang',
+        createdAt: now,
+        updatedAt: now,
+        // Not on this device yet: the repository's placeholder.
+        media: [example('asset://A9')],
+      ),
+      poolRoot,
+    );
+    final remote = StreamController<RemoteApplied>.broadcast();
+    addTearDown(remote.close);
+    final analysis = _FixedAnalysis(_analysis())..failing = true;
+    final vm = TechniqueDetailViewModel(
+      repository: repo,
+      mediaService: TechniqueMediaService(storage: _TempStorage(tmp)),
+      techniqueId: _techniqueId,
+      analysisService: analysis,
+      recorder: _FakeRecorder(),
+      remoteApplied: remote.stream,
+    );
+    addTearDown(vm.dispose);
+    for (var i = 0; i < 200 && vm.technique == null; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+    await vm.ensureReferenceAnalysis();
+    expect(vm.referenceAnalysisFailed, isTrue);
+
+    // The bytes land (an import of the same file elsewhere re-points the row),
+    // and a remote edit reloads the technique.
+    analysis.failing = false;
+    final pooled = p.join(poolRoot, 'M9.wav');
+    repo.technique = repo.technique.copyWith(media: [example(pooled)]);
+    remote.add(
+      RemoteApplied(
+        rows: const [],
+        practiceIds: const {},
+        techniqueIds: {_techniqueId},
+      ),
+    );
+    await pumpEventQueue();
+    expect(vm.referenceMedia!.path, pooled);
+    expect(vm.referenceAnalysisFailed, isFalse);
+    await vm.ensureReferenceAnalysis();
+    expect(vm.referenceAnalysis, isNotNull);
   });
 
   test('save carries the analysis-failed latch across the path rewrite '

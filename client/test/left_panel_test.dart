@@ -133,11 +133,19 @@ class _FakeAnalysis extends Fake with ChangeNotifier implements AnalysisCache {
   @override
   Future<void> ensureSelectedSpectrogram() async {}
 
-  @override
-  bool lacksAnalysis({bool spectrogram = false, bool metrics = false}) => false;
+  /// What [lacksAnalysis] answers when asked about the metrics alone.
+  bool lacksMetrics = false;
+
+  /// The parts each [healSelectedAnalysis] asked for.
+  final List<({bool? spectrogram, bool? metrics})> heals = [];
 
   @override
-  Future<void> healSelectedAnalysis({bool? spectrogram, bool? metrics}) async {}
+  bool lacksAnalysis({bool spectrogram = false, bool metrics = false}) =>
+      lacksMetrics && metrics && !spectrogram;
+
+  @override
+  Future<void> healSelectedAnalysis({bool? spectrogram, bool? metrics}) async =>
+      heals.add((spectrogram: spectrogram, metrics: metrics));
 
   @override
   void showDockTab(DockTab tab) {}
@@ -319,6 +327,23 @@ void main() {
       await tester.pump();
       expect(vm.fakeMixer.trackMutes, ['t1']);
     });
+  });
+
+  testWidgets('the inspector asks again for the metrics it shows, and only '
+      'those', (tester) async {
+    // Asking for the dock's halves, or for the pair, computes what the
+    // inspector does not show.
+    final vm = _FakeVm(fakeMixer: _FakeMixer(const []), track: _vocal());
+    vm.fakeAnalysis.lacksMetrics = true;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Row(children: [LeftPanel(vm: vm)]),
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(vm.fakeAnalysis.heals, [(spectrogram: false, metrics: true)]);
   });
 
   testWidgets('a selected take renders its channel strip', (tester) async {

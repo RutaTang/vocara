@@ -88,8 +88,10 @@ class AssetStore {
     _stepLanded();
     try {
       // One import at a time per pool file, from its promote to its row (and
-      // its move to the trash, for a duplicate): see [_inTurn].
-      return await _inTurn(relPathFor(staged.hash, ext), () async {
+      // its move to the trash, for a duplicate): see [_inTurn]. Case-folded:
+      // on a case-insensitive volume (macOS's default) `<hash>.wav` and
+      // `<hash>.WAV` are one file.
+      return await _inTurn(relPathFor(staged.hash, ext).toLowerCase(), () async {
         // Promote BEFORE the row work: idempotent by content address, and it
         // replaces a truncated crash leftover with the verified bytes whichever
         // branch below wins.
@@ -142,12 +144,7 @@ class AssetStore {
               // The same bytes under another extension (a.wav, then b.m4a): the
               // copy promoted above is no row's file, and the orphan sweep keeps
               // every file of a live hash — it stayed for the asset's life.
-              final owner =
-                  await (db.select(db.assets)
-                        ..where((a) => a.localRelPath.equals(rel))
-                        ..limit(1))
-                      .getSingleOrNull();
-              if (owner == null) duplicate = rel;
+              if (!await _poolFileClaimed(rel, staged.hash)) duplicate = rel;
             }
             return existing.id;
           }
@@ -188,12 +185,7 @@ class AssetStore {
           // import of this file ([_inTurn]); but one may have pointed a row at
           // it before this one's turn and after the check above. Ask again. To
           // the trash, like every pool removal.
-          final claimed =
-              await (db.select(db.assets)
-                    ..where((a) => a.localRelPath.equals(duplicate!))
-                    ..limit(1))
-                  .getSingleOrNull();
-          if (claimed == null) {
+          if (!await _poolFileClaimed(duplicate!, staged.hash)) {
             await _moveToTrash(File(p.join(root.path, duplicate)));
           }
         }
@@ -207,6 +199,33 @@ class AssetStore {
         if (await tmp.exists()) await tmp.delete();
       } catch (_) {}
     }
+  }
+
+  /// Whether a row points at the pool file [rel]: by that path, or by another
+  /// name of the same file. On a case-insensitive volume (macOS's default)
+  /// `<hash>.WAV` IS a row's `<hash>.wav`: importing the same bytes as `x.WAV`
+  /// reused that file, found no row on the upper-case path, and moved the
+  /// row's only copy to the trash as a duplicate.
+  Future<bool> _poolFileClaimed(String rel, String hash) async {
+    final rows =
+        await (db.select(db.assets)..where(
+              (a) => a.localRelPath.equals(rel) | a.contentHash.equals(hash),
+            ))
+            .get();
+    final file = p.join(root.path, rel);
+    for (final r in rows) {
+      final other = r.localRelPath;
+      if (other == null) continue;
+      if (other == rel) return true;
+      try {
+        if (await FileSystemEntity.identical(p.join(root.path, other), file)) {
+          return true;
+        }
+      } catch (_) {
+        // One of the two is not there: not the same file.
+      }
+    }
+    return false;
   }
 
   /// A stable reference to an asset whose BYTES aren't present locally, encoded
