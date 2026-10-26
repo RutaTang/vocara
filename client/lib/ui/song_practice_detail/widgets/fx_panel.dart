@@ -790,7 +790,7 @@ class _Toggle extends StatelessWidget {
 
 /// A clean minimal slider: a thin track with an accent fill + small thumb; tap or drag
 /// anywhere on it to set the value.
-class _FxSlider extends StatelessWidget {
+class _FxSlider extends StatefulWidget {
   const _FxSlider({
     required this.value,
     required this.min,
@@ -806,26 +806,69 @@ class _FxSlider extends StatelessWidget {
   final VoidCallback onCommit;
 
   @override
+  State<_FxSlider> createState() => _FxSliderState();
+}
+
+class _FxSliderState extends State<_FxSlider> {
+  /// A press or pan that set the value and owes its [_FxSlider.onCommit].
+  bool _active = false;
+
+  /// A pan the press turned into: its end commits.
+  bool _panning = false;
+
+  void _commit() {
+    if (!_active) return;
+    _active = false;
+    widget.onCommit();
+  }
+
+  @override
+  void dispose() {
+    // Unmounted mid-gesture (the selection changed, the inspector collapsed):
+    // a disposed recognizer fires no end, so the value already live in the
+    // model was never written. (onCommit only persists the model, which is
+    // safe from here.)
+    _commit();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (context, c) {
         final w = c.maxWidth;
-        void update(double dx) =>
-            onChanged(min + (dx / w).clamp(0.0, 1.0) * (max - min));
+        void update(double dx) {
+          _active = true;
+          widget.onChanged(
+            widget.min + (dx / w).clamp(0.0, 1.0) * (widget.max - widget.min),
+          );
+        }
+
         return GestureDetector(
           behavior: HitTestBehavior.opaque,
           onTapDown: (d) => update(d.localPosition.dx),
-          onTapUp: (_) => onCommit(),
+          onTapUp: (_) => _commit(),
           // Cancelled after its tap-down (a dialog opening while held), a
-          // press fires no tap-up: the value it set was never saved.
-          onTapCancel: onCommit,
+          // press fires no tap-up: the value it set was never saved. One
+          // turning into a pan lands here too, its start following in this
+          // same event: that pan's end commits, so this stands down.
+          onTapCancel: () => scheduleMicrotask(() {
+            if (!_panning) _commit();
+          }),
+          onPanStart: (_) => _panning = true,
           onPanUpdate: (d) => update(d.localPosition.dx),
-          onPanEnd: (_) => onCommit(),
+          onPanEnd: (_) {
+            _panning = false;
+            _commit();
+          },
           child: SizedBox(
             height: 20,
             child: CustomPaint(
               painter: _SliderPainter(
-                ((value - min) / (max - min)).clamp(0.0, 1.0),
+                ((widget.value - widget.min) / (widget.max - widget.min)).clamp(
+                  0.0,
+                  1.0,
+                ),
               ),
             ),
           ),
@@ -921,8 +964,12 @@ class _EqGraphState extends State<_EqGraph> {
     // inspector or leaving within 400 ms of the last tick would otherwise keep
     // it in memory and never write it. (onCommit only persists the model,
     // which is safe from here.)
-    if (_qCommit?.isActive ?? false) {
-      _qCommit!.cancel();
+    // A band drag still in flight is the same: a disposed recognizer fires no
+    // end, so the band it moved was never written either.
+    final debounced = _qCommit?.isActive ?? false;
+    _qCommit?.cancel();
+    if (debounced || _dragging != null) {
+      _dragging = null;
       widget.onCommit();
     }
     super.dispose();

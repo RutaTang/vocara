@@ -949,6 +949,9 @@ class _VerticalFaderState extends State<_VerticalFader> {
   /// A drag in flight: it has moved the level and owes its [onChangeEnd].
   bool _active = false;
 
+  /// A vertical drag the press turned into: its end saves.
+  bool _dragging = false;
+
   @override
   void dispose() {
     // Unmounted mid-drag (a sideways wheel scrolled its strip out of the lazy strip list): a
@@ -991,18 +994,25 @@ class _VerticalFaderState extends State<_VerticalFader> {
             },
             // A press cancelled after its tap-down (a dialog opening while the
             // button is held) fires no tap-up: the level it set was never
-            // saved. (One turning into a drag lands here too, and the drag's
-            // end saves again; a cancelled drag still ends through its end.)
+            // saved. One turning into a drag lands here too, its start
+            // following in this same event: that drag's end saves, so this
+            // stands down (a cancelled drag still ends through its end).
             onTapCancel: () {
               if (!_active) return;
-              _active = false;
-              widget.onChangeEnd();
+              final end = widget.onChangeEnd;
+              scheduleMicrotask(() {
+                if (!_active || _dragging) return;
+                _active = false;
+                end();
+              });
             },
+            onVerticalDragStart: (_) => _dragging = true,
             onVerticalDragUpdate: (d) {
               _active = true;
               update(d.localPosition.dy);
             },
             onVerticalDragEnd: (_) {
+              _dragging = false;
               _active = false;
               widget.onChangeEnd();
             },

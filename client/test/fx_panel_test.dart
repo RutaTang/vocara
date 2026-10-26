@@ -227,6 +227,74 @@ void main() {
     expect(vm.commits, 1);
   });
 
+  Finder byTypeName(String name) =>
+      find.byWidgetPredicate((w) => w.runtimeType.toString() == name).first;
+
+  testWidgets('a held slider press that turns into a pan commits once', (
+    tester,
+  ) async {
+    final vm = await pump(
+      tester,
+      track: _track(fx: _fxAllOff().copyWith(compOn: true)),
+    );
+    final g = await tester.startGesture(
+      tester.getRect(byTypeName('_FxSlider')).center,
+      kind: PointerDeviceKind.mouse,
+    );
+    await tester.pump(kPressTimeout + const Duration(milliseconds: 20));
+    await g.moveBy(const Offset(30, 0));
+    await tester.pump();
+    await g.moveBy(const Offset(10, 0));
+    await tester.pump();
+    expect(vm.commits, 0, reason: 'mid-pan');
+    await g.up();
+    await tester.pump();
+    expect(vm.commits, 1);
+  });
+
+  testWidgets('a slider unmounted mid-pan still commits', (tester) async {
+    // Unmounted mid-gesture (the selection changed, the inspector collapsed),
+    // a disposed recognizer fires no end: the value already live in the model
+    // was never written.
+    final vm = await pump(
+      tester,
+      track: _track(fx: _fxAllOff().copyWith(compOn: true)),
+    );
+    final g = await tester.startGesture(
+      tester.getRect(byTypeName('_FxSlider')).center,
+      kind: PointerDeviceKind.mouse,
+    );
+    await tester.pump();
+    await g.moveBy(const Offset(30, 0));
+    await tester.pump();
+    await g.moveBy(const Offset(10, 0));
+    await tester.pump();
+    await tester.pumpWidget(const SizedBox());
+    await g.up();
+    await tester.pump();
+    expect(vm.commits, 1);
+  });
+
+  testWidgets('an EQ band unmounted mid-drag still commits', (tester) async {
+    final vm = await pump(
+      tester,
+      track: _track(fx: _fxAllOff().copyWith(eqOn: true)),
+    );
+    final g = await tester.startGesture(
+      tester.getRect(byTypeName('_EqGraph')).center,
+      kind: PointerDeviceKind.mouse,
+    );
+    await tester.pump();
+    await g.moveBy(const Offset(30, -10));
+    await tester.pump();
+    await g.moveBy(const Offset(10, -5));
+    await tester.pump();
+    await tester.pumpWidget(const SizedBox());
+    await g.up();
+    await tester.pump();
+    expect(vm.commits, 1);
+  });
+
   testWidgets('every insert editor renders with its plugin on', (tester) async {
     // All nine editors laid out at once: an out-of-range clamp or a bad
     // constraint in any of them surfaces as a thrown exception here.

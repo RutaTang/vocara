@@ -352,6 +352,25 @@ void main() {
     expect(vm.fakeMixer.trackVolumes, isNotEmpty);
     await g.cancel();
     await tester.pumpAndSettle();
-    expect(vm.fakeMixer.trackCommits, greaterThanOrEqualTo(1));
+    expect(vm.fakeMixer.trackCommits, 1);
+  });
+
+  testWidgets('a held press that turns into a drag saves once', (tester) async {
+    // The tap is cancelled when the drag wins, and saving there too wrote the
+    // level mid-drag on top of the drag's own save at its end.
+    final vm = await pumpStrip(tester);
+    final g = await tester.startGesture(
+      tester.getRect(_faders.first).center,
+      kind: PointerDeviceKind.mouse,
+    );
+    await tester.pump(kPressTimeout + const Duration(milliseconds: 20));
+    await g.moveBy(const Offset(0, -30));
+    await tester.pump();
+    await g.moveBy(const Offset(0, -10));
+    await tester.pump();
+    expect(vm.fakeMixer.trackCommits, 0, reason: 'mid-drag');
+    await g.up();
+    await tester.pumpAndSettle();
+    expect(vm.fakeMixer.trackCommits, 1);
   });
 }
