@@ -14,6 +14,7 @@ import '../../data/services/update_check_service.dart';
 import '../../domain/models/audio_device.dart';
 import '../../routing/navigation.dart';
 import '../../routing/routes.dart';
+import '../../utils/export_copy.dart';
 import '../core/themes/studio.dart';
 import '../core/widgets/confirm_dialog.dart';
 import '../core/widgets/window_drag_bar.dart';
@@ -330,7 +331,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final export =
           widget.exportDiagnostics ?? DiagnosticsLog.instance.exportArchive;
       bundle = await export();
-      await File(bundle).copy(destination);
+      await exportCopy(File(bundle), destination);
       // The bundle was only the copy's source: drop it and its temp folder.
       await DiagnosticsLog.discardArchive(bundle);
       if (!mounted) return;

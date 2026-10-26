@@ -33,6 +33,7 @@ import '../../../domain/models/technique_marker.dart';
 import '../../../domain/models/voice_metrics.dart';
 import '../../../utils/busy_gate.dart';
 import '../../../utils/command.dart';
+import '../../../utils/export_copy.dart';
 import '../../../utils/id.dart';
 import '../../../utils/lyrics_format.dart';
 import '../../../utils/result.dart';
@@ -1654,7 +1655,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     if (destPath == null) return; // user cancelled
     try {
       // Overwrite is intentional: the save panel already confirmed replacing.
-      await source.copy(destPath);
+      await exportCopy(source, destPath);
     } catch (_) {
       _toast('Could not export the audio to that location.');
       return;
