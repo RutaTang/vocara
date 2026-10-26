@@ -978,10 +978,11 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       if (result is Ok<Loaded<SongPractice>>) {
         ok = true;
         // Saved with nothing newer behind it: no stamp is pending any more.
-        if (identical(_practice, sent)) _unsavedFrom = null;
+        final current = identical(_practice, sent);
+        if (current) _unsavedFrom = null;
         final saved = result.value;
         final sentHashes = saved.sentHashes;
-        if (identical(_practice, sent) &&
+        if (current &&
             sentHashes != null &&
             !mapEquals(sentHashes, saved.baseHashes)) {
           // The store differs from what this write sent: the merge kept rows a
@@ -993,7 +994,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
           await mixer.resyncPlayback();
         } else {
           _adoptSaved(sent, saved);
-          if (!saved.reread) {
+          if (current && !saved.reread) {
             final differed = await _catchUpOnStore(saved);
             if (_disposed) return true;
             if (differed) await mixer.resyncPlayback();
@@ -2751,8 +2752,12 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// stands in what it sent): reads the store once more and takes it in as a
   /// load does. Judged against the sent state alone, rows the merge kept from
   /// another writer stayed off screen, and the next edit of one rolled it
-  /// back. Skipped when the model moved on: its own save re-reads. Returns
-  /// whether the store differed from what was sent.
+  /// back. Only for a model the save held as it was sent — the caller judges
+  /// that BEFORE adopting the save: judged here, after it, an edit made while
+  /// the save ran was read over with the store, and its own queued save then
+  /// wrote nothing (a moved-on model's queued save re-reads anyway). An edit
+  /// made during this read stops it too. Returns whether the store differed
+  /// from what was sent.
   Future<bool> _catchUpOnStore(Loaded<SongPractice> saved) async {
     final adopted = _practice;
     if (adopted == null) return false;
@@ -2805,9 +2810,10 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       if (_disposed) return ok;
       if (ok) {
         // Saved with nothing newer behind it: no stamp is pending any more.
-        if (identical(_practice, sent)) _unsavedFrom = null;
+        final current = identical(_practice, sent);
+        if (current) _unsavedFrom = null;
         _adoptSaved(sent, result.value);
-        if (!result.value.reread) {
+        if (current && !result.value.reread) {
           await _catchUpOnStore(result.value);
           if (_disposed) return ok;
         }

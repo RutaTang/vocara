@@ -382,6 +382,53 @@ void main() {
     expect(engine.syncs, greaterThan(syncs), reason: 'the mix must follow');
   });
 
+  test('... but never over an edit made while that save ran', () async {
+    // The catch-up judged "moved on" after the save, against whatever was on
+    // screen by then: an edit made during the save was read over with the
+    // store, and its own queued save then wrote nothing and said it landed.
+    final p = await seed();
+    final store = flaky();
+    final vm = await open(p.id, repository: store);
+    store.failNextLoad = true;
+
+    await renameTwice(vm, p.vocalTracks.single.id);
+
+    expect(vm.practice!.vocalTracks.single.displayName, 'B');
+    expect((await load(p.id)).aggregate.vocalTracks.single.displayName, 'B');
+  });
+
+  test('... nor over lyrics saved again while it ran', () async {
+    final p = await seed();
+    final store = flaky();
+    final vm = await open(p.id, repository: store);
+    store.failNextLoad = true;
+
+    final first = vm.setLyricsText('one');
+    await null;
+    final second = vm.setLyricsText('two');
+    expect(await first, isTrue);
+    expect(await second, isTrue);
+
+    String words(SongPractice s) => s.lyrics.map((l) => l.text).join('|');
+    expect(words(vm.practice!), 'two');
+    expect(words((await load(p.id)).aggregate), 'two');
+  });
+
+  test('... and a plain lyrics stand-in leaves the mix alone', () async {
+    // Resynced only when the store differs from what was sent: a lyric stamp
+    // never glitches playback.
+    final p = await seed();
+    final store = flaky();
+    final vm = await open(p.id, repository: store);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    final syncs = engine.syncs;
+    store.failNextLoad = true;
+
+    expect(await vm.setLyricsText('first line'), isTrue);
+
+    expect(engine.syncs, syncs);
+  });
+
   test(
     'a save reports what it sent in the same hashes a load reports',
     () async {
