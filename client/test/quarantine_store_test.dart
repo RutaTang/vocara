@@ -51,6 +51,34 @@ void main() {
     await store.delete('practices', _id('P1')); // missing row: no-op
   });
 
+  test(
+    'listReplayable holds exactly what isReplayable says can land',
+    () async {
+      const reasons = [
+        'hlc-drift: ahead',
+        'fk-orphan: tracks',
+        'apply-failed: newer schema',
+        'unknown-column: x',
+        'invalid-schema_v: 0',
+        'invalid-id: bad',
+        'invalid-value: mistyped',
+        'dead-letter(invalid-value: x)',
+        // LIKE's `_` would match this; the class is the exact prefix.
+        'invalid-schemaXv: 0',
+      ];
+      for (final (i, r) in reasons.indexed) {
+        await put('practices', 'P$i', reason: r, at: i);
+      }
+      expect(
+        [for (final q in await store.listReplayable()) q.reason],
+        [
+          for (final r in reasons)
+            if (QuarantineStore.isReplayable(r)) r,
+        ],
+      );
+    },
+  );
+
   test('re-quarantining a row keeps only the LATEST state (upsert on the '
       '(tbl, id) primary key)', () async {
     await put('practices', 'P1', reason: 'hlc-drift: old', at: 100);

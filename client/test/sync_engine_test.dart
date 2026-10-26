@@ -1300,6 +1300,27 @@ void main() {
       expect(await practiceTitle('P'), 'ahead');
       expect(await quarantine.list(), isEmpty);
     });
+
+    test('a park that can never land costs a pull nothing', () async {
+      // Its verdict is a function of the payload alone, yet every pull
+      // decoded it, applied it in a transaction and re-parked it unchanged —
+      // as many times as a peer had sent such rows.
+      final bad = remotePractice('BAD', 'never', remoteHlc(t0));
+      cloud.accept(
+        SyncRow(table: bad.table, fields: {...bad.fields, 'schema_v': 0}),
+      );
+      expect((await engine.pumpPull()).failedRecords, 1);
+      expect(
+        (await quarantine.list()).single.reason,
+        startsWith('invalid-schema_v'),
+      );
+
+      cost.reset();
+      expect((await engine.pumpPull()).failed, isFalse);
+      expect(cost.transactions, 0);
+      expect(cost.writes, isEmpty);
+      expect(await quarantine.list(), hasLength(1), reason: 'kept for review');
+    });
   });
 
   group('quarantine replay', () {

@@ -228,6 +228,23 @@ class QuarantineStore {
       .map((p) => "$alias.reason NOT GLOB '$p*'")
       .join(' AND ');
 
+  /// The rows a replay can still land ([isReplayable]), in [list]'s order. The
+  /// rest only re-park as they were, so a replay cycle leaves them, payloads
+  /// and all, unread.
+  Future<List<SyncQuarantineRow>> listReplayable() =>
+      (_db.select(_db.syncQuarantine)
+            ..where(
+              (_) => CustomExpression<bool>(
+                replayableSql(_db.syncQuarantine.actualTableName),
+              ),
+            )
+            ..orderBy([
+              (q) => OrderingTerm.asc(q.quarantinedAt),
+              (q) => OrderingTerm.asc(q.tbl),
+              (q) => OrderingTerm.asc(q.id),
+            ]))
+          .get();
+
   /// All quarantined rows, oldest quarantine first (stable review order).
   Future<List<SyncQuarantineRow>> list() =>
       (_db.select(_db.syncQuarantine)..orderBy([

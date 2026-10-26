@@ -909,7 +909,10 @@ class SyncEngine {
     const nothing = (count: 0, settled: 0, rows: <SyncRow>[]);
     final store = _applier.quarantine;
     if (store == null) return nothing;
-    final parked = await store.list();
+    // Only what can land: a park whose verdict is a function of its payload
+    // alone was decoded, applied in a transaction and re-parked unchanged by
+    // every pull, however many a peer had left there.
+    final parked = await store.listReplayable();
     if (parked.isEmpty) return nothing;
     final ranks = parked.length > 1
         ? await _builder.tableRanks()
