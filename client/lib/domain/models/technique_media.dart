@@ -116,8 +116,8 @@ class TechniqueMedia {
     '.aiff',
     '.flac',
     '.ogg',
-    '.opus',
-    '.wma',
+    // Not '.opus' or '.wma': the engine has no decoder for either (see the
+    // song screen's import list).
   };
 
   /// Whether [path] looks like an importable audio or video file.

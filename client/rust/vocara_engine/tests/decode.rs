@@ -40,3 +40,83 @@ fn the_duration_budget_holds_at_the_rate_it_decodes_at() {
     assert!(decode_file(path, 1.5, 0, 0).is_err());
     assert!(decode_file(path, 2.5, 0, 0).is_ok());
 }
+
+/// 2 s of a 440 Hz mono 16-bit tone at 44.1 kHz.
+fn tone_i16() -> Vec<i16> {
+    (0..88_200)
+        .map(|i| {
+            let t = i as f64 / 44_100.0;
+            ((2.0 * std::f64::consts::PI * 440.0 * t).sin() * 0.5 * i16::MAX as f64) as i16
+        })
+        .collect()
+}
+
+/// Writes [bytes] to a fresh file named [name] in the temp dir and returns its path.
+fn temp_file(name: &str, bytes: &[u8]) -> String {
+    let path = std::env::temp_dir().join(format!("{}-{name}", std::process::id()));
+    std::fs::write(&path, bytes).unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+#[test]
+fn an_aiff_bounce_decodes() {
+    // GarageBand's and Logic's default bounce. The import offered .aif/.aiff, and the decoder
+    // was built without them: every one failed with "could not be converted for playback".
+    let samples = tone_i16();
+    let data: Vec<u8> = samples.iter().flat_map(|s| s.to_be_bytes()).collect();
+    let mut comm = Vec::new();
+    comm.extend_from_slice(&1u16.to_be_bytes()); // channels
+    comm.extend_from_slice(&(samples.len() as u32).to_be_bytes()); // frames
+    comm.extend_from_slice(&16u16.to_be_bytes()); // bits
+    comm.extend_from_slice(&[0x40, 0x0E, 0xAC, 0x44, 0, 0, 0, 0, 0, 0]); // 44100, 80-bit float
+    let mut body = b"AIFF".to_vec();
+    body.extend_from_slice(b"COMM");
+    body.extend_from_slice(&(comm.len() as u32).to_be_bytes());
+    body.extend_from_slice(&comm);
+    body.extend_from_slice(b"SSND");
+    body.extend_from_slice(&(data.len() as u32 + 8).to_be_bytes());
+    body.extend_from_slice(&[0; 8]); // offset, block size
+    body.extend_from_slice(&data);
+    let mut file = b"FORM".to_vec();
+    file.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    file.extend_from_slice(&body);
+    let path = temp_file("tone.aiff", &file);
+
+    let decoded = decode_file(&path, 0.0, 0, 0);
+    let _ = std::fs::remove_file(&path);
+    let (frames, rate) = decoded.expect("an AIFF decodes");
+    assert_eq!(rate, 44_100);
+    assert!((frames.len() as f64 / 44_100.0 - 2.0).abs() < 0.05);
+    assert!((tone_hz(&frames, rate) - 440.0).abs() < 10.0);
+}
+
+#[test]
+fn a_caf_file_decodes() {
+    // Core Audio Format, offered by the import as .caf and refused by the decoder alike.
+    let samples = tone_i16();
+    let data: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+    let mut file = b"caff".to_vec();
+    file.extend_from_slice(&1u16.to_be_bytes()); // version
+    file.extend_from_slice(&0u16.to_be_bytes()); // flags
+    file.extend_from_slice(b"desc");
+    file.extend_from_slice(&32i64.to_be_bytes());
+    file.extend_from_slice(&44_100f64.to_be_bytes());
+    file.extend_from_slice(b"lpcm");
+    file.extend_from_slice(&2u32.to_be_bytes()); // little-endian integer samples
+    file.extend_from_slice(&2u32.to_be_bytes()); // bytes per packet
+    file.extend_from_slice(&1u32.to_be_bytes()); // frames per packet
+    file.extend_from_slice(&1u32.to_be_bytes()); // channels
+    file.extend_from_slice(&16u32.to_be_bytes()); // bits
+    file.extend_from_slice(b"data");
+    file.extend_from_slice(&(data.len() as i64 + 4).to_be_bytes());
+    file.extend_from_slice(&0u32.to_be_bytes()); // edit count
+    file.extend_from_slice(&data);
+    let path = temp_file("tone.caf", &file);
+
+    let decoded = decode_file(&path, 0.0, 0, 0);
+    let _ = std::fs::remove_file(&path);
+    let (frames, rate) = decoded.expect("a CAF decodes");
+    assert_eq!(rate, 44_100);
+    assert!((frames.len() as f64 / 44_100.0 - 2.0).abs() < 0.05);
+    assert!((tone_hz(&frames, rate) - 440.0).abs() < 10.0);
+}

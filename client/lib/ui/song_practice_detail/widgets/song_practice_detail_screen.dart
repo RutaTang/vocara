@@ -36,6 +36,9 @@ import 'technique_picker.dart';
 import 'track_context_menu.dart';
 import 'track_row.dart';
 
+/// What the engine's decoder reads (symphonia's features in the engine's
+/// Cargo.toml). Opus and WMA were offered too, with no decoder for either:
+/// each drop failed with "could not be converted for playback".
 const _audioExtensions = {
   '.wav',
   '.mp3',
@@ -47,8 +50,6 @@ const _audioExtensions = {
   '.aif',
   '.aiff',
   '.caf',
-  '.opus',
-  '.wma',
 };
 
 /// The least height the timeline (and the side panels beside it) keeps
