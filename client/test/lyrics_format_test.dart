@@ -2,6 +2,48 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:vocara/utils/lyrics_format.dart';
 
 void main() {
+  group('alignLines', () {
+    test('a repeated line maps to its own earlier self', () {
+      // A typo fixed in the first chorus: the second chorus is still the
+      // second one, not the first.
+      expect(
+        alignLines(
+          ['chorus', 'verse', 'chorus'],
+          ['chorus!', 'verse', 'chorus'],
+        ),
+        [null, 1, 2],
+      );
+      // The first chorus deleted.
+      expect(alignLines(['chorus', 'verse', 'chorus'], ['verse', 'chorus']), [
+        1,
+        2,
+      ]);
+    });
+
+    test('insertions are new; a moved line keeps the order of the rest', () {
+      expect(alignLines(['a', 'b', 'a'], ['a', 'x', 'b', 'a']), [
+        0,
+        null,
+        1,
+        2,
+      ]);
+      expect(alignLines(['a', 'b', 'c'], ['c', 'a', 'b']), [null, 0, 1]);
+      expect(alignLines(['a', '', 'b'], ['a', '', 'b']), [0, 1, 2]);
+    });
+
+    test('past the cell limit, a forward greedy match', () {
+      expect(
+        alignLines(
+          ['chorus', 'verse', 'chorus'],
+          ['verse', 'chorus'],
+          cellLimit: 1,
+        ),
+        [1, 2],
+      );
+      expect(alignLines(const [], ['a']), [null]);
+    });
+  });
+
   test('parsePlainLyrics keeps lines and trims trailing blanks', () {
     final lines = parsePlainLyrics('Line one\nLine two\n\n');
     expect(lines.length, 2);

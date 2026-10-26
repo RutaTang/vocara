@@ -1431,6 +1431,56 @@ void main() {
     );
   });
 
+  group('editing timed lyrics', () {
+    // Times were matched to the edited text by line text alone, first come
+    // first served, and a plain-text round trip dropped the times on blank
+    // lines (end-of-line and instrumental markers).
+    test(
+      'a fixed typo in the first chorus leaves the second its own time',
+      () async {
+        final vm = await pumpVm();
+        expect(
+          await vm.importLyrics(
+            '[00:30.00]chorus\n[00:40.00]verse\n[01:30.00]chorus',
+          ),
+          isTrue,
+        );
+        await vm.setLyricsText('chorus!\nverse\nchorus');
+        expect(vm.lyrics.map((l) => l.timeMs), [null, 40000, 90000]);
+        await vm.setLyricsText('verse\nchorus'); // the first chorus deleted
+        expect(vm.lyrics.map((l) => l.timeMs), [40000, 90000]);
+      },
+    );
+
+    test('an unchanged save keeps the timed blank lines', () async {
+      final vm = await pumpVm();
+      await vm.importLyrics(
+        '[00:10.00]hello\n[00:15.00]\n[00:20.00]world\n[00:25.00]',
+      );
+      final before = [for (final l in vm.lyrics) (l.text, l.timeMs)];
+      expect(before, [
+        ('hello', 10000),
+        ('', 15000),
+        ('world', 20000),
+        ('', 25000),
+      ]);
+      expect(await vm.setLyricsText(vm.lyricsAsText()), isTrue);
+      expect([for (final l in vm.lyrics) (l.text, l.timeMs)], before);
+    });
+
+    test('an edit keeps the end marker of a line that is still last', () async {
+      final vm = await pumpVm();
+      await vm.importLyrics(
+        '[00:10.00]hello\n[00:15.00]\n[00:20.00]world\n[00:25.00]',
+      );
+      await vm.setLyricsText('hello there\n\nworld');
+      expect(
+        [for (final l in vm.lyrics) (l.text, l.timeMs)],
+        [('hello there', null), ('', 15000), ('world', 20000), ('', 25000)],
+      );
+    });
+  });
+
   group('the sync cursor follows the words under it', () {
     test(
       'the same words re-imported without their times restart the cursor',

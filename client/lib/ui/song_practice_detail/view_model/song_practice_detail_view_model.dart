@@ -687,21 +687,37 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// its trimmed text matches a new line.
   /// Returns whether the write landed (the editor keeps the draft if not).
   Future<bool> setLyricsText(String text) async {
+    final prev = lyrics;
+    // Saved unchanged: nothing to write. The plain text cannot carry a time on
+    // a blank line (an LRC end-of-line or instrumental marker), and the round
+    // trip dropped every one, leaving the line before it lit through the gap.
+    if (text == lyricsToPlainText(prev)) return true;
     final parsed = parsePlainLyrics(text);
-    final byText = <String, List<int>>{};
-    for (final l in lyrics) {
-      final t = l.timeMs;
-      if (t == null) continue;
-      (byText[l.text.trim()] ??= <int>[]).add(t);
-    }
-    final next = <LyricLine>[];
-    for (final line in parsed) {
-      final key = line.text.trim();
-      final q = byText[key];
-      if (key.isNotEmpty && q != null && q.isNotEmpty) {
-        next.add(line.copyWith(timeMs: q.removeAt(0)));
-      } else {
-        next.add(line); // parsed plain line carries no time
+    // A line keeps its time only from the line it continues, in order: matched
+    // on text alone and handed out first come first served, a fixed typo in
+    // the first chorus gave the second chorus the first one's time.
+    final from = alignLines(
+      [for (final l in prev) l.text.trim()],
+      [for (final l in parsed) l.text.trim()],
+    );
+    final next = <LyricLine>[
+      for (var i = 0; i < parsed.length; i++)
+        switch (from[i]) {
+          final j? when prev[j].timeMs != null => parsed[i].copyWith(
+            timeMs: prev[j].timeMs,
+          ),
+          _ => parsed[i], // a new line carries no time
+        },
+    ];
+    // The timed blank lines that closed the old last line (its end marker)
+    // still close it, when it is still the last.
+    if (parsed.isNotEmpty) {
+      final last = from[parsed.length - 1];
+      if (last != null) {
+        final tail = prev.sublist(last + 1);
+        if (tail.every((l) => l.isBlank)) {
+          next.addAll(tail.where((l) => l.isSynced));
+        }
       }
     }
     return _replaceLyrics(next);

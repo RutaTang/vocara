@@ -2,6 +2,60 @@ import '../domain/models/lyric_line.dart';
 
 final _lrcTimeTag = RegExp(r'\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]');
 
+/// Aligns two texts line by line, in order: for each line of [next], the
+/// index of the line of [prev] it continues, or null for a line that is new.
+/// Lines match only on equal text, and only in order (a longest common
+/// subsequence), so a line repeated in the song (a chorus) maps to its own
+/// earlier self, never to another repeat of it. Past [cellLimit] pairs (a
+/// text thousands of lines long) it falls back to a forward greedy match.
+List<int?> alignLines(
+  List<String> prev,
+  List<String> next, {
+  int cellLimit = 4000000,
+}) {
+  final n = prev.length, m = next.length;
+  final out = List<int?>.filled(m, null);
+  if (n == 0 || m == 0) return out;
+  if (n * m > cellLimit) {
+    var from = 0;
+    for (var j = 0; j < m; j++) {
+      for (var i = from; i < n; i++) {
+        if (prev[i] == next[j]) {
+          out[j] = i;
+          from = i + 1;
+          break;
+        }
+      }
+    }
+    return out;
+  }
+  // lcs[i][j]: the longest common subsequence of prev[i..] and next[j..].
+  final w = m + 1;
+  final lcs = List<int>.filled((n + 1) * w, 0);
+  for (var i = n - 1; i >= 0; i--) {
+    for (var j = m - 1; j >= 0; j--) {
+      lcs[i * w + j] = prev[i] == next[j]
+          ? lcs[(i + 1) * w + j + 1] + 1
+          : (lcs[(i + 1) * w + j] > lcs[i * w + j + 1]
+                ? lcs[(i + 1) * w + j]
+                : lcs[i * w + j + 1]);
+    }
+  }
+  var i = 0, j = 0;
+  while (i < n && j < m) {
+    if (prev[i] == next[j]) {
+      out[j] = i;
+      i++;
+      j++;
+    } else if (lcs[(i + 1) * w + j] >= lcs[i * w + j + 1]) {
+      i++;
+    } else {
+      j++;
+    }
+  }
+  return out;
+}
+
 /// Parses plain lyrics text into (unsynced) lines, preserving blank lines as
 /// section gaps but trimming trailing blanks.
 List<LyricLine> parsePlainLyrics(String text) {
