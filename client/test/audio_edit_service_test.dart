@@ -733,6 +733,45 @@ void main() {
     );
   });
 
+  test('a take whose file is not on this device is called missing, not '
+      'compressed', () async {
+    final dir = await Directory.systemTemp.createTemp('vocara_edit');
+    addTearDown(() => dir.delete(recursive: true));
+    final wav = '${dir.path}/take.wav';
+    await File(wav).writeAsBytes(
+      writeWavMono(Float64List.fromList(List.filled(100, 0.1)), 8000),
+    );
+    // A synced clip whose bytes haven't arrived is an asset:// reference.
+    const missing = 'asset://0123456789abcdef';
+    final edit = AudioEditService(files: _TempFiles(dir));
+    Matcher saysMissing() => throwsA(
+      isA<FormatException>().having(
+        (e) => e.message,
+        'message',
+        contains("isn't on this device"),
+      ),
+    );
+
+    expect(
+      () => edit.splitWav(
+        practiceId: 'P0000000000000000000000000',
+        sourcePath: missing,
+        splitFileMs: 100,
+      ),
+      saysMissing(),
+    );
+    for (final (first, second) in [(missing, wav), (wav, missing)]) {
+      expect(
+        () => edit.concatWav(
+          practiceId: 'P0000000000000000000000000',
+          firstPath: first,
+          secondPath: second,
+        ),
+        saysMissing(),
+      );
+    }
+  });
+
   group('trimWavHeadInPlace', () {
     test(
       'cuts exactly the head frames and preserves the sample format',

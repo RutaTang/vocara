@@ -343,6 +343,16 @@ _WavLayout? _parseWavFromRaf(RandomAccessFile raf) {
   return _WavLayout(f, sampleRate, blockAlign, dataStart, dataLen);
 }
 
+/// Why [path] can't be edited when it doesn't parse as a WAV: [notWav], or,
+/// when there is no file at all (its bytes haven't reached this device, or the
+/// file was removed), that — not a format it doesn't have.
+FormatException _cannotEdit(String path, String notWav) =>
+    File(path).existsSync()
+    ? FormatException(notWav)
+    : const FormatException(
+        "This take's audio file isn't on this device, so it can't be edited.",
+      );
+
 /// [_parseWavFromRaf] on a path: opens, parses the header, closes. Cheap
 /// (a handful of small reads), so callers may run it on any isolate.
 _WavLayout? _parseWavAtPath(String path) {
@@ -478,7 +488,8 @@ class AudioEditService {
     // split is a byte-range operation and streams as one.
     final w = _parseWavAtPath(sourcePath);
     if (w == null) {
-      throw const FormatException(
+      throw _cannotEdit(
+        sourcePath,
         'This take is compressed audio (e.g. mp3/m4a). Only recordings and '
         'WAV files can be split.',
       );
@@ -568,12 +579,11 @@ class AudioEditService {
     // reads held both takes, both slices, and the merged buffer at once).
     final wa = _parseWavAtPath(firstPath);
     final wb = _parseWavAtPath(secondPath);
-    if (wa == null || wb == null) {
-      throw const FormatException(
+    const compressed =
         'These takes are compressed audio. Only recordings and WAV files '
-        'can be merged.',
-      );
-    }
+        'can be merged.';
+    if (wa == null) throw _cannotEdit(firstPath, compressed);
+    if (wb == null) throw _cannotEdit(secondPath, compressed);
     // The output reuses wa's fmt header for BOTH halves, so the takes must share
     // the fields that determine how the PCM bytes are read — sample rate,
     // channels, bit depth — otherwise the second take is reinterpreted under the
