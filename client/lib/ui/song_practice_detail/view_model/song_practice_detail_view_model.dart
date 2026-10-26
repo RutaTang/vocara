@@ -853,9 +853,13 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     // take past it): grown on load, it shrank back on a failed save's revert,
     // the take cut off at the right edge.
     _ensureTimeline();
-    if (listEquals(before, lyrics)) return;
-    final from = math.min(_unsavedFrom ?? 0, lyrics.length);
+    // Nothing unsaved after it, the lines unchanged or not: kept set, an
+    // unchanged Save wrote again, and a failing write toasted a failure over
+    // text already on disk.
+    final unsaved = _unsavedFrom;
     _unsavedFrom = null;
+    if (listEquals(before, lyrics)) return;
+    final from = math.min(unsaved ?? 0, lyrics.length);
     _placeCursor(_firstUntimedFrom(from) ?? _wordsFrom(from));
   }
 

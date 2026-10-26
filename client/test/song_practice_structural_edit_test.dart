@@ -1265,6 +1265,33 @@ void main() {
     );
 
     test(
+      'an unchanged Save after a revert that kept the text writes nothing',
+      () async {
+        // The lyrics write landed while a rename was queued (so it could not
+        // clear the pending mark), the rename's save then failed, and its revert
+        // found the lines unchanged and returned before clearing the mark: the
+        // next unchanged Save wrote again, and with saves failing toasted a
+        // failure over text already on disk.
+        final vm = await pumpVm();
+        repo.failAt = {2};
+        final lyrics = vm.setLyricsText('new words');
+        for (var i = 0; i < 50 && repo.inFlight == 0; i++) {
+          await Future<void>.delayed(Duration.zero);
+        }
+        expect(repo.inFlight, 1, reason: 'the lyrics write is in flight');
+        final rename = vm.renameTrack('single', 'renamed');
+        expect(await lyrics, isTrue);
+        await rename;
+        expect(vm.lyrics.map((l) => l.text), ['new words']);
+
+        repo.failSaves = true;
+        final saves = repo.saveNo;
+        expect(await vm.setLyricsText('new words'), isTrue);
+        expect(repo.saveNo, saves);
+      },
+    );
+
+    test(
       'a failed lyrics save reverts the optimistic lines and toasts',
       () async {
         final vm = await pumpVm();
