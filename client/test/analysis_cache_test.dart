@@ -29,6 +29,7 @@ class _StubSpectrograms extends Fake implements SpectrogramService {
     int fftSize = 2048,
     int hop = 512,
     double maxHz = 5000,
+    bool Function()? wanted,
   }) async {
     specCalls++;
     onSingle?.call(path);
@@ -40,6 +41,7 @@ class _StubSpectrograms extends Fake implements SpectrogramService {
     String path, {
     int fftSize = 2048,
     int hop = 512,
+    bool Function()? wanted,
   }) async {
     metricsCalls++;
     onSingle?.call(path);
@@ -60,6 +62,9 @@ class _StubSpectrograms extends Fake implements SpectrogramService {
   /// How many times the aggregate compute ran, for the pairing tests.
   int bothCalls = 0;
 
+  /// The predicate the last pair compute was asked with.
+  bool Function()? lastWanted;
+
   /// Paths whose compute parks until the test completes them, so an interleaving
   /// (a clip still computing when a second consumer asks for the same path) can
   /// be staged deterministically instead of raced.
@@ -77,8 +82,10 @@ class _StubSpectrograms extends Fake implements SpectrogramService {
     int fftSize = 2048,
     int hop = 512,
     double maxHz = 5000,
+    bool Function()? wanted,
   }) async {
     bothCalls++;
+    lastWanted = wanted;
     // Snapshot at CALL time, like a real read of the file: a compute parked on
     // [hold] carries the bytes it started with, so a test can replace a path's
     // content mid-flight and have the parked compute still return the old one.
@@ -110,6 +117,7 @@ class _GatedMetricsSpectrograms extends _StubSpectrograms {
     String path, {
     int fftSize = 2048,
     int hop = 512,
+    bool Function()? wanted,
   }) async {
     await metricsGate.future;
     return super.computeMetricsFromFile(path, fftSize: fftSize, hop: hop);
@@ -593,6 +601,37 @@ void main() {
       expect(cache.selectedMetricsUnavailable, isFalse);
       expect(cache.selectedMetrics?.frames, 10);
       cache.dispose();
+    });
+
+    // Queued behind the gate, a pair whose screen closed or whose file changed
+    // still ran its full-take isolate for no one.
+    test('a queued pair compute stops being wanted once the cache closes or '
+        'the file changes', () async {
+      final track = _lane([_clip('c1', 0)]);
+      final stub = _StubSpectrograms(
+        metricsByPath: {'c1.wav': _metrics(10)},
+        specsByPath: {'c1.wav': _spec(10)},
+      );
+      stub.hold['c1.wav'] = Completer<void>();
+      final cache = _cache(spectrograms: stub, selectedTrack: () => track);
+
+      final first = cache.ensureSelectedSpectrogram();
+      await pumpEventQueue();
+      expect(stub.lastWanted!(), isTrue);
+      cache.evictAnalysis('c1.wav');
+      expect(stub.lastWanted!(), isFalse, reason: 'its file changed');
+      stub.hold.remove('c1.wav')!.complete();
+      await first;
+      await pumpEventQueue();
+
+      stub.hold['c1.wav'] = Completer<void>();
+      final second = cache.ensureSelectedSpectrogram();
+      await pumpEventQueue();
+      expect(stub.lastWanted!(), isTrue);
+      cache.dispose();
+      expect(stub.lastWanted!(), isFalse, reason: 'its screen closed');
+      stub.hold.remove('c1.wav')!.complete();
+      await second;
     });
 
     test('a clip evicted mid-compute because it LEFT the model (delete, '

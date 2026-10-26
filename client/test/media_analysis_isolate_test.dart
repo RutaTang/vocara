@@ -40,4 +40,20 @@ void main() {
     expect(analysis, isNotNull);
     expect(analysis!.durationMs, 2000);
   });
+
+  test('a clip deselected during its decode is not analyzed', () async {
+    const rate = 16000;
+    var wanted = true;
+    final service = MediaAnalysisService(
+      decode: (path, {maxDuration}) async {
+        wanted = false; // deselected while it decoded
+        return PcmAudio(Float32List(rate), rate);
+      },
+    );
+
+    expect(
+      await service.analyze('reference.m4a', wanted: () => wanted),
+      isNull,
+    );
+  });
 }

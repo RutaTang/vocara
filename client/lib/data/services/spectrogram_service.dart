@@ -293,6 +293,7 @@ class SpectrogramService {
     int fftSize = 2048,
     int hop = 512,
     double maxHz = 5000,
+    bool Function()? wanted,
   }) async {
     final file = File(path);
     if (!await file.exists()) return null;
@@ -304,30 +305,42 @@ class SpectrogramService {
     // one 4 MiB chunk beside the columns). Gated: heavy analyses queue
     // behind the app-wide AnalysisGate instead of stacking peaks.
     return analysisGate.run(
-      () => Isolate.run(() {
-        final builder = StreamingSpectrogramBuilder(
-          admission.sampleRate,
-          fftSize: fftSize,
-          hop: hop,
-          maxHz: maxHz,
-          // The header gave the frame count: the image is sized once instead
-          // of held twice (see StreamingSpectrogramBuilder).
-          expectedFrames: stftFrameCount(
-            admission.frames,
-            fftSize: fftSize,
-            hop: hop,
-          ),
-        );
-        var any = false;
-        readWavMonoChunked(path, admission, (chunk, _) {
-          any = true;
-          builder.add(chunk);
-        });
-        if (!any) return null;
-        return builder.finish();
-      }),
+      () => _unwanted(wanted)
+          ? Future.value(null)
+          : _spectrogramOffThread(path, admission, fftSize, hop, maxHz),
     );
   }
+
+  /// [computeFromFile]'s isolate. Static, so the closure it sends carries only
+  /// these arguments (a `wanted` closing over its caller would ride along).
+  static Future<Spectrogram?> _spectrogramOffThread(
+    String path,
+    WavAdmission admission,
+    int fftSize,
+    int hop,
+    double maxHz,
+  ) => Isolate.run(() {
+    final builder = StreamingSpectrogramBuilder(
+      admission.sampleRate,
+      fftSize: fftSize,
+      hop: hop,
+      maxHz: maxHz,
+      // The header gave the frame count: the image is sized once instead
+      // of held twice (see StreamingSpectrogramBuilder).
+      expectedFrames: stftFrameCount(
+        admission.frames,
+        fftSize: fftSize,
+        hop: hop,
+      ),
+    );
+    var any = false;
+    readWavMonoChunked(path, admission, (chunk, _) {
+      any = true;
+      builder.add(chunk);
+    });
+    if (!any) return null;
+    return builder.finish();
+  });
 
   /// Computes per-frame voice-timbre metrics (ring/tilt/CPP/formants) for a take
   /// off the UI thread. Same WAV/PCM16-only support as [computeFromFile].
@@ -335,36 +348,47 @@ class SpectrogramService {
     String path, {
     int fftSize = 2048,
     int hop = 512,
+    bool Function()? wanted,
   }) async {
     final file = File(path);
     if (!await file.exists()) return null;
     final admission = await admitForAnalysis(file);
     if (admission == null) return null;
     return analysisGate.run(
-      () => Isolate.run(() {
-        // Windowed like computeBothFromFile, minus the spectrogram.
-        final expectedFrames = stftFrameCount(
-          admission.frames,
-          fftSize: fftSize,
-          hop: hop,
-        );
-        final analyzer = StreamingTakeAnalyzer(
-          admission.sampleRate,
-          fftSize: fftSize,
-          hop: hop,
-          expectedFrames: expectedFrames,
-          spectrogram: false,
-        );
-        var any = false;
-        readWavMonoChunked(path, admission, (chunk, loudest) {
-          any = true;
-          analyzer.add(chunk, loudest: loudest);
-        });
-        if (!any) return null;
-        return analyzer.finish().metrics;
-      }),
+      () => _unwanted(wanted)
+          ? Future.value(null)
+          : _metricsOffThread(path, admission, fftSize, hop),
     );
   }
+
+  /// [computeMetricsFromFile]'s isolate (static: see [_spectrogramOffThread]).
+  static Future<VoiceMetrics?> _metricsOffThread(
+    String path,
+    WavAdmission admission,
+    int fftSize,
+    int hop,
+  ) => Isolate.run(() {
+    // Windowed like computeBothFromFile, minus the spectrogram.
+    final expectedFrames = stftFrameCount(
+      admission.frames,
+      fftSize: fftSize,
+      hop: hop,
+    );
+    final analyzer = StreamingTakeAnalyzer(
+      admission.sampleRate,
+      fftSize: fftSize,
+      hop: hop,
+      expectedFrames: expectedFrames,
+      spectrogram: false,
+    );
+    var any = false;
+    readWavMonoChunked(path, admission, (chunk, loudest) {
+      any = true;
+      analyzer.add(chunk, loudest: loudest);
+    });
+    if (!any) return null;
+    return analyzer.finish().metrics;
+  });
 
   /// Computes the spectrogram AND the voice metrics from a single decode, in a
   /// single isolate. The two analyses always run together when a take is
@@ -378,44 +402,62 @@ class SpectrogramService {
     int fftSize = 2048,
     int hop = 512,
     double maxHz = 5000,
+    bool Function()? wanted,
   }) async {
     final file = File(path);
     if (!await file.exists()) return null;
     final admission = await admitForAnalysis(file);
     if (admission == null) return null;
     return analysisGate.run(
-      () => Isolate.run(() {
-        // FULLY windowed: decode chunks feed the streaming analyzer (whose
-        // per-frame math IS the batch computeVoiceMetrics, pinned
-        // bit-identical by test) — neither the whole-track sample buffer nor
-        // the full decimated copies ever exist. The resident set is a few
-        // analysis windows plus the RESULTS.
-        final expectedFrames = stftFrameCount(
-          admission.frames,
-          fftSize: fftSize,
-          hop: hop,
-        );
-        final analyzer = StreamingTakeAnalyzer(
-          admission.sampleRate,
-          fftSize: fftSize,
-          hop: hop,
-          expectedFrames: expectedFrames,
-          maxHz: maxHz,
-        );
-        var any = false;
-        readWavMonoChunked(path, admission, (chunk, loudest) {
-          any = true;
-          analyzer.add(chunk, loudest: loudest);
-        });
-        if (!any) return null;
-        final (:spectrogram, :metrics) = analyzer.finish();
-        return (
-          spectrogram: spectrogram,
-          metrics: metrics,
-          ltas: spectrogram == null ? null : computeLtas(spectrogram, metrics),
-          profile: analyzeVoiceProfile(metrics),
-        );
-      }),
+      () => _unwanted(wanted)
+          ? Future.value(null)
+          : _bothOffThread(path, admission, fftSize, hop, maxHz),
     );
   }
+
+  /// [computeBothFromFile]'s isolate (static: see [_spectrogramOffThread]).
+  static Future<TakeAnalysisBundle?> _bothOffThread(
+    String path,
+    WavAdmission admission,
+    int fftSize,
+    int hop,
+    double maxHz,
+  ) => Isolate.run(() {
+    // FULLY windowed: decode chunks feed the streaming analyzer (whose
+    // per-frame math IS the batch computeVoiceMetrics, pinned
+    // bit-identical by test) — neither the whole-track sample buffer nor
+    // the full decimated copies ever exist. The resident set is a few
+    // analysis windows plus the RESULTS.
+    final expectedFrames = stftFrameCount(
+      admission.frames,
+      fftSize: fftSize,
+      hop: hop,
+    );
+    final analyzer = StreamingTakeAnalyzer(
+      admission.sampleRate,
+      fftSize: fftSize,
+      hop: hop,
+      expectedFrames: expectedFrames,
+      maxHz: maxHz,
+    );
+    var any = false;
+    readWavMonoChunked(path, admission, (chunk, loudest) {
+      any = true;
+      analyzer.add(chunk, loudest: loudest);
+    });
+    if (!any) return null;
+    final (:spectrogram, :metrics) = analyzer.finish();
+    return (
+      spectrogram: spectrogram,
+      metrics: metrics,
+      ltas: spectrogram == null ? null : computeLtas(spectrogram, metrics),
+      profile: analyzeVoiceProfile(metrics),
+    );
+  });
+
+  /// Whether a caller that waited its turn at the gate no longer wants the
+  /// result (its screen closed, or its file changed): the queued analyses of a
+  /// song left with several lanes open each still ran a full-take isolate,
+  /// holding up the next screen's behind them.
+  static bool _unwanted(bool Function()? wanted) => wanted != null && !wanted();
 }

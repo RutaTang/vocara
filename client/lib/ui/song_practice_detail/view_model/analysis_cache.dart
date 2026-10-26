@@ -227,6 +227,13 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   /// of the app-wide analysis slots.
   final Set<String> _recomputeOnStale = {};
   int _generationOf(String path) => _pathGeneration[path] ?? 0;
+
+  /// Whether an analysis of [path] begun at [generation] is still wanted once
+  /// it reaches the gate: this cache is still open and the file unchanged.
+  /// Asked before the isolate starts, so a song left with several lanes open
+  /// doesn't run their queued analyses for no one.
+  bool _wanted(String path, int generation) =>
+      !_disposed && generation == _generationOf(path);
   void _bumpGeneration(String path) =>
       _pathGeneration[path] = _generationOf(path) + 1;
   // Paths whose compute finished but produced nothing (non-WAV imports, missing
@@ -923,7 +930,10 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     notifyListeners();
     var stale = false;
     try {
-      final m = await _spectrograms.computeMetricsFromFile(path);
+      final m = await _spectrograms.computeMetricsFromFile(
+        path,
+        wanted: () => _wanted(path, generation),
+      );
       // See [_disposed]: no reader is left for this cache.
       if (_disposed) return;
       // See [_pathGeneration]: evicted mid-compute, so this describes bytes
@@ -996,7 +1006,10 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     notifyListeners();
     var stale = false;
     try {
-      final spec = await _spectrograms.computeFromFile(path);
+      final spec = await _spectrograms.computeFromFile(
+        path,
+        wanted: () => _wanted(path, generation),
+      );
       if (_disposed) return;
       // See [_pathGeneration]: evicted mid-compute.
       if (generation != _generationOf(path)) {
@@ -1060,7 +1073,10 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     notifyListeners();
     var stale = false;
     try {
-      final both = await _spectrograms.computeBothFromFile(path);
+      final both = await _spectrograms.computeBothFromFile(
+        path,
+        wanted: () => _wanted(path, generation),
+      );
       if (_disposed) return _clipAnalysis(path);
       // See [_pathGeneration]: evicted mid-compute, so this pair describes
       // bytes the eviction already declared stale.
@@ -1163,6 +1179,7 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
       final spec = await _spectrograms.computeFromFile(
         path,
         maxHz: _eqDisplayMaxHz,
+        wanted: () => _wanted(path, generation),
       );
       // See [_pathGeneration]. No retry is scheduled here: [eqInputColumn]
       // re-asks on the next frame it is painted, which starts a fresh compute

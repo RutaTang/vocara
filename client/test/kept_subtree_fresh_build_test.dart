@@ -193,6 +193,7 @@ class _FakeSpectrograms extends Fake implements SpectrogramService {
     int fftSize = 2048,
     int hop = 512,
     double maxHz = 5000,
+    bool Function()? wanted,
   }) async =>
       (spectrogram: spectrogram, metrics: metrics, ltas: null, profile: null);
 
@@ -201,6 +202,7 @@ class _FakeSpectrograms extends Fake implements SpectrogramService {
     String path, {
     int fftSize = 2048,
     int hop = 512,
+    bool Function()? wanted,
   }) async => metrics;
 
   @override
@@ -209,6 +211,7 @@ class _FakeSpectrograms extends Fake implements SpectrogramService {
     int fftSize = 2048,
     int hop = 512,
     double maxHz = 5000,
+    bool Function()? wanted,
   }) async => spectrogram;
 }
 

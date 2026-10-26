@@ -80,6 +80,7 @@ class _CountingSpectro extends SpectrogramService {
     int fftSize = 2048,
     int hop = 512,
     double maxHz = 5000,
+    bool Function()? wanted,
   }) async {
     asked.add(path);
     return null;

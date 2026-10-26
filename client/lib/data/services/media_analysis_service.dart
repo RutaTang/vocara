@@ -53,8 +53,8 @@ class MediaAnalysisService {
   /// exceeds [maxAnalysisDuration] (a clear, user-presentable message —
   /// callers already handle analyze() throwing).
   ///
-  /// [wanted], when given, is asked once the gate admits the call: false
-  /// abandons it before the decode and returns null. A call can wait behind
+  /// [wanted], when given, is asked once the gate admits the call and again
+  /// after the decode: false abandons it and returns null. A call can wait behind
   /// other computes long enough to go stale (its example deselected, its
   /// screen left), and running it anyway only delays the ones still wanted.
   /// A caller passing it tells such a skip from a failed decode itself.
@@ -70,6 +70,8 @@ class MediaAnalysisService {
       if (wanted != null && !wanted()) return null;
       final pcm = await _decode(path, maxDuration: maxAnalysisDuration);
       if (pcm == null || pcm.samples.isEmpty) return null;
+      // Again: the decode of a long clip takes seconds, ample to deselect it.
+      if (wanted != null && !wanted()) return null;
       return _analyzeOffThread(pcm.samples, pcm.sampleRate);
     });
   }
