@@ -456,6 +456,20 @@ class LoudnessLane extends StatelessWidget {
   }
 }
 
+/// The loudest finite frame of each take's metrics, or none: found once per
+/// take rather than on every paint, which a pan, a zoom or a follow page
+/// flip asks of each loudness view (some 56k frames for a 10-minute take).
+/// Metrics are never mutated once computed (see the memos in pitch_lane.dart).
+final Expando<({double? db})> _peakMemo = Expando('loudnessPeak');
+
+double? _peakOf(VoiceMetrics m) => (_peakMemo[m] ??= () {
+  double? peak;
+  for (final v in m.loudness) {
+    if (v.isFinite && (peak == null || v > peak)) peak = v;
+  }
+  return (db: peak);
+}()).db;
+
 /// Draws the loudness envelope as a filled area + top line, auto-ranged to the
 /// take's peak over a fixed [_rangeDb] window.
 class LoudnessLanePainter extends CustomPainter {
@@ -482,11 +496,8 @@ class LoudnessLanePainter extends CustomPainter {
     // painting over the track-header column (see [PitchLanePainter.paint]).
     canvas.clipRect(Offset.zero & size);
 
-    var peak = -1e9;
-    for (final v in metrics.loudness) {
-      if (v.isFinite && v > peak) peak = v;
-    }
-    if (peak <= -1e8) return;
+    final peak = _peakOf(metrics);
+    if (peak == null) return;
     final floor = peak - _rangeDb;
 
     double xOf(double ms) => (ms - viewStartMs) / dur * size.width;
