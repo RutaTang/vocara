@@ -957,6 +957,16 @@ class _VerticalFaderState extends State<_VerticalFader> {
   /// A vertical drag the press turned into: its end saves.
   bool _dragging = false;
 
+  /// The pointer the press came from: another finger lifting off the fader
+  /// saved this press's level early, and its drag's end then saved again.
+  int? _pointer;
+
+  void _pointerGone(PointerEvent e) {
+    if (e.pointer != _pointer) return;
+    _pointer = null;
+    if (!_dragging) _settle();
+  }
+
   /// Saves the level a press or drag set, once.
   void _settle() {
     if (!_active) return;
@@ -1001,10 +1011,15 @@ class _VerticalFaderState extends State<_VerticalFader> {
           // its slop, before a drag has won, and a press another gesture took
           // (a parent's scroll) ends no gesture of this one at all.
           child: Listener(
-            onPointerUp: (_) => _dragging ? null : _settle(),
-            onPointerCancel: (_) => _dragging ? null : _settle(),
+            onPointerDown: (e) => _pointer ??= e.pointer,
+            onPointerUp: _pointerGone,
+            onPointerCancel: _pointerGone,
             child: GestureDetector(
               behavior: HitTestBehavior.opaque,
+              // Not the trackpad: a two-finger swipe scrolls the strip list,
+              // and a drag recognizer takes a trackpad pan by default, so the
+              // swipe moved (and saved) whichever fader it crossed.
+              supportedDevices: kPointerDragDevices,
               onTapDown: (d) {
                 _active = true;
                 update(d.localPosition.dy);

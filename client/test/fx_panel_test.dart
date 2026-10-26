@@ -266,11 +266,38 @@ void main() {
     await tester.pump(kPressTimeout + const Duration(milliseconds: 20));
     await g.moveBy(const Offset(25, 0)); // past the tap's slop, not the pan's
     await tester.pump();
-    await g.moveBy(const Offset(20, 0));
+    await g.moveBy(const Offset(20, 0)); // the pan wins
+    await tester.pump();
+    await g.moveBy(const Offset(10, 0)); // and moves the value
     await tester.pump();
     await g.up();
     await tester.pump();
     expect(vm.commits, 1);
+  });
+
+  testWidgets('a two-finger trackpad swipe over the editors moves nothing', (
+    tester,
+  ) async {
+    // The swipe scrolls the panel; a pan recognizer takes a trackpad pan by
+    // default, so it also moved (and saved) the slider or EQ band it crossed.
+    final vm = await pump(
+      tester,
+      track: _track(fx: _fxAllOff().copyWith(compOn: true, eqOn: true)),
+    );
+    for (final target in [byTypeName('_FxSlider'), byTypeName('_EqGraph')]) {
+      final at = tester.getRect(target).center;
+      final g = await tester.createGesture(kind: PointerDeviceKind.trackpad);
+      await g.panZoomStart(at);
+      await tester.pump();
+      await g.panZoomUpdate(at, pan: const Offset(30, -20));
+      await tester.pump();
+      await g.panZoomUpdate(at, pan: const Offset(60, -40));
+      await tester.pump();
+      await g.panZoomEnd();
+      await tester.pump();
+    }
+    expect(vm.fakeMixer.trackFx, isEmpty);
+    expect(vm.commits, 0);
   });
 
   testWidgets('a slider unmounted mid-pan still commits', (tester) async {

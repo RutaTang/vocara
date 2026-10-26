@@ -13,7 +13,8 @@ import '../../../domain/models/fx_bus.dart';
 import '../../../domain/models/fx_presets.dart';
 import '../../core/themes/studio.dart';
 import '../../core/widgets/cap_label.dart';
-import '../../core/widgets/studio_controls.dart' show FixedWidthReadout;
+import '../../core/widgets/studio_controls.dart'
+    show FixedWidthReadout, kPointerDragDevices;
 import '../view_model/song_practice_detail_view_model.dart';
 import 'track_context_menu.dart';
 
@@ -816,6 +817,16 @@ class _FxSliderState extends State<_FxSlider> {
   /// A pan the press turned into: its end commits.
   bool _panning = false;
 
+  /// The pointer the press came from: another finger lifting off the slider
+  /// committed this press's value early, and its pan's end then again.
+  int? _pointer;
+
+  void _pointerGone(PointerEvent e) {
+    if (e.pointer != _pointer) return;
+    _pointer = null;
+    if (!_panning) _commit();
+  }
+
   void _commit() {
     if (!_active) return;
     _active = false;
@@ -851,10 +862,15 @@ class _FxSliderState extends State<_FxSlider> {
         // its slop, before a pan has won, and a press the panel's scroll took
         // ends no gesture of this one at all.
         return Listener(
-          onPointerUp: (_) => _panning ? null : _commit(),
-          onPointerCancel: (_) => _panning ? null : _commit(),
+          onPointerDown: (e) => _pointer ??= e.pointer,
+          onPointerUp: _pointerGone,
+          onPointerCancel: _pointerGone,
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
+            // Not the trackpad: a two-finger swipe scrolls the panel, and a
+            // pan recognizer takes a trackpad pan by default, so the swipe
+            // moved (and saved) whichever slider it crossed.
+            supportedDevices: kPointerDragDevices,
             onTapDown: (d) => update(d.localPosition.dx),
             onTapUp: (_) => _commit(),
             onPanStart: (_) => _panning = true,
@@ -1008,6 +1024,8 @@ class _EqGraphState extends State<_EqGraph> {
           },
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
+            // Not the trackpad (see _FxSlider): the swipe moved a band.
+            supportedDevices: kPointerDragDevices,
             onPanStart: (d) => _dragging = _nearestBand(d.localPosition.dx, w),
             onPanUpdate: (d) {
               final i = _dragging;

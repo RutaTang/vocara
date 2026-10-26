@@ -932,8 +932,15 @@ class _Center extends StatelessWidget {
                           // takes and the master. Only on the native FX engine.
                           if (vm.mixer.supportsEffects) ...[
                             _BusesHeader(vm: vm),
+                            // Keyed by bus, as the take rows are: unkeyed, a
+                            // bus deleted above one whose fader was being
+                            // dragged handed the rest of the drag to the next.
                             for (final b in vm.mixer.fxBuses)
-                              _BusRow(vm: vm, bus: b),
+                              _BusRow(
+                                key: ValueKey('bus:${b.id}'),
+                                vm: vm,
+                                bus: b,
+                              ),
                           ],
                           const _MasterHeader(),
                           _MasterRow(vm: vm),
@@ -1544,7 +1551,7 @@ class _BusesHeader extends StatelessWidget {
 /// mute and fader (clicking it opens the bus's FX in the inspector), and its
 /// timeline area renders the composite of every take routed into it.
 class _BusRow extends StatelessWidget {
-  const _BusRow({required this.vm, required this.bus});
+  const _BusRow({super.key, required this.vm, required this.bus});
 
   final SongPracticeDetailViewModel vm;
   final FxBus bus;

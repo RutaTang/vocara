@@ -8,6 +8,7 @@ import 'package:vocara/data/services/local_storage_service.dart';
 import 'package:vocara/domain/models/audio_fx.dart';
 import 'package:vocara/domain/models/audio_track.dart';
 import 'package:vocara/domain/models/fx_bus.dart';
+import 'package:vocara/ui/core/widgets/studio_controls.dart';
 import 'package:vocara/ui/song_practice_detail/view_model/mixer_controller.dart';
 import 'package:vocara/ui/song_practice_detail/view_model/recording_controller.dart';
 import 'package:vocara/ui/song_practice_detail/view_model/song_practice_detail_view_model.dart';
@@ -402,4 +403,58 @@ void main() {
       expect(vm.fakeMixer.trackCommits, 1);
     });
   }
+  testWidgets('a second finger lifting off a held fader saves nothing early', (
+    tester,
+  ) async {
+    // Saving on any pointer's lift wrote finger 1's level when finger 2 let
+    // go, and the drag's end saved it again.
+    final vm = await pumpStrip(tester);
+    final at = tester.getRect(_faders.first).center;
+    final first = await tester.startGesture(
+      at,
+      kind: PointerDeviceKind.touch,
+      pointer: 1,
+    );
+    await tester.pump(kPressTimeout + const Duration(milliseconds: 20));
+    final second = await tester.startGesture(
+      at + const Offset(0, 20),
+      kind: PointerDeviceKind.touch,
+      pointer: 2,
+    );
+    await tester.pump();
+    await second.up();
+    await tester.pump();
+    expect(vm.fakeMixer.trackCommits, 0, reason: 'finger 1 still holds');
+    await first.moveBy(const Offset(0, -30));
+    await tester.pump();
+    await first.moveBy(const Offset(0, -10));
+    await tester.pump();
+    await first.up();
+    await tester.pumpAndSettle();
+    expect(vm.fakeMixer.trackCommits, 1);
+  });
+
+  testWidgets('a two-finger trackpad swipe over a strip moves nothing', (
+    tester,
+  ) async {
+    // The swipe scrolls the strip list; a drag recognizer takes a trackpad
+    // pan by default, so it also moved (and saved) the fader or knob it
+    // crossed.
+    final vm = await pumpStrip(tester);
+    for (final target in [_faders.first, find.byType(StudioPanKnob).first]) {
+      final at = tester.getRect(target).center;
+      final g = await tester.createGesture(kind: PointerDeviceKind.trackpad);
+      await g.panZoomStart(at);
+      await tester.pump();
+      await g.panZoomUpdate(at, pan: const Offset(30, -40));
+      await tester.pump();
+      await g.panZoomUpdate(at, pan: const Offset(60, -80));
+      await tester.pump();
+      await g.panZoomEnd();
+      await tester.pumpAndSettle();
+    }
+    expect(tester.takeException(), isNull, reason: 'the knob moved');
+    expect(vm.fakeMixer.trackVolumes, isEmpty);
+    expect(vm.fakeMixer.trackCommits, 0);
+  });
 }

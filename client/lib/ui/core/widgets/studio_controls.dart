@@ -80,6 +80,10 @@ class _StudioPanKnobState extends State<StudioPanKnob> {
     return MouseRegion(
       cursor: SystemMouseCursors.resizeLeftRight,
       child: GestureDetector(
+        // Not the trackpad: a two-finger swipe scrolls the strip list, and a
+        // pan recognizer takes a trackpad pan by default, so the swipe turned
+        // (and saved) whichever knob it crossed.
+        supportedDevices: kPointerDragDevices,
         behavior: HitTestBehavior.opaque,
         onPanStart: (_) => _drag = widget.value,
         onPanUpdate: (d) {
