@@ -1,5 +1,5 @@
 import 'package:flutter/gestures.dart'
-    show PointerDeviceKind, PointerScrollEvent, kSecondaryButton;
+    show PointerDeviceKind, PointerScrollEvent, kPressTimeout, kSecondaryButton;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:forui/forui.dart' show FIcons;
@@ -295,5 +295,63 @@ void main() {
     await g.up();
     await tester.pumpAndSettle();
     expect(vm.fakeMixer.trackCommits, 1);
+  });
+
+  Future<_FakeVm> pumpStrip(WidgetTester tester) async {
+    final vm = _FakeVm();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Align(
+            alignment: Alignment.topLeft,
+            child: SizedBox(
+              height: 400,
+              width: 600,
+              child: MixerStrip(
+                vm: vm,
+                tracks: [_trackN(0)],
+                onDeleteTrack: (_) {},
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    return vm;
+  }
+
+  testWidgets('a held fader press that is cancelled still saves its level', (
+    tester,
+  ) async {
+    // The press sets the level at tap-down; a pointer cancelled after it (a
+    // dialog opening while the button is held) fired no tap-up, so the level
+    // the engine played was never saved.
+    final vm = await pumpStrip(tester);
+    final g = await tester.startGesture(
+      tester.getRect(_faders.first).center + const Offset(0, -20),
+      kind: PointerDeviceKind.mouse,
+    );
+    await tester.pump(kPressTimeout + const Duration(milliseconds: 20));
+    expect(vm.fakeMixer.trackVolumes, isNotEmpty);
+    await g.cancel();
+    await tester.pumpAndSettle();
+    expect(vm.fakeMixer.trackCommits, 1);
+  });
+
+  testWidgets('a cancelled fader drag still saves its level', (tester) async {
+    final vm = await pumpStrip(tester);
+    final g = await tester.startGesture(
+      tester.getRect(_faders.first).center,
+      kind: PointerDeviceKind.mouse,
+    );
+    await tester.pump();
+    await g.moveBy(const Offset(0, -30));
+    await tester.pump();
+    await g.moveBy(const Offset(0, -10));
+    await tester.pump();
+    expect(vm.fakeMixer.trackVolumes, isNotEmpty);
+    await g.cancel();
+    await tester.pumpAndSettle();
+    expect(vm.fakeMixer.trackCommits, greaterThanOrEqualTo(1));
   });
 }

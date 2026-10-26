@@ -816,6 +816,9 @@ class _FxSlider extends StatelessWidget {
           behavior: HitTestBehavior.opaque,
           onTapDown: (d) => update(d.localPosition.dx),
           onTapUp: (_) => onCommit(),
+          // Cancelled after its tap-down (a dialog opening while held), a
+          // press fires no tap-up: the value it set was never saved.
+          onTapCancel: onCommit,
           onPanUpdate: (d) => update(d.localPosition.dx),
           onPanEnd: (_) => onCommit(),
           child: SizedBox(

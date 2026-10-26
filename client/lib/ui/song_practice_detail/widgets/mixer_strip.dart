@@ -989,6 +989,15 @@ class _VerticalFaderState extends State<_VerticalFader> {
               _active = false;
               widget.onChangeEnd();
             },
+            // A press cancelled after its tap-down (a dialog opening while the
+            // button is held) fires no tap-up: the level it set was never
+            // saved. (One turning into a drag lands here too, and the drag's
+            // end saves again; a cancelled drag still ends through its end.)
+            onTapCancel: () {
+              if (!_active) return;
+              _active = false;
+              widget.onChangeEnd();
+            },
             onVerticalDragUpdate: (d) {
               _active = true;
               update(d.localPosition.dy);

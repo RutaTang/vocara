@@ -10,7 +10,7 @@
 
 import 'dart:typed_data';
 
-import 'package:flutter/gestures.dart' show PointerDeviceKind;
+import 'package:flutter/gestures.dart' show PointerDeviceKind, kPressTimeout;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vocara/domain/models/audio_fx.dart';
@@ -202,6 +202,29 @@ void main() {
     await pump(tester, track: _track(fx: _fxAllOff()));
     expect(find.text('Ratio'), findsNothing);
     expect(find.text('Makeup'), findsNothing);
+  });
+
+  testWidgets('a held slider press that is cancelled still commits', (
+    tester,
+  ) async {
+    // The press sets the value at tap-down; a pointer cancelled after it (a
+    // dialog opening while the button is held) fired no tap-up, so the value
+    // the engine played was never saved.
+    final vm = await pump(
+      tester,
+      track: _track(fx: _fxAllOff().copyWith(compOn: true)),
+    );
+    final slider = find
+        .byWidgetPredicate((w) => w.runtimeType.toString() == '_FxSlider')
+        .first;
+    final g = await tester.startGesture(
+      tester.getRect(slider).center,
+      kind: PointerDeviceKind.mouse,
+    );
+    await tester.pump(kPressTimeout + const Duration(milliseconds: 20));
+    await g.cancel();
+    await tester.pump();
+    expect(vm.commits, 1);
   });
 
   testWidgets('every insert editor renders with its plugin on', (tester) async {
