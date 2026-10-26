@@ -1066,8 +1066,9 @@ class MixerController extends ChangeNotifier {
   // --- Engine graph sync ----------------------------------------------------
 
   /// Reconciles the engine with the whole current mix (tracks, buses, reverb,
-  /// master). Called by the view model's load/save tail, by recording start
-  /// (mutes the punched take), and after routing edits here.
+  /// master). Called by the view model's load/save tail (which is how the
+  /// routing edits here reach the engine) and by recording start (mutes the
+  /// punched take).
   Future<void> resyncPlayback() async {
     final practice = _practiceOf();
     if (practice == null) return;
