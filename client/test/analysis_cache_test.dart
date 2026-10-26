@@ -898,6 +898,82 @@ void main() {
     });
   });
 
+  group('a folded-out lane on screen', () {
+    // Lanes compute when folded open or toggled. Data the shared byte budget
+    // let go (the dock on other long takes) or a clip move re-keyed left a
+    // lane empty, saying the take could not be analyzed, until toggled again.
+    final single = _lane([_clip('s1', 0)], id: 'S');
+    final multi = _lane([_clip('m1', 0), _clip('m2', 2000)], id: 'M');
+    final odd = _lane([_clip('x1', 0)], id: 'X'); // nothing to analyze
+    _StubSpectrograms stub() => _StubSpectrograms(
+      metricsByPath: {
+        for (final p in ['s1.wav', 'm1.wav', 'm2.wav']) p: _metrics(10),
+      },
+      specsByPath: {
+        for (final p in ['s1.wav', 'm1.wav', 'm2.wav']) p: _spec(10),
+      },
+    );
+    AudioTrack? lanes(String id) => {'S': single, 'M': multi, 'X': odd}[id];
+
+    test("asks again for a take's analysis the budget let go", () async {
+      final cache = _cache(spectrograms: stub(), trackById: lanes);
+      addTearDown(cache.dispose);
+      cache.toggleTrackExpanded('S');
+      await pumpEventQueue();
+      expect(cache.metricsFor('S'), isNotNull);
+      expect(cache.laneLacksData('S'), isFalse);
+
+      cache.debugDropHalf('s1.wav', metrics: true);
+      expect(cache.laneLacksData('S'), isTrue);
+      await cache.healLane('S');
+      expect(cache.metricsFor('S'), isNotNull);
+      expect(cache.laneLacksData('S'), isFalse);
+    });
+
+    test('asks again for a lane merge let go', () async {
+      final cache = _cache(spectrograms: stub(), trackById: lanes);
+      addTearDown(cache.dispose);
+      cache.toggleTrackExpanded('M');
+      await pumpEventQueue();
+      expect(cache.metricsFor('M'), isNotNull);
+
+      cache.evictAnalysis('m1.wav');
+      expect(cache.laneLacksData('M'), isTrue);
+      await cache.healLane('M');
+      expect(cache.metricsFor('M'), isNotNull);
+    });
+
+    test('asks for the same take at most once in a while', () async {
+      // More analysis on screen than the budget holds: lanes and the dock
+      // would evict each other's in turn, one decode after another.
+      final s = stub();
+      final cache = _cache(spectrograms: s, trackById: lanes);
+      addTearDown(cache.dispose);
+      cache.toggleTrackExpanded('S');
+      await pumpEventQueue();
+      cache.debugDropHalf('s1.wav', metrics: true);
+      await cache.healLane('S');
+      final computes = s.bothCalls + s.metricsCalls;
+
+      cache.debugDropHalf('s1.wav', metrics: true);
+      await cache.healLane('S');
+      expect(s.bothCalls + s.metricsCalls, computes);
+      expect(cache.metricsFor('S'), isNull);
+    });
+
+    test('does not ask for a take that cannot be analyzed, or one folded '
+        'shut', () async {
+      final cache = _cache(spectrograms: stub(), trackById: lanes);
+      addTearDown(cache.dispose);
+      cache.toggleTrackExpanded('X');
+      await pumpEventQueue();
+      expect(cache.metricsFor('X'), isNull);
+      expect(cache.laneLacksData('X'), isFalse, reason: 'settled: none');
+
+      expect(cache.laneLacksData('S'), isFalse, reason: 'never folded open');
+    });
+  });
+
   group('aggregate eviction', () {
     final laneA = _lane([_clip('a1', 0), _clip('a2', 2000)], id: 'A');
     final laneC = _lane([_clip('c1', 0), _clip('c2', 2000)], id: 'C');

@@ -839,6 +839,95 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     }
   }
 
+  /// What the folded-open lanes of [trackId] read: metrics (pitch, loudness,
+  /// power) and the spectrogram (spectrogram, power).
+  ({bool metrics, bool spectrogram}) _laneNeeds(String trackId) {
+    final lanes = _trackLanes[trackId] ?? const {};
+    return (
+      metrics:
+          lanes.contains(AnalysisLane.pitch) ||
+          lanes.contains(AnalysisLane.loudness) ||
+          lanes.contains(AnalysisLane.power),
+      spectrogram:
+          lanes.contains(AnalysisLane.spectrogram) ||
+          lanes.contains(AnalysisLane.power),
+    );
+  }
+
+  /// Whether the folded-open lanes of [trackId] lack data they can still get,
+  /// with nothing computing it: the byte budget let it go (every lane, the
+  /// dock and the inspector share it), or a clip moved and re-keyed the lane.
+  /// Lanes are computed only when folded open or a lane is toggled, so they
+  /// sat empty, saying the take could not be analyzed, until the user
+  /// toggled the lane again. A lane on screen asks [healLane], as the dock
+  /// asks [healSelectedAnalysis].
+  bool laneLacksData(String trackId) {
+    if (!_expandedTracks.contains(trackId)) return false;
+    final t = _trackById(trackId);
+    if (t == null) return false;
+    final needs = _laneNeeds(trackId);
+    if (!needs.metrics && !needs.spectrogram) return false;
+    if (t.clips.length > 1) {
+      final key = aggregateKeyFor(t);
+      return !_aggLoading.contains(key) &&
+          !_aggAnalysisCache.containsKey(key) &&
+          !_aggUnavailable.contains(key) &&
+          !_laneHealBlocked.contains(key);
+    }
+    final path = t.primaryClip?.audioFilePath;
+    if (path == null ||
+        _metricsLoading.contains(path) ||
+        _spectrogramLoading.contains(path)) {
+      return false;
+    }
+    return (needs.metrics && !_metricsSettled(path)) ||
+        (needs.spectrogram && !_spectrogramSettled(path));
+  }
+
+  /// Lane aggregates a heal merged and could not cache: not asked for again,
+  /// or every rebuild of the lane merged it once more (see [_healBlocked]).
+  final Set<String> _laneHealBlocked = {};
+
+  /// When each lane subject (a clip's path, or a lane aggregate's key) was
+  /// last asked again by [healLane].
+  final Map<String, DateTime> _laneHealedAt = {};
+
+  /// How soon [healLane] asks again for the same subject. More analysis on
+  /// screen than the byte budget holds would otherwise have the lanes and the
+  /// dock evict each other's in turn, one decode after another, for good.
+  static const _laneHealInterval = Duration(seconds: 30);
+
+  /// Asks again for what [laneLacksData] says the lanes of [trackId] lack.
+  Future<void> healLane(String trackId) async {
+    if (!laneLacksData(trackId)) return;
+    final t = _trackById(trackId)!;
+    final subject = t.clips.length > 1
+        ? aggregateKeyFor(t)
+        : t.primaryClip!.audioFilePath;
+    final now = DateTime.now();
+    _laneHealedAt.removeWhere(
+      (_, at) => now.difference(at) >= _laneHealInterval,
+    );
+    if (_laneHealedAt.containsKey(subject)) return;
+    _laneHealedAt[subject] = now;
+    if (t.clips.length > 1) {
+      final key = subject;
+      await _ensureAggregateAnalysis(t);
+      if (!_disposed &&
+          !_aggAnalysisCache.containsKey(key) &&
+          !_aggUnavailable.contains(key)) {
+        _laneHealBlocked.add(key);
+      }
+      return;
+    }
+    final needs = _laneNeeds(trackId);
+    await _ensureHalves(
+      t.primaryClip!.audioFilePath,
+      spectrogram: needs.spectrogram,
+      metrics: needs.metrics,
+    );
+  }
+
   /// Computes whatever the currently-shown lanes need (metrics / spectrogram).
   void _ensureLaneData(String trackId) {
     final lanes = _trackLanes[trackId] ?? const {};

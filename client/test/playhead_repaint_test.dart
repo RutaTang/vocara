@@ -487,6 +487,24 @@ void main() {
     expect(find.byType(SpectrogramImage), findsOneWidget);
   });
 
+  testWidgets('a folded-out lane asks again for metrics the cache let go', (
+    tester,
+  ) async {
+    final vm = await _pumpScreen(tester);
+    vm.analysis.toggleTrackExpanded('t0'); // the pitch lane
+    await tester.pump(const Duration(milliseconds: 16));
+    await tester.pump(const Duration(milliseconds: 16));
+    expect(vm.analysis.metricsFor('t0'), isNotNull);
+
+    vm.analysis.debugDropHalf('/pool/t0.wav', metrics: true);
+    // Any notification rebuilds the lane (here a fader tick on another lane).
+    vm.mixer.setTrackVolumeLive('t3', 0.4);
+    await tester.pump(const Duration(milliseconds: 16));
+    await tester.pump(const Duration(milliseconds: 16));
+    await tester.pump(const Duration(milliseconds: 16));
+    expect(vm.analysis.metricsFor('t0'), isNotNull);
+  });
+
   testWidgets('the Pitch and Timbre tabs repaint only their playheads per '
       'tick', (tester) async {
     final vm = await _pumpScreen(tester);
