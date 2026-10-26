@@ -127,8 +127,10 @@ impl StreamingSource {
     }
 
     /// Enters a block (see the `feed` module doc, "Taking the queue back"):
-    /// marks the node inside, then reads the pop limit for the whole block.
-    /// Both SeqCst, against the feeder's limit store and its read of the mark.
+    /// marks the node inside, then reads the pop limit the block keeps (until
+    /// it sees it lifted, see [`Self::at_limit`]). Both SeqCst, against the
+    /// feeder's limit store and its read of the mark: that ordering is what
+    /// makes every later take-back wait this block out.
     #[inline]
     fn enter_block(&mut self) {
         use std::sync::atomic::Ordering;
@@ -154,10 +156,11 @@ impl StreamingSource {
     /// the moment a take-back holds it (between the feeder's raise and its
     /// lift), and held there for the whole block it dropped a callback out of
     /// steady playback — a loop-handle drag replans on every tick. Seen
-    /// lifted (Acquire, against the feeder's Release lift after it published
-    /// the new fence), the slots are the new plan's and the block plays on; a
-    /// later take-back waits this block out before it retracts anything, as it
-    /// does every block that entered before its raise.
+    /// lifted (Acquire, against the feeder's Release lift), the take-back is
+    /// over: its new fence published, or, after a wait that timed out, nothing
+    /// taken back at all; either way the block plays on. A later take-back
+    /// waits this block out before it retracts anything, as it does every
+    /// block that entered before its raise.
     #[inline]
     fn at_limit(&self) -> bool {
         use std::sync::atomic::Ordering;
@@ -452,8 +455,9 @@ impl StreamingSource {
                     out[o] = 0.0;
                     out[o + 1] = 0.0;
                     // Held at a take-back's limit is the feeder mid-replan, not
-                    // the ring run dry: no underrun.
-                    if self.rx.is_empty() && !self.at_limit() && self.pending_fence.is_none() {
+                    // the ring run dry: no underrun. The limit is read first, so
+                    // a lift between the two reads finds the ring as it now is.
+                    if !self.at_limit() && self.rx.is_empty() && self.pending_fence.is_none() {
                         // Wait-free health signal, read via the ctrl by the
                         // FFI aggregate (ve_stream_xruns).
                         self.ctrl

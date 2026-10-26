@@ -80,8 +80,9 @@ pub struct StreamCtrl {
     pub(crate) node_entered: AtomicU32,
     pub(crate) node_left: AtomicU32,
     /// The ring index the node may neither pop nor peek at or past, read at
-    /// the start of each block; [`NO_POP_LIMIT`] when free. Raised only while
-    /// the feeder takes the queue back (see the module doc).
+    /// the start of each block (and again while the node stands at it);
+    /// [`NO_POP_LIMIT`] when free. Raised only while the feeder takes the
+    /// queue back (see the module doc).
     pub(crate) pop_limit: AtomicUsize,
     /// The node has taken a fence's first frame and still waits for its base
     /// frame, the next one it pops (written at the end of each block): taking
@@ -1015,7 +1016,13 @@ mod tests {
         let before = f.ctrl.xruns.load(Ordering::Relaxed);
         h.seek(tl);
         assert!(f.discard_queued(), "the queue is taken back");
-        // A whole block inside the take-back: the limit stays raised.
+        // The new plan queued, the limit not yet lifted: a whole block inside the take-back
+        // is held by the limit alone (the ring has audio for it).
+        assert!(f.push_fence(f.generation.wrapping_add(1), tl, true));
+        assert!(
+            f.producer.free() < f.producer.capacity(),
+            "the ring holds the fence"
+        );
         let out = block(&mut node, tl, 512);
         f.ctrl.pop_limit.store(NO_POP_LIMIT, Ordering::Release);
         let _ = std::fs::remove_file(&path);
