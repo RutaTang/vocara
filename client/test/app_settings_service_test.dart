@@ -1079,6 +1079,56 @@ void main() {
       expect(service.bluetoothInOutConflictNow(), isFalse);
     });
 
+    test('a Bluetooth mic warns whatever output is picked', () async {
+      // A take plays through the duplex mic unit, which renders to the mic's
+      // own device: with the speakers picked as output, the AirPods mic still
+      // put the AirPods (playing the take's backing) in call mode, unwarned.
+      AudioDevice bt({bool input = false}) => AudioDevice(
+        uid: 'airpods',
+        name: 'AirPods Pro',
+        rate: 48000,
+        isInput: input,
+        isBluetooth: true,
+        transport: AudioTransport.bluetooth,
+      );
+      outs = [_builtInOut, bt()];
+      ins = [_builtInMic, bt(input: true)];
+      storage.doc = {
+        'outputDeviceUid': _builtInOut.uid,
+        'inputDeviceUid': 'airpods',
+      };
+      await service.load();
+      expect(service.bluetoothInOutConflict, isTrue);
+      expect(service.bluetoothInOutConflictNow(), isTrue);
+    });
+
+    test(
+      'REC judges the mic the engine has open, not the returned pick',
+      () async {
+        // A mic opened on a fallback stays there after the pick returns.
+        AudioDevice bt({bool input = false}) => AudioDevice(
+          uid: 'airpods',
+          name: 'AirPods Pro',
+          rate: 48000,
+          isDefault: true,
+          isInput: input,
+          isBluetooth: true,
+          transport: AudioTransport.bluetooth,
+        );
+        outs = [bt()];
+        ins = [_builtInMic, bt(input: true)];
+        storage.doc = {'inputDeviceUid': _builtInMic.uid};
+        await service.load();
+        final engine = _FakeEngine()
+          ..streamState = 1
+          ..boundInput = 'airpods';
+        service.attachEngine(engine);
+        expect(service.bluetoothInOutConflictNow(), isTrue);
+        engine.streamState = 0; // closed: the pick, the built-in mic
+        expect(service.bluetoothInOutConflictNow(), isFalse);
+      },
+    );
+
     test(
       'the same Bluetooth headset listed under two uids is still one device',
       () async {

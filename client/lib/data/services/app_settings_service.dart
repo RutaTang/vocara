@@ -255,16 +255,33 @@ class AppSettingsService extends ChangeNotifier {
     return null;
   }
 
-  /// True when the effective input and output are the SAME Bluetooth device: opening its mic
-  /// forces HFP and degrades the output (a hardware limit — the UI warns to pick another mic).
+  /// True when a take would record from a Bluetooth headset that also plays: opening its mic
+  /// forces its call mode (HFP), which degrades what it plays (a hardware limit — the UI warns to
+  /// pick another mic). A take always plays through the duplex mic unit, which renders to the
+  /// mic's own device when that has an output side (else to the system default), whatever output
+  /// is picked: so the input decides, and the output pick does not.
   bool get bluetoothInOutConflict => _conflict(_outputDevices, _inputDevices);
 
   /// [bluetoothInOutConflict] judged on a fresh enumeration, without adopting it (like
-  /// [syncInputChannel]): the lists are polled only while Settings is open, so a song page judged
-  /// by the lists from when it opened — a headset turned off since was still warned about, one
-  /// connected since recorded in its call mode unwarned.
-  bool bluetoothInOutConflictNow() =>
-      _conflict(_enumerateOutputs(), _enumerateInputs());
+  /// [syncInputChannel]), and on the device the mic is open on, if it is: the lists are polled
+  /// only while Settings is open, so a song page judged by the lists from when it opened, and a
+  /// mic left open on a fallback stays there after the pick returns.
+  bool bluetoothInOutConflictNow() {
+    final engine = _engine;
+    String? bound;
+    if (engine != null &&
+        GraphAudioPlaybackService.inputStateRunning(
+          engine.inputStreamState(),
+        )) {
+      final b = engine.actualInputDevice();
+      if (b.isNotEmpty) bound = b;
+    }
+    return _conflict(
+      _enumerateOutputs(),
+      _enumerateInputs(),
+      boundInput: bound,
+    );
+  }
 
   // The device a pick resolves to in [list]: the pick while connected, else the system default
   // (what the engine uses on System Default, or while the pick is unplugged — which read as no
@@ -278,15 +295,18 @@ class AppSettingsService extends ChangeNotifier {
     return null;
   }
 
-  bool _conflict(List<AudioDevice> outputs, List<AudioDevice> inputs) {
-    final out = _inUse(outputs, _outputDeviceUid);
-    final inp = _inUse(inputs, _inputDeviceUid);
-    if (out == null || inp == null) return false;
-    if (!out.isBluetooth && !inp.isBluetooth) return false;
-    // One device in both lists — or, should the system list a headset's two
-    // directions under two uids, one Bluetooth product named alike in both.
-    return out.uid == inp.uid ||
-        (out.isBluetooth && inp.isBluetooth && out.name == inp.name);
+  bool _conflict(
+    List<AudioDevice> outputs,
+    List<AudioDevice> inputs, {
+    String? boundInput,
+  }) {
+    final inp = _byUid(inputs, boundInput) ?? _inUse(inputs, _inputDeviceUid);
+    if (inp == null || !inp.isBluetooth) return false;
+    // Its own output side — the same uid, or, should the system list a headset's two directions
+    // under two uids, one Bluetooth product named alike.
+    return outputs.any(
+      (o) => o.uid == inp.uid || (o.isBluetooth && o.name == inp.name),
+    );
   }
 
   /// Whether the audible monitor (hear-yourself) is allowed: only when the device actually
