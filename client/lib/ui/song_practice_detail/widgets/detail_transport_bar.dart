@@ -40,9 +40,11 @@ class DetailTransportBar extends StatelessWidget {
         practice.hasAccompaniment ||
         practice.hasReference ||
         practice.activeVocalTracks.isNotEmpty;
-    final canPlay = hasTracks && !vm.isRecording;
     // A take in REC's arm window is a take too: Stop and the pill cancel it.
     final taking = vm.isRecording || vm.recording.isStartingTake;
+    // Dead there too: the backing it started jumped back to the take's start
+    // the moment the mic armed.
+    final canPlay = hasTracks && !taking;
 
     // Its own layer: a relayout elsewhere on the screen (the dock's per-tick
     // readouts climb to the Scaffold) repaints the screen's shell, not the

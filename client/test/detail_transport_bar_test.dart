@@ -252,6 +252,13 @@ void main() {
     );
   });
 
+  testWidgets('play is dead while REC is still arming', (tester) async {
+    // isRecording flips only once the mic delivers: Play in that window
+    // started the backing, which the take then jumped back to its start.
+    await pump(tester, practice: _practice(takes: [_take('t1')]), arming: true);
+    expect(enabled(tester, FIcons.play), isFalse);
+  });
+
   testWidgets('stop WHILE RECORDING ends the take, not the transport', (
     tester,
   ) async {
