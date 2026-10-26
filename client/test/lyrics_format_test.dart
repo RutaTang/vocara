@@ -149,6 +149,8 @@ void main() {
       [0, 9500],
     );
     expect(parseLrc('[offset:-250]\n[00:10.00]a').single.timeMs, 10250);
+    // Too long to be a number: no offset, not a parse that throws.
+    expect(parseLrc('[offset:+${'9' * 25}]\n[00:10.00]a').single.timeMs, 10000);
   });
 
   test('looksLikeLrc distinguishes lrc from plain text', () {

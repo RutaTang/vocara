@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
@@ -8,6 +9,8 @@ import 'package:path_provider/path_provider.dart';
 /// directory, and hands out per-collection directories for binary assets
 /// (e.g. imported/recorded audio). Stateless apart from a cached root dir.
 class LocalStorageService {
+  LocalStorageService({@visibleForTesting Directory? root}) : _root = root;
+
   Directory? _root;
 
   Future<Directory> _collectionDir(String collection) async {
@@ -27,11 +30,13 @@ class LocalStorageService {
     final dir = await _collectionDir(collection);
     final file = File(p.join(dir.path, '$id.json'));
     if (!await file.exists()) return null;
+    // Read, then decode: dart:io reports bytes that are not UTF-8 as a
+    // FileSystemException too, and taken as unreadable they blocked every
+    // write of a document that is only corrupt.
+    final bytes = await file.readAsBytes();
     try {
-      final decoded = jsonDecode(await file.readAsString());
+      final decoded = jsonDecode(utf8.decode(bytes));
       return decoded is Map<String, dynamic> ? decoded : null;
-    } on FileSystemException {
-      rethrow;
     } catch (_) {
       // A truncated / corrupt / non-object file (partial write after a crash,
       // manual edit) must not crash startup — treat it as "no value", so the

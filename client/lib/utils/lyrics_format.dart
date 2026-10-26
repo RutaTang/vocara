@@ -139,7 +139,9 @@ List<LyricLine> parseLrc(String content) {
   var offsetMs = 0;
   for (final raw in content.split('\n')) {
     final m = _lrcOffsetTag.firstMatch(raw.trim());
-    if (m != null) offsetMs = int.parse(m.group(1)!);
+    // An offset too long to be a number of milliseconds is no offset.
+    final ms = m == null ? null : int.tryParse(m.group(1)!);
+    if (ms != null) offsetMs = ms;
   }
   final out = <LyricLine>[];
   for (final raw in content.split('\n')) {

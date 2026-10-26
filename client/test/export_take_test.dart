@@ -365,6 +365,34 @@ void main() {
     expect(picks.single, endsWith('歌 - Take 1.wav'));
   });
 
+  test('a long take name keeps its clip number', () async {
+    // The number was cut with the name: two clips suggested one file name.
+    final practice =
+        (await repo.getPractice(practiceId) as Ok<SongPractice>).value;
+    final long = 'a full set recorded live at the rehearsal room ' * 3;
+    await repo.savePractice(
+      practice.copyWith(
+        vocalTracks: [
+          for (final t in practice.vocalTracks)
+            t.displayName == 'Take 2' ? t.copyWith(displayName: long) : t,
+        ],
+      ),
+    );
+    final picks = <String>[];
+    final vm = await pumpVm(picks, (_) async => null);
+    final take = vm.practice!.vocalTracks.firstWhere(
+      (t) => t.displayName == long,
+    );
+
+    await vm.exportClipAudio(take.id, take.clips[0].id);
+    await vm.exportClipAudio(take.id, take.clips[1].id);
+
+    // (The fixture's first clip shares the backing's bytes, so its pool file
+    // is the backing's .mp3.)
+    expect(picks[0], matches(r' \(clip 1\)\.\w+$'));
+    expect(picks[1], matches(r' \(clip 2\)\.\w+$'));
+  });
+
   test('keeps the source extension for a backing export', () async {
     final dest = p.join(tmp.path, 'backing_export.mp3');
     final picks = <String>[];

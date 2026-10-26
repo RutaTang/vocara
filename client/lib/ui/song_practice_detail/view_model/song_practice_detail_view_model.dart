@@ -1694,8 +1694,9 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       clip.audioFilePath,
       suggestedName: _exportName(
         practice.title,
-        '${track.displayName}$suffix',
+        track.displayName,
         clip.audioFilePath,
+        suffix: suffix,
       ),
     );
   }
@@ -1705,11 +1706,18 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// extension is kept (an imported mp3 exports as .mp3; recordings are .wav).
   /// A file name holds 255 bytes, and neither name is bounded: the suggestion
   /// the copy then failed on is cut to fit, the title first (the take's name
-  /// says which file it is).
-  static String _exportName(String title, String trackName, String sourcePath) {
+  /// says which file it is), and never the [suffix] after the take's name
+  /// (cut with it, two clips of a take suggested one name).
+  static String _exportName(
+    String title,
+    String trackName,
+    String sourcePath, {
+    String suffix = '',
+  }) {
     final ext = p.extension(sourcePath);
     String flat(String s) => s.replaceAll(RegExp(r'[/\\:]'), '-');
-    final tail = ' - ${_fitBytes(flat(trackName), 120)}';
+    final name = _fitBytes(flat(trackName), 120 - utf8.encode(suffix).length);
+    final tail = ' - $name$suffix';
     final base = _fitBytes(flat(title), 200 - utf8.encode(tail).length) + tail;
     return '$base${ext.isEmpty ? '.wav' : ext}';
   }
