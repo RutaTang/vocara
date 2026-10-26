@@ -3217,7 +3217,13 @@ fn writer_run(mut rec: Consumer<[Smp; CHANNELS]>, rx: mpsc::Receiver<WriterCmd>)
                     failed = false;
                 }
                 WriterCmd::Shutdown => {
-                    if let Some(w) = wav.take() {
+                    // An engine torn down mid-take: drain the buffered tail into the take
+                    // first, as Stop does (it is up to the ring's ~2.7 s of the take's
+                    // end). There is no one left to report a failure to.
+                    if let Some(mut w) = wav.take() {
+                        while let Some(f) = rec.pop() {
+                            let _ = w.write_sample(f[0]);
+                        }
                         let _ = w.finalize();
                     }
                     return;
@@ -4840,6 +4846,37 @@ mod record_writer_tests {
         assert_eq!(prod.free(), prod.capacity());
         let bytes = std::fs::read(&path).expect("recorded WAV must exist");
         assert_eq!(bytes.len(), 44, "stale frames must not lead the take");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn shutdown_mid_take_keeps_the_buffered_tail() {
+        // ve_destroy drops the writer with a take still recording: the frames still in the
+        // ring are the take's end, and Shutdown must write them as Stop does.
+        use super::{writer_run, WriterCmd};
+        let (mut prod, cons) = spsc::<[Smp; CHANNELS]>(1024);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let join = std::thread::spawn(move || writer_run(cons, rx));
+        let path = temp_wav("shutdown_tail");
+        let (ack, ack_rx) = std::sync::mpsc::channel();
+        tx.send(WriterCmd::Start(path.to_str().unwrap().to_string(), ack))
+            .unwrap();
+        assert!(ack_rx.recv().unwrap(), "start must ack the file creation");
+        // Let the writer find the ring empty and park in its idle sleep, so the tail and
+        // the Shutdown both wait for it there (commands are handled before the drain).
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        for _ in 0..20 {
+            assert!(prod.push([0.75, 0.0]));
+        }
+        tx.send(WriterCmd::Shutdown).unwrap();
+        join.join().unwrap();
+        let bytes = std::fs::read(&path).expect("recorded WAV must exist");
+        // 44-byte header + the take's 20 mono float32 samples.
+        assert_eq!(
+            bytes.len(),
+            44 + 20 * 4,
+            "the buffered tail must reach the take"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
