@@ -756,6 +756,20 @@ void main() {
           ..recording = false
           ..recPeaks = const [];
       });
+      // What no envelope shows keeps them: keyed on whole tracks and the bus
+      // list, a pan or a bus level tick refolded every lane at pointer rate.
+      host.mixer.setTrackPanLive('v1', 0.3);
+      host.mixer.setBusVolumeLive('busA', 0.4);
+      expect(identical(host.mixer.masterWaveformPeaks, master), isTrue);
+      expect(identical(host.mixer.busWaveformPeaks('busA'), bus), isTrue);
+      await expectRefolded(
+        'a bus mute',
+        () => host.mixer.toggleBusMute('busA'),
+      );
+      await expectRefolded(
+        'a send',
+        () => host.mixer.addTrackSend('v2', 'busB'),
+      );
     });
 
     test('busWaveformPeaks folds only takes routed into the bus, including '

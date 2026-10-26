@@ -1000,9 +1000,12 @@ class MixerController extends ChangeNotifier {
   static bool debugNoEnvelopeCache = false;
 
   /// [fold]'s envelope for [busId], refolded only when what it reads changed:
-  /// the timeline length, the master gain, the A/B backing, the buses (solo
-  /// and routing), every track the mix holds — compared by identity, as any
-  /// edit replaces it — and the take being recorded.
+  /// the timeline length, the master gain, the A/B backing, each bus's mute,
+  /// solo and routing, each track's mute, solo, level, routing and clips
+  /// (lists compared by identity, as any edit replaces them), and the take
+  /// being recorded. Not a pan or FX tick, nor a bus's level, pan or FX,
+  /// which no envelope shows: keyed on whole tracks and the bus list, each
+  /// of those refolded the master and every bus lane at pointer rate.
   List<double> _envelope(String? busId, List<double> Function() fold) {
     if (debugNoEnvelopeCache) return List<double>.unmodifiable(fold());
     final recording = _isRecording();
@@ -1010,7 +1013,6 @@ class MixerController extends ChangeNotifier {
       _practiceOf()?.timelineDurationMs,
       masterVolume,
       _playReference,
-      fxBuses,
       recording,
       if (recording) ...[
         _recordingTargetId(),
@@ -1018,7 +1020,22 @@ class MixerController extends ChangeNotifier {
         _recordingStartMs(),
         _recordingDurationMs(),
       ],
-      ..._allTracksOf(),
+      for (final b in fxBuses) ...[
+        b.id,
+        b.muted,
+        b.soloed,
+        b.outputBusId,
+        b.sends,
+      ],
+      for (final t in _allTracksOf()) ...[
+        t.id,
+        t.muted,
+        t.soloed,
+        t.volume,
+        t.busId,
+        t.sends,
+        t.clips,
+      ],
     ];
     final memo = _envelopes[busId];
     if (memo != null && _sameKey(memo.key, key)) return memo.peaks;
