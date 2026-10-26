@@ -540,9 +540,10 @@ impl Vpio {
                         // echo bleed always beats no mic at all. One-shot setup log
                         // (host thread, not the RT callback).
                         in_ctx.aec_bypass = true;
-                        oc.push_ref = false; // leave the ref ring unpumped so it can't grow
-                                             // Without the AEC in the capture path its block latency no longer
-                                             // applies to recorded takes.
+                        // Leave the ref ring unpumped so it can't grow.
+                        oc.push_ref = false;
+                        // Without the AEC in the capture path its block latency no longer
+                        // applies to recorded takes.
                         RECORD_LATENCY_FRAMES.store(io_round_trip, Ordering::Relaxed);
                         AEC_BYPASSED.store(true, Ordering::Relaxed);
                         // Tell the UI, not just stderr: the user should know

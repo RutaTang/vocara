@@ -1107,10 +1107,11 @@ impl Aec {
         let mut s_err_bg = 0.0f64;
         for i in 0..b {
             let d = self.in_mic[i] as f64;
-            let x = self.in_far[i] as f64; // far-end INPUT (reference)
-            let yh = sanitize(self.y_re[b + i]) as f64; // foreground echo estimate (sanitized so
-                                                        // the recursive power stats can never be
-                                                        // poisoned by a non-finite estimate)
+            // Far-end INPUT (reference).
+            let x = self.in_far[i] as f64;
+            // Foreground echo estimate, sanitized so the recursive power stats can
+            // never be poisoned by a non-finite estimate.
+            let yh = sanitize(self.y_re[b + i]) as f64;
             let ef = self.eblk_fg[i] as f64;
             let eb = self.eblk_bg[i] as f64;
             s_mic += d * d;
@@ -1751,9 +1752,10 @@ impl Aec {
         // (it is not in the reference and the filter never models it), so it cannot self-attenuate.
         for k in 0..half {
             let d_pow = self.d_pow[k] + EPS;
-            let ref_echo_pow = self.gxx[k] * self.x_ref[k]; // shaped path * far-end power
-            let echo_pow = ref_echo_pow.max(self.yh_pow[k]); // ∪ the filter's own estimate
-                                                             // clamp01 maps NaN→0 (f32::clamp would propagate NaN into sup_gain).
+            // The shaped path * far-end power, ∪ the filter's own estimate.
+            let ref_echo_pow = self.gxx[k] * self.x_ref[k];
+            let echo_pow = ref_echo_pow.max(self.yh_pow[k]);
+            // clamp01 maps NaN→0 (f32::clamp would propagate NaN into sup_gain).
             let ratio = clamp01(SUPPRESS_OVER * echo_pow / d_pow);
             let raw_gain = (1.0 - ratio).max(SUPPRESS_FLOOR);
             self.sup_gain[k] =

@@ -137,8 +137,9 @@ mod tests {
         assert_eq!(frames_at_engine_rate(512, 48_000.0), 512);
         // 44.1 kHz device frames grow by 48/44.1 (e.g. a 44.1 kHz USB interface).
         assert_eq!(frames_at_engine_rate(441, 44_100.0), 480);
-        assert_eq!(frames_at_engine_rate(512, 44_100.0), 557); // 512 * 48/44.1 = 557.28 → 557
-                                                               // High-rate device frames shrink.
+        // 512 * 48/44.1 = 557.28 → 557.
+        assert_eq!(frames_at_engine_rate(512, 44_100.0), 557);
+        // High-rate device frames shrink.
         assert_eq!(frames_at_engine_rate(960, 96_000.0), 480);
         assert_eq!(frames_at_engine_rate(882, 88_200.0), 480);
         // Degenerate rates pass the count through unchanged.

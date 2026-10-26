@@ -1174,7 +1174,8 @@ pub fn spawn(
     };
     let mut mon_gain = Smoothed::new(0.0);
     mon_gain.set_time(0.010, ENGINE_SR); // 10 ms arm/disarm ramp
-                                         // Monitor reverb: a pleasant vocal room, dry kept at 1 so the direct voice is always heard.
+
+    // Monitor reverb: a pleasant vocal room, dry kept at 1 so the direct voice is always heard.
     let mut mon_reverb = ReverbNode::new(0.6, 0.5, 0.2, 1.0, 1.0);
     mon_reverb.prepare(ENGINE_SR, max_block);
     let rt = RtProcessor {

@@ -358,9 +358,10 @@ pub fn build(spec: ProjectSpec) -> GraphDesc {
         }
         edges.push(Edge::simple(prev, gain));
         edges.push(Edge::simple(gain, pan));
-        edges.push(Edge::simple(pan, output_target(b.output))); // bus out → master / bus
-                                                                // Shared reverb send: a post-fader tap of the bus fader into the one reverb bus.
-                                                                // Always created (even at -120 dB "off") so the control plane can address it.
+        // Bus out → master / bus.
+        edges.push(Edge::simple(pan, output_target(b.output)));
+        // Shared reverb send: a post-fader tap of the bus fader into the one reverb bus.
+        // Always created (even at -120 dB "off") so the control plane can address it.
         let bus_send = bus_send_id(b.id);
         nodes.push(NodeEntry::new(
             bus_send,

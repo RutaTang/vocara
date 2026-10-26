@@ -467,10 +467,11 @@ const PAUSED_PRIME_FRAMES: usize = crate::feed::MAX_CALLBACK_FRAMES;
 const RING_FRAMES: usize = 1 << 16; // ~1.4 s @ 48k of headroom
 const MIC_RING_FRAMES: usize = 1 << 12; // 4096 frames ≈ 85 ms @ 48k (monitor jitter buffer)
 const CAP_RING_FRAMES: usize = 1 << 13; // analysis capture (Dart polls ve_input_frames)
-                                        // Recording ring (drained by the writer thread). 2^17 frames ≈ 2.7 s @ 48k (1 MiB): the
-                                        // writer's ~1 s header-patch flush can stall multi-hundred ms on a slow or full disk, and
-                                        // the old 2^14 (≈ 341 ms) headroom made such a stall silently drop take audio. Overflow is
-                                        // still counted (`rec_dropped`) and surfaced — headroom reduces the odds, never the honesty.
+
+// Recording ring (drained by the writer thread). 2^17 frames ≈ 2.7 s @ 48k (1 MiB): the
+// writer's ~1 s header-patch flush can stall multi-hundred ms on a slow or full disk, and
+// the old 2^14 (≈ 341 ms) headroom made such a stall silently drop take audio. Overflow is
+// still counted (`rec_dropped`) and surfaced — headroom reduces the odds, never the honesty.
 const REC_RING_FRAMES: usize = 1 << 17;
 
 /// Keep-alive budget for decoded PCM whose path is NOT in the committed graph. Live paths
