@@ -267,20 +267,19 @@ class AppSettingsService extends ChangeNotifier {
   /// only while Settings is open, so a song page judged by the lists from when it opened, and a
   /// mic left open on a fallback stays there after the pick returns.
   bool bluetoothInOutConflictNow() {
+    final inputs = _enumerateInputs();
     final engine = _engine;
     String? bound;
     if (engine != null &&
         GraphAudioPlaybackService.inputStateRunning(
           engine.inputStreamState(),
         )) {
+      // No uid while open: bound to the system default (picked, or a fallback), as in
+      // [syncInputChannel].
       final b = engine.actualInputDevice();
-      if (b.isNotEmpty) bound = b;
+      bound = b.isNotEmpty ? b : _defaultIn(inputs);
     }
-    return _conflict(
-      _enumerateOutputs(),
-      _enumerateInputs(),
-      boundInput: bound,
-    );
+    return _conflict(_enumerateOutputs(), inputs, boundInput: bound);
   }
 
   // The device a pick resolves to in [list]: the pick while connected, else the system default

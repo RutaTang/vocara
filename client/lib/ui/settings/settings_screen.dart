@@ -178,9 +178,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 if (settings.bluetoothInOutConflict) ...[
                   const SizedBox(height: 12),
                   const _WarningBanner(
-                    'Input and output are the same Bluetooth device. Bluetooth can\'t do '
-                    'high-quality output and microphone at once, so recording will drop the '
-                    'sound quality. Pick a different microphone (e.g. the built-in mic).',
+                    'The microphone is a Bluetooth headset. Bluetooth can\'t do '
+                    'high-quality sound and a microphone at once, so recording drops the '
+                    'headset to call quality. Pick a different microphone (e.g. the '
+                    'built-in mic).',
                   ),
                 ],
                 const SizedBox(height: 24),

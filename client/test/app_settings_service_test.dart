@@ -1102,32 +1102,50 @@ void main() {
       expect(service.bluetoothInOutConflictNow(), isTrue);
     });
 
-    test(
-      'REC judges the mic the engine has open, not the returned pick',
-      () async {
-        // A mic opened on a fallback stays there after the pick returns.
-        AudioDevice bt({bool input = false}) => AudioDevice(
-          uid: 'airpods',
-          name: 'AirPods Pro',
-          rate: 48000,
-          isDefault: true,
-          isInput: input,
-          isBluetooth: true,
-          transport: AudioTransport.bluetooth,
-        );
-        outs = [bt()];
-        ins = [_builtInMic, bt(input: true)];
-        storage.doc = {'inputDeviceUid': _builtInMic.uid};
+    group('REC judges the mic the engine has open, not the returned pick', () {
+      // A mic opened on a fallback stays there after the pick returns, and the
+      // engine names no uid for it: bound to the system default.
+      AudioDevice bt({bool input = false, bool isDefault = false}) =>
+          AudioDevice(
+            uid: 'airpods',
+            name: 'AirPods Pro',
+            rate: 48000,
+            isDefault: isDefault,
+            isInput: input,
+            isBluetooth: true,
+            transport: AudioTransport.bluetooth,
+          );
+      const builtIn = AudioDevice(
+        uid: 'built-in-mic',
+        name: 'MacBook Pro Microphone',
+        rate: 48000,
+        isInput: true,
+      );
+
+      test('fallen back onto a Bluetooth default: warned', () async {
+        outs = [bt(isDefault: true)];
+        ins = [builtIn, bt(input: true, isDefault: true)];
+        storage.doc = {'inputDeviceUid': builtIn.uid};
         await service.load();
-        final engine = _FakeEngine()
-          ..streamState = 1
-          ..boundInput = 'airpods';
+        final engine = _FakeEngine()..streamState = 1;
         service.attachEngine(engine);
         expect(service.bluetoothInOutConflictNow(), isTrue);
         engine.streamState = 0; // closed: the pick, the built-in mic
         expect(service.bluetoothInOutConflictNow(), isFalse);
-      },
-    );
+      });
+
+      test('fallen back off a Bluetooth pick: not warned', () async {
+        outs = [bt()];
+        ins = [_builtInMic, bt(input: true)];
+        storage.doc = {'inputDeviceUid': 'airpods'};
+        await service.load();
+        final engine = _FakeEngine()..streamState = 1;
+        service.attachEngine(engine);
+        expect(service.bluetoothInOutConflictNow(), isFalse);
+        engine.streamState = 0; // closed: the pick, the headset
+        expect(service.bluetoothInOutConflictNow(), isTrue);
+      });
+    });
 
     test(
       'the same Bluetooth headset listed under two uids is still one device',
