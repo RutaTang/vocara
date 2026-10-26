@@ -73,6 +73,9 @@ pub enum CompileError {
     MultiOutput(NodeId),
     /// A node declares more input ports than [`MAX_IN`].
     TooManyInputs(NodeId),
+    /// Two nodes share an id: edges and parameters reached only one of them,
+    /// while the other rendered unconnected.
+    DuplicateId(NodeId),
 }
 
 struct ScheduledNode {
@@ -110,8 +113,12 @@ impl GraphDesc {
         let n = nodes.len();
 
         let ids: Vec<NodeId> = nodes.iter().map(|e| e.id).collect();
-        let id_to_pos: HashMap<NodeId, usize> =
-            ids.iter().enumerate().map(|(i, &id)| (id, i)).collect();
+        let mut id_to_pos: HashMap<NodeId, usize> = HashMap::with_capacity(n);
+        for (i, &id) in ids.iter().enumerate() {
+            if id_to_pos.insert(id, i).is_some() {
+                return Err(CompileError::DuplicateId(id));
+            }
+        }
         if !id_to_pos.contains_key(&master) {
             return Err(CompileError::MissingMaster);
         }

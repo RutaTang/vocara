@@ -420,8 +420,10 @@ impl StreamingSource {
             // next run's fence at the ring head — adopt it. A FORWARD base
             // (a plan starting later than tl) has that future audio at the
             // head instead, which must wait untouched; peek tells them
-            // apart without consuming anything.
-            while self.armed && self.ring_pos > tl {
+            // apart without consuming anything. In step (a discarding replan
+            // at the playhead) the fence is adopted too: left for the pop
+            // below, it took this frame's place and the frame played silent.
+            while self.armed && self.ring_pos >= tl {
                 if self.head_is_fence() {
                     let _ = self.pop_audio(); // adopts; updates ring_pos
                 } else {

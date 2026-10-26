@@ -976,8 +976,9 @@ mod tests {
         }
         // The flush is announced after the block: it met the new fence in band.
         f.ctrl.flush_seq.fetch_add(1, Ordering::Release);
-        // The fence consumed the first frame's pop; every frame after it plays.
-        for (i, fr) in out.chunks(2).enumerate().skip(1) {
+        // Every frame plays, the first included: the fence at the head is adopted, not
+        // popped in that frame's place (which left one sample of silence).
+        for (i, fr) in out.chunks(2).enumerate() {
             assert_eq!(fr[0], value(tl as usize + i), "frame {i} of the block");
         }
         assert_eq!(

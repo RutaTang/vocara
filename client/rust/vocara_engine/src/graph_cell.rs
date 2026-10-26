@@ -2,15 +2,15 @@
 //!
 //! The control thread compiles a new graph entirely off the audio thread and `publish`es it
 //! with one atomic swap. The audio thread `load`s the raw pointer once per block — no
-//! refcount, nothing to drop. The retired graph is handed to a reaper via an SPSC ring and
-//! freed on a non-audio thread after a one-block grace epoch, so the audio thread never
-//! performs an unbounded `free()`.
+//! refcount, nothing to drop. The retired graph goes back to the publisher, which frees it
+//! on the control thread once no block that could still hold it can be running (two blocks
+//! after the swap; see `EngineHandle::reap`), so the audio thread never performs an
+//! unbounded `free()`.
 
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 use crate::graph::Graph;
-use crate::ring::{spsc, Consumer, Producer};
 
 pub struct GraphCell {
     ptr: AtomicPtr<Graph>,
@@ -24,8 +24,8 @@ impl GraphCell {
     }
 
     /// Audio thread: the current graph pointer. Read once per block; do **not** cache the
-    /// reference across blocks (the reaper's grace epoch only guarantees liveness for the
-    /// current block).
+    /// reference across blocks (a retired graph's grace only covers the blocks running when
+    /// it was swapped out).
     #[inline]
     pub fn load(&self) -> *mut Graph {
         self.ptr.load(Ordering::Acquire)
@@ -50,11 +50,11 @@ impl Drop for GraphCell {
 }
 
 // SAFETY: the pointer is only published by the control thread and loaded by the audio
-// thread; ownership transfer of the retired graph goes through the reaper ring.
+// thread; the retired graph goes back to the publisher, which frees it after its grace.
 unsafe impl Send for GraphCell {}
 unsafe impl Sync for GraphCell {}
 
-/// A retired graph pointer in transit to the reaper. POD for the ring.
+/// A retired graph pointer, for [`reap`].
 #[derive(Clone, Copy)]
 pub struct RetiredPtr(pub *mut Graph);
 
@@ -64,19 +64,14 @@ impl Default for RetiredPtr {
     }
 }
 
-// SAFETY: the audio thread relinquishes all access before pushing; only the reaper drops it.
+// SAFETY: handed on only once the audio thread can no longer reach it; only [`reap`] drops it.
 unsafe impl Send for RetiredPtr {}
 
-pub fn reaper_channel(capacity: usize) -> (Producer<RetiredPtr>, Consumer<RetiredPtr>) {
-    spsc(capacity)
-}
-
-/// Drop a retired graph pointer (called by the reaper on a non-audio thread, after the
-/// grace epoch). No-op on null.
+/// Drop a retired graph pointer on a non-audio thread, after its grace. No-op on null.
 ///
 /// # Safety
 /// `p` must have come from [`GraphCell::publish`] and must no longer be observable by the
-/// audio thread (one block has elapsed since the swap).
+/// audio thread (no block that began before the swap is still running).
 pub unsafe fn reap(p: RetiredPtr) {
     if !p.0.is_null() {
         drop(Box::from_raw(p.0));

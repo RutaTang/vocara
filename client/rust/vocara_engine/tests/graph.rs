@@ -98,6 +98,28 @@ fn out_of_range_from_port_is_rejected_at_compile() {
 }
 
 #[test]
+fn duplicate_node_ids_are_rejected() {
+    let desc = GraphDesc {
+        nodes: vec![
+            NodeEntry::new(1, Box::new(GainPanNode::unity())),
+            NodeEntry::new(1, Box::new(GainPanNode::unity())),
+            NodeEntry::new(2, Box::new(MasterNode::unity())),
+        ],
+        edges: vec![Edge {
+            from: 1,
+            from_port: 0,
+            to: 2,
+            to_port: 0,
+        }],
+        master: 2,
+    };
+    assert_eq!(
+        desc.compile(SR, BLOCK).err(),
+        Some(CompileError::DuplicateId(1))
+    );
+}
+
+#[test]
 fn missing_master_is_rejected() {
     let desc = GraphDesc {
         nodes: vec![NodeEntry::new(1, Box::new(GainPanNode::unity()))],

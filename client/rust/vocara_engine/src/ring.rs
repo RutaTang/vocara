@@ -1,8 +1,8 @@
 //! A bounded, wait-free single-producer / single-consumer ring buffer (Lamport style).
 //!
-//! This is the only cross-thread sharing in the live engine: one ring carries coalesced
-//! parameter commands (control → audio), one ring per source carries decoded PCM
-//! (feeder → audio), and one carries retired graph pointers (audio → reaper). Push/pop are
+//! It carries data between the engine's threads: coalesced parameter commands (control →
+//! audio), decoded PCM, one ring per source (feeder → audio), and captured input (device →
+//! engine). Push/pop are
 //! wait-free and allocate nothing after construction, so they are safe on the audio thread.
 
 use std::cell::UnsafeCell;
@@ -12,9 +12,22 @@ use std::sync::Arc;
 struct Inner<T> {
     buf: Box<[UnsafeCell<T>]>,
     mask: usize,
-    // Monotonic indices; live count = tail - head. Separate cache lines in practice.
-    head: AtomicUsize,
-    tail: AtomicUsize,
+    // Monotonic indices; live count = tail - head. Each on its own cache line: side by
+    // side, every per-frame push and pop moved the one line between the two threads.
+    head: CacheLine<AtomicUsize>,
+    tail: CacheLine<AtomicUsize>,
+}
+
+/// A value alone on its cache line (128 bytes: Apple silicon's, twice x86's).
+#[repr(align(128))]
+struct CacheLine<T>(T);
+
+impl<T> std::ops::Deref for CacheLine<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.0
+    }
 }
 
 // SAFETY: access is disciplined SPSC — only the producer writes `tail` and the slot at
@@ -44,8 +57,8 @@ pub fn spsc<T: Copy + Default>(capacity: usize) -> (Producer<T>, Consumer<T>) {
     let inner = Arc::new(Inner {
         buf,
         mask: cap - 1,
-        head: AtomicUsize::new(0),
-        tail: AtomicUsize::new(0),
+        head: CacheLine(AtomicUsize::new(0)),
+        tail: CacheLine(AtomicUsize::new(0)),
     });
     (
         Producer {
