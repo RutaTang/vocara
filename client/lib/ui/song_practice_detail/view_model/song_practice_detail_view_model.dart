@@ -1487,33 +1487,11 @@ class SongPracticeDetailViewModel extends ChangeNotifier
           // Keep the original as the Reference track. If it isn't already the
           // reference (e.g. it was dropped into the accompaniment slot — the
           // ordinary first separation), recreate it with the reference kind so
-          // the Original stays available.
-          //
-          // Only the KIND changes: this is the same lane, so it carries every
-          // field over. `copyWith` deliberately cannot change kind, so the
-          // constructor is spelled out — which is exactly how pan, mute, solo
-          // and the insert chain came to be dropped here while volume and the
-          // colour tint were kept.
+          // the Original stays available. Only the KIND changes: this is the
+          // same lane, so it carries every field over (see [_rekinded]).
           final referenceTrack = liveOriginal.isReference
               ? liveOriginal
-              : AudioTrack(
-                  id: liveOriginal.id,
-                  kind: AudioTrackKind.reference,
-                  displayName: liveOriginal.displayName,
-                  clips: liveOriginal.clips,
-                  notes: liveOriginal.notes,
-                  techniqueMarkers: liveOriginal.techniqueMarkers,
-                  colorValue: liveOriginal.colorValue,
-                  muted: liveOriginal.muted,
-                  soloed: liveOriginal.soloed,
-                  volume: liveOriginal.volume,
-                  pan: liveOriginal.pan,
-                  versionId: liveOriginal.versionId,
-                  fx: liveOriginal.fx,
-                  busId: liveOriginal.busId,
-                  sends: liveOriginal.sends,
-                  createdAt: liveOriginal.createdAt,
-                );
+              : _rekinded(liveOriginal, AudioTrackKind.reference);
 
           oldAccompaniment = cur.accompaniment;
           oldReference = cur.reference;
@@ -1534,28 +1512,62 @@ class SongPracticeDetailViewModel extends ChangeNotifier
             reference: referenceTrack,
             separationSource: originalPath,
           );
+          // Taken back, on a failed save, by what this did, and only where the
+          // model still holds it: putting back the whole model from before it
+          // dropped what was edited while the save ran, the Original lane's
+          // own name, notes and mix included.
+          SongPractice takeBack(SongPractice live) {
+            if (live.accompaniment?.id != instrumental.id) return live;
+            final kept = live.reference;
+            final AudioTrack? backing;
+            final AudioTrack? reference;
+            if (liveOriginal.isReference) {
+              backing = cur.accompaniment; // the Original stays where it was
+              reference = kept;
+            } else {
+              // The Original goes back to the backing slot it came from.
+              backing = kept?.id == liveOriginal.id
+                  ? _rekinded(kept!, AudioTrackKind.accompaniment)
+                  : liveOriginal;
+              reference = cur.reference;
+            }
+            return live.copyWith(
+              accompaniment: backing,
+              clearAccompaniment: backing == null,
+              reference: reference,
+              clearReference: reference == null,
+              separationSource: cur.separationSource,
+              clearSeparationSource: cur.separationSource == null,
+            );
+          }
+
           // Persist BEFORE deleting any old audio, so a failed save can't leave
           // the JSON pointing at files already gone. On failure
           // _withImportedAudio rolls the imported/transcoded files back.
-          if (!await _save()) {
-            // Take back only what this did, and only where the model still
-            // holds it: the whole model from before it dropped an edit made
-            // while the save ran (its own save queued with it).
+          final saved = await _enqueueSave(() async {
+            final reverts = _reverts;
+            if (await _doSave()) return true;
             final live = _practice;
-            if (live != null && live.accompaniment?.id == instrumental.id) {
-              _practice = live.copyWith(
-                accompaniment: cur.accompaniment,
-                clearAccompaniment: cur.accompaniment == null,
-                reference: cur.reference,
-                clearReference: cur.reference == null,
-                separationSource: cur.separationSource,
-                clearSeparationSource: cur.separationSource == null,
-              );
+            if (live == null) return false;
+            // Back on the disk's model: it holds the separation only when the
+            // write committed and its re-read alone failed.
+            if (_reverts != reverts) {
+              return live.accompaniment?.id == instrumental.id;
             }
+            // Inside this save, before any queued behind it runs: one queued
+            // (an edit made while this ran) sent the model as it is when it
+            // starts, and taken back after, it saved the separation the files
+            // below are about to be deleted from under.
+            _practice = takeBack(live);
+            return false;
+          });
+          if (!saved) {
             // Restore the pre-separation backing flag AND push it: the failed
             // save already resynced the engine under the flipped flag, so a
             // silent restore left the toggle and the audible backing apart.
-            mixer.setPlayReference(prevPlayRef);
+            // The take-back changed the lanes after that resync, too.
+            mixer.setPlayReferenceSilently(prevPlayRef);
+            await mixer.resyncPlayback();
             // Unless the user picked a lane while the save ran.
             if (_userSelections == prevSelection.picks) {
               _selectedTrackId = prevSelection.track;
@@ -2705,6 +2717,29 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       _baseHashes = saved.sentHashes ?? saved.baseHashes;
     }
   }
+
+  /// [t] as a lane of [kind]: the same lane, every field carried over.
+  /// `copyWith` deliberately cannot change kind, so the constructor is spelled
+  /// out (which is how pan, mute, solo and the insert chain once came to be
+  /// dropped while volume and the colour tint were kept).
+  static AudioTrack _rekinded(AudioTrack t, AudioTrackKind kind) => AudioTrack(
+    id: t.id,
+    kind: kind,
+    displayName: t.displayName,
+    clips: t.clips,
+    notes: t.notes,
+    techniqueMarkers: t.techniqueMarkers,
+    colorValue: t.colorValue,
+    muted: t.muted,
+    soloed: t.soloed,
+    volume: t.volume,
+    pan: t.pan,
+    versionId: t.versionId,
+    fx: t.fx,
+    busId: t.busId,
+    sends: t.sends,
+    createdAt: t.createdAt,
+  );
 
   static bool _sameWords(List<LyricLine>? a, List<LyricLine> b) {
     if (a == null || a.length != b.length) return false;

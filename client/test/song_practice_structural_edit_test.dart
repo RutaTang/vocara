@@ -48,10 +48,20 @@ class _FakeRepo extends Fake implements SongPracticeRepository {
   /// When set, saves park on it — a write held in flight.
   Completer<void>? saveGate;
 
+  /// The next save commits, then reports failure (its re-read failed).
+  bool commitThenFail = false;
+
+  /// The next load fails.
+  bool failNextLoad = false;
+
   @override
   Future<Result<Loaded<SongPractice>>> loadPractice(String id) async {
     final gate = loadGate;
     if (gate != null) await gate.future;
+    if (failNextLoad) {
+      failNextLoad = false;
+      return Result.error(Exception('load failed'));
+    }
     return Result.ok(Loaded(stored, const {}));
   }
 
@@ -89,6 +99,11 @@ class _FakeRepo extends Fake implements SongPracticeRepository {
       );
     }
     stored = practice;
+    if (commitThenFail) {
+      commitThenFail = false;
+      events.add('save-committed-failed');
+      return Result.error(Exception('re-read failed'));
+    }
     events.add('save');
     return Result.ok(Loaded(stored, const {}));
   }
@@ -292,6 +307,17 @@ class _FakeEngine extends Fake implements PlaybackEngine {
 
 /// Engine that remembers the last mute pushed for each source — through a
 /// full graph sync or a live per-source level push, whichever came last.
+/// Records the file paths of the last graph sync.
+class _SyncRecordingEngine extends _FakeEngine {
+  List<String> lastPaths = const [];
+
+  @override
+  Future<void> sync(
+    List<TrackPlayback> tracks,
+    List<BusPlayback> buses,
+  ) async => lastPaths = [for (final t in tracks) t.path];
+}
+
 class _MuteTrackingEngine extends _FakeEngine {
   final Map<String, bool> muted = {};
 
@@ -1250,42 +1276,146 @@ void main() {
   });
 
   group('a save failing beside another', () {
-    test('a failed separation keeps an edit made while its save ran', () async {
-      // The failure path put back the whole model from before the separation,
-      // dropping a rename made while its save ran: the rename's own save had
-      // queued behind it, and the next save wrote the rename away.
-      final separation = _GatedSeparation();
-      final reference = AudioTrack(
-        id: 'ref',
-        kind: AudioTrackKind.reference,
-        displayName: 'Original',
-        audioFilePath: '/pool/original.wav',
-        durationMs: 1000,
-        createdAt: DateTime(2026),
-      );
-      final vm = await pumpVm(separation: separation, reference: reference);
+    AudioTrack originalRef() => AudioTrack(
+      id: 'ref',
+      kind: AudioTrackKind.reference,
+      displayName: 'Original',
+      audioFilePath: '/pool/original.wav',
+      durationMs: 1000,
+      createdAt: DateTime(2026),
+    );
+
+    /// Runs [separate] with its save held, makes [edit] while it is held,
+    /// then lets the save fail.
+    Future<void> failSeparationAround(
+      SongPracticeDetailViewModel vm,
+      _GatedSeparation separation,
+      Future<void> Function() separate,
+      Future<void> Function() edit,
+    ) async {
       for (var i = 0; i < 400 && !vm.separationAvailable; i++) {
         await Future<void>.delayed(const Duration(milliseconds: 5));
       }
       repo.saveGate = Completer<void>();
-      repo.failAt = {1};
-      final separating = vm.separateBacking('ref');
+      repo.failAt = {repo.saveNo + 1};
+      final separating = separate();
       separation.gate.complete();
       for (var i = 0; i < 400 && repo.inFlight == 0; i++) {
         await Future<void>.delayed(const Duration(milliseconds: 5));
       }
       expect(vm.practice!.accompaniment, isNotNull, reason: 'its save runs');
-      final rename = vm.renameTrack('single', 'renamed');
-      repo.saveGate!.complete();
-      await Future.wait([rename, separating]);
-      await vm.renameTrack('multi', 'later'); // the next save
+      final editing = edit();
+      final gate = repo.saveGate!;
+      repo.saveGate = null;
+      gate.complete();
+      await Future.wait([editing, separating]);
+    }
 
-      String name(SongPractice p, String id) =>
-          p.vocalTracks.firstWhere((t) => t.id == id).displayName;
+    test('a failed separation keeps an edit made while its save ran', () async {
+      // The failure path put back the whole model from before the separation,
+      // dropping a rename made while its save ran. Taken back after that save,
+      // the rename's save queued behind it had already sent the separation.
+      final separation = _GatedSeparation();
+      final vm = await pumpVm(separation: separation, reference: originalRef());
+      await failSeparationAround(
+        vm,
+        separation,
+        () => vm.separateBacking('ref'),
+        () => vm.renameTrack('single', 'renamed'),
+      );
+
+      String name(SongPractice p) =>
+          p.vocalTracks.firstWhere((t) => t.id == 'single').displayName;
       expect(vm.practice!.accompaniment, isNull);
-      expect(name(vm.practice!, 'single'), 'renamed');
+      expect(name(vm.practice!), 'renamed');
       expect(repo.stored.accompaniment, isNull);
-      expect(name(repo.stored, 'single'), 'renamed');
+      expect(repo.stored.separationSource, isNull);
+      expect(name(repo.stored), 'renamed');
+    });
+
+    test('... and an edit to the Original lane itself', () async {
+      final separation = _GatedSeparation();
+      final vm = await pumpVm(separation: separation, reference: originalRef());
+      await failSeparationAround(
+        vm,
+        separation,
+        () => vm.separateBacking('ref'),
+        () => vm.renameTrack('ref', 'My original'),
+      );
+
+      expect(vm.practice!.reference!.displayName, 'My original');
+      expect(repo.stored.reference!.displayName, 'My original');
+      expect(repo.stored.accompaniment, isNull);
+    });
+
+    test(
+      '... and puts a moved Original back in the backing slot, edited',
+      () async {
+        // The ordinary first separation moves the full mix from the backing
+        // slot to the reference one: taken back, it returns there.
+        final separation = _GatedSeparation();
+        final vm = await pumpVm(separation: separation);
+        await vm.addAccompaniment('/src/full-mix.wav');
+        final backingId = vm.practice!.accompaniment!.id;
+        await failSeparationAround(
+          vm,
+          separation,
+          () => vm.separateBacking(backingId),
+          () => vm.renameTrack(backingId, 'Full mix'),
+        );
+
+        for (final p in [vm.practice!, repo.stored]) {
+          expect(p.reference, isNull);
+          expect(p.accompaniment!.id, backingId);
+          expect(p.accompaniment!.kind, AudioTrackKind.accompaniment);
+          expect(p.accompaniment!.displayName, 'Full mix');
+        }
+      },
+    );
+
+    test('a separation whose write committed is kept on screen', () async {
+      // The write committed and only its re-read failed: the revert put back
+      // a store holding the separation, and the take-back then hid it.
+      final separation = _GatedSeparation();
+      final vm = await pumpVm(separation: separation, reference: originalRef());
+      for (var i = 0; i < 400 && !vm.separationAvailable; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+      final toasts = <String>[];
+      vm.toasts.listen(toasts.add);
+      repo.commitThenFail = true;
+      final separating = vm.separateBacking('ref');
+      separation.gate.complete();
+      await separating;
+      await Future<void>.delayed(Duration.zero);
+
+      expect(repo.stored.accompaniment, isNotNull);
+      expect(vm.practice!.accompaniment?.id, repo.stored.accompaniment!.id);
+      expect(toasts, isNot(contains('Could not save the separated track.')));
+    });
+
+    test('a taken-back separation leaves the engine without it', () async {
+      // With no revert (the reload failed too), the take-back changed the
+      // lanes after the failed save's resync: the engine kept the
+      // instrumental, whose file the rollback then deleted.
+      final separation = _GatedSeparation();
+      final engine = _SyncRecordingEngine();
+      final vm = await pumpVm(
+        separation: separation,
+        reference: originalRef(),
+        engine: engine,
+      );
+      for (var i = 0; i < 400 && !vm.separationAvailable; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+      repo.failAt = {repo.saveNo + 1};
+      repo.failNextLoad = true;
+      final separating = vm.separateBacking('ref');
+      separation.gate.complete();
+      await separating;
+
+      expect(vm.practice!.accompaniment, isNull);
+      expect(engine.lastPaths, isNot(contains('/import/0.wav')));
     });
 
     test('a lyrics Save reports it did not land', () async {
