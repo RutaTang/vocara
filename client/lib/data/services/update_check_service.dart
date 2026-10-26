@@ -126,12 +126,15 @@ class UpdateCheckService extends ChangeNotifier {
   }
 
   /// Fetches and parses the manifest, then updates [status] / [available].
-  /// Never throws; every failure degrades to [UpdateStatus.unknown].
+  /// Never throws. A failure keeps the last good result (or leaves
+  /// [UpdateStatus.unknown] when there is none): a manual check made offline,
+  /// or past GitHub's hourly limit, erased an update the auto-check had found,
+  /// banner and all.
   Future<void> check() async {
     if (_checking) return;
     _checking = true;
     notifyListeners();
-    var next = UpdateStatus.unknown;
+    UpdateStatus? next;
     UpdateInfo? info;
     try {
       final body = await _fetch(Uri.parse(manifestUrl));
@@ -148,14 +151,19 @@ class UpdateCheckService extends ChangeNotifier {
       // Offline / 404 / TLS / timeout: silently unknown. The check must never
       // become an error the user has to deal with.
     }
-    _status = next;
-    _available = info;
-    _lastCheckedAt = DateTime.now();
+    if (next != null) {
+      _status = next;
+      _available = info;
+      _lastCheckedAt = DateTime.now();
+    } else if (_status == UpdateStatus.unknown) {
+      _lastCheckedAt = DateTime.now(); // no result yet: report the attempt
+    }
     _checking = false;
     // Only the version strings ever reach the log — no user content.
     DiagnosticsLog.instance.log(
       'update',
-      'check: ${next.name}${info == null ? '' : ' latest=${info.version}'}',
+      'check: ${next?.name ?? 'failed'}'
+          '${info == null ? '' : ' latest=${info.version}'}',
     );
     notifyListeners();
   }

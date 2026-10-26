@@ -115,6 +115,27 @@ Future<void> _pump(
 }
 
 void main() {
+  // The card's tags wrap in rows, but a tag too long for one row wrapped
+  // inside its chip as well, and three of them pushed the fixed-height card
+  // past its cell.
+  // (The header needs more than 960 px only in the test font, a square em per
+  // glyph; real metrics fit it there.)
+  for (final size in const [Size(1200, 800), Size(1440, 900)]) {
+    testWidgets('long tags stay inside a card at ${size.width.toInt()} px', (
+      tester,
+    ) async {
+      tester.view.physicalSize = size;
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+      final long = [
+        for (var i = 0; i < 3; i++)
+          'a tag long enough to wrap onto a second line in its chip $i',
+      ];
+      await _pump(tester, [_t('t1', 'Twang', long), _t('t2', 'Belt', long)]);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
   testWidgets('populated grid + filter bar + rebuilds: no overflow', (
     tester,
   ) async {

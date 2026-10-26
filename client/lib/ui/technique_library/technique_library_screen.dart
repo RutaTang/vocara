@@ -763,8 +763,12 @@ class _MiniTag extends StatelessWidget {
                   : Studio.border,
             ),
           ),
+          // One line: the Wrap bounds a chip to the card's width, and a long
+          // tag wrapped inside its chip grew the card past its fixed height.
           child: Text(
             label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
             style: TextStyle(
               color: active ? Studio.accentBright : Studio.textSecondary,
               fontSize: 10.5,

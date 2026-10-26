@@ -190,6 +190,28 @@ void main() {
       expect(service.status, UpdateStatus.updateAvailable);
     });
 
+    test('a failed check keeps the last good result', () async {
+      // A manual check made offline (or past GitHub's hourly limit) erased an
+      // update the auto-check had found: the banner went, and Settings said
+      // the server could not be reached.
+      var fail = false;
+      final service = UpdateCheckService(
+        fetch: (_) async {
+          if (fail) throw const SocketException('offline');
+          return '{"latest": "2.0.0", "url": "https://example.com"}';
+        },
+        currentVersion: '1.0.0',
+      );
+      await service.check();
+      expect(service.status, UpdateStatus.updateAvailable);
+      final checkedAt = service.lastCheckedAt;
+      fail = true;
+      await service.check();
+      expect(service.status, UpdateStatus.updateAvailable);
+      expect(service.available?.version, '2.0.0');
+      expect(service.lastCheckedAt, checkedAt);
+    });
+
     test('notifies listeners when the check starts and completes', () async {
       var notifications = 0;
       final service = UpdateCheckService(
