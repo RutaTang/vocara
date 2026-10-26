@@ -627,9 +627,13 @@ class FxPanel extends StatelessWidget {
           onSelected: (name) {
             final preset = FxPresets.vocal.firstWhere((p) => p.name == name);
             // A preset replaces the whole insert chain (tone), but keeps the
-            // user's custom plugin order. Aux sends / output routing live on the
-            // track, not in TrackFx, so they're untouched.
-            _setFx(preset.fx.copyWith(order: fx.order), commit: true);
+            // user's custom plugin order and the reverb send (it lives in
+            // TrackFx, and a preset reset it to off). Aux sends / output
+            // routing live on the track, so they're untouched.
+            _setFx(
+              preset.fx.copyWith(order: fx.order, sendDb: fx.sendDb),
+              commit: true,
+            );
           },
         ),
       ],

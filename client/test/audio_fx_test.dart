@@ -82,7 +82,7 @@ void main() {
         expect(TrackFx.flat().order, FxKind.values);
 
         // A saved custom order keeps its leading arrangement; missing kinds are
-        // appended (so newly-added plugin types always show up).
+        // restored (so newly-added plugin types always show up).
         final fx = TrackFx.flat().copyWith(
           order: const [FxKind.comp, FxKind.eq],
         );
@@ -110,9 +110,45 @@ void main() {
       // Unknown kind gone; known kinds keep their saved relative order (eq must
       // NOT jump in front of comp via the unknown slot).
       expect(back.order.take(3), [FxKind.comp, FxKind.eq, FxKind.deEsser]);
-      // Missing known kinds are appended, so the chain is still complete.
+      // Missing known kinds are restored, so the chain is still complete.
       expect(back.order.toSet(), FxKind.values.toSet());
       expect(back.order.length, FxKind.values.length);
+    });
+
+    test('a kind missing from an old order comes back at its default place, '
+        'not after the reverb', () {
+      final j = Map<String, dynamic>.from(TrackFx.flat().toJson())
+        ..['order'] = [
+          for (final k in FxKind.values)
+            if (k != FxKind.deEsser) k.name,
+        ];
+      expect(TrackFx.fromJson(j).order, FxKind.values);
+
+      // In a reordered chain: right after its default predecessors.
+      final reordered = Map<String, dynamic>.from(TrackFx.flat().toJson())
+        ..['order'] = ['reverb', 'comp', 'eq'];
+      expect(TrackFx.fromJson(reordered).order.take(4), [
+        FxKind.reverb,
+        FxKind.comp,
+        FxKind.eq,
+        FxKind.deEsser,
+      ]);
+    });
+
+    test('an EQ band with no kind keeps its slot in the 6-band layout', () {
+      // Read as a peak, a low shelf missing its kind shifted every band one
+      // slot over and dropped the 6 kHz band.
+      final bands = [
+        for (final b in TrackFx.flat().eq) b.copyWith(gainDb: 3).toJson(),
+      ];
+      bands[0].remove('kind');
+      final j = Map<String, dynamic>.from(TrackFx.flat().toJson())
+        ..['eq'] = bands;
+      final back = TrackFx.fromJson(j);
+      expect(back.eq.map((b) => b.kind), [
+        for (final b in TrackFx.flat().eq) b.kind,
+      ]);
+      expect(back.eq.map((b) => b.gainDb), everyElement(3));
     });
 
     test('fromJson clamps out-of-range values to the editable ranges', () {

@@ -89,6 +89,28 @@ void main() {
     });
   });
 
+  test('an unreadable version or a URL with no host is no manifest', () {
+    // Compared as unreadable, "next" read "You have the latest version" and
+    // erased an update already found; "https://" opened nothing.
+    for (final version in ['next', 'v', '0x1.0.0', '0. 2.0', '1.0.0-rc1']) {
+      expect(
+        UpdateCheckService.parseManifest(
+          '{"latest": "$version", "url": "https://example.com"}',
+        ),
+        isNull,
+        reason: version,
+      );
+    }
+    expect(
+      UpdateCheckService.parseManifest(
+        '{"latest": "1.0.0", "url": "https://"}',
+      ),
+      isNull,
+    );
+    expect(UpdateCheckService.isNewer('0x2.0.0', '1.0.0'), isFalse);
+    expect(UpdateCheckService.isNewer('1.0.1x9', '1.0.0'), isFalse);
+  });
+
   group('isNewer', () {
     test('strictly newer dotted versions win', () {
       expect(UpdateCheckService.isNewer('1.0.1', '1.0.0'), isTrue);

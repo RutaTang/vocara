@@ -53,10 +53,14 @@ class EqBand {
     'enabled': enabled,
   };
 
-  factory EqBand.fromJson(Map<String, dynamic> j) {
+  /// [slotKind] is the kind the band's slot holds, when the list it came in
+  /// is the fixed 6-slot layout: a band with no (or an unknown) kind takes
+  /// it. Read as a peak, a low shelf missing its kind broke the layout check
+  /// and shifted every band one slot over (see TrackFx._normalizeEq).
+  factory EqBand.fromJson(Map<String, dynamic> j, {EqBandKind? slotKind}) {
     final kind = EqBandKind.values.firstWhere(
       (k) => k.name == j['kind'],
-      orElse: () => EqBandKind.peaking,
+      orElse: () => slotKind ?? EqBandKind.peaking,
     );
     // Parse freq defensively like every other numeric field: a malformed /
     // missing freq must not throw and fail the whole practice load. Fall back to
@@ -624,8 +628,10 @@ class TrackFx {
     order: order != null ? List.of(order) : this.order,
   );
 
-  /// Normalizes a chain order: de-dupes, drops unknown kinds, and appends any
-  /// known kind missing from a saved order (so new plugin types always appear).
+  /// Normalizes a chain order: de-dupes, drops unknown kinds, and restores
+  /// any known kind missing from a saved order (so new plugin types always
+  /// appear) right after the last kind the default chain puts before it.
+  /// Appended, a de-esser missing from an old order ran after the reverb.
   static List<FxKind> _normalizeOrder(List<FxKind> parsed) {
     final seen = <FxKind>{};
     final out = <FxKind>[];
@@ -633,7 +639,12 @@ class TrackFx {
       if (seen.add(k)) out.add(k);
     }
     for (final k in FxKind.values) {
-      if (seen.add(k)) out.add(k);
+      if (!seen.add(k)) continue;
+      var at = 0;
+      for (var i = 0; i < out.length; i++) {
+        if (out[i].index < k.index) at = i + 1;
+      }
+      out.insert(at, k);
     }
     return out;
   }
@@ -681,15 +692,21 @@ class TrackFx {
 
   factory TrackFx.fromJson(Map<String, dynamic> j) {
     final eqJson = j['eq'] as List?;
+    final canonical = eqJson != null && eqJson.length == _flatBands.length;
     final eq = eqJson != null && eqJson.isNotEmpty
         ? _normalizeEq([
-            for (final b in eqJson) EqBand.fromJson(b as Map<String, dynamic>),
+            for (var i = 0; i < eqJson.length; i++)
+              EqBand.fromJson(
+                eqJson[i] as Map<String, dynamic>,
+                slotKind: canonical ? _flatBands[i].kind : null,
+              ),
           ])
         : _flatBands;
     final orderJson = j['order'] as List?;
     // Skip unknown kind names (e.g. a plugin added by a newer schema) instead
     // of aliasing them to eq: _normalizeOrder must genuinely drop them, and its
-    // append-missing pass restores any absent known kind at its default slot.
+    // restore pass puts any absent known kind back after its default
+    // predecessor.
     final kindByName = FxKind.values.asNameMap();
     final order = _normalizeOrder([
       for (final e in orderJson ?? const [])

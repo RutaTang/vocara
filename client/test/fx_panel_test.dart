@@ -466,13 +466,12 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('choosing a preset replaces the chain but keeps the order', (
-    tester,
-  ) async {
+  testWidgets('choosing a preset replaces the chain but keeps the order and '
+      'the reverb send', (tester) async {
     final custom = [FxKind.comp, FxKind.eq, ...FxKind.values.skip(2)];
     final vm = await pump(
       tester,
-      track: _track(fx: _fxAllOff().copyWith(order: custom)),
+      track: _track(fx: _fxAllOff().copyWith(order: custom, sendDb: -12)),
     );
 
     await tester.tap(find.text('Choose…'));
@@ -487,6 +486,8 @@ void main() {
       custom,
       reason: "a preset is tone, not the user's plugin order",
     );
+    // It lives in TrackFx, and a preset reset it to off.
+    expect(vm.fakeMixer.trackFx.single.sendDb, -12);
     expect(vm.commits, 1);
   });
 

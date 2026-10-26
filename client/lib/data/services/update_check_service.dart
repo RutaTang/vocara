@@ -174,7 +174,10 @@ class UpdateCheckService extends ChangeNotifier {
   /// Accepts the plain `{latest, url, notes}` shape and GitHub's
   /// releases/latest shape (`tag_name` / `html_url` / `body`). The URL must
   /// be https — a tampered or downgraded manifest must not be able to point
-  /// users at a plaintext download page, let alone a non-web URL.
+  /// users at a plaintext download page, let alone a non-web URL — and name
+  /// a host. The version must be one [isNewer] can read: compared as an
+  /// unreadable one, it read "You have the latest version" and erased an
+  /// update already found.
   ///
   /// `html_url` WINS over `url` when both are present: a real GitHub release
   /// object carries both, and its `url` is the api.github.com resource
@@ -189,10 +192,10 @@ class UpdateCheckService extends ChangeNotifier {
       final Object? version = decoded['latest'] ?? decoded['tag_name'];
       final Object? url = decoded['html_url'] ?? decoded['url'];
       final Object? notes = decoded['notes'] ?? decoded['body'];
-      if (version is! String || version.trim().isEmpty) return null;
+      if (version is! String || _parseVersion(version) == null) return null;
       if (url is! String) return null;
       final uri = Uri.tryParse(url.trim());
-      if (uri == null || uri.scheme != 'https') {
+      if (uri == null || uri.scheme != 'https' || uri.host.isEmpty) {
         return null;
       }
       return UpdateInfo(
@@ -232,6 +235,8 @@ class UpdateCheckService extends ChangeNotifier {
     return dash >= 0; // equal cores: the GA beats its own prerelease
   }
 
+  static final _digits = RegExp(r'^\d+$');
+
   static List<int>? _parseVersion(String raw) {
     var s = raw.trim();
     if (s.startsWith('v') || s.startsWith('V')) s = s.substring(1);
@@ -240,8 +245,10 @@ class UpdateCheckService extends ChangeNotifier {
     if (s.isEmpty) return null;
     final parts = <int>[];
     for (final part in s.split('.')) {
+      // Digits only: int.tryParse also takes "0x1" and " 2".
+      if (!_digits.hasMatch(part)) return null;
       final n = int.tryParse(part);
-      if (n == null || n < 0) return null;
+      if (n == null) return null;
       parts.add(n);
     }
     return parts;
