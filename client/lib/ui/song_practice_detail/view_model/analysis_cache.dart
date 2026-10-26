@@ -892,6 +892,9 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   /// last asked again by [healLane].
   final Map<String, DateTime> _laneHealedAt = {};
 
+  /// A rebuild of the lanes once a heal the interval refused may run.
+  Timer? _laneHealRetry;
+
   /// How soon [healLane] asks again for the same subject. More analysis on
   /// screen than the byte budget holds would otherwise have the lanes and the
   /// dock evict each other's in turn, one decode after another, for good.
@@ -908,10 +911,27 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     _laneHealedAt.removeWhere(
       (_, at) => now.difference(at) >= _laneHealInterval,
     );
-    if (_laneHealedAt.containsKey(subject)) return;
+    final last = _laneHealedAt[subject];
+    if (last != null) {
+      // Asked again once the interval is up: nothing else may rebuild the
+      // lane, and it sat empty on an idle screen.
+      _laneHealRetry ??= Timer(_laneHealInterval - now.difference(last), () {
+        _laneHealRetry = null;
+        notifyListeners();
+      });
+      return;
+    }
     _laneHealedAt[subject] = now;
     if (t.clips.length > 1) {
       final key = subject;
+      // Only lanes as they are now: a key from an earlier layout can never
+      // be asked for again.
+      final current = {
+        for (final id in _expandedTracks)
+          if (_trackById(id) case final lane? when lane.clips.length > 1)
+            aggregateKeyFor(lane),
+      };
+      _laneHealBlocked.retainWhere(current.contains);
       await _ensureAggregateAnalysis(t);
       if (!_disposed &&
           !_aggAnalysisCache.containsKey(key) &&
@@ -1562,6 +1582,7 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   void dispose() {
     _disposed = true;
     _captureTimer?.cancel();
+    _laneHealRetry?.cancel();
     // Stop the engine's capture if the live view was on; the owner disposes
     // the engine right after, this just closes the pump's source first.
     if (_liveMonitor) _graphEngine()?.stopCapture();

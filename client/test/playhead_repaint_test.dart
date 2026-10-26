@@ -505,6 +505,60 @@ void main() {
     expect(vm.analysis.metricsFor('t0'), isNotNull);
   });
 
+  testWidgets('a clip dragged on a folded-out multi-clip take is analyzed '
+      'where it lands, not at every position it passes', (tester) async {
+    // Each tick re-keys the lane's merge, so a lane asking for what it lacks
+    // merged (and cached) every in-between position.
+    final base = _practice(8);
+    final split = base.vocalTracks.first.copyWith(
+      clips: [
+        AudioClip(
+          id: 'c0',
+          audioFilePath: '/pool/t0.wav',
+          durationMs: 10000,
+          startMs: 0,
+        ),
+        AudioClip(
+          id: 'c1',
+          audioFilePath: '/pool/t0b.wav',
+          durationMs: 10000,
+          startMs: 20000,
+        ),
+      ],
+    );
+    final vm = await _pumpScreen(
+      tester,
+      repository: _FakeRepo(
+        base.copyWith(vocalTracks: [split, ...base.vocalTracks.skip(1)]),
+      ),
+    );
+    // The merge runs in an isolate: real time for it, then a frame.
+    Future<void> settle() async {
+      for (var i = 0; i < 3; i++) {
+        await tester.pump(const Duration(milliseconds: 16));
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 50)),
+        );
+      }
+      await tester.pump(const Duration(milliseconds: 16));
+    }
+
+    vm.analysis.toggleTrackExpanded('t0'); // the pitch lane
+    await settle();
+    expect(vm.analysis.metricsFor('t0'), isNotNull);
+
+    for (var ms = 20100; ms <= 20500; ms += 100) {
+      vm.moveClipStartLive('t0', 'c1', ms);
+      await settle();
+    }
+    expect(vm.analysis.metricsFor('t0'), isNull, reason: 'nothing merged');
+    expect(vm.analysis.metricsLoadingFor('t0'), isFalse);
+
+    await vm.commitTrackMove();
+    await settle();
+    expect(vm.analysis.metricsFor('t0'), isNotNull, reason: 'where it landed');
+  });
+
   testWidgets('the Pitch and Timbre tabs repaint only their playheads per '
       'tick', (tester) async {
     final vm = await _pumpScreen(tester);

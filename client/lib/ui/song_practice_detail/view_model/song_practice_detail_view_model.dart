@@ -2018,6 +2018,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// stale) — recompute whatever analysis is on screen for the new layout. The
   /// ensure calls are cheap no-ops for single-clip takes and cached subjects.
   Future<void> commitTrackMove() async {
+    _movingLive.clear();
     await _save();
     // A drag whose lane unmounted commits after the frame, which may be the
     // page closing: the move is saved, and nothing else is left to refresh.
@@ -2028,12 +2029,24 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     analysis.refreshExpandedLanes();
   }
 
+  /// Takes with a clip moved live and not yet committed (see
+  /// [commitTrackMove]).
+  final Set<String> _movingLive = {};
+
+  /// Whether a clip of [trackId] is being moved live. Its folded-out lanes
+  /// don't ask for their analysis meanwhile (see AnalysisCache.healLane):
+  /// each tick re-keys a multi-clip lane, and they merged every position the
+  /// clip passed through, caching each; the commit computes the one it lands
+  /// on.
+  bool isMovingLive(String trackId) => _movingLive.contains(trackId);
+
   /// Moves a single clip along the timeline live (model only) while dragging.
   /// Persist once on release with [commitTrackMove].
   void moveClipStartLive(String trackId, String clipId, int startMs) {
     final track = _trackById(trackId);
     final clip = track?.clipById(clipId);
     if (track == null || clip == null) return;
+    _movingLive.add(trackId);
     final timeline = _practice?.timelineDurationMs ?? 0;
     final maxStart = (timeline - clip.durationMs).clamp(0, timeline);
     final clamped = startMs.clamp(0, maxStart);

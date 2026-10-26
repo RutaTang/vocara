@@ -55,7 +55,9 @@ class AnalysisLanes extends StatelessWidget {
     final viewStart = vm.playback.viewStartMs;
     // On screen, so asked again for what the cache let go (see
     // AnalysisCache.laneLacksData); the dock and inspector do the same.
-    if (!vm.liveMonitor && vm.analysis.laneLacksData(id)) {
+    if (!vm.liveMonitor &&
+        !vm.isMovingLive(id) &&
+        vm.analysis.laneLacksData(id)) {
       WidgetsBinding.instance.addPostFrameCallback(
         (_) => vm.analysis.healLane(id),
       );

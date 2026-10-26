@@ -961,6 +961,27 @@ void main() {
       expect(cache.metricsFor('S'), isNull);
     });
 
+    testWidgets('a heal the interval refused is asked again once it is up', (
+      tester,
+    ) async {
+      // Nothing else may rebuild the lane: on an idle screen it sat empty.
+      final cache = _cache(spectrograms: stub(), trackById: lanes);
+      addTearDown(cache.dispose);
+      cache.toggleTrackExpanded('S');
+      await tester.pump();
+      cache.debugDropHalf('s1.wav', metrics: true);
+      await cache.healLane('S');
+      cache.debugDropHalf('s1.wav', metrics: true);
+      await cache.healLane('S'); // refused: asked too recently
+      var notified = 0;
+      cache.addListener(() => notified++);
+
+      await tester.pump(const Duration(seconds: 29));
+      expect(notified, 0);
+      await tester.pump(const Duration(seconds: 2));
+      expect(notified, 1, reason: 'the lanes rebuild and ask again');
+    });
+
     test('does not ask for a take that cannot be analyzed, or one folded '
         'shut', () async {
       final cache = _cache(spectrograms: stub(), trackById: lanes);
