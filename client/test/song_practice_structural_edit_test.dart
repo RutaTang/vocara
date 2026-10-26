@@ -714,6 +714,26 @@ void main() {
       );
     });
 
+    test("a note's text saved from the copy its editor opened with keeps "
+        'the clamp a split gave it meanwhile', () async {
+      final vm = await pumpVm();
+      AudioTrack single() =>
+          vm.practice!.vocalTracks.firstWhere((t) => t.id == 'single');
+      await vm.addNote('single', 100, 900, 'range');
+      final opened = single().notes.single; // what the editor holds
+      vm.playback.position.value = const Duration(milliseconds: 500);
+      await vm.splitTrackAtPlayhead('single');
+      final clamped = single().notes.single;
+      expect(clamped.endMs, isNot(900), reason: 'precondition: split clamped');
+
+      await vm.updateNoteContent('single', opened.id, 'edited');
+
+      final note = single().notes.single;
+      expect(note.content, 'edited');
+      expect(note.endMs, clamped.endMs);
+      expect(note.positionMs, clamped.positionMs);
+    });
+
     test('a rename and a note landing DURING a merge survive it', () async {
       final waveforms = _GatedWaveforms();
       final vm = await pumpVm(

@@ -327,10 +327,7 @@ class _WorkspaceState extends State<_Workspace> {
     if (result.deleted) {
       await vm.deleteNote(trackId, note.id);
     } else if (result.content != null) {
-      await vm.updateNote(
-        trackId,
-        note.copyWith(content: result.content, updatedAt: DateTime.now()),
-      );
+      await vm.updateNoteContent(trackId, note.id, result.content!);
     }
   }
 

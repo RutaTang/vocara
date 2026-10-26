@@ -2491,13 +2491,25 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   Future<void> addNoteAtPlayhead(String trackId, String content) =>
       addNote(trackId, position.value.inMilliseconds, null, content);
 
-  Future<void> updateNote(String trackId, PracticeNote note) async {
+  /// Sets a note's text. The rest of the note is taken as it stands now, not
+  /// from the copy the editor opened with: a split landing while the editor
+  /// was up (or a sync) can have clamped its end since, and writing the copy
+  /// back undid that.
+  Future<void> updateNoteContent(
+    String trackId,
+    String noteId,
+    String content,
+  ) async {
+    final now = DateTime.now();
     _updateTrack(
       trackId,
       (t) => t.copyWith(
         notes: [
           for (final n in t.notes)
-            if (n.id == note.id) note else n,
+            if (n.id == noteId)
+              n.copyWith(content: content, updatedAt: now)
+            else
+              n,
         ],
       ),
     );

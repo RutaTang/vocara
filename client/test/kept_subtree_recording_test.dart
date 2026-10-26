@@ -438,8 +438,8 @@ void main() {
         .notes
         .first;
     await step(
-      'note moved',
-      () => vm.updateNote('take3', note.copyWith(positionMs: 9000)),
+      'note edited',
+      () => vm.updateNoteContent('take3', note.id, 'm'),
     );
     await step('note deleted', () => vm.deleteNote('take3', note.id));
     await step(
