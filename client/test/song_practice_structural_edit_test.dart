@@ -168,6 +168,20 @@ class _GatedWaveforms extends Fake implements WaveformService {
   }
 }
 
+/// [_GatedWaveforms] that says when an analysis has reached its gate.
+class _SignalingWaveforms extends _GatedWaveforms {
+  final Completer<void> reached = Completer<void>();
+
+  @override
+  Future<WaveformResult> analyze(
+    String audioFilePath, {
+    int targetBuckets = 1000,
+  }) {
+    if (!reached.isCompleted) reached.complete();
+    return super.analyze(audioFilePath, targetBuckets: targetBuckets);
+  }
+}
+
 /// Separation that parks until the test releases it — the minutes-long window
 /// during which the rest of the screen stays interactive.
 class _GatedSeparation implements SourceSeparationService {
@@ -812,6 +826,45 @@ void main() {
         );
       },
     );
+
+    // Cancel stays on screen while the stems are imported and analyzed (the
+    // whole visible run on a cached song), but the service had nothing left
+    // to cancel and the backing was applied anyway.
+    test('Cancel after the stems arrive keeps the backing as it was', () async {
+      final separation = _GatedSeparation();
+      final waveforms = _SignalingWaveforms();
+      final reference = AudioTrack(
+        id: 'ref',
+        kind: AudioTrackKind.reference,
+        displayName: 'Original',
+        audioFilePath: '/pool/original.wav',
+        durationMs: 1000,
+        createdAt: DateTime(2026),
+      );
+      final vm = await pumpVm(
+        separation: separation,
+        reference: reference,
+        waveforms: waveforms,
+      );
+      for (var i = 0; i < 400 && !vm.separationAvailable; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+      final backing = vm.practice!.accompaniment;
+
+      final run = vm.separateBacking('ref');
+      await Future<void>.delayed(Duration.zero);
+      separation.gate.complete(); // the stems are in
+      await waveforms.reached.future; // the instrumental is being analyzed
+      expect(vm.isSeparating, isTrue, reason: 'Cancel is still on screen');
+      vm.cancelSeparation();
+      waveforms.gate.complete();
+      await run;
+
+      expect(vm.practice!.accompaniment?.id, backing?.id);
+      expect(vm.practice!.separationSource, isNull);
+      expect(events, isNot(contains('save')));
+      expect(vm.isSeparating, isFalse);
+    });
 
     test(
       'a separation whose save fails leaves the selection on the Original',

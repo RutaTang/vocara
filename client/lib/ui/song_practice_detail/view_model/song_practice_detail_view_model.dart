@@ -1456,6 +1456,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     final originalPath = original.primaryClip?.audioFilePath ?? '';
 
     _separationProgress = 0;
+    _separationCancelled = false;
     notifyListeners();
     await _busyGate.run(() async {
       // The old backing/reference to clean up after a successful swap. Captured from
@@ -1475,6 +1476,10 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         } on SeparationCancelled {
           return; // user aborted before any file work — nothing to undo
         }
+        // Cancel stays on screen until the backing is in (seconds of import
+        // and analysis after the stems, the whole visible run on a cached
+        // song), but the service has nothing left to cancel by then.
+        if (_separationCancelled) return;
 
         // Only the instrumental is used; the vocal stem is ignored for now.
         // Same import discipline as every other lane import: the sidecar
@@ -1485,6 +1490,8 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         String? committedDest;
         await _withImportedAudio(stems.instrumentalPath, (instDest) async {
           final instAnalysis = await _waveforms.analyze(instDest);
+          // Cancelled while it imported: the import is undone (see above).
+          if (_separationCancelled) return false;
           // Re-read the LIVE practice: notes / lyrics / interpretations may have been
           // edited (and persisted) during the minutes-long separation. Build on the
           // current state so those edits are not clobbered by the pre-await snapshot
@@ -1645,8 +1652,13 @@ class SongPracticeDetailViewModel extends ChangeNotifier
 
   /// Aborts an in-flight separation (best-effort).
   void cancelSeparation() {
-    if (isSeparating) _separation.cancel();
+    if (!isSeparating) return;
+    _separationCancelled = true;
+    _separation.cancel();
   }
+
+  /// Cancel was pressed during the current separation (see [separateBacking]).
+  bool _separationCancelled = false;
 
   // --- Exporting audio -------------------------------------------------------
   // The escape hatch that guarantees audio is never trapped in the app's
