@@ -546,14 +546,6 @@ class ProcessSourceSeparationService implements SourceSeparationService {
       if (code != 0 || !instOk || !vocOk) {
         await _deleteQuietly(instTmp);
         await _deleteQuietly(vocTmp);
-        // Killed by a signal (negative on POSIX): the system ending a model
-        // run out of memory leaves no traceback, only the progress bar.
-        if (code < 0) {
-          throw FormatException(
-            'Separation stopped: the system ended the separation engine '
-            '(signal ${-code}), possibly for lack of memory.',
-          );
-        }
         // Surface the LAST non-empty stderr line as the cause: the sidecar (and a
         // Python traceback) print the real reason last, after audio-separator's own
         // logs — the first line would just echo a library log, not the failure.
@@ -565,6 +557,19 @@ class ProcessSourceSeparationService implements SourceSeparationService {
               (l) => l.isNotEmpty && !_progressBar.hasMatch(l),
               orElse: () => '',
             );
+        // Ended by a signal (negative on POSIX): say which, with what it
+        // printed. A SIGKILL with nothing to say is most often the system
+        // ending a model run that ran out of memory.
+        if (code < 0) {
+          throw FormatException(
+            cause.isNotEmpty
+                ? 'Separation failed (signal ${-code}): $cause'
+                : code == -9
+                ? 'Separation stopped: the system ended the separation engine '
+                      '(signal 9), possibly for lack of memory.'
+                : 'Separation failed (signal ${-code}).',
+          );
+        }
         throw FormatException(
           cause.isNotEmpty
               ? 'Separation failed: $cause'

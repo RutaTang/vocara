@@ -277,6 +277,19 @@ exit 0''';
       },
     );
 
+    test('a native abort keeps the reason it printed', () async {
+      final stub = await writeStub(
+        r"printf 'failed assertion: MPS buffer too large\n' >&2"
+        '\nkill -6 \$\$',
+      );
+      final svc = buildService(stub);
+      final err = await outcome(svc.separate(await writeSource()));
+      expect(
+        (err as FormatException).message,
+        'Separation failed (signal 6): failed assertion: MPS buffer too large',
+      );
+    });
+
     test('a failure names its last line that is not a progress bar', () async {
       final stub = await writeStub(
         r"printf 'loading\nValueError: bad model\n 50%%|#    | 19/38\r' >&2"
