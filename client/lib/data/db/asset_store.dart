@@ -1032,6 +1032,12 @@ class AssetStore {
   /// replaced while the bytes survived (wiped/restored DB file), and sweeping
   /// would reclaim every byte the user could still recover.
   ///
+  /// The fuse is remembered ([_poolFuseKey]): the first take recorded into the
+  /// new library gave it a live row, and the next sweep then reclaimed every
+  /// byte of the old one (gone for good 30 days later). Once tripped, a pool
+  /// file older than the trip is never reclaimed; a newer one can only be
+  /// this database's own crash leftover.
+  ///
   /// Meant to run at startup when nothing is in flight. Best-effort; returns the count removed.
   Future<int> sweepOrphanPoolFiles() async {
     final pool = Directory(p.join(root.path, 'assets'));
@@ -1057,11 +1063,23 @@ class AssetStore {
             'AssetStore.sweepOrphanPoolFiles: skipped — the assets table has '
             'zero live rows but the pool holds files; protecting the bytes.',
           );
+          await db.customStatement(
+            'INSERT INTO sync_state ("key", value) VALUES (?, ?) '
+            'ON CONFLICT ("key") DO NOTHING',
+            [_poolFuseKey, '${DateTime.now().millisecondsSinceEpoch}'],
+          );
           return 0;
         }
       }
       return 0; // no live assets AND no pool files: nothing to sweep anyway
     }
+    final fuse = await db
+        .customSelect(
+          'SELECT value FROM sync_state WHERE "key" = ?',
+          variables: [Variable.withString(_poolFuseKey)],
+        )
+        .getSingleOrNull();
+    final protectUpTo = int.tryParse('${fuse?.data['value'] ?? ''}');
     var removed = 0;
     await for (final e in pool.list(recursive: true)) {
       if (e is! File) continue;
@@ -1076,11 +1094,20 @@ class AssetStore {
       final dot = name.indexOf('.');
       final hash = dot < 0 ? name : name.substring(0, dot);
       if (hash.length == 64 && !known.contains(hash)) {
+        // A file from before the fuse tripped: the lost library's.
+        if (protectUpTo != null &&
+            (await e.lastModified()).millisecondsSinceEpoch <= protectUpTo) {
+          continue;
+        }
         if (await _moveToTrash(e)) removed++;
       }
     }
     return removed;
   }
+
+  /// The local `sync_state` key recording when [sweepOrphanPoolFiles]' fuse
+  /// first tripped (epoch ms).
+  static const _poolFuseKey = 'pool_fuse_at';
 
   // --- Trash (GC recoverability) --------------------------------------------
 

@@ -395,6 +395,34 @@ void main() {
     expect(await assets.trashDir.exists(), isFalse); // nothing trashed
   });
 
+  // The fuse switched off as soon as the new library had one live row: the
+  // first take recorded into it, and the next sweep trashed every byte of the
+  // lost library (gone for good 30 days later).
+  test('the fuse holds the lost library\'s bytes after the new one\'s first '
+      'take, and still reclaims the new one\'s own leftovers', () async {
+    final old = File(p.join(tmp.path, 'assets', 'aa', 'aa', '${'a' * 64}.wav'));
+    await old.create(recursive: true);
+    await old.writeAsBytes([9, 9, 9]);
+    old.setLastModifiedSync(DateTime.now().subtract(const Duration(hours: 1)));
+
+    expect(await assets.sweepOrphanPoolFiles(), 0); // boot 1: the fuse trips
+    await assets.importFile(await makeSrc('new.wav', [1, 2, 3])); // a take
+
+    // A crash leftover of the new library: written after the fuse tripped.
+    final leftover = File(
+      p.join(tmp.path, 'assets', 'bb', 'bb', '${'b' * 64}.wav'),
+    );
+    await leftover.create(recursive: true);
+    await leftover.writeAsBytes([7]);
+    leftover.setLastModifiedSync(
+      DateTime.now().add(const Duration(minutes: 1)),
+    );
+
+    expect(await assets.sweepOrphanPoolFiles(), 1); // boot 2
+    expect(await old.exists(), isTrue, reason: 'the lost library is kept');
+    expect(await leftover.exists(), isFalse);
+  });
+
   test(
     'a GC-reclaimed pool file lands in the trash and is recoverable',
     () async {
