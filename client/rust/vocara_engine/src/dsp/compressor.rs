@@ -68,6 +68,14 @@ impl CompressorNode {
         c
     }
 
+    /// No gain reduction, on the meter too.
+    fn clear_meter(&mut self) {
+        self.gr_meter = 0.0;
+        if let Some(m) = &self.meter {
+            m.store(0, Ordering::Relaxed);
+        }
+    }
+
     /// Attach a shared gain-reduction meter (the node writes its block peak to it).
     pub fn with_meter(mut self, meter: Option<Arc<AtomicU32>>) -> Self {
         self.meter = meter;
@@ -112,10 +120,18 @@ impl Node for CompressorNode {
         // no-op) the held gain-reduction envelope carries across the discontinuity
         // and recovers only over the attack/release time — an audible momentary
         // wrong level right after a seek. Clear it to the idle value prepare()
-        // uses (mirrors deesser.rs's reset). gr_meter is recomputed per block and
-        // the Smoothed params target-track on seek, so only env_db is stale.
+        // uses (mirrors deesser.rs's reset). The Smoothed params target-track on
+        // seek. The meter goes too: a seek while paused left it reading the old
+        // reduction until Play.
         self.env_db = 0.0;
         self.fade.settle();
+        self.clear_meter();
+    }
+
+    fn idle(&mut self) {
+        // Nothing is compressed while the transport is stopped, but only process()
+        // writes the meter: paused mid-phrase, it held that phrase's reduction.
+        self.clear_meter();
     }
 
     fn process(&mut self, io: &mut ProcessIo) {

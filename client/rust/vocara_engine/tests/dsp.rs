@@ -143,6 +143,28 @@ fn compressor_reduces_loud_passes_quiet() {
 }
 
 #[test]
+fn compressor_meter_falls_to_zero_when_the_transport_stops_or_seeks() {
+    // Only process() wrote the meter: paused mid-phrase (or seeked while paused), the
+    // strip kept showing that phrase's reduction with nothing playing.
+    for stop in ["idle", "reset"] {
+        let meter = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let mut comp =
+            CompressorNode::new(-18.0, 4.0, 6.0, 5.0, 80.0, 0.0).with_meter(Some(meter.clone()));
+        let loud = to_stereo(&sine_mono(220.0, SR, 16_000, 0.9));
+        run_node(&mut comp, &loud, SR, 256);
+        let read = || f32::from_bits(meter.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(read() > 1.0, "compressing before the {stop}");
+        if stop == "idle" {
+            comp.idle();
+        } else {
+            comp.reset();
+        }
+        assert_eq!(read(), 0.0, "after {stop}");
+        assert_eq!(comp.gain_reduction_db(), 0.0, "after {stop}");
+    }
+}
+
+#[test]
 fn compressor_makeup_adds_gain() {
     let mut comp = CompressorNode::new(-60.0, 1.0, 0.0, 1.0, 50.0, 6.0); // ratio 1 = no compression, +6 dB makeup
     let input = to_stereo(&sine_mono(220.0, SR, 8000, 0.1));
