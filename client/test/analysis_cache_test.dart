@@ -934,7 +934,11 @@ void main() {
       final cache = _cache(spectrograms: stub(), trackById: lanes);
       addTearDown(cache.dispose);
       cache.toggleTrackExpanded('M');
-      await pumpEventQueue();
+      // The merge runs in an isolate: waited for, not a fixed number of
+      // event-loop turns (which a loaded machine outran).
+      for (var i = 0; i < 300 && cache.metricsFor('M') == null; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
       expect(cache.metricsFor('M'), isNotNull);
 
       cache.evictAnalysis('m1.wav');
