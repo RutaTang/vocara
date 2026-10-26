@@ -1,5 +1,8 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:vocara/domain/models/audio_fx.dart';
 import 'package:vocara/domain/models/audio_track.dart';
+import 'package:vocara/domain/models/fx_bus.dart';
+import 'package:vocara/domain/models/lyric_line.dart';
 import 'package:vocara/domain/models/practice_note.dart';
 import 'package:vocara/domain/models/song_practice.dart';
 import 'package:vocara/domain/models/take_version.dart';
@@ -296,6 +299,126 @@ void main() {
         updatedAt: DateTime(2026),
       );
       expect(p.nextTakeNumber, 2);
+    });
+  });
+
+  // A save's re-read is all-new objects; taking it in must keep what it
+  // reproduces, so what compares by identity sees only real changes.
+  group('SongPractice.sharing', () {
+    SongPractice practice({
+      List<AudioTrack>? vocals,
+      AudioTrack? backing,
+      List<FxBus>? buses,
+      List<LyricLine> lyrics = const [],
+    }) => SongPractice(
+      id: 'p',
+      title: 'Song',
+      createdAt: DateTime(2026),
+      updatedAt: DateTime(2026),
+      accompaniment: backing,
+      vocalTracks: vocals ?? [_vocal('a'), _vocal('b'), _vocal('c')],
+      versions: [TakeVersion(id: 'v', name: 'I', createdAt: DateTime(2026))],
+      activeVersionId: 'v',
+      lyrics: lyrics,
+      fxBuses: buses ?? [FxBus(id: 'x', name: 'Verb', fx: TrackFx.flat())],
+    );
+
+    test('keeps every equal part, and each list all of whose parts it '
+        'kept', () {
+      final held = practice(
+        backing: _laneWithNotes('acc', AudioTrackKind.accompaniment, 2),
+        lyrics: const [LyricLine(text: 'la')],
+      );
+      final shared = practice(
+        backing: _laneWithNotes('acc', AudioTrackKind.accompaniment, 2),
+        lyrics: const [LyricLine(text: 'la')],
+      ).sharing(held);
+      expect(shared, held);
+      expect(identical(shared.accompaniment, held.accompaniment), isTrue);
+      expect(identical(shared.vocalTracks, held.vocalTracks), isTrue);
+      expect(identical(shared.versions, held.versions), isTrue);
+      expect(identical(shared.fxBuses, held.fxBuses), isTrue);
+      expect(identical(shared.lyrics, held.lyrics), isTrue);
+    });
+
+    test('takes what changed, and a new list around it', () {
+      final held = practice();
+      final shared = practice(
+        vocals: [_vocal('a'), _vocal('b').copyWith(muted: true), _vocal('c')],
+      ).sharing(held);
+      expect(shared.vocalTracks[1].muted, isTrue);
+      expect(identical(shared.vocalTracks[0], held.vocalTracks[0]), isTrue);
+      expect(identical(shared.vocalTracks[2], held.vocalTracks[2]), isTrue);
+      expect(identical(shared.vocalTracks, held.vocalTracks), isFalse);
+      expect(identical(shared.fxBuses, held.fxBuses), isTrue);
+    });
+
+    test('follows a reorder, an addition and a removal', () {
+      final held = practice();
+      final reordered = practice(
+        vocals: [_vocal('c'), _vocal('a'), _vocal('b')],
+      ).sharing(held);
+      expect(reordered.vocalTracks.map((t) => t.id), ['c', 'a', 'b']);
+      expect(identical(reordered.vocalTracks[0], held.vocalTracks[2]), isTrue);
+      expect(identical(reordered.vocalTracks, held.vocalTracks), isFalse);
+
+      final grown = practice(
+        vocals: [_vocal('a'), _vocal('b'), _vocal('c'), _vocal('d')],
+      ).sharing(held);
+      expect(grown.vocalTracks.map((t) => t.id), ['a', 'b', 'c', 'd']);
+      expect(identical(grown.vocalTracks, held.vocalTracks), isFalse);
+
+      final shrunk = practice(vocals: [_vocal('a'), _vocal('b')]).sharing(held);
+      expect(shrunk.vocalTracks.map((t) => t.id), ['a', 'b']);
+      expect(identical(shrunk.vocalTracks[1], held.vocalTracks[1]), isTrue);
+
+      final cleared = practice(buses: const []).sharing(held);
+      expect(cleared.fxBuses, isEmpty);
+    });
+
+    test('keeps every scalar and a backing that came or went', () {
+      final held = practice(
+        backing: _laneWithNotes('acc', AudioTrackKind.accompaniment, 0),
+      );
+      final fresh = SongPractice(
+        id: 'p',
+        title: 'Renamed',
+        createdAt: DateTime(2026),
+        updatedAt: DateTime(2027),
+        vocalTracks: held.vocalTracks,
+        versions: held.versions,
+        activeVersionId: 'v',
+        timelineDurationMs: 9000,
+        separationSource: '/song.wav',
+        masterVolume: 0.5,
+      );
+      final shared = fresh.sharing(held);
+      expect(shared, fresh);
+      expect(shared.accompaniment, isNull);
+      expect(
+        practice().sharing(held.copyWith(clearAccompaniment: true)),
+        practice(),
+      );
+      final came = _laneWithNotes('acc', AudioTrackKind.accompaniment, 0);
+      expect(
+        identical(
+          practice(backing: came).sharing(practice()).accompaniment,
+          came,
+        ),
+        isTrue,
+      );
+    });
+
+    test("ignores another practice's parts", () {
+      final other = SongPractice(
+        id: 'q',
+        title: 'Other',
+        createdAt: DateTime(2026),
+        updatedAt: DateTime(2026),
+        vocalTracks: [_vocal('a')],
+      );
+      final fresh = practice();
+      expect(identical(fresh.sharing(other), fresh), isTrue);
     });
   });
 }

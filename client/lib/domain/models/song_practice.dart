@@ -258,6 +258,52 @@ class SongPractice {
     );
   }
 
+  /// This aggregate with each lane, FX bus and interpretation that equals
+  /// [held]'s (by id) replaced by [held]'s very object, and each list whose
+  /// every element is then [held]'s, in order, by [held]'s list. The values
+  /// are equal, so nothing read from it changes; what compares by identity —
+  /// the kept lanes and channel strips, the envelope cache — sees only what
+  /// actually differs. A re-read is all-new objects, and taking one in after
+  /// a save rebuilt and repainted every lane though one fader had moved.
+  SongPractice sharing(SongPractice held) {
+    if (held.id != id) return this;
+    T? one<T extends Object>(T? fresh, T? old) =>
+        fresh != null && fresh == old ? old : fresh;
+    List<T> many<T extends Object>(
+      List<T> fresh,
+      List<T> old,
+      String Function(T) idOf,
+    ) {
+      final byId = {for (final x in old) idOf(x): x};
+      var same = fresh.length == old.length;
+      final out = <T>[];
+      for (var i = 0; i < fresh.length; i++) {
+        final x = one(fresh[i], byId[idOf(fresh[i])])!;
+        out.add(x);
+        same = same && identical(x, old[i]);
+      }
+      return same ? old : out;
+    }
+
+    return SongPractice(
+      id: id,
+      title: title,
+      createdAt: createdAt,
+      updatedAt: updatedAt,
+      accompaniment: one(accompaniment, held.accompaniment),
+      reference: one(reference, held.reference),
+      vocalTracks: many(vocalTracks, held.vocalTracks, (t) => t.id),
+      versions: many(versions, held.versions, (v) => v.id),
+      activeVersionId: activeVersionId,
+      lyrics: listEquals(lyrics, held.lyrics) ? held.lyrics : lyrics,
+      timelineDurationMs: timelineDurationMs,
+      separationSource: separationSource,
+      reverb: one(reverb, held.reverb),
+      masterVolume: masterVolume,
+      fxBuses: many(fxBuses, held.fxBuses, (b) => b.id),
+    );
+  }
+
   factory SongPractice.fromJson(Map<String, dynamic> json) {
     final id = json['id'] as String;
     final createdAt = DateTime.parse(json['createdAt'] as String);

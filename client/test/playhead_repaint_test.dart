@@ -7,6 +7,7 @@
 // clock's one paragraph), across the screen's states.
 
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
@@ -41,9 +42,14 @@ import 'package:vocara/ui/song_practice_detail/widgets/song_practice_detail_scre
 import 'package:vocara/utils/result.dart';
 
 class _FakeRepo extends Fake implements SongPracticeRepository {
-  _FakeRepo(this.stored);
+  _FakeRepo(this.stored, {this.reread = false});
 
   SongPractice stored;
+
+  /// Answers a save as the real store does: with a re-read, every object in
+  /// it new.
+  final bool reread;
+  int saves = 0;
 
   @override
   Future<Result<Loaded<SongPractice>>> loadPractice(String id) async =>
@@ -54,8 +60,13 @@ class _FakeRepo extends Fake implements SongPracticeRepository {
     SongPractice practice, {
     required Map<String, String> baseHashes,
   }) async {
+    saves++;
     stored = practice;
-    return Result.ok(Loaded(stored, const {}));
+    if (!reread) return Result.ok(Loaded(stored, const {}));
+    final copy = SongPractice.fromJson(
+      jsonDecode(jsonEncode(practice.toJson())) as Map<String, dynamic>,
+    );
+    return Result.ok(Loaded(copy, const {}));
   }
 }
 
@@ -250,12 +261,13 @@ Future<SongPracticeDetailViewModel> _pumpScreen(
   Size size = const Size(1800, 1100),
   RecordingFinalizer? finalizer,
   bool effects = false,
+  _FakeRepo? repository,
 }) async {
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.reset);
   final vm = SongPracticeDetailViewModel(
-    repository: _FakeRepo(_practice(lanes)),
+    repository: repository ?? _FakeRepo(_practice(lanes)),
     techniqueRepository: _FakeTechRepo(),
     audioFileService: _FakeFiles(),
     waveformService: _FakeWaveforms(),
@@ -643,6 +655,46 @@ void main() {
     expect(painted['TimelineGridPainter'], 1, reason: 'its own lane');
     // The edit itself still lands on screen.
     expect(vm.practice!.vocalTracks[3].volume, closeTo(v, 1e-9));
+  });
+
+  // A save is answered with a re-read of the whole practice, every object in
+  // it new; taking that in rebuilt every lane and repainted every waveform
+  // after each fader release, mute or rename. What the re-read reproduces
+  // keeps the objects it was sent as.
+  testWidgets("a save's re-read rebuilds and repaints only what the edit "
+      'changed', (tester) async {
+    SongPractice roundTrip(SongPractice p) => SongPractice.fromJson(
+      jsonDecode(jsonEncode(p.toJson())) as Map<String, dynamic>,
+    );
+    // Through JSON once first: that gives the takes their interpretation.
+    final repo = _FakeRepo(roundTrip(_practice(8)), reread: true);
+    expect(
+      roundTrip(repo.stored),
+      repo.stored,
+      reason: 'the stand-in re-read must reproduce what it was sent',
+    );
+    final vm = await _pumpScreen(tester, repository: repo);
+    final untouched = vm.practice!.vocalTracks[1];
+
+    final rebuilt = await _rebuildCountsBy(
+      tester,
+      () => unawaited(vm.mixer.toggleMute('t3')),
+    );
+    expect(repo.saves, 1, reason: 'the save must have landed');
+    expect(vm.practice!.vocalTracks[3].muted, isTrue);
+    expect(rebuilt['TrackRow'], 1, reason: 'the other lanes are kept');
+    expect(identical(vm.practice!.vocalTracks[1], untouched), isTrue);
+
+    final painted = await _paintsBy(
+      tester,
+      () => unawaited(vm.mixer.toggleMute('t3')),
+    );
+    expect(repo.saves, 2);
+    expect(
+      painted['WaveformPainter'],
+      lessThanOrEqualTo(2),
+      reason: "the lane's clip, and the master envelope its mute changes",
+    );
   });
 
   testWidgets('a pan repaints the lanes\' waveforms, not their headers', (

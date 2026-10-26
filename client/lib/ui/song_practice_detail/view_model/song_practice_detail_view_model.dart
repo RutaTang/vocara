@@ -856,7 +856,10 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   void _revertTo(Loaded<SongPractice> reloaded) {
     final before = lyrics;
     _reverts++;
-    _practice = reloaded.aggregate;
+    final held = _practice;
+    _practice = held == null
+        ? reloaded.aggregate
+        : reloaded.aggregate.sharing(held);
     _baseHashes = reloaded.baseHashes;
     // The stored timeline need not cover the content (a recovered or synced
     // take past it): grown on load, it shrank back on a failed save's revert,
@@ -1125,7 +1128,9 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// selection because the selected take was deleted remotely).
   void _adoptLoaded(Loaded<SongPractice> loaded) {
     final before = _practice;
-    _practice = loaded.aggregate;
+    _practice = before == null
+        ? loaded.aggregate
+        : loaded.aggregate.sharing(before);
     _baseHashes = loaded.baseHashes;
     _ensureSelection();
     _ensureTimeline();
@@ -2733,7 +2738,9 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// revert a remote edit and resurrect a remote delete.
   void _adoptSaved(SongPractice sent, Loaded<SongPractice> saved) {
     if (identical(_practice, sent)) {
-      _practice = saved.aggregate;
+      // What the re-read reproduces keeps the objects it was sent as (see
+      // [SongPractice.sharing]).
+      _practice = saved.aggregate.sharing(sent);
       _baseHashes = saved.baseHashes;
       // The re-read can hold content past the end of the timeline (a take
       // from another device, merged in; see [_adoptLoaded]).
