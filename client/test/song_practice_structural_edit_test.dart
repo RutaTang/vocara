@@ -45,6 +45,9 @@ class _FakeRepo extends Fake implements SongPracticeRepository {
   /// When set, the next save comes back merged with these words from a peer.
   List<LyricLine>? peerWordsOnNextSave;
 
+  /// When set, saves park on it — a write held in flight.
+  Completer<void>? saveGate;
+
   @override
   Future<Result<Loaded<SongPractice>>> loadPractice(String id) async {
     final gate = loadGate;
@@ -59,6 +62,8 @@ class _FakeRepo extends Fake implements SongPracticeRepository {
   }) async {
     inFlight++;
     if (inFlight > maxInFlight) maxInFlight = inFlight;
+    final gate = saveGate;
+    if (gate != null) await gate.future;
     // Yield, so an overlapping (non-serialized) second save would be caught
     // by the in-flight counter.
     await Future<void>.delayed(Duration.zero);
@@ -1241,6 +1246,78 @@ void main() {
         reason: 'the screen must keep showing the surviving edit',
       );
       expect(toasts, contains("Couldn't save your changes."));
+    });
+  });
+
+  group('a change a failed save ahead of it lost', () {
+    // A queued save sends the model as it is when it runs, so a save failing
+    // ahead of it sent the queued change too, and its revert threw the change
+    // away. The queued save then wrote the reverted model and said it landed.
+    test('a delete keeps the audio the store still names', () async {
+      final vm = await pumpVm();
+      repo.failAt = {1};
+      final rename = vm.renameTrack('multi', 'renamed');
+      final delete = vm.deleteTrack('single');
+      await Future.wait([rename, delete]);
+
+      expect(repo.stored.vocalTracks.map((t) => t.id), contains('single'));
+      expect(vm.practice!.vocalTracks.map((t) => t.id), contains('single'));
+      expect(events, isNot(contains('delete:/pool/take1.wav')));
+    });
+
+    test('a separation shows the disk, not an edit that revert lost', () async {
+      // Its failure path put back the model from before it, which carried a
+      // rename the failed save ahead of it had lost: the screen showed the
+      // rename the disk did not have.
+      final separation = _GatedSeparation();
+      final reference = AudioTrack(
+        id: 'ref',
+        kind: AudioTrackKind.reference,
+        displayName: 'Original',
+        audioFilePath: '/pool/original.wav',
+        durationMs: 1000,
+        createdAt: DateTime(2026),
+      );
+      final vm = await pumpVm(separation: separation, reference: reference);
+      for (var i = 0; i < 400 && !vm.separationAvailable; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+      final separating = vm.separateBacking('ref');
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      repo.saveGate = Completer<void>();
+      repo.failAt = {2};
+      final first = vm.renameTrack('multi', 'held'); // in flight, then lands
+      for (var i = 0; i < 50 && repo.inFlight == 0; i++) {
+        await Future<void>.delayed(Duration.zero);
+      }
+      expect(repo.inFlight, 1);
+      final rename = vm.renameTrack('single', 'renamed'); // queued; fails
+      separation.gate.complete();
+      for (var i = 0; i < 400 && vm.practice!.accompaniment == null; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+      expect(vm.practice!.accompaniment, isNotNull, reason: 'queued');
+      repo.saveGate!.complete();
+      await Future.wait([first, rename, separating]);
+
+      String name(String id) =>
+          vm.practice!.vocalTracks.firstWhere((t) => t.id == id).displayName;
+      expect(name('multi'), 'held');
+      expect(name('single'), 'Take 1');
+      expect(vm.practice!.accompaniment, isNull);
+      expect(repo.stored.accompaniment, isNull);
+    });
+
+    test('a lyrics Save reports it did not land', () async {
+      final vm = await pumpVm();
+      repo.failAt = {1};
+      final first = vm.setLyricsText('new words');
+      final second = vm.setLyricsText('new words');
+
+      expect(await first, isFalse);
+      expect(await second, isFalse, reason: 'the editor must keep the draft');
+      expect(vm.lyrics.map((l) => l.text), ['la la la']);
+      expect(repo.stored.lyrics.map((l) => l.text), ['la la la']);
     });
   });
 

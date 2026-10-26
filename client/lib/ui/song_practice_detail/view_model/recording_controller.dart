@@ -141,6 +141,9 @@ class RecordingController extends ChangeNotifier {
   /// Selects the lane (and, when non-null, the clip) the recording landed on.
   /// A null clip id leaves the host's clip selection untouched (new-take case).
   final void Function(String trackId, String? clipId) _selectRecordedClip;
+
+  /// Persists the model, reporting whether THIS write landed: the finalize
+  /// judges for itself whether the store holds the take (see its kept()).
   final Future<bool> Function() _save;
   final void Function(String) _toast;
   final String Function(Object) _friendlyError;

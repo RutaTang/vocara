@@ -234,7 +234,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       createEmptyVocalTake: createEmptyVocalTake,
       discardEmptyTake: _discardEmptyTake,
       selectRecordedClip: _selectRecordedClip,
-      save: _save,
+      save: _write,
       toast: _toast,
       friendlyError: _friendlyError,
       mic: mic,
@@ -847,6 +847,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// that line itself (a lost re-time of a fully timed song).
   void _revertTo(Loaded<SongPractice> reloaded) {
     final before = lyrics;
+    _reverts++;
     _practice = reloaded.aggregate;
     _baseHashes = reloaded.baseHashes;
     // The stored timeline need not cover the content (a recovered or synced
@@ -946,7 +947,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     final practice = _practice;
     if (practice == null) return false;
     _practice = practice.copyWith(lyrics: lines);
-    return _enqueueSave(_writeLyrics);
+    return _persist(_writeLyrics);
   }
 
   /// The lyrics-only persist body (see [_setLyrics]); queued via [_enqueueSave].
@@ -1528,8 +1529,11 @@ class SongPracticeDetailViewModel extends ChangeNotifier
           // Persist BEFORE deleting any old audio, so a failed save can't leave
           // the JSON pointing at files already gone. On failure
           // _withImportedAudio rolls the imported/transcoded files back.
+          final reverts = _reverts;
           if (!await _save()) {
-            _practice = cur; // revert in-memory to the un-persisted state
+            // Back to the un-persisted state, unless a revert already put the
+            // disk's model on screen: [cur] can carry an edit that revert lost.
+            if (_reverts == reverts) _practice = cur;
             // Restore the pre-separation backing flag AND push it: the failed
             // save already resynced the engine under the flipped flag, so a
             // silent restore left the toggle and the audible backing apart.
@@ -2690,7 +2694,26 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// Persists [_practice]. Returns whether the write succeeded — callers that
   /// then delete files must gate the deletion on a successful save so a failed
   /// write can't leave the JSON referencing audio that's already gone.
-  Future<bool> _save() => _enqueueSave(_doSave);
+  Future<bool> _save() => _persist(_doSave);
+
+  /// Queues [write] for a change already made to the model, and reports
+  /// whether that change landed. A queued write sends the model as it is when
+  /// it runs, so a save failing ahead of it sent this change too, and its
+  /// revert ([_revertTo]) threw the change away: the write then saved the
+  /// reverted model and said it landed. A delete then removed the audio the
+  /// store still named, and the lyrics editor closed with its draft gone.
+  Future<bool> _persist(Future<bool> Function() write) {
+    final reverts = _reverts;
+    return _enqueueSave(() async => await write() && _reverts == reverts);
+  }
+
+  /// Bumped by every revert to the disk's model (see [_persist]).
+  int _reverts = 0;
+
+  /// [_save] without its check for a revert ahead of it: whether this write
+  /// landed. For the take finalize, which tells a take its own save lost from
+  /// one an edit's failed save reverted away by what the model still holds.
+  Future<bool> _write() => _enqueueSave(_doSave);
 
   Future<bool> _doSave() async {
     if (_practice == null) return false;
