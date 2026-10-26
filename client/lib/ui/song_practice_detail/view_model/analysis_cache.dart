@@ -93,13 +93,11 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     // over this cache.
     _spectrogramCache.onEvict = _dropDerived;
     _metricsCache.onEvict = _dropDerived;
-    // What the selected take's views show under its path — the dock's and the
-    // inspector's halves of its analysis, the FX panel's EQ display — is
-    // never evicted by another's insert under that path: with the three over
-    // the budget, each view asked again for what the last insert pushed out,
-    // a decode after every frame.
+    // A clip's two halves are one analysis: neither insert evicts the other.
+    // Not the EQ display: it follows the clip under the playhead, not the
+    // selected one, and pinned with a selected clip's halves it outlived the
+    // display on screen.
     _metricsCache.partnerWith(_spectrogramCache);
-    _eqSpectroCache.partnerWith(_spectrogramCache);
     _aggAnalysisCache.onEvict = _dropAggDerived;
   }
 
@@ -608,9 +606,9 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   /// The lane aggregate a heal merged and could not cache, which is not asked
   /// for again until a merge caches it or a file it folds changes: the
   /// inspector asks on every rebuild, and merged the lane again each time.
-  /// A clip needs no such bound: a compute's insert never drops what the
-  /// clip's views hold under its path (see [LruBytesCache.partnerWith]), so a
-  /// heal leaves what it asked for.
+  /// A clip needs no such bound: a compute's insert never drops the clip's
+  /// other half (see [LruBytesCache.partnerWith]), so a heal leaves what it
+  /// asked for.
   String? _healBlocked;
 
   /// Asks again for what [lacksAnalysis] says the subject lacks: by default

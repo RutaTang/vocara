@@ -1216,43 +1216,6 @@ void main() {
       expect(cache.selectedMetrics, isNotNull);
     });
 
-    test('the EQ display and the take\'s analysis do not push each other '
-        'out', () async {
-      // The FX panel's EQ shows the selected take, as the dock and the
-      // inspector do. With the three over the budget, each insert evicted
-      // another's entry under the take's path, and the view showing it asked
-      // again: a decode after every frame.
-      final track = _lane([_clip('c1', 0)]);
-      final stub = _StubSpectrograms(
-        metricsByPath: {'c1.wav': _metrics(10)},
-        specsByPath: {'c1.wav': _spec(10)},
-      );
-      final cache = _cache(
-        spectrograms: stub,
-        selectedTrack: () => track,
-        trackById: (id) => id == track.id ? track : null,
-        cacheBudget: LruBytesBudget(560), // the pair (490 B) or the EQ, not all
-      );
-      addTearDown(cache.dispose);
-      int computes() => stub.bothCalls + stub.specCalls + stub.metricsCalls;
-      cache.showDockTab(DockTab.spectrogram);
-      await _settled(() => !cache.spectrogramLoading && !cache.metricsLoading);
-      for (var i = 0; i < 10; i++) {
-        cache.eqInputColumn(track.id); // the FX panel paints
-        await pumpEventQueue();
-        if (cache.selectedAnalysisIncomplete) {
-          await cache.healSelectedAnalysis();
-        }
-        if (cache.lacksAnalysis(metrics: true)) {
-          await cache.healSelectedAnalysis(spectrogram: false, metrics: true);
-        }
-      }
-      expect(computes(), 2, reason: 'the pair once, the EQ display once');
-      expect(cache.eqInputColumn(track.id), isNotNull);
-      expect(cache.selectedSpectrogram, isNotNull);
-      expect(cache.selectedMetrics, isNotNull);
-    });
-
     test(
       'a half pushed out while a heal computes is asked for again',
       () async {
