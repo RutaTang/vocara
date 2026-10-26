@@ -616,6 +616,48 @@ void main() {
         'opens.',
       );
     });
+
+    test(
+      'beside an edit whose save fails too still lands on its lane',
+      () async {
+        // The take's save failed while an edit made during it queued a save of
+        // its own, holding the take: judged right then, the take was kept, so
+        // it was not staged again. The edit's save then failed and reverted the
+        // model to the store's, the retry saved that, and the take vanished with
+        // no word of it.
+        final vm = await pumpVm(engine: _FakeGraphEngine(), mic: _FakeMic());
+        final toasts = <String>[];
+        final sub = vm.toasts.listen(toasts.add);
+        addTearDown(sub.cancel);
+        vm.selectTrack('take1');
+        await vm.recording.startRecording();
+        vm.position.value = const Duration(milliseconds: 500);
+        // Park the take's save (a long take's pool copy), then fail it and the
+        // edit's save behind it.
+        final gate = Completer<void>();
+        repo.saveGate = gate;
+        repo.failSaves = 2;
+        final stop = vm.stopRecording();
+        for (var i = 0; i < 50; i++) {
+          await Future<void>.delayed(Duration.zero);
+        }
+        unawaited(vm.renameTrack('take1', 'Lead')); // an edit while it saves
+        repo.saveGate = null;
+        gate.complete();
+        await stop;
+        for (var i = 0; i < 20; i++) {
+          await Future<void>.delayed(Duration.zero);
+        }
+        final inModel = vm.practice!.vocalTracks.singleWhere(
+          (t) => t.id == 'take1',
+        );
+        final inStore = repo.stored.vocalTracks.singleWhere(
+          (t) => t.id == 'take1',
+        );
+        expect(inModel.clips, hasLength(2), reason: 'the take is on its lane');
+        expect(inStore.clips, hasLength(2), reason: 'and saved there');
+      },
+    );
   });
 
   group("REC's empty take", () {
@@ -657,6 +699,37 @@ void main() {
       await start;
       expect(vm.practice!.vocalTracks.map((t) => t.id), ['take1']);
       expect(vm.selectedBusId, busId);
+    });
+
+    test('a quit while REC is arming leaves no empty take behind', () async {
+      // The mic lists a take's quit work only once it arms: a quit in the arm
+      // window found nothing to wait for and exited, and the empty "Take N"
+      // REC had saved to record into reopened with the practice ever after.
+      final mic = _FakeMic()..ready = Completer<void>();
+      repo = _FakeRepo(_seed(accompaniment: _backing()));
+      waveforms = _FakeWaveforms();
+      spectrograms = _FakeSpectrograms();
+      final finalizer = RecordingFinalizer.forTesting();
+      final vm = openVm(
+        engine: _FakeGraphEngine(),
+        mic: mic,
+        finalizer: finalizer,
+      );
+      addTearDown(vm.dispose);
+      for (var i = 0; i < 400 && vm.practice == null; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+      final start = vm.recording.startRecording();
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(vm.recording.isStartingTake, isTrue);
+      expect(repo.stored.vocalTracks, hasLength(2), reason: 'REC saved one');
+      final quit = finalizer.finalizeAll();
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      mic.ready!.complete(); // the open answers (or times out)
+      await quit;
+      await start;
+      expect(vm.isRecording, isFalse);
+      expect(repo.stored.vocalTracks.map((t) => t.id), ['take1']);
     });
 
     test('a REC cancelled while arming leaves no empty take behind', () async {

@@ -381,7 +381,24 @@ class RecordingController extends ChangeNotifier {
     if (_mic.isRecording || isStartingTake || _stopping || _busyGate.busy) {
       return;
     }
-    await (_startInFlight = _armTake());
+    // Held from here until the start settles. The mic lists the take's own
+    // quit work only once it arms, so a quit in the arm window (the mic's
+    // open can take up to its ready timeout) exited at once, and the empty
+    // "Take N" REC had saved to record into stayed in the practice for good.
+    // The quit cancels the start, as Back does, and waits for it to unwind
+    // (which drops that take); a take that armed meanwhile stops and saves.
+    Future<void> cancelForQuit() async {
+      final start = _startInFlight;
+      await stopRecording();
+      if (start != null) await start;
+    }
+
+    _finalizer.register(cancelForQuit);
+    try {
+      await (_startInFlight = _armTake());
+    } finally {
+      _finalizer.unregister(cancelForQuit);
+    }
   }
 
   /// The latest [startRecording] past its guard, until it armed, failed or
@@ -735,22 +752,37 @@ class RecordingController extends ChangeNotifier {
       }
 
       var staged = stage();
-      if (!await _save()) {
+      // Whether the model holds the take, judged by the lane's and clip's ids,
+      // which survive the commit: the take comes back under its pooled path,
+      // and judged by its staging path it was staged twice and played doubled.
+      bool kept() {
+        final lane = _trackById(staged.lane);
+        return lane != null &&
+            (staged.clip == null || lane.clips.any((c) => c.id == staged.clip));
+      }
+
+      // A save that lands has committed the take: a failing save queued behind
+      // it reverts to a store that holds it.
+      var ok = await _save();
+      if (!ok) {
         // A failed save reverts the model to the store's, which never held the
         // take: it vanished from the screen and no later save brought it back,
         // only the next launch's recovery of its file, as a new take at 0:00
         // off its lane. Stage it again — unless the model kept it (a newer
         // edit's queued save carrying it, or a save that committed and only
-        // failed its re-read) — and retry once. Kept is judged by the lane's
-        // and clip's ids, which survive the commit: the take comes back under
-        // its pooled path, and judged by its staging path it was staged twice
-        // and played doubled.
-        final lane = _trackById(staged.lane);
-        final kept =
-            lane != null &&
-            (staged.clip == null || lane.clips.any((c) => c.id == staged.clip));
-        if (!kept) staged = stage();
-        if (!await _save()) {
+        // failed its re-read) — and retry once.
+        if (!kept()) staged = stage();
+        ok = await _save();
+        // Saves run one at a time, so every save queued ahead of the retry has
+        // settled by now. One that carried the take (an edit made while the
+        // take's save ran) and failed in turn reverted it away, and the retry
+        // then saved a model without it: the take vanished with no notice.
+        // That was the edit's failure, not the take's: stage it once more.
+        if (ok && !kept()) {
+          staged = stage();
+          ok = await _save();
+        }
+        if (!ok || !kept()) {
           _toast(
             "Couldn't save the take. It will be recovered the next time "
             'Vocara opens.',
