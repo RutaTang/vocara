@@ -805,6 +805,7 @@ void main() {
     final rebuilt = await _rebuildCountsBy(tester, fader);
     expect(rebuilt['TrackRow'], 1, reason: 'the other lanes are kept');
     expect(rebuilt['_TrackHeader'], 1, reason: 'its fader moved');
+    expect(rebuilt, isNot(contains('Scaffold')), reason: 'only the back guard');
     // Its body shows the clips and notes, which a fader leaves as they are:
     // rebuilt, it repainted every clip's waveform in the lane per tick.
     expect(rebuilt['_ClipRegion'], isNull, reason: 'its clips are unchanged');

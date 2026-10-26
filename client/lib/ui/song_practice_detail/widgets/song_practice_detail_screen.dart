@@ -89,42 +89,53 @@ class SongPracticeDetailScreen extends StatelessWidget {
     // first so navigating away mid-record never loses it — and in REC's arm
     // window cancel the start first, or it could still arm on the leaving
     // page. canPop must react to both, so wrap in a ListenableBuilder on the vm.
+    //
+    // Only the PopScope reads what this listens to: the Scaffold is built once
+    // and handed through, not rebuilt on every notification (each fader, pan
+    // or clip-drag tick), and the workspace below listens on its own.
     return ListenableBuilder(
       listenable: vm,
-      builder: (context, _) => PopScope(
+      builder: (context, scaffold) => PopScope(
         canPop: !vm.takeHoldsScreen,
         onPopInvokedWithResult: (didPop, _) async {
           if (didPop || !await vm.stopBeforeLeaving()) return;
           if (context.mounted) context.pop();
         },
-        child: Scaffold(
-          backgroundColor: Studio.background,
-          body: ListenableBuilder(
-            listenable: Listenable.merge([vm, vm.load]),
-            builder: (context, _) {
-              if (vm.load.running && vm.practice == null) {
-                return const _NoWorkspace(
-                  child: CircularProgressIndicator(
-                    valueColor: AlwaysStoppedAnimation(Studio.textSecondary),
-                  ),
-                );
-              }
-              final practice = vm.practice;
-              if (practice == null) {
-                return const _NoWorkspace(
-                  child: Text(
-                    'Could not load this practice.',
-                    style: TextStyle(color: Studio.textSecondary),
-                  ),
-                );
-              }
-              return _Workspace(vm: vm, practice: practice);
-            },
-          ),
+        child: scaffold!,
+      ),
+      child: Scaffold(
+        backgroundColor: Studio.background,
+        body: ListenableBuilder(
+          listenable: _changesOrLoad(vm),
+          builder: (context, _) {
+            if (vm.load.running && vm.practice == null) {
+              return const _NoWorkspace(
+                child: CircularProgressIndicator(
+                  valueColor: AlwaysStoppedAnimation(Studio.textSecondary),
+                ),
+              );
+            }
+            final practice = vm.practice;
+            if (practice == null) {
+              return const _NoWorkspace(
+                child: Text(
+                  'Could not load this practice.',
+                  style: TextStyle(color: Studio.textSecondary),
+                ),
+              );
+            }
+            return _Workspace(vm: vm, practice: practice);
+          },
         ),
       ),
     );
   }
+
+  /// [vm]'s notifications and its load's, merged once per view model rather
+  /// than anew (and resubscribed) on every build.
+  static Listenable _changesOrLoad(SongPracticeDetailViewModel vm) =>
+      _merged[vm] ??= Listenable.merge([vm, vm.load]);
+  static final _merged = Expando<Listenable>('changesOrLoad');
 }
 
 /// The screen while there is no workspace — loading, or a practice that could
