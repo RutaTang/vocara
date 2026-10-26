@@ -258,6 +258,32 @@ void main() {
     });
   });
 
+  test('a send turned back on while a bus is soloed is heard as it is '
+      'dragged, not from the release', () {
+    final host = _Host(
+      _practice(
+        vocals: [
+          _vocal(
+            'v1',
+            sends: const [TrackSend(busId: 'verb', levelDb: kSendOffDb)],
+          ),
+        ],
+        buses: [_bus('verb')],
+      ),
+    );
+    host.mixer.toggleBusSolo('verb');
+    expect(
+      host.engine.volumes['v1-c0']?.muted,
+      isTrue,
+      reason: 'off: no route',
+    );
+
+    host.mixer.setTrackSendLevelLive('v1', 0, -12);
+    expect(host.engine.volumes['v1-c0']?.muted, isFalse);
+    host.mixer.setTrackSendLevelLive('v1', 0, kSendOffDb);
+    expect(host.engine.volumes['v1-c0']?.muted, isTrue);
+  });
+
   group('backing A/B (playReference)', () {
     test('flips the audible backing and pushes the swap to the engine', () {
       final host = _Host(_practice());

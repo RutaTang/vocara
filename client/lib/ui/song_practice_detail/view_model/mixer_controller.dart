@@ -474,11 +474,16 @@ class MixerController extends ChangeNotifier {
     final track = _trackById(trackId);
     if (track == null || slot < 0 || slot >= track.sends.length) return;
     final next = [...track.sends];
+    final wasOff = next[slot].levelDb <= kSendOffDb;
     next[slot] = next[slot].copyWith(levelDb: levelDb);
     _updateTrack(trackId, (t) => t.copyWith(sends: next));
     for (final c in track.clips) {
       _playback.setTrackSendLevel(c.id, slot, levelDb);
     }
+    // A send turned off or back on is a route gone or come back, which a
+    // soloed bus's feeders are judged by (see resolveSolo): left to the
+    // release, the take stayed muted, or its dry path played, while dragged.
+    if (wasOff != levelDb <= kSendOffDb) _applyAudibility();
     notifyListeners();
   }
 
@@ -582,6 +587,7 @@ class MixerController extends ChangeNotifier {
         slot >= bus.sends.length) {
       return;
     }
+    final wasOff = bus.sends[slot].levelDb <= kSendOffDb;
     _setPractice(
       practice.copyWith(
         fxBuses: _withBus(busId, (b) {
@@ -592,6 +598,7 @@ class MixerController extends ChangeNotifier {
       ),
     );
     _playback.setBusSendLevel(busId, slot, levelDb);
+    if (wasOff != levelDb <= kSendOffDb) _applyAudibility(); // as above
     notifyListeners();
   }
 
