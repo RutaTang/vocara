@@ -456,6 +456,41 @@ void main() {
       expect(await AssetStore.knownHashOf(elsewhere), isNull);
       expect(File('${elsewhere.path}.sha256').existsSync(), isFalse);
     });
+
+    test('only for recordings boot recovery looks at, not the imports and '
+        'edits staged below them', () async {
+      final below = await staged(
+        p.join('imports', 'guide.wav'),
+        List.filled(64, 9),
+      );
+      await store.importFile(below.path);
+      expect(File('${below.path}.sha256').existsSync(), isFalse);
+      expect(await AssetStore.importedHashOf(below), isNull);
+    });
+
+    test('and lands it on the drive before the import goes on', () async {
+      // Boot recovery trusts this record over a staging file a power cut
+      // rolled back, so it must be on disk before any row names the bytes.
+      final fs = _DirFlushLog();
+      final logged = AssetStore(
+        db: db,
+        root: tmp,
+        writer: SyncWriter(db, HlcClock(node: 'NODE'.padRight(26, '0'))),
+        fs: fs,
+      );
+      final f = await staged('take.wav', List.generate(512, (i) => i & 0xff));
+      await logged.importFile(f.path);
+      expect(fs.dirs, contains(f.parent.path));
+      // Kept whatever later happens to the file: it answers for what the
+      // import pooled.
+      f.writeAsBytesSync([1, 2, 3]);
+      expect(await AssetStore.knownHashOf(f), isNull);
+      expect(
+        await AssetStore.importedHashOf(f),
+        isNot(await AssetStore.sha256OfFile(f.path)),
+      );
+      expect(await AssetStore.importedHashOf(f), isNotNull);
+    });
   });
 }
 

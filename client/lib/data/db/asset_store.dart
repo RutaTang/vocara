@@ -509,8 +509,10 @@ class AssetStore {
   }
 
   /// Leaves [staged]'s hash beside [sourcePath] when it is a staged recording
-  /// (under `audio/`) that did not change while it was read. Best-effort: a
-  /// missing sidecar only means boot hashes the file itself.
+  /// (directly in a practice's folder under `audio/`, where boot recovery
+  /// looks; imports and edits stage a level further down) that did not change
+  /// while it was read. Best-effort: a missing sidecar only means boot hashes
+  /// the file itself.
   ///
   /// Flushed to the drive before the import goes on, so it is on disk before
   /// any row naming these bytes commits: boot recovery trusts it over the
@@ -520,7 +522,8 @@ class AssetStore {
     (int, int)? before,
     _StagedImport staged,
   ) async {
-    if (before == null || !p.isWithin(p.join(root.path, 'audio'), sourcePath)) {
+    final audio = p.join(root.path, 'audio');
+    if (before == null || !p.equals(p.dirname(p.dirname(sourcePath)), audio)) {
       return;
     }
     final after = await _sizeAndMtime(sourcePath);
