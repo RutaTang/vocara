@@ -3937,6 +3937,44 @@ mod punch_tests {
     }
 
     #[test]
+    fn a_mono_take_at_another_rate_splices_before_a_stereo_one() {
+        // Merge down sends any two takes of different formats here: a mono recording
+        // (here at 44.1 kHz) followed by a stereo engine-rate import.
+        let old = temp_wav("mix_old");
+        let new = temp_wav("mix_new");
+        let out = temp_wav("mix_out");
+        crate::wav::write_wav_f32(&old, &[0.25; 4410], 1, 44_100).unwrap(); // 100 ms
+        let new_pcm: Vec<f32> = (0..96).flat_map(|_| [0.5, -0.5]).collect();
+        crate::wav::write_wav_f32(&new, &new_pcm, 2, 48_000).unwrap();
+        let c = |p: &std::path::Path| CString::new(p.to_str().unwrap()).unwrap();
+        let (c_old, c_new, c_out) = (c(&old), c(&new), c(&out));
+
+        let frames =
+            super::ve_punch_wav(c_old.as_ptr(), c_new.as_ptr(), 100, 48_000, c_out.as_ptr());
+        assert_eq!(
+            frames,
+            4800 + 96,
+            "all of old at the engine rate, then all of new"
+        );
+        let (pcm, rate) =
+            crate::device::decode_file(out.to_str().unwrap(), 10.0, 192_000, 1 << 20).unwrap();
+        assert_eq!(rate, 48_000);
+        assert_eq!(pcm.len(), 4896);
+        // Old's mono on both channels (mid-take, clear of the resampler's edges).
+        let mid = pcm[2400];
+        assert!(
+            (mid[0] - 0.25).abs() < 0.01 && (mid[1] - 0.25).abs() < 0.01,
+            "{mid:?}"
+        );
+        // New's stereo as it was, from its first frame to its last.
+        assert_eq!(pcm[4800], [0.5, -0.5]);
+        assert_eq!(pcm[4895], [0.5, -0.5]);
+        let _ = std::fs::remove_file(&old);
+        let _ = std::fs::remove_file(&new);
+        let _ = std::fs::remove_file(&out);
+    }
+
+    #[test]
     fn an_in_place_splice_is_refused_and_the_source_survives() {
         // WavStream::create TRUNCATES its target: out == old used to cut the source to a
         // 44-byte header before it was ever read (measured on a real take). Same-file
