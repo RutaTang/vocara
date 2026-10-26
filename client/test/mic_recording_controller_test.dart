@@ -420,6 +420,47 @@ void main() {
     controller.stop();
   });
 
+  testWidgets('an input that stops delivering mid-take counts as lost after '
+      'the stall limit', (tester) async {
+    final engine = _FakeEngine();
+    final dest = _FakeDestination();
+    var lost = 0;
+    final controller = MicRecordingController(
+      acquireEngine: () => engine,
+      requestPermission: () async => true,
+      onInputDeviceLost: () => lost++,
+    );
+    addTearDown(controller.dispose);
+
+    await controller.start(dest.strategy);
+    await tester.pump(const Duration(milliseconds: 200)); // delivering
+    engine.framesReceivedStep = 0; // the unit stops calling back, no event
+    await tester.pump(const Duration(milliseconds: 1500));
+    expect(lost, 0, reason: 'not stalled for the limit yet');
+    await tester.pump(const Duration(milliseconds: 700));
+    expect(lost, 1);
+    controller.stop();
+  });
+
+  testWidgets('an input that has not delivered yet is not counted lost', (
+    tester,
+  ) async {
+    final engine = _FakeEngine()..framesReceivedStep = 0;
+    final dest = _FakeDestination();
+    var lost = 0;
+    final controller = MicRecordingController(
+      acquireEngine: () => engine,
+      requestPermission: () async => true,
+      onInputDeviceLost: () => lost++,
+    );
+    addTearDown(controller.dispose);
+
+    await controller.start(dest.strategy);
+    await tester.pump(const Duration(seconds: 5));
+    expect(lost, 0, reason: 'a mic still warming up');
+    controller.stop();
+  });
+
   testWidgets('abort stops the hardware and discards the take file', (
     tester,
   ) async {

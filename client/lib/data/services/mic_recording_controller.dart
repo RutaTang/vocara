@@ -173,6 +173,10 @@ class MicRecordingController {
   /// instead of hard-coding a second 50 that could drift.
   static const int levelIntervalMs = 50;
 
+  /// How long an input that was delivering may stall before the take counts it
+  /// lost (see the level tick).
+  static const stallLimit = Duration(seconds: 2);
+
   /// Borrows the engine to record with; called once per [start], after the
   /// permission gate (so a denied/abandoned start never touches — or lazily
   /// creates — an engine). The owner keeps engine ownership and disposal.
@@ -435,6 +439,9 @@ class MicRecordingController {
           },
         );
       }
+      var lastFrames = engine.inputFramesReceived();
+      var delivered = false;
+      var stalledTicks = 0;
       _levelTimer = Timer.periodic(
         const Duration(milliseconds: levelIntervalMs),
         (_) {
@@ -472,6 +479,23 @@ class MicRecordingController {
               return;
             }
             if (events & GraphAudioPlaybackService.eventInputLost != 0) {
+              onLost();
+              return;
+            }
+            // VPIO raises no loss event when its unit just stops calling back
+            // (a headset carrying both legs dropping out): the take sat
+            // "recording", its meter frozen, with nothing said. An input that
+            // delivered and then stalls for [stallLimit] is lost too, as the
+            // song page's own device watch judges it (not one still warming
+            // up: a Bluetooth profile switch delivers nothing for a while).
+            final frames = engine.inputFramesReceived();
+            if (frames != lastFrames) {
+              lastFrames = frames;
+              delivered = true;
+              stalledTicks = 0;
+            } else if (delivered &&
+                ++stalledTicks * levelIntervalMs >= stallLimit.inMilliseconds) {
+              stalledTicks = 0;
               onLost();
               return;
             }
