@@ -13,7 +13,7 @@ import 'package:vocara/ui/song_practice_detail/widgets/ruler_bar.dart';
 import 'package:vocara/ui/song_practice_detail/widgets/track_row.dart';
 
 class _FakePlayback extends Fake implements PlaybackController {
-  _FakePlayback(this.viewStartMs);
+  _FakePlayback(this.viewStartMs, this.loopStartMs, this.loopEndMs);
 
   final starts = <int>[];
   final ends = <int>[];
@@ -22,10 +22,10 @@ class _FakePlayback extends Fake implements PlaybackController {
   final int viewStartMs;
 
   @override
-  int get loopStartMs => 2000;
+  final int loopStartMs;
 
   @override
-  int get loopEndMs => 8000;
+  final int loopEndMs;
 
   @override
   bool get loopEnabled => true;
@@ -38,15 +38,17 @@ class _FakePlayback extends Fake implements PlaybackController {
 }
 
 class _FakeVm extends Fake implements SongPracticeDetailViewModel {
-  _FakeVm(int viewStartMs) : fakePlayback = _FakePlayback(viewStartMs);
+  _FakeVm(int viewStartMs, int loopStartMs, int loopEndMs)
+    : fakePlayback = _FakePlayback(viewStartMs, loopStartMs, loopEndMs);
 
   final _FakePlayback fakePlayback;
+  final seeks = <int>[];
 
   @override
   PlaybackController get playback => fakePlayback;
 
   @override
-  Future<void> seek(Duration to) async {}
+  Future<void> seek(Duration to) async => seeks.add(to.inMilliseconds);
 }
 
 void main() {
@@ -58,8 +60,10 @@ void main() {
     WidgetTester tester, {
     int viewStartMs = 0,
     int viewMs = timelineMs,
+    int loopStartMs = 2000,
+    int loopEndMs = 8000,
   }) async {
-    final vm = _FakeVm(viewStartMs);
+    final vm = _FakeVm(viewStartMs, loopStartMs, loopEndMs);
     final position = ValueNotifier(Duration.zero);
     addTearDown(position.dispose);
     await tester.pumpWidget(
@@ -87,6 +91,54 @@ void main() {
     kTimelineHMargin + kTrackHeaderW + 8000 / timelineMs * laneW,
     rulerHeight / 2,
   );
+
+  /// The ruler's x for [ms] of the 10 s view.
+  Offset at(double ms) => Offset(
+    kTimelineHMargin + kTrackHeaderW + ms / timelineMs * laneW,
+    rulerHeight / 2,
+  );
+
+  testWidgets('a click on a loop handle still seeks', (tester) async {
+    // The default loop starts at 0: its handle covered the start of the
+    // ruler, and a click there to go back to 0:00 did nothing.
+    final vm = await pumpRuler(tester, loopStartMs: 0);
+    await tester.tapAt(at(0) + const Offset(3, 0));
+    await tester.pump();
+    expect(vm.seeks, hasLength(1));
+    expect(vm.seeks.single, closeTo(3 / laneW * timelineMs, 2));
+    expect(vm.fakePlayback.starts, isEmpty);
+  });
+
+  testWidgets('a loop narrower than a handle still moves left', (tester) async {
+    // The end's handle lies over the start's: a leftward drag took the end,
+    // which stops at the start, so the region could not move left at all.
+    final vm = await pumpRuler(tester, loopStartMs: 5000, loopEndMs: 5100);
+    final g = await tester.startGesture(
+      at(5050),
+      kind: PointerDeviceKind.mouse,
+    );
+    await g.moveBy(const Offset(-10, 0)); // past the drag slop
+    await tester.pump();
+    await g.moveBy(const Offset(-20, 0));
+    await tester.pump();
+    await g.up();
+    await tester.pump();
+    expect(vm.fakePlayback.starts, isNotEmpty);
+    expect(vm.fakePlayback.starts.last, lessThan(5000));
+    expect(vm.fakePlayback.ends, isEmpty);
+
+    final right = await tester.startGesture(
+      at(5050),
+      kind: PointerDeviceKind.mouse,
+    );
+    await right.moveBy(const Offset(10, 0));
+    await tester.pump();
+    await right.moveBy(const Offset(20, 0));
+    await tester.pump();
+    await right.up();
+    await tester.pump();
+    expect(vm.fakePlayback.ends.last, greaterThan(5100));
+  });
 
   testWidgets('a two-finger trackpad swipe over a loop handle leaves it', (
     tester,

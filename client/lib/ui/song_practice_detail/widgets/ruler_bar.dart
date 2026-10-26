@@ -125,18 +125,31 @@ class RulerBar extends StatelessWidget {
               child: IgnorePointer(child: ColoredBox(color: loopColor)),
             ),
             Positioned.fill(child: IgnorePointer(child: ticks)),
-            // Edge handles (only these resize the region).
+            // Edge handles (only these resize the region). A click on one
+            // still seeks, as on the rest of the ruler: the default loop
+            // starts at 0, and its handle covered the click back to 0:00.
             _LoopHandle(
               centerX: startX,
               valueMs: vm.playback.loopStartMs,
               msPerPx: dur / w,
               onChanged: vm.playback.setLoopStart,
+              onTapAt: (dx) => vm.seek(Duration(milliseconds: msAt(dx))),
             ),
             _LoopHandle(
               centerX: endX,
               valueMs: vm.playback.loopEndMs,
               msPerPx: dur / w,
               onChanged: vm.playback.setLoopEnd,
+              onTapAt: (dx) => vm.seek(Duration(milliseconds: msAt(dx))),
+              // Drawn over the start's handle when the region is narrower
+              // than a handle: a drag leftward there moves the start, or the
+              // region could only be widened to the right.
+              leftward: (endX - startX).abs() < _LoopHandle.width
+                  ? (
+                      valueMs: vm.playback.loopStartMs,
+                      onChanged: vm.playback.setLoopStart,
+                    )
+                  : null,
             ),
             Positioned.fill(child: playhead),
           ],
@@ -152,7 +165,12 @@ class _LoopHandle extends StatefulWidget {
     required this.valueMs,
     required this.msPerPx,
     required this.onChanged,
+    required this.onTapAt,
+    this.leftward,
   });
+
+  /// How wide a handle is to grab.
+  static const double width = 16;
 
   final double centerX;
 
@@ -160,6 +178,12 @@ class _LoopHandle extends StatefulWidget {
   final int valueMs;
   final double msPerPx;
   final ValueChanged<int> onChanged;
+
+  /// A click on the handle, at this x on the ruler.
+  final ValueChanged<double> onTapAt;
+
+  /// The edge a drag that starts leftward moves instead, when one is given.
+  final ({int valueMs, ValueChanged<int> onChanged})? leftward;
 
   @override
   State<_LoopHandle> createState() => _LoopHandleState();
@@ -173,11 +197,15 @@ class _LoopHandleState extends State<_LoopHandle> {
   int _baseMs = 0;
   double _dx = 0;
 
+  /// The edge this drag moves, chosen by its first movement.
+  ValueChanged<int>? _edge;
+
   @override
   Widget build(BuildContext context) {
+    final left = widget.centerX - _LoopHandle.width / 2;
     return Positioned(
-      left: widget.centerX - 8,
-      width: 16,
+      left: left,
+      width: _LoopHandle.width,
       top: 0,
       bottom: 0,
       child: MouseRegion(
@@ -187,13 +215,25 @@ class _LoopHandleState extends State<_LoopHandle> {
           // Not a trackpad swipe either: with the cursor on a handle, the
           // swipe meant to pan moved the loop edge.
           supportedDevices: kPointerDragDevices,
+          onTapUp: (d) => widget.onTapAt(left + d.localPosition.dx),
           onHorizontalDragStart: (_) {
-            _baseMs = widget.valueMs;
+            _edge = null;
             _dx = 0;
           },
           onHorizontalDragUpdate: (d) {
             _dx += d.primaryDelta ?? 0;
-            widget.onChanged(_baseMs + (_dx * widget.msPerPx).round());
+            if (_edge == null) {
+              if (_dx == 0) return;
+              final other = widget.leftward;
+              if (other != null && _dx < 0) {
+                _edge = other.onChanged;
+                _baseMs = other.valueMs;
+              } else {
+                _edge = widget.onChanged;
+                _baseMs = widget.valueMs;
+              }
+            }
+            _edge!(_baseMs + (_dx * widget.msPerPx).round());
           },
           child: Center(
             child: Container(
