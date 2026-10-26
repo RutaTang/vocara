@@ -1178,6 +1178,52 @@ void main() {
       );
       expect(single.volume, 0.3);
     });
+
+    test('a fader held still when a reload arrives keeps its value', () async {
+      // The reload skipped only an edit made DURING its read: a value held
+      // since before it (the fader still down, not moving) was read over with
+      // the store's, the slider snapped back and the release saved the old
+      // value.
+      final remote = StreamController<RemoteApplied>.broadcast();
+      addTearDown(remote.close);
+      final vm = await pumpVm(remoteApplied: remote.stream);
+      vm.mixer.setTrackVolumeLive('single', 0.3); // held, not released
+
+      remote.add(
+        RemoteApplied(
+          rows: const [],
+          practiceIds: const {'p1'},
+          techniqueIds: const {},
+        ),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      double volume(SongPractice p) =>
+          p.vocalTracks.firstWhere((t) => t.id == 'single').volume;
+      expect(volume(vm.practice!), 0.3);
+      await vm.mixer.commitTrackVolume(); // release
+
+      expect(volume(repo.stored), 0.3);
+    });
+
+    test('... and a reload after the release shows the store', () async {
+      final remote = StreamController<RemoteApplied>.broadcast();
+      addTearDown(remote.close);
+      final vm = await pumpVm(remoteApplied: remote.stream);
+      vm.mixer.setTrackVolumeLive('single', 0.3);
+      await vm.mixer.commitTrackVolume();
+
+      repo.stored = repo.stored.copyWith(title: 'Renamed elsewhere');
+      remote.add(
+        RemoteApplied(
+          rows: const [],
+          practiceIds: const {'p1'},
+          techniqueIds: const {},
+        ),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(vm.practice!.title, 'Renamed elsewhere');
+    });
   });
 
   group('take numbering', () {

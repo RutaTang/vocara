@@ -384,6 +384,10 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// state (the classic stale-read-completes-last race).
   int _reloadEpoch = 0;
 
+  /// The model as last read from or written to the store (a load, a save's
+  /// re-read, a revert). Any other [_practice] holds a change not saved yet.
+  SongPractice? _persisted;
+
   /// Freshness-only reload when sync applied remote rows belonging to THIS
   /// practice. Heavily guarded: skipped while anything is in flight (busy
   /// gate, recording, separating, saving) — skipping is always SAFE because
@@ -401,15 +405,19 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   Future<void> _reloadIfUnchanged() async {
     if (_disposed || _practice == null || load.running) return;
     if (busy || isRecording || isSeparating || _saving) return;
+    // A change not saved yet (a fader held still, a save still queued): read
+    // over with the store, the control snapped back and its release saved the
+    // old value. Skip — that change's own save merges the remote one and
+    // re-reads.
+    if (!identical(_practice, _persisted)) return;
     final epoch = ++_reloadEpoch;
     final before = _practice;
     final loaded = await _repository.loadPractice(_practiceId);
     if (_disposed || epoch != _reloadEpoch) return;
     if (busy || isRecording || isSeparating || _saving) return;
-    // Live edits (fader/pan ticks, clip drags, FX knobs) change the model
-    // without saving or bumping the epoch; adopting the disk read over one
-    // would snap the control back and make its release commit the old value.
-    // Skip — the edit's own save merges the remote change.
+    // The same for a live edit (fader/pan ticks, clip drags, FX knobs) made
+    // during the read: it changes the model without saving or bumping the
+    // epoch.
     if (!identical(_practice, before)) return;
     if (loaded is! Ok<Loaded<SongPractice>>) {
       // Deleted remotely (or unreadable): keep showing the current state. A
@@ -854,6 +862,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     // take past it): grown on load, it shrank back on a failed save's revert,
     // the take cut off at the right edge.
     _ensureTimeline();
+    _persisted = _practice;
     // Nothing unsaved after it, the lines unchanged or not: kept set, an
     // unchanged Save wrote again, and a failing write toasted a failure over
     // text already on disk.
@@ -1120,6 +1129,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     _baseHashes = loaded.baseHashes;
     _ensureSelection();
     _ensureTimeline();
+    _persisted = _practice;
     playback.ensureLoopRange();
     if ((analysis.dockOpen && analysis.dockShowsTake) || _inspectorOpen) {
       unawaited(analysis.ensureSelectedSpectrogram());
@@ -2711,6 +2721,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       // The re-read can hold content past the end of the timeline (a take
       // from another device, merged in; see [_adoptLoaded]).
       _ensureTimeline();
+      _persisted = _practice;
       // The re-read may move clips to other paths (see [_adoptLoaded]),
       // re-keying their analysis: the dock and inspector look it up by path,
       // and sat blank on a take whose clip moved after its own save.
