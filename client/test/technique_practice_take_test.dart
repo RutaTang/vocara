@@ -12,6 +12,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:provider/provider.dart';
 import 'package:vocara/data/repositories/technique_repository.dart';
+import 'package:vocara/data/services/graph_audio_playback_service.dart';
 import 'package:vocara/data/services/local_storage_service.dart';
 import 'package:vocara/data/services/media_analysis_service.dart';
 import 'package:vocara/data/services/mic_recording_controller.dart';
@@ -224,6 +225,20 @@ Technique _technique({List<String> examples = const []}) {
 }
 
 /// A loaded view model over [repo] (no screen), for the VM-level tests.
+/// An engine that opened, or (as with no output device) didn't.
+class _StubEngine extends Fake implements GraphAudioPlaybackService {
+  _StubEngine({required this.available});
+
+  final bool available;
+  bool disposed = false;
+
+  @override
+  bool get isAvailable => available;
+
+  @override
+  Future<void> dispose() async => disposed = true;
+}
+
 Future<TechniqueDetailViewModel> _loadedVm(
   _FakeRepo repo,
   _FreshAnalysis analysis,
@@ -362,5 +377,30 @@ void main() {
       identical(vm.selectedMetrics, vm.referenceAnalysis!.metrics),
       isTrue,
     );
+  });
+
+  // An engine that failed to open was kept for the page's life: every take
+  // failed with "reconnect an audio device" even after the user did.
+  test('a page whose engine failed to open builds a new one for the next '
+      'take, and keeps one that opened', () async {
+    final engines = [
+      _StubEngine(available: false),
+      _StubEngine(available: true),
+    ];
+    var made = 0;
+    final vm = TechniqueDetailViewModel(
+      repository: _FakeRepo(_technique()),
+      mediaService: TechniqueMediaService(storage: LocalStorageService()),
+      techniqueId: _techniqueId,
+      recorder: _FakeRecorder(),
+      createEngine: () => engines[made++],
+    );
+    addTearDown(vm.dispose);
+
+    expect(vm.acquireEngine(), same(engines[0]));
+    expect(vm.acquireEngine(), same(engines[1]));
+    expect(engines[0].disposed, isTrue);
+    expect(vm.acquireEngine(), same(engines[1]));
+    expect(made, 2);
   });
 }

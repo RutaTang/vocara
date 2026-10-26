@@ -79,11 +79,13 @@ class TechniqueDetailViewModel extends ChangeNotifier
     MediaAnalysisService analysisService = const MediaAnalysisService(),
     @visibleForTesting MicRecordingController? recorder,
     RecordingFinalizer? finalizer,
+    @visibleForTesting GraphAudioPlaybackService Function()? createEngine,
   }) : _repository = repository,
        _mediaService = mediaService,
        _appSettings = appSettings,
        _analysis = analysisService,
        _recorderOverride = recorder,
+       _createEngine = createEngine ?? GraphAudioPlaybackService.new,
        _finalizer = finalizer ?? RecordingFinalizer.instance {
     load = Command0(_load)..execute();
     // Freshness reloads when sync applies remote changes to THIS technique.
@@ -664,6 +666,29 @@ class TechniqueDetailViewModel extends ChangeNotifier
   // --- Mic recording (shared controller) -----------------------------------
 
   GraphAudioPlaybackService? _engine;
+  final GraphAudioPlaybackService Function() _createEngine;
+
+  /// The engine for the next take: this page's own, built on the first take.
+  /// One that failed to open (no output device then) never opens by itself,
+  /// and kept, every take failed until the page was reopened: it is replaced,
+  /// so connecting a device and pressing Record again works.
+  @visibleForTesting
+  GraphAudioPlaybackService acquireEngine() {
+    final dud = _engine;
+    if (dud != null && !dud.isAvailable) {
+      _engine = null;
+      unawaited(dud.dispose());
+    }
+    final engine = _engine ??= _createEngine();
+    // Record from the input the user chose in Settings, device and channel
+    // (this VM owns its own engine, so without this it would capture from
+    // the OS default and silently contradict the global selection). Read
+    // per take, so a choice changed between takes applies to the next.
+    // No-op when the engine is unavailable.
+    _appSettings?.applyInputTo(engine);
+    return engine;
+  }
+
   bool _recordingExample = false;
 
   /// Test seam: when the constructor received a recorder, [_recorder] uses it
@@ -678,16 +703,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
   late final MicRecordingController _recorder =
       _recorderOverride ??
       MicRecordingController(
-        acquireEngine: () {
-          final engine = _engine ??= GraphAudioPlaybackService();
-          // Record from the input the user chose in Settings, device and channel
-          // (this VM owns its own engine, so without this it would capture from
-          // the OS default and silently contradict the global selection). Read
-          // per take, so a choice changed between takes applies to the next.
-          // No-op when the engine is unavailable.
-          _appSettings?.applyInputTo(engine);
-          return engine;
-        },
+        acquireEngine: acquireEngine,
         monitor: _monitor,
         onQuitFinalize: quitFinalize,
         onInputDeviceLost: _onInputDeviceLost,
