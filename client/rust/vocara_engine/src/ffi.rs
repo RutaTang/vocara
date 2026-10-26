@@ -366,15 +366,29 @@ fn sweep_dead(feeders: &std::sync::Mutex<Vec<Arc<std::sync::Mutex<FeederSlot>>>>
     }
 }
 
+/// [`VeEngine::chain_of`] over `chains`. A negative index names no track: it gets track 0's id
+/// band, which no node uses (track ids start at 1). Cast as it was, -2 became `u32::MAX`, whose
+/// ids wrap around onto the master's and the reverb's.
+fn chain_for(chains: &[u32], track: c_int) -> u32 {
+    match usize::try_from(track) {
+        Ok(t) => chains.get(t).copied().unwrap_or((track + 1) as u32),
+        Err(_) => 0,
+    }
+}
+
+/// A host bus index as the node-id math takes it, or None for a negative one: cast as is,
+/// -(t + 8) wrapped around onto the ids of track `t`'s sends and inserts, and a setter for a
+/// bus wrote another track's parameters.
+fn bus_index(bus: c_int) -> Option<u32> {
+    u32::try_from(bus).ok()
+}
+
 impl VeEngine {
     /// The track id whose nodes a per-track setter on committed track `track` addresses: the
     /// chain it plays through (see [`ve_track_lane`]). An index past the committed set keeps
     /// the plain `track + 1`, which names no node of the live graph.
     fn chain_of(&self, track: c_int) -> u32 {
-        usize::try_from(track)
-            .ok()
-            .and_then(|t| self.track_chains.get(t).copied())
-            .unwrap_or((track + 1) as u32)
+        chain_for(&self.track_chains, track)
     }
 
     /// Spawns the feeder pump thread once (idempotent). The thread holds
@@ -1573,7 +1587,10 @@ pub extern "C" fn ve_set_bus_send_level(
         return -1;
     }
     with_engine(e, -1, |eng| {
-        let node = build::bus_aux_send_id(bus as u32, slot as usize);
+        let Some(bus) = bus_index(bus) else {
+            return -1;
+        };
+        let node = build::bus_aux_send_id(bus, slot as usize);
         let g = crate::sample::db_to_lin(level_db);
         eng.handle
             .set_param(node, crate::dsp::master::param::GAIN, g);
@@ -2637,7 +2654,10 @@ pub extern "C" fn ve_set_bus_eq_band(
 ) -> c_int {
     with_engine(e, -1, |eng| {
         use crate::dsp::biquad::param as p;
-        let node = build::bus_eq_id(bus as u32);
+        let Some(bus) = bus_index(bus) else {
+            return -1;
+        };
+        let node = build::bus_eq_id(bus);
         let b = (band as u16) << p::FIELD_BITS;
         let h = &mut eng.handle;
         h.set_param(node, b | p::FREQ, freq);
@@ -2664,7 +2684,10 @@ pub extern "C" fn ve_set_bus_comp(
 ) -> c_int {
     with_engine(e, -1, |eng| {
         use crate::dsp::compressor::param as p;
-        let node = build::bus_comp_id(bus as u32);
+        let Some(bus) = bus_index(bus) else {
+            return -1;
+        };
+        let node = build::bus_comp_id(bus);
         let h = &mut eng.handle;
         h.set_param(node, p::THRESHOLD_DB, threshold_db);
         h.set_param(node, p::RATIO, ratio);
@@ -2682,7 +2705,10 @@ pub extern "C" fn ve_set_bus_comp(
 #[no_mangle]
 pub extern "C" fn ve_set_bus_send(e: *mut VeEngine, bus: c_int, send_db: f32) -> c_int {
     with_engine(e, -1, |eng| {
-        let node = build::bus_send_id(bus as u32);
+        let Some(bus) = bus_index(bus) else {
+            return -1;
+        };
+        let node = build::bus_send_id(bus);
         let g = crate::sample::db_to_lin(send_db);
         eng.handle
             .set_param(node, crate::dsp::master::param::GAIN, g);
@@ -2695,7 +2721,10 @@ pub extern "C" fn ve_set_bus_send(e: *mut VeEngine, bus: c_int, send_db: f32) ->
 #[no_mangle]
 pub extern "C" fn ve_set_bus_pan(e: *mut VeEngine, bus: c_int, pan: f32) -> c_int {
     with_engine(e, -1, |eng| {
-        let node = build::bus_pan_id(bus as u32);
+        let Some(bus) = bus_index(bus) else {
+            return -1;
+        };
+        let node = build::bus_pan_id(bus);
         eng.handle
             .set_param(node, crate::dsp::gain_pan::param::PAN, pan);
         eng.handle.flush();
@@ -2712,7 +2741,10 @@ pub extern "C" fn ve_set_bus_volume(
     muted: c_int,
 ) -> c_int {
     with_engine(e, -1, |eng| {
-        let node = build::bus_gain_id(bus as u32);
+        let Some(bus) = bus_index(bus) else {
+            return -1;
+        };
+        let node = build::bus_gain_id(bus);
         let g = if muted != 0 { 0.0 } else { gain };
         eng.handle
             .set_param(node, crate::dsp::master::param::GAIN, g);
@@ -2776,7 +2808,10 @@ pub extern "C" fn ve_set_bus_deesser(
 ) -> c_int {
     with_engine(e, -1, |eng| {
         use crate::dsp::deesser::param as p;
-        let node = build::bus_deesser_id(bus as u32);
+        let Some(bus) = bus_index(bus) else {
+            return -1;
+        };
+        let node = build::bus_deesser_id(bus);
         let h = &mut eng.handle;
         h.set_param(node, p::FREQ, freq);
         h.set_param(node, p::THRESHOLD_DB, threshold_db);
@@ -2823,7 +2858,10 @@ pub extern "C" fn ve_set_bus_gate(
 ) -> c_int {
     with_engine(e, -1, |eng| {
         use crate::dsp::gate::param as p;
-        let node = build::bus_gate_id(bus as u32);
+        let Some(bus) = bus_index(bus) else {
+            return -1;
+        };
+        let node = build::bus_gate_id(bus);
         let h = &mut eng.handle;
         h.set_param(node, p::THRESHOLD_DB, threshold_db);
         h.set_param(node, p::RANGE_DB, range_db);
@@ -2868,7 +2906,10 @@ pub extern "C" fn ve_set_bus_delay(
 ) -> c_int {
     with_engine(e, -1, |eng| {
         use crate::dsp::delay::param as p;
-        let node = build::bus_delay_id(bus as u32);
+        let Some(bus) = bus_index(bus) else {
+            return -1;
+        };
+        let node = build::bus_delay_id(bus);
         let h = &mut eng.handle;
         h.set_param(node, p::TIME_MS, time_ms);
         h.set_param(node, p::FEEDBACK, feedback);
@@ -2909,7 +2950,10 @@ pub extern "C" fn ve_set_bus_saturation(
 ) -> c_int {
     with_engine(e, -1, |eng| {
         use crate::dsp::saturation::param as p;
-        let node = build::bus_saturation_id(bus as u32);
+        let Some(bus) = bus_index(bus) else {
+            return -1;
+        };
+        let node = build::bus_saturation_id(bus);
         let h = &mut eng.handle;
         h.set_param(node, p::DRIVE_DB, drive_db);
         h.set_param(node, p::MIX, mix);
@@ -2955,7 +2999,10 @@ pub extern "C" fn ve_set_bus_doubler(
 ) -> c_int {
     with_engine(e, -1, |eng| {
         use crate::dsp::doubler::param as p;
-        let node = build::bus_doubler_id(bus as u32);
+        let Some(bus) = bus_index(bus) else {
+            return -1;
+        };
+        let node = build::bus_doubler_id(bus);
         let h = &mut eng.handle;
         h.set_param(node, p::DELAY_MS, delay_ms);
         h.set_param(node, p::DEPTH_MS, depth_ms);
@@ -2997,7 +3044,10 @@ pub extern "C" fn ve_set_bus_limiter(
 ) -> c_int {
     with_engine(e, -1, |eng| {
         use crate::dsp::limiter::param as p;
-        let node = build::bus_limiter_id(bus as u32);
+        let Some(bus) = bus_index(bus) else {
+            return -1;
+        };
+        let node = build::bus_limiter_id(bus);
         let h = &mut eng.handle;
         h.set_param(node, p::CEILING_DB, ceiling_db);
         h.set_param(node, p::RELEASE_MS, release_ms);
@@ -3042,7 +3092,10 @@ pub extern "C" fn ve_set_bus_reverb_insert(
 ) -> c_int {
     with_engine(e, -1, |eng| {
         use crate::dsp::reverb::param as p;
-        let node = build::bus_reverb_id(bus as u32);
+        let Some(bus) = bus_index(bus) else {
+            return -1;
+        };
+        let node = build::bus_reverb_id(bus);
         let h = &mut eng.handle;
         h.set_param(node, p::ROOM_SIZE, room);
         h.set_param(node, p::DAMPING, damping);
@@ -3590,6 +3643,43 @@ mod staged_gain_tests {
             assert_eq!(staged_gain(false, bad), 1.0);
             assert_eq!(staged_gain(true, bad), 0.0);
         }
+    }
+}
+
+#[cfg(test)]
+mod index_guard_tests {
+    //! Host indices reach the node-id math unsigned: a negative one cast as is wrapped
+    //! around onto another node's ids.
+
+    use super::{bus_index, chain_for};
+    use crate::build;
+
+    #[test]
+    fn a_negative_bus_index_addresses_nothing() {
+        // Cast as is, -(t + 8) put a bus's EQ on track t's source and its sends on t's.
+        for bus in [-1, -11, i32::MIN] {
+            assert_eq!(bus_index(bus), None);
+        }
+        assert_eq!(bus_index(0), Some(0));
+        assert_eq!(bus_index(7), Some(7));
+    }
+
+    #[test]
+    fn a_negative_track_index_names_no_track() {
+        let chains = [1, 1, 3];
+        for track in [-1, -2, i32::MIN] {
+            let id = chain_for(&chains, track);
+            assert_eq!(id, 0, "{track}");
+            // Track 0's band: below every track's (ids start at 1), far below the master's.
+            assert!(build::reverb_id(id) < build::source_id(1));
+        }
+        assert_eq!(
+            chain_for(&chains, 1),
+            1,
+            "a committed track plays through its chain"
+        );
+        assert_eq!(chain_for(&chains, 2), 3);
+        assert_eq!(chain_for(&chains, 5), 6, "past the committed set: no node");
     }
 }
 
