@@ -251,6 +251,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       practice: () => _practice,
       setPractice: (next) => _practice = next,
       save: _save,
+      resyncPlayback: () => mixer.resyncPlayback(),
       ensureSelection: _ensureSelectionAnalyzed,
       toast: _toast,
       // The whole take window, not just the armed span: a switch while the

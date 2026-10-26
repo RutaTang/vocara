@@ -26,6 +26,7 @@ class InterpretationsController extends ChangeNotifier {
     required SongPractice? Function() practice,
     required void Function(SongPractice) setPractice,
     required Future<bool> Function() save,
+    required Future<void> Function() resyncPlayback,
     required void Function() ensureSelection,
     required void Function(String) toast,
     required bool Function() isRecording,
@@ -37,6 +38,7 @@ class InterpretationsController extends ChangeNotifier {
        _practiceOf = practice,
        _setPractice = setPractice,
        _save = save,
+       _resync = resyncPlayback,
        _ensureSelection = ensureSelection,
        _toast = toast,
        _isRecording = isRecording,
@@ -49,6 +51,10 @@ class InterpretationsController extends ChangeNotifier {
   final SongPractice? Function() _practiceOf;
   final void Function(SongPractice) _setPractice;
   final Future<bool> Function() _save;
+
+  /// Loads the engine with the takes the model now shows (the save does it
+  /// again once it lands).
+  final Future<void> Function() _resync;
   final void Function() _ensureSelection;
   final void Function(String) _toast;
   final bool Function() _isRecording;
@@ -119,8 +125,10 @@ class InterpretationsController extends ChangeNotifier {
     _ensureSelection();
     // Shown now, not once the save lands: it queues behind any save already
     // in flight, and until then the screen showed the old interpretation
-    // while the selection and REC already acted on the new one.
+    // while the selection and REC already acted on the new one. The engine
+    // too, or Play meanwhile played the old takes under the new lanes.
     notifyListeners();
+    await _resync();
     await _save();
     if (_analysis.dockOpen && _analysis.dockShowsTake) {
       unawaited(_analysis.ensureSelectedSpectrogram());
@@ -159,7 +167,8 @@ class InterpretationsController extends ChangeNotifier {
       ),
     );
     _ensureSelection();
-    notifyListeners(); // shown now (see setActive)
+    notifyListeners(); // shown and loaded now (see setActive)
+    await _resync();
     await _save();
   }
 
@@ -218,7 +227,8 @@ class InterpretationsController extends ChangeNotifier {
         ),
       );
       _ensureSelection();
-      notifyListeners(); // shown now (see setActive)
+      notifyListeners(); // shown and loaded now (see setActive)
+      await _resync();
       // Persist the dropped state BEFORE deleting files, and ONLY delete when the
       // save succeeded — a failed save reverts the model back to referencing
       // these takes, so their audio must survive (deleteAudio already refuses

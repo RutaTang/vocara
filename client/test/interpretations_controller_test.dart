@@ -77,6 +77,9 @@ class _Host {
   bool saveResult = true;
   int saves = 0;
   int ensureSelectionCalls = 0;
+
+  /// The active interpretation at each engine resync, before its save.
+  final resyncedOn = <String?>[];
   bool recording = false;
   bool separating = false;
 
@@ -98,6 +101,7 @@ class _Host {
       onSave?.call();
       return saveResult;
     },
+    resyncPlayback: () async => resyncedOn.add(practice?.activeVersionId),
     ensureSelection: () => ensureSelectionCalls++,
     toast: toasts.add,
     isRecording: () => recording,
@@ -172,6 +176,24 @@ void main() {
         expect(host.saves, 1);
         expect(host.ensureSelectionCalls, 1);
         expect(host.toasts, isEmpty);
+      },
+    );
+
+    test(
+      'loads the new interpretation into the engine before its save',
+      () async {
+        // Shown at once, the new lanes sat over an engine still holding the
+        // old takes until the save landed: Play meanwhile played those.
+        final host = _Host(
+          _practice(
+            versions: [_version('v1', 'One'), _version('v2', 'Two')],
+            activeVersionId: 'v1',
+          ),
+        );
+        String? resyncedBeforeSave;
+        host.onSave = () => resyncedBeforeSave = host.resyncedOn.lastOrNull;
+        await host.controller.setActive('v2');
+        expect(resyncedBeforeSave, 'v2');
       },
     );
 
