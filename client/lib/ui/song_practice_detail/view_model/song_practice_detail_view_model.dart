@@ -246,7 +246,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       practice: () => _practice,
       setPractice: (next) => _practice = next,
       save: _save,
-      ensureSelection: _ensureSelection,
+      ensureSelection: _ensureSelectionAnalyzed,
       toast: _toast,
       // The whole take window, not just the armed span: a switch while the
       // mic is still arming (or the stopped take is still landing) moved the
@@ -2461,21 +2461,61 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     }
   }
 
-  void _ensureSelection() {
+  /// Keeps the selection on a lane that exists and is on screen. Returns
+  /// whether it moved the selected take, so a caller can fetch the analysis
+  /// the dock and inspector show for it (they only compute when asked).
+  bool _ensureSelection() {
     final practice = _practice;
-    if (practice == null) return;
+    if (practice == null) return false;
+    // A selected bus that is gone (a failed create reverted, another device
+    // deleted it) selected nothing at all, for good: an empty inspector and
+    // no lane highlighted.
+    if (_selectedBusId != null && practice.busById(_selectedBusId) == null) {
+      _selectedBusId = null;
+    }
     // A selected bus owns the inspector; track and bus selection are mutually
     // exclusive, so don't force a track back in (that would highlight two lanes
     // at once after creating/duplicating a bus).
-    if (_selectedBusId != null) return;
+    if (_selectedBusId != null) return false;
+    // The backing lane shows one backing at a time: the hidden one was a
+    // candidate too, and a practice holding only the original reopened with
+    // its (silent, hidden) lane selected under the inspector.
+    final backing = mixer.activeBacking;
     final ids = <String>[
-      if (practice.accompaniment != null) practice.accompaniment!.id,
-      if (practice.reference != null) practice.reference!.id,
+      if (backing != null) backing.id,
       ...practice.activeVocalTracks.map((t) => t.id),
     ];
-    if (_selectedTrackId == null || !ids.contains(_selectedTrackId)) {
-      _selectedTrackId = ids.isEmpty ? null : ids.first;
+    if (_selectedTrackId != null && ids.contains(_selectedTrackId)) {
+      final clip = _selectedClipId;
+      if (clip != null &&
+          _trackById(_selectedTrackId!)?.clipById(clip) == null) {
+        _selectedClipId = null;
+      }
+      return false;
     }
+    final next = ids.isEmpty ? null : ids.first;
+    final moved = next != _selectedTrackId;
+    _selectedTrackId = next;
+    _selectedClipId = null;
+    return moved;
+  }
+
+  /// [_ensureSelection], fetching the newly selected take's analysis when the
+  /// dock or the inspector shows it (as [selectTrack] does): a take deleted
+  /// from under the selection left an open dock blank on its replacement.
+  void _ensureSelectionAnalyzed() {
+    if (_ensureSelection() &&
+        ((analysis.dockOpen && analysis.dockShowsTake) || _inspectorOpen)) {
+      unawaited(analysis.ensureSelectedSpectrogram());
+    }
+  }
+
+  /// Switches the backing lane between the accompaniment and the original
+  /// (see [MixerController.setPlayReference]), keeping a selection on that
+  /// lane on the backing now shown.
+  void setPlayReference(bool value) {
+    mixer.setPlayReference(value);
+    if (_ensureSelection()) notifyListeners();
   }
 
   /// The tail of the save chain (see [_save]): the completion of the latest
@@ -2518,6 +2558,9 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     if (identical(_practice, sent)) {
       _practice = saved.aggregate;
       _baseHashes = saved.baseHashes;
+      // The re-read can hold content past the end of the timeline (a take
+      // from another device, merged in; see [_adoptLoaded]).
+      _ensureTimeline();
       // The re-read may move clips to other paths (see [_adoptLoaded]).
       if (_clipPathsMoved(sent, saved.aggregate)) {
         analysis.refreshExpandedLanes();
@@ -2581,7 +2624,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         }
         _toast("Couldn't save your changes.");
       }
-      _ensureSelection();
+      _ensureSelectionAnalyzed();
       playback.ensureLoopRange();
       await mixer.resyncPlayback();
       notifyListeners();

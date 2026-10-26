@@ -874,7 +874,7 @@ class _Center extends StatelessWidget {
                         children: [
                           _BackingHeader(
                             playReference: ref,
-                            onSelect: vm.mixer.setPlayReference,
+                            onSelect: vm.setPlayReference,
                           ),
                           // Backing region: its own drop zone, so only it highlights when a
                           // file is dragged over it. Drop fills the empty backing slot; any
