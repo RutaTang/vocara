@@ -200,7 +200,7 @@ class SpectrogramService {
   static PcmAudio? readWavMonoStreaming(String path, WavAdmission a) {
     final out = Float32List(a.frames);
     var frame = 0;
-    readWavMonoChunked(path, a, (chunk) {
+    readWavMonoChunked(path, a, (chunk, _) {
       out.setRange(frame, frame + chunk.length, chunk);
       frame += chunk.length;
     });
@@ -217,11 +217,16 @@ class SpectrogramService {
   /// consumer that never needs the whole track (the streaming spectrogram)
   /// pays only one chunk of memory. [readWavMonoStreaming] is this plus a
   /// collecting buffer — one decode path, so the two can never diverge.
+  ///
+  /// Each chunk comes with its frames' loudest channel (the sample of largest
+  /// magnitude; the chunk itself for a mono file), for the input-quality scan:
+  /// averaged into the mono signal, a take recorded on one input of a stereo
+  /// interface read 6 dB under its peak and never as clipped.
   @visibleForTesting
   static void readWavMonoChunked(
     String path,
     WavAdmission a,
-    void Function(Float32List chunk) onChunk,
+    void Function(Float32List chunk, Float32List loudest) onChunk,
   ) {
     final sampleBytes = (a.bits + 7) ~/ 8;
     final frameBytes = a.channels * sampleBytes;
@@ -239,12 +244,14 @@ class SpectrogramService {
         if (got == 0) break; // truncated on disk: keep what exists
         final bd = ByteData.sublistView(bytes);
         final out = Float32List(got);
+        final loudest = a.channels == 1 ? out : Float32List(got);
         for (var f = 0; f < got; f++) {
           var acc = 0.0;
+          var peak = 0.0;
           final base = f * frameBytes;
           for (var c = 0; c < a.channels; c++) {
             final o = base + c * sampleBytes;
-            acc += switch ((a.format, a.bits)) {
+            final v = switch ((a.format, a.bits)) {
               (1, 8) => (bytes[o] - 128) / 128.0,
               (1, 16) => bd.getInt16(o, Endian.little) / 32768.0,
               (1, 24) =>
@@ -260,14 +267,20 @@ class SpectrogramService {
               (3, 64) => _finiteOrZero(bd.getFloat64(o, Endian.little)),
               _ => 0.0, // unreachable: the gate admitted the format
             };
+            acc += v;
+            if (v.abs() > peak.abs()) peak = v;
           }
           out[f] = acc * inv;
           // Judge finiteness on the NARROWED value: a float64 WAV can carry
           // 1e300 — finite in the double above, Infinity once stored into
           // Float32 — and one Inf poisons every FFT and metric downstream.
           if (!out[f].isFinite) out[f] = 0.0;
+          if (!identical(loudest, out)) {
+            loudest[f] = peak;
+            if (!loudest[f].isFinite) loudest[f] = 0.0;
+          }
         }
-        onChunk(out);
+        onChunk(out, loudest);
         frame += got;
       }
     } finally {
@@ -306,7 +319,7 @@ class SpectrogramService {
           ),
         );
         var any = false;
-        readWavMonoChunked(path, admission, (chunk) {
+        readWavMonoChunked(path, admission, (chunk, _) {
           any = true;
           builder.add(chunk);
         });
@@ -343,9 +356,9 @@ class SpectrogramService {
           spectrogram: false,
         );
         var any = false;
-        readWavMonoChunked(path, admission, (chunk) {
+        readWavMonoChunked(path, admission, (chunk, loudest) {
           any = true;
-          analyzer.add(chunk);
+          analyzer.add(chunk, loudest: loudest);
         });
         if (!any) return null;
         return analyzer.finish().metrics;
@@ -390,9 +403,9 @@ class SpectrogramService {
           maxHz: maxHz,
         );
         var any = false;
-        readWavMonoChunked(path, admission, (chunk) {
+        readWavMonoChunked(path, admission, (chunk, loudest) {
           any = true;
-          analyzer.add(chunk);
+          analyzer.add(chunk, loudest: loudest);
         });
         if (!any) return null;
         final (:spectrogram, :metrics) = analyzer.finish();

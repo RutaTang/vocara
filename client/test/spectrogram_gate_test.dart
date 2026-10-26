@@ -83,6 +83,38 @@ Uint8List _wavHeader8ch({
   return b.toBytes();
 }
 
+/// A 1 s, 48 kHz, 16-bit stereo WAV with the singer on the LEFT input only
+/// (what a 2-input interface records as a stereo file), driven into clipping;
+/// the right channel is silent.
+File _oneSidedClippedStereo(Directory dir) {
+  const sr = 48000, n = sr;
+  final pcm = ByteData(n * 4);
+  for (var i = 0; i < n; i++) {
+    final v = (1.6 * math.sin(2 * math.pi * 220 * i / sr)).clamp(-1.0, 1.0);
+    pcm.setInt16(i * 4, (v * 32767).round(), Endian.little);
+    pcm.setInt16(i * 4 + 2, 0, Endian.little);
+  }
+  final b = BytesBuilder();
+  void u32(int v) =>
+      b.add((ByteData(4)..setUint32(0, v, Endian.little)).buffer.asUint8List());
+  void u16(int v) =>
+      b.add((ByteData(2)..setUint16(0, v, Endian.little)).buffer.asUint8List());
+  b.add('RIFF'.codeUnits);
+  u32(36 + n * 4);
+  b.add('WAVEfmt '.codeUnits);
+  u32(16);
+  u16(1);
+  u16(2);
+  u32(sr);
+  u32(sr * 4);
+  u16(4);
+  u16(16);
+  b.add('data'.codeUnits);
+  u32(n * 4);
+  b.add(pcm.buffer.asUint8List());
+  return File('${dir.path}/one_sided.wav')..writeAsBytesSync(b.toBytes());
+}
+
 void main() {
   // 10 min cap @ 44.1 kHz mono 16-bit = 44100 * 2 bytes * 600 s.
   const underCap = 44100 * 2 * 60; // 1 minute
@@ -574,4 +606,20 @@ void main() {
       [profile.softDb, profile.loudDb, profile.medianDb],
     );
   });
+  // Averaged into the mono analysis signal, a full-scale channel beside a
+  // silent one read 6 dB under its peak, and the "Clipped" warning never
+  // showed for a take recorded on one input of a stereo interface.
+  test(
+    'a take clipped on one channel of a stereo file reads as clipped',
+    () async {
+      final dir = Directory.systemTemp.createTempSync('stereo_clip');
+      addTearDown(() => dir.deleteSync(recursive: true));
+      final path = _oneSidedClippedStereo(dir).path;
+      final m = await const SpectrogramService().computeMetricsFromFile(path);
+      expect(m!.peakDbfs, greaterThan(-0.5), reason: 'the left channel peaks');
+      expect(m.isClipped, isTrue, reason: 'half its samples are flat-topped');
+      final both = await const SpectrogramService().computeBothFromFile(path);
+      expect(both!.metrics!.isClipped, isTrue);
+    },
+  );
 }

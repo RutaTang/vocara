@@ -927,9 +927,12 @@ class StreamingTakeAnalyzer {
   /// whenever they are emitted.
   static const int _emitBlock = 4096;
 
-  /// Feeds the next chunk of mono samples.
-  void add(Float32List chunk) {
-    _pass.feedClip(chunk);
+  /// Feeds the next chunk of mono samples. [loudest] is each of its frames'
+  /// loudest channel when the source had more than one: the peak and clipping
+  /// scan reads it, since averaged into [chunk] a full-scale channel beside a
+  /// silent one read 6 dB low and never clipped.
+  void add(Float32List chunk, {Float32List? loudest}) {
+    _pass.feedClip(loudest ?? chunk);
     for (var at = 0; at < chunk.length; at += _emitBlock) {
       final end = math.min(chunk.length, at + _emitBlock);
       for (var i = at; i < end; i++) {
