@@ -44,25 +44,53 @@ void main() {
       expect(out.skip(1), [for (var k = 0; k < 2500; k++) k]);
     });
 
-    test('a long rewritten middle is matched forward within a window', () {
-      final prev = [for (var k = 0; k < 3000; k++) 'old $k'];
-      final next = [
-        for (var k = 0; k < 3000; k++) k == 1500 ? 'old 2999' : 'new $k',
+    test('a long cut between edited ends keeps every line left', () {
+      // Edited at both ends, nothing is shared at the edges, so the whole
+      // text is the middle: past the old cell limit a windowed guess lost
+      // every line after a cut longer than its window, or matched them to a
+      // chorus or blank line far back (that line's time handed on).
+      String line(int k) => switch (k % 8) {
+        3 || 7 => '',
+        5 || 6 => 'chorus ${k % 8}',
+        _ => 'verse $k',
+      };
+      final prev = [for (var k = 0; k < 2600; k++) line(k)];
+      final kept = [
+        for (var k = 1; k < 2599; k++)
+          if (k < 1200 || k >= 1300) k,
       ];
-      // No line matches near where it would sit: all new, no far jump.
-      expect(alignLines(prev, next).every((i) => i == null), isTrue);
+      final next = ['edited top', for (final k in kept) prev[k], 'edited end'];
+      final out = alignLines(prev, next);
+      expect(out.first, isNull);
+      expect(out.last, isNull);
+      final mid = out.sublist(1, out.length - 1);
+      expect(mid.whereType<int>().length, kept.length);
+      for (var j = 0; j < kept.length; j++) {
+        expect(prev[mid[j]!], next[j + 1]);
+        if (j > 0) expect(mid[j]!, greaterThan(mid[j - 1]!));
+        // A verse line is unique: it can only be its own line.
+        if (next[j + 1].startsWith('verse')) expect(mid[j], kept[j]);
+      }
     });
 
-    test('past the cell limit, a forward greedy match', () {
+    test('past the cell limit the changed middle is new, the edges kept', () {
       expect(
         alignLines(
-          ['chorus', 'verse', 'chorus'],
-          ['verse', 'chorus'],
+          ['intro', 'chorus', 'verse', 'bridge', 'outro'],
+          ['intro', 'verse', 'chorus', 'outro'],
           cellLimit: 1,
         ),
-        [1, 2],
+        [0, null, null, 4],
       );
       expect(alignLines(const [], ['a']), [null]);
+    });
+
+    test('a wholly rewritten long text aligns in good time', () {
+      final prev = [for (var k = 0; k < 5000; k++) 'old $k'];
+      final next = [for (var k = 0; k < 5000; k++) 'new $k'];
+      final watch = Stopwatch()..start();
+      expect(alignLines(prev, next).every((i) => i == null), isTrue);
+      expect(watch.elapsed, lessThan(const Duration(seconds: 5)));
     });
   });
 

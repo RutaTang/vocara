@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import '../domain/models/lyric_line.dart';
 
 final _lrcTimeTag = RegExp(r'\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]');
@@ -10,15 +12,13 @@ final _lrcTimeTag = RegExp(r'\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]');
 ///
 /// The lines both texts share at the start and the end match as they stand
 /// (an edit usually changes a few lines in the middle), so the full
-/// alignment runs on the changed middle only. A middle past [cellLimit]
-/// pairs (thousands of lines rewritten at once) is matched forward, each line
-/// against the next [window] lines of [prev] only: a line with no match close
-/// ahead is new, rather than a jump past everything up to some far repeat.
+/// alignment runs on the changed middle only, at one bit a pair. A middle
+/// past [cellLimit] pairs (thousands of lines rewritten at once) is all new:
+/// a guess over it handed lines the times of far-off repeats.
 List<int?> alignLines(
   List<String> prev,
   List<String> next, {
-  int cellLimit = 4000000,
-  int window = 64,
+  int cellLimit = 25000000,
 }) {
   final out = List<int?>.filled(next.length, null);
   var lo = 0;
@@ -33,40 +33,45 @@ List<int?> alignLines(
     out[hiNext] = hiPrev;
   }
   final n = hiPrev - lo, m = hiNext - lo;
-  if (n == 0 || m == 0) return out;
-  if (n * m > cellLimit) {
-    var from = lo;
-    for (var j = lo; j < hiNext; j++) {
-      final end = from + window < hiPrev ? from + window : hiPrev;
-      for (var i = from; i < end; i++) {
-        if (prev[i] == next[j]) {
-          out[j] = i;
-          from = i + 1;
-          break;
-        }
+  if (n == 0 || m == 0 || n * m > cellLimit) return out;
+  // The middles as ints, so the table compares numbers, not strings.
+  final ids = <String, int>{};
+  final a = Int32List(n), b = Int32List(m);
+  for (var i = 0; i < n; i++) {
+    a[i] = ids.putIfAbsent(prev[lo + i], () => ids.length);
+  }
+  for (var j = 0; j < m; j++) {
+    b[j] = ids.putIfAbsent(next[lo + j], () => ids.length);
+  }
+  // The lengths of the longest common subsequence of the middles from i and
+  // j on, a row at a time; [down] keeps, per unequal pair, whether skipping
+  // prev's line keeps it longest (what the walk below needs of the table).
+  final down = Uint8List((n * m + 7) >> 3);
+  var below = Int32List(m + 1), row = Int32List(m + 1);
+  for (var i = n - 1; i >= 0; i--) {
+    final ai = a[i];
+    for (var j = m - 1; j >= 0; j--) {
+      if (ai == b[j]) {
+        row[j] = below[j + 1] + 1;
+      } else if (below[j] >= row[j + 1]) {
+        row[j] = below[j];
+        final k = i * m + j;
+        down[k >> 3] |= 1 << (k & 7);
+      } else {
+        row[j] = row[j + 1];
       }
     }
-    return out;
-  }
-  // lcs[i][j]: the longest common subsequence of the middles from i and j on.
-  final w = m + 1;
-  final lcs = List<int>.filled((n + 1) * w, 0);
-  for (var i = n - 1; i >= 0; i--) {
-    for (var j = m - 1; j >= 0; j--) {
-      lcs[i * w + j] = prev[lo + i] == next[lo + j]
-          ? lcs[(i + 1) * w + j + 1] + 1
-          : (lcs[(i + 1) * w + j] > lcs[i * w + j + 1]
-                ? lcs[(i + 1) * w + j]
-                : lcs[i * w + j + 1]);
-    }
+    final t = below;
+    below = row;
+    row = t;
   }
   var i = 0, j = 0;
   while (i < n && j < m) {
-    if (prev[lo + i] == next[lo + j]) {
+    if (a[i] == b[j]) {
       out[lo + j] = lo + i;
       i++;
       j++;
-    } else if (lcs[(i + 1) * w + j] >= lcs[i * w + j + 1]) {
+    } else if (down[(i * m + j) >> 3] & (1 << ((i * m + j) & 7)) != 0) {
       i++;
     } else {
       j++;
