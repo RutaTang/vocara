@@ -692,7 +692,10 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     // Saved unchanged: nothing to write. The plain text cannot carry a time on
     // a blank line (an LRC end-of-line or instrumental marker), and the round
     // trip dropped every one, leaving the line before it lit through the gap.
-    if (text == lyricsToPlainText(prev)) return true;
+    // Only with nothing pending, though: unchanged from a write still queued
+    // (a second Save) said "saved" at once, the editor closed, and that write
+    // then failed and reverted the text with the draft gone.
+    if (_unsavedFrom == null && text == lyricsToPlainText(prev)) return true;
     final parsed = parsePlainLyrics(text);
     // A line keeps its time only from the line it continues, in order: matched
     // on text alone and handed out first come first served, a fixed typo in

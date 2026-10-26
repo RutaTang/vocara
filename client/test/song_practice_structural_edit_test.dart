@@ -1217,6 +1217,25 @@ void main() {
 
   group('lyrics save failure', () {
     test(
+      'a second Save of the same text waits for the write it repeats',
+      () async {
+        // The unchanged-text shortcut read the text already on screen, so a
+        // second Save while the first write was queued said "saved" at once:
+        // the editor closed, the write then failed and reverted the lines, and
+        // the draft was gone.
+        final vm = await pumpVm();
+        repo.failSaves = true;
+
+        final first = vm.setLyricsText('new words');
+        final second = vm.setLyricsText('new words');
+
+        expect(await first, isFalse);
+        expect(await second, isFalse, reason: 'the editor must keep the draft');
+        expect(vm.lyrics.map((l) => l.text), ['la la la']);
+      },
+    );
+
+    test(
       'a failed lyrics save reverts the optimistic lines and toasts',
       () async {
         final vm = await pumpVm();
