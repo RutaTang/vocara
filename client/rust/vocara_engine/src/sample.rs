@@ -21,6 +21,25 @@ pub const ENGINE_SR: f64 = 48_000.0;
 /// Smallest level we treat as audible when converting to dB (avoids `log10(0)`).
 const DB_FLOOR: f32 = 1.0e-9;
 
+/// The loudest sample a read file may carry: +42 dBFS. A take is stored losslessly in float,
+/// and the record gain reaches +40 dB, so a full-scale mic at the top of it stores 100.0: the
+/// ±16 this replaced cut such a take off before its track fader, where turning the fader
+/// down could not undo it. Still far below anything the sinc resampler's unit-gain
+/// convolution could overflow (a hostile `f32::MAX` did, into NaN/Inf).
+pub const SAMPLE_CEILING: Smp = 128.0;
+
+/// One sample read from a file, made safe for every consumer downstream: NaN/Inf scrubbed
+/// to 0 (the fence protocol reserves NaN; a corrupt file must not forge one) and the
+/// amplitude clamped to [`SAMPLE_CEILING`].
+#[inline]
+pub fn scrub_sample(v: Smp) -> Smp {
+    if v.is_finite() {
+        v.clamp(-SAMPLE_CEILING, SAMPLE_CEILING)
+    } else {
+        0.0
+    }
+}
+
 #[inline]
 pub fn db_to_lin(db: f32) -> f32 {
     // 10^(db/20)
@@ -126,5 +145,21 @@ mod tests {
         assert_eq!(frames_at_engine_rate(512, 0.0), 512);
         assert_eq!(frames_at_engine_rate(512, -1.0), 512);
         assert_eq!(frames_at_engine_rate(512, f64::NAN), 512);
+    }
+}
+
+#[cfg(test)]
+mod scrub_tests {
+    use super::*;
+
+    #[test]
+    fn a_hot_take_passes_unclamped_up_to_the_ceiling() {
+        // A take at the top of the record gain stores up to 100.0: the ±16 clamp cut it off
+        // before its track fader.
+        assert_eq!(scrub_sample(50.0), 50.0);
+        assert_eq!(scrub_sample(-100.0), -100.0);
+        assert_eq!(scrub_sample(f32::MAX), SAMPLE_CEILING);
+        assert_eq!(scrub_sample(f32::NAN), 0.0);
+        assert_eq!(scrub_sample(f32::NEG_INFINITY), 0.0);
     }
 }

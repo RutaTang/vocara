@@ -3122,18 +3122,11 @@ pub fn decode_file(
 pub const MIN_SRC_RATE: u32 = 8_000;
 pub const MAX_SRC_RATE: u32 = 384_000;
 
-/// One decoded sample, made safe for every consumer downstream: NaN/Inf scrubbed to 0 and
-/// the amplitude clamped to ±16 (24 dB over full scale — beyond any real mastering
-/// headroom). The clamp is not cosmetic: finite-but-absurd samples (a hostile float WAV of
-/// `f32::MAX`) overflow the sinc resampler's convolution into NaN/Inf AFTER the decode-root
-/// scrub, and would otherwise reach playback and analysis as poison.
+/// One decoded sample, made safe for every consumer downstream (see
+/// [`crate::sample::scrub_sample`]).
 #[inline]
 fn scrub_sample(v: Smp) -> Smp {
-    if v.is_finite() {
-        v.clamp(-16.0, 16.0)
-    } else {
-        0.0
-    }
+    crate::sample::scrub_sample(v)
 }
 
 /// Reads just enough of a RIFF/WAVE header to report its declared sample rate; `Ok(None)`
@@ -3412,9 +3405,8 @@ mod decode_tests {
     fn absurd_finite_amplitudes_are_clamped_at_the_decode_root() {
         // f32::MAX samples are finite, so the NaN scrub alone waved them through — and
         // the sinc resampler's convolution then overflowed them into NaN/Inf (measured:
-        // 100% of output frames). The root clamp bounds every decoded sample to ±16
-        // (24 dB over full scale), which no convolution with unit-gain kernels can
-        // overflow.
+        // 100% of output frames). The root clamp bounds every decoded sample to
+        // SAMPLE_CEILING, which no convolution with unit-gain kernels can overflow.
         let p = temp_wav("huge");
         f32_wav_at_rate(
             &p,
@@ -3424,7 +3416,8 @@ mod decode_tests {
         let (frames, rate) = super::decode_file(p.to_str().unwrap(), 0.0, 0, 0).unwrap();
         assert!(frames
             .iter()
-            .all(|f| f[0].abs() <= 16.0 && f[1].abs() <= 16.0));
+            .all(|f| f[0].abs() <= crate::sample::SAMPLE_CEILING
+                && f[1].abs() <= crate::sample::SAMPLE_CEILING));
         assert_eq!(frames[2], [0.5, 0.5], "sane samples pass through unclamped");
 
         let out = super::resample_sinc(frames, rate, 48_000).unwrap();

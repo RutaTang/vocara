@@ -304,13 +304,8 @@ impl WavTrackReader {
                 } else {
                     i16::from_le_bytes([buf[o], buf[o + 1]]) as f32 / 32768.0
                 };
-                // The fence protocol RESERVES NaN; a corrupt file must not
-                // forge one (finite clamp mirrors the decode root).
-                if v.is_finite() {
-                    v.clamp(-16.0, 16.0)
-                } else {
-                    0.0
-                }
+                // The same scrub as the decode root (see `scrub_sample`).
+                crate::sample::scrub_sample(v)
             };
             let l = sample(0);
             let r = if self.channels > 1 { sample(1) } else { l };
