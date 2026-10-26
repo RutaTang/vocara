@@ -8,6 +8,7 @@ import 'package:ffi/ffi.dart';
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:path/path.dart' as p;
 
+import '../db/durable_fs.dart';
 import '../ffi/vocara_engine_bindings.dart';
 import 'audio_file_service.dart';
 
@@ -169,12 +170,29 @@ bool _compatibleForMerge(_WavLayout a, _WavLayout b) {
 /// read → rebuild → write held two full copies on the MAIN isolate.
 Future<void> trimWavHeadInPlace(String path, int trimMs) async {
   if (trimMs <= 0) return;
-  await Isolate.run(() => _trimWavHeadSync(path, trimMs));
+  final tmp = await Isolate.run(() => _trimWavHeadSync(path, trimMs));
+  // The trimmed copy takes the name of the take's only copy (the save pools
+  // it seconds later): its bytes go to disk before the rename gives it that
+  // name, and the rename before the take is relied on. Unflushed, a power
+  // cut in between could leave an empty file there, which boot recovery
+  // takes for junk.
+  const fs = DurableFs();
+  try {
+    await fs.fsyncFile(tmp);
+  } catch (_) {
+    try {
+      await File(tmp).delete();
+    } catch (_) {}
+    rethrow;
+  }
+  await File(tmp).rename(path);
+  await fs.fsyncDir(p.dirname(path));
 }
 
 /// Isolate body of [trimWavHeadInPlace]: RandomAccessFile chunk walk (header
-/// bytes only), then a chunked data copy into the temp file.
-void _trimWavHeadSync(String path, int trimMs) {
+/// bytes only), then a chunked data copy into a temp file beside [path],
+/// whose path it returns for the caller to make durable and rename.
+String _trimWavHeadSync(String path, int trimMs) {
   const noWav = FormatException('Only uncompressed WAV takes can be trimmed.');
   final raf = File(path).openSync();
   Uint8List? fmt;
@@ -289,7 +307,7 @@ void _trimWavHeadSync(String path, int trimMs) {
         } catch (_) {}
       }
     }
-    tmp.renameSync(path);
+    return tmpPath;
   } finally {
     raf.closeSync();
   }
