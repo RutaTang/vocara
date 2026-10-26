@@ -239,26 +239,30 @@ class TrackRow extends StatelessWidget {
               ),
             ),
           ),
+          // Its own layer: kept across the header's fader, pan and FX ticks,
+          // it would still repaint every clip's waveform with the header.
           Expanded(
-            child: StableSubtree<_Body>(
-              sameAs: (next, shown) => next.showsSameAs(shown),
-              child: _Body(
-                track: track,
-                timelineDurationMs: timelineDurationMs,
-                viewStartMs: viewStartMs,
-                position: position,
-                accent: accent,
-                laneSelected: selected,
-                selectedClipId: selectedClipId,
-                recordingPeaks: recordingPeaks,
-                recordingStartMs: recordingStartMs,
-                onSelect: onSelect,
-                onSelectClip: onSelectClip,
-                onClipMoveLive: onClipMoveLive,
-                onMoveCommit: onMoveCommit,
-                onContextMenu: onContextMenu,
-                onClipContextMenu: onClipContextMenu,
-                onEditNote: onEditNote,
+            child: RepaintBoundary(
+              child: StableSubtree<_Body>(
+                sameAs: (next, shown) => next.showsSameAs(shown),
+                child: _Body(
+                  track: track,
+                  timelineDurationMs: timelineDurationMs,
+                  viewStartMs: viewStartMs,
+                  position: position,
+                  accent: accent,
+                  laneSelected: selected,
+                  selectedClipId: selectedClipId,
+                  recordingPeaks: recordingPeaks,
+                  recordingStartMs: recordingStartMs,
+                  onSelect: onSelect,
+                  onSelectClip: onSelectClip,
+                  onClipMoveLive: onClipMoveLive,
+                  onMoveCommit: onMoveCommit,
+                  onContextMenu: onContextMenu,
+                  onClipContextMenu: onClipContextMenu,
+                  onEditNote: onEditNote,
+                ),
               ),
             ),
           ),
@@ -580,11 +584,16 @@ class _Body extends StatefulWidget {
   /// it shows ([StableSubtree]): a fader, pan-knob or FX tick, a clip drag or
   /// the master fader changes at most one lane, and re-running every other
   /// lane's body re-laid-out and repainted all of its clips and waveforms, at
-  /// pointer rate. As with [_TrackHeader.showsSameAs], the callbacks are not
-  /// compared: they capture only this lane's ids and [track], which is
-  /// compared by identity.
+  /// pointer rate. Of [track] it reads only the clips and notes, compared by
+  /// identity (a copy keeps the lists it does not change), so the lane's own
+  /// volume, pan or FX tick leaves it too: compared whole, that repainted
+  /// every clip's waveform in the lane at pointer rate. As with
+  /// [_TrackHeader.showsSameAs], the callbacks are not compared: they capture
+  /// only this lane's ids.
   bool showsSameAs(_Body other) =>
-      identical(track, other.track) &&
+      track.id == other.track.id &&
+      identical(track.clips, other.track.clips) &&
+      identical(track.notes, other.track.notes) &&
       timelineDurationMs == other.timelineDurationMs &&
       viewStartMs == other.viewStartMs &&
       identical(position, other.position) &&

@@ -457,7 +457,8 @@ void main() {
       tester,
       () => vm.mixer.setTrackVolumeLive('t3', v += 0.01),
     );
-    expect(painted['WaveformPainter'], 1, reason: 'the tick must land');
+    // Its lane's clips sit on their own layer, untouched by its fader.
+    expect(painted['_FaderPainter'], isNotNull, reason: 'the tick must land');
     expect(painted, isNot(contains('FormantTrackPainter')));
     expect(painted, isNot(contains('FrequencyGridPainter')));
     expect(painted, isNot(contains('_SpectrogramImagePainter')));
@@ -743,15 +744,17 @@ void main() {
     final rebuilt = await _rebuildCountsBy(tester, fader);
     expect(rebuilt['TrackRow'], 1, reason: 'the other lanes are kept');
     expect(rebuilt['_TrackHeader'], 1, reason: 'its fader moved');
-    expect(rebuilt['_ClipRegion'], 1, reason: 'its body follows its track');
+    // Its body shows the clips and notes, which a fader leaves as they are:
+    // rebuilt, it repainted every clip's waveform in the lane per tick.
+    expect(rebuilt['_ClipRegion'], isNull, reason: 'its clips are unchanged');
     final painted = await _paintsBy(tester, fader);
     expect(
       painted['WaveformPainter'],
-      2,
-      reason: "the lane's clip, and the master envelope its level scales",
+      1,
+      reason: 'the master envelope its level scales, not its clips',
     );
     expect(painted, isNot(contains('TimeRulerPainter')));
-    expect(painted['TimelineGridPainter'], 1, reason: 'its own lane');
+    expect(painted, isNot(contains('TimelineGridPainter')));
     // The edit itself still lands on screen.
     expect(vm.practice!.vocalTracks[3].volume, closeTo(v, 1e-9));
   });
@@ -824,6 +827,23 @@ void main() {
     expect(rebuilt, isNot(contains('_Tab')), reason: 'the tab strip is kept');
   });
 
+  testWidgets('a bus fader tick rebuilds its own strip alone', (tester) async {
+    // Every strip compared the bus list by identity, and each bus tick makes
+    // a new one: every strip in the mixer was rebuilt at pointer rate.
+    final vm = await _pumpScreen(tester, effects: true);
+    await vm.mixer.createBus('Verb');
+    vm.analysis.showDockTab(DockTab.mixer);
+    await tester.pump(const Duration(milliseconds: 50));
+    final busId = vm.mixer.fxBuses.single.id;
+    var v = 0.5;
+    final rebuilt = await _rebuildCountsBy(
+      tester,
+      () => vm.mixer.setBusVolumeLive(busId, v += 0.01),
+    );
+    expect(rebuilt, isNot(contains('_Channel')), reason: 'no take strip');
+    expect(rebuilt['_BusChannel'], 1);
+  });
+
   testWidgets('the inspector keeps its FX panel through another lane\'s '
       'edits, and follows its own', (tester) async {
     final vm = await _pumpScreen(tester, effects: true);
@@ -837,6 +857,18 @@ void main() {
     );
     expect(rebuilt, isNot(contains('FxPanel')));
     expect(rebuilt, isNot(contains('_MicInputChannel')));
+
+    // Its own take's volume is not something the panel shows either: the
+    // whole insert chain was rebuilt (its analyzer restarted) per fader tick.
+    rebuilt = await _rebuildCountsBy(
+      tester,
+      () => vm.mixer.setTrackVolumeLive('t0', v += 0.01),
+    );
+    expect(
+      rebuilt,
+      isNot(contains('FxPanel')),
+      reason: 'its chain is unchanged',
+    );
 
     final fx = TrackFx.flat();
     rebuilt = await _rebuildCountsBy(

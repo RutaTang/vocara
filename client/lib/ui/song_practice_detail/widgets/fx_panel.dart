@@ -123,17 +123,20 @@ class FxPanel extends StatelessWidget {
 
   bool get _isBus => bus != null;
 
-  /// The `StableSubtree.sameAs` of an FX panel: everything it shows comes
-  /// from its [track] or [bus] — compared by identity, as any edit replaces
-  /// them — and what it reads from the view model it reads through its own
-  /// listeners and polls, never from a build. So a fader, knob or clip drag
-  /// elsewhere (every view-model notification rebuilds the inspector) leaves
-  /// the whole insert chain alone.
+  /// The `StableSubtree.sameAs` of an FX panel: all it shows of its [track]
+  /// or [bus] is the id and the chain — compared by identity, as any FX edit
+  /// replaces it — and what it reads from the view model it reads through its
+  /// own listeners and polls, never from a build. So a fader, knob or clip
+  /// drag elsewhere (every view-model notification rebuilds the inspector),
+  /// or a volume, pan or send tick on this very take, leaves the whole insert
+  /// chain alone.
   static bool same(FxPanel next, FxPanel shown) =>
       next.key == shown.key &&
       identical(next.vm, shown.vm) &&
-      identical(next.track, shown.track) &&
-      identical(next.bus, shown.bus);
+      next.track?.id == shown.track?.id &&
+      identical(next.track?.fx, shown.track?.fx) &&
+      next.bus?.id == shown.bus?.id &&
+      identical(next.bus?.fx, shown.bus?.fx);
 
   /// What wakes a take's idle EQ analyzer: the playhead, and the analysis
   /// caches — where a newly computed input spectrum arrives, which a rebuild

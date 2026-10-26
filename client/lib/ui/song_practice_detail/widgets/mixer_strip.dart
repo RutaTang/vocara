@@ -158,6 +158,18 @@ class MixerStrip extends StatelessWidget {
   }
 }
 
+/// Whether [a] and [b] name the same buses in the same order — all a strip's
+/// route chip reads of them. Compared by identity, every bus fader, pan, FX
+/// or send tick (each a new list) rebuilt every strip of the mixer.
+bool _sameRouteNames(List<FxBus> a, List<FxBus> b) {
+  if (identical(a, b)) return true;
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (a[i].id != b[i].id || a[i].name != b[i].name) return false;
+  }
+  return true;
+}
+
 /// Display name of the bus [id] routes to, or "Master" when it's null/missing.
 String _busName(List<FxBus> buses, String? id) {
   if (id == null) return 'Master';
@@ -326,7 +338,7 @@ class _BusChannel extends StatelessWidget {
   bool showsSameAs(_BusChannel other) =>
       identical(bus, other.bus) &&
       selected == other.selected &&
-      identical(buses, other.buses);
+      _sameRouteNames(buses, other.buses);
 
   @override
   Widget build(BuildContext context) {
@@ -798,7 +810,7 @@ class _Channel extends StatelessWidget {
   bool showsSameAs(_Channel other) =>
       identical(track, other.track) &&
       selected == other.selected &&
-      identical(buses, other.buses) &&
+      _sameRouteNames(buses, other.buses) &&
       routedBusId == other.routedBusId;
 
   static String _formatDb(double v) {
