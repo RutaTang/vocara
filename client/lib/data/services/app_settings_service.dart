@@ -715,17 +715,25 @@ class AppSettingsService extends ChangeNotifier {
   /// over (a song): a chosen output unplugged there and plugged back in stayed on the fallback
   /// until the mic next closed or the song was reopened. Inputs are left to the take's own
   /// device handling: switching the mic mid-take would splice two mics into it.
+  ///
+  /// It keeps its own list rather than adopting the read: a Bluetooth headset leaves the list
+  /// for a moment while the mic switches it to its headset profile, and adopting that dropped
+  /// the echo-free choice and muted the monitor as a take opened. And it leaves an output the
+  /// engine already plays on alone: one that came back as the system default is followed by
+  /// the stream as it is, and rebuilding it made the gap the engine avoids.
   void refreshOutputDevices() {
     final outs = _enumerateOutputs();
-    if (_deviceSig(outs) == _deviceSig(_outputDevices)) return;
-    final outReturned = _returned(_outputDevices, outs, _outputDeviceUid);
-    _outputDevices = outs;
-    if (outReturned) _engine?.setOutputDevice(_outputDeviceUid!);
-    _syncLastKnownNames();
-    _refreshActualOutput();
-    _applyOutputRoute();
-    notifyListeners();
+    final uid = _outputDeviceUid;
+    if (uid != null &&
+        _returned(_watchedOutputs, outs, uid) &&
+        _engine?.actualOutputDevice() != uid) {
+      _engine?.setOutputDevice(uid);
+    }
+    _watchedOutputs = outs;
   }
+
+  /// The outputs as [refreshOutputDevices] last read them.
+  List<AudioDevice> _watchedOutputs = const [];
 
   // A change signature over a device set (the fields the panel renders) to skip no-op rebuilds.
   static String _deviceSig(List<AudioDevice> ds) =>
