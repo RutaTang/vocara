@@ -57,6 +57,9 @@ class _FakeRepo extends Fake implements SongPracticeRepository {
   /// When set, a save parks until it completes (a slow disk).
   Completer<void>? saveGate;
 
+  /// Saves parked on [saveGate] right now.
+  int parked = 0;
+
   static AudioTrack _pooled(AudioTrack t) => t.copyWith(
     clips: [
       for (final c in t.clips)
@@ -79,7 +82,11 @@ class _FakeRepo extends Fake implements SongPracticeRepository {
   }) async {
     await Future<void>.delayed(Duration.zero);
     final gate = saveGate;
-    if (gate != null) await gate.future;
+    if (gate != null) {
+      parked++;
+      await gate.future;
+      parked--;
+    }
     if (failNextSave || failSaves > 0) {
       failNextSave = false;
       if (failSaves > 0) failSaves--;
@@ -638,6 +645,45 @@ void main() {
         expect(take(repo.stored).clips, hasLength(2));
       },
     );
+
+    test('a take whose clip moves to the pool on a later save is analyzed '
+        'there', () async {
+      // An edit made while the take's save ran kept its newer model, holding
+      // the take at its staging path, and the take was analyzed there. The
+      // edit's save then moved the clip to the pool, which re-keys its
+      // analysis, and refreshed only the folded-out lanes: the dock, a
+      // lookup by path, sat blank on the take.
+      final vm = await pumpVm(
+        seed: _seed(accompaniment: _backing()),
+        engine: _FakeGraphEngine(),
+        mic: _FakeMic(),
+      );
+      repo.pooling = true;
+      vm.analysis.setDockOpen(true); // the Voiceprint dock, on the take
+      await vm.recording.startRecording(); // nothing armed: a new take
+      final take = vm.selectedTrackId!;
+      expect(take, isNot('take1'));
+      vm.position.value = const Duration(milliseconds: 500);
+      repo.saveGate = Completer<void>();
+      final stop = vm.stopRecording();
+      for (var i = 0; i < 400 && repo.parked == 0; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 1));
+      }
+      expect(repo.parked, 1, reason: "the take's save is in flight");
+      final rename = vm.renameTrack(take, 'A');
+      final gate = repo.saveGate!;
+      repo.saveGate = null;
+      gate.complete();
+      await Future.wait([stop, rename]);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      final clip = vm.practice!.vocalTracks
+          .singleWhere((t) => t.id == take)
+          .clips
+          .single;
+      expect(clip.audioFilePath, startsWith('/pool/'));
+      expect(spectrograms.requested, contains(clip.audioFilePath));
+    });
 
     test('twice says it will be recovered at the next launch', () async {
       final vm = await pumpVm(engine: _FakeGraphEngine(), mic: _FakeMic());

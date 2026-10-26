@@ -2710,8 +2710,13 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       // The re-read can hold content past the end of the timeline (a take
       // from another device, merged in; see [_adoptLoaded]).
       _ensureTimeline();
-      // The re-read may move clips to other paths (see [_adoptLoaded]).
+      // The re-read may move clips to other paths (see [_adoptLoaded]),
+      // re-keying their analysis: the dock and inspector look it up by path,
+      // and sat blank on a take whose clip moved after its own save.
       if (_clipPathsMoved(sent, saved.aggregate)) {
+        if ((analysis.dockOpen && analysis.dockShowsTake) || _inspectorOpen) {
+          unawaited(analysis.ensureSelectedSpectrogram());
+        }
         analysis.refreshExpandedLanes();
       }
     } else {
