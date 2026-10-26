@@ -1675,6 +1675,11 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       _toast("That is the take's own audio file. Export it somewhere else.");
       return;
     }
+    // Into the app's storage: another take's audio, or the library itself.
+    if (await _audioFiles.isAppStorage(destPath)) {
+      _toast("That folder holds Vocara's own files. Export somewhere else.");
+      return;
+    }
     try {
       // Overwrite is intentional: the save panel already confirmed replacing.
       await exportCopy(source, destPath);

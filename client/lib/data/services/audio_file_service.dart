@@ -154,6 +154,27 @@ class AudioFileService {
     return p.join(dir.path, '${newId()}.$extension');
   }
 
+  /// Whether [path] lies inside the app's own storage (the folder holding the
+  /// recordings, the take pool and the library database), links followed: an
+  /// export there overwrote another take's audio, or the library itself. False
+  /// when either side cannot be resolved (the copy then reports its own error).
+  Future<bool> isAppStorage(String path) async {
+    try {
+      final root = await Directory(
+        p.dirname(await _storage.assetPath('audio')),
+      ).resolveSymbolicLinks();
+      final target = await File(path).exists()
+          ? await File(path).resolveSymbolicLinks()
+          : p.join(
+              await Directory(p.dirname(path)).resolveSymbolicLinks(),
+              p.basename(path),
+            );
+      return p.isWithin(root, target);
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// Deletes a per-practice working audio file. REFUSES content-addressed pool
   /// files (under `assets/`, shared by content hash across clips) and
   /// `asset://` references: those are owned by the AssetStore and reclaimed by

@@ -84,6 +84,17 @@ class _FakeEngine extends Fake implements PlaybackEngine {
   Future<void> dispose() async {}
 }
 
+/// Storage rooted at [root], as the app's is at its support folder.
+class _RootedStorage extends LocalStorageService {
+  _RootedStorage(this.root);
+
+  final Directory root;
+
+  @override
+  Future<String> assetPath(String collection) async =>
+      p.join(root.path, collection);
+}
+
 void main() {
   late AppDatabase db;
   late Directory tmp;
@@ -172,9 +183,10 @@ void main() {
   /// the initial load. [picks] collects every suggested file name.
   Future<SongPracticeDetailViewModel> pumpVm(
     List<String> picks,
-    Future<String?> Function(String suggestedName) pick,
-  ) async {
-    final storage = LocalStorageService();
+    Future<String?> Function(String suggestedName) pick, {
+    LocalStorageService? storage,
+  }) async {
+    storage ??= LocalStorageService();
     final vm = SongPracticeDetailViewModel(
       repository: repo,
       techniqueRepository: techRepo,
@@ -250,6 +262,28 @@ void main() {
 
     expect(await File(own).readAsBytes(), takeBytes);
     expect(toasts.single, contains('own audio file'));
+  });
+
+  test('an export into the app\'s own storage is refused', () async {
+    // The take pool and the library database live there: an export replacing
+    // one overwrote another take's audio, or the library itself.
+    final library = Directory(p.join(tmp.path, 'library'))..createSync();
+    final db = File(p.join(library.path, 'vocara.sqlite'))
+      ..writeAsBytesSync([1, 2, 3]);
+    final picks = <String>[];
+    final vm = await pumpVm(
+      picks,
+      (_) async => db.path,
+      storage: _RootedStorage(library),
+    );
+    final toasts = <String>[];
+    vm.toasts.listen(toasts.add);
+
+    await vm.exportTrackAudio(byName(vm, 'Take 1').id);
+    await Future<void>.delayed(Duration.zero);
+
+    expect(db.readAsBytesSync(), [1, 2, 3]);
+    expect(toasts.single, contains("Vocara's own files"));
   });
 
   test('a cancelled save panel exports nothing and stays silent', () async {
