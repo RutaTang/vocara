@@ -212,6 +212,24 @@ void main() {
       expect(service.lastCheckedAt, checkedAt);
     });
 
+    test('a failed check after "up to date" says it failed', () async {
+      // Kept, "up to date" read as a fresh answer: Settings said "You have the
+      // latest version" for a check that never reached the server.
+      var fail = false;
+      final service = UpdateCheckService(
+        fetch: (_) async {
+          if (fail) throw const SocketException('offline');
+          return '{"latest": "1.0.0", "url": "https://example.com"}';
+        },
+        currentVersion: '1.0.0',
+      );
+      await service.check();
+      expect(service.status, UpdateStatus.upToDate);
+      fail = true;
+      await service.check();
+      expect(service.status, UpdateStatus.unknown);
+    });
+
     test('notifies listeners when the check starts and completes', () async {
       var notifications = 0;
       final service = UpdateCheckService(

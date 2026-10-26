@@ -8,7 +8,8 @@ import 'diagnostics_log.dart';
 /// The outcome of the most recent update check.
 enum UpdateStatus {
   /// No check has completed yet, or the last check could not reach / parse
-  /// the manifest. Never surfaced as an error on the automatic check.
+  /// the manifest (and none had found an update, which a failure keeps).
+  /// Never surfaced as an error on the automatic check.
   unknown,
 
   /// The manifest was read and this build is the latest (or newer).
@@ -46,8 +47,8 @@ typedef UpdateFetcher = Future<String> Function(Uri url);
 ///
 /// Failure policy: an update check can never make anything worse. Offline,
 /// 404, TLS trouble, or a malformed manifest all collapse to
-/// [UpdateStatus.unknown] silently; only Settings' manual check shows even a
-/// gentle "could not check" line.
+/// [UpdateStatus.unknown] silently (an update already found is kept);
+/// only Settings' manual check shows even a gentle "could not check" line.
 class UpdateCheckService extends ChangeNotifier {
   UpdateCheckService({UpdateFetcher? fetch, String currentVersion = appVersion})
     : _fetch = fetch ?? _fetchOverHttp,
@@ -102,7 +103,9 @@ class UpdateCheckService extends ChangeNotifier {
   /// True while a check is in flight.
   bool get checking => _checking;
 
-  /// When the last check completed (successfully or not); null before any.
+  /// When the last check completed (successfully or not; a failure that kept
+  /// a found update leaves the time of the check that found it); null before
+  /// any.
   DateTime? get lastCheckedAt => _lastCheckedAt;
 
   /// True once the user dismissed the home banner for this app run.
@@ -126,10 +129,11 @@ class UpdateCheckService extends ChangeNotifier {
   }
 
   /// Fetches and parses the manifest, then updates [status] / [available].
-  /// Never throws. A failure keeps the last good result (or leaves
-  /// [UpdateStatus.unknown] when there is none): a manual check made offline,
-  /// or past GitHub's hourly limit, erased an update the auto-check had found,
-  /// banner and all.
+  /// Never throws. A failure keeps an update already found (a manual check
+  /// made offline, or past GitHub's hourly limit, erased the one the auto-check
+  /// had found, banner and all); anything else degrades to
+  /// [UpdateStatus.unknown], so Settings says the check failed rather than
+  /// "You have the latest version".
   Future<void> check() async {
     if (_checking) return;
     _checking = true;
@@ -151,12 +155,10 @@ class UpdateCheckService extends ChangeNotifier {
       // Offline / 404 / TLS / timeout: silently unknown. The check must never
       // become an error the user has to deal with.
     }
-    if (next != null) {
-      _status = next;
+    if (next != null || _status != UpdateStatus.updateAvailable) {
+      _status = next ?? UpdateStatus.unknown;
       _available = info;
       _lastCheckedAt = DateTime.now();
-    } else if (_status == UpdateStatus.unknown) {
-      _lastCheckedAt = DateTime.now(); // no result yet: report the attempt
     }
     _checking = false;
     // Only the version strings ever reach the log — no user content.
