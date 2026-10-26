@@ -6,20 +6,39 @@ final _lrcTimeTag = RegExp(r'\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]');
 /// index of the line of [prev] it continues, or null for a line that is new.
 /// Lines match only on equal text, and only in order (a longest common
 /// subsequence), so a line repeated in the song (a chorus) maps to its own
-/// earlier self, never to another repeat of it. Past [cellLimit] pairs (a
-/// text thousands of lines long) it falls back to a forward greedy match.
+/// earlier self, never to another repeat of it.
+///
+/// The lines both texts share at the start and the end match as they stand
+/// (an edit usually changes a few lines in the middle), so the full
+/// alignment runs on the changed middle only. A middle past [cellLimit]
+/// pairs (thousands of lines rewritten at once) is matched forward, each line
+/// against the next [window] lines of [prev] only: a line with no match close
+/// ahead is new, rather than a jump past everything up to some far repeat.
 List<int?> alignLines(
   List<String> prev,
   List<String> next, {
   int cellLimit = 4000000,
+  int window = 64,
 }) {
-  final n = prev.length, m = next.length;
-  final out = List<int?>.filled(m, null);
+  final out = List<int?>.filled(next.length, null);
+  var lo = 0;
+  while (lo < prev.length && lo < next.length && prev[lo] == next[lo]) {
+    out[lo] = lo;
+    lo++;
+  }
+  var hiPrev = prev.length, hiNext = next.length;
+  while (hiPrev > lo && hiNext > lo && prev[hiPrev - 1] == next[hiNext - 1]) {
+    hiPrev--;
+    hiNext--;
+    out[hiNext] = hiPrev;
+  }
+  final n = hiPrev - lo, m = hiNext - lo;
   if (n == 0 || m == 0) return out;
   if (n * m > cellLimit) {
-    var from = 0;
-    for (var j = 0; j < m; j++) {
-      for (var i = from; i < n; i++) {
+    var from = lo;
+    for (var j = lo; j < hiNext; j++) {
+      final end = from + window < hiPrev ? from + window : hiPrev;
+      for (var i = from; i < end; i++) {
         if (prev[i] == next[j]) {
           out[j] = i;
           from = i + 1;
@@ -29,12 +48,12 @@ List<int?> alignLines(
     }
     return out;
   }
-  // lcs[i][j]: the longest common subsequence of prev[i..] and next[j..].
+  // lcs[i][j]: the longest common subsequence of the middles from i and j on.
   final w = m + 1;
   final lcs = List<int>.filled((n + 1) * w, 0);
   for (var i = n - 1; i >= 0; i--) {
     for (var j = m - 1; j >= 0; j--) {
-      lcs[i * w + j] = prev[i] == next[j]
+      lcs[i * w + j] = prev[lo + i] == next[lo + j]
           ? lcs[(i + 1) * w + j + 1] + 1
           : (lcs[(i + 1) * w + j] > lcs[i * w + j + 1]
                 ? lcs[(i + 1) * w + j]
@@ -43,8 +62,8 @@ List<int?> alignLines(
   }
   var i = 0, j = 0;
   while (i < n && j < m) {
-    if (prev[i] == next[j]) {
-      out[j] = i;
+    if (prev[lo + i] == next[lo + j]) {
+      out[lo + j] = lo + i;
       i++;
       j++;
     } else if (lcs[(i + 1) * w + j] >= lcs[i * w + j + 1]) {

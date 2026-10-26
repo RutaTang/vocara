@@ -31,6 +31,28 @@ void main() {
       expect(alignLines(['a', '', 'b'], ['a', '', 'b']), [0, 1, 2]);
     });
 
+    test('a line inserted into a long text keeps every other line matched', () {
+      // Past the cell limit the forward match jumped ahead to the first equal
+      // line anywhere: one blank line added at the top of a 2500-line song
+      // kept times on only 1750 of its lines.
+      final prev = [
+        for (var k = 0; k < 2500; k++) k % 10 == 9 ? '' : 'line $k',
+      ];
+      final next = ['', ...prev];
+      final out = alignLines(prev, next);
+      expect(out.first, isNull);
+      expect(out.skip(1), [for (var k = 0; k < 2500; k++) k]);
+    });
+
+    test('a long rewritten middle is matched forward within a window', () {
+      final prev = [for (var k = 0; k < 3000; k++) 'old $k'];
+      final next = [
+        for (var k = 0; k < 3000; k++) k == 1500 ? 'old 2999' : 'new $k',
+      ];
+      // No line matches near where it would sit: all new, no far jump.
+      expect(alignLines(prev, next).every((i) => i == null), isTrue);
+    });
+
     test('past the cell limit, a forward greedy match', () {
       expect(
         alignLines(
