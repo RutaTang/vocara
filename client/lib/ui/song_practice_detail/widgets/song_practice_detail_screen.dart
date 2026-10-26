@@ -1833,7 +1833,7 @@ class _InterpretationDropdown extends StatelessWidget {
   Future<void> _create(BuildContext context) async {
     final name = await showRenameDialog(
       context,
-      current: 'Interpretation ${vm.versions.all.length + 1}',
+      current: vm.versions.nextDefaultName,
       title: 'New interpretation',
       hint: 'e.g. Tender, Powerful',
       confirmLabel: 'Create',

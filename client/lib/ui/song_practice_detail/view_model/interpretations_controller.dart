@@ -74,6 +74,18 @@ class InterpretationsController extends ChangeNotifier {
   List<AudioTrack> get vocalTakes =>
       _practiceOf()?.activeVocalTracks ?? const [];
 
+  /// The name a new interpretation gets when it is given none: the first
+  /// "Interpretation N" no interpretation has. Counting them instead named a
+  /// second "Interpretation 2" after the first of two was deleted.
+  String get nextDefaultName {
+    final taken = {for (final v in all) v.name};
+    var n = 1;
+    while (taken.contains('Interpretation $n')) {
+      n++;
+    }
+    return 'Interpretation $n';
+  }
+
   /// Switches which interpretation is shown/played; the other interpretations'
   /// takes stop playing. Because the loaded track set changes, this is a pause →
   /// reload → resume (playback continues from the same spot if it was playing).
@@ -104,6 +116,10 @@ class InterpretationsController extends ChangeNotifier {
     }
     _setPractice(cur.copyWith(activeVersionId: versionId));
     _ensureSelection();
+    // Shown now, not once the save lands: it queues behind any save already
+    // in flight, and until then the screen showed the old interpretation
+    // while the selection and REC already acted on the new one.
+    notifyListeners();
     await _save();
     if (_analysis.dockOpen && _analysis.dockShowsTake) {
       unawaited(_analysis.ensureSelectedSpectrogram());
@@ -132,9 +148,7 @@ class InterpretationsController extends ChangeNotifier {
     if (cur == null) return;
     final version = TakeVersion(
       id: newId(),
-      name: trimmed.isEmpty
-          ? 'Interpretation ${cur.versions.length + 1}'
-          : trimmed,
+      name: trimmed.isEmpty ? nextDefaultName : trimmed,
       createdAt: DateTime.now(),
     );
     _setPractice(
@@ -144,6 +158,7 @@ class InterpretationsController extends ChangeNotifier {
       ),
     );
     _ensureSelection();
+    notifyListeners(); // shown now (see setActive)
     await _save();
   }
 
@@ -159,6 +174,7 @@ class InterpretationsController extends ChangeNotifier {
         ],
       ),
     );
+    notifyListeners(); // shown now (see setActive)
     await _save();
   }
 
@@ -201,6 +217,7 @@ class InterpretationsController extends ChangeNotifier {
         ),
       );
       _ensureSelection();
+      notifyListeners(); // shown now (see setActive)
       // Persist the dropped state BEFORE deleting files, and ONLY delete when the
       // save succeeded — a failed save reverts the model back to referencing
       // these takes, so their audio must survive (deleteAudio already refuses

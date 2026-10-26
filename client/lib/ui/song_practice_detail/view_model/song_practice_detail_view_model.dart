@@ -1354,6 +1354,9 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       return;
     } // no concurrent structural edit
     if (!_admitImportDuration(sourcePath)) return;
+    // The interpretation it was dropped into: a switch to another (or a new
+    // one) while it imports must not carry the take along.
+    final versionId = practice.activeVersion?.id;
     await _busyGate.run(() async {
       await _withImportedAudio(sourcePath, (dest) async {
         final analysis = await _waveforms.analyze(dest);
@@ -1361,6 +1364,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
           path: dest,
           displayName: p.basenameWithoutExtension(sourcePath),
           analysis: analysis,
+          versionId: versionId,
         );
         return _save();
       });
@@ -1871,14 +1875,20 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     }
   }
 
+  /// Appends a vocal take of [path] to [versionId], or to the interpretation
+  /// on screen when that is null or no longer exists.
   String _appendVocal({
     required String path,
     required String displayName,
     required WaveformResult analysis,
     int startMs = 0,
+    String? versionId,
   }) {
     final practice = _practice;
     if (practice == null) return '';
+    final target = practice.versions.any((v) => v.id == versionId)
+        ? versionId
+        : practice.activeVersion?.id;
     final track = AudioTrack(
       id: newId(),
       kind: AudioTrackKind.vocal,
@@ -1889,8 +1899,8 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       waveformPeaks: analysis.peaks,
       createdAt: DateTime.now(),
       // Resolved, like createEmptyVocalTake: a recording or import must land
-      // in the interpretation on screen.
-      versionId: practice.activeVersion?.id,
+      // in an interpretation that is shown.
+      versionId: target,
     );
     _practice = practice.copyWith(
       vocalTracks: [...practice.vocalTracks, track],

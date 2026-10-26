@@ -563,6 +563,89 @@ void main() {
     });
   });
 
+  group('interpretations during an import', () {
+    /// Holds the import's analysis until the test releases it.
+    Completer<void> holdAnalysis() {
+      final gate = waveforms.gate = Completer<void>();
+      addTearDown(() {
+        if (!gate.isCompleted) gate.complete();
+      });
+      return gate;
+    }
+
+    test('a switch while a take imports leaves the take where it was '
+        'dropped', () async {
+      final vm = await pumpVm();
+      holdAnalysis();
+      final import = vm.addVocalTake('/src/guide.wav');
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      await vm.versions.setActive('v2');
+      waveforms.gate!.complete();
+      await import;
+      final added = vm.practice!.vocalTracks.last;
+      expect(added.id, isNot('take1'));
+      expect(added.versionId, 'v1');
+    });
+
+    test('a new interpretation made while a take imports does not take it '
+        'along', () async {
+      final vm = await pumpVm();
+      holdAnalysis();
+      final import = vm.addVocalTake('/src/guide.wav');
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      await vm.versions.create('Fresh');
+      waveforms.gate!.complete();
+      await import;
+      expect(vm.practice!.vocalTracks.last.versionId, 'v1');
+    });
+  });
+
+  group('interpretation changes are shown before their save lands', () {
+    Future<(SongPracticeDetailViewModel, List<String?>)> watched() async {
+      final vm = await pumpVm();
+      final seen = <String?>[];
+      vm.addListener(() => seen.add(vm.versions.active?.id));
+      final gate = repo.saveGate = Completer<void>();
+      addTearDown(() {
+        if (!gate.isCompleted) gate.complete();
+      });
+      return (vm, seen);
+    }
+
+    test('a switch', () async {
+      final (vm, seen) = await watched();
+      final switching = vm.versions.setActive('v2');
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(seen, contains('v2'), reason: 'the save is still parked');
+      repo.saveGate!.complete();
+      await switching;
+    });
+
+    test('a new one, named after the first free number', () async {
+      final (vm, seen) = await watched();
+      final creating = vm.versions.create();
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(seen, isNotEmpty, reason: 'the save is still parked');
+      expect(vm.versions.active?.name, 'Interpretation 3');
+      repo.saveGate!.complete();
+      await creating;
+    });
+  });
+
+  test('a new interpretation is not named after one that exists', () async {
+    // Counting them named a second "Interpretation 2" once the first of two
+    // was deleted.
+    final vm = await pumpVm();
+    await vm.versions.delete('v1');
+    expect(vm.versions.all.map((v) => v.name), ['Interpretation 2']);
+    expect(vm.versions.nextDefaultName, 'Interpretation 1');
+    await vm.versions.create();
+    expect(vm.versions.all.map((v) => v.name), [
+      'Interpretation 2',
+      'Interpretation 1',
+    ]);
+  });
+
   group('interpretations wait out the take window', () {
     test('a switch while the mic is arming is refused; the take lands on '
         'screen', () async {
