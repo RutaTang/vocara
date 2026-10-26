@@ -861,18 +861,21 @@ pub extern "C" fn ve_poll_device_event(e: *mut VeEngine, mask: u32) -> u32 {
         // a closed mic or a lost output advances one counter only, and the
         // estimator freezes. Ticking from more than one poller is fine: it
         // samples about once a second of wall time, whoever polls.
-        let transport = eng.handle.transport();
-        eng.drift.tick(device::DriftObservation {
-            input: eng.input_nominal_frames.load(Ordering::Acquire),
-            output: transport.played_frames(),
-            input_quantum: eng.input_cell.take_quantum(),
-            output_quantum: transport.take_played_quantum(),
-            generation: eng
-                .input_cell
-                .generation()
-                .wrapping_add(transport.output_streams()),
-            secs: eng.drift_clock.elapsed().as_secs_f64(),
-        });
+        // Not where the mic runs in the output's own IO cycle: nothing can drift there.
+        if !device::MIC_ON_OUTPUT_CLOCK {
+            let transport = eng.handle.transport();
+            eng.drift.tick(device::DriftObservation {
+                input: eng.input_nominal_frames.load(Ordering::Acquire),
+                output: transport.played_frames(),
+                input_quantum: eng.input_cell.take_quantum(),
+                output_quantum: transport.take_played_quantum(),
+                generation: eng
+                    .input_cell
+                    .generation()
+                    .wrapping_add(transport.output_streams()),
+                secs: eng.drift_clock.elapsed().as_secs_f64(),
+            });
+        }
         // Re-derive the monitor safety mute on the same tick. The host thread reconciles on every
         // command that moves the binding, which covers the sharp edge (the mic opening and taking
         // the output with it), but nothing wakes it when the SYSTEM default output changes under

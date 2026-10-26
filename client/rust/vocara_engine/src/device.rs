@@ -1557,8 +1557,9 @@ impl InputCell {
 /// callback each off their clocks; a 4096-frame callback is 85 ms, worth
 /// 140 ppm of a ten-minute span. The design follows from that, and from
 /// what the estimate costs when it is wrong:
-///  * one chain on one clock (VPIO's input and output share an IO cycle; a
-///    duplex device is one crystal) must read EXACTLY 1.0, which keeps the
+///  * one chain on one clock (a duplex device is one crystal; VPIO's input
+///    and output share an IO cycle, and with it nothing is estimated at all,
+///    see [`MIC_ON_OUTPUT_CLOCK`]) must read EXACTLY 1.0, which keeps the
 ///    resampler's identity fast path. A noisy fit published as drift slipped
 ///    such takes by up to 16 ms where nothing drifted. So nothing is published
 ///    until the fit says it beats the noise: its slope must clear
@@ -1588,11 +1589,10 @@ impl InputCell {
 ///    change on the same stream, at a new rate) drops them;
 ///  * a new input or output stream — a reopened mic, a rebuilt output, maybe
 ///    another device — restarts the history. The published ratio holds until
-///    the new stream's fit rules it out or shows a drift of its own, for ten
-///    minutes at most; then it counts for nothing, as if the stream had
-///    started on 1.0. (A mic reopened on the same pair, the common case off
-///    Apple, keeps its correction; on Apple every mic stream is VPIO, one
-///    clock, so there is nothing to carry);
+///    the new stream's fit rules it out, or shows a drift of its own more
+///    precisely than the published fit did, for ten minutes at most; then it
+///    counts for nothing, as if the stream had started on 1.0 (a mic reopened
+///    on the same pair, the common case, keeps its correction);
 ///  * the correction clamps at ±500 ppm: anything larger is a broken device,
 ///    not drift.
 ///
@@ -1717,7 +1717,6 @@ impl DriftEstimator {
             self.points.clear();
             self.split = false;
             self.fit = None;
-            self.published_se = f64::INFINITY;
             self.held_over = self.published() != 1.0;
             self.history = 0;
             return self.published();
@@ -1816,11 +1815,15 @@ impl DriftEstimator {
             self.seg += 1;
             self.split = false;
         }
+        // Samples that all read one quantization level spread by nothing, yet their mean can
+        // sit anywhere within a callback of the truth: with equal callbacks in step, every
+        // point did, and the fit read its slope to a fraction of a ppm.
+        let quantization = self.quantum.0.max(self.quantum.1) as f64;
         self.points.push_back(DriftPoint {
             x: xm,
             m,
             seg: self.seg,
-            range: hi - lo,
+            range: (hi - lo).max(quantization),
         });
         if self.points.len() > DRIFT_POINTS {
             self.points.pop_front();
@@ -2028,14 +2031,9 @@ impl DriftEstimator {
         } else if (f.slope - held).abs() > tol && holds(level(f.slope), Some(held)) {
             // A fit that rules the published value out.
             level(f.slope)
-        } else if self.held_over {
-            // The new stream's own drift, once it shows; until then the carried ratio stands.
-            if !shows {
-                return;
-            }
-            f.slope
         } else if f.se < self.published_se && holds(level(f.slope), None) {
-            // A better fit than the one published.
+            // A better fit than the one published (a carried ratio's included: a new stream's
+            // fit that showed drift replaced it however noisy it was).
             level(f.slope)
         } else {
             return;
@@ -2457,12 +2455,21 @@ mod drift_tests {
                                 c.out_stalls = vec![(at, cb_out / 48_000.0)];
                             }
                             let r = fresh(&c);
+                            let tag = format!(
+                                "{cb_in}/{cb_out} callbacks at {ppm} ppm, an {} callback lost \
+                                 at {at} s, seed {seed}",
+                                if input { "input" } else { "output" }
+                            );
                             assert!(
                                 r.worst_published_ppm < 20.0,
-                                "{cb_in}/{cb_out} callbacks at {ppm} ppm, an {} callback lost \
-                                 at {at} s, seed {seed}: published {:.1} ppm off",
-                                if input { "input" } else { "output" },
+                                "{tag}: published {:.1} ppm off",
                                 r.worst_published_ppm
+                            );
+                            // Never publishing would pass the line above too.
+                            assert!(
+                                (r.last_ppm - ppm).abs() < 10.0,
+                                "{tag}: ends at {:.1} ppm",
+                                r.last_ppm
                             );
                         }
                     }
@@ -2667,6 +2674,62 @@ mod drift_tests {
                     r.worst_published_ppm
                 );
             }
+        }
+    }
+
+    #[test]
+    fn a_reopened_pair_keeps_its_correction_over_a_noisier_fit() {
+        // A new stream's fit that showed drift replaced the carried ratio however noisy it
+        // was: reopened on the same 1024/1024 pair at -40 ppm, the correction went 20 ppm off
+        // for minutes, where the carried one was within 2.3.
+        for seed in 1..=6 {
+            let bits = Arc::new(AtomicU64::new(0));
+            let mut est = DriftEstimator::new(Arc::clone(&bits));
+            let first = Chain {
+                seed,
+                seconds: 1200.0,
+                ..Chain::new(1024.0, 1024.0, -40.0)
+            };
+            run(&first, &mut est, &bits);
+            let again = Chain {
+                seed: seed + 30,
+                seconds: 1800.0,
+                ..Chain::new(1024.0, 1024.0, -40.0)
+            };
+            let r = run(&again, &mut est, &bits);
+            assert!(
+                r.worst_published_ppm < 8.0,
+                "seed {seed}: published {:.1} ppm off",
+                r.worst_published_ppm
+            );
+        }
+    }
+
+    #[test]
+    fn callbacks_in_step_do_not_make_the_fit_look_precise() {
+        // Equal callbacks whose phases sit together read one quantization level at every
+        // sample: each point spread by nothing, the fit's standard error fell to a fraction
+        // of a ppm, and a minute into a reopen it "ruled out" a correct carried 14.6 ppm.
+        for gap in [0.0, 0.99] {
+            let bits = Arc::new(AtomicU64::new(0));
+            let mut est = DriftEstimator::new(Arc::clone(&bits));
+            let first = Chain {
+                seed: 2,
+                ..Chain::new(480.0, 512.0, 15.0)
+            };
+            run(&first, &mut est, &bits);
+            let again = Chain {
+                seed: 5,
+                phase_gap: Some(gap),
+                ..Chain::new(1024.0, 1024.0, 15.0)
+            };
+            let r = run(&again, &mut est, &bits);
+            assert_eq!(r.unity, 0.0, "phase gap {gap}: dropped the correction");
+            assert!(
+                r.worst_published_ppm < 5.0,
+                "phase gap {gap}: published {:.1} ppm off",
+                r.worst_published_ppm
+            );
         }
     }
 
@@ -3357,6 +3420,13 @@ const VPIO_DUPLEX_AEC: bool = true;
 /// Non-Apple uses the cpal input path; there is no VPIO output swap.
 #[cfg(not(target_vendor = "apple"))]
 const VPIO_DUPLEX_AEC: bool = false;
+
+/// Whether the mic, whenever it is open, runs in the output's own IO cycle: duplex VPIO
+/// renders the output and delivers the input in one cycle of one unit, so the two counters
+/// [`DriftEstimator`] compares cannot drift apart. Nothing is estimated then and the ratio
+/// stays exactly 1.0: a published correction could only be a false one (a lost callback read
+/// as slope).
+pub const MIC_ON_OUTPUT_CLOCK: bool = VPIO_DUPLEX_AEC;
 
 /// The opaque mic-input handle: a VoiceProcessingIO unit on macOS, a cpal input stream elsewhere.
 #[cfg(target_vendor = "apple")]
