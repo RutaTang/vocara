@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:forui/forui.dart';
 import 'package:media_kit/media_kit.dart';
@@ -6,7 +8,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 import '../../../../data/db/asset_store.dart';
 import '../../../core/themes/studio.dart';
 import 'technique_audio_player.dart'
-    show createExamplePlayer, unavailableClipMessage;
+    show createExamplePlayer, pauseWhilePlayBlocked, unavailableClipMessage;
 
 /// An inline video player for a technique example clip. To avoid spinning up a
 /// libmpv instance and a GPU texture for every clip just by showing the viewer,
@@ -39,6 +41,7 @@ class TechniqueVideoPlayer extends StatefulWidget {
 class _TechniqueVideoPlayerState extends State<TechniqueVideoPlayer> {
   Player? _player;
   VideoController? _controller;
+  StreamSubscription<bool>? _blockedPlay;
 
   /// True when the clip cannot be played here: its bytes are not on this
   /// device (the repository's `asset://` placeholder, which media_kit would
@@ -53,11 +56,17 @@ class _TechniqueVideoPlayerState extends State<TechniqueVideoPlayer> {
       // used to throw out of this tap handler after the player was built.
       final media = Media(widget.path);
       final player = built = createExamplePlayer();
+      _blockedPlay = pauseWhilePlayBlocked(
+        player,
+        () => mounted && widget.playBlocked,
+      );
       final controller = VideoController(player);
       player.open(media);
       _player = player;
       _controller = controller;
     } catch (_) {
+      unawaited(_blockedPlay?.cancel());
+      _blockedPlay = null;
       built?.dispose();
       _unavailable = true;
     }
@@ -84,6 +93,7 @@ class _TechniqueVideoPlayerState extends State<TechniqueVideoPlayer> {
   @override
   void dispose() {
     widget.pauseSignal?.removeListener(_onPauseSignal);
+    unawaited(_blockedPlay?.cancel());
     _player?.dispose();
     super.dispose();
   }
@@ -102,22 +112,28 @@ class _TechniqueVideoPlayerState extends State<TechniqueVideoPlayer> {
         ),
         child: AspectRatio(
           aspectRatio: 16 / 9,
+          // Neither the pointer nor the keyboard: the controls' own Space /
+          // media-key shortcuts started a video into the take (and anything
+          // that slips through is paused again, see pauseWhilePlayBlocked).
           child: IgnorePointer(
             ignoring: widget.playBlocked,
-            child: controller == null
-                ? _Poster(onPlay: _start, unavailable: _unavailable)
-                // No volume on the wheel (or a drag): the controls' default
-                // turned every scroll of the page that passed over a started
-                // video into a volume change, quietly fading it toward mute.
-                : MaterialDesktopVideoControlsTheme(
-                    normal: _noWheelVolume,
-                    fullscreen: _noWheelVolume,
-                    child: Video(
-                      controller: controller,
-                      controls: AdaptiveVideoControls,
-                      fill: Colors.black,
+            child: ExcludeFocus(
+              excluding: widget.playBlocked,
+              child: controller == null
+                  ? _Poster(onPlay: _start, unavailable: _unavailable)
+                  // No volume on the wheel (or a drag): the controls' default
+                  // turned every scroll of the page that passed over a started
+                  // video into a volume change, quietly fading it toward mute.
+                  : MaterialDesktopVideoControlsTheme(
+                      normal: _noWheelVolume,
+                      fullscreen: _noWheelVolume,
+                      child: Video(
+                        controller: controller,
+                        controls: AdaptiveVideoControls,
+                        fill: Colors.black,
+                      ),
                     ),
-                  ),
+            ),
           ),
         ),
       ),

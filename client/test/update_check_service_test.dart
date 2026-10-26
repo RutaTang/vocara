@@ -187,6 +187,29 @@ void main() {
       expect(service.lastCheckedAt, isNotNull);
     });
 
+    test(
+      'an unreadable manifest is told apart from an unreachable one',
+      () async {
+        // Settings blamed the network for a manifest it had read.
+        final unreadable = UpdateCheckService(
+          currentVersion: '1.0.0',
+          fetch: (_) async =>
+              '{"latest": "next", "url": "https://example.com"}',
+        );
+        await unreadable.check();
+        expect(unreadable.status, UpdateStatus.unknown);
+        expect(unreadable.manifestUnreadable, isTrue);
+
+        final offline = UpdateCheckService(
+          currentVersion: '1.0.0',
+          fetch: (_) async => throw const SocketException('offline'),
+        );
+        await offline.check();
+        expect(offline.status, UpdateStatus.unknown);
+        expect(offline.manifestUnreadable, isFalse);
+      },
+    );
+
     test('a malformed body degrades to unknown', () async {
       final service = UpdateCheckService(
         fetch: (_) async => '<html>rate limited</html>',

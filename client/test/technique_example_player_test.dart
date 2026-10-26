@@ -399,4 +399,33 @@ void main() {
     await tester.pump();
     expect(built.every((p) => p.plays == 0), isTrue);
   });
+
+  testWidgets('a player started by any means while a take records is paused '
+      'again', (tester) async {
+    // A pointer block left the video controls' own Space shortcut live: it
+    // started a video into the take, and its Pause could not be clicked.
+    var blocked = true;
+    final player = _FakePlayer();
+    final sub = pauseWhilePlayBlocked(player, () => blocked);
+    addTearDown(sub.cancel);
+    player._stream.playingController.add(true);
+    await tester.pump();
+    expect(player.pauses, 1);
+
+    blocked = false;
+    player._stream.playingController.add(true);
+    await tester.pump();
+    expect(player.pauses, 1, reason: 'no take: it plays');
+
+    // The audio player holds to it too.
+    final built = _fakePlayers();
+    await tester.pumpWidget(
+      _host(
+        const TechniqueAudioPlayer(path: '/tmp/example.wav', playBlocked: true),
+      ),
+    );
+    built.single._stream.playingController.add(true);
+    await tester.pump();
+    expect(built.single.pauses, 1);
+  });
 }

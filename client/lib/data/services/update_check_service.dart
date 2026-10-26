@@ -92,6 +92,7 @@ class UpdateCheckService extends ChangeNotifier {
   bool _autoCheckDone = false;
   bool _noticeDismissed = false;
   DateTime? _lastCheckedAt;
+  bool _unreadable = false;
 
   /// The outcome of the most recent completed check.
   UpdateStatus get status => _status;
@@ -107,6 +108,11 @@ class UpdateCheckService extends ChangeNotifier {
   /// a found update leaves the time of the check that found it); null before
   /// any.
   DateTime? get lastCheckedAt => _lastCheckedAt;
+
+  /// Whether the last recorded [UpdateStatus.unknown] reached the manifest
+  /// but could not read it (an unreadable version or link), rather than not
+  /// reaching it: Settings blamed the network for both.
+  bool get manifestUnreadable => _unreadable;
 
   /// True once the user dismissed the home banner for this app run.
   bool get noticeDismissed => _noticeDismissed;
@@ -140,8 +146,10 @@ class UpdateCheckService extends ChangeNotifier {
     notifyListeners();
     UpdateStatus? next;
     UpdateInfo? info;
+    var reached = false;
     try {
       final body = await _fetch(Uri.parse(manifestUrl));
+      reached = true;
       final parsed = parseManifest(body);
       if (parsed != null) {
         if (isNewer(parsed.version, _currentVersion)) {
@@ -159,6 +167,7 @@ class UpdateCheckService extends ChangeNotifier {
       _status = next ?? UpdateStatus.unknown;
       _available = info;
       _lastCheckedAt = DateTime.now();
+      _unreadable = next == null && reached;
     }
     _checking = false;
     // Only the version strings ever reach the log — no user content.

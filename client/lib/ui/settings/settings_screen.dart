@@ -286,8 +286,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
       case UpdateStatus.upToDate:
         return 'You have the latest version.';
       case UpdateStatus.unknown:
-        return updates.lastCheckedAt == null
-            ? 'Compares this build against the latest release.'
+        if (updates.lastCheckedAt == null) {
+          return 'Compares this build against the latest release.';
+        }
+        return updates.manifestUnreadable
+            ? 'The update information could not be read. You can try again '
+                  'later.'
             : 'Could not reach the update server. You can try again later.';
     }
   }

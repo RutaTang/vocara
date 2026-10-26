@@ -14,6 +14,17 @@ import '../../../core/themes/studio.dart';
 /// what the players are asked to do (and whether each one is disposed).
 Player Function() createExamplePlayer = Player.new;
 
+/// Keeps [player] paused while [blocked] says a take is arming or recording:
+/// whatever starts it then — a keyboard shortcut of the video controls,
+/// which a pointer block does not reach — it is paused again as soon as it
+/// reports playing, before it plays on speakers into the take.
+StreamSubscription<bool> pauseWhilePlayBlocked(
+  Player player,
+  bool Function() blocked,
+) => player.stream.playing.listen((playing) {
+  if (playing && blocked()) unawaited(player.pause());
+});
+
 /// A compact inline audio player: a play/pause button, a scrubbable progress
 /// bar, and a time readout. Backed by a media_kit [Player] it owns and disposes.
 ///
@@ -87,6 +98,9 @@ class _TechniqueAudioPlayerState extends State<TechniqueAudioPlayer> {
         player.stream.playing.listen((v) {
           if (mounted) setState(() => _playing = v);
         }),
+      );
+      _subs.add(
+        pauseWhilePlayBlocked(player, () => mounted && widget.playBlocked),
       );
       _subs.add(
         player.stream.position.listen((v) {
