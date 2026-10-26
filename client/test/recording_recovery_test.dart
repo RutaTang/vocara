@@ -689,9 +689,9 @@ void main() {
       'the sweep after all', () async {
     final practice = await createPractice();
     final stale = await stageOrphan(practice.id, monoWav(4800));
-    await stale.setLastModified(
-      DateTime.now().subtract(const Duration(days: 8)),
-    );
+    final stamp = File('${stale.path}.retry');
+    final firstFailure = DateTime.now().subtract(const Duration(days: 8));
+    await stamp.writeAsString('${firstFailure.millisecondsSinceEpoch}');
 
     Future<WaveformResult> brokenAnalyze(String path) async =>
         throw StateError('decoder down');
@@ -704,7 +704,112 @@ void main() {
     expect(persistence.recoveryRetryPaths, isEmpty);
     await persistence.assets.sweepStaging(keep: persistence.recoveryRetryPaths);
     expect(await stale.exists(), isFalse);
+    expect(await stamp.exists(), isFalse);
   });
+
+  test('a crash left untouched for over 7 days still gets its retries: the '
+      'window opens at its first failed attempt', () async {
+    // The app was not opened for a week after the crash; the first boot's
+    // attempt then failed (disk full, decoder down). Measured from the
+    // file's modification time, the take went to the sweep on that very
+    // first attempt.
+    final practice = await createPractice();
+    final old = await stageOrphan(practice.id, monoWav(4800));
+    await old.setLastModified(DateTime.now().subtract(const Duration(days: 8)));
+
+    Future<WaveformResult> brokenAnalyze(String path) async =>
+        throw StateError('decoder down');
+    expect(
+      await persistence.recoverStagedRecordings(analyze: brokenAnalyze),
+      0,
+    );
+    expect(persistence.recoveryRetryPaths, {old.path});
+    await persistence.assets.sweepStaging(keep: persistence.recoveryRetryPaths);
+    expect(await old.exists(), isTrue);
+    // The first failure's time stays with it for the next boot's verdict.
+    final stamp = File('${old.path}.retry');
+    expect(await stamp.exists(), isTrue);
+    final first = DateTime.fromMillisecondsSinceEpoch(
+      int.parse(await stamp.readAsString()),
+    );
+    expect(
+      DateTime.now().difference(first),
+      lessThan(const Duration(hours: 1)),
+    );
+
+    // A later failure measures from that first one, not from now.
+    expect(
+      await persistence.recoverStagedRecordings(analyze: brokenAnalyze),
+      0,
+    );
+    expect(await stamp.readAsString(), '${first.millisecondsSinceEpoch}');
+    expect(persistence.recoveryRetryPaths, {old.path});
+
+    // Healthy again: recovered normally.
+    expect(await persistence.recoverStagedRecordings(analyze: fakeAnalyze), 1);
+    expect((await reload(practice.id)).vocalTracks, hasLength(1));
+  });
+
+  test('a take whose staging copy lost its last writes to a power cut after '
+      'its save is not recovered a second time', () async {
+    // Graceful stop: the save pools the take and leaves the staging copy for
+    // the boot sweep, recording the hash it pooled beside it.
+    final practice = await createPractice();
+    final staged = await stageOrphan(practice.id, monoWav(4800));
+    final saved = await persistence.songRepo.savePractice(
+      practice.copyWith(
+        vocalTracks: [
+          AudioTrack(
+            id: newId(),
+            kind: AudioTrackKind.vocal,
+            displayName: 'Take 1',
+            audioFilePath: staged.path,
+            durationMs: 100,
+            createdAt: DateTime.now(),
+            versionId: practice.activeVersionId,
+          ),
+        ],
+      ),
+    );
+    expect(saved, isA<Ok<SongPractice>>());
+    expect(await File('${staged.path}.sha256').exists(), isTrue);
+
+    // The power cut: the recorder never flushed the staging file, so it comes
+    // back holding only what reached the disk — older, shorter bytes whose
+    // own hash matches nothing saved.
+    await staged.writeAsBytes(monoWav(2400), flush: true);
+
+    expect(await persistence.recoverStagedRecordings(analyze: fakeAnalyze), 0);
+    expect((await reload(practice.id)).vocalTracks, hasLength(1));
+    await persistence.assets.sweepStaging();
+    expect(await staged.exists(), isFalse);
+  });
+
+  test(
+    'a held-back recording keeps its recorded hash through the sweep',
+    () async {
+      // The hash a save recorded is what tells a power-cut leftover from an
+      // orphan (see above); a boot whose attempt failed must not sweep it
+      // away from the file it describes.
+      final practice = await createPractice();
+      final staged = await stageOrphan(practice.id, monoWav(4800));
+      await persistence.assets.importFile(staged.path);
+      final sidecar = File('${staged.path}.sha256');
+      expect(await sidecar.exists(), isTrue);
+
+      Future<WaveformResult> brokenAnalyze(String path) async =>
+          throw StateError('decoder down');
+      expect(
+        await persistence.recoverStagedRecordings(analyze: brokenAnalyze),
+        0,
+      );
+      await persistence.assets.sweepStaging(
+        keep: persistence.recoveryRetryPaths,
+      );
+      expect(await staged.exists(), isTrue);
+      expect(await sidecar.exists(), isTrue);
+    },
+  );
 
   test(
     'numbering continues after existing takes in the interpretation',

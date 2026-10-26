@@ -511,6 +511,10 @@ class AssetStore {
   /// Leaves [staged]'s hash beside [sourcePath] when it is a staged recording
   /// (under `audio/`) that did not change while it was read. Best-effort: a
   /// missing sidecar only means boot hashes the file itself.
+  ///
+  /// Flushed to the drive before the import goes on, so it is on disk before
+  /// any row naming these bytes commits: boot recovery trusts it over the
+  /// staging file itself (see [importedHashOf]).
   Future<void> _rememberStagedHash(
     String sourcePath,
     (int, int)? before,
@@ -522,11 +526,43 @@ class AssetStore {
     final after = await _sizeAndMtime(sourcePath);
     if (after != before || after!.$1 != staged.size) return;
     try {
+      final sidecar = _hashSidecar(sourcePath);
       await File(
-        _hashSidecar(sourcePath),
+        sidecar,
       ).writeAsString('${after.$1} ${after.$2} ${staged.hash}', flush: true);
+      // The flush handed the bytes to the drive; the directory's
+      // F_FULLFSYNC lands its new entry and empties the drive's cache.
+      await fs.fsyncDir(p.dirname(sidecar));
     } catch (_) {}
   }
+
+  /// The sidecar [_rememberStagedHash] left for [path]: the size and
+  /// modification time the file had then, and its hash. Null when there is
+  /// none or it does not parse.
+  static Future<(int, int, String)?> _readHashSidecar(String path) async {
+    try {
+      final parts = (await File(_hashSidecar(path)).readAsString()).split(' ');
+      if (parts.length != 3 || !_sha256Hex.hasMatch(parts[2])) return null;
+      final size = int.tryParse(parts[0]);
+      final mtime = int.tryParse(parts[1]);
+      if (size == null || mtime == null) return null;
+      return (size, mtime, parts[2]);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// The sha256 of the bytes an import pooled from the staged file [f],
+  /// whether or not [f] still holds them; null when no import recorded one.
+  ///
+  /// The recorder never flushes its file to the drive (it guards against a
+  /// killed process, not a power cut), while an import flushes the pooled
+  /// copy and this record before its rows commit. A power cut soon after a
+  /// save can therefore bring the staging file back holding older bytes than
+  /// the save pooled. Their own hash matches nothing saved, so boot recovery
+  /// asks this one too, or the take came back a second time, truncated.
+  static Future<String?> importedHashOf(File f) async =>
+      (await _readHashSidecar(f.path))?.$3;
 
   /// The sha256 an import measured for the staged file [f], while [f] is
   /// unchanged since (same size and modification time); null otherwise.
@@ -537,21 +573,12 @@ class AssetStore {
   /// one of them in full before the window appeared. A file that has no
   /// sidecar (a hard kill skips the save) or changed is hashed as before.
   static Future<String?> knownHashOf(File f) async {
-    try {
-      final parts = (await File(
-        _hashSidecar(f.path),
-      ).readAsString()).split(' ');
-      if (parts.length != 3 || !_sha256Hex.hasMatch(parts[2])) return null;
-      final now = await _sizeAndMtime(f.path);
-      if (now == null) return null;
-      final (size, mtime) = now;
-      if (int.tryParse(parts[0]) != size || int.tryParse(parts[1]) != mtime) {
-        return null;
-      }
-      return parts[2];
-    } catch (_) {
-      return null;
-    }
+    final recorded = await _readHashSidecar(f.path);
+    if (recorded == null) return null;
+    final now = await _sizeAndMtime(f.path);
+    if (now == null) return null;
+    final (size, mtime, hash) = recorded;
+    return now == (size, mtime) ? hash : null;
   }
 
   static final RegExp _sha256Hex = RegExp(r'^[0-9a-f]{64}$');
@@ -621,7 +648,8 @@ class AssetStore {
   /// recordings whose boot recovery ATTEMPT threw (an environment-wide decoder
   /// or disk failure, not per-file junk). Sweeping those would destroy the
   /// only copy of a take with no retry ever; leaving them lets the next boot's
-  /// recovery try again. Persistence bounds the exemption by file age.
+  /// recovery try again; their sidecars stay with them. Persistence bounds
+  /// the exemption in time.
   Future<void> sweepStaging({Set<String> keep = const {}}) async {
     for (final name in const ['audio', 'technique_media']) {
       try {
@@ -641,8 +669,8 @@ class AssetStore {
   }
 
   /// Moves every entry under [dir] (recursively) into the trash except files
-  /// whose exact path is in [keep]; subdirectories emptied by the sweep are
-  /// removed. Best-effort per entry, like the whole-tree path.
+  /// whose exact path is in [keep], and their sidecars; subdirectories emptied
+  /// by the sweep are removed. Best-effort per entry, like the whole-tree path.
   Future<void> _sweepTreeExcept(Directory dir, Set<String> keep) async {
     await for (final e in dir.list()) {
       if (e is Directory) {
@@ -651,10 +679,18 @@ class AssetStore {
           if (await e.list().isEmpty) await e.delete();
         } catch (_) {}
       } else {
-        if (keep.contains(e.path)) continue;
+        if (keep.contains(e.path) || _sidecarOfKept(e.path, keep)) continue;
         await _moveToTrash(e);
       }
     }
+  }
+
+  /// Whether [path] is a sidecar (`<kept>.<ext>`, like the hash an import
+  /// recorded) of a file in [keep]: a file held back for another attempt
+  /// keeps what that attempt reads beside it.
+  static bool _sidecarOfKept(String path, Set<String> keep) {
+    final dot = path.lastIndexOf('.');
+    return dot > 0 && keep.contains(path.substring(0, dot));
   }
 
   /// Every (table, column) that can reference an asset id — THE single source

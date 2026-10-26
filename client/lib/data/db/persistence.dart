@@ -723,17 +723,18 @@ class Persistence {
   /// failure is an environmental symptom (decode error, disk error, a store
   /// that could not commit), not proof the file is junk — one systemic
   /// breakage would otherwise funnel EVERY orphan to trash this boot, with
-  /// staging empty next boot so recovery never retries. Bounded by age: a
-  /// file that has kept failing for over 7 days goes to the sweep after all
-  /// (the trash then still holds it for 30 days).
+  /// staging empty next boot so recovery never retries. Bounded in time: a
+  /// file that has kept failing for over 7 days since its first failed
+  /// attempt goes to the sweep after all (the trash then still holds it for
+  /// 30 days).
   Future<void> _holdBackForRetry(File f, String why) async {
-    if (await _youngEnoughToRetry(f)) {
+    if (await _stillRetrying(f)) {
       _recoveryRetryPaths.add(f.path);
     }
     DiagnosticsLog.instance.log(
       'persistence',
       'one staged recording failed to recover ($why); exempted from this '
-          'boot\'s sweep if young enough to retry',
+          'boot\'s sweep if it has not kept failing too long',
     );
   }
 
@@ -742,12 +743,34 @@ class Persistence {
   /// applies on top).
   static const Duration _recoveryRetryMaxAge = Duration(days: 7);
 
-  /// Whether [f] is young enough (by mtime) to hold back for a retry. An
-  /// unstat-able file is kept — lingering is always safer than trashing.
-  static Future<bool> _youngEnoughToRetry(File f) async {
+  /// Where a held-back staged recording keeps the time of its first failed
+  /// recovery, in milliseconds since the epoch. The sweep keeps it with the
+  /// file and takes it with the file.
+  static String _firstFailureStamp(String path) => '$path.retry';
+
+  /// Whether [f] first failed to recover less than [_recoveryRetryMaxAge]
+  /// ago, stamping now as its first failure when nothing earlier is on
+  /// record. Measured from the file's modification time instead, a crash
+  /// left untouched for a week (the app not opened since) was released on
+  /// its first failed attempt. A stamp that cannot be read or lies in the
+  /// future starts the window over, and anything that throws keeps the file:
+  /// lingering is always safer than trashing.
+  static Future<bool> _stillRetrying(File f) async {
     try {
-      final modified = (await f.stat()).modified;
-      return DateTime.now().difference(modified) < _recoveryRetryMaxAge;
+      final stamp = File(_firstFailureStamp(f.path));
+      final now = DateTime.now();
+      DateTime? first;
+      try {
+        final ms = int.tryParse((await stamp.readAsString()).trim());
+        if (ms != null) first = DateTime.fromMillisecondsSinceEpoch(ms);
+      } catch (_) {
+        // None yet (this is the first failure), or unreadable.
+      }
+      if (first == null || first.isAfter(now)) {
+        first = now;
+        await stamp.writeAsString('${now.millisecondsSinceEpoch}', flush: true);
+      }
+      return now.difference(first) < _recoveryRetryMaxAge;
     } catch (_) {
       return true;
     }
@@ -789,7 +812,14 @@ class Persistence {
 
     // Bytes already referenced by a completed save → a normal leftover, not an
     // orphaned take (this is also what makes a re-run after a mid-recovery
-    // crash a no-op instead of a duplicate take).
+    // crash a no-op instead of a duplicate take). Asked first by the hash the
+    // save recorded when it pooled this file: a power cut soon after that
+    // save can bring the never-flushed staging file back holding older bytes,
+    // whose own hash matches nothing (see [AssetStore.importedHashOf]).
+    final imported = await AssetStore.importedHashOf(file);
+    if (imported != null && referencedHashes.contains(imported)) {
+      return _RecoveryOutcome.junk;
+    }
     final hash =
         await hashes.of(file) ?? await AssetStore.sha256OfFile(file.path);
     if (referencedHashes.contains(hash)) return _RecoveryOutcome.junk;
