@@ -1292,6 +1292,37 @@ class _EqSpectrumLayerState extends State<_EqSpectrumLayer>
   }
 }
 
+/// The EQ's response (dB) at each spectrum render point for [bands]. The
+/// analyzer redraws every frame while the take plays, and summed afresh that
+/// was 168 points × every band's biquad per frame for a curve that changes
+/// only with the bands (a new list on any edit).
+final Expando<Float64List> _responseMemo = Expando('eqResponse');
+
+Float64List _responseOf(List<EqBand> bands) =>
+    _responseMemo[bands] ??= Float64List.fromList([
+      for (var i = 0; i < _spectrumPoints; i++)
+        _totalDb(bands, true, _spectrumPointFreq(i)),
+    ]);
+
+/// The decade labels of the analyzer's grid, laid out once.
+final List<(double, TextPainter)> _decadeLabels = [
+  for (final (f, label) in const [
+    (100.0, '100'),
+    (1000.0, '1k'),
+    (10000.0, '10k'),
+  ])
+    (
+      f,
+      TextPainter(
+        text: TextSpan(
+          text: label,
+          style: const TextStyle(color: Studio.textFaint, fontSize: 8.5),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout(),
+    ),
+];
+
 class _SpectrumPainter extends CustomPainter {
   _SpectrumPainter({
     required this.data,
@@ -1334,20 +1365,9 @@ class _SpectrumPainter extends CustomPainter {
       canvas.drawLine(Offset(x, 0), Offset(x, h), minor);
     }
     final major = Paint()..color = Studio.border.withValues(alpha: 0.6);
-    for (final entry in const [
-      (100.0, '100'),
-      (1000.0, '1k'),
-      (10000.0, '10k'),
-    ]) {
-      final x = _freqToX(entry.$1, w);
+    for (final (f, tp) in _decadeLabels) {
+      final x = _freqToX(f, w);
       canvas.drawLine(Offset(x, 0), Offset(x, h), major);
-      final tp = TextPainter(
-        text: TextSpan(
-          text: entry.$2,
-          style: const TextStyle(color: Studio.textFaint, fontSize: 8.5),
-        ),
-        textDirection: TextDirection.ltr,
-      )..layout();
       tp.paint(canvas, Offset(x + 3, h - tp.height - 2));
     }
 
@@ -1359,15 +1379,15 @@ class _SpectrumPainter extends CustomPainter {
         return h - t * (h * (1 - top));
       }
 
+      final response = on ? _responseOf(bands) : null;
       final pre = <Offset>[];
       final post = <Offset>[];
       for (var i = 0; i < _spectrumPoints; i++) {
-        final f = _spectrumPointFreq(i);
-        final x = _freqToX(f, w);
+        final x = _freqToX(_spectrumPointFreq(i), w);
         final preDb = data.pre[i];
         pre.add(Offset(x, yOf(preDb)));
         // Output = input × EQ, i.e. input dB + response dB.
-        post.add(Offset(x, yOf(preDb + _totalDb(bands, on, f))));
+        post.add(Offset(x, yOf(preDb + (response?[i] ?? 0))));
       }
 
       void fillUnder(List<Offset> pts, Color color) {
