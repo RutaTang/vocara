@@ -911,6 +911,11 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
   /// A rebuild of the lanes once a heal the interval refused may run.
   Timer? _laneHealRetry;
 
+  /// How many times [healLane] asked for each subject, and how many of those
+  /// earn a retry of their own (see [healLane]).
+  final Map<String, int> _laneHeals = {};
+  static const _laneHealRetries = 3;
+
   /// How soon [healLane] asks again for the same subject. More analysis on
   /// screen than the byte budget holds would otherwise have the lanes and the
   /// dock evict each other's in turn, one decode after another, for good.
@@ -930,14 +935,20 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
     final last = _laneHealedAt[subject];
     if (last != null) {
       // Asked again once the interval is up: nothing else may rebuild the
-      // lane, and it sat empty on an idle screen.
-      _laneHealRetry ??= Timer(_laneHealInterval - now.difference(last), () {
-        _laneHealRetry = null;
-        notifyListeners();
-      });
+      // lane, and it sat empty on an idle screen. Not for a subject already
+      // healed a few times: more analysis on screen than the budget holds
+      // has every view evict another's in turn, and an idle screen then
+      // decoded something every interval for as long as it stayed open.
+      if ((_laneHeals[subject] ?? 0) < _laneHealRetries) {
+        _laneHealRetry ??= Timer(_laneHealInterval - now.difference(last), () {
+          _laneHealRetry = null;
+          notifyListeners();
+        });
+      }
       return;
     }
     _laneHealedAt[subject] = now;
+    _laneHeals[subject] = (_laneHeals[subject] ?? 0) + 1;
     if (t.clips.length > 1) {
       final key = subject;
       // Only lanes as they are now: a key from an earlier layout can never
