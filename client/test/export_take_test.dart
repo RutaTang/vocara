@@ -236,6 +236,22 @@ void main() {
     },
   );
 
+  test('... and so is one onto a link to it', () async {
+    final picks = <String>[];
+    final link = p.join(tmp.path, 'linked.wav');
+    final vm = await pumpVm(picks, (_) async => link);
+    final own = byName(vm, 'Take 1').primaryClip!.audioFilePath;
+    await Link(link).create(own);
+    final toasts = <String>[];
+    vm.toasts.listen(toasts.add);
+
+    await vm.exportTrackAudio(byName(vm, 'Take 1').id);
+    await Future<void>.delayed(Duration.zero);
+
+    expect(await File(own).readAsBytes(), takeBytes);
+    expect(toasts.single, contains('own audio file'));
+  });
+
   test('a cancelled save panel exports nothing and stays silent', () async {
     final picks = <String>[];
     final vm = await pumpVm(picks, (_) async => null);

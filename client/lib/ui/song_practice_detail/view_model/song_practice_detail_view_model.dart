@@ -33,6 +33,7 @@ import '../../../domain/models/technique_marker.dart';
 import '../../../domain/models/voice_metrics.dart';
 import '../../../utils/busy_gate.dart';
 import '../../../utils/command.dart';
+import '../../../utils/export_copy.dart';
 import '../../../utils/id.dart';
 import '../../../utils/lyrics_format.dart';
 import '../../../utils/result.dart';
@@ -1668,8 +1669,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     }
     try {
       // Overwrite is intentional: the save panel already confirmed replacing.
-      // (A copy failing part-way removes what it wrote: Dart's own cleanup.)
-      await source.copy(destPath);
+      await exportCopy(source, destPath);
     } catch (_) {
       _toast('Could not export the audio to that location.');
       return;
@@ -1680,7 +1680,12 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// Whether [a] and [b] are one file (a symlink or hard link to it too).
   static Future<bool> _sameFile(String a, String b) async {
     try {
-      return await File(b).exists() && await FileSystemEntity.identical(a, b);
+      if (!await File(b).exists()) return false;
+      // identical() judges a link itself, not what it points to.
+      return await FileSystemEntity.identical(
+        await File(a).resolveSymbolicLinks(),
+        await File(b).resolveSymbolicLinks(),
+      );
     } on FileSystemException {
       return false;
     }
