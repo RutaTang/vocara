@@ -49,10 +49,11 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
   static DateTime _dt(int ms) => DateTime.fromMillisecondsSinceEpoch(ms);
 
   // --- save-side content-hash projections -------------------------------------
-  // The MINE side of every three-way merge. The reconcile passes and
-  // [_sentHashes] both hash through these, so "what a save sent" can never
-  // drift from what its merge compared. Hydration records the BASE side of
-  // the JSON-carrying rows through them too (see [_hydrate]).
+  // The MINE side of every three-way merge, hashed once per save by
+  // [_sentHashes]; the reconcile passes compare that very map, so "what a
+  // save sent" can never drift from what its merge compared. Hydration
+  // records the BASE side of the JSON-carrying rows through them too (see
+  // [_hydrate]).
 
   /// The practice's JSON columns exactly as a save writes them.
   static String? _reverbJsonOf(SongPractice p) =>
@@ -427,6 +428,9 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
         await db.customStatement('PRAGMA defer_foreign_keys = ON');
 
         // --- practice row (single-entity reconcile) ---
+        // Every pass below compares the MINE hashes in [sent], never hashes
+        // the model again: what a save sent is then what its merge compared
+        // by construction, and the rows are hashed once per save, not twice.
         final practiceWritten = await _upsertPractice(
           practice,
           separationAssetId: separationAssetId,
@@ -434,13 +438,19 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
           lyricsJson: lyricsJson,
           now: now,
           base: base,
+          mine: sent,
         );
 
         // --- interpretations ---
-        var childChanges = await _reconcileInterpretations(practice, now, base);
+        var childChanges = await _reconcileInterpretations(
+          practice,
+          now,
+          base,
+          sent,
+        );
 
         // --- fx buses (before tracks so a track's bus_id resolves) ---
-        childChanges += await _reconcileFxBuses(practice, now, base);
+        childChanges += await _reconcileFxBuses(practice, now, base, sent);
 
         // --- tracks (+ cascade their clips / notes / markers) ---
         childChanges += await _reconcileTracks(
@@ -449,6 +459,7 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
           clipAsset,
           now,
           base,
+          sent,
         );
 
         // A child-only edit (clip move, note/marker, fader, add/remove an
@@ -512,6 +523,7 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
     required String lyricsJson,
     required int now,
     required Map<String, String>? base,
+    required Map<String, String> mine,
   }) async {
     final existing = await (db.select(
       db.practices,
@@ -528,12 +540,7 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
       // surfaces Result.error, like the pre-upsert-revive PK failure.
       throw StateError('practice ${p.id} is deleted; refusing to save over it');
     }
-    final hash = _practiceHash(
-      p,
-      separationAssetId: separationAssetId,
-      reverbJson: reverbJson,
-      lyricsJson: lyricsJson,
-    );
+    final hash = mine[p.id]!;
     if (existing == null) {
       final s = writer.stamp();
       await db
@@ -615,6 +622,7 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
     SongPractice p,
     int now,
     Map<String, String>? base,
+    Map<String, String> mine,
   ) async {
     final live = await _live(
       db.interpretations,
@@ -633,7 +641,7 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
       currentHashes: current,
       desired: desired,
       idOf: (d) => d.v.id,
-      hashOf: (d) => _interpretationHash(d.v, d.order),
+      hashOf: (d) => mine[d.v.id]!,
       insert: (d, s) => db
           .into(db.interpretations)
           .insertOnConflictUpdate(
@@ -675,6 +683,7 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
     SongPractice p,
     int now,
     Map<String, String>? base,
+    Map<String, String> mine,
   ) async {
     final live = await _live(db.fxBuses, (x) => x.practiceId.equals(p.id));
     final current = {for (final r in live) r.id: fxBusRowHash(r)};
@@ -689,7 +698,7 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
       currentHashes: current,
       desired: desired,
       idOf: (d) => d.bus.id,
-      hashOf: (d) => _busHash(d.bus, d.order),
+      hashOf: (d) => mine[d.bus.id]!,
       insert: (d, s) => db
           .into(db.fxBuses)
           .insertOnConflictUpdate(
@@ -751,6 +760,7 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
     Map<String, String> clipAsset,
     int now,
     Map<String, String>? base,
+    Map<String, String> mine,
   ) async {
     final live = await _live(db.tracks, (x) => x.practiceId.equals(p.id));
     final current = {for (final r in live) r.id: trackRowHash(r)};
@@ -774,7 +784,7 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
       final d = desiredById[r.id];
       if (d == null || d.track.kind.name == r.kind) continue;
       final op = reconcileOpFor(
-        mine: _trackHash(d.track, d.order),
+        mine: mine[r.id]!,
         db: current[r.id],
         base: (base ?? current)[r.id],
       );
@@ -794,7 +804,7 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
       currentHashes: current,
       desired: desired,
       idOf: (d) => d.track.id,
-      hashOf: (d) => _trackHash(d.track, d.order),
+      hashOf: (d) => mine[d.track.id]!,
       insert: (d, s) => db
           .into(db.tracks)
           .insertOnConflictUpdate(
@@ -892,18 +902,21 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
         clipAsset,
         now,
         base,
+        mine,
         children.clips[t.id] ?? const [],
       );
       changed += await _reconcileNotes(
         t,
         now,
         base,
+        mine,
         children.notes[t.id] ?? const [],
       );
       changed += await _reconcileMarkers(
         t,
         now,
         base,
+        mine,
         children.markers[t.id] ?? const [],
       );
     }
@@ -915,6 +928,7 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
     Map<String, String> clipAsset,
     int now,
     Map<String, String>? base,
+    Map<String, String> mine,
     List<ClipRow> live,
   ) async {
     final current = {for (final r in live) r.id: clipRowHash(r)};
@@ -930,7 +944,7 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
       currentHashes: current,
       desired: desired,
       idOf: (d) => d.clip.id,
-      hashOf: (d) => _clipHash(d.clip, d.assetId, d.order),
+      hashOf: (d) => mine[d.clip.id]!,
       insert: (d, s) => db
           .into(db.clips)
           .insertOnConflictUpdate(
@@ -974,6 +988,7 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
     AudioTrack t,
     int now,
     Map<String, String>? base,
+    Map<String, String> mine,
     List<PracticeNoteRow> live,
   ) async {
     final current = {for (final r in live) r.id: practiceNoteRowHash(r)};
@@ -985,7 +1000,7 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
       currentHashes: current,
       desired: t.notes,
       idOf: (n) => n.id,
-      hashOf: _noteHash,
+      hashOf: (n) => mine[n.id]!,
       insert: (n, s) => db
           .into(db.practiceNotes)
           .insertOnConflictUpdate(
@@ -1027,6 +1042,7 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
     AudioTrack t,
     int now,
     Map<String, String>? base,
+    Map<String, String> mine,
     List<TechniqueMarkerRow> live,
   ) async {
     final current = {for (final r in live) r.id: techniqueMarkerRowHash(r)};
@@ -1038,7 +1054,7 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
       currentHashes: current,
       desired: t.techniqueMarkers,
       idOf: (m) => m.id,
-      hashOf: _markerHash,
+      hashOf: (m) => mine[m.id]!,
       insert: (m, s) => db
           .into(db.techniqueMarkers)
           .insertOnConflictUpdate(
