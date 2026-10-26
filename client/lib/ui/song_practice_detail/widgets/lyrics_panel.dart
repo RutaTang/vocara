@@ -1,4 +1,3 @@
-import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_selector/file_selector.dart' show XTypeGroup, openFile;
 import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart';
@@ -12,6 +11,7 @@ import '../../../domain/models/technique_marker.dart';
 import '../../../utils/format.dart';
 import '../../core/themes/studio.dart';
 import '../../core/widgets/studio_button.dart';
+import '../../core/widgets/visible_drop_target.dart';
 import '../view_model/song_practice_detail_view_model.dart';
 
 const double _panelWidth = 300;
@@ -223,10 +223,9 @@ class _LyricsTabState extends State<_LyricsTab> {
               // Keyed, so the toolbar coming or going (the dock dragged past
               // the threshold) keeps the editor or the sync list it holds.
               key: const ValueKey('lyrics-tab-body'),
-              child: DropTarget(
-                onDragDone: (d) async {
-                  if (d.files.isEmpty) return;
-                  await _importDrop(d.files.first.path);
+              child: VisibleDropTarget(
+                onDrop: (paths) {
+                  if (paths.isNotEmpty) _importDrop(paths.first);
                 },
                 child: _body(),
               ),

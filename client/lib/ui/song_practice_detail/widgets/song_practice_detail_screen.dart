@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_selector/file_selector.dart' show XTypeGroup, openFiles;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -23,6 +22,7 @@ import '../../core/widgets/stable_subtree.dart';
 import '../../core/widgets/studio_button.dart';
 import '../../core/widgets/studio_controls.dart';
 import '../../core/widgets/tick_boundary.dart';
+import '../../core/widgets/visible_drop_target.dart';
 import '../../core/widgets/waveform_painter.dart';
 import '../view_model/song_practice_detail_view_model.dart';
 import 'analysis_lanes.dart';
@@ -2022,13 +2022,12 @@ class _AudioDropZoneState extends State<_AudioDropZone> {
 
   @override
   Widget build(BuildContext context) {
-    return DropTarget(
-      onDragEntered: (_) => setState(() => _hover = true),
-      onDragExited: (_) => setState(() => _hover = false),
-      onDragDone: (d) {
-        if (_hover) setState(() => _hover = false);
-        widget.onDropPaths(d.files.map((f) => f.path).toList());
-      },
+    // Only where the zone can be seen: a drop over a dialog, the lyrics
+    // focus overlay, or the dock over a lane scrolled out of view imported
+    // into that hidden take (see VisibleDropTarget).
+    return VisibleDropTarget(
+      onHover: (hover) => setState(() => _hover = hover),
+      onDrop: widget.onDropPaths,
       child: widget.builder(_hover),
     );
   }

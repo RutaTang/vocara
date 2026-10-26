@@ -1,4 +1,3 @@
-import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -6,6 +5,7 @@ import 'package:forui/forui.dart';
 
 import '../../../../domain/models/technique_media.dart';
 import '../../../core/themes/studio.dart';
+import '../../../core/widgets/visible_drop_target.dart';
 import 'technique_audio_player.dart';
 import 'technique_video_player.dart';
 
@@ -470,18 +470,16 @@ class _AddZoneState extends State<_AddZone> {
 
   @override
   Widget build(BuildContext context) {
-    return DropTarget(
-      onDragEntered: (_) =>
-          widget.enabled ? setState(() => _dragging = true) : null,
-      onDragExited: (_) => setState(() => _dragging = false),
-      onDragDone: (detail) {
-        setState(() => _dragging = false);
+    // Only where the zone can be seen (see VisibleDropTarget): a drop over a
+    // dialog above it added the clip to this technique.
+    return VisibleDropTarget(
+      onHover: (hover) => setState(() => _dragging = hover && widget.enabled),
+      onDrop: (paths) {
         if (!widget.enabled) return;
         // Hand over EVERY dropped path: the view model filters, and it needs
         // the unsupported ones to report them. Filtering here made a drop of
         // only unsupported files do nothing at all — no import, no notice —
         // and under-counted the skips in a mixed drop.
-        final paths = detail.files.map((f) => f.path).toList();
         if (paths.isNotEmpty) widget.onDropPaths(paths);
       },
       child: MouseRegion(
