@@ -218,9 +218,12 @@ pub struct VeEngine {
     degraded_mask: u64,
     feeder_stop: Arc<std::sync::atomic::AtomicBool>,
     feeder_join: Vec<std::thread::JoinHandle<()>>,
-    /// Input-vs-output clock-drift estimator, ticked by the Dart device
-    /// watch's 1 s poll (ve_poll_device_event — the process's one poller).
+    /// Input-vs-output clock-drift estimator, ticked by the device-event
+    /// pollers (ve_poll_device_event: the song page's 1 s watch, the
+    /// technique page's 50 ms level tick).
     drift: device::DriftEstimator,
+    /// The drift estimator's wall clock: it samples about once a second of it.
+    drift_clock: std::time::Instant,
 }
 
 /// Highest staged-track index [`ve_commit_degraded_mask`] can name on its own.
@@ -662,6 +665,7 @@ pub extern "C" fn ve_create() -> *mut VeEngine {
             feeder_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             feeder_join: Vec::new(),
             drift: device::DriftEstimator::new(drift_ratio),
+            drift_clock: std::time::Instant::now(),
         })))
     });
     match built {
@@ -849,19 +853,26 @@ pub extern "C" fn ve_current_output_device(
 #[no_mangle]
 pub extern "C" fn ve_poll_device_event(e: *mut VeEngine, mask: u32) -> u32 {
     with_engine(e, 0, |eng| {
-        // Piggyback the ~1 s clock-drift tick on the event pollers:
-        // it compares the input's NOMINAL emission counter (correction-free —
-        // feeding the corrected counter closed the loop on itself and only
-        // half the drift was ever compensated) against the frames the output
-        // played (its consumed cursor less what a flush skipped) and publishes
-        // the input resampler's correction ratio.
-        // Self-gating — a closed mic or a paused transport advances one
-        // counter only, and the estimator freezes. Ticking from more than
-        // one poller is fine: the estimator accumulates deltas until a
-        // measurement spans 10 s.
-        let nominal_in = eng.input_nominal_frames.load(Ordering::Acquire);
-        let played = eng.handle.transport().played_frames();
-        eng.drift.tick(nominal_in, played);
+        // Piggyback the clock-drift tick on the event pollers: it compares
+        // the input's NOMINAL emission counter (correction-free — feeding the
+        // corrected counter closed the loop on itself and only half the drift
+        // was ever compensated) against the frames the output devices played,
+        // and publishes the input resampler's correction ratio. Self-gating:
+        // a closed mic or a lost output advances one counter only, and the
+        // estimator freezes. Ticking from more than one poller is fine: it
+        // samples about once a second of wall time, whoever polls.
+        let transport = eng.handle.transport();
+        eng.drift.tick(device::DriftObservation {
+            input: eng.input_nominal_frames.load(Ordering::Acquire),
+            output: transport.played_frames(),
+            input_quantum: eng.input_cell.take_quantum(),
+            output_quantum: transport.take_played_quantum(),
+            generation: eng
+                .input_cell
+                .generation()
+                .wrapping_add(transport.output_streams()),
+            secs: eng.drift_clock.elapsed().as_secs_f64(),
+        });
         // Re-derive the monitor safety mute on the same tick. The host thread reconciles on every
         // command that moves the binding, which covers the sharp edge (the mic opening and taking
         // the output with it), but nothing wakes it when the SYSTEM default output changes under

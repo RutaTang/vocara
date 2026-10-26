@@ -406,6 +406,10 @@ struct OutResampler {
     /// The last observed transport flush generation: a bump (seek/pause) means the FIFO holds
     /// audio from BEFORE the transport change, which must be dropped, not played out.
     flush_gen: u32,
+    /// Fractional carry of the engine-rate frames the device was handed (`out_frames * step`)
+    /// for the output clock ([`Shared::count_played`]). Kept across flushes: resetting it
+    /// with `pos` lost up to a frame per seek, a bias the drift estimator read as drift.
+    played_acc: f64,
 }
 
 /// Kernel width in engine frames. 64 taps at 256x table resolution yields ~70 dB stopband
@@ -573,6 +577,7 @@ impl OutResampler {
             table: build_sinc_table(step),
             max_block,
             flush_gen,
+            played_acc: 0.0,
         };
         r.reset_stream();
         r
@@ -622,6 +627,12 @@ impl OutResampler {
             out[..out_frames * CHANNELS].fill(0.0);
             return;
         }
+        // The device plays this whole buffer, whatever below fills it (silence included).
+        let handed = out_frames as f64 * self.step;
+        self.played_acc += handed;
+        let whole = self.played_acc as u64;
+        self.played_acc -= whole as f64;
+        self.rt.transport().count_played(whole);
         // A seek/pause happened since the last callback: everything pre-rendered into the
         // FIFO belongs to the OLD transport position and must not reach the listener —
         // dropping it makes the transport respond within one callback instead of playing out
@@ -635,7 +646,7 @@ impl OutResampler {
             // or never count.
             let content_end = self.origin + self.fifo.len() as i64;
             let unconsumed = (content_end - self.consumed_floor).max(0);
-            self.rt.transport().skip_unplayed(unconsumed as u64);
+            self.rt.transport().advance_consumed(unconsumed as u64);
             self.reset_stream();
         }
         let mut done = 0;
@@ -712,7 +723,7 @@ fn build_stream(
     // FIFO: the consumed cursor would lag the render counter forever. This
     // stream starts with an empty (or no) FIFO, so the cursor equals the
     // render counter — sync before any callback can run.
-    rt.transport().sync_consumed_over_unplayed();
+    rt.transport().begin_output_stream();
     let err_cb = move |err: cpal::Error| {
         // A stream following the system default reports a default change as DeviceChanged:
         // cpal already rerouted it and documents that it stays active with no rebuild needed.
@@ -1142,6 +1153,9 @@ pub struct InputCell {
     /// [`InputChannelMix`]). Outside the single-accessor state: the control thread writes it, and
     /// the VPIO input callback reads it for its own downmix before it feeds the cell.
     channel_mode: AtomicU32,
+    /// The largest callback's share of the nominal input counter since the drift estimator
+    /// last took it (see [`Self::take_quantum`]).
+    quantum: AtomicU64,
 }
 
 // SAFETY: see the type doc — the owner epoch plus the `busy` compare-exchange admit at most one
@@ -1296,6 +1310,7 @@ impl InputCell {
             owner: AtomicU64::new(0),
             busy: AtomicBool::new(false),
             channel_mode: AtomicU32::new(INPUT_CHANNEL_AUTO),
+            quantum: AtomicU64::new(0),
         })
     }
 
@@ -1316,6 +1331,18 @@ impl InputCell {
     /// building an input stream; taking it retires every older input callback.
     pub fn claim(&self) -> u64 {
         self.owner.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    /// The current input-stream generation: it moves whenever a stream (re)opens, which the
+    /// drift estimator takes as a new clock.
+    pub fn generation(&self) -> u64 {
+        self.owner.load(Ordering::Acquire)
+    }
+
+    /// The largest single callback's advance of the nominal input counter (engine frames) since
+    /// the last call, which resets it: how far that counter can lag its device.
+    pub fn take_quantum(&self) -> u64 {
+        self.quantum.swap(0, Ordering::Relaxed)
     }
 
     /// Enter the state as `epoch`, or `None` when a newer input stream owns the cell or another
@@ -1501,6 +1528,8 @@ impl InputCell {
         // untouched by the published ratio (see nominal_frames_in). Carried
         // fractionally so non-integer steps lose nothing across callbacks.
         st.nominal_acc += frames as f64 / st.step;
+        self.quantum
+            .fetch_max((frames as f64 / st.step).ceil() as u64, Ordering::Relaxed);
         let whole = st.nominal_acc as u64;
         if whole > 0 {
             st.nominal_frames_in.fetch_add(whole, Ordering::Relaxed);
@@ -1514,9 +1543,9 @@ impl InputCell {
 /// NOMINAL engine-rate frame counter (device frames / nominal step — never
 /// the corrected emission, which would feed the published ratio back into
 /// its own error signal and settle the loop at sqrt of the real ratio)
-/// against the output's consumed cursor, and publishes a smoothed
-/// correction ratio for the input resampler
-/// ([`InputState::drift_ratio_bits`]).
+/// against the frames the output devices played
+/// ([`Shared::played_frames`]), and publishes a correction ratio for the
+/// input resampler ([`InputState::drift_ratio_bits`]).
 ///
 /// Two independent crystals never run at exactly the same rate; a mic 30 ppm
 /// fast drifts a take ~18 ms ahead of the backing over 10 minutes, which
@@ -1524,132 +1553,335 @@ impl InputCell {
 /// OUTPUT clock is the goal — the take must sit against what the listener
 /// heard — so both absolute crystal errors cancel out of the design.
 ///
-/// Robustness over reactivity, deliberately:
-///  * the estimate is the least-squares slope of the input counter over the
-///    output counter across the last [`DRIFT_HISTORY`] samples, taken
-///    ≥ [`DRIFT_SAMPLE_SPAN`] apart (about once a second). Both counters move
-///    in whole callbacks,
-///    so each sample carries up to a callback of quantization: the old
-///    per-tick ratios (100 ms-1 s) carried ~1% of it (480-frame input against
-///    512-frame output callbacks), a ±5000 ppm glitch gate cut it off on one
-///    side only, and the estimate settled at the ±500 ppm clamp — a take
-///    slipping ~0.45 s over 15 minutes, where uncorrected drift is ~27 ms. A
-///    slope over many samples averages the quantization away instead;
-///  * a stopped stream — mic closed, output device gone — FREEZES the
-///    estimate, never decays it (a mere transport PAUSE keeps measuring,
-///    because the output still delivers silence and both clocks keep
-///    ticking — verified on hardware);
-///  * a span the two clocks did not run through together (beyond ±2% over
-///    ≥ [`DRIFT_GATE_SPAN`], where two callbacks of quantization stay inside
-///    it: a stall, a rebuild, a mic reopened) restarts the history, and the
-///    published ratio holds until [`DRIFT_MIN_SAMPLES`] samples are back;
-///  * the output clock is what the device PLAYED ([`Shared::played_frames`]):
-///    a seek's flush advances the consumed cursor over the FIFO's unplayed
-///    frames at once, which read as the output clock leaping ahead;
-///  * a ±2 ppm deadband publishes EXACTLY 1.0 (keeping the identity fast
-///    path for healthy 48 kHz chains), and the correction clamps at
-///    ±500 ppm — anything larger is a broken device, not drift.
+/// Both counters move in whole callbacks, so each poll reads them up to a
+/// callback each off their clocks; a 4096-frame callback is 85 ms, worth
+/// 140 ppm of a ten-minute span. The design follows from that, and from
+/// what the estimate costs when it is wrong:
+///  * one chain on one clock (VPIO's input and output share an IO cycle; a
+///    duplex device is one crystal) must read EXACTLY 1.0, which keeps the
+///    resampler's identity fast path. A noisy fit published as drift slipped
+///    such takes by up to 16 ms where nothing drifted. So nothing is published
+///    until the fit says it beats the noise: its slope must clear
+///    `(4 + 4/dof)` standard errors and a 3 ppm deadband, and until then the
+///    published ratio holds;
+///  * samples are about a second apart on the WALL clock, and only while both
+///    counters move (a closed mic or a lost output freezes the estimate). A
+///    sample taken when the counters crossed a span landed right after a
+///    callback, every time, and read one quantization level for minutes;
+///  * ten samples make a point: their means, which keep the slow drift of
+///    the callbacks' phases (equal-sized callbacks show drift only as the
+///    share of samples one level up), and the samples' spread around them;
+///  * the slope is a least-squares fit over ten minutes of points, with one
+///    offset per segment: a stall (an underrun, a lost burst of input) moves
+///    the counters' difference for good, and a fit through the step took a
+///    100 ms output stall for 250 ppm of drift. A change between
+///    two samples larger than a callback each way cannot be quantization and
+///    splits the segment there. A smaller step shows as the segment's points
+///    parting into two offsets under one slope: past six standard errors (and
+///    a quarter of that bound) it splits the segment, and past three it holds
+///    publishing until it does;
+///  * a segment whose own slope disagrees with the older ones' (a device
+///    change on the same stream, at a new rate) drops them;
+///  * a new input or output stream — a reopened mic, a rebuilt output, maybe
+///    another device — restarts the history; the published ratio holds;
+///  * the correction clamps at ±500 ppm: anything larger is a broken device,
+///    not drift.
 ///
-/// The mechanism is fully simulation-tested; hardware-in-the-loop
+/// The mechanism is simulation-tested (`drift_tests`); hardware-in-the-loop
 /// CALIBRATION (real crystal pairs) remains the follow-up noted in memory.
 pub struct DriftEstimator {
     ratio_bits: Arc<AtomicU64>,
-    /// (input, output) counter pairs, oldest first.
-    samples: std::collections::VecDeque<(u64, u64)>,
+    generation: Option<u64>,
+    /// The counters at the start of the history; the fit runs relative to them.
+    origin: (u64, u64),
+    /// The last sample's counters and wall time.
+    last: (u64, u64),
+    last_secs: f64,
+    /// The largest callback seen on each side since the history started (engine frames).
+    quantum: (u64, u64),
+    /// The open point's samples: (output, input - output) relative to `origin`.
+    window: Vec<(f64, f64)>,
+    points: std::collections::VecDeque<DriftPoint>,
+    /// The current segment; the next point opens a new one when `split` is set.
+    seg: u32,
+    split: bool,
+    fit: Option<DriftFit>,
+    /// The standard error of the fit last published.
+    published_se: f64,
 }
 
-/// The least advance (engine frames) on both counters between samples: 1 s.
-const DRIFT_SAMPLE_SPAN: u64 = 48_000;
+/// One poll of the counters, for [`DriftEstimator::tick`].
+#[derive(Clone, Copy, Debug)]
+pub struct DriftObservation {
+    /// The input's nominal engine-rate frame counter.
+    pub input: u64,
+    /// Engine-rate frames the output devices played.
+    pub output: u64,
+    /// The largest single callback on each side since the last poll (engine frames).
+    pub input_quantum: u64,
+    pub output_quantum: u64,
+    /// Changes whenever either side starts a new stream.
+    pub generation: u64,
+    /// Wall-clock seconds, from any fixed origin.
+    pub secs: f64,
+}
 
-/// The span (output frames) a new sample is checked against for a glitch: 10 s.
-const DRIFT_GATE_SPAN: u64 = 480_000;
+#[derive(Clone, Copy)]
+struct DriftPoint {
+    x: f64,
+    m: f64,
+    seg: u32,
+    /// The samples' spread about the trend: the quantization this point saw.
+    range: f64,
+}
 
-/// Samples the slope is fitted over: 10 minutes of them.
-const DRIFT_HISTORY: usize = 600;
+#[derive(Clone, Copy)]
+struct DriftFit {
+    slope: f64,
+    se: f64,
+    dof: f64,
+}
 
-/// Samples a (re)started history needs before it publishes: half a minute.
-const DRIFT_MIN_SAMPLES: usize = 30;
+/// Samples per point (~10 s).
+const DRIFT_WINDOW: usize = 10;
+/// Points the fit spans (~10 min).
+const DRIFT_POINTS: usize = 60;
+/// Points a history needs before it publishes (~40 s).
+const DRIFT_MIN_POINTS: usize = 4;
+/// The least advance (engine frames) on both counters between samples: half a second's.
+const DRIFT_SAMPLE_SPAN: u64 = 24_000;
+/// A step smaller than this (engine frames) is not looked for: 0.5 ms.
+const DRIFT_STEP_FLOOR: f64 = 24.0;
+/// |error| below this publishes exactly 1.0.
+const DRIFT_DEADBAND: f64 = 3e-6;
+/// The correction's bound: past it the device is broken, not drifting.
+const DRIFT_CLAMP: f64 = 500e-6;
 
 impl DriftEstimator {
     pub fn new(ratio_bits: Arc<AtomicU64>) -> Self {
         ratio_bits.store(1.0f64.to_bits(), Ordering::Relaxed);
         DriftEstimator {
             ratio_bits,
-            samples: std::collections::VecDeque::with_capacity(DRIFT_HISTORY + 1),
+            generation: None,
+            origin: (0, 0),
+            last: (0, 0),
+            last_secs: 0.0,
+            quantum: (0, 0),
+            window: Vec::with_capacity(DRIFT_WINDOW),
+            points: std::collections::VecDeque::with_capacity(DRIFT_POINTS + 1),
+            seg: 0,
+            split: false,
+            fit: None,
+            published_se: f64::INFINITY,
         }
     }
 
-    /// One tick (~1 s, or 50 ms from the technique page) with the CURRENT
-    /// counter values (monotonic totals): the input's nominal emission and the
-    /// frames the output played. Publishes the updated ratio; returns it for
-    /// tests.
-    pub fn tick(&mut self, frames_in: u64, frames_out: u64) -> f64 {
-        let Some(&(last_in, last_out)) = self.samples.back() else {
-            self.samples.push_back((frames_in, frames_out));
-            return self.published();
-        };
-        let din = frames_in.wrapping_sub(last_in);
-        let dout = frames_out.wrapping_sub(last_out);
-        // Sample only when both sides moved enough to mean something (a stopped
-        // stream freezes the estimate rather than corrupting it); ticks in between
-        // accumulate into the next sample, whichever page polls and how often.
-        if din < DRIFT_SAMPLE_SPAN || dout < DRIFT_SAMPLE_SPAN {
+    /// One poll (~1 s from the song page, 50 ms from the technique page; any
+    /// number of pollers). Publishes the updated ratio; returns it for tests.
+    pub fn tick(&mut self, o: DriftObservation) -> f64 {
+        if self.generation != Some(o.generation) || o.input < self.last.0 || o.output < self.last.1
+        {
+            self.generation = Some(o.generation);
+            self.origin = (o.input, o.output);
+            self.last = (o.input, o.output);
+            self.last_secs = o.secs;
+            self.quantum = (o.input_quantum, o.output_quantum);
+            self.window.clear();
+            self.points.clear();
+            self.split = false;
+            self.fit = None;
             return self.published();
         }
-        // Checked against the newest sample ≥ 10 s back (any sample at all when
-        // the gap since the last is that long already): a stalled or rebuilt
-        // stream, a mic reopened.
-        let gate = if dout >= DRIFT_GATE_SPAN {
-            Some((last_in, last_out))
-        } else {
-            self.samples
-                .iter()
-                .rev()
-                .find(|&&(_, o)| frames_out.wrapping_sub(o) >= DRIFT_GATE_SPAN)
-                .copied()
+        self.quantum.0 = self.quantum.0.max(o.input_quantum);
+        self.quantum.1 = self.quantum.1.max(o.output_quantum);
+        let din = o.input - self.last.0;
+        let dout = o.output - self.last.1;
+        if o.secs - self.last_secs < 1.0 || din < DRIFT_SAMPLE_SPAN || dout < DRIFT_SAMPLE_SPAN {
+            return self.published();
+        }
+        self.last = (o.input, o.output);
+        self.last_secs = o.secs;
+        // A change since the last sample that callback granularity cannot make (each counter
+        // lags its device by less than one of its callbacks): a step, between these samples.
+        let q = (self.quantum.0 + self.quantum.1) as f64;
+        let delta = (din as f64 - dout as f64) - self.reference_slope() * dout as f64;
+        if q > 0.0 && delta.abs() > q + 2.0 + 1e-3 * dout as f64 + DRIFT_STEP_FLOOR {
+            self.close_window();
+            self.split = true;
+        }
+        let x = (o.output - self.origin.1) as f64;
+        self.window.push((x, (o.input - self.origin.0) as f64 - x));
+        if self.window.len() == DRIFT_WINDOW {
+            self.close_window();
+        }
+        self.published()
+    }
+
+    fn reference_slope(&self) -> f64 {
+        self.fit.map_or(self.published() - 1.0, |f| f.slope)
+    }
+
+    /// Turns the open window into a point (half a window at least; less is dropped), or
+    /// splits the segment ahead of it.
+    fn close_window(&mut self) {
+        let n = self.window.len();
+        if n < DRIFT_WINDOW / 2 {
+            self.window.clear();
+            return;
+        }
+        let xm = self.window.iter().map(|p| p.0).sum::<f64>() / n as f64;
+        let m = self.window.iter().map(|p| p.1).sum::<f64>() / n as f64;
+        let d = self.reference_slope();
+        let (lo, hi) = self
+            .window
+            .iter()
+            .map(|&(x, z)| z - d * (x - xm))
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), v| {
+                (l.min(v), h.max(v))
+            });
+        self.window.clear();
+        if self.split || self.points.is_empty() {
+            self.seg += 1;
+            self.split = false;
+        }
+        self.points.push_back(DriftPoint {
+            x: xm,
+            m,
+            seg: self.seg,
+            range: hi - lo,
+        });
+        if self.points.len() > DRIFT_POINTS {
+            self.points.pop_front();
+        }
+        self.split_at_step();
+        self.prune_inconsistent();
+        self.fit = pooled_fit(self.points.iter().copied());
+        self.publish();
+    }
+
+    /// Splits the current segment at a step inside it (see [`Self::likeliest_step`]) that
+    /// clears the noise six times over.
+    fn split_at_step(&mut self) {
+        let Some((j, z)) = self.likeliest_step() else {
+            return;
         };
-        if let Some((gin, gout)) = gate {
-            let ratio = frames_in.wrapping_sub(gin) as f64 / frames_out.wrapping_sub(gout) as f64;
-            if !(0.98..=1.02).contains(&ratio) {
-                // The clocks did not run together over this span: start over here.
-                self.samples.clear();
-                self.samples.push_back((frames_in, frames_out));
-                return self.published();
+        if z <= 6.0 {
+            return;
+        }
+        let start = self
+            .points
+            .iter()
+            .position(|p| p.seg == self.seg)
+            .unwrap_or(0);
+        self.seg += 1;
+        let new = self.seg;
+        for p in self.points.iter_mut().skip(start + j) {
+            p.seg = new;
+        }
+    }
+
+    /// The boundary in the current segment where a step is likeliest — where offsets fitted
+    /// either side, under a common slope, part the most against their noise — and how many
+    /// standard errors that clears. Only steps past a quarter of the callback bound count.
+    /// Using every point either side, it finds a step a point-by-point test against the line
+    /// cannot: early in a fit the slope is too uncertain to predict a point to within one.
+    fn likeliest_step(&self) -> Option<(usize, f64)> {
+        let start = self.points.iter().position(|p| p.seg == self.seg)?;
+        let pts: Vec<DriftPoint> = self.points.iter().skip(start).copied().collect();
+        let n = pts.len();
+        if n < 6 {
+            return None;
+        }
+        // (count, mean x, mean m, Sxx, Sxy, Smm) of a run of points.
+        let stats = |ps: &[DriftPoint]| {
+            let k = ps.len() as f64;
+            let xm = ps.iter().map(|p| p.x).sum::<f64>() / k;
+            let mm = ps.iter().map(|p| p.m).sum::<f64>() / k;
+            let (mut sxx, mut sxy, mut smm) = (0.0, 0.0, 0.0);
+            for p in ps {
+                sxx += (p.x - xm) * (p.x - xm);
+                sxy += (p.x - xm) * (p.m - mm);
+                smm += (p.m - mm) * (p.m - mm);
+            }
+            (k, xm, mm, sxx, sxy, smm)
+        };
+        let prior = pts.iter().map(|p| (0.3 * p.range).powi(2)).sum::<f64>() / n as f64;
+        let least = 0.25 * (self.quantum.0 + self.quantum.1) as f64 + DRIFT_STEP_FLOOR;
+        let mut best: Option<(usize, f64)> = None;
+        for j in 3..=n - 3 {
+            let (ka, xa, ma, sxxa, sxya, smma) = stats(&pts[..j]);
+            let (kb, xb, mb, sxxb, sxyb, smmb) = stats(&pts[j..]);
+            let sxx = sxxa + sxxb;
+            if sxx <= 0.0 {
+                continue;
+            }
+            let slope = (sxya + sxyb) / sxx;
+            let rss = (smma + smmb - slope * (sxya + sxyb)).max(0.0);
+            // Blended with the spreads' prior as in [`pooled_fit`].
+            let var = (rss + 4.0 * prior) / (n as f64 - 3.0 + 4.0);
+            let step = (mb - slope * xb) - (ma - slope * xa);
+            let se = (var * (1.0 / ka + 1.0 / kb + (xb - xa) * (xb - xa) / sxx)).sqrt();
+            let z = if se > 0.0 {
+                step.abs() / se
+            } else {
+                f64::INFINITY
+            };
+            if step.abs() > least && best.is_none_or(|b| z > b.1) {
+                best = Some((j, z));
             }
         }
-        self.samples.push_back((frames_in, frames_out));
-        if self.samples.len() > DRIFT_HISTORY {
-            self.samples.pop_front();
+        best
+    }
+
+    /// Drops the older segments when the newest one's slope disagrees with theirs.
+    fn prune_inconsistent(&mut self) {
+        let newest = self.seg;
+        let in_newest = self.points.iter().filter(|p| p.seg == newest).count();
+        if in_newest < DRIFT_MIN_POINTS || in_newest == self.points.len() {
+            return;
         }
-        if self.samples.len() < DRIFT_MIN_SAMPLES {
-            return self.published();
-        }
-        // Centred least squares, relative to the oldest sample (exact in f64).
-        let (in0, out0) = self.samples[0];
-        let n = self.samples.len() as f64;
-        let rel = |(i, o): (u64, u64)| ((o - out0) as f64, (i - in0) as f64);
-        let (sx, sy) = self
-            .samples
-            .iter()
-            .map(|&p| rel(p))
-            .fold((0.0, 0.0), |(a, b), (x, y)| (a + x, b + y));
-        let (mx, my) = (sx / n, sy / n);
-        let (sxy, sxx) = self
-            .samples
-            .iter()
-            .map(|&p| rel(p))
-            .fold((0.0, 0.0), |(a, b), (x, y)| {
-                (a + (x - mx) * (y - my), b + (x - mx) * (x - mx))
-            });
-        let err = sxy / sxx - 1.0;
-        let corrected = if err.abs() < 2e-6 {
-            1.0 // deadband: exactly 1.0 keeps the identity fast path
-        } else {
-            1.0 + err.clamp(-500e-6, 500e-6)
+        let (Some(new), Some(old)) = (
+            pooled_fit(self.points.iter().copied().filter(|p| p.seg == newest)),
+            pooled_fit(self.points.iter().copied().filter(|p| p.seg != newest)),
+        ) else {
+            return;
         };
-        self.ratio_bits
-            .store(corrected.to_bits(), Ordering::Relaxed);
-        corrected
+        if (new.slope - old.slope).abs() > 4.0 * new.se.hypot(old.se) + DRIFT_DEADBAND {
+            self.points.retain(|p| p.seg == newest);
+        }
+    }
+
+    fn publish(&mut self) {
+        let Some(f) = self.fit else { return };
+        if self.points.len() < DRIFT_MIN_POINTS {
+            return;
+        }
+        // A step too young to confirm tilts the fit: wait for it to be split off, or for
+        // the evidence to fade.
+        if self.likeliest_step().is_some_and(|(_, z)| z > 3.0) {
+            return;
+        }
+        let tol = ((4.0 + 4.0 / f.dof) * f.se).max(DRIFT_DEADBAND);
+        let held = self.published() - 1.0;
+        let err = if held == 0.0 {
+            // Leave the identity path only for drift the fit can tell from noise.
+            if f.slope.abs() <= tol {
+                return;
+            }
+            f.slope
+        } else if f.se < self.published_se || (f.slope - held).abs() > tol {
+            // A better fit than the one published, or one that rules it out.
+            if f.slope.abs() <= 0.5 * tol {
+                0.0
+            } else {
+                f.slope
+            }
+        } else {
+            return;
+        };
+        self.published_se = f.se;
+        let ratio = 1.0 + err.clamp(-DRIFT_CLAMP, DRIFT_CLAMP);
+        self.ratio_bits.store(ratio.to_bits(), Ordering::Relaxed);
     }
 
     fn published(&self) -> f64 {
@@ -1664,14 +1896,71 @@ impl DriftEstimator {
     }
 }
 
+/// Least squares over `points` with one offset per segment and a slope common to all. The
+/// residual variance is blended with a prior from the points' spreads (a mean's error is at
+/// most a fraction of its window's range), so a fit of few points cannot read as precise
+/// because they happened to agree.
+fn pooled_fit(points: impl Iterator<Item = DriftPoint> + Clone) -> Option<DriftFit> {
+    // (segment, count, Σx, Σm), in order: segments are contiguous runs.
+    let mut segs: Vec<(u32, usize, f64, f64)> = Vec::new();
+    let (mut n, mut prior) = (0usize, 0.0);
+    for p in points.clone() {
+        n += 1;
+        prior += (0.3 * p.range) * (0.3 * p.range);
+        match segs.last_mut() {
+            Some(s) if s.0 == p.seg => {
+                s.1 += 1;
+                s.2 += p.x;
+                s.3 += p.m;
+            }
+            _ => segs.push((p.seg, 1, p.x, p.m)),
+        }
+    }
+    let dof = n as f64 - segs.len() as f64 - 1.0;
+    if dof < 1.0 {
+        return None;
+    }
+    let mean = |seg: u32| {
+        segs.iter()
+            .find(|s| s.0 == seg)
+            .map_or((0.0, 0.0), |s| (s.2 / s.1 as f64, s.3 / s.1 as f64))
+    };
+    let (mut sxx, mut sxy) = (0.0, 0.0);
+    for p in points.clone() {
+        let (xm, mm) = mean(p.seg);
+        sxx += (p.x - xm) * (p.x - xm);
+        sxy += (p.x - xm) * (p.m - mm);
+    }
+    if sxx <= 0.0 {
+        return None;
+    }
+    let slope = sxy / sxx;
+    let rss: f64 = points
+        .map(|p| {
+            let (xm, mm) = mean(p.seg);
+            let r = p.m - mm - slope * (p.x - xm);
+            r * r
+        })
+        .sum();
+    // Four points' worth of prior.
+    const K0: f64 = 4.0;
+    let var = (rss + K0 * prior / n as f64) / (dof + K0);
+    Some(DriftFit {
+        slope,
+        se: (var / sxx).sqrt(),
+        dof,
+    })
+}
+
 #[cfg(test)]
 mod drift_tests {
     //! The clock-drift compensation MECHANISM, simulation-tested end to end
-    //! (the estimator's convergence/freeze/reject behavior, and the input
-    //! resampler applying the ratio). Hardware CALIBRATION — real crystal
-    //! pairs — is the documented follow-up; nothing here needs a device.
+    //! (the estimator against counters as the callbacks leave them, and the
+    //! input resampler applying the ratio). Hardware CALIBRATION — real
+    //! crystal pairs — is the documented follow-up; nothing here needs a
+    //! device.
 
-    use super::DriftEstimator;
+    use super::{DriftEstimator, DriftObservation};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
 
@@ -1679,117 +1968,187 @@ mod drift_tests {
         f64::from_bits(bits.load(Ordering::Relaxed))
     }
 
-    /// Simulated 1 s ticks: the mic crystal runs [ppm] fast relative to the
-    /// output clock, both counters advancing accordingly.
-    fn run_ticks(est: &mut DriftEstimator, ppm: f64, seconds: u64) -> f64 {
-        let mut last = 0.0;
-        for s in 1..=seconds {
-            let out = s * 48_000;
-            let inn = (out as f64 * (1.0 + ppm * 1e-6)) as u64;
-            last = est.tick(inn, out);
+    /// A simulated chain: counters advancing in whole callbacks, at crystals `ppm` off
+    /// nominal, read by a timer that fires about every `poll` seconds, up to 20 ms late.
+    #[derive(Clone)]
+    struct Chain {
+        cb_in: f64,
+        cb_out: f64,
+        ppm_in: f64,
+        ppm_out: f64,
+        poll: f64,
+        seconds: f64,
+        seed: u64,
+        /// The input's callback phase this far ahead of the output's, in callbacks; random
+        /// when `None`. VPIO runs both in one IO cycle, the input just before the output.
+        phase_gap: Option<f64>,
+        /// Output stalls (start, seconds): the device plays nothing meanwhile.
+        out_stalls: Vec<(f64, f64)>,
+        in_stalls: Vec<(f64, f64)>,
+        /// From this time on the output runs at `ppm_out2`; with `rebuild`, as a new stream.
+        switch_at: f64,
+        ppm_out2: f64,
+        rebuild: bool,
+    }
+
+    impl Chain {
+        fn new(cb_in: f64, cb_out: f64, ppm_in: f64) -> Self {
+            Chain {
+                cb_in,
+                cb_out,
+                ppm_in,
+                ppm_out: 0.0,
+                poll: 1.0,
+                seconds: 900.0,
+                seed: 1,
+                phase_gap: None,
+                out_stalls: vec![],
+                in_stalls: vec![],
+                switch_at: f64::INFINITY,
+                ppm_out2: 0.0,
+                rebuild: false,
+            }
         }
-        last
-    }
 
-    #[test]
-    fn converges_to_the_true_drift_within_the_ema_time_constant() {
-        let bits = Arc::new(AtomicU64::new(0));
-        let mut est = DriftEstimator::new(Arc::clone(&bits));
-        let r = run_ticks(&mut est, 30.0, 120); // 30 ppm fast mic, 2 min
-        assert!(
-            ((r - 1.0) * 1e6 - 30.0).abs() < 3.0,
-            "converged correction {} ppm, expected ~30",
-            (r - 1.0) * 1e6
-        );
-        assert_eq!(r, ratio_of(&bits), "published ratio matches");
-    }
-
-    #[test]
-    fn a_stopped_stream_freezes_the_estimate() {
-        let bits = Arc::new(AtomicU64::new(0));
-        let mut est = DriftEstimator::new(Arc::clone(&bits));
-        let before = run_ticks(&mut est, 30.0, 120);
-        // The output stream stops delivering (device gone): the input keeps
-        // counting, the estimate must HOLD — decaying toward 1.0 would
-        // re-drift the next take, and averaging the stall would corrupt it.
-        let (inn0, out0) = (300 * 48_000, 120 * 48_000);
-        for s in 0..60u64 {
-            est.tick(inn0 + s * 48_100, out0); // out frozen
+        fn truth(&self, t: f64) -> f64 {
+            let out = if t < self.switch_at {
+                self.ppm_out
+            } else {
+                self.ppm_out2
+            };
+            (1.0 + self.ppm_in * 1e-6) / (1.0 + out * 1e-6)
         }
-        assert_eq!(ratio_of(&bits), before, "estimate must freeze, not drift");
-        // Mic closed: same.
-        for _ in 0..60 {
-            est.tick(inn0 + 60 * 48_100, out0);
-        }
-        assert_eq!(ratio_of(&bits), before);
     }
 
-    #[test]
-    fn glitches_are_rejected_and_the_correction_clamps() {
-        let bits = Arc::new(AtomicU64::new(0));
-        let mut est = DriftEstimator::new(Arc::clone(&bits));
-        let before = run_ticks(&mut est, 20.0, 60);
-        // A stream rebuild produces a wild instantaneous ratio: discarded.
-        est.tick(60 * 48_000 * 2, 61 * 48_000);
-        assert_eq!(ratio_of(&bits), before, "a glitch tick must not move it");
-
-        // A pathologically fast clock clamps at +500 ppm (a broken device,
-        // not drift — larger corrections would be audible pitch).
-        let bits2 = Arc::new(AtomicU64::new(0));
-        let mut est2 = DriftEstimator::new(Arc::clone(&bits2));
-        let r = run_ticks(&mut est2, 4_000.0, 600);
-        assert!(
-            ((r - 1.0) * 1e6 - 500.0).abs() < 1.0,
-            "clamped at +500 ppm, got {} ppm",
-            (r - 1.0) * 1e6
-        );
+    struct Run {
+        /// How far a take slipped against the output (engine frames): the published
+        /// correction's error, integrated over the run.
+        slip: f64,
+        /// Share of the run published as exactly 1.0.
+        unity: f64,
+        /// The published correction at the end (ppm).
+        last_ppm: f64,
+        /// The largest |published - true| (ppm) once the first correction published.
+        worst_published_ppm: f64,
+        /// The last poll.
+        last: DriftObservation,
     }
 
-    /// Counters as the callbacks leave them: whole callbacks of `cb_in` and
-    /// `cb_out` frames, the mic `ppm` fast, read about every `poll` seconds
-    /// for `seconds` — a timer's tick, so its phase against the callbacks
-    /// wanders (up to 20 ms here). Returns how far (engine frames) the take
-    /// slipped against the output over the run: the published correction's
-    /// error, integrated.
-    fn slip_with_callbacks(cb_in: u64, cb_out: u64, ppm: f64, poll: f64, seconds: f64) -> f64 {
-        let bits = Arc::new(AtomicU64::new(0));
-        let mut est = DriftEstimator::new(Arc::clone(&bits));
-        let truth = 1.0 + ppm * 1e-6;
-        let mut rng = 0x2545_f491_4f6c_dd1du64;
-        let mut jitter = || {
+    fn run(c: &Chain, est: &mut DriftEstimator, bits: &Arc<AtomicU64>) -> Run {
+        let mut rng = c.seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        let mut uniform = move || {
             rng ^= rng << 13;
             rng ^= rng >> 7;
             rng ^= rng << 17;
-            (rng >> 11) as f64 / (1u64 << 53) as f64 * 0.02
+            (rng >> 11) as f64 / (1u64 << 53) as f64
         };
-        let (mut slip, mut k) = (0.0, 1u64);
-        while k as f64 * poll <= seconds {
-            slip += (ratio_of(&bits) - truth) * poll * 48_000.0;
-            let t = k as f64 * poll + jitter();
-            let inn = (t * 48_000.0 * truth) as u64 / cb_in * cb_in;
-            let out = (t * 48_000.0) as u64 / cb_out * cb_out;
-            est.tick(inn, out);
+        let ph_in = uniform();
+        let ph_out = c
+            .phase_gap
+            .map_or_else(&mut uniform, |g| (ph_in - g).rem_euclid(1.0));
+        let lost = |ev: &[(f64, f64)], t: f64| -> f64 {
+            ev.iter().map(|&(s, l)| (t - s).clamp(0.0, l)).sum()
+        };
+        // Output device seconds by wall time t, across the crystal change.
+        let out_secs = |t: f64| {
+            let tl = t - lost(&c.out_stalls, t);
+            let k = |ppm: f64| 1.0 + ppm * 1e-6;
+            if tl < c.switch_at {
+                tl * k(c.ppm_out)
+            } else {
+                c.switch_at * k(c.ppm_out) + (tl - c.switch_at) * k(c.ppm_out2)
+            }
+        };
+        let (mut slip, mut unity, mut worst) = (0.0, 0.0, 0.0f64);
+        let mut published_once = false;
+        let (mut prev_t, mut k) = (0.0, 1u64);
+        let mut last = None;
+        loop {
+            let t = k as f64 * c.poll + 0.02 * uniform();
+            if t > c.seconds {
+                break;
+            }
+            let r = ratio_of(bits);
+            slip += (r - c.truth(prev_t)) * (t - prev_t) * 48_000.0;
+            if r == 1.0 {
+                unity += t - prev_t;
+            } else {
+                published_once = true;
+            }
+            if published_once {
+                worst = worst.max(((r - c.truth(prev_t)) * 1e6).abs());
+            }
+            let ti = t - lost(&c.in_stalls, t);
+            let n_in = (ti * 48_000.0 * (1.0 + c.ppm_in * 1e-6) / c.cb_in + ph_in).floor();
+            let n_out = (out_secs(t) * 48_000.0 / c.cb_out + ph_out).floor();
+            let o = DriftObservation {
+                input: (n_in * c.cb_in) as u64,
+                output: (n_out * c.cb_out) as u64,
+                input_quantum: c.cb_in as u64,
+                output_quantum: c.cb_out as u64,
+                generation: u64::from(c.rebuild && t >= c.switch_at),
+                secs: t,
+            };
+            est.tick(o);
+            last = Some(o);
+            prev_t = t;
             k += 1;
         }
-        slip
+        Run {
+            slip,
+            unity: unity / prev_t,
+            last_ppm: (ratio_of(bits) - 1.0) * 1e6,
+            worst_published_ppm: worst,
+            last: last.expect("the run polled"),
+        }
+    }
+
+    fn fresh(c: &Chain) -> Run {
+        let bits = Arc::new(AtomicU64::new(0));
+        let mut est = DriftEstimator::new(Arc::clone(&bits));
+        run(c, &mut est, &bits)
+    }
+
+    /// The slip of a take left uncorrected over the whole run (engine frames).
+    fn uncorrected(c: &Chain) -> f64 {
+        (c.truth(0.0) - 1.0).abs() * c.seconds * 48_000.0
     }
 
     #[test]
-    fn callback_sized_counters_do_not_bias_the_estimate() {
-        // Over 100 ms-1 s measurements a callback of quantization is ~1%, and
-        // the glitch gate cut it off on one side only: 480-frame input and
-        // 512-frame output callbacks published the -500 ppm clamp, slipping a
-        // take ~0.45 s in 15 minutes, where uncorrected drift is ~27 ms.
-        for (cb_in, cb_out) in [(480, 512), (512, 480), (480, 480), (1024, 1024)] {
+    fn one_clock_publishes_exactly_one() {
+        // VPIO's input and output share one IO cycle, and a duplex device has one crystal:
+        // nothing drifts, and anything but exactly 1.0 takes the resampler off its identity
+        // path for nothing. A fit through callback-quantized counters published 49% of the
+        // time at 512-frame callbacks, with errors up to 113 ppm.
+        let mut chains = vec![];
+        for (cb_in, cb_out) in [
+            (512.0, 512.0),
+            (480.0, 512.0),
+            (1024.0, 1024.0),
+            (4096.0, 4096.0),
+        ] {
+            chains.push(Chain::new(cb_in, cb_out, 0.0));
+        }
+        for gap in [0.05, 0.5] {
+            chains.push(Chain {
+                phase_gap: Some(gap),
+                ..Chain::new(256.0, 256.0, 0.0)
+            });
+        }
+        for c in chains {
             for poll in [1.0, 0.05] {
-                for ppm in [0.0, 30.0] {
-                    let slip = slip_with_callbacks(cb_in, cb_out, ppm, poll, 900.0);
-                    // 5 ms; the first measurement (10 s at the published 1.0)
-                    // alone accounts for up to 14.4 frames at 30 ppm.
-                    assert!(
-                        slip.abs() < 240.0,
-                        "{cb_in}/{cb_out} callbacks, {poll} s polls, {ppm} ppm: \
-                         the take slipped {slip} frames"
+                for seed in 1..=3 {
+                    let c = Chain {
+                        poll,
+                        seed,
+                        ..c.clone()
+                    };
+                    let r = fresh(&c);
+                    assert_eq!(
+                        r.unity, 1.0,
+                        "{}/{} callbacks, gap {:?}, {poll} s polls, seed {seed}: published \
+                         {:.1} ppm",
+                        c.cb_in, c.cb_out, c.phase_gap, r.worst_published_ppm
                     );
                 }
             }
@@ -1797,11 +2156,205 @@ mod drift_tests {
     }
 
     #[test]
-    fn the_deadband_publishes_exactly_one_for_healthy_chains() {
+    fn drift_is_corrected_whatever_the_callbacks() {
+        // (callbacks, drift, the share of the uncorrected slip a run may keep, how close it
+        // ends). Large callbacks quantize the counters coarsely: their fit takes minutes to
+        // clear the noise, and until then the take runs uncorrected rather than on a guess.
+        for (cb_in, cb_out, ppm, keep, close) in [
+            (480.0, 512.0, 30.0, 0.5, 5.0),
+            (480.0, 512.0, -100.0, 0.5, 5.0),
+            (128.0, 128.0, 30.0, 0.5, 5.0),
+            (128.0, 128.0, -100.0, 0.5, 5.0),
+            (1024.0, 1024.0, -100.0, 0.6, 10.0),
+            (4096.0, 4096.0, -100.0, 0.7, 40.0),
+            (128.0, 4096.0, 100.0, 0.7, 40.0),
+            (4096.0, 4096.0, 30.0, 1.0, f64::INFINITY),
+        ] {
+            for poll in [1.0, 0.05] {
+                let c = Chain {
+                    poll,
+                    ..Chain::new(cb_in, cb_out, ppm)
+                };
+                let r = fresh(&c);
+                let label = format!("{cb_in}/{cb_out} callbacks, {ppm} ppm, {poll} s polls");
+                assert!(
+                    r.slip.abs() < keep * uncorrected(&c),
+                    "{label}: slipped {:.0} frames (uncorrected {:.0})",
+                    r.slip,
+                    uncorrected(&c)
+                );
+                assert!(
+                    (r.last_ppm - ppm).abs() < close,
+                    "{label}: ends at {:.1} ppm",
+                    r.last_ppm
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_stall_does_not_tilt_the_fit() {
+        // An underrun or a lost burst moves the counters' difference for good: a fit through
+        // the step took a 100 ms output stall for 250 ppm of drift. 15 ms is less than a
+        // callback each way here, so only the points' drift off their line shows it.
+        for at in [120.0, 450.0] {
+            for len in [0.015, 0.05, 0.1, 0.15, 0.3] {
+                for output in [true, false] {
+                    let mut c = Chain::new(480.0, 512.0, 30.0);
+                    if output {
+                        c.out_stalls = vec![(at, len)];
+                    } else {
+                        c.in_stalls = vec![(at, len)];
+                    }
+                    let r = fresh(&c);
+                    let label = format!(
+                        "{} ms {} stall at {at} s",
+                        len * 1e3,
+                        if output { "output" } else { "input" }
+                    );
+                    assert!(
+                        (r.last_ppm - 30.0).abs() < 5.0,
+                        "{label}: ends at {:.1} ppm",
+                        r.last_ppm
+                    );
+                    assert!(
+                        r.worst_published_ppm < 15.0,
+                        "{label}: published {:.1} ppm off",
+                        r.worst_published_ppm
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn stalls_every_minute_never_do_worse_than_no_correction() {
+        for len in [0.05, 0.1, 0.15] {
+            for poll in [1.0, 0.05] {
+                let c = Chain {
+                    poll,
+                    out_stalls: (1..15).map(|m| (m as f64 * 60.0, len)).collect(),
+                    ..Chain::new(480.0, 512.0, 30.0)
+                };
+                let r = fresh(&c);
+                assert!(
+                    r.slip.abs() <= uncorrected(&c) + 50.0,
+                    "{} ms stalls, {poll} s polls: slipped {:.0} frames (uncorrected {:.0})",
+                    len * 1e3,
+                    r.slip,
+                    uncorrected(&c)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_device_change_is_followed() {
+        // The output moves to a crystal 100 ppm away, as a new stream or (a default-device
+        // reroute) on the same one. The old pair must not stay in the fit for ten minutes.
+        for rebuild in [true, false] {
+            for gap in [0.0, 0.1, 0.3] {
+                // Eight minutes on: with the old pair still in, the fit would sit nearer -50.
+                let c = Chain {
+                    ppm_out: 50.0,
+                    switch_at: 300.0,
+                    ppm_out2: -50.0,
+                    rebuild,
+                    seconds: 780.0,
+                    out_stalls: vec![(300.0, gap)],
+                    ..Chain::new(480.0, 512.0, 0.0)
+                };
+                let r = fresh(&c);
+                let label = format!("rebuild {rebuild}, gap {} ms", gap * 1e3);
+                assert!(
+                    (r.last_ppm - 50.0).abs() < 5.0,
+                    "{label}: ends at {:.1} ppm",
+                    r.last_ppm
+                );
+                assert!(
+                    r.slip.abs() < 0.6 * uncorrected(&c),
+                    "{label}: slipped {:.0} frames (uncorrected {:.0})",
+                    r.slip,
+                    uncorrected(&c)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_new_stream_holds_the_published_ratio_until_it_knows_better() {
         let bits = Arc::new(AtomicU64::new(0));
         let mut est = DriftEstimator::new(Arc::clone(&bits));
-        let r = run_ticks(&mut est, 0.5, 300); // half a ppm: below deadband
-        assert_eq!(r, 1.0, "sub-deadband drift must publish EXACTLY 1.0");
+        let c = Chain {
+            seconds: 600.0,
+            ..Chain::new(480.0, 512.0, 30.0)
+        };
+        run(&c, &mut est, &bits);
+        let before = ratio_of(&bits);
+        assert!(((before - 1.0) * 1e6 - 30.0).abs() < 5.0);
+        // The mic reopens (a new generation, counters carrying on): the history restarts and
+        // the ratio holds, rather than the take starting uncorrected.
+        let obs = |i: u64, o: u64| DriftObservation {
+            input: i,
+            output: o,
+            input_quantum: 480,
+            output_quantum: 512,
+            generation: 7,
+            secs: 700.0 + o as f64 / 48_000.0,
+        };
+        for s in 0..20u64 {
+            est.tick(obs(40_000_000 + s * 48_001, 30_000_000 + s * 48_000));
+        }
+        assert_eq!(ratio_of(&bits), before);
+    }
+
+    #[test]
+    fn a_stopped_stream_freezes_the_estimate() {
+        let bits = Arc::new(AtomicU64::new(0));
+        let mut est = DriftEstimator::new(Arc::clone(&bits));
+        let c = Chain {
+            seconds: 600.0,
+            ..Chain::new(480.0, 512.0, 30.0)
+        };
+        let end = run(&c, &mut est, &bits).last;
+        let before = ratio_of(&bits);
+        assert_ne!(before, 1.0, "the run must have published");
+        // The output stops delivering (device gone): the input keeps counting, and the
+        // estimate must HOLD — decaying toward 1.0 would re-drift the next take, and fitting
+        // the stall would corrupt it. Then the mic closes too.
+        for s in 1..=120u64 {
+            est.tick(DriftObservation {
+                input: end.input + s.min(60) * 48_001,
+                output_quantum: 0,
+                secs: end.secs + s as f64,
+                ..end
+            });
+        }
+        assert_eq!(ratio_of(&bits), before, "estimate must freeze, not drift");
+    }
+
+    #[test]
+    fn the_correction_clamps() {
+        // A pathologically fast clock clamps at +500 ppm (a broken device, not drift — larger
+        // corrections would be audible pitch).
+        let c = Chain {
+            seconds: 300.0,
+            ..Chain::new(480.0, 512.0, 4_000.0)
+        };
+        let r = fresh(&c);
+        assert!(
+            (r.last_ppm - 500.0).abs() < 1e-6,
+            "clamped at {} ppm",
+            r.last_ppm
+        );
+    }
+
+    #[test]
+    fn sub_deadband_drift_publishes_exactly_one() {
+        for ppm in [0.5, 1.5, -1.5] {
+            let r = fresh(&Chain::new(480.0, 512.0, ppm));
+            assert_eq!(r.unity, 1.0, "{ppm} ppm left the identity path");
+        }
     }
 
     #[test]
@@ -1857,7 +2410,14 @@ mod drift_tests {
             }
             while mic_cons.pop().is_some() {}
             // The output clock consumes exactly 48 000 engine frames/s.
-            est.tick(nominal.load(Ordering::Relaxed), s * 48_000);
+            est.tick(DriftObservation {
+                input: nominal.load(Ordering::Relaxed),
+                output: s * 48_000,
+                input_quantum: cell.take_quantum(),
+                output_quantum: 512,
+                generation: cell.generation(),
+                secs: s as f64,
+            });
             if s == 500 {
                 emitted_at_500 = frames_in.load(Ordering::Relaxed);
             }
@@ -2401,7 +2961,7 @@ fn open_mic(
     // VPIO renders playback at 48 kHz with no boundary resampler: sync the
     // consumed cursor over anything a dying non-48 kHz cpal stream left in
     // its FIFO (see build_stream).
-    rt.transport().sync_consumed_over_unplayed();
+    rt.transport().begin_output_stream();
     crate::vpio::Vpio::start(
         uid,
         Arc::clone(input_cell),
@@ -4325,29 +4885,37 @@ mod out_resampler_tests {
     }
 
     #[test]
-    fn a_flushed_fifo_is_consumed_but_not_played() {
-        // The drift estimator's output clock is what the device played: a seek's
-        // flush jumps the consumed cursor over the FIFO's unplayed frames, which
-        // read as the output clock leaping ahead.
+    fn the_output_clock_counts_what_the_device_played_through_flushes() {
+        // The drift estimator's output clock is what the device played. The consumed cursor
+        // jumps a flushed FIFO's unplayed frames (hundreds per seek on a 44.1 kHz device), and
+        // a count kept off the read position lost the fraction of a frame each flush left in
+        // it: 258 pause/play toggles lost 231 frames, a bias the estimator read as drift.
         let (h, mut res) = tone_engine(1_000.0, 44_100.0);
         h.play();
-        let mut out = vec![0.0; 441 * CHANNELS];
-        for _ in 0..10 {
-            res.process(&mut out, 441);
-        }
         let t = Arc::clone(&res.rt);
-        let (consumed, played) = (
-            t.transport().consumed_frames(),
-            t.transport().played_frames(),
-        );
-        assert_eq!(consumed, played, "nothing skipped yet");
-        h.seek(10_000);
-        res.process(&mut out, 441);
-        let skipped = t.transport().consumed_frames() - consumed;
-        let heard = t.transport().played_frames() - played;
-        assert!(skipped > heard, "the flush jumped the cursor ({skipped})");
-        // One 441-frame callback at 44.1 kHz plays 480 engine frames.
-        assert!((479..=481).contains(&heard), "played {heard} engine frames");
+        let mut out = vec![0.0; 512 * CHANNELS];
+        // A 512-frame callback at 44.1 kHz plays 557.28 engine frames: the fraction carries.
+        let per = 512.0 * ENGINE_SR / 44_100.0;
+        let mut jumped = false;
+        for k in 0..300 {
+            let consumed = t.transport().consumed_frames();
+            let played = t.transport().played_frames();
+            if k % 3 == 0 {
+                h.seek(10_000 + k * 37);
+            }
+            res.process(&mut out, 512);
+            let heard = t.transport().played_frames() - played;
+            assert!(
+                (557..=558).contains(&heard),
+                "callback {k} played {heard} engine frames"
+            );
+            jumped |= t.transport().consumed_frames() - consumed > 558;
+        }
+        assert!(jumped, "a flush must have jumped the cursor");
+        let played = t.transport().played_frames();
+        let want = (300.0 * per) as u64;
+        assert!(played.abs_diff(want) <= 1, "played {played} of {want}");
+        assert!((557..=558).contains(&t.transport().take_played_quantum()));
     }
 
     #[test]

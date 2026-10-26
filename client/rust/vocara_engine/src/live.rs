@@ -111,12 +111,17 @@ pub struct Shared {
     /// exact at pause (the fold reads the mapping, not a depth estimate).
     rendered_total: AtomicU64,
     consumed_total: AtomicU64,
-    /// Frames `consumed_total` was advanced over without the device playing them: a flush's
-    /// discarded FIFO, a dead stream's leftovers synced over at the next one's start. The
-    /// clock-drift estimator's output clock is what was PLAYED (`consumed - skipped`): the
-    /// jumps read as the output clock leaping ahead, by hundreds of frames per seek on a
-    /// 44.1 kHz device.
-    skipped_total: AtomicU64,
+    /// The output's clock for the drift estimator: engine-rate frames the current output
+    /// stream handed its device, counted where they leave (one atomic, so it never reads
+    /// backwards). Unlike `consumed_total` it is not moved by a flush or by the sync at a
+    /// stream's start, which jump the cursor over frames nobody played.
+    played_total: AtomicU64,
+    /// The largest single callback's share of `played_total` since the drift estimator last
+    /// took it: how far the counter can lag its device at any instant.
+    played_quantum: AtomicU64,
+    /// Output streams started ([`Self::begin_output_stream`]): a new stream may be a new
+    /// device, on a new crystal, after a gap — the drift estimator restarts its history.
+    output_streams: AtomicU64,
     /// `rendered_total` when the transport last started playing, or the render last
     /// applied a seek: a new run. Spans ending at or before it belong to an EARLIER
     /// run: until the cursor reaches this run's audio, nothing of it has been heard.
@@ -151,7 +156,9 @@ impl Shared {
             mon_rev_wet: AtomicU32::new(0.2f32.to_bits()),
             rendered_total: AtomicU64::new(0),
             consumed_total: AtomicU64::new(0),
-            skipped_total: AtomicU64::new(0),
+            played_total: AtomicU64::new(0),
+            played_quantum: AtomicU64::new(0),
+            output_streams: AtomicU64::new(0),
             play_mark: AtomicU64::new(0),
             seg_head: AtomicU32::new(0),
             segments: std::array::from_fn(|_| RenderSegment {
@@ -248,41 +255,48 @@ impl Shared {
         }
     }
 
-    /// [`Self::advance_consumed`] over `n` frames the device never played (a flushed FIFO).
-    pub fn skip_unplayed(&self, n: u64) {
-        if n > 0 {
-            self.skipped_total.fetch_add(n, Ordering::Relaxed);
-            self.consumed_total.fetch_add(n, Ordering::Release);
-        }
-    }
-
-    /// [`Self::sync_consumed_to_rendered`] at a stream's START, on the host thread before any
-    /// of its callbacks: what the cursor jumps over is a dead stream's unplayed FIFO.
-    pub fn sync_consumed_over_unplayed(&self) {
-        let rendered = self.rendered_total.load(Ordering::Acquire);
-        let consumed = self.consumed_total.swap(rendered, Ordering::AcqRel);
-        self.skipped_total
-            .fetch_add(rendered.saturating_sub(consumed), Ordering::Relaxed);
-    }
-
-    /// Frames the device has actually played: the consumed cursor less what it skipped.
-    pub fn played_frames(&self) -> u64 {
-        // Skipped first: read after the cursor, a skip landing in between would be taken
-        // off a cursor that does not hold it yet.
-        let skipped = self.skipped_total.load(Ordering::Relaxed);
-        self.consumed_total
-            .load(Ordering::Acquire)
-            .saturating_sub(skipped)
-    }
-
-    /// Identity-path (48 kHz) stream callback: the render IS the delivery, so
-    /// after rendering straight into the device buffer the cursor equals the
-    /// render counter exactly.
-    pub fn sync_consumed_to_rendered(&self) {
+    /// A new output stream starts, on the host thread before any of its callbacks: the
+    /// cursor syncs over a dead stream's unplayed FIFO (this one starts with an empty or no
+    /// FIFO), and the drift estimator learns that its output clock may be another device's.
+    pub fn begin_output_stream(&self) {
         self.consumed_total.store(
             self.rendered_total.load(Ordering::Acquire),
             Ordering::Release,
         );
+        self.output_streams.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Identity-path (48 kHz) stream callback: the render IS the delivery, so
+    /// after rendering straight into the device buffer the cursor equals the
+    /// render counter exactly — and what it moved over is what the device played.
+    pub fn sync_consumed_to_rendered(&self) {
+        let rendered = self.rendered_total.load(Ordering::Acquire);
+        let before = self.consumed_total.swap(rendered, Ordering::AcqRel);
+        self.count_played(rendered.saturating_sub(before));
+    }
+
+    /// Stream-callback only: the device was handed `n` more engine-rate frames (see
+    /// `played_total`).
+    pub fn count_played(&self, n: u64) {
+        if n > 0 {
+            self.played_total.fetch_add(n, Ordering::Release);
+            self.played_quantum.fetch_max(n, Ordering::Relaxed);
+        }
+    }
+
+    /// Engine-rate frames the output devices have played (see `played_total`).
+    pub fn played_frames(&self) -> u64 {
+        self.played_total.load(Ordering::Acquire)
+    }
+
+    /// The largest callback's [`Self::count_played`] since the last call, which resets it.
+    pub fn take_played_quantum(&self) -> u64 {
+        self.played_quantum.swap(0, Ordering::Relaxed)
+    }
+
+    /// How many output streams have started (see [`Self::begin_output_stream`]).
+    pub fn output_streams(&self) -> u64 {
+        self.output_streams.load(Ordering::Acquire)
     }
 
     /// The current flush generation; the resampler drops its FIFO when this changes.
