@@ -172,7 +172,7 @@ class _HomeScreenState extends State<HomeScreen> {
       // read: one landing while it reads may not be in it, and is no longer
       // landing after.
       final landing = RecordingFinalizer.instance.isLanding(id);
-      await vm.load.execute();
+      vm.refresh();
       if (landing) unawaited(_reloadOnceLanded(vm, id));
     } finally {
       _opening = false;
@@ -181,20 +181,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _reloadOnceLanded(HomeViewModel vm, String id) async {
     await RecordingFinalizer.instance.settled(id);
-    if (!mounted) return;
-    // A load already running ignores another ask, and may have read before
-    // the landing: ask once it is done.
-    if (vm.load.running) {
-      final idle = Completer<void>();
-      void check() {
-        if (!vm.load.running && !idle.isCompleted) idle.complete();
-      }
-
-      vm.load.addListener(check);
-      await idle.future;
-      vm.load.removeListener(check);
-    }
-    if (mounted) await vm.load.execute();
+    // A load running now may have read before the landing: refresh owes one
+    // after it.
+    if (mounted) vm.refresh();
   }
 
   Future<void> _deletePractice(

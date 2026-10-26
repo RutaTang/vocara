@@ -18,6 +18,10 @@ class HomeViewModel extends ChangeNotifier {
     load = Command0(_load)..execute();
     createProject = Command1(_createProject);
     deleteProject = Command1(_deleteProject);
+    // Each command notifies as it finishes, its running flag already clear.
+    for (final command in [load, createProject, deleteProject]) {
+      command.addListener(_replayMissed);
+    }
     _remoteSub = remoteApplied?.listen(_onRemoteApplied);
   }
 
@@ -52,18 +56,49 @@ class HomeViewModel extends ChangeNotifier {
   /// Freshness-only reload when sync applied remote changes to any practice —
   /// its own row (a new/renamed/deleted practice) or a child row the cards
   /// count (a take, a note, a backing track), which ships without touching
-  /// the practices table. Skipped while any command runs — a skipped reload
-  /// can never lose data (three-way saves merge against base hashes); the
-  /// list simply refreshes on the next event or navigation.
+  /// the practices table. Held while any command runs and loaded after it
+  /// (see [_replayMissed]): dropped, a rename landing during a load kept its
+  /// old title until some later reload. (The technique library's pattern.)
   void _onRemoteApplied(RemoteApplied event) {
     if (event.practiceIds.isEmpty) return;
-    if (load.running || createProject.running || deleteProject.running) return;
+    _missedRemote = true;
+    _replayMissed();
+  }
+
+  /// Loads again on return from a practice, for what was changed there. A
+  /// load already running read the list before those changes, so another is
+  /// owed after it: re-run directly, the Command dropped it as re-entry.
+  void refresh() {
+    _missedRemote = true;
+    _replayMissed();
+  }
+
+  /// A remote change, a return from a practice, or a list read overtaken by a
+  /// create or delete, that a fresh load still owes the cards.
+  bool _missedRemote = false;
+
+  bool get _busy =>
+      load.running || createProject.running || deleteProject.running;
+
+  /// Loads again for what [_missedRemote] owes, once no command runs (each
+  /// command asks again as it finishes).
+  void _replayMissed() {
+    if (_disposed || !_missedRemote || _busy) return;
+    _missedRemote = false;
     load.execute();
   }
 
+  /// Bumped by a create or delete changing the list: a load that read it
+  /// before them would land over theirs (a deleted card back on the list).
+  int _listEpoch = 0;
+
   Future<Result<List<PracticeSummary>>> _load() async {
+    final epoch = _listEpoch;
     final result = await _repository.listPracticeSummaries();
-    if (result is Ok<List<PracticeSummary>>) {
+    if (epoch != _listEpoch) {
+      // Read before a create or delete landed: owe a fresh one instead.
+      _missedRemote = true;
+    } else if (result is Ok<List<PracticeSummary>>) {
       _projects = result.value;
       notifyListeners();
     }
@@ -73,6 +108,7 @@ class HomeViewModel extends ChangeNotifier {
   Future<Result<SongPractice>> _createProject(String title) async {
     final result = await _repository.createPractice(title);
     if (result is Ok<SongPractice>) {
+      _listEpoch++;
       _projects = [PracticeSummary.of(result.value), ..._projects];
       notifyListeners();
     }
@@ -82,6 +118,7 @@ class HomeViewModel extends ChangeNotifier {
   Future<Result<void>> _deleteProject(String id) async {
     final result = await _repository.deletePractice(id);
     if (result is Ok<void>) {
+      _listEpoch++;
       _projects = _projects.where((p) => p.id != id).toList();
       notifyListeners();
     }

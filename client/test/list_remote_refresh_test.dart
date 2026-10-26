@@ -122,6 +122,40 @@ class _HeldTechniqueRepo extends _TechniqueRepo {
   }
 }
 
+/// A practice list whose read can be held open ([gate]), over a list a test
+/// edits as another device or this one would.
+class _HeldPracticeRepo extends _PracticeRepo {
+  List<PracticeSummary> practices = [];
+  Completer<void>? gate;
+
+  @override
+  Future<Result<List<PracticeSummary>>> listPracticeSummaries() async {
+    summaryReads++;
+    final read = List.of(practices); // read now, returned when let go
+    final g = gate;
+    if (g != null) await g.future;
+    return Result.ok(read);
+  }
+
+  @override
+  Future<Result<void>> deletePractice(String id) async {
+    practices = [
+      for (final p in practices)
+        if (p.id != id) p,
+    ];
+    return const Result.ok(null);
+  }
+}
+
+PracticeSummary _summary(String id, String title) => PracticeSummary(
+  id: id,
+  title: title,
+  updatedAt: DateTime(2026),
+  takeCount: 0,
+  hasAccompaniment: false,
+  noteCount: 0,
+);
+
 Technique _technique(String id, String name) => Technique(
   id: id,
   name: name,
@@ -214,6 +248,80 @@ void main() {
     held.complete();
     await pumpEventQueue();
     expect(vm.all.map((t) => t.id), ['b']);
+  });
+
+  group('Home keeps its list fresh as the library does', () {
+    // It had none of the library's guards: a remote rename landing during a
+    // load was dropped, a read taken before a delete brought the card back,
+    // and the reload on return was dropped behind a running load.
+    late _HeldPracticeRepo repo;
+    late StreamController<RemoteApplied> remote;
+    late HomeViewModel vm;
+
+    void remoteChange() => remote.add(
+      RemoteApplied(
+        rows: const [],
+        practiceIds: const {'a'},
+        techniqueIds: const {},
+      ),
+    );
+
+    setUp(() async {
+      repo = _HeldPracticeRepo()
+        ..practices = [_summary('a', 'Old'), _summary('b', 'B')];
+      remote = StreamController<RemoteApplied>.broadcast();
+      vm = HomeViewModel(repository: repo, remoteApplied: remote.stream);
+      await pumpEventQueue();
+    });
+
+    tearDown(() async {
+      vm.dispose();
+      await remote.close();
+    });
+
+    test('a remote change landing during a load is loaded after it', () async {
+      repo.gate = Completer<void>();
+      vm.refresh();
+      await pumpEventQueue();
+      expect(vm.load.running, isTrue);
+      repo.practices = [_summary('a', 'New'), _summary('b', 'B')];
+      remoteChange();
+      final held = repo.gate!;
+      repo.gate = null;
+      held.complete();
+      await pumpEventQueue();
+      expect(vm.projects.map((p) => p.title), ['New', 'B']);
+    });
+
+    test('a load read before a delete does not bring the card back', () async {
+      repo.gate = Completer<void>();
+      remoteChange();
+      await pumpEventQueue();
+      expect(vm.load.running, isTrue);
+      await vm.deleteProject.execute('a');
+      expect(vm.projects.map((p) => p.id), ['b']);
+      final held = repo.gate!;
+      repo.gate = null;
+      held.complete(); // the older read lands
+      await pumpEventQueue();
+      expect(vm.projects.map((p) => p.id), ['b']);
+    });
+
+    test(
+      'a return from a practice while a load runs loads again after it',
+      () async {
+        repo.gate = Completer<void>();
+        remoteChange();
+        await pumpEventQueue();
+        repo.practices = [_summary('a', 'Renamed there'), _summary('b', 'B')];
+        vm.refresh();
+        final held = repo.gate!;
+        repo.gate = null;
+        held.complete();
+        await pumpEventQueue();
+        expect(vm.projects.map((p) => p.title), ['Renamed there', 'B']);
+      },
+    );
   });
 
   test('Home reloads when a remote page carries only a practice\'s takes '
