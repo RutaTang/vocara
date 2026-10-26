@@ -940,15 +940,16 @@ class RecordingController extends ChangeNotifier {
       );
       // A chosen output plugged back in is switched back to (the Settings panel, which watches
       // for that, can't be open over a song).
-      _appSettings.refreshOutputDevices();
+      final rebound = _appSettings.refreshOutputDevices();
       // Opening the mic hands the output to the duplex unit, which can move playback off the
       // selected device without any device SET changing — so monitor safety has to be re-derived
       // on the tick, not only when refreshDevices sees a difference.
       _appSettings.reconcileMonitorSafety();
-      if (events & 1 != 0) {
+      if (events & 1 != 0 && !rebound) {
         // Output lost: re-open the current output so transport doesn't freeze. Deliberately the
         // REQUESTED device, not the one currently rendering: re-asking for the user's pick
         // re-attaches it if it came back, where re-asking for a fallback would strand them there.
+        // Skipped when the refresh above just re-opened it: a second rebuild is a second gap.
         engine.setOutputDevice(engine.currentOutputDevice());
       }
       if (events & GraphAudioPlaybackService.eventOutputRerouted != 0) {

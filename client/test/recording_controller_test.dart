@@ -125,8 +125,14 @@ class _FakeSettings extends Fake implements AppSettingsService {
 
   int outputRefreshes = 0;
 
+  /// What [refreshOutputDevices] answers: whether it switched the output.
+  bool rebinds = false;
+
   @override
-  void refreshOutputDevices() => outputRefreshes++;
+  bool refreshOutputDevices() {
+    outputRefreshes++;
+    return rebinds;
+  }
 }
 
 /// Minimal native-engine double: only what the recording flow and the 1 s
@@ -177,6 +183,30 @@ class _HandFedGraph extends _FakeGraph {
 
   @override
   double inputLevel() => 0;
+}
+
+/// Reports its output lost once per [lostReported] reset, and records the
+/// re-opens that follow.
+class _LosingGraph extends _HandFedGraph {
+  bool lostReported = false;
+  final List<String> outputCalls = [];
+
+  @override
+  int pollDeviceEvents(int mask) {
+    super.pollDeviceEvents(mask);
+    if (lostReported) return 0;
+    lostReported = true;
+    return GraphAudioPlaybackService.eventOutputLost & mask;
+  }
+
+  @override
+  String currentOutputDevice() => 'headphones';
+
+  @override
+  bool setOutputDevice(String uid) {
+    outputCalls.add(uid);
+    return true;
+  }
 }
 
 /// An engine that failed to open: its calls do nothing.
@@ -860,6 +890,23 @@ void main() {
     final from = graph.polls;
     await untilTicks(graph, from + 2);
     expect(settings.outputRefreshes, greaterThanOrEqualTo(2));
+  });
+
+  test('an output lost in the tick that switched back to the returning output '
+      'is not re-opened a second time', () async {
+    final graph = _LosingGraph();
+    final settings = _FakeSettings()..rebinds = true;
+    final c = build(_FakeMic(), graph: graph, settings: settings);
+    addTearDown(c.dispose);
+    await untilTicks(graph, graph.polls + 2);
+    expect(graph.lostReported, isTrue);
+    expect(graph.outputCalls, isEmpty, reason: 'the refresh already did');
+
+    settings.rebinds = false;
+    graph.lostReported = false;
+    await untilTicks(graph, graph.polls + 2);
+    expect(graph.lostReported, isTrue);
+    expect(graph.outputCalls, ['headphones'], reason: 'no refresh did then');
   });
 
   test('monitoring still stops when a delivering mic goes silent', () async {

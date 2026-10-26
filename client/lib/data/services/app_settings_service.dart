@@ -724,16 +724,22 @@ class AppSettingsService extends ChangeNotifier {
   /// plays there: that stream follows the default, so the next default change (AirPods
   /// connecting, a display with speakers) took the backing with it, monitor muted, until the mic
   /// next closed. A brief gap as the headphones reconnect is the lesser cost.
-  void refreshOutputDevices() {
+  ///
+  /// Returns whether it switched, so the caller's own re-open of the output
+  /// does not rebuild the stream a second time in the same tick.
+  bool refreshOutputDevices() {
     final outs = _enumerateOutputs();
     final uid = _outputDeviceUid;
-    if (uid != null && _returned(_watchedOutputs, outs, uid)) {
-      _engine?.setOutputDevice(uid);
-    }
+    final engine = _engine;
+    final rebind =
+        engine != null && uid != null && _returned(_watchedOutputs, outs, uid);
+    if (rebind) engine.setOutputDevice(uid);
     _watchedOutputs = outs;
+    return rebind;
   }
 
-  /// The outputs as [refreshOutputDevices] last read them.
+  /// The outputs as [refreshOutputDevices] last read them, for the engine
+  /// attached now (see [attachEngine]).
   List<AudioDevice> _watchedOutputs = const [];
 
   // A change signature over a device set (the fields the panel renders) to skip no-op rebuilds.
@@ -774,6 +780,11 @@ class AppSettingsService extends ChangeNotifier {
   void attachEngine(GraphAudioPlaybackService engine) {
     _engine = engine;
     _echoFreePushed = null;
+    // A list read for an earlier engine (an earlier song, the chosen output
+    // unplugged there) would show the output as returning on this engine's
+    // first watch tick, though the attach below already binds it there: the
+    // stream was rebuilt, audibly, a second after the song opened.
+    _watchedOutputs = const [];
     _applyAllToEngine();
     // attachEngine runs inside the ViewModel constructor, which is built during a widget build;
     // defer the device refresh so its notifyListeners() doesn't fire mid-build.

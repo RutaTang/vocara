@@ -313,6 +313,27 @@ void main() {
       expect(engine.outputCalls, [_headphones.uid, _headphones.uid]);
     });
 
+    test('a song opened after the chosen output came back elsewhere does not '
+        'switch to it again on its first tick', () async {
+      outs = [_builtInOut, _headphones];
+      storage.doc = {'outputDeviceUid': _headphones.uid};
+      await service.load();
+      final first = _FakeEngine();
+      service.attachEngine(first);
+      outs = [_builtInOut]; // unplugged in the first song
+      expect(service.refreshOutputDevices(), isFalse);
+      service.detachEngine(first);
+
+      outs = [_builtInOut, _headphones]; // back before the next song opens
+      final next = _FakeEngine();
+      service.attachEngine(next);
+      expect(next.outputCalls, [
+        _headphones.uid,
+      ], reason: 'the attach binds it');
+      expect(service.refreshOutputDevices(), isFalse);
+      expect(next.outputCalls, [_headphones.uid], reason: 'no second rebuild');
+    });
+
     test('only a product named as earbuds is echo-free', () async {
       // A speaker taken for headphones would leave its whole echo in every take: not a device
       // merely on Bluetooth, and not a headphone PORT — "External Headphones" is the jack of an
