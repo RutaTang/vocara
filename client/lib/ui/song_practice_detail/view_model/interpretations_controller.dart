@@ -74,12 +74,13 @@ class InterpretationsController extends ChangeNotifier {
   List<AudioTrack> get vocalTakes =>
       _practiceOf()?.activeVocalTracks ?? const [];
 
-  /// The name a new interpretation gets when it is given none: the first
-  /// "Interpretation N" no interpretation has. Counting them instead named a
-  /// second "Interpretation 2" after the first of two was deleted.
+  /// The name a new interpretation gets when it is given none: "Interpretation
+  /// N" numbered on from how many there are, past any name already taken.
+  /// Numbered by the count alone, a second "Interpretation 2" followed the
+  /// first of two being deleted.
   String get nextDefaultName {
     final taken = {for (final v in all) v.name};
-    var n = 1;
+    var n = all.length + 1;
     while (taken.contains('Interpretation $n')) {
       n++;
     }

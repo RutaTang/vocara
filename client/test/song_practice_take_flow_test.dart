@@ -638,11 +638,11 @@ void main() {
     final vm = await pumpVm();
     await vm.versions.delete('v1');
     expect(vm.versions.all.map((v) => v.name), ['Interpretation 2']);
-    expect(vm.versions.nextDefaultName, 'Interpretation 1');
+    expect(vm.versions.nextDefaultName, 'Interpretation 3');
     await vm.versions.create();
     expect(vm.versions.all.map((v) => v.name), [
       'Interpretation 2',
-      'Interpretation 1',
+      'Interpretation 3',
     ]);
   });
 
