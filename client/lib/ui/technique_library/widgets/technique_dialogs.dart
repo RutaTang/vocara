@@ -5,8 +5,8 @@ import '../../core/widgets/studio_button.dart';
 import 'studio_field.dart';
 
 /// Name-first create dialog for a new technique. Returns the trimmed name, or
-/// null if cancelled / left blank. Tags and the rest of the body are filled in
-/// the detail editor afterward.
+/// null if cancelled. Create waits for a name. Tags and the rest of the body
+/// are filled in the detail editor afterward.
 Future<String?> showNewTechniqueDialog(BuildContext context) {
   return showDialog<String>(
     context: context,
@@ -37,9 +37,11 @@ class _NewTechniqueDialogState extends State<_NewTechniqueDialog> {
   }
 
   // Pops the dialog with the dialog's own context, so it is go_router safe.
+  // A blank name keeps it open: closed, it created nothing and said nothing.
   void _create() {
     final text = _name.text.trim();
-    Navigator.of(context).pop(text.isEmpty ? null : text);
+    if (text.isEmpty) return;
+    Navigator.of(context).pop(text);
   }
 
   @override
@@ -94,10 +96,14 @@ class _NewTechniqueDialogState extends State<_NewTechniqueDialog> {
                       onTap: () => Navigator.of(context).pop(),
                     ),
                     const SizedBox(width: 8),
-                    StudioButton(
-                      label: 'Create',
-                      variant: StudioButtonVariant.accent,
-                      onTap: _create,
+                    ValueListenableBuilder<TextEditingValue>(
+                      valueListenable: _name,
+                      builder: (context, value, _) => StudioButton(
+                        label: 'Create',
+                        variant: StudioButtonVariant.accent,
+                        enabled: value.text.trim().isNotEmpty,
+                        onTap: _create,
+                      ),
                     ),
                   ],
                 ),

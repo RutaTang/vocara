@@ -140,4 +140,21 @@ void main() {
 
     expect(analysis.decoded, isEmpty);
   });
+
+  test('an example whose analysis failed for no stated cause can be '
+      'analyzed again', () async {
+    // The failure was latched for the life of the page.
+    final analysis = _QueuedAnalysis()..admit.complete();
+    final vm = await _loadedVm(analysis);
+    addTearDown(vm.dispose);
+
+    await vm.ensureReferenceAnalysis();
+    expect(vm.referenceAnalysisFailed, isTrue);
+    expect(vm.canRetryReferenceAnalysis, isTrue);
+    await vm.ensureReferenceAnalysis(); // latched: not asked again
+    expect(analysis.decoded, ['/tmp/a.wav']);
+
+    await vm.retryReferenceAnalysis();
+    expect(analysis.decoded, ['/tmp/a.wav', '/tmp/a.wav']);
+  });
 }

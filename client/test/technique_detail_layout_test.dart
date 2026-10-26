@@ -464,6 +464,30 @@ void main() {
     expect(vm.hasMediaDraft, isFalse, reason: 'the save cleared its draft');
   });
 
+  testWidgets('saving with the name cleared says so and keeps editing', (
+    tester,
+  ) async {
+    // Save kept the old name and closed the editor as if the cleared one
+    // had been saved.
+    tester.view.physicalSize = const Size(1200, 2600);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+
+    final vm = await _pump(tester, _technique(body: false));
+    await tester.tap(find.text('Edit').first);
+    await tester.pump();
+    final name = find.byWidgetPredicate(
+      (w) => w is TextField && w.controller?.text == 'Twang',
+    );
+    await tester.enterText(name, '  ');
+    await tester.tap(find.text('Save'));
+    await tester.pump();
+
+    expect(find.text('Give the technique a name.'), findsOneWidget);
+    expect(find.text('Edit technique'), findsOneWidget);
+    expect(vm.technique!.name, 'Twang');
+  });
+
   testWidgets('Save and Cancel are disabled while the save is in flight', (
     tester,
   ) async {

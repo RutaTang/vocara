@@ -158,6 +158,14 @@ class _TechniqueDetailScreenState extends State<TechniqueDetailScreen> {
     final base = vm.technique;
     if (base == null) return;
     final name = _name!.text.trim();
+    // Said, not quietly put back: Save kept the old name and closed the
+    // editor as if the cleared one had been saved.
+    if (name.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Give the technique a name.')),
+      );
+      return;
+    }
     // Build from the form BEFORE any await: an in-flight example recording is
     // finalized by vm.save itself (stopped, imported and committed under the
     // quit gate, with Cancel and the form frozen throughout). Stopping it here
@@ -166,7 +174,7 @@ class _TechniqueDetailScreenState extends State<TechniqueDetailScreen> {
     // The media comes from the VM's draft at commit time, so a clip staged by
     // that stop is still saved.
     final built = base.copyWith(
-      name: name.isEmpty ? base.name : name,
+      name: name,
       aliases: parseCommaList(_aliases!.text),
       tags: parseCommaList(_tags!.text),
       summary: _summary!.text.trim(),

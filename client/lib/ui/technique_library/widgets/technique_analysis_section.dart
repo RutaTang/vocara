@@ -1,9 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:forui/forui.dart' show FIcons;
 
 import '../../../domain/models/technique_analysis.dart';
 import '../../../domain/models/voice_metrics.dart';
 import '../../core/themes/studio.dart';
+import '../../core/widgets/studio_button.dart';
 import '../../core/widgets/studio_hint.dart';
 import '../../song_practice_detail/widgets/voice_profile_view.dart';
 import '../../song_practice_detail/widgets/voiceprint_view.dart';
@@ -406,6 +409,23 @@ class _AnalysisBox extends StatelessWidget {
         spinner: true,
         fontSize: 12.5,
         padding: const EdgeInsets.all(20),
+      );
+    } else if (analysis == null && !practice && vm.canRetryReferenceAnalysis) {
+      body = Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const StudioHint(
+              "Couldn't analyze this example clip.",
+              fontSize: 12.5,
+            ),
+            const SizedBox(height: 12),
+            StudioButton(
+              label: 'Try again',
+              onTap: () => unawaited(vm.retryReferenceAnalysis()),
+            ),
+          ],
+        ),
       );
     } else if (analysis == null) {
       body = StudioHint(

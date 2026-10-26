@@ -581,6 +581,25 @@ class TechniqueDetailViewModel extends ChangeNotifier
     return path == null ? null : _refFailedMessage[path];
   }
 
+  /// Whether the selected example's failed analysis may yet succeed: one that
+  /// failed with no stated cause (a decode or isolate hiccup). One refused
+  /// for a cause (too long, an unsupported format) fails the same way again.
+  bool get canRetryReferenceAnalysis {
+    final path = referenceMedia?.path;
+    return path != null &&
+        _refFailed.contains(path) &&
+        !_refFailedMessage.containsKey(path);
+  }
+
+  /// Forgets the selected example's failed analysis and runs it again: the
+  /// failure was latched for the life of the page, with no way to ask again
+  /// short of reopening it.
+  Future<void> retryReferenceAnalysis() async {
+    if (!canRetryReferenceAnalysis) return;
+    _refFailed.remove(referenceMedia!.path);
+    await ensureReferenceAnalysis();
+  }
+
   /// Computes the reference analysis from [referenceMedia] if it hasn't been
   /// done for the current clip. Safe to call repeatedly (e.g. from build).
   Future<void> ensureReferenceAnalysis() async {
