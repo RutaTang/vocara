@@ -342,4 +342,43 @@ void main() {
     expect(vm.importingMedia, isFalse);
     expect(vm.technique!.summary, 'remote summary');
   });
+
+  test('a skipped reload is still owed after Edit reopens', () async {
+    // beginEdit cleared the miss: Edit reopened while the abandoned copy still
+    // ran dropped the remote change, so neither the copy's end nor the second
+    // Cancel replayed it and the read view kept the old text.
+    final repo = _Repo(_technique(), {'t1': 'BASE-HASH'});
+    final remote = StreamController<RemoteApplied>.broadcast();
+    addTearDown(remote.close);
+    final media = _GatedMedia();
+    final vm = TechniqueDetailViewModel(
+      repository: repo,
+      mediaService: media,
+      techniqueId: 't1',
+      remoteApplied: remote.stream,
+      analysisService: _NoAnalysis(),
+      recorder: _FakeRecorder(),
+    );
+    addTearDown(vm.dispose);
+    for (var i = 0; i < 200 && vm.technique == null; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+
+    vm.beginEdit();
+    final adding = vm.addMedia(['/src/a large take.wav']);
+    await pumpEventQueue();
+    _remoteEdit(repo, remote);
+    await pumpEventQueue();
+    await vm.discardMediaDraft();
+    vm.endEdit();
+    vm.beginEdit(); // Edit again before the copy ends
+    media.gate.complete();
+    await adding;
+    await pumpEventQueue();
+    expect(vm.technique!.summary, 'local summary', reason: 'held by the edit');
+
+    vm.endEdit();
+    await pumpEventQueue();
+    expect(vm.technique!.summary, 'remote summary');
+  });
 }

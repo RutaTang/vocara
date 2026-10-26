@@ -190,7 +190,9 @@ class TechniqueDetailViewModel extends ChangeNotifier
   /// seeds the form's controllers, so the flag's lifetime is exactly theirs.
   void beginEdit() {
     _editing = true;
-    _missedRemote = false;
+    // A change missed before this session stays owed (replayed once it and any
+    // hold end): cleared here, one missed while an abandoned import still ran
+    // was dropped by an Edit reopened before the copy ended.
     // The editor's example card has no Reference/Practice switch and only the
     // reference drives (and is driven by) the inline player, so a practice
     // subject left over from the read view would show the take's analysis
