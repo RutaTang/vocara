@@ -239,6 +239,24 @@ void main() {
     expect(await journaled(), journalBefore, reason: 'and not journaled');
   });
 
+  test('a recovered take longer than the timeline grows it', () async {
+    // A song an editor has had open stores its timeline (an unset one, 0, is
+    // sized when the song opens).
+    final created = await createPractice();
+    final stored = await persistence.songRepo.savePractice(
+      created.copyWith(timelineDurationMs: 20000),
+    );
+    final practice = (stored as Ok<SongPractice>).value;
+    expect(practice.timelineDurationMs, 20000);
+    await stageOrphan(practice.id, monoWav(4800));
+    Future<WaveformResult> long(String path) async =>
+        (peaks: <double>[0.1, 0.2], durationMs: 600000);
+    expect(await persistence.recoverStagedRecordings(analyze: long), 1);
+    final after = await reload(practice.id);
+    expect(after.contentEndMs, 600000);
+    expect(after.timelineDurationMs, greaterThanOrEqualTo(600000));
+  });
+
   test('second run is a no-op', () async {
     final practice = await createPractice();
     await stageOrphan(practice.id, monoWav(4800));

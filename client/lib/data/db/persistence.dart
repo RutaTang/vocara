@@ -826,8 +826,18 @@ class Persistence {
       createdAt: DateTime.now(),
       versionId: practice.activeVersion?.id,
     );
+    var recovered = practice.copyWith(
+      vocalTracks: [...practice.vocalTracks, track],
+    );
+    // A take running past the end of the timeline grows it, as an editor's
+    // save does: otherwise it sat cut off until the song was next edited.
+    final contentEnd = recovered.contentEndMs;
+    if (recovered.timelineDurationMs > 0 &&
+        recovered.timelineDurationMs < contentEnd) {
+      recovered = recovered.copyWith(timelineDurationMs: contentEnd);
+    }
     final saved = await songRepo.savePracticeWithBase(
-      practice.copyWith(vocalTracks: [...practice.vocalTracks, track]),
+      recovered,
       baseHashes: res.value.baseHashes,
     );
     if (saved is! Ok<Loaded<SongPractice>>) return _RecoveryOutcome.failed;
