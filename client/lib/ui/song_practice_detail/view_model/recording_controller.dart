@@ -223,6 +223,7 @@ class RecordingController extends ChangeNotifier {
       _recordingStartMs = _playback.position.value.inMilliseconds;
       _recordingPreRollMs = 0;
       _backingRolling = false;
+      _headZeroMs = 0;
       _recPeaks.clear();
       recordingPeaks.value = const [];
       return _audioFiles.newRecordingPath(
@@ -321,6 +322,9 @@ class RecordingController extends ChangeNotifier {
   /// playhead waits at REC until then.
   bool _backingRolling = false;
 
+  /// [_takenMs] as the backing started: the playhead runs from it.
+  double _headZeroMs = 0;
+
   /// The vocal take the in-flight recording is punching into (frozen at start);
   /// null when REC is instead creating a brand-new take.
   String? _recordingTargetId;
@@ -392,26 +396,24 @@ class RecordingController extends ChangeNotifier {
     recordingPeaks.value = UnmodifiableListView(_recPeaks);
     // The head runs with the backing, which starts a pre-roll after the take
     // does: run from the arm, it led what was heard by that much, and a lyric
-    // stamped or a note added at it mid-take saved that late a time. Read
-    // from the frames the take has taken, which the pre-roll is counted in:
-    // the clock starts only once the mic reports ready, and steps a tick at a
-    // time, so the head trailed the backing by up to a tick and a poll. Those
-    // dropped from a full ring count too, and while the input stalls (none
-    // arriving) the clock carries the head on, as the backing goes on.
-    final engine = _graphEngine();
-    final clockMs = recordingDurationMs.toDouble();
-    final heldMs = engine == null
-        ? clockMs
-        : math.max(
-            clockMs,
-            (engine.recordWrittenFrames() + engine.recordDroppedFrames()) *
-                1000 /
-                48000,
-          );
-    final heard = _backingRolling ? heldMs - _recordingPreRollMs : 0.0;
+    // stamped or a note added at it mid-take saved that late a time.
+    final heard = _backingRolling ? _takenMs() - _headZeroMs : 0.0;
     _playback.setRecordingPosition(
       Duration(milliseconds: _recordingStartMs + math.max(0, heard.round())),
     );
+  }
+
+  /// How long this take has been taking input, as the playhead measures it:
+  /// the frames it has taken (kept or dropped from a full ring), or the clock
+  /// while the input stalls (none arriving) and the backing goes on. The
+  /// clock alone trailed: it starts only once the mic reports ready and steps
+  /// a tick at a time.
+  double _takenMs() {
+    final clockMs = _takeClock.elapsedMilliseconds.toDouble();
+    final engine = _graphEngine();
+    if (engine == null) return clockMs;
+    final frames = engine.recordWrittenFrames() + engine.recordDroppedFrames();
+    return math.max(clockMs, frames * 1000 / 48000);
   }
 
   // --- Recording ------------------------------------------------------------
@@ -568,6 +570,7 @@ class RecordingController extends ChangeNotifier {
       // The backing is rolling; read synchronously below, no tick lands
       // between this and its pre-roll.
       _backingRolling = true;
+      _headZeroMs = _takenMs();
       final engineNow = _graphEngine();
       if (!stopped() && engineNow != null) {
         final pre = engineNow.recordWrittenFrames();

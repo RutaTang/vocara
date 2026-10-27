@@ -328,6 +328,8 @@ class _FakeGraphEngine extends _FakeEngine
   @override
   int recordWrittenFrames() => 0;
   @override
+  int recordDroppedFrames() => 0;
+  @override
   double recordLatencyMs() => 0;
 }
 

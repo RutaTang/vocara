@@ -176,6 +176,9 @@ class _FakeGraph extends Fake implements GraphAudioPlaybackService {
   @override
   int recordWrittenFrames() => writtenFrames;
 
+  @override
+  int recordDroppedFrames() => 0;
+
   /// The input round-trip the take is compensated for.
   double latencyMs = 0;
 
@@ -256,8 +259,17 @@ class _RollingGraph extends _FakeGraph {
   /// Frames that arrived but the ring had no room for (not written).
   int dropped = 0;
 
-  /// The input delivers nothing while set.
-  bool stalled = false;
+  /// The input delivers nothing while set; what it missed never arrives.
+  bool get stalled => _stalled;
+  set stalled(bool on) {
+    if (_stalled && !on) {
+      _lost = _sinceArm.elapsedMicroseconds * 48 ~/ 1000 + lead - _written;
+    }
+    _stalled = on;
+  }
+
+  bool _stalled = false;
+  int _lost = 0;
   final Stopwatch _sinceArm = Stopwatch();
 
   @override
@@ -274,7 +286,7 @@ class _RollingGraph extends _FakeGraph {
       ? _written
       : _written = math.max(
           _written + 1,
-          _sinceArm.elapsedMicroseconds * 48 ~/ 1000 + lead - dropped,
+          _sinceArm.elapsedMicroseconds * 48 ~/ 1000 + lead - dropped - _lost,
         );
 
   @override
@@ -283,6 +295,7 @@ class _RollingGraph extends _FakeGraph {
   @override
   bool startInputRecording(String path) {
     _written = 0;
+    _lost = 0;
     _sinceArm
       ..reset()
       ..start();
@@ -1006,6 +1019,32 @@ void main() {
     await c.stopRecording();
     expect(moved, greaterThanOrEqualTo(1300), reason: 'the head stood still');
   });
+
+  test(
+    'an input stall before the backing starts leaves the head with it',
+    () async {
+      // The head ran from the pre-roll in frames, which a stall before the
+      // backing started left short of the clock: ahead by the stall all take.
+      final graph = _RollingGraph();
+      final c = build(null, graph: graph);
+      addTearDown(c.dispose);
+      playback.position.value = const Duration(seconds: 10);
+      final start = c.startRecording();
+      await pumpUntil(() => mixer.gates.isNotEmpty);
+      graph.stalled = true;
+      await Future<void>.delayed(const Duration(milliseconds: 600));
+      graph.stalled = false;
+      mixer.gates.single.complete();
+      await start;
+      final sincePlay = Stopwatch()..start();
+
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+      final head = playback.position.value.inMilliseconds - 10000;
+      final played = sincePlay.elapsedMilliseconds;
+      await c.stopRecording();
+      expect(head, inInclusiveRange(played - 150, played + 60));
+    },
+  );
 
   test('monitoring outlasts a mic still warming up', () async {
     // A Bluetooth headset switching to its headset profile delivers nothing
