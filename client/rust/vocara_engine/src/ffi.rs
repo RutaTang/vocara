@@ -2044,6 +2044,17 @@ pub const VE_DECODE_RATE_UNSUPPORTED: c_int = -4;
 /// that is not a normal end of stream) — the disk, not the format.
 pub const VE_DECODE_IO: c_int = -5;
 
+/// The `ve_decode` status a [`device::DecodeError`] reports.
+fn decode_status(e: &device::DecodeError) -> c_int {
+    match e {
+        device::DecodeError::TooLong => VE_DECODE_TOO_LONG,
+        device::DecodeError::TooBig => VE_DECODE_TOO_BIG,
+        device::DecodeError::RateUnsupported => VE_DECODE_RATE_UNSUPPORTED,
+        device::DecodeError::Io(_) => VE_DECODE_IO,
+        device::DecodeError::Other(_) => VE_DECODE_ERR,
+    }
+}
+
 /// Stateless decode (no engine handle) for a background isolate: decode `path` and resample
 /// to `rate`, returning malloc'd interleaved-stereo f32. Free with [`ve_free_decoded`]. Safe
 /// to call off the main thread (touches no shared engine state).
@@ -2260,7 +2271,7 @@ pub extern "C" fn ve_punch_wav(
         let ceiling_pre = (MAX_PLAYBACK_SECS * rate as f64) as i128;
         let split_pre = (split_ms.max(0) as i128 * rate as i128) / 1000;
         if split_pre > ceiling_pre {
-            return -1;
+            return VE_DECODE_TOO_LONG as i64;
         }
         let declared_frames = |p: &str| -> Option<i128> {
             device::probe_duration_ms(p)
@@ -2270,7 +2281,7 @@ pub extern "C" fn ve_punch_wav(
         };
         if let Some(new_decl) = declared_frames(new_p) {
             if split_pre + new_decl > ceiling_pre {
-                return -1;
+                return VE_DECODE_TOO_LONG as i64;
             }
         }
         // Old's duration only matters when a prefix of it is actually kept: a split of 0
@@ -2278,7 +2289,7 @@ pub extern "C" fn ve_punch_wav(
         if split_pre > 0 {
             if let Some(old_decl) = declared_frames(old_p) {
                 if old_decl > ceiling_pre {
-                    return -1;
+                    return VE_DECODE_TOO_LONG as i64;
                 }
             }
         }
@@ -2289,12 +2300,22 @@ pub extern "C" fn ve_punch_wav(
         if paths_alias(out_p, old_p) || paths_alias(out_p, new_p) {
             return -1;
         }
+        // Why the splice failed, when a decode or a duration ceiling says: returned as
+        // `ve_decode`'s status (negative), so the caller can name it — a file with no
+        // declared length past the hour read as "could not be converted".
+        let refusal = std::cell::Cell::new(VE_DECODE_ERR);
         let decode = |p: &str| -> Option<Vec<[Smp; CHANNELS]>> {
             // Both inputs are normally takes this app recorded, but nothing enforces that,
             // so they get the same generous ceiling as the playback path (the Dart side's
             // maxPlaybackDuration, 60 min) instead of an unbounded decode.
             let (frames, src_rate) =
-                device::decode_file(p, MAX_PLAYBACK_SECS, 192_000, MAX_SPLICE_SRC_FRAMES).ok()?;
+                match device::decode_file(p, MAX_PLAYBACK_SECS, 192_000, MAX_SPLICE_SRC_FRAMES) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        refusal.set(decode_status(&e));
+                        return None;
+                    }
+                };
             device::resample_sinc(frames, src_rate, rate).ok()
         };
         // Checked before any decode: the old `as usize` cast of the i128 split TRUNCATED a
@@ -2307,7 +2328,7 @@ pub extern "C" fn ve_punch_wav(
         let ceiling_frames = ((MAX_PLAYBACK_SECS * rate as f64) as i128).min(max_riff_frames);
         let split_i128 = (split_ms.max(0) as i128 * rate as i128) / 1000;
         if split_i128 > ceiling_frames {
-            return -1;
+            return VE_DECODE_TOO_LONG as i64;
         }
         let split = split_i128 as usize;
 
@@ -2366,7 +2387,10 @@ pub extern "C" fn ve_punch_wav(
             // The OUTPUT stays bounded even though it never materializes in memory.
             match split.checked_add(new_frames.len()) {
                 Some(t) if (t as i128) <= ceiling_frames => {}
-                _ => return None,
+                _ => {
+                    refusal.set(VE_DECODE_TOO_LONG);
+                    return None;
+                }
             }
             for &f in &new_frames {
                 if !write_frame(&mut wav, f) {
@@ -2403,7 +2427,7 @@ pub extern "C" fn ve_punch_wav(
             }
             None => {
                 let _ = std::fs::remove_file(&tmp_path);
-                -1
+                refusal.get() as i64
             }
         }
     }))
@@ -3903,7 +3927,10 @@ mod punch_tests {
             48_000,
             c_out.as_ptr(),
         );
-        assert_eq!(frames, -1, "an over-ceiling output must be refused");
+        assert_eq!(
+            frames, VE_DECODE_TOO_LONG as i64,
+            "an over-ceiling output must be refused, said as too long"
+        );
         assert_eq!(
             crate::device::DECODE_CALLS.with(|c| c.get()),
             calls_before,
@@ -4014,7 +4041,8 @@ mod punch_tests {
     fn a_failed_splice_leaves_no_output_and_no_temp_litter() {
         // Old is fine, new is missing: the splice fails AFTER the output stream was
         // created. The destination must not exist (no partial WAV masquerading as a
-        // take) and the temp file must be cleaned up.
+        // take) and the temp file must be cleaned up. (Missing reads as an IO
+        // failure, the disk's, not the format's.)
         let old = temp_wav("fx_old");
         let new = temp_wav("fx_new_missing");
         let out = temp_wav("fx_out");
@@ -4023,7 +4051,7 @@ mod punch_tests {
         let (c_old, c_new, c_out) = (c(&old), c(&new), c(&out));
 
         let frames = super::ve_punch_wav(c_old.as_ptr(), c_new.as_ptr(), 1, 48_000, c_out.as_ptr());
-        assert_eq!(frames, -1);
+        assert_eq!(frames, super::VE_DECODE_IO as i64);
         assert!(!out.exists(), "a failed splice must not publish an output");
         let dir = out.parent().unwrap();
         let stem = out.file_name().unwrap().to_str().unwrap().to_string();
@@ -4039,7 +4067,7 @@ mod punch_tests {
         crate::wav::write_wav_f32(&out, &[0.3; 96], 2, 48_000).unwrap();
         let before = std::fs::metadata(&out).unwrap().len();
         let frames = super::ve_punch_wav(c_old.as_ptr(), c_new.as_ptr(), 1, 48_000, c_out.as_ptr());
-        assert_eq!(frames, -1);
+        assert_eq!(frames, super::VE_DECODE_IO as i64);
         assert_eq!(
             std::fs::metadata(&out).unwrap().len(),
             before,

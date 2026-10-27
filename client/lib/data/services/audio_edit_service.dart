@@ -11,6 +11,8 @@ import 'package:path/path.dart' as p;
 import '../db/durable_fs.dart';
 import '../ffi/vocara_engine_bindings.dart';
 import 'audio_file_service.dart';
+import 'graph_audio_playback_service.dart'
+    show decodeStatusToException, maxPlaybackDuration;
 
 /// Open the embedded engine framework. Top-level so a background isolate can
 /// load it without capturing `this`.
@@ -774,7 +776,10 @@ class AudioEditService {
   /// cursor lands past old's end the gap is silence-padded so [newPath] keeps
   /// its timeline position. Decode/splice/encode run in the Rust engine on a
   /// background isolate, so any source format works (output is engine-rate WAV).
-  /// Returns the new file's path, or null on failure.
+  /// Returns the new file's path, or null on failure. Throws the typed
+  /// refusal a decode names (too long, too dense, an unsupported rate, a read
+  /// error): a file with no declared length past the hour was copied whole,
+  /// then said only that it "could not be converted".
   Future<String?> punchIn({
     required String practiceId,
     required String oldPath,
@@ -782,27 +787,29 @@ class AudioEditService {
     required int splitMs,
   }) async {
     final outPath = await _newEditPath(practiceId: practiceId);
-    final ok = await Isolate.run(() {
+    final result = await Isolate.run(() {
       final bindings = VocaraEngineBindings(_openVocaraLibrary());
       final oldC = oldPath.toNativeUtf8();
       final newC = newPath.toNativeUtf8();
       final outC = outPath.toNativeUtf8();
       try {
         return bindings.ve_punch_wav(
-              oldC.cast(),
-              newC.cast(),
-              splitMs,
-              _engineRate,
-              outC.cast(),
-            ) >
-            0;
+          oldC.cast(),
+          newC.cast(),
+          splitMs,
+          _engineRate,
+          outC.cast(),
+        );
       } finally {
         malloc.free(oldC);
         malloc.free(newC);
         malloc.free(outC);
       }
     });
-    return ok ? outPath : null;
+    if (result > 0) return outPath;
+    final refused = decodeStatusToException(result, maxPlaybackDuration);
+    if (refused != null) throw refused;
+    return null;
   }
 
   /// The engine's working sample rate; punch-in output is written at this rate.
