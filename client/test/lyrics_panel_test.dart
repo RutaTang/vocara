@@ -7,6 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:vocara/domain/models/audio_track.dart';
 import 'package:vocara/domain/models/lyric_line.dart';
 import 'package:vocara/domain/models/practice_note.dart';
+import 'package:vocara/ui/core/widgets/confirm_dialog.dart';
 import 'package:vocara/ui/song_practice_detail/view_model/song_practice_detail_view_model.dart';
 import 'package:vocara/ui/song_practice_detail/widgets/lyrics_panel.dart';
 
@@ -81,9 +82,13 @@ class _FakeVm extends Fake implements SongPracticeDetailViewModel {
   @override
   String lyricsAsText() => text;
 
+  /// Holds an import until completed, as one queued behind a save does.
+  Completer<void>? importGate;
+
   @override
   Future<void> importLyricsFromFile(String path) async {
     imported.add(path);
+    if (importGate case final gate?) await gate.future;
     // Mimic the real VM: only a valid lyrics file replaces the lyrics; a
     // rejected drop (wrong type, unreadable, busy) toasts and changes nothing.
     if (path.endsWith('.lrc')) text = 'dropped line one\ndropped line two';
@@ -660,5 +665,30 @@ void main() {
       await tester.pumpAndSettle();
       expect(editor().hasFocus, isTrue);
     });
+  });
+
+  testWidgets('an import landing under a dialog leaves it the keyboard', (
+    tester,
+  ) async {
+    // The editor is rebuilt to show an import, and its autofocus took the
+    // keys from a dialog opened meanwhile: the name typed into a rename went
+    // into the hidden lyrics.
+    final vm = _FakeVm()..importGate = Completer<void>();
+    await _pumpPanel(tester, vm);
+    await tester.pumpAndSettle();
+    await _drop(tester, '/tmp/song.lrc');
+
+    final ctx = tester.element(find.byType(RightPanel));
+    unawaited(showStudioPrompt(ctx, title: 'Rename', initial: 'Take 1'));
+    await tester.pumpAndSettle();
+    final dialog = tester
+        .widgetList<EditableText>(find.byType(EditableText))
+        .firstWhere((e) => e.controller.text == 'Take 1')
+        .focusNode;
+    expect(dialog.hasFocus, isTrue);
+
+    vm.importGate!.complete();
+    await tester.pumpAndSettle();
+    expect(dialog.hasFocus, isTrue, reason: 'the hidden editor took the keys');
   });
 }

@@ -1045,7 +1045,9 @@ class _LyricsEditorState extends State<_LyricsEditor> {
                 // The user's edits only, not focus or selection churn: the
                 // draft must never be re-written behind a re-seed.
                 onChanged: (text) => vm.lyricsDraft = text,
-                autofocus: true,
+                // Not under a dialog: an import landing while one was open
+                // rebuilt the editor, whose autofocus took the dialog's keys.
+                autofocus: ModalRoute.isCurrentOf(context) ?? true,
                 expands: true,
                 maxLines: null,
                 minLines: null,
