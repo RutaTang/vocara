@@ -690,5 +690,18 @@ void main() {
     vm.importGate!.complete();
     await tester.pumpAndSettle();
     expect(dialog.hasFocus, isTrue, reason: 'the hidden editor took the keys');
+
+    // Closed, the dialog hands the keyboard to the editor it covered.
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pumpAndSettle();
+    final editor = tester
+        .widget<EditableText>(
+          find.descendant(
+            of: find.byType(RightPanel),
+            matching: find.byType(EditableText),
+          ),
+        )
+        .focusNode;
+    expect(editor.hasFocus, isTrue, reason: 'the keyboard went nowhere');
   });
 }

@@ -1005,9 +1005,30 @@ class _LyricsEditorState extends State<_LyricsEditor> {
     text: widget.vm.lyricsDraft ?? widget.vm.lyricsAsText(),
   );
 
+  final FocusNode _focus = FocusNode(debugLabel: 'lyrics editor');
+
+  /// Built under a dialog (an import re-created it while one was open), so
+  /// it did not autofocus: the keyboard is taken once the page is on top
+  /// again, if nothing on it has taken it meanwhile.
+  bool _focusOwed = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (!(ModalRoute.isCurrentOf(context) ?? true)) {
+      _focusOwed = true;
+    } else if (_focusOwed) {
+      _focusOwed = false;
+      if (FocusManager.instance.primaryFocus == FocusScope.of(context)) {
+        _focus.requestFocus();
+      }
+    }
+  }
+
   @override
   void dispose() {
     _c.dispose();
+    _focus.dispose();
     super.dispose();
   }
 
@@ -1042,6 +1063,7 @@ class _LyricsEditorState extends State<_LyricsEditor> {
               ),
               child: TextField(
                 controller: _c,
+                focusNode: _focus,
                 // The user's edits only, not focus or selection churn: the
                 // draft must never be re-written behind a re-seed.
                 onChanged: (text) => vm.lyricsDraft = text,
