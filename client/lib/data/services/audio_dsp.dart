@@ -995,10 +995,11 @@ class _MetricsPass {
 }
 
 /// A 3-stage Butterworth decimator producing [_decimate]'s output
-/// INCREMENTALLY: each incoming sample runs the cascade per stage with the
-/// same Float32 rounding between stages the in-place batch filter has (each
-/// batch stage reads the previous stage's f32-stored output), so the
-/// streamed decimated signal is bit-identical to the batch copy.
+/// INCREMENTALLY: each block of incoming samples runs through the cascade
+/// exactly as the batch runs the whole take — each stage in place over a
+/// Float32 copy, reading the previous stage's f32-stored output, its state
+/// carried from block to block — so the streamed decimated signal is
+/// bit-identical to the batch copy.
 class _StreamDecimator {
   _StreamDecimator(this.factor, double fs) : assert(factor >= 1) {
     final fc = 0.45 * fs / factor;
@@ -1018,50 +1019,65 @@ class _StreamDecimator {
       _s1 = _BiquadState(),
       _s2 = _BiquadState();
   late final double _b0, _b1, _b2, _a1, _a2;
+
+  /// Position of the next input sample on the decimation grid (0 = kept).
   var _phase = 0;
+  var _scratch = Float32List(0);
 
-  /// Feeds one raw sample; appends the decimated output sample to [out]
-  /// when this position lands on the decimation grid. Called once per input
-  /// sample of the take (~29M for 10 minutes at 48 kHz), so the sink is the
-  /// buffer itself rather than a callback, and the three stages are spelled
-  /// out.
-  void feed(double x, _RollingF32 out) {
-    var v = x;
-    if (factor > 1) {
-      // Round to Float32 between stages, matching the batch's in-place
-      // Float32List storage exactly.
-      v = _f32(_s0.step(v, _b0, _b1, _b2, _a1, _a2));
-      v = _f32(_s1.step(v, _b0, _b1, _b2, _a1, _a2));
-      v = _f32(_s2.step(v, _b0, _b1, _b2, _a1, _a2));
+  /// Feeds the next [block] of raw samples, appending to [out] every
+  /// decimated sample that lands on the grid. One sample at a time (~29M for
+  /// 10 minutes at 48 kHz) cost a call, the state's loads and stores and a
+  /// Float32 round trip per stage per sample; a block runs each stage's
+  /// recursion in a tight loop over the block, in local variables.
+  void feedAll(Float32List block, _RollingF32 out) {
+    if (factor == 1) {
+      out.addAll(block);
+      return;
     }
-    if (_phase == 0) out.add(v);
-    if (++_phase == factor) _phase = 0;
-  }
-
-  static final Float32List _round = Float32List(1);
-  static double _f32(double v) {
-    _round[0] = v;
-    return _round[0];
+    final n = block.length;
+    if (_scratch.length < n) _scratch = Float32List(n);
+    final buf = _scratch..setRange(0, n, block);
+    _s0.runInPlace(buf, n, _b0, _b1, _b2, _a1, _a2);
+    _s1.runInPlace(buf, n, _b0, _b1, _b2, _a1, _a2);
+    _s2.runInPlace(buf, n, _b0, _b1, _b2, _a1, _a2);
+    for (var i = _phase == 0 ? 0 : factor - _phase; i < n; i += factor) {
+      out.add(buf[i]);
+    }
+    _phase = (_phase + n) % factor;
   }
 }
 
+/// One biquad's Direct Form I recursion, its state carried between calls:
+/// the batch [_biquadLpInPlace] runs it once over the whole take, the
+/// streaming [_StreamDecimator] block by block.
 class _BiquadState {
   var x1 = 0.0, x2 = 0.0, y1 = 0.0, y2 = 0.0;
 
-  double step(
-    double xi,
+  /// Filters `x[0, n)` in place: double state and intermediates, each output
+  /// rounded to Float32 only where it is stored.
+  void runInPlace(
+    Float32List x,
+    int n,
     double b0,
     double b1,
     double b2,
     double a1,
     double a2,
   ) {
-    final yi = b0 * xi + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
-    x2 = x1;
-    x1 = xi;
-    y2 = y1;
-    y1 = yi;
-    return yi;
+    var x1 = this.x1, x2 = this.x2, y1 = this.y1, y2 = this.y2;
+    for (var i = 0; i < n; i++) {
+      final xi = x[i];
+      final yi = b0 * xi + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+      x[i] = yi;
+      x2 = x1;
+      x1 = xi;
+      y2 = y1;
+      y1 = yi;
+    }
+    this.x1 = x1;
+    this.x2 = x2;
+    this.y1 = y1;
+    this.y2 = y2;
   }
 }
 
@@ -1206,13 +1222,14 @@ class StreamingTakeAnalyzer {
   void add(Float32List chunk, {Float32List? loudest}) {
     _pass.feedClip(loudest ?? chunk);
     for (var at = 0; at < chunk.length; at += _emitBlock) {
-      final end = math.min(chunk.length, at + _emitBlock);
-      for (var i = at; i < end; i++) {
-        final s = chunk[i];
-        _raw.add(s);
-        _dsDec.feed(s, _ds);
-        _yinDec.feed(s, _yin);
-      }
+      final block = Float32List.sublistView(
+        chunk,
+        at,
+        math.min(chunk.length, at + _emitBlock),
+      );
+      _raw.addAll(block);
+      _dsDec.feedAll(block, _ds);
+      _yinDec.feedAll(block, _yin);
       _emitReady(flush: false);
     }
   }
@@ -1400,16 +1417,7 @@ void _biquadLpInPlace(Float32List x, double fc, double fs) {
   final b2 = b0;
   final a1 = -2 * cosw / a0;
   final a2 = (1 - alpha) / a0;
-  var x1 = 0.0, x2 = 0.0, y1 = 0.0, y2 = 0.0;
-  for (var i = 0; i < x.length; i++) {
-    final xi = x[i];
-    final yi = b0 * xi + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
-    x[i] = yi;
-    x2 = x1;
-    x1 = xi;
-    y2 = y1;
-    y1 = yi;
-  }
+  _BiquadState().runInPlace(x, x.length, b0, b1, b2, a1, a2);
 }
 
 /// Anti-aliased decimation by integer [factor] (three cascaded Butterworth
