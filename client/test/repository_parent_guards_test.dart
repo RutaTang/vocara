@@ -14,6 +14,7 @@ import 'package:vocara/data/sync/hlc.dart';
 import 'package:vocara/data/sync/sync_hashes.dart';
 import 'package:vocara/data/sync/sync_writer.dart';
 import 'package:vocara/domain/models/audio_track.dart';
+import 'package:vocara/domain/models/practice_summary.dart';
 import 'package:vocara/domain/models/song_practice.dart';
 import 'package:vocara/domain/models/technique.dart';
 import 'package:vocara/domain/models/technique_media.dart';
@@ -157,4 +158,32 @@ void main() {
     expect(techniqueSave, isA<Error<Loaded<Technique>>>());
     expect(await ops(), before);
   });
+
+  test(
+    'a stored time past what a DateTime holds still lists and opens',
+    () async {
+      // Every list of the library threw on one such row, and showed nothing.
+      final p0 = await seedPractice();
+      final t0 = await seedTechnique();
+      await db.customStatement(
+        'UPDATE practices SET updated_at = ${1 << 62}, created_at = ${-(1 << 62)}',
+      );
+      await db.customStatement('UPDATE techniques SET updated_at = ${1 << 62}');
+
+      final listed = await songs.listPracticeSummaries();
+      expect(
+        (listed as Ok<List<PracticeSummary>>).value.single.id,
+        p0.aggregate.id,
+      );
+      expect(
+        await songs.loadPractice(p0.aggregate.id),
+        isA<Ok<Loaded<SongPractice>>>(),
+      );
+      final techniques = await techs.listTechniques();
+      expect(
+        (techniques as Ok<List<Technique>>).value.single.id,
+        t0.aggregate.id,
+      );
+    },
+  );
 }

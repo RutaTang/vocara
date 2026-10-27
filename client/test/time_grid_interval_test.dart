@@ -18,6 +18,12 @@ void main() {
     expect(spacingPx(3 * 3600000, 400), greaterThanOrEqualTo(72));
   });
 
+  test('a timeline of years keeps its labels apart too', () {
+    // Held at an hour a step, 2^62 ms drew a line per hour: the screen froze.
+    expect(spacingPx(1 << 62, 800), greaterThanOrEqualTo(72));
+    expect(spacingPx(30 * 24 * 3600000, 800), greaterThanOrEqualTo(72));
+  });
+
   test('a song-length timeline keeps its fine steps', () {
     expect(niceTimeIntervalMs(180000, 800), 30000);
     expect(niceTimeIntervalMs(10000, 800), 1000);

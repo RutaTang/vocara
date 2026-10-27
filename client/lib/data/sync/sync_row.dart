@@ -450,6 +450,13 @@ void checkColumnTypes(
         '${value.runtimeType}',
       );
     }
+    final bound = value is int ? _intColumnBound(column.name) : null;
+    if (bound != null && (value as int).abs() > bound) {
+      throw FormatException(
+        'SyncRow: "${table.actualTableName}.${column.name}" is out of range '
+        '($value)',
+      );
+    }
     if (column.name.endsWith('_json') && value is String) {
       final Object? body;
       try {
@@ -485,6 +492,17 @@ void checkColumnTypes(
       }
     }
   }
+}
+
+/// The magnitude an int column may hold on the wire, by its name, or null for
+/// none. A time (`*_at`, ms since the epoch) within what a DateTime holds:
+/// past it, every list of the library threw. A timeline position or length
+/// (`*_ms`) within a day: past it, the timeline was laid out and gridded over
+/// trillions of steps and the practice froze.
+int? _intColumnBound(String column) {
+  if (column.endsWith('_at')) return 8640000000000000;
+  if (column.endsWith('_ms')) return 24 * 60 * 60 * 1000;
+  return null;
 }
 
 /// Reads current rows generically (via the drift [TableInfo] registry) and

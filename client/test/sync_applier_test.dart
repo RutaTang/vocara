@@ -1082,6 +1082,41 @@ void main() {
       }
     });
 
+    test('a time or timeline length out of range is refused at the value '
+        'gate, and the page still commits', () async {
+      // Landed, a practice updated at 2^62 ms made every list of the library
+      // throw (no DateTime holds it), and a timeline of 2^62 ms froze the
+      // practice screen laying out and gridding it.
+      final res = await applier.apply([
+        RemoteRecord(
+          table: 'practices',
+          columns: {
+            ...practice('P', 'late', hlc(900)).columns,
+            'updated_at': 1 << 62,
+          },
+        ),
+        RemoteRecord(
+          table: 'practices',
+          columns: {
+            ...practice('R', 'long', hlc(902)).columns,
+            'timeline_duration_ms': 1 << 62,
+          },
+        ),
+        practice('Q', 'kept', hlc(901)),
+      ]);
+      expect(res.committed, isTrue, reason: 'the page must still commit');
+      expect(res.applied, 1);
+      expect(res.failed, 2);
+      expect(await row('P'), isNull);
+      expect(await row('R'), isNull);
+      expect((await row('Q'))!['title'], 'kept');
+      final parked = await store.list();
+      expect(parked, hasLength(2));
+      for (final q in parked) {
+        expect(q.reason, contains('out of range'));
+      }
+    });
+
     test('a CHECK-violating newer state cannot void the FK sweep\'s park — the '
         'row\'s only surviving copy', () async {
       // The audited black hole: an honest clip C@H1 (asset not yet

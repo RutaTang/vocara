@@ -46,7 +46,12 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
   final AssetStore assets;
 
   static int _ms(DateTime d) => d.millisecondsSinceEpoch;
-  static DateTime _dt(int ms) => DateTime.fromMillisecondsSinceEpoch(ms);
+  // Clamped to what a DateTime holds: a stored time past it (written by a
+  // peer, or any build that let one through) threw for every list of the
+  // library, which then showed nothing.
+  static DateTime _dt(int ms) => DateTime.fromMillisecondsSinceEpoch(
+    ms.clamp(-8640000000000000, 8640000000000000),
+  );
 
   // --- save-side content-hash projections -------------------------------------
   // The MINE side of every three-way merge, hashed once per save by

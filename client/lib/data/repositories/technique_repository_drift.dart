@@ -33,7 +33,12 @@ class TechniqueRepositoryDrift implements TechniqueRepository {
   final AssetStore assets;
 
   static int _ms(DateTime d) => d.millisecondsSinceEpoch;
-  static DateTime _dt(int ms) => DateTime.fromMillisecondsSinceEpoch(ms);
+  // Clamped to what a DateTime holds: a stored time past it (written by a
+  // peer, or any build that let one through) threw for every list of the
+  // library, which then showed nothing.
+  static DateTime _dt(int ms) => DateTime.fromMillisecondsSinceEpoch(
+    ms.clamp(-8640000000000000, 8640000000000000),
+  );
 
   // The MINE side of the three-way merge, and — over the hydrated model —
   // the base side too (see [_hydrate]): one projection each, so what a load

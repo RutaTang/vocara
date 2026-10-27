@@ -27,7 +27,10 @@ int niceTimeIntervalMs(int durationMs, double width, {double minPx = 72}) {
   for (final c in candidates) {
     if (c >= minMs) return c;
   }
-  return candidates.last;
+  // Past an hour, whole hours, as many as keep the ticks apart: held at one,
+  // a timeline of 2^62 ms (a peer's, before the sync door bounded it) drew a
+  // line and a label per hour, and the screen froze.
+  return (minMs / 3600000).ceil() * 3600000;
 }
 
 /// Cuts the whole-peak slice of [peaks] (spanning [spanStartMs] for
