@@ -65,7 +65,14 @@ pub fn screen_full<R: Read + Seek>(src: &mut R) -> Result<(), Refusal> {
 
 fn run<R: Read + Seek>(src: &mut R, full: bool) -> Result<(), Refusal> {
     let start = src.stream_position()?;
-    let verdict = scan(&mut Source::new(&mut *src)?, full);
+    // The bytes the decode will read, a CAF's open data size filled in included.
+    let patch = caf_open_data(src)?;
+    let verdict = Source::new(&mut *src)
+        .map_err(Refusal::from)
+        .and_then(|mut file| {
+            file.patch = patch;
+            scan(&mut file, full)
+        });
     src.seek(SeekFrom::Start(start))?;
     verdict
 }
@@ -542,17 +549,12 @@ fn caf<R: Read + Seek>(file: &mut Source<R>, start: u64) -> Result<(), Refusal> 
                 body + 32
             }
             // A size of -1 is a data chunk still being written, running to the end of the file.
-            // Where the decode fills that size in (see [`caf_open_data`]) the reader skips to
-            // the end: walked as chunks, a second of leading silence was 4096 empty ones, and
-            // the recording refused. Anywhere else it carries on reading chunks from the start
-            // of the audio, its packets capped by no end of data.
+            // The reader then carries on reading chunks from the start of the audio, its packets
+            // capped by no end of data. (Where the decode fills that size in, see
+            // [`caf_open_data`], this walk reads it filled in too, and skips to the end.)
             b"data" if size == -1 => {
-                if open_data(file)?.is_some_and(|(field, _)| field == at + 4) {
-                    len
-                } else {
-                    unsized_data = true;
-                    body + 4
-                }
+                unsized_data = true;
+                body + 4
             }
             b"pakt" => {
                 let Some(format) = format.filter(|_| size >= 24) else {
@@ -611,17 +613,17 @@ fn caf<R: Read + Seek>(file: &mut Source<R>, start: u64) -> Result<(), Refusal> 
 }
 
 /// Where a CAF's data chunk declares its size as -1, "to the end of the file", as Core Audio
-/// leaves it until the file is closed: the size field's offset and the size it stands for, or
-/// None for any other file. The spec allows it, but symphonia's reader then reads on from the
-/// start of the sound as if more chunks followed, and refused an interrupted recording as
-/// malformed; the decode reads such a file with this field filled in instead. Walks chunks by
-/// their declared sizes, of a CAF at the start of the file only, and at most 64 of them.
-/// Leaves `src` where it found it.
-pub fn caf_open_data<R: Read + Seek>(src: &mut R) -> io::Result<Option<(u64, u64)>> {
+/// leaves it until the file is closed: the size field's offset and the bytes that fill in the
+/// size it stands for, or None for any other file. The spec allows it, but symphonia's reader
+/// then reads on from the start of the sound as if more chunks followed, and refused an
+/// interrupted recording as malformed; the decode reads such a file with this field filled
+/// in, and the screen judges the file as filled in. Walks chunks by their declared sizes, of a
+/// CAF at the start of the file only, and at most 64 of them. Leaves `src` where it found it.
+pub fn caf_open_data<R: Read + Seek>(src: &mut R) -> io::Result<Option<(u64, [u8; 8])>> {
     let start = src.stream_position()?;
     let found = open_data(&mut Source::new(&mut *src)?);
     src.seek(SeekFrom::Start(start))?;
-    found
+    Ok(found?.map(|(field, size)| (field, i64::try_from(size).unwrap_or(i64::MAX).to_be_bytes())))
 }
 
 fn open_data<R: Read + Seek>(file: &mut Source<R>) -> io::Result<Option<(u64, u64)>> {
@@ -1634,6 +1636,9 @@ struct Source<R> {
     len: u64,
     cache: Vec<u8>,
     cache_at: u64,
+    /// Eight bytes read in place of the file's own at an offset, as the decode reads them (see
+    /// [`caf_open_data`]).
+    patch: Option<(u64, [u8; 8])>,
 }
 
 impl<R: Read + Seek> Source<R> {
@@ -1644,7 +1649,16 @@ impl<R: Read + Seek> Source<R> {
             len,
             cache: Vec::new(),
             cache_at: 0,
+            patch: None,
         })
+    }
+
+    fn overlay(&self, at: u64, out: &mut [u8]) {
+        if let Some((field, bytes)) = self.patch {
+            for p in at.max(field)..(at + out.len() as u64).min(field + 8) {
+                out[(p - at) as usize] = bytes[(p - field) as usize];
+            }
+        }
     }
 
     /// Copies what the file holds at `at` into the front of `out` and returns how much: less
@@ -1659,6 +1673,7 @@ impl<R: Read + Seek> Source<R> {
             if n > CACHE {
                 self.inner.seek(SeekFrom::Start(at))?;
                 self.inner.read_exact(&mut out[..n])?;
+                self.overlay(at, &mut out[..n]);
                 return Ok(n);
             }
             self.cache
@@ -1669,6 +1684,7 @@ impl<R: Read + Seek> Source<R> {
         }
         let from = (at - self.cache_at) as usize;
         out[..n].copy_from_slice(&self.cache[from..from + n]);
+        self.overlay(at, &mut out[..n]);
         Ok(n)
     }
 
@@ -1972,7 +1988,7 @@ mod tests {
         let file = caf(&[(b"desc", 32, d), (b"data", -1, vec![0; 4 + 64_000])]);
         assert_eq!(
             caf_open_data(&mut Cursor::new(&file)).unwrap(),
-            Some((8 + 44 + 4, 4 + 64_000))
+            Some((8 + 44 + 4, (4i64 + 64_000).to_be_bytes()))
         );
         assert_eq!(screened(&file), Ok(()));
         assert!(screen_full(&mut Cursor::new(&file)).is_ok());

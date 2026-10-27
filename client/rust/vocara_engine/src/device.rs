@@ -4660,14 +4660,10 @@ impl symphonia::core::io::MediaSource for PatchedFile {
 }
 
 /// What symphonia reads `file` through: the file itself, or for a CAF whose data runs to its
-/// end, the file with that size filled in. The screen judged the file as read this way.
+/// end, the file with that size filled in, as the screen read it.
 fn media_source(mut file: std::fs::File) -> Box<dyn symphonia::core::io::MediaSource> {
     match crate::media_screen::caf_open_data(&mut file) {
-        Ok(Some((at, size))) => Box::new(PatchedFile {
-            file,
-            at,
-            bytes: i64::try_from(size).unwrap_or(i64::MAX).to_be_bytes(),
-        }),
+        Ok(Some((at, bytes))) => Box::new(PatchedFile { file, at, bytes }),
         _ => Box::new(file),
     }
 }
