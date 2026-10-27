@@ -522,7 +522,8 @@ class StreamingSpectrogramBuilder {
     this.hop = 512,
     this.maxHz = 5000,
     int expectedFrames = 0,
-  }) : maxBin = _spectrogramBins(maxHz, fftSize, sampleRate) {
+  }) : maxBin = _spectrogramBins(maxHz, fftSize, sampleRate),
+       _window = Float32List(fftSize) {
     _image = _SpectrogramImage(maxBin, expectedFrames: expectedFrames);
     _stft = _ColumnStft(fftSize, maxBin);
   }
@@ -535,6 +536,7 @@ class StreamingSpectrogramBuilder {
   late final _ColumnStft _stft;
   late final _SpectrogramImage _image;
   final _raw = _RollingF32();
+  final Float32List _window;
   var _nextFrame = 0;
 
   /// Feeds the next chunk of mono samples, a block at a time so the buffer
@@ -559,7 +561,8 @@ class StreamingSpectrogramBuilder {
       final start = _nextFrame * hop;
       // Until the end is known, only frames whose samples are all in.
       if (!flush && start + fftSize > len) return;
-      _stft.column(_raw.slice(start, fftSize, len), _image);
+      _raw.sliceInto(_window, start, len);
+      _stft.column(_window, _image);
       _nextFrame++;
       _raw.dropBelow(_nextFrame * hop);
     }
@@ -594,8 +597,9 @@ Spectrogram computeSpectrogram(
   final nFrames = stftFrameCount(len, fftSize: fftSize, hop: hop);
   final image = _SpectrogramImage(maxBin, expectedFrames: nFrames);
   final stft = _ColumnStft(fftSize, maxBin);
+  final window = Float32List(fftSize);
   for (var fr = 0; fr < nFrames; fr++) {
-    stft.column(_padSlice(samples, fr * hop, fftSize, len), image);
+    stft.column(_padSliceInto(window, samples, fr * hop, len), image);
   }
   return image.finish(
     maxHz: maxHz,
@@ -608,12 +612,26 @@ Spectrogram computeSpectrogram(
 /// A zero-padded window copy: [count] values from [src] starting at absolute
 /// index [start]; indices outside `[0, srcLen)` read as 0 (the exact
 /// edge semantics the batch metrics loop always had).
-Float32List _padSlice(Float32List src, int start, int count, int srcLen) {
-  final out = Float32List(count);
+Float32List _padSlice(Float32List src, int start, int count, int srcLen) =>
+    _padSliceInto(Float32List(count), src, start, srcLen);
+
+/// [_padSlice] into [out] (the window is its length), reusing it.
+Float32List _padSliceInto(
+  Float32List out,
+  Float32List src,
+  int start,
+  int srcLen,
+) {
+  final count = out.length;
   final from = start.clamp(0, srcLen);
   final to = (start + count).clamp(0, srcLen);
-  for (var i = from; i < to; i++) {
-    out[i - start] = src[i];
+  if (to > from) {
+    out
+      ..fillRange(0, from - start, 0)
+      ..setRange(from - start, to - start, src, from)
+      ..fillRange(to - start, count, 0);
+  } else {
+    out.fillRange(0, count, 0);
   }
   return out;
 }
@@ -1163,41 +1181,36 @@ class _RollingF32 {
   }
 
   /// Drops everything below absolute index [keepFrom] (clamped), compacting
-  /// the storage when the dead head has grown past a block.
+  /// the storage when the dead head has grown past a block: the live tail
+  /// slides to the front of the same buffer (setRange within one list copies
+  /// overlapping ranges as memmove does). A fresh buffer per compaction was
+  /// a 256 KB allocation every 32 frames of the raw signal alone.
   void dropBelow(int keepFrom) {
     final target = keepFrom.clamp(_base, _len);
     final dead = target - _base;
     if (dead < (1 << 14)) return;
-    final live = _len - target;
-    final next = Float32List(math.max(1 << 15, _nextPow2(live + (1 << 15))));
-    for (var i = 0; i < live; i++) {
-      next[i] = _buf[dead + i];
-    }
-    _buf = next;
+    _buf.setRange(0, _len - target, _buf, dead);
     _base = target;
   }
 
-  static int _nextPow2(int v) {
-    var p = 1;
-    while (p < v) {
-      p <<= 1;
-    }
-    return p;
-  }
-
-  /// Zero-padded window copy; [maxLen] caps the readable length (indices at
-  /// or past it read 0 — the batch-equivalent signal length, see the
-  /// decimator tail note in [StreamingTakeAnalyzer]).
-  Float32List slice(int start, int count, int maxLen) {
-    final out = Float32List(count);
+  /// Zero-padded window copy into [out] (the window is its length, the
+  /// caller's buffer reused frame after frame); [maxLen] caps the readable
+  /// length (indices at or past it read 0 — the batch-equivalent signal
+  /// length, see the decimator tail note in [StreamingTakeAnalyzer]).
+  void sliceInto(Float32List out, int start, int maxLen) {
+    final count = out.length;
     // The readable span [start, end): held, and below [maxLen]; the rest of
-    // the window stays zero.
+    // the window is zero.
     final from = math.max(start, _base);
     final end = math.min(start + count, math.min(_len, maxLen));
     if (end > from) {
-      out.setRange(from - start, end - start, _buf, from - _base);
+      out
+        ..fillRange(0, from - start, 0)
+        ..setRange(from - start, end - start, _buf, from - _base)
+        ..fillRange(end - start, count, 0);
+    } else {
+      out.fillRange(0, count, 0);
     }
-    return out;
   }
 }
 
@@ -1233,6 +1246,9 @@ class StreamingTakeAnalyzer {
        ) {
     _dsDec = _StreamDecimator(_pass.dsFactor, sampleRate.toDouble());
     _yinDec = _StreamDecimator(_pass.yinFactor, sampleRate.toDouble());
+    _rawWindow = Float32List(fftSize);
+    _dsWindow = Float32List(_pass.lpcWin + 1);
+    _yinWindow = Float32List(_pass.yinWin);
   }
 
   final int sampleRate;
@@ -1245,6 +1261,10 @@ class StreamingTakeAnalyzer {
   final _raw = _RollingF32();
   final _ds = _RollingF32();
   final _yin = _RollingF32();
+
+  /// Each frame's three windows, refilled frame after frame ([_MetricsPass]
+  /// keeps nothing of them).
+  late final Float32List _rawWindow, _dsWindow, _yinWindow;
   var _nextFrame = 0;
 
   /// Samples taken in between frame emissions. Emitting only once a whole
@@ -1299,12 +1319,10 @@ class StreamingTakeAnalyzer {
         final yinReady = yinCenter - _pass.yinWin ~/ 2 + _pass.yinWin <= yinMax;
         if (!rawReady || !dsReady || !yinReady) return;
       }
-      _pass.emitFrame(
-        fr,
-        _raw.slice(start, fftSize, len),
-        _ds.slice(dsCenter - _pass.lpcWin ~/ 2 - 1, _pass.lpcWin + 1, dsMax),
-        _yin.slice(yinCenter - _pass.yinWin ~/ 2, _pass.yinWin, yinMax),
-      );
+      _raw.sliceInto(_rawWindow, start, len);
+      _ds.sliceInto(_dsWindow, dsCenter - _pass.lpcWin ~/ 2 - 1, dsMax);
+      _yin.sliceInto(_yinWindow, yinCenter - _pass.yinWin ~/ 2, yinMax);
+      _pass.emitFrame(fr, _rawWindow, _dsWindow, _yinWindow);
       _nextFrame = fr + 1;
       // Retain only what future frames can still reach.
       final nextStart = _nextFrame * hop;
@@ -1393,23 +1411,21 @@ _MetricsPass _batchPass(
       ? samples
       : _decimate(samples, pass.yinFactor, sampleRate.toDouble());
 
+  final rawWindow = Float32List(fftSize);
+  final dsWindow = Float32List(pass.lpcWin + 1);
+  final yinWindow = Float32List(pass.yinWin);
   for (var fr = 0; fr < nFrames; fr++) {
     final start = fr * hop;
     final dsCenter = ((fr * hop + fftSize / 2) / pass.dsFactor).round();
     final yinCenter = ((fr * hop + fftSize / 2) / pass.yinFactor).round();
     pass.emitFrame(
       fr,
-      _padSlice(samples, start, fftSize, len),
-      _padSlice(
-        ds,
-        dsCenter - pass.lpcWin ~/ 2 - 1,
-        pass.lpcWin + 1,
-        ds.length,
-      ),
-      _padSlice(
+      _padSliceInto(rawWindow, samples, start, len),
+      _padSliceInto(dsWindow, ds, dsCenter - pass.lpcWin ~/ 2 - 1, ds.length),
+      _padSliceInto(
+        yinWindow,
         yinSig,
         yinCenter - pass.yinWin ~/ 2,
-        pass.yinWin,
         yinSig.length,
       ),
     );
