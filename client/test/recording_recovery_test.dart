@@ -22,6 +22,7 @@ import 'package:vocara/data/services/waveform_service.dart';
 import 'package:vocara/data/sync/sync_hashes.dart' show Loaded;
 import 'package:vocara/domain/models/audio_track.dart';
 import 'package:vocara/domain/models/song_practice.dart';
+import 'package:vocara/domain/models/take_version.dart';
 import 'package:vocara/utils/id.dart';
 import 'package:vocara/utils/result.dart';
 
@@ -292,9 +293,10 @@ void main() {
     final files = AudioFileService(storage: _RootedStorage(root));
 
     for (final (aligned, expected) in [(3650, 3650), (-120, 0)]) {
+      final bytes = monoWav(48000, gain: aligned < 0 ? 0.2 : 0.3);
       final staged = await stageOrphan(
         practice.id,
-        monoWav(4800, gain: aligned < 0 ? 0.2 : 0.3),
+        bytes,
         name: '${newId()}~${first.id}~4000.wav',
       );
       await files.writeAlignedStart(staged.path, aligned);
@@ -302,12 +304,124 @@ void main() {
         await persistence.recoverStagedRecordings(analyze: fakeAnalyze),
         1,
       );
-      expect(
-        (await reload(practice.id)).vocalTracks.last.primaryClip!.startMs,
-        expected,
-      );
+      final clip = (await reload(practice.id)).vocalTracks.last.primaryClip!;
+      expect(clip.startMs, expected);
+      // Audio from before the timeline's start is cut, as a stop cuts it:
+      // kept, the take sat late by it.
+      final cutBytes = aligned < 0 ? -aligned * 48 * 2 : 0; // 16-bit mono
+      expect(await File(clip.audioFilePath).length(), bytes.length - cutBytes);
     }
   });
+
+  test('a take whose cut was noted is not cut again', () async {
+    // The start the cut leaves is written before the cut: a crash after it
+    // left the arm's negative estimate beside a cut file, and the next
+    // recovery cut it a second time.
+    final practice = await createPractice();
+    await stageOrphan(practice.id, monoWav(4800));
+    await persistence.recoverStagedRecordings(analyze: fakeAnalyze);
+    final first = (await reload(practice.id)).vocalTracks.single;
+    final bytes = monoWav(48000, gain: 0.25);
+    final staged = await stageOrphan(
+      practice.id,
+      bytes,
+      name: '${newId()}~${first.id}~0.wav',
+    );
+    // As a stop (or an earlier recovery) leaves it once its cut is noted.
+    await AudioFileService.writeAlignedStartTo(staged.path, 0);
+    expect(await persistence.recoverStagedRecordings(analyze: fakeAnalyze), 1);
+    final clip = (await reload(practice.id)).vocalTracks.last.primaryClip!;
+    expect(clip.startMs, 0);
+    expect(await File(clip.audioFilePath).length(), bytes.length);
+  });
+
+  test('a recovered take is numbered among the takes of the interpretation '
+      'it joins', () async {
+    // Numbered among those on screen, it could repeat a number of its own
+    // interpretation's.
+    var practice = await createPractice();
+    final other = TakeVersion(
+      id: newId(),
+      name: 'Other',
+      createdAt: DateTime(2026),
+    );
+    final existing = File(p.join(root.path, 'existing.wav'));
+    await existing.writeAsBytes(monoWav(1200, gain: 0.3), flush: true);
+    AudioTrack take(String name, String? versionId) => AudioTrack(
+      id: newId(),
+      kind: AudioTrackKind.vocal,
+      displayName: name,
+      audioFilePath: existing.path,
+      durationMs: 100,
+      createdAt: DateTime.now(),
+      versionId: versionId,
+    );
+    final punchedInto = take('Take 1', other.id);
+    final saved = await persistence.songRepo.savePractice(
+      practice.copyWith(
+        versions: [...practice.versions, other],
+        vocalTracks: [
+          take('Take 1', practice.activeVersionId),
+          take('Take 2', practice.activeVersionId),
+          take('Take 3', practice.activeVersionId),
+          punchedInto,
+        ],
+      ),
+    );
+    practice = (saved as Ok<SongPractice>).value;
+
+    await stageOrphan(
+      practice.id,
+      monoWav(4800),
+      name: '${newId()}~${punchedInto.id}~500.wav',
+    );
+    expect(await persistence.recoverStagedRecordings(analyze: fakeAnalyze), 1);
+    final recovered = (await reload(practice.id)).vocalTracks.last;
+    expect(recovered.versionId, other.id);
+    expect(recovered.displayName, 'Take 2 (recovered)');
+  });
+
+  test(
+    'takes that crashed into one empty lane: the earliest fills it',
+    () async {
+      final practice = await createPractice();
+      final loaded =
+          (await persistence.songRepo.loadPractice(practice.id))
+              as Ok<Loaded<SongPractice>>;
+      final empty = AudioTrack(
+        id: newId(),
+        kind: AudioTrackKind.vocal,
+        displayName: 'Take 1',
+        createdAt: DateTime(2026),
+        versionId: loaded.value.aggregate.activeVersion?.id,
+      );
+      await persistence.songRepo.savePracticeWithBase(
+        loaded.value.aggregate.copyWith(vocalTracks: [empty]),
+        baseHashes: loaded.value.baseHashes,
+      );
+      // Named in time order (ULIDs), staged newest first; the directory
+      // lists them in an order of its own.
+      final names = [
+        for (var i = 0; i < 8; i++)
+          '${newId()}~${empty.id}~${1000 * (i + 1)}.wav',
+      ];
+      for (final (i, name) in names.reversed.indexed) {
+        await stageOrphan(
+          practice.id,
+          monoWav(4800, gain: 0.1 + i * 0.05),
+          name: name,
+        );
+      }
+
+      expect(
+        await persistence.recoverStagedRecordings(analyze: fakeAnalyze),
+        8,
+      );
+      final after = await reload(practice.id);
+      final filled = after.vocalTracks.singleWhere((t) => t.id == empty.id);
+      expect(filled.primaryClip!.startMs, 1000);
+    },
+  );
 
   test('a crashed take over a take with audio comes back as a lane of its '
       'own, where it was recorded', () async {

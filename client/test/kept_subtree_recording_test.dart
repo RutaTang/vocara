@@ -99,7 +99,7 @@ class _FakeFiles extends Fake implements AudioFileService {
   }) async => '/audio/p1/rec${recordings++}.wav';
 
   @override
-  Future<void> writeAlignedStart(String path, int startMs) async {}
+  Future<bool> writeAlignedStart(String path, int startMs) async => true;
 
   @override
   Future<String> importAudio({

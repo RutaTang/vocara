@@ -13,6 +13,7 @@ import '../../utils/id.dart';
 import '../../utils/result.dart';
 import '../repositories/song_practice_repository_drift.dart';
 import '../repositories/technique_repository_drift.dart';
+import '../services/audio_edit_service.dart' show trimWavHeadInPlace;
 import '../services/audio_file_service.dart';
 import '../services/diagnostics_log.dart';
 import '../services/local_storage_service.dart';
@@ -679,6 +680,12 @@ class Persistence {
         candidates.add((practiceId: practiceId, file: f));
       }
     }
+    // Oldest first (names start with a ULID, which sorts by time): two takes
+    // that crashed into the same empty lane left it to the directory's order
+    // which filled it, and the later take could take the earlier's place.
+    candidates.sort(
+      (a, b) => p.basename(a.file.path).compareTo(p.basename(b.file.path)),
+    );
     // Every staged take is hashed before it can be judged, and a graceful
     // stop leaves each of the last session's takes here for the sweep, so
     // this boot pass re-reads all of them before the window shows. Hash them
@@ -866,12 +873,27 @@ class Persistence {
     final into = placed == null
         ? null
         : practice.vocalTracks.where((t) => t.id == placed.takeId).firstOrNull;
+    var startMs = placed?.startMs ?? 0;
+    if (startMs < 0) {
+      // Audio from before the timeline's start (a take from the top, whose
+      // stop never ran to cut it): cut here, as the stop would have, or it sat
+      // late by it. The start the cut leaves is noted first (see
+      // [AudioFileService.writeAlignedStart]), so no later boot cuts it twice.
+      if (await AudioFileService.writeAlignedStartTo(file.path, 0)) {
+        try {
+          await trimWavHeadInPlace(file.path, -startMs);
+        } catch (_) {
+          // Kept whole: placed at 0, late by the uncut head.
+        }
+      }
+      startMs = 0;
+    }
     final analysis = await analyze(file.path);
     final clip = AudioClip(
       id: newId(),
       audioFilePath: file.path,
       durationMs: analysis.durationMs,
-      startMs: placed?.startMs ?? 0,
+      startMs: startMs,
       waveformPeaks: analysis.peaks,
     );
     final List<AudioTrack> vocalTracks;
@@ -894,7 +916,10 @@ class Persistence {
         AudioTrack(
           id: newId(),
           kind: AudioTrackKind.vocal,
-          displayName: 'Take ${practice.nextTakeNumber} (recovered)',
+          // Numbered among the takes of the interpretation it joins, not of
+          // the one on screen.
+          displayName:
+              'Take ${(into == null ? practice : practice.copyWith(activeVersionId: into.versionId)).nextTakeNumber} (recovered)',
           clips: [clip],
           createdAt: DateTime.now(),
           versionId: into?.versionId ?? practice.activeVersion?.id,

@@ -109,8 +109,10 @@ class _FakeFiles extends Fake implements AudioFileService {
   final alignedStarts = <String, int>{};
 
   @override
-  Future<void> writeAlignedStart(String path, int startMs) async =>
-      alignedStarts[path] = startMs;
+  Future<bool> writeAlignedStart(String path, int startMs) async {
+    alignedStarts[path] = startMs;
+    return true;
+  }
 
   @override
   Future<void> deleteAudio(String path) async {}
@@ -484,6 +486,26 @@ void main() {
     expect(files.placements, [('t1', 2500)]);
     expect(files.alignedStarts.values, [2500 - 200 - 30]);
     await c.stopRecording();
+  });
+
+  test('a stop notes the start its cut leaves before it cuts', () async {
+    // A take whose save then failed is recovered at boot: still reading the
+    // arm's negative estimate, it was cut a second time.
+    final graph = _FakeGraph()
+      ..writtenFrames =
+          9600 // 200 ms of pre-roll at 48 kHz
+      ..latencyMs = 30;
+    final c = build(_FakeMic(), graph: graph);
+    addTearDown(c.dispose);
+    playback.position.value = const Duration(milliseconds: 100);
+    final start = c.startRecording();
+    await pumpUntil(() => mixer.gates.isNotEmpty);
+    mixer.gates.single.complete();
+    await start;
+    await pumpUntil(() => files.alignedStarts.isNotEmpty);
+    expect(files.alignedStarts.values, [100 - 200 - 30]);
+    await c.stopRecording();
+    expect(files.alignedStarts.values, [0]);
   });
 
   test('happy-path ABA: take A\'s continuation parked across A\'s stop and '

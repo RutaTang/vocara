@@ -538,12 +538,17 @@ class RecordingController extends ChangeNotifier {
         // Truncated to whole ms here, every take sat up to 1 ms late.
         if (pre > 0) _recordingPreRollMs = pre * 1000 / 48000;
         // Where a stop will place it, for a crash's recovery to place it by.
-        await _audioFiles.writeAlignedStart(
-          r.path!,
-          (_recordingStartMs -
-                  _recordingPreRollMs -
-                  engineNow.recordLatencyMs())
-              .round(),
+        // Not awaited: this start is done here, and held open on a slow disk
+        // it outlived its take, clearing its flags as it returned under the
+        // next take's arm.
+        unawaited(
+          _audioFiles.writeAlignedStart(
+            r.path!,
+            (_recordingStartMs -
+                    _recordingPreRollMs -
+                    engineNow.recordLatencyMs())
+                .round(),
+          ),
         );
       }
     } catch (e) {
@@ -683,10 +688,20 @@ class RecordingController extends ChangeNotifier {
     final rawStartMs = (_recordingStartMs - _recordingPreRollMs - latencyMs)
         .round();
     var startMs = rawStartMs;
+    // Noted beside the take before any cut, as the start the cut leaves (see
+    // AudioFileService.writeAlignedStart): a take whose save then fails is
+    // recovered at boot, and still read the arm's estimate — negative, so it
+    // was cut a second time.
+    final noted = await _audioFiles.writeAlignedStart(
+      path,
+      math.max(0, rawStartMs),
+    );
     if (rawStartMs < 0) {
       startMs = 0;
       try {
-        await trimWavHeadInPlace(path, -rawStartMs);
+        // Not without the note: the arm's negative estimate beside a cut
+        // file is a second cut at recovery.
+        if (noted) await trimWavHeadInPlace(path, -rawStartMs);
       } catch (_) {
         // Best-effort: a take that can't be trimmed (unparseable partial after
         // an IO error) keeps its head and sits late by the untrimmed amount —

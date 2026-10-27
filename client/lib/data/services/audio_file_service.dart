@@ -1,5 +1,4 @@
 import 'dart:io';
-import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:path/path.dart' as p;
@@ -174,7 +173,9 @@ class AudioFileService {
   /// The lane and timeline position a recording at [path] was made for, as
   /// [newRecordingPath] named it — or, once the take's backing started, as
   /// [writeAlignedStart] put it beside it; null for any other name (one from
-  /// a build before it did, or not a recording).
+  /// a build before it did, or not a recording). The start is negative when
+  /// the take's audio begins before the timeline does: that much of the
+  /// file's head is still to be cut (see [writeAlignedStart]).
   static Future<({String takeId, int startMs})?> recordingPlacementOf(
     String path,
   ) async {
@@ -189,19 +190,32 @@ class AudioFileService {
     } catch (_) {
       // Unreadable: placed at REC instead, late by the arm and the latency.
     }
-    return (takeId: parts[1], startMs: math.max(0, aligned ?? startMs));
+    return (takeId: parts[1], startMs: aligned ?? startMs);
   }
 
   /// Records beside the take at [path] where its audio starts on the
-  /// timeline once its backing has started: the playhead at REC less the
+  /// timeline: once its backing has started, the playhead at REC less the
   /// file's head recorded before the backing rolled and the input latency —
-  /// where a stop would place it. The name holds only the playhead at REC,
-  /// so a take recovered by it alone sat late by both. Best effort.
-  Future<void> writeAlignedStart(String path, int startMs) async {
+  /// where a stop would place it; and from the stop on, where it did. The
+  /// name holds only the playhead at REC, so a take recovered by it alone
+  /// sat late by both.
+  ///
+  /// A negative start says the file's head is still to be cut. Whoever cuts
+  /// it writes the start it leaves FIRST, and cuts only once that write is
+  /// on disk: the other way round, a crash in between left a cut file still
+  /// saying to cut, and the next recovery cut it again. Answers whether the
+  /// write landed; best effort otherwise.
+  Future<bool> writeAlignedStart(String path, int startMs) =>
+      writeAlignedStartTo(path, startMs);
+
+  /// [writeAlignedStart] for callers without a service (boot recovery).
+  static Future<bool> writeAlignedStartTo(String path, int startMs) async {
     try {
       await File(_alignedStartOf(path)).writeAsString('$startMs', flush: true);
+      return true;
     } catch (_) {
       // Recovery falls back to the playhead at REC.
+      return false;
     }
   }
 
