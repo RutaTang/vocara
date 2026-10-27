@@ -109,9 +109,17 @@ class _Recorder extends Fake implements MicRecordingController {
   bool get isStarting => starting;
   @override
   bool get feedingMonitor => false;
+
+  /// When set, a start throws (the take's temp folder could not be made).
+  bool throwOnStart = false;
   @override
   Future<MicRecordingStart> start(RecordingPathStrategy destination) async {
     starting = true;
+    if (throwOnStart) {
+      await Future<void>.delayed(Duration.zero);
+      starting = false;
+      throw const FileSystemException('createTemp failed');
+    }
     if (park) {
       final r = await (pending = Completer<MicRecordingStart>()).future;
       starting = false;
@@ -238,7 +246,8 @@ void main() {
     final staged = vm.effectiveMedia.single;
 
     expect(await vm.save(vm.technique!.copyWith(summary: 'typed')), isFalse);
-    await vm.discardMediaDraft();
+    // Held off, and says so: the screen keeps the edit open on the draft.
+    expect(await vm.discardMediaDraft(), isFalse);
     expect(repo.baseSaves, 1, reason: 'no second commit');
     expect(File(staged.path).existsSync(), isTrue);
 
@@ -288,4 +297,24 @@ void main() {
     expect(await vm.save(vm.technique!), isTrue);
     expect(vm.isUnsavedMedia(vm.technique!.media.single.id), isFalse);
   });
+
+  test(
+    'a practice start that throws is said as a failure, the button let go',
+    () async {
+      // Nothing was told after the throw: the button stayed on "Starting the
+      // microphone…", disabled, and the error went unhandled.
+      final (vm, repo, rec, remote) = await make();
+      addTearDown(remote.close);
+      addTearDown(vm.dispose);
+      rec.throwOnStart = true;
+      final seen = <bool>[];
+      vm.addListener(() => seen.add(vm.startingPractice));
+      expect(
+        await vm.startPractice(),
+        "Couldn't create the recording file. Check your free disk space.",
+      );
+      expect(seen.last, isFalse);
+      expect(vm.canRecordPractice, isTrue);
+    },
+  );
 }

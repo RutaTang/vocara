@@ -149,7 +149,10 @@ class _TechniqueDetailScreenState extends State<TechniqueDetailScreen> {
         // session down mid-copy.
         vm.importingMedia;
     if (dirty && !await _confirmDiscard()) return;
-    await vm.discardMediaDraft();
+    // Held off by a save that began while the dialog was open (a quit
+    // committing the example): the edit stays open on the draft, as Cancel
+    // is not offered during a save.
+    if (!await vm.discardMediaDraft()) return;
     _disposeForm();
     if (mounted) setState(() => _editing = false);
   }

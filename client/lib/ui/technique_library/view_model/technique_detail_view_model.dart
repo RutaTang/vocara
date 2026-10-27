@@ -414,14 +414,16 @@ class TechniqueDetailViewModel extends ChangeNotifier
   }
 
   /// Drops the media draft and deletes any files copied for staged additions
-  /// (they were never committed). Called when an edit is cancelled.
-  Future<void> discardMediaDraft() async {
+  /// (they were never committed). Called when an edit is cancelled. Answers
+  /// whether it ran: a save in flight holds it off, and the edit must then
+  /// stay open — closed, the draft lived on in the read view.
+  Future<bool> discardMediaDraft() async {
     // Never during an in-flight save: the commit is persisting rows for the
     // exact files this would delete (the screen disables Cancel while saving,
     // but this method is callable directly). The save's own success path
     // clears the draft; its failure path leaves the edit session — and this
     // draft — alive for the user to retry or cancel.
-    if (_saving) return;
+    if (_saving) return false;
     // Invalidate any in-flight import: a clip that finishes copying after this
     // must be treated as an orphan (deleted), not appended to the now-cleared
     // draft (which would strand its file and show a phantom clip in the read view).
@@ -456,6 +458,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
     }
     _fixSelectionAfterMediaChange(referenceBefore);
     notifyListeners();
+    return true;
   }
 
   // --- Reference analysis (ground truth) -----------------------------------
@@ -865,7 +868,24 @@ class TechniqueDetailViewModel extends ChangeNotifier
     _micArmed.fire();
     final pending = _recorder.start(destination);
     notifyListeners();
-    final r = await pending;
+    final MicRecordingStart r;
+    try {
+      r = await pending;
+    } catch (e) {
+      // Thrown rather than answered (the take's temp folder could not be made,
+      // the engine would not open): told nothing, the screen kept showing the
+      // start pending, its button disabled. Said as the failure it is.
+      DiagnosticsLog.instance.log(
+        'technique',
+        'recording start threw: ${e.runtimeType}',
+      );
+      _busyEnded();
+      return MicRecordingStart.failed(
+        e is FileSystemException
+            ? MicRecordingFailure.fileCreateFailed
+            : MicRecordingFailure.engineUnavailable,
+      );
+    }
     // A remote change held off while it pended is owed now, as after a
     // failed import (see [_busyEnded]): left, the page kept the old text,
     // and an edit seeded from it saved over the change.
@@ -1788,14 +1808,14 @@ class TechniqueDetailViewModel extends ChangeNotifier
     notifyListeners();
   }
 
-  /// Removes one example clip. A staged (not-yet-saved) addition is dropped and
-  /// its file deleted now; a persisted example is staged for removal (its file
-  /// is deleted on save).
   /// Whether example [mediaId] was added in this edit and not saved yet:
   /// removing it deletes it at once (see [removeMedia]), with nothing for
   /// Cancel to bring back.
   bool isUnsavedMedia(String mediaId) => _draftAdds.any((m) => m.id == mediaId);
 
+  /// Removes one example clip. A staged (not-yet-saved) addition is dropped and
+  /// its file deleted now; a persisted example is staged for removal (its file
+  /// is deleted on save).
   Future<void> removeMedia(String mediaId) async {
     // In-flight-save invariant (backstop behind the disabled UI): a removal
     // staged now is invisible to the airborne commit and gets cleared with
