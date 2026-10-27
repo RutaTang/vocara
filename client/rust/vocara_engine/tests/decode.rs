@@ -1,7 +1,7 @@
 //! File decode against what the file holds, not only what its container says.
 #![cfg(feature = "device")]
 
-use vocara_engine::device::decode_file;
+use vocara_engine::device::{decode_file, probe_duration_ms};
 
 /// Zero-crossing pitch of the left channel, skipping 0.25 s at each end (encoder priming).
 fn tone_hz(frames: &[[f32; 2]], rate: u32) -> f64 {
@@ -73,6 +73,44 @@ fn two_mp3s_joined_end_to_end_decode_whole() {
     let (frames, _) = decode_file(&path, 0.0, 0, 0).unwrap();
     let _ = std::fs::remove_file(&path);
     assert!(frames.len() > 88_000, "{} frames", frames.len());
+}
+
+#[test]
+fn two_ogg_links_each_lose_only_their_own_edges() {
+    // Chained end to end, as joined files are: the first link's end trim stayed mid-file
+    // (the second link starting late) and was cut from the second link's end instead of
+    // its own.
+    let read = |name: &str| {
+        std::fs::read(format!(
+            "{}/tests/fixtures/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap()
+    };
+    let joined = [read("link_2000ms.ogg"), read("link_1500ms.ogg")].concat();
+    let path = temp_file("chain.ogg", &joined);
+    let (frames, rate) = decode_file(&path, 0.0, 0, 0).unwrap();
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(rate, 44_100);
+    assert!(
+        frames.len().abs_diff(154_350) < 200,
+        "{} frames",
+        frames.len()
+    );
+}
+
+#[test]
+fn a_file_the_probe_admits_at_the_cap_decodes_under_it() {
+    // 1 s once its encoder delay and padding are trimmed, 1.045 s with them: the probe
+    // reported the trimmed length and the decode judged the untrimmed one, refusing as too
+    // long what the import gate had admitted.
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/onset_0500ms.mp3"
+    );
+    assert_eq!(probe_duration_ms(path).unwrap(), Some(1000));
+    let (frames, _) = decode_file(path, 1.0, 0, 0).unwrap();
+    assert_eq!(frames.len(), 44_100);
 }
 
 /// 2 s of a 440 Hz mono 16-bit tone at 44.1 kHz.

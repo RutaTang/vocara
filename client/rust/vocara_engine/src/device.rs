@@ -4100,7 +4100,9 @@ pub fn decode_file(
         .default_track()
         .ok_or_else(|| err("no default track".to_string()))?;
     let track_id = track.id;
-    let (mut skip, padding) = edge_trim(&track.codec_params);
+    // Per link of a chained stream: each brings its own (see the reset below).
+    let (mut skip, mut padding) = edge_trim(&track.codec_params);
+    let mut link_start = 0usize;
     let src_rate = track.codec_params.sample_rate.unwrap_or(44_100);
     // Absolute source-rate envelope, independent of any caller ceiling. The FLOOR is a
     // memory/CPU bound, not taste: resampling a 1 Hz source to 48 kHz is a 48000x ratio,
@@ -4146,7 +4148,13 @@ pub fn decode_file(
     // length fits, pre-size the Vec so packet pushes never realloc-copy the whole track
     // (the count is clamped by the budget first — a lying header must not drive a huge
     // allocation on its own).
-    let mut out: Vec<[Smp; CHANNELS]> = match track.codec_params.n_frames {
+    // Judged as trimmed, as probe_duration_ms reports it: untrimmed, a file the import gate
+    // admitted within a few ms of the cap was refused here.
+    let mut out: Vec<[Smp; CHANNELS]> = match track
+        .codec_params
+        .n_frames
+        .map(|n| n.saturating_sub(skip.saturating_add(padding)))
+    {
         Some(n) if n > max_frames => return Err(budget_err(n, duration_frames)),
         Some(n) => Vec::with_capacity(n.min(max_frames) as usize),
         None => Vec::new(),
@@ -4192,6 +4200,13 @@ pub fn decode_file(
                     )));
                 }
                 track_id = track.id;
+                // The finished link's padding goes from its own end, never into an
+                // earlier link, and the next link brings its own: kept, the first
+                // link's tail sat mid-file and the second's was never cut.
+                let kept = (out.len() as u64).saturating_sub(padding);
+                out.truncate(kept.max(link_start as u64) as usize);
+                (skip, padding) = edge_trim(&track.codec_params);
+                link_start = out.len();
                 decoder = symphonia::default::get_codecs()
                     .make(&track.codec_params, &DecoderOptions::default())
                     .map_err(|e| err(format!("make decoder after reset: {e}")))?;
@@ -4255,15 +4270,20 @@ pub fn decode_file(
         // (a plain doubling push could hold up to 2x the cap in capacity — a 173M-frame
         // budget transiently backed by a 268M-frame allocation). Containers without a
         // declared frame count (e.g. plain mp3) are bounded exactly the same way,
-        // packet by packet.
-        let needed = out.len() + packet_frames;
-        if needed as u64 > max_frames {
-            return Err(budget_err(needed as u64, duration_frames));
+        // packet by packet. Judged as trimmed: the delay is never pushed, and the
+        // padding, cut only once its link ends, may sit past the budget meanwhile.
+        let needed = out.len() + (packet_frames as u64).saturating_sub(skip) as usize;
+        let budget = max_frames.saturating_add(padding);
+        if needed as u64 > budget {
+            return Err(budget_err(
+                (needed as u64).saturating_sub(padding),
+                duration_frames,
+            ));
         }
         if needed > out.capacity() {
             // Amortized geometric growth, capped at the budget so capacity can never
             // exceed what the budget promised the caller.
-            let cap_limit = max_frames.min(usize::MAX as u64) as usize;
+            let cap_limit = budget.min(usize::MAX as u64) as usize;
             let target = out
                 .capacity()
                 .max(4096)
@@ -4286,9 +4306,11 @@ pub fn decode_file(
             out.push([scrub_sample(l), scrub_sample(r)]);
         }
     }
-    // From the end of what decoded, not where the header says the stream ends.
-    if let Some(kept) = (out.len() as u64).checked_sub(padding).filter(|&k| k > 0) {
-        out.truncate(kept as usize);
+    // From the end of what decoded, not where the header says the stream ends, and never
+    // into an earlier link.
+    let kept = (out.len() as u64).saturating_sub(padding);
+    if kept > 0 {
+        out.truncate(kept.max(link_start as u64) as usize);
     }
     if out.is_empty() {
         return Err(err(format!(
