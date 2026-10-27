@@ -15,6 +15,8 @@ pub mod feed;
 pub mod graph;
 pub mod graph_cell;
 pub mod live;
+// The pre-decode file screen: no external crates, so it builds and tests without `device`.
+pub mod media_screen;
 pub mod node;
 pub mod ring;
 pub mod ring_sync;

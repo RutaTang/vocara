@@ -113,23 +113,25 @@ fn a_file_the_probe_admits_at_the_cap_decodes_under_it() {
     assert_eq!(frames.len(), 44_100);
 }
 
+/// The Ogg page checksum of [bytes] (a page with its checksum field zeroed).
+fn ogg_crc(bytes: &[u8]) -> u32 {
+    let mut c: u32 = 0;
+    for &b in bytes {
+        c ^= (b as u32) << 24;
+        for _ in 0..8 {
+            c = if c & 0x8000_0000 != 0 {
+                (c << 1) ^ 0x04C1_1DB7
+            } else {
+                c << 1
+            };
+        }
+    }
+    c
+}
+
 /// [ogg] with the granule position of its second-to-last page set to [granule] (and that
 /// page's checksum redone), as a crafted file sets it.
 fn with_granule_before_last(ogg: &[u8], granule: i64) -> Vec<u8> {
-    let crc = |bytes: &[u8]| {
-        let mut c: u32 = 0;
-        for &b in bytes {
-            c ^= (b as u32) << 24;
-            for _ in 0..8 {
-                c = if c & 0x8000_0000 != 0 {
-                    (c << 1) ^ 0x04C1_1DB7
-                } else {
-                    c << 1
-                };
-            }
-        }
-        c
-    };
     let mut pages = Vec::new();
     let mut at = 0;
     while at < ogg.len() {
@@ -146,7 +148,7 @@ fn with_granule_before_last(ogg: &[u8], granule: i64) -> Vec<u8> {
     let mut out = ogg.to_vec();
     out[page + 6..page + 14].copy_from_slice(&granule.to_le_bytes());
     out[page + 22..page + 26].copy_from_slice(&[0; 4]);
-    let sum = crc(&out[page..page + len]);
+    let sum = ogg_crc(&out[page..page + len]);
     out[page + 22..page + 26].copy_from_slice(&sum.to_le_bytes());
     out
 }
@@ -220,6 +222,86 @@ fn a_crafted_packet_size_is_refused_before_the_decoder_sizes_it() {
         let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
         assert!(decode_file(&path, 0.0, 0, 0).is_ok(), "{name}");
     }
+}
+
+#[test]
+fn a_table_declaring_more_than_the_file_holds_is_refused_before_the_probe() {
+    // The reader reserves a whole sample table from its entry count, during the probe and before
+    // reading a single entry: 4 billion entries asked for 16 to 64 GB and aborted the app, the
+    // import gate included, since it probes too.
+    for (name, bytes) in [
+        // Chunk offsets, and sample durations: the count follows the version and flags.
+        (
+            "stco.mov",
+            with_u32_after("lpcm_96k_20ms.mov", b"stco", 0, 8, u32::MAX),
+        ),
+        (
+            "stts.mov",
+            with_u32_after("lpcm_96k_20ms.mov", b"stts", 0, 8, u32::MAX),
+        ),
+        // Sample sizes (a table here, with no constant size ahead of the count).
+        (
+            "stsz.m4a",
+            with_u32_after("alac_100ms.m4a", b"stsz", 0, 12, u32::MAX),
+        ),
+        (
+            "stsc.m4a",
+            with_u32_after("alac_100ms.m4a", b"stsc", 0, 8, u32::MAX),
+        ),
+        // The encoder tag's data atom, read whole into a buffer of its declared size.
+        (
+            "tag.m4a",
+            with_u32_after("alac_100ms.m4a", b"\xa9too", 0, 4, u32::MAX),
+        ),
+    ] {
+        let path = temp_file(name, &bytes);
+        let probed = probe_duration_ms(&path);
+        let decoded = decode_file(&path, 0.0, 0, 0);
+        let _ = std::fs::remove_file(&path);
+        assert!(probed.is_err(), "{name}: probe {probed:?}");
+        assert!(
+            matches!(decoded, Err(vocara_engine::device::DecodeError::TooBig)),
+            "{name}: {:?}",
+            decoded.map(|d| d.0.len())
+        );
+    }
+    // Untouched, both probe and decode.
+    for name in ["lpcm_96k_20ms.mov", "alac_100ms.m4a"] {
+        let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
+        assert!(probe_duration_ms(&path).is_ok(), "{name}");
+        assert!(decode_file(&path, 0.0, 0, 0).is_ok(), "{name}");
+    }
+}
+
+#[test]
+fn an_ogg_comment_longer_than_its_packet_is_refused() {
+    // Each comment's buffer is reserved from its length before it is read. The fixture's one
+    // comment (the encoder's) has its length 28 bytes into the comment packet, on page 2.
+    let mut ogg = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/link_2000ms.ogg"
+    ))
+    .unwrap();
+    let page = 58;
+    let body = page + 27 + ogg[page + 26] as usize;
+    ogg[body + 28..body + 32].copy_from_slice(&u32::MAX.to_le_bytes());
+    let len = body - page
+        + ogg[page + 27..body]
+            .iter()
+            .map(|&s| s as usize)
+            .sum::<usize>();
+    ogg[page + 22..page + 26].copy_from_slice(&[0; 4]);
+    let sum = ogg_crc(&ogg[page..page + len]);
+    ogg[page + 22..page + 26].copy_from_slice(&sum.to_le_bytes());
+    let path = temp_file("comment.ogg", &ogg);
+    let probed = probe_duration_ms(&path);
+    let decoded = decode_file(&path, 0.0, 0, 0);
+    let _ = std::fs::remove_file(&path);
+    assert!(probed.is_err(), "probe {probed:?}");
+    assert!(matches!(
+        decoded,
+        Err(vocara_engine::device::DecodeError::TooBig)
+    ));
 }
 
 /// 2 s of a 440 Hz mono 16-bit tone at 44.1 kHz.

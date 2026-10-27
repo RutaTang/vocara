@@ -4006,7 +4006,10 @@ pub fn probe_duration_ms(path: &str) -> Result<Option<u64>, String> {
     use symphonia::core::meta::MetadataOptions;
     use symphonia::core::probe::Hint;
 
-    let file = std::fs::File::open(path).map_err(|e| format!("open {path}: {e}"))?;
+    let mut file = std::fs::File::open(path).map_err(|e| format!("open {path}: {e}"))?;
+    // The probe itself sizes allocations by what the file declares (see media_screen), so this
+    // gate is only a gate once the file has been screened.
+    crate::media_screen::screen(&mut file).map_err(|e| format!("screen {path}: {e}"))?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
     let mut hint = Hint::new();
     if let Some(ext) = std::path::Path::new(path)
@@ -4051,7 +4054,9 @@ pub enum DecodeError {
     /// The audio exceeds a caller's MEMORY budget (source-rate ceiling or
     /// absolute source-frame cap) without being over-duration — a short but
     /// extremely dense file. Distinct from [`DecodeError::TooLong`] so the UI
-    /// can say what is actually wrong.
+    /// can say what is actually wrong. Also a file whose container declares a
+    /// packet, table or tag larger than it could hold, which would be
+    /// allocated before it is read.
     TooBig,
     /// The source sample rate sits outside the supported envelope
     /// ([`MIN_SRC_RATE`], [`MAX_SRC_RATE`]) — no real recording, refused
@@ -4097,7 +4102,7 @@ pub fn decode_file(
     use symphonia::core::probe::Hint;
 
     let err = |m: String| DecodeError::Other(m);
-    let file =
+    let mut file =
         std::fs::File::open(path).map_err(|e| DecodeError::Io(format!("open {path}: {e}")))?;
 
     // WAV pre-sniff BEFORE symphonia sees the bytes: a zero sample rate makes symphonia's
@@ -4109,6 +4114,15 @@ pub fn decode_file(
     if let Ok(Some(rate)) = sniff_wav_sample_rate(path) {
         if !(MIN_SRC_RATE..=MAX_SRC_RATE).contains(&rate) {
             return Err(DecodeError::RateUnsupported);
+        }
+    }
+    // A sample table, packet table or tag that declares more than the file holds: symphonia
+    // reserves it whole during the probe, and failing to allocate aborts the app.
+    match crate::media_screen::screen(&mut file) {
+        Ok(()) => {}
+        Err(crate::media_screen::Refusal::Impossible(_)) => return Err(DecodeError::TooBig),
+        Err(crate::media_screen::Refusal::Io(e)) => {
+            return Err(DecodeError::Io(format!("read {path}: {e}")))
         }
     }
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
