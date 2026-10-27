@@ -25,7 +25,38 @@ const _windowChannel = MethodChannel('vocara/window');
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Diagnostics first: from here on, every uncaught Flutter/platform error is
+  // The red close button is only one quit path: Cmd+Q, the app-menu Quit, a
+  // Dock quit and logout all go through NSApplication.terminate:, which never
+  // reaches the window-close listener below. FlutterAppDelegate implements
+  // macOS's cancellable-termination flow (applicationShouldTerminate defers the
+  // terminate and asks the framework), so this exit request fires on all of
+  // those paths — including windowManager.destroy(), which also calls
+  // terminate. Finalize any in-flight recording, then allow the exit.
+  // Force-quit / kill -9 is not interceptable, but the recording WAV's header
+  // is patched in place every ~1 s while recording, and the next boot recovers
+  // the orphaned take (Persistence.recoverStagedRecordings) instead of
+  // sweeping it.
+  //
+  // Installed before the first await: the binding takes quit requests from
+  // ensureInitialized on, and a Quit answered with no guard in place never
+  // reports "exitApproved", so AppDelegate held every Quit after it for 65 s.
+  _exitGuard = AppLifecycleListener(
+    onExitRequested: () async {
+      // Kill any in-flight separation sidecar first (synchronous SIGKILL):
+      // it is a child process that macOS reparents rather than kills on app
+      // exit, so without this it would keep burning CPU/RAM for minutes.
+      // Its orphaned .tmp output is swept on the next launch.
+      try {
+        SeparationQuitGuard.instance.killAll();
+        await RecordingFinalizer.instance.finalizeAll();
+      } finally {
+        await _approveExit();
+      }
+      return AppExitResponse.exit;
+    },
+  );
+
+  // Diagnostics next: from here on, every uncaught Flutter/platform error is
   // appended to the rotating on-disk log (then forwarded to the default
   // handlers), so a field failure leaves a trace exportArchive can bundle.
   await DiagnosticsLog.instance.attachGlobalHooks();
@@ -56,33 +87,6 @@ Future<void> main() async {
   } catch (e) {
     DiagnosticsLog.instance.log('boot', 'window setup failed: $e');
   }
-  // The red close button is only one quit path: Cmd+Q, the app-menu Quit, a
-  // Dock quit and logout all go through NSApplication.terminate:, which never
-  // reaches the window-close listener above. FlutterAppDelegate implements
-  // macOS's cancellable-termination flow (applicationShouldTerminate defers the
-  // terminate and asks the framework), so this exit request fires on all of
-  // those paths — including windowManager.destroy(), which also calls
-  // terminate. Finalize any in-flight recording, then allow the exit.
-  // Force-quit / kill -9 is not interceptable, but the recording WAV's header
-  // is patched in place every ~1 s while recording, and the next boot recovers
-  // the orphaned take (Persistence.recoverStagedRecordings) instead of
-  // sweeping it.
-  _exitGuard = AppLifecycleListener(
-    onExitRequested: () async {
-      // Kill any in-flight separation sidecar first (synchronous SIGKILL):
-      // it is a child process that macOS reparents rather than kills on app
-      // exit, so without this it would keep burning CPU/RAM for minutes.
-      // Its orphaned .tmp output is swept on the next launch.
-      try {
-        SeparationQuitGuard.instance.killAll();
-        await RecordingFinalizer.instance.finalizeAll();
-      } finally {
-        await _approveExit();
-      }
-      return AppExitResponse.exit;
-    },
-  );
-
   // Open the drift/SQLite store (db file, device node id, asset pool) once.
   // A fatal open MUST still end in a visible window: the native window stays
   // transparent until the show call below, so awaiting open() bare would turn
