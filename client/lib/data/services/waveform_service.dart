@@ -108,7 +108,6 @@ class WaveformService {
   /// that much early, a split left a gap over audio that plays, and a loop
   /// over the whole song dropped the tail. The header's count is used only
   /// where it agrees with the decoded one to within that grid.
-  @visibleForTesting
   static Future<int> exactDurationMs(String path, int waveformMs) async {
     try {
       final wav = await AudioFileService.probeWav(File(path));

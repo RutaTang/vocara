@@ -297,6 +297,12 @@ class RecordingController extends ChangeNotifier {
   int _recordingStartMs = 0;
   int get recordingStartMs => _recordingStartMs;
 
+  /// Where the forming take is drawn from: the timeline point its first
+  /// frame plays against, a pre-roll before REC once the backing has started.
+  /// Drawn from REC, it ran that far ahead of the playhead.
+  int get liveTakeStartMs =>
+      _recordingStartMs - (_backingRolling ? _recordingPreRollMs.round() : 0);
+
   /// Monotonic per-take token, bumped when a take's destination is created.
   /// The start continuation captures it and re-checks after every await: a
   /// plain `isRecording` bool is ABA-vulnerable — take A's continuation can
@@ -386,12 +392,17 @@ class RecordingController extends ChangeNotifier {
     recordingPeaks.value = UnmodifiableListView(_recPeaks);
     // The head runs with the backing, which starts a pre-roll after the take
     // does: run from the arm, it led what was heard by that much, and a lyric
-    // stamped or a note added at it mid-take saved that late a time.
-    final heard = _backingRolling
-        ? recordingDurationMs - _recordingPreRollMs.round()
-        : 0;
+    // stamped or a note added at it mid-take saved that late a time. Read
+    // from the frames the take holds, which the pre-roll is counted in: the
+    // clock starts only once the mic reports ready, and steps a tick at a
+    // time, so the head trailed the backing by up to a tick and a poll.
+    final engine = _graphEngine();
+    final heldMs = engine != null
+        ? engine.recordWrittenFrames() * 1000 / 48000
+        : recordingDurationMs.toDouble();
+    final heard = _backingRolling ? heldMs - _recordingPreRollMs : 0.0;
     _playback.setRecordingPosition(
-      Duration(milliseconds: _recordingStartMs + math.max(0, heard)),
+      Duration(milliseconds: _recordingStartMs + math.max(0, heard.round())),
     );
   }
 
@@ -555,6 +566,8 @@ class RecordingController extends ChangeNotifier {
         // Kept fractional: the placement below rounds the whole sum once.
         // Truncated to whole ms here, every take sat up to 1 ms late.
         if (pre > 0) _recordingPreRollMs = pre * 1000 / 48000;
+        // The forming take moves back to where it plays (liveTakeStartMs).
+        notifyListeners();
         // Where a stop will place it, for a crash's recovery to place it by.
         // Not awaited: this start is done here, and held open on a slow disk
         // it outlived its take, clearing its flags as it returned under the

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -247,12 +248,11 @@ class _DeadGraph extends _HandFedGraph {
 /// stream whose take ring grows on every read, so its ready handshake passes
 /// at once and its level timer drives the take's clock.
 class _RollingGraph extends _FakeGraph {
-  _RollingGraph({this.step = 480});
-
-  /// How far the take's ring grows on each read.
-  final int step;
-
   int _written = 0;
+
+  /// The take's ring fills in real time from its arm, plus this many frames.
+  int lead = 0;
+  final Stopwatch _sinceArm = Stopwatch();
 
   @override
   int inputIntentSeq() => 1;
@@ -264,13 +264,22 @@ class _RollingGraph extends _FakeGraph {
   int inputStreamState() => (7 << 1) | 1;
 
   @override
-  int recordWrittenFrames() => _written += step;
+  int recordWrittenFrames() => _written = math.max(
+    _written + 1,
+    _sinceArm.elapsedMicroseconds * 48 ~/ 1000 + lead,
+  );
 
   @override
   int inputFramesReceived() => _written;
 
   @override
-  bool startInputRecording(String path) => true;
+  bool startInputRecording(String path) {
+    _written = 0;
+    _sinceArm
+      ..reset()
+      ..start();
+    return true;
+  }
 
   @override
   bool stopInputRecording() => true;
@@ -912,28 +921,50 @@ void main() {
     );
   });
 
-  test('the playhead runs with the backing, not from the arm', () async {
+  test('the playhead waits at REC until the backing starts', () async {
     // The take rolls from the arm, the backing a pre-roll later: a head run
     // from the arm led what was heard, and a lyric stamped at it mid-take
     // saved that late a time.
-    // Reads 200 ms apart: the pre-roll the take measures is long.
-    final c = build(null, graph: _RollingGraph(step: 9600));
+    final c = build(null, graph: _RollingGraph());
+    addTearDown(c.dispose);
+    playback.position.value = const Duration(seconds: 10);
+    final start = c.startRecording();
+    await pumpUntil(() => mixer.gates.isNotEmpty);
+    // The backing is still being set up while the take records.
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    expect(c.recordingDurationMs, greaterThan(0), reason: 'the take ticks');
+    expect(playback.position.value.inMilliseconds, 10000);
+    expect(c.liveTakeStartMs, 10000);
+
+    mixer.gates.single.complete();
+    await start;
+    // Drawn from where its first frame plays, as the stop will place it.
+    final preRoll = 10000 - files.alignedStarts.values.single;
+    expect(preRoll, greaterThanOrEqualTo(300));
+    expect(c.liveTakeStartMs, 10000 - preRoll);
+    await c.stopRecording();
+  });
+
+  test('the playhead follows the frames the take holds', () async {
+    // The clock starts once the mic reports ready and steps a tick at a
+    // time, while the pre-roll is counted in frames from the arm: run by the
+    // clock, the head trailed the backing by the difference.
+    final graph = _RollingGraph();
+    final c = build(null, graph: graph);
     addTearDown(c.dispose);
     playback.position.value = const Duration(seconds: 10);
     final start = c.startRecording();
     await pumpUntil(() => mixer.gates.isNotEmpty);
     mixer.gates.single.complete();
     await start;
-    expect(c.isRecording, isTrue);
-    await Future<void>.delayed(const Duration(milliseconds: 700));
-
-    final head = playback.position.value.inMilliseconds;
-    final clock = c.recordingDurationMs;
-    await c.stopRecording();
-    // Where the take was placed: its pre-roll before the backing's start.
     final preRoll = 10000 - files.alignedStarts.values.single;
-    expect(preRoll, greaterThanOrEqualTo(200));
-    expect(head - 10000, clock - preRoll);
+
+    graph.lead = 48000; // a second the clock never saw
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    final head = playback.position.value.inMilliseconds - 10000;
+    final held = graph.recordWrittenFrames() * 1000 ~/ 48000 - preRoll;
+    await c.stopRecording();
+    expect(head, inInclusiveRange(held - 120, held));
   });
 
   test('monitoring outlasts a mic still warming up', () async {

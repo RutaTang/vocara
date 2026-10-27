@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vocara/data/repositories/song_practice_repository.dart';
 import 'package:vocara/data/repositories/technique_repository.dart';
 import 'package:vocara/data/services/app_settings_service.dart';
+import 'package:vocara/data/services/audio_dsp.dart';
 import 'package:vocara/data/services/audio_edit_service.dart';
 import 'package:vocara/data/services/audio_file_service.dart';
 import 'package:vocara/data/services/graph_audio_playback_service.dart'
@@ -1007,6 +1009,46 @@ void main() {
       expect(first.clips.single.id, isNot(original));
       expect(vm.selectedClipId, first.clips.single.id);
     });
+
+    test(
+      'the bottom take\'s notes follow its audio in the joined file',
+      () async {
+        // The shift was the top clip's stored length, which a clip measured by
+        // an earlier build holds up to 10 ms short of its audio.
+        final dir = Directory.systemTemp.createTempSync('merge_len');
+        addTearDown(() => dir.deleteSync(recursive: true));
+        final topWav = File(
+          '${dir.path}/top.wav',
+        )..writeAsBytesSync(writeWavMono(Float64List(59232), 48000)); // 1234 ms
+        final takes = _mergeableTakes();
+        final vm = await pumpVm(
+          vocalTracks: [
+            takes[0].copyWith(
+              clips: [
+                takes[0].primaryClip!.copyWith(
+                  audioFilePath: topWav.path,
+                  durationMs: 1230,
+                ),
+              ],
+            ),
+            takes[1].copyWith(
+              notes: [
+                PracticeNote(
+                  id: 'n',
+                  positionMs: 100,
+                  content: 'n',
+                  createdAt: DateTime(2026),
+                  updatedAt: DateTime(2026),
+                ),
+              ],
+            ),
+          ],
+        );
+        await vm.mergeTrackDown('top');
+
+        expect(vm.practice!.vocalTracks.single.notes.single.positionMs, 1334);
+      },
+    );
 
     test('merge puts the merged audio in a new clip row, selection and '
         'all', () async {

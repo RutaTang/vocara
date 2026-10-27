@@ -857,7 +857,7 @@ class _Center extends StatelessWidget {
     recordingPeaks: (vm.isRecording && vm.recording.recordTargetId == track.id)
         ? vm.recording.recordingPeaks
         : null,
-    recordingStartMs: vm.recording.recordingStartMs,
+    recordingStartMs: vm.recording.liveTakeStartMs,
     onSelect: () => vm.selectTrack(track.id),
     reorderable: !track.isBacking,
     onSelectClip: (clipId) => vm.selectClip(track.id, clipId),

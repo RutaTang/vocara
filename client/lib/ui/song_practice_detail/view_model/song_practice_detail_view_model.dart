@@ -209,7 +209,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       isRecording: () => recording.isRecording,
       recordingTargetId: () => recording.recordTargetId,
       recordingPeaks: () => recording.recordingPeaks.value,
-      recordingStartMs: () => recording.recordingStartMs,
+      recordingStartMs: () => recording.liveTakeStartMs,
       recordingDurationMs: () => recording.recordingDurationMs,
       position: playback.position,
     );
@@ -2480,6 +2480,13 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         secondPath: bottomClip.audioFilePath,
       );
       final analysisResult = await _waveforms.analyze(mergedPath);
+      // Where the bottom audio now starts in the joined file: the top's true
+      // length, which a clip measured by an earlier build stores up to 10 ms
+      // short (its notes then landed that much early).
+      final topMs = await WaveformService.exactDurationMs(
+        topClip.audioFilePath,
+        topClip.durationMs,
+      );
       // Re-read the LIVE practice and re-find the indices after the concat/
       // analyze awaits (they shift if a take was added meanwhile) so the merge
       // never rebuilds from a stale snapshot and drops a concurrent take.
@@ -2511,7 +2518,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       final liveBottomClip = liveBottom.primaryClip!;
       // Shift the bottom take's markers onto the merged timeline; range markers
       // shift their end by the same delta so the span is preserved.
-      final delta = liveTopClip.endMs - liveBottomClip.startMs;
+      final delta = liveTopClip.startMs + topMs - liveBottomClip.startMs;
       // Fresh ids for the bottom take's notes/markers: the bottom track is tombstoned but
       // its child rows keep these ids, so reusing them on the merged (top) track would
       // collide on insert and roll the save back.
