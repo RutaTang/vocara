@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:drift/drift.dart' hide isNull, isNotNull;
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -790,6 +792,50 @@ void main() {
         );
       },
     );
+
+    test('a CHECK failure is parked unreplayable on a background database '
+        'too, as the live library runs', () async {
+      // There drift hands the SqliteException over wrapped in a
+      // DriftRemoteException: the classifier, matching only the bare type,
+      // parked the failure as replayable apply-failed.
+      final dir = Directory.systemTemp.createTempSync('vocara_applier_bg');
+      addTearDown(() => dir.deleteSync(recursive: true));
+      final bg = AppDatabase(
+        NativeDatabase.createInBackground(File('${dir.path}/lib.sqlite')),
+      );
+      addTearDown(bg.close);
+      final store = QuarantineStore(bg);
+      final onDisk = SyncApplier(
+        bg,
+        HlcClock(node: _id('LOCAL'), now: () => 1000),
+        builder: SyncRowBuilder(bg),
+        quarantine: store,
+      );
+      final h = hlc(1000 + 60 * 1000);
+      final res = await onDisk.apply([
+        RemoteRecord(
+          table: 'assets',
+          columns: {
+            'id': _id('BAD'),
+            'content_hash': 'HASH_BAD',
+            'byte_size': -1, // CHECK (byte_size >= 0) fires in the savepoint
+            'ext': 'wav',
+            'kind': 'audio',
+            'created_at': h.wallMs,
+            'updated_at': h.wallMs,
+            'deleted_at': null,
+            'hlc_wall': h.wallMs,
+            'hlc_ctr': h.counter,
+            'hlc_node': h.node,
+            'hlc_packed': h.packed,
+            'schema_v': 1,
+          },
+        ),
+      ]);
+      expect(res.failed, 1);
+      final parked = await store.list();
+      expect(parked.single.reason, startsWith('invalid-value'));
+    });
 
     test('a door park with an IMPLAUSIBLE stamp still leaves the clock alone '
         '(the drift discipline holds at every gate)', () async {

@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:crypto/crypto.dart';
 import 'package:drift/drift.dart';
+import 'package:drift/remote.dart' show DriftRemoteException;
 import 'package:sqlite3/common.dart' show SqliteException;
 
 import '../db/app_database.dart';
@@ -626,9 +627,14 @@ class SyncApplier {
     // batch can change.
     const constraintCheck = 275;
     const constraintNotNull = 1299;
-    if (e is SqliteException &&
-        (e.extendedResultCode == constraintCheck ||
-            e.extendedResultCode == constraintNotNull)) {
+    // The live library runs on a background isolate, whose errors arrive
+    // wrapped: unwrapped only on an in-memory database (the tests'), the
+    // classifier never matched in the app and parked a CHECK failure as
+    // replayable.
+    final cause = e is DriftRemoteException ? e.remoteCause : e;
+    if (cause is SqliteException &&
+        (cause.extendedResultCode == constraintCheck ||
+            cause.extendedResultCode == constraintNotNull)) {
       return 'invalid-value: $e';
     }
     return 'apply-failed: $e';
