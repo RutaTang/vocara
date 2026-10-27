@@ -127,6 +127,9 @@ void main() {
       ),
       'Twang',
     );
+    // Create enables on the frame after the name lands: a tap before it hits
+    // the disabled button and is dropped.
+    await tester.pump();
     await tester.tap(find.widgetWithText(StudioButton, 'Create'));
 
     // Creating navigates straight into the new technique's detail screen.

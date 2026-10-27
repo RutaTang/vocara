@@ -300,6 +300,9 @@ void main() {
     );
 
     await tester.enterText(find.byType(TextField), 'breath runs out here');
+    // Let the text land in a frame before confirming, so the tap meets the
+    // editor as it stands with the note typed.
+    await tester.pump();
     await tester.tap(find.widgetWithText(StudioButton, 'Add'));
     expect(
       await pumpUntil(
