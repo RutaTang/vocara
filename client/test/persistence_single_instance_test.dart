@@ -470,6 +470,32 @@ void main() {
     await guard.releaseExclusive();
   });
 
+  test('a second instance saving while the first one writes waits its turn '
+      'instead of failing the save', () async {
+    // Two running instances share the library (each holds the lock shared).
+    // Each writes through its own SQLite connection, and with no busy timeout
+    // a write that met the other's open transaction failed at once with
+    // "database is locked": the save reported failed and its edit reverted.
+    await createPracticeAndClose();
+    final first = await boot(guard: LibraryGuard.fixed(exclusive: true));
+    addTearDown(first.db.close);
+    final second = await boot(guard: LibraryGuard.fixed(exclusive: false));
+    addTearDown(second.db.close);
+
+    final writing = Completer<void>();
+    final held = first.db.transaction(() async {
+      await first.db.customStatement(
+        "INSERT INTO sync_state (\"key\", value) VALUES ('probe', 'x')",
+      );
+      writing.complete();
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+    });
+    await writing.future;
+    final saved = await second.songRepo.createPractice('Second');
+    await held;
+    expect(saved, isA<Ok<SongPractice>>(), reason: '$saved');
+  });
+
   test('a non-owner refuses a library whose owner died mid-migration', () async {
     // Its live file may be missing (moved to the backup, the migrated copy not
     // yet in): opened as it stood, that became a new EMPTY library, and the

@@ -6,6 +6,7 @@ import 'package:drift/native.dart';
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:sqlite3/sqlite3.dart' show Database;
 
 import '../../domain/models/audio_track.dart';
 import '../../domain/models/song_practice.dart';
@@ -123,6 +124,35 @@ enum _RecoveryOutcome {
   /// The attempt could not complete — an unreadable file, a decoder failure, a
   /// store that reported an error. Held back for the next boot to retry.
   failed,
+}
+
+/// How long a write waits for another connection's transaction to commit
+/// before it fails as "database is locked".
+const _lockWait = Duration(seconds: 5);
+
+/// Installs [_lockWait] on the live library's connection, run on its
+/// background isolate as it opens. A second running instance shares the
+/// library (see LibraryLock) through its own connection, so a write meeting
+/// the other's transaction must wait for it, not fail: failed, it was a save
+/// that reported an error and reverted its edit.
+///
+/// Not `PRAGMA busy_timeout`: SQLite's own handler counts its retries rather
+/// than timing them, and a signal cuts each of its sleeps short (the Dart VM's
+/// profiler, in a debug run, does every millisecond), so its five seconds came
+/// to under a tenth of one. This one waits by the clock. The wait blocks only
+/// that background isolate.
+void _waitOutOtherWriters(Database raw) {
+  final waited = Stopwatch();
+  raw.busyHandler = (count) {
+    if (count == 0) {
+      waited
+        ..reset()
+        ..start();
+    }
+    if (waited.elapsed >= _lockWait) return false;
+    sleep(Duration(milliseconds: count < 10 ? 2 : 20));
+    return true;
+  };
 }
 
 /// The wired-up persistence layer: one drift database, the write chokepoint, the
@@ -315,7 +345,12 @@ class Persistence {
         throw const LibraryInUseException();
       }
     }
-    final db = AppDatabase(NativeDatabase.createInBackground(File(dbPath)));
+    final db = AppDatabase(
+      NativeDatabase.createInBackground(
+        File(dbPath),
+        setup: _waitOutOtherWriters,
+      ),
+    );
     final node = await _readOrCreateNode(dir);
     // Restore the HLC clock's monotonicity across restarts BEFORE wiring the
     // writer (the startup sweeps below tick it), so a new local edit can never
