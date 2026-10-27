@@ -207,6 +207,31 @@ void main() {
       );
     });
 
+    test('a double quote inside a name does not end the scrub early', () {
+      // The match stopped at the first `"`, so the rest of the name was
+      // logged verbatim: 'path = <path>" Version).mp3'.
+      expect(
+        DiagnosticsLog.scrubPaths(
+          "path = '/Users/a/Music/Blue Monday (12\" Version).mp3' "
+          '(OS Error: x, errno = 2)',
+        ),
+        "path = '<path>.mp3' (OS Error: x, errno = 2)",
+      );
+      final live = DiagnosticsLog.scrubPaths(
+        "path = '/Users/a/Song \"Live at Wembley\".m4a'",
+      );
+      expect(live, isNot(contains('Wembley')), reason: live);
+      // A double-quoted path still ends at its closing quote.
+      expect(
+        DiagnosticsLog.scrubPaths('open "/Users/a/x.wav" failed'),
+        'open "<path>.wav" failed',
+      );
+      expect(
+        DiagnosticsLog.scrubPaths('copy "/Users/a/x.wav" to "/Users/b/y.aiff"'),
+        'copy "<path>.wav" to "<path>.aiff"',
+      );
+    });
+
     test('a dotted number in the prose after a path is not taken for its '
         'extension', () {
       // Taking the LAST extension-looking run in the final component cut

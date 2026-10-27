@@ -276,11 +276,13 @@ class DiagnosticsLog {
   // Dart's `path = '…'` (line end, punctuation, or ` (OS Error`); inside a
   // name ("Don't Stop.m4a", "Guns N' Roses/…", "The Players' (Club Mix)") it
   // is part of the path, and stopping there leaked the rest of the name
-  // unscrubbed. Any ` (` used to count, the last case included.
+  // unscrubbed. Any ` (` used to count, the last case included. A double
+  // quote reads the same way: in a name ('Blue Monday (12" Version).mp3',
+  // 'Song "Live".m4a') it is part of the path, and the scrub stopped at it.
   static final RegExp _absolutePath = RegExp(
-    '$_roots(?:/(?:[^\'"\\n]|\'(?!\\s*\$|\\s+\\(OS Error|\\n|[,;:)\\]}.]))+)+',
+    '$_roots(?:/(?:[^\'"\\n]|[\'"](?!\\s*\$|\\s+\\(OS Error|\\n|[,;:)\\]}.]))+)+',
   );
-  static final RegExp _nextRoot = RegExp('\\s\'?(?=$_roots/)');
+  static final RegExp _nextRoot = RegExp('\\s[\'"]?(?=$_roots/)');
   static final Set<String> _knownExtensions = {
     ...'wav wave aif aiff aifc caf mp3 m4a aac flac ogg oga opus mp4 m4v mov '
             'webm mkv json db sqlite sqlite3 ckpt pth onnx yaml txt log zip '
@@ -289,7 +291,7 @@ class DiagnosticsLog {
   };
   static final RegExp _numericRun = RegExp(r'^\.\d');
   static final RegExp _extensionInside = RegExp(
-    r"\.[A-Za-z0-9]{1,8}(?=[\s.,;:)\]}']|$)",
+    r"""\.[A-Za-z0-9]{1,8}(?=[\s.,;:)\]}'"]|$)""",
   );
 
   /// The running bundle's version (CFBundleShortVersionString + build +
