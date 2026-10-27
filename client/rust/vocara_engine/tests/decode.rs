@@ -105,6 +105,20 @@ fn an_aiff_ends_where_its_sound_does() {
 }
 
 #[test]
+fn a_caf_whose_sound_runs_to_its_end_decodes() {
+    // Core Audio leaves a CAF's data size at -1 until the file is closed, so an interrupted
+    // recording keeps it. symphonia read on from the sound's start as further chunks and
+    // refused the file as malformed.
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/unclosed_100ms.caf"
+    );
+    assert_eq!(probe_duration_ms(path), Ok(Some(100)));
+    let (frames, rate) = decode_file(path, 0.0, 0, 0).unwrap();
+    assert_eq!((frames.len(), rate), (800, 8_000));
+}
+
+#[test]
 fn a_wav_written_to_a_pipe_is_not_refused_as_too_long() {
     // Written where it could not seek back, a WAV keeps its data size at all ones: 4 GB, which
     // read as hours. 100 ms at 8 kHz, its length unknown rather than refused.

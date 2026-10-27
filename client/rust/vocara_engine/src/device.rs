@@ -4143,7 +4143,7 @@ pub fn probe_duration_ms(path: &str) -> Result<Option<u64>, String> {
     // The probe itself sizes allocations by what the file declares (see media_screen), so this
     // gate is only a gate once the file has been screened.
     crate::media_screen::screen(&mut file).map_err(|e| format!("screen {path}: {e}"))?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mss = MediaSourceStream::new(media_source(path, file), Default::default());
     let mut hint = Hint::new();
     if let Some(ext) = std::path::Path::new(path)
         .extension()
@@ -4264,7 +4264,7 @@ pub fn decode_file(
             return Err(DecodeError::Io(format!("read {path}: {e}")))
         }
     }
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mss = MediaSourceStream::new(media_source(path, file), Default::default());
 
     let mut hint = Hint::new();
     if let Some(ext) = std::path::Path::new(path)
@@ -4606,6 +4606,89 @@ fn sniff_aiff_frames(path: &str) -> std::io::Result<Option<u64>> {
         f.seek(std::io::SeekFrom::Current((size + (size & 1)) as i64))?;
     }
     Ok(None)
+}
+
+/// Where a CAF's data chunk declares its size as -1, "to the end of the file", as Core Audio
+/// leaves it until the file is closed: the size field's offset and the size it stands for.
+/// `Ok(None)` for any other file. The spec allows it, but symphonia's reader then reads on
+/// from the start of the sound as if more chunks followed, and refused an interrupted
+/// recording as malformed.
+fn sniff_caf_open_data(path: &str) -> std::io::Result<Option<(u64, u64)>> {
+    use std::io::{Read, Seek};
+    let mut f = std::fs::File::open(path)?;
+    let len = f.metadata()?.len();
+    let mut head = [0u8; 8];
+    if f.read(&mut head)? < 8 || &head[0..4] != b"caff" {
+        return Ok(None);
+    }
+    // Bounded, as the WAV sniff's walk is.
+    let mut at = 8u64;
+    let mut hdr = [0u8; 12];
+    for _ in 0..64 {
+        f.seek(std::io::SeekFrom::Start(at))?;
+        if f.read(&mut hdr)? < 12 {
+            return Ok(None);
+        }
+        let size = i64::from_be_bytes([
+            hdr[4], hdr[5], hdr[6], hdr[7], hdr[8], hdr[9], hdr[10], hdr[11],
+        ]);
+        if &hdr[0..4] == b"data" {
+            return Ok((size == -1).then(|| (at + 4, len.saturating_sub(at + 12))));
+        }
+        let Ok(size) = u64::try_from(size) else {
+            return Ok(None);
+        };
+        at = at.saturating_add(12).saturating_add(size);
+    }
+    Ok(None)
+}
+
+/// A file read with one 8-byte field replaced (see [`sniff_caf_open_data`]).
+struct PatchedFile {
+    file: std::fs::File,
+    at: u64,
+    bytes: [u8; 8],
+}
+
+impl std::io::Read for PatchedFile {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        use std::io::Seek;
+        let pos = self.file.stream_position()?;
+        let n = self.file.read(buf)?;
+        for p in pos.max(self.at)..(pos + n as u64).min(self.at + 8) {
+            buf[(p - pos) as usize] = self.bytes[(p - self.at) as usize];
+        }
+        Ok(n)
+    }
+}
+
+impl std::io::Seek for PatchedFile {
+    fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.file.seek(to)
+    }
+}
+
+impl symphonia::core::io::MediaSource for PatchedFile {
+    fn is_seekable(&self) -> bool {
+        self.file.is_seekable()
+    }
+
+    fn byte_len(&self) -> Option<u64> {
+        self.file.byte_len()
+    }
+}
+
+/// What symphonia reads `file` (opened from `path`) through: the file itself, or for a CAF
+/// whose data runs to its end, the file with that size filled in.
+fn media_source(path: &str, file: std::fs::File) -> Box<dyn symphonia::core::io::MediaSource> {
+    match sniff_caf_open_data(path) {
+        Ok(Some((at, size))) => Box::new(PatchedFile {
+            file,
+            at,
+            bytes: i64::try_from(size).unwrap_or(i64::MAX).to_be_bytes(),
+        }),
+        _ => Box::new(file),
+    }
 }
 
 /// Windowed-sinc sample-rate conversion (interleaved stereo) on the offline decode paths —
