@@ -3948,6 +3948,9 @@ thread_local! {
     /// function's top). Thread-local so parallel tests cannot pollute each other's deltas:
     /// every counter-sensitive test decodes on its own test thread.
     pub static DECODE_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Makes [`decode_file`] panic on THIS thread (tests only): stands in for a decoder
+    /// panicking on a corrupt packet, which nothing else can produce on demand.
+    pub static DECODE_PANICS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Probe `path`'s DECLARED duration in milliseconds without decoding a single packet:
@@ -4043,6 +4046,8 @@ pub fn decode_file(
     // "decoded everything, then refused".
     #[cfg(test)]
     DECODE_CALLS.with(|c| c.set(c.get() + 1));
+    #[cfg(test)]
+    assert!(!DECODE_PANICS.with(|c| c.get()), "decoder panicked (test)");
     use symphonia::core::audio::SampleBuffer;
     use symphonia::core::codecs::DecoderOptions;
     use symphonia::core::formats::FormatOptions;

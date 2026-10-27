@@ -2349,7 +2349,10 @@ pub extern "C" fn ve_punch_wav(
             std::process::id(),
             PUNCH_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         );
-        let written = (|| -> Option<usize> {
+        // Caught here too, not only at the boundary: a decoder panicking on a corrupt
+        // packet unwound past the cleanup below and left the temp file in the edits
+        // folder, where nothing sweeps it.
+        let written = catch_unwind(AssertUnwindSafe(|| -> Option<usize> {
             let mut wav =
                 crate::wav::WavStream::create_new(&tmp_path, CHANNELS as u16, rate).ok()?;
             let write_frame = |wav: &mut crate::wav::WavStream, f: [Smp; CHANNELS]| -> bool {
@@ -2410,7 +2413,8 @@ pub extern "C" fn ve_punch_wav(
                 .and_then(|f| f.sync_all())
                 .ok()?;
             Some(total)
-        })();
+        }))
+        .unwrap_or(None);
 
         match written {
             Some(n) => {
@@ -3930,7 +3934,8 @@ mod punch_tests {
             c_out.as_ptr(),
         );
         assert_eq!(
-            frames, VE_DECODE_TOO_LONG as i64,
+            frames,
+            super::VE_DECODE_TOO_LONG as i64,
             "an over-ceiling output must be refused, said as too long"
         );
         assert_eq!(
@@ -4034,6 +4039,38 @@ mod punch_tests {
             super::ve_punch_wav(c_old.as_ptr(), c_new.as_ptr(), 1, 48_000, c_alias.as_ptr());
         assert_eq!(frames, -1, "a path alias of the input must be refused");
         assert_eq!(std::fs::metadata(&old).unwrap().len(), size_before);
+
+        let _ = std::fs::remove_file(&old);
+        let _ = std::fs::remove_file(&new);
+    }
+
+    #[test]
+    fn a_panicking_splice_leaves_no_temp_litter() {
+        // A decoder panic AFTER the temp output was created: the splice fails as any
+        // other failure does, and its temp file goes with it.
+        let old = temp_wav("pn_old");
+        let new = temp_wav("pn_new");
+        let out = temp_wav("pn_out");
+        crate::wav::write_wav_f32(&old, &[0.1; 96], 2, 48_000).unwrap();
+        crate::wav::write_wav_f32(&new, &[0.2; 96], 2, 48_000).unwrap();
+        let c = |p: &std::path::Path| CString::new(p.to_str().unwrap()).unwrap();
+        let (c_old, c_new, c_out) = (c(&old), c(&new), c(&out));
+
+        crate::device::DECODE_PANICS.with(|p| p.set(true));
+        let frames = super::ve_punch_wav(c_old.as_ptr(), c_new.as_ptr(), 1, 48_000, c_out.as_ptr());
+        crate::device::DECODE_PANICS.with(|p| p.set(false));
+        assert_eq!(frames, -1);
+        assert!(!out.exists(), "a failed splice must not publish an output");
+        let stem = out.file_name().unwrap().to_str().unwrap().to_string();
+        let litter: Vec<_> = std::fs::read_dir(out.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with(&stem))
+            .collect();
+        assert!(
+            litter.is_empty(),
+            "a panic must not leave the temp file behind"
+        );
 
         let _ = std::fs::remove_file(&old);
         let _ = std::fs::remove_file(&new);

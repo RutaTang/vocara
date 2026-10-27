@@ -1115,8 +1115,9 @@ class VocaraEngineBindings {
   late final _ve_probe_duration_ms = _ve_probe_duration_msPtr
       .asFunction<int Function(ffi.Pointer<ffi.Char>)>();
 
-  /// Punch-in splice: write old[0..split_ms] ++ new to out_path as a 16-bit WAV.
-  /// Stateless; returns the output frame count or -1.
+  /// Punch-in splice: write old[0..split_ms] ++ new to out_path as a 32-bit float WAV.
+  /// Stateless; returns the output frame count, or a negative ve_decode status on failure
+  /// (-2 too long, -3 too dense, -4 unsupported rate, -5 unreadable, -1 anything else).
   int ve_punch_wav(
     ffi.Pointer<ffi.Char> old_path,
     ffi.Pointer<ffi.Char> new_path,

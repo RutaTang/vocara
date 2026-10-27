@@ -119,9 +119,13 @@ const DEFAULT_INPUT_GAIN: f32 = 3.981; // 10^(12/20)
 /// Runtime record/input gain (linear bits), set from the mixer's mic-input fader.
 pub(crate) static INPUT_GAIN: AtomicU32 = AtomicU32::new(DEFAULT_INPUT_GAIN.to_bits());
 
-/// Set the record/input gain (linear).
+/// Set the record/input gain (linear). A non-finite gain is dropped, as the other setters
+/// drop theirs: +inf passed `max(0.0)` and turned the monitor and the analysis feed NaN,
+/// and a NaN read as 0, muting every take.
 pub(crate) fn set_input_gain(linear: f32) {
-    INPUT_GAIN.store(linear.max(0.0).to_bits(), Ordering::Relaxed);
+    if linear.is_finite() {
+        INPUT_GAIN.store(linear.max(0.0).to_bits(), Ordering::Relaxed);
+    }
 }
 
 const ELEM_OUTPUT: u32 = 0; // speaker (AEC reference lives here)
@@ -1344,5 +1348,15 @@ mod tests {
             .err()
             .expect("an unresolvable UID must not open on the system default");
         assert_eq!(err, "input device vocara-no-such-device not found");
+    }
+
+    #[test]
+    fn a_non_finite_input_gain_is_dropped() {
+        set_input_gain(2.0);
+        set_input_gain(f32::INFINITY);
+        set_input_gain(f32::NAN);
+        let kept = f32::from_bits(INPUT_GAIN.load(Ordering::Relaxed));
+        set_input_gain(DEFAULT_INPUT_GAIN);
+        assert_eq!(kept, 2.0, "+inf and NaN must leave the gain as it was");
     }
 }
