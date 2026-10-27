@@ -183,6 +183,25 @@ fn the_duration_budget_holds_at_the_rate_it_decodes_at() {
 }
 
 #[test]
+fn an_m4a_starts_where_other_players_start_it() {
+    // 1 s at 44.1 kHz, silent until a tone at 0.5 s, as ffmpeg encodes AAC: its edit list
+    // starts the sound 1024 frames into the media, past the encoder's priming, which symphonia
+    // decoded as sound (the tone 23 ms late), and ends it short of the last frame's padding.
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/onset_0500ms.m4a"
+    );
+    assert_eq!(probe_duration_ms(path), Ok(Some(1_000)));
+    let (frames, rate) = decode_file(path, 0.0, 0, 0).unwrap();
+    assert_eq!((frames.len(), rate), (44_100, 44_100));
+    let onset = frames.iter().position(|f| f[0].abs() > 0.09).unwrap();
+    assert!(
+        onset.abs_diff(22_050) < 44,
+        "the tone starts at frame {onset}"
+    );
+}
+
+#[test]
 fn an_mp3_starts_where_other_players_start_it() {
     // 1 s at 44.1 kHz, silent until a tone at 0.5 s, as LAME encodes it: its encoder delay
     // and padding were decoded as audio, the tone landing 25 ms late (a technique example's

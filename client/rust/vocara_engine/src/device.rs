@@ -4172,6 +4172,17 @@ pub fn probe_duration_ms(path: &str) -> Result<Option<u64>, String> {
         audio_track(&*probed.format).ok_or_else(|| "no decodable audio track".to_string())?;
     let rate = track.codec_params.sample_rate.unwrap_or(0) as u64;
     let (delay, padding) = edge_trim(&track.codec_params);
+    // An MP4 track's edit declares the length it presents (see Mp4Edit).
+    if let Some(Mp4Edit {
+        timescale,
+        length: Some(length),
+        ..
+    }) = sniff_mp4_edit(path, track.id).ok().flatten()
+    {
+        return Ok(Some(
+            length.saturating_mul(1000).div_ceil(u64::from(timescale)),
+        ));
+    }
     Ok(
         match (declared_frames(&track.codec_params, file_len), rate) {
             // Ceiling division: a gate comparing `declared > cap` must see a file that is even
@@ -4323,6 +4334,8 @@ fn decode_source(
     let track_block_frames = track.codec_params.frames_per_block.unwrap_or(1).max(1);
     // Per link of a chained stream: each brings its own (see the reset below).
     let (mut skip, mut padding) = edge_trim(&track.codec_params);
+    // An MP4 track's edit (see Mp4Edit), applied at the rate the track decodes at.
+    let mp4_edit = sniff_mp4_edit(path, track_id).ok().flatten();
     let mut link_start = 0usize;
     // Packets of the current link's track read so far.
     let mut link_packets = 0u64;
@@ -4481,6 +4494,10 @@ fn decode_source(
         match out_rate {
             None => {
                 out_rate = Some(spec.rate);
+                if let Some(edit) = mp4_edit {
+                    // Bounded as edge_trim bounds a delay.
+                    skip = edit.frames(edit.start, spec.rate).min(1 << 16);
+                }
                 if spec.rate != src_rate {
                     if !(MIN_SRC_RATE..=MAX_SRC_RATE).contains(&spec.rate) {
                         return Err(DecodeError::RateUnsupported);
@@ -4559,6 +4576,11 @@ fn decode_source(
     }
     // Only the 8 bytes the reader overran, at most 8 frames: a count left short by its writer
     // must not cut real sound.
+    if let (Some(edit), Some(rate)) = (mp4_edit, out_rate) {
+        if let Some(length) = edit.length {
+            out.truncate(usize::try_from(edit.frames(length, rate)).unwrap_or(usize::MAX));
+        }
+    }
     if let Some(n) = aiff_frames.filter(|&n| (out.len() as u64).saturating_sub(n) <= 8) {
         out.truncate(usize::try_from(n).unwrap_or(usize::MAX));
     }
@@ -4625,6 +4647,170 @@ fn sniff_wav_sample_rate(path: &str) -> std::io::Result<Option<u32>> {
         f.seek(std::io::SeekFrom::Current((size + (size & 1)) as i64))?;
     }
     Ok(None)
+}
+
+/// An MP4 track's edit: where its presentation starts in the media, and how long it lasts,
+/// both in the media's own timescale. symphonia ignores edit lists, so an AAC track decoded
+/// its encoder's priming as sound ahead of every note (1024 frames from ffmpeg, 23 ms at
+/// 44.1 kHz; 2112 from Apple's encoders) and its last frame's padding after its end.
+#[derive(Clone, Copy)]
+struct Mp4Edit {
+    timescale: u32,
+    start: u64,
+    /// None where the file declares no length (a fragmented one).
+    length: Option<u64>,
+}
+
+impl Mp4Edit {
+    /// `media` ticks of the media's timescale, as frames at `rate`.
+    fn frames(&self, media: u64, rate: u32) -> u64 {
+        let frames = u128::from(media) * u128::from(rate) / u128::from(self.timescale);
+        u64::try_from(frames).unwrap_or(u64::MAX)
+    }
+}
+
+/// Reads the edit of track `index` (in `moov` order, as symphonia numbers an MP4's tracks) of
+/// the file at `path`: only a single edit at normal rate, the shape encoders write; `Ok(None)`
+/// for any other edit list, and for a file that is not an MP4. Walks a bounded number of atoms.
+fn sniff_mp4_edit(path: &str, index: u32) -> std::io::Result<Option<Mp4Edit>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path)?;
+    let len = f.metadata()?.len();
+    let mut walked = 0;
+    // The atoms in `[at, end)`: each one's type, body and end.
+    let mut atoms = |f: &mut std::fs::File, at: u64, end: u64| -> std::io::Result<Vec<_>> {
+        let mut found = Vec::new();
+        let mut at = at;
+        while at + 8 <= end && walked < 4096 {
+            walked += 1;
+            let mut head = [0u8; 16];
+            f.seek(SeekFrom::Start(at))?;
+            f.read_exact(&mut head[..8])?;
+            let kind = [head[4], head[5], head[6], head[7]];
+            let (body, size) = match u32::from_be_bytes([head[0], head[1], head[2], head[3]]) {
+                0 => (at + 8, end - at),
+                1 => {
+                    f.read_exact(&mut head[8..])?;
+                    (at + 16, u64::from_be_bytes(head[8..16].try_into().unwrap()))
+                }
+                size => (at + 8, u64::from(size)),
+            };
+            if size < body - at || at.saturating_add(size) > end {
+                break;
+            }
+            found.push((kind, body, at + size));
+            at += size;
+        }
+        Ok(found)
+    };
+    let read = |f: &mut std::fs::File, at: u64, out: &mut [u8]| -> std::io::Result<()> {
+        f.seek(SeekFrom::Start(at))?;
+        f.read_exact(out)
+    };
+    let top = atoms(&mut f, 0, len)?;
+    let is_mp4 = top.first().is_some_and(|(kind, ..)| {
+        matches!(
+            kind,
+            b"ftyp" | b"moov" | b"mdat" | b"free" | b"skip" | b"wide"
+        )
+    });
+    let Some(&(_, moov, moov_end)) = top.iter().find(|(kind, ..)| kind == b"moov") else {
+        return Ok(None);
+    };
+    if !is_mp4 {
+        return Ok(None);
+    }
+    // A header's timescale and duration, after its version, flags and two times.
+    let header = |f: &mut std::fs::File, body: u64| -> std::io::Result<(u32, u64)> {
+        let mut b = [0u8; 32];
+        read(f, body, &mut b[..1])?;
+        Ok(if b[0] == 1 {
+            read(f, body, &mut b)?;
+            let duration = u64::from_be_bytes(b[24..32].try_into().unwrap());
+            (u32::from_be_bytes(b[20..24].try_into().unwrap()), duration)
+        } else {
+            read(f, body, &mut b[..20])?;
+            let duration = u32::from_be_bytes(b[16..20].try_into().unwrap());
+            let duration = if duration == u32::MAX {
+                0
+            } else {
+                u64::from(duration)
+            };
+            (u32::from_be_bytes(b[12..16].try_into().unwrap()), duration)
+        })
+    };
+    let children = atoms(&mut f, moov, moov_end)?;
+    let Some(&(_, mvhd, _)) = children.iter().find(|(kind, ..)| kind == b"mvhd") else {
+        return Ok(None);
+    };
+    let (movie_scale, _) = header(&mut f, mvhd)?;
+    let Some(&(_, trak, trak_end)) = children
+        .iter()
+        .filter(|(kind, ..)| kind == b"trak")
+        .nth(index as usize)
+    else {
+        return Ok(None);
+    };
+    let trak = atoms(&mut f, trak, trak_end)?;
+    let child = |atoms: &[([u8; 4], u64, u64)], name: &[u8; 4]| {
+        atoms
+            .iter()
+            .find(|(kind, ..)| kind == name)
+            .map(|&(_, body, end)| (body, end))
+    };
+    let (Some(edts), Some(mdia)) = (child(&trak, b"edts"), child(&trak, b"mdia")) else {
+        return Ok(None);
+    };
+    let edts = atoms(&mut f, edts.0, edts.1)?;
+    let mdia = atoms(&mut f, mdia.0, mdia.1)?;
+    let (Some((elst, elst_end)), Some((mdhd, _))) = (child(&edts, b"elst"), child(&mdia, b"mdhd"))
+    else {
+        return Ok(None);
+    };
+    let (timescale, media_length) = header(&mut f, mdhd)?;
+    let mut b = [0u8; 28];
+    read(&mut f, elst, &mut b[..8])?;
+    let wide = b[0] == 1;
+    let entry = if wide { 20 } else { 12 };
+    if u32::from_be_bytes(b[4..8].try_into().unwrap()) != 1 || elst + 8 + entry > elst_end {
+        return Ok(None);
+    }
+    read(&mut f, elst + 8, &mut b[..entry as usize])?;
+    let (segment, start, rate) = if wide {
+        let start = i64::from_be_bytes(b[8..16].try_into().unwrap());
+        (
+            u64::from_be_bytes(b[..8].try_into().unwrap()),
+            start,
+            &b[16..20],
+        )
+    } else {
+        let start = i64::from(i32::from_be_bytes(b[4..8].try_into().unwrap()));
+        (
+            u64::from(u32::from_be_bytes(b[..4].try_into().unwrap())),
+            start,
+            &b[8..12],
+        )
+    };
+    let Ok(start) = u64::try_from(start) else {
+        return Ok(None);
+    };
+    if rate != [0, 1, 0, 0] || timescale == 0 || movie_scale == 0 {
+        return Ok(None);
+    }
+    // The segment counts in the movie's timescale, often whole milliseconds: rounded up, and
+    // held to the samples the media holds after the start.
+    let segment = (u128::from(segment) * u128::from(timescale)).div_ceil(u128::from(movie_scale));
+    let segment = u64::try_from(segment).unwrap_or(u64::MAX);
+    let length = match (segment, media_length) {
+        (0, _) => None,
+        (segment, 0) => Some(segment),
+        (segment, media) => Some(segment.min(media.saturating_sub(start))),
+    };
+    Ok((start > 0 || length.is_some()).then_some(Mp4Edit {
+        timescale,
+        start,
+        length,
+    }))
 }
 
 /// Reads just enough of an ADPCM WAV's header to report the frame count its 'fact' chunk
