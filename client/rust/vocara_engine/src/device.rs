@@ -3953,13 +3953,24 @@ thread_local! {
     pub static DECODE_PANICS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// Container options for every decode and probe: gapless, so an MP3's encoder delay and
+/// padding (and an Ogg stream's pre-skip) are trimmed as other players trim them. Kept, they
+/// put the audio 25 ms late: a technique example's analysis trailed its own playback (the
+/// player trims), and lyrics timed in another player read early. (MP4/AAC priming is not
+/// trimmed: this reader ignores edit lists.)
+fn gapless() -> symphonia::core::formats::FormatOptions {
+    symphonia::core::formats::FormatOptions {
+        enable_gapless: true,
+        ..Default::default()
+    }
+}
+
 /// Probe `path`'s DECLARED duration in milliseconds without decoding a single packet:
 /// container probe only, so an import gate can refuse an hours-long file before any copy or
 /// allocation happens. `Ok(None)` = the container declares no frame count (e.g. a plain mp3
 /// without a Xing header) — the caller falls back to the decode-time budget, which bails
 /// mid-decode with peak memory bounded by the budget.
 pub fn probe_duration_ms(path: &str) -> Result<Option<u64>, String> {
-    use symphonia::core::formats::FormatOptions;
     use symphonia::core::io::MediaSourceStream;
     use symphonia::core::meta::MetadataOptions;
     use symphonia::core::probe::Hint;
@@ -3974,12 +3985,7 @@ pub fn probe_duration_ms(path: &str) -> Result<Option<u64>, String> {
         hint.with_extension(ext);
     }
     let probed = symphonia::default::get_probe()
-        .format(
-            &hint,
-            mss,
-            &FormatOptions::default(),
-            &MetadataOptions::default(),
-        )
+        .format(&hint, mss, &gapless(), &MetadataOptions::default())
         .map_err(|e| format!("probe: {e}"))?;
     let track = probed
         .format
@@ -4050,7 +4056,6 @@ pub fn decode_file(
     assert!(!DECODE_PANICS.with(|c| c.get()), "decoder panicked (test)");
     use symphonia::core::audio::SampleBuffer;
     use symphonia::core::codecs::DecoderOptions;
-    use symphonia::core::formats::FormatOptions;
     use symphonia::core::io::MediaSourceStream;
     use symphonia::core::meta::MetadataOptions;
     use symphonia::core::probe::Hint;
@@ -4081,12 +4086,7 @@ pub fn decode_file(
     }
 
     let probed = symphonia::default::get_probe()
-        .format(
-            &hint,
-            mss,
-            &FormatOptions::default(),
-            &MetadataOptions::default(),
-        )
+        .format(&hint, mss, &gapless(), &MetadataOptions::default())
         .map_err(|e| err(format!("probe: {e}")))?;
     let mut format = probed.format;
     let track = format

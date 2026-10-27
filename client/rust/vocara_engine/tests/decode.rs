@@ -41,6 +41,25 @@ fn the_duration_budget_holds_at_the_rate_it_decodes_at() {
     assert!(decode_file(path, 2.5, 0, 0).is_ok());
 }
 
+#[test]
+fn an_mp3_starts_where_other_players_start_it() {
+    // 1 s at 44.1 kHz, silent until a tone at 0.5 s, as LAME encodes it: its encoder delay
+    // and padding were decoded as audio, the tone landing 25 ms late (a technique example's
+    // analysis trailed its own playback) and the file 46 ms long.
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/onset_0500ms.mp3"
+    );
+    let (frames, rate) = decode_file(path, 0.0, 0, 0).unwrap();
+    assert_eq!(rate, 44_100);
+    assert_eq!(frames.len(), 44_100, "the padding is trimmed too");
+    let onset = frames.iter().position(|f| f[0].abs() > 0.09).unwrap();
+    assert!(
+        onset.abs_diff(22_050) < 44,
+        "the tone starts at frame {onset}"
+    );
+}
+
 /// 2 s of a 440 Hz mono 16-bit tone at 44.1 kHz.
 fn tone_i16() -> Vec<i16> {
     (0..88_200)
