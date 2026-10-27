@@ -92,6 +92,12 @@ class HomeViewModel extends ChangeNotifier {
   /// before them would land over theirs (a deleted card back on the list).
   int _listEpoch = 0;
 
+  /// Whether a read of the list has ever succeeded. Until one has, a create
+  /// leaves the list alone after a failed read: added to a list never read,
+  /// the new card alone replaced the read error, and the rest of the library
+  /// looked lost (the error shows only over an empty list).
+  bool _listed = false;
+
   Future<Result<List<PracticeSummary>>> _load() async {
     final epoch = _listEpoch;
     final result = await _repository.listPracticeSummaries();
@@ -99,6 +105,7 @@ class HomeViewModel extends ChangeNotifier {
       // Read before a create or delete landed: owe a fresh one instead.
       _missedRemote = true;
     } else if (result is Ok<List<PracticeSummary>>) {
+      _listed = true;
       _projects = result.value;
       notifyListeners();
     }
@@ -109,8 +116,10 @@ class HomeViewModel extends ChangeNotifier {
     final result = await _repository.createPractice(title);
     if (result is Ok<SongPractice>) {
       _listEpoch++;
-      _projects = [PracticeSummary.of(result.value), ..._projects];
-      notifyListeners();
+      if (_listed || !load.error) {
+        _projects = [PracticeSummary.of(result.value), ..._projects];
+        notifyListeners();
+      }
     }
     return result;
   }

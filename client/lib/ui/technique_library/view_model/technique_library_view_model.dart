@@ -97,6 +97,12 @@ class TechniqueLibraryViewModel extends ChangeNotifier {
   /// before them would land over theirs (a deleted card back on the grid).
   int _listEpoch = 0;
 
+  /// Whether a read of the list has ever succeeded. Until one has, a create
+  /// leaves the list alone after a failed read: added to a list never read,
+  /// the new card alone replaced the read error, and the rest of the library
+  /// looked lost (the error shows only over an empty list).
+  bool _listed = false;
+
   /// Loads all techniques (runs once on creation; re-run on return from detail).
   late final Command0<List<Technique>> load;
 
@@ -197,6 +203,7 @@ class TechniqueLibraryViewModel extends ChangeNotifier {
       // Read before a create or delete landed: owe a fresh one instead.
       _missedRemote = true;
     } else if (result is Ok<List<Technique>>) {
+      _listed = true;
       _all = result.value;
       _dropStaleTagFilter();
       notifyListeners();
@@ -234,8 +241,10 @@ class TechniqueLibraryViewModel extends ChangeNotifier {
     final result = await _repository.saveTechnique(technique);
     if (result is Ok<Technique>) {
       _listEpoch++;
-      _all = [result.value, ..._all];
-      notifyListeners();
+      if (_listed || !load.error) {
+        _all = [result.value, ..._all];
+        notifyListeners();
+      }
     }
     return result;
   }
