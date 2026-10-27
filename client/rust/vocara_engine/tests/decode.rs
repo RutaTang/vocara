@@ -217,6 +217,32 @@ fn two_mp3s_joined_end_to_end_decode_whole() {
 }
 
 #[test]
+fn a_chained_ogg_keeps_its_short_links() {
+    // Two 0.3 s links at 8 kHz, 440 Hz then 1 kHz. Read seekable, symphonia skipped a link
+    // whose sound all came in with its headers: only the 1 kHz one decoded.
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/short_links.ogg"
+    );
+    let (frames, rate) = decode_file(path, 0.0, 0, 0).unwrap();
+    assert_eq!((frames.len(), rate), (4_800, 8_000));
+    let hz = |range: std::ops::Range<usize>| {
+        let n = range.len();
+        let crossings = range
+            .skip(1)
+            .filter(|&i| (frames[i - 1][0] < 0.0) != (frames[i][0] < 0.0))
+            .count();
+        crossings as f64 / 2.0 / (n as f64 / 8_000.0)
+    };
+    assert!((hz(400..2_000) - 440.0).abs() < 30.0, "{}", hz(400..2_000));
+    assert!(
+        (hz(2_800..4_400) - 1_000.0).abs() < 30.0,
+        "{}",
+        hz(2_800..4_400)
+    );
+}
+
+#[test]
 fn two_ogg_links_each_lose_only_their_own_edges() {
     // Chained end to end, as joined files are: the first link's end trim stayed mid-file
     // (the second link starting late) and was cut from the second link's end instead of

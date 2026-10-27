@@ -4157,7 +4157,7 @@ pub fn probe_duration_ms(path: &str) -> Result<Option<u64>, String> {
     // The probe itself sizes allocations by what the file declares (see media_screen), so this
     // gate is only a gate once the file has been screened.
     crate::media_screen::screen(&mut file).map_err(|e| format!("screen {path}: {e}"))?;
-    let mss = MediaSourceStream::new(media_source(file), Default::default());
+    let mss = MediaSourceStream::new(media_source(file, false), Default::default());
     let mut hint = Hint::new();
     if let Some(ext) = std::path::Path::new(path)
         .extension()
@@ -4218,9 +4218,9 @@ pub enum DecodeError {
 }
 
 /// Decode a file (wav/flac/mp3/aac/m4a/ogg) to interleaved-stereo f32 at its source rate.
-/// Mono is duplicated; more than 2 channels mix down (see [`downmix_gains`]). `max_secs` (0.0 = unbounded) caps the
-/// decoded duration: the full track lives in memory here, so an arbitrary-length input must
-/// be refused up front rather than after gigabytes of Vec growth.
+/// Mono is duplicated; more than 2 channels mix down (see [`downmix_gains`]). `max_secs`
+/// (0.0 = unbounded) caps the decoded duration: the full track lives in memory here, so an
+/// arbitrary-length input must be refused up front rather than after gigabytes of Vec growth.
 /// `max_src_rate` (0 = unbounded) refuses files whose SOURCE sample rate exceeds it, and
 /// `max_src_frames` (0 = unbounded) is the ABSOLUTE memory budget in source-rate frames:
 /// the duration budget alone never bounded decode memory (a legal 10-minute 384 kHz file
@@ -4242,6 +4242,26 @@ pub fn decode_file(
     DECODE_CALLS.with(|c| c.set(c.get() + 1));
     #[cfg(test)]
     assert!(!DECODE_PANICS.with(|c| c.get()), "decoder panicked (test)");
+    match decode_source(path, max_secs, max_src_rate, max_src_frames, false)? {
+        Some(decoded) => Ok(decoded),
+        // A chained Ogg link came up empty: read again, unseekable (see [`Unseekable`]).
+        None => decode_source(path, max_secs, max_src_rate, max_src_frames, true)?
+            .ok_or_else(|| DecodeError::Other(format!("decoded no audio from {path}"))),
+    }
+}
+
+/// A decoded file: its frames, and the rate they play at.
+type Decoded = (Vec<[Smp; CHANNELS]>, u32);
+
+/// [`decode_file`], reading the file `unseekable` or not. `Ok(None)` when, read seekable, a
+/// chained Ogg link yielded no packet before the next began.
+fn decode_source(
+    path: &str,
+    max_secs: f64,
+    max_src_rate: u32,
+    max_src_frames: u64,
+    unseekable: bool,
+) -> Result<Option<Decoded>, DecodeError> {
     use symphonia::core::audio::SampleBuffer;
     use symphonia::core::codecs::DecoderOptions;
     use symphonia::core::io::MediaSourceStream;
@@ -4278,7 +4298,7 @@ pub fn decode_file(
             return Err(DecodeError::Io(format!("read {path}: {e}")))
         }
     }
-    let mss = MediaSourceStream::new(media_source(file), Default::default());
+    let mss = MediaSourceStream::new(media_source(file, unseekable), Default::default());
 
     let mut hint = Hint::new();
     if let Some(ext) = std::path::Path::new(path)
@@ -4297,6 +4317,8 @@ pub fn decode_file(
     // Per link of a chained stream: each brings its own (see the reset below).
     let (mut skip, mut padding) = edge_trim(&track.codec_params);
     let mut link_start = 0usize;
+    // Packets of the current link's track read so far.
+    let mut link_packets = 0u64;
     let src_rate = track.codec_params.sample_rate.unwrap_or(44_100);
     // Absolute source-rate envelope, independent of any caller ceiling. The FLOOR is a
     // memory/CPU bound, not taste: resampling a 1 Hz source to 48 kHz is a 48000x ratio,
@@ -4386,6 +4408,10 @@ pub fn decode_file(
                 break; // normal end of stream
             }
             Err(symphonia::core::errors::Error::ResetRequired) => {
+                if link_packets == 0 && !unseekable {
+                    return Ok(None);
+                }
+                link_packets = 0;
                 // Rebuild the decoder against the new audio track and keep
                 // going. A mid-stream sample-rate change is refused honestly:
                 // this single-rate output cannot represent it.
@@ -4423,6 +4449,7 @@ pub fn decode_file(
         if packet.track_id() != track_id {
             continue;
         }
+        link_packets += 1;
         let decoded = match decoder.decode(&packet) {
             Ok(d) => d,
             // Corrupt DATA is skipped (one damaged frame must not kill a
@@ -4539,7 +4566,7 @@ pub fn decode_file(
             "decoded no audio from {path} ({skipped_packets} corrupt packets skipped)"
         )));
     }
-    Ok((out, out_rate.unwrap_or(src_rate)))
+    Ok(Some((out, out_rate.unwrap_or(src_rate))))
 }
 
 /// Absolute source-sample-rate envelope for every decoded file, mirroring the Dart analysis
@@ -4659,13 +4686,48 @@ impl symphonia::core::io::MediaSource for PatchedFile {
     }
 }
 
-/// What symphonia reads `file` through: the file itself, or for a CAF whose data runs to its
-/// end, the file with that size filled in, as the screen read it.
-fn media_source(mut file: std::fs::File) -> Box<dyn symphonia::core::io::MediaSource> {
-    match crate::media_screen::caf_open_data(&mut file) {
-        Ok(Some((at, bytes))) => Box::new(PatchedFile { file, at, bytes }),
-        _ => Box::new(file),
+/// A file symphonia is told it cannot seek in. Read seekable, its Ogg reader skips any
+/// chained link whose sound all came in with its headers (under a page, about a second): its
+/// end-of-stream scan leaves the page it stopped at as the current one, so that buffered sound
+/// is never asked for, and the next link's start comes first. Unseekable, it makes no such
+/// scan: no link is lost, but none has its end padding trimmed (tens of milliseconds).
+struct Unseekable(std::fs::File);
+
+impl std::io::Read for Unseekable {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buf)
     }
+}
+
+impl std::io::Seek for Unseekable {
+    fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.0.seek(to)
+    }
+}
+
+impl symphonia::core::io::MediaSource for Unseekable {
+    fn is_seekable(&self) -> bool {
+        false
+    }
+
+    fn byte_len(&self) -> Option<u64> {
+        self.0.byte_len()
+    }
+}
+
+/// What symphonia reads `file` through: the file itself, or `unseekable`; for a CAF whose
+/// data runs to its end, the file with that size filled in, as the screen read it.
+fn media_source(
+    mut file: std::fs::File,
+    unseekable: bool,
+) -> Box<dyn symphonia::core::io::MediaSource> {
+    if let Ok(Some((at, bytes))) = crate::media_screen::caf_open_data(&mut file) {
+        return Box::new(PatchedFile { file, at, bytes });
+    }
+    if unseekable {
+        return Box::new(Unseekable(file));
+    }
+    Box::new(file)
 }
 
 /// Windowed-sinc sample-rate conversion (interleaved stereo) on the offline decode paths —
