@@ -545,6 +545,7 @@ class AudioEditService {
         final tmpFirst = '$firstPath.$nonce.tmp';
         final tmpSecond = '$secondPath.$nonce.tmp';
         var ok = false;
+        var firstPublished = false;
         try {
           for (final (tmpPath, start, len) in [
             (tmpFirst, w.dataStart, cut),
@@ -571,11 +572,18 @@ class AudioEditService {
             }
           }
           File(tmpFirst).renameSync(firstPath);
+          firstPublished = true;
           File(tmpSecond).renameSync(secondPath);
           ok = true;
         } finally {
           if (!ok) {
-            for (final t in [tmpFirst, tmpSecond]) {
+            // A first half already published goes too: alone at its final
+            // path, it read as a finished edit.
+            for (final t in [
+              tmpFirst,
+              tmpSecond,
+              if (firstPublished) firstPath,
+            ]) {
               try {
                 File(t).deleteSync();
               } catch (_) {}
@@ -717,7 +725,15 @@ class AudioEditService {
           } catch (_) {}
         }
       }
-      File(tmpPath).renameSync(path);
+      try {
+        File(tmpPath).renameSync(path);
+      } catch (_) {
+        // Unpublished, the whole merge would sit in edits/ until a boot sweep.
+        try {
+          File(tmpPath).deleteSync();
+        } catch (_) {}
+        rethrow;
+      }
     });
     return path;
   }

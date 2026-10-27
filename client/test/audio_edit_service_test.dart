@@ -251,6 +251,54 @@ void main() {
     },
   );
 
+  test(
+    'a split or merge that fails to publish leaves nothing in edits/',
+    () async {
+      // A split whose second rename failed left its first half at its final
+      // path, a finished edit; a merge whose rename failed left the whole
+      // merged temp behind.
+      final dir = await Directory.systemTemp.createTemp('vocara_publish');
+      addTearDown(() => dir.delete(recursive: true));
+      const sr = 8000;
+      final srcPath = '${dir.path}/src.wav';
+      await File(srcPath).writeAsBytes(
+        writeWavMono(Float64List.fromList(List.filled(sr, 0.25)), sr),
+      );
+      final edits = Directory('${dir.path}/edits');
+      List<String> left() => [
+        for (final e in edits.listSync())
+          if (e is File) e.path.split('/').last,
+      ];
+
+      // Splits write clip_0 and clip_1: a directory where the second goes
+      // fails its rename.
+      Directory('${edits.path}/clip_1.wav').createSync(recursive: true);
+      final splitter = AudioEditService(files: _TempFiles(dir));
+      await expectLater(
+        splitter.splitWav(
+          practiceId: 'P0000000000000000000000000',
+          sourcePath: srcPath,
+          splitFileMs: 400,
+        ),
+        throwsA(isA<FileSystemException>()),
+      );
+      expect(left(), isEmpty);
+
+      // A merge writes clip_0.
+      Directory('${edits.path}/clip_0.wav').createSync();
+      final merger = AudioEditService(files: _TempFiles(dir));
+      await expectLater(
+        merger.concatWav(
+          practiceId: 'P0000000000000000000000000',
+          firstPath: srcPath,
+          secondPath: srcPath,
+        ),
+        throwsA(isA<FileSystemException>()),
+      );
+      expect(left(), isEmpty);
+    },
+  );
+
   test('reads and splits a WAVE_FORMAT_EXTENSIBLE recording', () async {
     // AVFoundation (the `record` plugin's macOS backend) can write WAVs tagged
     // 0xFFFE rather than plain PCM. Both the decoder and the byte-level split
