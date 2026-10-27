@@ -944,6 +944,12 @@ class SyncEngine {
       } on HlcDriftException {
         continue;
       }
+      // An FK orphan whose parent is still absent can only park again: spare
+      // it the transaction and the whole-store FK sweep, which every pull
+      // otherwise paid per orphan for as long as the parent stayed away.
+      // Parents replay first (the rank order above), so one landing earlier
+      // in this pass is already there.
+      if (await _orphanParentMissing(q.reason)) continue;
       final result = await _applier.apply([row]);
       if (!result.committed) break; // storage trouble — retry next run
       if (result.applied > 0 || result.skipped > 0) {
@@ -980,6 +986,28 @@ class SyncEngine {
       }
     }
     return (count: applied, settled: settled, rows: landed);
+  }
+
+  static final RegExp _orphanReason = RegExp(
+    r'^fk-orphan: parent ([a-z_]+)/(.+) missing$',
+  );
+
+  /// Whether [reason] is the FK sweep's (see SyncApplier) and the parent it
+  /// names still has no row, tombstones included (the constraint checks
+  /// existence, not liveness). False whenever that cannot be told, so the
+  /// entry replays as before.
+  Future<bool> _orphanParentMissing(String reason) async {
+    final m = _orphanReason.firstMatch(reason);
+    if (m == null || m[2] == 'unknown') return false;
+    final table = m[1]!;
+    if (!_db.allTables.any((t) => t.actualTableName == table)) return false;
+    final parent = await _db
+        .customSelect(
+          'SELECT 1 FROM $table WHERE id = ?',
+          variables: [Variable.withString(m[2]!)],
+        )
+        .getSingleOrNull();
+    return parent == null;
   }
 
   void _fireRemoteApplied(RemoteApplied event) {

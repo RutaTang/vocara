@@ -1301,6 +1301,33 @@ void main() {
       expect(await quarantine.list(), isEmpty);
     });
 
+    test('an FK orphan whose parent is still missing costs a pull nothing, '
+        'and lands with its parent', () async {
+      // Every pull applied it in a transaction, ran the whole-store FK sweep,
+      // and parked it again, for as long as the parent stayed away.
+      cloud.accept(remoteTrack('T', 'P', remoteHlc(t0 - 1000)));
+      expect((await engine.pumpPull()).failedRecords, 1);
+      expect((await quarantine.list()).single.reason, startsWith('fk-orphan'));
+
+      cost.reset();
+      expect((await engine.pumpPull()).failed, isFalse);
+      expect(cost.transactions, 0);
+      expect(cost.matching('foreign_key_check'), 0);
+      expect(cost.writes, isEmpty);
+      expect(await quarantine.list(), hasLength(1), reason: 'still parked');
+
+      cloud.accept(remotePractice('P', 'parent', remoteHlc(t0 - 2000)));
+      expect((await engine.pumpPull()).failed, isFalse);
+      expect(await quarantine.list(), isEmpty);
+      final track = await db
+          .customSelect(
+            'SELECT id FROM tracks WHERE id = ?',
+            variables: [Variable.withString(_id('T'))],
+          )
+          .getSingleOrNull();
+      expect(track, isNotNull, reason: 'replayed once its parent arrived');
+    });
+
     test('a park that can never land costs a pull nothing', () async {
       // Its verdict is a function of the payload alone, yet every pull
       // decoded it, applied it in a transaction and re-parked it unchanged —
