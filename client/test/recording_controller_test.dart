@@ -252,6 +252,12 @@ class _RollingGraph extends _FakeGraph {
 
   /// The take's ring fills in real time from its arm, plus this many frames.
   int lead = 0;
+
+  /// Frames that arrived but the ring had no room for (not written).
+  int dropped = 0;
+
+  /// The input delivers nothing while set.
+  bool stalled = false;
   final Stopwatch _sinceArm = Stopwatch();
 
   @override
@@ -264,10 +270,12 @@ class _RollingGraph extends _FakeGraph {
   int inputStreamState() => (7 << 1) | 1;
 
   @override
-  int recordWrittenFrames() => _written = math.max(
-    _written + 1,
-    _sinceArm.elapsedMicroseconds * 48 ~/ 1000 + lead,
-  );
+  int recordWrittenFrames() => stalled
+      ? _written
+      : _written = math.max(
+          _written + 1,
+          _sinceArm.elapsedMicroseconds * 48 ~/ 1000 + lead - dropped,
+        );
 
   @override
   int inputFramesReceived() => _written;
@@ -285,7 +293,7 @@ class _RollingGraph extends _FakeGraph {
   bool stopInputRecording() => true;
 
   @override
-  int recordDroppedFrames() => 0;
+  int recordDroppedFrames() => dropped;
 
   @override
   double inputLevel() => 0.5;
@@ -965,6 +973,38 @@ void main() {
     final held = graph.recordWrittenFrames() * 1000 ~/ 48000 - preRoll;
     await c.stopRecording();
     expect(head, inInclusiveRange(held - 120, held));
+  });
+
+  test('the playhead keeps with the backing through dropped frames and a '
+      'stalled input', () async {
+    // The ring counts only the frames it kept: frames dropped from a full
+    // ring, or an input delivering nothing for a moment, left the head behind
+    // the backing for the rest of the take.
+    final graph = _RollingGraph();
+    final c = build(null, graph: graph);
+    addTearDown(c.dispose);
+    playback.position.value = const Duration(seconds: 10);
+    final start = c.startRecording();
+    await pumpUntil(() => mixer.gates.isNotEmpty);
+    mixer.gates.single.complete();
+    await start;
+    final preRoll = 10000 - files.alignedStarts.values.single;
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+
+    graph.dropped = 9600; // 200 ms the ring had no room for
+    await Future<void>.delayed(const Duration(milliseconds: 400));
+    final head = playback.position.value.inMilliseconds - 10000;
+    final taken =
+        (graph.recordWrittenFrames() + graph.dropped) * 1000 ~/ 48000 - preRoll;
+    expect(head, inInclusiveRange(taken - 120, taken), reason: 'dropped');
+
+    graph.stalled = true;
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+    final stalledAt = playback.position.value.inMilliseconds;
+    await Future<void>.delayed(const Duration(milliseconds: 1500));
+    final moved = playback.position.value.inMilliseconds - stalledAt;
+    await c.stopRecording();
+    expect(moved, greaterThanOrEqualTo(1300), reason: 'the head stood still');
   });
 
   test('monitoring outlasts a mic still warming up', () async {

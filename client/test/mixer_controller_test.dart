@@ -654,6 +654,13 @@ void main() {
       expect(peaks[100], closeTo(0.25, 1e-9)); // 0.5 × master 0.5
       expect(peaks[500], closeTo(0.4, 1e-9));
 
+      // A take started at 0 draws its pre-roll before the timeline, which
+      // the stop cuts: none of it lands in the first bin.
+      host.recPeaks = const [0.9, 0.1];
+      host.recStartMs = -300;
+      host.recDurationMs = 400; // 0.9 at -200 ms, 0.1 at 0 ms
+      expect(host.mixer.masterWaveformPeaks[0], closeTo(0.05, 1e-9));
+
       // Muting the take removes its envelope but keeps the live one.
       host.recording = false;
       await host.mixer.toggleMute('v1');

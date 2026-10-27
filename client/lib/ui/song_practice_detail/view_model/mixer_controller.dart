@@ -1123,6 +1123,9 @@ class MixerController extends ChangeNotifier {
       if (peaks.isEmpty || durationMs <= 0 || vol <= 0) return;
       for (var i = 0; i < peaks.length; i++) {
         final tms = startMs + (i + 0.5) / peaks.length * durationMs;
+        // Before the timeline: the live take's pre-roll, which its stop
+        // cuts (clamped, it all piled into the first bin).
+        if (tms < 0) continue;
         final b = (tms / tl * n).floor().clamp(0, n - 1);
         final v = peaks[i] * vol;
         if (v > out[b]) out[b] = v;

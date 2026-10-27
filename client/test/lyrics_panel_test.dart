@@ -667,6 +667,29 @@ void main() {
     });
   });
 
+  testWidgets('a menu closing over an unfocused editor leaves it so', (
+    tester,
+  ) async {
+    // Every route over the editor counted as owing it the keyboard: one the
+    // user had clicked away from took it back as a menu closed.
+    final vm = _FakeVm();
+    await _pumpPanel(tester, vm);
+    await tester.pumpAndSettle();
+    final editor = tester
+        .widget<EditableText>(find.byType(EditableText))
+        .focusNode;
+    editor.unfocus();
+    await tester.pump();
+    expect(editor.hasFocus, isFalse);
+
+    final ctx = tester.element(find.byType(RightPanel));
+    unawaited(showConfirmDialog(ctx, title: 'Delete?'));
+    await tester.pumpAndSettle();
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pumpAndSettle();
+    expect(editor.hasFocus, isFalse, reason: 'the editor took the keyboard');
+  });
+
   testWidgets('an import landing under a dialog leaves it the keyboard', (
     tester,
   ) async {

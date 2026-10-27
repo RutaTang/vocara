@@ -393,13 +393,21 @@ class RecordingController extends ChangeNotifier {
     // The head runs with the backing, which starts a pre-roll after the take
     // does: run from the arm, it led what was heard by that much, and a lyric
     // stamped or a note added at it mid-take saved that late a time. Read
-    // from the frames the take holds, which the pre-roll is counted in: the
-    // clock starts only once the mic reports ready, and steps a tick at a
-    // time, so the head trailed the backing by up to a tick and a poll.
+    // from the frames the take has taken, which the pre-roll is counted in:
+    // the clock starts only once the mic reports ready, and steps a tick at a
+    // time, so the head trailed the backing by up to a tick and a poll. Those
+    // dropped from a full ring count too, and while the input stalls (none
+    // arriving) the clock carries the head on, as the backing goes on.
     final engine = _graphEngine();
-    final heldMs = engine != null
-        ? engine.recordWrittenFrames() * 1000 / 48000
-        : recordingDurationMs.toDouble();
+    final clockMs = recordingDurationMs.toDouble();
+    final heldMs = engine == null
+        ? clockMs
+        : math.max(
+            clockMs,
+            (engine.recordWrittenFrames() + engine.recordDroppedFrames()) *
+                1000 /
+                48000,
+          );
     final heard = _backingRolling ? heldMs - _recordingPreRollMs : 0.0;
     _playback.setRecordingPosition(
       Duration(milliseconds: _recordingStartMs + math.max(0, heard.round())),

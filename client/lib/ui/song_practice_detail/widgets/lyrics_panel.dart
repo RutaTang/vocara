@@ -1009,15 +1009,18 @@ class _LyricsEditorState extends State<_LyricsEditor> {
 
   /// Built under a dialog (an import re-created it while one was open), so
   /// it did not autofocus: the keyboard is taken once the page is on top
-  /// again, if nothing on it has taken it meanwhile.
-  bool _focusOwed = false;
+  /// again, if nothing on it has taken it meanwhile. Only then: owed for any
+  /// menu over an editor the user had clicked away from, it took the
+  /// keyboard back as the menu closed.
+  bool? _focusOwed;
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    if (!(ModalRoute.isCurrentOf(context) ?? true)) {
-      _focusOwed = true;
-    } else if (_focusOwed) {
+    final current = ModalRoute.isCurrentOf(context) ?? true;
+    if (_focusOwed == null) {
+      _focusOwed = !current;
+    } else if (current && _focusOwed!) {
       _focusOwed = false;
       if (FocusManager.instance.primaryFocus == FocusScope.of(context)) {
         _focus.requestFocus();
