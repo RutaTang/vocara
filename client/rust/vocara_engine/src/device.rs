@@ -3972,6 +3972,23 @@ fn edge_trim(params: &symphonia::core::codecs::CodecParameters) -> (u64, u64) {
     )
 }
 
+/// The track's declared length in frames at its sample rate. symphonia hands an MP4's on as
+/// the media header has it, in the track's own timescale, which need not be the sample rate:
+/// an HE-AAC file often counts at its core rate, half the declared one, and a Smooth
+/// Streaming file in 10 MHz ticks, so read as frames the one was half its length and the
+/// other hours long, refused as too long. All ones is the header's "unknown".
+fn declared_frames(params: &symphonia::core::codecs::CodecParameters) -> Option<u64> {
+    let n = params.n_frames.filter(|&n| n != u64::MAX)?;
+    match (params.time_base, params.sample_rate) {
+        (Some(tb), Some(rate)) if (tb.numer, tb.denom) != (1, rate) && tb.denom > 0 => {
+            let frames = (u128::from(n) * u128::from(tb.numer) * u128::from(rate))
+                .div_ceil(u128::from(tb.denom));
+            Some(u64::try_from(frames).unwrap_or(u64::MAX))
+        }
+        _ => Some(n),
+    }
+}
+
 /// The track decoding reads: the first a decoder exists for. symphonia's own default is simply
 /// the first track, which in an MP4 holding a video or cover-picture track ahead of its audio
 /// is that one, and the decode failed as an unsupported codec.
@@ -4052,7 +4069,7 @@ pub fn probe_duration_ms(path: &str) -> Result<Option<u64>, String> {
     let track = audio_track(&*probed.format).ok_or_else(|| "no audio track".to_string())?;
     let rate = track.codec_params.sample_rate.unwrap_or(0) as u64;
     let (delay, padding) = edge_trim(&track.codec_params);
-    Ok(match (track.codec_params.n_frames, rate) {
+    Ok(match (declared_frames(&track.codec_params), rate) {
         // Ceiling division: a gate comparing `declared > cap` must see a file that is even
         // ONE sample past the cap as strictly longer — flooring would round it down onto
         // the boundary and admit it. What decode_file drops is not counted.
@@ -4218,9 +4235,7 @@ pub fn decode_file(
     // allocation on its own).
     // Judged as trimmed, as probe_duration_ms reports it: untrimmed, a file the import gate
     // admitted within a few ms of the cap was refused here.
-    let mut out: Vec<[Smp; CHANNELS]> = match track
-        .codec_params
-        .n_frames
+    let mut out: Vec<[Smp; CHANNELS]> = match declared_frames(&track.codec_params)
         .map(|n| n.saturating_sub(skip.saturating_add(padding)))
     {
         Some(n) if n > max_frames => return Err(budget_err(n, duration_frames)),

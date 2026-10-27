@@ -30,6 +30,33 @@ fn an_he_aac_file_is_labelled_with_the_rate_it_decodes_at() {
 }
 
 #[test]
+fn an_mp4_length_is_read_in_its_own_timescale() {
+    // The media header counts in the track's timescale, not the sample rate's frames. This
+    // file's is its 22.05 kHz core rate, so read as 44.1 kHz frames it probed at half its 2 s
+    // and the import gate admitted a file twice the cap.
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/he_aac_440hz.m4a"
+    );
+    let ms = probe_duration_ms(path).unwrap().unwrap();
+    assert!(ms.abs_diff(2_000) < 100, "probed at {ms} ms");
+}
+
+#[test]
+fn an_mp4_of_unknown_length_is_not_refused_as_too_long() {
+    // 200 ms in 10 MHz ticks, its length written as all ones (unknown), as Smooth Streaming
+    // writes it: read as frames, it was billions of hours, refused by the gate and the decode.
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/unknown_length_200ms.mp4"
+    );
+    assert_eq!(probe_duration_ms(path), Ok(None));
+    let (frames, rate) = decode_file(path, 1.0, 0, 0).unwrap();
+    let secs = frames.len() as f64 / rate as f64;
+    assert!((0.2..0.3).contains(&secs), "{secs:.3} s");
+}
+
+#[test]
 fn the_duration_budget_holds_at_the_rate_it_decodes_at() {
     // A 1.5 s budget judged at the declared 44.1 kHz is about 66k frames, which the 44k frames
     // the core decodes to pass, though they hold the full 2 s.
