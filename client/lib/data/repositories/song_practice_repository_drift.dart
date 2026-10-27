@@ -310,6 +310,13 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
   Future<Result<void>> deletePractice(String id) async {
     try {
       await db.transaction(() async {
+        // Already gone (a stale list after a remote delete, a second tap) or
+        // never there: nothing to delete. Tombstoned again, it journaled a
+        // fresh delete — for a row that did not exist, too.
+        final parent = await (db.select(
+          db.practices,
+        )..where((x) => x.id.equals(id))).getSingleOrNull();
+        if (parent == null || parent.deletedAt != null) return;
         await db.customStatement('PRAGMA defer_foreign_keys = ON');
         final now = _ms(DateTime.now());
         // Cascade-tombstone the whole subtree (children before parents is not
@@ -384,6 +391,19 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
         if (practice.reference != null) practice.reference!,
         ...practice.vocalTracks,
       ];
+
+      // A deleted practice takes no save (the transaction refuses it too, see
+      // _upsertPractice), and is turned away before the imports below: asked
+      // only there, its new files were already imported and journaled for a
+      // save that then failed.
+      final parent = await (db.select(
+        db.practices,
+      )..where((x) => x.id.equals(practice.id))).getSingleOrNull();
+      if (parent != null && parent.deletedAt != null) {
+        throw StateError(
+          'practice ${practice.id} is deleted; refusing to save over it',
+        );
+      }
 
       // Assets first (idempotent, deduped): every clip's audio + the separation
       // source. A dependent clip row never exists without its asset.

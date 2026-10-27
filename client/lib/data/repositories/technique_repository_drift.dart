@@ -169,6 +169,19 @@ class TechniqueRepositoryDrift implements TechniqueRepository {
     required Map<String, String>? base,
   }) => assets.gate.shared(() async {
     try {
+      // A deleted technique takes no save (the transaction refuses it too),
+      // and is turned away before the imports below: asked only there, its
+      // new files were already imported and journaled for a save that then
+      // failed.
+      final parent = await (db.select(
+        db.techniques,
+      )..where((t) => t.id.equals(technique.id))).getSingleOrNull();
+      if (parent != null && parent.deletedAt != null) {
+        throw StateError(
+          'technique ${technique.id} is deleted; refusing to save over it',
+        );
+      }
+
       // Assets first (outside the row transaction, idempotent + deduped): a
       // dependent media row never exists without its asset.
       final mediaAssets = <String>[]; // assetId per media, by index
@@ -427,6 +440,13 @@ class TechniqueRepositoryDrift implements TechniqueRepository {
   Future<Result<void>> deleteTechnique(String id) async {
     try {
       await db.transaction(() async {
+        // Already gone (a stale list after a remote delete, a second tap) or
+        // never there: nothing to delete. Tombstoned again, it journaled a
+        // fresh delete — for a row that did not exist, too.
+        final parent = await (db.select(
+          db.techniques,
+        )..where((t) => t.id.equals(id))).getSingleOrNull();
+        if (parent == null || parent.deletedAt != null) return;
         final media = await (db.select(
           db.techniqueMedia,
         )..where((m) => m.techniqueId.equals(id) & m.deletedAt.isNull())).get();

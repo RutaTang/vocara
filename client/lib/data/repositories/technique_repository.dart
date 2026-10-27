@@ -34,7 +34,15 @@ abstract class TechniqueRepository {
   /// Persists [technique] as a THREE-WAY merge against [baseHashes] (captured
   /// by [loadTechnique] or returned by the previous save) and returns the
   /// saved technique re-read from the store together with FRESH base hashes
-  /// for the next save.
+  /// for the next save — and, as [Loaded.sentHashes], the hashes of
+  /// [technique] as sent.
+  ///
+  /// An error means no row of the technique was written; media it imported
+  /// into the asset pool before the failure may remain (the pool's sweep
+  /// reclaims what nothing references). A deleted technique is refused before
+  /// any import. A write that committed but whose re-read failed still
+  /// succeeds, with [technique] itself and its sent hashes standing in for the
+  /// re-read ([Loaded.reread] false).
   Future<Result<Loaded<Technique>>> saveTechniqueWithBase(
     Technique technique, {
     required Map<String, String> baseHashes,

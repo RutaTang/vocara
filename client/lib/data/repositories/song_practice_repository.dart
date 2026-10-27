@@ -49,9 +49,12 @@ abstract class SongPracticeRepository {
   /// next save — and, as [Loaded.sentHashes], the hashes of [practice] as
   /// sent: the base for a caller that kept a model newer than [practice].
   ///
-  /// An error means nothing was written. A write that committed but whose
-  /// re-read failed still succeeds, with [practice] itself and its sent hashes
-  /// standing in for the re-read ([Loaded.reread] false).
+  /// An error means no row of the practice was written; files it imported
+  /// into the asset pool before the failure may remain (the pool's sweep
+  /// reclaims what nothing references). A deleted practice is refused before
+  /// any import. A write that committed but whose re-read failed still
+  /// succeeds, with [practice] itself and its sent hashes standing in for the
+  /// re-read ([Loaded.reread] false).
   Future<Result<Loaded<SongPractice>>> savePracticeWithBase(
     SongPractice practice, {
     required Map<String, String> baseHashes,
