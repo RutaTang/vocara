@@ -661,6 +661,15 @@ void main() {
       host.recDurationMs = 400; // 0.9 at -200 ms, 0.1 at 0 ms
       expect(host.mixer.masterWaveformPeaks[0], closeTo(0.05, 1e-9));
 
+      // Nor does a take sung on past the timeline's end (10 s) pile into the
+      // last bin.
+      host.recPeaks = const [0.2, 0.9];
+      host.recStartMs = 8000;
+      host.recDurationMs = 4000; // 0.2 at 9 s, 0.9 at 11 s
+      peaks = host.mixer.masterWaveformPeaks;
+      expect(peaks[900], closeTo(0.1, 1e-9));
+      expect(peaks[999], 0.0);
+
       // Muting the take removes its envelope but keeps the live one.
       host.recording = false;
       await host.mixer.toggleMute('v1');
