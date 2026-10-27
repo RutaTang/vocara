@@ -209,9 +209,33 @@ class AudioFileService {
       writeAlignedStartTo(path, startMs);
 
   /// [writeAlignedStart] for callers without a service (boot recovery).
-  static Future<bool> writeAlignedStartTo(String path, int startMs) async {
+  ///
+  /// Writes to one path land in call order, each whole: the start's write is
+  /// not awaited, and on a slow disk the stop's ran alongside it, both
+  /// truncating one file. It was left `-512` (recovery cut the head the stop
+  /// had already cut) or `0512` (placed half a second late).
+  static Future<bool> writeAlignedStartTo(String path, int startMs) {
+    final place = _alignedStartOf(path);
+    final Future<bool> mine = (_placeWrites[place] ?? Future.value(true)).then(
+      (_) => _writePlace(place, startMs),
+    );
+    _placeWrites[place] = mine;
+    mine.whenComplete(() {
+      if (identical(_placeWrites[place], mine)) _placeWrites.remove(place);
+    });
+    return mine;
+  }
+
+  /// The latest write queued per sidecar path ([writeAlignedStartTo]).
+  static final Map<String, Future<bool>> _placeWrites = {};
+
+  /// Writes [startMs] to [place] through a temp file and a rename, so a
+  /// crash mid-write leaves the previous value rather than a cut-off one.
+  static Future<bool> _writePlace(String place, int startMs) async {
     try {
-      await File(_alignedStartOf(path)).writeAsString('$startMs', flush: true);
+      final tmp = File('$place.tmp');
+      await tmp.writeAsString('$startMs', flush: true);
+      await tmp.rename(place);
       return true;
     } catch (_) {
       // Recovery falls back to the playhead at REC.

@@ -446,6 +446,22 @@ void main() {
     expect(take.primaryClip!.startMs, 3000);
   });
 
+  test('the stop\'s aligned start lands after the start\'s', () async {
+    // The start's write is not awaited; on a slow disk the stop's ran
+    // alongside it and the file came out "-512" or "0512", never "0".
+    final dir = Directory.systemTemp.createTempSync('place_order');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    final staged = '${dir.path}/${newId()}~01HZZZZZZZZZZZZZZZZZZZZZZZ~3000.wav';
+    for (var i = 0; i < 40; i++) {
+      final atStart = AudioFileService.writeAlignedStartTo(staged, -512);
+      final atStop = AudioFileService.writeAlignedStartTo(staged, 0);
+      expect(await Future.wait([atStart, atStop]), [true, true]);
+      expect(File('$staged.place').readAsStringSync(), '0', reason: 'run $i');
+    }
+    expect((await AudioFileService.recordingPlacementOf(staged))!.startMs, 0);
+    expect(File('$staged.place.tmp').existsSync(), isFalse);
+  });
+
   test(
     'a recording name carries its lane and start; others carry none',
     () async {
