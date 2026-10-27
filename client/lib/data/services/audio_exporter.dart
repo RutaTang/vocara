@@ -81,12 +81,14 @@ class AudioExporter {
 
   /// Copies [sourcePath] to a location the user picks, suggesting
   /// [suggestedName]. [noun] names what is exported in the messages ("take",
-  /// "track", "example"). Returns the outcome to show, or null when the user
+  /// "track", "example") and [medium] what it holds ("audio", or "video" for
+  /// a video example). Returns the outcome to show, or null when the user
   /// cancelled the save panel.
   Future<String?> export(
     String sourcePath, {
     required String suggestedName,
     required String noun,
+    String medium = 'audio',
   }) async {
     // One at a time: nothing showed a copy running (to a slow drive it runs
     // a while), and a second export to the same chosen name had two copies
@@ -95,7 +97,7 @@ class AudioExporter {
     // Bytes another device holds, not yet here: as edits of it say, not
     // "missing".
     if (AssetStore.assetIdOf(sourcePath) != null) {
-      return "This $noun's audio isn't on this device yet, so it can't be "
+      return "This $noun's $medium isn't on this device yet, so it can't be "
           'exported.';
     }
     // Claimed before the first await: set after one, a double-click while a
@@ -103,9 +105,9 @@ class AudioExporter {
     _exporting = true;
     try {
       final source = File(sourcePath);
-      final missing = 'The audio file for this $noun is missing.';
+      final missing = 'The $medium file for this $noun is missing.';
       if (sourcePath.isEmpty || !await source.exists()) return missing;
-      return await _exportPicked(source, suggestedName, noun, missing);
+      return await _exportPicked(source, suggestedName, noun, medium, missing);
     } finally {
       _exporting = false;
     }
@@ -116,6 +118,7 @@ class AudioExporter {
     File source,
     String suggestedName,
     String noun,
+    String medium,
     String missing,
   ) async {
     final String? destPath;
@@ -134,7 +137,7 @@ class AudioExporter {
     // and confirm Replace): the copy truncated it to nothing, the audio
     // gone, and said "Exported".
     if (await sameFile(source.path, dest)) {
-      return "That is the $noun's own audio file. Export it somewhere else.";
+      return "That is the $noun's own $medium file. Export it somewhere else.";
     }
     // Into the app's storage: another take's audio, or the library itself.
     if (await _audioFiles.isAppStorage(dest)) {
@@ -148,7 +151,7 @@ class AudioExporter {
     } catch (_) {
       // Blamed on the destination only when the source is still there.
       return await source.exists()
-          ? 'Could not export the audio to that location.'
+          ? 'Could not export the $medium to that location.'
           : missing;
     }
     return 'Exported to $dest';

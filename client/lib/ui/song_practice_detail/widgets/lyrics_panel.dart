@@ -12,6 +12,7 @@ import '../../../domain/models/practice_note.dart';
 import '../../../domain/models/technique_marker.dart';
 import '../../../utils/format.dart';
 import '../../core/themes/studio.dart';
+import '../../core/widgets/holds_keyboard.dart';
 import '../../core/widgets/studio_button.dart';
 import '../../core/widgets/visible_drop_target.dart';
 import '../view_model/song_practice_detail_view_model.dart';
@@ -1326,21 +1327,23 @@ class LyricsFocusOverlay extends StatelessWidget {
   Widget build(BuildContext context) {
     // The panel beneath takes no drop through this overlay (see
     // VisibleDropTarget), so the overlay takes it: a lyrics file dropped on
-    // the lyrics in focus did nothing at all.
-    return VisibleDropTarget(
-      onDrop: (paths) {
-        if (paths.isEmpty) return;
-        // The panel's editor is kept under the overlay with the text it
-        // opened on, and its Save would put that back over the import.
-        if (vm.lyricsMode == LyricsMode.edit) {
-          onToast?.call(
-            'Exit focus to import into the lyrics you are editing.',
-          );
-          return;
-        }
-        unawaited(vm.importLyricsFromFile(paths.first));
-      },
-      child: _focusBody(),
+    // the lyrics in focus did nothing at all. Nor the keyboard.
+    return HoldsKeyboard(
+      child: VisibleDropTarget(
+        onDrop: (paths) {
+          if (paths.isEmpty) return;
+          // The panel's editor is kept under the overlay with the text it
+          // opened on, and its Save would put that back over the import.
+          if (vm.lyricsMode == LyricsMode.edit) {
+            onToast?.call(
+              'Exit focus to import into the lyrics you are editing.',
+            );
+            return;
+          }
+          unawaited(vm.importLyricsFromFile(paths.first));
+        },
+        child: _focusBody(),
+      ),
     );
   }
 

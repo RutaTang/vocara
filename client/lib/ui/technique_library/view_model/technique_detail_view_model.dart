@@ -1837,6 +1837,7 @@ class TechniqueDetailViewModel extends ChangeNotifier
         m.path,
       ),
       noun: 'example',
+      medium: m.isVideo ? 'video' : 'audio',
     );
     if (said == null || _disposed) return;
     _recordingNotice = said;

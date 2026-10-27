@@ -387,6 +387,35 @@ void main() {
     expect(vm.recordingNotice, 'Exported to $dest');
   });
 
+  test('a video example\'s export says video, not audio', () async {
+    final vm = TechniqueDetailViewModel(
+      repository: _FakeRepo(
+        _technique(
+          media: [
+            TechniqueMedia(
+              id: 'v1',
+              path: '/nonexistent/vocara/clip.mp4',
+              kind: TechniqueMediaKind.video,
+              addedAt: DateTime(2026, 6, 20),
+            ),
+          ],
+        ),
+      ),
+      mediaService: TechniqueMediaService(storage: LocalStorageService()),
+      techniqueId: 't1',
+      exporter: AudioExporter(
+        audioFiles: AudioFileService(storage: LocalStorageService()),
+        pickSaveLocation: (_) async => fail('a missing file opens no panel'),
+      ),
+    );
+    addTearDown(vm.dispose);
+    for (var i = 0; i < 200 && vm.technique == null; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+    await vm.exportMedia('v1');
+    expect(vm.recordingNotice, 'The video file for this example is missing.');
+  });
+
   test('a MediaTooLongException analysis failure surfaces its cause via '
       'referenceAnalysisFailureMessage', () async {
     // Regression: the decode-length cap throws with user-presentable copy,

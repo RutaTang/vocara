@@ -18,6 +18,7 @@ import '../../../routing/routes.dart';
 import '../../../utils/format.dart';
 import '../../core/themes/studio.dart';
 import '../../core/widgets/confirm_dialog.dart';
+import '../../core/widgets/holds_keyboard.dart';
 import '../../core/widgets/stable_subtree.dart';
 import '../../core/widgets/studio_button.dart';
 import '../../core/widgets/studio_controls.dart';
@@ -605,12 +606,14 @@ class _WorkspaceState extends State<_Workspace> {
         if (vm.isSeparating)
           Positioned.fill(
             // Nothing beneath takes a drop through the overlay (see
-            // VisibleDropTarget): said, not silently dropped.
-            child: VisibleDropTarget(
-              onDrop: (_) => _showToast('Wait for the separation to finish.'),
-              child: _SeparationOverlay(
-                progress: vm.separationProgress,
-                onCancel: vm.canCancelSeparation ? vm.cancelSeparation : null,
+            // VisibleDropTarget): said, not silently dropped. Nor a key.
+            child: HoldsKeyboard(
+              child: VisibleDropTarget(
+                onDrop: (_) => _showToast('Wait for the separation to finish.'),
+                child: _SeparationOverlay(
+                  progress: vm.separationProgress,
+                  onCancel: vm.canCancelSeparation ? vm.cancelSeparation : null,
+                ),
               ),
             ),
           ),

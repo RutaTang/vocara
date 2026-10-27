@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vocara/domain/models/audio_track.dart';
 import 'package:vocara/domain/models/lyric_line.dart';
@@ -227,6 +228,101 @@ Future<void> _drop(WidgetTester tester, String path) async {
   // Flush the async import and the editor re-seed.
   await tester.pump();
   await tester.pump();
+}
+
+/// Fake for the keyboard under the focus view: the panel in [mode] with five
+/// lines, counting what Space stamps.
+class _KeysVm extends Fake implements SongPracticeDetailViewModel {
+  _KeysVm(this.mode);
+  LyricsMode mode;
+  int stamps = 0;
+  @override
+  bool get lyricsOpen => true;
+  @override
+  RightTab get rightTab => RightTab.lyrics;
+  @override
+  void toggleLyricsPanel() {}
+  @override
+  AudioTrack? get selectedTrack => null;
+  @override
+  List<({String trackId, String trackName, PracticeNote note})> get allNotes =>
+      const [];
+  @override
+  bool get hasLyrics => true;
+  @override
+  List<LyricLine> get lyrics => [
+    for (var i = 0; i < 5; i++) LyricLine(text: 'line $i'),
+  ];
+  @override
+  final ValueNotifier<Duration> position = ValueNotifier(Duration.zero);
+  @override
+  int currentLyricIndex(int positionMs) => -1;
+  @override
+  LyricsMode get lyricsMode => mode;
+  @override
+  String? lyricsDraft;
+  @override
+  int lyricsEditSession = 0;
+  @override
+  void setLyricsMode(LyricsMode m) => mode = m;
+  @override
+  void setLyricsFocus(bool on) {}
+  @override
+  String lyricsAsText() => 'line 0';
+  @override
+  int get syncIndex => 0;
+  @override
+  Future<void> stampNextLyric() async => stamps++;
+  @override
+  Future<void> stampLyricAt(int index) async {}
+  @override
+  Future<void> clearLyricTimes() async {}
+  @override
+  void seekToLyric(LyricLine line) {}
+}
+
+/// The panel with the focus view stacked over it while [focus] is on, as the
+/// workspace stacks them (text scaled down so the em-wide test font fits the
+/// sync view's buttons).
+Future<void> _pumpUnderFocus(
+  WidgetTester tester,
+  _KeysVm vm,
+  ValueNotifier<bool> focus,
+) async {
+  tester.view.physicalSize = const Size(1200, 800);
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.reset);
+  await tester.pumpWidget(
+    MaterialApp(
+      home: MediaQuery(
+        data: const MediaQueryData(textScaler: TextScaler.linear(0.5)),
+        child: Scaffold(
+          body: ValueListenableBuilder(
+            valueListenable: focus,
+            builder: (context, on, _) => Stack(
+              children: [
+                Align(
+                  alignment: Alignment.topLeft,
+                  child: SizedBox(
+                    height: 700,
+                    child: RightPanel(
+                      vm: vm,
+                      onAddNote: (_) {},
+                      onEditNote: (_, _) {},
+                      onAddTechnique: (_) {},
+                      onEditTechnique: (_, _) {},
+                    ),
+                  ),
+                ),
+                if (on) Positioned.fill(child: LyricsFocusOverlay(vm: vm)),
+              ],
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+  await tester.pumpAndSettle();
 }
 
 void main() {
@@ -515,5 +611,47 @@ void main() {
     await _drop(tester, '/tmp/song.lrc');
     expect(vm.imported, isEmpty);
     expect(toasts.single, contains('Exit focus'));
+  });
+
+  group('the focus view holds the keyboard', () {
+    testWidgets('Space stamps nothing hidden beneath it, and again after', (
+      tester,
+    ) async {
+      final vm = _KeysVm(LyricsMode.sync);
+      final focus = ValueNotifier(false);
+      await _pumpUnderFocus(tester, vm, focus);
+      await tester.sendKeyEvent(LogicalKeyboardKey.space);
+      expect(vm.stamps, 1);
+
+      focus.value = true;
+      await tester.pumpAndSettle();
+      await tester.sendKeyEvent(LogicalKeyboardKey.space);
+      await tester.sendKeyEvent(LogicalKeyboardKey.space);
+      expect(vm.stamps, 1, reason: 'the hidden sync view took the keys');
+
+      focus.value = false;
+      await tester.pumpAndSettle();
+      await tester.sendKeyEvent(LogicalKeyboardKey.space);
+      expect(vm.stamps, 2, reason: 'the sync view has the keyboard back');
+    });
+
+    testWidgets('typing reaches no hidden editor, which gets focus back', (
+      tester,
+    ) async {
+      final vm = _KeysVm(LyricsMode.edit);
+      final focus = ValueNotifier(false);
+      await _pumpUnderFocus(tester, vm, focus);
+      FocusNode editor() =>
+          tester.widget<EditableText>(find.byType(EditableText)).focusNode;
+      expect(editor().hasFocus, isTrue);
+
+      focus.value = true;
+      await tester.pumpAndSettle();
+      expect(editor().hasFocus, isFalse);
+
+      focus.value = false;
+      await tester.pumpAndSettle();
+      expect(editor().hasFocus, isTrue);
+    });
   });
 }
