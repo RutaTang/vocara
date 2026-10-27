@@ -288,7 +288,7 @@ class TechniqueRepositoryDrift implements TechniqueRepository {
             // Plain local edit, or a true conflict (both sides changed): the
             // ACTIVE EDITOR wins by policy and mine is written with a fresh
             // HLC, so it also wins entity-level LWW downstream.
-            final s = writer.stamp();
+            final s = writer.stampAfter(existing.hlcPacked);
             techniqueWritten = true;
             await (db.update(
               db.techniques,
@@ -457,7 +457,7 @@ class TechniqueRepositoryDrift implements TechniqueRepository {
         )..where((m) => m.techniqueId.equals(id) & m.deletedAt.isNull())).get();
         final now = _ms(DateTime.now());
         for (final m in media) {
-          final s = writer.stamp();
+          final s = writer.stampAfter(m.hlcPacked);
           await (db.update(
             db.techniqueMedia,
           )..where((x) => x.id.equals(m.id))).write(
@@ -478,7 +478,7 @@ class TechniqueRepositoryDrift implements TechniqueRepository {
             payloadHash: '',
           );
         }
-        final s = writer.stamp();
+        final s = writer.stampAfter(parent.hlcPacked);
         await (db.update(db.techniques)..where((t) => t.id.equals(id))).write(
           TechniquesCompanion(
             deletedAt: Value(now),

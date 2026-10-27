@@ -896,7 +896,7 @@ class AssetStore {
     final tombstonedHashes = await db.transaction(() async {
       final hashes = <String>[];
       for (final c in candidates) {
-        final s = writer.stamp();
+        final s = await writer.stampFor('assets', c.id);
         final changed = await db.customUpdate(
           'UPDATE assets SET deleted_at = ?, updated_at = ?, hlc_wall = ?, '
           'hlc_ctr = ?, hlc_node = ?, hlc_packed = ? WHERE id = ? '

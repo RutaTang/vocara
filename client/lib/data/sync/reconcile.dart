@@ -155,7 +155,7 @@ Future<ReconcileResult> reconcileCollection<Item>({
     }
     // Rule 6: the editor held this row and dropped it — an explicit removal.
     // Tombstone even if the DB content moved on since load (delete wins).
-    final stamp = writer.stamp();
+    final stamp = await writer.stampFor(table, id);
     await tombstone(id, stamp);
     await writer.journal(
       table: table,
@@ -194,7 +194,7 @@ Future<ReconcileResult> reconcileCollection<Item>({
         // side, base != null && mine != base): an edit-vs-delete conflict —
         // the active editor wins and the row is revived. Both go through the
         // same upsert insert path (which clears deleted_at) with a fresh HLC.
-        final stamp = writer.stamp();
+        final stamp = await writer.stampFor(table, id);
         await insert(item, stamp);
         await writer.journal(
           table: table,
@@ -210,7 +210,7 @@ Future<ReconcileResult> reconcileCollection<Item>({
         // wins, mine is written with a fresh HLC.
         // base == null with a live row: no base knowledge (a no-base save
         // over an existing row) — treated as a conflict, local wins.
-        final stamp = writer.stamp();
+        final stamp = await writer.stampFor(table, id);
         await update(item, stamp);
         await writer.journal(
           table: table,

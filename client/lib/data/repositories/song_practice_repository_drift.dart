@@ -621,7 +621,7 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
       // Plain local edit (existingHash == baseHash) or a true conflict (both
       // sides changed): the ACTIVE EDITOR wins by policy and mine is written
       // with a fresh HLC, so it also wins entity-level LWW downstream.
-      final s = writer.stamp();
+      final s = writer.stampAfter(existing.hlcPacked);
       await (db.update(db.practices)..where((x) => x.id.equals(p.id))).write(
         PracticesCompanion(
           title: Value(p.title),
@@ -1211,7 +1211,7 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
     String id,
     int now,
   ) async {
-    final s = writer.stamp();
+    final s = await writer.stampFor(table.actualTableName, id);
     await db.customUpdate(
       'UPDATE ${table.actualTableName} SET deleted_at = ?, updated_at = ?, '
       'hlc_wall = ?, hlc_ctr = ?, hlc_node = ?, hlc_packed = ? WHERE id = ?',

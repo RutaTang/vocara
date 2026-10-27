@@ -487,6 +487,60 @@ void main() {
     expect(await repo.getPractice(a.id), isA<Error<SongPractice>>());
   });
 
+  test('an edit or delete over a row stamped ahead of this clock orders '
+      'after it', () async {
+    // A second running instance shares the library with a clock of its own,
+    // so a row it wrote can carry a stamp ahead of ours. Stamped from our
+    // clock alone, the edit replacing it lost entity-level LWW to the very
+    // version it replaced.
+    final pr = ok(await repo.createPractice('Mine'));
+    final versionId = pr.versions.single.id;
+    final ahead = Hlc(
+      wallMs: DateTime.now().millisecondsSinceEpoch + 60000,
+      counter: 7,
+      node: 'OTHER'.padRight(26, '0'),
+    ).packed;
+    Future<void> plant(String table, String id) => db.customUpdate(
+      'UPDATE $table SET hlc_packed = ? WHERE id = ?',
+      variables: [Variable.withString(ahead), Variable.withString(id)],
+    );
+    Future<String> held(String table, String id) async =>
+        (await db
+                .customSelect(
+                  'SELECT hlc_packed FROM $table WHERE id = ?',
+                  variables: [Variable.withString(id)],
+                )
+                .getSingle())
+            .read<String>('hlc_packed');
+
+    await plant('practices', pr.id);
+    await plant('interpretations', versionId);
+    final saved = ok(
+      await repo.savePractice(
+        pr.copyWith(
+          title: 'Renamed',
+          versions: [
+            for (final v in pr.versions) v.copyWith(name: 'Renamed take'),
+          ],
+        ),
+      ),
+    );
+    expect(saved.title, 'Renamed');
+    expect((await held('practices', pr.id)).compareTo(ahead), 1);
+    expect((await held('interpretations', versionId)).compareTo(ahead), 1);
+
+    await plant('practices', pr.id);
+    await plant('interpretations', versionId);
+    await repo.deletePractice(pr.id);
+    expect((await held('practices', pr.id)).compareTo(ahead), 1);
+    expect((await held('interpretations', versionId)).compareTo(ahead), 1);
+    // The journal carries the same order.
+    final last = await (db.select(
+      db.oplog,
+    )..where((o) => o.entityId.equals(pr.id))).get();
+    expect(last.last.hlcPacked.compareTo(ahead), 1);
+  });
+
   // --- regression: data-loss blockers ---
 
   test('a clip whose pooled file goes missing survives reload + re-save '

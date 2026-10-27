@@ -33,7 +33,47 @@ class SyncWriter {
 
   /// Stamps a local write (ticks the clock). Splice [SyncStamp.hlc] into the
   /// row companion's SyncCols, then call [journal] in the SAME transaction.
+  /// For a row that already exists, use [stampAfter] or [stampFor].
   SyncStamp stamp() => SyncStamp(_clock.tick());
+
+  /// Stamps a write over a row whose stored stamp is [heldPacked] (read in
+  /// the same transaction; null for a row that does not exist): the stamp
+  /// orders after it as well as after this clock's own last one.
+  ///
+  /// The clock alone does not guarantee that. A second running instance
+  /// shares the library (see LibraryLock) with a clock of its own, so a row
+  /// the other one wrote or applied can hold a stamp ahead of this clock;
+  /// an edit stamped from the clock alone then lost entity-level LWW to the
+  /// very version it replaced, on every device but this one. A stored
+  /// stamp that does not parse stamps as [stamp] does.
+  SyncStamp stampAfter(String? heldPacked) {
+    if (heldPacked != null) {
+      final Hlc held;
+      try {
+        held = Hlc.parse(heldPacked);
+      } on FormatException {
+        return stamp();
+      }
+      // Stored stamps passed the drift gate on the way in, and boot seeds
+      // the clock from the same columns, so no re-check (see mergeVerified).
+      if (held >= _clock.last) return SyncStamp(_clock.mergeVerified(held));
+    }
+    return stamp();
+  }
+
+  /// [stampAfter] for the row [id] of [table], reading its stored stamp.
+  /// Run inside the write's transaction.
+  Future<SyncStamp> stampFor(String table, String id) async {
+    final info = _db.allTables.where((t) => t.actualTableName == table);
+    if (info.isEmpty) throw ArgumentError.value(table, 'table');
+    final row = await _db
+        .customSelect(
+          'SELECT hlc_packed FROM ${info.single.actualTableName} WHERE id = ?',
+          variables: [Variable.withString(id)],
+        )
+        .getSingleOrNull();
+    return stampAfter(row?.read<String>('hlc_packed'));
+  }
 
   /// Appends one oplog entry. MUST be called inside the same transaction as the
   /// row write so the ledger and the data are atomic.

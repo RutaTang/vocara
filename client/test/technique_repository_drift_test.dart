@@ -1,7 +1,7 @@
 import 'dart:io';
 
 import 'package:drift/drift.dart'
-    show ApplyInterceptor, QueryExecutor, QueryInterceptor;
+    show ApplyInterceptor, QueryExecutor, QueryInterceptor, Variable;
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
@@ -96,6 +96,42 @@ void main() {
     createdAt: DateTime(2026),
     updatedAt: DateTime(2026),
   );
+
+  test('an edit or delete over a row stamped ahead of this clock orders '
+      'after it', () async {
+    // See the practice repository's twin: a second running instance's
+    // stamps can sit ahead of this clock.
+    final m = await media('ex.wav', [1, 2, 3]);
+    final t = (await repo.saveTechnique(technique(media: [m])) as Ok<Technique>)
+        .value;
+    final ahead = Hlc(
+      wallMs: DateTime.now().millisecondsSinceEpoch + 60000,
+      counter: 7,
+      node: 'OTHER'.padRight(26, '0'),
+    ).packed;
+    Future<void> plant(String table, String id) => db.customUpdate(
+      'UPDATE $table SET hlc_packed = ? WHERE id = ?',
+      variables: [Variable.withString(ahead), Variable.withString(id)],
+    );
+    Future<String> held(String table, String id) async =>
+        (await db
+                .customSelect(
+                  'SELECT hlc_packed FROM $table WHERE id = ?',
+                  variables: [Variable.withString(id)],
+                )
+                .getSingle())
+            .read<String>('hlc_packed');
+
+    await plant('techniques', t.id);
+    await repo.saveTechnique(t.copyWith(name: 'Belt'));
+    expect((await held('techniques', t.id)).compareTo(ahead), 1);
+
+    await plant('techniques', t.id);
+    await plant('technique_media', m.id);
+    await repo.deleteTechnique(t.id);
+    expect((await held('techniques', t.id)).compareTo(ahead), 1);
+    expect((await held('technique_media', m.id)).compareTo(ahead), 1);
+  });
 
   test(
     'save -> load round-trips a technique + resolves its media to a path',
