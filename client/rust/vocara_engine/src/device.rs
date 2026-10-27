@@ -3977,16 +3977,34 @@ fn edge_trim(params: &symphonia::core::codecs::CodecParameters) -> (u64, u64) {
 /// an HE-AAC file often counts at its core rate, half the declared one, and a Smooth
 /// Streaming file in 10 MHz ticks, so read as frames the one was half its length and the
 /// other hours long, refused as too long. All ones is the header's "unknown".
-fn declared_frames(params: &symphonia::core::codecs::CodecParameters) -> Option<u64> {
+///
+/// A PCM track also declares no more frames than the file's `file_len` bytes hold: a WAV
+/// written to a pipe leaves its data size at all ones (4 GB, never patched), which read as
+/// hours, so a 2 s file was refused as too long. Past the file, a declaration counts as none.
+fn declared_frames(
+    params: &symphonia::core::codecs::CodecParameters,
+    file_len: u64,
+) -> Option<u64> {
     let n = params.n_frames.filter(|&n| n != u64::MAX)?;
-    match (params.time_base, params.sample_rate) {
+    let frames = match (params.time_base, params.sample_rate) {
         (Some(tb), Some(rate)) if (tb.numer, tb.denom) != (1, rate) && tb.denom > 0 => {
             let frames = (u128::from(n) * u128::from(tb.numer) * u128::from(rate))
                 .div_ceil(u128::from(tb.denom));
-            Some(u64::try_from(frames).unwrap_or(u64::MAX))
+            u64::try_from(frames).unwrap_or(u64::MAX)
         }
-        _ => Some(n),
+        _ => n,
+    };
+    let pcm = symphonia::default::get_codecs()
+        .get_codec(params.codec)
+        .is_some_and(|c| c.short_name.starts_with("pcm_"));
+    // Rounded down to whole bytes: a looser bound, never a real length thrown out.
+    let bits = params.bits_per_coded_sample.or(params.bits_per_sample);
+    let frame_bytes =
+        u64::from(bits.unwrap_or(0) / 8) * params.channels.map_or(0, |c| c.count() as u64);
+    if pcm && frame_bytes > 0 && frames.saturating_mul(frame_bytes) > file_len {
+        return None;
     }
+    Some(frames)
 }
 
 /// The track decoding reads: the first a decoder exists for. symphonia's own default is simply
@@ -4052,6 +4070,7 @@ pub fn probe_duration_ms(path: &str) -> Result<Option<u64>, String> {
     use symphonia::core::probe::Hint;
 
     let mut file = std::fs::File::open(path).map_err(|e| format!("open {path}: {e}"))?;
+    let file_len = file.metadata().map_or(u64::MAX, |m| m.len());
     // The probe itself sizes allocations by what the file declares (see media_screen), so this
     // gate is only a gate once the file has been screened.
     crate::media_screen::screen(&mut file).map_err(|e| format!("screen {path}: {e}"))?;
@@ -4070,17 +4089,19 @@ pub fn probe_duration_ms(path: &str) -> Result<Option<u64>, String> {
         audio_track(&*probed.format).ok_or_else(|| "no decodable audio track".to_string())?;
     let rate = track.codec_params.sample_rate.unwrap_or(0) as u64;
     let (delay, padding) = edge_trim(&track.codec_params);
-    Ok(match (declared_frames(&track.codec_params), rate) {
-        // Ceiling division: a gate comparing `declared > cap` must see a file that is even
-        // ONE sample past the cap as strictly longer — flooring would round it down onto
-        // the boundary and admit it. What decode_file drops is not counted.
-        (Some(n), r) if r > 0 => Some(
-            n.saturating_sub(delay.saturating_add(padding))
-                .saturating_mul(1000)
-                .div_ceil(r),
-        ),
-        _ => None,
-    })
+    Ok(
+        match (declared_frames(&track.codec_params, file_len), rate) {
+            // Ceiling division: a gate comparing `declared > cap` must see a file that is even
+            // ONE sample past the cap as strictly longer — flooring would round it down onto
+            // the boundary and admit it. What decode_file drops is not counted.
+            (Some(n), r) if r > 0 => Some(
+                n.saturating_sub(delay.saturating_add(padding))
+                    .saturating_mul(1000)
+                    .div_ceil(r),
+            ),
+            _ => None,
+        },
+    )
 }
 
 /// Why [`decode_file`] refused a file. The variants are DIAGNOSTIC taxonomy,
@@ -4147,6 +4168,7 @@ pub fn decode_file(
     let err = |m: String| DecodeError::Other(m);
     let mut file =
         std::fs::File::open(path).map_err(|e| DecodeError::Io(format!("open {path}: {e}")))?;
+    let file_len = file.metadata().map_or(u64::MAX, |m| m.len());
 
     // WAV pre-sniff BEFORE symphonia sees the bytes: a zero sample rate makes symphonia's
     // TimeBase constructor panic inside the probe itself, so the envelope must be judged
@@ -4236,7 +4258,7 @@ pub fn decode_file(
     // allocation on its own).
     // Judged as trimmed, as probe_duration_ms reports it: untrimmed, a file the import gate
     // admitted within a few ms of the cap was refused here.
-    let mut out: Vec<[Smp; CHANNELS]> = match declared_frames(&track.codec_params)
+    let mut out: Vec<[Smp; CHANNELS]> = match declared_frames(&track.codec_params, file_len)
         .map(|n| n.saturating_sub(skip.saturating_add(padding)))
     {
         Some(n) if n > max_frames => return Err(budget_err(n, duration_frames)),
