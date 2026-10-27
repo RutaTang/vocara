@@ -4668,6 +4668,11 @@ fn decode_source(
     if kept > 0 {
         out.truncate(kept.max(link_start as u64) as usize);
     }
+    // The budget let an ADPCM file's last block, and a link's padding, run past the cap only
+    // to be cut back above. Where a count left short kept them, the track is over it after all.
+    if out.len() as u64 > max_frames {
+        return Err(budget_err(out.len() as u64, duration_frames));
+    }
     if out.is_empty() {
         return Err(err(format!(
             "decoded no audio from {path} ({skipped_packets} corrupt packets skipped)"

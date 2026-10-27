@@ -324,6 +324,42 @@ fn an_adpcm_wav_written_to_a_pipe_is_not_refused_as_too_long() {
 }
 
 #[test]
+fn an_adpcm_wav_whose_count_falls_short_still_holds_the_cap() {
+    // The room left for an ADPCM file's padded last block is cut back to its 'fact' count at
+    // the end, but a count short by a block or more cuts nothing (it must not cut real
+    // sound): the whole decode came back past the cap instead of being refused.
+    let one = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/ima_adpcm_100ms.wav"
+    ))
+    .unwrap();
+    // Its one data block (2041 frames at 8 kHz) three times over, declared as 4000 frames.
+    let data = one.windows(4).position(|w| w == b"data").unwrap();
+    let block = &one[data + 8..];
+    assert_eq!(block.len(), 1024);
+    let mut bytes = [&one[..data + 8], block, block, block].concat();
+    bytes[data + 4..data + 8].copy_from_slice(&3_072u32.to_le_bytes());
+    let riff = (bytes.len() - 8) as u32;
+    bytes[4..8].copy_from_slice(&riff.to_le_bytes());
+    let fact = bytes.windows(4).position(|w| w == b"fact").unwrap();
+    bytes[fact + 8..fact + 12].copy_from_slice(&4_000u32.to_le_bytes());
+    let path = temp_file("short_fact.wav", &bytes);
+    let capped = decode_file(&path, 0.6, 0, 0); // 4800 frames
+    let whole = decode_file(&path, 0.8, 0, 0);
+    let _ = std::fs::remove_file(&path);
+    let (capped, whole) = (
+        capped.map(|(f, _)| f.len()),
+        whole.map(|(f, r)| (f.len(), r)),
+    );
+    assert!(
+        matches!(capped, Err(vocara_engine::device::DecodeError::TooLong)),
+        "{capped:?}"
+    );
+    // Under a cap it fits, nothing is cut: a count left short is no reason to drop sound.
+    assert!(matches!(whole, Ok((6_123, 8_000))), "{whole:?}");
+}
+
+#[test]
 fn a_chained_ogg_keeps_a_short_link_before_one_of_headers_only() {
     // A link of headers only ends the file before it starts a link, so the seekable read's
     // empty link showed at the end of the file rather than at a reset.
