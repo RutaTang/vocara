@@ -300,6 +300,14 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     }
 
     load = Command0(_load)..execute();
+    // A remote change that landed while a load read is owed once it is done
+    // (the command notifies as it finishes, its running flag already clear).
+    load.addListener(() {
+      if (!load.running && _missedRemote) {
+        _missedRemote = false;
+        unawaited(_reloadIfUnchanged());
+      }
+    });
     // Freshness reloads when sync applies remote changes to THIS practice.
     _remoteSub = remoteApplied?.listen(_onRemoteApplied);
     // Probe the separation engine once so the UI can hide "Separate" when no
@@ -413,6 +421,10 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// state (the classic stale-read-completes-last race).
   int _reloadEpoch = 0;
 
+  /// A remote change [_reloadIfUnchanged] skipped because a load was still
+  /// reading; replayed once the load is done.
+  bool _missedRemote = false;
+
   /// The model as last read from or written to the store (a load, a save's
   /// re-read, a revert). Any other [_practice] holds a change not saved yet.
   SongPractice? _persisted;
@@ -432,7 +444,13 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// model changed meanwhile — the freshness reload shared by a remote apply
   /// and a save that landed after this screen opened (see [_load]).
   Future<void> _reloadIfUnchanged() async {
-    if (_disposed || _practice == null || load.running) return;
+    if (_disposed) return;
+    if (_practice == null || load.running) {
+      // Owed after the load (see the constructor): dropped, a change landing
+      // after the first read stayed invisible until the next save re-read.
+      _missedRemote = true;
+      return;
+    }
     if (busy || isRecording || isSeparating || _saving) return;
     // A change not saved yet (a fader held still, a save still queued): read
     // over with the store, the control snapped back and its release saved the
@@ -2190,6 +2208,8 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       // source (or the copy) must never touch the other's audio, and reused clip
       // PKs would collide on insert and roll the whole save back.
       final newClips = <AudioClip>[];
+      // Each copy by the source clip it was made from (see below).
+      final copyOf = <String, AudioClip>{};
       // Declared BEFORE the copies, not after: a multi-clip lane can fail part way through
       // (disk full on the second file), and the copies that already landed are then orphaned
       // in edits/ with nothing referencing them. Undo them on the way out instead of leaving
@@ -2208,15 +2228,15 @@ class SongPracticeDetailViewModel extends ChangeNotifier
             practiceId: _practiceId,
             sourcePath: c.audioFilePath,
           );
-          newClips.add(
-            AudioClip(
-              id: newId(),
-              audioFilePath: dest,
-              durationMs: c.durationMs,
-              startMs: c.startMs,
-              waveformPeaks: c.waveformPeaks,
-            ),
+          final copied = AudioClip(
+            id: newId(),
+            audioFilePath: dest,
+            durationMs: c.durationMs,
+            startMs: c.startMs,
+            waveformPeaks: c.waveformPeaks,
           );
+          newClips.add(copied);
+          copyOf[c.id] = copied;
         }
       } catch (_) {
         // Never let a cleanup failure replace the failure that caused it: the
@@ -2227,20 +2247,6 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         } catch (_) {}
         rethrow; // the busy gate reports it; the model was never touched
       }
-      final copy = src.copyWith(
-        id: newId(),
-        displayName: '${src.displayName} copy',
-        createdAt: DateTime.now(),
-        clips: newClips,
-        // Fresh note/marker ids too: unlike split/merge the SOURCE take survives,
-        // so its child rows stay LIVE holding these ids — copying them verbatim
-        // onto the new track id would collide on the notes/markers primary key and
-        // roll the whole save back (only clip ids were regenerated before).
-        notes: src.notes.map((n) => n.copyWith(id: newId())).toList(),
-        techniqueMarkers: src.techniqueMarkers
-            .map((m) => m.copyWith(id: newId()))
-            .toList(),
-      );
       // Re-read the LIVE practice after the file copies so a take recorded/
       // imported meanwhile isn't dropped by a stale-snapshot rebuild.
       final cur = _practice;
@@ -2248,6 +2254,29 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       final list = [...cur.vocalTracks];
       final idx = list.indexWhere((t) => t.id == trackId);
       if (idx < 0) return discardCopies(); // source removed during the copy
+      // The copy is of the lane as it is now, as split and merge rebuild
+      // theirs: built from the pre-copy snapshot, it missed a rename, a note
+      // or a clip drag made while the files copied, and kept the bus and
+      // sends of a bus deleted meanwhile.
+      final live = list[idx];
+      final copy = live.copyWith(
+        id: newId(),
+        displayName: '${live.displayName} copy',
+        createdAt: DateTime.now(),
+        clips: [
+          for (final c in live.clips)
+            if (copyOf[c.id] case final copied?)
+              copied.copyWith(startMs: c.startMs),
+        ],
+        // Fresh note/marker ids too: unlike split/merge the SOURCE take survives,
+        // so its child rows stay LIVE holding these ids — copying them verbatim
+        // onto the new track id would collide on the notes/markers primary key and
+        // roll the whole save back (only clip ids were regenerated before).
+        notes: live.notes.map((n) => n.copyWith(id: newId())).toList(),
+        techniqueMarkers: live.techniqueMarkers
+            .map((m) => m.copyWith(id: newId()))
+            .toList(),
+      );
       list.insert(idx + 1, copy);
       _practice = cur.copyWith(vocalTracks: list);
       if (await _save()) {
@@ -2778,19 +2807,21 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   }
 
   /// Defaults the timeline length to fit the content (plus a little tail) on
-  /// first open, and grows it if the content has outgrown it — but never
-  /// shrinks it, so moving a clip can't rescale the timeline.
+  /// first open, and grows it — tail included — if the content has outgrown
+  /// it, but never shrinks it, so moving a clip can't rescale the timeline.
+  /// Grown to the content alone, a new practice (opened on the 20 s
+  /// placeholder) ended exactly where its first import did, and no clip could
+  /// be dragged to end past the backing.
   void _ensureTimeline() {
     final practice = _practice;
     if (practice == null) return;
     final content = practice.contentEndMs;
+    final withTail = content + (content * 15 ~/ 100).clamp(2000, 30000);
     var dur = practice.timelineDurationMs;
     if (dur <= 0) {
-      dur = content <= 0
-          ? 20000
-          : content + (content * 15 ~/ 100).clamp(2000, 30000);
+      dur = content <= 0 ? 20000 : withTail;
     } else if (dur < content) {
-      dur = content;
+      dur = withTail;
     }
     if (dur != practice.timelineDurationMs) {
       _practice = practice.copyWith(timelineDurationMs: dur);

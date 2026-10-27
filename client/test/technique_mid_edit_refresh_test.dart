@@ -49,6 +49,10 @@ class _Repo implements TechniqueRepository {
   /// Loads that fail before the store answers again.
   int loadFailures = 0;
 
+  /// When set, the next load reads the store, then parks on it before it
+  /// answers — a read taken before a change that lands while it is out.
+  Completer<void>? loadGate;
+
   @override
   Future<Result<Loaded<Technique>>> loadTechnique(String id) async {
     loadCalls++;
@@ -56,7 +60,13 @@ class _Repo implements TechniqueRepository {
       loadFailures--;
       return Result.error(Exception('read failed'));
     }
-    return Result.ok(Loaded(stored, storedHashes));
+    final read = Loaded(stored, storedHashes);
+    final gate = loadGate;
+    if (gate != null) {
+      loadGate = null;
+      await gate.future;
+    }
+    return Result.ok(read);
   }
 
   @override
@@ -207,6 +217,39 @@ void _remoteEdit(_Repo repo, StreamController<RemoteApplied> remote) {
 }
 
 void main() {
+  test(
+    'a remote change landing during the first load is loaded after it',
+    () async {
+      // Skipped while the page's first read was out, and never replayed: the
+      // rename stayed invisible, through Edit and Cancel too.
+      final firstRead = Completer<void>();
+      final repo = _Repo(_technique(), {'t1': 'BASE-HASH'})
+        ..loadGate = firstRead;
+      final remote = StreamController<RemoteApplied>.broadcast();
+      addTearDown(remote.close);
+      final vm = TechniqueDetailViewModel(
+        repository: repo,
+        mediaService: TechniqueMediaService(storage: LocalStorageService()),
+        techniqueId: 't1',
+        remoteApplied: remote.stream,
+      );
+      addTearDown(vm.dispose);
+      await pumpEventQueue();
+      expect(vm.load.running, isTrue);
+      _remoteEdit(repo, remote);
+      await pumpEventQueue();
+      firstRead.complete();
+      for (
+        var i = 0;
+        i < 50 && vm.technique?.summary != 'remote summary';
+        i++
+      ) {
+        await pumpEventQueue();
+      }
+      expect(vm.technique!.summary, 'remote summary');
+    },
+  );
+
   testWidgets('a remote change mid-edit does not advance the save base', (
     tester,
   ) async {

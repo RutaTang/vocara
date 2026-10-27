@@ -53,8 +53,19 @@ class _FakeRepo extends Fake implements SongPracticeRepository {
   /// The next load fails.
   bool failNextLoad = false;
 
+  /// When set, the next load reads the store, then parks on it before it
+  /// answers — a read taken before a change that lands while it is out.
+  Completer<void>? staleLoadGate;
+
   @override
   Future<Result<Loaded<SongPractice>>> loadPractice(String id) async {
+    final stale = staleLoadGate;
+    if (stale != null) {
+      staleLoadGate = null;
+      final read = stored;
+      await stale.future;
+      return Result.ok(Loaded(read, const {}));
+    }
     final gate = loadGate;
     if (gate != null) await gate.future;
     if (failNextLoad) {
@@ -242,11 +253,16 @@ class _FakeEdits extends Fake implements AudioEditService {
   /// fails PART WAY through a multi-clip lane.
   int? failDuplicateAt;
 
+  /// When set, each duplicate parks on it — a copy of a long take.
+  Completer<void>? duplicateGate;
+
   @override
   Future<String> duplicate({
     required String practiceId,
     required String sourcePath,
   }) async {
+    final gate = duplicateGate;
+    if (gate != null) await gate.future;
     final n = _dups++;
     if (n == failDuplicateAt) {
       throw StateError('injected duplicate failure (disk full)');
@@ -424,6 +440,7 @@ void main() {
     String? separationSource,
     Stream<RemoteApplied>? remoteApplied,
     PlaybackEngine? engine,
+    Completer<void>? firstLoad,
   }) async {
     events = <String>[];
     repo = _FakeRepo(
@@ -433,7 +450,7 @@ void main() {
         separationSource: separationSource,
       ),
       events,
-    );
+    )..staleLoadGate = firstLoad;
     files = _FakeFiles(events);
     final storage = LocalStorageService();
     final vm = SongPracticeDetailViewModel(
@@ -452,6 +469,7 @@ void main() {
       remoteApplied: remoteApplied,
     );
     addTearDown(vm.dispose);
+    if (firstLoad != null) return vm; // the caller lets it land
     for (var i = 0; i < 400 && vm.practice == null; i++) {
       await Future<void>.delayed(const Duration(milliseconds: 5));
     }
@@ -1300,6 +1318,27 @@ void main() {
       expect(vm.practice!.vocalTracks.map((t) => t.id), ['single', 'multi']);
     });
 
+    test(
+      'a duplicate is of the take as it is once the files are copied',
+      () async {
+        // Built from the snapshot taken before the copies, it missed a rename
+        // and a clip drag made while they ran.
+        final edits = _FakeEdits()..duplicateGate = Completer<void>();
+        final vm = await pumpVm(edits: edits);
+        final dup = vm.duplicateTrack('multi');
+        await Future<void>.delayed(Duration.zero);
+        await vm.renameTrack('multi', 'Verse');
+        vm.moveClipStartLive('multi', 'clip-b', 700);
+        await vm.commitTrackMove();
+        edits.duplicateGate!.complete();
+        await dup;
+
+        final copy = vm.practice!.vocalTracks.last;
+        expect(copy.displayName, 'Verse copy');
+        expect(copy.clips.map((c) => c.startMs), [0, 700]);
+      },
+    );
+
     test('duplicateTrack that fails PART WAY through a multi-clip lane '
         'deletes the copies that already landed', () async {
       // The cleanup path used to be declared only after the copy loop, so a
@@ -1422,6 +1461,41 @@ void main() {
       );
       expect(single.volume, 0.3);
     });
+
+    test(
+      'a remote change landing during the first load is loaded after it',
+      () async {
+        // Skipped while the page's first read was out, and never replayed: the
+        // change stayed invisible until some later save re-read the store.
+        final remote = StreamController<RemoteApplied>.broadcast();
+        addTearDown(remote.close);
+        final firstRead = Completer<void>();
+        final vm = await pumpVm(
+          remoteApplied: remote.stream,
+          firstLoad: firstRead,
+        );
+        await Future<void>.delayed(Duration.zero);
+        expect(vm.load.running, isTrue);
+        repo.stored = repo.stored.copyWith(title: 'Renamed elsewhere');
+        remote.add(
+          RemoteApplied(
+            rows: const [],
+            practiceIds: const {'p1'},
+            techniqueIds: const {},
+          ),
+        );
+        await Future<void>.delayed(Duration.zero);
+        firstRead.complete();
+        for (
+          var i = 0;
+          i < 100 && vm.practice?.title != 'Renamed elsewhere';
+          i++
+        ) {
+          await Future<void>.delayed(const Duration(milliseconds: 5));
+        }
+        expect(vm.practice!.title, 'Renamed elsewhere');
+      },
+    );
 
     test('a fader held still when a reload arrives keeps its value', () async {
       // The reload skipped only an edit made DURING its read: a value held

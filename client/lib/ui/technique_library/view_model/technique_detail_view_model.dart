@@ -88,6 +88,11 @@ class TechniqueDetailViewModel extends ChangeNotifier
        _createEngine = createEngine ?? GraphAudioPlaybackService.new,
        _finalizer = finalizer ?? RecordingFinalizer.instance {
     load = Command0(_load)..execute();
+    // A remote change that landed while a load read is owed once it is done
+    // (the command notifies as it finishes, its running flag already clear).
+    load.addListener(() {
+      if (!load.running) _replayMissedRemote();
+    });
     // Freshness reloads when sync applies remote changes to THIS technique.
     _remoteSub = remoteApplied?.listen(_onRemoteApplied);
   }
@@ -272,7 +277,13 @@ class TechniqueDetailViewModel extends ChangeNotifier
 
   /// The reload body: shared by the sync event and by [endEdit]'s replay.
   Future<void> _reloadFromRemote() async {
-    if (_disposed || _technique == null || load.running) return;
+    if (_disposed) return;
+    if (_technique == null || load.running) {
+      // Owed after the load (see the constructor): dropped, a rename landing
+      // after the first read stayed invisible, Edit and Cancel included.
+      _missedRemote = true;
+      return;
+    }
     if (_holdsEditorState()) return;
     final epoch = ++_reloadEpoch;
     final result = await _repository.loadTechnique(techniqueId);

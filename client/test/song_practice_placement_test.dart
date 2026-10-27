@@ -236,6 +236,9 @@ void main() {
 
         expect(vm.practice!.contentEndMs, 180000);
         expect(vm.playback.loopEndMs, 180000);
+        // And room past it, as a practice opened on its content has: grown
+        // to the content alone, no clip could be dragged to end past it.
+        expect(vm.practice!.timelineDurationMs, greaterThan(180000));
       },
     );
   });
