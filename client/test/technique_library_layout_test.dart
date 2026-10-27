@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -72,6 +74,20 @@ class _DeletingRepo extends _FakeRepo {
   }
 }
 
+/// Media service whose first cleanup parks on [gate] — a technique with
+/// a lot of media still being removed.
+class _SlowFirstCleanup extends TechniqueMediaService {
+  _SlowFirstCleanup() : super(storage: LocalStorageService());
+
+  final gate = Completer<void>();
+  var _calls = 0;
+
+  @override
+  Future<void> deleteTechniqueMedia(String techniqueId) async {
+    if (_calls++ == 0) await gate.future;
+  }
+}
+
 /// Media service whose per-technique cleanup is a no-op (the real one
 /// resolves the app-support dir through a platform channel).
 class _NoDiskMedia extends TechniqueMediaService {
@@ -97,10 +113,12 @@ Future<void> _pump(
   WidgetTester tester,
   List<Technique> techniques, {
   TechniqueRepository? repository,
+  TechniqueMediaService? mediaService,
 }) async {
   final vm = TechniqueLibraryViewModel(
     repository: repository ?? _FakeRepo(techniques),
-    mediaService: TechniqueMediaService(storage: LocalStorageService()),
+    mediaService:
+        mediaService ?? TechniqueMediaService(storage: LocalStorageService()),
   );
   await tester.pumpWidget(
     MaterialApp(
@@ -259,6 +277,44 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('the open tag menu follows a reload', (tester) async {
+    // It read the library once: a reload landing while it was open left it
+    // offering the tags and counts from before.
+    tester.view.physicalSize = const Size(1440, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    final repo = _FakeRepo([
+      _t('1', 'Twang', ['EVT']),
+    ]);
+    await _pump(tester, repo.techniques, repository: repo);
+
+    await tester.tap(find.text('All tags'));
+    await tester.pumpAndSettle();
+    // The menu, not the cards behind it (they show their tags too).
+    Finder inMenu(String text) => find.descendant(
+      of: find
+          .ancestor(
+            of: find.text('All tags').last,
+            matching: find.byType(Material),
+          )
+          .first,
+      matching: find.text(text),
+    );
+    expect(inMenu('CVT'), findsNothing);
+
+    repo.techniques = [
+      ...repo.techniques,
+      _t('2', 'Curbing', ['CVT']),
+    ];
+    final vm = Provider.of<TechniqueLibraryViewModel>(
+      tester.element(find.byType(TechniqueLibraryScreen)),
+      listen: false,
+    );
+    vm.refresh();
+    await tester.pumpAndSettle();
+    expect(inMenu('CVT'), findsOneWidget);
+  });
+
   test('deleting the last technique a filter matches drops the filter, '
       'exactly as a reload would', () async {
     // Regression: the reload drops a filter that can no longer match (so the
@@ -297,5 +353,41 @@ void main() {
     await vm.deleteTechnique.execute('4');
     expect(vm.activeTag, isNull);
     expect(vm.filtered.map((t) => t.id), ['3']);
+  });
+
+  testWidgets('a delete confirmed while another cleans up runs after it', (
+    tester,
+  ) async {
+    // The command dropped the second as re-entry: the technique stayed and
+    // the page said it couldn't be deleted.
+    await tester.binding.setSurfaceSize(const Size(1440, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final repo = _DeletingRepo([
+      _t('1', 'Twang', const []),
+      _t('2', 'Belting', const []),
+    ]);
+    final media = _SlowFirstCleanup();
+    await _pump(tester, repo.techniques, repository: repo, mediaService: media);
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    addTearDown(mouse.removePointer);
+
+    Future<void> deleteCard(String name) async {
+      await mouse.moveTo(tester.getCenter(find.text(name)));
+      await tester.pump();
+      await tester.tap(find.byIcon(FIcons.trash2));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(StudioButton, 'Delete').last);
+      await tester.pump();
+    }
+
+    await deleteCard('Twang'); // its media cleanup parks
+    expect(find.text('Twang'), findsNothing);
+    await deleteCard('Belting');
+    media.gate.complete();
+    await tester.pumpAndSettle();
+
+    expect(find.text('Belting'), findsNothing);
+    expect(repo.techniques, isEmpty);
+    expect(find.text("Couldn't delete the technique."), findsNothing);
   });
 }

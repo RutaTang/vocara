@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:forui/forui.dart';
 import 'package:go_router/go_router.dart';
@@ -95,6 +97,13 @@ class _TechniqueLibraryScreenState extends State<TechniqueLibraryScreen> {
           'This cannot be undone.',
     );
     if (!confirmed || !mounted) return;
+    // One delete at a time, and the command drops a second as re-entry: one
+    // confirmed while another still cleaned up its media was ignored, then
+    // reported as failed. It runs once that one is done instead.
+    while (vm.deleteTechnique.running) {
+      await _nextChange(vm.deleteTechnique);
+      if (!mounted) return;
+    }
     await vm.deleteTechnique.execute(technique.id);
     if (vm.deleteTechnique.result is! Ok<void> && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -102,6 +111,18 @@ class _TechniqueLibraryScreenState extends State<TechniqueLibraryScreen> {
       );
     }
   }
+}
+
+/// Completes the next time [listenable] notifies.
+Future<void> _nextChange(Listenable listenable) {
+  final changed = Completer<void>();
+  void listener() {
+    listenable.removeListener(listener);
+    changed.complete();
+  }
+
+  listenable.addListener(listener);
+  return changed.future;
 }
 
 class _Header extends StatelessWidget {
@@ -299,69 +320,79 @@ class _TagMenuRoute extends PopupRoute<void> {
     Animation<double> animation,
     Animation<double> secondaryAnimation,
   ) {
-    final facets = vm.tagFacets;
     return CustomSingleChildLayout(
       delegate: _TagMenuDelegate(anchorRight: anchorRight, top: top),
-      child: Material(
-        color: Studio.surfaceRaised,
-        elevation: 10,
-        borderRadius: BorderRadius.circular(10),
-        child: Container(
-          width: 240,
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(color: Studio.border),
-          ),
-          clipBehavior: Clip.antiAlias,
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxHeight: 440),
-            child: ScrollConfiguration(
-              behavior: ScrollConfiguration.of(context).copyWith(
-                scrollbars: false,
-                physics: const ClampingScrollPhysics(),
-              ),
-              child: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
+      // Kept current while open: a reload landing meanwhile (a sync, a return
+      // from a technique) left it offering tags and counts the library no
+      // longer had.
+      child: ListenableBuilder(
+        listenable: vm,
+        builder: (context, _) => _menu(context),
+      ),
+    );
+  }
+
+  Widget _menu(BuildContext context) {
+    final facets = vm.tagFacets;
+    return Material(
+      color: Studio.surfaceRaised,
+      elevation: 10,
+      borderRadius: BorderRadius.circular(10),
+      child: Container(
+        width: 240,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: Studio.border),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxHeight: 440),
+          child: ScrollConfiguration(
+            behavior: ScrollConfiguration.of(context).copyWith(
+              scrollbars: false,
+              physics: const ClampingScrollPhysics(),
+            ),
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _TagMenuItem(
+                    label: 'All tags',
+                    count: vm.all.length,
+                    active: vm.activeTag == null,
+                    onTap: () {
+                      vm.setTag(null);
+                      Navigator.of(context).pop();
+                    },
+                  ),
+                  if (vm.untaggedCount > 0)
                     _TagMenuItem(
-                      label: 'All tags',
-                      count: vm.all.length,
-                      active: vm.activeTag == null,
+                      label: 'Untagged',
+                      count: vm.untaggedCount,
+                      active: vm.activeTag == kUntaggedFilter,
                       onTap: () {
-                        vm.setTag(null);
+                        vm.setTag(kUntaggedFilter);
                         Navigator.of(context).pop();
                       },
                     ),
-                    if (vm.untaggedCount > 0)
-                      _TagMenuItem(
-                        label: 'Untagged',
-                        count: vm.untaggedCount,
-                        active: vm.activeTag == kUntaggedFilter,
-                        onTap: () {
-                          vm.setTag(kUntaggedFilter);
-                          Navigator.of(context).pop();
-                        },
-                      ),
-                    if (facets.isNotEmpty)
-                      const Divider(
-                        height: 9,
-                        thickness: 1,
-                        color: Studio.border,
-                      ),
-                    for (final f in facets)
-                      _TagMenuItem(
-                        label: f.tag,
-                        count: f.count,
-                        active: vm.isTagActive(f.tag),
-                        onTap: () {
-                          vm.setTag(f.tag);
-                          Navigator.of(context).pop();
-                        },
-                      ),
-                  ],
-                ),
+                  if (facets.isNotEmpty)
+                    const Divider(
+                      height: 9,
+                      thickness: 1,
+                      color: Studio.border,
+                    ),
+                  for (final f in facets)
+                    _TagMenuItem(
+                      label: f.tag,
+                      count: f.count,
+                      active: vm.isTagActive(f.tag),
+                      onTap: () {
+                        vm.setTag(f.tag);
+                        Navigator.of(context).pop();
+                      },
+                    ),
+                ],
               ),
             ),
           ),
