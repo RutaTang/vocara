@@ -92,7 +92,7 @@ fn scan<R: Read + Seek>(file: &mut Source<R>, full: bool) -> Result<(), Refusal>
                 from = at + 10 + size;
             }
             // The reader starts at the atom whose type the marker is.
-            Marker::Mp4 => return mp4(file, at.saturating_sub(4)),
+            Marker::Mp4 => return mp4(file, at.saturating_sub(4), full),
             Marker::Caf => return caf(file, at),
             Marker::Flac => return flac(file, at),
             Marker::Ogg => return ogg(file, at, full),
@@ -202,9 +202,16 @@ enum Atom {
     /// An iTunes metadata item, whose `data`, `name` and `mean` children are read whole into
     /// buffers sized by their headers.
     Item,
+    /// The movie's fragment defaults, a fragment, and a track's run within it: where a
+    /// fragmented file declares its sample sizes (full scan only).
+    Mvex,
+    Moof,
+    Traf,
 }
 
-fn mp4<R: Read + Seek>(file: &mut Source<R>, root: u64) -> Result<(), Refusal> {
+/// `full` also checks every sample's declared size, which only decoding reads by (the probe
+/// reads no samples): the stsz table's entries and a fragmented file's run sizes and defaults.
+fn mp4<R: Read + Seek>(file: &mut Source<R>, root: u64, full: bool) -> Result<(), Refusal> {
     // Each level: what it is, where its next child starts, where it ends.
     let mut levels = vec![(Atom::File, root, file.len)];
     let mut atoms = 0;
@@ -214,7 +221,9 @@ fn mp4<R: Read + Seek>(file: &mut Source<R>, root: u64) -> Result<(), Refusal> {
             levels.pop();
             continue;
         }
-        if parent != Atom::File {
+        // Fragments are not counted either: a long file holds thousands, each a handful of small
+        // atoms, all bounded by the file's size.
+        if !matches!(parent, Atom::File | Atom::Moof | Atom::Traf) {
             atoms += 1;
             if atoms > MAX_ATOMS {
                 return impossible(format!("mp4: more than {MAX_ATOMS} atoms in the movie"));
@@ -261,7 +270,24 @@ fn mp4<R: Read + Seek>(file: &mut Source<R>, root: u64) -> Result<(), Refusal> {
             (Atom::Meta, b"ilst") => Some(Atom::Ilst),
             (Atom::Ilst, kind) if PARSED_ITEMS.contains(&kind) => Some(Atom::Item),
             (Atom::Stbl, _) => {
-                sample_table(file, kind, body, body_end)?;
+                sample_table(file, kind, body, body_end, full)?;
+                None
+            }
+            (Atom::Moov, b"mvex") if full => Some(Atom::Mvex),
+            (Atom::File, b"moof") if full => Some(Atom::Moof),
+            (Atom::Moof, b"traf") => Some(Atom::Traf),
+            // The track's default sample size, after version and flags, track, description
+            // index and duration.
+            (Atom::Mvex, b"trex") => {
+                sample_size_fits(file, kind, body + 16, body_end)?;
+                None
+            }
+            (Atom::Traf, b"tfhd") => {
+                fragment_header(file, body, body_end)?;
+                None
+            }
+            (Atom::Traf, b"trun") => {
+                track_run(file, body, body_end)?;
                 None
             }
             _ => None,
@@ -281,12 +307,14 @@ fn mp4<R: Read + Seek>(file: &mut Source<R>, root: u64) -> Result<(), Refusal> {
 }
 
 /// Refuses a sample table whose entry count needs more bytes than the atom holds after it: the
-/// reader reserves the whole table from the count alone.
+/// reader reserves the whole table from the count alone. With `full`, also a sample size larger
+/// than the file (see [`sample_fits`]).
 fn sample_table<R: Read + Seek>(
     file: &mut Source<R>,
     kind: [u8; 4],
     body: u64,
     end: u64,
+    full: bool,
 ) -> Result<(), Refusal> {
     // Bytes ahead of the count (version and flags, then for stsz the constant sample size), and
     // an entry's size on disk.
@@ -295,7 +323,11 @@ fn sample_table<R: Read + Seek>(
         b"co64" | b"stts" => (4, 8),
         b"stsc" => (4, 12),
         // A table only when no constant sample size precedes the count.
-        b"stsz" if end - body >= 8 && file.u32_be(body + 4)? != Some(0) => return Ok(()),
+        b"stsz" if end - body >= 8 => match file.u32_be(body + 4)? {
+            Some(0) => (8, 4),
+            Some(size) => return sample_fits(file, kind, size),
+            None => return Ok(()),
+        },
         b"stsz" => (8, 4),
         _ => return Ok(()),
     };
@@ -317,7 +349,124 @@ fn sample_table<R: Read + Seek>(
             fourcc(kind)
         ));
     }
+    if full && &kind == b"stsz" {
+        return sample_sizes_fit(file, kind, body + fixed, count, 4, 0);
+    }
     Ok(())
+}
+
+/// Refuses a declared sample size larger than the whole file: decoding reads each sample whole
+/// into a buffer of its declared size, zeroed before a byte of it is read, so a 1.7 KB file
+/// declaring a 4 GB sample aborted the app. No real sample is larger than its file.
+fn sample_fits<R: Read + Seek>(
+    file: &mut Source<R>,
+    kind: [u8; 4],
+    size: u32,
+) -> Result<(), Refusal> {
+    if u64::from(size) > file.len {
+        return impossible(format!(
+            "mp4: '{}' declares a sample of {size} bytes in a file of {}",
+            fourcc(kind),
+            file.len
+        ));
+    }
+    Ok(())
+}
+
+/// [`sample_fits`] for a size at `at`, where the atom (ending at `end`) holds one; a field the
+/// atom is too short for is the reader's own error.
+fn sample_size_fits<R: Read + Seek>(
+    file: &mut Source<R>,
+    kind: [u8; 4],
+    at: u64,
+    end: u64,
+) -> Result<(), Refusal> {
+    match file.u32_be(at)? {
+        Some(size) if at + 4 <= end => sample_fits(file, kind, size),
+        _ => Ok(()),
+    }
+}
+
+/// [`sample_fits`] for each of `count` sizes, `stride` bytes apart from `at`, each `offset`
+/// into its entry. Read in chunks: the caller has bounded the count by the atom's bytes.
+fn sample_sizes_fit<R: Read + Seek>(
+    file: &mut Source<R>,
+    kind: [u8; 4],
+    at: u64,
+    count: u64,
+    stride: u64,
+    offset: u64,
+) -> Result<(), Refusal> {
+    const CHUNK: u64 = 4096;
+    // Sized by the count: a file can hold millions of runs, most of a few samples.
+    let mut buf = vec![0u8; (count.min(CHUNK) * stride) as usize];
+    let mut done = 0;
+    while done < count {
+        let n = (count - done).min(CHUNK);
+        let bytes = &mut buf[..(n * stride) as usize];
+        if !file.read_at(at + done * stride, bytes)? {
+            return Ok(()); // past the file's end: the reader's read fails first
+        }
+        for entry in bytes.chunks_exact(stride as usize) {
+            let o = offset as usize;
+            let size = u32::from_be_bytes([entry[o], entry[o + 1], entry[o + 2], entry[o + 3]]);
+            sample_fits(file, kind, size)?;
+        }
+        done += n;
+    }
+    Ok(())
+}
+
+/// A fragment's track header: its default sample size, where its flags say it has one (after
+/// the track and whichever of base offset, description index and duration come first).
+fn fragment_header<R: Read + Seek>(
+    file: &mut Source<R>,
+    body: u64,
+    end: u64,
+) -> Result<(), Refusal> {
+    let Some(flags) = file.u32_be(body)? else {
+        return Ok(());
+    };
+    if flags & 0x10 == 0 {
+        return Ok(());
+    }
+    let mut at = body + 8;
+    for (flag, width) in [(0x1, 8), (0x2, 4), (0x8, 4)] {
+        if flags & flag != 0 {
+            at += width;
+        }
+    }
+    sample_size_fits(file, *b"tfhd", at, end)
+}
+
+/// A fragment's track run: the size of each sample, where its flags say it lists them. Each
+/// sample's entry holds, in order and where flagged, its duration, size, flags and composition
+/// offset, after the run's sample count, data offset and first sample's flags.
+fn track_run<R: Read + Seek>(file: &mut Source<R>, body: u64, end: u64) -> Result<(), Refusal> {
+    let (Some(flags), Some(count)) = (file.u32_be(body)?, file.u32_be(body + 4)?) else {
+        return Ok(());
+    };
+    if flags & 0x200 == 0 {
+        return Ok(());
+    }
+    let mut at = body + 8;
+    for flag in [0x1, 0x4] {
+        if flags & flag != 0 {
+            at += 4;
+        }
+    }
+    let stride = 4 * u64::from((flags & 0xf00).count_ones());
+    let offset = if flags & 0x100 != 0 { 4 } else { 0 };
+    // Only the entries the atom holds: the reader's read fails past them.
+    let held = end.saturating_sub(at) / stride;
+    sample_sizes_fit(
+        file,
+        *b"trun",
+        at,
+        u64::from(count).min(held),
+        stride,
+        offset,
+    )
 }
 
 fn fourcc(kind: [u8; 4]) -> String {
@@ -1540,6 +1689,95 @@ mod tests {
             &atom(b"trak", &atom(b"mdia", &atom(b"minf", &stbl))),
         );
         [atom(b"ftyp", b"M4A \0\0\0\0"), moov, tail.to_vec()].concat()
+    }
+
+    fn refused_full(bytes: &[u8]) -> bool {
+        matches!(
+            screen_full(&mut Cursor::new(bytes)),
+            Err(Refusal::Impossible(_))
+        )
+    }
+
+    /// An stsz with no constant size and these entries.
+    fn sizes(entries: &[u32]) -> Vec<u8> {
+        let mut p = vec![0u8; 8];
+        p.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+        for e in entries {
+            p.extend_from_slice(&e.to_be_bytes());
+        }
+        atom(b"stsz", &p)
+    }
+
+    /// A fragmented file: a movie whose fragment defaults are `trex`, then one fragment whose
+    /// track holds `traf`.
+    fn fragmented(trex: &[u8], traf: &[Vec<u8>]) -> Vec<u8> {
+        let stbl = atom(b"stbl", &sizes(&[]));
+        let trak = atom(b"trak", &atom(b"mdia", &atom(b"minf", &stbl)));
+        let mvex = atom(b"mvex", &atom(b"trex", trex));
+        let moof = atom(b"moof", &atom(b"traf", &traf.concat()));
+        [
+            atom(b"ftyp", b"iso5\0\0\0\0"),
+            atom(b"moov", &[trak, mvex].concat()),
+            moof,
+            atom(b"mdat", &[0; 64]),
+        ]
+        .concat()
+    }
+
+    fn be(words: &[u32]) -> Vec<u8> {
+        words.iter().flat_map(|w| w.to_be_bytes()).collect()
+    }
+
+    #[test]
+    fn a_sample_larger_than_the_file_is_refused() {
+        // Decoding reads each sample whole into a buffer of its declared size, zeroed first: a
+        // 4 GB sample in a 1.7 KB file aborted the app.
+        let huge = u32::MAX - 15;
+        // A constant size, by both scans.
+        assert!(refused(&mp4(&[table(b"stsz", &[huge], 1, 0)], &[])));
+        assert_eq!(screened(&mp4(&[table(b"stsz", &[64], 1, 0)], &[])), Ok(()));
+        // A table entry, by the full scan only: the probe reads no samples.
+        let entry = mp4(&[sizes(&[64, huge])], &[]);
+        assert_eq!(screened(&entry), Ok(()));
+        assert!(refused_full(&entry));
+        assert!(!refused_full(&mp4(&[sizes(&[64, 32])], &[])));
+    }
+
+    #[test]
+    fn a_fragments_sample_larger_than_the_file_is_refused() {
+        let huge = u32::MAX - 15;
+        let trex = |size| be(&[0, 1, 1, 1024, size, 0]);
+        // tfhd with a base offset (flag 0x1, 8 bytes) ahead of its default size (0x10).
+        let tfhd = |size| atom(b"tfhd", &[be(&[0x11, 1]), vec![0; 8], be(&[size])].concat());
+        // trun listing each sample's duration and size (0x300).
+        let trun = |size| atom(b"trun", &be(&[0x300, 2, 1024, 64, 1024, size]));
+        let good = fragmented(&trex(0), &[tfhd(64), trun(64)]);
+        assert_eq!(
+            screen_full(&mut Cursor::new(&good)).map_err(|e| e.to_string()),
+            Ok(())
+        );
+        assert!(refused_full(&fragmented(
+            &trex(huge),
+            &[tfhd(64), trun(64)]
+        )));
+        assert!(refused_full(&fragmented(&trex(0), &[tfhd(huge), trun(64)])));
+        assert!(refused_full(&fragmented(&trex(0), &[tfhd(64), trun(huge)])));
+        // The probe reads no samples, so the bounded scan leaves them.
+        assert_eq!(
+            screened(&fragmented(&trex(0), &[tfhd(64), trun(huge)])),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_long_fragmented_file_is_not_counted_against_the_atom_limit() {
+        let fragment = atom(b"moof", &atom(b"traf", &atom(b"tfhd", &be(&[0, 1]))));
+        let file = [
+            mp4(&[sizes(&[])], &[]),
+            fragment.repeat(MAX_ATOMS as usize + 10),
+        ]
+        .concat();
+        assert!(screen_full(&mut Cursor::new(&file)).is_ok());
     }
 
     #[test]

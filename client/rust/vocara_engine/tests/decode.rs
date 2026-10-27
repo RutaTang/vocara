@@ -274,6 +274,38 @@ fn a_table_declaring_more_than_the_file_holds_is_refused_before_the_probe() {
 }
 
 #[test]
+fn a_sample_larger_than_the_file_is_refused() {
+    // Each packet is read whole into a buffer of its declared size: a size of 4 billion took the
+    // allocation down at the first packet, aborting the app. A constant size is screened before
+    // the probe, a table entry before the decode.
+    for (name, bytes, probes) in [
+        // The constant size, ahead of the count.
+        (
+            "const.m4a",
+            with_u32_after("alac_100ms.m4a", b"stsz", 0, 8, 0xFFFF_FFF0),
+            false,
+        ),
+        // The table's first entry, past the count.
+        (
+            "entry.m4a",
+            with_u32_after("alac_100ms.m4a", b"stsz", 0, 16, 0xFFFF_FFF0),
+            true,
+        ),
+    ] {
+        let path = temp_file(name, &bytes);
+        let probed = probe_duration_ms(&path);
+        let decoded = decode_file(&path, 0.0, 0, 0);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(probed.is_ok(), probes, "{name}: probe {probed:?}");
+        assert!(
+            matches!(decoded, Err(vocara_engine::device::DecodeError::TooBig)),
+            "{name}: {:?}",
+            decoded.map(|d| d.0.len())
+        );
+    }
+}
+
+#[test]
 fn an_ogg_comment_longer_than_its_packet_is_refused() {
     // Each comment's buffer is reserved from its length before it is read. The fixture's one
     // comment (the encoder's) has its length 28 bytes into the comment packet, on page 2.
