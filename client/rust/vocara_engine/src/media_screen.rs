@@ -91,7 +91,9 @@ fn scan<R: Read + Seek>(file: &mut Source<R>, full: bool) -> Result<(), Refusal>
                 };
                 from = at + 10 + size;
             }
-            // The reader starts at the atom whose type the marker is.
+            // The reader starts at the atom whose type the marker is. (It walks the top level
+            // again from byte 0 before reading packets, but a file with bytes ahead of that atom
+            // fails its first walk, so nothing outside this one is read.)
             Marker::Mp4 => return mp4(file, at.saturating_sub(4), full),
             Marker::Caf => return caf(file, at),
             Marker::Flac => return flac(file, at),
@@ -307,8 +309,8 @@ fn mp4<R: Read + Seek>(file: &mut Source<R>, root: u64, full: bool) -> Result<()
 }
 
 /// Refuses a sample table whose entry count needs more bytes than the atom holds after it: the
-/// reader reserves the whole table from the count alone. With `full`, also a sample size larger
-/// than the file (see [`sample_fits`]).
+/// reader reserves the whole table from the count alone. Also a constant sample size larger than
+/// the file, and with `full` any such table entry (see [`sample_fits`]).
 fn sample_table<R: Read + Seek>(
     file: &mut Source<R>,
     kind: [u8; 4],

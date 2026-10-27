@@ -4287,6 +4287,8 @@ pub fn decode_file(
             Err(symphonia::core::errors::Error::IoError(e)) => {
                 return Err(DecodeError::Io(format!("read {path}: {e}")));
             }
+            // Ends the decode, never skipped: the MP4 reader keeps a fragment it then fails to
+            // finish reading, and media_screen checks only what a fragment's own bounds hold.
             Err(e) => return Err(err(format!("packet: {e}"))),
         };
         if packet.track_id() != track_id {
