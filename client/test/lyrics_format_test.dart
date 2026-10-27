@@ -109,6 +109,21 @@ void main() {
     expect(lines[1].timeMs, isNull);
   });
 
+  test('lyrics read lines ended by a lone carriage return', () {
+    // Classic Mac line endings, as some tag editors still write them. Split on
+    // line feeds alone, such a file was one line: an LRC one gave each of its
+    // tags the whole text, and plain lyrics could be timed only once.
+    final lrc = parseLrc('[00:01.00]one\r[00:02.00]two\r\n[00:03.00]three');
+    expect(lrc.map((l) => l.text), ['one', 'two', 'three']);
+    expect(isLrcDocument('[00:01.00]one\r[00:02.00]two'), isTrue);
+    expect(parsePlainLyrics('one\rtwo\r\rthree').map((l) => l.text), [
+      'one',
+      'two',
+      '',
+      'three',
+    ]);
+  });
+
   test('parseLrc reads timestamps (centiseconds + milliseconds)', () {
     final lines = parseLrc(
       '[ti:Song]\n[00:12.50]hello\n[01:03.250]world\nuntimed',

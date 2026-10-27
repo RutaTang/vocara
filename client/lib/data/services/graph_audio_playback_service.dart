@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi' as ffi;
+import 'dart:io' show FileSystemEntity, FileSystemEntityType;
 import 'dart:isolate';
 import 'dart:typed_data';
 
@@ -240,6 +241,10 @@ Exception? decodeStatusToException(int status, Duration durationCap) {
 /// or the file can't be probed (the import will fail on its own terms).
 /// Stateless FFI; cheap enough for the UI thread (header read only).
 Duration? probeMediaDuration(String path) {
+  // A plain file only. This runs on the UI thread, and opening a named pipe
+  // with no writer blocks: dropped as audio, one froze the app. The import
+  // itself refuses anything else (see AudioFileService.importAudio).
+  if (FileSystemEntity.typeSync(path) != FileSystemEntityType.file) return null;
   final bindings = VocaraEngineBindings(_openVocaraLibrary());
   final cpath = path.toNativeUtf8();
   try {

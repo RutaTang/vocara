@@ -87,7 +87,16 @@ class AudioFileService {
     // Order: pure id validation, then the source stat, then any mkdir — a
     // refusal must precede every filesystem side effect.
     _checkPathComponent(practiceId);
-    if (await File(sourcePath).length() > maxImportBytes) {
+    // A plain file only: a pipe reports no length and held the copy open for
+    // good, and a link to a device (/dev/zero) copied up to the cap.
+    if (await FileSystemEntity.type(sourcePath) != FileSystemEntityType.file) {
+      throw const FormatException("The file couldn't be read.");
+    }
+    final length = await File(sourcePath).length();
+    if (length == 0) {
+      throw const FormatException('This file is empty.');
+    }
+    if (length > maxImportBytes) {
       throw const FormatException(
         'This file is too large to import. Media longer than an hour is not '
         'supported.',

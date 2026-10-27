@@ -81,11 +81,17 @@ List<int?> alignLines(
   return out;
 }
 
+/// Ends of lines as any lyrics file writes them: a carriage return and line
+/// feed, a line feed, or a lone carriage return (classic Mac, some tag
+/// editors). Split on line feeds alone, such a file was one line: an LRC one
+/// gave each of its tags the whole text, and plain lyrics a single line.
+final _lineEnd = RegExp(r'\r\n|\r|\n');
+
 /// Parses plain lyrics text into (unsynced) lines, preserving blank lines as
 /// section gaps but trimming trailing blanks.
 List<LyricLine> parsePlainLyrics(String text) {
   final out = [
-    for (final raw in text.split('\n')) LyricLine(text: raw.trimRight()),
+    for (final raw in text.split(_lineEnd)) LyricLine(text: raw.trimRight()),
   ];
   while (out.isNotEmpty && out.last.isBlank) {
     out.removeLast();
@@ -112,7 +118,7 @@ final _lrcMetaTag = RegExp(r'^\[[A-Za-z#][^\]:]*:[^\]]*\]$');
 /// line on save.
 bool isLrcDocument(String content) {
   var sawTime = false;
-  for (final raw in content.split('\n')) {
+  for (final raw in content.split(_lineEnd)) {
     final line = raw.trim();
     if (line.isEmpty) continue;
     if (_lrcTimeTag.hasMatch(line)) {
@@ -139,7 +145,7 @@ final _lrcOffsetTag = RegExp(
 /// own size.
 List<LyricLine> parseLrc(String content) {
   var offsetMs = 0;
-  for (final raw in content.split('\n')) {
+  for (final raw in content.split(_lineEnd)) {
     final m = _lrcOffsetTag.firstMatch(raw.trim());
     // An offset too long to be a number of milliseconds is no offset, and
     // one past a day is held to it: subtracted as is, it overflowed and the
@@ -153,7 +159,7 @@ List<LyricLine> parseLrc(String content) {
   // ran out of memory encoding them.
   final budget = math.max(1 << 20, content.length * 4);
   var emitted = 0;
-  for (final raw in content.split('\n')) {
+  for (final raw in content.split(_lineEnd)) {
     final line = raw.trim();
     if (line.isEmpty) continue;
     final tags = _lrcTimeTag.allMatches(line).toList();

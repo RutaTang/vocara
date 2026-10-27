@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:vocara/data/services/audio_file_service.dart';
+import 'package:vocara/data/services/graph_audio_playback_service.dart';
 import 'package:vocara/data/services/local_storage_service.dart';
 import 'package:vocara/data/services/technique_media_service.dart';
 
@@ -62,6 +63,41 @@ void main() {
       isFalse,
       reason: 'the refusal must precede every filesystem side effect',
     );
+  });
+
+  test('importAudio refuses a pipe and an empty source, without waiting '
+      'on either', () async {
+    // A named pipe reports no length: copied, it held the import (and the
+    // edit gate) open for good, and the duration probe ahead of it froze the
+    // app opening it. An empty file is no audio either.
+    final files = AudioFileService(storage: _TempStorage(tmp));
+    final fifo = p.join(tmp.path, 'take.wav');
+    final made = await Process.run('mkfifo', [fifo]);
+    expect(made.exitCode, 0, reason: '${made.stderr}');
+    final empty = File(p.join(tmp.path, 'empty.wav'))
+      ..writeAsBytesSync(const []);
+    for (final (src, message) in [
+      (fifo, "The file couldn't be read."),
+      (empty.path, 'This file is empty.'),
+    ]) {
+      await expectLater(
+        files
+            .importAudio(
+              practiceId: 'P0000000000000000000000000',
+              sourcePath: src,
+            )
+            .timeout(const Duration(seconds: 5)),
+        throwsA(
+          isA<FormatException>().having((e) => e.message, 'message', message),
+        ),
+      );
+    }
+    expect(
+      probeMediaDuration(fifo),
+      isNull,
+      reason: 'the probe never opens it',
+    );
+    expect(Directory(p.join(tmp.path, 'audio')).existsSync(), isFalse);
   });
 
   test('importMedia refuses an empty source', () async {
