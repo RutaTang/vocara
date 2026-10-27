@@ -1328,6 +1328,49 @@ void main() {
       expect(track, isNotNull, reason: 'replayed once its parent arrived');
     });
 
+    test('an FK orphan an older build parked under its bare id still '
+        'replays, and moves to the sweep slot', () async {
+      final track = remoteTrack('T', 'P', remoteHlc(t0 - 1000));
+      await quarantine.put(
+        table: 'tracks',
+        id: _id('T'),
+        hlcPacked: track.hlc.packed,
+        schemaV: track.schemaV,
+        payload: track.encode(),
+        reason: 'fk-orphan: parent practices/${_id('P')} missing',
+        quarantinedAt: 1,
+      );
+      expect((await engine.pumpPull()).failed, isFalse);
+      // Left under the bare id, a drift-parked newer state of the row would
+      // displace it there (see QuarantineStore.putSwept).
+      expect(
+        (await quarantine.list()).single.id,
+        QuarantineStore.sweepSlotId(_id('T')),
+      );
+    });
+
+    test('an FK orphan the row has moved past settles though its parent '
+        'never arrives', () async {
+      cloud.accept(remotePractice('P', 'parent', remoteHlc(t0 - 3000)));
+      final routed = remoteTrack('T', 'P', remoteHlc(t0 - 2000));
+      cloud.accept(
+        SyncRow(
+          table: 'tracks',
+          fields: {...routed.fields, 'bus_id': _id('B')},
+        ),
+      );
+      expect((await engine.pumpPull()).failedRecords, 1);
+      expect(
+        (await quarantine.list()).single.reason,
+        startsWith('fk-orphan: parent fx_buses/'),
+      );
+
+      // The author routes the take back to master; bus B never arrives.
+      cloud.accept(remoteTrack('T', 'P', remoteHlc(t0 - 1000)));
+      expect((await engine.pumpPull()).failed, isFalse);
+      expect(await quarantine.list(), isEmpty);
+    });
+
     test('a park that can never land costs a pull nothing', () async {
       // Its verdict is a function of the payload alone, yet every pull
       // decoded it, applied it in a transaction and re-parked it unchanged —

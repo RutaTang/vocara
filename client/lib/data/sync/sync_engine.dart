@@ -8,6 +8,7 @@ import '../services/diagnostics_log.dart';
 import 'hlc.dart';
 import 'integrity_checker.dart';
 import 'oplog_drain.dart';
+import 'quarantine_store.dart';
 import 'sync_applier.dart';
 import 'sync_row.dart';
 import 'sync_state_store.dart';
@@ -949,7 +950,7 @@ class SyncEngine {
       // otherwise paid per orphan for as long as the parent stayed away.
       // Parents replay first (the rank order above), so one landing earlier
       // in this pass is already there.
-      if (await _orphanParentMissing(q.reason)) continue;
+      if (await _orphanWaitsOnParent(q, row)) continue;
       final result = await _applier.apply([row]);
       if (!result.committed) break; // storage trouble — retry next run
       if (result.applied > 0 || result.skipped > 0) {
@@ -992,18 +993,40 @@ class SyncEngine {
     r'^fk-orphan: parent ([a-z_]+)/(.+) missing$',
   );
 
-  /// Whether [reason] is the FK sweep's (see SyncApplier) and the parent it
-  /// names still has no row, tombstones included (the constraint checks
-  /// existence, not liveness). False whenever that cannot be told, so the
-  /// entry replays as before.
-  Future<bool> _orphanParentMissing(String reason) async {
-    final m = _orphanReason.firstMatch(reason);
+  /// Whether parked entry [q], holding [row], is an FK orphan that can only
+  /// park again, so its replay can wait. All of:
+  ///   * it sits in the row's sweep slot. An fk-orphan entry an older build
+  ///     parked under the bare row id moves there on its first replay (see
+  ///     QuarantineStore.putSwept), and must still get that replay;
+  ///   * the local row is not already at or past its stamp. One the row has
+  ///     moved past (the author pointed it elsewhere since) replays as a
+  ///     clean LWW skip and settles, whatever its parent;
+  ///   * the parent its reason names (the FK sweep's wording, see
+  ///     SyncApplier) still has no row, tombstones included: the constraint
+  ///     checks existence, not liveness.
+  /// False whenever that cannot be told, so the entry replays as before.
+  Future<bool> _orphanWaitsOnParent(SyncQuarantineRow q, SyncRow row) async {
+    if (q.id != QuarantineStore.sweepSlotId(row.id)) return false;
+    final m = _orphanReason.firstMatch(q.reason);
     if (m == null || m[2] == 'unknown') return false;
-    final table = m[1]!;
-    if (!_db.allTables.any((t) => t.actualTableName == table)) return false;
+    final parentTable = m[1]!;
+    final tables = {for (final t in _db.allTables) t.actualTableName};
+    if (!tables.contains(parentTable) || !tables.contains(row.table)) {
+      return false;
+    }
+    final caughtUp = await _db
+        .customSelect(
+          'SELECT 1 FROM ${row.table} WHERE id = ? AND hlc_packed >= ?',
+          variables: [
+            Variable.withString(row.id),
+            Variable.withString(q.remoteHlcPacked),
+          ],
+        )
+        .getSingleOrNull();
+    if (caughtUp != null) return false;
     final parent = await _db
         .customSelect(
-          'SELECT 1 FROM $table WHERE id = ?',
+          'SELECT 1 FROM $parentTable WHERE id = ?',
           variables: [Variable.withString(m[2]!)],
         )
         .getSingleOrNull();
