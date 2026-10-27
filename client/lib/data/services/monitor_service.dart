@@ -28,6 +28,11 @@ class MonitorService extends ChangeNotifier {
   // Per-column voicing flag (1 = voiced), parallel to _columns. The live
   // spectrogram dims unvoiced columns so silence/noise reads dark.
   final List<int> _act = [];
+  // Per-column: a pitched frame, parallel to _columns. [_act] holds a phrase
+  // a few frames past its last pitched one (the overlay's release), which
+  // the averages and the dynamics must not count: each phrase's tail of
+  // fading breath read as voice, a 50 dB "range" over notes sung level.
+  final List<bool> _voiced = [];
   bool _active = false;
   double _level = 0;
   // Latest smoothed metrics (for the readout bar / vowel dot).
@@ -110,7 +115,9 @@ class MonitorService extends ChangeNotifier {
   ({double softDb, double loudDb, double rangeDb}) get liveDynamics {
     final v = <double>[];
     for (var i = 0; i < _loud.length; i++) {
-      if (i < _act.length && _act[i] == 1 && _loud[i].isFinite) v.add(_loud[i]);
+      if (i < _voiced.length && _voiced[i] && _loud[i].isFinite) {
+        v.add(_loud[i]);
+      }
     }
     if (v.length < 8) {
       return (softDb: double.nan, loudDb: double.nan, rangeDb: double.nan);
@@ -135,6 +142,7 @@ class MonitorService extends ChangeNotifier {
     _f2.clear();
     _f3.clear();
     _act.clear();
+    _voiced.clear();
     _loud.clear();
     _ringSum = _tiltSum = _cppSum = 0;
     _activeN = 0;
@@ -171,6 +179,8 @@ class MonitorService extends ChangeNotifier {
       _f2.add(f.f2);
       _f3.add(f.f3);
       _act.add(f.active ? 1 : 0);
+      final voiced = f.active && f.f0Confidence > 0;
+      _voiced.add(voiced);
       _loud.add(f.loudness);
       if (_columns.length > maxColumns) {
         _columns.removeAt(0);
@@ -179,6 +189,7 @@ class MonitorService extends ChangeNotifier {
         _f2.removeAt(0);
         _f3.removeAt(0);
         _act.removeAt(0);
+        _voiced.removeAt(0);
         _loud.removeAt(0);
       }
       _curF0 = f.f0;
@@ -189,7 +200,7 @@ class MonitorService extends ChangeNotifier {
       _tilt = f.tilt;
       _cpp = f.cpp;
       _curH1H2 = f.h1h2;
-      if (f.active) {
+      if (voiced) {
         _ringSum += f.ring;
         _tiltSum += f.tilt;
         _cppSum += f.cpp;
