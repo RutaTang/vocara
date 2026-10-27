@@ -30,10 +30,17 @@ class _FakeEngine implements GraphAudioPlaybackService {
   @override
   bool get isAvailable => available;
 
+  /// When set, the arm throws (a native call failing outright).
+  bool throwOnStart = false;
+
+  /// When set, starting the live capture throws (after the take armed).
+  bool throwOnCapture = false;
+
   @override
   bool startInputRecording(String path) {
     startCalls++;
     lastRecordingPath = path;
+    if (throwOnStart) throw StateError('native arm failed');
     return startResult;
   }
 
@@ -44,7 +51,10 @@ class _FakeEngine implements GraphAudioPlaybackService {
   }
 
   @override
-  void startCapture() => captureStarts++;
+  void startCapture() {
+    captureStarts++;
+    if (throwOnCapture) throw StateError('capture failed');
+  }
 
   @override
   void stopCapture() => captureStops++;
@@ -167,6 +177,47 @@ class _FakeDestination {
 }
 
 void main() {
+  // A start that threw past its destination left the file behind, and one
+  // that threw after arming left the mic recording with nothing to stop it:
+  // the owner heard only the throw.
+  testWidgets('a start that throws before arming discards its file', (
+    tester,
+  ) async {
+    final engine = _FakeEngine()..throwOnStart = true;
+    final dest = _FakeDestination();
+    final controller = MicRecordingController(
+      acquireEngine: () => engine,
+      requestPermission: () async => true,
+    );
+    await expectLater(controller.start(dest.strategy), throwsStateError);
+    await tester.pump(); // flush the unawaited discard
+    expect(controller.isRecording, isFalse);
+    expect(controller.isStarting, isFalse);
+    expect(dest.discarded, [dest.path]);
+    controller.dispose();
+  });
+
+  testWidgets('a start that throws after arming stops the mic and discards '
+      'its file', (tester) async {
+    final engine = _FakeEngine()..throwOnCapture = true;
+    final monitor = MonitorService();
+    final dest = _FakeDestination();
+    final controller = MicRecordingController(
+      acquireEngine: () => engine,
+      monitor: monitor,
+      requestPermission: () async => true,
+    );
+    await expectLater(controller.start(dest.strategy), throwsStateError);
+    await tester.pump();
+    expect(controller.isRecording, isFalse);
+    expect(controller.feedingMonitor, isFalse);
+    expect(engine.stopCalls, 1, reason: 'the armed recording is disarmed');
+    expect(engine.captureStops, 1);
+    expect(dest.discarded, [dest.path]);
+    controller.dispose();
+    monitor.dispose();
+  });
+
   testWidgets(
     'start failure (WAV create): failed result, nothing armed, file discarded',
     (tester) async {

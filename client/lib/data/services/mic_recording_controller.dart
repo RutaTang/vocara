@@ -292,6 +292,9 @@ class MicRecordingController {
     // destination awaits below abandons this start — arming the mic then would
     // leave it hot with no stop affordance in the owner's UI.
     final generation = _generation;
+    // What this start has set up, for [_unwindThrownStart].
+    String? createdPath;
+    void Function()? disarm;
     try {
       if (!await _requestPermission()) {
         return const MicRecordingStart.failed(
@@ -312,7 +315,7 @@ class MicRecordingController {
           MicRecordingFailure.engineUnavailable,
         );
       }
-      final path = await destination.create();
+      final path = createdPath = await destination.create();
       // Same guard after the destination await: a dispose/invalidate in this
       // window can't stop a recording that hasn't started. Don't arm
       // hardware/timers; drop the just-created destination.
@@ -335,6 +338,8 @@ class MicRecordingController {
       void disarmIfStillOurs() {
         if (_nativeArmToken == armToken) engine.stopInputRecording();
       }
+
+      disarm = disarmIfStillOurs;
 
       // Ready handshake. startInputRecording == true proves only that the WAV
       // exists — the native input-stream open is deliberately asynchronous (a
@@ -421,9 +426,10 @@ class MicRecordingController {
       if (monitor != null) {
         // Live preview: the engine captures the same input it's recording
         // (cpal), so the live spectrogram / tuner / metrics run off it.
+        // Set first, so a start that throws part way is stopped whole.
+        _feedingMonitor = true;
         engine.startCapture();
         monitor.start();
-        _feedingMonitor = true;
         _captureTimer = Timer.periodic(
           const Duration(milliseconds: _captureIntervalMs),
           (_) {
@@ -508,11 +514,38 @@ class MicRecordingController {
       // Finalize this take if the app quits mid-record; unregistered on stop.
       _finalizer.register(_finalizeOnQuit, startsWork: true);
       return MicRecordingStart.started(path);
+    } catch (_) {
+      _unwindThrownStart(destination, createdPath, disarm);
+      rethrow;
     } finally {
       // Only this start's own outcome clears the flag: after an invalidate a
       // NEWER start may already be pending and own it.
       if (_generation == generation) _starting = false;
     }
+  }
+
+  /// Undoes what a start that THREW (a native call, the monitor, a timer)
+  /// had set up past its destination: the owner hears the throw, not that a
+  /// take armed, so nothing else would ever stop the mic or delete the file.
+  void _unwindThrownStart(
+    RecordingPathStrategy destination,
+    String? createdPath,
+    void Function()? disarm,
+  ) {
+    try {
+      if (_isRecording) {
+        // Armed and part set up: undone as a stop undoes a take.
+        stop();
+      } else {
+        disarm?.call();
+      }
+    } catch (e) {
+      DiagnosticsLog.instance.log(
+        'mic',
+        'unwinding a failed start threw: ${e.runtimeType}',
+      );
+    }
+    if (createdPath != null) _discardQuietly(destination, createdPath);
   }
 
   /// Fire-and-forget discard of an aborted start's file. A discard strategy
