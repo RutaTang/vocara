@@ -941,6 +941,13 @@ fn ogg_crc(mut crc: u32, bytes: &[u8]) -> u32 {
 /// it fills. 2^24 (64 MiB) is far above any real codebook.
 const MAX_VQ_FLOATS: u64 = 1 << 24;
 
+/// The most entries a Vorbis setup's codebooks may hold between them before it is refused.
+/// Every codebook the decoder reads whole it also builds a decode tree for, sized by its entry
+/// count whether or not it has a lookup table: a codebook of 2^24 - 1 entries fits in a few
+/// bytes and built 410 MB, and the setup holds up to 256 of them. Real setups hold a few
+/// thousand entries in all.
+const MAX_CODEBOOK_ENTRIES: u64 = 1 << 22;
+
 /// Whether building a Vorbis decoder from `extra_data` (the identification header followed by
 /// the setup header) would size a codebook's VQ lookup table past [`MAX_VQ_FLOATS`]. The setup
 /// header is parsed bit for bit as the decoder parses it, so a later codebook is reached only
@@ -983,8 +990,9 @@ fn vorbis_codebooks(extra_data: &[u8]) -> Option<Walk> {
     }
     let mut bs = BitRtl::new(setup.get(7..)?);
     let count = bs.bits(8)? + 1;
+    let mut built = 0;
     for _ in 0..count {
-        if codebook_overlarge(&mut bs)? == Walk::Done {
+        if codebook_overlarge(&mut bs, &mut built)? == Walk::Done {
             return Some(Walk::Done);
         }
     }
@@ -997,7 +1005,9 @@ fn vorbis_codebooks(extra_data: &[u8]) -> Option<Walk> {
 /// decoder reads every multiplicand first, so the table is reached only if those bits are
 /// present). None where the codebook is malformed or the bits run out, which the decoder
 /// rejects before allocating.
-fn codebook_overlarge(bs: &mut BitRtl) -> Option<Walk> {
+/// `built` counts the entries of the codebooks read whole so far, which the decoder builds
+/// decode trees for; past [`MAX_CODEBOOK_ENTRIES`] the setup is refused.
+fn codebook_overlarge(bs: &mut BitRtl, built: &mut u64) -> Option<Walk> {
     if bs.bits(24)? != 0x564342 {
         return None;
     }
@@ -1033,7 +1043,7 @@ fn codebook_overlarge(bs: &mut BitRtl) -> Option<Walk> {
     }
     let lookup_type = bs.bits(4)?;
     match lookup_type {
-        0 => Some(Walk::Short),
+        0 => {}
         1 | 2 => {
             bs.skip(32)?; // minimum
             bs.skip(32)?; // delta
@@ -1053,10 +1063,16 @@ fn codebook_overlarge(bs: &mut BitRtl) -> Option<Walk> {
                 return Some(Walk::Done);
             }
             bs.skip(multiplicand_bits)?;
-            Some(Walk::Short)
         }
-        _ => None,
+        _ => return None,
     }
+    // Read whole, the codebook is built, and its decode tree with it.
+    *built += u64::from(entries);
+    Some(if *built > MAX_CODEBOOK_ENTRIES {
+        Walk::Done
+    } else {
+        Walk::Short
+    })
 }
 
 /// `ilog` as the Vorbis setup reader defines it: the position of the highest set bit, 0 for 0.
@@ -2056,6 +2072,26 @@ mod tests {
         let mut w = BitWriter::new();
         codebook(&mut w, 0x8000, 0xfe_0000, 2, 1, 0, true);
         assert!(vorbis_setup_overlarge(&vorbis_extra(w, 1)));
+    }
+
+    #[test]
+    fn codebook_entries_are_capped_lookup_table_or_not() {
+        // Each codebook builds a decode tree sized by its entries: one of 2^24 - 1 entries
+        // with no lookup table built 410 MB, and a setup holds up to 256.
+        let mut w = BitWriter::new();
+        codebook(&mut w, 1, (1 << 24) - 1, 0, 1, 0, false);
+        assert!(vorbis_setup_overlarge(&vorbis_extra(w, 1)));
+        // Under the cap one by one, over it together.
+        let mut w = BitWriter::new();
+        for _ in 0..5 {
+            codebook(&mut w, 1, 1 << 20, 0, 1, 0, false);
+        }
+        assert!(vorbis_setup_overlarge(&vorbis_extra(w, 5)));
+        let mut w = BitWriter::new();
+        for _ in 0..3 {
+            codebook(&mut w, 1, 1 << 20, 0, 1, 0, false);
+        }
+        assert!(!vorbis_setup_overlarge(&vorbis_extra(w, 3)));
     }
 
     #[test]
