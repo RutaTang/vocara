@@ -4007,6 +4007,50 @@ fn declared_frames(
     Some(frames)
 }
 
+/// Each channel's share of the left and right output, in the decoder's channel order, for a
+/// file of more than two: the front pair as is, a centre at -3 dB to both sides, any other
+/// left or right channel at -3 dB to its own side, the LFE left out (ffmpeg's default
+/// downmix). Kept to its first two channels, a 5.1 file lost its centre, where its vocals
+/// are, and its surrounds.
+fn downmix_gains(channels: symphonia::core::audio::Channels) -> Vec<[Smp; 2]> {
+    use symphonia::core::audio::Channels as C;
+    const HALF_POWER: Smp = std::f32::consts::FRAC_1_SQRT_2;
+    let left = C::FRONT_LEFT_CENTRE
+        | C::REAR_LEFT
+        | C::SIDE_LEFT
+        | C::TOP_FRONT_LEFT
+        | C::TOP_REAR_LEFT
+        | C::REAR_LEFT_CENTRE
+        | C::FRONT_LEFT_WIDE
+        | C::FRONT_LEFT_HIGH;
+    let right = C::FRONT_RIGHT_CENTRE
+        | C::REAR_RIGHT
+        | C::SIDE_RIGHT
+        | C::TOP_FRONT_RIGHT
+        | C::TOP_REAR_RIGHT
+        | C::REAR_RIGHT_CENTRE
+        | C::FRONT_RIGHT_WIDE
+        | C::FRONT_RIGHT_HIGH;
+    channels
+        .iter()
+        .map(|c| {
+            if c == C::FRONT_LEFT {
+                [1.0, 0.0]
+            } else if c == C::FRONT_RIGHT {
+                [0.0, 1.0]
+            } else if c.intersects(C::LFE1 | C::LFE2) {
+                [0.0, 0.0]
+            } else if c.intersects(left) {
+                [HALF_POWER, 0.0]
+            } else if c.intersects(right) {
+                [0.0, HALF_POWER]
+            } else {
+                [HALF_POWER, HALF_POWER]
+            }
+        })
+        .collect()
+}
+
 /// The track decoding reads: the first a decoder exists for. symphonia's own default is simply
 /// the first track, which in an MP4 holding a video or cover-picture track ahead of its audio
 /// is that one, and the decode failed as an unsupported codec.
@@ -4288,6 +4332,8 @@ pub fn decode_file(
     // Labelled with the container's rate, such an import played an octave up at double speed,
     // and was baked that way into the library WAV that replaced the original.
     let mut out_rate: Option<u32> = None;
+    // The shares of a file of more than two channels, for the layout they were made for.
+    let mut downmix: Option<(symphonia::core::audio::Channels, Vec<[Smp; 2]>)> = None;
     loop {
         let packet = match format.next_packet() {
             Ok(p) => p,
@@ -4404,6 +4450,13 @@ pub fn decode_file(
                 .clamp(needed, cap_limit);
             out.reserve_exact(target - out.len());
         }
+        if ch > 2
+            && downmix
+                .as_ref()
+                .is_none_or(|(layout, _)| *layout != spec.channels)
+        {
+            downmix = Some((spec.channels, downmix_gains(spec.channels)));
+        }
         for frame in sbuf.samples().chunks(ch.max(1)) {
             if skip > 0 {
                 skip -= 1; // the encoder's delay (see edge_trim)
@@ -4414,8 +4467,15 @@ pub fn decode_file(
             // metric, and DSP node fed from here (the WAV streaming reader scrubs
             // independently; this covers the symphonia paths — analysis via ve_decode
             // AND playback staging).
-            let l = frame[0];
-            let r = if ch > 1 { frame[1] } else { l };
+            let (l, r) = match &downmix {
+                Some((_, gains)) if ch > 2 => {
+                    frame.iter().zip(gains).fold((0.0, 0.0), |(l, r), (&v, g)| {
+                        let v = scrub_sample(v);
+                        (l + v * g[0], r + v * g[1])
+                    })
+                }
+                _ => (frame[0], if ch > 1 { frame[1] } else { frame[0] }),
+            };
             out.push([scrub_sample(l), scrub_sample(r)]);
         }
     }

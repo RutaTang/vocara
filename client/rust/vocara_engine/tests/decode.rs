@@ -57,6 +57,28 @@ fn an_mp4_of_unknown_length_is_not_refused_as_too_long() {
 }
 
 #[test]
+fn a_surround_file_is_mixed_down_not_cut_to_its_front_pair() {
+    // 5.1 with silent front channels: 440 Hz in the centre, 60 Hz in the LFE, 660 Hz in the
+    // rear left, each at 0.5. Kept to its first two channels it decoded silent; mixed as
+    // ffmpeg mixes it, the centre reaches both sides and the rear left its own, at -3 dB
+    // (0.25 RMS each), and the LFE neither.
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/surround_100ms.flac"
+    );
+    let (frames, _) = decode_file(path, 0.0, 0, 0).unwrap();
+    let rms = |c: usize| {
+        (frames.iter().map(|f| f64::from(f[c]).powi(2)).sum::<f64>() / frames.len() as f64).sqrt()
+    };
+    assert!(
+        (rms(0) - 0.25 * 2f64.sqrt()).abs() < 0.01,
+        "left {}",
+        rms(0)
+    );
+    assert!((rms(1) - 0.25).abs() < 0.01, "right {}", rms(1));
+}
+
+#[test]
 fn a_wav_written_to_a_pipe_is_not_refused_as_too_long() {
     // Written where it could not seek back, a WAV keeps its data size at all ones: 4 GB, which
     // read as hours. 100 ms at 8 kHz, its length unknown rather than refused.
