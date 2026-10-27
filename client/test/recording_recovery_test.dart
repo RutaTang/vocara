@@ -19,6 +19,7 @@ import 'package:vocara/data/services/audio_dsp.dart';
 import 'package:vocara/data/services/audio_file_service.dart';
 import 'package:vocara/data/services/local_storage_service.dart';
 import 'package:vocara/data/services/waveform_service.dart';
+import 'package:vocara/data/sync/sync_hashes.dart' show Loaded;
 import 'package:vocara/domain/models/audio_track.dart';
 import 'package:vocara/domain/models/song_practice.dart';
 import 'package:vocara/utils/id.dart';
@@ -151,8 +152,19 @@ void main() {
 
   /// Writes an orphaned recording into the staging tree exactly where
   /// AudioFileService.newRecordingPath would have placed it.
-  Future<File> stageOrphan(String practiceId, List<int> bytes) async {
-    final f = File(p.join(root.path, 'audio', practiceId, '${newId()}.wav'));
+  Future<File> stageOrphan(
+    String practiceId,
+    List<int> bytes, {
+    String name = '',
+  }) async {
+    final f = File(
+      p.join(
+        root.path,
+        'audio',
+        practiceId,
+        name.isEmpty ? '${newId()}.wav' : name,
+      ),
+    );
     await f.parent.create(recursive: true);
     await f.writeAsBytes(bytes, flush: true);
     return f;
@@ -195,6 +207,93 @@ void main() {
     expect(await File(clip.audioFilePath).exists(), isTrue);
     // The staging copy was deleted after the rows committed.
     expect(await orphan.exists(), isFalse);
+  });
+
+  test('a crashed take fills the empty take REC made for it, where it was '
+      'recorded', () async {
+    // Its name said neither, so the take came back as a new lane at the
+    // timeline's start, and the empty "Take 1" REC had saved stayed behind.
+    final practice = await createPractice();
+    final loaded =
+        (await persistence.songRepo.loadPractice(practice.id))
+            as Ok<Loaded<SongPractice>>;
+    final empty = AudioTrack(
+      id: newId(),
+      kind: AudioTrackKind.vocal,
+      displayName: 'Take 1',
+      createdAt: DateTime(2026),
+      versionId: loaded.value.aggregate.activeVersion?.id,
+    );
+    expect(
+      await persistence.songRepo.savePracticeWithBase(
+        loaded.value.aggregate.copyWith(vocalTracks: [empty]),
+        baseHashes: loaded.value.baseHashes,
+      ),
+      isA<Ok<Loaded<SongPractice>>>(),
+    );
+    final name = p.basename(
+      await AudioFileService(storage: _RootedStorage(root)).newRecordingPath(
+        practiceId: practice.id,
+        takeId: empty.id,
+        startMs: 4200,
+      ),
+    );
+    await stageOrphan(practice.id, monoWav(4800), name: name);
+
+    expect(await persistence.recoverStagedRecordings(analyze: fakeAnalyze), 1);
+
+    final after = await reload(practice.id);
+    expect(after.vocalTracks, hasLength(1));
+    final take = after.vocalTracks.single;
+    expect(take.id, empty.id);
+    expect(take.displayName, 'Take 1 (recovered)');
+    expect(take.primaryClip!.startMs, 4200);
+  });
+
+  test('a crashed take over a take with audio comes back as a lane of its '
+      'own, where it was recorded', () async {
+    final practice = await createPractice();
+    await stageOrphan(practice.id, monoWav(4800));
+    await persistence.recoverStagedRecordings(analyze: fakeAnalyze);
+    final first = (await reload(practice.id)).vocalTracks.single;
+
+    await stageOrphan(
+      practice.id,
+      monoWav(4800, gain: 0.3),
+      name: '${newId()}~${first.id}~3000.wav',
+    );
+    expect(await persistence.recoverStagedRecordings(analyze: fakeAnalyze), 1);
+
+    final after = await reload(practice.id);
+    expect(after.vocalTracks, hasLength(2));
+    expect(after.vocalTracks.first.clips, hasLength(1), reason: 'untouched');
+    final take = after.vocalTracks.last;
+    expect(take.displayName, 'Take 2 (recovered)');
+    expect(take.versionId, first.versionId);
+    expect(take.primaryClip!.startMs, 3000);
+  });
+
+  test('a recording name carries its lane and start; others carry none', () {
+    expect(
+      AudioFileService.recordingPlacementOf(
+        '/a/p1/01ABC~01HZZZZZZZZZZZZZZZZZZZZZZZ~1500.wav',
+      ),
+      (takeId: '01HZZZZZZZZZZZZZZZZZZZZZZZ', startMs: 1500),
+    );
+    for (final other in [
+      '/a/p1/01ABC.wav',
+      '/a/p1/01ABC~01HZZZZZZZZZZZZZZZZZZZZZZZ.wav',
+      '/a/p1/01ABC~~1500.wav',
+      '/a/p1/01ABC~TAKE9~1500.wav', // not an id of the minted shape
+      '/a/p1/01ABC~01HZZZZZZZZZZZZZZZZZZZZZZZ~-5.wav',
+      '/a/p1/01ABC~01HZZZZZZZZZZZZZZZZZZZZZZZ~x.wav',
+    ]) {
+      expect(
+        AudioFileService.recordingPlacementOf(other),
+        isNull,
+        reason: other,
+      );
+    }
   });
 
   test('recovery leaves every row but the new take as it was stored', () async {

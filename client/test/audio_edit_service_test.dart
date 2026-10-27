@@ -19,6 +19,8 @@ class _TempFiles extends AudioFileService {
   Future<String> newRecordingPath({
     required String practiceId,
     String extension = 'wav',
+    String? takeId,
+    int? startMs,
   }) async => '${dir.path}/clip_${_n++}.$extension';
 }
 

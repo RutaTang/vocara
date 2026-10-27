@@ -91,11 +91,19 @@ class _FakeAnalysis extends Fake implements AnalysisCache {
 class _FakeFiles extends Fake implements AudioFileService {
   var n = 0;
 
+  /// Where each recording was asked for: its lane and start.
+  final placements = <(String?, int?)>[];
+
   @override
   Future<String> newRecordingPath({
     required String practiceId,
     String extension = 'wav',
-  }) async => '/fake/take_${n++}.wav';
+    String? takeId,
+    int? startMs,
+  }) async {
+    placements.add((takeId, startMs));
+    return '/fake/take_${n++}.wav';
+  }
 
   @override
   Future<void> deleteAudio(String path) async {}
@@ -364,6 +372,7 @@ void main() {
   late _FakePlayback playback;
   late _FakeMixer mixer;
   late _FakeMic mic;
+  late _FakeFiles files;
   late RecordingController controller;
   late SongPractice practice;
   // Swappable save so a test can park the finalize tail mid-save.
@@ -386,7 +395,7 @@ void main() {
       mixer: mixer,
       analysis: _FakeAnalysis(),
       busyGate: BusyGate(onError: (_) {}),
-      audioFiles: _FakeFiles(),
+      audioFiles: files,
       waveforms: _FakeWaveforms(),
       appSettings: settings ?? _FakeSettings(),
       practiceId: 'p1',
@@ -414,6 +423,7 @@ void main() {
   }
 
   setUp(() {
+    files = _FakeFiles();
     final now = DateTime(2026, 6, 20);
     practice = SongPractice(
       id: 'p1',
@@ -442,6 +452,17 @@ void main() {
 
   tearDown(() {
     controller.dispose();
+  });
+
+  test('a take records under a name holding its lane and start', () async {
+    // What boot recovery places a crashed take by.
+    playback.position.value = const Duration(milliseconds: 2500);
+    final start = controller.startRecording();
+    await pumpUntil(() => mixer.gates.isNotEmpty);
+    mixer.gates.single.complete();
+    await start;
+    expect(files.placements, [('t1', 2500)]);
+    await controller.stopRecording();
   });
 
   test('happy-path ABA: take A\'s continuation parked across A\'s stop and '

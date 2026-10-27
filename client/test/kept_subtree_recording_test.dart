@@ -94,6 +94,8 @@ class _FakeFiles extends Fake implements AudioFileService {
   Future<String> newRecordingPath({
     required String practiceId,
     String extension = 'wav',
+    String? takeId,
+    int? startMs,
   }) async => '/audio/p1/rec${recordings++}.wav';
 
   @override

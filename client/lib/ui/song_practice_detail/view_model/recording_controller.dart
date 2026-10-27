@@ -224,7 +224,11 @@ class RecordingController extends ChangeNotifier {
       _recordingPreRollMs = 0;
       _recPeaks.clear();
       recordingPeaks.value = const [];
-      return _audioFiles.newRecordingPath(practiceId: _practiceId);
+      return _audioFiles.newRecordingPath(
+        practiceId: _practiceId,
+        takeId: targetId,
+        startMs: _recordingStartMs,
+      );
     },
     // Failed/invalidated starts drop the created WAV; an armed take's file is
     // never discarded here (it is kept for the boot sweep on hard kills).

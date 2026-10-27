@@ -147,12 +147,38 @@ class AudioFileService {
 
   /// Returns a fresh path inside the sandbox for a new recording. The recorder
   /// writes directly to this path.
+  ///
+  /// A take records into lane [takeId] from [startMs] on the timeline, and the
+  /// name carries both (see [recordingPlacementOf]): after a crash, boot
+  /// recovery found neither, so it added the take as a new lane at the
+  /// timeline's start, and the empty lane REC had made for it stayed behind.
   Future<String> newRecordingPath({
     required String practiceId,
     String extension = 'wav',
+    String? takeId,
+    int? startMs,
   }) async {
     final dir = await _audioDir(practiceId);
-    return p.join(dir.path, '${newId()}.$extension');
+    // Only an id of the minted shape goes into a file name.
+    final placed =
+        takeId != null &&
+            isPathComponentId(takeId) &&
+            startMs != null &&
+            startMs >= 0
+        ? '~$takeId~$startMs'
+        : '';
+    return p.join(dir.path, '${newId()}$placed.$extension');
+  }
+
+  /// The lane and timeline position a recording at [path] was made for, as
+  /// [newRecordingPath] named it; null for any other name (one from a build
+  /// before it did, or not a recording).
+  static ({String takeId, int startMs})? recordingPlacementOf(String path) {
+    final parts = p.basenameWithoutExtension(path).split('~');
+    if (parts.length != 3 || !isPathComponentId(parts[1])) return null;
+    final startMs = int.tryParse(parts[2]);
+    if (startMs == null || startMs < 0) return null;
+    return (takeId: parts[1], startMs: startMs);
   }
 
   /// Whether an export onto [path] would write inside the app's own storage

@@ -858,22 +858,53 @@ class Persistence {
     if (res is! Ok<Loaded<SongPractice>>) return _RecoveryOutcome.failed;
     final practice = res.value.aggregate;
 
-    // Same take construction as a graceful stop with nothing armed: analyze
-    // the audio, append a fresh single-clip vocal take to the active
-    // interpretation, save. The killed session's playhead is unknowable, so
-    // the clip lands at the timeline origin.
+    // Where the take was recorded, when its file name says (see
+    // [AudioFileService.recordingPlacementOf]): the lane it recorded into and
+    // the playhead at REC. Placed by the arm position, not the stop's
+    // latency-aligned one, which died with the session.
+    final placed = AudioFileService.recordingPlacementOf(file.path);
+    final into = placed == null
+        ? null
+        : practice.vocalTracks.where((t) => t.id == placed.takeId).firstOrNull;
     final analysis = await analyze(file.path);
-    final track = AudioTrack(
+    final clip = AudioClip(
       id: newId(),
-      kind: AudioTrackKind.vocal,
-      displayName: 'Take ${practice.nextTakeNumber} (recovered)',
       audioFilePath: file.path,
       durationMs: analysis.durationMs,
-      startMs: 0,
+      startMs: placed?.startMs ?? 0,
       waveformPeaks: analysis.peaks,
-      createdAt: DateTime.now(),
-      versionId: practice.activeVersion?.id,
     );
+    final List<AudioTrack> vocalTracks;
+    if (into != null && into.clips.isEmpty) {
+      // The empty take REC made for it: filled, where it was recorded. Added
+      // as a lane of its own, that one stayed behind empty.
+      vocalTracks = [
+        for (final t in practice.vocalTracks)
+          if (identical(t, into))
+            t.copyWith(
+              displayName: '${t.displayName} (recovered)',
+              clips: [clip],
+            )
+          else
+            t,
+      ];
+    } else {
+      // Same take construction as a graceful stop with nothing armed: a fresh
+      // single-clip vocal take, in the interpretation it was recorded in (a
+      // take over another's audio stays a lane of its own here), at the
+      // timeline origin when its position is unknown.
+      vocalTracks = [
+        ...practice.vocalTracks,
+        AudioTrack(
+          id: newId(),
+          kind: AudioTrackKind.vocal,
+          displayName: 'Take ${practice.nextTakeNumber} (recovered)',
+          clips: [clip],
+          createdAt: DateTime.now(),
+          versionId: into?.versionId ?? practice.activeVersion?.id,
+        ),
+      ];
+    }
     // Only the take is new: the practice row is left as stored even when the
     // take runs past the stored timeline (the editor grows it in memory on
     // open, and nothing else reads it). Growing it here made the row a local
@@ -881,7 +912,7 @@ class Persistence {
     // journaled at boot, before sync pulls, as a whole-row write that would
     // override what another device changed in it meanwhile.
     final saved = await songRepo.savePracticeWithBase(
-      practice.copyWith(vocalTracks: [...practice.vocalTracks, track]),
+      practice.copyWith(vocalTracks: vocalTracks),
       baseHashes: res.value.baseHashes,
     );
     if (saved is! Ok<Loaded<SongPractice>>) return _RecoveryOutcome.failed;
