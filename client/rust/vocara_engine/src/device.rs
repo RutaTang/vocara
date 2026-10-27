@@ -3972,16 +3972,17 @@ fn edge_trim(params: &symphonia::core::codecs::CodecParameters) -> (u64, u64) {
     )
 }
 
-/// The track decoding reads: the first with a codec. symphonia's own default is simply the
-/// first track, which in an MP4 holding a video or cover-picture track ahead of its audio is
-/// that one, and the decode failed as an unsupported codec.
+/// The track decoding reads: the first a decoder exists for. symphonia's own default is simply
+/// the first track, which in an MP4 holding a video or cover-picture track ahead of its audio
+/// is that one, and the decode failed as an unsupported codec.
 fn audio_track(
     format: &dyn symphonia::core::formats::FormatReader,
 ) -> Option<&symphonia::core::formats::Track> {
+    let codecs = symphonia::default::get_codecs();
     format
         .tracks()
         .iter()
-        .find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
+        .find(|t| codecs.get_codec(t.codec_params.codec).is_some())
 }
 
 /// The most frames a decoder may size one packet's buffer for. Real codecs stay far below
