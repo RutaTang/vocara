@@ -3972,6 +3972,30 @@ fn edge_trim(params: &symphonia::core::codecs::CodecParameters) -> (u64, u64) {
     )
 }
 
+/// The most frames a decoder may size one packet's buffer for. Real codecs stay far below
+/// (MP3 1152, AAC 2048, ALAC 4096, FLAC 65535), but the count comes from the file, and the
+/// decoder allocates it (times the channels) as it is built, before any budget here applies:
+/// an LPCM .mov or an ALAC cookie declaring billions aborted the app, and an allocation
+/// failure is not a panic, so no catch_unwind stops it.
+const MAX_FRAMES_PER_PACKET: u64 = 1 << 17;
+
+/// Whether a decoder built for `params` would size its packet buffer past
+/// [`MAX_FRAMES_PER_PACKET`]: the container's declared packet size, or for ALAC the frame
+/// length its config cookie (24 or 48 bytes, as the decoder reads it) declares.
+fn oversized_packets(params: &symphonia::core::codecs::CodecParameters) -> bool {
+    let declared = params.max_frames_per_packet.unwrap_or(0);
+    let alac = match params.extra_data.as_deref() {
+        Some(c)
+            if params.codec == symphonia::core::codecs::CODEC_TYPE_ALAC
+                && (c.len() == 24 || c.len() == 48) =>
+        {
+            u64::from(u32::from_be_bytes([c[0], c[1], c[2], c[3]]))
+        }
+        _ => 0,
+    };
+    declared.max(alac) > MAX_FRAMES_PER_PACKET
+}
+
 /// Probe `path`'s DECLARED duration in milliseconds without decoding a single packet:
 /// container probe only, so an import gate can refuse an hours-long file before any copy or
 /// allocation happens. `Ok(None)` = the container declares no frame count (e.g. a plain mp3
@@ -4164,6 +4188,9 @@ pub fn decode_file(
         Some(n) => Vec::with_capacity(n.min(max_frames) as usize),
         None => Vec::new(),
     };
+    if oversized_packets(&track.codec_params) {
+        return Err(DecodeError::TooBig);
+    }
     let mut decoder = symphonia::default::get_codecs()
         .make(&track.codec_params, &DecoderOptions::default())
         .map_err(|e| err(format!("make decoder: {e}")))?;
@@ -4212,6 +4239,9 @@ pub fn decode_file(
                 out.truncate(kept.max(link_start as u64) as usize);
                 (skip, padding) = edge_trim(&track.codec_params);
                 link_start = out.len();
+                if oversized_packets(&track.codec_params) {
+                    return Err(DecodeError::TooBig);
+                }
                 decoder = symphonia::default::get_codecs()
                     .make(&track.codec_params, &DecoderOptions::default())
                     .map_err(|e| err(format!("make decoder after reset: {e}")))?;

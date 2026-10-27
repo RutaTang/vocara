@@ -173,6 +173,55 @@ fn a_crafted_end_trim_lifts_no_budget() {
     }
 }
 
+/// [fixture] with the big-endian u32 `at` bytes past the first `tag` set to [value], as a
+/// crafted file sets it.
+fn with_u32_after(fixture: &str, tag: &[u8], nth: usize, at: usize, value: u32) -> Vec<u8> {
+    let mut bytes = std::fs::read(format!(
+        "{}/tests/fixtures/{fixture}",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap();
+    let found = (0..bytes.len() - tag.len())
+        .filter(|&i| &bytes[i..i + tag.len()] == tag)
+        .nth(nth)
+        .unwrap();
+    bytes[found + at..found + at + 4].copy_from_slice(&value.to_be_bytes());
+    bytes
+}
+
+#[test]
+fn a_crafted_packet_size_is_refused_before_the_decoder_sizes_it() {
+    // The decoder allocates the declared frames per packet (times the channels) as it is
+    // built, before any budget applies: a version-2 LPCM sample entry or an ALAC cookie
+    // declaring 4 billion took the allocation down, aborting the app.
+    for (name, bytes) in [
+        // constLPCMFramesPerAudioPacket: 64 bytes past the sample entry's type.
+        (
+            "lpcm.mov",
+            with_u32_after("lpcm_96k_20ms.mov", b"lpcm", 0, 64, u32::MAX),
+        ),
+        // frameLength: the cookie's first field, past the nested atom's type and flags.
+        (
+            "alac.m4a",
+            with_u32_after("alac_100ms.m4a", b"alac", 1, 8, u32::MAX),
+        ),
+    ] {
+        let path = temp_file(name, &bytes);
+        let decoded = decode_file(&path, 0.0, 0, 0);
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            matches!(decoded, Err(vocara_engine::device::DecodeError::TooBig)),
+            "{name}: {:?}",
+            decoded.map(|d| d.0.len())
+        );
+    }
+    // Untouched, both decode.
+    for name in ["lpcm_96k_20ms.mov", "alac_100ms.m4a"] {
+        let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
+        assert!(decode_file(&path, 0.0, 0, 0).is_ok(), "{name}");
+    }
+}
+
 /// 2 s of a 440 Hz mono 16-bit tone at 44.1 kHz.
 fn tone_i16() -> Vec<i16> {
     (0..88_200)
