@@ -198,8 +198,28 @@ class _HomeScreenState extends State<HomeScreen> {
           'This cannot be undone.',
     );
     if (!confirmed || !mounted) return;
+    // One delete at a time, and the command drops a call made while it runs:
+    // one confirmed while another still ran was ignored, its card left with
+    // no word said. It runs once that one is done instead (as the technique
+    // library's do).
+    while (vm.deleteProject.running) {
+      await _nextChange(vm.deleteProject);
+      if (!mounted) return;
+    }
     await vm.deleteProject.execute(practice.id);
   }
+}
+
+/// Completes the next time [listenable] notifies.
+Future<void> _nextChange(Listenable listenable) {
+  final changed = Completer<void>();
+  void listener() {
+    listenable.removeListener(listener);
+    changed.complete();
+  }
+
+  listenable.addListener(listener);
+  return changed.future;
 }
 
 class _Header extends StatelessWidget {
