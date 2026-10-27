@@ -860,9 +860,9 @@ class Persistence {
 
     // Where the take was recorded, when its file name says (see
     // [AudioFileService.recordingPlacementOf]): the lane it recorded into and
-    // the playhead at REC. Placed by the arm position, not the stop's
-    // latency-aligned one, which died with the session.
-    final placed = AudioFileService.recordingPlacementOf(file.path);
+    // where its audio starts. (A take whose start sits before the timeline's
+    // start keeps its head here: a stop would have cut it, and sits at 0.)
+    final placed = await AudioFileService.recordingPlacementOf(file.path);
     final into = placed == null
         ? null
         : practice.vocalTracks.where((t) => t.id == placed.takeId).firstOrNull;
@@ -877,16 +877,12 @@ class Persistence {
     final List<AudioTrack> vocalTracks;
     if (into != null && into.clips.isEmpty) {
       // The empty take REC made for it: filled, where it was recorded. Added
-      // as a lane of its own, that one stayed behind empty.
+      // as a lane of its own, that one stayed behind empty. Only the clip is
+      // new: renamed, the lane's row was rewritten and journaled as a local
+      // edit (see below).
       vocalTracks = [
         for (final t in practice.vocalTracks)
-          if (identical(t, into))
-            t.copyWith(
-              displayName: '${t.displayName} (recovered)',
-              clips: [clip],
-            )
-          else
-            t,
+          if (identical(t, into)) t.copyWith(clips: [clip]) else t,
       ];
     } else {
       // Same take construction as a graceful stop with nothing armed: a fresh

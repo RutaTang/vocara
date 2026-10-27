@@ -239,6 +239,36 @@ void main() {
       ),
     );
     await stageOrphan(practice.id, monoWav(4800), name: name);
+    // Only the clip is new: renamed, the lane's row was rewritten (a field
+    // another build wrote stripped) and journaled at boot as a local edit,
+    // overriding whatever another device did to the lane meanwhile.
+    await persistence.db.customStatement(
+      "UPDATE tracks SET fx_json = json_set(COALESCE(fx_json, '{}'), "
+      "'\$.future', 1) WHERE id = ?",
+      [empty.id],
+    );
+    Future<List<Object?>> laneRow() async {
+      final r = await persistence.db
+          .customSelect(
+            'SELECT display_name, fx_json FROM tracks WHERE id = ?',
+            variables: [Variable.withString(empty.id)],
+          )
+          .getSingle();
+      final journaled = await persistence.db
+          .customSelect(
+            "SELECT COUNT(*) AS n FROM oplog WHERE entity_table = 'tracks' "
+            'AND entity_id = ?',
+            variables: [Variable.withString(empty.id)],
+          )
+          .getSingle();
+      return [
+        r.data['display_name'],
+        r.data['fx_json'],
+        journaled.read<int>('n'),
+      ];
+    }
+
+    final before = await laneRow();
 
     expect(await persistence.recoverStagedRecordings(analyze: fakeAnalyze), 1);
 
@@ -246,8 +276,37 @@ void main() {
     expect(after.vocalTracks, hasLength(1));
     final take = after.vocalTracks.single;
     expect(take.id, empty.id);
-    expect(take.displayName, 'Take 1 (recovered)');
+    expect(take.displayName, 'Take 1');
     expect(take.primaryClip!.startMs, 4200);
+    expect(await laneRow(), before);
+  });
+
+  test('a crashed take is placed where its stop would have put it, once its '
+      'backing started', () async {
+    // The name holds the playhead at REC; the file's head was recorded
+    // before the backing rolled, and the take sat late by it.
+    final practice = await createPractice();
+    await stageOrphan(practice.id, monoWav(4800));
+    await persistence.recoverStagedRecordings(analyze: fakeAnalyze);
+    final first = (await reload(practice.id)).vocalTracks.single;
+    final files = AudioFileService(storage: _RootedStorage(root));
+
+    for (final (aligned, expected) in [(3650, 3650), (-120, 0)]) {
+      final staged = await stageOrphan(
+        practice.id,
+        monoWav(4800, gain: aligned < 0 ? 0.2 : 0.3),
+        name: '${newId()}~${first.id}~4000.wav',
+      );
+      await files.writeAlignedStart(staged.path, aligned);
+      expect(
+        await persistence.recoverStagedRecordings(analyze: fakeAnalyze),
+        1,
+      );
+      expect(
+        (await reload(practice.id)).vocalTracks.last.primaryClip!.startMs,
+        expected,
+      );
+    }
   });
 
   test('a crashed take over a take with audio comes back as a lane of its '
@@ -273,28 +332,31 @@ void main() {
     expect(take.primaryClip!.startMs, 3000);
   });
 
-  test('a recording name carries its lane and start; others carry none', () {
-    expect(
-      AudioFileService.recordingPlacementOf(
-        '/a/p1/01ABC~01HZZZZZZZZZZZZZZZZZZZZZZZ~1500.wav',
-      ),
-      (takeId: '01HZZZZZZZZZZZZZZZZZZZZZZZ', startMs: 1500),
-    );
-    for (final other in [
-      '/a/p1/01ABC.wav',
-      '/a/p1/01ABC~01HZZZZZZZZZZZZZZZZZZZZZZZ.wav',
-      '/a/p1/01ABC~~1500.wav',
-      '/a/p1/01ABC~TAKE9~1500.wav', // not an id of the minted shape
-      '/a/p1/01ABC~01HZZZZZZZZZZZZZZZZZZZZZZZ~-5.wav',
-      '/a/p1/01ABC~01HZZZZZZZZZZZZZZZZZZZZZZZ~x.wav',
-    ]) {
+  test(
+    'a recording name carries its lane and start; others carry none',
+    () async {
       expect(
-        AudioFileService.recordingPlacementOf(other),
-        isNull,
-        reason: other,
+        await AudioFileService.recordingPlacementOf(
+          '/a/p1/01ABC~01HZZZZZZZZZZZZZZZZZZZZZZZ~1500.wav',
+        ),
+        (takeId: '01HZZZZZZZZZZZZZZZZZZZZZZZ', startMs: 1500),
       );
-    }
-  });
+      for (final other in [
+        '/a/p1/01ABC.wav',
+        '/a/p1/01ABC~01HZZZZZZZZZZZZZZZZZZZZZZZ.wav',
+        '/a/p1/01ABC~~1500.wav',
+        '/a/p1/01ABC~TAKE9~1500.wav', // not an id of the minted shape
+        '/a/p1/01ABC~01HZZZZZZZZZZZZZZZZZZZZZZZ~-5.wav',
+        '/a/p1/01ABC~01HZZZZZZZZZZZZZZZZZZZZZZZ~x.wav',
+      ]) {
+        expect(
+          await AudioFileService.recordingPlacementOf(other),
+          isNull,
+          reason: other,
+        );
+      }
+    },
+  );
 
   test('recovery leaves every row but the new take as it was stored', () async {
     // Recovery saved without a base, so the store's own rows stood in as one:

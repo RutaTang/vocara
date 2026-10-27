@@ -537,6 +537,14 @@ class RecordingController extends ChangeNotifier {
         // Kept fractional: the placement below rounds the whole sum once.
         // Truncated to whole ms here, every take sat up to 1 ms late.
         if (pre > 0) _recordingPreRollMs = pre * 1000 / 48000;
+        // Where a stop will place it, for a crash's recovery to place it by.
+        await _audioFiles.writeAlignedStart(
+          r.path!,
+          (_recordingStartMs -
+                  _recordingPreRollMs -
+                  engineNow.recordLatencyMs())
+              .round(),
+        );
       }
     } catch (e) {
       // Setup failed partway (createEmptyVocalTake/save, newRecordingPath I/O,

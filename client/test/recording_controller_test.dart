@@ -105,6 +105,13 @@ class _FakeFiles extends Fake implements AudioFileService {
     return '/fake/take_${n++}.wav';
   }
 
+  /// The aligned starts written beside each take, by path.
+  final alignedStarts = <String, int>{};
+
+  @override
+  Future<void> writeAlignedStart(String path, int startMs) async =>
+      alignedStarts[path] = startMs;
+
   @override
   Future<void> deleteAudio(String path) async {}
 }
@@ -160,11 +167,17 @@ class _FakeGraph extends Fake implements GraphAudioPlaybackService {
   @override
   int inputFramesReceived() => 0;
 
-  @override
-  int recordWrittenFrames() => 0;
+  /// Frames already in the take's ring as its backing starts (the pre-roll).
+  int writtenFrames = 0;
 
   @override
-  double recordLatencyMs() => 0;
+  int recordWrittenFrames() => writtenFrames;
+
+  /// The input round-trip the take is compensated for.
+  double latencyMs = 0;
+
+  @override
+  double recordLatencyMs() => latencyMs;
 }
 
 /// A mic the test feeds by hand: [frames] is the engine's input counter, and
@@ -454,15 +467,23 @@ void main() {
     controller.dispose();
   });
 
-  test('a take records under a name holding its lane and start', () async {
+  test('a take records under a name holding its lane and start, and notes '
+      'where its stop would place it once its backing starts', () async {
     // What boot recovery places a crashed take by.
+    final graph = _FakeGraph()
+      ..writtenFrames =
+          9600 // 200 ms of pre-roll at 48 kHz
+      ..latencyMs = 30;
+    final c = build(_FakeMic(), graph: graph);
+    addTearDown(c.dispose);
     playback.position.value = const Duration(milliseconds: 2500);
-    final start = controller.startRecording();
+    final start = c.startRecording();
     await pumpUntil(() => mixer.gates.isNotEmpty);
     mixer.gates.single.complete();
     await start;
     expect(files.placements, [('t1', 2500)]);
-    await controller.stopRecording();
+    expect(files.alignedStarts.values, [2500 - 200 - 30]);
+    await c.stopRecording();
   });
 
   test('happy-path ABA: take A\'s continuation parked across A\'s stop and '

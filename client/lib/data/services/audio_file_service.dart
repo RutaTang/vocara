@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:path/path.dart' as p;
@@ -171,15 +172,42 @@ class AudioFileService {
   }
 
   /// The lane and timeline position a recording at [path] was made for, as
-  /// [newRecordingPath] named it; null for any other name (one from a build
-  /// before it did, or not a recording).
-  static ({String takeId, int startMs})? recordingPlacementOf(String path) {
+  /// [newRecordingPath] named it — or, once the take's backing started, as
+  /// [writeAlignedStart] put it beside it; null for any other name (one from
+  /// a build before it did, or not a recording).
+  static Future<({String takeId, int startMs})?> recordingPlacementOf(
+    String path,
+  ) async {
     final parts = p.basenameWithoutExtension(path).split('~');
     if (parts.length != 3 || !isPathComponentId(parts[1])) return null;
     final startMs = int.tryParse(parts[2]);
     if (startMs == null || startMs < 0) return null;
-    return (takeId: parts[1], startMs: startMs);
+    int? aligned;
+    try {
+      final f = File(_alignedStartOf(path));
+      if (await f.exists()) aligned = int.tryParse(await f.readAsString());
+    } catch (_) {
+      // Unreadable: placed at REC instead, late by the arm and the latency.
+    }
+    return (takeId: parts[1], startMs: math.max(0, aligned ?? startMs));
   }
+
+  /// Records beside the take at [path] where its audio starts on the
+  /// timeline once its backing has started: the playhead at REC less the
+  /// file's head recorded before the backing rolled and the input latency —
+  /// where a stop would place it. The name holds only the playhead at REC,
+  /// so a take recovered by it alone sat late by both. Best effort.
+  Future<void> writeAlignedStart(String path, int startMs) async {
+    try {
+      await File(_alignedStartOf(path)).writeAsString('$startMs', flush: true);
+    } catch (_) {
+      // Recovery falls back to the playhead at REC.
+    }
+  }
+
+  /// The sidecar [writeAlignedStart] writes; the boot sweep keeps it with
+  /// its recording while that is held back, and clears it with it.
+  static String _alignedStartOf(String path) => '$path.place';
 
   /// Whether an export onto [path] would write inside the app's own storage
   /// (the folder holding the recordings, the take pool and the library
