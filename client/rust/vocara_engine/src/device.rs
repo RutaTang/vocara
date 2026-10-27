@@ -4287,6 +4287,11 @@ fn decode_source(
     // Where an AIFF's sound ends (see sniff_aiff_frames). Zero is a header never patched, not
     // an empty file.
     let aiff_frames = sniff_aiff_frames(path).ok().flatten().filter(|&n| n > 0);
+    // Where an ADPCM WAV's sound ends (see sniff_wav_adpcm_frames).
+    let adpcm_frames = sniff_wav_adpcm_frames(path)
+        .ok()
+        .flatten()
+        .filter(|&n| n > 0);
     // A sample table, packet table or tag that declares more than the file holds: symphonia
     // reserves it whole during the probe, and failing to allocate aborts the app. The full
     // scan (decode reads the whole file anyway) also covers an Ogg stream's later links, whose
@@ -4314,6 +4319,8 @@ fn decode_source(
     let mut format = probed.format;
     let track = audio_track(&*format).ok_or_else(|| err("no decodable audio track".to_string()))?;
     let track_id = track.id;
+    // An ADPCM block's frames (1 elsewhere): its last block's padding is less than this.
+    let track_block_frames = track.codec_params.frames_per_block.unwrap_or(1).max(1);
     // Per link of a chained stream: each brings its own (see the reset below).
     let (mut skip, mut padding) = edge_trim(&track.codec_params);
     let mut link_start = 0usize;
@@ -4555,6 +4562,12 @@ fn decode_source(
     if let Some(n) = aiff_frames.filter(|&n| (out.len() as u64).saturating_sub(n) <= 8) {
         out.truncate(usize::try_from(n).unwrap_or(usize::MAX));
     }
+    // Only the last block's padding, less than a block: a count left short by its writer must
+    // not cut real sound.
+    let block = track_block_frames;
+    if let Some(n) = adpcm_frames.filter(|&n| (out.len() as u64).saturating_sub(n) < block) {
+        out.truncate(usize::try_from(n).unwrap_or(usize::MAX));
+    }
     // From the end of what decoded, not where the header says the stream ends, and never
     // into an earlier link.
     let kept = (out.len() as u64).saturating_sub(padding);
@@ -4612,6 +4625,47 @@ fn sniff_wav_sample_rate(path: &str) -> std::io::Result<Option<u32>> {
         f.seek(std::io::SeekFrom::Current((size + (size & 1)) as i64))?;
     }
     Ok(None)
+}
+
+/// Reads just enough of an ADPCM WAV's header to report the frame count its 'fact' chunk
+/// declares; `Ok(None)` for any other file. ADPCM codes whole blocks, the last padded out, and
+/// symphonia counts the file's length in blocks: 100 ms at 8 kHz decoded as 255 ms, its tail
+/// a block of padding. (A PCM WAV's 'fact' chunk is optional, and not always right.)
+fn sniff_wav_adpcm_frames(path: &str) -> std::io::Result<Option<u64>> {
+    use std::io::{Read, Seek};
+    let mut f = std::fs::File::open(path)?;
+    let mut head = [0u8; 12];
+    if f.read(&mut head)? < 12 || &head[0..4] != b"RIFF" || &head[8..12] != b"WAVE" {
+        return Ok(None);
+    }
+    // Bounded, as the WAV sniff's walk is.
+    let (mut adpcm, mut fact) = (None, None);
+    let mut hdr = [0u8; 8];
+    for _ in 0..64 {
+        if f.read(&mut hdr)? < 8 {
+            break;
+        }
+        let size = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]) as u64;
+        let mut field = [0u8; 4];
+        match &hdr[0..4] {
+            // The format tag: 2 is Microsoft's ADPCM, 0x11 IMA's.
+            b"fmt " if size >= 2 && f.read(&mut field[..2])? == 2 => {
+                adpcm = Some(matches!(
+                    u16::from_le_bytes([field[0], field[1]]),
+                    0x0002 | 0x0011
+                ));
+                f.seek(std::io::SeekFrom::Current(-2))?;
+            }
+            b"fact" if size >= 4 && f.read(&mut field)? == 4 => {
+                fact = Some(u64::from(u32::from_le_bytes(field)));
+                f.seek(std::io::SeekFrom::Current(-4))?;
+            }
+            b"data" => break,
+            _ => {}
+        }
+        f.seek(std::io::SeekFrom::Current((size + (size & 1)) as i64))?;
+    }
+    Ok(fact.filter(|_| adpcm == Some(true)))
 }
 
 /// Reads just enough of an AIFF or AIFF-C header to report the frame count its COMM chunk

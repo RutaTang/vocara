@@ -217,6 +217,20 @@ fn two_mp3s_joined_end_to_end_decode_whole() {
 }
 
 #[test]
+fn an_adpcm_wav_decodes_to_its_declared_length() {
+    // Voice recorders write IMA or Microsoft ADPCM WAVs: no decoder read them. ADPCM codes
+    // whole blocks, the last padded, and the length counted in blocks made 100 ms at 8 kHz
+    // last 255 ms; the 'fact' chunk declares the real 800 frames.
+    for name in ["ima_adpcm_100ms.wav", "ms_adpcm_100ms.wav"] {
+        let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
+        let (frames, rate) = decode_file(&path, 0.0, 0, 0).unwrap();
+        assert_eq!((frames.len(), rate), (800, 8_000), "{name}");
+        let rms = (frames.iter().map(|f| f64::from(f[0]).powi(2)).sum::<f64>() / 800.0).sqrt();
+        assert!((rms - 0.125 / 2f64.sqrt()).abs() < 0.005, "{name}: {rms}");
+    }
+}
+
+#[test]
 fn a_chained_ogg_keeps_its_short_links() {
     // Two 0.3 s links at 8 kHz, 440 Hz then 1 kHz. Read seekable, symphonia skipped a link
     // whose sound all came in with its headers: only the 1 kHz one decoded.
