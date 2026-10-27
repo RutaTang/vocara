@@ -1158,6 +1158,34 @@ void main() {
     // Cancel stays on screen while the stems are imported and analyzed (the
     // whole visible run on a cached song), but the service had nothing left
     // to cancel and the backing was applied anyway.
+    test('the instrumental sits where the original does', () async {
+      // Built without a start, it landed at 0 under an Original dragged
+      // right: played early against it and against every take sung to it.
+      final separation = _GatedSeparation();
+      final vm = await pumpVm(
+        separation: separation,
+        reference: AudioTrack(
+          id: 'ref',
+          kind: AudioTrackKind.reference,
+          displayName: 'Original',
+          audioFilePath: '/pool/original.wav',
+          durationMs: 1000,
+          startMs: 5000,
+          createdAt: DateTime(2026),
+        ),
+      );
+      for (var i = 0; i < 400 && !vm.separationAvailable; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+      final run = vm.separateBacking('ref');
+      await Future<void>.delayed(Duration.zero);
+      separation.gate.complete();
+      await run;
+
+      expect(vm.practice!.reference!.primaryClip!.startMs, 5000);
+      expect(vm.practice!.accompaniment!.primaryClip!.startMs, 5000);
+    });
+
     test('Cancel after the stems arrive keeps the backing as it was', () async {
       final separation = _GatedSeparation();
       final waveforms = _SignalingWaveforms();

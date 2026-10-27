@@ -247,6 +247,11 @@ class _DeadGraph extends _HandFedGraph {
 /// stream whose take ring grows on every read, so its ready handshake passes
 /// at once and its level timer drives the take's clock.
 class _RollingGraph extends _FakeGraph {
+  _RollingGraph({this.step = 480});
+
+  /// How far the take's ring grows on each read.
+  final int step;
+
   int _written = 0;
 
   @override
@@ -259,7 +264,7 @@ class _RollingGraph extends _FakeGraph {
   int inputStreamState() => (7 << 1) | 1;
 
   @override
-  int recordWrittenFrames() => _written += 480;
+  int recordWrittenFrames() => _written += step;
 
   @override
   int inputFramesReceived() => _written;
@@ -905,6 +910,30 @@ void main() {
       isEmpty,
       reason: 'the stop clears the forming waveform',
     );
+  });
+
+  test('the playhead runs with the backing, not from the arm', () async {
+    // The take rolls from the arm, the backing a pre-roll later: a head run
+    // from the arm led what was heard, and a lyric stamped at it mid-take
+    // saved that late a time.
+    // Reads 200 ms apart: the pre-roll the take measures is long.
+    final c = build(null, graph: _RollingGraph(step: 9600));
+    addTearDown(c.dispose);
+    playback.position.value = const Duration(seconds: 10);
+    final start = c.startRecording();
+    await pumpUntil(() => mixer.gates.isNotEmpty);
+    mixer.gates.single.complete();
+    await start;
+    expect(c.isRecording, isTrue);
+    await Future<void>.delayed(const Duration(milliseconds: 700));
+
+    final head = playback.position.value.inMilliseconds;
+    final clock = c.recordingDurationMs;
+    await c.stopRecording();
+    // Where the take was placed: its pre-roll before the backing's start.
+    final preRoll = 10000 - files.alignedStarts.values.single;
+    expect(preRoll, greaterThanOrEqualTo(200));
+    expect(head - 10000, clock - preRoll);
   });
 
   test('monitoring outlasts a mic still warming up', () async {

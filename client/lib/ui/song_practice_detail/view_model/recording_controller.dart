@@ -222,6 +222,7 @@ class RecordingController extends ChangeNotifier {
       _recordingTargetId = targetId;
       _recordingStartMs = _playback.position.value.inMilliseconds;
       _recordingPreRollMs = 0;
+      _backingRolling = false;
       _recPeaks.clear();
       recordingPeaks.value = const [];
       return _audioFiles.newRecordingPath(
@@ -310,6 +311,10 @@ class RecordingController extends ChangeNotifier {
   /// arm and play (graph resync, decode, seek) lands as unbounded skew.
   double _recordingPreRollMs = 0;
 
+  /// Whether this take's backing has started (its pre-roll is known): the
+  /// playhead waits at REC until then.
+  bool _backingRolling = false;
+
   /// The vocal take the in-flight recording is punching into (frozen at start);
   /// null when REC is instead creating a brand-new take.
   String? _recordingTargetId;
@@ -379,8 +384,14 @@ class RecordingController extends ChangeNotifier {
       _recPeaks.add(peak);
     } while (_recPeaks.length < due);
     recordingPeaks.value = UnmodifiableListView(_recPeaks);
+    // The head runs with the backing, which starts a pre-roll after the take
+    // does: run from the arm, it led what was heard by that much, and a lyric
+    // stamped or a note added at it mid-take saved that late a time.
+    final heard = _backingRolling
+        ? recordingDurationMs - _recordingPreRollMs.round()
+        : 0;
     _playback.setRecordingPosition(
-      Duration(milliseconds: _recordingStartMs + recordingDurationMs),
+      Duration(milliseconds: _recordingStartMs + math.max(0, heard)),
     );
   }
 
@@ -535,6 +546,9 @@ class RecordingController extends ChangeNotifier {
       // compensated separately (recordLatencyMs). Guarded: a stop that raced
       // the play() above has already read (and reset) the pre-roll, so a
       // late write here would leak into the NEXT take.
+      // The backing is rolling; read synchronously below, no tick lands
+      // between this and its pre-roll.
+      _backingRolling = true;
       final engineNow = _graphEngine();
       if (!stopped() && engineNow != null) {
         final pre = engineNow.recordWrittenFrames();

@@ -7,6 +7,7 @@ import 'package:just_waveform/just_waveform.dart';
 import 'package:path/path.dart' as p;
 
 import '../../utils/id.dart';
+import 'audio_file_service.dart';
 import 'local_storage_service.dart';
 
 /// Result of analyzing an audio file: normalized peaks plus its duration.
@@ -87,7 +88,10 @@ class WaveformService {
 
       return (
         peaks: downsample(waveform, targetBuckets),
-        durationMs: waveform.duration.inMilliseconds,
+        durationMs: await exactDurationMs(
+          audioFilePath,
+          waveform.duration.inMilliseconds,
+        ),
       );
     } finally {
       if (await waveOut.exists()) {
@@ -95,6 +99,25 @@ class WaveformService {
           await waveOut.delete();
         } catch (_) {}
       }
+    }
+  }
+
+  /// [path]'s length to the millisecond when it is a WAV (every clip is, once
+  /// imported), else [waveformMs]. The waveform counts whole 10 ms pixels, up
+  /// to 10 ms short of the audio: a merge shifted the bottom take's notes
+  /// that much early, a split left a gap over audio that plays, and a loop
+  /// over the whole song dropped the tail. The header's count is used only
+  /// where it agrees with the decoded one to within that grid.
+  @visibleForTesting
+  static Future<int> exactDurationMs(String path, int waveformMs) async {
+    try {
+      final wav = await AudioFileService.probeWav(File(path));
+      if (wav == null) return waveformMs;
+      final frameBytes = wav.channels * wav.bitsPerSample ~/ 8;
+      final ms = (wav.dataBytes ~/ frameBytes * 1000 / wav.sampleRate).round();
+      return ms >= waveformMs && ms - waveformMs <= 20 ? ms : waveformMs;
+    } catch (_) {
+      return waveformMs;
     }
   }
 

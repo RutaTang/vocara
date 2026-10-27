@@ -7,6 +7,7 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:just_waveform/just_waveform.dart';
+import 'package:vocara/data/services/audio_dsp.dart';
 import 'package:vocara/data/services/waveform_service.dart';
 
 /// A .wave file as the package's darwin writer lays it out: a 20-byte header
@@ -64,4 +65,18 @@ void main() {
       expect(peaks, everyElement(closeTo(0.1, 1e-4)));
     },
   );
+
+  test('a WAV clip is as long as its audio, not its 10 ms pixels', () async {
+    // 1234 ms at 48 kHz, which the waveform counts as 123 pixels: 1230 ms.
+    final dir = await Directory.systemTemp.createTemp('wavlen');
+    addTearDown(() => dir.delete(recursive: true));
+    final wav = File('${dir.path}/take.wav')
+      ..writeAsBytesSync(writeWavMono(Float64List(59232), 48000));
+    expect(await WaveformService.exactDurationMs(wav.path, 1230), 1234);
+    // A header that disagrees with what decoded keeps the decoded length.
+    expect(await WaveformService.exactDurationMs(wav.path, 900), 900);
+    // Not a WAV: the waveform's length.
+    final mp3 = File('${dir.path}/song.mp3')..writeAsBytesSync([1, 2, 3]);
+    expect(await WaveformService.exactDurationMs(mp3.path, 1230), 1230);
+  });
 }

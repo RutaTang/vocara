@@ -1610,6 +1610,9 @@ class SongPracticeDetailViewModel extends ChangeNotifier
             kind: AudioTrackKind.accompaniment,
             displayName: '$baseName (Instrumental)',
             audioFilePath: instDest,
+            // Where the audio it was separated from sits: at 0, under an
+            // Original dragged right, it played early against it.
+            startMs: liveOriginal.primaryClip?.startMs ?? 0,
             durationMs: instAnalysis.durationMs,
             waveformPeaks: instAnalysis.peaks,
             createdAt: DateTime.now(),
