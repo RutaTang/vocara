@@ -212,15 +212,16 @@ impl Fft {
         let (a0r, a0i) = (self.wr[0], wi_all[0]);
         if n >= 4 {
             let (b0r, b0i, b1r, b1i) = (self.wr[1], wi_all[1], self.wr[2], wi_all[2]);
-            for (rc, ic) in re.chunks_exact_mut(4).zip(im.chunks_exact_mut(4)) {
-                let [mut r0, mut r1, mut r2, mut r3] = [rc[0], rc[1], rc[2], rc[3]];
-                let [mut i0, mut i1, mut i2, mut i3] = [ic[0], ic[1], ic[2], ic[3]];
+            let (re4, im4) = (re.as_chunks_mut::<4>().0, im.as_chunks_mut::<4>().0);
+            for (rc, ic) in re4.iter_mut().zip(im4) {
+                let [mut r0, mut r1, mut r2, mut r3] = *rc;
+                let [mut i0, mut i1, mut i2, mut i3] = *ic;
                 butterfly(&mut r0, &mut i0, &mut r1, &mut i1, a0r, a0i);
                 butterfly(&mut r2, &mut i2, &mut r3, &mut i3, a0r, a0i);
                 butterfly(&mut r0, &mut i0, &mut r2, &mut i2, b0r, b0i);
                 butterfly(&mut r1, &mut i1, &mut r3, &mut i3, b1r, b1i);
-                rc.copy_from_slice(&[r0, r1, r2, r3]);
-                ic.copy_from_slice(&[i0, i1, i2, i3]);
+                *rc = [r0, r1, r2, r3];
+                *ic = [i0, i1, i2, i3];
             }
         } else {
             let [mut r0, mut r1, mut i0, mut i1] = [re[0], re[1], im[0], im[1]];

@@ -508,8 +508,8 @@ fn sinc_run(
     out: &mut [Smp],
 ) {
     let frames = out.len() / CHANNELS;
-    let mut quads = out[..frames * CHANNELS].chunks_exact_mut(4 * CHANNELS);
-    for o in &mut quads {
+    let (quads, rest) = out[..frames * CHANNELS].as_chunks_mut::<{ 4 * CHANNELS }>();
+    for o in quads {
         let mut w = [[0.0f32; SINC_TAPS]; 4];
         let mut f: [&[[Smp; CHANNELS]]; 4] = [&[]; 4];
         for (wj, fj) in w.iter_mut().zip(f.iter_mut()) {
@@ -535,9 +535,9 @@ fn sinc_run(
             l3 += f3[t][0] * w3[t];
             r3 += f3[t][1] * w3[t];
         }
-        o.copy_from_slice(&[l0, r0, l1, r1, l2, r2, l3, r3]);
+        *o = [l0, r0, l1, r1, l2, r2, l3, r3];
     }
-    for o in quads.into_remainder().chunks_exact_mut(CHANNELS) {
+    for o in rest.as_chunks_mut::<CHANNELS>().0 {
         let a = KernelAt::at(*pos, origin);
         let (r0, r1) = (
             &table[a.row0..a.row0 + SINC_TAPS],
@@ -2209,9 +2209,12 @@ mod drift_tests {
             (rng >> 11) as f64 / (1u64 << 53) as f64
         };
         let ph_in = uniform();
-        let ph_out = c
-            .phase_gap
-            .map_or_else(&mut uniform, |g| (ph_in - g).rem_euclid(1.0));
+        // A match, not `map_or_else(uniform, ..)`: the closure is Copy, so passing it by value
+        // would draw from a copy and leave `uniform`'s stream unadvanced.
+        let ph_out = match c.phase_gap {
+            Some(g) => (ph_in - g).rem_euclid(1.0),
+            None => uniform(),
+        };
         let lost = |ev: &[(f64, f64)], t: f64| -> f64 {
             ev.iter().map(|&(s, l)| (t - s).clamp(0.0, l)).sum()
         };

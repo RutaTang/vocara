@@ -33,10 +33,11 @@ fn balance(pan: f32) -> (f32, f32) {
 fn apply_gains(gl: &mut Smoothed, gr: &mut Smoothed, inp: &[f32], out: &mut [f32]) {
     let frames = out.len() / CHANNELS;
     if let (Some(l), Some(r)) = (gl.settled(frames), gr.settled(frames)) {
-        for (o, x) in out
-            .chunks_exact_mut(CHANNELS)
-            .zip(inp.chunks_exact(CHANNELS))
-        {
+        let (out, inp) = (
+            out.as_chunks_mut::<CHANNELS>().0,
+            inp.as_chunks::<CHANNELS>().0,
+        );
+        for (o, x) in out.iter_mut().zip(inp) {
             o[0] = x[0] * l;
             o[1] = x[1] * r;
         }

@@ -349,7 +349,7 @@ impl Band {
         let (ca, cb) = (a.l.c, b.l.c);
         let (mut al, mut ar) = (a.l.history(), a.r.history());
         let (mut bl, mut br) = (b.l.history(), b.r.history());
-        for f in buf[..frames * CHANNELS].chunks_exact_mut(CHANNELS) {
+        for f in buf[..frames * CHANNELS].as_chunks_mut::<CHANNELS>().0 {
             let l = al.tick(&ca, f[0]);
             let r = ar.tick(&ca, f[1]);
             f[0] = bl.tick(&cb, l);

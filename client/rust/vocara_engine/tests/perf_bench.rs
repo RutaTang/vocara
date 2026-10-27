@@ -384,8 +384,8 @@ fn bench_live_monitor() {
     let mic = material(block, 2);
     let mut out = vec![0.0; block * CHANNELS];
     let ns = best_ns(25, 200, || {
-        for f in mic.chunks_exact(CHANNELS) {
-            mic_tx.push([f[0], f[1]]);
+        for &f in mic.as_chunks::<CHANNELS>().0 {
+            mic_tx.push(f);
         }
         rt.process(&mut out, block);
     });

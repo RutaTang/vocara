@@ -155,7 +155,9 @@ fn main() {
 /// level moving by half a cycle or more from one to the next is a step.
 fn whole_cycle_steps(samples: &[(f64, f64)], cycle: f64) -> usize {
     let levels: Vec<f64> = samples
-        .chunks_exact(10)
+        .as_chunks::<10>()
+        .0
+        .iter()
         .map(|w| w.iter().map(|s| s.1).fold(f64::INFINITY, f64::min))
         .collect();
     levels

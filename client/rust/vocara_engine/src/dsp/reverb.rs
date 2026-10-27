@@ -116,16 +116,13 @@ impl Allpass {
 /// registers. Four independent damping recursions in one loop keep the FPU busy where one comb
 /// at a time would wait on its own recursion every sample.
 fn comb4_run(
-    cs: &mut [Comb],
+    [c0, c1, c2, c3]: &mut [Comb; 4],
     input: &[f32],
     acc: &mut [f32],
     feedback: f32,
     damp1: f32,
     damp2: f32,
 ) {
-    let [c0, c1, c2, c3] = cs else {
-        unreachable!("comb4_run takes exactly four combs")
-    };
     let n = input.len();
     let mut i = 0;
     while i < n {
@@ -209,11 +206,10 @@ impl Channel {
     /// output, so the reordering visits the same operations on the same values.
     fn process_run(&mut self, input: &[f32], out: &mut [f32], feedback: f32, d1: f32, d2: f32) {
         out.fill(0.0);
-        let mut groups = self.combs.chunks_exact_mut(4);
-        for g in &mut groups {
+        let (groups, rest) = self.combs.as_chunks_mut::<4>();
+        for g in groups {
             comb4_run(g, input, out, feedback, d1, d2);
         }
-        let rest = groups.into_remainder();
         if !rest.is_empty() {
             for (o, &x) in out.iter_mut().zip(input) {
                 let mut acc = *o;
@@ -310,10 +306,8 @@ impl ReverbNode {
         while start < frames {
             let m = (frames - start).min(RUN);
             let (mut in_l, mut in_r) = ([0.0f32; RUN], [0.0f32; RUN]);
-            for (j, f) in inp[CHANNELS * start..CHANNELS * (start + m)]
-                .chunks_exact(CHANNELS)
-                .enumerate()
-            {
+            let frames_in = inp[CHANNELS * start..CHANNELS * (start + m)].as_chunks::<CHANNELS>();
+            for (j, f) in frames_in.0.iter().enumerate() {
                 in_l[j] = f[0] * FIXED_GAIN;
                 in_r[j] = f[1] * FIXED_GAIN;
             }
