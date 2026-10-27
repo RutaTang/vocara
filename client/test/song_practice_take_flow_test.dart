@@ -632,6 +632,31 @@ void main() {
     await stopping;
   });
 
+  test('an edit refused while a cancelled REC unwinds says to wait, not to '
+      'stop recording', () async {
+    // Stop was already pressed (REC still at the permission prompt): told
+    // to stop recording, the user had nothing left to stop.
+    final mic = _FakeMic()..permission = Completer<void>();
+    final vm = await pumpVm(engine: _FakeGraphEngine(), mic: mic);
+    final toasts = <String>[];
+    final sub = vm.toasts.listen(toasts.add);
+    addTearDown(sub.cancel);
+    final start = vm.recording.startRecording();
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    await vm.stopRecording();
+    expect(vm.recording.isCancellingStart, isTrue);
+
+    expect(vm.refuseStructuralEdit(), isTrue);
+    await vm.versions.create('Fresh');
+    await Future<void>.delayed(Duration.zero);
+    expect(toasts, [
+      'Wait for the recording to stop.',
+      'Wait for the recording to stop.',
+    ]);
+    mic.permission!.complete();
+    await start;
+  });
+
   test(
     'take and clip menu actions refused while an import runs say why',
     () async {

@@ -283,7 +283,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       // longer looks — no forming waveform, and no take after Stop.
       isRecording: () => takeInFlight,
       isSeparating: () => isSeparating,
-      isSavingTake: () => recording.isStopping && !recording.isRecording,
+      takeWait: () => _takeWait,
       transportMoves: () => playback.transportMoves,
     );
     // Forward every controller's notifications through this VM so all existing
@@ -814,10 +814,9 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// silently does nothing, OOMs on a huge file, or overwrites the lyrics with
   /// the contents of an unrelated file.
   Future<void> importLyricsFromFile(String path) async {
-    if (isRecording || busy) {
-      _toast('Finish the current action before importing lyrics.');
-      return;
-    }
+    // No take or edit guard, as for pasted lyrics: the text goes onto the live
+    // model and its write queues behind any other. Refused, the same lines
+    // dropped mid-take were turned away while pasted ones were taken.
     const exts = {'.lrc', '.txt', '.text'};
     final dot = path.lastIndexOf('.');
     final ext = dot < 0 ? '' : path.substring(dot).toLowerCase();
@@ -1082,6 +1081,16 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         if (reloaded is Ok<Loaded<SongPractice>> &&
             identical(_practice, sent)) {
           _revertTo(reloaded.value);
+          // And the engine and selection with it, as [_doSave]'s revert does:
+          // the disk's model can differ in more than the lyrics (an import
+          // whose own save failed ahead of this one, unreverted as the stamp
+          // had moved the model on). Left, its lane was gone from the screen
+          // and still played.
+          if (!_disposed) {
+            _ensureSelectionAnalyzed();
+            playback.ensureLoopRange();
+            await mixer.resyncPlayback();
+          }
         }
         _toast("Couldn't save your changes.");
       }
@@ -1340,17 +1349,24 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         // landed. Deleting them first meant a failed save reverted the model
         // to rows whose audio was already gone.
         if (!await _save()) return false;
-        if (old != null) {
-          for (final c in old.clips) {
-            await _audioFiles.deleteAudio(c.audioFilePath);
-          }
-        }
-        if (staleSource != null) {
-          await _audioFiles.deleteAudio(staleSource);
-        }
+        await _deleteReplaced([
+          ...?old?.clips.map((c) => c.audioFilePath),
+          ?staleSource,
+        ]);
         return true;
       });
     });
+  }
+
+  /// Deletes the audio a replaced backing left — unless the model still holds
+  /// it: the kept original is the very file the Original lane plays, and a
+  /// take can share pooled bytes with the old backing.
+  Future<void> _deleteReplaced(List<String> paths) async {
+    for (final path in paths) {
+      if (_holdsAudio(path)) continue;
+      _evictUnused(path);
+      await _audioFiles.deleteAudio(path);
+    }
   }
 
   /// Imports [sourcePath] as the reference track / original song (replacing any
@@ -1382,14 +1398,10 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         _practice = cur.copyWith(reference: track, clearSeparationSource: true);
         // Persist-before-delete (see addAccompaniment).
         if (!await _save()) return false;
-        if (old != null) {
-          for (final c in old.clips) {
-            await _audioFiles.deleteAudio(c.audioFilePath);
-          }
-        }
-        if (staleSource != null) {
-          await _audioFiles.deleteAudio(staleSource);
-        }
+        await _deleteReplaced([
+          ...?old?.clips.map((c) => c.audioFilePath),
+          ?staleSource,
+        ]);
         return true;
       });
     });
@@ -1503,6 +1515,11 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     // lanes, so the primary clip's file IS the original recording.
     final original = practice.reference ?? source;
     final originalPath = original.primaryClip?.audioFilePath ?? '';
+    // A lane with no clip (one an older build emptied) has nothing to split.
+    if (originalPath.isEmpty) {
+      _toast('There is no audio to separate.');
+      return;
+    }
 
     _separationProgress = 0;
     _separationCancelled = false;
@@ -1892,14 +1909,29 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     _practice = practice.copyWith(
       vocalTracks: [...practice.vocalTracks, track],
     );
-    _selectionBeforeEmptyTake = (
+    final before = (
       track: _selectedTrackId,
       bus: _selectedBusId,
       picks: _userSelections,
     );
+    _selectionBeforeEmptyTake = before;
     _selectedTrackId = track.id;
     _selectedBusId = null; // track and bus selection are exclusive
-    return await _save() ? track.id : null;
+    if (await _save()) return track.id;
+    // Not saved, so reverted out of the model: as when a REC drops its empty
+    // take, the selection goes back (it had fallen to the first lane).
+    if (identical(_selectionBeforeEmptyTake, before)) {
+      _selectionBeforeEmptyTake = null;
+    }
+    _restoreSelection(before, track.id);
+    return null;
+  }
+
+  /// The "+ New take" button: an empty take, selected — the user's own pick,
+  /// which a REC start dropping its empty take must not restore over.
+  Future<void> newTake() async {
+    _userSelected();
+    await createEmptyVocalTake();
   }
 
   /// What was selected before [createEmptyVocalTake] selected its take.
@@ -1925,7 +1957,16 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       );
       if (await _save()) analysis.dropLaneState(trackId);
     });
-    if (before == null || _trackById(trackId) != null) return;
+    if (before != null) _restoreSelection(before, trackId);
+  }
+
+  /// Gives back the selection [before] an empty take [trackId] took, once
+  /// that take is gone.
+  void _restoreSelection(
+    ({String? track, String? bus, int picks}) before,
+    String trackId,
+  ) {
+    if (_trackById(trackId) != null) return;
     // Unless the user picked a lane during the arm window: restored over it,
     // their choice was undone (the separation's restore stands down too).
     if (_userSelections != before.picks) return;
@@ -1983,9 +2024,8 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// a word, the take still there after "Delete".
   bool refuseStructuralEdit() {
     final String why;
-    if (recording.isStopping && !recording.isRecording) {
-      // Stop is already pressed: the take is being saved.
-      why = 'Wait for the take to finish saving.';
+    if (_takeWait case final wait?) {
+      why = wait;
     } else if (takeInFlight) {
       why = 'Stop recording first.';
     } else if (isSeparating) {
@@ -2060,6 +2100,10 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     // No concurrent structural edit; said, not silently ignored (the menu
     // offers it either way).
     if (refuseStructuralEdit()) return;
+    // A backing lane is its one clip: its only clip gone, it stayed as an
+    // empty lane nothing could fill (a dropped file went to the takes, as the
+    // slot read as taken), with its kept original still set.
+    if (track.isBacking) return deleteTrack(trackId);
     await _busyGate.run(() async {
       final remaining = track.clips.where((c) => c.id != clipId).toList();
       // Drop markers anchored where the lane falls silent; for a range that
@@ -3169,6 +3213,17 @@ class SongPracticeDetailViewModel extends ChangeNotifier
 
   bool get takeInFlight =>
       recording.isRecording || recording.isStartingTake || recording.isStopping;
+
+  /// What a take in flight the user has nothing left to stop makes them wait
+  /// for; null while there is a take to stop. Stop pressed while REC still
+  /// armed (or a start that failed, dropping its empty take) read "Stop
+  /// recording first", and pressing Stop again did nothing.
+  String? get _takeWait {
+    if (recording.isRecording) return null;
+    if (recording.isStopping) return 'Wait for the take to finish saving.';
+    if (recording.isCancellingStart) return 'Wait for the recording to stop.';
+    return null;
+  }
 
   // Cross-cutting stop: invoked from the transport bar.
   Future<void> stopRecording() => recording.stopRecording();

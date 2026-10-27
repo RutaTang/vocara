@@ -478,6 +478,108 @@ void main() {
     return vm;
   }
 
+  group('parallel paths kept consistent', () {
+    test('a failed lyric write takes the engine back with the model', () async {
+      // An import's save failed while a lyric stamp had moved the model on,
+      // so it was not reverted; the stamp's failure then reverted the model to
+      // the disk's, without the import's lane, but the engine kept playing it.
+      final engine = _SyncRecordingEngine();
+      final vm = await pumpVm(engine: engine);
+      repo.saveGate = Completer<void>();
+      final importing = vm.addVocalTake('/src/new.wav');
+      for (var i = 0; i < 200 && repo.inFlight == 0; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 1));
+      }
+      final stamping = vm.stampNextLyric();
+      repo.failSaves = true;
+      repo.saveGate!.complete();
+      repo.saveGate = null;
+      await importing;
+      await stamping;
+      for (var i = 0; i < 20; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 2));
+      }
+      final shown = [
+        for (final t in vm.practice!.vocalTracks)
+          ...t.clips.map((c) => c.audioFilePath),
+      ];
+      expect(shown, isNot(contains('/import/0.wav')));
+      expect(engine.lastPaths, isNot(contains('/import/0.wav')));
+    });
+
+    test('deleting the Original\'s clip removes the Original', () async {
+      // It left an empty backing lane nothing could fill, its kept original
+      // still set.
+      final vm = await pumpVm(
+        reference: AudioTrack(
+          id: 'ref',
+          kind: AudioTrackKind.reference,
+          displayName: 'Original',
+          audioFilePath: '/pool/orig.wav',
+          durationMs: 1000,
+          createdAt: DateTime(2026),
+        ),
+        separationSource: '/pool/orig.wav',
+      );
+      final clipId = vm.practice!.reference!.clips.single.id;
+      await vm.deleteClip('ref', clipId);
+      expect(vm.practice!.reference, isNull);
+      expect(vm.practice!.separationSource, isNull);
+    });
+
+    test('a new backing keeps the file the Original still plays', () async {
+      // The kept original IS the Original lane's file: deleted with the
+      // replaced backing, only the pool's own refusal had saved it.
+      final vm = await pumpVm(
+        reference: AudioTrack(
+          id: 'ref',
+          kind: AudioTrackKind.reference,
+          displayName: 'Original',
+          audioFilePath: '/work/orig.wav',
+          durationMs: 1000,
+          createdAt: DateTime(2026),
+        ),
+        separationSource: '/work/orig.wav',
+      );
+      await vm.addAccompaniment('/src/backing.wav');
+      expect(
+        vm.practice!.reference!.clips.single.audioFilePath,
+        '/work/orig.wav',
+      );
+      expect(events, isNot(contains('delete:/work/orig.wav')));
+    });
+
+    test('a failed empty take gives the selection back', () async {
+      // It fell to the first lane, losing the selected bus, unlike a REC
+      // start that drops its empty take.
+      final vm = await pumpVm();
+      final bus = await vm.mixer.createBus();
+      expect(vm.selectedBusId, bus);
+      repo.failNextSave = true;
+      expect(await vm.createEmptyVocalTake(), isNull);
+      expect(vm.selectedBusId, bus);
+    });
+
+    test(
+      'lyrics dropped during an edit are taken, as pasted ones are',
+      () async {
+        final edits = _FakeEdits()..duplicateGate = Completer<void>();
+        final vm = await pumpVm(edits: edits);
+        final duplicating = vm.duplicateTrack('single');
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+        expect(vm.busy, isTrue);
+        final dir = await Directory.systemTemp.createTemp('lyrics');
+        addTearDown(() => dir.delete(recursive: true));
+        final file = File('${dir.path}/song.txt')
+          ..writeAsStringSync('first line\nsecond line');
+        await vm.importLyricsFromFile(file.path);
+        expect(vm.lyrics.map((l) => l.text), ['first line', 'second line']);
+        edits.duplicateGate!.complete();
+        await duplicating;
+      },
+    );
+  });
+
   group('import transcode (P0 of the disk-streaming migration)', () {
     test('a compressed import is transcoded ONCE to a streamable WAV and the '
         'compressed copy is deleted', () async {

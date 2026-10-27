@@ -252,6 +252,10 @@ class RecordingController extends ChangeNotifier {
   bool get isStartingTake =>
       _mic.isStarting || _cancellingStart || _discardingTake;
 
+  /// Within [isStartingTake], the part with nothing left to stop: a start
+  /// Stop cancelled, or one that failed, unwinding (its empty take dropped).
+  bool get isCancellingStart => _cancellingStart || _discardingTake;
+
   /// Set when Stop cancels a start still arming, until that start returns:
   /// its take setup (the empty take's save) may still be finishing, and a
   /// fast re-arm's setup interleaving with it would bump the take generation

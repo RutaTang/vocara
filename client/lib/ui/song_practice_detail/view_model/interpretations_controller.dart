@@ -31,7 +31,7 @@ class InterpretationsController extends ChangeNotifier {
     required void Function(String) toast,
     required bool Function() isRecording,
     required bool Function() isSeparating,
-    bool Function()? isSavingTake,
+    String? Function()? takeWait,
     int Function()? transportMoves,
   }) : _playback = engine,
        _analysis = analysis,
@@ -45,7 +45,7 @@ class InterpretationsController extends ChangeNotifier {
        _toast = toast,
        _isRecording = isRecording,
        _isSeparating = isSeparating,
-       _isSavingTake = isSavingTake ?? _never,
+       _takeWait = takeWait ?? _nothing,
        _transportMoves = transportMoves ?? _noMoves;
 
   final PlaybackEngine _playback;
@@ -64,25 +64,22 @@ class InterpretationsController extends ChangeNotifier {
   final bool Function() _isRecording;
   final bool Function() _isSeparating;
 
-  /// Whether the take in flight ([_isRecording]) is one already stopped and
-  /// saving: the user has nothing to stop.
-  final bool Function() _isSavingTake;
+  /// What the take in flight ([_isRecording]) makes the user wait for when
+  /// there is nothing left to stop (stopped and saving, or a start being
+  /// cancelled); null while there is a take to stop.
+  final String? Function() _takeWait;
 
   /// The user's transport presses so far (see
   /// [PlaybackController.transportMoves]).
   final int Function() _transportMoves;
 
-  static bool _never() => false;
+  static String? _nothing() => null;
   static int _noMoves() => 0;
 
   /// Refuses [action] while a take is in flight, saying what to wait for.
   bool _refusedForTake(String action) {
     if (!_isRecording()) return false;
-    _toast(
-      _isSavingTake()
-          ? 'Wait for the take to finish saving.'
-          : 'Stop recording to $action.',
-    );
+    _toast(_takeWait() ?? 'Stop recording to $action.');
     return true;
   }
 

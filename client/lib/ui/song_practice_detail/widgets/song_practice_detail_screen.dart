@@ -1197,7 +1197,7 @@ class TakesHeader extends StatelessWidget {
             child: Row(
               mainAxisAlignment: MainAxisAlignment.end,
               children: [
-                _NewTakeButton(onTap: () => vm.createEmptyVocalTake()),
+                _NewTakeButton(onTap: () => vm.newTake()),
                 const SizedBox(width: 10),
                 Flexible(child: _InterpretationDropdown(vm: vm)),
               ],
