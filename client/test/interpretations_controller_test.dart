@@ -87,6 +87,9 @@ class _Host {
   bool recording = false;
   bool separating = false;
 
+  /// The user's transport presses (Play/Pause, seek, Stop).
+  int transportMoves = 0;
+
   /// Runs inside the save closure, so a test can e.g. dispose the controller
   /// mid-save (route popped while a switch persists).
   void Function()? onSave;
@@ -110,6 +113,7 @@ class _Host {
     toast: toasts.add,
     isRecording: () => recording,
     isSeparating: () => separating,
+    transportMoves: () => transportMoves,
   );
 }
 
@@ -329,6 +333,7 @@ void main() {
         host.onSave = () {
           if (meanwhile == 'stop') {
             host.engine.at = Duration.zero;
+            host.transportMoves++;
           } else {
             host.recording = true;
           }
@@ -337,6 +342,24 @@ void main() {
         expect(host.engine.log, ['pause'], reason: meanwhile);
       }
     });
+
+    test(
+      'resumes though the playhead moved one buffer after the pause',
+      () async {
+        // A render already under way at the pause lands after it: judged by
+        // the playhead, the switch stayed paused though the user did nothing.
+        final host = _Host(
+          _practice(
+            versions: [_version('v1', 'One'), _version('v2', 'Two')],
+            activeVersionId: 'v1',
+          ),
+        );
+        host.engine.transportRunning = true;
+        host.onSave = () => host.engine.at += const Duration(milliseconds: 10);
+        await host.controller.setActive('v2');
+        expect(host.engine.log, ['pause', 'play']);
+      },
+    );
 
     test('does not resume playback when disposed during the save', () async {
       final host = _Host(

@@ -284,6 +284,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       isRecording: () => takeInFlight,
       isSeparating: () => isSeparating,
       isSavingTake: () => recording.isStopping && !recording.isRecording,
+      transportMoves: () => playback.transportMoves,
     );
     // Forward every controller's notifications through this VM so all existing
     // `ListenableBuilder(listenable: vm)` / `Listenable.merge([vm, …])`

@@ -140,6 +140,22 @@ void main() {
     expect(toasts, [PlaybackController.noDeviceMessage]);
   });
 
+  test('Play/Pause, a seek and Stop count as transport presses', () async {
+    // What a switch of interpretation checks before playing on: the playhead
+    // was no test of them (a render under way at a pause still moves it).
+    final c = controller();
+    expect(c.transportMoves, 0);
+    await c.togglePlay();
+    await c.seek(const Duration(seconds: 3));
+    await c.stop();
+    expect(c.transportMoves, 3);
+    // Ignored mid-take, so not counted either.
+    recording = true;
+    await c.seek(const Duration(seconds: 1));
+    await c.stop();
+    expect(c.transportMoves, 3);
+  });
+
   group('viewport follow', () {
     test(
       'a playing cursor pages the view forward once it nears the edge',

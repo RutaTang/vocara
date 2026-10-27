@@ -32,6 +32,7 @@ class InterpretationsController extends ChangeNotifier {
     required bool Function() isRecording,
     required bool Function() isSeparating,
     bool Function()? isSavingTake,
+    int Function()? transportMoves,
   }) : _playback = engine,
        _analysis = analysis,
        _busyGate = busyGate,
@@ -44,7 +45,8 @@ class InterpretationsController extends ChangeNotifier {
        _toast = toast,
        _isRecording = isRecording,
        _isSeparating = isSeparating,
-       _isSavingTake = isSavingTake ?? _never;
+       _isSavingTake = isSavingTake ?? _never,
+       _transportMoves = transportMoves ?? _noMoves;
 
   final PlaybackEngine _playback;
   final AnalysisCache _analysis;
@@ -66,7 +68,12 @@ class InterpretationsController extends ChangeNotifier {
   /// saving: the user has nothing to stop.
   final bool Function() _isSavingTake;
 
+  /// The user's transport presses so far (see
+  /// [PlaybackController.transportMoves]).
+  final int Function() _transportMoves;
+
   static bool _never() => false;
+  static int _noMoves() => 0;
 
   /// Refuses [action] while a take is in flight, saying what to wait for.
   bool _refusedForTake(String action) {
@@ -125,7 +132,7 @@ class InterpretationsController extends ChangeNotifier {
     if (!practice.versions.any((v) => v.id == versionId)) return;
     final wasPlaying = _playback.isPlaying;
     await _playback.pause();
-    final pausedAt = _playback.currentPosition;
+    final moves = _transportMoves();
     // Re-read the LIVE practice after the pause await (the rule [delete]
     // follows): a take recorded/imported during it must survive the rebuild,
     // and the target interpretation may have been deleted meanwhile. An early
@@ -153,12 +160,14 @@ class InterpretationsController extends ChangeNotifier {
     // The route can pop while the save is in flight; don't drive the disposed
     // engine wiring back into play.
     if (_disposed) return;
-    // Nor over what the user did while the save queued: a Stop or a seek
-    // (the playhead moved), a Play of their own, or a take now arming.
+    // Nor over what the user did while the save queued: a Stop, a seek, a
+    // Play or Pause of their own, or a take now arming. (Not judged by the
+    // playhead: a render under way at the pause still moved it one buffer,
+    // and the switch then stayed paused for no reason.)
     if (wasPlaying &&
         !_isRecording() &&
         !_playback.isPlaying &&
-        _playback.currentPosition == pausedAt) {
+        _transportMoves() == moves) {
       await _playback.play();
     }
   }

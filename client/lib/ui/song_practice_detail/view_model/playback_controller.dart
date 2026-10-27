@@ -91,7 +91,15 @@ class PlaybackController extends ChangeNotifier {
   static const noDeviceMessage =
       'No audio device is available. Connect one, then reopen this song.';
 
+  /// Counts the user's own transport presses — Play/Pause, a seek, Stop —
+  /// so code that paused playback for its own work can tell whether the user
+  /// moved the transport meanwhile. The engine's position is no test for it:
+  /// a render already under way when it paused still lands one buffer later.
+  int get transportMoves => _transportMoves;
+  int _transportMoves = 0;
+
   Future<void> togglePlay() async {
+    _transportMoves++;
     if (_engine.isPlaying) {
       await _engine.pause();
     } else if (!_engineAvailable()) {
@@ -108,6 +116,7 @@ class PlaybackController extends ChangeNotifier {
   /// controller drives its own seeks through [engine] directly.)
   Future<void> seek(Duration to) async {
     if (_isRecording()) return;
+    _transportMoves++;
     await _engine.seek(to);
   }
 
@@ -131,6 +140,7 @@ class PlaybackController extends ChangeNotifier {
   /// routes its Stop to the recording instead.
   Future<void> stop() async {
     if (_isRecording()) return;
+    _transportMoves++;
     await _engine.pause();
     await _engine.seek(Duration(milliseconds: _loopStartMs));
   }
