@@ -79,6 +79,7 @@ const _techniqueId = 'T1000000000000000000000000';
 Future<TechniqueDetailViewModel> _loadedVm(
   _QueuedAnalysis analysis, {
   String ext = 'wav',
+  bool synced = false,
 }) async {
   final now = DateTime(2026, 6, 20);
   final vm = TechniqueDetailViewModel(
@@ -90,7 +91,8 @@ Future<TechniqueDetailViewModel> _loadedVm(
           for (final name in ['a', 'b', 'c'])
             TechniqueMedia(
               id: name.toUpperCase(),
-              path: '/tmp/$name.$ext',
+              // A synced example whose file has not arrived holds a ref.
+              path: synced ? 'asset://${name * 64}' : '/tmp/$name.$ext',
               kind: TechniqueMediaKind.audio,
               addedAt: now,
             ),
@@ -180,6 +182,25 @@ void main() {
     expect(analysis.decoded, isEmpty);
     expect(vm.referenceAnalysisFailed, isTrue);
     expect(vm.referenceAnalysisFailureMessage, contains("can't be analyzed"));
+    expect(vm.canRetryReferenceAnalysis, isFalse);
+  });
+
+  test('an example whose file has not reached this device says so, is never '
+      'decoded, and offers no retry', () async {
+    // Decoded, its asset ref failed to open: "The file could not be read.
+    // Check the disk", a retry that could never work, under a player saying
+    // the file isn't on this device.
+    final analysis = _QueuedAnalysis()..admit.complete();
+    final vm = await _loadedVm(analysis, synced: true);
+    addTearDown(vm.dispose);
+
+    await vm.ensureReferenceAnalysis();
+    expect(analysis.decoded, isEmpty);
+    expect(vm.referenceAnalysisFailed, isTrue);
+    expect(
+      vm.referenceAnalysisFailureMessage,
+      contains("isn't on this device"),
+    );
     expect(vm.canRetryReferenceAnalysis, isFalse);
   });
 

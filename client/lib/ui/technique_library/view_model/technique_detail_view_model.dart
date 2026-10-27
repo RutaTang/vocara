@@ -656,6 +656,19 @@ class TechniqueDetailViewModel extends ChangeNotifier
         _loadingPaths.contains(path)) {
       return;
     }
+    if (AssetStore.assetIdOf(path) != null) {
+      // Synced in, its file not here yet (the player above says so): the
+      // decode failed as a disk error, with "Try again" that could not work.
+      // Once the file lands, a reload moves the example to its real path,
+      // which is analyzed afresh.
+      _refFailed.add(path);
+      _refFailedCause[path] = (
+        text: "This clip's file isn't on this device yet.",
+        retryable: false,
+      );
+      notifyListeners();
+      return;
+    }
     if (!TechniqueMedia.isAnalyzable(path)) {
       // It plays (through media_kit), but the engine has no decoder for it:
       // said, and never decoded — a decode only failed the same way again,
