@@ -3978,7 +3978,7 @@ fn edge_trim(params: &symphonia::core::codecs::CodecParameters) -> (u64, u64) {
 /// Streaming file in 10 MHz ticks, so read as frames the one was half its length and the
 /// other hours long, refused as too long. All ones is the header's "unknown".
 ///
-/// A PCM track also declares no more frames than the file's `file_len` bytes hold: a WAV
+/// A PCM or ADPCM track also declares no more frames than the file's `file_len` bytes hold: a WAV
 /// written to a pipe leaves its data size at all ones (4 GB, never patched), which read as
 /// hours, so a 2 s file was refused as too long. Past the file, a declaration counts as none.
 fn declared_frames(
@@ -3994,23 +3994,26 @@ fn declared_frames(
         }
         _ => n,
     };
-    // A sample's bytes as the decoder reads them, from its name ("pcm_s24le", "pcm_f32be",
-    // "pcm_alaw"): A-law, µ-law and float WAVs declare no bit depth.
-    let sample_bytes = symphonia::default::get_codecs()
+    // A sample's bits as the decoder reads them, from its name ("pcm_s24le", "pcm_f32be",
+    // "pcm_alaw"): A-law, µ-law and float WAVs declare no bit depth. ADPCM codes 4 bits a
+    // sample (and a few block headers more), so it is bounded the same way: piped, an IMA WAV
+    // declared 12 days.
+    let sample_bits = symphonia::default::get_codecs()
         .get_codec(params.codec)
-        .and_then(|c| c.short_name.strip_prefix("pcm_"))
-        .and_then(|name| match name {
-            "alaw" | "mulaw" => Some(1),
-            _ => name
+        .and_then(|c| match c.short_name {
+            "adpcm_ms" | "adpcm_ima_wav" => Some(4),
+            "pcm_alaw" | "pcm_mulaw" => Some(8),
+            name => name
+                .strip_prefix("pcm_")?
                 .get(1..)?
                 .split(|c: char| !c.is_ascii_digit())
                 .next()?
                 .parse::<u64>()
                 .ok()
-                .map(|bits| bits / 8),
+                .map(|bits| bits / 8 * 8),
         });
-    let frame_bytes = sample_bytes.unwrap_or(0) * params.channels.map_or(0, |c| c.count() as u64);
-    if frame_bytes > 0 && frames.saturating_mul(frame_bytes) > file_len {
+    let frame_bits = sample_bits.unwrap_or(0) * params.channels.map_or(0, |c| c.count() as u64);
+    if frame_bits > 0 && frames.saturating_mul(frame_bits) > file_len.saturating_mul(8) {
         return None;
     }
     Some(frames)
@@ -4157,6 +4160,11 @@ pub fn probe_duration_ms(path: &str) -> Result<Option<u64>, String> {
     // The probe itself sizes allocations by what the file declares (see media_screen), so this
     // gate is only a gate once the file has been screened.
     crate::media_screen::screen(&mut file).map_err(|e| format!("screen {path}: {e}"))?;
+    // An ADPCM layout symphonia cannot read is refused before its reader works one out.
+    let adpcm = sniff_wav_adpcm(path).ok().flatten();
+    if adpcm.is_some_and(|a| !a.readable) {
+        return Err(format!("unsupported ADPCM layout in {path}"));
+    }
     let mss = MediaSourceStream::new(media_source(file, false), Default::default());
     let mut hint = Hint::new();
     if let Some(ext) = std::path::Path::new(path)
@@ -4172,6 +4180,12 @@ pub fn probe_duration_ms(path: &str) -> Result<Option<u64>, String> {
         audio_track(&*probed.format).ok_or_else(|| "no decodable audio track".to_string())?;
     let rate = track.codec_params.sample_rate.unwrap_or(0) as u64;
     let (delay, padding) = edge_trim(&track.codec_params);
+    // An ADPCM WAV's 'fact' chunk declares the length it holds (see AdpcmWav).
+    if let Some(Some(frames)) = adpcm.map(|a| a.frames) {
+        if rate > 0 {
+            return Ok(Some(frames.saturating_mul(1000).div_ceil(rate)));
+        }
+    }
     // An MP4 track's edit declares the length it presents (see Mp4Edit).
     if let Some(Mp4Edit {
         timescale,
@@ -4298,11 +4312,12 @@ fn decode_source(
     // Where an AIFF's sound ends (see sniff_aiff_frames). Zero is a header never patched, not
     // an empty file.
     let aiff_frames = sniff_aiff_frames(path).ok().flatten().filter(|&n| n > 0);
-    // Where an ADPCM WAV's sound ends (see sniff_wav_adpcm_frames).
-    let adpcm_frames = sniff_wav_adpcm_frames(path)
-        .ok()
-        .flatten()
-        .filter(|&n| n > 0);
+    // An ADPCM WAV's layout and where its sound ends (see AdpcmWav).
+    let adpcm = sniff_wav_adpcm(path).ok().flatten();
+    if adpcm.is_some_and(|a| !a.readable) {
+        return Err(err(format!("unsupported ADPCM layout in {path}")));
+    }
+    let adpcm_frames = adpcm.and_then(|a| a.frames);
     // A sample table, packet table or tag that declares more than the file holds: symphonia
     // reserves it whole during the probe, and failing to allocate aborts the app. The full
     // scan (decode reads the whole file anyway) also covers an Ogg stream's later links, whose
@@ -4336,6 +4351,8 @@ fn decode_source(
     let (mut skip, mut padding) = edge_trim(&track.codec_params);
     // An MP4 track's edit (see Mp4Edit), applied at the rate the track decodes at.
     let mp4_edit = sniff_mp4_edit(path, track_id).ok().flatten();
+    // The frames the edit keeps, at the rate the track decodes at (known at its first packet).
+    let mut mp4_keep: Option<u64> = None;
     let mut link_start = 0usize;
     // Packets of the current link's track read so far.
     let mut link_packets = 0u64;
@@ -4386,9 +4403,22 @@ fn decode_source(
     // allocation on its own).
     // Judged as trimmed, as probe_duration_ms reports it: untrimmed, a file the import gate
     // admitted within a few ms of the cap was refused here.
-    let mut out: Vec<[Smp; CHANNELS]> = match declared_frames(&track.codec_params, file_len)
-        .map(|n| n.saturating_sub(skip.saturating_add(padding)))
-    {
+    // An MP4 edit's or an ADPCM 'fact' chunk's length, where one is declared, is the length.
+    let declared = match (mp4_edit, adpcm_frames) {
+        (
+            Some(
+                edit @ Mp4Edit {
+                    length: Some(length),
+                    ..
+                },
+            ),
+            _,
+        ) => Some(edit.frames(length, src_rate)),
+        (_, Some(frames)) => Some(frames),
+        _ => declared_frames(&track.codec_params, file_len)
+            .map(|n| n.saturating_sub(skip.saturating_add(padding))),
+    };
+    let mut out: Vec<[Smp; CHANNELS]> = match declared {
         Some(n) if n > max_frames => return Err(budget_err(n, duration_frames)),
         Some(n) => Vec::with_capacity(n.min(max_frames) as usize),
         None => Vec::new(),
@@ -4425,6 +4455,11 @@ fn decode_source(
             Err(symphonia::core::errors::Error::IoError(e))
                 if e.kind() == std::io::ErrorKind::UnexpectedEof =>
             {
+                // A link the seekable read skipped can be followed by one that never reaches
+                // its sound (only headers), which ends the file rather than starting a link.
+                if link_packets == 0 && !unseekable {
+                    return Ok(None);
+                }
                 break; // normal end of stream
             }
             Err(symphonia::core::errors::Error::ResetRequired) => {
@@ -4495,8 +4530,11 @@ fn decode_source(
             None => {
                 out_rate = Some(spec.rate);
                 if let Some(edit) = mp4_edit {
-                    // Bounded as edge_trim bounds a delay.
-                    skip = edit.frames(edit.start, spec.rate).min(1 << 16);
+                    // Not bounded as edge_trim bounds a delay: skipped frames are never kept,
+                    // and a stream-copy cut starts its edit seconds in, at the cut, past the
+                    // keyframe it had to keep.
+                    skip = edit.frames(edit.start, spec.rate);
+                    mp4_keep = edit.length.map(|length| edit.frames(length, spec.rate));
                 }
                 if spec.rate != src_rate {
                     if !(MIN_SRC_RATE..=MAX_SRC_RATE).contains(&spec.rate) {
@@ -4527,6 +4565,12 @@ fn decode_source(
         // packet by packet. Judged as trimmed: the delay is never pushed, and the
         // padding, cut only once its link ends, may sit past the budget meanwhile.
         let needed = out.len() + (packet_frames as u64).saturating_sub(skip) as usize;
+        // Frames past an MP4 edit's end are never kept.
+        let needed = mp4_keep.map_or(needed, |keep| {
+            needed
+                .min(usize::try_from(keep).unwrap_or(usize::MAX))
+                .max(out.len())
+        });
         let budget = max_frames.saturating_add(padding);
         if needed as u64 > budget {
             return Err(budget_err(
@@ -4557,6 +4601,9 @@ fn decode_source(
                 skip -= 1; // the encoder's delay (see edge_trim)
                 continue;
             }
+            if out.len() >= needed {
+                break; // past an MP4 edit's end
+            }
             // Scrub NaN/Inf (and clamp absurd amplitudes) at the single deepest decode
             // point: one poisoned sample would otherwise propagate through every FFT,
             // metric, and DSP node fed from here (the WAV streaming reader scrubs
@@ -4573,14 +4620,15 @@ fn decode_source(
             };
             out.push([scrub_sample(l), scrub_sample(r)]);
         }
+        if mp4_keep.is_some_and(|keep| out.len() as u64 >= keep) {
+            break; // an MP4 edit's end: nothing after it is kept
+        }
+    }
+    if let Some(keep) = mp4_keep {
+        out.truncate(usize::try_from(keep).unwrap_or(usize::MAX));
     }
     // Only the 8 bytes the reader overran, at most 8 frames: a count left short by its writer
     // must not cut real sound.
-    if let (Some(edit), Some(rate)) = (mp4_edit, out_rate) {
-        if let Some(length) = edit.length {
-            out.truncate(usize::try_from(edit.frames(length, rate)).unwrap_or(usize::MAX));
-        }
-    }
     if let Some(n) = aiff_frames.filter(|&n| (out.len() as u64).saturating_sub(n) <= 8) {
         out.truncate(usize::try_from(n).unwrap_or(usize::MAX));
     }
@@ -4813,11 +4861,23 @@ fn sniff_mp4_edit(path: &str, index: u32) -> std::io::Result<Option<Mp4Edit>> {
     }))
 }
 
-/// Reads just enough of an ADPCM WAV's header to report the frame count its 'fact' chunk
-/// declares; `Ok(None)` for any other file. ADPCM codes whole blocks, the last padded out, and
-/// symphonia counts the file's length in blocks: 100 ms at 8 kHz decoded as 255 ms, its tail
-/// a block of padding. (A PCM WAV's 'fact' chunk is optional, and not always right.)
-fn sniff_wav_adpcm_frames(path: &str) -> std::io::Result<Option<u64>> {
+/// An ADPCM WAV's header, as far as the decode needs it.
+#[derive(Clone, Copy)]
+struct AdpcmWav {
+    /// Whether symphonia can read the layout. Its reader works out a block's frames in 16-bit
+    /// arithmetic from the block size and channel count, so a large or small block wraps (or
+    /// panics, in a debug build) to a wrong count, and its decoder handles one or two channels
+    /// only, IMA stereo only in whole 8-byte groups, and panics on anything else.
+    readable: bool,
+    /// The frame count its 'fact' chunk declares. ADPCM codes whole blocks, the last padded
+    /// out, and symphonia counts the file's length in blocks: 100 ms at 8 kHz decoded as
+    /// 255 ms, its tail a block of padding. (A PCM WAV's 'fact' chunk is optional, and not
+    /// always right.)
+    frames: Option<u64>,
+}
+
+/// Reads just enough of an ADPCM WAV's header for [`AdpcmWav`]; `Ok(None)` for any other file.
+fn sniff_wav_adpcm(path: &str) -> std::io::Result<Option<AdpcmWav>> {
     use std::io::{Read, Seek};
     let mut f = std::fs::File::open(path)?;
     let mut head = [0u8; 12];
@@ -4825,25 +4885,37 @@ fn sniff_wav_adpcm_frames(path: &str) -> std::io::Result<Option<u64>> {
         return Ok(None);
     }
     // Bounded, as the WAV sniff's walk is.
-    let (mut adpcm, mut fact) = (None, None);
+    let (mut readable, mut fact) = (None, None);
     let mut hdr = [0u8; 8];
     for _ in 0..64 {
         if f.read(&mut hdr)? < 8 {
             break;
         }
         let size = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]) as u64;
-        let mut field = [0u8; 4];
+        let mut field = [0u8; 16];
         match &hdr[0..4] {
-            // The format tag: 2 is Microsoft's ADPCM, 0x11 IMA's.
-            b"fmt " if size >= 2 && f.read(&mut field[..2])? == 2 => {
-                adpcm = Some(matches!(
-                    u16::from_le_bytes([field[0], field[1]]),
-                    0x0002 | 0x0011
-                ));
-                f.seek(std::io::SeekFrom::Current(-2))?;
+            b"fmt " if size >= 16 && f.read(&mut field)? == 16 => {
+                let word = |i: usize| u32::from(u16::from_le_bytes([field[i], field[i + 1]]));
+                let (tag, channels, block, bits) = (word(0), word(2), word(12), word(14));
+                // Each channel's block header: 7 bytes for Microsoft's, 4 for IMA's.
+                let header = match tag {
+                    0x0002 => 7,
+                    0x0011 => 4,
+                    _ => return Ok(None),
+                };
+                readable = Some(
+                    (1..=2).contains(&channels)
+                        && bits == 4
+                        && block >= header * channels
+                        && (block - header * channels) * 8 <= u32::from(u16::MAX)
+                        && (tag != 0x0011 || channels == 1 || (block - 8) % 8 == 0),
+                );
+                f.seek(std::io::SeekFrom::Current(-16))?;
             }
-            b"fact" if size >= 4 && f.read(&mut field)? == 4 => {
-                fact = Some(u64::from(u32::from_le_bytes(field)));
+            b"fact" if size >= 4 && f.read(&mut field[..4])? == 4 => {
+                fact = Some(u64::from(u32::from_le_bytes([
+                    field[0], field[1], field[2], field[3],
+                ])));
                 f.seek(std::io::SeekFrom::Current(-4))?;
             }
             b"data" => break,
@@ -4851,7 +4923,10 @@ fn sniff_wav_adpcm_frames(path: &str) -> std::io::Result<Option<u64>> {
         }
         f.seek(std::io::SeekFrom::Current((size + (size & 1)) as i64))?;
     }
-    Ok(fact.filter(|_| adpcm == Some(true)))
+    Ok(readable.map(|readable| AdpcmWav {
+        readable,
+        frames: fact.filter(|&n| n > 0),
+    }))
 }
 
 /// Reads just enough of an AIFF or AIFF-C header to report the frame count its COMM chunk

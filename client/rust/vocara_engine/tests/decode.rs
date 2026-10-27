@@ -199,6 +199,22 @@ fn an_m4a_starts_where_other_players_start_it() {
         onset.abs_diff(22_050) < 44,
         "the tone starts at frame {onset}"
     );
+    // The import gate admits it under a 1 s cap, and so does the decode's own budget.
+    assert!(decode_file(path, 1.0, 0, 0).is_ok());
+}
+
+#[test]
+fn an_mp4_cut_at_a_keyframe_starts_at_the_cut() {
+    // Cut with its streams copied at 9 s into a file whose one keyframe is at 0, its edit
+    // starts the sound 9 s (72,000 frames at 8 kHz) into the media, where a tone begins. The
+    // start held to 65,536 frames as an encoder delay is, the tone came 0.8 s late and the
+    // clip's end was lost.
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/cut_9s.mp4");
+    let (frames, rate) = decode_file(path, 0.0, 0, 0).unwrap();
+    assert_eq!(rate, 8_000);
+    assert!((16_000..16_100).contains(&frames.len()), "{}", frames.len());
+    let onset = frames.iter().position(|f| f[0].abs() > 0.09).unwrap();
+    assert!(onset < 44, "the tone starts at frame {onset}");
 }
 
 #[test]
@@ -242,11 +258,54 @@ fn an_adpcm_wav_decodes_to_its_declared_length() {
     // last 255 ms; the 'fact' chunk declares the real 800 frames.
     for name in ["ima_adpcm_100ms.wav", "ms_adpcm_100ms.wav"] {
         let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
+        assert_eq!(probe_duration_ms(&path), Ok(Some(100)), "{name}");
         let (frames, rate) = decode_file(&path, 0.0, 0, 0).unwrap();
         assert_eq!((frames.len(), rate), (800, 8_000), "{name}");
         let rms = (frames.iter().map(|f| f64::from(f[0]).powi(2)).sum::<f64>() / 800.0).sqrt();
         assert!((rms - 0.125 / 2f64.sqrt()).abs() < 0.005, "{name}: {rms}");
     }
+}
+
+#[test]
+fn an_adpcm_wav_symphonia_cannot_read_is_refused() {
+    // symphonia's ADPCM decoder handles one or two channels and panics on more; its reader
+    // works a block's frames out in 16-bit arithmetic. Three channels are refused up front.
+    let mut bytes = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/ima_adpcm_100ms.wav"
+    ))
+    .unwrap();
+    let fmt = bytes.windows(4).position(|w| w == b"fmt ").unwrap();
+    bytes[fmt + 10..fmt + 12].copy_from_slice(&3u16.to_le_bytes());
+    let path = temp_file("three.wav", &bytes);
+    let probed = probe_duration_ms(&path);
+    let decoded = decode_file(&path, 0.0, 0, 0);
+    let _ = std::fs::remove_file(&path);
+    assert!(probed.is_err(), "probe {probed:?}");
+    assert!(decoded.is_err());
+}
+
+#[test]
+fn an_adpcm_wav_written_to_a_pipe_is_not_refused_as_too_long() {
+    // Its data size left at all ones, an IMA WAV declared 12 days.
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/pipe_ima_100ms.wav"
+    );
+    assert_eq!(probe_duration_ms(path), Ok(None));
+    assert!(decode_file(path, 1.0, 0, 0).is_ok());
+}
+
+#[test]
+fn a_chained_ogg_keeps_a_short_link_before_one_of_headers_only() {
+    // A link of headers only ends the file before it starts a link, so the seekable read's
+    // empty link showed at the end of the file rather than at a reset.
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/short_then_empty.ogg"
+    );
+    let (frames, rate) = decode_file(path, 0.0, 0, 0).unwrap();
+    assert_eq!((frames.len(), rate), (2_400, 8_000));
 }
 
 #[test]
