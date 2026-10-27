@@ -36,6 +36,10 @@ class MainFlutterWindow: NSWindow {
       if call.method == "show" {
         self?.reveal()
         result(nil)
+      } else if call.method == "exitApproved" {
+        // The exit guard is done: the quit it answers next goes through (see AppDelegate).
+        (NSApp.delegate as? AppDelegate)?.exitApproved = true
+        result(nil)
       } else {
         result(FlutterMethodNotImplemented)
       }

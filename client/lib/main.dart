@@ -73,8 +73,12 @@ Future<void> main() async {
       // it is a child process that macOS reparents rather than kills on app
       // exit, so without this it would keep burning CPU/RAM for minutes.
       // Its orphaned .tmp output is swept on the next launch.
-      SeparationQuitGuard.instance.killAll();
-      await RecordingFinalizer.instance.finalizeAll();
+      try {
+        SeparationQuitGuard.instance.killAll();
+        await RecordingFinalizer.instance.finalizeAll();
+      } finally {
+        await _approveExit();
+      }
       return AppExitResponse.exit;
     },
   );
@@ -141,6 +145,17 @@ Future<void> _revealLibraryFolder() async {
     await Process.run('open', [dir.path]);
   } catch (_) {
     // Best-effort: the fatal window stays up either way.
+  }
+}
+
+/// Tells the native side the exit guard is done, so the quit it answers next
+/// goes through. Until then it ignores a repeat Quit (a second Cmd+Q quit at
+/// once, cutting off the save the guard was finishing; see AppDelegate).
+Future<void> _approveExit() async {
+  try {
+    await _windowChannel.invokeMethod<void>('exitApproved');
+  } catch (_) {
+    // No native side to tell (a test host): nothing waits on it.
   }
 }
 
