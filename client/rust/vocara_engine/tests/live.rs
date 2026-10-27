@@ -601,3 +601,76 @@ fn a_non_finite_parameter_never_reaches_a_node() {
         "graph-level NaN reached the node"
     );
 }
+
+#[test]
+fn a_pause_right_after_a_seek_keeps_the_seek_under_a_concurrent_render() {
+    // pause() folds the clock back to what was heard of the run before. When the render
+    // applied the seek between that read and the clock swap, the swap put the pre-seek
+    // position back over it: paused where the seek had left, while the UI showed the seek.
+    // About a third of these rounds lost it. A render that plays on from the seek before
+    // the pause lands may leave it later, never earlier.
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use vocara_engine::live::RtCell;
+    use vocara_engine::source::BufferSource;
+
+    let desc = GraphDesc {
+        nodes: vec![
+            NodeEntry::new(
+                1,
+                Box::new(BufferSource::new(vec![0.1; 1_000_000 * CHANNELS], 0)),
+            ),
+            NodeEntry::new(2, Box::new(MasterNode::unity())),
+        ],
+        edges: vec![Edge::simple(1, 2)],
+        master: 2,
+    };
+    let (_mic, mic_cons) = spsc::<[f32; CHANNELS]>(256);
+    let (h, rt) = spawn(
+        desc.compile(SR, 64).unwrap(),
+        HashMap::new(),
+        mic_cons,
+        CMD_RING_CAPACITY,
+    );
+    let cell = RtCell::new(rt);
+    let stop = Arc::new(AtomicBool::new(false));
+    let render = {
+        let (cell, stop) = (Arc::clone(&cell), Arc::clone(&stop));
+        std::thread::spawn(move || {
+            let mut out = vec![0.0f32; 64 * CHANNELS];
+            while !stop.load(Ordering::Relaxed) {
+                // 48 kHz identity output: what renders is what is heard.
+                cell.render_offline(&mut out, 64);
+                cell.transport().sync_consumed_to_rendered();
+            }
+        })
+    };
+    let t = cell.transport();
+    let heard_on = |frames: u64| {
+        let from = t.consumed_frames();
+        while t.consumed_frames() < from + frames {
+            std::hint::spin_loop();
+        }
+    };
+    let mut lost = Vec::new();
+    for round in 0..5_000 {
+        let target: i64 = if round % 2 == 0 { 600_000 } else { 100_000 };
+        h.seek(target - 50_000);
+        h.play();
+        heard_on(256);
+        h.seek(target);
+        h.pause();
+        heard_on(256); // the render applies anything still pending
+        if h.frame() < target {
+            lost.push((round, target, h.frame()));
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    render.join().unwrap();
+    assert!(
+        lost.is_empty(),
+        "{} of 5000 seeks lost to the pause after them; first: {:?}",
+        lost.len(),
+        &lost[..lost.len().min(5)]
+    );
+}

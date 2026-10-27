@@ -926,7 +926,18 @@ impl EngineHandle {
         // frames) and only costs the same bounded precision it always did. Nothing of
         // this run (since play or a seek) heard yet (None) leaves the render clock:
         // where play() or the seek put it, plus at most the one block rendered since.
-        if let Some(heard) = self.shared.map_consumed() {
+        //
+        // A seek still pending was asked for first, and the render applies it, with its
+        // own reset, paused or not: nothing to fold. Folded, the render could apply it
+        // between the read of the old run and the swap below, which then put the pre-seek
+        // position back over it: paused where the seek had left, the UI showing the seek.
+        // Read as done (-1), the seek's raised `play_mark` is visible, so the fold reads
+        // only the run it started.
+        let seek_pending = self.shared.seek_req.load(Ordering::Acquire) >= 0;
+        if let Some(heard) = (!seek_pending)
+            .then(|| self.shared.map_consumed())
+            .flatten()
+        {
             // Frames rendered past what was heard are rendered again on resume, but the
             // nodes' delay lines, reverb tank and filter histories already hold them: the
             // resume played on top of its own future, a doubler or delay clicking one
