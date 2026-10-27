@@ -3960,10 +3960,15 @@ thread_local! {
 /// symphonia's gapless mode, which also cuts the stream at the header's frame count: two
 /// MP3s joined end to end lost the second, and a count below the delay wrapped round to an
 /// endless file. (MP4/AAC priming is not reported: its reader ignores edit lists.)
+///
+/// Bounded: real edges are a few thousand frames, but they come from the file, and an Ogg
+/// whose last granule ran backwards claimed billions, lifting every budget the decode
+/// judges against by as much.
 fn edge_trim(params: &symphonia::core::codecs::CodecParameters) -> (u64, u64) {
+    const MAX_EDGE: u64 = 1 << 16;
     (
-        u64::from(params.delay.unwrap_or(0)),
-        u64::from(params.padding.unwrap_or(0)),
+        u64::from(params.delay.unwrap_or(0)).min(MAX_EDGE),
+        u64::from(params.padding.unwrap_or(0)).min(MAX_EDGE),
     )
 }
 

@@ -113,6 +113,66 @@ fn a_file_the_probe_admits_at_the_cap_decodes_under_it() {
     assert_eq!(frames.len(), 44_100);
 }
 
+/// [ogg] with the granule position of its second-to-last page set to [granule] (and that
+/// page's checksum redone), as a crafted file sets it.
+fn with_granule_before_last(ogg: &[u8], granule: i64) -> Vec<u8> {
+    let crc = |bytes: &[u8]| {
+        let mut c: u32 = 0;
+        for &b in bytes {
+            c ^= (b as u32) << 24;
+            for _ in 0..8 {
+                c = if c & 0x8000_0000 != 0 {
+                    (c << 1) ^ 0x04C1_1DB7
+                } else {
+                    c << 1
+                };
+            }
+        }
+        c
+    };
+    let mut pages = Vec::new();
+    let mut at = 0;
+    while at < ogg.len() {
+        assert_eq!(&ogg[at..at + 4], b"OggS");
+        let segments = ogg[at + 26] as usize;
+        let body: usize = ogg[at + 27..at + 27 + segments]
+            .iter()
+            .map(|&s| s as usize)
+            .sum();
+        pages.push((at, 27 + segments + body));
+        at += 27 + segments + body;
+    }
+    let (page, len) = pages[pages.len() - 2];
+    let mut out = ogg.to_vec();
+    out[page + 6..page + 14].copy_from_slice(&granule.to_le_bytes());
+    out[page + 22..page + 26].copy_from_slice(&[0; 4]);
+    let sum = crc(&out[page..page + len]);
+    out[page + 22..page + 26].copy_from_slice(&sum.to_le_bytes());
+    out
+}
+
+#[test]
+fn a_crafted_end_trim_lifts_no_budget() {
+    // A last page whose granule runs backwards reads as an end trim of billions of frames:
+    // judged on the trimmed length, the decode's every budget rose by as much, and 2 s came
+    // back from a decode capped at 1 s.
+    let ogg = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/link_2000ms.ogg"
+    ))
+    .unwrap();
+    let path = temp_file("crafted.ogg", &with_granule_before_last(&ogg, 1 << 31));
+    let decoded = decode_file(&path, 1.0, 0, 0);
+    let _ = std::fs::remove_file(&path);
+    if let Ok((frames, _)) = decoded {
+        assert!(
+            frames.len() <= 44_100,
+            "{} frames past a 1 s cap",
+            frames.len()
+        );
+    }
+}
+
 /// 2 s of a 440 Hz mono 16-bit tone at 44.1 kHz.
 fn tone_i16() -> Vec<i16> {
     (0..88_200)
