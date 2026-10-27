@@ -4609,29 +4609,37 @@ fn decode_source(
         {
             downmix = Some((spec.channels, downmix_gains(spec.channels)));
         }
-        for frame in sbuf.samples().chunks(ch.max(1)) {
-            if skip > 0 {
-                skip -= 1; // the encoder's delay (see edge_trim)
-                continue;
+        // The encoder's delay (see edge_trim) first, and nothing past an MP4 edit's end:
+        // settled once a packet, not tested on every frame.
+        let skipped = usize::try_from(skip)
+            .unwrap_or(usize::MAX)
+            .min(packet_frames);
+        skip -= skipped as u64;
+        let frames = sbuf
+            .samples()
+            .chunks_exact(ch.max(1))
+            .skip(skipped)
+            .take(needed - out.len());
+        // Scrub NaN/Inf (and clamp absurd amplitudes) at the single deepest decode
+        // point: one poisoned sample would otherwise propagate through every FFT,
+        // metric, and DSP node fed from here (the WAV streaming reader scrubs
+        // independently; this covers the symphonia paths — analysis via ve_decode
+        // AND playback staging).
+        match &downmix {
+            Some((_, gains)) if ch > 2 => out.extend(frames.map(|frame| {
+                let (l, r) = frame.iter().zip(gains).fold((0.0, 0.0), |(l, r), (&v, g)| {
+                    let v = scrub_sample(v);
+                    (l + v * g[0], r + v * g[1])
+                });
+                [scrub_sample(l), scrub_sample(r)]
+            })),
+            _ if ch > 1 => {
+                out.extend(frames.map(|frame| [scrub_sample(frame[0]), scrub_sample(frame[1])]))
             }
-            if out.len() >= needed {
-                break; // past an MP4 edit's end
-            }
-            // Scrub NaN/Inf (and clamp absurd amplitudes) at the single deepest decode
-            // point: one poisoned sample would otherwise propagate through every FFT,
-            // metric, and DSP node fed from here (the WAV streaming reader scrubs
-            // independently; this covers the symphonia paths — analysis via ve_decode
-            // AND playback staging).
-            let (l, r) = match &downmix {
-                Some((_, gains)) if ch > 2 => {
-                    frame.iter().zip(gains).fold((0.0, 0.0), |(l, r), (&v, g)| {
-                        let v = scrub_sample(v);
-                        (l + v * g[0], r + v * g[1])
-                    })
-                }
-                _ => (frame[0], if ch > 1 { frame[1] } else { frame[0] }),
-            };
-            out.push([scrub_sample(l), scrub_sample(r)]);
+            _ => out.extend(frames.map(|frame| {
+                let v = scrub_sample(frame[0]);
+                [v, v]
+            })),
         }
         if mp4_keep.is_some_and(|keep| out.len() as u64 >= keep) {
             break; // an MP4 edit's end: nothing after it is kept
