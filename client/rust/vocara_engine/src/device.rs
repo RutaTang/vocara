@@ -4418,14 +4418,25 @@ fn decode_source(
         _ => declared_frames(&track.codec_params, file_len)
             .map(|n| n.saturating_sub(skip.saturating_add(padding))),
     };
+    // An ADPCM WAV decodes whole blocks, its last padded past the 'fact' count it is cut back
+    // to at the end: room for that block, or a file at the cap was refused, and every one
+    // grew its whole track into a copy twice its size for the last packet.
+    let adpcm_slack = if adpcm_frames.is_some() {
+        track_block_frames - 1
+    } else {
+        0
+    };
     let mut out: Vec<[Smp; CHANNELS]> = match declared {
         Some(n) if n > max_frames => return Err(budget_err(n, duration_frames)),
-        Some(n) => Vec::with_capacity(n.min(max_frames) as usize),
+        Some(n) => Vec::with_capacity((n.min(max_frames) + adpcm_slack) as usize),
         None => Vec::new(),
     };
     let params = decoder_params(&track.codec_params);
     if decoder_overallocates(&params) {
         return Err(DecodeError::TooBig);
+    }
+    if adpcm_unreadable(&params) {
+        return Err(err(format!("unsupported ADPCM layout in {path}")));
     }
     let mut decoder = symphonia::default::get_codecs()
         .make(&params, &DecoderOptions::default())
@@ -4571,7 +4582,9 @@ fn decode_source(
                 .min(usize::try_from(keep).unwrap_or(usize::MAX))
                 .max(out.len())
         });
-        let budget = max_frames.saturating_add(padding);
+        let budget = max_frames
+            .saturating_add(padding)
+            .saturating_add(adpcm_slack);
         if needed as u64 > budget {
             return Err(budget_err(
                 (needed as u64).saturating_sub(padding),
@@ -4861,6 +4874,23 @@ fn sniff_mp4_edit(path: &str, index: u32) -> std::io::Result<Option<Mp4Edit>> {
     }))
 }
 
+/// Whether symphonia's ADPCM decoder would panic on `params`: it handles one or two channels
+/// only, and IMA stereo only in whole 8-byte groups. [`sniff_wav_adpcm`] refuses these from the
+/// header, but walks a bounded number of chunks, where symphonia's reader walks them all.
+fn adpcm_unreadable(params: &symphonia::core::codecs::CodecParameters) -> bool {
+    use symphonia::core::codecs::{CODEC_TYPE_ADPCM_IMA_WAV, CODEC_TYPE_ADPCM_MS};
+    if params.codec != CODEC_TYPE_ADPCM_MS && params.codec != CODEC_TYPE_ADPCM_IMA_WAV {
+        return false;
+    }
+    let channels = params.channels.map_or(0, |c| c.count());
+    let block = params.frames_per_block.unwrap_or(0);
+    !(1..=2).contains(&channels)
+        || block == 0
+        || (params.codec == CODEC_TYPE_ADPCM_IMA_WAV
+            && channels == 2
+            && !(block - 1).is_multiple_of(8))
+}
+
 /// An ADPCM WAV's header, as far as the decode needs it.
 #[derive(Clone, Copy)]
 struct AdpcmWav {
@@ -4880,12 +4910,13 @@ struct AdpcmWav {
 fn sniff_wav_adpcm(path: &str) -> std::io::Result<Option<AdpcmWav>> {
     use std::io::{Read, Seek};
     let mut f = std::fs::File::open(path)?;
+    let len = f.metadata()?.len();
     let mut head = [0u8; 12];
     if f.read(&mut head)? < 12 || &head[0..4] != b"RIFF" || &head[8..12] != b"WAVE" {
         return Ok(None);
     }
     // Bounded, as the WAV sniff's walk is.
-    let (mut readable, mut fact) = (None, None);
+    let (mut readable, mut fact, mut sample_bits) = (None, None, 0);
     let mut hdr = [0u8; 8];
     for _ in 0..64 {
         if f.read(&mut hdr)? < 8 {
@@ -4897,6 +4928,7 @@ fn sniff_wav_adpcm(path: &str) -> std::io::Result<Option<AdpcmWav>> {
             b"fmt " if size >= 16 && f.read(&mut field)? == 16 => {
                 let word = |i: usize| u32::from(u16::from_le_bytes([field[i], field[i + 1]]));
                 let (tag, channels, block, bits) = (word(0), word(2), word(12), word(14));
+                sample_bits = u64::from(bits * channels);
                 // Each channel's block header: 7 bytes for Microsoft's, 4 for IMA's.
                 let header = match tag {
                     0x0002 => 7,
@@ -4923,9 +4955,10 @@ fn sniff_wav_adpcm(path: &str) -> std::io::Result<Option<AdpcmWav>> {
         }
         f.seek(std::io::SeekFrom::Current((size + (size & 1)) as i64))?;
     }
+    // A count the file cannot hold is a placeholder (sox piping one), not a length.
     Ok(readable.map(|readable| AdpcmWav {
         readable,
-        frames: fact.filter(|&n| n > 0),
+        frames: fact.filter(|&n| n > 0 && n.saturating_mul(sample_bits) <= len.saturating_mul(8)),
     }))
 }
 

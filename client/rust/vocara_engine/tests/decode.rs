@@ -259,6 +259,8 @@ fn an_adpcm_wav_decodes_to_its_declared_length() {
     for name in ["ima_adpcm_100ms.wav", "ms_adpcm_100ms.wav"] {
         let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
         assert_eq!(probe_duration_ms(&path), Ok(Some(100)), "{name}");
+        // A cap of its own length admits it, its padded last block and all.
+        assert!(decode_file(&path, 0.1, 0, 0).is_ok(), "{name} at the cap");
         let (frames, rate) = decode_file(&path, 0.0, 0, 0).unwrap();
         assert_eq!((frames.len(), rate), (800, 8_000), "{name}");
         let rms = (frames.iter().map(|f| f64::from(f[0]).powi(2)).sum::<f64>() / 800.0).sqrt();
@@ -283,6 +285,16 @@ fn an_adpcm_wav_symphonia_cannot_read_is_refused() {
     let _ = std::fs::remove_file(&path);
     assert!(probed.is_err(), "probe {probed:?}");
     assert!(decoded.is_err());
+    // The header check walks a bounded number of chunks; past them, the layout symphonia
+    // read is checked again before its decoder is built.
+    let junk = b"JUNK\0\0\0\0".repeat(70);
+    let mut padded = [&bytes[..12], &junk, &bytes[12..]].concat();
+    let riff = (padded.len() - 8) as u32;
+    padded[4..8].copy_from_slice(&riff.to_le_bytes());
+    let path = temp_file("three_late.wav", &padded);
+    let decoded = decode_file(&path, 0.0, 0, 0);
+    let _ = std::fs::remove_file(&path);
+    assert!(decoded.is_err());
 }
 
 #[test]
@@ -294,6 +306,21 @@ fn an_adpcm_wav_written_to_a_pipe_is_not_refused_as_too_long() {
     );
     assert_eq!(probe_duration_ms(path), Ok(None));
     assert!(decode_file(path, 1.0, 0, 0).is_ok());
+    // sox, piping one, writes a 'fact' count it never patches: a placeholder (here 147 hours
+    // of 100 ms), not a length, past what the file's bytes can hold.
+    let mut bytes = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/ima_adpcm_100ms.wav"
+    ))
+    .unwrap();
+    let fact = bytes.windows(4).position(|w| w == b"fact").unwrap();
+    bytes[fact + 8..fact + 12].copy_from_slice(&4_236_238_960u32.to_le_bytes());
+    let path = temp_file("placeholder.wav", &bytes);
+    let probed = probe_duration_ms(&path);
+    let decoded = decode_file(&path, 1.0, 0, 0);
+    let _ = std::fs::remove_file(&path);
+    assert!(matches!(probed, Ok(Some(ms)) if ms < 1_000), "{probed:?}");
+    assert!(decoded.is_ok());
 }
 
 #[test]
