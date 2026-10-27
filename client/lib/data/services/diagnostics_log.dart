@@ -279,8 +279,10 @@ class DiagnosticsLog {
   // unscrubbed. Any ` (` used to count, the last case included. A double
   // quote reads the same way: in a name ('Blue Monday (12" Version).mp3',
   // 'Song "Live".m4a') it is part of the path, and the scrub stopped at it.
+  // A dot after a quote ends the path only as sentence punctuation; followed
+  // by a letter or digit it begins the name's extension.
   static final RegExp _absolutePath = RegExp(
-    '$_roots(?:/(?:[^\'"\\n]|[\'"](?!\\s*\$|\\s+\\(OS Error|\\n|[,;:)\\]}.]))+)+',
+    '$_roots(?:/(?:[^\'"\\n]|[\'"](?!\\s*\$|\\s+\\(OS Error|\\n|[,;:)\\]}]|\\.(?![A-Za-z0-9])))+)+',
   );
   static final RegExp _nextRoot = RegExp('\\s[\'"]?(?=$_roots/)');
   static final Set<String> _knownExtensions = {

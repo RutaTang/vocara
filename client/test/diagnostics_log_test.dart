@@ -221,6 +221,13 @@ void main() {
         "path = '/Users/a/Song \"Live at Wembley\".m4a'",
       );
       expect(live, isNot(contains('Wembley')), reason: live);
+      // A quote right before the extension's dot is still inside the name.
+      expect(
+        DiagnosticsLog.scrubPaths(
+          "path = '/Users/a/Song \"Live\".m4a' (OS Error: x)",
+        ),
+        "path = '<path>.m4a' (OS Error: x)",
+      );
       // A double-quoted path still ends at its closing quote.
       expect(
         DiagnosticsLog.scrubPaths('open "/Users/a/x.wav" failed'),
