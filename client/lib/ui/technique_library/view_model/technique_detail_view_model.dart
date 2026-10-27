@@ -7,8 +7,11 @@ import 'package:path/path.dart' as p;
 import '../../../data/db/asset_store.dart';
 import '../../../data/repositories/technique_repository.dart';
 import '../../../data/services/app_settings_service.dart';
+import '../../../data/services/audio_exporter.dart';
+import '../../../data/services/audio_file_service.dart';
 import '../../../data/services/diagnostics_log.dart';
 import '../../../data/services/graph_audio_playback_service.dart';
+import '../../../data/services/local_storage_service.dart';
 import '../../../data/services/media_analysis_service.dart';
 import '../../../data/services/mic_permission.dart';
 import '../../../data/services/mic_recording_controller.dart';
@@ -80,13 +83,20 @@ class TechniqueDetailViewModel extends ChangeNotifier
     @visibleForTesting MicRecordingController? recorder,
     RecordingFinalizer? finalizer,
     @visibleForTesting GraphAudioPlaybackService Function()? createEngine,
+    AudioExporter? exporter,
   }) : _repository = repository,
        _mediaService = mediaService,
        _appSettings = appSettings,
        _analysis = analysisService,
        _recorderOverride = recorder,
        _createEngine = createEngine ?? GraphAudioPlaybackService.new,
-       _finalizer = finalizer ?? RecordingFinalizer.instance {
+       _finalizer = finalizer ?? RecordingFinalizer.instance,
+       _exporter =
+           exporter ??
+           AudioExporter(
+             audioFiles: AudioFileService(storage: LocalStorageService()),
+             finalizer: finalizer,
+           ) {
     load = Command0(_load)..execute();
     // A remote change that landed while a load read is owed once it is done
     // (the command notifies as it finishes, its running flag already clear).
@@ -1810,6 +1820,30 @@ class TechniqueDetailViewModel extends ChangeNotifier
     }
     notifyListeners();
   }
+
+  /// Copies example [mediaId] out of the app to a place the user picks, as a
+  /// take's export does: a recorded example was otherwise reachable only by
+  /// digging through the app's container, its file named by a hash. The
+  /// outcome is said through [recordingNotice]; a cancelled panel is silent.
+  Future<void> exportMedia(String mediaId) async {
+    final m = effectiveMedia.where((x) => x.id == mediaId).firstOrNull;
+    final technique = _technique;
+    if (m == null || technique == null) return;
+    final said = await _exporter.export(
+      m.path,
+      suggestedName: AudioExporter.fileName(
+        technique.name,
+        m.displayLabel,
+        m.path,
+      ),
+      noun: 'example',
+    );
+    if (said == null || _disposed) return;
+    _recordingNotice = said;
+    notifyListeners();
+  }
+
+  final AudioExporter _exporter;
 
   /// Whether example [mediaId] was added in this edit and not saved yet:
   /// removing it deletes it at once (see [removeMedia]), with nothing for

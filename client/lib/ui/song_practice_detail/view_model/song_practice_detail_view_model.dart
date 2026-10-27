@@ -1,17 +1,15 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 
-import 'package:file_selector/file_selector.dart' show getSaveLocation;
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 
-import '../../../data/db/asset_store.dart';
 import '../../../data/repositories/song_practice_repository.dart';
 import '../../../data/repositories/technique_repository.dart';
 import '../../../data/services/app_settings_service.dart';
 import '../../../data/services/audio_edit_service.dart';
+import '../../../data/services/audio_exporter.dart';
 import '../../../data/services/audio_file_service.dart';
 import '../../../data/services/graph_audio_playback_service.dart';
 import '../../../data/services/mic_recording_controller.dart';
@@ -35,7 +33,6 @@ import '../../../domain/models/technique_marker.dart';
 import '../../../domain/models/voice_metrics.dart';
 import '../../../utils/busy_gate.dart';
 import '../../../utils/command.dart';
-import '../../../utils/export_copy.dart';
 import '../../../utils/id.dart';
 import '../../../utils/lyrics_format.dart';
 import '../../../utils/result.dart';
@@ -160,7 +157,11 @@ class SongPracticeDetailViewModel extends ChangeNotifier
        _appSettings = appSettings,
        _practiceId = practiceId,
        _playback = playbackEngine ?? createPlaybackEngine(),
-       _pickSaveLocation = saveLocationPicker ?? _systemSaveLocation,
+       _exporter = AudioExporter(
+         audioFiles: audioFileService,
+         pickSaveLocation: saveLocationPicker,
+         finalizer: finalizer,
+       ),
        _monitor = monitor ?? MonitorService(),
        _edits = editService ?? AudioEditService(files: audioFileService),
        // Injectable because the real probe is a direct FFI call into the
@@ -328,16 +329,9 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   final SourceSeparationService _separation;
   final AppSettingsService _appSettings;
 
-  /// Resolves where an export is written (the platform save panel by default);
-  /// injected so tests can drive [exportTrackAudio] without the plugin.
-  final Future<String?> Function(String suggestedName) _pickSaveLocation;
-
-  /// The production picker: the macOS save panel via file_selector. Returns
-  /// null when the user cancels.
-  static Future<String?> _systemSaveLocation(String suggestedName) async {
-    final location = await getSaveLocation(suggestedName: suggestedName);
-    return location?.path;
-  }
+  /// Exports takes, clips and backings (its save panel is injectable so
+  /// tests can drive [exportTrackAudio] without the plugin).
+  final AudioExporter _exporter;
 
   /// The global audio settings (devices, record/monitor gains) — used by the mixer's mic strip.
   AppSettingsService get appSettings => _appSettings;
@@ -1785,7 +1779,8 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     final clip = track.primaryClip!;
     await _exportFile(
       clip.audioFilePath,
-      suggestedName: _exportName(
+      noun: track.isBacking ? 'track' : 'take',
+      suggestedName: AudioExporter.fileName(
         practice.title,
         track.displayName,
         clip.audioFilePath,
@@ -1808,7 +1803,8 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     final suffix = track.clips.length > 1 ? ' (clip ${index + 1})' : '';
     await _exportFile(
       clip.audioFilePath,
-      suggestedName: _exportName(
+      noun: 'clip',
+      suggestedName: AudioExporter.fileName(
         practice.title,
         track.displayName,
         clip.audioFilePath,
@@ -1817,138 +1813,19 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     );
   }
 
-  /// `"{practice title} - {track name}{source extension}"`, with path-hostile
-  /// characters flattened so the suggestion is a valid file name. The source
-  /// extension is kept (an imported mp3 exports as .mp3; recordings are .wav).
-  /// A file name holds 255 bytes, and neither name is bounded: the suggestion
-  /// the copy then failed on is cut to fit, the title first (the take's name
-  /// says which file it is), and never the [suffix] after the take's name
-  /// (cut with it, two clips of a take suggested one name).
-  static String _exportName(
-    String title,
-    String trackName,
-    String sourcePath, {
-    String suffix = '',
-  }) {
-    final ext = p.extension(sourcePath);
-    String flat(String s) => s.replaceAll(RegExp(r'[/\\:]'), '-');
-    final name = _fitBytes(flat(trackName), 120 - utf8.encode(suffix).length);
-    final tail = ' - $name$suffix';
-    final base = _fitBytes(flat(title), 200 - utf8.encode(tail).length) + tail;
-    return '$base${ext.isEmpty ? '.wav' : ext}';
-  }
-
-  /// [s]'s longest leading run of whole characters within [maxBytes] of UTF-8.
-  static String _fitBytes(String s, int maxBytes) {
-    final out = StringBuffer();
-    var bytes = 0;
-    for (final rune in s.runes) {
-      final c = String.fromCharCode(rune);
-      bytes += utf8.encode(c).length;
-      if (bytes > maxBytes) break;
-      out.write(c);
-    }
-    return out.toString();
-  }
-
-  /// Copies [sourcePath] to a location picked via [_pickSaveLocation]. A null
-  /// pick (user cancelled) exits silently; everything else toasts an outcome.
+  /// Exports [sourcePath] (see [AudioExporter]); a cancelled save panel is
+  /// silent, every other outcome is said.
   Future<void> _exportFile(
     String sourcePath, {
     required String suggestedName,
+    String noun = 'take',
   }) async {
-    // One at a time: nothing showed a copy running (to a slow drive it runs
-    // a while), and a second export to the same chosen name had two copies
-    // writing one file, each then saying "Exported".
-    if (_exporting) {
-      _toast('Wait for the current export to finish.');
-      return;
-    }
-    // Bytes another device holds, not yet here: as edits of it say, not
-    // "missing".
-    if (AssetStore.assetIdOf(sourcePath) != null) {
-      _toast(
-        "This take's audio isn't on this device yet, so it can't be "
-        'exported.',
-      );
-      return;
-    }
-    final source = File(sourcePath);
-    if (sourcePath.isEmpty || !await source.exists()) {
-      _toast('The audio file for this track is missing.');
-      return;
-    }
-    _exporting = true;
-    try {
-      await _exportPicked(source, suggestedName);
-    } finally {
-      _exporting = false;
-    }
-  }
-
-  bool _exporting = false;
-
-  /// The save panel and the copy of [_exportFile].
-  Future<void> _exportPicked(File source, String suggestedName) async {
-    final sourcePath = source.path;
-    final String? destPath;
-    try {
-      destPath = await _pickSaveLocation(suggestedName);
-    } catch (_) {
-      _toast('Could not open the save dialog.');
-      return;
-    }
-    if (destPath == null) return; // user cancelled
-    final dest = destPath;
-    // Again, after the panel: it can stay open indefinitely, and the clip's
-    // file can go meanwhile (a sync removed the clip, a failed import's
-    // revert deleted its copy) — the copy then failed as if the destination
-    // had.
-    if (!await source.exists()) {
-      _toast('The audio file for this track is missing.');
-      return;
-    }
-    // Onto the clip's own file (the save panel can browse into the app's
-    // storage and confirm Replace): the copy truncated it to nothing, the
-    // take's audio gone, and said "Exported".
-    if (await _sameFile(sourcePath, destPath)) {
-      _toast("That is the take's own audio file. Export it somewhere else.");
-      return;
-    }
-    // Into the app's storage: another take's audio, or the library itself.
-    if (await _audioFiles.isAppStorage(destPath)) {
-      _toast("That folder holds Vocara's own files. Export somewhere else.");
-      return;
-    }
-    try {
-      // Overwrite is intentional: the save panel already confirmed replacing.
-      // Held: a quit mid-copy exited under it and left the destination cut
-      // short (an old file there already replaced).
-      await _finalizer.hold(() => exportCopy(source, dest));
-    } catch (_) {
-      // Blamed on the destination only when the source is still there.
-      _toast(
-        await source.exists()
-            ? 'Could not export the audio to that location.'
-            : 'The audio file for this track is missing.',
-      );
-      return;
-    }
-    _toast('Exported to $destPath');
-  }
-
-  /// Whether [a] and [b] are one file (a symlink or hard link to it too).
-  static Future<bool> _sameFile(String a, String b) async {
-    try {
-      if (!await File(b).exists()) return false;
-      // identical() judges a link itself, not what it points to.
-      return await FileSystemEntity.identical(
-        await File(a).resolveSymbolicLinks(),
-        await File(b).resolveSymbolicLinks(),
-      );
-    } on FileSystemException {
-      return false;
-    }
+    final said = await _exporter.export(
+      sourcePath,
+      suggestedName: suggestedName,
+      noun: noun,
+    );
+    if (said != null) _toast(said);
   }
 
   // --- Takes -----------------------------------------------------------------

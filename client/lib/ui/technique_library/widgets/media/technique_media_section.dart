@@ -22,6 +22,7 @@ class TechniqueMediaSection extends StatelessWidget {
     required this.onAddPaths,
     required this.onRemove,
     required this.onRename,
+    this.onExport,
     this.editable = true,
     this.onStartRecord,
     this.onStopRecord,
@@ -83,6 +84,10 @@ class TechniqueMediaSection extends StatelessWidget {
 
   /// (mediaId, newLabel).
   final void Function(String mediaId, String label) onRename;
+
+  /// Copies an example out of the app (called with its media id); offered on
+  /// every card, read view included, as it changes nothing.
+  final ValueChanged<String>? onExport;
 
   /// When false (the read view), the clips are play-only: no add/drop zone and
   /// no per-clip rename/remove controls.
@@ -165,6 +170,7 @@ class TechniqueMediaSection extends StatelessWidget {
             editable: editable && enabled,
             onRemove: () => onRemove(m.id),
             onRename: (label) => onRename(m.id, label),
+            onExport: onExport == null ? null : () => onExport!(m.id),
             // Only the analyzed clip's player is linked to the analysis playhead
             // (both directions).
             onPosition: m.id == analyzedId ? onPlaybackPosition : null,
@@ -237,6 +243,7 @@ class _MediaTile extends StatefulWidget {
     required this.editable,
     required this.onRemove,
     required this.onRename,
+    this.onExport,
     this.onPosition,
     this.seekSignal,
     this.pauseSignal,
@@ -252,6 +259,7 @@ class _MediaTile extends StatefulWidget {
   final bool editable;
   final VoidCallback onRemove;
   final ValueChanged<String> onRename;
+  final VoidCallback? onExport;
   final ValueChanged<Duration>? onPosition;
   final ValueListenable<Duration>? seekSignal;
   final Listenable? pauseSignal;
@@ -331,30 +339,40 @@ class _MediaTileState extends State<_MediaTile>
                     ),
                   ),
                 ),
-                if (widget.editable) ...[
+                if (widget.editable || widget.onExport != null) ...[
                   const SizedBox(width: 8),
                   AnimatedOpacity(
                     opacity: _hover ? 1 : 0,
                     duration: const Duration(milliseconds: 120),
                     child: Row(
                       children: [
-                        _HoverIcon(
-                          icon: FIcons.pencil,
-                          tooltip: 'Rename',
-                          onTap: () async {
-                            final label = await _promptLabel(
-                              context,
-                              m.displayLabel,
-                            );
-                            if (label != null) widget.onRename(label);
-                          },
-                        ),
-                        const SizedBox(width: 4),
-                        _HoverIcon(
-                          icon: FIcons.trash2,
-                          tooltip: 'Remove',
-                          onTap: widget.onRemove,
-                        ),
+                        if (widget.onExport case final export?) ...[
+                          _HoverIcon(
+                            icon: FIcons.download,
+                            tooltip: 'Export',
+                            onTap: export,
+                          ),
+                          if (widget.editable) const SizedBox(width: 4),
+                        ],
+                        if (widget.editable) ...[
+                          _HoverIcon(
+                            icon: FIcons.pencil,
+                            tooltip: 'Rename',
+                            onTap: () async {
+                              final label = await _promptLabel(
+                                context,
+                                m.displayLabel,
+                              );
+                              if (label != null) widget.onRename(label);
+                            },
+                          ),
+                          const SizedBox(width: 4),
+                          _HoverIcon(
+                            icon: FIcons.trash2,
+                            tooltip: 'Remove',
+                            onTap: widget.onRemove,
+                          ),
+                        ],
                       ],
                     ),
                   ),

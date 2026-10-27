@@ -1,11 +1,15 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:forui/forui.dart';
+import 'package:path/path.dart' as p;
 import 'package:provider/provider.dart';
 import 'package:vocara/data/repositories/technique_repository.dart';
+import 'package:vocara/data/services/audio_exporter.dart';
+import 'package:vocara/data/services/audio_file_service.dart';
 import 'package:vocara/data/services/graph_audio_playback_service.dart'
     show MediaTooLongException;
 import 'package:vocara/data/services/local_storage_service.dart';
@@ -94,6 +98,17 @@ class _FailingLoadRepo extends _FakeRepo {
     await gate.future;
     return Result.error(Exception('simulated read failure'));
   }
+}
+
+/// Storage rooted in a temp folder: the app's own storage, which an export
+/// must never write into, lives there.
+class _RootedStorage extends LocalStorageService {
+  _RootedStorage(this.root);
+  final Directory root;
+
+  @override
+  Future<String> assetPath(String collection) async =>
+      p.join(root.path, 'app', collection);
 }
 
 Technique _technique({
@@ -313,6 +328,63 @@ void main() {
     expect(find.text('EXAMPLES'), findsOneWidget);
     expect(find.textContaining('Drag an audio'), findsNothing);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('an example can be exported, from the read view too', (
+    tester,
+  ) async {
+    // A recorded example was reachable only by digging through the app's
+    // container, its file named by a hash.
+    final dir = Directory.systemTemp.createTempSync('vocara_export');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    final source = File(p.join(dir.path, 'take.wav'))
+      ..writeAsBytesSync(const [1, 2, 3, 4]);
+    final dest = p.join(dir.path, 'out', 'exported.wav');
+    Directory(p.dirname(dest)).createSync();
+    final suggested = <String>[];
+    final media = [
+      TechniqueMedia(
+        id: 'm1',
+        path: source.path,
+        kind: TechniqueMediaKind.audio,
+        label: 'Recording 1',
+        addedAt: DateTime(2026, 6, 20),
+      ),
+    ];
+    late TechniqueDetailViewModel vm;
+    await tester.runAsync(() async {
+      vm = TechniqueDetailViewModel(
+        repository: _FakeRepo(_technique(media: media)),
+        mediaService: TechniqueMediaService(storage: LocalStorageService()),
+        techniqueId: 't1',
+        exporter: AudioExporter(
+          audioFiles: AudioFileService(storage: _RootedStorage(dir)),
+          pickSaveLocation: (name) async {
+            suggested.add(name);
+            return dest;
+          },
+        ),
+      );
+      for (var i = 0; i < 200 && vm.technique == null; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+    });
+    addTearDown(vm.dispose);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ChangeNotifierProvider.value(
+          value: vm,
+          child: const TechniqueDetailScreen(),
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(find.byIcon(FIcons.download), findsOneWidget);
+
+    await tester.runAsync(() => vm.exportMedia('m1'));
+    expect(suggested, ['Twang - Recording 1.wav']);
+    expect(File(dest).readAsBytesSync(), [1, 2, 3, 4]);
+    expect(vm.recordingNotice, 'Exported to $dest');
   });
 
   test('a MediaTooLongException analysis failure surfaces its cause via '
