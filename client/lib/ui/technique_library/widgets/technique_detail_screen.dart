@@ -1,3 +1,6 @@
+import 'dart:async';
+
+import 'package:flutter/gestures.dart' show kDoubleTapTimeout;
 import 'package:flutter/material.dart';
 import 'package:forui/forui.dart';
 import 'package:provider/provider.dart';
@@ -29,6 +32,25 @@ class TechniqueDetailScreen extends StatefulWidget {
 
 class _TechniqueDetailScreenState extends State<TechniqueDetailScreen> {
   bool _editing = false;
+
+  /// Set for a double-tap's span after the header switches between edit and
+  /// view. Its buttons trade places there (view's Delete sits where Save
+  /// was), so a double-click on Save, the save quick, opened the Delete
+  /// dialog; a double-click on Edit cancelled the edit it opened.
+  bool _headerSettling = false;
+  Timer? _headerSettle;
+
+  void _setEditing(bool editing) {
+    _headerSettle?.cancel();
+    _headerSettle = Timer(kDoubleTapTimeout, () {
+      if (mounted) setState(() => _headerSettling = false);
+    });
+    setState(() {
+      _editing = editing;
+      _headerSettling = true;
+    });
+  }
+
   bool _editorDirty = false;
 
   // Edit-form controllers, non-null only while editing.
@@ -125,7 +147,7 @@ class _TechniqueDetailScreenState extends State<TechniqueDetailScreen> {
     // remote change landing mid-edit disarms the save's keep-theirs branch.
     vm.beginEdit();
     _seedForm(t);
-    setState(() => _editing = true);
+    _setEditing(true);
   }
 
   Future<void> _cancelEdit(TechniqueDetailViewModel vm) async {
@@ -154,7 +176,7 @@ class _TechniqueDetailScreenState extends State<TechniqueDetailScreen> {
     // is not offered during a save.
     if (!await vm.discardMediaDraft()) return;
     _disposeForm();
-    if (mounted) setState(() => _editing = false);
+    if (mounted) _setEditing(false);
   }
 
   Future<void> _save(TechniqueDetailViewModel vm) async {
@@ -197,11 +219,12 @@ class _TechniqueDetailScreenState extends State<TechniqueDetailScreen> {
       return;
     }
     _disposeForm();
-    setState(() => _editing = false);
+    _setEditing(false);
   }
 
   @override
   void dispose() {
+    _headerSettle?.cancel();
     _disposeForm();
     super.dispose();
   }
@@ -284,20 +307,23 @@ class _TechniqueDetailScreenState extends State<TechniqueDetailScreen> {
       body: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _Header(
-            title: _editing
-                ? 'Edit technique'
-                : (technique?.name ?? 'Technique'),
-            editing: _editing,
-            canEdit: technique != null,
-            editBlocked: !vm.canEdit,
-            onBack: _handleBack,
-            onEdit: technique == null ? null : () => _enterEdit(vm),
-            onDelete: () => _delete(vm),
-            onCancel: () => _cancelEdit(vm),
-            onSave: () => _save(vm),
-            saveBlocked: vm.saving || vm.savingExample || vm.importingMedia,
-            cancelBlocked: vm.saving,
+          IgnorePointer(
+            ignoring: _headerSettling,
+            child: _Header(
+              title: _editing
+                  ? 'Edit technique'
+                  : (technique?.name ?? 'Technique'),
+              editing: _editing,
+              canEdit: technique != null,
+              editBlocked: !vm.canEdit,
+              onBack: _handleBack,
+              onEdit: technique == null ? null : () => _enterEdit(vm),
+              onDelete: () => _delete(vm),
+              onCancel: () => _cancelEdit(vm),
+              onSave: () => _save(vm),
+              saveBlocked: vm.saving || vm.savingExample || vm.importingMedia,
+              cancelBlocked: vm.saving,
+            ),
           ),
           Expanded(child: _content(vm)),
         ],

@@ -279,6 +279,33 @@ void main() {
     );
   });
 
+  testWidgets('a double-click on Save does not land on the Delete that takes '
+      'its place', (tester) async {
+    // A text-only save finishes within a double-click: the header was back
+    // in view mode for the second click, and view's Delete, wider than Save
+    // and at the same edge, opened its dialog.
+    final (_, repo, remote) = await _pump(tester);
+    addTearDown(remote.close);
+    await tester.tap(find.text('Edit').first);
+    await tester.pumpAndSettle();
+
+    final save = tester.getCenter(find.text('Save').first);
+    await tester.tapAt(save);
+    await tester.pump(const Duration(milliseconds: 30));
+    expect(find.text('Edit'), findsWidgets, reason: 'saved and back in view');
+    await tester.pump(const Duration(milliseconds: 120));
+    await tester.tapAt(save);
+    await tester.pumpAndSettle();
+
+    expect(repo.savedTechniques, hasLength(1));
+    expect(find.textContaining('Delete "'), findsNothing);
+    // Once the double-tap span is over, the header answers again.
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.tap(find.text('Delete').first);
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Delete "'), findsOneWidget);
+  });
+
   testWidgets('a reload skipped during the edit is replayed on cancel', (
     tester,
   ) async {

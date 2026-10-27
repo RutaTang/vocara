@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:desktop_drop/desktop_drop.dart';
+import 'package:flutter/gestures.dart' show kDoubleTapTimeout;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:forui/forui.dart';
@@ -239,7 +240,8 @@ void main() {
 
     await _pump(tester, _technique(body: false)); // view mode
     await tester.tap(find.text('Edit').first);
-    await tester.pump();
+    // The header ignores taps for a double-tap's span after it switches.
+    await tester.pump(kDoubleTapTimeout);
 
     // Edit mode shows the "Edit technique" title and drops the back chevron —
     // Cancel/Save are the exits.
@@ -265,7 +267,7 @@ void main() {
 
     final vm = await _pump(tester, _technique(body: false));
     await tester.tap(find.text('Edit').first);
-    await tester.pump();
+    await tester.pump(kDoubleTapTimeout);
 
     final finder = find.byType(DropTarget);
     tester.widget<DropTarget>(finder).onDragDone!(
@@ -576,7 +578,7 @@ void main() {
 
     final vm = await _pump(tester, _technique(body: false));
     await tester.tap(find.text('Edit').first);
-    await tester.pump();
+    await tester.pump(kDoubleTapTimeout);
     final name = find.byWidgetPredicate(
       (w) => w is TextField && w.controller?.text == 'Twang',
     );
@@ -615,7 +617,7 @@ void main() {
     await tester.pump();
 
     await tester.tap(find.text('Edit').first);
-    await tester.pump();
+    await tester.pump(kDoubleTapTimeout);
 
     StudioButton button(String label) =>
         tester.widget<StudioButton>(find.widgetWithText(StudioButton, label));
@@ -770,7 +772,7 @@ void main() {
     await tester.pump(); // let the load command resolve
     await tester.pump();
     await tester.tap(find.text('Edit').first);
-    await tester.pump();
+    await tester.pump(kDoubleTapTimeout);
     await tester.enterText(find.byType(TextField).first, 'Twang, revised');
     expect(await vm.startExampleRecording(), isNull);
     await tester.pump();

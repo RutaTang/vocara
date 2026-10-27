@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:flutter/gestures.dart' show kDoubleTapTimeout;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
@@ -99,6 +100,8 @@ void main() {
       isTrue,
       reason: 'tapping Edit opens the editor form',
     );
+    // The header ignores taps for a double-tap's span after it switches.
+    await tester.pump(kDoubleTapTimeout);
 
     expect(editField('Name'), findsOneWidget);
     await tester.enterText(editField('Name'), 'Belted Twang');
@@ -131,6 +134,7 @@ void main() {
       await pumpUntil(tester, () => present(find.text('Edit technique'))),
       isTrue,
     );
+    await tester.pump(kDoubleTapTimeout);
 
     // With no media yet, the add zone shows its full prompt.
     const addZone = 'Drag an audio or video clip here, or click to browse';
@@ -186,6 +190,7 @@ void main() {
         await pumpUntil(tester, () => present(find.text('Edit technique'))),
         isTrue,
       );
+      await tester.pump(kDoubleTapTimeout);
 
       await tester.enterText(editField('Name'), 'Should Not Persist');
       await tester.pump();

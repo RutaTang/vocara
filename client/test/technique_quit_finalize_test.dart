@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/gestures.dart' show kDoubleTapTimeout;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
@@ -337,7 +338,8 @@ void main() {
     );
     await tester.pump();
     await tester.tap(find.text('Edit').first);
-    await tester.pump();
+    // The header ignores taps for a double-tap's span after it switches.
+    await tester.pump(kDoubleTapTimeout);
     // The fake take and its import are real file IO.
     await tester.runAsync(vm.startExampleRecording);
     await tester.pump();
