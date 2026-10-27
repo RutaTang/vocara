@@ -2353,106 +2353,116 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         sourcePath: clip.audioFilePath,
         splitFileMs: atMs - clip.startMs,
       );
-      final firstAnalysis = await _waveforms.analyze(parts.firstPath);
-      final secondAnalysis = await _waveforms.analyze(parts.secondPath);
-      // Re-read the LIVE practice after the split/analyze awaits so a take
-      // recorded/imported meanwhile isn't dropped by a stale-snapshot rebuild.
-      final cur = _practice;
-      if (cur == null) return;
-      final list = [...cur.vocalTracks];
-      final idx = list.indexWhere((t) => t.id == trackId);
-      if (idx < 0) return; // source removed during the split
-      // Rebuild both halves from the LIVE take, not the pre-await snapshot:
-      // renames and note/marker edits are NOT busy-gated, so one landing during
-      // those awaits would be overwritten here — and a note added meanwhile
-      // would be missing from the desired list, which the save tombstones.
-      final live = list[idx];
-      if (live.clips.length != 1 || live.primaryClip?.id != clip.id) {
-        // The lane's audio changed underneath (no gated path does this today):
-        // abandon the split rather than write halves cut from a stale file.
-        await _discardQuietly([parts.firstPath, parts.secondPath]);
-        return;
-      }
-      // The surviving take keeps its lane, but its clip is a NEW row. Never
-      // re-point a clip id at a different file: the reconcile would overwrite
-      // the row's asset in place, leaving nothing that references the
-      // original recording, and the next boot's recovery would adopt its
-      // staging WAV as a whole "(recovered)" take beside the two halves. A
-      // fresh id tombstones the old row, which keeps its asset referenced.
-      final firstClipId = newId();
-      // The CLIP is re-read live too: a drag is not busy-gated either, and it
-      // moves the clip without touching its file. The file was cut at an
-      // offset INTO the clip, so both halves (and the cut) follow the clip to
-      // where it sits now — rebuilding from the snapshot snapped it back.
-      final liveClip = live.primaryClip!;
-      final cutMs = atMs + liveClip.startMs - clip.startMs;
-      final first = live.copyWith(
-        clips: [
-          liveClip.copyWith(
-            id: firstClipId,
-            audioFilePath: parts.firstPath,
-            durationMs: firstAnalysis.durationMs,
-            waveformPeaks: firstAnalysis.peaks,
-          ),
-        ],
-        // Markers stay with the half their start falls in; a range straddling
-        // the cut is clamped so it doesn't dangle past the shortened take.
-        notes: live.notes
-            .where((n) => n.positionMs < cutMs)
-            .map((n) => clampNoteEnd(n, cutMs))
-            .toList(),
-        techniqueMarkers: live.techniqueMarkers
-            .where((m) => m.positionMs < cutMs)
-            .map((m) => clampMarkerEnd(m, cutMs))
-            .toList(),
-      );
-      final second = live.copyWith(
-        id: newId(),
-        // A FRESH clip id — otherwise the new take and the surviving `first`
-        // take would share one clip primary key and the save transaction would
-        // roll back on the duplicate INSERT, silently losing the split (and the
-        // original file is already deleted by then).
-        clips: [
-          AudioClip(
-            id: newId(),
-            audioFilePath: parts.secondPath,
-            durationMs: secondAnalysis.durationMs,
-            startMs: cutMs,
-            waveformPeaks: secondAnalysis.peaks,
-          ),
-        ],
-        // Relocating notes/markers onto a NEW track id needs fresh ids: the source track
-        // is tombstoned (its child rows soft-deleted) but still holds these ids, so reusing
-        // them would collide on insert and roll the whole save back.
-        notes: live.notes
-            .where((n) => n.positionMs >= cutMs)
-            .map((n) => n.copyWith(id: newId()))
-            .toList(),
-        techniqueMarkers: live.techniqueMarkers
-            .where((m) => m.positionMs >= cutMs)
-            .map((m) => m.copyWith(id: newId()))
-            .toList(),
-        displayName: '${live.displayName} (2)',
-        createdAt: DateTime.now(),
-      );
-      list[idx] = first;
-      list.insert(idx + 1, second);
-      _practice = cur.copyWith(vocalTracks: list);
-      final followSelection = _selectedClipId == clip.id;
-      if (followSelection) _selectedClipId = firstClipId;
-      // Persist BEFORE deleting any old audio, so a failed save can't leave
-      // the model pointing at a file that's already gone.
-      if (await _save()) {
-        _evictUnused(clip.audioFilePath);
-        await _audioFiles.deleteAudio(clip.audioFilePath);
-        _toast('Take split.');
-      } else {
-        // The failed save reverted the model to the original one-clip take,
-        // so the split halves are orphans — clean them up instead.
-        if (followSelection && _selectedClipId == firstClipId) {
-          _selectedClipId = clip.id;
+      // Until the model takes the new files, every way out (an analysis that
+      // throws, the practice or take gone meanwhile) discards them rather than
+      // leave them in edits/ until the next boot's sweep.
+      var adopted = false;
+      try {
+        final firstAnalysis = await _waveforms.analyze(parts.firstPath);
+        final secondAnalysis = await _waveforms.analyze(parts.secondPath);
+        // Re-read the LIVE practice after the split/analyze awaits so a take
+        // recorded/imported meanwhile isn't dropped by a stale-snapshot rebuild.
+        final cur = _practice;
+        if (cur == null) return;
+        final list = [...cur.vocalTracks];
+        final idx = list.indexWhere((t) => t.id == trackId);
+        if (idx < 0) return; // source removed during the split
+        // Rebuild both halves from the LIVE take, not the pre-await snapshot:
+        // renames and note/marker edits are NOT busy-gated, so one landing during
+        // those awaits would be overwritten here — and a note added meanwhile
+        // would be missing from the desired list, which the save tombstones.
+        final live = list[idx];
+        if (live.clips.length != 1 || live.primaryClip?.id != clip.id) {
+          // The lane's audio changed underneath (no gated path does this today):
+          // abandon the split rather than write halves cut from a stale file.
+          return;
         }
-        await _discardQuietly([parts.firstPath, parts.secondPath]);
+        // The surviving take keeps its lane, but its clip is a NEW row. Never
+        // re-point a clip id at a different file: the reconcile would overwrite
+        // the row's asset in place, leaving nothing that references the
+        // original recording, and the next boot's recovery would adopt its
+        // staging WAV as a whole "(recovered)" take beside the two halves. A
+        // fresh id tombstones the old row, which keeps its asset referenced.
+        final firstClipId = newId();
+        // The CLIP is re-read live too: a drag is not busy-gated either, and it
+        // moves the clip without touching its file. The file was cut at an
+        // offset INTO the clip, so both halves (and the cut) follow the clip to
+        // where it sits now — rebuilding from the snapshot snapped it back.
+        final liveClip = live.primaryClip!;
+        final cutMs = atMs + liveClip.startMs - clip.startMs;
+        final first = live.copyWith(
+          clips: [
+            liveClip.copyWith(
+              id: firstClipId,
+              audioFilePath: parts.firstPath,
+              durationMs: firstAnalysis.durationMs,
+              waveformPeaks: firstAnalysis.peaks,
+            ),
+          ],
+          // Markers stay with the half their start falls in; a range straddling
+          // the cut is clamped so it doesn't dangle past the shortened take.
+          notes: live.notes
+              .where((n) => n.positionMs < cutMs)
+              .map((n) => clampNoteEnd(n, cutMs))
+              .toList(),
+          techniqueMarkers: live.techniqueMarkers
+              .where((m) => m.positionMs < cutMs)
+              .map((m) => clampMarkerEnd(m, cutMs))
+              .toList(),
+        );
+        final second = live.copyWith(
+          id: newId(),
+          // A FRESH clip id — otherwise the new take and the surviving `first`
+          // take would share one clip primary key and the save transaction would
+          // roll back on the duplicate INSERT, silently losing the split (and the
+          // original file is already deleted by then).
+          clips: [
+            AudioClip(
+              id: newId(),
+              audioFilePath: parts.secondPath,
+              durationMs: secondAnalysis.durationMs,
+              startMs: cutMs,
+              waveformPeaks: secondAnalysis.peaks,
+            ),
+          ],
+          // Relocating notes/markers onto a NEW track id needs fresh ids: the source track
+          // is tombstoned (its child rows soft-deleted) but still holds these ids, so reusing
+          // them would collide on insert and roll the whole save back.
+          notes: live.notes
+              .where((n) => n.positionMs >= cutMs)
+              .map((n) => n.copyWith(id: newId()))
+              .toList(),
+          techniqueMarkers: live.techniqueMarkers
+              .where((m) => m.positionMs >= cutMs)
+              .map((m) => m.copyWith(id: newId()))
+              .toList(),
+          displayName: '${live.displayName} (2)',
+          createdAt: DateTime.now(),
+        );
+        list[idx] = first;
+        list.insert(idx + 1, second);
+        adopted = true;
+        _practice = cur.copyWith(vocalTracks: list);
+        final followSelection = _selectedClipId == clip.id;
+        if (followSelection) _selectedClipId = firstClipId;
+        // Persist BEFORE deleting any old audio, so a failed save can't leave
+        // the model pointing at a file that's already gone.
+        if (await _save()) {
+          _evictUnused(clip.audioFilePath);
+          await _audioFiles.deleteAudio(clip.audioFilePath);
+          _toast('Take split.');
+        } else {
+          // The failed save reverted the model to the original one-clip take,
+          // so the split halves are orphans — clean them up instead.
+          if (followSelection && _selectedClipId == firstClipId) {
+            _selectedClipId = clip.id;
+          }
+          await _discardQuietly([parts.firstPath, parts.secondPath]);
+        }
+      } finally {
+        if (!adopted) {
+          await _discardQuietly([parts.firstPath, parts.secondPath]);
+        }
       }
     });
     // The surviving take keeps its id but now plays a new file.
@@ -2501,119 +2511,127 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         firstPath: topClip.audioFilePath,
         secondPath: bottomClip.audioFilePath,
       );
-      final analysisResult = await _waveforms.analyze(mergedPath);
-      // Where the bottom audio now starts in the joined file: the top's true
-      // length, which a clip measured by an earlier build stores up to 10 ms
-      // short (its notes then landed that much early).
-      final topMs = await WaveformService.exactDurationMs(
-        topClip.audioFilePath,
-        topClip.durationMs,
-      );
-      // Re-read the LIVE practice and re-find the indices after the concat/
-      // analyze awaits (they shift if a take was added meanwhile) so the merge
-      // never rebuilds from a stale snapshot and drops a concurrent take.
-      final cur = _practice;
-      if (cur == null) return;
-      final newList = [...cur.vocalTracks];
-      final idx = newList.indexWhere((t) => t.id == top.id);
-      final bottomIdx = newList.indexWhere((t) => t.id == bottom.id);
-      if (idx < 0 || bottomIdx < 0) return;
-      // Both lanes are re-read LIVE for the rebuild below: renames and note/
-      // marker edits are NOT busy-gated, so folding the pre-await snapshots in
-      // would overwrite one that landed during those awaits (and a note added
-      // meanwhile, absent from the desired list, is tombstoned by the save).
-      final liveTop = newList[idx];
-      final liveBottom = newList[bottomIdx];
-      if (liveTop.primaryClip?.id != topClip.id ||
-          liveBottom.primaryClip?.id != bottomClip.id ||
-          liveTop.clips.length != 1 ||
-          liveBottom.clips.length != 1) {
-        // A lane's audio changed underneath (no gated path does this today):
-        // abandon the merge rather than publish a file cut from stale inputs.
-        await _discardQuietly([mergedPath]);
-        return;
-      }
-      // The clips themselves are re-read live as well: a drag (not gated)
-      // moves a clip without changing its file, and the merged clip must sit
-      // where the top clip is NOW, not where it was before the awaits.
-      final liveTopClip = liveTop.primaryClip!;
-      final liveBottomClip = liveBottom.primaryClip!;
-      // Shift the bottom take's markers onto the merged timeline; range markers
-      // shift their end by the same delta so the span is preserved.
-      final delta = liveTopClip.startMs + topMs - liveBottomClip.startMs;
-      // Fresh ids for the bottom take's notes/markers: the bottom track is tombstoned but
-      // its child rows keep these ids, so reusing them on the merged (top) track would
-      // collide on insert and roll the save back.
-      final notes = [
-        ...liveTop.notes,
-        for (final n in liveBottom.notes)
-          n.copyWith(
-            id: newId(),
-            positionMs: n.positionMs + delta,
-            endMs: n.endMs == null ? null : n.endMs! + delta,
-          ),
-      ]..sort((a, b) => a.positionMs.compareTo(b.positionMs));
-      final markers = [
-        ...liveTop.techniqueMarkers,
-        for (final m in liveBottom.techniqueMarkers)
-          m.copyWith(
-            id: newId(),
-            positionMs: m.positionMs + delta,
-            endMs: m.endMs == null ? null : m.endMs! + delta,
-          ),
-      ]..sort((a, b) => a.positionMs.compareTo(b.positionMs));
-      // The merged take keeps the top lane, but its clip is a NEW row — never
-      // the top clip's id re-pointed at the merged file (see split: the
-      // original recording would lose its last reference and come back at
-      // the next boot as a "(recovered)" take).
-      final mergedClipId = newId();
-      final merged = liveTop.copyWith(
-        clips: [
-          liveTopClip.copyWith(
-            id: mergedClipId,
-            audioFilePath: mergedPath,
-            durationMs: analysisResult.durationMs,
-            waveformPeaks: analysisResult.peaks,
-          ),
-        ],
-        notes: notes,
-        techniqueMarkers: markers,
-      );
-      newList[idx] = merged;
-      newList.removeAt(bottomIdx);
-      _practice = cur.copyWith(vocalTracks: newList);
-      // The selection follows the audio into the merged lane: a selected
-      // bottom lane (the take armed to record into, say) is the top one now.
-      // Left on the absorbed lane, it fell back to the first lane, the
-      // backing, and disarmed recording.
-      final movedTrack = _selectedTrackId == bottom.id;
-      if (movedTrack) _selectedTrackId = top.id;
-      final priorClip = _selectedClipId;
-      final movedClip = priorClip == topClip.id || priorClip == bottomClip.id;
-      if (movedClip) _selectedClipId = mergedClipId;
-      // Persist BEFORE deleting any old audio, so a failed save can't leave
-      // the model pointing at files that are already gone.
-      if (await _save()) {
-        analysis.dropLaneState(bottom.id); // the absorbed take is gone
-        _evictUnused(topClip.audioFilePath);
-        _evictUnused(bottomClip.audioFilePath);
-        await _audioFiles.deleteAudio(topClip.audioFilePath);
-        await _audioFiles.deleteAudio(bottomClip.audioFilePath);
-        _toast('Takes merged.');
-      } else {
-        // The failed save reverted the model to the two original takes, so
-        // the merged output is an orphan — clean it up instead.
-        // The selection goes back with the takes, unless the user moved it
-        // meanwhile. The revert's repair has already let go of the merged
-        // clip, which it no longer finds.
-        final ours =
-            _selectedTrackId == top.id &&
-            (_selectedClipId == mergedClipId || _selectedClipId == null);
-        if (ours && (movedTrack || movedClip)) {
-          if (movedTrack) _selectedTrackId = bottom.id;
-          if (movedClip) _selectedClipId = priorClip;
+      // Until the model takes the new files, every way out (an analysis that
+      // throws, the practice or take gone meanwhile) discards them rather than
+      // leave them in edits/ until the next boot's sweep.
+      var adopted = false;
+      try {
+        final analysisResult = await _waveforms.analyze(mergedPath);
+        // Where the bottom audio now starts in the joined file: the top's true
+        // length, which a clip measured by an earlier build stores up to 10 ms
+        // short (its notes then landed that much early).
+        final topMs = await WaveformService.exactDurationMs(
+          topClip.audioFilePath,
+          topClip.durationMs,
+        );
+        // Re-read the LIVE practice and re-find the indices after the concat/
+        // analyze awaits (they shift if a take was added meanwhile) so the merge
+        // never rebuilds from a stale snapshot and drops a concurrent take.
+        final cur = _practice;
+        if (cur == null) return;
+        final newList = [...cur.vocalTracks];
+        final idx = newList.indexWhere((t) => t.id == top.id);
+        final bottomIdx = newList.indexWhere((t) => t.id == bottom.id);
+        if (idx < 0 || bottomIdx < 0) return;
+        // Both lanes are re-read LIVE for the rebuild below: renames and note/
+        // marker edits are NOT busy-gated, so folding the pre-await snapshots in
+        // would overwrite one that landed during those awaits (and a note added
+        // meanwhile, absent from the desired list, is tombstoned by the save).
+        final liveTop = newList[idx];
+        final liveBottom = newList[bottomIdx];
+        if (liveTop.primaryClip?.id != topClip.id ||
+            liveBottom.primaryClip?.id != bottomClip.id ||
+            liveTop.clips.length != 1 ||
+            liveBottom.clips.length != 1) {
+          // A lane's audio changed underneath (no gated path does this today):
+          // abandon the merge rather than publish a file cut from stale inputs.
+          return;
         }
-        await _discardQuietly([mergedPath]);
+        // The clips themselves are re-read live as well: a drag (not gated)
+        // moves a clip without changing its file, and the merged clip must sit
+        // where the top clip is NOW, not where it was before the awaits.
+        final liveTopClip = liveTop.primaryClip!;
+        final liveBottomClip = liveBottom.primaryClip!;
+        // Shift the bottom take's markers onto the merged timeline; range markers
+        // shift their end by the same delta so the span is preserved.
+        final delta = liveTopClip.startMs + topMs - liveBottomClip.startMs;
+        // Fresh ids for the bottom take's notes/markers: the bottom track is tombstoned but
+        // its child rows keep these ids, so reusing them on the merged (top) track would
+        // collide on insert and roll the save back.
+        final notes = [
+          ...liveTop.notes,
+          for (final n in liveBottom.notes)
+            n.copyWith(
+              id: newId(),
+              positionMs: n.positionMs + delta,
+              endMs: n.endMs == null ? null : n.endMs! + delta,
+            ),
+        ]..sort((a, b) => a.positionMs.compareTo(b.positionMs));
+        final markers = [
+          ...liveTop.techniqueMarkers,
+          for (final m in liveBottom.techniqueMarkers)
+            m.copyWith(
+              id: newId(),
+              positionMs: m.positionMs + delta,
+              endMs: m.endMs == null ? null : m.endMs! + delta,
+            ),
+        ]..sort((a, b) => a.positionMs.compareTo(b.positionMs));
+        // The merged take keeps the top lane, but its clip is a NEW row — never
+        // the top clip's id re-pointed at the merged file (see split: the
+        // original recording would lose its last reference and come back at
+        // the next boot as a "(recovered)" take).
+        final mergedClipId = newId();
+        final merged = liveTop.copyWith(
+          clips: [
+            liveTopClip.copyWith(
+              id: mergedClipId,
+              audioFilePath: mergedPath,
+              durationMs: analysisResult.durationMs,
+              waveformPeaks: analysisResult.peaks,
+            ),
+          ],
+          notes: notes,
+          techniqueMarkers: markers,
+        );
+        newList[idx] = merged;
+        newList.removeAt(bottomIdx);
+        adopted = true;
+        _practice = cur.copyWith(vocalTracks: newList);
+        // The selection follows the audio into the merged lane: a selected
+        // bottom lane (the take armed to record into, say) is the top one now.
+        // Left on the absorbed lane, it fell back to the first lane, the
+        // backing, and disarmed recording.
+        final movedTrack = _selectedTrackId == bottom.id;
+        if (movedTrack) _selectedTrackId = top.id;
+        final priorClip = _selectedClipId;
+        final movedClip = priorClip == topClip.id || priorClip == bottomClip.id;
+        if (movedClip) _selectedClipId = mergedClipId;
+        // Persist BEFORE deleting any old audio, so a failed save can't leave
+        // the model pointing at files that are already gone.
+        if (await _save()) {
+          analysis.dropLaneState(bottom.id); // the absorbed take is gone
+          _evictUnused(topClip.audioFilePath);
+          _evictUnused(bottomClip.audioFilePath);
+          await _audioFiles.deleteAudio(topClip.audioFilePath);
+          await _audioFiles.deleteAudio(bottomClip.audioFilePath);
+          _toast('Takes merged.');
+        } else {
+          // The failed save reverted the model to the two original takes, so
+          // the merged output is an orphan — clean it up instead.
+          // The selection goes back with the takes, unless the user moved it
+          // meanwhile. The revert's repair has already let go of the merged
+          // clip, which it no longer finds.
+          final ours =
+              _selectedTrackId == top.id &&
+              (_selectedClipId == mergedClipId || _selectedClipId == null);
+          if (ours && (movedTrack || movedClip)) {
+            if (movedTrack) _selectedTrackId = bottom.id;
+            if (movedClip) _selectedClipId = priorClip;
+          }
+          await _discardQuietly([mergedPath]);
+        }
+      } finally {
+        if (!adopted) await _discardQuietly([mergedPath]);
       }
     });
     // The merged take keeps the top take's id but now plays a new file.

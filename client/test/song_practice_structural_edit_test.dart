@@ -1052,6 +1052,25 @@ void main() {
       expect(vm.practice!.vocalTracks.map((t) => t.id), ['top', 'bottom']);
     });
 
+    test('a split or merge whose analysis fails deletes the new files, and '
+        'nothing else', () async {
+      // Only a failed save cleaned up: a throw from the analysis (or the take
+      // gone meanwhile) left the halves or the merged file in edits/.
+      final vm = await pumpVm(waveforms: _ThrowingWaveforms());
+      vm.playback.position.value = const Duration(milliseconds: 500);
+      await vm.splitTrackAtPlayhead('single');
+      expect(events, ['delete:/edit/first.wav', 'delete:/edit/second.wav']);
+      expect(vm.practice!.vocalTracks.map((t) => t.id), ['single', 'multi']);
+
+      final merging = await pumpVm(
+        vocalTracks: _mergeableTakes(),
+        waveforms: _ThrowingWaveforms(),
+      );
+      await merging.mergeTrackDown('top');
+      expect(events, ['delete:/edit/merged.wav']);
+      expect(merging.practice!.vocalTracks.map((t) => t.id), ['top', 'bottom']);
+    });
+
     // Split and merge used to keep the surviving clip's id and point it at
     // the new file. The save then overwrote that clip row's asset in place,
     // so nothing referenced the original recording any more, and the next
