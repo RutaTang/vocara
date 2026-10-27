@@ -140,6 +140,88 @@ void main() {
     }
   });
 
+  test("the live analyzers' columns are fftea's transform bit for bit", () {
+    // What StreamingStft and LiveVoiceAnalyzer computed: every complete
+    // window at a multiple of hop (no padded tail), Hann-windowed through
+    // fftea's realFft, the first maxBin magnitudes in dB.
+    List<Float32List> ffteaColumns(
+      Float32List samples,
+      int sr,
+      double maxHz,
+      int fftSize,
+      int hop,
+    ) {
+      final maxBin = min(fftSize ~/ 2 + 1, (maxHz * fftSize / sr).ceil() + 1);
+      final window = Window.hanning(fftSize);
+      final fft = FFT(fftSize);
+      final frame = Float64List(fftSize);
+      final out = <Float32List>[];
+      for (var at = 0; at + fftSize <= samples.length; at += hop) {
+        for (var i = 0; i < fftSize; i++) {
+          frame[i] = samples[at + i] * window[i];
+        }
+        final mags = fft.realFft(frame).discardConjugates().magnitudes();
+        out.add(
+          Float32List.fromList([
+            for (var b = 0; b < maxBin; b++)
+              20.0 * (log(mags[b] + 1e-9) / 2.302585092994046),
+          ]),
+        );
+      }
+      return out;
+    }
+
+    Uint32List bits(Float32List a) =>
+        a.buffer.asUint32List(a.offsetInBytes, a.length);
+    final rng = Random(29);
+    for (final (sr, fftSize, hop) in [
+      (16000, 2048, 512),
+      (44100, 2048, 512),
+      (48000, 2048, 512),
+      (48000, 1024, 256),
+      (44100, 1000, 300), // fftea's own FFT, not radix-2
+    ]) {
+      final n = sr ~/ 2 + 123;
+      final samples = Float32List(n);
+      for (var i = 0; i < n; i++) {
+        samples[i] =
+            0.4 * sin(2 * pi * 220 * i / sr) + 0.05 * (rng.nextDouble() - 0.5);
+      }
+      for (final maxHz in [5000.0, 18000.0]) {
+        final want = ffteaColumns(samples, sr, maxHz, fftSize, hop);
+        final why = 'sr=$sr fft=$fftSize maxHz=$maxHz';
+        final stft = StreamingStft(
+          sampleRate: sr,
+          fftSize: fftSize,
+          hop: hop,
+          maxHz: maxHz,
+        );
+        final live = LiveVoiceAnalyzer(
+          sampleRate: sr,
+          fftSize: fftSize,
+          hop: hop,
+          maxHz: maxHz,
+        );
+        final stftCols = <Float32List>[], liveCols = <Float32List>[];
+        for (var at = 0; at < n; at += 777) {
+          final chunk = Float32List.sublistView(samples, at, min(n, at + 777));
+          stft.addSamples(chunk, stftCols.add);
+          live.addSamples(chunk, (f) => liveCols.add(f.column));
+        }
+        expect(stftCols.length, want.length, reason: why);
+        expect(liveCols.length, want.length, reason: why);
+        for (var c = 0; c < want.length; c++) {
+          expect(bits(stftCols[c]), bits(want[c]), reason: '$why col $c');
+          expect(
+            bits(liveCols[c]),
+            bits(want[c]),
+            reason: '$why col $c (live)',
+          );
+        }
+      }
+    }
+  });
+
   test(
     'computeSpectrogram concentrates energy at the input tone frequencies',
     () {

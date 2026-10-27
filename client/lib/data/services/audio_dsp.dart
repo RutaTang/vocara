@@ -469,13 +469,13 @@ class _SpectrogramImage {
   }
 }
 
-/// The STFT behind the spectrogram-only paths, one dB column per frame:
-/// [fftSize] samples from frame·hop (0 past the end) times the Hann window,
-/// transformed, 20·log10(|X| + 1e-9) for the first [bins] bins. This is
-/// fftea's STFT (`run`, and `stream` + `flush` alike) exactly — the same
-/// frames, the same window products, the same transform ([_RealFft]) and
-/// conversion — without its per-frame interleave, and it is the metrics
-/// pass's first FFT too (both pinned by test).
+/// The STFT behind the spectrogram-only paths and [StreamingStft], one dB
+/// column per frame: [fftSize] samples from frame·hop (0 past the end) times
+/// the Hann window, transformed, 20·log10(|X| + 1e-9) for the first [bins]
+/// bins. This is fftea's STFT (`run`, and `stream` + `flush` alike) exactly —
+/// the same frames, the same window products, the same transform
+/// ([_RealFft]) and conversion — without its per-frame interleave, and it is
+/// the metrics pass's first FFT too (both pinned by test).
 class _ColumnStft {
   _ColumnStft(int fftSize, this.bins)
     : _window = Window.hanning(fftSize),
@@ -492,6 +492,12 @@ class _ColumnStft {
   /// Appends the column of [samples] (one frame, already zero-padded) to
   /// [image].
   void column(Float32List samples, _SpectrogramImage image) {
+    final base = image.nextColumn();
+    columnInto(samples, image.db, base);
+  }
+
+  /// The column of [samples] into [out] at [at]..[at] + [bins].
+  void columnInto(Float32List samples, Float32List out, int at) {
     final frame = _frame, window = _window;
     for (var i = 0; i < frame.length; i++) {
       frame[i] = samples[i] * window[i];
@@ -499,10 +505,8 @@ class _ColumnStft {
     _fft
       ..transform(frame)
       ..magnitudesInto(_mags, bins);
-    final base = image.nextColumn();
-    final db = image.db;
     for (var b = 0; b < bins; b++) {
-      db[base + b] = 20.0 * (math.log(_mags[b] + 1e-9) / _ln10);
+      out[at + b] = 20.0 * (math.log(_mags[b] + 1e-9) / _ln10);
     }
   }
 }
@@ -1824,19 +1828,19 @@ void _medianInto(Float32List src, Float32List dst, int half) {
 
 /// Incremental STFT for live audio: feed samples as they arrive, get one dB
 /// column (0..[maxHz]) per [hop] samples. Runs on the main thread (each FFT is
-/// sub-millisecond). Pure Dart — also unit-testable without a mic.
+/// sub-millisecond). A column is [_ColumnStft]'s: the Hann window, transform
+/// and dB conversion it had through fftea, bit for bit. Pure Dart — also
+/// unit-testable without a mic.
 class StreamingStft {
   StreamingStft({
     this.fftSize = 2048,
     this.hop = 512,
     this.sampleRate = 44100,
     this.maxHz = 5000,
-  }) : maxBin = math.min(
-         fftSize ~/ 2 + 1,
-         (maxHz * fftSize / sampleRate).ceil() + 1,
-       ),
-       _window = Window.hanning(fftSize),
-       _fft = FFT(fftSize);
+  }) : maxBin = _spectrogramBins(maxHz, fftSize, sampleRate),
+       _samples = Float32List(fftSize) {
+    _stft = _ColumnStft(fftSize, maxBin);
+  }
 
   final int fftSize;
   final int hop;
@@ -1844,29 +1848,26 @@ class StreamingStft {
   final double maxHz;
   final int maxBin;
 
-  final Float64List _window;
-  final FFT _fft;
+  late final _ColumnStft _stft;
+  final Float32List _samples;
   final List<double> _acc = <double>[];
 
   double get binHz => sampleRate / fftSize;
 
   /// Appends [samples] and emits a dB column via [onColumn] for every [hop].
+  /// Each column is a new list, the caller's to keep.
   void addSamples(
     Float32List samples,
     void Function(Float32List col) onColumn,
   ) {
     _acc.addAll(samples);
-    const ln10 = 2.302585092994046;
-    final frame = Float64List(fftSize);
+    final frame = _samples;
     while (_acc.length >= fftSize) {
       for (var i = 0; i < fftSize; i++) {
-        frame[i] = _acc[i] * _window[i];
+        frame[i] = _acc[i];
       }
-      final mags = _fft.realFft(frame).discardConjugates().magnitudes();
       final col = Float32List(maxBin);
-      for (var b = 0; b < maxBin; b++) {
-        col[b] = 20.0 * (math.log(mags[b] + 1e-9) / ln10);
-      }
+      _stft.columnInto(frame, col, 0);
       onColumn(col);
       _acc.removeRange(0, hop);
     }
@@ -2229,10 +2230,14 @@ class LiveVoiceAnalyzer {
          (maxHz * fftSize / sampleRate).ceil() + 1,
        ),
        _window = Window.hanning(fftSize),
-       _fft = FFT(fftSize),
+       _fft = _RealFft(fftSize),
        _half = fftSize ~/ 2,
        _binHz = sampleRate / fftSize,
-       _dsFactor = (sampleRate / 11000).round().clamp(1, 8) {
+       _dsFactor = (sampleRate / 11000).round().clamp(1, 8),
+       _raw = Float32List(fftSize),
+       _frame = Float64List(fftSize),
+       _logmag = Float64List(fftSize),
+       _mags = Float64List(fftSize ~/ 2 + 1) {
     _dsRate = sampleRate / _dsFactor;
     _lpcOrder = (2 + _dsRate / 1000).round().clamp(8, 20);
     _lpcWin = fftSize ~/ _dsFactor;
@@ -2256,13 +2261,14 @@ class LiveVoiceAnalyzer {
     // cepstrum (mirrored above Nyquist). Defensive — the live analyzer runs at 48 kHz
     // where qMax < _half anyway, but keeps the two analysis paths consistent.
     _qMax = (sampleRate / 60).ceil().clamp(_qMin + 1, _half);
+    _cep = Float64List(_qMax - _qMin + 1);
   }
 
   final int fftSize, hop, sampleRate;
   final double maxHz;
   final int maxBin;
   final Float64List _window;
-  final FFT _fft;
+  final _RealFft _fft;
   final int _half;
   final double _binHz;
   final int _dsFactor;
@@ -2272,6 +2278,14 @@ class LiveVoiceAnalyzer {
   late final int _lpcOrder, _lpcWin;
   late final Float64List _lpcWindow;
   late final int _b2k, _b4k, _b50, _b1k, _b5k, _qMin, _qMax;
+
+  // Per-frame scratch, reused frame after frame: the raw window, its Hann-
+  // windowed copy, the dB spectrum mirrored for the cepstrum, the magnitude
+  // spectrum (bins 0..[_half]) and the cepstrum's real parts over
+  // [_qMin]..[_qMax].
+  final Float32List _raw;
+  final Float64List _frame, _logmag, _mags;
+  late final Float64List _cep;
 
   final List<double> _acc = [];
   final List<double> _f0H = [], _f1H = [], _f2H = [], _f3H = [], _h1h2H = [];
@@ -2295,9 +2309,7 @@ class LiveVoiceAnalyzer {
   /// Appends [samples] and emits a [LiveFrame] via [onFrame] for every [hop].
   void addSamples(Float32List samples, void Function(LiveFrame f) onFrame) {
     _acc.addAll(samples);
-    final raw = Float32List(fftSize);
-    final frame = Float64List(fftSize);
-    final logmag = Float64List(fftSize);
+    final raw = _raw, frame = _frame, logmag = _logmag, mags = _mags;
     while (_acc.length >= fftSize) {
       var rawSq = 0.0;
       for (var i = 0; i < fftSize; i++) {
@@ -2305,11 +2317,17 @@ class LiveVoiceAnalyzer {
         rawSq += raw[i] * raw[i];
         frame[i] = raw[i] * _window[i];
       }
-      final mags = _fft.realFft(frame).discardConjugates().magnitudes();
+      _fft
+        ..transform(frame)
+        ..magnitudesInto(mags, _half + 1);
 
+      // The dB spectrum: the column's bins, and the cepstrum's input below.
+      for (var k = 0; k <= _half; k++) {
+        logmag[k] = _db20(mags[k]);
+      }
       final col = Float32List(maxBin);
       for (var b = 0; b < maxBin; b++) {
-        col[b] = _db20(mags[b]);
+        col[b] = logmag[b];
       }
       // Voice-activity floor: reject anything below an absolute RMS level so the
       // analyzer never reacts to room noise; the YIN periodicity gate (below)
@@ -2337,16 +2355,15 @@ class LiveVoiceAnalyzer {
           10.0 * (math.log((highE + 1e-12) / (lowE + 1e-12)) / math.ln10);
 
       // Cepstrum → CPP + F0.
-      for (var k = 0; k <= _half; k++) {
-        logmag[k] = _db20(mags[k]);
-      }
       for (var k = _half + 1; k < fftSize; k++) {
         logmag[k] = logmag[fftSize - k];
       }
-      final cep = _fft.realFft(logmag);
+      _fft.transform(logmag);
+      final cep = _cep;
+      _fft.realPartsInto(cep, _qMin, _qMax + 1);
       var peakQ = _qMin, peakV = -1e30;
       for (var q = _qMin; q <= _qMax; q++) {
-        final v = cep[q].x / fftSize;
+        final v = cep[q - _qMin] / fftSize;
         if (v > peakV) {
           peakV = v;
           peakQ = q;
@@ -2358,7 +2375,7 @@ class LiveVoiceAnalyzer {
       var sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0, cnt = 0;
       for (var q = _qMin; q <= _qMax; q++) {
         if ((q - peakQ).abs() <= cppGuard) continue;
-        final v = cep[q].x / fftSize;
+        final v = cep[q - _qMin] / fftSize;
         final qd = q.toDouble();
         sx += qd;
         sy += v;
