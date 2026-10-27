@@ -1890,7 +1890,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// Creates an empty vocal take (a lane with no clip yet) in the active
   /// interpretation and selects it, so the next REC records into it. Returns
   /// its id once its save landed, null otherwise (REC then records nothing).
-  Future<String?> createEmptyVocalTake() async {
+  Future<String?> createEmptyVocalTake({bool Function()? giveBackIf}) async {
     final practice = _practice;
     if (practice == null) return null;
     final track = AudioTrack(
@@ -1923,7 +1923,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     if (identical(_selectionBeforeEmptyTake, before)) {
       _selectionBeforeEmptyTake = null;
     }
-    _restoreSelection(before, track.id);
+    if (giveBackIf?.call() ?? true) _restoreSelection(before, track.id);
     return null;
   }
 
@@ -1931,7 +1931,10 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// which a REC start dropping its empty take must not restore over.
   Future<void> newTake() async {
     _userSelected();
-    await createEmptyVocalTake();
+    // Its failure gives the selection back only with no REC arming: that
+    // start reads the selection as the take to record into, and given back,
+    // a take the user meant to be new went into the one selected before.
+    await createEmptyVocalTake(giveBackIf: () => !recording.isStartingTake);
   }
 
   /// What was selected before [createEmptyVocalTake] selected its take.

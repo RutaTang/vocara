@@ -632,6 +632,35 @@ void main() {
     await stopping;
   });
 
+  test(
+    'a failed "+ New take" leaves a REC still arming to make its own take',
+    () async {
+      // Its failure gave the earlier selection back, which the arming REC then
+      // read as the take to record into: the take the user meant to be new
+      // went into the one selected before.
+      final mic = _FakeMic()..permission = Completer<void>();
+      final vm = await pumpVm(
+        seed: _seed(accompaniment: _backing()),
+        engine: _FakeGraphEngine(),
+        mic: mic,
+      );
+      vm.selectTrack('take1');
+      final gate = repo.saveGate = Completer<void>();
+      repo.failNextSave = true;
+      final adding = vm.newTake();
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+      final start = vm.recording.startRecording();
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+      repo.saveGate = null;
+      gate.complete();
+      await adding;
+      expect(vm.selectedTrackId, isNot('take1'));
+      await vm.stopRecording();
+      mic.permission!.complete();
+      await start;
+    },
+  );
+
   test('an edit refused while a cancelled REC unwinds says to wait, not to '
       'stop recording', () async {
     // Stop was already pressed (REC still at the permission prompt): told

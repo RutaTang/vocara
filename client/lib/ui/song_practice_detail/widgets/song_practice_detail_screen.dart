@@ -507,7 +507,11 @@ class _WorkspaceState extends State<_Workspace> {
     showClipContextMenu(
       context,
       position,
-      onDelete: () => _deleteClip(track.id, clipId),
+      // A backing lane is its one clip: deleting it deletes the lane, so it
+      // asks as Delete does (the clip's dialog spoke of the clip alone).
+      onDelete: track.isBacking
+          ? () => _deleteTrack(track)
+          : () => _deleteClip(track.id, clipId),
       onExport: () => vm.exportClipAudio(track.id, clipId),
     );
   }

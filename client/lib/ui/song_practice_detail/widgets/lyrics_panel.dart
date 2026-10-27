@@ -174,8 +174,7 @@ class _LyricsTabState extends State<_LyricsTab> {
   Future<void> _importDrop(String path) async {
     final editing = vm.lyricsMode == LyricsMode.edit;
     final before = editing ? vm.lyricsAsText() : '';
-    // The VM validates type + size, reads, and toasts on every failure
-    // (and guards against the recording/busy lost-update race).
+    // The VM validates type + size, reads, and toasts on every failure.
     await vm.importLyricsFromFile(path);
     // Route a successful edit-mode drop INTO the open editor: the drop is an
     // explicit "replace the lyrics" action, so the editor must show (and Save

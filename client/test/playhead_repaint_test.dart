@@ -563,6 +563,36 @@ void main() {
     expect(vm.practice!.vocalTracks.first.clips, isEmpty);
   });
 
+  testWidgets('deleting the backing\'s clip asks to delete the backing', (
+    tester,
+  ) async {
+    // A backing lane is its one clip, so deleting it deletes the lane — its
+    // mix and every note on it — while the dialog spoke of the clip alone.
+    final vm = await _pumpScreen(tester, repository: _FakeRepo(_practice(2)));
+    final body = find
+        .descendant(
+          of: find.byWidgetPredicate(
+            (w) => w is TrackRow && w.track.id == 'acc',
+          ),
+          matching: find.byWidgetPredicate(
+            (w) => w.runtimeType.toString() == '_Body',
+          ),
+        )
+        .first;
+    final box = tester.getRect(body);
+    await tester.tapAt(
+      Offset(box.left + 20, box.center.dy),
+      buttons: kSecondaryButton,
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Delete clip'));
+    await tester.pumpAndSettle();
+    expect(find.text('Delete "Backing"?'), findsOneWidget);
+    await tester.tap(find.text('Delete').last);
+    await tester.pumpAndSettle();
+    expect(vm.practice!.accompaniment, isNull);
+  });
+
   testWidgets("a lane's menu offers the take as it is now, after a rename", (
     tester,
   ) async {
