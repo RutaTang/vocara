@@ -3953,16 +3953,18 @@ thread_local! {
     pub static DECODE_PANICS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Container options for every decode and probe: gapless, so an MP3's encoder delay and
-/// padding (and an Ogg stream's pre-skip) are trimmed as other players trim them. Kept, they
-/// put the audio 25 ms late: a technique example's analysis trailed its own playback (the
-/// player trims), and lyrics timed in another player read early. (MP4/AAC priming is not
-/// trimmed: this reader ignores edit lists.)
-fn gapless() -> symphonia::core::formats::FormatOptions {
-    symphonia::core::formats::FormatOptions {
-        enable_gapless: true,
-        ..Default::default()
-    }
+/// Frames the container says to drop from the decoded stream's start and end: an MP3's
+/// encoder delay and padding (its LAME tag), an Ogg stream's pre-skip and end trim. Kept,
+/// they put the audio 25 ms late against every other player (a technique example's analysis
+/// trailed its own playback; lyrics timed elsewhere read early). Dropped here, not by
+/// symphonia's gapless mode, which also cuts the stream at the header's frame count: two
+/// MP3s joined end to end lost the second, and a count below the delay wrapped round to an
+/// endless file. (MP4/AAC priming is not reported: its reader ignores edit lists.)
+fn edge_trim(params: &symphonia::core::codecs::CodecParameters) -> (u64, u64) {
+    (
+        u64::from(params.delay.unwrap_or(0)),
+        u64::from(params.padding.unwrap_or(0)),
+    )
 }
 
 /// Probe `path`'s DECLARED duration in milliseconds without decoding a single packet:
@@ -3985,18 +3987,23 @@ pub fn probe_duration_ms(path: &str) -> Result<Option<u64>, String> {
         hint.with_extension(ext);
     }
     let probed = symphonia::default::get_probe()
-        .format(&hint, mss, &gapless(), &MetadataOptions::default())
+        .format(&hint, mss, &Default::default(), &MetadataOptions::default())
         .map_err(|e| format!("probe: {e}"))?;
     let track = probed
         .format
         .default_track()
         .ok_or_else(|| "no default track".to_string())?;
     let rate = track.codec_params.sample_rate.unwrap_or(0) as u64;
+    let (delay, padding) = edge_trim(&track.codec_params);
     Ok(match (track.codec_params.n_frames, rate) {
         // Ceiling division: a gate comparing `declared > cap` must see a file that is even
         // ONE sample past the cap as strictly longer — flooring would round it down onto
-        // the boundary and admit it.
-        (Some(n), r) if r > 0 => Some(n.saturating_mul(1000).div_ceil(r)),
+        // the boundary and admit it. What decode_file drops is not counted.
+        (Some(n), r) if r > 0 => Some(
+            n.saturating_sub(delay.saturating_add(padding))
+                .saturating_mul(1000)
+                .div_ceil(r),
+        ),
         _ => None,
     })
 }
@@ -4086,13 +4093,14 @@ pub fn decode_file(
     }
 
     let probed = symphonia::default::get_probe()
-        .format(&hint, mss, &gapless(), &MetadataOptions::default())
+        .format(&hint, mss, &Default::default(), &MetadataOptions::default())
         .map_err(|e| err(format!("probe: {e}")))?;
     let mut format = probed.format;
     let track = format
         .default_track()
         .ok_or_else(|| err("no default track".to_string()))?;
     let track_id = track.id;
+    let (mut skip, padding) = edge_trim(&track.codec_params);
     let src_rate = track.codec_params.sample_rate.unwrap_or(44_100);
     // Absolute source-rate envelope, independent of any caller ceiling. The FLOOR is a
     // memory/CPU bound, not taste: resampling a 1 Hz source to 48 kHz is a 48000x ratio,
@@ -4264,6 +4272,10 @@ pub fn decode_file(
             out.reserve_exact(target - out.len());
         }
         for frame in sbuf.samples().chunks(ch.max(1)) {
+            if skip > 0 {
+                skip -= 1; // the encoder's delay (see edge_trim)
+                continue;
+            }
             // Scrub NaN/Inf (and clamp absurd amplitudes) at the single deepest decode
             // point: one poisoned sample would otherwise propagate through every FFT,
             // metric, and DSP node fed from here (the WAV streaming reader scrubs
@@ -4273,6 +4285,10 @@ pub fn decode_file(
             let r = if ch > 1 { frame[1] } else { l };
             out.push([scrub_sample(l), scrub_sample(r)]);
         }
+    }
+    // From the end of what decoded, not where the header says the stream ends.
+    if let Some(kept) = (out.len() as u64).checked_sub(padding).filter(|&k| k > 0) {
+        out.truncate(kept as usize);
     }
     if out.is_empty() {
         return Err(err(format!(

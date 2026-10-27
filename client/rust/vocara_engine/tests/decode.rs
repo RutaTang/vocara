@@ -60,6 +60,21 @@ fn an_mp3_starts_where_other_players_start_it() {
     );
 }
 
+#[test]
+fn two_mp3s_joined_end_to_end_decode_whole() {
+    // The joined file keeps the first one's header, whose frame count covers only the first:
+    // trimmed to that count, the second was dropped without a word.
+    let one = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/onset_0500ms.mp3"
+    ))
+    .unwrap();
+    let path = temp_file("joined.mp3", &[one.as_slice(), one.as_slice()].concat());
+    let (frames, _) = decode_file(&path, 0.0, 0, 0).unwrap();
+    let _ = std::fs::remove_file(&path);
+    assert!(frames.len() > 88_000, "{} frames", frames.len());
+}
+
 /// 2 s of a 440 Hz mono 16-bit tone at 44.1 kHz.
 fn tone_i16() -> Vec<i16> {
     (0..88_200)
