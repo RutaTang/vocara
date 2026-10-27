@@ -66,6 +66,17 @@ impl BandSpec {
 
     /// RBJ cookbook coefficients for this band at sample rate `sr`, normalized by `a0`.
     pub fn coeffs(&self, sr: f64) -> Coeffs {
+        // A peak or shelf at 0 dB is the identity (b = a term for term): pass-through
+        // renders it exactly, where the cookbook terms only cancel to within rounding, and
+        // lets the band be skipped (see `Band::passes`). Flat is the default strip.
+        if self.gain_db == 0.0
+            && matches!(
+                self.kind,
+                BandKind::Peaking | BandKind::LowShelf | BandKind::HighShelf
+            )
+        {
+            return Coeffs::PASS;
+        }
         // Guard the frequency away from DC and Nyquist for stability.
         let f0 = (self.freq as f64).clamp(10.0, sr * 0.45);
         let q = (self.q as f64).max(0.05);
@@ -177,6 +188,16 @@ impl Biquad {
         self.y2 = self.y1;
         self.y1 = y;
         y
+    }
+
+    /// The history a [`tick`](Self::tick) on [`Coeffs::PASS`] leaves for a finite `x`
+    /// (its output is `x`).
+    #[inline]
+    fn shift(&mut self, x: f32) {
+        self.x2 = self.x1;
+        self.x1 = x;
+        self.y2 = self.y1;
+        self.y1 = x;
     }
 
     /// Zero the filter state (history), keeping coefficients. Used on seek.
@@ -301,7 +322,9 @@ impl Band {
 
     #[inline]
     fn process(&mut self, buf: &mut [Smp], frames: usize) {
-        if self.xfading {
+        if self.passes() {
+            self.pass(buf, frames);
+        } else if self.xfading {
             let mut m = self.mix;
             for i in 0..frames {
                 let il = buf[CHANNELS * i];
@@ -324,10 +347,39 @@ impl Band {
                 self.xfading = false;
             }
         } else {
-            for i in 0..frames {
-                buf[CHANNELS * i] = self.l.tick(buf[CHANNELS * i]);
-                buf[CHANNELS * i + 1] = self.r.tick(buf[CHANNELS * i + 1]);
-            }
+            self.run(buf, frames);
+        }
+    }
+
+    /// Every frame through the current filters.
+    #[inline]
+    fn run(&mut self, buf: &mut [Smp], frames: usize) {
+        for i in 0..frames {
+            buf[CHANNELS * i] = self.l.tick(buf[CHANNELS * i]);
+            buf[CHANNELS * i + 1] = self.r.tick(buf[CHANNELS * i + 1]);
+        }
+    }
+
+    /// Whether the band is pass-through with no cross-fade in flight — disabled, or a flat
+    /// peak or shelf — so [`pass`](Self::pass) renders it.
+    #[inline]
+    fn passes(&self) -> bool {
+        !self.xfading && self.l.c == Coeffs::PASS && self.r.c == Coeffs::PASS
+    }
+
+    /// [`run`](Self::run) on pass-through coefficients without the per-frame filter: what
+    /// ticking renders (`y = x`, a non-finite sample as 0), up to the sign of a zero, with the
+    /// history it would leave, so a later edit cross-fades in from the same state. The default
+    /// strip is all flat, so this is most bands on most tracks.
+    fn pass(&mut self, buf: &mut [Smp], frames: usize) {
+        let block = &mut buf[..frames * CHANNELS];
+        for s in block.iter_mut() {
+            *s = sanitize(*s);
+        }
+        let held = block.as_chunks::<CHANNELS>().0;
+        for &[l, r] in &held[held.len().saturating_sub(2)..] {
+            self.l.shift(l);
+            self.r.shift(r);
         }
     }
 
@@ -477,7 +529,12 @@ impl Node for EqNode {
         let count = self.bands.len();
         let mut i = 0;
         while i < count {
-            if i + 1 < count && self.bands[i].pairable() && self.bands[i + 1].pairable() {
+            if i + 1 < count
+                && self.bands[i].pairable()
+                && self.bands[i + 1].pairable()
+                && !self.bands[i].passes()
+                && !self.bands[i + 1].passes()
+            {
                 let (done, rest) = self.bands.split_at_mut(i + 1);
                 Band::process_pair(&mut done[i], &mut rest[0], out, frames);
                 i += 2;
@@ -514,7 +571,7 @@ impl Node for EqNode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dsp::test_support::assert_matches_reference;
+    use crate::dsp::test_support::{assert_matches_reference, material};
 
     /// The cascade as it ran before band pairing: each band over the whole block in turn.
     fn reference(eq: &mut EqNode, inp: &[f32], out: &mut [f32]) {
@@ -571,5 +628,125 @@ mod tests {
             slow.prepare(48_000.0, 1024);
             assert_matches_reference(&mut fast, &mut slow, reference, &edits, 60);
         }
+    }
+
+    /// Runs `eq` over `blocks` blocks of the shared material, applying `edits` like
+    /// `assert_matches_reference`, and returns every output sample. `tick_all` ticks every
+    /// band that is not fading through its filters instead of letting pass-through bands skip.
+    fn render(
+        eq: &mut EqNode,
+        edits: &[(usize, u16, f32)],
+        blocks: usize,
+        tick_all: bool,
+    ) -> Vec<f32> {
+        let sizes = [512, 1, 37, 1024, 256, 129, 700, 2];
+        let total: usize = (0..blocks).map(|b| sizes[b % sizes.len()]).sum();
+        let input = material(total);
+        let mut out = input.clone();
+        let mut at = 0;
+        for b in 0..blocks {
+            for &(when, param, value) in edits {
+                if when == b {
+                    eq.set_param(param, value);
+                }
+            }
+            let frames = sizes[b % sizes.len()];
+            let block = &mut out[at * CHANNELS..(at + frames) * CHANNELS];
+            if tick_all {
+                eq.heard = true;
+                for band in &mut eq.bands {
+                    if band.xfading {
+                        band.process(block, frames);
+                    } else {
+                        band.run(block, frames);
+                    }
+                }
+            } else {
+                let inputs: [&[Smp]; 1] = [&input[at * CHANNELS..(at + frames) * CHANNELS]];
+                let mut outs: [&mut [Smp]; 1] = [block];
+                eq.process(&mut ProcessIo {
+                    inputs: &inputs,
+                    outputs: &mut outs[..],
+                    frames,
+                    tl: at as i64,
+                    sr: 48_000.0,
+                });
+            }
+            at += frames;
+        }
+        out
+    }
+
+    /// A pass-through band (flat or switched off) skips its filter but renders what ticking it
+    /// renders, and leaves the history ticking would: bands fade in from it and back to it, on
+    /// the default strip and on one mixing filters with flat and disabled bands, through block
+    /// sizes of 1 and 2 frames. Equal as numbers; only the sign of a zero may differ.
+    #[test]
+    fn skipped_pass_through_bands_render_what_ticking_them_renders() {
+        let edits = [
+            (3, id(2, param::GAIN_DB), 6.0), // a skipped flat band fades in
+            (5, id(0, param::ENABLED), 0.0),
+            (7, id(2, param::GAIN_DB), 0.0), // and back out to flat
+            (8, id(4, param::GAIN_DB), -4.0),
+            (8, id(4, param::GAIN_DB), 0.0), // retargeted to flat before any audio
+            (11, id(1, param::GAIN_DB), 3.0),
+            (12, id(1, param::ENABLED), 0.0), // a fade in flight switched off
+            (16, id(0, param::ENABLED), 1.0),
+            (17, id(5, param::Q), 3.0), // a flat band's shape changes: still pass-through
+            (19, id(3, param::GAIN_DB), -9.0),
+        ];
+        let mixed = || {
+            EqNode::new(&[
+                BandSpec {
+                    kind: BandKind::HighPass,
+                    freq: 90.0,
+                    q: 0.7,
+                    gain_db: 0.0,
+                    enabled: true,
+                },
+                BandSpec::peaking(300.0, 1.0, 0.0),
+                BandSpec::peaking(900.0, 2.0, 5.0),
+                BandSpec {
+                    kind: BandKind::LowShelf,
+                    freq: 120.0,
+                    q: 0.7,
+                    gain_db: 0.0,
+                    enabled: false,
+                },
+                BandSpec::peaking(3_000.0, 1.0, 0.0),
+                BandSpec {
+                    kind: BandKind::HighShelf,
+                    freq: 10_000.0,
+                    q: 0.7,
+                    gain_db: 0.0,
+                    enabled: true,
+                },
+            ])
+        };
+        for fresh in [EqNode::default_strip as fn() -> EqNode, mixed] {
+            let (mut fast, mut slow) = (fresh(), fresh());
+            fast.prepare(48_000.0, 1024);
+            slow.prepare(48_000.0, 1024);
+            let got = render(&mut fast, &edits, 40, false);
+            let want = render(&mut slow, &edits, 40, true);
+            for (k, (g, w)) in got.iter().zip(&want).enumerate() {
+                assert!(g == w, "sample {k}: {g} vs {w} ticking every band");
+            }
+        }
+    }
+
+    /// The flat default strip hands its input through untouched, bit for bit, where its
+    /// cookbook filters (b = a) only reproduced it to within rounding.
+    #[test]
+    fn the_flat_default_strip_is_an_exact_pass_through() {
+        let mut eq = EqNode::default_strip();
+        eq.prepare(48_000.0, 1024);
+        let got = render(&mut eq, &[], 12, false);
+        let sizes = [512, 1, 37, 1024, 256, 129, 700, 2];
+        let input = material((0..12).map(|b| sizes[b % sizes.len()]).sum());
+        assert!(got
+            .iter()
+            .zip(&input)
+            .all(|(g, x)| g.to_bits() == x.to_bits()));
     }
 }
