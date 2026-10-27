@@ -1482,16 +1482,18 @@ Float64List _hamming(int n) {
 /// filtered value as a raw one. The recursion state (x1/x2/y1/y2) and every
 /// intermediate stay double; only the stored output rounds to Float32.
 void _biquadLpInPlace(Float32List x, double fc, double fs) {
+  final (b0, b1, b2, a1, a2) = _butterworthLp(fc, fs);
+  _BiquadState().runInPlace(x, x.length, b0, b1, b2, a1, a2);
+}
+
+/// [_biquadLpInPlace]'s coefficients (b0, b1, b2, a1, a2) for cutoff [fc].
+(double, double, double, double, double) _butterworthLp(double fc, double fs) {
   final w0 = 2 * math.pi * fc / fs;
   final cosw = math.cos(w0), sinw = math.sin(w0);
   final alpha = sinw / math.sqrt2;
   final a0 = 1 + alpha;
   final b0 = (1 - cosw) / 2 / a0;
-  final b1 = (1 - cosw) / a0;
-  final b2 = b0;
-  final a1 = -2 * cosw / a0;
-  final a2 = (1 - alpha) / a0;
-  _BiquadState().runInPlace(x, x.length, b0, b1, b2, a1, a2);
+  return (b0, (1 - cosw) / a0, b0, -2 * cosw / a0, (1 - alpha) / a0);
 }
 
 /// Anti-aliased decimation by integer [factor] (three cascaded Butterworth
@@ -1517,6 +1519,53 @@ Float32List _decimate(Float32List x, int factor, double fs) {
     out[i] = lp[i * factor];
   }
   return out;
+}
+
+/// [_decimate] of [x] by [f1] and by [f2] (both > 1), bit for bit. A
+/// biquad's recursion waits on its own last output at every sample (a
+/// multiply and two subtracts), so a cascade stage alone runs at that
+/// chain's latency. The two cascades share only their input, so they run
+/// side by side, one to each lane of a Float64x2: each lane is the same
+/// IEEE operations in the same order as [_biquadLpInPlace], on the same
+/// f32-stored stage outputs, and both chains advance at the cost of one.
+/// Pinned to the one-filter cascade by test.
+@visibleForTesting
+(Float32List, Float32List) decimatePair(
+  Float32List x,
+  int f1,
+  int f2,
+  double fs,
+) {
+  final (p0, p1, p2, pa1, pa2) = _butterworthLp(0.45 * fs / f1, fs);
+  final (q0, q1, q2, qa1, qa2) = _butterworthLp(0.45 * fs / f2, fs);
+  final b0 = Float64x2(p0, q0), b1 = Float64x2(p1, q1);
+  final b2 = Float64x2(p2, q2);
+  final a1 = Float64x2(pa1, qa1), a2 = Float64x2(pa2, qa2);
+  final n = x.length;
+  final p = Float32List.fromList(x), q = Float32List.fromList(x);
+  for (var stage = 0; stage < 3; stage++) {
+    var x1 = Float64x2.zero(), x2 = Float64x2.zero();
+    var y1 = Float64x2.zero(), y2 = Float64x2.zero();
+    for (var i = 0; i < n; i++) {
+      final xi = Float64x2(p[i], q[i]);
+      final yi = b0 * xi + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+      p[i] = yi.x;
+      q[i] = yi.y;
+      x2 = x1;
+      x1 = xi;
+      y2 = y1;
+      y1 = yi;
+    }
+  }
+  Float32List keep(Float32List lp, int factor) {
+    final out = Float32List(n ~/ factor);
+    for (var i = 0; i < out.length; i++) {
+      out[i] = lp[i * factor];
+    }
+    return out;
+  }
+
+  return (keep(p, f1), keep(q, f2));
 }
 
 /// Levinson-Durbin recursion: LPC coefficients [1, a1..ap] for the all-pole
@@ -2439,11 +2488,19 @@ class LiveVoiceAnalyzer {
       Float32List? ds;
       var yinF0 = double.nan, periodicity = 0.0;
       if (audible) {
-        ds = _decimate(raw, _dsFactor, sampleRate.toDouble());
         // YIN on the lighter ~22 kHz decimation; formants stay on the 11 kHz ds.
-        final yinSig = _yinFactor == 1
-            ? raw
-            : _decimate(raw, _yinFactor, sampleRate.toDouble());
+        final Float32List yinSig;
+        if (_yinFactor == 1) {
+          ds = _decimate(raw, _dsFactor, sampleRate.toDouble());
+          yinSig = raw;
+        } else {
+          (ds, yinSig) = decimatePair(
+            raw,
+            _dsFactor,
+            _yinFactor,
+            sampleRate.toDouble(),
+          );
+        }
         final yin = yinPitch(yinSig, _yinRate, fmin: 70, fmax: 1100);
         yinF0 = yin.f0;
         periodicity = yin.periodicity;

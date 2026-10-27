@@ -878,6 +878,64 @@ void main() {
     expect(run(live, stft, [1440]), whole, reason: 'after reset');
   });
 
+  test('decimatePair is two one-filter decimations, bit for bit', () {
+    // The live analyzer's decimation, as defined: three cascaded RBJ
+    // Butterworth low-passes at 0.45·fs/factor, Direct Form I in double,
+    // each stage's output stored as Float32 and read back by the next, then
+    // every factor-th sample.
+    Float32List decimate(Float32List x, int factor, double fs) {
+      final w0 = 2 * pi * (0.45 * fs / factor) / fs;
+      final cosw = cos(w0), sinw = sin(w0);
+      final alpha = sinw / sqrt2;
+      final a0 = 1 + alpha;
+      final b0 = (1 - cosw) / 2 / a0, b1 = (1 - cosw) / a0, b2 = b0;
+      final a1 = -2 * cosw / a0, a2 = (1 - alpha) / a0;
+      final lp = Float32List.fromList(x);
+      for (var stage = 0; stage < 3; stage++) {
+        var x1 = 0.0, x2 = 0.0, y1 = 0.0, y2 = 0.0;
+        for (var i = 0; i < lp.length; i++) {
+          final xi = lp[i];
+          final yi = b0 * xi + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+          lp[i] = yi;
+          x2 = x1;
+          x1 = xi;
+          y2 = y1;
+          y1 = yi;
+        }
+      }
+      return Float32List.fromList([
+        for (var i = 0; i < lp.length ~/ factor; i++) lp[i * factor],
+      ]);
+    }
+
+    final rng = Random(31);
+    for (final (fs, f1, f2) in [
+      (48000.0, 4, 2), // the app's
+      (44100.0, 4, 2),
+      (96000.0, 8, 2),
+      (33075.0, 3, 2),
+      (24000.0, 2, 2),
+    ]) {
+      for (final n in [0, 1, 7, 2048, 4097]) {
+        final x = Float32List(n);
+        for (var i = 0; i < n; i++) {
+          // Signed zeros, denormal-scale and full-scale values, clipping.
+          x[i] = switch (rng.nextInt(10)) {
+            0 => 0.0,
+            1 => -0.0,
+            2 => 1e-40 * (rng.nextDouble() - 0.5),
+            3 => rng.nextBool() ? 1.0 : -1.0,
+            _ => 0.5 * sin(i / 3.7) + 0.3 * (rng.nextDouble() - 0.5),
+          };
+        }
+        final (a, b) = decimatePair(x, f1, f2, fs);
+        final why = 'fs=$fs f=$f1/$f2 n=$n';
+        _expectBitsEqual(a, decimate(x, f1, fs), '$why first');
+        _expectBitsEqual(b, decimate(x, f2, fs), '$why second');
+      }
+    }
+  });
+
   test('LiveVoiceAnalyzer gates out quiet (room-noise-level) frames', () {
     final analyzer = LiveVoiceAnalyzer();
     // A vowel attenuated to ~-66 dBFS — below the VAD floor.
