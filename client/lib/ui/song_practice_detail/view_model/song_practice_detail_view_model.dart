@@ -394,6 +394,8 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     // Carry user-presentable copy (duration cap / density / rate / IO).
     MediaTooLongException() => e.toString(),
     MediaUnsupportedException() => e.toString(),
+    // A file gone or unreadable mid-import (moved, a disconnected drive).
+    FileSystemException() => "The file couldn't be read.",
     _ => 'Something went wrong.',
   };
 
@@ -1254,7 +1256,10 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     }
     if (declared != null && declared > maxPlaybackDuration) {
       _toast(
-        'That file is ${declared.inMinutes} minutes long. The limit is '
+        // Rounded up, as the limit counts: rounded down, a file just over it
+        // read as exactly the limit.
+        'That file is ${(declared.inSeconds + 59) ~/ 60} minutes long. The '
+        'limit is '
         '${maxPlaybackDuration.inMinutes} minutes.',
       );
       return false;
@@ -1311,7 +1316,10 @@ class SongPracticeDetailViewModel extends ChangeNotifier
 
   /// Imports [sourcePath] as the accompaniment (replacing any existing one).
   Future<void> addAccompaniment(String sourcePath) async {
-    if (_practice == null) return;
+    // Not for a screen already gone: a drop of several files carried on
+    // importing after Back, each file a write a reopened screen did not
+    // wait for. (One in flight still lands.)
+    if (_disposed || _practice == null) return;
     // No concurrent structural edit. takeInFlight is part of EVERY structural
     // pre-guard: the gate must be free when the stop finalize needs it, or the
     // finalize waits behind the edit — and the edit may delete or move the
@@ -1372,7 +1380,10 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// Imports [sourcePath] as the reference track / original song (replacing any
   /// existing one).
   Future<void> addReference(String sourcePath) async {
-    if (_practice == null) return;
+    // Not for a screen already gone: a drop of several files carried on
+    // importing after Back, each file a write a reopened screen did not
+    // wait for. (One in flight still lands.)
+    if (_disposed || _practice == null) return;
     if (busy || isSeparating || takeInFlight) {
       return;
     } // no concurrent structural edit
@@ -1410,7 +1421,8 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   /// Imports [sourcePath] as a new vocal take.
   Future<void> addVocalTake(String sourcePath) async {
     final practice = _practice;
-    if (practice == null) return;
+    // Not for a screen already gone (see [addAccompaniment]).
+    if (_disposed || practice == null) return;
     if (busy || isSeparating || takeInFlight) {
       return;
     } // no concurrent structural edit
@@ -1421,12 +1433,19 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     await _busyGate.run(() async {
       await _withImportedAudio(sourcePath, (dest) async {
         final analysis = await _waveforms.analyze(dest);
-        _appendVocal(
+        final id = _appendVocal(
           path: dest,
           displayName: p.basenameWithoutExtension(sourcePath),
           analysis: analysis,
           versionId: versionId,
         );
+        // Selected, as a recorded take and an added clip are (when it shows
+        // here): left on the take before, the import was easy to miss.
+        if (versions.vocalTakes.any((t) => t.id == id)) {
+          _selectedTrackId = id;
+          _selectedClipId = null;
+          _selectedBusId = null; // track and bus selection are exclusive
+        }
         return _save();
       });
     });
@@ -1449,7 +1468,8 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     int? atMs,
   }) async {
     final practice = _practice;
-    if (practice == null) return null;
+    // Not for a screen already gone (see [addAccompaniment]).
+    if (_disposed || practice == null) return null;
     final target = _trackById(trackId);
     if (target == null || target.kind != AudioTrackKind.vocal) return null;
     if (busy || isSeparating || takeInFlight) {
@@ -3248,6 +3268,8 @@ class SongPracticeDetailViewModel extends ChangeNotifier
 
   @override
   void dispose() {
+    // Once: a second call disposed the controllers' notifiers again.
+    if (_disposed) return;
     _disposed = true;
     unawaited(_remoteSub?.cancel());
     // ORDER MATTERS. Recording first: it closes an in-flight take's WAV

@@ -116,6 +116,7 @@ class TechniqueMedia {
     '.aiff',
     '.flac',
     '.ogg',
+    '.oga',
     '.caf',
     // Played by media_kit, not the engine: an example the engine cannot
     // decode still plays, and only its analysis fails (unlike a song

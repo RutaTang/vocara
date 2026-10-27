@@ -248,10 +248,9 @@ class _WorkspaceState extends State<_Workspace> {
     List<String> paths,
     Future<void> Function(List<String> audio) action,
   ) async {
-    if (vm.takeInFlight || vm.isSeparating || vm.busy) {
-      _showToast('Finish the current action before importing.');
-      return;
-    }
+    // In the words every other refused edit uses ("Stop recording first",
+    // "Wait for the take to finish saving", …).
+    if (vm.refuseStructuralEdit()) return;
     final audio = paths.where(_isAudioPath).toList();
     if (audio.isEmpty) {
       if (paths.isNotEmpty) {
@@ -981,6 +980,7 @@ class _Center extends StatelessWidget {
                               onDropPaths: onDropBacking,
                               empty: (hover) => _LanePad(
                                 child: _BrowseTap(
+                                  refused: vm.refuseStructuralEdit,
                                   onPaths: onDropBacking,
                                   child: _DropHint(
                                     icon: ref ? FIcons.disc3 : FIcons.music,
@@ -999,6 +999,7 @@ class _Center extends StatelessWidget {
                               onDropPaths: onDropNewTake,
                               builder: (hover) => _LanePad(
                                 child: _BrowseTap(
+                                  refused: vm.refuseStructuralEdit,
                                   onPaths: onDropNewTake,
                                   child: _DropHint(
                                     icon: FIcons.mic,
@@ -2033,8 +2034,15 @@ class _DropHint extends StatelessWidget {
 /// path uses (busy guard, format filter and toasts included). Only hints are
 /// wrapped — never whole lanes, whose taps belong to clips/seek/menus.
 class _BrowseTap extends StatelessWidget {
-  const _BrowseTap({required this.onPaths, required this.child});
+  const _BrowseTap({
+    required this.refused,
+    required this.onPaths,
+    required this.child,
+  });
 
+  /// Says why an import can't run now, before the open panel rather than
+  /// after a file was picked in it (as the lane menu's Add clip does).
+  final bool Function() refused;
   final Future<void> Function(List<String> paths) onPaths;
   final Widget child;
 
@@ -2044,6 +2052,7 @@ class _BrowseTap extends StatelessWidget {
       cursor: SystemMouseCursors.click,
       child: GestureDetector(
         onTap: () async {
+          if (refused()) return;
           final paths = await _pickAudioPaths();
           if (paths.isNotEmpty) await onPaths(paths);
         },

@@ -1748,6 +1748,9 @@ class TechniqueDetailViewModel extends ChangeNotifier
     // act on (the size cap): the count alone hid why a lone file failed.
     String? reason;
     for (final source in supported) {
+      // Cancelled or left part way: the rest are not copied (each file up to
+      // gigabytes, deleted again below).
+      if (_draftGeneration != generation || _disposed) break;
       try {
         final dest = await _mediaService.importMedia(
           techniqueId: techniqueId,

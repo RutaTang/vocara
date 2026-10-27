@@ -13,6 +13,8 @@ void main() {
       'a.aiff',
       'a.caf',
       'a.flac',
+      // Ogg audio the song screen takes too (the engine decodes it).
+      'a.oga',
       'a.opus',
       'a.wma',
       'a.mp4',

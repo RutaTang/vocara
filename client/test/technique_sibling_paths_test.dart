@@ -155,6 +155,27 @@ class _Recorder extends Fake implements MicRecordingController {
   void dispose() => _level.dispose();
 }
 
+/// A media import that parks each copy on [gate], counting them.
+class _GatedMedia extends TechniqueMediaService {
+  _GatedMedia(Directory root) : super(storage: _Storage(root));
+
+  Completer<void> gate = Completer<void>();
+  int imports = 0;
+
+  @override
+  Future<String> importMedia({
+    required String techniqueId,
+    required String sourcePath,
+  }) async {
+    imports++;
+    await gate.future;
+    return '/pool/$techniqueId-$imports.wav';
+  }
+
+  @override
+  Future<void> deleteMedia(String path) async {}
+}
+
 Technique _t() {
   final now = DateTime(2026, 6, 20);
   return Technique(id: _id, name: 'Twang', createdAt: now, updatedAt: now);
@@ -317,4 +338,37 @@ void main() {
       expect(vm.canRecordPractice, isTrue);
     },
   );
+
+  test('a cancelled import copies no more of its files', () async {
+    // Cancelled during the first of four, all four were still copied (each
+    // up to gigabytes), only to be deleted.
+    final repo = _Repo(_t());
+    final media = _GatedMedia(tmp);
+    final vm = TechniqueDetailViewModel(
+      repository: repo,
+      mediaService: media,
+      techniqueId: _id,
+      analysisService: _NoAnalysis(),
+      recorder: _Recorder(),
+    );
+    addTearDown(vm.dispose);
+    for (var i = 0; i < 200 && vm.technique == null; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+    vm.beginMediaDraft();
+    vm.beginEdit();
+    final adding = vm.addMedia([
+      '/a/1.wav',
+      '/a/2.wav',
+      '/a/3.wav',
+      '/a/4.wav',
+    ]);
+    await pumpEventQueue();
+    expect(media.imports, 1);
+    await vm.discardMediaDraft();
+    media.gate.complete();
+    await adding;
+    expect(media.imports, 1);
+    expect(vm.effectiveMedia, isEmpty);
+  });
 }

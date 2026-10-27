@@ -64,6 +64,30 @@ void main() {
     );
   });
 
+  test('importMedia refuses an empty source', () async {
+    // Staged and saved, it was an example that could neither play nor be
+    // analyzed, where the song screen refuses the same file.
+    final media = TechniqueMediaService(storage: _TempStorage(tmp));
+    final src = File(p.join(tmp.path, 'empty.mp3'))..writeAsBytesSync(const []);
+    await expectLater(
+      media.importMedia(
+        techniqueId: 'T1000000000000000000000000',
+        sourcePath: src.path,
+      ),
+      throwsA(
+        isA<FormatException>().having(
+          (e) => e.message,
+          'message',
+          'This file is empty.',
+        ),
+      ),
+    );
+    expect(
+      Directory(p.join(tmp.path, 'technique_media')).existsSync(),
+      isFalse,
+    );
+  });
+
   test('importMedia refuses an oversized source the same way', () async {
     final media = TechniqueMediaService(storage: _TempStorage(tmp));
     final src = await oversized();

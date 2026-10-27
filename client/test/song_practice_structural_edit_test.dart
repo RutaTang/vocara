@@ -7,6 +7,8 @@ import 'package:vocara/data/repositories/technique_repository.dart';
 import 'package:vocara/data/services/app_settings_service.dart';
 import 'package:vocara/data/services/audio_edit_service.dart';
 import 'package:vocara/data/services/audio_file_service.dart';
+import 'package:vocara/data/services/graph_audio_playback_service.dart'
+    show maxPlaybackDuration;
 import 'package:vocara/data/services/local_storage_service.dart';
 import 'package:vocara/data/services/playback_engine.dart';
 import 'package:vocara/data/services/source_separation_service.dart';
@@ -124,12 +126,20 @@ class _FakeFiles extends Fake implements AudioFileService {
   final List<String> events;
   int imports = 0;
 
+  /// When set, the next import fails reading its source (moved, a
+  /// disconnected drive).
+  bool failNextRead = false;
+
   @override
   Future<String> importAudio({
     required String practiceId,
     required String sourcePath,
   }) async {
     await Future<void>.delayed(Duration.zero);
+    if (failNextRead) {
+      failNextRead = false;
+      throw FileSystemException('Cannot open file', sourcePath);
+    }
     return '/import/${imports++}.wav';
   }
 
@@ -477,6 +487,54 @@ void main() {
     events.clear();
     return vm;
   }
+
+  group('imports kept consistent', () {
+    test('a screen already gone imports nothing more', () async {
+      // A drop of several files carried on importing after Back.
+      final vm = await pumpVm();
+      final before = repo.stored.vocalTracks.length;
+      vm.dispose();
+      await vm.addVocalTake('/src/late.wav');
+      await vm.addAccompaniment('/src/late.wav');
+      await vm.addReference('/src/late.wav');
+      expect(await vm.addClipToTake('single', '/src/late.wav'), isNull);
+      expect(files.imports, 0);
+      expect(repo.stored.vocalTracks, hasLength(before));
+    });
+
+    test('an imported take is selected', () async {
+      // Left on the take before, unlike a recorded take or an added clip.
+      final vm = await pumpVm();
+      await vm.addVocalTake('/src/new.wav');
+      final added = vm.practice!.vocalTracks.last;
+      expect(vm.selectedTrackId, added.id);
+    });
+
+    test('a file just over the length limit says so', () async {
+      // Rounded down, a file just over the limit read as exactly it.
+      final toasts = <String>[];
+      final vm = await pumpVm(
+        probeDuration: (_) => maxPlaybackDuration + const Duration(seconds: 30),
+      );
+      final sub = vm.toasts.listen(toasts.add);
+      addTearDown(sub.cancel);
+      await vm.addVocalTake('/src/long.wav');
+      await Future<void>.delayed(Duration.zero);
+      final over = maxPlaybackDuration.inMinutes + 1;
+      expect(toasts.single, startsWith('That file is $over minutes long.'));
+    });
+
+    test('a file that cannot be read says so', () async {
+      final toasts = <String>[];
+      final vm = await pumpVm();
+      final sub = vm.toasts.listen(toasts.add);
+      addTearDown(sub.cancel);
+      files.failNextRead = true;
+      await vm.addVocalTake('/src/gone.wav');
+      await Future<void>.delayed(Duration.zero);
+      expect(toasts, ["The file couldn't be read."]);
+    });
+  });
 
   group('parallel paths kept consistent', () {
     test('a failed lyric write takes the engine back with the model', () async {

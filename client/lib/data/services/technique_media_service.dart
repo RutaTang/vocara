@@ -48,7 +48,13 @@ class TechniqueMediaService {
     // Order: pure id validation, then the source stat, then any mkdir — a
     // refusal must precede every filesystem side effect.
     _checkPathComponent(techniqueId);
-    if (await File(sourcePath).length() > AudioFileService.maxImportBytes) {
+    final length = await File(sourcePath).length();
+    // Empty: staged and saved, it was an example that could neither play nor
+    // be analyzed, where the song screen refuses the same file.
+    if (length == 0) {
+      throw const FormatException('This file is empty.');
+    }
+    if (length > AudioFileService.maxImportBytes) {
       throw const FormatException(
         'This file is too large to import. Media longer than an hour is not '
         'supported.',
