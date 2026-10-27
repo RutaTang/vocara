@@ -246,9 +246,12 @@ class _TechniqueDetailScreenState extends State<TechniqueDetailScreen> {
     final confirmed = await showConfirmDialog(
       context,
       title: 'Remove this example?',
-      body:
-          "It's removed from this technique when you save. Cancel the edit to "
-          'keep it.',
+      // One added in this edit goes at once: Cancel would not bring it back
+      // (and discards it anyway).
+      body: vm.isUnsavedMedia(mediaId)
+          ? "This example hasn't been saved yet. Removing it deletes it."
+          : "It's removed from this technique when you save. Cancel the edit "
+                'to keep it.',
       confirmLabel: 'Remove',
     );
     if (!confirmed) return;

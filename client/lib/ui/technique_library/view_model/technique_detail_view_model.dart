@@ -115,11 +115,22 @@ class TechniqueDetailViewModel extends ChangeNotifier
       // from the stop on, like [save]'s: the stop unregisters this finalizer,
       // so a close-button run cut off mid-stage or mid-commit left the exit
       // request's run nothing to wait on, and the clip was lost.
-      final stopped = _recorder.stop();
-      await _recorder.guardStopFinalize(() async {
-        final staged = await _stageStoppedExample(stopped);
-        if (staged != null) await _persistExampleAtQuit(staged);
-      });
+      // Held as [save] holds it, from the stop to the commit's end: the
+      // window stays usable while the quit waits, and a Save meanwhile ran a
+      // second commit against the same base, while Cancel → Discard deleted
+      // the clip being committed.
+      _saving = true;
+      notifyListeners();
+      try {
+        final stopped = _recorder.stop();
+        await _recorder.guardStopFinalize(() async {
+          final staged = await _stageStoppedExample(stopped);
+          if (staged != null) await _persistExampleAtQuit(staged);
+        });
+      } finally {
+        _saving = false;
+        notifyListeners();
+      }
     } else if (isRecordingPractice) {
       // A practice take is ephemeral: the dying process would never show the
       // analysis result, so skip the full DSP pass and only clean up — quit
@@ -278,10 +289,16 @@ class TechniqueDetailViewModel extends ChangeNotifier
   /// The reload body: shared by the sync event and by [endEdit]'s replay.
   Future<void> _reloadFromRemote() async {
     if (_disposed) return;
-    if (_technique == null || load.running) {
+    if (load.running) {
       // Owed after the load (see the constructor): dropped, a rename landing
       // after the first read stayed invisible, Edit and Cancel included.
       _missedRemote = true;
+      return;
+    }
+    if (_technique == null) {
+      // The first load failed (a passing read error): the change is a reason
+      // to read again, not one owed to a load that has already ended.
+      unawaited(load.execute());
       return;
     }
     if (_holdsEditorState()) return;
@@ -811,9 +828,12 @@ class TechniqueDetailViewModel extends ChangeNotifier
   /// so everything captured up to the limit is saved, instead of leaving a take
   /// that looks like it is still recording while nothing more is stored.
   void _onRecordLimitReached() {
-    _recordingNotice =
-        'Recording stopped at the six-hour maximum length. '
-        'Everything up to that point was saved.';
+    // A practice take is never saved (only analyzed), so it is told no such
+    // thing.
+    _recordingNotice = _recordingExample
+        ? 'Recording stopped at the six-hour maximum length. '
+              'Everything up to that point was saved.'
+        : 'Recording stopped at the six-hour maximum length.';
     if (_recordingExample) {
       unawaited(stopExampleRecording());
     } else {
@@ -846,7 +866,10 @@ class TechniqueDetailViewModel extends ChangeNotifier
     final pending = _recorder.start(destination);
     notifyListeners();
     final r = await pending;
-    if (!r.started) notifyListeners();
+    // A remote change held off while it pended is owed now, as after a
+    // failed import (see [_busyEnded]): left, the page kept the old text,
+    // and an edit seeded from it saved over the change.
+    if (!r.started) _busyEnded();
     return r;
   }
 
@@ -918,12 +941,23 @@ class TechniqueDetailViewModel extends ChangeNotifier
       !_saving &&
       !_recorder.isStarting;
 
+  /// Whether the start pending (see [starting]) is a practice take's: its
+  /// button says so and takes no taps, as the example's does.
+  bool get startingPractice => _practiceStarting && _recorder.isStarting;
+  bool _practiceStarting = false;
+
   /// Starts an ephemeral practice recording. Returns an error to show, or null.
   Future<String?> startPractice() async {
     if (!canRecordPractice) return null;
-    final r = await _startRecorder(
-      RecordingPathStrategy.tempDir('vocara_practice'),
-    );
+    final MicRecordingStart r;
+    _practiceStarting = true;
+    try {
+      r = await _startRecorder(
+        RecordingPathStrategy.tempDir('vocara_practice'),
+      );
+    } finally {
+      _practiceStarting = false;
+    }
     final failure = r.failure;
     if (failure != null) return _startFailureMessage(failure);
     // Not started with no failure: the start was invalidated mid-await
@@ -1029,7 +1063,8 @@ class TechniqueDetailViewModel extends ChangeNotifier
       if (_practiceGeneration == generation) {
         if (!recordingClean) {
           _recordingNotice = result == null
-              ? 'Recording failed. The take could not be saved.'
+              // A practice take is analyzed, never saved.
+              ? 'Recording failed. The take could not be analyzed.'
               : 'Recording hit a disk error. The take may be incomplete.';
         }
         _practice = result;
@@ -1044,7 +1079,8 @@ class TechniqueDetailViewModel extends ChangeNotifier
     } catch (e) {
       if (_practiceGeneration == generation) {
         if (!recordingClean) {
-          _recordingNotice = 'Recording failed. The take could not be saved.';
+          _recordingNotice =
+              'Recording failed. The take could not be analyzed.';
         }
         _practice = null;
         _practiceFailed = true;
@@ -1755,6 +1791,11 @@ class TechniqueDetailViewModel extends ChangeNotifier
   /// Removes one example clip. A staged (not-yet-saved) addition is dropped and
   /// its file deleted now; a persisted example is staged for removal (its file
   /// is deleted on save).
+  /// Whether example [mediaId] was added in this edit and not saved yet:
+  /// removing it deletes it at once (see [removeMedia]), with nothing for
+  /// Cancel to bring back.
+  bool isUnsavedMedia(String mediaId) => _draftAdds.any((m) => m.id == mediaId);
+
   Future<void> removeMedia(String mediaId) async {
     // In-flight-save invariant (backstop behind the disabled UI): a removal
     // staged now is invisible to the airborne commit and gets cleared with

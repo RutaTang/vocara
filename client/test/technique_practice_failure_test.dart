@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -69,12 +70,22 @@ class _FakeRecorder extends Fake implements MicRecordingController {
   ValueNotifier<double> get level => _level;
   @override
   bool get isRecording => recording;
+
+  /// When set, a start pends on it (the permission prompt, the mic opening).
+  Completer<void>? gate;
+  bool _starting = false;
   @override
-  bool get isStarting => false;
+  bool get isStarting => _starting;
   @override
   bool get feedingMonitor => recording;
   @override
   Future<MicRecordingStart> start(RecordingPathStrategy destination) async {
+    final g = gate;
+    if (g != null) {
+      _starting = true;
+      await g.future;
+      _starting = false;
+    }
     final d = Directory(p.join(dir.path, 'practice_take'))..createSync();
     _path = p.join(d.path, 'take.wav');
     File(_path!).writeAsBytesSync(const [1, 2, 3]);
@@ -260,6 +271,64 @@ void main() {
     expect(vm.analysisSubject, TechniqueAnalysisSubject.practice);
     expect(find.textContaining('too long'), findsOneWidget);
 
+    vm.dispose();
+    tmp.deleteSync(recursive: true);
+  });
+
+  testWidgets('the practice button says the mic is starting, and takes no '
+      'taps', (tester) async {
+    // It said "Record practice" through the permission prompt and the mic's
+    // opening, and every tap did nothing, unlike the example's record row.
+    final tmp = Directory.systemTemp.createTempSync('vocara_pf');
+    final now = DateTime(2026, 6, 20);
+    final recorder = _FakeRecorder(tmp)..gate = Completer<void>();
+    late TechniqueDetailViewModel vm;
+    await tester.runAsync(() async {
+      vm = TechniqueDetailViewModel(
+        repository: _FakeRepo(
+          Technique(id: 'T1', name: 'Twang', createdAt: now, updatedAt: now),
+        ),
+        mediaService: TechniqueMediaService(storage: _TempStorage(tmp)),
+        techniqueId: 'T1',
+        analysisService: _Analysis(),
+        recorder: recorder,
+      );
+      for (var i = 0; i < 200 && vm.technique == null; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+    });
+    vm.setAnalysisDim(8);
+    await tester.binding.setSurfaceSize(const Size(960, 1200));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: ListenableBuilder(
+              listenable: vm,
+              builder: (_, _) => TechniqueExampleAnalysis(vm: vm),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(find.text('Record practice'), findsOneWidget);
+
+    late Future<String?> starting;
+    await tester.runAsync(() async {
+      starting = vm.startPractice();
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    });
+    await tester.pump();
+    expect(find.text('Starting the microphone…'), findsOneWidget);
+    expect(find.text('Record practice'), findsNothing);
+
+    recorder.gate!.complete();
+    await tester.runAsync(() async {
+      expect(await starting, isNull);
+      await vm.stopPractice(skipAnalysis: true);
+    });
     vm.dispose();
     tmp.deleteSync(recursive: true);
   });

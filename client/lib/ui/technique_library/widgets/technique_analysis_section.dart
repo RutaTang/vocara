@@ -133,13 +133,21 @@ class _Controls extends StatelessWidget {
           ),
         ] else if (vm.practiceAnalysisLoading)
           const _RecButton(label: 'Analyzing…', icon: FIcons.loader)
+        // As the example's record row: while the mic starts (the permission
+        // prompt, the device opening) it said "Record practice" and ignored
+        // every tap, as it did whenever a take could not start.
+        else if (vm.startingPractice)
+          const _RecButton(
+            label: 'Starting the microphone…',
+            icon: FIcons.loader,
+          )
         else ...[
           if (hasPractice) _TextButton(label: 'Clear', onTap: vm.clearPractice),
           const SizedBox(width: 8),
           _RecButton(
             label: hasPractice ? 'Re-record' : 'Record practice',
             icon: FIcons.mic,
-            onTap: () => _record(context),
+            onTap: vm.canRecordPractice ? () => _record(context) : null,
           ),
         ],
       ],
