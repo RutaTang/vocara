@@ -993,4 +993,28 @@ void main() {
     ).singersFormantDb;
     expect((sf(clean) - sf(offset)).abs(), lessThan(1.0));
   });
+
+  test('clipping reads a held rail, not a loud low note cresting above it', () {
+    // The engine records float after its input gain: a clean low note can
+    // crest above 1.0, its peak samples a few 1e-5 apart, and it read as
+    // clipped ("lower the mic gain") though nothing clipped.
+    Float32List tone(double hz, double amp, {double? rail}) {
+      final x = Float32List(_sr * 2);
+      for (var i = 0; i < x.length; i++) {
+        final v = amp * sin(2 * pi * hz * i / _sr);
+        x[i] = rail == null ? v : v.clamp(-rail, rail);
+      }
+      return x;
+    }
+
+    for (final hz in [73.4, 82.4, 110.0]) {
+      final m = computeVoiceMetrics(tone(hz, 2.0), _sr);
+      expect(m.clippedFraction, 0, reason: '$hz Hz cresting at 2.0');
+      expect(m.isClipped, isFalse);
+    }
+    // A file clipped where it was made holds the rail exactly.
+    final clipped = computeVoiceMetrics(tone(220, 2.0, rail: 1.0), _sr);
+    expect(clipped.isClipped, isTrue);
+    expect(clipped.clippedFraction, greaterThan(0.5));
+  });
 }

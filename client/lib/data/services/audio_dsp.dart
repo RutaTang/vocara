@@ -761,8 +761,16 @@ class _MetricsPass {
 
   /// Streams raw samples through the input-quality scan (peak / true-clipping
   /// run detection). Chunk boundaries are invisible: the run state carries.
+  ///
+  /// A clipped run is held at the rail: flat to float rounding, not merely
+  /// slow. The engine records float after its input gain, so a clean loud
+  /// low note crests above 1.0 with neighbouring samples a few 1e-5 apart;
+  /// within the old 3e-4 they read as clipped and the take said to lower the
+  /// mic gain over audio that never clipped. (Clipping at the mic itself is
+  /// not visible in such a take at all: its high-pass and gain reshape the
+  /// plateau. What still reads here is a file clipped where it was made.)
   void feedClip(Float32List chunk) {
-    const clipLevel = 0.997, clipRun = 4, flatEps = 0.0003;
+    const clipLevel = 0.997, clipRun = 4, flatEps = 1e-6;
     for (var i = 0; i < chunk.length; i++) {
       final a = chunk[i].abs();
       if (a > _peak) _peak = a;
