@@ -274,6 +274,20 @@ fn a_table_declaring_more_than_the_file_holds_is_refused_before_the_probe() {
 }
 
 #[test]
+fn the_audio_track_is_read_when_a_video_track_comes_first() {
+    // symphonia's default track is simply the first, which in an MP4 is usually its video: the
+    // probe saw no length and the decode failed as an unsupported codec. 100 ms of ALAC behind
+    // a 16x16 MPEG-4 frame.
+    let path = format!(
+        "{}/tests/fixtures/video_first_100ms.mp4",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    assert_eq!(probe_duration_ms(&path), Ok(Some(100)));
+    let (frames, rate) = decode_file(&path, 0.0, 0, 0).unwrap();
+    assert_eq!((frames.len(), rate), (4410, 44_100));
+}
+
+#[test]
 fn a_sample_larger_than_the_file_is_refused() {
     // Each packet is read whole into a buffer of its declared size: a size of 4 billion took the
     // allocation down at the first packet, aborting the app. A constant size is screened before

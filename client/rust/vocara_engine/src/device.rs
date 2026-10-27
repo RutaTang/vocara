@@ -3972,6 +3972,18 @@ fn edge_trim(params: &symphonia::core::codecs::CodecParameters) -> (u64, u64) {
     )
 }
 
+/// The track decoding reads: the first with a codec. symphonia's own default is simply the
+/// first track, which in an MP4 holding a video or cover-picture track ahead of its audio is
+/// that one, and the decode failed as an unsupported codec.
+fn audio_track(
+    format: &dyn symphonia::core::formats::FormatReader,
+) -> Option<&symphonia::core::formats::Track> {
+    format
+        .tracks()
+        .iter()
+        .find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
+}
+
 /// The most frames a decoder may size one packet's buffer for. Real codecs stay far below
 /// (MP3 1152, AAC 2048, ALAC 4096, FLAC 65535), but the count comes from the file, and the
 /// decoder allocates it (times the channels) as it is built, before any budget here applies:
@@ -4036,10 +4048,7 @@ pub fn probe_duration_ms(path: &str) -> Result<Option<u64>, String> {
     let probed = symphonia::default::get_probe()
         .format(&hint, mss, &Default::default(), &MetadataOptions::default())
         .map_err(|e| format!("probe: {e}"))?;
-    let track = probed
-        .format
-        .default_track()
-        .ok_or_else(|| "no default track".to_string())?;
+    let track = audio_track(&*probed.format).ok_or_else(|| "no audio track".to_string())?;
     let rate = track.codec_params.sample_rate.unwrap_or(0) as u64;
     let (delay, padding) = edge_trim(&track.codec_params);
     Ok(match (track.codec_params.n_frames, rate) {
@@ -4156,9 +4165,7 @@ pub fn decode_file(
         .format(&hint, mss, &Default::default(), &MetadataOptions::default())
         .map_err(|e| err(format!("probe: {e}")))?;
     let mut format = probed.format;
-    let track = format
-        .default_track()
-        .ok_or_else(|| err("no default track".to_string()))?;
+    let track = audio_track(&*format).ok_or_else(|| err("no audio track".to_string()))?;
     let track_id = track.id;
     // Per link of a chained stream: each brings its own (see the reset below).
     let (mut skip, mut padding) = edge_trim(&track.codec_params);
@@ -4251,12 +4258,11 @@ pub fn decode_file(
                 break; // normal end of stream
             }
             Err(symphonia::core::errors::Error::ResetRequired) => {
-                // Rebuild the decoder against the new default track and keep
+                // Rebuild the decoder against the new audio track and keep
                 // going. A mid-stream sample-rate change is refused honestly:
                 // this single-rate output cannot represent it.
-                let track = format
-                    .default_track()
-                    .ok_or_else(|| err("reset: no default track".to_string()))?;
+                let track = audio_track(&*format)
+                    .ok_or_else(|| err("reset: no audio track".to_string()))?;
                 if track.codec_params.sample_rate.unwrap_or(src_rate) != src_rate {
                     return Err(err(format!(
                         "mid-stream sample-rate change in {path} is unsupported"
