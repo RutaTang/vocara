@@ -19,6 +19,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart' show Scrollable;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
 import 'package:vocara/app.dart';
@@ -156,6 +157,25 @@ Future<bool> pumpUntil(
 
 /// True once at least one widget matches [finder].
 bool present(Finder finder) => finder.evaluate().isNotEmpty;
+
+/// Scrolls the first scrollable inside [within] until [finder] is built and on
+/// screen. A lazy list (the settings page) builds only what lies near its
+/// viewport, so on a short display — a CI runner — a row below the fold is not
+/// in the tree at all until scrolled to.
+Future<void> scrollTo(
+  WidgetTester tester,
+  Finder finder, {
+  required Finder within,
+}) async {
+  await tester.scrollUntilVisible(
+    finder,
+    120,
+    scrollable: find
+        .descendant(of: within, matching: find.byType(Scrollable))
+        .first,
+  );
+  await tester.pump();
+}
 
 /// Moves a synthetic mouse pointer onto [finder]'s center so a hover-only
 /// affordance (e.g. a card's delete icon, which is only built while the card is

@@ -189,6 +189,11 @@ void main() {
       findsWidgets,
       reason: 'each device card offers a System Default row',
     );
+    await scrollTo(
+      tester,
+      find.byType(Slider),
+      within: find.byType(SettingsScreen),
+    );
     expect(
       find.byType(Slider),
       findsOneWidget,

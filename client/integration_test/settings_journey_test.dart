@@ -85,6 +85,11 @@ void main() {
       findsWidgets,
       reason: 'each device card offers a System Default row',
     );
+    await scrollTo(
+      tester,
+      find.byType(Slider),
+      within: find.byType(SettingsScreen),
+    );
     expect(
       find.byType(Slider),
       findsOneWidget,
@@ -97,13 +102,11 @@ void main() {
   ) async {
     await boot(tester);
 
-    final slider = find.byType(Slider);
-    expect(await pumpUntil(tester, () => present(slider)), isTrue);
-
     // On a short display (CI runner) the MONITORING section sits below the
-    // fold: the slider exists in the tree but a drag at its coordinates
-    // would land outside the viewport and silently do nothing.
-    await tester.ensureVisible(slider);
+    // fold: the lazy list has not built the slider yet, and a drag at a
+    // position off the viewport would silently do nothing.
+    final slider = find.byType(Slider);
+    await scrollTo(tester, slider, within: find.byType(SettingsScreen));
     await tester.pumpAndSettle();
 
     final before = reverbPercent(tester);
