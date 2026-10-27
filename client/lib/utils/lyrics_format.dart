@@ -134,7 +134,9 @@ final _lrcOffsetTag = RegExp(
 /// Parses an `.lrc` document into timed lines, sorted by time. A line with
 /// several timestamps emits one entry per timestamp; metadata tags (`[ti:]`,
 /// `[ar:]`, …) and untimed lines are skipped, but an `[offset:]` moves every
-/// time by it (ignored, a file with one landed that much off).
+/// time by it (ignored, a file with one landed that much off). Throws a
+/// [FormatException] for a document that would expand past a few times its
+/// own size.
 List<LyricLine> parseLrc(String content) {
   var offsetMs = 0;
   for (final raw in content.split('\n')) {
@@ -144,12 +146,23 @@ List<LyricLine> parseLrc(String content) {
     if (ms != null) offsetMs = ms;
   }
   final out = <LyricLine>[];
+  // A line's text is repeated once per time tag on it: half a megabyte of
+  // tags before one long text came to billions of characters, and the save
+  // ran out of memory encoding them.
+  final budget = math.max(1 << 20, content.length * 4);
+  var emitted = 0;
   for (final raw in content.split('\n')) {
     final line = raw.trim();
     if (line.isEmpty) continue;
     final tags = _lrcTimeTag.allMatches(line).toList();
     if (tags.isEmpty) continue;
     final text = line.replaceAll(_lrcTimeTag, '').trim();
+    emitted += (text.length + 1) * tags.length;
+    if (emitted > budget) {
+      throw const FormatException(
+        'These lyrics repeat their lines too many times to load.',
+      );
+    }
     for (final m in tags) {
       final minutes = int.parse(m.group(1)!);
       final seconds = int.parse(m.group(2)!);

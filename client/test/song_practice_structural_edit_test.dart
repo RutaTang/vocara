@@ -518,6 +518,45 @@ void main() {
       },
     );
 
+    test(
+      'a lyrics "file" that is a pipe or a device is refused at once',
+      () async {
+        // Their length reads 0, so the size cap passed and the read went on
+        // without end: a pipe held the import open, /dev/zero ate memory.
+        final dir = Directory.systemTemp.createTempSync('lyrics_dev');
+        addTearDown(() => dir.deleteSync(recursive: true));
+        final pipe = '${dir.path}/pipe.lrc';
+        expect((await Process.run('mkfifo', [pipe])).exitCode, 0);
+        final zero = '${dir.path}/zero.lrc';
+        Link(zero).createSync('/dev/zero');
+        final toasts = <String>[];
+        final vm = await pumpVm();
+        final sub = vm.toasts.listen(toasts.add);
+        addTearDown(sub.cancel);
+        final before = vm.lyrics;
+        for (final path in [pipe, zero]) {
+          await vm
+              .importLyricsFromFile(path)
+              .timeout(const Duration(seconds: 3));
+        }
+        await Future<void>.delayed(Duration.zero);
+        expect(toasts, hasLength(2));
+        expect(vm.lyrics, before);
+      },
+    );
+
+    test('lyrics that repeat their lines past reason are refused, not '
+        'expanded', () async {
+      final toasts = <String>[];
+      final vm = await pumpVm();
+      final sub = vm.toasts.listen(toasts.add);
+      addTearDown(sub.cancel);
+      final crafted = '${'[0:00]' * 40000}${'x' * 100000}';
+      expect(await vm.applyEditedLyrics(crafted), isFalse);
+      await Future<void>.delayed(Duration.zero);
+      expect(toasts.single, contains('too many times'));
+    });
+
     test('a file just over the length limit says so', () async {
       // Rounded down, a file just over the limit read as exactly it.
       final toasts = <String>[];

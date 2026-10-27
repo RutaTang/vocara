@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
@@ -780,9 +782,18 @@ class SongPracticeDetailViewModel extends ChangeNotifier
 
   /// Imports pasted/dropped lyrics — `.lrc` if it has time tags, else plain.
   /// Returns whether the write landed.
-  Future<bool> importLyrics(String content) => _importLyricLines(
-    looksLikeLrc(content) ? parseLrc(content) : parsePlainLyrics(content),
-  );
+  Future<bool> importLyrics(String content) {
+    final List<LyricLine> lines;
+    try {
+      lines = looksLikeLrc(content)
+          ? parseLrc(content)
+          : parsePlainLyrics(content);
+    } on FormatException catch (e) {
+      _toast(e.message);
+      return Future.value(false);
+    }
+    return _importLyricLines(lines);
+  }
 
   Future<bool> _importLyricLines(List<LyricLine> lines) async {
     if (lines.every((l) => l.isBlank)) {
@@ -820,12 +831,23 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       return;
     }
     try {
-      final file = File(path);
-      if (await file.length() > 512 * 1024) {
+      // A plain file, read no further than the cap: a link to a device
+      // (/dev/zero) reports no length and was read without end, and a pipe
+      // held the import open for good.
+      if (await FileSystemEntity.type(path) != FileSystemEntityType.file) {
+        _toast("Couldn't read that file as lyrics.");
+        return;
+      }
+      const cap = 512 * 1024;
+      final bytes = BytesBuilder(copy: false);
+      await for (final chunk in File(path).openRead(0, cap + 1)) {
+        bytes.add(chunk);
+      }
+      if (bytes.length > cap) {
         _toast('That file is too large to be lyrics.');
         return;
       }
-      final text = await file.readAsString();
+      final text = utf8.decode(bytes.takeBytes());
       // A .lrc file is LRC wherever its time tags are; a text file only when
       // every line is timed (see [isLrcDocument]): [parseLrc] drops untimed
       // lines, so one "Guitar solo [2:30]" kept that line of a .txt alone.

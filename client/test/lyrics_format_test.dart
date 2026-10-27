@@ -185,4 +185,13 @@ void main() {
     final round = toLrc(parseLrc(lrc));
     expect(round, lrc);
   });
+
+  test('an LRC line repeated past reason is refused, not expanded', () {
+    // 40 000 tags before one long text: each tag repeats the text.
+    final crafted = '${'[0:00]' * 40000}${'x' * 100000}';
+    expect(() => parseLrc(crafted), throwsFormatException);
+    // A chorus under a handful of tags is what the repetition is for.
+    final chorus = parseLrc('[00:10][01:10][02:10]la la\n[00:20]verse');
+    expect(chorus.map((l) => l.timeMs), [10000, 20000, 70000, 130000]);
+  });
 }
