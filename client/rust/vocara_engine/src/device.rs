@@ -3996,6 +3996,21 @@ fn oversized_packets(params: &symphonia::core::codecs::CodecParameters) -> bool 
     declared.max(alac) > MAX_FRAMES_PER_PACKET
 }
 
+/// Whether building a decoder for `params` would allocate unbounded from what the file
+/// declares, before any decode budget applies: an oversized packet buffer (see
+/// [`oversized_packets`]), or, for Vorbis, a codebook VQ lookup table sized by the setup
+/// header's entry count and dimensions (see [`crate::media_screen::vorbis_setup_overlarge`]).
+fn decoder_overallocates(params: &symphonia::core::codecs::CodecParameters) -> bool {
+    if oversized_packets(params) {
+        return true;
+    }
+    params.codec == symphonia::core::codecs::CODEC_TYPE_VORBIS
+        && params
+            .extra_data
+            .as_deref()
+            .is_some_and(crate::media_screen::vorbis_setup_overlarge)
+}
+
 /// Probe `path`'s DECLARED duration in milliseconds without decoding a single packet:
 /// container probe only, so an import gate can refuse an hours-long file before any copy or
 /// allocation happens. `Ok(None)` = the container declares no frame count (e.g. a plain mp3
@@ -4117,8 +4132,10 @@ pub fn decode_file(
         }
     }
     // A sample table, packet table or tag that declares more than the file holds: symphonia
-    // reserves it whole during the probe, and failing to allocate aborts the app.
-    match crate::media_screen::screen(&mut file) {
+    // reserves it whole during the probe, and failing to allocate aborts the app. The full
+    // scan (decode reads the whole file anyway) also covers an Ogg stream's later links, whose
+    // header packets symphonia parses as it decodes; the import gate's bounded scan does not.
+    match crate::media_screen::screen_full(&mut file) {
         Ok(()) => {}
         Err(crate::media_screen::Refusal::Impossible(_)) => return Err(DecodeError::TooBig),
         Err(crate::media_screen::Refusal::Io(e)) => {
@@ -4202,7 +4219,7 @@ pub fn decode_file(
         Some(n) => Vec::with_capacity(n.min(max_frames) as usize),
         None => Vec::new(),
     };
-    if oversized_packets(&track.codec_params) {
+    if decoder_overallocates(&track.codec_params) {
         return Err(DecodeError::TooBig);
     }
     let mut decoder = symphonia::default::get_codecs()
@@ -4253,7 +4270,7 @@ pub fn decode_file(
                 out.truncate(kept.max(link_start as u64) as usize);
                 (skip, padding) = edge_trim(&track.codec_params);
                 link_start = out.len();
-                if oversized_packets(&track.codec_params) {
+                if decoder_overallocates(&track.codec_params) {
                     return Err(DecodeError::TooBig);
                 }
                 decoder = symphonia::default::get_codecs()

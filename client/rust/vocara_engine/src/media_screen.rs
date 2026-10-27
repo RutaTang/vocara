@@ -49,10 +49,23 @@ fn impossible<T>(why: String) -> Result<T, Refusal> {
 }
 
 /// Refuses `src` when the container symphonia would read it as declares a table, chunk or
-/// metadata length that the file cannot hold. Leaves `src` where it found it.
+/// metadata length that the file cannot hold. Leaves `src` where it found it. The scan is
+/// bounded (the import gate runs it on every file), so an Ogg stream's later links are left
+/// unchecked; [`screen_full`] covers them.
 pub fn screen<R: Read + Seek>(src: &mut R) -> Result<(), Refusal> {
+    run(src, false)
+}
+
+/// Like [`screen`], but with no bound on the Ogg scan beyond the end of the file, so every
+/// link's header packets are checked. For the decode path, which reads the whole file anyway
+/// and, unlike the probe, parses the header packets of every chained link.
+pub fn screen_full<R: Read + Seek>(src: &mut R) -> Result<(), Refusal> {
+    run(src, true)
+}
+
+fn run<R: Read + Seek>(src: &mut R, full: bool) -> Result<(), Refusal> {
     let start = src.stream_position()?;
-    let verdict = scan(&mut Source::new(&mut *src)?);
+    let verdict = scan(&mut Source::new(&mut *src)?, full);
     src.seek(SeekFrom::Start(start))?;
     verdict
 }
@@ -60,7 +73,7 @@ pub fn screen<R: Read + Seek>(src: &mut R) -> Result<(), Refusal> {
 /// How far symphonia's probe looks for a container marker before giving up (its own constant).
 const PROBE_SEARCH_LIMIT: u64 = 1 << 20;
 
-fn scan<R: Read + Seek>(file: &mut Source<R>) -> Result<(), Refusal> {
+fn scan<R: Read + Seek>(file: &mut Source<R>, full: bool) -> Result<(), Refusal> {
     // Any number of ID3v2 tags may stand ahead of the container, as the probe follows them all.
     // Each search starts past the last tag and stops at the first marker, so together they
     // cover the file at most once.
@@ -82,7 +95,7 @@ fn scan<R: Read + Seek>(file: &mut Source<R>) -> Result<(), Refusal> {
             Marker::Mp4 => return mp4(file, at.saturating_sub(4)),
             Marker::Caf => return caf(file, at),
             Marker::Flac => return flac(file, at),
-            Marker::Ogg => return ogg(file, at),
+            Marker::Ogg => return ogg(file, at, full),
             Marker::Unscreened => return Ok(()),
         }
     }
@@ -573,24 +586,45 @@ struct OggPage {
     continued: bool,
 }
 
-/// Checks the header packets of each logical stream in the first link of an Ogg file: the
-/// comment packet of a Vorbis or Opus stream, and the comment and picture blocks of an Ogg FLAC
-/// one. Bounded, so a stream whose headers outlast the bounds is left unchecked.
-fn ogg<R: Read + Seek>(file: &mut Source<R>, start: u64) -> Result<(), Refusal> {
+/// Checks the header packets of each logical stream in an Ogg file: the comment and setup
+/// packets of a Vorbis stream, the comment packet of an Opus one, and the comment and picture
+/// blocks of an Ogg FLAC one. The bounded scan ([`screen`]) covers only the first link; the
+/// full scan ([`screen_full`]) walks every link to the end of the file. A stream whose headers
+/// outlast the bounded scan's limits is left unchecked.
+fn ogg<R: Read + Seek>(file: &mut Source<R>, start: u64, full: bool) -> Result<(), Refusal> {
     let mut pages = Pages {
         at: start,
         scanned: 0,
         read: 0,
+        full,
         segments: Vec::new(),
         body: Vec::new(),
     };
-    // The reader gives up on a stream whose first page is damaged or does not open a stream.
-    let mut page = match pages.next(file)? {
-        Next::Page(page) if page.first => page,
+    // The reader gives up on a stream that does not open with a first page.
+    let mut next = match pages.next(file)? {
+        Next::Page(page) if page.first => Some(page),
         _ => return Ok(()),
     };
+    // Each physical link is a fresh set of streams. The bounded scan stops after the first.
+    while let Some(opening) = next {
+        next = ogg_link(file, &mut pages, opening)?;
+        if !full {
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+/// Checks one physical link, starting at its first page, and returns the first page of the
+/// next link (or None at the end of the file).
+fn ogg_link<R: Read + Seek>(
+    file: &mut Source<R>,
+    pages: &mut Pages,
+    opening: OggPage,
+) -> Result<Option<OggPage>, Refusal> {
     let mut streams: Vec<Stream> = Vec::new();
     // Each opening page carries a stream's identification packet, which picks its mapping.
+    let mut page = opening;
     while page.first {
         if let Some(&(_, len)) = pages.packets().first() {
             if let Some(mapping) = mapping(&pages.body[..len]) {
@@ -607,22 +641,28 @@ fn ogg<R: Read + Seek>(file: &mut Source<R>, start: u64) -> Result<(), Refusal> 
         }
         page = match pages.next_valid(file)? {
             Some(next) => next,
-            None => return Ok(()),
+            None => return Ok(None),
         };
     }
     loop {
-        // A stream opening now is the next link of a chained file, beyond this scan.
-        if page.first || streams.iter().all(|s| s.audio) {
-            return Ok(());
+        // A first page opens the next link.
+        if page.first {
+            return Ok(Some(page));
+        }
+        // Once every stream's header packets are behind it, nothing in this link is left to
+        // check; skip to where the next link begins.
+        if streams.iter().all(|s| s.audio) {
+            return pages.next_first_page(file);
         }
         if let Some(stream) = streams.iter_mut().find(|s| s.serial == page.serial) {
-            if !stream.read_page(&page, &pages)? {
-                return Ok(());
+            // A packet the reader cannot assemble fails its decode; this link is done.
+            if !stream.read_page(&page, pages)? {
+                return pages.next_first_page(file);
             }
         }
         page = match pages.next_valid(file)? {
             Some(next) => next,
-            None => return Ok(()),
+            None => return Ok(None),
         };
     }
 }
@@ -741,6 +781,9 @@ struct Pages {
     at: u64,
     scanned: u64,
     read: u32,
+    /// The full scan walks every link to the end of the file; the bounded scan stops at its
+    /// byte and page limits.
+    full: bool,
     segments: Vec<u8>,
     body: Vec<u8>,
 }
@@ -752,6 +795,21 @@ impl Pages {
                 Next::Page(page) => return Ok(Some(page)),
                 Next::Damaged => {}
                 Next::End => return Ok(None),
+            }
+        }
+    }
+
+    /// Reads on past the current link's remaining pages to the first page of the next link,
+    /// without checking packets. None at the end of the file.
+    fn next_first_page<R: Read + Seek>(
+        &mut self,
+        file: &mut Source<R>,
+    ) -> Result<Option<OggPage>, Refusal> {
+        loop {
+            match self.next_valid(file)? {
+                Some(page) if page.first => return Ok(Some(page)),
+                Some(_) => {}
+                None => return Ok(None),
             }
         }
     }
@@ -803,7 +861,7 @@ impl Pages {
     fn sync<R: Read + Seek>(&mut self, file: &mut Source<R>) -> io::Result<Option<u64>> {
         let mut chunk = [0u8; 4096];
         loop {
-            if self.scanned >= MAX_OGG_BYTES || self.read >= MAX_OGG_PAGES {
+            if !self.full && (self.scanned >= MAX_OGG_BYTES || self.read >= MAX_OGG_PAGES) {
                 return Ok(None);
             }
             let n = file.read_upto(self.at, &mut chunk)?;
@@ -862,6 +920,198 @@ fn ogg_crc(mut crc: u32, bytes: &[u8]) -> u32 {
         crc = (crc << 8) ^ TABLE[usize::from((crc >> 24) as u8 ^ b)];
     }
     crc
+}
+
+// ---------------------------------------------------------------------------------------------
+// Vorbis setup header
+
+/// The most f32 a Vorbis codebook's VQ lookup table may hold before it is refused. The decoder
+/// allocates `entries * dimensions` of them for each type-1 or type-2 codebook as it is built,
+/// from a cheap setup header: a type-1 codebook declares a huge table from a few bytes, since
+/// it reads only `lookup1_values(entries, dimensions)` multiplicands, far fewer than the table
+/// it fills. 2^24 (64 MiB) is far above any real codebook.
+const MAX_VQ_FLOATS: u64 = 1 << 24;
+
+/// Whether building a Vorbis decoder from `extra_data` (the identification header followed by
+/// the setup header) would size a codebook's VQ lookup table past [`MAX_VQ_FLOATS`]. The setup
+/// header is parsed bit for bit as the decoder parses it, so a later codebook is reached only
+/// where the earlier ones are read as it reads them. Anything malformed or truncated is left
+/// for the decoder to reject.
+pub fn vorbis_setup_overlarge(extra_data: &[u8]) -> bool {
+    vorbis_codebooks(extra_data) == Some(Walk::Done)
+}
+
+/// Walks the codebooks of the setup header the decoder would build from `extra_data`.
+/// `Some(Walk::Done)` once one would allocate past the cap and the decoder would reach it;
+/// None or `Some(Walk::Short)` when nothing proves oversized (malformed, truncated, or within
+/// the cap), to leave for the decoder.
+fn vorbis_codebooks(extra_data: &[u8]) -> Option<Walk> {
+    // The identification header is a fixed 30 bytes. The decoder validates these and bails,
+    // allocating nothing, before it reads the setup header, so a bad one is not our concern.
+    let ident = extra_data.get(..30)?;
+    let u32le = |i: usize| u32::from_le_bytes([ident[i], ident[i + 1], ident[i + 2], ident[i + 3]]);
+    if ident[0] != 1 || &ident[1..7] != b"vorbis" || u32le(7) != 0 {
+        return None;
+    }
+    let channels = ident[11];
+    let block_sizes = ident[28];
+    let (bs0, bs1) = (block_sizes & 0x0f, block_sizes >> 4);
+    if channels == 0
+        || channels > 32
+        || u32le(12) == 0
+        || !(6..=13).contains(&bs0)
+        || !(6..=13).contains(&bs1)
+        || bs0 > bs1
+        || ident[29] != 1
+    {
+        return None;
+    }
+    // The setup header follows, as its own packet: a type byte, the signature, then the
+    // codebooks, read as a bitstream.
+    let setup = extra_data.get(30..)?;
+    if setup.first() != Some(&5) || setup.get(1..7) != Some(b"vorbis") {
+        return None;
+    }
+    let mut bs = BitRtl::new(setup.get(7..)?);
+    let count = bs.bits(8)? + 1;
+    for _ in 0..count {
+        if codebook_overlarge(&mut bs)? == Walk::Done {
+            return Some(Walk::Done);
+        }
+    }
+    Some(Walk::Short)
+}
+
+/// Reads one codebook's header as the decoder's codebook reader does, up to and including its
+/// VQ lookup declaration, leaving the reader at the next codebook. `Some(Walk::Done)` once this
+/// codebook's lookup table exceeds the cap and the decoder would reach its allocation (the
+/// decoder reads every multiplicand first, so the table is reached only if those bits are
+/// present). None where the codebook is malformed or the bits run out, which the decoder
+/// rejects before allocating.
+fn codebook_overlarge(bs: &mut BitRtl) -> Option<Walk> {
+    if bs.bits(24)? != 0x564342 {
+        return None;
+    }
+    let dimensions = u64::from(bs.bits(16)?);
+    let entries = bs.bits(24)?;
+    let ordered = bs.bool()?;
+    if !ordered {
+        if bs.bool()? {
+            // Sparsely packed: a used flag per entry, a 5-bit length where used.
+            for _ in 0..entries {
+                if bs.bool()? {
+                    bs.skip(5)?;
+                }
+            }
+        } else {
+            // Densely packed: a 5-bit length per entry.
+            bs.skip(u64::from(entries) * 5)?;
+        }
+    } else {
+        // Length ordered: runs of entries sharing a length.
+        let mut cur = 0u32;
+        bs.skip(5)?;
+        loop {
+            let num = bs.bits(vorbis_ilog(entries - cur))?;
+            cur = cur.checked_add(num)?;
+            if cur > entries {
+                return None;
+            }
+            if cur == entries {
+                break;
+            }
+        }
+    }
+    let lookup_type = bs.bits(4)?;
+    match lookup_type {
+        0 => Some(Walk::Short),
+        1 | 2 => {
+            bs.skip(32)?; // minimum
+            bs.skip(32)?; // delta
+            let value_bits = u64::from(bs.bits(4)?) + 1;
+            bs.skip(1)?; // sequence flag
+            let lookup_values = match lookup_type {
+                1 => vorbis_lookup1_values(entries, dimensions as u16)?,
+                _ => u64::from(entries) * dimensions,
+            };
+            let multiplicand_bits = lookup_values.checked_mul(value_bits)?;
+            let table = u64::from(entries) * dimensions;
+            // The decoder allocates the table only after reading every multiplicand, so it is
+            // reached only if those bits are present.
+            if table > MAX_VQ_FLOATS && bs.fits(multiplicand_bits) {
+                return Some(Walk::Done);
+            }
+            bs.skip(multiplicand_bits)?;
+            Some(Walk::Short)
+        }
+        _ => None,
+    }
+}
+
+/// `ilog` as the Vorbis setup reader defines it: the position of the highest set bit, 0 for 0.
+fn vorbis_ilog(x: u32) -> u32 {
+    32 - x.leading_zeros()
+}
+
+/// `lookup1_values` as the decoder computes it: the greatest integer whose `dimensions`-th
+/// power is at most `entries`, by the same f32 arithmetic so the bit offsets match. None where
+/// the decoder's own bounds check would fail (it panics there, decoding nothing), so a later
+/// codebook is not read past it.
+fn vorbis_lookup1_values(entries: u32, dimensions: u16) -> Option<u64> {
+    let value = (entries as f32).powf(1.0 / f32::from(dimensions)).floor() as u64;
+    let dims = u32::from(dimensions);
+    let within = |v: u64| v.checked_pow(dims).is_some_and(|p| p <= u64::from(entries));
+    let beyond = |v: u64| v.checked_pow(dims).is_none_or(|p| p > u64::from(entries));
+    (within(value) && beyond(value + 1)).then_some(value)
+}
+
+/// Reads a Vorbis setup header's bits the way the decoder does: least-significant bit first,
+/// out of bytes filled from their low bit. A read past the end returns None, where the
+/// decoder's own read fails and it builds nothing.
+struct BitRtl<'a> {
+    buf: &'a [u8],
+    pos: u64,
+}
+
+impl<'a> BitRtl<'a> {
+    fn new(buf: &'a [u8]) -> Self {
+        BitRtl { buf, pos: 0 }
+    }
+
+    fn total(&self) -> u64 {
+        self.buf.len() as u64 * 8
+    }
+
+    /// Whether `n` more bits remain.
+    fn fits(&self, n: u64) -> bool {
+        self.pos
+            .checked_add(n)
+            .is_some_and(|end| end <= self.total())
+    }
+
+    /// Reads `n` bits (n <= 32), the earliest as the result's least-significant.
+    fn bits(&mut self, n: u32) -> Option<u32> {
+        if !self.fits(u64::from(n)) {
+            return None;
+        }
+        let mut value = 0u32;
+        for i in 0..n {
+            let p = self.pos + u64::from(i);
+            let bit = (self.buf[(p >> 3) as usize] >> (p & 7)) & 1;
+            value |= u32::from(bit) << i;
+        }
+        self.pos += u64::from(n);
+        Some(value)
+    }
+
+    fn bool(&mut self) -> Option<bool> {
+        self.bits(1).map(|b| b == 1)
+    }
+
+    /// Advances past `n` bits; None if they run past the end.
+    fn skip(&mut self, n: u64) -> Option<()> {
+        self.fits(n).then(|| self.pos += n)
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1526,6 +1776,11 @@ mod tests {
 
     /// An Ogg page on stream 1 completing each of `packets`.
     fn page(sequence: u32, first: bool, packets: &[&[u8]]) -> Vec<u8> {
+        page_s(1, sequence, first, packets)
+    }
+
+    /// An Ogg page on stream `serial` completing each of `packets`.
+    fn page_s(serial: u32, sequence: u32, first: bool, packets: &[&[u8]]) -> Vec<u8> {
         let mut segments = Vec::new();
         for p in packets {
             segments.extend(std::iter::repeat_n(255u8, p.len() / 255));
@@ -1534,7 +1789,7 @@ mod tests {
         let mut page = b"OggS\0".to_vec();
         page.push(if first { 2 } else { 0 });
         page.extend_from_slice(&0u64.to_le_bytes());
-        page.extend_from_slice(&1u32.to_le_bytes());
+        page.extend_from_slice(&serial.to_le_bytes());
         page.extend_from_slice(&sequence.to_le_bytes());
         page.extend_from_slice(&[0; 4]);
         page.push(segments.len() as u8);
@@ -1630,13 +1885,207 @@ mod tests {
     }
 
     #[test]
+    fn a_later_oggs_link_is_checked_only_by_the_full_scan() {
+        // A two-link chain whose second link's comment overruns its packet. The bounded scan
+        // (the import gate) checks only the first link; the full scan (decode) checks both.
+        let mut ident = b"\x01vorbis".to_vec();
+        ident.resize(30, 0);
+        let link2 = [
+            page_s(2, 0, true, &[&ident]),
+            page_s(2, 1, false, &[&vorbis_comment_packet(Some(u32::MAX))]),
+            page_s(2, 2, false, &[&[0u8; 4]]),
+        ]
+        .concat();
+        let chain = [vorbis_ogg(&vorbis_comment_packet(None)), link2].concat();
+        assert!(screen(&mut Cursor::new(&chain)).is_ok());
+        assert!(matches!(
+            screen_full(&mut Cursor::new(&chain)),
+            Err(Refusal::Impossible(_))
+        ));
+    }
+
+    #[test]
     fn the_engine_fixtures_pass() {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
         for entry in std::fs::read_dir(dir).unwrap() {
             let path = entry.unwrap().path();
             let mut file = std::fs::File::open(&path).unwrap();
             assert!(screen(&mut file).is_ok(), "{}", path.display());
+            assert!(screen_full(&mut file).is_ok(), "{} (full)", path.display());
         }
+    }
+
+    // --- Vorbis setup header ---
+
+    /// Packs bits least-significant first, as a Vorbis setup bitstream is packed.
+    struct BitWriter {
+        bytes: Vec<u8>,
+        bit: u32,
+    }
+
+    impl BitWriter {
+        fn new() -> Self {
+            BitWriter {
+                bytes: Vec::new(),
+                bit: 0,
+            }
+        }
+
+        fn put(&mut self, value: u32, n: u32) {
+            for i in 0..n {
+                if self.bit == 0 {
+                    self.bytes.push(0);
+                }
+                if (value >> i) & 1 == 1 {
+                    *self.bytes.last_mut().unwrap() |= 1 << self.bit;
+                }
+                self.bit = (self.bit + 1) & 7;
+            }
+        }
+    }
+
+    /// A length-ordered codebook whose single run covers every entry, followed by its VQ lookup
+    /// of `lookup_type` (0, 1 or 2) with `lookup_values` multiplicands of `value_bits` bits.
+    fn codebook(
+        w: &mut BitWriter,
+        dimensions: u16,
+        entries: u32,
+        lookup_type: u32,
+        value_bits: u32,
+        lookup_values: u32,
+        multiplicands: bool,
+    ) {
+        w.put(0x564342, 24);
+        w.put(u32::from(dimensions), 16);
+        w.put(entries, 24);
+        w.put(1, 1); // length ordered
+        w.put(0, 5); // first length - 1
+        w.put(entries, 32 - entries.leading_zeros()); // one run of every entry
+        w.put(lookup_type, 4);
+        if lookup_type != 0 {
+            w.put(0, 32); // minimum
+            w.put(0, 32); // delta
+            w.put(value_bits - 1, 4);
+            w.put(0, 1); // sequence flag
+            if multiplicands {
+                for _ in 0..lookup_values {
+                    w.put(0, value_bits);
+                }
+            }
+        }
+    }
+
+    /// Identification and setup headers (as the decoder reads `codec_params.extra_data`) around
+    /// a setup bitstream `w`.
+    fn vorbis_extra(w: BitWriter, codebook_count: u8) -> Vec<u8> {
+        let mut ident = vec![1u8];
+        ident.extend_from_slice(b"vorbis");
+        ident.extend_from_slice(&0u32.to_le_bytes()); // version
+        ident.push(1); // channels
+        ident.extend_from_slice(&44_100u32.to_le_bytes());
+        ident.extend_from_slice(&[0; 12]); // bitrates
+        ident.push(0xb6); // block sizes 6 and 11
+        ident.push(1); // framing
+        let mut setup = vec![5u8];
+        setup.extend_from_slice(b"vorbis");
+        let mut head = BitWriter::new();
+        head.put(u32::from(codebook_count - 1), 8);
+        setup.extend_from_slice(&head.bytes);
+        setup.extend_from_slice(&w.bytes);
+        [ident, setup].concat()
+    }
+
+    #[test]
+    fn a_real_shaped_vorbis_codebook_passes() {
+        let mut w = BitWriter::new();
+        // 16 entries of 4 dimensions, a type-1 lookup: lookup1_values(16, 4) = 2.
+        codebook(&mut w, 4, 16, 1, 5, 2, true);
+        assert!(!vorbis_setup_overlarge(&vorbis_extra(w, 1)));
+    }
+
+    #[test]
+    fn a_huge_type1_vorbis_lookup_is_refused() {
+        // entries 2^24-1 by 31 dimensions is about 16 GB of f32, declared with one multiplicand
+        // (lookup1_values(2^24-1, 31) = 1).
+        let mut w = BitWriter::new();
+        codebook(&mut w, 31, (1 << 24) - 1, 1, 5, 1, true);
+        assert!(vorbis_setup_overlarge(&vorbis_extra(w, 1)));
+    }
+
+    #[test]
+    fn a_truncated_vorbis_setup_is_left_for_the_decoder() {
+        // The huge codebook declared but its multiplicand bits cut off: the decoder's read
+        // fails before it allocates, so the screen does not refuse.
+        let mut w = BitWriter::new();
+        codebook(&mut w, 31, (1 << 24) - 1, 1, 5, 1, false);
+        assert!(!vorbis_setup_overlarge(&vorbis_extra(w, 1)));
+    }
+
+    #[test]
+    fn a_type2_vorbis_lookup_is_bounded_by_the_bits_present() {
+        // Type 2 reads entries x dimensions multiplicands before it allocates, so a huge table
+        // needs that many bits present. Declared without them, it is left for the decoder.
+        let mut w = BitWriter::new();
+        codebook(&mut w, 2, (1 << 23) + 1, 2, 1, (1 << 24) + 2, false);
+        assert!(!vorbis_setup_overlarge(&vorbis_extra(w, 1)));
+        // With the bits present, it is refused.
+        let mut w = BitWriter::new();
+        codebook(&mut w, 2, (1 << 23) + 1, 2, 1, (1 << 24) + 2, true);
+        assert!(vorbis_setup_overlarge(&vorbis_extra(w, 1)));
+    }
+
+    #[test]
+    fn a_small_codebook_before_a_huge_one_is_stepped_over() {
+        // The reader reaches the second codebook only by reading the first exactly; the guard
+        // must too.
+        let mut w = BitWriter::new();
+        codebook(&mut w, 4, 16, 1, 5, 2, true);
+        codebook(&mut w, 31, (1 << 24) - 1, 1, 5, 1, true);
+        assert!(vorbis_setup_overlarge(&vorbis_extra(w, 2)));
+    }
+
+    #[test]
+    fn real_vorbis_setups_pass() {
+        // The repo fixtures' Vorbis setup headers, extracted as the decoder receives them.
+        for name in ["link_1500ms.ogg", "link_2000ms.ogg"] {
+            let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
+            let extra = vorbis_extra_data(&std::fs::read(path).unwrap());
+            assert!(!vorbis_setup_overlarge(&extra), "{name}");
+        }
+    }
+
+    /// The Vorbis `extra_data` symphonia builds from an Ogg file: the identification packet
+    /// followed by the setup packet (the header packet whose type byte is 5), reassembled from
+    /// the first logical stream's pages.
+    fn vorbis_extra_data(ogg: &[u8]) -> Vec<u8> {
+        let mut packets: Vec<Vec<u8>> = Vec::new();
+        let mut partial: Vec<u8> = Vec::new();
+        let mut at = 0;
+        let serial = u32::from_le_bytes([ogg[14], ogg[15], ogg[16], ogg[17]]);
+        while at + 27 <= ogg.len() && &ogg[at..at + 4] == b"OggS" {
+            let page_serial =
+                u32::from_le_bytes([ogg[at + 14], ogg[at + 15], ogg[at + 16], ogg[at + 17]]);
+            let n = ogg[at + 26] as usize;
+            let laces = &ogg[at + 27..at + 27 + n];
+            let mut body = at + 27 + n;
+            if page_serial == serial {
+                for &lace in laces {
+                    partial.extend_from_slice(&ogg[body..body + lace as usize]);
+                    body += lace as usize;
+                    if lace < 255 {
+                        packets.push(std::mem::take(&mut partial));
+                    }
+                }
+            }
+            at = at + 27 + n + laces.iter().map(|&l| l as usize).sum::<usize>();
+        }
+        let ident = packets[0].clone();
+        let setup = packets
+            .iter()
+            .find(|p| p.first() == Some(&5))
+            .unwrap()
+            .clone();
+        [ident, setup].concat()
     }
 
     #[test]
