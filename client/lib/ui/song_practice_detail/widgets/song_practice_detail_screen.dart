@@ -1933,6 +1933,7 @@ class _InterpretationDropdown extends StatelessWidget {
   }
 
   Future<void> _create(BuildContext context) async {
+    if (vm.versions.refusesCreate()) return; // not asked, then refused
     final name = await showRenameDialog(
       context,
       current: vm.versions.nextDefaultName,

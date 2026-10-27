@@ -169,6 +169,11 @@ class InterpretationsController extends ChangeNotifier {
     }
   }
 
+  /// Whether [create] would be refused right now, saying why when it would.
+  /// Asked before the name dialog opens: the name typed into it was refused
+  /// only once the dialog closed, and lost.
+  bool refusesCreate() => _refusedForTake('add an interpretation');
+
   /// Creates a new (empty) interpretation and switches to it, ready to record a
   /// fresh emotional/technical reading of the song.
   Future<void> create([String name = '']) async {

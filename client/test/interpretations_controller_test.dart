@@ -409,6 +409,17 @@ void main() {
       expect(host.toasts, ['Stop recording to add an interpretation.']);
     });
 
+    test('says before the name is asked for whether it would be refused', () {
+      final host = _Host(
+        _practice(versions: [_version('v1', 'One')], activeVersionId: 'v1'),
+      );
+      expect(host.controller.refusesCreate(), isFalse);
+      expect(host.toasts, isEmpty);
+      host.recording = true;
+      expect(host.controller.refusesCreate(), isTrue);
+      expect(host.toasts, ['Stop recording to add an interpretation.']);
+    });
+
     test(
       'a take committed during the pause await survives the create',
       () async {
