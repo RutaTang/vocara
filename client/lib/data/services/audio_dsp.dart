@@ -152,7 +152,7 @@ int stftFrameCount(int samples, {int fftSize = 2048, int hop = 512}) =>
 /// The FFT of a real frame of one fixed size, as every analysis here takes
 /// it: magnitudes for the spectrum, real parts for the cepstrum. A power of
 /// two of 16 or more (every production size) is [_Radix2RealFft], fftea's
-/// own radix-2 arithmetic at about half the cost; any other size is fftea.
+/// own radix-2 arithmetic at a third of the cost; any other size is fftea.
 abstract class _RealFft {
   factory _RealFft(int size) => size >= 16 && size & (size - 1) == 0
       ? _Radix2RealFft(size)
@@ -169,7 +169,7 @@ abstract class _RealFft {
 }
 
 /// fftea's `FFT(size).realFft` for a power-of-two size ≥ 16 (its Radix2FFT),
-/// bit for bit, at about half the cost.
+/// bit for bit, at a third of the cost.
 ///
 /// fftea keeps each value as an interleaved (re, im) vector, so every
 /// butterfly swaps and negates lanes to multiply by its twiddle. This keeps
@@ -179,9 +179,10 @@ abstract class _RealFft {
 /// o·w̄ as (o.x·w.x + o.y·w.y, o.y·w.x − o.x·w.y), where fftea adds the
 /// product with the negated o.x (IEEE subtraction is exactly that), then
 /// p ± q, over fftea's twiddles built fftea's way. The bit-reversal
-/// permutation is a table read straight out of the input, and the first
-/// stage (twiddle 1, every imaginary input +0) is formed as it is read.
-/// Pinned equal to fftea by test.
+/// permutation is a table read straight out of the input, the first stage
+/// (twiddle 1, every imaginary input +0) is formed as it is read, and the
+/// stages after it run two to a pass over the data. Pinned equal to fftea
+/// by test.
 class _Radix2RealFft implements _RealFft {
   _Radix2RealFft(this.size)
     : _half = size >> 1,
@@ -275,9 +276,48 @@ class _Radix2RealFft implements _RealFft {
       re[i] = Float64x2(p + qr, p - qr);
       im[i] = Float64x2(zero + qi, zero - qi);
     }
-    // The rest: blocks of 2h pairs, butterflies h pairs apart.
+    // The rest: the stage of span h pairs runs blocks of 2h pairs,
+    // butterflies h apart, twiddle h + j. Two stages at a time (h, then 2h,
+    // over the four values i0..i3 whose butterflies they share), so each
+    // value is loaded and stored once per two stages: the same butterflies,
+    // only scheduled in fewer passes over the data.
     final twRe = _twRe, twIm = _twIm;
-    for (var h = 1; h < half; h <<= 1) {
+    var h = 1;
+    for (; 2 * h < half; h <<= 2) {
+      final h2 = 2 * h;
+      for (var k0 = 0; k0 < half; k0 += 2 * h2) {
+        for (var j = 0; j < h; j++) {
+          final i0 = k0 + j, i1 = i0 + h, i2 = i0 + h2, i3 = i2 + h;
+          // Stage h: (i0, i1) and (i2, i3), both twiddle h + j.
+          final wr = twRe[h + j], wi = twIm[h + j];
+          final r0 = re[i0], m0 = im[i0], r1 = re[i1], m1 = im[i1];
+          var qr = r1 * wr + m1 * wi;
+          var qi = m1 * wr - r1 * wi;
+          final a0r = r0 + qr, a0i = m0 + qi, a1r = r0 - qr, a1i = m0 - qi;
+          final r2 = re[i2], m2 = im[i2], r3 = re[i3], m3 = im[i3];
+          qr = r3 * wr + m3 * wi;
+          qi = m3 * wr - r3 * wi;
+          final a2r = r2 + qr, a2i = m2 + qi, a3r = r2 - qr, a3i = m2 - qi;
+          // Stage 2h: (i0, i2) twiddle 2h + j, (i1, i3) twiddle 2h + h + j.
+          final ur = twRe[h2 + j], ui = twIm[h2 + j];
+          qr = a2r * ur + a2i * ui;
+          qi = a2i * ur - a2r * ui;
+          re[i0] = a0r + qr;
+          im[i0] = a0i + qi;
+          re[i2] = a0r - qr;
+          im[i2] = a0i - qi;
+          final vr = twRe[h2 + h + j], vi = twIm[h2 + h + j];
+          qr = a3r * vr + a3i * vi;
+          qi = a3i * vr - a3r * vi;
+          re[i1] = a1r + qr;
+          im[i1] = a1i + qi;
+          re[i3] = a1r - qr;
+          im[i3] = a1i - qi;
+        }
+      }
+    }
+    // An odd stage count leaves the last stage on its own.
+    for (; h < half; h <<= 1) {
       for (var k0 = 0; k0 < half; k0 += 2 * h) {
         for (var j = 0; j < h; j++) {
           final k = k0 + j, km = k + h;
