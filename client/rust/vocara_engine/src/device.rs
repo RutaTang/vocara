@@ -4088,6 +4088,31 @@ fn oversized_packets(params: &symphonia::core::codecs::CodecParameters) -> bool 
     declared.max(alac) > MAX_FRAMES_PER_PACKET
 }
 
+/// `params` as the decoder is to read them. An ALAC cookie can come wrapped in 'frma' and
+/// 'alac' atom headers ahead of its config, as older encoders and ffmpeg's CAF writer vend it
+/// and as Apple's own decoder skips: symphonia read the wrapping as the config, and refused
+/// the file as a newer ALAC version.
+fn decoder_params(
+    params: &symphonia::core::codecs::CodecParameters,
+) -> symphonia::core::codecs::CodecParameters {
+    let mut params = params.clone();
+    if params.codec == symphonia::core::codecs::CODEC_TYPE_ALAC {
+        let unwrapped = params.extra_data.as_deref().and_then(|cookie| {
+            let mut config = cookie;
+            for tag in [b"frma", b"alac"] {
+                if config.len() >= 12 && config[4..8] == tag[..] {
+                    config = &config[12..];
+                }
+            }
+            (config.len() != cookie.len()).then(|| Box::<[u8]>::from(config))
+        });
+        if unwrapped.is_some() {
+            params.extra_data = unwrapped;
+        }
+    }
+    params
+}
+
 /// Whether building a decoder for `params` would allocate unbounded from what the file
 /// declares, before any decode budget applies: an oversized packet buffer (see
 /// [`oversized_packets`]), or, for Vorbis, a codebook VQ lookup table sized by the setup
@@ -4309,11 +4334,12 @@ pub fn decode_file(
         Some(n) => Vec::with_capacity(n.min(max_frames) as usize),
         None => Vec::new(),
     };
-    if decoder_overallocates(&track.codec_params) {
+    let params = decoder_params(&track.codec_params);
+    if decoder_overallocates(&params) {
         return Err(DecodeError::TooBig);
     }
     let mut decoder = symphonia::default::get_codecs()
-        .make(&track.codec_params, &DecoderOptions::default())
+        .make(&params, &DecoderOptions::default())
         .map_err(|e| err(format!("make decoder: {e}")))?;
 
     // Iterate packets until end of stream. Error taxonomy matters here (#19):
@@ -4361,11 +4387,12 @@ pub fn decode_file(
                 out.truncate(kept.max(link_start as u64) as usize);
                 (skip, padding) = edge_trim(&track.codec_params);
                 link_start = out.len();
-                if decoder_overallocates(&track.codec_params) {
+                let params = decoder_params(&track.codec_params);
+                if decoder_overallocates(&params) {
                     return Err(DecodeError::TooBig);
                 }
                 decoder = symphonia::default::get_codecs()
-                    .make(&track.codec_params, &DecoderOptions::default())
+                    .make(&params, &DecoderOptions::default())
                     .map_err(|e| err(format!("make decoder after reset: {e}")))?;
                 continue;
             }

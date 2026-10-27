@@ -79,6 +79,15 @@ fn a_surround_file_is_mixed_down_not_cut_to_its_front_pair() {
 }
 
 #[test]
+fn an_alac_cookie_wrapped_in_its_atom_headers_decodes() {
+    // ffmpeg's CAF writer (and older encoders) put the ALAC config behind 'frma' and 'alac'
+    // atom headers, which symphonia read as the config itself and refused as a newer version.
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/alac_100ms.caf");
+    let (frames, rate) = decode_file(path, 0.0, 0, 0).unwrap();
+    assert_eq!((frames.len(), rate), (4410, 44_100));
+}
+
+#[test]
 fn a_wav_written_to_a_pipe_is_not_refused_as_too_long() {
     // Written where it could not seek back, a WAV keeps its data size at all ones: 4 GB, which
     // read as hours. 100 ms at 8 kHz, its length unknown rather than refused.
