@@ -186,4 +186,20 @@ void main() {
       );
     },
   );
+
+  test('a stored level or pan past the faders loads within them', () async {
+    // A peer's level went to the engine verbatim: 1e30 a gain.
+    final p0 = await seedPractice();
+    await db.customStatement('UPDATE tracks SET volume = 1e30, pan = -7.5');
+    await db.customStatement('UPDATE practices SET master_volume = 1e30');
+    final loaded =
+        (await songs.loadPractice(p0.aggregate.id) as Ok<Loaded<SongPractice>>)
+            .value
+            .aggregate;
+    expect(loaded.masterVolume, 1.0);
+    for (final t in loaded.vocalTracks) {
+      expect(t.volume, 1.0);
+      expect(t.pan, -1.0);
+    }
+  });
 }

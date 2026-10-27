@@ -194,4 +194,10 @@ void main() {
     final chorus = parseLrc('[00:10][01:10][02:10]la la\n[00:20]verse');
     expect(chorus.map((l) => l.timeMs), [10000, 20000, 70000, 130000]);
   });
+
+  test('an offset past a day is held to it', () {
+    // Subtracted as is, a 19-digit offset overflowed: lines landed anywhere.
+    final lines = parseLrc('[offset:-9223372036854775807]\n[00:01.00]a');
+    expect(lines.single.timeMs, 1000 + 86400000);
+  });
 }

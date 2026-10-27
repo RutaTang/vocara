@@ -53,6 +53,12 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
     ms.clamp(-8640000000000000, 8640000000000000),
   );
 
+  // A fader level and a pan as the faders reach them, as the JSON readers
+  // clamp them: a stored level past the fader (a peer's) went to the engine
+  // verbatim, and 1e30 is a gain the master's soft clip only squares off.
+  static double _level(double v) => v.clamp(0.0, 1.0);
+  static double _pan(double v) => v.clamp(-1.0, 1.0);
+
   // --- save-side content-hash projections -------------------------------------
   // The MINE side of every three-way merge, hashed once per save by
   // [_sentHashes]; the reconcile passes compare that very map, so "what a
@@ -1372,10 +1378,10 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
               ? TrackFx.flat()
               : TrackFx.fromJson(jsonDecode(b.fxJson!) as Map<String, dynamic>),
           colorValue: b.colorValue,
-          volume: b.volume,
+          volume: _level(b.volume),
           muted: b.muted,
           soloed: b.soloed,
-          pan: b.pan,
+          pan: _pan(b.pan),
           outputBusId: b.outputBusId,
           sends: _sendsFrom(b.sendsJson),
         ),
@@ -1407,7 +1413,7 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
           : ReverbSettings.fromJson(
               jsonDecode(row.reverbJson!) as Map<String, dynamic>,
             ),
-      masterVolume: row.masterVolume,
+      masterVolume: _level(row.masterVolume),
       fxBuses: buses,
     );
     baseHashes?[row.id] = _practiceHash(
@@ -1502,8 +1508,8 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
       colorValue: tr.colorValue,
       muted: tr.muted,
       soloed: tr.soloed,
-      volume: tr.volume,
-      pan: tr.pan,
+      volume: _level(tr.volume),
+      pan: _pan(tr.pan),
     );
   }
 

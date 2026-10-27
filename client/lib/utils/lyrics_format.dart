@@ -141,9 +141,11 @@ List<LyricLine> parseLrc(String content) {
   var offsetMs = 0;
   for (final raw in content.split('\n')) {
     final m = _lrcOffsetTag.firstMatch(raw.trim());
-    // An offset too long to be a number of milliseconds is no offset.
+    // An offset too long to be a number of milliseconds is no offset, and
+    // one past a day is held to it: subtracted as is, it overflowed and the
+    // lines landed anywhere.
     final ms = m == null ? null : int.tryParse(m.group(1)!);
-    if (ms != null) offsetMs = ms;
+    if (ms != null) offsetMs = ms.clamp(-86400000, 86400000);
   }
   final out = <LyricLine>[];
   // A line's text is repeated once per time tag on it: half a megabyte of

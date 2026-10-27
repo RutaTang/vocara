@@ -96,10 +96,11 @@ class FxBus {
         ? TrackFx.fromJson(j['fx'] as Map<String, dynamic>)
         : TrackFx.flat(),
     colorValue: j['colorValue'] as int?,
-    volume: (j['volume'] as num?)?.toDouble() ?? 1.0,
+    // Within the fader's reach, as a track's (see AudioTrack.fromJson).
+    volume: ((j['volume'] as num?)?.toDouble() ?? 1.0).clamp(0.0, 1.0),
     muted: j['muted'] as bool? ?? false,
     soloed: j['soloed'] as bool? ?? false,
-    pan: (j['pan'] as num?)?.toDouble() ?? 0.0,
+    pan: ((j['pan'] as num?)?.toDouble() ?? 0.0).clamp(-1.0, 1.0),
     outputBusId: j['outputBusId'] as String?,
     sends: (j['sends'] as List<dynamic>? ?? const [])
         .map((e) => TrackSend.fromJson(e as Map<String, dynamic>))
