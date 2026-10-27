@@ -1447,8 +1447,9 @@ Float32List _decimate(Float32List x, int factor, double fs) {
 
 /// Levinson-Durbin recursion: LPC coefficients [1, a1..ap] for the all-pole
 /// model A(z)=1+Σ a_k·z⁻ᵏ, or null if the frame is degenerate.
-List<double>? _levinson(Float64List r, int order) {
-  final a = List<double>.filled(order + 1, 0.0);
+Float64List? _levinson(Float64List r, int order) {
+  final a = Float64List(order + 1);
+  final prev = Float64List(order + 1);
   a[0] = 1.0;
   var err = r[0];
   if (err <= 0) return null;
@@ -1458,7 +1459,7 @@ List<double>? _levinson(Float64List r, int order) {
       acc += a[j] * r[i - j];
     }
     final k = -acc / err;
-    final prev = List<double>.from(a);
+    prev.setRange(0, i, a); // the update below reads prev[1, i)
     for (var j = 1; j < i; j++) {
       a[j] = prev[j] + k * prev[i - j];
     }
@@ -1470,11 +1471,14 @@ List<double>? _levinson(Float64List r, int order) {
 }
 
 /// Durand-Kerner: all complex roots of the monic polynomial with descending
-/// coefficients [coeffs] (coeffs[0]==1). Returns [re, im].
-List<List<double>> _durandKerner(List<double> coeffs) {
+/// coefficients [coeffs] (coeffs[0]==1). Returns (re, im).
+///
+/// Typed lists throughout: a `List<double>` holds each double boxed, so
+/// every root update allocated (twice per root per iteration).
+(Float64List, Float64List) _durandKerner(Float64List coeffs) {
   final p = coeffs.length - 1;
-  final re = List<double>.filled(p, 0.0);
-  final im = List<double>.filled(p, 0.0);
+  final re = Float64List(p);
+  final im = Float64List(p);
   // Initial guesses equally spaced on a circle (offset off the real axis) —
   // spreads the roots so coincident-guess stalls are unlikely.
   for (var k = 0; k < p; k++) {
@@ -1486,23 +1490,23 @@ List<List<double>> _durandKerner(List<double> coeffs) {
     var maxStep = 0.0;
     for (var k = 0; k < p; k++) {
       final zr = re[k], zi = im[k];
-      // P(z_k) via Horner.
+      // P(z_k) via Horner, and denom = Π_{j≠k}(z_k - z_j), in one loop:
+      // each is a chain of dependent complex multiplies, so stepping both
+      // at once overlaps them; each still runs its steps in its own order.
       var pr = coeffs[0], pi = 0.0;
-      for (var i = 1; i <= p; i++) {
-        final nr = pr * zr - pi * zi + coeffs[i];
+      var dr = 1.0, di = 0.0;
+      for (var t = 0; t < p; t++) {
+        final nr = pr * zr - pi * zi + coeffs[t + 1];
         final ni = pr * zi + pi * zr;
         pr = nr;
         pi = ni;
-      }
-      // denom = Π_{j≠k}(z_k - z_j).
-      var dr = 1.0, di = 0.0;
-      for (var j = 0; j < p; j++) {
-        if (j == k) continue;
-        final xr = zr - re[j], xi = zi - im[j];
-        final nr = dr * xr - di * xi;
-        final ni = dr * xi + di * xr;
-        dr = nr;
-        di = ni;
+        if (t != k) {
+          final xr = zr - re[t], xi = zi - im[t];
+          final mr = dr * xr - di * xi;
+          final mi = dr * xi + di * xr;
+          dr = mr;
+          di = mi;
+        }
       }
       final dd = dr * dr + di * di;
       if (dd < 1e-30) {
@@ -1522,7 +1526,7 @@ List<List<double>> _durandKerner(List<double> coeffs) {
     }
     if (maxStep < 1e-18) break;
   }
-  return [re, im];
+  return (re, im);
 }
 
 /// LPC formant candidates (sorted Hz) for the frame of [ds] (rate [dsRate])
@@ -1571,13 +1575,33 @@ List<double> _lpcFormantsPadded(
   }
   if (energy <= 1e-12) return const [];
 
+  // Autocorrelation r[lag] = Σ_{i ≥ lag} frame[i]·frame[i − lag], four lags
+  // per sweep: each lag its own accumulator, summed in i order as a one-lag
+  // loop sums it (so the same value, bit for bit), the four chains
+  // overlapping. The last sweep may run past [order]; those sums are
+  // dropped.
   final r = Float64List(order + 1);
-  for (var lag = 0; lag <= order; lag++) {
-    var acc = 0.0;
-    for (var i = lag; i < win; i++) {
-      acc += frame[i] * frame[i - lag];
+  for (var lag = 0; lag <= order; lag += 4) {
+    var a0 = 0.0, a1 = 0.0, a2 = 0.0, a3 = 0.0;
+    // Below lag + 3, i reaches only the lower lags of the four.
+    final head = math.min(lag + 3, win);
+    for (var i = lag; i < head; i++) {
+      final fi = frame[i];
+      a0 += fi * frame[i - lag];
+      if (i > lag) a1 += fi * frame[i - lag - 1];
+      if (i > lag + 1) a2 += fi * frame[i - lag - 2];
     }
-    r[lag] = acc;
+    for (var i = lag + 3; i < win; i++) {
+      final fi = frame[i];
+      a0 += fi * frame[i - lag];
+      a1 += fi * frame[i - lag - 1];
+      a2 += fi * frame[i - lag - 2];
+      a3 += fi * frame[i - lag - 3];
+    }
+    r[lag] = a0;
+    if (lag + 1 <= order) r[lag + 1] = a1;
+    if (lag + 2 <= order) r[lag + 2] = a2;
+    if (lag + 3 <= order) r[lag + 3] = a3;
   }
   if (r[0] <= 0) return const [];
   r[0] *= 1.0 + 1e-6; // ridge for numerical stability
@@ -1585,8 +1609,7 @@ List<double> _lpcFormantsPadded(
   final a = _levinson(r, order);
   if (a == null) return const [];
 
-  final roots = _durandKerner(a);
-  final re = roots[0], im = roots[1];
+  final (re, im) = _durandKerner(a);
   final nyq = dsRate / 2;
   final out = <double>[];
   for (var k = 0; k < re.length; k++) {
