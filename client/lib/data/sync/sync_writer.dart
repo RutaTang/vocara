@@ -5,6 +5,7 @@ import 'package:drift/drift.dart';
 
 import '../db/app_database.dart';
 import 'hlc.dart';
+import 'sync_state_store.dart';
 
 /// The Hybrid Logical Clock stamp + bookkeeping for one local write.
 class SyncStamp {
@@ -33,46 +34,52 @@ class SyncWriter {
 
   /// Stamps a local write (ticks the clock). Splice [SyncStamp.hlc] into the
   /// row companion's SyncCols, then call [journal] in the SAME transaction.
-  /// For a row that already exists, use [stampAfter] or [stampFor].
+  /// For a row that already exists, use [stampFor].
   SyncStamp stamp() => SyncStamp(_clock.tick());
 
-  /// Stamps a write over a row whose stored stamp is [heldPacked] (read in
-  /// the same transaction; null for a row that does not exist): the stamp
-  /// orders after it as well as after this clock's own last one.
+  /// Stamps a local write over the row [id] of [table] (one that exists, or
+  /// may: a reused id revives a tombstone). The stamp orders after the row's
+  /// stored stamp and after the durable high-water mark of accepted remote
+  /// stamps, as well as after this clock's own last one. Run inside the
+  /// write's transaction.
   ///
   /// The clock alone does not guarantee that. A second running instance
   /// shares the library (see LibraryLock) with a clock of its own, so a row
-  /// the other one wrote or applied can hold a stamp ahead of this clock;
-  /// an edit stamped from the clock alone then lost entity-level LWW to the
-  /// very version it replaced, on every device but this one. A stored
-  /// stamp that does not parse stamps as [stamp] does.
-  SyncStamp stampAfter(String? heldPacked) {
-    if (heldPacked != null) {
-      final Hlc held;
-      try {
-        held = Hlc.parse(heldPacked);
-      } on FormatException {
-        return stamp();
-      }
-      // Stored stamps passed the drift gate on the way in, and boot seeds
-      // the clock from the same columns, so no re-check (see mergeVerified).
-      if (held >= _clock.last) return SyncStamp(_clock.mergeVerified(held));
-    }
-    return stamp();
-  }
-
-  /// [stampAfter] for the row [id] of [table], reading its stored stamp.
-  /// Run inside the write's transaction.
+  /// it wrote or applied can hold a stamp ahead of this clock, and so can a
+  /// newer state of the row it parked (whose stamp only the high-water mark
+  /// records, see SyncStateStore.hlcHighWaterKey). An edit stamped from the
+  /// clock alone then lost entity-level LWW to the very version it replaced
+  /// (or to the parked one, on its replay). Both stamps merge without a
+  /// drift re-check, as boot seeds the clock from the same two sources; one
+  /// that does not parse is skipped.
   Future<SyncStamp> stampFor(String table, String id) async {
     final info = _db.allTables.where((t) => t.actualTableName == table);
     if (info.isEmpty) throw ArgumentError.value(table, 'table');
     final row = await _db
         .customSelect(
-          'SELECT hlc_packed FROM ${info.single.actualTableName} WHERE id = ?',
-          variables: [Variable.withString(id)],
+          'SELECT (SELECT hlc_packed FROM ${info.single.actualTableName} '
+          'WHERE id = ?) AS held, (SELECT value FROM sync_state '
+          'WHERE key = ?) AS high',
+          variables: [
+            Variable.withString(id),
+            Variable.withString(SyncStateStore.hlcHighWaterKey),
+          ],
         )
-        .getSingleOrNull();
-    return stampAfter(row?.read<String>('hlc_packed'));
+        .getSingle();
+    for (final packed in [
+      row.readNullable<String>('held'),
+      row.readNullable<String>('high'),
+    ]) {
+      if (packed == null) continue;
+      final Hlc seen;
+      try {
+        seen = Hlc.parse(packed);
+      } on FormatException {
+        continue;
+      }
+      if (seen >= _clock.last) _clock.mergeVerified(seen);
+    }
+    return stamp();
   }
 
   /// Appends one oplog entry. MUST be called inside the same transaction as the

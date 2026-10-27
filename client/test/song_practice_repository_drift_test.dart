@@ -12,6 +12,7 @@ import 'package:vocara/data/sync/hlc.dart';
 import 'package:vocara/data/sync/integrity_checker.dart';
 import 'package:vocara/data/sync/quarantine_store.dart';
 import 'package:vocara/data/sync/sync_hashes.dart';
+import 'package:vocara/data/sync/sync_state_store.dart';
 import 'package:vocara/data/sync/sync_writer.dart';
 import 'package:vocara/domain/models/audio_fx.dart';
 import 'package:vocara/domain/models/audio_track.dart';
@@ -540,6 +541,31 @@ void main() {
     )..where((o) => o.entityId.equals(pr.id))).get();
     expect(last.last.hlcPacked.compareTo(ahead), 1);
   });
+
+  test(
+    'an edit orders after the high-water mark of accepted remote stamps',
+    () async {
+      // A second instance that parked a newer state of this row raised the
+      // mark, not the row: our edit must still out-rank that parked state.
+      final pr = ok(await repo.createPractice('Mine'));
+      final ahead = Hlc(
+        wallMs: DateTime.now().millisecondsSinceEpoch + 60000,
+        counter: 7,
+        node: 'OTHER'.padRight(26, '0'),
+      ).packed;
+      await SyncStateStore(db).raiseHlcHighWater(ahead);
+      ok(await repo.savePractice(pr.copyWith(title: 'Renamed')));
+      final held =
+          (await db
+                  .customSelect(
+                    'SELECT hlc_packed FROM practices WHERE id = ?',
+                    variables: [Variable.withString(pr.id)],
+                  )
+                  .getSingle())
+              .read<String>('hlc_packed');
+      expect(held.compareTo(ahead), 1);
+    },
+  );
 
   // --- regression: data-loss blockers ---
 

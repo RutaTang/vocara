@@ -621,7 +621,7 @@ class SongPracticeRepositoryDrift implements SongPracticeRepository {
       // Plain local edit (existingHash == baseHash) or a true conflict (both
       // sides changed): the ACTIVE EDITOR wins by policy and mine is written
       // with a fresh HLC, so it also wins entity-level LWW downstream.
-      final s = writer.stampAfter(existing.hlcPacked);
+      final s = await writer.stampFor('practices', p.id);
       await (db.update(db.practices)..where((x) => x.id.equals(p.id))).write(
         PracticesCompanion(
           title: Value(p.title),
