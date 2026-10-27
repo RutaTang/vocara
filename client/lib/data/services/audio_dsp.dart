@@ -1812,14 +1812,19 @@ const double _voicedConfidence = 0.55;
 ///
 /// O(w·τmax) — ~245k multiply-adds per 48 kHz frame, the bulk of the take
 /// analysis and of the live analyzer's UI-isolate budget. A one-lag loop is
-/// bound by its single add chain, so the lags are swept FOUR at a time, two
+/// bound by its single add chain, so the lags are swept EIGHT at a time, two
 /// to a SIMD lane pair: `pairs` holds (x[k], x[k+1]) at k, so one vector
 /// subtract against the splatted x[j] forms the differences for lags τ and
 /// τ+1 together. Every lane is its own accumulator summed in the same j
 /// order with the same IEEE multiply and add (no fused multiply-add), so
 /// every d[τ] is the one-lag loop's sum, bit for bit (pinned by test) — the
-/// four chains just overlap, two per instruction. The Float64 copy is exact
+/// eight chains just overlap, two per instruction. The Float64 copy is exact
 /// (float32 → double is lossless) and spares the conversions per step.
+///
+/// A sweep reads its pairs through a view whose length is the loop's own
+/// bound, so the compiler can prove those reads in range and drops their
+/// bounds checks: with a check (and its spilled operands) per load, the
+/// loads, not the arithmetic, set the pace.
 @visibleForTesting
 Float64List yinDifference(Float32List frame, int tauMax, int w) {
   final n = frame.length;
@@ -1837,6 +1842,32 @@ Float64List yinDifference(Float32List frame, int tauMax, int w) {
     final splat = Float64x2List(w);
     for (var j = 0; j < w; j++) {
       splat[j] = Float64x2.splat(x[j]);
+    }
+    for (; tau + 7 <= tauMax; tau += 8) {
+      // pairs[tau + j .. tau + j + 6] for every j < w (tau + w + 6 <= n - 1,
+      // as tau + 7 <= tauMax and w + tauMax <= n).
+      final seg = Float64x2List.sublistView(pairs, tau, tau + w + 6);
+      var s01 = Float64x2.zero(), s23 = Float64x2.zero();
+      var s45 = Float64x2.zero(), s67 = Float64x2.zero();
+      for (var j = 0; j < seg.length - 6; j++) {
+        final xj = splat[j];
+        final d01 = xj - seg[j];
+        final d23 = xj - seg[j + 2];
+        final d45 = xj - seg[j + 4];
+        final d67 = xj - seg[j + 6];
+        s01 += d01 * d01;
+        s23 += d23 * d23;
+        s45 += d45 * d45;
+        s67 += d67 * d67;
+      }
+      d[tau] = s01.x;
+      d[tau + 1] = s01.y;
+      d[tau + 2] = s23.x;
+      d[tau + 3] = s23.y;
+      d[tau + 4] = s45.x;
+      d[tau + 5] = s45.y;
+      d[tau + 6] = s67.x;
+      d[tau + 7] = s67.y;
     }
     for (; tau + 3 <= tauMax; tau += 4) {
       var s01 = Float64x2.zero(), s23 = Float64x2.zero();

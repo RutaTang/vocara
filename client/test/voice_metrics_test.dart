@@ -413,8 +413,8 @@ void main() {
             0.5 * sin(2 * pi * hz * i / rate) +
             noise * (rng.nextDouble() - 0.5);
       }
-      // yinPitch's own bounds, plus arbitrary ones so every tauMax % 4
-      // (the four-lag sweep's tail) is exercised.
+      // yinPitch's own bounds, plus arbitrary ones so every tauMax % 8
+      // (the eight- and four-lag sweeps' tails) is exercised.
       final tauMax = t.isEven
           ? min((rate / 63).ceil(), n - 1)
           : 1 + rng.nextInt(n - 2);
