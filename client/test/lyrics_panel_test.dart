@@ -628,6 +628,10 @@ void main() {
       await tester.sendKeyEvent(LogicalKeyboardKey.space);
       await tester.sendKeyEvent(LogicalKeyboardKey.space);
       expect(vm.stamps, 1, reason: 'the hidden sync view took the keys');
+      // Nor does Tab walk back to it.
+      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+      await tester.sendKeyEvent(LogicalKeyboardKey.space);
+      expect(vm.stamps, 1, reason: 'Tab handed the hidden sync view the keys');
 
       focus.value = false;
       await tester.pumpAndSettle();
@@ -648,6 +652,9 @@ void main() {
       focus.value = true;
       await tester.pumpAndSettle();
       expect(editor().hasFocus, isFalse);
+      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+      await tester.pump();
+      expect(editor().hasFocus, isFalse, reason: 'Tab reached the editor');
 
       focus.value = false;
       await tester.pumpAndSettle();

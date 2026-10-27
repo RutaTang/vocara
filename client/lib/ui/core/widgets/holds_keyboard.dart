@@ -6,7 +6,8 @@ import 'package:flutter/widgets.dart';
 ///
 /// Beneath the lyrics focus view the panel kept it: Space stamped lines no
 /// one could see (wrapping round to overwrite good timings), and typing went
-/// into the hidden editor, which its Save then kept.
+/// into the hidden editor, which its Save then kept. A scope of its own, so
+/// Tab cannot walk back to them either.
 class HoldsKeyboard extends StatefulWidget {
   const HoldsKeyboard({required this.child, super.key});
 
@@ -17,7 +18,7 @@ class HoldsKeyboard extends StatefulWidget {
 }
 
 class _HoldsKeyboardState extends State<HoldsKeyboard> {
-  final FocusNode _node = FocusNode(debugLabel: 'HoldsKeyboard');
+  final FocusScopeNode _node = FocusScopeNode(debugLabel: 'HoldsKeyboard');
 
   @override
   void initState() {
@@ -38,5 +39,5 @@ class _HoldsKeyboardState extends State<HoldsKeyboard> {
 
   @override
   Widget build(BuildContext context) =>
-      Focus(focusNode: _node, child: widget.child);
+      FocusScope(node: _node, child: widget.child);
 }
