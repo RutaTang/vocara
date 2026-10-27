@@ -542,10 +542,17 @@ fn caf<R: Read + Seek>(file: &mut Source<R>, start: u64) -> Result<(), Refusal> 
                 body + 32
             }
             // A size of -1 is a data chunk still being written, running to the end of the file.
-            // The reader then carries on reading chunks from the start of the audio.
+            // Where the decode fills that size in (see [`caf_open_data`]) the reader skips to
+            // the end: walked as chunks, a second of leading silence was 4096 empty ones, and
+            // the recording refused. Anywhere else it carries on reading chunks from the start
+            // of the audio, its packets capped by no end of data.
             b"data" if size == -1 => {
-                unsized_data = true;
-                body + 4
+                if open_data(file)?.is_some_and(|(field, _)| field == at + 4) {
+                    len
+                } else {
+                    unsized_data = true;
+                    body + 4
+                }
             }
             b"pakt" => {
                 let Some(format) = format.filter(|_| size >= 24) else {
@@ -601,6 +608,45 @@ fn caf<R: Read + Seek>(file: &mut Source<R>, start: u64) -> Result<(), Refusal> 
         }
     }
     Ok(())
+}
+
+/// Where a CAF's data chunk declares its size as -1, "to the end of the file", as Core Audio
+/// leaves it until the file is closed: the size field's offset and the size it stands for, or
+/// None for any other file. The spec allows it, but symphonia's reader then reads on from the
+/// start of the sound as if more chunks followed, and refused an interrupted recording as
+/// malformed; the decode reads such a file with this field filled in instead. Walks chunks by
+/// their declared sizes, of a CAF at the start of the file only, and at most 64 of them.
+/// Leaves `src` where it found it.
+pub fn caf_open_data<R: Read + Seek>(src: &mut R) -> io::Result<Option<(u64, u64)>> {
+    let start = src.stream_position()?;
+    let found = open_data(&mut Source::new(&mut *src)?);
+    src.seek(SeekFrom::Start(start))?;
+    found
+}
+
+fn open_data<R: Read + Seek>(file: &mut Source<R>) -> io::Result<Option<(u64, u64)>> {
+    let mut head = [0u8; 4];
+    if !file.read_at(0, &mut head)? || &head != b"caff" {
+        return Ok(None);
+    }
+    let mut at = 8u64;
+    for _ in 0..64 {
+        let mut hdr = [0u8; 12];
+        if !file.read_at(at, &mut hdr)? {
+            return Ok(None);
+        }
+        let size = i64::from_be_bytes([
+            hdr[4], hdr[5], hdr[6], hdr[7], hdr[8], hdr[9], hdr[10], hdr[11],
+        ]);
+        if &hdr[0..4] == b"data" {
+            return Ok((size == -1).then(|| (at + 4, file.len.saturating_sub(at + 12))));
+        }
+        let Ok(size) = u64::try_from(size) else {
+            return Ok(None);
+        };
+        at = at.saturating_add(12).saturating_add(size);
+    }
+    Ok(None)
 }
 
 /// Walks the entries of a CAF packet table from `at` as the reader parses them (each a
@@ -1911,6 +1957,28 @@ mod tests {
             d.extend_from_slice(&v.to_be_bytes());
         }
         (b"desc", 32, d)
+    }
+
+    #[test]
+    fn an_unclosed_caf_opening_in_silence_passes() {
+        // Core Audio leaves the data size at -1 until the file is closed. The decode reads it
+        // filled in, so the reader skips the sound, not walks it as chunks: four seconds of
+        // 16-bit 8 kHz silence were 4096 empty ones, and the recording refused.
+        let mut d = 8_000f64.to_be_bytes().to_vec();
+        d.extend_from_slice(b"lpcm");
+        for v in [2u32, 2, 1, 1, 16] {
+            d.extend_from_slice(&v.to_be_bytes());
+        }
+        let file = caf(&[(b"desc", 32, d), (b"data", -1, vec![0; 4 + 64_000])]);
+        assert_eq!(
+            caf_open_data(&mut Cursor::new(&file)).unwrap(),
+            Some((8 + 44 + 4, 4 + 64_000))
+        );
+        assert_eq!(screened(&file), Ok(()));
+        assert!(screen_full(&mut Cursor::new(&file)).is_ok());
+        // Only a CAF at the start of the file is read filled in.
+        let later = [vec![0; 16], file].concat();
+        assert_eq!(caf_open_data(&mut Cursor::new(&later)).unwrap(), None);
     }
 
     fn pakt(packets: i64, entries: &[u8]) -> (&'static [u8; 4], i64, Vec<u8>) {

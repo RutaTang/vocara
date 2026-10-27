@@ -121,11 +121,46 @@ fn a_caf_whose_sound_runs_to_its_end_decodes() {
 #[test]
 fn a_wav_written_to_a_pipe_is_not_refused_as_too_long() {
     // Written where it could not seek back, a WAV keeps its data size at all ones: 4 GB, which
-    // read as hours. 100 ms at 8 kHz, its length unknown rather than refused.
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/pipe_100ms.wav");
-    assert_eq!(probe_duration_ms(path), Ok(None));
-    let (frames, rate) = decode_file(path, 1.0, 0, 0).unwrap();
-    assert_eq!((frames.len(), rate), (800, 8_000));
+    // read as hours. 100 ms at 8 kHz, its length unknown rather than refused: 16-bit, and
+    // A-law, whose header declares no bit depth.
+    for name in ["pipe_100ms.wav", "pipe_alaw_100ms.wav"] {
+        let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
+        assert_eq!(probe_duration_ms(&path), Ok(None), "{name}");
+        let (frames, rate) = decode_file(&path, 1.0, 0, 0).unwrap();
+        assert_eq!((frames.len(), rate), (800, 8_000), "{name}");
+    }
+}
+
+#[test]
+fn a_tracks_wav_keeps_its_fourth_track() {
+    // A WAV naming no layout is given one by its channel count, an LFE fourth. Four recorder
+    // tracks, a 440 Hz tone at 0.5 on the fourth only: left out as an LFE it decoded silent;
+    // mixed as a centre it reaches both sides at -3 dB.
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/four_track_100ms.wav"
+    );
+    let (frames, _) = decode_file(path, 0.0, 0, 0).unwrap();
+    for side in 0..2 {
+        let rms = (frames
+            .iter()
+            .map(|f| f64::from(f[side]).powi(2))
+            .sum::<f64>()
+            / frames.len() as f64)
+            .sqrt();
+        assert!((rms - 0.25).abs() < 0.01, "side {side}: {rms}");
+    }
+}
+
+#[test]
+fn a_short_aiff_count_cuts_no_sound() {
+    // The decode trims an AIFF to its declared count only by the 8 bytes its reader overruns:
+    // a count its writer left 100 frames short must not cut those frames.
+    let bytes = with_u32_after("tagged_100ms.aiff", b"COMM", 0, 10, 700);
+    let path = temp_file("short.aiff", &bytes);
+    let decoded = decode_file(&path, 0.0, 0, 0);
+    let _ = std::fs::remove_file(&path);
+    assert!(decoded.unwrap().0.len() >= 800);
 }
 
 #[test]

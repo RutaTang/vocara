@@ -3994,14 +3994,23 @@ fn declared_frames(
         }
         _ => n,
     };
-    let pcm = symphonia::default::get_codecs()
+    // A sample's bytes as the decoder reads them, from its name ("pcm_s24le", "pcm_f32be",
+    // "pcm_alaw"): A-law, µ-law and float WAVs declare no bit depth.
+    let sample_bytes = symphonia::default::get_codecs()
         .get_codec(params.codec)
-        .is_some_and(|c| c.short_name.starts_with("pcm_"));
-    // Rounded down to whole bytes: a looser bound, never a real length thrown out.
-    let bits = params.bits_per_coded_sample.or(params.bits_per_sample);
-    let frame_bytes =
-        u64::from(bits.unwrap_or(0) / 8) * params.channels.map_or(0, |c| c.count() as u64);
-    if pcm && frame_bytes > 0 && frames.saturating_mul(frame_bytes) > file_len {
+        .and_then(|c| c.short_name.strip_prefix("pcm_"))
+        .and_then(|name| match name {
+            "alaw" | "mulaw" => Some(1),
+            _ => name
+                .get(1..)?
+                .split(|c: char| !c.is_ascii_digit())
+                .next()?
+                .parse::<u64>()
+                .ok()
+                .map(|bits| bits / 8),
+        });
+    let frame_bytes = sample_bytes.unwrap_or(0) * params.channels.map_or(0, |c| c.count() as u64);
+    if frame_bytes > 0 && frames.saturating_mul(frame_bytes) > file_len {
         return None;
     }
     Some(frames)
@@ -4012,6 +4021,10 @@ fn declared_frames(
 /// left or right channel at -3 dB to its own side, the LFE left out (ffmpeg's default
 /// downmix). Kept to its first two channels, a 5.1 file lost its centre, where its vocals
 /// are, and its surrounds.
+///
+/// The LFE is left out of 5.1 and 7.1 only. A WAV that names no layout is given one by its
+/// channel count, which places an LFE fourth whatever the file holds: a four-track recorder's
+/// fourth track decoded silent. Elsewhere it counts as a centre.
 fn downmix_gains(channels: symphonia::core::audio::Channels) -> Vec<[Smp; 2]> {
     use symphonia::core::audio::Channels as C;
     const HALF_POWER: Smp = std::f32::consts::FRAC_1_SQRT_2;
@@ -4031,6 +4044,7 @@ fn downmix_gains(channels: symphonia::core::audio::Channels) -> Vec<[Smp; 2]> {
         | C::REAR_RIGHT_CENTRE
         | C::FRONT_RIGHT_WIDE
         | C::FRONT_RIGHT_HIGH;
+    let surround = matches!(channels.count(), 6 | 8);
     channels
         .iter()
         .map(|c| {
@@ -4038,7 +4052,7 @@ fn downmix_gains(channels: symphonia::core::audio::Channels) -> Vec<[Smp; 2]> {
                 [1.0, 0.0]
             } else if c == C::FRONT_RIGHT {
                 [0.0, 1.0]
-            } else if c.intersects(C::LFE1 | C::LFE2) {
+            } else if surround && c.intersects(C::LFE1 | C::LFE2) {
                 [0.0, 0.0]
             } else if c.intersects(left) {
                 [HALF_POWER, 0.0]
@@ -4143,7 +4157,7 @@ pub fn probe_duration_ms(path: &str) -> Result<Option<u64>, String> {
     // The probe itself sizes allocations by what the file declares (see media_screen), so this
     // gate is only a gate once the file has been screened.
     crate::media_screen::screen(&mut file).map_err(|e| format!("screen {path}: {e}"))?;
-    let mss = MediaSourceStream::new(media_source(path, file), Default::default());
+    let mss = MediaSourceStream::new(media_source(file), Default::default());
     let mut hint = Hint::new();
     if let Some(ext) = std::path::Path::new(path)
         .extension()
@@ -4204,7 +4218,7 @@ pub enum DecodeError {
 }
 
 /// Decode a file (wav/flac/mp3/aac/m4a/ogg) to interleaved-stereo f32 at its source rate.
-/// Mono is duplicated; >2 channels take the first two. `max_secs` (0.0 = unbounded) caps the
+/// Mono is duplicated; more than 2 channels mix down (see [`downmix_gains`]). `max_secs` (0.0 = unbounded) caps the
 /// decoded duration: the full track lives in memory here, so an arbitrary-length input must
 /// be refused up front rather than after gigabytes of Vec growth.
 /// `max_src_rate` (0 = unbounded) refuses files whose SOURCE sample rate exceeds it, and
@@ -4264,7 +4278,7 @@ pub fn decode_file(
             return Err(DecodeError::Io(format!("read {path}: {e}")))
         }
     }
-    let mss = MediaSourceStream::new(media_source(path, file), Default::default());
+    let mss = MediaSourceStream::new(media_source(file), Default::default());
 
     let mut hint = Hint::new();
     if let Some(ext) = std::path::Path::new(path)
@@ -4509,7 +4523,9 @@ pub fn decode_file(
             out.push([scrub_sample(l), scrub_sample(r)]);
         }
     }
-    if let Some(n) = aiff_frames {
+    // Only the 8 bytes the reader overran, at most 8 frames: a count left short by its writer
+    // must not cut real sound.
+    if let Some(n) = aiff_frames.filter(|&n| (out.len() as u64).saturating_sub(n) <= 8) {
         out.truncate(usize::try_from(n).unwrap_or(usize::MAX));
     }
     // From the end of what decoded, not where the header says the stream ends, and never
@@ -4608,42 +4624,7 @@ fn sniff_aiff_frames(path: &str) -> std::io::Result<Option<u64>> {
     Ok(None)
 }
 
-/// Where a CAF's data chunk declares its size as -1, "to the end of the file", as Core Audio
-/// leaves it until the file is closed: the size field's offset and the size it stands for.
-/// `Ok(None)` for any other file. The spec allows it, but symphonia's reader then reads on
-/// from the start of the sound as if more chunks followed, and refused an interrupted
-/// recording as malformed.
-fn sniff_caf_open_data(path: &str) -> std::io::Result<Option<(u64, u64)>> {
-    use std::io::{Read, Seek};
-    let mut f = std::fs::File::open(path)?;
-    let len = f.metadata()?.len();
-    let mut head = [0u8; 8];
-    if f.read(&mut head)? < 8 || &head[0..4] != b"caff" {
-        return Ok(None);
-    }
-    // Bounded, as the WAV sniff's walk is.
-    let mut at = 8u64;
-    let mut hdr = [0u8; 12];
-    for _ in 0..64 {
-        f.seek(std::io::SeekFrom::Start(at))?;
-        if f.read(&mut hdr)? < 12 {
-            return Ok(None);
-        }
-        let size = i64::from_be_bytes([
-            hdr[4], hdr[5], hdr[6], hdr[7], hdr[8], hdr[9], hdr[10], hdr[11],
-        ]);
-        if &hdr[0..4] == b"data" {
-            return Ok((size == -1).then(|| (at + 4, len.saturating_sub(at + 12))));
-        }
-        let Ok(size) = u64::try_from(size) else {
-            return Ok(None);
-        };
-        at = at.saturating_add(12).saturating_add(size);
-    }
-    Ok(None)
-}
-
-/// A file read with one 8-byte field replaced (see [`sniff_caf_open_data`]).
+/// A file read with one 8-byte field replaced (see [`crate::media_screen::caf_open_data`]).
 struct PatchedFile {
     file: std::fs::File,
     at: u64,
@@ -4678,10 +4659,10 @@ impl symphonia::core::io::MediaSource for PatchedFile {
     }
 }
 
-/// What symphonia reads `file` (opened from `path`) through: the file itself, or for a CAF
-/// whose data runs to its end, the file with that size filled in.
-fn media_source(path: &str, file: std::fs::File) -> Box<dyn symphonia::core::io::MediaSource> {
-    match sniff_caf_open_data(path) {
+/// What symphonia reads `file` through: the file itself, or for a CAF whose data runs to its
+/// end, the file with that size filled in. The screen judged the file as read this way.
+fn media_source(mut file: std::fs::File) -> Box<dyn symphonia::core::io::MediaSource> {
+    match crate::media_screen::caf_open_data(&mut file) {
         Ok(Some((at, size))) => Box::new(PatchedFile {
             file,
             at,
