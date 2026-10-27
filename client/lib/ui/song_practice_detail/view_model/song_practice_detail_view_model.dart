@@ -7,6 +7,7 @@ import 'package:file_selector/file_selector.dart' show getSaveLocation;
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 
+import '../../../data/db/asset_store.dart';
 import '../../../data/repositories/song_practice_repository.dart';
 import '../../../data/repositories/technique_repository.dart';
 import '../../../data/services/app_settings_service.dart';
@@ -1799,8 +1800,11 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     final clip = track?.clipById(clipId);
     if (practice == null || track == null || clip == null) return;
     // Number the clip when the lane holds several, so exporting two clips of
-    // the same take doesn't suggest the same file name twice.
-    final index = track.clips.indexWhere((c) => c.id == clipId);
+    // the same take doesn't suggest the same file name twice — by where it
+    // sits on the timeline, as the user sees them (by storage order, a clip
+    // dropped before the first was "clip 2").
+    final byStart = [...track.clips]..sort((a, b) => a.startMs - b.startMs);
+    final index = byStart.indexWhere((c) => c.id == clipId);
     final suffix = track.clips.length > 1 ? ' (clip ${index + 1})' : '';
     await _exportFile(
       clip.audioFilePath,
@@ -1853,11 +1857,40 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     String sourcePath, {
     required String suggestedName,
   }) async {
+    // One at a time: nothing showed a copy running (to a slow drive it runs
+    // a while), and a second export to the same chosen name had two copies
+    // writing one file, each then saying "Exported".
+    if (_exporting) {
+      _toast('Wait for the current export to finish.');
+      return;
+    }
+    // Bytes another device holds, not yet here: as edits of it say, not
+    // "missing".
+    if (AssetStore.assetIdOf(sourcePath) != null) {
+      _toast(
+        "This take's audio isn't on this device yet, so it can't be "
+        'exported.',
+      );
+      return;
+    }
     final source = File(sourcePath);
     if (sourcePath.isEmpty || !await source.exists()) {
       _toast('The audio file for this track is missing.');
       return;
     }
+    _exporting = true;
+    try {
+      await _exportPicked(source, suggestedName);
+    } finally {
+      _exporting = false;
+    }
+  }
+
+  bool _exporting = false;
+
+  /// The save panel and the copy of [_exportFile].
+  Future<void> _exportPicked(File source, String suggestedName) async {
+    final sourcePath = source.path;
     final String? destPath;
     try {
       destPath = await _pickSaveLocation(suggestedName);
@@ -1867,6 +1900,14 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     }
     if (destPath == null) return; // user cancelled
     final dest = destPath;
+    // Again, after the panel: it can stay open indefinitely, and the clip's
+    // file can go meanwhile (a sync removed the clip, a failed import's
+    // revert deleted its copy) — the copy then failed as if the destination
+    // had.
+    if (!await source.exists()) {
+      _toast('The audio file for this track is missing.');
+      return;
+    }
     // Onto the clip's own file (the save panel can browse into the app's
     // storage and confirm Replace): the copy truncated it to nothing, the
     // take's audio gone, and said "Exported".
@@ -1885,7 +1926,12 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       // short (an old file there already replaced).
       await _finalizer.hold(() => exportCopy(source, dest));
     } catch (_) {
-      _toast('Could not export the audio to that location.');
+      // Blamed on the destination only when the source is still there.
+      _toast(
+        await source.exists()
+            ? 'Could not export the audio to that location.'
+            : 'The audio file for this track is missing.',
+      );
       return;
     }
     _toast('Exported to $destPath');

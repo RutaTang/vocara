@@ -379,6 +379,68 @@ void main() {
     expect(await File(dest).readAsBytes(), clipBBytes);
   });
 
+  test('a clip is numbered by where it sits on the timeline', () async {
+    // By storage order, a clip placed before the take's first was "clip 2".
+    final loaded =
+        (await repo.loadPractice(practiceId)) as Ok<Loaded<SongPractice>>;
+    final practice = loaded.value.aggregate;
+    await repo.savePracticeWithBase(
+      practice.copyWith(
+        vocalTracks: [
+          for (final t in practice.vocalTracks)
+            t.displayName == 'Take 2'
+                ? t.copyWith(clips: t.clips.reversed.toList())
+                : t,
+        ],
+      ),
+      baseHashes: loaded.value.baseHashes,
+    );
+    final picks = <String>[];
+    final vm = await pumpVm(picks, (_) async => null);
+    final take = byName(vm, 'Take 2');
+    final first = take.clips.firstWhere((c) => c.startMs == 0);
+    expect(take.clips.first.id, isNot(first.id), reason: 'stored reversed');
+    await vm.exportClipAudio(take.id, first.id);
+    // (Its bytes are pooled with the backing's, so its extension is that
+    // file's.)
+    expect(picks.single, startsWith('My Song - Take 2 (clip 1).'));
+  });
+
+  test('a second export while one runs is refused', () async {
+    // Nothing showed a copy running, and two copies to one chosen name
+    // wrote one file together, each then saying "Exported".
+    final panel = Completer<String?>();
+    final vm = await pumpVm(<String>[], (_) => panel.future);
+    final toasts = <String>[];
+    vm.toasts.listen(toasts.add);
+    final take = byName(vm, 'Take 1');
+    final first = vm.exportTrackAudio(take.id);
+    await Future<void>.delayed(Duration.zero);
+    await vm.exportTrackAudio(take.id);
+    await Future<void>.delayed(Duration.zero);
+    expect(toasts, ['Wait for the current export to finish.']);
+    panel.complete(null);
+    await first;
+  });
+
+  test('a source gone while the save panel was open is said so', () async {
+    // The copy then failed as if the destination had.
+    final dest = p.join(tmp.path, 'late.wav');
+    late final String source;
+    final vm = await pumpVm(<String>[], (_) async {
+      File(source).deleteSync();
+      return dest;
+    });
+    final toasts = <String>[];
+    vm.toasts.listen(toasts.add);
+    final take = byName(vm, 'Take 1');
+    source = take.primaryClip!.audioFilePath;
+    await vm.exportTrackAudio(take.id);
+    await Future<void>.delayed(Duration.zero);
+    expect(toasts.single, contains('missing'));
+    expect(File(dest).existsSync(), isFalse);
+  });
+
   test('a long title is cut to a name the file system takes', () async {
     // A file name holds 255 bytes; an unbounded title suggested one the copy
     // then failed on, with only "Could not export" to say why.

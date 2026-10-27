@@ -437,6 +437,18 @@ void main() {
     await _teardown(tester, persistence);
   });
 
+  testWidgets('a save panel that fails to open says so', (tester) async {
+    // Thrown out of the tap, it said nothing (a take's export says this).
+    final persistence = await _pumpSettings(
+      tester,
+      pickSavePath: (_) async => throw StateError('panel failed'),
+    );
+    await tester.tap(find.text('Export diagnostics…'));
+    await tester.pump();
+    await _pumpUntilFound(tester, find.text('Could not open the save dialog.'));
+    await _teardown(tester, persistence);
+  });
+
   testWidgets('Export diagnostics leaves no temporary bundle behind', (
     tester,
   ) async {

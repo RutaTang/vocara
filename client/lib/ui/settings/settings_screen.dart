@@ -335,8 +335,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _exportDiagnostics() async {
     final pick = widget.pickSavePath ?? _saveLocationPath;
-    final destination = await pick('vocara-diagnostics.txt');
-    if (destination == null || !mounted) return;
+    final String? picked;
+    try {
+      picked = await pick('vocara-diagnostics.txt');
+    } catch (_) {
+      // As a take's export says it: thrown out of the tap, it said nothing.
+      if (mounted) _showToast('Could not open the save dialog.');
+      return;
+    }
+    if (picked == null || !mounted) return;
+    final destination = picked;
     setState(() => _exporting = true);
     String? bundle;
     try {
