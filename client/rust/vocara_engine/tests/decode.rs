@@ -88,6 +88,23 @@ fn an_alac_cookie_wrapped_in_its_atom_headers_decodes() {
 }
 
 #[test]
+fn an_aiff_ends_where_its_sound_does() {
+    // symphonia reads 8 bytes past an AIFF's sound chunk. With an ID3 chunk after it, as iTunes
+    // and taggers write one, those bytes were the tag's header, decoded as a click at the end:
+    // here 4 frames, the first at 0.57.
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/tagged_100ms.aiff"
+    );
+    let (frames, rate) = decode_file(path, 0.0, 0, 0).unwrap();
+    assert_eq!((frames.len(), rate), (800, 8_000));
+    assert!(
+        frames.iter().all(|f| f[0].abs() <= 0.5),
+        "a click past the sound"
+    );
+}
+
+#[test]
 fn a_wav_written_to_a_pipe_is_not_refused_as_too_long() {
     // Written where it could not seek back, a WAV keeps its data size at all ones: 4 GB, which
     // read as hours. 100 ms at 8 kHz, its length unknown rather than refused.

@@ -4250,6 +4250,9 @@ pub fn decode_file(
             return Err(DecodeError::RateUnsupported);
         }
     }
+    // Where an AIFF's sound ends (see sniff_aiff_frames). Zero is a header never patched, not
+    // an empty file.
+    let aiff_frames = sniff_aiff_frames(path).ok().flatten().filter(|&n| n > 0);
     // A sample table, packet table or tag that declares more than the file holds: symphonia
     // reserves it whole during the probe, and failing to allocate aborts the app. The full
     // scan (decode reads the whole file anyway) also covers an Ogg stream's later links, whose
@@ -4506,6 +4509,9 @@ pub fn decode_file(
             out.push([scrub_sample(l), scrub_sample(r)]);
         }
     }
+    if let Some(n) = aiff_frames {
+        out.truncate(usize::try_from(n).unwrap_or(usize::MAX));
+    }
     // From the end of what decoded, not where the header says the stream ends, and never
     // into an earlier link.
     let kept = (out.len() as u64).saturating_sub(padding);
@@ -4560,6 +4566,43 @@ fn sniff_wav_sample_rate(path: &str) -> std::io::Result<Option<u32>> {
             return Ok(Some(u32::from_le_bytes([fmt[4], fmt[5], fmt[6], fmt[7]])));
         }
         use std::io::Seek;
+        f.seek(std::io::SeekFrom::Current((size + (size & 1)) as i64))?;
+    }
+    Ok(None)
+}
+
+/// Reads just enough of an AIFF or AIFF-C header to report the frame count its COMM chunk
+/// declares; `Ok(None)` when the file is not an AIFF. symphonia's reader ends the sound data
+/// 8 bytes past its chunk (it counts the chunk's offset and block-size fields as sound), so an
+/// AIFF with a chunk after its sound, where iTunes and taggers write an ID3 tag, decoded that
+/// chunk's header as a click at its very end.
+fn sniff_aiff_frames(path: &str) -> std::io::Result<Option<u64>> {
+    use std::io::{Read, Seek};
+    let mut f = std::fs::File::open(path)?;
+    let mut head = [0u8; 12];
+    if f.read(&mut head)? < 12
+        || &head[0..4] != b"FORM"
+        || !(&head[8..12] == b"AIFF" || &head[8..12] == b"AIFC")
+    {
+        return Ok(None);
+    }
+    // Bounded, as the WAV sniff's walk is.
+    let mut hdr = [0u8; 8];
+    for _ in 0..64 {
+        if f.read(&mut hdr)? < 8 {
+            return Ok(None);
+        }
+        let size = u32::from_be_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]) as u64;
+        if &hdr[0..4] == b"COMM" {
+            // The channel count, then the frame count.
+            let mut comm = [0u8; 6];
+            if size < 6 || f.read(&mut comm)? < 6 {
+                return Ok(None);
+            }
+            return Ok(Some(u64::from(u32::from_be_bytes([
+                comm[2], comm[3], comm[4], comm[5],
+            ]))));
+        }
         f.seek(std::io::SeekFrom::Current((size + (size & 1)) as i64))?;
     }
     Ok(None)
