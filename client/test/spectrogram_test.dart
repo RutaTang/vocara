@@ -1,15 +1,16 @@
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'package:fftea/fftea.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vocara/data/services/audio_dsp.dart';
 
 void main() {
   test('StreamingSpectrogramBuilder equals computeSpectrogram exactly, over '
       'awkward chunk boundaries', () {
-    // The builder must be COLUMN-EXACT with the batch path (same fftea
-    // pipeline; stream+flush share run's implementation) — including the
-    // trailing zero-padded partial frame and the empty-input case.
+    // The builder must be COLUMN-EXACT with the batch path (the same frames
+    // and column math) — including the trailing zero-padded partial frame
+    // and the empty-input case.
     final n = 10000; // not a multiple of fftSize or hop
     final samples = Float32List(n);
     for (var i = 0; i < n; i++) {
@@ -41,6 +42,102 @@ void main() {
     // Empty input: zero frames on both paths, never a lone padded frame.
     expect(StreamingSpectrogramBuilder(44100).finish().frames, 0);
     expect(computeSpectrogram(Float32List(0), 44100).frames, 0);
+  });
+
+  test("the analysis FFT is fftea's realFft bit for bit", () {
+    Uint64List bits(Float64x2List a) =>
+        a.buffer.asUint64List(a.offsetInBytes, a.length * 2);
+    final rng = Random(17);
+    for (final n in [16, 32, 64, 256, 512, 1024, 2048, 4096, 8192]) {
+      final fft = FFT(n);
+      for (var t = 0; t < 30; t++) {
+        final x = Float64List(n);
+        for (var i = 0; i < n; i++) {
+          // Signed zeros (a Hann window's ends, digital silence), denormal-
+          // scale and full-scale values, and an all-zero frame.
+          x[i] = t == 0
+              ? 0.0
+              : switch (rng.nextInt(12)) {
+                  0 => 0.0,
+                  1 => -0.0,
+                  2 => 1e-310 * (rng.nextDouble() - 0.5),
+                  _ => rng.nextDouble() * 2 - 1,
+                };
+        }
+        expect(
+          bits(radix2RealFft(x)),
+          bits(fft.realFft(x)),
+          reason: 'n=$n trial $t',
+        );
+      }
+    }
+  });
+
+  test("the spectrogram builders are fftea's STFT bit for bit", () {
+    // What computeSpectrogram was: fftea's STFT over the samples, the first
+    // maxBin magnitudes of each frame in dB, no frame for empty input.
+    Float32List ffteaColumns(
+      Float32List samples,
+      int sr,
+      double maxHz,
+      int fftSize,
+      int hop,
+    ) {
+      final maxBin = min(fftSize ~/ 2 + 1, (maxHz * fftSize / sr).ceil() + 1);
+      final out = <double>[];
+      if (samples.isNotEmpty) {
+        STFT(fftSize, Window.hanning(fftSize)).run(samples, (freq) {
+          final mags = freq.discardConjugates().magnitudes();
+          for (var b = 0; b < maxBin; b++) {
+            out.add(20.0 * (log(mags[b] + 1e-9) / 2.302585092994046));
+          }
+        }, hop);
+      }
+      return Float32List.fromList(out);
+    }
+
+    Uint32List bits(Float32List a) =>
+        a.buffer.asUint32List(a.offsetInBytes, a.length);
+    final rng = Random(23);
+    for (final (sr, fftSize, hop) in [
+      (8000, 2048, 512),
+      (22050, 2048, 512),
+      (44100, 2048, 512),
+      (48000, 2048, 512),
+      (48000, 1024, 256),
+      (44100, 1000, 300), // fftea's own FFT, not radix-2
+    ]) {
+      for (final n in [0, 1, 300, fftSize, fftSize + 1, 9001, sr]) {
+        final samples = Float32List(n);
+        for (var i = 0; i < n; i++) {
+          samples[i] =
+              0.4 * sin(2 * pi * 220 * i / sr) +
+              0.05 * (rng.nextDouble() - 0.5);
+        }
+        for (final maxHz in [5000.0, 18000.0]) {
+          final want = ffteaColumns(samples, sr, maxHz, fftSize, hop);
+          final why = 'sr=$sr fft=$fftSize n=$n maxHz=$maxHz';
+          final batch = computeSpectrogram(
+            samples,
+            sr,
+            fftSize: fftSize,
+            hop: hop,
+            maxHz: maxHz,
+          );
+          expect(bits(batch.db), bits(want), reason: why);
+          final b = StreamingSpectrogramBuilder(
+            sr,
+            fftSize: fftSize,
+            hop: hop,
+            maxHz: maxHz,
+          );
+          for (var at = 0; at < n; at += 777) {
+            b.add(Float32List.sublistView(samples, at, min(n, at + 777)));
+          }
+          expect(bits(b.finish().db), bits(want), reason: '$why (streamed)');
+        }
+      }
+    }
   });
 
   test(

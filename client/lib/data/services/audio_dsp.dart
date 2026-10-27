@@ -141,13 +141,224 @@ double _coveredMaxHz(double maxHz, int maxBin, int sampleRate, int fftSize) =>
 int _spectrogramBins(double maxHz, int fftSize, int sampleRate) =>
     math.min(fftSize ~/ 2 + 1, (maxHz * fftSize / sampleRate).ceil() + 1);
 
-/// How many STFT frames fftea's framing gives [samples] samples — `run`, and
-/// `stream` + `flush` alike, zero-pad and emit a trailing partial frame; empty
-/// input gives none.
+/// How many STFT frames [samples] samples make — fftea's STFT framing, which
+/// every analysis here keeps: frames start every [hop], the trailing partial
+/// frame is zero-padded and emitted, and empty input gives none.
 int stftFrameCount(int samples, {int fftSize = 2048, int hop = 512}) =>
     samples <= 0
     ? 0
     : (samples <= fftSize ? 1 : ((samples - fftSize + hop - 1) ~/ hop) + 1);
+
+/// The FFT of a real frame of one fixed size, as every analysis here takes
+/// it: magnitudes for the spectrum, real parts for the cepstrum. A power of
+/// two of 16 or more (every production size) is [_Radix2RealFft], fftea's
+/// own radix-2 arithmetic at about half the cost; any other size is fftea.
+abstract class _RealFft {
+  factory _RealFft(int size) => size >= 16 && size & (size - 1) == 0
+      ? _Radix2RealFft(size)
+      : _FfteaRealFft(size);
+
+  /// Transforms [x] (the FFT's size long), replacing the previous result.
+  void transform(Float64List x);
+
+  /// |X[k]| for k in [0, count) into [out] — fftea's `magnitudes()`.
+  void magnitudesInto(Float64List out, int count);
+
+  /// Re X[k] for k in [from, to) into [out] at k - from.
+  void realPartsInto(Float64List out, int from, int to);
+}
+
+/// fftea's `FFT(size).realFft` for a power-of-two size ≥ 16 (its Radix2FFT),
+/// bit for bit, at about half the cost.
+///
+/// fftea keeps each value as an interleaved (re, im) vector, so every
+/// butterfly swaps and negates lanes to multiply by its twiddle. This keeps
+/// the real and the imaginary parts apart, two neighbouring values to a
+/// Float64x2, so a stage past the first is plain lane-wise arithmetic on two
+/// butterflies at once — the SAME multiplies and adds in the same order: q =
+/// o·w̄ as (o.x·w.x + o.y·w.y, o.y·w.x − o.x·w.y), where fftea adds the
+/// product with the negated o.x (IEEE subtraction is exactly that), then
+/// p ± q, over fftea's twiddles built fftea's way. The bit-reversal
+/// permutation is a table read straight out of the input, and the first
+/// stage (twiddle 1, every imaginary input +0) is formed as it is read.
+/// Pinned equal to fftea by test.
+class _Radix2RealFft implements _RealFft {
+  _Radix2RealFft(this.size)
+    : _half = size >> 1,
+      _rev = Int32List(size >> 1),
+      _twRe = Float64x2List(size >> 1),
+      _twIm = Float64x2List(size >> 1),
+      _re = Float64x2List(size >> 1),
+      _im = Float64x2List(size >> 1) {
+    if (size < 16 || size & (size - 1) != 0) {
+      throw ArgumentError.value(size, 'size', 'not a power of two ≥ 16');
+    }
+    final bits = size.bitLength - 1;
+    // The input sample fftea's bit-reversal permutation moves to 2i: the
+    // first of the first stage's i-th butterfly. Its partner, at 2i + 1, is
+    // sample rev(2i) + size/2.
+    for (var i = 0; i < _half; i++) {
+      var v = 2 * i, r = 0;
+      for (var b = 0; b < bits; b++) {
+        r = (r << 1) | (v & 1);
+        v >>= 1;
+      }
+      _rev[i] = r;
+    }
+    final tw = _ffteaTwiddles(size);
+    _w0Re = tw[0].x;
+    _w0Im = tw[0].y;
+    // fftea's stage of half-span m reads tw[j·(size/2)/m] for its j-th
+    // butterfly; laid out flat at [m, 2m), so a stage's twiddles are
+    // contiguous and pair up like the values they multiply.
+    final flatRe = Float64List(size), flatIm = Float64List(size);
+    for (var m = 1; m < size; m <<= 1) {
+      final stride = _half ~/ m;
+      for (var j = 0; j < m; j++) {
+        flatRe[m + j] = tw[j * stride].x;
+        flatIm[m + j] = tw[j * stride].y;
+      }
+    }
+    for (var i = 0; i < _half; i++) {
+      _twRe[i] = Float64x2(flatRe[2 * i], flatRe[2 * i + 1]);
+      _twIm[i] = Float64x2(flatIm[2 * i], flatIm[2 * i + 1]);
+    }
+  }
+
+  final int size;
+  final int _half;
+  final Int32List _rev;
+  final Float64x2List _twRe, _twIm;
+  late final double _w0Re, _w0Im;
+
+  /// The result: Re/Im of X[2i] and X[2i+1] in lanes x and y of entry i.
+  final Float64x2List _re, _im;
+
+  /// fftea 1.5's Radix2FFT twiddles, computed exactly as it computes them.
+  static Float64x2List _ffteaTwiddles(int size) {
+    final half = size >>> 1;
+    final twiddles = Float64x2List(half);
+    twiddles[0] = Float64x2(1, 0);
+    final step = 2 * math.pi / size;
+    final quarter = half >>> 1;
+    final eighth = quarter >>> 1;
+    for (var i = 1; i < eighth; ++i) {
+      final theta = step * i;
+      twiddles[i] = Float64x2(math.cos(theta), math.sin(theta));
+    }
+    twiddles[eighth] = Float64x2(math.sqrt1_2, math.sqrt1_2);
+    for (var i = 1; i < eighth; ++i) {
+      final z = -twiddles[eighth - i];
+      twiddles[eighth + i] = Float64x2(-z.y, -z.x);
+    }
+    twiddles[quarter] = Float64x2(0, 1);
+    for (var i = 1; i < quarter; ++i) {
+      final z = twiddles[quarter - i];
+      twiddles[quarter + i] = Float64x2(-z.x, z.y);
+    }
+    return twiddles;
+  }
+
+  @override
+  void transform(Float64List x) {
+    final half = _half;
+    final re = _re, im = _im, rev = _rev;
+    // Stage 1: butterflies of neighbours after the permutation, twiddle
+    // tw[0], imaginary parts +0 (fftea's realFft input is (x, 0)).
+    final wr0 = _w0Re, wi0 = _w0Im;
+    const zero = 0.0;
+    for (var i = 0; i < half; i++) {
+      final a = rev[i];
+      final p = x[a], o = x[a + half];
+      final qr = o * wr0 + zero * wi0;
+      final qi = zero * wr0 - o * wi0;
+      re[i] = Float64x2(p + qr, p - qr);
+      im[i] = Float64x2(zero + qi, zero - qi);
+    }
+    // The rest: blocks of 2h pairs, butterflies h pairs apart.
+    final twRe = _twRe, twIm = _twIm;
+    for (var h = 1; h < half; h <<= 1) {
+      for (var k0 = 0; k0 < half; k0 += 2 * h) {
+        for (var j = 0; j < h; j++) {
+          final k = k0 + j, km = k + h;
+          final wr = twRe[h + j], wi = twIm[h + j];
+          final pr = re[k], pi = im[k], or = re[km], oi = im[km];
+          final qr = or * wr + oi * wi;
+          final qi = oi * wr - or * wi;
+          re[k] = pr + qr;
+          im[k] = pi + qi;
+          re[km] = pr - qr;
+          im[km] = pi - qi;
+        }
+      }
+    }
+  }
+
+  @override
+  void magnitudesInto(Float64List out, int count) {
+    // fftea: sqrt(x·x + y·y) per value; sqrt is correctly rounded either way.
+    final re = _re, im = _im;
+    final pairs = count >> 1;
+    for (var i = 0; i < pairs; i++) {
+      final r = re[i], m = im[i];
+      final mag = (r * r + m * m).sqrt();
+      out[2 * i] = mag.x;
+      out[2 * i + 1] = mag.y;
+    }
+    if (count.isOdd) {
+      final r = re[pairs].x, m = im[pairs].x;
+      out[count - 1] = math.sqrt(r * r + m * m);
+    }
+  }
+
+  @override
+  void realPartsInto(Float64List out, int from, int to) {
+    final re = _re;
+    for (var k = from; k < to; k++) {
+      final pair = re[k >> 1];
+      out[k - from] = k.isEven ? pair.x : pair.y;
+    }
+  }
+}
+
+/// [_RealFft] by fftea itself, for the sizes [_Radix2RealFft] does not take.
+class _FfteaRealFft implements _RealFft {
+  _FfteaRealFft(int size) : _fft = FFT(size);
+
+  final FFT _fft;
+  Float64x2List _out = Float64x2List(0);
+
+  @override
+  void transform(Float64List x) => _out = _fft.realFft(x);
+
+  @override
+  void magnitudesInto(Float64List out, int count) {
+    for (var k = 0; k < count; k++) {
+      final z = _out[k];
+      out[k] = math.sqrt(z.x * z.x + z.y * z.y);
+    }
+  }
+
+  @override
+  void realPartsInto(Float64List out, int from, int to) {
+    for (var k = from; k < to; k++) {
+      out[k - from] = _out[k].x;
+    }
+  }
+}
+
+/// [_Radix2RealFft]'s spectrum of [x] (a power-of-two length ≥ 16),
+/// interleaved like fftea's `FFT(x.length).realFft(x)`.
+@visibleForTesting
+Float64x2List radix2RealFft(Float64List x) {
+  final fft = _Radix2RealFft(x.length)..transform(x);
+  Float64x2 at(int k) {
+    final re = fft._re[k >> 1], im = fft._im[k >> 1];
+    return k.isEven ? Float64x2(re.x, im.x) : Float64x2(re.y, im.y);
+  }
+
+  return Float64x2List.fromList([for (var k = 0; k < x.length; k++) at(k)]);
+}
 
 /// The dB image of a spectrogram as it is built: each column's [bins] values
 /// are written STRAIGHT into one flat buffer, sized up front from the frame
@@ -218,11 +429,50 @@ class _SpectrogramImage {
   }
 }
 
+/// The STFT behind the spectrogram-only paths, one dB column per frame:
+/// [fftSize] samples from frame·hop (0 past the end) times the Hann window,
+/// transformed, 20·log10(|X| + 1e-9) for the first [bins] bins. This is
+/// fftea's STFT (`run`, and `stream` + `flush` alike) exactly — the same
+/// frames, the same window products, the same transform ([_RealFft]) and
+/// conversion — without its per-frame interleave, and it is the metrics
+/// pass's first FFT too (both pinned by test).
+class _ColumnStft {
+  _ColumnStft(int fftSize, this.bins)
+    : _window = Window.hanning(fftSize),
+      _fft = _RealFft(fftSize),
+      _frame = Float64List(fftSize),
+      _mags = Float64List(bins);
+
+  final int bins;
+  final Float64List _window, _frame, _mags;
+  final _RealFft _fft;
+
+  static const double _ln10 = 2.302585092994046;
+
+  /// Appends the column of [samples] (one frame, already zero-padded) to
+  /// [image].
+  void column(Float32List samples, _SpectrogramImage image) {
+    final frame = _frame, window = _window;
+    for (var i = 0; i < frame.length; i++) {
+      frame[i] = samples[i] * window[i];
+    }
+    _fft
+      ..transform(frame)
+      ..magnitudesInto(_mags, bins);
+    final base = image.nextColumn();
+    final db = image.db;
+    for (var b = 0; b < bins; b++) {
+      db[base + b] = 20.0 * (math.log(_mags[b] + 1e-9) / _ln10);
+    }
+  }
+}
+
 /// Incremental spectrogram builder with EXACTLY [computeSpectrogram]'s
-/// column math (same fftea STFT windowing — `stream`/`flush` share `run`'s
-/// pipeline — same dB conversion, same assembly), fed in chunks so the
-/// full-track sample buffer never has to exist. Pinned equal to the batch
-/// path by test.
+/// columns (the same frames, zero-padded tail included, the same
+/// [_ColumnStft], the same assembly), fed in chunks so the full-track sample
+/// buffer never has to exist: a frame is emitted once its samples are all in,
+/// and what no later frame reads is dropped. Pinned equal to the batch path
+/// by test.
 class StreamingSpectrogramBuilder {
   /// [expectedFrames] — the [stftFrameCount] of the whole input, when known —
   /// sizes the image once; without it the image grows as columns arrive.
@@ -232,9 +482,9 @@ class StreamingSpectrogramBuilder {
     this.hop = 512,
     this.maxHz = 5000,
     int expectedFrames = 0,
-  }) : maxBin = _spectrogramBins(maxHz, fftSize, sampleRate),
-       _stft = STFT(fftSize, Window.hanning(fftSize)) {
+  }) : maxBin = _spectrogramBins(maxHz, fftSize, sampleRate) {
     _image = _SpectrogramImage(maxBin, expectedFrames: expectedFrames);
+    _stft = _ColumnStft(fftSize, maxBin);
   }
 
   final int sampleRate;
@@ -242,33 +492,44 @@ class StreamingSpectrogramBuilder {
   final int hop;
   final double maxHz;
   final int maxBin;
-  final STFT _stft;
+  late final _ColumnStft _stft;
   late final _SpectrogramImage _image;
-  bool _any = false;
+  final _raw = _RollingF32();
+  var _nextFrame = 0;
 
-  static const double _ln10 = 2.302585092994046;
-
-  void _column(Float64x2List freq) {
-    final mags = freq.discardConjugates().magnitudes();
-    final base = _image.nextColumn();
-    final db = _image.db;
-    for (var b = 0; b < maxBin; b++) {
-      db[base + b] = 20.0 * (math.log(mags[b] + 1e-9) / _ln10);
+  /// Feeds the next chunk of mono samples, a block at a time so the buffer
+  /// never holds (and compacts) a whole file-reader chunk; see
+  /// [StreamingTakeAnalyzer._emitBlock].
+  void add(Float32List chunk) {
+    for (
+      var at = 0;
+      at < chunk.length;
+      at += StreamingTakeAnalyzer._emitBlock
+    ) {
+      final end = math.min(chunk.length, at + StreamingTakeAnalyzer._emitBlock);
+      _raw.addAll(Float32List.sublistView(chunk, at, end));
+      _emitReady(flush: false);
     }
   }
 
-  /// Feeds the next chunk of mono samples.
-  void add(Float32List chunk) {
-    if (chunk.isEmpty) return;
-    _any = true;
-    _stft.stream(chunk, _column, hop);
+  void _emitReady({required bool flush}) {
+    final len = _raw.length;
+    final nFrames = stftFrameCount(len, fftSize: fftSize, hop: hop);
+    while (_nextFrame < nFrames) {
+      final start = _nextFrame * hop;
+      // Until the end is known, only frames whose samples are all in.
+      if (!flush && start + fftSize > len) return;
+      _stft.column(_raw.slice(start, fftSize, len), _image);
+      _nextFrame++;
+      _raw.dropBelow(_nextFrame * hop);
+    }
   }
 
-  /// Flushes the trailing partial frame and assembles the [Spectrogram].
+  /// Emits the trailing zero-padded frame and assembles the [Spectrogram].
   /// Matches [computeSpectrogram] on empty input too: zero frames, never a
   /// lone zero-padded one.
   Spectrogram finish() {
-    if (_any) _stft.flush(_column);
+    _emitReady(flush: true);
     return _image.finish(
       maxHz: maxHz,
       sampleRate: sampleRate,
@@ -287,28 +548,15 @@ Spectrogram computeSpectrogram(
   double maxHz = 5000,
 }) {
   final maxBin = _spectrogramBins(maxHz, fftSize, sampleRate);
-
-  final stft = STFT(fftSize, Window.hanning(fftSize));
-  final image = _SpectrogramImage(
-    maxBin,
-    expectedFrames: stftFrameCount(samples.length, fftSize: fftSize, hop: hop),
-  );
-  const ln10 = 2.302585092994046;
-
-  // Empty input → no frames, so VoiceMetrics.frames == Spectrogram.frames stays aligned
-  // (computeVoiceMetrics returns 0 frames for empty input; fftea's STFT would otherwise
-  // emit a single zero-padded frame here, breaking the per-frame overlay alignment).
-  if (samples.isNotEmpty) {
-    stft.run(samples, (Float64x2List freq) {
-      final mags = freq.discardConjugates().magnitudes();
-      final base = image.nextColumn();
-      final db = image.db;
-      for (var b = 0; b < maxBin; b++) {
-        db[base + b] = 20.0 * (math.log(mags[b] + 1e-9) / ln10);
-      }
-    }, hop);
+  // Empty input → no frames, so VoiceMetrics.frames == Spectrogram.frames
+  // stays aligned (never a lone zero-padded frame; see [stftFrameCount]).
+  final len = samples.length;
+  final nFrames = stftFrameCount(len, fftSize: fftSize, hop: hop);
+  final image = _SpectrogramImage(maxBin, expectedFrames: nFrames);
+  final stft = _ColumnStft(fftSize, maxBin);
+  for (var fr = 0; fr < nFrames; fr++) {
+    stft.column(_padSlice(samples, fr * hop, fftSize, len), image);
   }
-
   return image.finish(
     maxHz: maxHz,
     sampleRate: sampleRate,
@@ -346,7 +594,7 @@ class _MetricsPass {
   }) : half = fftSize ~/ 2,
        binHz = sampleRate / fftSize,
        window = Window.hanning(fftSize),
-       fft = FFT(fftSize),
+       fft = _RealFft(fftSize),
        dsFactor = (sampleRate / 11000).round().clamp(1, 8),
        yinFactor = (sampleRate / 22050).round().clamp(1, 2),
        ring = Float32List(capacityFrames),
@@ -369,6 +617,7 @@ class _MetricsPass {
        voicedMask = Uint8List(capacityFrames),
        frame = Float64List(fftSize),
        logmag = Float64List(fftSize),
+       mags = Float64List(fftSize ~/ 2 + 1),
        image = spectrogramBins > 0
            ? _SpectrogramImage(spectrogramBins, expectedFrames: capacityFrames)
            : null {
@@ -385,6 +634,7 @@ class _MetricsPass {
     b5k = _binOf(5000);
     qMin = (sampleRate / 500).floor().clamp(2, half);
     qMax = (sampleRate / 60).ceil().clamp(qMin + 1, half);
+    cepRe = Float64List(qMax - qMin + 1);
   }
 
   static const double _ln10 = 2.302585092994046;
@@ -396,7 +646,7 @@ class _MetricsPass {
   final int half;
   final double binHz;
   final Float64List window;
-  final FFT fft;
+  final _RealFft fft;
   final int dsFactor;
   final int yinFactor;
   late final double dsRate;
@@ -415,13 +665,18 @@ class _MetricsPass {
   final Uint8List voicedMask;
   final Float64List frame, logmag;
 
+  /// The frame's magnitude spectrum, bins 0..[half]; and the cepstrum's real
+  /// parts over the F0 quefrency window [qMin]..[qMax]. Reused every frame.
+  final Float64List mags;
+  late final Float64List cepRe;
+
   var _maxEnergy = 1e-12;
   var _emitted = 0;
 
   /// When > 0, every frame also keeps the first [spectrogramBins] bins of its
   /// dB spectrum as a spectrogram column ([image]). The spectrogram's STFT
   /// is this pass's first FFT exactly — same frames, same Hann window, same
-  /// fftea transform, same 20·log10(|X| + 1e-9) — so the column IS what a
+  /// [_RealFft], same 20·log10(|X| + 1e-9) — so the column IS what a
   /// separate [computeSpectrogram] would compute, bit for bit (pinned by
   /// test), without transforming every frame a third time.
   final int spectrogramBins;
@@ -490,7 +745,9 @@ class _MetricsPass {
       frame[i] = s * window[i];
     }
     loudness[fr] = 20.0 * (math.log(math.sqrt(rawSq / fftSize) + 1e-9) / _ln10);
-    final mags = fft.realFft(frame).discardConjugates().magnitudes();
+    fft.transform(frame);
+    final mags = this.mags;
+    fft.magnitudesInto(mags, half + 1);
 
     var e = 0.0;
     for (var b = 1; b <= half; b++) {
@@ -536,14 +793,16 @@ class _MetricsPass {
     for (var k = half + 1; k < fftSize; k++) {
       logmag[k] = logmag[fftSize - k];
     }
-    final cep = fft.realFft(logmag);
+    fft.transform(logmag);
+    final cep = cepRe;
+    fft.realPartsInto(cep, qMin, qMax + 1);
     // Locate the rahmonic peak, then fit the cepstral-baseline regression over
     // the window EXCLUDING a small neighborhood of the peak — so the line
     // reflects the spectral trend, not the peak it's measured against (including
     // the peak biases prominence, and thus CPP, downward).
     var peakQ = qMin, peakV = -1e30;
     for (var q = qMin; q <= qMax; q++) {
-      final v = cep[q].x / fftSize;
+      final v = cep[q - qMin] / fftSize;
       if (v > peakV) {
         peakV = v;
         peakQ = q;
@@ -553,7 +812,7 @@ class _MetricsPass {
     var sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0, cnt = 0;
     for (var q = qMin; q <= qMax; q++) {
       if ((q - peakQ).abs() <= cppGuard) continue;
-      final v = cep[q].x / fftSize;
+      final v = cep[q - qMin] / fftSize;
       final qd = q.toDouble();
       sx += qd;
       sy += v;
@@ -827,6 +1086,19 @@ class _RollingF32 {
     _len++;
   }
 
+  /// Appends all of [chunk].
+  void addAll(Float32List chunk) {
+    final local = _len - _base;
+    final need = local + chunk.length;
+    if (need > _buf.length) {
+      final grown = Float32List(math.max(need, _buf.length * 2));
+      grown.setRange(0, local, _buf);
+      _buf = grown;
+    }
+    _buf.setRange(local, need, chunk);
+    _len += chunk.length;
+  }
+
   /// Value at absolute index [i]; 0 outside `[base, len)` — the zero-pad
   /// edge semantics of [_padSlice].
   double at(int i) {
@@ -1042,8 +1314,8 @@ _MetricsPass _batchPass(
   required int hop,
   int spectrogramBins = 0,
 }) {
-  // Match fftea's STFT framing exactly (computeSpectrogram uses STFT.run, which
-  // zero-pads and emits a trailing partial frame) so VoiceMetrics.frames ==
+  // Match the spectrogram's STFT framing exactly ([stftFrameCount]: a
+  // zero-padded trailing partial frame is emitted) so VoiceMetrics.frames ==
   // Spectrogram.frames and the per-frame overlay/playhead stay aligned. The
   // final frame is zero-padded past the end of [samples].
   final len = samples.length;
