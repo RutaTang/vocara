@@ -389,8 +389,6 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     // Carry user-presentable copy (duration cap / density / rate / IO).
     MediaTooLongException() => e.toString(),
     MediaUnsupportedException() => e.toString(),
-    // A file gone or unreadable mid-import (moved, a disconnected drive).
-    FileSystemException() => "The file couldn't be read.",
     _ => 'Something went wrong.',
   };
 
@@ -1253,7 +1251,8 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       _toast(
         // Rounded up, as the limit counts: rounded down, a file just over it
         // read as exactly the limit.
-        'That file is ${(declared.inSeconds + 59) ~/ 60} minutes long. The '
+        'That file is ${(declared.inMilliseconds + 59999) ~/ 60000} minutes '
+        'long. The '
         'limit is '
         '${maxPlaybackDuration.inMinutes} minutes.',
       );
@@ -1276,10 +1275,20 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     String sourcePath,
     Future<bool> Function(String dest) body,
   ) async {
-    final imported = await _audioFiles.importAudio(
-      practiceId: _practiceId,
-      sourcePath: sourcePath,
-    );
+    final String imported;
+    try {
+      imported = await _audioFiles.importAudio(
+        practiceId: _practiceId,
+        sourcePath: sourcePath,
+      );
+    } on FileSystemException {
+      // The source gone or unreadable mid-import (moved, a disconnected
+      // drive) — only here: a write failing (a full disk) is not the file's.
+      if (!await File(sourcePath).exists()) {
+        throw const FormatException("The file couldn't be read.");
+      }
+      rethrow;
+    }
     var dest = imported;
     var committed = false;
     try {
@@ -1428,19 +1437,15 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     await _busyGate.run(() async {
       await _withImportedAudio(sourcePath, (dest) async {
         final analysis = await _waveforms.analyze(dest);
-        final id = _appendVocal(
+        // Not selected, unlike a recorded take: the selection is REC's target,
+        // and a guide vocal imported to sing along with became the take the
+        // next recording landed on, muted for the whole of it.
+        _appendVocal(
           path: dest,
           displayName: p.basenameWithoutExtension(sourcePath),
           analysis: analysis,
           versionId: versionId,
         );
-        // Selected, as a recorded take and an added clip are (when it shows
-        // here): left on the take before, the import was easy to miss.
-        if (versions.vocalTakes.any((t) => t.id == id)) {
-          _selectedTrackId = id;
-          _selectedClipId = null;
-          _selectedBusId = null; // track and bus selection are exclusive
-        }
         return _save();
       });
     });

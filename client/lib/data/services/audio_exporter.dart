@@ -98,11 +98,13 @@ class AudioExporter {
       return "This $noun's audio isn't on this device yet, so it can't be "
           'exported.';
     }
-    final source = File(sourcePath);
-    final missing = 'The audio file for this $noun is missing.';
-    if (sourcePath.isEmpty || !await source.exists()) return missing;
+    // Claimed before the first await: set after one, a double-click while a
+    // slow drive answered let both through, two panels and two copies.
     _exporting = true;
     try {
+      final source = File(sourcePath);
+      final missing = 'The audio file for this $noun is missing.';
+      if (sourcePath.isEmpty || !await source.exists()) return missing;
       return await _exportPicked(source, suggestedName, noun, missing);
     } finally {
       _exporting = false;

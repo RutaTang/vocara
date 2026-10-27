@@ -2242,7 +2242,9 @@ pub extern "C" fn ve_free_decoded_mono(ptr: *mut f32, frames: usize) {
 /// (the recording/take format; legacy 16-bit inputs decode fine and re-encode as float).
 /// `split_ms` is measured from the START of old's audio; if it lands past old's end, the gap
 /// is padded with silence so the new audio keeps its timeline position. Returns the output
-/// frame count, or -1 on error. Stateless — safe to call on a background isolate.
+/// frame count, or on error a negative `ve_decode` status ([`VE_DECODE_TOO_LONG`],
+/// [`VE_DECODE_TOO_BIG`], [`VE_DECODE_RATE_UNSUPPORTED`], [`VE_DECODE_IO`]) when one names
+/// the cause, else [`VE_DECODE_ERR`] (-1). Stateless — safe to call on a background isolate.
 #[no_mangle]
 pub extern "C" fn ve_punch_wav(
     old_path: *const c_char,

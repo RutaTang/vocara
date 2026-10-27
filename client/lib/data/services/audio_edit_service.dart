@@ -12,7 +12,7 @@ import '../db/durable_fs.dart';
 import '../ffi/vocara_engine_bindings.dart';
 import 'audio_file_service.dart';
 import 'graph_audio_playback_service.dart'
-    show decodeStatusToException, maxPlaybackDuration;
+    show MediaTooLongException, decodeStatusToException, maxPlaybackDuration;
 
 /// Open the embedded engine framework. Top-level so a background isolate can
 /// load it without capturing `this`.
@@ -624,12 +624,22 @@ class AudioEditService {
       // down fail for a recorded take under an imported one.
       final frames = wa.dataLen ~/ wa.blockAlign;
       final oldMs = (frames * 1000 + wa.sampleRate - 1) ~/ wa.sampleRate;
-      final merged = await punchIn(
-        practiceId: practiceId,
-        oldPath: firstPath,
-        newPath: secondPath,
-        splitMs: oldMs,
-      );
+      final String? merged;
+      try {
+        merged = await punchIn(
+          practiceId: practiceId,
+          oldPath: firstPath,
+          newPath: secondPath,
+          splitMs: oldMs,
+        );
+      } on MediaTooLongException {
+        // The two together, not either take: "This file is too long" named
+        // neither.
+        throw FormatException(
+          'The merged take would be longer than '
+          '${maxPlaybackDuration.inMinutes} minutes.',
+        );
+      }
       if (merged == null) {
         throw const FormatException(
           'These takes have different audio formats and merging them by '

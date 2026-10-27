@@ -502,19 +502,26 @@ void main() {
       expect(repo.stored.vocalTracks, hasLength(before));
     });
 
-    test('an imported take is selected', () async {
-      // Left on the take before, unlike a recorded take or an added clip.
-      final vm = await pumpVm();
-      await vm.addVocalTake('/src/new.wav');
-      final added = vm.practice!.vocalTracks.last;
-      expect(vm.selectedTrackId, added.id);
-    });
+    test(
+      'an imported take leaves the selection, REC\'s target, alone',
+      () async {
+        // Selected, a guide vocal imported to sing along with became the take
+        // the next recording landed on, muted for the whole of it.
+        final vm = await pumpVm();
+        final before = vm.selectedTrackId;
+        final target = vm.recording.recordTargetId;
+        await vm.addVocalTake('/src/guide.wav');
+        expect(vm.selectedTrackId, before);
+        expect(vm.recording.recordTargetId, target);
+      },
+    );
 
     test('a file just over the length limit says so', () async {
       // Rounded down, a file just over the limit read as exactly it.
       final toasts = <String>[];
       final vm = await pumpVm(
-        probeDuration: (_) => maxPlaybackDuration + const Duration(seconds: 30),
+        probeDuration: (_) =>
+            maxPlaybackDuration + const Duration(milliseconds: 400),
       );
       final sub = vm.toasts.listen(toasts.add);
       addTearDown(sub.cancel);
@@ -533,6 +540,21 @@ void main() {
       await vm.addVocalTake('/src/gone.wav');
       await Future<void>.delayed(Duration.zero);
       expect(toasts, ["The file couldn't be read."]);
+    });
+
+    test('a failed write does not blame the file', () async {
+      // Every file-system error read as the source's: a full disk too.
+      final dir = await Directory.systemTemp.createTemp('import_src');
+      addTearDown(() => dir.delete(recursive: true));
+      final source = File('${dir.path}/take.wav')..writeAsBytesSync([1, 2]);
+      final toasts = <String>[];
+      final vm = await pumpVm();
+      final sub = vm.toasts.listen(toasts.add);
+      addTearDown(sub.cancel);
+      files.failNextRead = true;
+      await vm.addVocalTake(source.path);
+      await Future<void>.delayed(Duration.zero);
+      expect(toasts.single, isNot("The file couldn't be read."));
     });
   });
 

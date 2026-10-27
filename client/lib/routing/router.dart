@@ -6,6 +6,7 @@ import '../data/db/persistence.dart';
 import '../data/repositories/song_practice_repository.dart';
 import '../data/repositories/technique_repository.dart';
 import '../data/services/app_settings_service.dart';
+import '../data/services/audio_exporter.dart';
 import '../data/services/audio_file_service.dart';
 import '../data/services/source_separation_service.dart';
 import '../data/services/spectrogram_service.dart';
@@ -108,6 +109,9 @@ GoRouter createRouter() {
                 techniqueId: id,
                 appSettings: context.read<AppSettingsService>(),
                 remoteApplied: context.read<Persistence>().remoteApplied,
+                exporter: AudioExporter(
+                  audioFiles: context.read<AudioFileService>(),
+                ),
               ),
               child: const TechniqueDetailScreen(),
             ),

@@ -414,8 +414,9 @@ void main() {
     final toasts = <String>[];
     vm.toasts.listen(toasts.add);
     final take = byName(vm, 'Take 1');
+    // Back to back, as a double-click: the guard was claimed only after an
+    // await, and both got through while a slow drive answered.
     final first = vm.exportTrackAudio(take.id);
-    await Future<void>.delayed(Duration.zero);
     await vm.exportTrackAudio(take.id);
     await Future<void>.delayed(Duration.zero);
     expect(toasts, ['Wait for the current export to finish.']);

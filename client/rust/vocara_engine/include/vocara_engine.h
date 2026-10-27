@@ -243,8 +243,9 @@ void ve_free_decoded_mono(float *ptr, size_t frames);
 /* Declared duration of a media file in ms WITHOUT decoding (container probe only) — the
  * import gate's cheap pre-check. -1 = container declares no length; -2 = unreadable. */
 int64_t ve_probe_duration_ms(const char *path);
-/* Punch-in splice: write old[0..split_ms] ++ new to out_path as a 16-bit WAV.
-   Stateless; returns the output frame count or -1. */
+/* Punch-in splice: write old[0..split_ms] ++ new to out_path as a 32-bit float WAV.
+   Stateless; returns the output frame count, or a negative ve_decode status on failure
+   (-2 too long, -3 too dense, -4 unsupported rate, -5 unreadable, -1 anything else). */
 int64_t ve_punch_wav(const char *old_path, const char *new_path, int64_t split_ms,
                      uint32_t rate, const char *out_path);
 /* Master bus output gain (linear, 1.0 = unity), feeding the master soft-clip. */
