@@ -60,13 +60,12 @@ pub fn screen<R: Read + Seek>(src: &mut R) -> Result<(), Refusal> {
 /// How far symphonia's probe looks for a container marker before giving up (its own constant).
 const PROBE_SEARCH_LIMIT: u64 = 1 << 20;
 
-/// ID3v2 tags followed to the container behind them. The probe follows any number, so stopping
-/// short would let a malformed container through behind enough of them; real files carry one.
-const MAX_ID3_TAGS: usize = 16;
-
 fn scan<R: Read + Seek>(file: &mut Source<R>) -> Result<(), Refusal> {
+    // Any number of ID3v2 tags may stand ahead of the container, as the probe follows them all.
+    // Each search starts past the last tag and stops at the first marker, so together they
+    // cover the file at most once.
     let mut from = 0;
-    for _ in 0..=MAX_ID3_TAGS {
+    loop {
         let Some((at, marker)) = find_marker(file, from)? else {
             return Ok(());
         };
@@ -87,7 +86,6 @@ fn scan<R: Read + Seek>(file: &mut Source<R>) -> Result<(), Refusal> {
             Marker::Unscreened => return Ok(()),
         }
     }
-    impossible(format!("more than {MAX_ID3_TAGS} ID3v2 tags"))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -157,9 +155,22 @@ fn id3_size<R: Read + Seek>(file: &mut Source<R>, at: u64) -> io::Result<Option<
 // ---------------------------------------------------------------------------------------------
 // MP4 / QuickTime
 
-/// Atoms walked before giving up. A fragmented file holds two top-level atoms per fragment, so
-/// this is hours of audio; a file with more is refused rather than half checked.
+/// Atoms walked inside the movie and metadata atoms before giving up; real files hold a few
+/// dozen, and a file with more is refused rather than half checked. Top-level atoms are not
+/// counted: a fragmented file holds two per fragment, thousands in a long one, and each costs a
+/// single header read (the reader walks them all too), so the file's size bounds them.
 const MAX_ATOMS: u32 = 1 << 16;
+
+/// The iTunes metadata items the reader parses (by its own table of tags), reading their
+/// `data`, `name` and `mean` children. It skips every other item by its size, whatever is
+/// inside: `rtng`, `©art`, `pgap`, `hdvd`, and any type it does not know.
+const PARSED_ITEMS: &[&[u8; 4]] = &[
+    b"aART", b"\xa9alb", b"\xa9ART", b"catg", b"\xa9cmt", b"cpil", b"\xa9wrt", b"cprt", b"covr",
+    b"\xa9gen", b"\xa9day", b"desc", b"disk", b"\xa9enc", b"\xa9too", b"gnre", b"\xa9grp", b"egid",
+    b"keyw", b"ldes", b"\xa9lyr", b"stik", b"ownr", b"pcst", b"purd", b"rate", b"soaa", b"soal",
+    b"soar", b"soco", b"sonm", b"tmpo", b"trkn", b"\xa9nam", b"tven", b"tves", b"tvnn", b"tvsn",
+    b"tvsh", b"purl", b"----",
+];
 
 /// An atom whose children the isomp4 reader parses, on its way to the sample tables and the
 /// iTunes metadata: the only atoms whose contents it sizes allocations by. Each kind nests only
@@ -190,9 +201,11 @@ fn mp4<R: Read + Seek>(file: &mut Source<R>, root: u64) -> Result<(), Refusal> {
             levels.pop();
             continue;
         }
-        atoms += 1;
-        if atoms > MAX_ATOMS {
-            return impossible(format!("mp4: more than {MAX_ATOMS} atoms"));
+        if parent != Atom::File {
+            atoms += 1;
+            if atoms > MAX_ATOMS {
+                return impossible(format!("mp4: more than {MAX_ATOMS} atoms in the movie"));
+            }
         }
         let kind = [head[4], head[5], head[6], head[7]];
         let (size, header) = match u32::from_be_bytes([head[0], head[1], head[2], head[3]]) {
@@ -233,7 +246,7 @@ fn mp4<R: Read + Seek>(file: &mut Source<R>, root: u64) -> Result<(), Refusal> {
             (Atom::Mdia, b"minf") => Some(Atom::Minf),
             (Atom::Minf, b"stbl") => Some(Atom::Stbl),
             (Atom::Meta, b"ilst") => Some(Atom::Ilst),
-            (Atom::Ilst, _) => Some(Atom::Item),
+            (Atom::Ilst, kind) if PARSED_ITEMS.contains(&kind) => Some(Atom::Item),
             (Atom::Stbl, _) => {
                 sample_table(file, kind, body, body_end)?;
                 None
@@ -495,7 +508,8 @@ fn flac<R: Read + Seek>(file: &mut Source<R>, start: u64) -> Result<(), Refusal>
         }
         let len = u64::from(u32::from_be_bytes([0, head[1], head[2], head[3]]));
         let body = at + 4;
-        // Read through a window of the block's length, past which the reader will not read.
+        // Read through a window of the block's length, past which the reader will not read. A
+        // block it cannot read fails the whole probe, so a damaged one is refused outright.
         let size = len.min(file.len - body);
         let mut block = FileWindow {
             file: &mut *file,
@@ -504,10 +518,10 @@ fn flac<R: Read + Seek>(file: &mut Source<R>, start: u64) -> Result<(), Refusal>
         };
         match head[0] & 0x7f {
             4 => {
-                vorbis_comments(&mut block)?;
+                vorbis_comments(&mut block, Overrun::FailsFile)?;
             }
             6 => {
-                picture(&mut block)?;
+                picture(&mut block, Overrun::FailsFile)?;
             }
             _ => {}
         }
@@ -671,13 +685,16 @@ impl Stream {
         Ok(true)
     }
 
+    /// Checks a packet as the stream's mapping reads it. The reader logs and skips a header
+    /// packet that fails to parse, so a damaged one is only refused for what it would reserve.
     fn map(&mut self, packet: &[u8]) -> Result<(), Refusal> {
+        const SKIPPED: Overrun = Overrun::DropsStructure;
         match self.mapping {
             Mapping::Vorbis => match packet.first() {
                 Some(kind) if kind & 1 == 0 => self.audio = true,
                 // The comment header, after its type and signature.
                 Some(3) if packet.get(1..7) == Some(b"vorbis") => {
-                    vorbis_comments(&mut SliceWindow(&packet[7..]))?;
+                    vorbis_comments(&mut SliceWindow(&packet[7..]), SKIPPED)?;
                 }
                 _ => {}
             },
@@ -685,7 +702,7 @@ impl Stream {
             Mapping::Opus => {
                 // The reader takes packets as the comment header until one parses as it.
                 if packet.starts_with(b"OpusTags")
-                    && vorbis_comments(&mut SliceWindow(&packet[8..]))? == Walk::Done
+                    && vorbis_comments(&mut SliceWindow(&packet[8..]), SKIPPED)? == Walk::Done
                 {
                     self.tags_read = true;
                 }
@@ -697,10 +714,10 @@ impl Stream {
                 // length its header gives.
                 Some(kind) if packet.len() >= 4 => match kind & 0x7f {
                     4 => {
-                        vorbis_comments(&mut SliceWindow(&packet[4..]))?;
+                        vorbis_comments(&mut SliceWindow(&packet[4..]), SKIPPED)?;
                     }
                     6 => {
-                        picture(&mut SliceWindow(&packet[4..]))?;
+                        picture(&mut SliceWindow(&packet[4..]), SKIPPED)?;
                     }
                     _ => {}
                 },
@@ -978,13 +995,43 @@ impl Window for Base64<'_> {
     }
 }
 
-/// Refuses `what` declaring `need` bytes when fewer than that follow `at` in `w`.
-fn room(w: &dyn Window, at: u64, need: u64, what: &str) -> Result<(), Refusal> {
+/// What a reader does on meeting a length that runs past the end of the structure it reads.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Overrun {
+    /// It fails the whole probe (a native FLAC metadata block), so refusing the file loses
+    /// nothing.
+    FailsFile,
+    /// It drops the structure and reads on (an Ogg header packet, a picture carried in a
+    /// comment), so damaged tags play. Refused only where it would first reserve more than
+    /// [`MAX_DROPPED_RESERVATION`] for the length.
+    DropsStructure,
+}
+
+/// The most a reader that drops a damaged structure may reserve for it before finding the
+/// damage. Above any length such a structure can honestly hold (an Ogg packet stops at 16 MiB, a
+/// FLAC block below that), and far below an allocation that fails.
+const MAX_DROPPED_RESERVATION: u64 = 64 << 20;
+
+/// Whether `need` bytes follow `at` in `w`. When they do not, the reader's read fails there,
+/// after reserving `need` bytes if `reserved`: refused when the reader fails the file with it,
+/// or when that reservation is too large to survive; otherwise false, as the reader goes no
+/// further into the structure.
+fn room(
+    w: &dyn Window,
+    at: u64,
+    need: u64,
+    reserved: bool,
+    overrun: Overrun,
+    what: &str,
+) -> Result<bool, Refusal> {
     let left = w.size().saturating_sub(at);
-    if need > left {
-        return impossible(format!("{what} of {need} bytes where {left} remain"));
+    if need <= left {
+        return Ok(true);
     }
-    Ok(())
+    if overrun == Overrun::DropsStructure && !(reserved && need > MAX_DROPPED_RESERVATION) {
+        return Ok(false);
+    }
+    impossible(format!("{what} of {need} bytes where {left} remain"))
 }
 
 fn u32_le(w: &mut dyn Window, at: u64) -> io::Result<Option<u32>> {
@@ -998,29 +1045,58 @@ fn u32_be(w: &mut dyn Window, at: u64) -> io::Result<Option<u32>> {
 }
 
 /// Walks a Vorbis comment list (a vendor string, a count, then the comments, each after its
-/// little-endian length) from the start of `w`. The reader reserves each comment's buffer from
-/// its length before reading it, and decodes a `METADATA_BLOCK_PICTURE` comment's base64 into a
-/// FLAC picture, whose lengths it trusts the same way.
-fn vorbis_comments(w: &mut dyn Window) -> Result<Walk, Refusal> {
+/// little-endian length) from the start of `w`. The reader skips the vendor string and counts
+/// nothing ahead, but reserves each comment's buffer from its length before reading it. It also
+/// decodes a `METADATA_BLOCK_PICTURE` comment's base64 into a FLAC picture, whose lengths it
+/// trusts the same way, and drops that picture if it is damaged.
+fn vorbis_comments(w: &mut dyn Window, overrun: Overrun) -> Result<Walk, Refusal> {
     let Some(vendor) = u32_le(w, 0)? else {
         return Ok(Walk::Short);
     };
     let mut at = 4;
-    room(w, at, vendor.into(), "vorbis comment: vendor string")?;
+    if !room(
+        w,
+        at,
+        vendor.into(),
+        false,
+        overrun,
+        "vorbis comment: vendor string",
+    )? {
+        return Ok(Walk::Short);
+    }
     at += u64::from(vendor);
     let Some(count) = u32_le(w, at)? else {
         return Ok(Walk::Short);
     };
     at += 4;
-    room(w, at, u64::from(count) * 4, "vorbis comment: list")?;
+    // A count past the end only shows when a length is read from what follows the last real
+    // comment. A reader that drops the structure is followed there, length by length; one that
+    // fails the file is refused here, before it reserves whatever that next length says.
+    if overrun == Overrun::FailsFile
+        && !room(
+            w,
+            at,
+            u64::from(count) * 4,
+            false,
+            overrun,
+            "vorbis comment: list",
+        )?
+    {
+        return Ok(Walk::Short);
+    }
     for _ in 0..count {
         let Some(len) = u32_le(w, at)? else {
             return Ok(Walk::Short);
         };
         at += 4;
-        room(w, at, len.into(), "vorbis comment")?;
+        if !room(w, at, len.into(), true, overrun, "vorbis comment")? {
+            return Ok(Walk::Short);
+        }
         if let Some((value, value_len)) = picture_value(w, at, len.into())? {
-            picture(&mut Base64::new(w, value, value_len)?)?;
+            picture(
+                &mut Base64::new(w, value, value_len)?,
+                Overrun::DropsStructure,
+            )?;
         }
         at += u64::from(len);
     }
@@ -1048,7 +1124,7 @@ fn picture_value(w: &mut dyn Window, at: u64, len: u64) -> io::Result<Option<(u6
 
 /// Walks a FLAC picture from the start of `w`: type, media type, description, four dimensions,
 /// data. The reader reserves the media type, the description and the data from their lengths.
-fn picture(w: &mut dyn Window) -> Result<Walk, Refusal> {
+fn picture(w: &mut dyn Window, overrun: Overrun) -> Result<Walk, Refusal> {
     let mut at = 4;
     for (what, skip_after) in [
         ("flac picture: media type", 0),
@@ -1059,7 +1135,9 @@ fn picture(w: &mut dyn Window) -> Result<Walk, Refusal> {
             return Ok(Walk::Short);
         };
         at += 4;
-        room(w, at, len.into(), what)?;
+        if !room(w, at, len.into(), true, overrun, what)? {
+            return Ok(Walk::Short);
+        }
         at += u64::from(len) + skip_after;
     }
     Ok(Walk::Done)
@@ -1257,6 +1335,43 @@ mod tests {
         assert!(refused(&file(bad)));
     }
 
+    #[test]
+    fn an_itunes_item_the_reader_skips_is_not_looked_into() {
+        // The reader skips these items by their size, damaged children and all.
+        let mut bad = atom(b"data", &[0, 0, 0, 1, 0, 0, 0, 0, b'x']);
+        bad[0..4].copy_from_slice(&u32::MAX.to_be_bytes());
+        for kind in [
+            b"pgap",
+            b"hdvd",
+            b"rtng",
+            b"\xa9art",
+            b"\0\0\0\0",
+            b"--\0\0",
+        ] {
+            let ilst = atom(b"ilst", &atom(kind, &bad));
+            let meta = atom(b"meta", &[vec![0; 4], ilst].concat());
+            let moov = atom(b"moov", &atom(b"udta", &meta));
+            let file = [atom(b"ftyp", b"M4A \0\0\0\0"), moov].concat();
+            assert_eq!(screened(&file), Ok(()), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn a_long_fragmented_file_passes_however_many_fragments() {
+        // Two top-level atoms a fragment: an hour of 100 ms fragments is 72,000.
+        let fragments = atom(b"free", &[]).repeat(80_000);
+        let file = mp4(&[table(b"stco", &[], 1, 4)], &fragments);
+        assert_eq!(screened(&file), Ok(()));
+        // The movie atom's own contents stay bounded.
+        let crowded = atom(b"free", &[]).repeat(MAX_ATOMS as usize);
+        let file = [
+            atom(b"ftyp", b"M4A \0\0\0\0"),
+            atom(b"moov", &[atom(b"mvhd", &[]), crowded].concat()),
+        ]
+        .concat();
+        assert!(refused(&file));
+    }
+
     fn caf(chunks: &[(&[u8; 4], i64, Vec<u8>)]) -> Vec<u8> {
         let mut f = b"caff\0\x01\0\0".to_vec();
         for (kind, size, body) in chunks {
@@ -1358,6 +1473,13 @@ mod tests {
         assert!(refused(&flac(&[(4, block)])));
     }
 
+    #[test]
+    fn a_damaged_flac_block_is_refused_as_the_reader_fails_on_it() {
+        // Overrunning by a little, a native block still fails the whole probe.
+        assert!(refused(&flac(&[(6, picture(9, 1, 4))])));
+        assert!(refused(&flac(&[(4, comments(&[b"TITLE=tone"], Some(14)))])));
+    }
+
     fn base64(bytes: &[u8]) -> Vec<u8> {
         const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
         let mut s = Vec::new();
@@ -1383,6 +1505,23 @@ mod tests {
         };
         assert_eq!(screened(&file(picture(9, 0, 4))), Ok(()));
         assert!(refused(&file(picture(u32::MAX, 0, 4))));
+    }
+
+    #[test]
+    fn a_damaged_picture_in_a_comment_is_dropped_as_the_reader_drops_it() {
+        let tag = |b64: &[u8]| [b"METADATA_BLOCK_PICTURE=".as_slice(), b64].concat();
+        // A description one byte long, and a value cut short: the reader ignores the picture
+        // and plays the file, whether the comment is in a FLAC block or an Ogg packet.
+        let long_description = base64(&picture(9, 1, 4));
+        let whole = base64(&picture(9, 0, 4));
+        let cut = &whole[..whole.len() - 4];
+        for b64 in [long_description.as_slice(), cut] {
+            let comment = tag(b64);
+            let block = comments(&[&comment], None);
+            assert_eq!(screened(&flac(&[(4, block.clone())])), Ok(()));
+            let packet = [b"\x03vorbis".as_slice(), &block].concat();
+            assert_eq!(screened(&vorbis_ogg(&packet)), Ok(()));
+        }
     }
 
     /// An Ogg page on stream 1 completing each of `packets`.
@@ -1434,6 +1573,31 @@ mod tests {
     }
 
     #[test]
+    fn a_damaged_ogg_comment_is_dropped_as_the_reader_drops_it() {
+        // The reader logs and skips a header packet that fails, so these play.
+        for len in [14, 100_000, MAX_DROPPED_RESERVATION as u32] {
+            let file = vorbis_ogg(&vorbis_comment_packet(Some(len)));
+            assert_eq!(screened(&file), Ok(()), "{len}");
+        }
+        // Above what it may reserve first, it is still refused.
+        let len = MAX_DROPPED_RESERVATION as u32 + 1;
+        assert!(refused(&vorbis_ogg(&vorbis_comment_packet(Some(len)))));
+    }
+
+    #[test]
+    fn an_overstated_ogg_comment_count_is_followed_as_the_reader_follows_it() {
+        // Two comments declared, one there: the reader reads the next length from whatever
+        // follows, and reserves it.
+        let packet = |trailing: &[u8]| {
+            let mut c = [b"\x03vorbis".as_slice(), &comments(&[b"TITLE=tone"], None)].concat();
+            c[7 + 4 + 3..7 + 4 + 3 + 4].copy_from_slice(&2u32.to_le_bytes());
+            [c.as_slice(), trailing].concat()
+        };
+        assert_eq!(screened(&vorbis_ogg(&packet(&[]))), Ok(()));
+        assert!(refused(&vorbis_ogg(&packet(&u32::MAX.to_le_bytes()))));
+    }
+
+    #[test]
     fn a_page_failing_its_checksum_is_skipped_as_the_reader_skips_it() {
         let mut file = vorbis_ogg(&vorbis_comment_packet(Some(u32::MAX)));
         // The comment page starts after the 58-byte identification page.
@@ -1454,6 +1618,15 @@ mod tests {
             screened(&[b"\xff\xfb\0\0".as_slice(), &bad].concat()),
             Ok(())
         );
+    }
+
+    #[test]
+    fn any_number_of_id3_tags_is_followed() {
+        let tags = b"ID3\x04\0\0\0\0\0\0".repeat(40);
+        let mp3 = [tags.as_slice(), b"\xff\xfb\x90\x00", &[0; 64]].concat();
+        assert_eq!(screened(&mp3), Ok(()));
+        let bad = flac(&[(6, picture(u32::MAX, 0, 4))]);
+        assert!(refused(&[tags.as_slice(), &bad].concat()));
     }
 
     #[test]
