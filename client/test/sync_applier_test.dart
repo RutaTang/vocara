@@ -1102,16 +1102,25 @@ void main() {
             'timeline_duration_ms': 1 << 62,
           },
         ),
+        // The most negative int has no absolute value: abs() left it as is.
+        RemoteRecord(
+          table: 'practices',
+          columns: {
+            ...practice('S', 'early', hlc(903)).columns,
+            'created_at': -9223372036854775808,
+          },
+        ),
         practice('Q', 'kept', hlc(901)),
       ]);
       expect(res.committed, isTrue, reason: 'the page must still commit');
       expect(res.applied, 1);
-      expect(res.failed, 2);
+      expect(res.failed, 3);
       expect(await row('P'), isNull);
       expect(await row('R'), isNull);
+      expect(await row('S'), isNull);
       expect((await row('Q'))!['title'], 'kept');
       final parked = await store.list();
-      expect(parked, hasLength(2));
+      expect(parked, hasLength(3));
       for (final q in parked) {
         expect(q.reason, contains('out of range'));
       }

@@ -6,7 +6,8 @@ import '../../../utils/format.dart';
 /// Picks a readable time-grid interval (in ms) so labels/lines land roughly
 /// every [minPx] pixels.
 int niceTimeIntervalMs(int durationMs, double width, {double minPx = 72}) {
-  if (durationMs <= 0 || width <= 0) return 1000;
+  if (durationMs <= 0) return 1000;
+  if (width <= 0) return durationMs; // nothing to space out: one tick at most
   final minMs = minPx / (width / durationMs);
   const candidates = [
     1000,
@@ -29,8 +30,10 @@ int niceTimeIntervalMs(int durationMs, double width, {double minPx = 72}) {
   }
   // Past an hour, whole hours, as many as keep the ticks apart: held at one,
   // a timeline of 2^62 ms (a peer's, before the sync door bounded it) drew a
-  // line and a label per hour, and the screen froze.
-  return (minMs / 3600000).ceil() * 3600000;
+  // line and a label per hour, and the screen froze. Never past the whole
+  // timeline (one tick at most), where the hours overflowed an int.
+  final hours = (minMs / 3600000).ceilToDouble() * 3600000;
+  return hours >= durationMs ? durationMs : hours.toInt();
 }
 
 /// Cuts the whole-peak slice of [peaks] (spanning [spanStartMs] for

@@ -24,6 +24,15 @@ void main() {
     expect(spacingPx(30 * 24 * 3600000, 800), greaterThanOrEqualTo(72));
   });
 
+  test('the step is never zero, negative, or past the timeline', () {
+    // At a few pixels wide, the hours for 2^62 ms overflowed to a negative
+    // step, and the grid's loop never ended; at zero width, 1 s a step.
+    for (final width in [0.0, 1.0, 36.0, 800.0]) {
+      final step = niceTimeIntervalMs(1 << 62, width);
+      expect(step, inInclusiveRange(1, 1 << 62), reason: '$width px');
+    }
+  });
+
   test('a song-length timeline keeps its fine steps', () {
     expect(niceTimeIntervalMs(180000, 800), 30000);
     expect(niceTimeIntervalMs(10000, 800), 1000);

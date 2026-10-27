@@ -451,7 +451,8 @@ void checkColumnTypes(
       );
     }
     final bound = value is int ? _intColumnBound(column.name) : null;
-    if (bound != null && (value as int).abs() > bound) {
+    // Compared on both sides, not by abs(): the most negative int has none.
+    if (bound != null && ((value as int) > bound || value < -bound)) {
       throw FormatException(
         'SyncRow: "${table.actualTableName}.${column.name}" is out of range '
         '($value)',
