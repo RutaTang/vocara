@@ -1176,6 +1176,36 @@ void main() {
       await merging;
       expect(cache.selectedMetrics, isNotNull);
     });
+
+    test('a lane merge still queued when the screen goes away gives its slot '
+        'to the next analysis', () async {
+      // Admitted after dispose, it copied every clip's analysis into an
+      // isolate for a cache with no reader, ahead of the next screen's work.
+      final track = _lane([_clip('c1', 0), _clip('c2', 2000)]);
+      final cache = _cache(spectrograms: stub(), selectedTrack: () => track);
+      final first = Completer<void>(), second = Completer<void>();
+      final slots = [
+        analysisGate.run(() => first.future),
+        analysisGate.run(() => second.future),
+      ];
+      addTearDown(() {
+        for (final c in [first, second]) {
+          if (!c.isCompleted) c.complete();
+        }
+      });
+      final merging = cache.ensureSelectedSpectrogram();
+      await _settled(() => analysisGate.queued > 0, tries: 40);
+      expect(analysisGate.queued, 1, reason: 'the merge waits for a slot');
+      cache.dispose();
+
+      var nextRan = false;
+      final next = analysisGate.run(() async => nextRan = true);
+      first.complete();
+      await pumpEventQueue(times: 10);
+      expect(nextRan, isTrue, reason: 'the freed slot went to the next one');
+      second.complete();
+      await Future.wait([...slots, next, merging]);
+    });
   });
 
   group('aggregate pair cache', () {

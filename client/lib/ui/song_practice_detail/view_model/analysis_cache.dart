@@ -951,7 +951,7 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
 
   /// Asks again for what [laneLacksData] says the lanes of [trackId] lack.
   Future<void> healLane(String trackId) async {
-    if (!laneLacksData(trackId)) return;
+    if (_disposed || !laneLacksData(trackId)) return;
     final t = _trackById(trackId)!;
     final subject = t.clips.length > 1
         ? aggregateKeyFor(t)
@@ -1443,11 +1443,21 @@ class AnalysisCache extends ChangeNotifier implements AnalysisSource {
           complete = false;
         }
       }
+      // A merge nothing will keep (a part missing, or an eviction disowned it:
+      // neither is cached below) is not run: it held an analysis slot, every
+      // clip's analysis copied into an isolate, for nothing.
+      if (!complete || _aggDisowned.contains(key)) return;
       // Off the UI isolate: the merges and the views derived from them are
       // lane-length work (a 10-minute lane's LTAS and profile alone ran
-      // ~250 ms in the dock's getters).
-      final lane = await _mergeLaneInGate(metrics, specs);
-      if (_disposed) return;
+      // ~250 ms in the dock's getters). Asked again once a slot admits it:
+      // one queued while the screen closed took the slot from the next
+      // screen's analysis.
+      final lane = await _mergeLaneInGate(
+        metrics,
+        specs,
+        wanted: () => !_disposed && !_aggDisowned.contains(key),
+      );
+      if (lane == null || _disposed) return;
       final mergedMetrics = lane.metrics;
       final mergedSpec = lane.spectrogram;
       // A lane whose parts did not all land is not cached: leaving the key
@@ -1670,12 +1680,23 @@ typedef _MergedLane = ({
 
 /// Runs [_mergeLane] on a worker isolate, holding one of the app-wide
 /// analysis slots like every other heavy compute: its input is every clip's
-/// analysis, copied into the isolate. Top-level, so the isolate's closure
-/// captures the two lists and nothing of the cache.
-Future<_MergedLane> _mergeLaneInGate(
+/// analysis, copied into the isolate. Null, without a merge, when [wanted]
+/// says no once a slot admits it.
+Future<_MergedLane?> _mergeLaneInGate(
+  List<({int offsetMs, VoiceMetrics metrics})> metrics,
+  List<({int offsetMs, Spectrogram spectrogram})> specs, {
+  required bool Function() wanted,
+}) => analysisGate.run(
+  () => wanted() ? _mergeOffThread(metrics, specs) : Future.value(null),
+);
+
+/// [_mergeLane] on a worker isolate. Its own top-level function, so the
+/// isolate's closure captures the two lists and nothing else: [wanted]
+/// reaches the cache, which cannot be sent.
+Future<_MergedLane?> _mergeOffThread(
   List<({int offsetMs, VoiceMetrics metrics})> metrics,
   List<({int offsetMs, Spectrogram spectrogram})> specs,
-) => analysisGate.run(() => Isolate.run(() => _mergeLane(metrics, specs)));
+) => Isolate.run(() => _mergeLane(metrics, specs));
 
 /// A lane's merged analysis plus the LTAS and voice profile the dock derives
 /// from it, exactly as its getters would ([AnalysisCache.selectedLtas] needs
