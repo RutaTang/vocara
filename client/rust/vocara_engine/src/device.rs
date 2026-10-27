@@ -4066,7 +4066,8 @@ pub fn probe_duration_ms(path: &str) -> Result<Option<u64>, String> {
     let probed = symphonia::default::get_probe()
         .format(&hint, mss, &Default::default(), &MetadataOptions::default())
         .map_err(|e| format!("probe: {e}"))?;
-    let track = audio_track(&*probed.format).ok_or_else(|| "no audio track".to_string())?;
+    let track =
+        audio_track(&*probed.format).ok_or_else(|| "no decodable audio track".to_string())?;
     let rate = track.codec_params.sample_rate.unwrap_or(0) as u64;
     let (delay, padding) = edge_trim(&track.codec_params);
     Ok(match (declared_frames(&track.codec_params), rate) {
@@ -4183,7 +4184,7 @@ pub fn decode_file(
         .format(&hint, mss, &Default::default(), &MetadataOptions::default())
         .map_err(|e| err(format!("probe: {e}")))?;
     let mut format = probed.format;
-    let track = audio_track(&*format).ok_or_else(|| err("no audio track".to_string()))?;
+    let track = audio_track(&*format).ok_or_else(|| err("no decodable audio track".to_string()))?;
     let track_id = track.id;
     // Per link of a chained stream: each brings its own (see the reset below).
     let (mut skip, mut padding) = edge_trim(&track.codec_params);
@@ -4278,7 +4279,7 @@ pub fn decode_file(
                 // going. A mid-stream sample-rate change is refused honestly:
                 // this single-rate output cannot represent it.
                 let track = audio_track(&*format)
-                    .ok_or_else(|| err("reset: no audio track".to_string()))?;
+                    .ok_or_else(|| err("reset: no decodable audio track".to_string()))?;
                 if track.codec_params.sample_rate.unwrap_or(src_rate) != src_rate {
                     return Err(err(format!(
                         "mid-stream sample-rate change in {path} is unsupported"

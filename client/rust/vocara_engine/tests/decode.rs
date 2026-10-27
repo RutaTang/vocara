@@ -59,13 +59,20 @@ fn an_mp4_of_unknown_length_is_not_refused_as_too_long() {
 #[test]
 fn the_duration_budget_holds_at_the_rate_it_decodes_at() {
     // A 1.5 s budget judged at the declared 44.1 kHz is about 66k frames, which the 44k frames
-    // the core decodes to pass, though they hold the full 2 s.
-    let path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/he_aac_440hz.m4a"
-    );
-    assert!(decode_file(path, 1.5, 0, 0).is_err());
-    assert!(decode_file(path, 2.5, 0, 0).is_ok());
+    // the core decodes to pass, though they hold the full 2 s. The file declaring its length
+    // is refused before decoding; the fragmented copy declares none, so only the budget at
+    // the decoded rate can refuse it.
+    for name in ["he_aac_440hz.m4a", "he_aac_unknown_length.m4a"] {
+        let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
+        assert!(
+            matches!(
+                decode_file(&path, 1.5, 0, 0),
+                Err(vocara_engine::device::DecodeError::TooLong)
+            ),
+            "{name}"
+        );
+        assert!(decode_file(&path, 2.5, 0, 0).is_ok(), "{name}");
+    }
 }
 
 #[test]
@@ -304,14 +311,14 @@ fn a_table_declaring_more_than_the_file_holds_is_refused_before_the_probe() {
 fn the_audio_track_is_read_when_a_video_track_comes_first() {
     // symphonia's default track is simply the first, which in an MP4 is usually its video: the
     // probe saw no length and the decode failed as an unsupported codec. 100 ms of ALAC behind
-    // a 16x16 MPEG-4 frame.
-    let path = format!(
-        "{}/tests/fixtures/video_first_100ms.mp4",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    assert_eq!(probe_duration_ms(&path), Ok(Some(100)));
-    let (frames, rate) = decode_file(&path, 0.0, 0, 0).unwrap();
-    assert_eq!((frames.len(), rate), (4410, 44_100));
+    // a 16x16 MPEG-4 frame, and behind an Opus track (a codec symphonia names but has no
+    // decoder for here).
+    for name in ["video_first_100ms.mp4", "opus_first_100ms.m4a"] {
+        let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
+        assert_eq!(probe_duration_ms(&path), Ok(Some(100)), "{name}");
+        let (frames, rate) = decode_file(&path, 0.0, 0, 0).unwrap();
+        assert_eq!((frames.len(), rate), (4410, 44_100), "{name}");
+    }
 }
 
 #[test]
