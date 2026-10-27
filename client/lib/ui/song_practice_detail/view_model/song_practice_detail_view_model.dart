@@ -2582,8 +2582,15 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       newList[idx] = merged;
       newList.removeAt(bottomIdx);
       _practice = cur.copyWith(vocalTracks: newList);
-      final followSelection = _selectedClipId == topClip.id;
-      if (followSelection) _selectedClipId = mergedClipId;
+      // The selection follows the audio into the merged lane: a selected
+      // bottom lane (the take armed to record into, say) is the top one now.
+      // Left on the absorbed lane, it fell back to the first lane, the
+      // backing, and disarmed recording.
+      final movedTrack = _selectedTrackId == bottom.id;
+      if (movedTrack) _selectedTrackId = top.id;
+      final priorClip = _selectedClipId;
+      final movedClip = priorClip == topClip.id || priorClip == bottomClip.id;
+      if (movedClip) _selectedClipId = mergedClipId;
       // Persist BEFORE deleting any old audio, so a failed save can't leave
       // the model pointing at files that are already gone.
       if (await _save()) {
@@ -2596,8 +2603,15 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       } else {
         // The failed save reverted the model to the two original takes, so
         // the merged output is an orphan — clean it up instead.
-        if (followSelection && _selectedClipId == mergedClipId) {
-          _selectedClipId = topClip.id;
+        // The selection goes back with the takes, unless the user moved it
+        // meanwhile. The revert's repair has already let go of the merged
+        // clip, which it no longer finds.
+        final ours =
+            _selectedTrackId == top.id &&
+            (_selectedClipId == mergedClipId || _selectedClipId == null);
+        if (ours && (movedTrack || movedClip)) {
+          if (movedTrack) _selectedTrackId = bottom.id;
+          if (movedClip) _selectedClipId = priorClip;
         }
         await _discardQuietly([mergedPath]);
       }

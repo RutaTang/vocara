@@ -1017,6 +1017,30 @@ void main() {
       expect(vm.practice!.vocalTracks.map((t) => t.id), ['top']);
     });
 
+    test('a selected bottom take follows its audio into the merged lane, and '
+        'back out of it when the save fails', () async {
+      for (final fail in [false, true]) {
+        final vm = await pumpVm(vocalTracks: _mergeableTakes());
+        final bottomClip = vm.practice!.vocalTracks[1].clips.single.id;
+        vm.selectClip('bottom', bottomClip);
+        expect(vm.recording.recordTargetId, 'bottom');
+        repo.failSaves = fail;
+        await vm.mergeTrackDown('top');
+        if (fail) {
+          expect(vm.selectedTrackId, 'bottom');
+          expect(vm.selectedClipId, bottomClip);
+        } else {
+          expect(vm.selectedTrackId, 'top', reason: 'not the backing');
+          expect(
+            vm.selectedClipId,
+            vm.practice!.vocalTracks.single.clips.single.id,
+          );
+          expect(vm.recording.recordTargetId, 'top');
+        }
+        repo.failSaves = false;
+      }
+    });
+
     test('merge on a FAILED save keeps the sources and cleans up the '
         'merged output instead', () async {
       final vm = await pumpVm(vocalTracks: _mergeableTakes());
