@@ -650,14 +650,23 @@ fn ogg_link<R: Read + Seek>(
             return Ok(Some(page));
         }
         // Once every stream's header packets are behind it, nothing in this link is left to
-        // check; skip to where the next link begins.
+        // check; the full scan skips to where the next link begins, and the bounded one stops
+        // (walking on, it read up to 32 MiB of every Ogg at import, on the UI's thread).
         if streams.iter().all(|s| s.audio) {
-            return pages.next_first_page(file);
+            return if pages.full {
+                pages.next_first_page(file)
+            } else {
+                Ok(None)
+            };
         }
         if let Some(stream) = streams.iter_mut().find(|s| s.serial == page.serial) {
             // A packet the reader cannot assemble fails its decode; this link is done.
             if !stream.read_page(&page, pages)? {
-                return pages.next_first_page(file);
+                return if pages.full {
+                    pages.next_first_page(file)
+                } else {
+                    Ok(None)
+                };
             }
         }
         page = match pages.next_valid(file)? {
@@ -1032,7 +1041,9 @@ fn codebook_overlarge(bs: &mut BitRtl) -> Option<Walk> {
             bs.skip(1)?; // sequence flag
             let lookup_values = match lookup_type {
                 1 => vorbis_lookup1_values(entries, dimensions as u16)?,
-                _ => u64::from(entries) * dimensions,
+                // In u32, as the decoder computes it: the product wraps, and it reads only the
+                // wrapped count before allocating the whole table (2 TB from 379 bytes).
+                _ => u64::from(entries.wrapping_mul(dimensions as u32)),
             };
             let multiplicand_bits = lookup_values.checked_mul(value_bits)?;
             let table = u64::from(entries) * dimensions;
@@ -1058,6 +1069,10 @@ fn vorbis_ilog(x: u32) -> u32 {
 /// the decoder's own bounds check would fail (it panics there, decoding nothing), so a later
 /// codebook is not read past it.
 fn vorbis_lookup1_values(entries: u32, dimensions: u16) -> Option<u64> {
+    // No dimensions: the decoder fails there, and the root below is infinite.
+    if dimensions == 0 {
+        return None;
+    }
     let value = (entries as f32).powf(1.0 / f32::from(dimensions)).floor() as u64;
     let dims = u32::from(dimensions);
     let within = |v: u64| v.checked_pow(dims).is_some_and(|p| p <= u64::from(entries));
@@ -2032,6 +2047,55 @@ mod tests {
         let mut w = BitWriter::new();
         codebook(&mut w, 2, (1 << 23) + 1, 2, 1, (1 << 24) + 2, true);
         assert!(vorbis_setup_overlarge(&vorbis_extra(w, 1)));
+    }
+
+    #[test]
+    fn a_type2_lookup_count_wraps_as_the_decoder_wraps_it() {
+        // entries x dimensions is 127 * 2^32, which the decoder's u32 product wraps to 0: it
+        // reads no multiplicands, then allocates the whole table.
+        let mut w = BitWriter::new();
+        codebook(&mut w, 0x8000, 0xfe_0000, 2, 1, 0, true);
+        assert!(vorbis_setup_overlarge(&vorbis_extra(w, 1)));
+    }
+
+    #[test]
+    fn a_dimensionless_type1_codebook_is_left_for_the_decoder() {
+        // The root of no dimensions is infinite; stepping past it overflowed.
+        assert_eq!(vorbis_lookup1_values(5, 0), None);
+    }
+
+    #[test]
+    fn the_bounded_scan_stops_after_the_first_links_headers() {
+        // It walked on to the next link, reading up to 32 MiB of every Ogg at import.
+        struct Counting<R> {
+            inner: R,
+            read: usize,
+        }
+        impl<R: Read> Read for Counting<R> {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                let n = self.inner.read(buf)?;
+                self.read += n;
+                Ok(n)
+            }
+        }
+        impl<R: Seek> Seek for Counting<R> {
+            fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
+                self.inner.seek(to)
+            }
+        }
+        let ogg = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/link_2000ms.ogg"
+        ))
+        .unwrap();
+        let padded = [ogg, vec![0u8; 4 << 20]].concat();
+        let mut file = Counting {
+            inner: Cursor::new(&padded),
+            read: 0,
+        };
+        assert!(screen(&mut file).is_ok());
+        assert!(file.read < 512 << 10, "read {} bytes", file.read);
+        assert!(screen_full(&mut Cursor::new(&padded)).is_ok());
     }
 
     #[test]
