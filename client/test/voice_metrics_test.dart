@@ -820,6 +820,64 @@ void main() {
     },
   );
 
+  test('the live analyzers do not depend on how their input is chunked, and '
+      'reset starts a session afresh', () {
+    // A vowel between silences, so frames cross the voicing and sustain
+    // gates both ways.
+    final vowel = _vowel(700, 1200, 2600, f0: 200);
+    final samples = Float32List(vowel.length + 20000)
+      ..setRange(9000, 9000 + vowel.length, vowel);
+    final n = samples.length;
+    // Every LiveFrame field and every StreamingStft column, as bits (NaN-safe).
+    Uint64List run(
+      LiveVoiceAnalyzer live,
+      StreamingStft stft,
+      List<int> chunks, {
+      int? stopAt,
+    }) {
+      final out = <double>[], cols = <double>[];
+      var at = 0, k = 0;
+      while (at < (stopAt ?? n)) {
+        final chunk = Float32List.sublistView(
+          samples,
+          at,
+          min(n, at + chunks[k++ % chunks.length]),
+        );
+        live.addSamples(chunk, (f) {
+          out
+            ..addAll(f.column)
+            ..addAll([f.ring, f.tilt, f.cpp, f.f0, f.f1, f.f2, f.f3])
+            ..addAll([f.f0Confidence, f.h1h2, f.loudness, f.active ? 1 : 0]);
+        });
+        stft.addSamples(chunk, cols.addAll);
+        at += chunk.length;
+      }
+      return Float64List.fromList(out + cols).buffer.asUint64List();
+    }
+
+    final whole = run(LiveVoiceAnalyzer(), StreamingStft(), [n]);
+    expect(whole.length, greaterThan(1000));
+    for (final chunks in [
+      [1],
+      [480],
+      [1440],
+      [1, 511, 2049, 0, 7, 9000],
+    ]) {
+      expect(
+        run(LiveVoiceAnalyzer(), StreamingStft(), chunks),
+        whole,
+        reason: 'chunks $chunks',
+      );
+    }
+    // A session cut off mid-vowel, then reset: the next one is a fresh one.
+    final live = LiveVoiceAnalyzer();
+    final stft = StreamingStft();
+    run(live, stft, [1000], stopAt: 30000);
+    live.reset();
+    stft.reset();
+    expect(run(live, stft, [1440]), whole, reason: 'after reset');
+  });
+
   test('LiveVoiceAnalyzer gates out quiet (room-noise-level) frames', () {
     final analyzer = LiveVoiceAnalyzer();
     // A vowel attenuated to ~-66 dBFS — below the VAD floor.

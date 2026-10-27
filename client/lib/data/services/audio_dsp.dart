@@ -1161,6 +1161,12 @@ class _RollingF32 {
 
   int get length => _len;
 
+  /// Empties the buffer, keeping its storage; absolute indices restart at 0.
+  void clear() {
+    _base = 0;
+    _len = 0;
+  }
+
   void add(double v) {
     final local = _len - _base;
     if (local >= _buf.length) {
@@ -1826,6 +1832,53 @@ void _medianInto(Float32List src, Float32List dst, int half) {
   }
 }
 
+/// The live analyzers' framing: samples arrive in chunks of any size, and
+/// each [fftSize]-sample frame starting at a multiple of [hop] is handed on
+/// the moment its last sample is in, through [frame], one buffer refilled
+/// frame after frame. The backlog was a `List<double>`, which boxed every
+/// sample on the way in, unboxed it again for each frame that read it, and
+/// shifted the whole backlog down by [hop] per frame (quadratic in a large
+/// chunk). It is a [_RollingF32] now, fed a block at a time like the take
+/// analyzer's (see [StreamingTakeAnalyzer._emitBlock]); a Float32 sample
+/// reads back as the same double, so a frame holds the values it did.
+class _LiveFramer {
+  _LiveFramer(this.fftSize, this.hop) : frame = Float32List(fftSize);
+
+  final int fftSize, hop;
+
+  /// The current frame's samples, valid during the callback only.
+  final Float32List frame;
+  final _raw = _RollingF32();
+  var _next = 0; // absolute index of the next frame's first sample
+
+  /// Appends [samples], calling [onFrame] with each frame they complete.
+  void add(Float32List samples, void Function(Float32List frame) onFrame) {
+    const block = StreamingTakeAnalyzer._emitBlock;
+    for (var at = 0; at < samples.length; at += block) {
+      _raw.addAll(
+        samples.length <= block
+            ? samples
+            : Float32List.sublistView(
+                samples,
+                at,
+                math.min(samples.length, at + block),
+              ),
+      );
+      while (_raw.length - _next >= fftSize) {
+        _raw.sliceInto(frame, _next, _raw.length);
+        onFrame(frame);
+        _next += hop;
+        _raw.dropBelow(_next);
+      }
+    }
+  }
+
+  void reset() {
+    _raw.clear();
+    _next = 0;
+  }
+}
+
 /// Incremental STFT for live audio: feed samples as they arrive, get one dB
 /// column (0..[maxHz]) per [hop] samples. Runs on the main thread (each FFT is
 /// sub-millisecond). A column is [_ColumnStft]'s: the Hann window, transform
@@ -1838,7 +1891,7 @@ class StreamingStft {
     this.sampleRate = 44100,
     this.maxHz = 5000,
   }) : maxBin = _spectrogramBins(maxHz, fftSize, sampleRate),
-       _samples = Float32List(fftSize) {
+       _frames = _LiveFramer(fftSize, hop) {
     _stft = _ColumnStft(fftSize, maxBin);
   }
 
@@ -1849,8 +1902,7 @@ class StreamingStft {
   final int maxBin;
 
   late final _ColumnStft _stft;
-  final Float32List _samples;
-  final List<double> _acc = <double>[];
+  final _LiveFramer _frames;
 
   double get binHz => sampleRate / fftSize;
 
@@ -1860,20 +1912,14 @@ class StreamingStft {
     Float32List samples,
     void Function(Float32List col) onColumn,
   ) {
-    _acc.addAll(samples);
-    final frame = _samples;
-    while (_acc.length >= fftSize) {
-      for (var i = 0; i < fftSize; i++) {
-        frame[i] = _acc[i];
-      }
+    _frames.add(samples, (frame) {
       final col = Float32List(maxBin);
       _stft.columnInto(frame, col, 0);
       onColumn(col);
-      _acc.removeRange(0, hop);
-    }
+    });
   }
 
-  void reset() => _acc.clear();
+  void reset() => _frames.reset();
 }
 
 double _db20(double m) => 20.0 * (math.log(m + 1e-9) / math.ln10);
@@ -2234,7 +2280,7 @@ class LiveVoiceAnalyzer {
        _half = fftSize ~/ 2,
        _binHz = sampleRate / fftSize,
        _dsFactor = (sampleRate / 11000).round().clamp(1, 8),
-       _raw = Float32List(fftSize),
+       _frames = _LiveFramer(fftSize, hop),
        _frame = Float64List(fftSize),
        _logmag = Float64List(fftSize),
        _mags = Float64List(fftSize ~/ 2 + 1) {
@@ -2279,15 +2325,14 @@ class LiveVoiceAnalyzer {
   late final Float64List _lpcWindow;
   late final int _b2k, _b4k, _b50, _b1k, _b5k, _qMin, _qMax;
 
-  // Per-frame scratch, reused frame after frame: the raw window, its Hann-
-  // windowed copy, the dB spectrum mirrored for the cepstrum, the magnitude
-  // spectrum (bins 0..[_half]) and the cepstrum's real parts over
-  // [_qMin]..[_qMax].
-  final Float32List _raw;
+  final _LiveFramer _frames;
+
+  // Per-frame scratch, reused frame after frame: the Hann-windowed frame, the
+  // dB spectrum mirrored for the cepstrum, the magnitude spectrum (bins
+  // 0..[_half]) and the cepstrum's real parts over [_qMin]..[_qMax].
   final Float64List _frame, _logmag, _mags;
   late final Float64List _cep;
 
-  final List<double> _acc = [];
   final List<double> _f0H = [], _f1H = [], _f2H = [], _f3H = [], _h1h2H = [];
   static const int _smoothN = 5;
   // Absolute RMS floor (dBFS) below which a frame is treated as silence/noise —
@@ -2308,14 +2353,13 @@ class LiveVoiceAnalyzer {
 
   /// Appends [samples] and emits a [LiveFrame] via [onFrame] for every [hop].
   void addSamples(Float32List samples, void Function(LiveFrame f) onFrame) {
-    _acc.addAll(samples);
-    final raw = _raw, frame = _frame, logmag = _logmag, mags = _mags;
-    while (_acc.length >= fftSize) {
+    final frame = _frame, logmag = _logmag, mags = _mags;
+    _frames.add(samples, (raw) {
       var rawSq = 0.0;
       for (var i = 0; i < fftSize; i++) {
-        raw[i] = _acc[i];
-        rawSq += raw[i] * raw[i];
-        frame[i] = raw[i] * _window[i];
+        final s = raw[i];
+        rawSq += s * s;
+        frame[i] = s * _window[i];
       }
       _fft
         ..transform(frame)
@@ -2478,8 +2522,7 @@ class LiveVoiceAnalyzer {
           rmsDb,
         ),
       );
-      _acc.removeRange(0, hop);
-    }
+    });
   }
 
   /// Trailing median (last [_smoothN] frames), ignoring NaN — but only emits a
@@ -2497,7 +2540,7 @@ class LiveVoiceAnalyzer {
   }
 
   void reset() {
-    _acc.clear();
+    _frames.reset();
     _f0H.clear();
     _f1H.clear();
     _f2H.clear();
