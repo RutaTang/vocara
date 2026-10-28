@@ -15,11 +15,13 @@ class PlaybackController extends ChangeNotifier {
     required PlaybackEngine engine,
     required SongPractice? Function() practice,
     required bool Function() isRecording,
+    bool Function()? isStartingTake,
     bool Function()? engineAvailable,
     void Function(String)? toast,
   }) : _engine = engine,
        _practice = practice,
        _isRecording = isRecording,
+       _isStartingTake = isStartingTake ?? _never,
        _engineAvailable = engineAvailable ?? _always,
        _toast = toast {
     _playingSub = _engine.playing.listen((playing) {
@@ -44,6 +46,19 @@ class PlaybackController extends ChangeNotifier {
   /// Whether a take is being recorded — the position stream must yield to the
   /// recording clock then, or the playhead fights the record tick.
   final bool Function() _isRecording;
+
+  /// Whether a take is between REC and its first recorded frame (the mic's
+  /// ready handshake). Its start position is already taken, and it seeks the
+  /// backing back there once the mic is ready, so a transport move in this
+  /// window was accepted and then silently undone, the take landing where
+  /// REC was pressed. Only the transport moves check it: the position stream
+  /// and the loop wrap still follow the engine until the take runs.
+  final bool Function() _isStartingTake;
+
+  /// Whether a take holds the transport: in flight, or about to be.
+  bool get _takeHoldsTransport => _isRecording() || _isStartingTake();
+
+  static bool _never() => false;
 
   /// The engine, for sibling controllers' transport primitives (recording
   /// seeks/plays/pauses and disables the loop wrap through the SAME instance).
@@ -115,7 +130,7 @@ class PlaybackController extends ChangeNotifier {
   /// sung after the jump against the wrong part of the song. (The recording
   /// controller drives its own seeks through [engine] directly.)
   Future<void> seek(Duration to) async {
-    if (_isRecording()) return;
+    if (_takeHoldsTransport) return;
     _transportMoves++;
     await _engine.seek(to);
   }
@@ -139,7 +154,7 @@ class PlaybackController extends ChangeNotifier {
   /// under a still-rolling mic would misalign the take); the transport bar
   /// routes its Stop to the recording instead.
   Future<void> stop() async {
-    if (_isRecording()) return;
+    if (_takeHoldsTransport) return;
     _transportMoves++;
     await _engine.pause();
     await _engine.seek(Duration(milliseconds: _loopStartMs));
@@ -347,7 +362,7 @@ class PlaybackController extends ChangeNotifier {
   void _snapPlayheadIntoLoop() {
     // Never mid-take: the record clock owns the playhead, and the seek would
     // jump the backing under the rolling take.
-    if (!_loopEnabled || !hasLoop || _isRecording()) return;
+    if (!_loopEnabled || !hasLoop || _takeHoldsTransport) return;
     final posMs = position.value.inMilliseconds;
     if (posMs < _loopStartMs || posMs >= _loopEndMs) {
       position.value = Duration(milliseconds: _loopStartMs);
