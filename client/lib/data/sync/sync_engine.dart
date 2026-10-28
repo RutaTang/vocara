@@ -951,7 +951,7 @@ class SyncEngine {
       // Parents replay first (the rank order above), so one landing earlier
       // in this pass is already there.
       if (await _orphanWaitsOnParent(q, row)) continue;
-      final result = await _applier.apply([row]);
+      final result = await _applier.apply([row], ownRowsOnly: true);
       if (!result.committed) break; // storage trouble — retry next run
       if (result.applied > 0 || result.skipped > 0) {
         // Conditional on the exact state we REPLAYED: a different state for

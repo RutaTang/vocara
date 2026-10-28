@@ -1371,6 +1371,54 @@ void main() {
       expect(await quarantine.list(), isEmpty);
     });
 
+    test('a replay scans for FK orphans among the rows it writes, not the '
+        'whole store per row', () async {
+      // A peer's fast clock parks every row it sends; once real time catches
+      // up, each landed in its own batch, and each batch scanned the whole
+      // store for orphans: K x N for K parked rows in a library of N.
+      for (final id in ['A', 'B', 'C']) {
+        cloud.accept(remotePractice(id, id, remoteHlc(t0 + 6 * 60 * 1000)));
+      }
+      expect((await engine.pumpPull()).quarantined, 3);
+
+      nowMs += 7 * 60 * 1000;
+      cost.reset();
+      expect((await engine.pumpPull()).failed, isFalse);
+      expect(cost.matching('foreign_key_check'), 0);
+      for (final id in ['A', 'B', 'C']) {
+        expect(await practiceTitle(id), id);
+      }
+      expect(await quarantine.list(), isEmpty);
+    });
+
+    test(
+      'a replayed row still dangling after it lands is parked again',
+      () async {
+        // Checked among its own rows only, the orphan an older build parked
+        // under its bare id is still caught, and parked rather than lost.
+        final track = remoteTrack('T', 'P', remoteHlc(t0 - 1000));
+        await quarantine.put(
+          table: 'tracks',
+          id: _id('T'),
+          hlcPacked: track.hlc.packed,
+          schemaV: track.schemaV,
+          payload: track.encode(),
+          reason: 'fk-orphan: parent practices/${_id('P')} missing',
+          quarantinedAt: 1,
+        );
+        expect((await engine.pumpPull()).failed, isFalse);
+        final parked = await quarantine.list();
+        expect(parked.single.reason, startsWith('fk-orphan'));
+        final row = await db
+            .customSelect(
+              'SELECT id FROM tracks WHERE id = ?',
+              variables: [Variable.withString(_id('T'))],
+            )
+            .getSingleOrNull();
+        expect(row, isNull);
+      },
+    );
+
     test('a park that can never land costs a pull nothing', () async {
       // Its verdict is a function of the payload alone, yet every pull
       // decoded it, applied it in a transaction and re-parked it unchanged —

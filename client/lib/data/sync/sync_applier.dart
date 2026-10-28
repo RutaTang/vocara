@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:crypto/crypto.dart';
 import 'package:drift/drift.dart';
@@ -167,10 +168,19 @@ class SyncApplier {
   /// batch's transaction, which is what makes them atomic with the caller's
   /// change-token write: parking them afterwards would lose them to a crash
   /// in between, and the server never re-delivers a record the token passed.
+  ///
+  /// [ownRowsOnly] limits the pre-commit FK sweep to the rows this batch
+  /// wrote, instead of the whole store (see [_sweepFkOrphans]). The
+  /// quarantine replay applies one parked row per batch, and a whole-store
+  /// scan for each made a replay of K rows into a store of N cost K x N (a
+  /// thousand rows parked by a slow clock: a thousand scans, growing with
+  /// the library). Pull pages keep the whole-store scan, which also catches
+  /// a dangling row no batch wrote.
   Future<ApplyResult> apply(
     List<SyncRow> records, {
     Future<void> Function()? beforeCommit,
     List<RejectedRecord> rejects = const [],
+    bool ownRowsOnly = false,
   }) async {
     final result = ApplyResult();
     // (table, id) pairs INSERTED by this batch — the only rows the FK sweep is
@@ -504,12 +514,14 @@ class SyncApplier {
         // a batch that only parked or skipped — every quarantine replay that
         // re-parks — skips the scan. result.applied counts exactly the
         // records whose savepoint wrote (slot resolutions ride inside them).
+        // The quarantine replay narrows the scan to those rows (ownRowsOnly).
         if (result.applied > 0) {
           await _sweepFkOrphans(
             result,
             insertedThisBatch,
             updatedThisBatch,
             slotResolutions,
+            ownRowsOnly: ownRowsOnly,
           );
         }
         // Durably record what the in-memory clock is about to merge, inside
@@ -780,7 +792,10 @@ class SyncApplier {
   ///
   /// foreign_key_check scans the WHOLE database, so a flagged row is not
   /// necessarily one this batch created: a remote UPDATE can plant a dangling
-  /// pointer into a row that existed long before. Healing is by provenance:
+  /// pointer into a row that existed long before. ([ownRowsOnly] checks only
+  /// the rows this batch inserted or updated, which is every row a batch can
+  /// leave dangling; the untouched-row case below is then the next pull
+  /// page's to find.) Healing is by provenance:
   ///
   ///  * A row INSERTED by this batch is PARKED, then deleted. The delete is
   ///    non-negotiable — the deferred FK still fails the outer commit while
@@ -881,8 +896,9 @@ class SyncApplier {
     ApplyResult result,
     Set<(String, String)> insertedThisBatch,
     Map<(String, String), SyncRow> updatedThisBatch,
-    Map<(String, String), _SlotResolution> slotResolutions,
-  ) async {
+    Map<(String, String), _SlotResolution> slotResolutions, {
+    bool ownRowsOnly = false,
+  }) async {
     // Rows already park-and-restored by THIS sweep. A restored row can never
     // be flagged by a LATER fixpoint pass (its pre-batch state satisfied
     // every FK when the batch began, and the sweep only ever deletes rows
@@ -892,9 +908,12 @@ class SyncApplier {
     // stale.
     final restored = <(String, String)>{};
     while (true) {
-      final violations = await db
-          .customSelect('PRAGMA foreign_key_check')
-          .get();
+      final violations = ownRowsOnly
+          ? await _violationsOf({
+              ...insertedThisBatch,
+              ...updatedThisBatch.keys,
+            })
+          : await db.customSelect('PRAGMA foreign_key_check').get();
       if (violations.isEmpty) break;
       for (final v in violations) {
         final table = v.read<String>('table');
@@ -1095,6 +1114,51 @@ class SyncApplier {
 
   /// The child column of foreign key [fkid] on [table] (our FKs are all
   /// single-column, so the first component is the whole key).
+  /// `PRAGMA foreign_key_check`'s rows (table, rowid, parent, fkid) for the
+  /// [rows] given by (table, id) only: each foreign key of each row whose
+  /// value names no parent row. What the sweep's [apply] `ownRowsOnly` reads
+  /// in place of the whole-store check. A row the sweep deleted is simply
+  /// not found again, as with the whole-store check.
+  Future<List<QueryRow>> _violationsOf(Set<(String, String)> rows) async {
+    final idsByTable = <String, List<String>>{};
+    for (final (table, id) in rows) {
+      (idsByTable[table] ??= []).add(id);
+    }
+    final found = <QueryRow>[];
+    for (final MapEntry(key: table, value: ids) in idsByTable.entries) {
+      final fks = await db
+          .customSelect('PRAGMA foreign_key_list("$table")')
+          .get();
+      for (final fk in fks) {
+        final parent = fk.read<String>('table');
+        final from = fk.read<String>('from');
+        final to = fk.readNullable<String>('to') ?? 'id';
+        final fkid = fk.read<int>('id');
+        for (var at = 0; at < ids.length; at += 500) {
+          final chunk = ids.sublist(at, math.min(ids.length, at + 500));
+          found.addAll(
+            await db
+                .customSelect(
+                  'SELECT ? AS "table", c.rowid AS rowid, ? AS parent, '
+                  '? AS fkid FROM "$table" c '
+                  'WHERE c.id IN (${List.filled(chunk.length, '?').join(', ')}) '
+                  'AND c."$from" IS NOT NULL AND NOT EXISTS '
+                  '(SELECT 1 FROM "$parent" p WHERE p."$to" = c."$from")',
+                  variables: [
+                    Variable.withString(table),
+                    Variable.withString(parent),
+                    Variable.withInt(fkid),
+                    for (final id in chunk) Variable.withString(id),
+                  ],
+                )
+                .get(),
+          );
+        }
+      }
+    }
+    return found;
+  }
+
   Future<String?> _fkColumn(String table, int fkid) async {
     final fks = await db.customSelect('PRAGMA foreign_key_list($table)').get();
     for (final fk in fks) {
