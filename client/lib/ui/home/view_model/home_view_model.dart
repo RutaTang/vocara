@@ -93,9 +93,10 @@ class HomeViewModel extends ChangeNotifier {
   int _listEpoch = 0;
 
   /// Whether a read of the list has ever succeeded. Until one has, a create
-  /// leaves the list alone after a failed read: added to a list never read,
-  /// the new card alone replaced the read error, and the rest of the library
-  /// looked lost (the error shows only over an empty list).
+  /// leaves the list alone: added to a list never read, the new card alone
+  /// replaced the read error, and the rest of the library looked lost (the
+  /// error shows only over an empty list). Not even while a read is still
+  /// running, which may fail yet; the read the create owes brings the card.
   bool _listed = false;
 
   Future<Result<List<PracticeSummary>>> _load() async {
@@ -116,7 +117,7 @@ class HomeViewModel extends ChangeNotifier {
     final result = await _repository.createPractice(title);
     if (result is Ok<SongPractice>) {
       _listEpoch++;
-      if (_listed || !load.error) {
+      if (_listed) {
         _projects = [PracticeSummary.of(result.value), ..._projects];
         notifyListeners();
       }

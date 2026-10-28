@@ -241,7 +241,7 @@ class TechniqueLibraryViewModel extends ChangeNotifier {
     final result = await _repository.saveTechnique(technique);
     if (result is Ok<Technique>) {
       _listEpoch++;
-      if (_listed || !load.error) {
+      if (_listed) {
         _all = [result.value, ..._all];
         notifyListeners();
       }

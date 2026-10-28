@@ -3,6 +3,8 @@
 // the error gave way to that one card, every later read failed too, and the
 // rest of the library looked lost.
 
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vocara/data/repositories/song_practice_repository.dart';
 import 'package:vocara/data/repositories/technique_repository.dart';
@@ -19,6 +21,9 @@ final _at = DateTime(2026, 6, 20);
 
 class _Practices extends Fake implements SongPracticeRepository {
   bool readable = false;
+
+  /// When set, reads wait on it.
+  Completer<void>? hold;
   final stored = [
     PracticeSummary(
       id: 'P1',
@@ -31,8 +36,10 @@ class _Practices extends Fake implements SongPracticeRepository {
   ];
 
   @override
-  Future<Result<List<PracticeSummary>>> listPracticeSummaries() async =>
-      readable ? Result.ok([...stored]) : Result.error(Exception('read'));
+  Future<Result<List<PracticeSummary>>> listPracticeSummaries() async {
+    await hold?.future;
+    return readable ? Result.ok([...stored]) : Result.error(Exception('read'));
+  }
 
   @override
   Future<Result<SongPractice>> createPractice(String title) async {
@@ -49,13 +56,18 @@ class _Practices extends Fake implements SongPracticeRepository {
 
 class _Techniques extends Fake implements TechniqueRepository {
   bool readable = false;
+
+  /// When set, reads wait on it.
+  Completer<void>? hold;
   final stored = [
     Technique(id: 'T1', name: 'Kept', createdAt: _at, updatedAt: _at),
   ];
 
   @override
-  Future<Result<List<Technique>>> listTechniques() async =>
-      readable ? Result.ok([...stored]) : Result.error(Exception('read'));
+  Future<Result<List<Technique>>> listTechniques() async {
+    await hold?.future;
+    return readable ? Result.ok([...stored]) : Result.error(Exception('read'));
+  }
 
   @override
   Future<Result<Technique>> saveTechnique(Technique t) async {
@@ -107,5 +119,44 @@ void main() {
     vm.refresh();
     await _settled(() => vm.load.running);
     expect(vm.all.map((t) => t.name), ['New', 'Kept']);
+  });
+
+  // The guard also let a create through while the first read still ran
+  // (its error not yet known): that read and the one the create owed then
+  // failed, and the one new card stood in for the whole library.
+  test('Home shows no lone new card when the read it overtook fails', () async {
+    final repo = _Practices()..hold = Completer<void>();
+    final vm = HomeViewModel(repository: repo);
+    addTearDown(vm.dispose);
+    await pumpEventQueue();
+    expect(vm.load.running, isTrue);
+    await vm.createProject.execute('New');
+    repo.hold!.complete();
+    repo.hold = null;
+    for (var i = 0; i < 3; i++) {
+      await _settled(() => vm.load.running);
+    }
+    expect(vm.load.error, isTrue);
+    expect(vm.projects, isEmpty, reason: 'the error still shows');
+  });
+
+  test('the library shows no lone new card when the read it overtook '
+      'fails', () async {
+    final repo = _Techniques()..hold = Completer<void>();
+    final vm = TechniqueLibraryViewModel(
+      repository: repo,
+      mediaService: TechniqueMediaService(storage: LocalStorageService()),
+    );
+    addTearDown(vm.dispose);
+    await pumpEventQueue();
+    expect(vm.load.running, isTrue);
+    await vm.createTechnique.execute('New');
+    repo.hold!.complete();
+    repo.hold = null;
+    for (var i = 0; i < 3; i++) {
+      await _settled(() => vm.load.running);
+    }
+    expect(vm.load.error, isTrue);
+    expect(vm.all, isEmpty, reason: 'the error still shows');
   });
 }
