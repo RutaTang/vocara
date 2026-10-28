@@ -206,21 +206,49 @@ class DiagnosticsLog {
 
   Future<void> _append(Directory dir, String entry) async {
     final file = File(p.join(dir.path, _fileName));
-    await _rotateIfNeeded(file, entry.length);
-    // flush: true — an entry usually describes a failure, and the process may
-    // be about to die; a buffered-and-lost diagnostic is worthless.
-    await file.writeAsString(entry, mode: FileMode.append, flush: true);
+    // A second running instance logs to the same file. dart:io's append mode
+    // seeks to the end when it opens the file (no O_APPEND), so two appends
+    // at once wrote at the same offset and one entry overwrote the other,
+    // and two rotations at once could roll the wrong file. An exclusive lock
+    // on a side file (never renamed, unlike the log) takes them in turn; the
+    // lock is per process, which is what is shared here, and [_tail] already
+    // orders this process's own writes. Closing the file releases it.
+    final lock = await File(
+      p.join(dir.path, '$_fileName.lock'),
+    ).open(mode: FileMode.append);
+    try {
+      await lock.lock(FileLock.blockingExclusive);
+      await _rotateIfNeeded(file, entry.length);
+      // flush: true — an entry usually describes a failure, and the process
+      // may be about to die; a buffered-and-lost diagnostic is worthless.
+      await file.writeAsString(entry, mode: FileMode.append, flush: true);
+    } finally {
+      await lock.close();
+    }
   }
 
   /// Size-based rotation: when the incoming entry would push the current file
   /// past the cap, the current file becomes `.1` (replacing the previous one)
   /// and a fresh file starts — exactly two files ever exist.
+  ///
+  /// The rename replaces `.1` in one step, and a file already rolled away,
+  /// when sized or when renamed, means the rotation is done: the entry still
+  /// goes into the fresh file instead of being dropped with the error. [_append]
+  /// keeps a second running instance from rotating at the same time; this is
+  /// the fallback should its lock be unavailable.
   Future<void> _rotateIfNeeded(File file, int incomingLength) async {
-    final length = await file.exists() ? await file.length() : 0;
+    final int length;
+    try {
+      length = await file.length();
+    } on PathNotFoundException {
+      return; // no file yet, or just rolled away: the entry starts a new one
+    }
     if (length == 0 || length + incomingLength <= _maxBytesPerFile) return;
-    final rolled = File('${file.path}.1');
-    if (await rolled.exists()) await rolled.delete();
-    await file.rename(rolled.path);
+    try {
+      await file.rename('${file.path}.1');
+    } on PathNotFoundException {
+      // Rotated by the other instance since the length was read.
+    }
   }
 
   static String _describe(Object error, StackTrace? stack) {
