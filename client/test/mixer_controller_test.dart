@@ -824,6 +824,17 @@ void main() {
       );
     });
 
+    test('a new bus never takes the default name of one still there', () async {
+      // Named by count, a delete then a create left two buses called
+      // "Bus 2", which the routing menus list by name alone.
+      final host = _Host(_practice());
+      final a = await host.mixer.createBus();
+      await host.mixer.createBus();
+      await host.mixer.deleteBus(a);
+      await host.mixer.createBus();
+      expect(host.mixer.fxBuses.map((b) => b.name), ['Bus 2', 'Bus 3']);
+    });
+
     test('busWaveformPeaks folds only takes routed into the bus, including '
         'through an upstream bus', () {
       final host = _Host(

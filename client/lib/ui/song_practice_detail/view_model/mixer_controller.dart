@@ -623,6 +623,19 @@ class MixerController extends ChangeNotifier {
 
   List<FxBus> get fxBuses => _practiceOf()?.fxBuses ?? const [];
 
+  /// 'Bus N' for the first N from the bus count on that no bus is called. By
+  /// count alone, a delete then a create named two buses alike ("Bus 2"),
+  /// and the output and send menus, which list buses by name, could not tell
+  /// them apart (the interpretations' default names had the same fix).
+  static String _nextBusName(List<FxBus> buses) {
+    final taken = {for (final b in buses) b.name};
+    var n = buses.length + 1;
+    while (taken.contains('Bus $n')) {
+      n++;
+    }
+    return 'Bus $n';
+  }
+
   /// Creates a new (transparent) FX bus and selects it. Returns its id.
   Future<String> createBus([String name = '']) async {
     final practice = _practiceOf();
@@ -630,7 +643,7 @@ class MixerController extends ChangeNotifier {
     final trimmed = name.trim();
     final bus = FxBus(
       id: newId(),
-      name: trimmed.isEmpty ? 'Bus ${practice.fxBuses.length + 1}' : trimmed,
+      name: trimmed.isEmpty ? _nextBusName(practice.fxBuses) : trimmed,
       fx: TrackFx.flat(),
     );
     _setPractice(practice.copyWith(fxBuses: [...practice.fxBuses, bus]));
