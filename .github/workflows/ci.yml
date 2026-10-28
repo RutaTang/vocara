@@ -63,6 +63,26 @@ jobs:
       - run: cargo test --locked
       - run: cargo test --locked --features device
 
+  # Compiles the macOS app itself (Swift runner, plugins, the native engine
+  # build) on every change. The jobs above never build it and the e2e job
+  # that does is manual, so a native compile error could merge unnoticed.
+  # Build only: the TEST flavor the e2e suites run, in debug.
+  macos-build:
+    name: macOS app build
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: subosito/flutter-action@1508160852fb97248640997f7cfb38da241df0ba # v2.9.1
+        with:
+          channel: stable
+          flutter-version: 3.38.5
+          cache: true
+      - run: flutter pub get
+      - run: flutter build macos --debug --flavor test
+
   # The UI-driven e2e suites boot the full macOS app (TEST flavor, seeded
   # sandbox store) and take several minutes each, so they are manual-only:
   # Actions tab -> CI -> Run workflow. Mirrors `just e2e`.
