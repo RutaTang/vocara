@@ -323,34 +323,32 @@ void main() {
     });
   });
 
-  test(
-    'a seek or Stop while the mic is still opening for a take does nothing',
-    () async {
-      // REC takes the start position first and seeks the backing back to it
-      // once the mic is ready: a ruler click in between moved the playhead,
-      // then was undone, and the take landed where REC was pressed.
-      engine = _FakeEngine();
-      var starting = true;
-      final c = PlaybackController(
-        engine: engine,
-        practice: () => _practice(300000),
-        isRecording: () => false,
-        isStartingTake: () => starting,
-      );
-      addTearDown(() async {
-        c.dispose();
-        await engine.close();
-      });
-      await c.seek(const Duration(seconds: 3));
-      await c.stop();
-      expect(engine.calls, isEmpty);
-      expect(c.transportMoves, 0);
+  test('a seek or Stop once an arming take has its start position does '
+      'nothing', () async {
+    // REC takes the start position first and seeks the backing back to it
+    // once the mic is ready: a ruler click in between moved the playhead,
+    // then was undone, and the take landed where REC was pressed.
+    engine = _FakeEngine();
+    var starting = true;
+    final c = PlaybackController(
+      engine: engine,
+      practice: () => _practice(300000),
+      isRecording: () => false,
+      takeHoldsStart: () => starting,
+    );
+    addTearDown(() async {
+      c.dispose();
+      await engine.close();
+    });
+    await c.seek(const Duration(seconds: 3));
+    await c.stop();
+    expect(engine.calls, isEmpty);
+    expect(c.transportMoves, 0);
 
-      starting = false; // the take ran and stopped, or never started
-      await c.seek(const Duration(seconds: 3));
-      expect(engine.calls, ['seek:3000']);
-    },
-  );
+    starting = false; // the take ran and stopped, or never started
+    await c.seek(const Duration(seconds: 3));
+    expect(engine.calls, ['seek:3000']);
+  });
 
   group('loop region', () {
     test('ensureLoopRange defaults the region to the content length', () {

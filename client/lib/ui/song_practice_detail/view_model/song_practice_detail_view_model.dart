@@ -192,7 +192,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
       // The engine's position stream must keep yielding to the record clock
       // while a take is in flight (the recording tick writes the playhead).
       isRecording: () => recording.isRecording,
-      isStartingTake: () => recording.isStartingTake,
+      takeHoldsStart: () => recording.holdsStartPosition,
       engineAvailable: () => _graphEngine?.isAvailable ?? true,
       toast: _toast,
     );

@@ -221,6 +221,7 @@ class RecordingController extends ChangeNotifier {
       _takeGeneration++;
       _recordingTargetId = targetId;
       _recordingStartMs = _playback.position.value.inMilliseconds;
+      _startPositionHeld = true;
       _recordingPreRollMs = 0;
       _backingRolling = false;
       _headZeroMs = 0;
@@ -236,6 +237,14 @@ class RecordingController extends ChangeNotifier {
     // never discarded here (it is kept for the boot sweep on hard kills).
     discard: _audioFiles.deleteAudio,
   );
+
+  /// Whether a start has taken its take's start position ([_recordingStartMs])
+  /// and is still arming: the mic, once ready, seeks the backing back to that
+  /// position, so a transport move now would be undone (see
+  /// [PlaybackController]). Not before: at the permission prompt or the empty
+  /// take's save the position is still the playhead's to set.
+  bool get holdsStartPosition => _startPositionHeld;
+  bool _startPositionHeld = false;
 
   /// Set once a start reaches its take setup (the destination's create, which
   /// may save an empty take), until that start returns: before it, a cancelled
@@ -490,6 +499,7 @@ class RecordingController extends ChangeNotifier {
         r = await starting;
       } finally {
         _cancellingStart = false;
+        _startPositionHeld = false;
       }
       // Armed, failed or cancelled: the arm window closed either way.
       notifyListeners();

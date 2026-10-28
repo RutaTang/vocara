@@ -15,13 +15,13 @@ class PlaybackController extends ChangeNotifier {
     required PlaybackEngine engine,
     required SongPractice? Function() practice,
     required bool Function() isRecording,
-    bool Function()? isStartingTake,
+    bool Function()? takeHoldsStart,
     bool Function()? engineAvailable,
     void Function(String)? toast,
   }) : _engine = engine,
        _practice = practice,
        _isRecording = isRecording,
-       _isStartingTake = isStartingTake ?? _never,
+       _takeHoldsStart = takeHoldsStart ?? _never,
        _engineAvailable = engineAvailable ?? _always,
        _toast = toast {
     _playingSub = _engine.playing.listen((playing) {
@@ -47,16 +47,16 @@ class PlaybackController extends ChangeNotifier {
   /// recording clock then, or the playhead fights the record tick.
   final bool Function() _isRecording;
 
-  /// Whether a take is between REC and its first recorded frame (the mic's
-  /// ready handshake). Its start position is already taken, and it seeks the
-  /// backing back there once the mic is ready, so a transport move in this
-  /// window was accepted and then silently undone, the take landing where
-  /// REC was pressed. Only the transport moves check it: the position stream
-  /// and the loop wrap still follow the engine until the take runs.
-  final bool Function() _isStartingTake;
+  /// Whether a take arming has taken its start position: the mic, once
+  /// ready, seeks the backing back there, so a transport move then was
+  /// accepted and silently undone, the take landing where it began. Earlier
+  /// in REC (the permission prompt, the empty take's save) a move still sets
+  /// where the take starts. Only the transport moves check it: the position
+  /// stream and the loop wrap follow the engine until the take runs.
+  final bool Function() _takeHoldsStart;
 
   /// Whether a take holds the transport: in flight, or about to be.
-  bool get _takeHoldsTransport => _isRecording() || _isStartingTake();
+  bool get _takeHoldsTransport => _isRecording() || _takeHoldsStart();
 
   static bool _never() => false;
 

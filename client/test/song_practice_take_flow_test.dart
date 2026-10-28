@@ -247,8 +247,12 @@ class _FakeEngine extends Fake implements PlaybackEngine {
   Future<void> play() async {}
   @override
   Future<void> pause() async {}
+
+  /// Every seek, in milliseconds.
+  final List<int> seeks = [];
   @override
-  Future<void> seek(Duration position) async {}
+  Future<void> seek(Duration position) async =>
+      seeks.add(position.inMilliseconds);
   @override
   Future<void> setVolume(
     String id,
@@ -662,6 +666,34 @@ void main() {
       await start;
     },
   );
+
+  test('a ruler click at the permission prompt still moves where the take '
+      'starts; once its start is taken, one is ignored', () async {
+    // The take's start position is taken after the prompt, and the backing
+    // seeks back to it once the mic is ready: a click before that point
+    // sets it, a click after would be undone.
+    final mic = _FakeMic()
+      ..permission = Completer<void>()
+      ..ready = Completer<void>();
+    final engine = _FakeGraphEngine();
+    final vm = await pumpVm(engine: engine, mic: mic);
+    final start = vm.recording.startRecording();
+    await Future<void>.delayed(const Duration(milliseconds: 5));
+
+    await vm.seek(const Duration(seconds: 3)); // at the permission prompt
+    expect(engine.seeks, [3000]);
+
+    mic.permission!.complete();
+    await Future<void>.delayed(const Duration(milliseconds: 5));
+    expect(vm.recording.holdsStartPosition, isTrue);
+    await vm.seek(const Duration(seconds: 5)); // waiting on the mic
+    expect(engine.seeks, [3000]);
+
+    mic.ready!.complete();
+    await start;
+    expect(vm.recording.holdsStartPosition, isFalse);
+    await vm.stopRecording();
+  });
 
   test('an edit refused while a cancelled REC unwinds says to wait, not to '
       'stop recording', () async {
