@@ -35,8 +35,10 @@ either works; this repo standardizes on the former).
 
 Then create the public releases repo itself: <https://github.com/new>, name
 `vocara-releases`, **Public**, with a README (a release needs a commit to
-tag, and an empty repo has none). The workflow's guard checks all three
-(token set, repo public, repo not empty) before it builds anything.
+tag, and an empty repo has none). The workflow's guard checks all of it
+(token set and allowed to create releases there, repo public, repo not
+empty) before it builds anything; its write check creates a draft release
+and deletes it at once.
 
 ## Cutting a release
 
@@ -51,9 +53,11 @@ tag, and an empty repo has none). The workflow's guard checks all three
      UI journeys plus the seven service-level pipelines; the same list as
      `just e2e`).
    - **Build**: universal prod build → deep re-sign → DMG → notarize →
-     staple → Gatekeeper assessment.
-   - **Publish**: GitHub release with the DMG and a `SHA256SUMS` file, and
-     the same plus `latest.json` on the public releases repo. A tag
+     staple → Gatekeeper assessment → launch the app from the DMG and check
+     it boots inside its sandbox (`.github/scripts/launch-check.sh`).
+   - **Publish**: the DMG, a `SHA256SUMS` file and `latest.json` as a
+     release of the public releases repo, then the DMG and `SHA256SUMS` as
+     this repo's GitHub release. A tag
      containing a `-` (e.g. `v1.0.0-rc.1`) publishes as a prerelease, which
      the update check never offers.
 3. **Verify on a second machine** (or at minimum a different user account):

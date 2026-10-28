@@ -85,11 +85,12 @@ jobs:
 
   # The shipping build is the only one with the App Sandbox on (the e2e
   # suites run the test flavor with DebugProfile.entitlements, sandbox off),
-  # and the release workflow signs and notarizes it without ever starting
-  # it. This builds that same Release-Prod configuration, with its
-  # Release.entitlements, and launches it. Signed ad hoc, since the Developer
-  # ID certificate lives only in the release workflow, and without the
-  # hardened runtime, whose library validation ad-hoc signed frameworks
+  # and the release workflow first launches it once it is notarized, at the
+  # end of a tagged release. This builds that same Release-Prod
+  # configuration, with its Release.entitlements, and launches it with the
+  # same checks (.github/scripts/launch-check.sh). Signed ad hoc, since the
+  # Developer ID certificate lives only in the release workflow, and without
+  # the hardened runtime, whose library validation ad-hoc signed frameworks
   # cannot pass (the release build re-signs them all with one identity).
   # Manual, like the e2e job.
   sandbox-launch:
