@@ -215,6 +215,24 @@ Future<ui.Image> spectrogramImageFor(Spectrogram s) async {
   return (await shared).clone();
 }
 
+/// Lets go of the cache's own image handles when the screen that showed them
+/// closes (the song workspace, the technique page). Their spectrograms go with
+/// that screen's analyses, so no lookup could reach them again, yet up to
+/// [_spectrogramImageCacheSize] textures (~14 MB each for a 3-minute take)
+/// stayed resident until as many newer takes were rendered, however long the
+/// app then sat on Home. An image still on screen keeps its own handle; one
+/// asked for again renders afresh.
+void releaseSpectrogramImages() {
+  for (final (key, image) in _recentImages) {
+    final target = key.target;
+    if (target != null && identical(_spectrogramImages[target], image)) {
+      _spectrogramImages[target] = null;
+    }
+    unawaited(image.then((i) => i.dispose(), onError: (Object _) {}));
+  }
+  _recentImages.clear();
+}
+
 /// Brightness multiplier applied to unvoiced live columns — a voiceprint should
 /// read dark when there is no voice, so room noise/breath that scrolls by is
 /// pushed toward black instead of glowing at the auto-scaled floor.

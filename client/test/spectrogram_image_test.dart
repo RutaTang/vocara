@@ -205,6 +205,30 @@ void main() {
     expect(painted(), findsOneWidget, reason: 'then the second take shows');
   });
 
+  testWidgets('a closed screen leaves the cache holding no image, and the '
+      'images still shown intact', (tester) async {
+    // The cache's own handles outlived the screen that showed them (up to
+    // four textures of ~14 MB each) until four newer takes were rendered.
+    final s = _spec(40, 8, (f, b) => (f + b) % 60.0);
+    await tester.runAsync(() async {
+      final shown = await spectrogramImageFor(s);
+      expect(shown.debugGetOpenHandleStackTraces(), hasLength(2));
+      releaseSpectrogramImages();
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        shown.debugGetOpenHandleStackTraces(),
+        hasLength(1),
+        reason: "the cache's handle is released",
+      );
+      expect(shown.debugDisposed, isFalse);
+      expect(await shown.toByteData(), isNotNull);
+      final again = await spectrogramImageFor(s);
+      expect(again.isCloneOf(shown), isFalse, reason: 'rendered afresh');
+      shown.dispose();
+      again.dispose();
+    });
+  });
+
   testWidgets('the cache does not keep a spectrogram alive', (tester) async {
     // A strong key kept every recently shown spectrogram — tens to hundreds
     // of MB for a long take — resident after the analysis cache let it go

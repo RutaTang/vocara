@@ -19,6 +19,7 @@ import '../../../utils/format.dart';
 import '../../core/themes/studio.dart';
 import '../../core/widgets/confirm_dialog.dart';
 import '../../core/widgets/holds_keyboard.dart';
+import '../../core/widgets/spectrogram_painter.dart';
 import '../../core/widgets/stable_subtree.dart';
 import '../../core/widgets/studio_button.dart';
 import '../../core/widgets/studio_controls.dart';
@@ -207,6 +208,7 @@ class _WorkspaceState extends State<_Workspace> {
   @override
   void dispose() {
     _toastSub?.cancel();
+    releaseSpectrogramImages();
     super.dispose();
   }
 

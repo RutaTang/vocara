@@ -10,6 +10,7 @@ import '../../../routing/navigation.dart';
 import '../../../routing/routes.dart';
 import '../../core/themes/studio.dart';
 import '../../core/widgets/confirm_dialog.dart';
+import '../../core/widgets/spectrogram_painter.dart';
 import '../../core/widgets/studio_button.dart';
 import '../view_model/technique_detail_view_model.dart';
 import 'media/technique_media_section.dart';
@@ -226,6 +227,7 @@ class _TechniqueDetailScreenState extends State<TechniqueDetailScreen> {
   void dispose() {
     _headerSettle?.cancel();
     _disposeForm();
+    releaseSpectrogramImages();
     super.dispose();
   }
 
