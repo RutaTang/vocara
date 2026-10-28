@@ -20,6 +20,26 @@ void main() {
     await File(p.join(dir.path, 'app.json')).writeAsBytes(bytes);
   }
 
+  test('two instances sharing the folder never tear a document', () async {
+    // A second running app shares the library. Each instance numbered its
+    // temp files from 0, so both wrote the same temp file: one rename failed
+    // and the document was left as torn JSON, read back as no settings.
+    final other = LocalStorageService(root: tmp);
+    final big = {'blob': 'x' * 200000};
+    for (var i = 0; i < 5; i++) {
+      await Future.wait([
+        storage.write('settings', 'app', big),
+        other.write('settings', 'app', {'a': i}),
+      ]);
+      final read = await storage.read('settings', 'app');
+      expect(read, anyOf(big, {'a': i}));
+    }
+    final leftovers = Directory(
+      p.join(tmp.path, 'settings'),
+    ).listSync().map((e) => p.basename(e.path));
+    expect(leftovers, ['app.json']);
+  });
+
   test('a document reads back as written', () async {
     await storage.write('settings', 'app', {'a': 1});
     expect(await storage.read('settings', 'app'), {'a': 1});

@@ -5,6 +5,8 @@ import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import '../../utils/id.dart';
+
 /// Persists JSON documents as one file per record under the macOS app support
 /// directory, and hands out per-collection directories for binary assets
 /// (e.g. imported/recorded audio). Stateless apart from a cached root dir.
@@ -49,7 +51,6 @@ class LocalStorageService {
   // settings slider firing a persist on every drag tick) can never interleave two
   // truncating writes into a torn, invalid-JSON file.
   final Map<String, Future<void>> _writeChains = {};
-  int _writeSeq = 0;
 
   Future<void> write(String collection, String id, Map<String, dynamic> json) {
     final key = '$collection/$id';
@@ -68,7 +69,9 @@ class LocalStorageService {
   }
 
   /// Writes to a unique temp file then atomically renames over the target, so a reader
-  /// (or a crash) never observes a half-written document.
+  /// (or a crash) never observes a half-written document. Unique across processes too:
+  /// a second running instance shares this folder, and a per-instance counter gave
+  /// both the same temp name, so two writes of one document tore it.
   Future<void> _writeAtomic(
     String collection,
     String id,
@@ -76,7 +79,7 @@ class LocalStorageService {
   ) async {
     final dir = await _collectionDir(collection);
     final file = File(p.join(dir.path, '$id.json'));
-    final tmp = File('${file.path}.${_writeSeq++}.tmp');
+    final tmp = File('${file.path}.${newId()}.tmp');
     try {
       await tmp.writeAsString(jsonEncode(json), flush: true);
       await tmp.rename(file.path);
