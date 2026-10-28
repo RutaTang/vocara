@@ -1112,8 +1112,6 @@ class SyncApplier {
     await _journalSlotTombstone(snapshot.id, stamp);
   }
 
-  /// The child column of foreign key [fkid] on [table] (our FKs are all
-  /// single-column, so the first component is the whole key).
   /// `PRAGMA foreign_key_check`'s rows (table, rowid, parent, fkid) for the
   /// [rows] given by (table, id) only: each foreign key of each row whose
   /// value names no parent row. What the sweep's [apply] `ownRowsOnly` reads
@@ -1159,6 +1157,8 @@ class SyncApplier {
     return found;
   }
 
+  /// The child column of foreign key [fkid] on [table] (our FKs are all
+  /// single-column, so the first component is the whole key).
   Future<String?> _fkColumn(String table, int fkid) async {
     final fks = await db.customSelect('PRAGMA foreign_key_list($table)').get();
     for (final fk in fks) {

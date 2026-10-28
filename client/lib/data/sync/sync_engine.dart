@@ -946,8 +946,8 @@ class SyncEngine {
         continue;
       }
       // An FK orphan whose parent is still absent can only park again: spare
-      // it the transaction and the whole-store FK sweep, which every pull
-      // otherwise paid per orphan for as long as the parent stayed away.
+      // it the transaction and its FK sweep, which every pull otherwise paid
+      // per orphan for as long as the parent stayed away.
       // Parents replay first (the rank order above), so one landing earlier
       // in this pass is already there.
       if (await _orphanWaitsOnParent(q, row)) continue;

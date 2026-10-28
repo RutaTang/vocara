@@ -1409,6 +1409,9 @@ void main() {
         expect((await engine.pumpPull()).failed, isFalse);
         final parked = await quarantine.list();
         expect(parked.single.reason, startsWith('fk-orphan'));
+        // Parked again by the sweep (into the row's sweep slot), not left as
+        // it was by a replay whose commit failed on a missed violation.
+        expect(parked.single.id, QuarantineStore.sweepSlotId(_id('T')));
         final row = await db
             .customSelect(
               'SELECT id FROM tracks WHERE id = ?',
