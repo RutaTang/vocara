@@ -213,17 +213,45 @@ class DiagnosticsLog {
     // on a side file (never renamed, unlike the log) takes them in turn; the
     // lock is per process, which is what is shared here, and [_tail] already
     // orders this process's own writes. Closing the file releases it.
-    final lock = await File(
-      p.join(dir.path, '$_fileName.lock'),
-    ).open(mode: FileMode.append);
+    final lock = await _takeLock(dir);
     try {
-      await lock.lock(FileLock.blockingExclusive);
       await _rotateIfNeeded(file, entry.length);
       // flush: true — an entry usually describes a failure, and the process
       // may be about to die; a buffered-and-lost diagnostic is worthless.
       await file.writeAsString(entry, mode: FileMode.append, flush: true);
     } finally {
-      await lock.close();
+      try {
+        await lock?.close();
+      } catch (_) {}
+    }
+  }
+
+  /// The write lock, or null to write without it: a lock file that cannot be
+  /// opened, a volume that refuses locks, or another instance holding it for
+  /// over ~2 s (a process frozen mid-write, in a debugger say). Waiting for
+  /// good there stalled every later entry and an export behind it, and a
+  /// failure to lock dropped them all; unlocked, an entry is written as it
+  /// was before the lock existed.
+  Future<RandomAccessFile?> _takeLock(Directory dir) async {
+    RandomAccessFile? lock;
+    try {
+      lock = await File(
+        p.join(dir.path, '$_fileName.lock'),
+      ).open(mode: FileMode.append);
+      for (var tries = 0; ; tries++) {
+        try {
+          await lock.lock(FileLock.exclusive);
+          return lock;
+        } on FileSystemException {
+          if (tries >= 40) rethrow;
+          await Future<void>.delayed(const Duration(milliseconds: 50));
+        }
+      }
+    } catch (_) {
+      try {
+        await lock?.close();
+      } catch (_) {}
+      return null;
     }
   }
 
@@ -235,7 +263,7 @@ class DiagnosticsLog {
   /// when sized or when renamed, means the rotation is done: the entry still
   /// goes into the fresh file instead of being dropped with the error. [_append]
   /// keeps a second running instance from rotating at the same time; this is
-  /// the fallback should its lock be unavailable.
+  /// the fallback for a write that goes ahead without its lock.
   Future<void> _rotateIfNeeded(File file, int incomingLength) async {
     final int length;
     try {

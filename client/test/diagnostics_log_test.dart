@@ -59,6 +59,16 @@ void main() {
     expect(await currentFile().readAsString(), contains('entry 39'));
   });
 
+  test('entries are still written when the write lock cannot be had', () async {
+    // A lock file that would not open (or a volume refusing locks) dropped
+    // every entry from then on.
+    await Directory(p.join(dir.path, 'diagnostics.log.lock')).create();
+    final log = DiagnosticsLog.forTesting(directory: dir);
+    log.log('boot', 'still recorded');
+    await log.flush();
+    expect(await currentFile().readAsString(), contains('still recorded'));
+  });
+
   test(
     'entries logged before a directory is bound are flushed after',
     () async {
