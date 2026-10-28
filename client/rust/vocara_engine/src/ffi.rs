@@ -2124,13 +2124,8 @@ fn decode_export(
         } else {
             max_frames as f64 / rate as f64
         };
-        // Source-rate ceiling at 4x the requested output rate: the duration budget alone
-        // does not bound decode MEMORY (a 10-minute 384 kHz file decodes ~1.8 GB at its
-        // source rate before any resample). 4x covers every real recording/media rate an
-        // analysis at 44.1/48 kHz meets (up to 176.4/192 kHz); beyond that is refused as
-        // too big for this caller's budget.
         let (frames, src_rate) =
-            match device::decode_file(path, max_secs, rate.saturating_mul(4), max_src_frames) {
+            match device::decode_file(path, max_secs, source_rate_ceiling(rate), max_src_frames) {
                 Ok(v) => v,
                 Err(device::DecodeError::TooLong) => {
                     set_status(VE_DECODE_TOO_LONG);
@@ -2604,6 +2599,16 @@ pub extern "C" fn ve_set_master(e: *mut VeEngine, gain: f32) -> c_int {
 /// the whole mix went silent until the master was set again.
 fn master_gain(gain: f32) -> Option<f32> {
     gain.is_finite().then(|| gain.max(0.0))
+}
+
+/// The highest source rate a decode for output at `rate` takes. The duration
+/// budget alone does not bound decode MEMORY (a 10-minute 384 kHz file
+/// decodes ~1.8 GB at its source rate before any resample), so it stops at 4x
+/// the output rate, but never below 192 kHz, the highest rate real recording
+/// and media files use: at 4x alone, an analysis at 44.1 kHz refused every
+/// 192 kHz file as too big while taking 176.4 kHz ones.
+fn source_rate_ceiling(rate: u32) -> u32 {
+    rate.saturating_mul(4).max(192_000)
 }
 
 // ---- File decode (so Dart hands a path and feeds the returned device-rate PCM) ----------
@@ -3329,7 +3334,7 @@ mod device_info_tests {
 
 #[cfg(test)]
 mod setter_rule_tests {
-    use super::master_gain;
+    use super::{master_gain, source_rate_ceiling};
 
     #[test]
     fn a_non_finite_master_gain_keeps_the_current_one() {
@@ -3338,6 +3343,14 @@ mod setter_rule_tests {
         assert_eq!(master_gain(f32::INFINITY), None);
         assert_eq!(master_gain(-1.0), Some(0.0));
         assert_eq!(master_gain(0.5), Some(0.5));
+    }
+
+    #[test]
+    fn a_192_khz_source_decodes_for_any_output_rate() {
+        assert_eq!(source_rate_ceiling(44_100), 192_000);
+        assert_eq!(source_rate_ceiling(48_000), 192_000);
+        assert_eq!(source_rate_ceiling(96_000), 384_000);
+        assert_eq!(source_rate_ceiling(u32::MAX), u32::MAX);
     }
 }
 
