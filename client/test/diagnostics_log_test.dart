@@ -69,6 +69,41 @@ void main() {
     expect(await currentFile().readAsString(), contains('still recorded'));
   });
 
+  group('a write lock that cannot be had', () {
+    // Retried in full for every entry, it cost each one ~2 s for good: on a
+    // volume that refuses locks, or behind a peer frozen mid-write.
+    Future<(int, Duration)> logThree(int errno) async {
+      final lock = _RefusingLock(errno);
+      final log = DiagnosticsLog.forTesting(
+        directory: dir,
+        openLock: (_) async => lock,
+      );
+      final watch = Stopwatch()..start();
+      for (final m in ['one', 'two', 'three']) {
+        log.log('boot', m);
+      }
+      await log.flush();
+      final content = await currentFile().readAsString();
+      for (final m in ['one', 'two', 'three']) {
+        expect(content, contains('[boot] $m'));
+      }
+      return (lock.tries, watch.elapsed);
+    }
+
+    test('on a volume that refuses locks is no longer tried', () async {
+      final (tries, took) = await logThree(45); // ENOTSUP on macOS
+      expect(tries, 1);
+      expect(took, lessThan(const Duration(seconds: 1)));
+    });
+
+    test('behind another holder is waited for once, then tried once per '
+        'entry', () async {
+      final (tries, took) = await logThree(35); // EAGAIN on macOS
+      expect(tries, 41 + 1 + 1);
+      expect(took, lessThan(const Duration(seconds: 4)));
+    });
+  });
+
   test(
     'entries logged before a directory is bound are flushed after',
     () async {
@@ -413,4 +448,25 @@ class _UnwritableFile extends Fake implements File {
     await _real.writeAsString('partial');
     throw const FileSystemException('No space left on device');
   }
+}
+
+/// A lock file whose lock is always refused with [errno].
+class _RefusingLock extends Fake implements RandomAccessFile {
+  _RefusingLock(this.errno);
+
+  final int errno;
+  int tries = 0;
+
+  @override
+  Future<RandomAccessFile> lock([
+    FileLock mode = FileLock.exclusive,
+    int start = 0,
+    int end = -1,
+  ]) async {
+    tries++;
+    throw FileSystemException('lock failed', 'x.lock', OSError('', errno));
+  }
+
+  @override
+  Future<void> close() async {}
 }

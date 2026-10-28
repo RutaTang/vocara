@@ -25,7 +25,9 @@ import '../db/safe_migrator.dart';
 /// schema `user_version` into one text file at a temp path, for the user to
 /// attach to a bug report.
 class DiagnosticsLog {
-  DiagnosticsLog._() : _maxBytesPerFile = _defaultMaxBytesPerFile;
+  DiagnosticsLog._()
+    : _maxBytesPerFile = _defaultMaxBytesPerFile,
+      _openLock = _openLockFile;
 
   /// An isolated instance for tests: logs under [directory] (bind later via
   /// [bindDirectory] when null) with an optional smaller rotation cap.
@@ -33,8 +35,16 @@ class DiagnosticsLog {
   DiagnosticsLog.forTesting({
     Directory? directory,
     int maxBytesPerFile = _defaultMaxBytesPerFile,
+    Future<RandomAccessFile> Function(String path)? openLock,
   }) : _maxBytesPerFile = maxBytesPerFile,
-       _dir = directory;
+       _dir = directory,
+       _openLock = openLock ?? _openLockFile;
+
+  /// Opens the write lock's file (a test seam: a lock that refuses).
+  final Future<RandomAccessFile> Function(String path) _openLock;
+
+  static Future<RandomAccessFile> _openLockFile(String path) =>
+      File(path).open(mode: FileMode.append);
 
   /// The single app-wide log (all areas share one file, so ordering across
   /// subsystems is preserved).
@@ -232,18 +242,33 @@ class DiagnosticsLog {
   /// good there stalled every later entry and an export behind it, and a
   /// failure to lock dropped them all; unlocked, an entry is written as it
   /// was before the lock existed.
+  ///
+  /// Only a lock held elsewhere is waited for, and only once: a refusal of
+  /// any other kind means the volume cannot lock, and later entries no longer
+  /// try; after a wait that ran out, entries take one try each for the next
+  /// 2 s. Waited for in full every time, either cost 2 s an entry for good.
   Future<RandomAccessFile?> _takeLock(Directory dir) async {
+    if (_lockUnsupported) return null;
     RandomAccessFile? lock;
     try {
-      lock = await File(
-        p.join(dir.path, '$_fileName.lock'),
-      ).open(mode: FileMode.append);
+      lock = await _openLock(p.join(dir.path, '$_fileName.lock'));
+      final patient = !DateTime.now().isBefore(_lockImpatientUntil);
       for (var tries = 0; ; tries++) {
         try {
           await lock.lock(FileLock.exclusive);
           return lock;
-        } on FileSystemException {
-          if (tries >= 40) rethrow;
+        } on FileSystemException catch (e) {
+          final code = e.osError?.errorCode;
+          if (code == null || !_heldElsewhere.contains(code)) {
+            _lockUnsupported = true;
+            rethrow;
+          }
+          if (!patient || tries >= 40) {
+            _lockImpatientUntil = DateTime.now().add(
+              const Duration(seconds: 2),
+            );
+            rethrow;
+          }
           await Future<void>.delayed(const Duration(milliseconds: 50));
         }
       }
@@ -254,6 +279,17 @@ class DiagnosticsLog {
       return null;
     }
   }
+
+  /// Errno values a non-blocking lock fails with while another process holds
+  /// it: EACCES, EAGAIN (11 on Linux, 35 on macOS), and EINTR (see
+  /// LibraryLock, which reads them the same way).
+  static const Set<int> _heldElsewhere = {13, 11, 35, 4};
+
+  /// Set when the volume refused a lock outright: later writes skip it.
+  bool _lockUnsupported = false;
+
+  /// Until when a write tries the lock once instead of waiting for it.
+  DateTime _lockImpatientUntil = DateTime.fromMillisecondsSinceEpoch(0);
 
   /// Size-based rotation: when the incoming entry would push the current file
   /// past the cap, the current file becomes `.1` (replacing the previous one)
