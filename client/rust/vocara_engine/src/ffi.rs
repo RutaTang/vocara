@@ -2588,14 +2588,22 @@ pub extern "C" fn ve_set_pan(e: *mut VeEngine, index: c_int, pan: f32) -> c_int 
 #[no_mangle]
 pub extern "C" fn ve_set_master(e: *mut VeEngine, gain: f32) -> c_int {
     with_engine(e, -1, |eng| {
-        eng.handle.set_param(
-            build::MASTER_ID,
-            crate::dsp::master::param::GAIN,
-            gain.max(0.0),
-        );
+        let Some(gain) = master_gain(gain) else {
+            return 0;
+        };
+        eng.handle
+            .set_param(build::MASTER_ID, crate::dsp::master::param::GAIN, gain);
         eng.handle.flush();
         0
     })
+}
+
+/// The gain [`ve_set_master`] applies, or `None` to keep the current one. A
+/// non-finite gain is dropped, as every other setter drops one: clamped
+/// first, NaN (and -inf) came out as 0.0, a finite value the engine took, and
+/// the whole mix went silent until the master was set again.
+fn master_gain(gain: f32) -> Option<f32> {
+    gain.is_finite().then(|| gain.max(0.0))
 }
 
 // ---- File decode (so Dart hands a path and feeds the returned device-rate PCM) ----------
@@ -3316,6 +3324,20 @@ mod device_info_tests {
     fn listed_and_reported_uids_truncate_alike() {
         let uid = "y".repeat(400);
         assert_eq!(listed_uid(&uid), reported_uid(&uid));
+    }
+}
+
+#[cfg(test)]
+mod setter_rule_tests {
+    use super::master_gain;
+
+    #[test]
+    fn a_non_finite_master_gain_keeps_the_current_one() {
+        assert_eq!(master_gain(f32::NAN), None);
+        assert_eq!(master_gain(f32::NEG_INFINITY), None);
+        assert_eq!(master_gain(f32::INFINITY), None);
+        assert_eq!(master_gain(-1.0), Some(0.0));
+        assert_eq!(master_gain(0.5), Some(0.5));
     }
 }
 
