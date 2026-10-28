@@ -54,22 +54,22 @@ class UpdateCheckService extends ChangeNotifier {
     : _fetch = fetch ?? _fetchOverHttp,
       _currentVersion = currentVersion;
 
-  /// Where the version manifest lives.
-  ///
-  /// OWNER: change this when the release process settles. The default is
-  /// derived from `git remote get-url origin`
-  /// (https://github.com/RutaTang/vocara): GitHub's "latest release" API,
-  /// which serves unauthenticated JSON as soon as the repo (or a dedicated
-  /// public releases repo) is public and has at least one release. The parser
-  /// accepts EITHER GitHub's release shape (`tag_name` / `html_url` / `body`)
-  /// OR a plain hand-hosted manifest:
+  /// Where the version manifest lives: the `latest.json` the release
+  /// workflow attaches to each release of the public releases repo
+  /// (release.yml's RELEASES_REPO; the vocara repo itself is private, so
+  /// neither its releases API nor its downloads are reachable without a
+  /// login). GitHub redirects `releases/latest/download/` to that file on
+  /// the newest release that is not a prerelease. It holds
   ///
   ///     {"latest": "1.1.0", "url": "https://...", "notes": "..."}
   ///
-  /// so pointing this at a static JSON file (e.g. GitHub raw or any web host)
-  /// also works without code changes.
+  /// The parser also accepts GitHub's own release shape (`tag_name` /
+  /// `html_url` / `body`), so this can point at a public repo's
+  /// releases/latest API instead without code changes.
+  /// update_check_manifest_sync_test.dart pins this to RELEASES_REPO.
   static const String manifestUrl =
-      'https://api.github.com/repos/RutaTang/vocara/releases/latest';
+      'https://github.com/RutaTang/vocara-releases/releases/latest/download/'
+      'latest.json';
 
   /// The running app's version. Keep in sync with pubspec.yaml `version:`
   /// (the part before `+`). Vocara does not depend on package_info_plus
@@ -270,7 +270,7 @@ class UpdateCheckService extends ChangeNotifier {
     final client = HttpClient()..connectionTimeout = timeout;
     try {
       final request = await client.getUrl(url).timeout(timeout);
-      // GitHub's API rejects requests without a User-Agent.
+      // GitHub rejects API requests without a User-Agent.
       request.headers.set(HttpHeaders.userAgentHeader, 'vocara-update-check');
       request.headers.set(HttpHeaders.acceptHeader, 'application/json');
       final response = await request.close().timeout(timeout);

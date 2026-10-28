@@ -4,6 +4,9 @@ How to cut a Vocara macOS release. Releases go through GitHub Actions ONLY
 (the `Release` workflow, `.github/workflows/release.yml`); there is no local
 release script. The artifact is a signed, notarized, stapled universal
 (arm64 + x86_64) DMG attached to a GitHub release: `Vocara-<version>.dmg`.
+This repository is private, so the release users download, and the
+`latest.json` the app's update check reads, are published to the public
+releases repo `RutaTang/vocara-releases` (`RELEASES_REPO` in the workflow).
 
 ## Bundle-id freeze warning
 
@@ -28,12 +31,20 @@ either works; this repo standardizes on the former).
 | `APPLE_ID` | the Apple ID email of the developer account |
 | `APPLE_TEAM_ID` | `TP7LCYW3NY` (shown on the certificate and at <https://developer.apple.com/account> → Membership) |
 | `APPLE_APP_SPECIFIC_PASSWORD` | <https://account.apple.com> → Sign-In and Security → App-Specific Passwords → generate one (e.g. named `vocara-ci`) |
+| `RELEASES_TOKEN` | <https://github.com/settings/personal-access-tokens> → Generate new token (fine-grained) → Repository access: only `RutaTang/vocara-releases` → Permissions: Contents: Read and write. It expires: renew it before then, or the next release stops at its guard. |
+
+Then create the public releases repo itself: <https://github.com/new>, name
+`vocara-releases`, **Public**, with a README (a release needs a commit to
+tag, and an empty repo has none). The workflow's guard checks all three
+(token set, repo public, repo not empty) before it builds anything.
 
 ## Cutting a release
 
 1. Bump `version:` in `client/pubspec.yaml`; commit to master.
-2. `git tag v<version> && git push origin v<version>` — the `Release`
-   workflow runs the full pipeline:
+2. `git tag -a v<version> -m "Vocara <version>" -m "<what changed>" && git push origin v<version>`
+   — the tag's message becomes the public release notes and the notes the
+   app's update dialog shows (a lightweight `git tag` publishes none). The
+   `Release` workflow runs the full pipeline:
    - **Guard**: the tag must sit on master HEAD and match the pubspec version.
    - **Validate**: format, analyze, unit tests, Rust engine tests (both
      feature modes) + clippy, and all twelve integration suites (the five
@@ -41,8 +52,10 @@ either works; this repo standardizes on the former).
      `just e2e`).
    - **Build**: universal prod build → deep re-sign → DMG → notarize →
      staple → Gatekeeper assessment.
-   - **Publish**: GitHub release with the DMG and a `SHA256SUMS` file. A tag
-     containing a `-` (e.g. `v1.0.0-rc.1`) publishes as a prerelease.
+   - **Publish**: GitHub release with the DMG and a `SHA256SUMS` file, and
+     the same plus `latest.json` on the public releases repo. A tag
+     containing a `-` (e.g. `v1.0.0-rc.1`) publishes as a prerelease, which
+     the update check never offers.
 3. **Verify on a second machine** (or at minimum a different user account):
    download the DMG through a browser so it is quarantined, then:
 
@@ -82,13 +95,21 @@ All of these live as steps of the `build-macos` job in
 
 ## In-app update check
 
-`UpdateCheckService` polls GitHub's `releases/latest` API and shows a
-notify-only banner (no auto-install). NOTE: the repository is currently
-private, so the unauthenticated API call returns 404 and the check silently
-reports "unknown" — it starts working the moment the repo (or a dedicated
-public releases repo, adjust `UpdateCheckService.manifestUrl`) is public.
-Auto-update via Sparkle was considered and deliberately deferred until that
-hosting decision is made.
+`UpdateCheckService` reads
+`https://github.com/RutaTang/vocara-releases/releases/latest/download/latest.json`
+(once per run, and from Settings) and shows a notify-only banner (no
+auto-install). GitHub serves that path from the newest release of the public
+repo that is not a prerelease; the release workflow writes the file:
+
+```json
+{"latest": "1.2.0", "url": "https://github.com/RutaTang/vocara-releases/releases/tag/v1.2.0", "notes": "..."}
+```
+
+`update_check_manifest_sync_test.dart` fails if `manifestUrl` and the
+workflow's `RELEASES_REPO` stop naming the same repo. v0.1.0 read this
+private repo's releases API instead, which answers 404 without a login, so
+v0.1.0 installs never see an update: their users need the next DMG by hand.
+Auto-update via Sparkle was considered and deliberately deferred.
 
 ## Troubleshooting
 

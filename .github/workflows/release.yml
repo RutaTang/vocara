@@ -7,7 +7,9 @@
 #   1  Validate  - format/analyze/unit tests, Rust engine tests, e2e journeys
 #   2  Build     - universal build -> Developer ID deep re-sign -> DMG
 #                  -> notarize -> staple -> Gatekeeper assessment
-#   3  Publish   - GitHub release with the DMG + SHA256SUMS
+#   3  Publish   - GitHub release with the DMG + SHA256SUMS, and the same
+#                  plus latest.json (the in-app update check's manifest) on
+#                  the public releases repo
 #
 # There is no backend deploy phase yet: sync is local-only P0 today. When the
 # self-hosted sync server lands (P1, see docs/sync-protocol.md), its deploy
@@ -20,6 +22,8 @@
 #   APPLE_ID                    Apple ID email of the developer account
 #   APPLE_TEAM_ID               TP7LCYW3NY
 #   APPLE_APP_SPECIFIC_PASSWORD app-specific password from account.apple.com
+#   RELEASES_TOKEN              fine-grained token with Contents: write on
+#                               RELEASES_REPO (below)
 name: Release
 
 on:
@@ -30,6 +34,11 @@ env:
   # Pinned to the stable release matching client/.metadata (revision f6ff1529fd);
   # keep in lockstep with ci.yml.
   FLUTTER_VERSION: "3.38.5"
+  # The public repo users download from and the app's update check reads
+  # (UpdateCheckService.manifestUrl, pinned to this by
+  # update_check_manifest_sync_test.dart). This repo is private, so its own
+  # releases are reachable only with a login.
+  RELEASES_REPO: RutaTang/vocara-releases
 
 # Least privilege by default; only the release job (which creates the GitHub
 # release) is granted contents: write. Third-party actions are pinned to
@@ -68,6 +77,27 @@ jobs:
             echo "::error::Tag v$TAG does not match client/pubspec.yaml version $PUBSPEC."
             exit 1
           fi
+
+      # Publishing to the public releases repo is the last step, so a
+      # missing token or an unusable repo would otherwise surface only after
+      # the whole build and notarization.
+      - name: Verify the public releases repo
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::The RELEASES_TOKEN secret is not set (see docs/release-runbook.md)."
+            exit 1
+          fi
+          PRIVATE="$(gh api "repos/$RELEASES_REPO" --jq .private)" \
+            || { echo "::error::RELEASES_TOKEN cannot read $RELEASES_REPO."; exit 1; }
+          if [ "$PRIVATE" != "false" ]; then
+            echo "::error::$RELEASES_REPO must be public: the app reads its update manifest without a login."
+            exit 1
+          fi
+          # A release needs a commit to tag; an empty repo has none.
+          gh api "repos/$RELEASES_REPO/commits?per_page=1" > /dev/null \
+            || { echo "::error::$RELEASES_REPO has no commits: initialize it with a README."; exit 1; }
 
   # ============================================================
   # Phase 1: Validate - nothing ships that CI would not pass
@@ -426,7 +456,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ============================================================
-  # Phase 3: Publish - GitHub release with DMG + checksums
+  # Phase 3: Publish - GitHub releases with DMG + checksums
   # ============================================================
   release:
     name: Create GitHub Release
@@ -436,6 +466,10 @@ jobs:
     permissions:
       contents: write
     steps:
+      # First: checkout empties the workspace. Only the tag's message is used.
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
       - name: Download macOS DMG
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -453,11 +487,49 @@ jobs:
             artifacts/*.dmg
             artifacts/SHA256SUMS
 
+      # The public notes are the tag's own message (`git tag -a`), empty for
+      # a lightweight tag: the generated notes above list this private repo's
+      # pull requests. latest.json links the public release page.
+      - name: Write the update manifest
+        run: |
+          set -euo pipefail
+          TAG="$GITHUB_REF_NAME"
+          git fetch --depth=1 --force origin "refs/tags/$TAG:refs/tags/$TAG"
+          NOTES=""
+          if [ "$(git cat-file -t "refs/tags/$TAG")" = tag ]; then
+            NOTES="$(git for-each-ref --format='%(contents:subject)%0a%0a%(contents:body)' "refs/tags/$TAG")"
+          fi
+          printf '%s\n' "$NOTES" > artifacts/notes.md
+          jq -n --arg latest "${TAG#v}" \
+            --arg url "https://github.com/$RELEASES_REPO/releases/tag/$TAG" \
+            --arg notes "$NOTES" \
+            '{latest: $latest, url: $url, notes: $notes}' > artifacts/latest.json
+          cat artifacts/latest.json
+
+      # GitHub serves releases/latest/download/latest.json from the newest
+      # release here that is not a prerelease, so a `-` tag never reaches
+      # the update check.
+      - name: Publish to the public releases repo
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          repository: ${{ env.RELEASES_REPO }}
+          token: ${{ secrets.RELEASES_TOKEN }}
+          tag_name: ${{ github.ref_name }}
+          name: Vocara ${{ github.ref_name }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          body_path: artifacts/notes.md
+          files: |
+            artifacts/*.dmg
+            artifacts/SHA256SUMS
+            artifacts/latest.json
+
       - name: Summary
         run: |
           {
             echo "## GitHub Release Created"
             echo "- **Version**: $GITHUB_REF_NAME"
+            echo "- **Public**: https://github.com/$RELEASES_REPO/releases/tag/$GITHUB_REF_NAME"
             echo "- **DMG**: ${{ needs.build-macos.outputs.dmg_name }}"
             echo "- **SHA256**: ${{ needs.build-macos.outputs.sha256 }}"
           } >> "$GITHUB_STEP_SUMMARY"

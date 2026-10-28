@@ -33,7 +33,7 @@ void main() {
     });
 
     test('a real GitHub release carries BOTH urls; the human page wins', () {
-      // The shape the shipping manifestUrl actually returns. `url` is the
+      // The shape GitHub's releases/latest API returns. `url` is the
       // api.github.com resource endpoint, and the banner's button opens
       // whatever lands here — preferring it showed the user raw JSON.
       final info = UpdateCheckService.parseManifest(
