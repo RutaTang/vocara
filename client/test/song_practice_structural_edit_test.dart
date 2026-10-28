@@ -870,6 +870,29 @@ void main() {
     expect(events, contains('delete:/audio/p1/source.wav'));
   });
 
+  test('REC pressed while an edit runs says why it does nothing', () async {
+    // Every structural edit refused in that window said so; REC alone was
+    // silent, and read as a broken button.
+    final waveforms = _SignalingWaveforms();
+    final vm = await pumpVm(
+      vocalTracks: _mergeableTakes(),
+      waveforms: waveforms,
+    );
+    final toasts = <String>[];
+    final sub = vm.toasts.listen(toasts.add);
+    addTearDown(sub.cancel);
+    final merge = vm.mergeTrackDown('top');
+    await waveforms.reached.future; // the merge holds the busy gate
+
+    await vm.recording.startRecording();
+    await Future<void>.delayed(Duration.zero);
+    expect(toasts, ['Wait for the current edit to finish.']);
+    expect(vm.recording.isStartingTake, isFalse);
+
+    waveforms.gate.complete();
+    await merge;
+  });
+
   group('an editor opened before a split or merge', () {
     // Split and merge move notes and markers to another take under fresh
     // ids. A note editor (or marker menu) opened before the edit landed still

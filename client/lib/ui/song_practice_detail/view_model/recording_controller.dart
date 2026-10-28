@@ -428,7 +428,12 @@ class RecordingController extends ChangeNotifier {
     // finalize's save (lost update + graph thrash).
     // isStartingTake is the synchronous re-entrancy guard for a fast
     // double-tap (and keeps a cancelled start's setup from interleaving).
-    if (_mic.isRecording || isStartingTake || _stopping || _busyGate.busy) {
+    if (_mic.isRecording || isStartingTake || _stopping) return;
+    if (_busyGate.busy) {
+      // An import, split, merge or a reopened screen's catch-up is running.
+      // Said, as every structural edit refused in that window says it: a
+      // REC press that did nothing at all read as a broken button.
+      _toast('Wait for the current edit to finish.');
       return;
     }
     // Held from here until the start settles. The mic lists the take's own
