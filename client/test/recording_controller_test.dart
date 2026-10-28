@@ -985,7 +985,11 @@ void main() {
     final head = playback.position.value.inMilliseconds - 10000;
     final held = graph.recordWrittenFrames() * 1000 ~/ 48000 - preRoll;
     await c.stopRecording();
-    expect(head, inInclusiveRange(held - 120, held));
+    // + 1: the head is rounded to the nearest ms, while [held] truncates the
+    // frames and [preRoll] comes from a start rounded on its own, so the two
+    // can differ by 1 ms with no timing error (1200.9 - 0.4 rounds to 1201,
+    // 1200 - 0 is 1200).
+    expect(head, inInclusiveRange(held - 120, held + 1));
   });
 
   test('the playhead keeps with the backing through dropped frames and a '
@@ -1009,7 +1013,8 @@ void main() {
     final head = playback.position.value.inMilliseconds - 10000;
     final taken =
         (graph.recordWrittenFrames() + graph.dropped) * 1000 ~/ 48000 - preRoll;
-    expect(head, inInclusiveRange(taken - 120, taken), reason: 'dropped');
+    // + 1: rounding, as in the test above.
+    expect(head, inInclusiveRange(taken - 120, taken + 1), reason: 'dropped');
 
     graph.stalled = true;
     await Future<void>.delayed(const Duration(milliseconds: 100));
