@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:drift/drift.dart' show Variable;
 import 'package:drift/native.dart';
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:path/path.dart' as p;
@@ -432,6 +433,7 @@ class Persistence {
         // one environment-wide analyzer failure.
         await persistence.assets.sweepStaging(
           keep: persistence._recoveryRetryPaths,
+          discard: persistence._pooledStagingPaths,
         );
         // Reclaim pooled bytes for assets no live clip/media/practice references any
         // more (removed takes, replaced accompaniment, deleted examples). Derives the
@@ -686,6 +688,7 @@ class Persistence {
   ///    deletes it — the take can never be attached twice.
   Future<int> recoverStagedRecordings({required WavAnalyzer analyze}) async {
     _recoveryRetryPaths.clear();
+    _pooledStagingPaths.clear();
     final staging = Directory(p.join(assets.root.path, 'audio'));
     if (!await staging.exists()) return 0;
 
@@ -757,6 +760,39 @@ class Persistence {
   /// by every [recoverStagedRecordings] run.
   Set<String> get recoveryRetryPaths => Set.unmodifiable(_recoveryRetryPaths);
   final Set<String> _recoveryRetryPaths = <String>{};
+
+  /// Staging files whose bytes the pool provably holds: a saved row
+  /// references their hash and a pool file of that hash is on disk. The boot
+  /// sweep deletes these instead of trashing them. A graceful stop leaves
+  /// every take of the session in staging after its save pooled it, so the
+  /// trash otherwise kept a second copy of each recording for 30 days.
+  /// Repopulated by every [recoverStagedRecordings] run.
+  Set<String> get pooledStagingPaths => Set.unmodifiable(_pooledStagingPaths);
+  final Set<String> _pooledStagingPaths = <String>{};
+
+  /// Adds [f] to [pooledStagingPaths] when a non-empty pool file of [hash]
+  /// exists. Anything less (no pooled copy found, a failed lookup) leaves the
+  /// file to the trash as before: never an error, never a hold-back.
+  Future<void> _notePooled(File f, String hash) async {
+    try {
+      final rows = await db
+          .customSelect(
+            'SELECT local_rel_path AS rel FROM assets '
+            'WHERE content_hash = ? AND local_rel_path IS NOT NULL',
+            variables: [Variable.withString(hash)],
+          )
+          .get();
+      for (final r in rows) {
+        final pooled = File(p.join(assets.root.path, r.read<String>('rel')));
+        if (await pooled.exists() && await pooled.length() > 0) {
+          _pooledStagingPaths.add(f.path);
+          return;
+        }
+      }
+    } catch (_) {
+      // Unproven: the trash keeps it.
+    }
+  }
 
   /// Exempts [f] from this boot's staging sweep so the next boot's recovery
   /// tries again.
@@ -878,11 +914,15 @@ class Persistence {
     // whose own hash matches nothing (see [AssetStore.importedHashOf]).
     final imported = await AssetStore.importedHashOf(file);
     if (imported != null && referencedHashes.contains(imported)) {
+      await _notePooled(file, imported);
       return _RecoveryOutcome.junk;
     }
     final hash =
         await hashes.of(file) ?? await AssetStore.sha256OfFile(file.path);
-    if (referencedHashes.contains(hash)) return _RecoveryOutcome.junk;
+    if (referencedHashes.contains(hash)) {
+      await _notePooled(file, hash);
+      return _RecoveryOutcome.junk;
+    }
 
     // The practice must still exist and be live (tombstones filtered); an
     // underivable id lands here too and the file is swept. Asked as its own

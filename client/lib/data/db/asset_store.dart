@@ -661,7 +661,26 @@ class AssetStore {
   /// only copy of a take with no retry ever; leaving them lets the next boot's
   /// recovery try again; their sidecars stay with them. Persistence bounds
   /// the exemption in time.
-  Future<void> sweepStaging({Set<String> keep = const {}}) async {
+  ///
+  /// [discard]: absolute paths of staged files whose bytes the pool provably
+  /// holds (Persistence.pooledStagingPaths). They are deleted, with their
+  /// hash record, instead of moved to the trash: the pool copy is the take,
+  /// and a second one kept for 30 days doubled every recording's footprint.
+  Future<void> sweepStaging({
+    Set<String> keep = const {},
+    Set<String> discard = const {},
+  }) async {
+    // Files whose bytes the pool provably holds (see
+    // Persistence.pooledStagingPaths) go for good, with their hash record;
+    // the trash is for what nothing else holds a copy of.
+    for (final path in discard) {
+      if (keep.contains(path)) continue;
+      for (final f in [File(path), File(_hashSidecar(path))]) {
+        try {
+          await f.delete();
+        } catch (_) {}
+      }
+    }
     for (final name in const ['audio', 'technique_media']) {
       try {
         final d = Directory(p.join(root.path, name));

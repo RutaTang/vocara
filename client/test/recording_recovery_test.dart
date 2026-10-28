@@ -649,6 +649,37 @@ void main() {
     expect(await orphan.exists(), isFalse);
   });
 
+  test('a staged take the pool already holds is deleted by the sweep, not '
+      'kept in the trash as a second copy', () async {
+    // A graceful stop leaves each take in staging after its save pooled it.
+    // The sweep moved all of them to the trash, kept for 30 days, so every
+    // recording sat on disk twice for a month.
+    final practice = await createPractice();
+    final bytes = monoWav(4800);
+    final saved = await stageOrphan(practice.id, bytes);
+    expect(await persistence.recoverStagedRecordings(analyze: fakeAnalyze), 1);
+    await saved.writeAsBytes(bytes, flush: true); // the leftover of that save
+    final unproven = await stageOrphan(practice.id, [1, 2, 3, 4, 5, 6, 7, 8]);
+
+    expect(await persistence.recoverStagedRecordings(analyze: fakeAnalyze), 0);
+    expect(persistence.pooledStagingPaths, {saved.path});
+    await persistence.assets.sweepStaging(
+      keep: persistence.recoveryRetryPaths,
+      discard: persistence.pooledStagingPaths,
+    );
+
+    expect(await saved.exists(), isFalse);
+    expect(await unproven.exists(), isFalse);
+    final trashed = [
+      await for (final e in persistence.assets.trashDir.list(recursive: true))
+        if (e is File) p.basename(e.path),
+    ];
+    expect(trashed, contains(p.basename(unproven.path)));
+    expect(trashed, isNot(contains(p.basename(saved.path))));
+    // The take itself is intact in the pool.
+    expect((await reload(practice.id)).vocalTracks, hasLength(1));
+  });
+
   test('a crash between the pool import and the row commit still recovers on '
       'the retry, reusing the half-imported asset', () async {
     final practice = await createPractice();
