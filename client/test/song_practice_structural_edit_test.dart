@@ -23,6 +23,7 @@ import 'package:vocara/domain/models/audio_track.dart';
 import 'package:vocara/domain/models/lyric_line.dart';
 import 'package:vocara/domain/models/practice_note.dart';
 import 'package:vocara/domain/models/song_practice.dart';
+import 'package:vocara/domain/models/technique_marker.dart';
 import 'package:vocara/ui/song_practice_detail/view_model/song_practice_detail_view_model.dart';
 import 'package:vocara/utils/result.dart';
 
@@ -867,6 +868,73 @@ void main() {
     expect(repo.stored.reference, isNull);
     expect(repo.stored.separationSource, isNull);
     expect(events, contains('delete:/audio/p1/source.wav'));
+  });
+
+  group('an editor opened before a split or merge', () {
+    // Split and merge move notes and markers to another take under fresh
+    // ids. A note editor (or marker menu) opened before the edit landed still
+    // names the old take and id, and its save found nothing there: the edit
+    // was dropped without a word.
+    PracticeNote note(String id, int at) => PracticeNote(
+      id: id,
+      positionMs: at,
+      content: 'flat here',
+      createdAt: DateTime(2026),
+      updatedAt: DateTime(2026),
+    );
+    TechniqueMarker marker(String id, int at) => TechniqueMarker(
+      id: id,
+      positionMs: at,
+      techniqueId: 't1',
+      techniqueName: 'Twang',
+      createdAt: DateTime(2026),
+      updatedAt: DateTime(2026),
+    );
+
+    test('still edits and deletes the moved note after a merge', () async {
+      final takes = _mergeableTakes();
+      final vm = await pumpVm(
+        vocalTracks: [
+          takes[0],
+          takes[1].copyWith(
+            notes: [note('n1', 100), note('n2', 300)],
+            techniqueMarkers: [marker('m1', 200)],
+          ),
+        ],
+      );
+      await vm.mergeTrackDown('top');
+
+      await vm.updateNoteContent('bottom', 'n1', 'sharp here');
+      await vm.deleteNote('bottom', 'n2');
+      await vm.deleteTechniqueMarker('bottom', 'm1');
+      final merged = repo.stored.vocalTracks.single;
+      expect(merged.notes.map((n) => n.content), ['sharp here']);
+      expect(merged.techniqueMarkers, isEmpty);
+    });
+
+    test('still edits the moved note after a split', () async {
+      final vm = await pumpVm(
+        vocalTracks: [
+          AudioTrack(
+            id: 'single',
+            kind: AudioTrackKind.vocal,
+            displayName: 'Take 1',
+            audioFilePath: '/pool/take1.wav',
+            durationMs: 1000,
+            createdAt: DateTime(2026),
+            notes: [note('n1', 100), note('n2', 800)],
+          ),
+        ],
+      );
+      vm.playback.position.value = const Duration(milliseconds: 500);
+      await vm.splitTrackAtPlayhead('single');
+
+      await vm.updateNoteContent('single', 'n2', 'sharp here');
+      await vm.updateNoteContent('single', 'n1', 'held');
+      final [first, second] = repo.stored.vocalTracks;
+      expect(first.notes.single.content, 'held');
+      expect(second.notes.single.content, 'sharp here');
+    });
   });
 
   group('deleting a clip from over another', () {

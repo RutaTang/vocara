@@ -2410,8 +2410,17 @@ class SongPracticeDetailViewModel extends ChangeNotifier
               .map((m) => clampMarkerEnd(m, cutMs))
               .toList(),
         );
+        final secondId = newId();
+        final movedKeys = <(String, String)>[];
+        String moveTo(String oldId) {
+          final fresh = newId();
+          movedKeys.add((trackId, oldId));
+          _movedMarks[(trackId, oldId)] = (secondId, fresh);
+          return fresh;
+        }
+
         final second = live.copyWith(
-          id: newId(),
+          id: secondId,
           // A FRESH clip id — otherwise the new take and the surviving `first`
           // take would share one clip primary key and the save transaction would
           // roll back on the duplicate INSERT, silently losing the split (and the
@@ -2430,11 +2439,11 @@ class SongPracticeDetailViewModel extends ChangeNotifier
           // them would collide on insert and roll the whole save back.
           notes: live.notes
               .where((n) => n.positionMs >= cutMs)
-              .map((n) => n.copyWith(id: newId()))
+              .map((n) => n.copyWith(id: moveTo(n.id)))
               .toList(),
           techniqueMarkers: live.techniqueMarkers
               .where((m) => m.positionMs >= cutMs)
-              .map((m) => m.copyWith(id: newId()))
+              .map((m) => m.copyWith(id: moveTo(m.id)))
               .toList(),
           displayName: '${live.displayName} (2)',
           createdAt: DateTime.now(),
@@ -2457,6 +2466,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
           if (followSelection && _selectedClipId == firstClipId) {
             _selectedClipId = clip.id;
           }
+          movedKeys.forEach(_movedMarks.remove);
           await _discardQuietly([parts.firstPath, parts.secondPath]);
         }
       } finally {
@@ -2558,11 +2568,19 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         // Fresh ids for the bottom take's notes/markers: the bottom track is tombstoned but
         // its child rows keep these ids, so reusing them on the merged (top) track would
         // collide on insert and roll the save back.
+        final movedKeys = <(String, String)>[];
+        String moveTo(String oldId) {
+          final fresh = newId();
+          movedKeys.add((bottom.id, oldId));
+          _movedMarks[(bottom.id, oldId)] = (top.id, fresh);
+          return fresh;
+        }
+
         final notes = [
           ...liveTop.notes,
           for (final n in liveBottom.notes)
             n.copyWith(
-              id: newId(),
+              id: moveTo(n.id),
               positionMs: n.positionMs + delta,
               endMs: n.endMs == null ? null : n.endMs! + delta,
             ),
@@ -2571,7 +2589,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
           ...liveTop.techniqueMarkers,
           for (final m in liveBottom.techniqueMarkers)
             m.copyWith(
-              id: newId(),
+              id: moveTo(m.id),
               positionMs: m.positionMs + delta,
               endMs: m.endMs == null ? null : m.endMs! + delta,
             ),
@@ -2628,6 +2646,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
             if (movedTrack) _selectedTrackId = bottom.id;
             if (movedClip) _selectedClipId = priorClip;
           }
+          movedKeys.forEach(_movedMarks.remove);
           await _discardQuietly([mergedPath]);
         }
       } finally {
@@ -2717,6 +2736,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
     String noteId,
     String content,
   ) async {
+    (trackId, noteId) = _markNow(trackId, noteId);
     final now = DateTime.now();
     _updateTrack(
       trackId,
@@ -2734,6 +2754,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   }
 
   Future<void> deleteNote(String trackId, String noteId) async {
+    (trackId, noteId) = _markNow(trackId, noteId);
     _updateTrack(
       trackId,
       (t) => t.copyWith(notes: t.notes.where((n) => n.id != noteId).toList()),
@@ -2783,6 +2804,7 @@ class SongPracticeDetailViewModel extends ChangeNotifier
   }
 
   Future<void> deleteTechniqueMarker(String trackId, String markerId) async {
+    (trackId, markerId) = _markNow(trackId, markerId);
     _updateTrack(
       trackId,
       (t) => t.copyWith(
@@ -2811,6 +2833,33 @@ class SongPracticeDetailViewModel extends ChangeNotifier
         /* best-effort */
       }
     }
+  }
+
+  /// Where a split or merge moved a note or technique marker, by its old
+  /// (take, id): both give what they move to another take a fresh id. A note
+  /// editor or marker menu opened before such an edit landed still names the
+  /// old pair, and its edit found nothing there and was lost without a word.
+  /// An edit whose save fails drops its entries again (the model goes back to
+  /// the old pairs).
+  final Map<(String, String), (String, String)> _movedMarks = {};
+
+  /// The (take, id) of a note or marker as the model holds it now: the pair
+  /// given while it is still there, else wherever splits and merges moved it.
+  (String, String) _markNow(String trackId, String id) {
+    var at = (trackId, id);
+    for (var hop = 0; hop < 16 && !_holdsMark(at); hop++) {
+      final next = _movedMarks[at];
+      if (next == null) break;
+      at = next;
+    }
+    return at;
+  }
+
+  bool _holdsMark((String, String) at) {
+    final t = _trackById(at.$1);
+    return t != null &&
+        (t.notes.any((n) => n.id == at.$2) ||
+            t.techniqueMarkers.any((m) => m.id == at.$2));
   }
 
   AudioTrack? _trackById(String trackId) {
