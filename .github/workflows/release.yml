@@ -372,6 +372,19 @@ jobs:
           spctl --assess --type open --context context:primary-signature -v "${{ steps.dmg.outputs.dmg }}" \
             || { echo "::error::Gatekeeper rejected the stapled DMG"; exit 1; }
 
+      # The notarized app is the one users get, and the only build with the
+      # App Sandbox on and this signature: launched here, from the stapled
+      # DMG, before anything is published (see .github/scripts/launch-check.sh;
+      # CI's manual sandbox-launch job runs the same checks on an ad-hoc
+      # build). A release that cannot start fails here.
+      - name: Launch the notarized app from the DMG
+        run: |
+          set -euo pipefail
+          MOUNT="$(mktemp -d)"
+          hdiutil attach -nobrowse -readonly -mountpoint "$MOUNT" "${{ steps.dmg.outputs.dmg }}"
+          trap 'hdiutil detach "$MOUNT" -force || true' EXIT
+          .github/scripts/launch-check.sh "$MOUNT/vocara.app"
+
       - name: Checksum and Package Outputs
         id: package
         run: |

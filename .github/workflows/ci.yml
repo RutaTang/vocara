@@ -118,33 +118,8 @@ jobs:
             -e 's/ENABLE_HARDENED_RUNTIME = YES;/ENABLE_HARDENED_RUNTIME = NO;/' \
             macos/Runner.xcodeproj/project.pbxproj
           flutter build macos --release --flavor prod
-          codesign --display --entitlements - --xml "$APP" > "$RUNNER_TEMP/ent.plist"
-          grep -q 'com.apple.security.app-sandbox' "$RUNNER_TEMP/ent.plist" \
-            || { echo "::error::the build is not sandboxed"; cat "$RUNNER_TEMP/ent.plist"; exit 1; }
       - name: Launch it and check it boots inside its sandbox
-        run: |
-          set -euo pipefail
-          DATA="$HOME/Library/Containers/com.rutatang.vocara/Data"
-          open -n "$APP"
-          # Up to 60 s for the library to open inside the container.
-          for i in $(seq 1 60); do
-            DB="$(find "$DATA/Library" -name vocara.db 2>/dev/null | head -1 || true)"
-            [ -n "$DB" ] && break
-            sleep 1
-          done
-          sleep 10 # then it must still be running
-          pgrep -f "vocara.app/Contents/MacOS/vocara" > /dev/null \
-            || { echo "::error::the app exited after launch"; EXITED=1; }
-          LOG="$(find "$DATA/Library" -name diagnostics.log 2>/dev/null | head -1 || true)"
-          if [ -n "$LOG" ]; then echo "--- diagnostics.log"; cat "$LOG"; fi
-          [ -n "$DB" ] || { echo "::error::no library opened in $DATA"; exit 1; }
-          [ -z "${EXITED:-}" ] || exit 1
-          if [ -n "$LOG" ] && grep -E '\[boot\] (open (failed|refused)|window setup failed)' "$LOG"; then
-            echo "::error::the app logged a boot failure"; exit 1
-          fi
-          osascript -e 'quit app id "com.rutatang.vocara"' || true
-          sleep 5
-          pkill -f "vocara.app/Contents/MacOS/vocara" || true
+        run: ../.github/scripts/launch-check.sh "$APP"
 
   # The UI-driven e2e suites boot the full macOS app (TEST flavor, seeded
   # sandbox store) and take several minutes each, so they are manual-only:
