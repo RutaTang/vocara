@@ -835,6 +835,18 @@ void main() {
       expect(host.mixer.fxBuses.map((b) => b.name), ['Bus 2', 'Bus 3']);
     });
 
+    test('a second copy of a bus gets a name of its own', () async {
+      final host = _Host(_practice());
+      final a = await host.mixer.createBus();
+      await host.mixer.duplicateBus(a);
+      await host.mixer.duplicateBus(a);
+      expect(host.mixer.fxBuses.map((b) => b.name).toSet(), {
+        'Bus 1',
+        'Bus 1 copy',
+        'Bus 1 copy 2',
+      });
+    });
+
     test('busWaveformPeaks folds only takes routed into the bus, including '
         'through an upstream bus', () {
       final host = _Host(

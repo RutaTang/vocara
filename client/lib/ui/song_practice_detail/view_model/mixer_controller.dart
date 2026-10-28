@@ -623,17 +623,22 @@ class MixerController extends ChangeNotifier {
 
   List<FxBus> get fxBuses => _practiceOf()?.fxBuses ?? const [];
 
-  /// 'Bus N' for the first N from the bus count on that no bus is called. By
-  /// count alone, a delete then a create named two buses alike ("Bus 2"),
-  /// and the output and send menus, which list buses by name, could not tell
-  /// them apart (the interpretations' default names had the same fix).
-  static String _nextBusName(List<FxBus> buses) {
+  /// [nameFor] of the first n from [first] on that no bus is called. The
+  /// output and send menus list buses by name alone, so two buses named alike
+  /// could not be told apart there: a default 'Bus N' (N the count + 1) after a
+  /// delete, or a second copy of one bus (the interpretations' default names
+  /// had the same fix).
+  static String _unusedBusName(
+    List<FxBus> buses,
+    String Function(int n) nameFor,
+    int first,
+  ) {
     final taken = {for (final b in buses) b.name};
-    var n = buses.length + 1;
-    while (taken.contains('Bus $n')) {
+    var n = first;
+    while (taken.contains(nameFor(n))) {
       n++;
     }
-    return 'Bus $n';
+    return nameFor(n);
   }
 
   /// Creates a new (transparent) FX bus and selects it. Returns its id.
@@ -643,7 +648,13 @@ class MixerController extends ChangeNotifier {
     final trimmed = name.trim();
     final bus = FxBus(
       id: newId(),
-      name: trimmed.isEmpty ? _nextBusName(practice.fxBuses) : trimmed,
+      name: trimmed.isEmpty
+          ? _unusedBusName(
+              practice.fxBuses,
+              (n) => 'Bus $n',
+              practice.fxBuses.length + 1,
+            )
+          : trimmed,
       fx: TrackFx.flat(),
     );
     _setPractice(practice.copyWith(fxBuses: [...practice.fxBuses, bus]));
@@ -881,7 +892,11 @@ class MixerController extends ChangeNotifier {
     // and duplicateTrack (which goes through copyWith) has always carried it.
     final copy = FxBus(
       id: newId(),
-      name: '${src.name} copy',
+      name: _unusedBusName(
+        practice.fxBuses,
+        (n) => n == 1 ? '${src.name} copy' : '${src.name} copy $n',
+        1,
+      ),
       fx: src.fx,
       colorValue: src.colorValue,
       volume: src.volume,
