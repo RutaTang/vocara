@@ -5601,6 +5601,11 @@ mod record_writer_tests {
     fn an_idle_writer_parks_instead_of_polling() {
         let (mut prod, cons) = spsc::<[Smp; CHANNELS]>(64);
         let w = RecordWriter::spawn(cons);
+        // The writer drains the ring once on its way to the idle wait: a thread first scheduled
+        // after the pushes below drained them there, correctly, and failed the test. A command
+        // round-trip first (a Stop with no take only acks): once it is answered the thread is
+        // running, with just that drain, of an empty ring, left before it parks.
+        assert!(w.stop());
         std::thread::sleep(std::time::Duration::from_millis(50)); // reach the idle wait
         for _ in 0..10 {
             assert!(prod.push([0.5, 0.0]));

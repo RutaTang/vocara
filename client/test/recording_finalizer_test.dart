@@ -8,6 +8,17 @@ import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vocara/data/services/recording_finalizer.dart';
 
+/// Whether [run] completes within a few turns of the event queue, long before
+/// a budget's timeout could fire. A quit whose budget is spent returns without
+/// starting one, and a wall-clock bound on that (< 50 ms) failed whenever the
+/// test isolate stalled that long, with nothing wrong.
+Future<bool> finishesWithoutWaiting(Future<void> run) async {
+  var done = false;
+  unawaited(run.whenComplete(() => done = true));
+  await pumpEventQueue();
+  return done;
+}
+
 void main() {
   test('a wedged finalizer cannot hold the quit, and does not starve the '
       'rest', () async {
@@ -184,11 +195,9 @@ void main() {
       finalizer.register(practiceTake, startsWork: true); // REC
       finalizer.unregister(practiceTake); // Stop: nothing to save
       await close.timeout(const Duration(seconds: 2));
-      final sw = Stopwatch()..start();
-      await finalizer.finalizeAll().timeout(const Duration(seconds: 2));
       expect(
-        sw.elapsedMilliseconds,
-        lessThan(50),
+        await finishesWithoutWaiting(finalizer.finalizeAll()),
+        isTrue,
         reason: 'the budget is spent',
       );
     },
@@ -227,9 +236,12 @@ void main() {
     // Stopping a take registers its tail and its save's hold as it goes;
     // counted as new work, they gave the exit request's run a full budget and
     // the quit ran past its total with nothing moving.
+    // Budgets far enough apart that the right total (450 ms) and a second
+    // full budget (800 ms) both sit ~200 ms from the bound: 70 ms of slack
+    // failed on a loaded runner.
     final finalizer = RecordingFinalizer.forTesting(
-      perFinalizerBudget: const Duration(milliseconds: 200),
-      totalBudget: const Duration(milliseconds: 300),
+      perFinalizerBudget: const Duration(milliseconds: 400),
+      totalBudget: const Duration(milliseconds: 450),
     );
     final never = Completer<void>();
     addTearDown(() {
@@ -245,8 +257,7 @@ void main() {
     final sw = Stopwatch()..start();
     await finalizer.finalizeAll().timeout(const Duration(seconds: 2));
     await finalizer.finalizeAll().timeout(const Duration(seconds: 2));
-    // A second full budget would be 400 ms.
-    expect(sw.elapsedMilliseconds, lessThan(370));
+    expect(sw.elapsedMilliseconds, lessThan(650));
   });
 
   test('a quit the app survived leaves the next one a fresh budget', () async {
@@ -376,11 +387,9 @@ void main() {
     unawaited(finalizer.hold(() => never.future));
     await finalizer.finalizeAll().timeout(const Duration(seconds: 2));
     await Future<void>.delayed(const Duration(milliseconds: 60));
-    final sw = Stopwatch()..start();
-    await finalizer.finalizeAll().timeout(const Duration(seconds: 2));
     expect(
-      sw.elapsedMilliseconds,
-      lessThan(50),
+      await finishesWithoutWaiting(finalizer.finalizeAll()),
+      isTrue,
       reason: 'budget already spent',
     );
   });

@@ -933,8 +933,11 @@ void main() {
     final clock = c.recordingDurationMs - clock0;
     final head = playback.position.value.inMilliseconds;
     await c.stopRecording();
-    expect(clock, inInclusiveRange(elapsed - 150, elapsed + 150));
-    expect(head - 10000, inInclusiveRange(elapsed - 150, elapsed + 150));
+    // Behind by up to ~100 ms with nothing wrong (the clock counts 50 ms
+    // level ticks and the head can be a tick stale), so 200 ms leaves room
+    // for a loaded runner; the skipped ticks put the bug ~400 ms behind.
+    expect(clock, inInclusiveRange(elapsed - 200, elapsed + 150));
+    expect(head - 10000, inInclusiveRange(elapsed - 200, elapsed + 150));
     expect(
       c.recordingPeaks.value,
       isEmpty,
@@ -1047,7 +1050,9 @@ void main() {
       final head = playback.position.value.inMilliseconds - 10000;
       final played = sincePlay.elapsedMilliseconds;
       await c.stopRecording();
-      expect(head, inInclusiveRange(played - 150, played + 60));
+      // Ahead only by the hops between play() and sincePlay's start; the bug
+      // put it ahead by the whole 600 ms stall.
+      expect(head, inInclusiveRange(played - 150, played + 200));
     },
   );
 
