@@ -788,6 +788,16 @@ void main() {
           ..recPeaks = const [0.5]
           ..recDurationMs = 2000;
       });
+      // A record tick reaches only the master: no bus lane folds the live
+      // take in, yet every bus lane was refolded 20 times a second for it.
+      final busOverTake = host.mixer.busWaveformPeaks('busA');
+      host
+        ..recPeaks = const [0.5, 0.7]
+        ..recDurationMs = 2025;
+      expect(
+        identical(host.mixer.busWaveformPeaks('busA'), busOverTake),
+        isTrue,
+      );
       await expectRefolded('a recording tick', () {
         host
           ..recPeaks = const [0.5, 0.9]

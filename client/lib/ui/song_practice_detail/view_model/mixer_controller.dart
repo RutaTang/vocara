@@ -1010,7 +1010,7 @@ class MixerController extends ChangeNotifier {
   /// the timeline length, the master gain, the A/B backing, each bus's mute,
   /// solo and routing, each track's mute, solo, level, routing and clips
   /// (lists compared by identity, as any edit replaces them), and the take
-  /// being recorded. Not a pan or FX tick, nor a bus's level, pan or FX,
+  /// being recorded (its live envelope for the master only). Not a pan or FX tick, nor a bus's level, pan or FX,
   /// which no envelope shows: keyed on whole tracks and the bus list, each
   /// of those refolded the master and every bus lane at pointer rate.
   List<double> _envelope(String? busId, List<double> Function() fold) {
@@ -1021,8 +1021,11 @@ class MixerController extends ChangeNotifier {
       masterVolume,
       _playReference,
       recording,
-      if (recording) ...[
-        _recordingTargetId(),
+      if (recording) _recordingTargetId(), // silenced while laid down
+      // Only the master lane folds the live take in. Keyed for a bus too,
+      // every record tick (20 a second) refolded and repainted each bus lane
+      // into the same envelope.
+      if (recording && busId == null) ...[
         _recordingPeaks(),
         _recordingStartMs(),
         _recordingDurationMs(),
