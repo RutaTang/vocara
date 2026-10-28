@@ -103,16 +103,19 @@ void main() {
     });
 
     /// Writes an executable interpreter stub. It answers the `-c` engine
-    /// probe with success; a real (sidecar) invocation logs a line to
-    /// `starts` and its argv to `argv`, then runs [body].
+    /// probe with success; a real (sidecar) invocation logs its argv to
+    /// `argv` and then a line to `starts`, then runs [body]. In that order:
+    /// a test that cancels a run as soon as `starts` counts it can kill the
+    /// stub before its next line, and a start counted with its argv not yet
+    /// written failed the argv checks.
     Future<String> writeStub(String body) async {
       final f = File(p.join(root.path, 'stub.sh'));
       await f.writeAsString(
         '#!/bin/bash\n'
         'if [ "\$1" = "-c" ]; then exit 0; fi\n'
         'dir="\$(dirname "\$0")"\n'
-        'echo start >> "\$dir/starts"\n'
         'echo "\$@" >> "\$dir/argv"\n'
+        'echo start >> "\$dir/starts"\n'
         '$body\n',
       );
       await Process.run('chmod', ['+x', f.path]);
