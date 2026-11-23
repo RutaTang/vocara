@@ -30,7 +30,6 @@ fn main() -> iced::Result {
         default_hook(info);
     }));
 
-    // SEAM: the Persistence port replaces the stand-in library open.
-    let boot = Boot::from_env(library::open_library_stub, Arc::new(quit::ServiceQuitHooks));
+    let boot = Boot::from_env(library::open_library, Arc::new(quit::ServiceQuitHooks));
     app::run(boot)
 }

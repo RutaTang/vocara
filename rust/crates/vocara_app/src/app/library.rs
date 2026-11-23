@@ -1,36 +1,26 @@
 //! Opening the library at launch: the seam for `Persistence.open` and the
 //! outcomes `main.dart` handled, and the "Reveal Library Folder" action.
 //!
-//! PERSISTENCE SEAM: `vocara_store`'s `Persistence` is not ported yet, so the
-//! open goes through an [`OpenLibrary`] function returning a
-//! [`LibraryOpen`] — the same outcomes Dart's `Persistence.open` had (the
-//! opened library, or `NewerLibraryException`, `LibraryInUseException`, or
-//! any other failure), with the `onWaitingForLibrary` callback. The app runs
-//! with [`open_library_stub`], which always succeeds, until the store port
-//! provides the real open.
+//! The open goes through an [`OpenLibrary`] function returning a
+//! [`LibraryOpen`] — the outcomes Dart's `Persistence.open` had (the opened
+//! library, or `NewerLibraryException`, `LibraryInUseException`, or any
+//! other failure), with the `onWaitingForLibrary` callback. The app runs
+//! [`open_library`] (`vocara_services::persistence`); tests run
+//! [`open_library_stub`], an in-memory library.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use vocara_model::config::environment::AppEnvironment;
-use vocara_model::util::id::new_id;
-use vocara_store::db::asset_store::AssetStore;
-use vocara_store::db::schema::AppDatabase;
-use vocara_store::repositories::{
-    SongPracticeRepository, SongPracticeRepositoryDrift, TechniqueRepository,
-    TechniqueRepositoryDrift,
-};
-use vocara_store::sync::hlc::HlcClock;
-use vocara_store::sync::sync_writer::SyncWriter;
+use vocara_services::local_storage_service::application_support_dir;
+use vocara_services::persistence::{library_dir, OpenError, OpenOptions, Persistence};
+use vocara_store::repositories::{SongPracticeRepository, TechniqueRepository};
 
-/// The opened library (Dart's `Persistence`: the database, the asset pool,
-/// both repositories and the remote-applied stream).
-///
-/// INTERIM: until `vocara_services::persistence` is wired in, this is an
-/// in-memory store (nothing reaches the disk) with the real repositories
-/// over it, so every screen runs against the real data layer.
+/// The opened library: Dart's `Persistence` (the database, the asset pool,
+/// both repositories and the remote-applied stream), with its repositories
+/// as the trait objects the screens read.
 pub struct Library {
+    persistence: Persistence,
     /// `persistence.songRepo`.
     pub song_repo: Arc<dyn SongPracticeRepository>,
     /// `persistence.techRepo`.
@@ -44,27 +34,27 @@ impl std::fmt::Debug for Library {
 }
 
 impl Library {
-    /// A library over an in-memory database, its asset pool in a fresh
-    /// temporary folder.
-    pub fn in_memory() -> Self {
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let db = Arc::new(AppDatabase::open_in_memory().expect("in-memory database"));
-        let clock = Arc::new(HlcClock::new(new_id()));
-        let writer = Arc::new(SyncWriter::new(db.clone(), clock));
-        let root = std::env::temp_dir().join(format!(
-            "vocara-memory-library-{}-{}",
-            std::process::id(),
-            SEQ.fetch_add(1, Ordering::Relaxed)
-        ));
-        let assets = Arc::new(AssetStore::new(db.clone(), root, writer.clone()));
+    /// The library over an opened [`Persistence`].
+    pub fn new(persistence: Persistence) -> Self {
+        let song_repo: Arc<dyn SongPracticeRepository> = persistence.song_repo().clone();
+        let technique_repo: Arc<dyn TechniqueRepository> = persistence.tech_repo().clone();
         Library {
-            song_repo: Arc::new(SongPracticeRepositoryDrift::new(
-                db.clone(),
-                writer.clone(),
-                assets.clone(),
-            )),
-            technique_repo: Arc::new(TechniqueRepositoryDrift::new(db, writer, assets)),
+            persistence,
+            song_repo,
+            technique_repo,
         }
+    }
+
+    /// The persistence layer itself, for the maintenance surfaces
+    /// (Settings' "Repair library", the remote-applied stream).
+    pub fn persistence(&self) -> &Persistence {
+        &self.persistence
+    }
+
+    /// A library over an in-memory database (`Persistence.memory`), its
+    /// asset pool in a fresh temporary folder: what the app's tests open.
+    pub fn in_memory() -> Self {
+        Library::new(Persistence::memory().expect("in-memory library"))
     }
 
     /// The library [`open_library_stub`] opens.
@@ -94,19 +84,38 @@ pub enum LibraryOpen {
 /// (`onWaitingForLibrary`). Blocks until the library is open or refused.
 pub type OpenLibrary = fn(on_waiting: &mut dyn FnMut()) -> LibraryOpen;
 
-/// The stand-in open: always succeeds at once.
+/// The stand-in open: an in-memory library, at once (tests).
 pub fn open_library_stub(_on_waiting: &mut dyn FnMut()) -> LibraryOpen {
     LibraryOpen::Opened(Arc::new(Library::stub()))
 }
 
+/// The app's open (`Persistence.open` in `main.dart`): the library in this
+/// environment's application support directory, with `on_waiting` called
+/// when another Vocara is still starting up on it.
+pub fn open_library(on_waiting: &mut dyn FnMut()) -> LibraryOpen {
+    let env = AppEnvironment::current();
+    let failed = |e: &dyn std::fmt::Display, log: String| LibraryOpen::Failed {
+        detail: e.to_string(),
+        log,
+    };
+    let dir = match library_dir(env.bundle_id()) {
+        Ok(dir) => dir,
+        Err(e) => return failed(&e, format!("{e:?}")),
+    };
+    match Persistence::open(OpenOptions::new(dir).on_waiting_for_library(on_waiting)) {
+        Ok(persistence) => LibraryOpen::Opened(Arc::new(Library::new(persistence))),
+        Err(e @ OpenError::NewerLibrary { .. }) => LibraryOpen::NewerLibrary(e.to_string()),
+        Err(e @ OpenError::LibraryInUse) => LibraryOpen::LibraryInUse(e.to_string()),
+        Err(e) => failed(&e, format!("{e:?}")),
+    }
+}
+
 /// The app's library folder: the application support directory per bundle
 /// id (`~/Library/Application Support/com.rutatang.vocara[.dev|.test]` on
-/// macOS), which holds the database and the asset pool.
-///
-/// LOCAL STAND-IN for `getApplicationSupportDirectory()` until the store
-/// port provides the library's location.
+/// macOS), which holds the database and the asset pool — the folder
+/// [`open_library`] opens.
 pub fn library_folder(env: AppEnvironment) -> Option<PathBuf> {
-    dirs::data_dir().map(|d| d.join(env.bundle_id()))
+    application_support_dir(env.bundle_id()).ok()
 }
 
 /// Opens the library folder in the file manager (Finder), for backups or
