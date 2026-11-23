@@ -313,35 +313,10 @@ fn separator<'a>(right: f32) -> Element<'a, Message> {
     .into()
 }
 
-/// The preset lane tints (ARGB) — 16 colors, two rows of eight, tuned to
-/// read well on the dark studio panels (`kTrackColorPalette`).
-pub const TRACK_COLOR_PALETTE: [i64; 16] = [
-    0xFFE3_604E, // red
-    0xFFE2_934A, // orange
-    0xFFD9_B44A, // amber
-    0xFFB7_C44A, // lime
-    0xFF6F_B562, // green
-    0xFF49_B6A8, // teal
-    0xFF4A_AEC4, // cyan
-    0xFF5B_8DEF, // blue
-    0xFF6F_7CE8, // indigo
-    0xFF8C_7CE8, // violet
-    0xFFB0_6FE0, // purple
-    0xFFD4_6BA8, // pink
-    0xFFD4_6172, // rose
-    0xFFB5_7C5A, // tan
-    0xFF8A_93A8, // slate
-    0xFF7F_B0A0, // sage
-];
-
-/// `defaultTakeColor`: a stable default tint for a vocal take with no custom
-/// color, picked from [`TRACK_COLOR_PALETTE`] by a deterministic hash of the
-/// take id (the sum of its UTF-16 code units), so a take keeps the same
-/// color across sessions and takes read as distinct.
-pub fn default_take_color(id: &str) -> Color {
-    let h: u64 = id.encode_utf16().map(u64::from).sum();
-    argb(TRACK_COLOR_PALETTE[(h % TRACK_COLOR_PALETTE.len() as u64) as usize])
-}
+// The preset lane tints and the default take tint are the context menu's
+// (`kTrackColorPalette` and `defaultTakeColor` lived in
+// `track_context_menu.dart`).
+pub use super::track_context_menu::{default_take_color, TRACK_COLOR_PALETTE};
 
 /// A take strip's accent: its tint, the coral for the backing, else its
 /// default take color.

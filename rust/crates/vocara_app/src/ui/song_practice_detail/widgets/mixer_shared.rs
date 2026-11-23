@@ -29,8 +29,8 @@ use iced::alignment::Vertical;
 use iced::widget::text::Wrapping;
 use iced::widget::{column, container, row, scrollable, text, Column, Space};
 use iced::{
-    keyboard, mouse, touch, Alignment, Background, Border, Color, Element, Event, Length, Padding,
-    Point, Rectangle, Renderer, Shadow, Size, Theme, Vector,
+    keyboard, mouse, touch, Alignment, Background, Border, Element, Event, Length, Padding, Point,
+    Rectangle, Renderer, Shadow, Size, Theme, Vector,
 };
 
 use crate::ui::core::icons::{self, Icon};
@@ -38,15 +38,7 @@ use crate::ui::core::theme::{self, Studio};
 use crate::ui::core::widgets::wrap::Wrap;
 
 /// A model color (`colorValue`, ARGB) as Flutter's `Color(value)`.
-pub fn argb(value: i64) -> Color {
-    let v = value as u32;
-    Color::from_rgba8(
-        (v >> 16) as u8,
-        (v >> 8) as u8,
-        v as u8,
-        f32::from((v >> 24) as u8) / 255.0,
-    )
-}
+pub use super::track_context_menu::argb;
 
 // ------------------------------------------------------------------- tap
 
