@@ -100,9 +100,9 @@ behavior and its tests are ported and the gates pass.
 | Dart source (client/lib/) | Lines | Rust home | Status |
 |---|---:|---|---|
 | `app.dart` | 85 | `vocara_app::app` | todo |
-| `config/app_config.dart` | 16 | `vocara_model::config::app_config` | todo |
+| `config/app_config.dart` | 16 | `vocara_model::config::app_config` | done |
 | `config/dependencies.dart` | 109 | `vocara_app::dependencies` | todo |
-| `config/environment.dart` | 59 | `vocara_model::config::environment` | todo |
+| `config/environment.dart` | 59 | `vocara_model::config::environment` | done |
 | `data/db/app_database.dart` | 180 | `vocara_store::db::app_database` | todo |
 | `data/db/asset_store.dart` | 1322 | `vocara_store::db::asset_store` | todo |
 | `data/db/durable_fs.dart` | 119 | `vocara_store::db::durable_fs` | todo |
@@ -224,12 +224,12 @@ behavior and its tests are ported and the gates pass.
 | `ui/technique_library/widgets/technique_analysis_section.dart` | 690 | `vocara_app::ui::technique_library::widgets::technique_analysis_section` | todo |
 | `ui/technique_library/widgets/technique_detail_screen.dart` | 825 | `vocara_app::ui::technique_library::widgets::technique_detail_screen` | todo |
 | `ui/technique_library/widgets/technique_dialogs.dart` | 117 | `vocara_app::ui::technique_library::widgets::technique_dialogs` | todo |
-| `utils/analysis_gate.dart` | 54 | `vocara_model::util::analysis_gate` | todo |
+| `utils/analysis_gate.dart` | 54 | `vocara_model::util::analysis_gate` | done |
 | `utils/busy_gate.dart` | 83 | `vocara_app::util::busy_gate` | todo |
 | `utils/command.dart` | 71 | `vocara_app::util::command` | todo |
-| `utils/export_copy.dart` | 153 | `vocara_model::util::export_copy` | todo |
-| `utils/format.dart` | 13 | `vocara_model::util::format` | todo |
+| `utils/export_copy.dart` | 153 | `vocara_model::util::export_copy` | done |
+| `utils/format.dart` | 13 | `vocara_model::util::format` | done |
 | `utils/id.dart` | 87 | `vocara_model::util::id` | done |
-| `utils/lru_bytes_cache.dart` | 242 | `vocara_model::util::lru_bytes_cache` | todo |
-| `utils/lyrics_format.dart` | 223 | `vocara_model::util::lyrics_format` | todo |
-| `utils/result.dart` | 32 | `(std Result; no port)` | todo |
+| `utils/lru_bytes_cache.dart` | 242 | `vocara_model::util::lru_bytes_cache` | done |
+| `utils/lyrics_format.dart` | 223 | `vocara_model::util::lyrics_format` | done |
+| `utils/result.dart` | 32 | `(std Result; no port)` | done |
