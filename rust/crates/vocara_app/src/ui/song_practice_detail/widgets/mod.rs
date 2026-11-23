@@ -4,3 +4,5 @@
 pub mod live_spectrogram;
 pub mod pitch_lane;
 pub mod voiceprint_view;
+
+mod mixer_shared;
