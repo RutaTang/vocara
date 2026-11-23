@@ -26,6 +26,8 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 dirs.workspace = true
+lucide-icons.workspace = true
+png.workspace = true
 
 [dev-dependencies]
 iced_test.workspace = true

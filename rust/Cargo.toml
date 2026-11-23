@@ -36,6 +36,7 @@ iced_test = "0.14"
 lucide-icons = { version = "1.77", features = ["iced"] }
 rfd = "0.18"
 tempfile = "3"
+png = "0.18"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

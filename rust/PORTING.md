@@ -212,8 +212,8 @@ behavior and its tests are ported and the gates pass.
 | `routing/navigation.dart` | 22 | `vocara_app::router` | todo |
 | `routing/router.dart` | 123 | `vocara_app::router` | todo |
 | `routing/routes.dart` | 23 | `vocara_app::router` | todo |
-| `ui/core/themes/studio.dart` | 45 | `vocara_app::ui::core::themes::studio` | todo |
-| `ui/core/themes/theme.dart` | 6 | `vocara_app::ui::core::themes::theme` | todo |
+| `ui/core/themes/studio.dart` | 45 | `vocara_app::ui::core::theme` (`Studio`) | done |
+| `ui/core/themes/theme.dart` | 6 | `vocara_app::ui::core::theme` (`Zinc`, `app_theme`, styles) | done |
 | `ui/core/widgets/cap_label.dart` | 21 | `vocara_app::ui::core::widgets::cap_label` | todo |
 | `ui/core/widgets/confirm_dialog.dart` | 284 | `vocara_app::ui::core::widgets::confirm_dialog` | todo |
 | `ui/core/widgets/fatal_open_screen.dart` | 276 | `vocara_app::ui::core::widgets::fatal_open_screen` | todo |
@@ -269,8 +269,8 @@ behavior and its tests are ported and the gates pass.
 | `ui/technique_library/widgets/technique_detail_screen.dart` | 825 | `vocara_app::ui::technique_library::widgets::technique_detail_screen` | todo |
 | `ui/technique_library/widgets/technique_dialogs.dart` | 117 | `vocara_app::ui::technique_library::widgets::technique_dialogs` | todo |
 | `utils/analysis_gate.dart` | 54 | `vocara_model::util::analysis_gate` | todo |
-| `utils/busy_gate.dart` | 83 | `vocara_app::util::busy_gate` | todo |
-| `utils/command.dart` | 71 | `vocara_app::util::command` | todo |
+| `utils/busy_gate.dart` | 83 | `vocara_app::util::busy_gate` | done |
+| `utils/command.dart` | 71 | `vocara_app::util::command` | done |
 | `utils/export_copy.dart` | 153 | `vocara_model::util::export_copy` | todo |
 | `utils/format.dart` | 13 | `vocara_model::util::format` | todo |
 | `utils/id.dart` | 87 | `vocara_model::util::id` | done |
