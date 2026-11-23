@@ -229,7 +229,7 @@ behavior and its tests are ported and the gates pass.
 | `utils/command.dart` | 71 | `vocara_app::util::command` | todo |
 | `utils/export_copy.dart` | 153 | `vocara_model::util::export_copy` | todo |
 | `utils/format.dart` | 13 | `vocara_model::util::format` | todo |
-| `utils/id.dart` | 87 | `vocara_model::util::id` | todo |
+| `utils/id.dart` | 87 | `vocara_model::util::id` | done |
 | `utils/lru_bytes_cache.dart` | 242 | `vocara_model::util::lru_bytes_cache` | todo |
 | `utils/lyrics_format.dart` | 223 | `vocara_model::util::lyrics_format` | todo |
 | `utils/result.dart` | 32 | `(std Result; no port)` | todo |
