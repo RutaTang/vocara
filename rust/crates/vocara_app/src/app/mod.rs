@@ -205,17 +205,7 @@ impl App {
             iced::stream::channel(
                 4,
                 async move |mut output: iced::futures::channel::mpsc::Sender<LibraryEvent>| {
-                    let mut waiting = output.clone();
-                    let outcome = crate::util::blocking(move || {
-                        open(&mut || {
-                            let _ = waiting.try_send(LibraryEvent::Waiting);
-                        })
-                    })
-                    .await
-                    .unwrap_or_else(|panic| LibraryOpen::Failed {
-                        detail: panic.clone(),
-                        log: panic,
-                    });
+                    let outcome = open_on_own_thread(open, output.clone()).await;
                     let _ = output.send(LibraryEvent::Finished(outcome)).await;
                 },
             ),
@@ -618,6 +608,51 @@ fn retire(running: &mut Running, gone: PageId, mut page: Page) -> Task<Message> 
         running.lingering.push((gone, page));
     }
     teardown
+}
+
+/// Runs the library open (`Persistence.open`) on a thread of its own and
+/// waits for its outcome; `waiting` gets [`LibraryEvent::Waiting`] when the
+/// open starts waiting on another Vocara's boot. A panic in the open comes
+/// back as a failure.
+///
+/// Not on the runtime's blocking pool: that wait lasts as long as the other
+/// boot does, and the runtime's teardown at exit waits for every blocking
+/// task, so the waiting window's Quit would hang until the other Vocara
+/// finished starting up. Dart's quit ended the process with the open still
+/// pending; a plain thread ends with the process the same way.
+async fn open_on_own_thread(
+    open: OpenLibrary,
+    mut waiting: iced::futures::channel::mpsc::Sender<LibraryEvent>,
+) -> LibraryOpen {
+    let (done, outcome) = iced::futures::channel::oneshot::channel();
+    let spawned = std::thread::Builder::new()
+        .name("library-open".into())
+        .spawn(move || {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                open(&mut || {
+                    let _ = waiting.try_send(LibraryEvent::Waiting);
+                })
+            }));
+            let _ = done.send(outcome.map_err(|p| crate::util::panic_message(p.as_ref())));
+        });
+    if let Err(e) = spawned {
+        return LibraryOpen::Failed {
+            detail: e.to_string(),
+            log: format!("{e:?}"),
+        };
+    }
+    match outcome.await {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(panic)) => LibraryOpen::Failed {
+            detail: panic.clone(),
+            log: panic,
+        },
+        // The thread always answers; this is the channel dropping unsent.
+        Err(gone) => LibraryOpen::Failed {
+            detail: gone.to_string(),
+            log: format!("{gone:?}"),
+        },
+    }
 }
 
 /// Writes a window screenshot as a PNG.

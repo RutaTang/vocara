@@ -251,3 +251,62 @@ fn a_page_that_leaves_takes_its_dialog_with_it() {
     let _ = app.update(Message::Navigate(Navigation::Go(Route::Home)));
     assert_eq!(app.dialogs(), 0);
 }
+
+/// What [`waiting_open`] waits for: another Vocara's boot to finish.
+static OPEN_RELEASED: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
+static OPEN_RELEASE: std::sync::Condvar = std::sync::Condvar::new();
+
+/// An open that waits on another Vocara's boot until
+/// [`release_waiting_open`].
+fn waiting_open(on_waiting: &mut dyn FnMut()) -> LibraryOpen {
+    on_waiting();
+    let mut released = OPEN_RELEASED.lock().unwrap();
+    while !*released {
+        released = OPEN_RELEASE.wait(released).unwrap();
+    }
+    LibraryOpen::LibraryInUse("released".into())
+}
+
+fn release_waiting_open() {
+    *OPEN_RELEASED.lock().unwrap() = true;
+    OPEN_RELEASE.notify_all();
+}
+
+// The waiting window's Quit: iced exits, and its runtime is torn down while
+// the open still waits on the other Vocara. The teardown must not wait for
+// the open (Dart's quit ended the process at once).
+#[test]
+fn a_library_open_still_waiting_does_not_hold_the_exit() {
+    use iced::futures::StreamExt;
+
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let (waiting, mut events) = iced::futures::channel::mpsc::channel(4);
+    let open = runtime.spawn(open_on_own_thread(waiting_open, waiting));
+    let first = runtime.block_on(events.next());
+    assert!(matches!(first, Some(LibraryEvent::Waiting)), "{first:?}");
+
+    let (dropped, teardown) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        drop(open);
+        drop(runtime);
+        let _ = dropped.send(());
+    });
+    let done = teardown.recv_timeout(Duration::from_secs(5));
+    // Let the open finish either way, so a failure here cannot hang the run.
+    release_waiting_open();
+    assert!(done.is_ok(), "the runtime's teardown waited on the open");
+}
+
+#[test]
+fn a_library_open_that_panics_fails_the_boot() {
+    fn panicking_open(_: &mut dyn FnMut()) -> LibraryOpen {
+        panic!("the disk is on fire")
+    }
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let (waiting, _events) = iced::futures::channel::mpsc::channel(4);
+    let outcome = runtime.block_on(open_on_own_thread(panicking_open, waiting));
+    assert!(
+        matches!(&outcome, LibraryOpen::Failed { detail, .. } if detail == "the disk is on fire"),
+        "{outcome:?}"
+    );
+}
