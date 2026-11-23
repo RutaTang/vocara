@@ -13,6 +13,7 @@
 mod export;
 mod interpretations;
 mod lyrics;
+mod lyrics_cursor;
 mod placement;
 mod pure;
 mod reopen;
