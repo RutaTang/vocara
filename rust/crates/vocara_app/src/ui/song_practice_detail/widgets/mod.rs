@@ -3,4 +3,10 @@
 
 pub mod live_spectrogram;
 pub mod pitch_lane;
+pub mod technique_picker;
+pub mod track_context_menu;
+pub mod track_row;
 pub mod voiceprint_view;
+
+#[cfg(test)]
+mod live_ui;
