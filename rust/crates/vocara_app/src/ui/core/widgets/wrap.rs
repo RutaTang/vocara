@@ -86,11 +86,11 @@ impl<M, S: Default + 'static> Widget<M, Theme, Renderer> for Wrap<'_, M, S> {
     }
 
     fn tag(&self) -> tree::Tag {
-        tree::Tag::of::<S>()
+        tree::Tag::of::<Slot<S>>()
     }
 
     fn state(&self) -> tree::State {
-        tree::State::new(S::default())
+        tree::State::new(Slot(S::default()))
     }
 
     fn children(&self) -> Vec<Tree> {
@@ -134,7 +134,7 @@ impl<M, S: Default + 'static> Widget<M, Theme, Renderer> for Wrap<'_, M, S> {
             shell,
             viewport,
         );
-        let state = tree.state.downcast_mut::<S>();
+        let state = &mut tree.state.downcast_mut::<Slot<S>>().0;
         (self.on_event)(state, event, layout.bounds(), cursor, shell);
     }
 
@@ -147,7 +147,7 @@ impl<M, S: Default + 'static> Widget<M, Theme, Renderer> for Wrap<'_, M, S> {
         renderer: &Renderer,
     ) -> mouse::Interaction {
         if let Some(interaction) = &self.interaction {
-            let state = tree.state.downcast_ref::<S>();
+            let state = &tree.state.downcast_ref::<Slot<S>>().0;
             if let Some(i) = interaction(state, layout.bounds(), cursor) {
                 return i;
             }
@@ -184,3 +184,8 @@ impl<'a, M: 'a, S: Default + 'static> From<Wrap<'a, M, S>> for Element<'a, M, Th
         Element::new(wrap)
     }
 }
+
+/// The wrapper's state in the tree. A newtype, so a stateless wrapper
+/// (`S = ()`) still gets a tag of its own: `Tag::of::<()>()` is iced's
+/// "stateless" tag, under which a reused tree keeps no state at all.
+struct Slot<S>(S);
