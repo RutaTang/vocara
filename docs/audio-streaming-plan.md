@@ -57,7 +57,8 @@ Replace the full-RAM `Arc` behind `BufferSource` with per-track file feeders:
 3. Underrun accounting: a starved ring produces counted silence, never
    stale frames.
 4. Memory ceiling: rings + chunk buffers only — assert with the RSS
-   measurement harness (test/measure_analysis_peak_test.dart pattern).
+   measurement harness (the ignored RSS tests in
+   `vocara_services::spectrogram_service` are the pattern).
 
 ## Explicitly out of scope until P1 lands
 

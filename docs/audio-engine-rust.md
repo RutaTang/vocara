@@ -4,7 +4,10 @@ Status: the original design, written before any Rust existed. The engine as buil
 differs in places, among them: its SPSC ring is its own (`src/ring.rs`), not `rtrb`, and
 retired graphs are freed on the control thread two blocks after their swap
 (`EngineHandle::reap`), not by a reaper thread after one. Where they disagree, the source
-is the reference. This doc re-cuts the
+is the reference. The Flutter/Dart client this design was cut for has since been
+replaced by the Rust app (`rust/`, iced GUI), so the Dart control thread, `dart:ffi`,
+the CocoaPods framework and the `client/...` paths below describe that retired client
+(see the git history); the engine is linked into the app directly. This doc re-cuts the
 *already-settled* DAG audio-engine architecture for a Rust implementation and focuses
 strictly on **what Rust changes**. The language-agnostic design — graph runtime, RCU
 swap at the block boundary, sample-counter clock (`g_frame`), node topology, the three
