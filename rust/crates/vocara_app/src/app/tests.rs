@@ -32,6 +32,13 @@ fn click(app: &mut App, label: &str) {
     }
 }
 
+/// Clicks the page's back chevron (the technique library's header has no
+/// "Back" label; the placeholders' Back buttons carry the same glyph).
+fn back(app: &mut App) {
+    let chevron = char::from(crate::ui::core::icons::Icon::ChevronLeft).to_string();
+    click(app, &chevron);
+}
+
 fn shows(app: &App, label: &str) -> bool {
     let mut ui = iced_test::simulator(app.view());
     ui.find(label).is_ok()
@@ -72,7 +79,7 @@ fn a_late_message_for_a_page_that_is_gone_is_dropped() {
     let mut app = boot(None);
     click(&mut app, "Technique library");
     let (gone, _) = app.top().unwrap();
-    click(&mut app, "Back");
+    back(&mut app);
     assert_eq!(app.routes(), vec![Some(Route::Home)]);
     // A result for the library arriving after it closed changes nothing.
     let _ = app.update(Message::Techniques(gone, technique_library::Message::Back));
@@ -98,7 +105,7 @@ fn a_deep_linked_technique_goes_back_to_the_library() {
 fn the_deep_linked_library_and_settings_go_back_home() {
     for start in ["/techniques", "/settings"] {
         let mut app = boot(Some(start));
-        click(&mut app, "Back");
+        back(&mut app);
         assert_eq!(app.routes(), vec![Some(Route::Home)], "{start}");
     }
 }

@@ -50,6 +50,8 @@ pub(crate) struct FakeRepo {
     /// Reads still to fail before they succeed.
     pub fail_reads: AtomicUsize,
     pub reads: AtomicUsize,
+    /// Saves and deletes fail while set.
+    pub refuse_writes: AtomicBool,
 }
 
 impl FakeRepo {
@@ -107,6 +109,9 @@ impl TechniqueRepository for FakeRepo {
 
     /// Stores a new technique first, as the list reads newest first.
     fn save_technique(&self, technique: &Technique) -> vocara_store::Result<Technique> {
+        if self.refuse_writes.load(Ordering::SeqCst) {
+            return Err(vocara_store::Error::State("refused".into()));
+        }
         self.techniques.lock().unwrap().insert(0, technique.clone());
         Ok(technique.clone())
     }
@@ -122,6 +127,9 @@ impl TechniqueRepository for FakeRepo {
     /// Forgets the technique, so a later reload sees the library the view
     /// model was left with.
     fn delete_technique(&self, id: &str) -> vocara_store::Result<()> {
+        if self.refuse_writes.load(Ordering::SeqCst) {
+            return Err(vocara_store::Error::State("refused".into()));
+        }
         self.techniques.lock().unwrap().retain(|t| t.id != id);
         Ok(())
     }

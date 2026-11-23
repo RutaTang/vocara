@@ -560,4 +560,4 @@ fn compare_utf16(a: &str, b: &str) -> Ordering {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
