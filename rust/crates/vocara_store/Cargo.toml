@@ -25,7 +25,9 @@ indexmap.workspace = true
 tempfile.workspace = true
 # The commit hook: the asset GC's tests count what reaches the disk as a
 # commit (database_durability_test.dart counted it with a query interceptor).
-rusqlite = { workspace = true, features = ["hooks"] }
+# The statement trace: the repositories' cost tests count the statements a
+# save or a load runs (song_practice_save_cost_test.dart's interceptor).
+rusqlite = { workspace = true, features = ["hooks", "trace"] }
 
 [lints]
 workspace = true
