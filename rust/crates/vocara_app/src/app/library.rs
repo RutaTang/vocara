@@ -11,7 +11,9 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+use iced::futures::channel::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use vocara_model::config::environment::AppEnvironment;
 use vocara_model::util::id::new_id;
@@ -22,6 +24,7 @@ use vocara_store::repositories::{
     TechniqueRepositoryDrift,
 };
 use vocara_store::sync::hlc::HlcClock;
+use vocara_store::sync::sync_engine::{RemoteApplied, RemoteAppliedSink};
 use vocara_store::sync::sync_writer::SyncWriter;
 
 /// The opened library (Dart's `Persistence`: the database, the asset pool,
@@ -35,6 +38,52 @@ pub struct Library {
     pub song_repo: Arc<dyn SongPracticeRepository>,
     /// `persistence.techRepo`.
     pub technique_repo: Arc<dyn TechniqueRepository>,
+    /// `persistence.remoteApplied`: what the sync engine announces after
+    /// each page of remote rows it applied. With no sync configured it
+    /// simply never fires.
+    pub remote_applied: Arc<RemoteAppliedBroadcast>,
+}
+
+/// Dart's broadcast `StreamController<RemoteApplied>`, which the sync
+/// engine's `onRemoteApplied` fed ([`RemoteAppliedBroadcast::sink`]) and
+/// the list screens listened to ([`RemoteAppliedBroadcast::subscribe`]).
+/// As a broadcast stream, an event announced while nobody listens is
+/// dropped, and each listener gets the events announced after it subscribed.
+#[derive(Debug, Default)]
+pub struct RemoteAppliedBroadcast {
+    listeners: Mutex<Vec<UnboundedSender<RemoteApplied>>>,
+}
+
+impl RemoteAppliedBroadcast {
+    /// A new listener: the events announced from now on, until the receiver
+    /// is dropped (Dart's `listen`, cancelled by dropping it).
+    pub fn subscribe(&self) -> UnboundedReceiver<RemoteApplied> {
+        let (sender, receiver) = mpsc::unbounded();
+        self.lock().push(sender);
+        receiver
+    }
+
+    /// Announces `event` to every listener (`_remoteApplied.add`); a
+    /// listener that has gone is forgotten.
+    pub fn publish(&self, event: &RemoteApplied) {
+        self.lock()
+            .retain(|listener| listener.unbounded_send(event.clone()).is_ok());
+    }
+
+    /// The engine's `onRemoteApplied` callback, announcing here.
+    pub fn sink(self: &Arc<Self>) -> RemoteAppliedSink {
+        let this = Arc::clone(self);
+        Arc::new(move |event: &RemoteApplied| this.publish(event))
+    }
+
+    /// How many listeners are subscribed.
+    pub fn listeners(&self) -> usize {
+        self.lock().iter().filter(|l| !l.is_closed()).count()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<UnboundedSender<RemoteApplied>>> {
+        self.listeners.lock().unwrap_or_else(|e| e.into_inner())
+    }
 }
 
 impl std::fmt::Debug for Library {
@@ -64,6 +113,7 @@ impl Library {
                 assets.clone(),
             )),
             technique_repo: Arc::new(TechniqueRepositoryDrift::new(db, writer, assets)),
+            remote_applied: Arc::new(RemoteAppliedBroadcast::default()),
         }
     }
 
