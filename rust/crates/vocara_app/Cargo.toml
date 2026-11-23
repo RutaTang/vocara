@@ -28,6 +28,7 @@ thiserror.workspace = true
 dirs.workspace = true
 lucide-icons.workspace = true
 png.workspace = true
+bytes.workspace = true
 
 [dev-dependencies]
 iced_test.workspace = true

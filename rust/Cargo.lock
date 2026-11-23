@@ -4511,6 +4511,7 @@ dependencies = [
 name = "vocara_app"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "dirs",
  "iced",
  "iced_test",
