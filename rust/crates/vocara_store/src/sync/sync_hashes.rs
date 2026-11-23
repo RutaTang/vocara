@@ -447,10 +447,11 @@ mod tests {
     }
 
     // The Dart suite proves the load-side and save-side projections agree
-    // through the repositories (not ported yet). Here the same invariant is
-    // checked at this layer: every row projection equals the content
-    // projection of the values a save derives from that row, and both
-    // encode the columns in the documented order, as Dart's jsonEncode does.
+    // through the repositories (tests/repositories/sync_hashes_test.rs).
+    // Here the same invariant is checked at this layer: every row projection
+    // equals the content projection of the values a save derives from that
+    // row, and both encode the columns in the documented order, as Dart's
+    // jsonEncode does.
 
     #[test]
     fn practice_projection_order_and_types() {
