@@ -166,20 +166,20 @@ behavior and its tests are ported and the gates pass.
 | `data/repositories/song_practice_repository_drift.dart` | 1678 | `vocara_store::repositories::song_practice_repository_drift` | done |
 | `data/repositories/technique_repository.dart` | 52 | `vocara_store::repositories::technique_repository` | done |
 | `data/repositories/technique_repository_drift.dart` | 607 | `vocara_store::repositories::technique_repository_drift` | done |
-| `data/services/app_settings_service.dart` | 1031 | `vocara_services::app_settings_service` | todo |
+| `data/services/app_settings_service.dart` | 1031 | `vocara_services::app_settings_service` | done |
 | `data/services/audio_dsp.dart` | 2663 | `vocara_services::audio_dsp` | done |
 | `data/services/audio_edit_service.dart` | 863 | `vocara_services::audio_edit_service` | todo |
 | `data/services/audio_exporter.dart` | 173 | `vocara_services::audio_exporter` | done (the save panel is passed in by the app) |
 | `data/services/audio_file_service.dart` | 362 | `vocara_services::audio_file_service` | done |
 | `data/services/diagnostics_log.dart` | 440 | `vocara_model::diagnostics` (used by the store too) | done |
-| `data/services/graph_audio_playback_service.dart` | 1533 | `vocara_services::graph_audio_playback_service` | todo |
+| `data/services/graph_audio_playback_service.dart` | 1533 | `vocara_services::graph_audio_playback_service` (with `SyncChain`; the top-level decode helpers are `engine::media`) | done |
 | `data/services/local_storage_service.dart` | 110 | `vocara_services::local_storage_service` | done |
 | `data/services/media_analysis_service.dart` | 112 | `vocara_services::media_analysis_service` | todo |
 | `data/services/mic_permission.dart` | 36 | `vocara_services::mic_permission` | done (macOS half type-checked; runs on CI) |
 | `data/services/mic_recording_controller.dart` | 681 | `vocara_services::mic_recording_controller` | todo |
 | `data/services/monitor_service.dart` | 262 | `vocara_services::monitor_service` | todo |
 | `data/services/playback_engine.dart` | 147 | `vocara_services::playback_engine` | done |
-| `data/services/playback_engine_factory.dart` | 8 | `vocara_services::playback_engine_factory` | todo |
+| `data/services/playback_engine_factory.dart` | 8 | `vocara_services::playback_engine_factory` | done |
 | `data/services/recording_finalizer.dart` | 331 | `vocara_services::recording_finalizer` | done |
 | `data/services/source_separation_service.dart` | 745 | `vocara_services::source_separation_service` | done |
 | `data/services/spectrogram_service.dart` | 463 | `vocara_services::spectrogram_service` | todo |
