@@ -183,7 +183,7 @@ behavior and its tests are ported and the gates pass.
 | `data/services/recording_finalizer.dart` | 331 | `vocara_services::recording_finalizer` | done |
 | `data/services/source_separation_service.dart` | 745 | `vocara_services::source_separation_service` | done |
 | `data/services/spectrogram_service.dart` | 463 | `vocara_services::spectrogram_service` | todo |
-| `data/services/technique_media_service.dart` | 103 | `vocara_services::technique_media_service` | todo |
+| `data/services/technique_media_service.dart` | 103 | `vocara_services::technique_media_service` | done |
 | `data/services/update_check_service.dart` | 285 | `vocara_services::update_check_service` | done |
 | `data/services/waveform_service.dart` | 169 | `vocara_services::waveform_service` | done (decode supplied by the engine bridge) |
 | `data/sync/hlc.dart` | 381 | `vocara_store::sync::hlc` | done |
