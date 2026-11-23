@@ -9,6 +9,7 @@ pub mod graph_audio_playback_service;
 pub mod local_storage_service;
 pub mod media_analysis_service;
 pub mod mic_permission;
+pub mod mic_recording_controller;
 pub mod monitor_service;
 pub mod playback_engine;
 pub mod playback_engine_factory;
