@@ -565,29 +565,27 @@ fn typing_in_the_search_box_filters_the_cards() {
     assert!(h.shows("No techniques match this filter."));
 }
 
-// technique_dialogs_test, through the page: Return in the name field creates
-// the technique, which then opens.
+// technique_dialogs_test, through the page: the dialog's name (trimmed by
+// the dialog itself, tested with it) creates the technique, which then
+// opens.
 #[test]
 fn new_technique_asks_for_a_name_creates_it_and_opens_it() {
     let mut h = Harness::library(vec![stored("Twang", &[])]);
     h.settle();
     assert_eq!(h.click("New technique"), vec![Message::NewTechnique]);
-    assert!(h.shows("NAME"), "the dialog is up");
+    assert!(
+        matches!(
+            h.dialog,
+            Some(DialogRequest {
+                dialog: Dialog::NewTechnique(_),
+                ..
+            })
+        ),
+        "the app's dialog stack shows the new-technique dialog"
+    );
 
-    h.send(Message::NewTechniqueDialog(
-        technique_dialogs::Message::Input("  Belt ".into()),
-    ));
-    let input = h
-        .screen
-        .new_technique
-        .as_ref()
-        .expect("the dialog")
-        .input_id();
-    h.drive(|ui| {
-        ui.click(input).expect("the name field");
-        let _ = ui.tap_key(keyboard::Key::Named(Named::Enter));
-    });
-    assert!(h.screen.new_technique.is_none(), "Return closes the dialog");
+    h.answer(DialogResult::Text(Some("Belt".into())));
+    assert!(h.dialog.is_none(), "the dialog answered");
     assert!(h.screen.vm.create_technique().running());
     h.settle();
 
@@ -605,30 +603,13 @@ fn new_technique_asks_for_a_name_creates_it_and_opens_it() {
 }
 
 #[test]
-fn a_cancelled_or_blank_new_technique_creates_nothing() {
+fn a_cancelled_new_technique_creates_nothing() {
     let mut h = Harness::library(Vec::new());
     h.settle();
     h.send(Message::NewTechnique);
-    h.send(Message::NewTechniqueDialog(
-        technique_dialogs::Message::Input("   ".into()),
-    ));
-    h.send(Message::NewTechniqueDialog(
-        technique_dialogs::Message::Confirm,
-    ));
-    assert!(
-        h.screen.new_technique.is_some(),
-        "a blank name keeps it open"
-    );
-    let messages = h.drive(|ui| {
-        let _ = ui.tap_key(keyboard::Key::Named(Named::Escape));
-    });
-    assert_eq!(
-        messages,
-        vec![Message::NewTechniqueDialog(
-            technique_dialogs::Message::Cancel
-        )]
-    );
-    assert!(h.screen.new_technique.is_none());
+    // Cancel, Escape and a blank name all answer `Text(None)` (the dialog's
+    // own tests).
+    h.answer(DialogResult::Text(None));
     assert!(h.pending.is_empty());
     assert!(!h.screen.vm.create_technique().running());
 }

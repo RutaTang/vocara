@@ -73,6 +73,11 @@ wrong. Port the behavior, not the shape:
   `// SAFETY:` comment.
 - **Gates** (run from `rust/`): `cargo fmt --all --check`, `cargo clippy
   --workspace --all-targets -- -D warnings`, `cargo test --workspace`.
+- **One target dir per checkout**: never point two git worktrees of this
+  workspace at the same `CARGO_TARGET_DIR`. Cargo names a workspace crate's
+  artifacts by its path relative to the workspace, so the checkouts overwrite
+  each other's builds and one can silently link the other's code. To save
+  disk, build with `CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0`.
 - **macOS check from Linux**: the shipped build is macOS, with the `device`
   feature. `cargo check`/`clippy` never link, so a no-op C toolchain lets the
   C dependencies' build scripts pass and type-checks every macOS-only path:
@@ -264,7 +269,7 @@ behavior and its tests are ported and the gates pass.
 | `ui/song_practice_detail/widgets/track_row.dart` | 1158 | `vocara_app::ui::song_practice_detail::widgets::track_row` | todo |
 | `ui/song_practice_detail/widgets/voice_profile_view.dart` | 567 | `vocara_app::ui::song_practice_detail::widgets::voice_profile_view` | todo |
 | `ui/song_practice_detail/widgets/voiceprint_view.dart` | 2015 | `vocara_app::ui::song_practice_detail::widgets::voiceprint_view` | todo |
-| `ui/technique_library/technique_library_screen.dart` | 914 | `vocara_app::ui::technique_library::technique_library_screen` | done (the new-technique dialog draws over the page until `confirm_dialog::Dialog` has its variant; `Message::RemoteApplied` waits for the library's remote-applied stream) |
+| `ui/technique_library/technique_library_screen.dart` | 914 | `vocara_app::ui::technique_library::technique_library_screen` | done |
 | `ui/technique_library/view_model/technique_detail_view_model.dart` | 2013 | `vocara_app::ui::technique_library::view_model::technique_detail_view_model` | todo |
 | `ui/technique_library/view_model/technique_library_view_model.dart` | 280 | `vocara_app::ui::technique_library::view_model::technique_library_view_model` | done |
 | `ui/technique_library/widgets/media/technique_audio_player.dart` | 417 | `vocara_app::ui::technique_library::widgets::media::technique_audio_player` (media_kit's `Player` → `vocara_services::media_player`, polled: AVFoundation on macOS with `device`, the null player elsewhere, a fake in tests; the keyed players a technique page keeps → `media::example_players`) | done (the AVFoundation backend type-checked for macOS; its pure parts tested everywhere) |

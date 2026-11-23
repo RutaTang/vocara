@@ -6,8 +6,8 @@
 //!
 //! The dialog is a modal like the studio dialogs (`confirm_dialog`): the same
 //! barrier, Escape and barrier tap cancel, and it speaks their
-//! [`Message`]s. Its owner keeps a [`NewTechniqueDialog`] while it is open,
-//! draws [`view`](NewTechniqueDialog::view) over the window, runs
+//! [`Message`]s. The app's dialog stack owns it (`Dialog::NewTechnique`):
+//! it draws [`view`](NewTechniqueDialog::view) over the window, runs
 //! [`focus`](NewTechniqueDialog::focus) when it opens (`autofocus`), and
 //! feeds it the messages until [`update`](NewTechniqueDialog::update) says it
 //! closed. Unlike `showStudioPrompt`, a blank name keeps it open: closed, it

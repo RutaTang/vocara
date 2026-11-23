@@ -30,6 +30,7 @@ mod anchored;
 mod tests;
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::Duration;
 
 use iced::alignment::{Horizontal, Vertical};
@@ -43,11 +44,13 @@ use vocara_model::models::technique::Technique;
 use vocara_model::util::dart_string;
 use vocara_store::sync::sync_engine::RemoteApplied;
 
+use crate::app::library::RemoteAppliedBroadcast;
+
 use self::anchored::Anchored;
 use super::view_model::technique_library_view_model::{
     Done, Effect, TechniqueLibraryViewModel, UNTAGGED_FILTER,
 };
-use super::widgets::technique_dialogs::{self, NewTechniqueDialog};
+use super::widgets::technique_dialogs::NewTechniqueDialog;
 use crate::router::{Navigation, Route};
 use crate::services::Services;
 use crate::ui::core::icons::{self, Icon};
@@ -89,9 +92,9 @@ pub struct TechniqueLibraryScreen {
     /// stacked identical screens the user must back out of twice). Released
     /// when the pushed page comes back.
     opening: bool,
-    /// The open new-technique dialog. INTERIM (see
-    /// [`show_new_technique_dialog`](Self::show_new_technique_dialog)).
-    new_technique: Option<NewTechniqueDialog>,
+    /// What the sync engine announces after applying remote rows (the
+    /// library's broadcast): a freshness reload.
+    remote_applied: Arc<RemoteAppliedBroadcast>,
     /// Whether the tag filter's menu is open.
     tag_menu: bool,
     /// Deletes confirmed while another still ran, in order: each runs once
@@ -121,9 +124,6 @@ pub enum Message {
     TapTag(String),
     /// "New technique": ask for a name.
     NewTechnique,
-    /// The new-technique dialog's own messages. INTERIM (see
-    /// [`TechniqueLibraryScreen::show_new_technique_dialog`]).
-    NewTechniqueDialog(technique_dialogs::Message),
     /// The new-technique dialog closed: the name to create, or `None`.
     NewTechniqueNamed(Option<String>),
     /// A card was tapped: open its technique.
@@ -232,7 +232,7 @@ impl TechniqueLibraryScreen {
         let screen = Self {
             vm: Box::new(vm),
             opening: false,
-            new_technique: None,
+            remote_applied: services.library.remote_applied.clone(),
             tag_menu: false,
             queued_deletes: VecDeque::new(),
             snacks: VecDeque::new(),
@@ -281,18 +281,6 @@ impl TechniqueLibraryScreen {
                 Step::none()
             }
             Message::NewTechnique => self.show_new_technique_dialog().into(),
-            Message::NewTechniqueDialog(m) => {
-                let Some(dialog) = self.new_technique.as_mut() else {
-                    return Step::none();
-                };
-                match dialog.update(m) {
-                    Some(result) => {
-                        self.new_technique = None;
-                        self.handle(Message::NewTechniqueNamed(result.text()))
-                    }
-                    None => Step::none(),
-                }
-            }
             Message::NewTechniqueNamed(name) => self.create(name),
             Message::Open(id) => match self.open_detail(id) {
                 Some(navigation) => Update::navigate(navigation).into(),
@@ -338,20 +326,12 @@ impl TechniqueLibraryScreen {
         }
     }
 
-    /// `showNewTechniqueDialog(context)`; the name comes back as
-    /// [`Message::NewTechniqueNamed`].
-    ///
-    /// INTERIM: until `confirm_dialog::Dialog` has a new-technique variant,
-    /// the dialog is drawn over this page (see `view`) and fed its messages
-    /// here ([`Message::NewTechniqueDialog`]). Then the body becomes
-    /// `Update::dialog(NewTechniqueDialog::new(), |r|
-    /// Message::NewTechniqueNamed(r.text()))`, and the `new_technique`
-    /// field, its layer in `view` and `Message::NewTechniqueDialog` go.
+    /// `showNewTechniqueDialog(context)`, on the app's dialog stack; the
+    /// name comes back as [`Message::NewTechniqueNamed`].
     fn show_new_technique_dialog(&mut self) -> Update<Message> {
-        let dialog = NewTechniqueDialog::new();
-        let focus = dialog.focus();
-        self.new_technique = Some(dialog);
-        Update::task(focus)
+        Update::dialog(NewTechniqueDialog::new(), |result| {
+            Message::NewTechniqueNamed(result.text())
+        })
     }
 
     /// `_createTechnique` once the dialog gave a name: create it; the rest
@@ -637,6 +617,14 @@ impl TechniqueLibraryScreen {
 impl Screen for TechniqueLibraryScreen {
     type Message = Message;
 
+    /// Freshness reloads when sync applies remote rows; with no sync
+    /// configured the stream simply never fires.
+    fn subscription(&self, _on_top: bool) -> iced::Subscription<Message> {
+        self.remote_applied
+            .subscription()
+            .map(Message::RemoteApplied)
+    }
+
     fn update(&mut self, message: Message, _services: &Services) -> Update<Message> {
         self.handle(message).into_update()
     }
@@ -654,9 +642,6 @@ impl Screen for TechniqueLibraryScreen {
             .style(theme::page)];
         if let Some(snack) = self.snack() {
             layers = layers.push(snack_bar(snack));
-        }
-        if let Some(dialog) = &self.new_technique {
-            layers = layers.push(dialog.view().map(Message::NewTechniqueDialog));
         }
         layers.into()
     }

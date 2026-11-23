@@ -66,6 +66,12 @@ impl RemoteAppliedBroadcast {
         Arc::new(move |event: &RemoteApplied| this.publish(event))
     }
 
+    /// The events as an iced subscription, one per broadcast (keyed by its
+    /// identity), for a screen's `subscription`.
+    pub fn subscription(self: &Arc<Self>) -> iced::Subscription<RemoteApplied> {
+        iced::Subscription::run_with(BroadcastFeed(Arc::clone(self)), |feed| feed.0.subscribe())
+    }
+
     /// How many listeners are subscribed.
     pub fn listeners(&self) -> usize {
         self.lock().iter().filter(|l| !l.is_closed()).count()
@@ -73,6 +79,15 @@ impl RemoteAppliedBroadcast {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Vec<UnboundedSender<RemoteApplied>>> {
         self.listeners.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// A broadcast as a subscription key: one stream per broadcast.
+struct BroadcastFeed(Arc<RemoteAppliedBroadcast>);
+
+impl std::hash::Hash for BroadcastFeed {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        Arc::as_ptr(&self.0).hash(state);
     }
 }
 
