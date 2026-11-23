@@ -2,6 +2,7 @@
 
 pub mod cap_label;
 pub mod holds_keyboard;
+pub mod spectrogram_painter;
 pub mod stable_subtree;
 pub mod studio_button;
 pub mod studio_controls;
