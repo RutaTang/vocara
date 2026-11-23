@@ -9,3 +9,4 @@ pub mod analysis_source;
 pub mod interpretations_controller;
 pub mod mixer_controller;
 pub mod playback_controller;
+pub mod recording_controller;
