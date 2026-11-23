@@ -21,7 +21,8 @@ use crate::ui::{Screen, Update};
 /// One open page.
 #[derive(Debug)]
 pub enum Page {
-    Home(HomeScreen),
+    /// Boxed: the home screen holds its list and its commands' outcomes.
+    Home(Box<HomeScreen>),
     Song(SongScreen),
     Settings(SettingsScreen),
     Techniques(TechniqueLibraryScreen),
@@ -78,7 +79,7 @@ impl Page {
         match route {
             Ok(Route::Home) => {
                 let (s, t) = HomeScreen::new(services);
-                (Page::Home(s), tagged(t, Message::Home))
+                (Page::Home(Box::new(s)), tagged(t, Message::Home))
             }
             Ok(Route::Song { id }) => {
                 let (s, t) = SongScreen::new(id, services);

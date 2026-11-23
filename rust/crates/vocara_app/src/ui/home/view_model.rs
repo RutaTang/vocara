@@ -51,7 +51,7 @@ impl Effect {
     pub fn run(self) -> Landing {
         match self {
             Effect::Load(run) => Landing::Loaded(run.run()),
-            Effect::Create(run) => Landing::Created(run.run()),
+            Effect::Create(run) => Landing::Created(Box::new(run.run())),
             Effect::Delete { id, run } => Landing::Deleted {
                 id,
                 outcome: run.run(),
@@ -64,7 +64,8 @@ impl Effect {
 #[derive(Debug, Clone)]
 pub enum Landing {
     Loaded(Outcome<Vec<PracticeSummary>, String>),
-    Created(Outcome<SongPractice, String>),
+    /// Boxed: a whole practice, where the others carry a list or nothing.
+    Created(Box<Outcome<SongPractice, String>>),
     Deleted {
         id: String,
         outcome: Outcome<(), String>,
@@ -248,6 +249,7 @@ impl HomeViewModel {
                 self.load.finish(outcome);
             }
             Landing::Created(outcome) => {
+                let outcome = *outcome;
                 if let Ok(practice) = &outcome {
                     self.list_epoch += 1;
                     if self.listed {
