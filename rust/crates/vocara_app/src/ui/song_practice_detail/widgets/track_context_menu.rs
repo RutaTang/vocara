@@ -1,0 +1,1104 @@
+//! Port of `ui/song_practice_detail/widgets/track_context_menu.dart`: the
+//! dark studio menus — the track (lane) right-click menu with its inline
+//! color picker, the FX bus menu, the clip menu, and the generic
+//! [`studio_menu`] the in-app dropdowns use — the lane tints (the preset
+//! palette, a take's stable default tint, the selected clip's border lift),
+//! and the rename / delete-bus prompts.
+//!
+//! # How a menu opens
+//!
+//! Dart pushed an instant (no-animation) popup route at the pointer's global
+//! position, dismissible by tapping outside, and handed each row a `close`
+//! callback. Here a screen holds which menu is open: it builds the menu
+//! ([`track_context_menu`], [`bus_context_menu`], [`clip_context_menu`],
+//! [`studio_menu`]) and hands it to the [`menu_host`] wrapped around what was
+//! clicked. The host remembers where the last press inside it landed (the
+//! right-click, or the ⋯ button's tap-down — `details.globalPosition`) and
+//! pops the menu there as an overlay over the whole window, clamped inside
+//! it as `_MenuLayoutDelegate` did; [`MenuAnchor::Below`] anchors a dropdown
+//! under its trigger instead (`menuAnchorBelow`). A position cannot travel in
+//! the message: a press inside a scrolled lane list is seen in the list's
+//! own coordinates, and only the host, which knows where it is drawn, can
+//! turn it into a window position.
+//!
+//! Like the popup route, the open menu is modal with no barrier color: a tap
+//! outside it (any button, released within the tap slop) or Escape reports
+//! the host's `on_dismiss`, and while it is open nothing beneath sees the
+//! pointer or the keyboard. Picking a row reports its action; the screen
+//! closes the menu (`close()`), then runs the action. (Dart ran a color pick
+//! before closing and every other row after; both happen in one update
+//! here.)
+
+use iced::advanced::layout::{self, Layout};
+use iced::advanced::widget::{tree, Operation, Tree};
+use iced::advanced::{overlay, renderer, Clipboard, Shell, Widget};
+use iced::alignment::Vertical;
+use iced::widget::text::Wrapping;
+use iced::widget::{button, column, container, row, scrollable, text, Column, Row, Space};
+use iced::{
+    keyboard, mouse, touch, Border, Color, Element, Event, Length, Padding, Point, Rectangle,
+    Renderer, Size, Theme, Vector,
+};
+
+use crate::ui::core::icons::{self, Icon};
+use crate::ui::core::theme::{self, bare_button, font, Studio};
+use crate::ui::core::widgets::confirm_dialog::{ConfirmDialog, StudioPrompt};
+
+// ------------------------------------------------------------------- tints
+
+/// The preset lane tints (ARGB) — 16 colors, two rows of eight, tuned to read
+/// well on the dark studio panels as a 3 px bar + waveform fill.
+pub const TRACK_COLOR_PALETTE: [i64; 16] = [
+    0xFFE3604E, // red
+    0xFFE2934A, // orange
+    0xFFD9B44A, // amber
+    0xFFB7C44A, // lime
+    0xFF6FB562, // green
+    0xFF49B6A8, // teal
+    0xFF4AAEC4, // cyan
+    0xFF5B8DEF, // blue
+    0xFF6F7CE8, // indigo
+    0xFF8C7CE8, // violet
+    0xFFB06FE0, // purple
+    0xFFD46BA8, // pink
+    0xFFD46172, // rose
+    0xFFB57C5A, // tan
+    0xFF8A93A8, // slate
+    0xFF7FB0A0, // sage
+];
+
+/// Dart's `Color(value)`: an ARGB int (its low 32 bits) as a color.
+pub fn argb(value: i64) -> Color {
+    let v = value as u32;
+    Color::from_rgba8(
+        (v >> 16) as u8,
+        (v >> 8) as u8,
+        v as u8,
+        f32::from((v >> 24) as u8) / 255.0,
+    )
+}
+
+/// A stable default tint for a vocal take with no custom color: picked from
+/// [`TRACK_COLOR_PALETTE`] by a deterministic hash of the take id (the sum of
+/// its UTF-16 code units, Dart's `codeUnits`), so a take keeps the same color
+/// across sessions and takes read as distinct (vs a flat gray). (Dart fell
+/// back to `Studio.waveform` for an empty palette; the palette is a constant
+/// of sixteen here.)
+pub fn default_take_color(id: &str) -> Color {
+    let h: i64 = id.encode_utf16().map(i64::from).sum();
+    argb(TRACK_COLOR_PALETTE[(h % TRACK_COLOR_PALETTE.len() as i64) as usize])
+}
+
+/// A brighter version of a lane's base color — used for the *border* of a
+/// selected clip (a gentle brightness lift in the same hue, not pure white):
+/// lightness +0.14, saturation +0.05, through Flutter's `HSLColor`.
+pub fn selected_lane_color(base: Color) -> Color {
+    let hsl = Hsl::from_color(base);
+    Hsl {
+        lightness: (hsl.lightness + 0.14).clamp(0.0, 1.0),
+        saturation: (hsl.saturation + 0.05).clamp(0.0, 1.0),
+        ..hsl
+    }
+    .to_color()
+}
+
+/// Flutter's `HSLColor`, on its 8-bit channels as Flutter reads a `Color`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Hsl {
+    alpha: f64,
+    hue: f64,
+    saturation: f64,
+    lightness: f64,
+}
+
+impl Hsl {
+    /// `HSLColor.fromColor`.
+    fn from_color(color: Color) -> Hsl {
+        let [r, g, b, a] = color.into_rgba8();
+        let (red, green, blue) = (
+            f64::from(r) / 255.0,
+            f64::from(g) / 255.0,
+            f64::from(b) / 255.0,
+        );
+        let max = red.max(green.max(blue));
+        let min = red.min(green.min(blue));
+        let delta = max - min;
+        // `_getHue`; Dart's `%` on doubles is never negative.
+        let mut hue = if max == 0.0 {
+            0.0
+        } else if max == red {
+            60.0 * ((green - blue) / delta).rem_euclid(6.0)
+        } else if max == green {
+            60.0 * (((blue - red) / delta) + 2.0)
+        } else {
+            60.0 * (((red - green) / delta) + 4.0)
+        };
+        // Hue is 0 when red == green == blue.
+        if hue.is_nan() {
+            hue = 0.0;
+        }
+        let lightness = (max + min) / 2.0;
+        // Saturation can exceed 1.0 with rounding errors, so clamp it.
+        let saturation = if min == max {
+            0.0
+        } else {
+            (delta / (1.0 - (2.0 * lightness - 1.0).abs())).clamp(0.0, 1.0)
+        };
+        Hsl {
+            alpha: f64::from(a) / 255.0,
+            hue,
+            saturation,
+            lightness,
+        }
+    }
+
+    /// `HSLColor.toColor` (`_colorFromHue`, then `Color.fromARGB`, which
+    /// keeps each channel's low 8 bits).
+    fn to_color(self) -> Color {
+        let chroma = (1.0 - (2.0 * self.lightness - 1.0).abs()) * self.saturation;
+        let secondary = chroma * (1.0 - ((self.hue / 60.0).rem_euclid(2.0) - 1.0).abs());
+        let m = self.lightness - chroma / 2.0;
+        let (red, green, blue) = match self.hue {
+            h if h < 60.0 => (chroma, secondary, 0.0),
+            h if h < 120.0 => (secondary, chroma, 0.0),
+            h if h < 180.0 => (0.0, chroma, secondary),
+            h if h < 240.0 => (0.0, secondary, chroma),
+            h if h < 300.0 => (secondary, 0.0, chroma),
+            _ => (chroma, 0.0, secondary),
+        };
+        let byte = |v: f64| ((v * 255.0).round() as i64 & 0xFF) as u8;
+        Color::from_rgba8(
+            byte(red + m),
+            byte(green + m),
+            byte(blue + m),
+            f32::from(byte(self.alpha)) / 255.0,
+        )
+    }
+}
+
+// ------------------------------------------------------------------- menus
+
+/// The track, bus and clip menus' width (`_kMenuWidth`).
+pub const MENU_WIDTH: f32 = 268.0;
+
+/// [`studio_menu`]'s default width (`showStudioMenu(width: 200)`).
+pub const STUDIO_MENU_WIDTH: f32 = 200.0;
+
+/// The menu's height cap: a long item list scrolls inside it instead of
+/// running the full height of the viewport.
+pub const MENU_MAX_HEIGHT: f32 = 440.0;
+
+/// How close a menu may come to the window's edges.
+pub const MENU_MARGIN: f32 = 8.0;
+
+/// `kTouchSlop`: how far a tap on the barrier may travel and still dismiss.
+const TAP_SLOP: f32 = 18.0;
+
+/// The track menu's flags (the non-callback half of `TrackMenuActions`).
+/// Vocal-only actions are hidden for the accompaniment; `can_merge_down`
+/// hides "Merge" when there is no lane below.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TrackMenu {
+    pub is_vocal: bool,
+    pub can_merge_down: bool,
+    /// Whether to offer "Separate into backing + vocal" (only for a
+    /// full-song backing/reference track).
+    pub can_separate: bool,
+    /// Whether to offer "Export take… / Export audio…" (the lane has audio).
+    pub can_export: bool,
+    /// When true the backing was already separated, so the action
+    /// re-separates the kept original (different label).
+    pub reseparate: bool,
+    /// The track's current custom tint (ARGB), or `None` when it uses the
+    /// default.
+    pub current_color_value: Option<i64>,
+}
+
+/// What the track menu's rows report (the callbacks of `TrackMenuActions`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrackAction {
+    /// Picks a lane tint (ARGB).
+    PickColor(i64),
+    Rename,
+    Separate,
+    /// Copies the lane's audio out to a user-chosen location.
+    Export,
+    AddNote,
+    AddTechnique,
+    /// Picks audio files and adds them as new clips on this take at the
+    /// playhead — the click-to-upload twin of dropping audio onto the lane.
+    AddClip,
+    Duplicate,
+    Split,
+    MergeDown,
+    Reanalyze,
+    Delete,
+}
+
+/// `showTrackContextMenu`'s menu: the color grid, Rename, the backing's
+/// extract, the vocal-take actions, export, re-analyze, and delete.
+pub fn track_context_menu<'a>(menu: &TrackMenu) -> Element<'a, TrackAction> {
+    let mut rows = column![
+        color_grid(menu.current_color_value, TrackAction::PickColor),
+        menu_divider(),
+        menu_row(Some(Icon::Pencil), "Rename", TrackAction::Rename),
+    ];
+    if menu.can_separate {
+        rows = rows.push(menu_row(
+            Some(Icon::WandSparkles),
+            if menu.reseparate {
+                "Re-extract backing"
+            } else {
+                "Extract backing"
+            },
+            TrackAction::Separate,
+        ));
+    }
+    // Notes and techniques annotate vocal takes only — the backing
+    // (accompaniment/original) track has no use for them.
+    if menu.is_vocal {
+        rows = rows
+            .push(menu_row(
+                Some(Icon::StickyNote),
+                "Add note at playhead",
+                TrackAction::AddNote,
+            ))
+            .push(menu_row(
+                Some(Icon::Waypoints),
+                "Add technique at playhead",
+                TrackAction::AddTechnique,
+            ))
+            .push(menu_row(
+                Some(Icon::FilePlus),
+                "Add audio clip at playhead…",
+                TrackAction::AddClip,
+            ))
+            .push(menu_row(
+                Some(Icon::Copy),
+                "Duplicate",
+                TrackAction::Duplicate,
+            ))
+            .push(menu_row(
+                Some(Icon::Scissors),
+                "Split at playhead",
+                TrackAction::Split,
+            ));
+    }
+    if menu.is_vocal && menu.can_merge_down {
+        rows = rows.push(menu_row(
+            Some(Icon::Combine),
+            "Merge with take below",
+            TrackAction::MergeDown,
+        ));
+    }
+    // Exporting is the guarantee that audio is never trapped in the app's
+    // private container — offered for any lane that has audio.
+    if menu.can_export {
+        rows = rows.push(menu_row(
+            Some(Icon::Download),
+            if menu.is_vocal {
+                "Export take…"
+            } else {
+                "Export audio…"
+            },
+            TrackAction::Export,
+        ));
+    }
+    rows = rows
+        .push(menu_row(
+            Some(Icon::RotateCw),
+            "Re-analyze waveform",
+            TrackAction::Reanalyze,
+        ))
+        .push(menu_divider())
+        .push(
+            MenuRow::new(
+                if menu.is_vocal {
+                    "Delete take"
+                } else {
+                    "Delete"
+                },
+                TrackAction::Delete,
+            )
+            .icon(Icon::Trash2)
+            .danger(true),
+        );
+    menu_card(rows, MENU_WIDTH)
+}
+
+/// The FX-bus menu's flags — a slimmer cousin of [`TrackMenu`]: a bus has no
+/// notes, clips, split/merge or re-analyze, so it offers just color, rename,
+/// duplicate and delete.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BusMenu {
+    pub current_color_value: Option<i64>,
+}
+
+/// What the bus menu's rows report (`BusMenuActions`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BusAction {
+    PickColor(i64),
+    Rename,
+    Duplicate,
+    Delete,
+}
+
+/// `showBusContextMenu`'s menu, styled like the track menu.
+pub fn bus_context_menu<'a>(menu: &BusMenu) -> Element<'a, BusAction> {
+    let rows = column![
+        color_grid(menu.current_color_value, BusAction::PickColor),
+        menu_divider(),
+        menu_row(Some(Icon::Pencil), "Rename", BusAction::Rename),
+        menu_row(Some(Icon::Copy), "Duplicate", BusAction::Duplicate),
+        menu_divider(),
+        MenuRow::new("Delete", BusAction::Delete)
+            .icon(Icon::Trash2)
+            .danger(true),
+    ];
+    menu_card(rows, MENU_WIDTH)
+}
+
+/// `confirmDeleteBus`: asks before deleting the FX bus named `bus_name`.
+/// Every surface that offers the delete (the timeline lane's menu, the mixer
+/// strip's menu and trash icon) goes through this one prompt: a delete takes
+/// the bus's FX chain and every send into it with it, and there is no undo.
+pub fn confirm_delete_bus(bus_name: &str) -> ConfirmDialog {
+    ConfirmDialog::new(format!("Delete \"{bus_name}\"?"))
+        .body("Removing this FX bus re-routes anything feeding it to the master.")
+}
+
+/// What the clip menu's rows report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClipAction {
+    Export,
+    Delete,
+}
+
+/// `showClipContextMenu`'s menu for a single clip: export (the per-clip
+/// escape hatch for multi-clip lanes), when the screen wires it, and delete.
+pub fn clip_context_menu<'a>(can_export: bool) -> Element<'a, ClipAction> {
+    let mut rows = Column::new();
+    if can_export {
+        rows = rows.push(menu_row(
+            Some(Icon::Download),
+            "Export clip…",
+            ClipAction::Export,
+        ));
+    }
+    rows = rows.push(
+        MenuRow::new("Delete clip", ClipAction::Delete)
+            .icon(Icon::Trash2)
+            .danger(true),
+    );
+    menu_card(rows, MENU_WIDTH)
+}
+
+/// One entry in a [`studio_menu`] popup.
+#[derive(Debug, Clone)]
+pub struct StudioMenuItem<M> {
+    pub label: String,
+    pub on_tap: M,
+    pub icon: Option<Icon>,
+    /// Optional one-line description shown faintly under the label.
+    pub subtitle: Option<String>,
+    pub selected: bool,
+    pub danger: bool,
+    /// Renders a divider above this item.
+    pub divider: bool,
+}
+
+impl<M> StudioMenuItem<M> {
+    pub fn new(label: impl Into<String>, on_tap: M) -> Self {
+        Self {
+            label: label.into(),
+            on_tap,
+            icon: None,
+            subtitle: None,
+            selected: false,
+            danger: false,
+            divider: false,
+        }
+    }
+
+    pub fn icon(mut self, icon: Icon) -> Self {
+        self.icon = Some(icon);
+        self
+    }
+
+    pub fn subtitle(mut self, subtitle: impl Into<String>) -> Self {
+        self.subtitle = Some(subtitle.into());
+        self
+    }
+
+    pub fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
+
+    pub fn danger(mut self, danger: bool) -> Self {
+        self.danger = danger;
+        self
+    }
+
+    pub fn divider(mut self, divider: bool) -> Self {
+        self.divider = divider;
+        self
+    }
+}
+
+/// `showStudioMenu`: an instant dark studio menu of `items`, `width` wide
+/// ([`STUDIO_MENU_WIDTH`] by default) — used by the in-app dropdowns so
+/// every menu opens the same way.
+pub fn studio_menu<'a, M: Clone + 'a>(items: Vec<StudioMenuItem<M>>, width: f32) -> Element<'a, M> {
+    let mut rows = Column::new();
+    for it in items {
+        if it.divider {
+            rows = rows.push(menu_divider());
+        }
+        let mut entry = MenuRow::new(it.label, it.on_tap)
+            .danger(it.danger)
+            .selected(it.selected);
+        entry.icon = it.icon;
+        entry.subtitle = it.subtitle;
+        rows = rows.push(entry);
+    }
+    menu_card(rows, width)
+}
+
+/// `showRenameDialog`: the modal text prompt used to name/rename something —
+/// "Rename track" / "Track name" / "Rename", prefilled with `current`.
+/// Callers retitle it through [`StudioPrompt`]'s fields and builders (the
+/// bus's "Rename bus" / "Bus name", the interpretations' prompts).
+/// Confirm/cancel prompts use the shared [`ConfirmDialog`].
+pub fn rename_dialog(current: &str) -> StudioPrompt {
+    StudioPrompt::new("Rename track")
+        .hint("Track name")
+        .initial(current)
+        .confirm_label("Rename")
+}
+
+/// The menu's card: `Studio.surfaceRaised`, radius 10, a 1 px
+/// `Studio.border` outline, elevation 10; the rows scroll (no scrollbar)
+/// inside a [`MENU_MAX_HEIGHT`] cap.
+fn menu_card<'a, M: 'a>(rows: Column<'a, M>, width: f32) -> Element<'a, M> {
+    container(
+        container(scrollable(rows.width(Length::Fill)).style(theme::no_scrollbar))
+            .max_height(MENU_MAX_HEIGHT),
+    )
+    .width(width)
+    // Inside the 1 px border (a decoration's border pads its child).
+    .padding(1)
+    .style(theme::menu)
+    .clip(true)
+    .into()
+}
+
+/// `_MenuDivider`: `Divider(height: 9, thickness: 1, color: Studio.border)`.
+fn menu_divider<'a, M: 'a>() -> Element<'a, M> {
+    container(
+        container(Space::new())
+            .width(Length::Fill)
+            .height(1)
+            .style(theme::fill(Studio::BORDER)),
+    )
+    .width(Length::Fill)
+    .height(9)
+    .align_y(Vertical::Center)
+    .into()
+}
+
+/// A plain row: `icon` (if any), `label`.
+fn menu_row<'a, M: Clone + 'a>(icon: Option<Icon>, label: &str, on_tap: M) -> Element<'a, M> {
+    let mut entry = MenuRow::new(label, on_tap);
+    entry.icon = icon;
+    entry.into()
+}
+
+/// `_MenuRow`: a full-bleed row (`Studio.hover` under the pointer), 14 / 9
+/// padding: a 15 px icon 12 px before the 13 px label (one line), a faint
+/// subtitle under it (two lines at most), and a check when selected. Red
+/// when it is the danger row, coral when selected.
+pub struct MenuRow<M> {
+    icon: Option<Icon>,
+    label: String,
+    on_tap: M,
+    danger: bool,
+    selected: bool,
+    subtitle: Option<String>,
+}
+
+impl<M> MenuRow<M> {
+    pub fn new(label: impl Into<String>, on_tap: M) -> Self {
+        Self {
+            icon: None,
+            label: label.into(),
+            on_tap,
+            danger: false,
+            selected: false,
+            subtitle: None,
+        }
+    }
+
+    pub fn icon(mut self, icon: Icon) -> Self {
+        self.icon = Some(icon);
+        self
+    }
+
+    pub fn danger(mut self, danger: bool) -> Self {
+        self.danger = danger;
+        self
+    }
+
+    pub fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
+
+    pub fn subtitle(mut self, subtitle: impl Into<String>) -> Self {
+        self.subtitle = Some(subtitle.into());
+        self
+    }
+
+    /// The row's label color.
+    pub fn color(&self) -> Color {
+        if self.danger {
+            Studio::RECORD
+        } else if self.selected {
+            Studio::ACCENT
+        } else {
+            Studio::TEXT_PRIMARY
+        }
+    }
+}
+
+impl<'a, M: Clone + 'a> From<MenuRow<M>> for Element<'a, M> {
+    fn from(r: MenuRow<M>) -> Self {
+        let color = r.color();
+        let mut content = row![].align_y(Vertical::Center);
+        if let Some(icon) = r.icon {
+            content = content
+                .push(icons::icon(icon, 15.0, color))
+                .push(Space::new().width(12));
+        }
+        // One line, clipped (Dart ellipsized it; iced has no ellipsis).
+        let mut labels =
+            column![
+                container(text(r.label).size(13).color(color).wrapping(Wrapping::None))
+                    .width(Length::Fill)
+                    .clip(true)
+            ]
+            .width(Length::Fill);
+        if let Some(subtitle) = r.subtitle {
+            labels = labels.push(Space::new().height(2)).push(
+                // Two lines at most.
+                container(
+                    text(subtitle)
+                        .size(10.5)
+                        .line_height(1.3)
+                        .color(Studio::TEXT_FAINT),
+                )
+                .width(Length::Fill)
+                .max_height(10.5 * 1.3 * 2.0)
+                .clip(true),
+            );
+        }
+        content = content.push(labels);
+        if r.selected {
+            content = content.push(icons::icon(Icon::Check, 14.0, Studio::ACCENT));
+        }
+        button(content)
+            .width(Length::Fill)
+            .padding([9, 14])
+            .style(theme::menu_item)
+            .on_press(r.on_tap)
+            .into()
+    }
+}
+
+/// `_ColorGrid`: the inline lane-color picker — a faint "COLOR" caption over
+/// the preset swatches, eight to a row at the menu's width. (The caption's
+/// 0.6 letter spacing has no iced counterpart.)
+fn color_grid<'a, M: Clone + 'a>(
+    current: Option<i64>,
+    on_pick: impl Fn(i64) -> M,
+) -> Element<'a, M> {
+    let swatches = TRACK_COLOR_PALETTE
+        .iter()
+        .map(|&value| color_swatch(argb(value), current == Some(value), on_pick(value)));
+    container(column![
+        container(
+            text("COLOR")
+                .size(9)
+                .font(font::BOLD)
+                .color(Studio::TEXT_FAINT)
+        )
+        .padding(Padding {
+            left: 1.0,
+            bottom: 8.0,
+            ..Padding::ZERO
+        }),
+        Row::with_children(swatches)
+            .spacing(8)
+            .wrap()
+            .vertical_spacing(8),
+    ])
+    .padding(Padding {
+        top: 12.0,
+        right: 14.0,
+        bottom: 10.0,
+        left: 14.0,
+    })
+    .into()
+}
+
+/// `_ColorSwatch`: a 22 px disc of `color`, ringed 2 px in
+/// `Studio.textPrimary` when it is the lane's tint, else 1 px in
+/// `Studio.border`.
+fn color_swatch<'a, M: Clone + 'a>(color: Color, selected: bool, on_tap: M) -> Element<'a, M> {
+    let disc = container(Space::new().width(22).height(22)).style(move |_| container::Style {
+        background: Some(color.into()),
+        border: Border {
+            color: if selected {
+                Studio::TEXT_PRIMARY
+            } else {
+                Studio::BORDER
+            },
+            width: if selected { 2.0 } else { 1.0 },
+            radius: 11.0.into(),
+        },
+        ..container::Style::default()
+    });
+    button(disc)
+        .padding(0)
+        .style(bare_button)
+        .on_press(on_tap)
+        .into()
+}
+
+// -------------------------------------------------------------- the host
+
+/// Where a [`MenuHost`] pops its menu.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum MenuAnchor {
+    /// At the last press inside the host: the right-click or tap-down that
+    /// opened it (`details.globalPosition`).
+    #[default]
+    Press,
+    /// Just below the host's bottom-left corner, `dy` lower
+    /// (`menuAnchorBelow(context, dy: 4)`): a dropdown under its trigger.
+    Below(f32),
+}
+
+/// [`MenuAnchor::Below`]'s default gap.
+pub const MENU_ANCHOR_BELOW_DY: f32 = 4.0;
+
+/// `content`, with `menu` popped over the window while `Some` (see the
+/// module docs).
+pub struct MenuHost<'a, M> {
+    content: Element<'a, M>,
+    menu: Option<Element<'a, M>>,
+    on_dismiss: M,
+    anchor: MenuAnchor,
+}
+
+/// Wraps `content`; while `menu` is `Some` it is open at the last press
+/// inside `content`, and a tap outside it or Escape reports `on_dismiss`.
+pub fn menu_host<'a, M>(
+    content: impl Into<Element<'a, M>>,
+    menu: Option<Element<'a, M>>,
+    on_dismiss: M,
+) -> MenuHost<'a, M> {
+    MenuHost {
+        content: content.into(),
+        menu,
+        on_dismiss,
+        anchor: MenuAnchor::Press,
+    }
+}
+
+impl<M> MenuHost<'_, M> {
+    pub fn anchor(mut self, anchor: MenuAnchor) -> Self {
+        self.anchor = anchor;
+        self
+    }
+}
+
+/// Where `_MenuLayoutDelegate` puts a menu of `menu` size opened at `at` in
+/// a window of `window` size: at the point, pulled back inside the
+/// [`MENU_MARGIN`] when it would run past the right or bottom edge, and held
+/// at the margin. (Dart's `clamp(8, size.width)` threw in a window narrower
+/// than the margin; held at the margin here.)
+pub fn menu_position(at: Point, menu: Size, window: Size) -> Point {
+    let mut x = at.x;
+    let mut y = at.y;
+    if x + menu.width > window.width - MENU_MARGIN {
+        x = window.width - menu.width - MENU_MARGIN;
+    }
+    if y + menu.height > window.height - MENU_MARGIN {
+        y = window.height - menu.height - MENU_MARGIN;
+    }
+    Point::new(
+        x.max(MENU_MARGIN).min(window.width.max(MENU_MARGIN)),
+        y.max(MENU_MARGIN).min(window.height.max(MENU_MARGIN)),
+    )
+}
+
+/// The host's memory: where the last press inside it landed, and a tap on
+/// the barrier in flight.
+#[derive(Debug, Default)]
+struct HostState {
+    /// The last press inside the host, from its top-left.
+    press: Option<Vector>,
+    /// A press on the barrier (outside the open menu), where it landed: its
+    /// release within the tap slop dismisses (Flutter's barrier dismisses on
+    /// a tap's up, of any button).
+    barrier: Option<Point>,
+}
+
+impl<'a, M: Clone + 'a> Widget<M, Theme, Renderer> for MenuHost<'a, M> {
+    fn size(&self) -> Size<Length> {
+        self.content.as_widget().size()
+    }
+
+    fn size_hint(&self) -> Size<Length> {
+        self.content.as_widget().size_hint()
+    }
+
+    fn tag(&self) -> tree::Tag {
+        tree::Tag::of::<HostState>()
+    }
+
+    fn state(&self) -> tree::State {
+        tree::State::new(HostState::default())
+    }
+
+    fn children(&self) -> Vec<Tree> {
+        vec![
+            Tree::new(&self.content),
+            self.menu.as_ref().map_or_else(Tree::empty, Tree::new),
+        ]
+    }
+
+    fn diff(&self, tree: &mut Tree) {
+        tree.children.resize_with(2, Tree::empty);
+        tree.children[0].diff(&self.content);
+        match &self.menu {
+            Some(menu) => tree.children[1].diff(menu),
+            None => tree.children[1] = Tree::empty(),
+        }
+    }
+
+    fn layout(
+        &mut self,
+        tree: &mut Tree,
+        renderer: &Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node {
+        self.content
+            .as_widget_mut()
+            .layout(&mut tree.children[0], renderer, limits)
+    }
+
+    fn draw(
+        &self,
+        tree: &Tree,
+        renderer: &mut Renderer,
+        theme: &Theme,
+        style: &renderer::Style,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+    ) {
+        self.content.as_widget().draw(
+            &tree.children[0],
+            renderer,
+            theme,
+            style,
+            layout,
+            cursor,
+            viewport,
+        );
+    }
+
+    fn operate(
+        &mut self,
+        tree: &mut Tree,
+        layout: Layout<'_>,
+        renderer: &Renderer,
+        operation: &mut dyn Operation,
+    ) {
+        self.content
+            .as_widget_mut()
+            .operate(&mut tree.children[0], layout, renderer, operation);
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut Tree,
+        event: &Event,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        renderer: &Renderer,
+        clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, M>,
+        viewport: &Rectangle,
+    ) {
+        self.content.as_widget_mut().update(
+            &mut tree.children[0],
+            event,
+            layout,
+            cursor,
+            renderer,
+            clipboard,
+            shell,
+            viewport,
+        );
+        let state = tree.state.downcast_mut::<HostState>();
+        if self.menu.is_none() {
+            state.barrier = None;
+        }
+        // Every press inside counts, the ones a child took too (the ⋯
+        // button's tap-down): the last one opened the menu.
+        let bounds = layout.bounds();
+        let pressed = match event {
+            Event::Mouse(mouse::Event::ButtonPressed(_)) => cursor.position_over(bounds),
+            Event::Touch(touch::Event::FingerPressed { position, .. }) => {
+                bounds.contains(*position).then_some(*position)
+            }
+            _ => None,
+        };
+        if let Some(p) = pressed {
+            state.press = Some(p - bounds.position());
+        }
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &Tree,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+        renderer: &Renderer,
+    ) -> mouse::Interaction {
+        self.content.as_widget().mouse_interaction(
+            &tree.children[0],
+            layout,
+            cursor,
+            viewport,
+            renderer,
+        )
+    }
+
+    fn overlay<'b>(
+        &'b mut self,
+        tree: &'b mut Tree,
+        layout: Layout<'b>,
+        renderer: &Renderer,
+        viewport: &Rectangle,
+        translation: Vector,
+    ) -> Option<overlay::Element<'b, M, Theme, Renderer>> {
+        let bounds = layout.bounds();
+        let Tree {
+            state, children, ..
+        } = tree;
+        let [content_tree, menu_tree] = children.as_mut_slice() else {
+            return None;
+        };
+        match &mut self.menu {
+            Some(menu) => {
+                let host = state.downcast_mut::<HostState>();
+                // The host as drawn on the window (a scrolled list moves it).
+                let origin = bounds.position() + translation;
+                let at = match self.anchor {
+                    MenuAnchor::Press => origin + host.press.unwrap_or(Vector::ZERO),
+                    MenuAnchor::Below(dy) => origin + Vector::new(0.0, bounds.height + dy),
+                };
+                Some(overlay::Element::new(Box::new(OpenMenu {
+                    menu,
+                    tree: menu_tree,
+                    at,
+                    barrier: &mut host.barrier,
+                    on_dismiss: self.on_dismiss.clone(),
+                })))
+            }
+            None => self.content.as_widget_mut().overlay(
+                content_tree,
+                layout,
+                renderer,
+                viewport,
+                translation,
+            ),
+        }
+    }
+}
+
+impl<'a, M: Clone + 'a> From<MenuHost<'a, M>> for Element<'a, M> {
+    fn from(host: MenuHost<'a, M>) -> Self {
+        Element::new(host)
+    }
+}
+
+/// The open menu over the whole window (`_InstantMenuRoute`).
+struct OpenMenu<'a, 'b, M> {
+    menu: &'b mut Element<'a, M>,
+    tree: &'b mut Tree,
+    at: Point,
+    barrier: &'b mut Option<Point>,
+    on_dismiss: M,
+}
+
+impl<M: Clone> overlay::Overlay<M, Theme, Renderer> for OpenMenu<'_, '_, M> {
+    fn layout(&mut self, renderer: &Renderer, bounds: Size) -> layout::Node {
+        // Laid out within the window less the margin all round
+        // (`BoxConstraints.loose(biggest).deflate(8)`).
+        let limits = layout::Limits::new(
+            Size::ZERO,
+            Size::new(
+                (bounds.width - 2.0 * MENU_MARGIN).max(0.0),
+                (bounds.height - 2.0 * MENU_MARGIN).max(0.0),
+            ),
+        );
+        let node = self
+            .menu
+            .as_widget_mut()
+            .layout(self.tree, renderer, &limits);
+        let at = menu_position(self.at, node.size(), bounds);
+        // The node spans the window (the barrier); its one child is the menu.
+        layout::Node::with_children(bounds, vec![node.move_to(at)])
+    }
+
+    fn draw(
+        &self,
+        renderer: &mut Renderer,
+        theme: &Theme,
+        style: &renderer::Style,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+    ) {
+        let Some(menu) = layout.children().next() else {
+            return;
+        };
+        self.menu.as_widget().draw(
+            self.tree,
+            renderer,
+            theme,
+            style,
+            menu,
+            cursor,
+            &layout.bounds(),
+        );
+    }
+
+    fn operate(&mut self, layout: Layout<'_>, renderer: &Renderer, operation: &mut dyn Operation) {
+        if let Some(menu) = layout.children().next() {
+            self.menu
+                .as_widget_mut()
+                .operate(self.tree, menu, renderer, operation);
+        }
+    }
+
+    fn update(
+        &mut self,
+        event: &Event,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        renderer: &Renderer,
+        clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, M>,
+    ) {
+        let Some(menu) = layout.children().next() else {
+            return;
+        };
+        let outside = |p: Point| !menu.bounds().contains(p);
+        match event {
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key: keyboard::Key::Named(keyboard::key::Named::Escape),
+                ..
+            }) => {
+                shell.publish(self.on_dismiss.clone());
+                shell.capture_event();
+                return;
+            }
+            Event::Mouse(mouse::Event::ButtonPressed(_)) => {
+                if let Some(p) = cursor.position().filter(|p| outside(*p)) {
+                    *self.barrier = Some(p);
+                    shell.capture_event();
+                    return;
+                }
+            }
+            Event::Touch(touch::Event::FingerPressed { position, .. }) if outside(*position) => {
+                *self.barrier = Some(*position);
+                shell.capture_event();
+                return;
+            }
+            Event::Mouse(mouse::Event::CursorMoved { position })
+            | Event::Touch(touch::Event::FingerMoved { position, .. }) => {
+                // Dragged past the tap slop: not a tap, so no dismissal.
+                if self
+                    .barrier
+                    .is_some_and(|at| at.distance(*position) > TAP_SLOP)
+                {
+                    *self.barrier = None;
+                }
+            }
+            Event::Mouse(mouse::Event::ButtonReleased(_))
+            | Event::Touch(touch::Event::FingerLifted { .. })
+                if self.barrier.is_some() =>
+            {
+                *self.barrier = None;
+                shell.publish(self.on_dismiss.clone());
+                shell.capture_event();
+                return;
+            }
+            _ => {}
+        }
+        self.menu.as_widget_mut().update(
+            self.tree,
+            event,
+            menu,
+            cursor,
+            renderer,
+            clipboard,
+            shell,
+            &layout.bounds(),
+        );
+        // The barrier: nothing beneath sees the pointer or the keyboard.
+        if matches!(
+            event,
+            Event::Mouse(_) | Event::Touch(_) | Event::Keyboard(_) | Event::InputMethod(_)
+        ) {
+            shell.capture_event();
+        }
+    }
+
+    fn mouse_interaction(
+        &self,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        renderer: &Renderer,
+    ) -> mouse::Interaction {
+        let interaction =
+            layout
+                .children()
+                .next()
+                .map_or_else(mouse::Interaction::default, |menu| {
+                    self.menu.as_widget().mouse_interaction(
+                        self.tree,
+                        menu,
+                        cursor,
+                        &layout.bounds(),
+                        renderer,
+                    )
+                });
+        // Anything but `None` keeps the cursor from the page beneath: the
+        // barrier covers the whole window.
+        if interaction == mouse::Interaction::None {
+            mouse::Interaction::Idle
+        } else {
+            interaction
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;
