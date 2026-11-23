@@ -273,6 +273,11 @@ impl App {
             Message::Library(event) => self.library(event),
             Message::Fatal(message) => self.fatal_action(message),
             Message::WindowOpened(id) => {
+                // The Runner's MainMenu.xib, in place of the app menu winit
+                // set when the app finished launching (before any window
+                // opened). Once; on the main thread, where iced runs update
+                // on macOS.
+                vocara_services::app_menu::install();
                 if self.window.is_some() {
                     return Task::none();
                 }

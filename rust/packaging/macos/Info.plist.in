@@ -24,12 +24,18 @@
 	<string>@BUILD@</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.music</string>
+	<!-- 11.0, where the Flutter app said 10.15 (its deployment target): the
+	     arm64 slice cannot run below 11.0, and whether the Rust app and its
+	     dependencies (wgpu, the engine, the AVFoundation players) run on
+	     10.15 has not been verified, so 10.15 is not claimed. -->
 	<key>LSMinimumSystemVersion</key>
 	<string>11.0</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © 2026 Vocara. All rights reserved.</string>
+	<!-- No NSMainNibFile: the menu bar the Runner's MainMenu.xib held is built
+	     in code (crates/vocara_services/src/app_menu.rs). -->
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>NSMicrophoneUsageDescription</key>
