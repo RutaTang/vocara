@@ -235,10 +235,10 @@ behavior and its tests are ported and the gates pass.
 | `ui/core/widgets/window_drag_bar.dart` | 60 | `vocara_app::ui::core::widgets::window_drag_bar` | done |
 | `ui/home/view_model/home_view_model.dart` | 144 | `vocara_app::ui::home::view_model::home_view_model` | todo |
 | `ui/home/widgets/home_screen.dart` | 491 | `vocara_app::ui::home::widgets::home_screen` | todo |
-| `ui/home/widgets/new_practice_dialog.dart` | 16 | `vocara_app::ui::home::widgets::new_practice_dialog` | todo |
-| `ui/home/widgets/practice_project_card.dart` | 126 | `vocara_app::ui::home::widgets::practice_project_card` | todo |
-| `ui/home/widgets/update_notice.dart` | 219 | `vocara_app::ui::home::widgets::update_notice` | todo |
-| `ui/settings/licenses.dart` | 213 | `vocara_app::ui::settings::licenses` | todo |
+| `ui/home/widgets/new_practice_dialog.dart` | 16 | `vocara_app::ui::home::widgets::new_practice_dialog` | done |
+| `ui/home/widgets/practice_project_card.dart` | 126 | `vocara_app::ui::home::widgets::practice_project_card` | done |
+| `ui/home/widgets/update_notice.dart` | 219 | `vocara_app::ui::home::widgets::update_notice` | done (the 5 s auto-check timer is the home screen's) |
+| `ui/settings/licenses.dart` | 213 | `vocara_app::ui::settings::licenses` (the page too; the crate list is the generated `assets/licenses/crates.json`: after a dependency change, run `VOCARA_UPDATE_LICENSES=1 cargo test -p vocara_app the_crate_license_list_is_current` and commit it) | done |
 | `ui/settings/settings_screen.dart` | 1135 | `vocara_app::ui::settings::settings_screen` | todo |
 | `ui/song_practice_detail/view_model/analysis_cache.dart` | 1717 | `vocara_app::ui::song_practice_detail::view_model::analysis_cache` | todo |
 | `ui/song_practice_detail/view_model/analysis_source.dart` | 64 | `vocara_app::ui::song_practice_detail::view_model::analysis_source` | todo |
@@ -256,7 +256,7 @@ behavior and its tests are ported and the gates pass.
 | `ui/song_practice_detail/widgets/lyrics_panel.dart` | 1396 | `vocara_app::ui::song_practice_detail::widgets::lyrics_panel` | todo |
 | `ui/song_practice_detail/widgets/mixer_strip.dart` | 1185 | `vocara_app::ui::song_practice_detail::widgets::mixer_strip` | todo |
 | `ui/song_practice_detail/widgets/note_editor.dart` | 195 | `vocara_app::ui::song_practice_detail::widgets::note_editor` | todo |
-| `ui/song_practice_detail/widgets/pitch_lane.dart` | 648 | `vocara_app::ui::song_practice_detail::widgets::pitch_lane` | todo |
+| `ui/song_practice_detail/widgets/pitch_lane.dart` | 648 | `vocara_app::ui::song_practice_detail::widgets::pitch_lane` | done (tests on hand-built metrics until `computeVoiceMetrics` lands) |
 | `ui/song_practice_detail/widgets/ruler_bar.dart` | 254 | `vocara_app::ui::song_practice_detail::widgets::ruler_bar` | todo |
 | `ui/song_practice_detail/widgets/song_practice_detail_screen.dart` | 2172 | `vocara_app::ui::song_practice_detail::widgets::song_practice_detail_screen` | todo |
 | `ui/song_practice_detail/widgets/technique_picker.dart` | 309 | `vocara_app::ui::song_practice_detail::widgets::technique_picker` | todo |
@@ -270,10 +270,10 @@ behavior and its tests are ported and the gates pass.
 | `ui/technique_library/widgets/media/technique_audio_player.dart` | 417 | `vocara_app::ui::technique_library::widgets::media::technique_audio_player` | todo |
 | `ui/technique_library/widgets/media/technique_media_section.dart` | 898 | `vocara_app::ui::technique_library::widgets::media::technique_media_section` | todo |
 | `ui/technique_library/widgets/media/technique_video_player.dart` | 190 | `vocara_app::ui::technique_library::widgets::media::technique_video_player` | todo |
-| `ui/technique_library/widgets/studio_field.dart` | 96 | `vocara_app::ui::technique_library::widgets::studio_field` | todo |
+| `ui/technique_library/widgets/studio_field.dart` | 96 | `vocara_app::ui::technique_library::widgets::studio_field` | done |
 | `ui/technique_library/widgets/technique_analysis_section.dart` | 690 | `vocara_app::ui::technique_library::widgets::technique_analysis_section` | todo |
 | `ui/technique_library/widgets/technique_detail_screen.dart` | 825 | `vocara_app::ui::technique_library::widgets::technique_detail_screen` | todo |
-| `ui/technique_library/widgets/technique_dialogs.dart` | 117 | `vocara_app::ui::technique_library::widgets::technique_dialogs` | todo |
+| `ui/technique_library/widgets/technique_dialogs.dart` | 117 | `vocara_app::ui::technique_library::widgets::technique_dialogs` | done |
 | `utils/analysis_gate.dart` | 54 | `vocara_model::util::analysis_gate` | done |
 | `utils/busy_gate.dart` | 83 | `vocara_app::util::busy_gate` | done |
 | `utils/command.dart` | 71 | `vocara_app::util::command` | done |
