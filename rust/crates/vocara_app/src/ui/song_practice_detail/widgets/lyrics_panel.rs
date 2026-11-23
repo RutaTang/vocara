@@ -37,8 +37,13 @@
 //!   The scroll is immediate (Dart animated it over 320 / 200 ms).
 //! - The sync view's `Focus(autofocus)` taking Space → the view handles a
 //!   Space press nothing else took, and takes it (the screen's shortcuts skip
-//!   captured keys). The Focus view takes every key while it is up
-//!   ([`holds_keyboard`]), so nothing hidden beneath it hears one.
+//!   captured keys). iced hands every widget the key, not the focused one
+//!   alone: a focused text field drawn over the page (a dialog) or earlier
+//!   in the tree takes it first, and the line is not stamped; one later in
+//!   the tree (none is: the panel is the page's last column) would type it
+//!   as well. The Focus
+//!   view takes every key while it is up ([`holds_keyboard`]), so nothing
+//!   hidden beneath it hears one.
 //! - `LayoutBuilder` → `responsive`; a part that comes and goes with the
 //!   height (the toolbar, the pinned hint) keeps a slot, so the editor and
 //!   the sync list keep their widget state (Dart keyed the tab body).
@@ -268,7 +273,8 @@ struct Editor {
     /// Made under a dialog, so it did not take the keyboard: it is taken
     /// once the page is on top again. Only then: owed for any dialog over an
     /// editor the user had clicked away from, it took the keyboard back as
-    /// the dialog closed.
+    /// the dialog closed. (Dart also checked that nothing on the page had
+    /// taken the keyboard meanwhile; under a modal dialog nothing on it can.)
     focus_owed: bool,
 }
 
