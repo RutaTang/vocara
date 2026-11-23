@@ -524,14 +524,18 @@ fn repair_library_started_between_two_pages_of_a_pull_run_waits_for_the_run() {
     cloud.accept(practice(t + 6, true));
     let events: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
     *wire.pause_after.lock().unwrap() = Some(inner.fetch_calls() + 1);
-    std::thread::scope(|scope| {
+    // What the paused run shows is READ inside the scope and asserted after
+    // it: an assertion failing while the pull thread waits to be resumed
+    // left the scope joining that thread forever — a regression here hung
+    // the suite instead of failing it.
+    let (between_pages, repair_waited, pull_failed, report) = std::thread::scope(|scope| {
         let pull = scope.spawn(|| {
             let run = engine.pump_pull();
             events.lock().unwrap().push("pull-done");
             run
         });
         paused.recv().unwrap();
-        assert_eq!(interp_deleted_at(), None, "page 1 landed");
+        let between_pages = interp_deleted_at();
 
         let repair = scope.spawn(|| {
             let report = m.repair_library();
@@ -539,15 +543,21 @@ fn repair_library_started_between_two_pages_of_a_pull_run_waits_for_the_run() {
             report
         });
         std::thread::sleep(Duration::from_millis(25));
-        assert!(
-            events.lock().unwrap().is_empty(),
-            "the repair must wait for the run"
-        );
+        let repair_waited = events.lock().unwrap().is_empty();
 
         resume.send(()).unwrap();
-        assert!(!pull.join().unwrap().failed());
-        repair.join().unwrap().unwrap();
+        let pull_failed = pull.join().unwrap().failed();
+        (
+            between_pages,
+            repair_waited,
+            pull_failed,
+            repair.join().unwrap(),
+        )
     });
+    assert_eq!(between_pages, None, "page 1 landed");
+    assert!(repair_waited, "the repair must wait for the run");
+    assert!(!pull_failed);
+    report.unwrap();
     // No order check between "pull-done" and "repair-done": once the run
     // releases its exclusive hold, the repair may finish before the pull
     // thread gets to record anything (Dart's single isolate made that order
@@ -581,7 +591,9 @@ fn a_repair_waiting_for_a_pull_run_does_not_hold_up_saves_meanwhile() {
         .attach_sync(wire.clone(), AttachSyncOptions::default())
         .unwrap();
     *wire.pause_after.lock().unwrap() = Some(inner.fetch_calls());
-    std::thread::scope(|scope| {
+    // Observed inside the scope, asserted after it (see the test above: a
+    // failing assertion with the pull thread still paused hung the suite).
+    let (saved_meanwhile, pull_failed, report) = std::thread::scope(|scope| {
         let pull = scope.spawn(|| engine.pump_pull());
         paused.recv().unwrap();
         let repair = scope.spawn(|| m.repair_library());
@@ -592,16 +604,19 @@ fn a_repair_waiting_for_a_pull_run_does_not_hold_up_saves_meanwhile() {
         scope.spawn(move || {
             let _ = saved_tx.send(gate.shared(|| true));
         });
-        assert_eq!(
-            saved.recv_timeout(Duration::from_secs(1)),
-            Ok(true),
-            "a save must not wait for the pull run"
-        );
+        let saved_meanwhile = saved.recv_timeout(Duration::from_secs(1));
 
         resume.send(()).unwrap();
-        assert!(!pull.join().unwrap().failed());
-        repair.join().unwrap().unwrap();
+        let pull_failed = pull.join().unwrap().failed();
+        (saved_meanwhile, pull_failed, repair.join().unwrap())
     });
+    assert_eq!(
+        saved_meanwhile,
+        Ok(true),
+        "a save must not wait for the pull run"
+    );
+    assert!(!pull_failed);
+    report.unwrap();
     engine.dispose();
 }
 

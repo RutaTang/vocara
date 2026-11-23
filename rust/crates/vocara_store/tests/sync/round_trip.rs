@@ -4,10 +4,12 @@
 //! state on the other.
 //!
 //! The Dart suite drives two full Persistence stacks through the
-//! repository; those are not ported yet, so the devices here make the same
-//! row-level writes the repository makes (see `device.rs`). Not ported: the
-//! "three-way stale editor" case, which exercises the repository's
-//! base-hash reconcile (`savePracticeWithBase`), not the sync layer.
+//! repository; the devices here make the same row-level writes the
+//! repository makes (see `device.rs`, whose devices also carry the
+//! repository). The "three-way stale editor END TO END" case, which needs
+//! the repository's base-hash reconcile (`savePracticeWithBase`), is
+//! `vocara_services/tests/sync_round_trip_three_way.rs`, on two
+//! `Persistence` stacks as in Dart.
 
 use vocara_store::sync::sync_transport::FakeCloud;
 

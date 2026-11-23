@@ -1,29 +1,36 @@
 //! A simulated device for the multi-device suites: a library, its clock and
-//! writer, a transport onto a shared fake cloud, and an engine — the parts
-//! `Persistence.attachSync` wires in Dart.
+//! writer, its asset pool and song repository, a transport onto a shared
+//! fake cloud, and an engine — the parts `Persistence` and
+//! `Persistence.attachSync` wire in Dart. (`vocara_services::persistence`
+//! wires the same parts, but takes no clock; these devices run on a
+//! settable one, so they are wired here.)
 //!
-//! Persistence and the repositories are not ported yet, so local edits are
-//! made the way the repository makes them at the row level: every write is
-//! a row change plus its journal entry in ONE transaction, stamped through
-//! `SyncWriter::stamp_for`, and a delete cascade-tombstones the practice's
-//! subtree (children journaled before the practice, as `deletePractice`
-//! does).
+//! Local edits are made either through the repository ([`Device::repo`]),
+//! as the Dart suites made them, or at the row level the way the
+//! repository makes them: every write is a row change plus its journal
+//! entry in ONE transaction, stamped through `SyncWriter::stamp_for`, and a
+//! delete cascade-tombstones the practice's subtree (children journaled
+//! before the practice, as `deletePractice` does).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use rusqlite::types::ToSql;
+use tempfile::TempDir;
+use vocara_model::models::song_practice::SongPractice;
 use vocara_store::db::rows::{
     AssetRow, ClipRow, InterpretationRow, PracticeNoteRow, PracticeRow, TrackRow,
 };
-use vocara_store::db::AppDatabase;
+use vocara_store::db::{AppDatabase, AssetStore};
 use vocara_store::error::Result;
+use vocara_store::repositories::{SongPracticeRepository, SongPracticeRepositoryDrift};
 use vocara_store::sync::hlc::HlcClock;
 use vocara_store::sync::integrity_checker::IntegrityChecker;
 use vocara_store::sync::oplog_drain::OplogDrain;
 use vocara_store::sync::quarantine_store::QuarantineStore;
 use vocara_store::sync::sync_applier::SyncApplier;
 use vocara_store::sync::sync_engine::{SyncEngine, SyncEngineOptions, SyncEngineParts};
+use vocara_store::sync::sync_hashes::Loaded;
 use vocara_store::sync::sync_row::{synced_table_registry, SyncRowBuilder};
 use vocara_store::sync::sync_state_store::SyncStateStore;
 use vocara_store::sync::sync_transport::{FakeCloud, FakeSyncTransport, SyncTransport};
@@ -37,6 +44,12 @@ pub struct Device {
     pub writer: Arc<SyncWriter>,
     pub transport: Arc<FakeSyncTransport>,
     pub engine: Arc<SyncEngine>,
+    /// The song repository over this library and its pool.
+    pub songs: SongPracticeRepositoryDrift,
+    /// The asset pool's root, then a scratch directory for source files
+    /// (both removed with the device).
+    _pool: TempDir,
+    scratch: TempDir,
 }
 
 /// The ids of one seeded aggregate: a practice with its default
@@ -91,13 +104,57 @@ impl Device {
             },
             SyncEngineOptions::default(),
         );
+        let pool = tempfile::Builder::new()
+            .prefix("vocara_sync_pool")
+            .tempdir()
+            .unwrap();
+        let scratch = tempfile::Builder::new()
+            .prefix("vocara_sync_src")
+            .tempdir()
+            .unwrap();
+        let assets = Arc::new(AssetStore::new(
+            db.clone(),
+            pool.path().to_path_buf(),
+            writer.clone(),
+        ));
         Device {
+            songs: SongPracticeRepositoryDrift::new(db.clone(), writer.clone(), assets),
             db,
             now,
             writer,
             transport,
             engine: Arc::new(engine),
+            _pool: pool,
+            scratch,
         }
+    }
+
+    /// The song repository (Dart's `songRepo`).
+    pub fn repo(&self) -> &dyn SongPracticeRepository {
+        &self.songs
+    }
+
+    /// Writes [bytes] to a fresh source file (`<prefix>_<id>.wav`) outside
+    /// the pool, as a drag-and-drop source, and returns its path.
+    pub fn source_file(&self, prefix: &str, bytes: &[u8]) -> String {
+        let f = self
+            .scratch
+            .path()
+            .join(format!("{prefix}_{}.wav", vocara_model::util::id::new_id()));
+        std::fs::write(&f, bytes).unwrap();
+        f.to_string_lossy().into_owned()
+    }
+
+    /// `loadPractice` (Dart's `loadOn`).
+    pub fn load(&self, practice: &str) -> Loaded<SongPractice> {
+        self.repo().load_practice(practice).unwrap()
+    }
+
+    /// `savePracticeWithBase` over a load's base hashes.
+    pub fn save_with_base(&self, next: &SongPractice, base: &Loaded<SongPractice>) {
+        self.repo()
+            .save_practice_with_base(next, &base.base_hashes)
+            .unwrap();
     }
 
     pub fn checker(&self) -> IntegrityChecker {
