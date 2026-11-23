@@ -834,8 +834,11 @@ pub fn analyze_vibrato(
     )
 }
 
-/// Live vibrato over the trailing [window_sec] (Dart's default: 1.6) of a
-/// rolling per-frame F0 history.
+/// Dart's default `windowSec` of [`analyze_vibrato_live`].
+pub const LIVE_VIBRATO_WINDOW_SEC: f64 = 1.6;
+
+/// Live vibrato over the trailing [window_sec] (Dart's default:
+/// [`LIVE_VIBRATO_WINDOW_SEC`]) of a rolling per-frame F0 history.
 pub fn analyze_vibrato_live(
     f0_history: &[f64],
     frame_rate: f64,
