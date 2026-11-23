@@ -214,18 +214,18 @@ behavior and its tests are ported and the gates pass.
 | `routing/routes.dart` | 23 | `vocara_app::router` | todo |
 | `ui/core/themes/studio.dart` | 45 | `vocara_app::ui::core::theme` (`Studio`) | done |
 | `ui/core/themes/theme.dart` | 6 | `vocara_app::ui::core::theme` (`Zinc`, `app_theme`, styles) | done |
-| `ui/core/widgets/cap_label.dart` | 21 | `vocara_app::ui::core::widgets::cap_label` | todo |
+| `ui/core/widgets/cap_label.dart` | 21 | `vocara_app::ui::core::widgets::cap_label` | done |
 | `ui/core/widgets/confirm_dialog.dart` | 284 | `vocara_app::ui::core::widgets::confirm_dialog` | todo |
 | `ui/core/widgets/fatal_open_screen.dart` | 276 | `vocara_app::ui::core::widgets::fatal_open_screen` | todo |
-| `ui/core/widgets/holds_keyboard.dart` | 43 | `vocara_app::ui::core::widgets::holds_keyboard` | todo |
+| `ui/core/widgets/holds_keyboard.dart` | 43 | `vocara_app::ui::core::widgets::holds_keyboard` | done |
 | `ui/core/widgets/spectrogram_painter.dart` | 946 | `vocara_app::ui::core::widgets::spectrogram_painter` | todo |
-| `ui/core/widgets/stable_subtree.dart` | 66 | `vocara_app::ui::core::widgets::stable_subtree` | todo |
-| `ui/core/widgets/studio_button.dart` | 118 | `vocara_app::ui::core::widgets::studio_button` | todo |
-| `ui/core/widgets/studio_controls.dart` | 500 | `vocara_app::ui::core::widgets::studio_controls` | todo |
-| `ui/core/widgets/studio_hint.dart` | 74 | `vocara_app::ui::core::widgets::studio_hint` | todo |
-| `ui/core/widgets/tick_boundary.dart` | 25 | `vocara_app::ui::core::widgets::tick_boundary` | todo |
+| `ui/core/widgets/stable_subtree.dart` | 66 | `vocara_app::ui::core::widgets::stable_subtree` | done |
+| `ui/core/widgets/studio_button.dart` | 118 | `vocara_app::ui::core::widgets::studio_button` | done |
+| `ui/core/widgets/studio_controls.dart` | 500 | `vocara_app::ui::core::widgets::studio_controls` | done |
+| `ui/core/widgets/studio_hint.dart` | 74 | `vocara_app::ui::core::widgets::studio_hint` | done |
+| `ui/core/widgets/tick_boundary.dart` | 25 | `vocara_app::ui::core::widgets::tick_boundary` | done |
 | `ui/core/widgets/visible_drop_target.dart` | 80 | `vocara_app::ui::core::widgets::visible_drop_target` | todo |
-| `ui/core/widgets/waveform_painter.dart` | 457 | `vocara_app::ui::core::widgets::waveform_painter` | todo |
+| `ui/core/widgets/waveform_painter.dart` | 457 | `vocara_app::ui::core::widgets::waveform_painter` | done |
 | `ui/core/widgets/window_drag_bar.dart` | 60 | `vocara_app::ui::core::widgets::window_drag_bar` | todo |
 | `ui/home/view_model/home_view_model.dart` | 144 | `vocara_app::ui::home::view_model::home_view_model` | todo |
 | `ui/home/widgets/home_screen.dart` | 491 | `vocara_app::ui::home::widgets::home_screen` | todo |

@@ -54,6 +54,40 @@ pub fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
+/// Dart's `double.toStringAsFixed(digits)`: `digits` decimals, an exact tie
+/// rounded away from zero (Rust's `{:.N}` rounds a tie to even), `NaN` /
+/// `Infinity` / `-Infinity` spelled as Dart spells them.
+pub fn to_string_as_fixed(x: f64, digits: usize) -> String {
+    if x.is_nan() {
+        return "NaN".to_string();
+    }
+    if x.is_infinite() {
+        return if x > 0.0 { "Infinity" } else { "-Infinity" }.to_string();
+    }
+    let rounded = format!("{x:.digits$}");
+    // A tie is a value whose exact decimal expansion stops at digit
+    // `digits + 1` with a 5: only then can Rust's ties-to-even differ.
+    let probe = format!("{:.*}", digits + 1, x.abs());
+    if !probe.ends_with('5') {
+        return rounded;
+    }
+    let exact = format!("{:.1100}", x.abs());
+    let tail_start = exact.find('.').map_or(exact.len(), |dot| dot + 1) + digits + 1;
+    if exact[tail_start..].bytes().any(|b| b != b'0') {
+        return rounded;
+    }
+    // Round the magnitude half up (the probe without its final 5, plus one
+    // unit in the last place kept), then put the sign back.
+    let step = 10f64.powi(-(digits as i32));
+    let truncated: f64 = probe[..probe.len() - 1].parse().unwrap_or(0.0);
+    let away = format!("{:.*}", digits, truncated + step);
+    if x < 0.0 {
+        format!("-{away}")
+    } else {
+        away
+    }
+}
+
 /// Runs `work` on tokio's blocking pool (the app's executor is tokio): the
 /// way a screen runs a synchronous store or service call off the UI thread,
 /// as `PORTING.md` prescribes. A panic in `work` comes back as `Err` with its
@@ -65,5 +99,23 @@ pub async fn blocking<T: Send + 'static>(
         Ok(Ok(value)) => Ok(value),
         Ok(Err(payload)) => Err(panic_message(payload.as_ref())),
         Err(join) => Err(join.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::to_string_as_fixed;
+
+    #[test]
+    fn to_string_as_fixed_rounds_like_dart() {
+        assert_eq!(to_string_as_fixed(0.25, 1), "0.3");
+        assert_eq!(to_string_as_fixed(-0.25, 1), "-0.3");
+        assert_eq!(to_string_as_fixed(2.5, 0), "3");
+        assert_eq!(to_string_as_fixed(1.45, 1), "1.4"); // 1.4499999…
+        assert_eq!(to_string_as_fixed(-13.979400086720377, 1), "-14.0");
+        assert_eq!(to_string_as_fixed(-79.17, 1), "-79.2");
+        assert_eq!(to_string_as_fixed(-0.04, 1), "-0.0");
+        assert_eq!(to_string_as_fixed(f64::NAN, 1), "NaN");
+        assert_eq!(to_string_as_fixed(f64::NEG_INFINITY, 1), "-Infinity");
     }
 }
