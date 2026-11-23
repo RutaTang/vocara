@@ -16,10 +16,11 @@
 //! nothing (no button there takes focus). While a dialog is up it holds the
 //! keyboard: nothing beneath sees a key.
 //!
-//! The app's two custom modals go through the same stack, so they too cover
-//! the drag bar as a Flutter dialog route did: the update download dialog
-//! ([`Dialog::UpdateDownload`], Home's banner and Settings) and the new
-//! technique dialog ([`Dialog::NewTechnique`], the technique library). They
+//! The app's custom modals go through the same stack, so they too cover the
+//! drag bar as a Flutter dialog route did: the update download dialog
+//! ([`Dialog::UpdateDownload`], Home's banner and Settings), the new
+//! technique dialog ([`Dialog::NewTechnique`], the technique library) and
+//! the example rename ([`Dialog::RenameExample`], a technique page). They
 //! speak the same [`Message`]s; [`DialogState::step`] says what a message did
 //! — the update dialog's "Open Download Page" keeps it open and asks the app
 //! to open the browser ([`DialogStep::OpenUrl`]).
@@ -35,6 +36,7 @@ use super::wrap::Wrap;
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{self, alpha, font, Studio};
 use crate::ui::home::widgets::update_notice::{DialogOutcome, UpdateDownloadDialog};
+use crate::ui::technique_library::widgets::media::technique_media_section::RenameExampleDialog;
 use crate::ui::technique_library::widgets::technique_dialogs::NewTechniqueDialog;
 
 /// `showConfirmDialog(title: ..., body: ..., ...)`. Defaults as in Dart:
@@ -149,6 +151,10 @@ pub enum Dialog {
     /// `showNewTechniqueDialog`: closes with [`DialogResult::Text`] (the
     /// trimmed name, or `None` cancelled).
     NewTechnique(NewTechniqueDialog),
+    /// A technique example's rename (`_promptLabel`): closes with
+    /// [`DialogResult::Text`] (the trimmed caption, empty to clear it, or
+    /// `None` cancelled).
+    RenameExample(RenameExampleDialog),
 }
 
 impl From<ConfirmDialog> for Dialog {
@@ -172,6 +178,12 @@ impl From<UpdateDownloadDialog> for Dialog {
 impl From<NewTechniqueDialog> for Dialog {
     fn from(d: NewTechniqueDialog) -> Self {
         Dialog::NewTechnique(d)
+    }
+}
+
+impl From<RenameExampleDialog> for Dialog {
+    fn from(d: RenameExampleDialog) -> Self {
+        Dialog::RenameExample(d)
     }
 }
 
@@ -261,6 +273,7 @@ impl DialogState {
         match &self.dialog {
             Dialog::Prompt(_) => iced::widget::operation::focus(self.input.clone()),
             Dialog::NewTechnique(d) => d.focus(),
+            Dialog::RenameExample(d) => d.focus(),
             Dialog::Confirm(_) | Dialog::UpdateDownload(_) => iced::Task::none(),
         }
     }
@@ -285,6 +298,7 @@ impl DialogState {
                 None => DialogStep::Stay,
             },
             (message, Dialog::NewTechnique(d)) => closed(d.update(message)),
+            (message, Dialog::RenameExample(d)) => closed(d.update(message)),
             (Message::Input(text), _) => {
                 self.text = text;
                 DialogStep::Stay
@@ -315,6 +329,7 @@ impl DialogState {
             // The custom modals draw their own barrier and card.
             Dialog::UpdateDownload(d) => return d.view(),
             Dialog::NewTechnique(d) => return d.view(),
+            Dialog::RenameExample(d) => return d.view(),
         };
         modal(card)
     }
