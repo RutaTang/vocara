@@ -106,7 +106,7 @@ behavior and its tests are ported and the gates pass.
 | `data/db/app_database.dart` | 180 | `vocara_store::db::schema` | done |
 | `data/db/asset_store.dart` | 1322 | `vocara_store::db::asset_store` | todo |
 | `data/db/durable_fs.dart` | 119 | `vocara_store::db::durable_fs` | done |
-| `data/db/library_lock.dart` | 318 | `vocara_store::db::library_lock` | todo |
+| `data/db/library_lock.dart` | 318 | `vocara_store::db::library_lock` | done |
 | `data/db/persistence.dart` | 1286 | `vocara_store::db::persistence` | todo |
 | `data/db/safe_migrator.dart` | 379 | `vocara_store::db::safe_migrator` | todo |
 | `data/db/tables.dart` | 347 | `vocara_store::db::{schema, rows}` | done |

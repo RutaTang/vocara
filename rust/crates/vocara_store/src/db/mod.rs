@@ -2,6 +2,7 @@
 //! `lib/data/db`).
 
 pub mod durable_fs;
+pub mod library_lock;
 pub mod rows;
 pub mod schema;
 pub mod write_gate;
