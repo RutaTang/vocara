@@ -498,6 +498,32 @@ fn mute_then_unmute_during_one_save_leaving() {
     mute_then_unmute_during_one_save(true);
 }
 
+// --- kept_subtree_*_test.dart (the view model's half) ------------------------------
+
+// The kept lanes and channel strips compare their lane by identity: a save's
+// re-read is all-new objects, and taking it in as such rebuilt and repainted
+// every lane though one fader had moved. What the re-read reproduces keeps
+// the object it was sent as.
+#[test]
+fn a_saves_re_read_keeps_the_objects_it_reproduces() {
+    let lib = Library::new();
+    let p = lib.seed(vec![note("kept")]);
+    let f = finalizer();
+    let (_e, mut s) = lib.open(&p.id, None, &f);
+    let lane = Arc::clone(&s.practice().vocal_tracks[0]);
+    let call = s.call(|vm| vm.set_lyrics_text("a line"));
+    assert!(s.landed(call));
+    s.settle();
+    assert!(
+        Arc::ptr_eq(&lane, &s.practice().vocal_tracks[0]),
+        "the untouched lane is the object it was"
+    );
+    s.act(|vm| vm.rename_track(&lane.id, "Renamed"));
+    s.settle();
+    assert!(!Arc::ptr_eq(&lane, &s.practice().vocal_tracks[0]));
+    assert_eq!(s.practice().vocal_tracks[0].display_name, "Renamed");
+}
+
 // --- song_practice_quit_save_test.dart ----------------------------------------------
 
 #[test]

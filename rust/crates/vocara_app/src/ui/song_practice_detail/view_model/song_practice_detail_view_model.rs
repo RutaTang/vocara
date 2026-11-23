@@ -1503,12 +1503,11 @@ impl SongPracticeDetailViewModel {
                     self.resync(persist::ResyncThen::Recording(op));
                 }
                 RecordingEffect::SetRecordingPosition(at) => {
-                    let mut host = PlaybackView {
-                        c: &mut self.c,
+                    let host = PlaybackView {
+                        c: &self.c,
                         recording: &self.recording,
                     };
                     self.playback.set_recording_position(&host, at);
-                    let _ = &mut host;
                 }
                 RecordingEffect::EnsureLoopRange => self.ensure_loop_range(),
                 RecordingEffect::Run(job) => self.c.out.push(Effect::RecordingWork(job)),
@@ -1671,9 +1670,9 @@ impl SongPracticeDetailViewModel {
     ) -> Vec<Effect> {
         let error = self.versions_call(|v, h| v.cleaned_up(op, outcome, h));
         self.c.notify();
-        if let Some(e) = error {
-            // The clean-up's failures are file system errors.
-            let _ = e;
+        // The clean-up's failures are file system errors, which Dart's
+        // `_friendlyError` said as "Something went wrong.".
+        if error.is_some() {
             self.c.toast(jobs::SOMETHING_WENT_WRONG);
         }
         self.finish()
