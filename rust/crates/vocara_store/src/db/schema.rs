@@ -179,6 +179,45 @@ impl AppDatabase {
     /// schema on a new file, refuse any other version than the current one,
     /// then the per-open pragmas and the derived indexes.
     pub fn from_connection(conn: Connection) -> Result<Self> {
+        Self::open_protocol(&conn)?;
+        Ok(Self::wrap(conn))
+    }
+
+    /// [`AppDatabase::from_connection`] as drift opened the live library for
+    /// Persistence: a failing open protocol does not fail the open. Drift
+    /// ran it lazily, on the first query, kept the failure, and failed every
+    /// later operation with it (its `_migrationError`); the store still
+    /// existed, so boot went on degraded — its read probe failed, which kept
+    /// every destructive sweep from running. Here the protocol runs at once,
+    /// and on failure the database comes back POISONED, with that failure:
+    /// an authorizer that denies every statement makes each later operation
+    /// fail (as `not authorized`), so nothing is served from a connection
+    /// the protocol left half set up. Closing still works. Fails only when
+    /// the poison itself cannot be installed.
+    pub fn from_connection_or_poisoned(mut conn: Connection) -> Result<(Self, Option<Error>)> {
+        match Self::open_protocol(&conn) {
+            Ok(()) => Ok((Self::wrap(conn), None)),
+            Err(e) => {
+                conn.authorizer(Some(|_: rusqlite::hooks::AuthContext<'_>| {
+                    rusqlite::hooks::Authorization::Deny
+                }))?;
+                Ok((Self::wrap(conn), Some(e)))
+            }
+        }
+    }
+
+    fn wrap(conn: Connection) -> Self {
+        AppDatabase {
+            inner: ReentrantMutex::new(Inner {
+                conn,
+                depth: Cell::new(0),
+            }),
+        }
+    }
+
+    /// The open protocol of [`AppDatabase::from_connection`] (drift's
+    /// onCreate / onUpgrade / beforeOpen).
+    fn open_protocol(conn: &Connection) -> Result<()> {
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         if version == 0 {
             // A new (or empty, just-created) file: build the current schema.
@@ -237,12 +276,7 @@ impl AppDatabase {
         for statement in DERIVED_INDEXES {
             conn.execute_batch(statement)?;
         }
-        Ok(AppDatabase {
-            inner: ReentrantMutex::new(Inner {
-                conn,
-                depth: Cell::new(0),
-            }),
-        })
+        Ok(())
     }
 
     /// Closes the connection (drift's `close()`), reporting a failure that
@@ -271,6 +305,14 @@ impl AppDatabase {
     /// back when it returns `Err` (or panics). Every store call [f] makes on
     /// this thread joins it; a nested call becomes a SAVEPOINT, so an inner
     /// failure the outer closure handles rolls back only the inner part.
+    ///
+    /// The outermost transaction takes the write lock at its BEGIN
+    /// (`BEGIN IMMEDIATE`, as drift's native database began every
+    /// transaction). A second Vocara instance shares the library through its
+    /// own connection: begun deferred, a transaction that read first and
+    /// then met the other's open write failed at once as "database is
+    /// locked", because SQLite never calls a busy handler for a read
+    /// transaction's upgrade. Taken at BEGIN, the lock is waited for.
     pub fn transaction<T, E>(
         &self,
         f: impl FnOnce() -> std::result::Result<T, E>,
@@ -283,7 +325,7 @@ impl AppDatabase {
         let depth = inner.depth.get();
         let (begin, commit, rollback) = if depth == 0 {
             (
-                "BEGIN TRANSACTION".to_string(),
+                "BEGIN IMMEDIATE".to_string(),
                 "COMMIT".to_string(),
                 "ROLLBACK".to_string(),
             )
@@ -532,6 +574,30 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, id("P1"));
         assert_eq!(rows[0].master_volume, 1.0); // default applied
+    }
+
+    #[test]
+    fn a_failed_open_protocol_poisons_the_database_instead_of_failing_the_open() {
+        // A table a derived index needs is gone: drift's beforeOpen failed
+        // and every later operation failed with it.
+        let conn = Connection::open_in_memory().unwrap();
+        AppDatabase::open_protocol(&conn).unwrap();
+        conn.execute_batch("DROP TABLE clips").unwrap();
+        let (db, failure) = AppDatabase::from_connection_or_poisoned(conn).unwrap();
+        assert!(matches!(failure, Some(Error::Sqlite(_))), "{failure:?}");
+        assert!(db.select_all::<PracticeRow>().is_err());
+        assert!(db.insert(&practice("P1")).is_err());
+        assert!(db
+            .transaction(|| -> Result<()> { db.execute("SELECT 1", []).map(|_| ()) })
+            .is_err());
+        db.close().unwrap();
+
+        // A healthy open is the plain open.
+        let (db, failure) =
+            AppDatabase::from_connection_or_poisoned(Connection::open_in_memory().unwrap())
+                .unwrap();
+        assert!(failure.is_none());
+        db.insert(&practice("P1")).unwrap();
     }
 
     #[test]

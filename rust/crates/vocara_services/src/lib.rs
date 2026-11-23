@@ -2,6 +2,7 @@
 
 pub mod app_settings_service;
 pub mod audio_dsp;
+pub mod audio_edit_service;
 pub mod audio_exporter;
 pub mod audio_file_service;
 pub mod engine;
@@ -10,6 +11,7 @@ pub mod local_storage_service;
 pub mod media_analysis_service;
 pub mod mic_permission;
 pub mod monitor_service;
+pub mod persistence;
 pub mod playback_engine;
 pub mod playback_engine_factory;
 pub mod recording_finalizer;

@@ -321,7 +321,7 @@ pub fn recording_placement_of(path: &str) -> Option<RecordingPlacement> {
 
 /// Dart's `int.tryParse`: surrounding whitespace, an optional sign, decimal
 /// digits or a `0x` hex prefix, within 64 bits.
-fn dart_int_try_parse(raw: &str) -> Option<i64> {
+pub(crate) fn dart_int_try_parse(raw: &str) -> Option<i64> {
     let s = raw.trim();
     let (neg, body) = match s.as_bytes().first() {
         Some(b'-') => (true, &s[1..]),
