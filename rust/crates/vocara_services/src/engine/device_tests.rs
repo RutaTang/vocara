@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use super::media::{self, MediaError};
 use super::*;
+use crate::waveform_service;
 
 fn fixture(name: &str) -> String {
     format!(
@@ -148,6 +149,23 @@ fn the_media_helpers_apply_their_caps() {
     assert!(
         media::decode_for_playback(&fixture("no_such_file.mp3"), ENGINE_RATE)
             .is_err_and(|e| e == MediaError::Read)
+    );
+}
+
+#[test]
+fn the_waveform_decodes_through_the_engine() {
+    // Resampled from 44.1 kHz to the engine rate: a second, give or take the
+    // resampler's last frame.
+    let r = waveform_service::analyze(&fixture(ONSET_MP3), 100).unwrap();
+    assert!(r.duration_ms.abs_diff(1000) <= 1, "{} ms", r.duration_ms);
+    assert_eq!(r.peaks.len(), 100);
+    assert!(
+        r.peaks[..45].iter().all(|&p| p < 0.01),
+        "silent before the onset"
+    );
+    assert!(
+        r.peaks[55..95].iter().all(|&p| p > 0.05),
+        "the tone after it"
     );
 }
 

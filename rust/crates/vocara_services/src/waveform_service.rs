@@ -3,14 +3,17 @@
 //! The Dart service extracted per-pixel (min, max) pairs at 100 pixels a
 //! second with `just_waveform` (AVFoundation on macOS) and down-sampled them
 //! to a compact, normalized peak list stored on the track and drawn by the
-//! waveform painter. Here the pixel pairs are computed from the decoded mono
-//! PCM the caller supplies (the engine's decoder), quantized to 16 bits as
-//! the `.wave` file held them, and down-sampled by the same rule.
+//! waveform painter. Here the pixel pairs are computed from mono PCM the
+//! engine decodes ([`analyze`]; [`analyze_pcm`] takes samples decoded
+//! elsewhere), quantized to 16 bits as the `.wave` file held them, and
+//! down-sampled by the same rule.
 
 use std::fs;
 use std::path::Path;
 
 use crate::audio_file_service::probe_wav;
+use crate::engine::media::{self, MediaError, MAX_PLAYBACK_DURATION, MAX_PLAYBACK_SRC_FRAMES};
+use crate::engine::{Pcm, ENGINE_RATE};
 
 /// Result of analyzing an audio file: normalized peaks plus its duration.
 #[derive(Debug, Clone, PartialEq)]
@@ -21,6 +24,21 @@ pub struct WaveformResult {
 
 /// The waveform's pixel rate (`WaveformZoom.pixelsPerSecond(100)`).
 pub const PIXELS_PER_SECOND: u32 = 100;
+
+/// Peaks [`analyze`] callers ask for unless they say otherwise (Dart's
+/// `targetBuckets` default).
+pub const DEFAULT_TARGET_BUCKETS: usize = 1000;
+
+/// The rate the engine decodes a waveform's audio at: its own graph rate,
+/// which every take and every transcoded import is already written at, so
+/// their decode is never resampled and the pixels hold the file's own sample
+/// peaks, as `just_waveform` read them at the file's rate.
+pub const DECODE_RATE: u32 = ENGINE_RATE;
+
+/// The message for audio that gave no waveform: undecodable, empty, or too
+/// short for a single pixel.
+const UNREADABLE: &str =
+    "Couldn't read this audio — it may be corrupt, too short, or an unsupported format.";
 
 /// The app-support folder the Dart service wrote its throwaway `.wave`
 /// intermediates to; [`sweep_scratch`] still clears what a Flutter build
@@ -126,6 +144,47 @@ pub fn wave_file_pairs(bytes: &[u8]) -> Vec<i16> {
         .collect()
 }
 
+/// Analyzes `audio_file_path`: decodes it to mono with the engine, then
+/// returns up to `target_buckets` peaks in [0, 1] and the audio duration in
+/// milliseconds ([`analyze_pcm`]). Fails if decoding fails. Blocking: the
+/// decode is the whole file's, so run it off the UI thread.
+///
+/// The decode is bounded as playback staging is (the clips analyzed here are
+/// the ones staged): [`MAX_PLAYBACK_DURATION`] and
+/// [`MAX_PLAYBACK_SRC_FRAMES`]. `just_waveform` streamed the file and had no
+/// such caps; a file over them fails with the engine's refusal (the import
+/// gate refuses an over-long file before it gets here).
+pub fn analyze(
+    audio_file_path: &str,
+    target_buckets: usize,
+) -> Result<WaveformResult, WaveformError> {
+    analyze_with(audio_file_path, target_buckets, |path| {
+        media::decode_mono_capped(
+            path,
+            DECODE_RATE,
+            MAX_PLAYBACK_DURATION,
+            MAX_PLAYBACK_SRC_FRAMES,
+        )
+    })
+}
+
+/// [`analyze`] over the mono decode `decode` stands for (the engine's in
+/// production; a test's own where there is no engine). A refusal the decode
+/// names (too long, too dense, unreadable) fails with its message; any other
+/// failure, an empty decode or no engine at all, with the generic one, as
+/// `just_waveform` completing with no waveform did.
+pub fn analyze_with(
+    audio_file_path: &str,
+    target_buckets: usize,
+    decode: impl FnOnce(&str) -> Result<Option<Pcm>, MediaError>,
+) -> Result<WaveformResult, WaveformError> {
+    match decode(audio_file_path) {
+        Ok(Some(pcm)) => analyze_pcm(audio_file_path, pcm.samples(), pcm.rate(), target_buckets),
+        Ok(None) | Err(MediaError::EngineUnavailable) => Err(WaveformError(UNREADABLE.into())),
+        Err(e) => Err(WaveformError(e.to_string())),
+    }
+}
+
 /// Analyzes decoded mono [samples] at [sample_rate] read from
 /// [audio_file_path]: up to [target_buckets] peaks in [0, 1] and the audio
 /// duration in milliseconds. Fails, as Dart's did, on audio too short to
@@ -138,10 +197,7 @@ pub fn analyze_pcm(
     target_buckets: usize,
 ) -> Result<WaveformResult, WaveformError> {
     if samples.is_empty() || sample_rate == 0 {
-        return Err(WaveformError(
-            "Couldn't read this audio — it may be corrupt, too short, or an unsupported format."
-                .into(),
-        ));
+        return Err(WaveformError(UNREADABLE.into()));
     }
     let pairs = pixel_pairs(samples, sample_rate);
     // The waveform's own duration counted whole 10 ms pixels.
@@ -262,6 +318,57 @@ mod tests {
         assert_eq!(r.peaks.len(), 10);
         assert_eq!(r.duration_ms, 100);
         assert!(analyze_pcm("/x", &[], rate, 10).is_err());
+    }
+
+    #[test]
+    fn analyze_decodes_through_the_engine_seam() {
+        let rate = 48_000;
+        let mut samples = vec![0.0f32; rate as usize / 10]; // 100 ms
+        samples[480] = 0.5;
+        let seen = std::cell::Cell::new(String::new());
+        let r = analyze_with("/takes/a.mp3", 1000, |path| {
+            seen.set(path.to_string());
+            Ok(Some(Pcm::mono(samples.clone(), rate)))
+        })
+        .unwrap();
+        assert_eq!(seen.take(), "/takes/a.mp3");
+        assert_eq!(r.peaks.len(), 10);
+        assert_eq!(r.peaks[1], 16384.0 / 32768.0);
+        assert_eq!(r.duration_ms, 100);
+    }
+
+    #[test]
+    fn a_failed_decode_fails_the_analysis() {
+        let generic = analyze_with("/x.mp3", 10, |_| Ok(None)).unwrap_err();
+        assert_eq!(generic.0, UNREADABLE);
+        let no_engine =
+            analyze_with("/x.mp3", 10, |_| Err(MediaError::EngineUnavailable)).unwrap_err();
+        assert_eq!(no_engine.0, UNREADABLE);
+        // A refusal the decode names keeps its own message.
+        let too_long = analyze_with("/x.mp3", 10, |_| {
+            Err(MediaError::TooLong {
+                max_duration: MAX_PLAYBACK_DURATION,
+            })
+        })
+        .unwrap_err();
+        assert_eq!(
+            too_long.0,
+            "This file is too long. The limit is 60 minutes."
+        );
+        let empty = analyze_with("/x.mp3", 10, |_| {
+            Ok(Some(Pcm::mono(Vec::new(), DECODE_RATE)))
+        });
+        assert_eq!(empty.unwrap_err().0, UNREADABLE);
+    }
+
+    #[cfg(not(feature = "device"))]
+    #[test]
+    fn without_an_engine_nothing_analyzes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wav = tmp.path().join("take.wav");
+        fs::write(&wav, wav_bytes(4800, 48_000)).unwrap();
+        let err = analyze(&wav.to_string_lossy(), DEFAULT_TARGET_BUCKETS).unwrap_err();
+        assert_eq!(err.0, UNREADABLE);
     }
 
     #[test]
