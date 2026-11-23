@@ -288,7 +288,7 @@ fn separating_a_backing_that_is_not_yet_the_reference_keeps_the_lanes_mixer_stat
 // re-decoded into RAM at every project open, exactly the failure mode the
 // import discipline exists to prevent.
 #[test]
-fn the_separated_instrumental_goes_through_the_same_import_discipline_as_every_import() {
+fn the_separated_instrumental_goes_through_the_same_import_discipline_as_every_other_import() {
     let gate = Gate::new();
     gate.open();
     let (f, mut s) = open(seeded_with(Some(original())), &gate);
@@ -314,7 +314,8 @@ fn the_separated_instrumental_goes_through_the_same_import_discipline_as_every_i
 }
 
 #[test]
-fn a_failed_save_after_separation_deletes_the_transcoded_wav_and_the_import_copy() {
+fn a_failed_save_after_separation_deletes_the_transcoded_wav_and_the_import_copy_and_keeps_nothing_live(
+) {
     let gate = Gate::new();
     gate.open();
     let (f, mut s) = open(seeded_with(Some(original())), &gate);

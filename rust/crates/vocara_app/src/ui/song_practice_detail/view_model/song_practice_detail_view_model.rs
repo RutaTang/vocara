@@ -144,9 +144,6 @@ mod persist;
 #[cfg(test)]
 mod tests;
 
-#[cfg(test)]
-mod structural_edit_tests;
-
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;

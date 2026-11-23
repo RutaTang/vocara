@@ -235,9 +235,9 @@ fn a_fixed_typo_in_the_first_chorus_leaves_the_second_its_own_time() {
     assert!(s.landed(call));
     let times =
         |s: &Screen| -> Vec<Option<i64>> { s.vm.lyrics().iter().map(|l| l.time_ms).collect() };
-    set_text(&mut s, "chorus!\nverse\nchorus");
+    assert!(set_text(&mut s, "chorus!\nverse\nchorus"));
     assert_eq!(times(&s), [None, Some(40000), Some(90000)]);
-    set_text(&mut s, "verse\nchorus"); // the first chorus deleted
+    assert!(set_text(&mut s, "verse\nchorus")); // the first chorus deleted
     assert_eq!(times(&s), [Some(40000), Some(90000)]);
 }
 

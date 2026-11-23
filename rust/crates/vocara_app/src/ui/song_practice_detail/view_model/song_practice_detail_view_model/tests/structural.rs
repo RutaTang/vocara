@@ -1294,25 +1294,46 @@ fn an_edit_made_while_a_save_is_failing_in_flight_survives() {
 }
 
 // --- A failed save that could not revert ---------------------------------------------
+//
+// With no store read to revert to, the failed change stays on screen, a
+// remote reload holds off for it, and the next save writes it with its own.
+
+fn display_name(p: &SongPractice, id: &str) -> String {
+    p.vocal_tracks
+        .iter()
+        .find(|t| t.id == id)
+        .map(|t| t.display_name.clone())
+        .expect("the take")
+}
 
 #[test]
-fn a_failed_save_that_could_not_revert_is_kept_and_retried_by_the_next_save() {
+fn a_change_whose_save_could_not_revert_is_kept_through_a_reload_and_retried_by_the_next_save() {
     let (f, mut s) = Fixture::open(Setup::default());
     {
         let mut r = f.repo.s();
         r.fail_next_save = true;
         r.fail_next_load = true;
     }
-    s.act(|vm| vm.rename_track("single", "Kept"));
+    s.act(|vm| vm.rename_track("single", "kept"));
     s.settle();
     assert_eq!(
-        s.track("single").display_name,
-        "Kept",
+        display_name(s.practice(), "single"),
+        "kept",
         "nothing to revert to"
     );
-    s.act(|vm| vm.rename_track("multi", "Next"));
+    let mut stored = f.repo.stored();
+    stored.title = "Renamed elsewhere".into();
+    f.repo.s().stored = Some(stored);
+    s.act(|vm| vm.on_remote_applied(&remote("p1")));
     s.settle();
-    assert_eq!(f.repo.stored().vocal_tracks[0].display_name, "Kept");
+    assert_eq!(display_name(s.practice(), "single"), "kept");
+
+    s.act(|vm| vm.rename_track("multi", "next"));
+    s.settle();
+
+    let stored = f.repo.stored();
+    assert_eq!(display_name(&stored, "single"), "kept");
+    assert_eq!(display_name(&stored, "multi"), "next");
 }
 
 #[test]
@@ -1342,18 +1363,41 @@ fn a_lyric_stamp_a_failed_save_could_not_revert_is_kept_for_the_next_tap() {
 }
 
 #[test]
-fn an_import_a_failed_save_could_not_revert_keeps_its_file() {
+fn an_accompaniment_import_a_failed_save_could_not_revert_keeps_its_file() {
+    // The import's rollback deleted the file the lane still on screen
+    // played: the next save stored a lane whose audio was gone.
     let (f, mut s) = Fixture::open(Setup::default());
     {
         let mut r = f.repo.s();
         r.fail_next_save = true;
         r.fail_next_load = true;
     }
-    let call = s.call(|vm| vm.add_vocal_take("/src/a.wav"));
+    let call = s.call(|vm| vm.add_accompaniment("/src/backing.wav"));
     s.await_reply(call);
     s.settle();
-    assert!(paths(s.practice()).contains(&"/import/0.wav".to_string()));
-    assert!(!f.events().contains(&"delete:/import/0.wav".to_string()));
+    let path = s
+        .practice()
+        .accompaniment
+        .as_ref()
+        .expect("kept on screen")
+        .clips[0]
+        .audio_file_path
+        .clone();
+    assert!(!f.events().contains(&format!("delete:{path}")));
+
+    s.act(|vm| vm.rename_track("single", "next"));
+    s.settle();
+
+    assert_eq!(
+        f.repo
+            .stored()
+            .accompaniment
+            .as_ref()
+            .expect("stored")
+            .clips[0]
+            .audio_file_path,
+        path
+    );
 }
 
 #[test]
