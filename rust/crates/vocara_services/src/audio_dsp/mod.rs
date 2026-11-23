@@ -49,7 +49,7 @@ mod wav;
 mod yin;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use std::f64::consts::LN_10;
 
