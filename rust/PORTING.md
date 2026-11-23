@@ -145,9 +145,9 @@ behavior and its tests are ported and the gates pass.
 | `data/sync/sync_engine.dart` | 1092 | `vocara_store::sync::sync_engine` | todo |
 | `data/sync/sync_hashes.dart` | 299 | `vocara_store::sync::sync_hashes` | todo |
 | `data/sync/sync_row.dart` | 618 | `vocara_store::sync::sync_row` | todo |
-| `data/sync/sync_state_store.dart` | 97 | `vocara_store::sync::sync_state_store` | todo |
+| `data/sync/sync_state_store.dart` | 97 | `vocara_store::sync::sync_state_store` | done |
 | `data/sync/sync_transport.dart` | 182 | `vocara_store::sync::sync_transport` | todo |
-| `data/sync/sync_writer.dart` | 142 | `vocara_store::sync::sync_writer` | todo |
+| `data/sync/sync_writer.dart` | 142 | `vocara_store::sync::sync_writer` | done |
 | `domain/models/audio_device.dart` | 79 | `vocara_model::models::audio_device` | todo |
 | `domain/models/audio_fx.dart` | 874 | `vocara_model::models::audio_fx` | todo |
 | `domain/models/audio_track.dart` | 453 | `vocara_model::models::audio_track` | todo |

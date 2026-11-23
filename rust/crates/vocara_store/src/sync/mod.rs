@@ -3,3 +3,5 @@
 //! `lib/data/sync`).
 
 pub mod hlc;
+pub mod sync_state_store;
+pub mod sync_writer;
