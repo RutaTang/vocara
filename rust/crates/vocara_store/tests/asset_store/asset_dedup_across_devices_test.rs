@@ -17,8 +17,8 @@
 //! here, the synced-in row keeps no path, and the pool path a hydrated clip
 //! carries resolves back to the local asset (so a save that never touched
 //! the clip re-sends the same asset id). The clip-level assertions (the
-//! peer's start_ms survives, no clip oplog entry) belong to the repository
-//! port.
+//! peer's start_ms survives, no clip oplog entry) are the repository port's:
+//! `tests/repositories/asset_dedup_across_devices_test.rs`.
 
 use std::fs;
 

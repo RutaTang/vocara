@@ -162,10 +162,10 @@ behavior and its tests are ported and the gates pass.
 | `data/db/tables.dart` | 347 | `vocara_store::db::{schema, rows}` | done |
 | `data/db/write_gate.dart` | 92 | `vocara_store::db::write_gate` | done |
 | `data/ffi/vocara_engine_bindings.dart` | 2051 | `vocara_services::engine` | todo |
-| `data/repositories/song_practice_repository.dart` | 64 | `vocara_store::repositories::song_practice_repository` | todo |
-| `data/repositories/song_practice_repository_drift.dart` | 1678 | `vocara_store::repositories::song_practice_repository_drift` | todo |
-| `data/repositories/technique_repository.dart` | 52 | `vocara_store::repositories::technique_repository` | todo |
-| `data/repositories/technique_repository_drift.dart` | 607 | `vocara_store::repositories::technique_repository_drift` | todo |
+| `data/repositories/song_practice_repository.dart` | 64 | `vocara_store::repositories::song_practice_repository` | done |
+| `data/repositories/song_practice_repository_drift.dart` | 1678 | `vocara_store::repositories::song_practice_repository_drift` | done |
+| `data/repositories/technique_repository.dart` | 52 | `vocara_store::repositories::technique_repository` | done |
+| `data/repositories/technique_repository_drift.dart` | 607 | `vocara_store::repositories::technique_repository_drift` | done |
 | `data/services/app_settings_service.dart` | 1031 | `vocara_services::app_settings_service` | todo |
 | `data/services/audio_dsp.dart` | 2663 | `vocara_services::audio_dsp` | done |
 | `data/services/audio_edit_service.dart` | 863 | `vocara_services::audio_edit_service` | todo |

@@ -25,7 +25,8 @@ indexmap.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-# trace: the sync tests count the statements a pull runs (drift's
+# trace: the sync tests count the statements a pull runs, and the
+# repositories' cost tests the statements a save or a load runs (drift's
 # QueryInterceptor in the Dart tests). The asset GC's tests count commits
 # with the commit hook (the library's own `hooks` feature).
 rusqlite = { workspace = true, features = ["trace"] }

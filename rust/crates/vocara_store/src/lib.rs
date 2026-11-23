@@ -3,6 +3,7 @@
 mod dart;
 pub mod db;
 pub mod error;
+pub mod repositories;
 pub mod sync;
 
 pub use error::{Error, Result};
