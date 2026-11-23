@@ -571,8 +571,8 @@ fn a_zoomed_pitch_lane_paints_nothing_outside_its_box() {
         ((inset + LANE.width) * scale) as usize,
     );
     let (mut inside, mut outside) = (0, 0);
-    for (i, px) in r.rgba.chunks_exact(4).enumerate() {
-        if px == background {
+    for (i, px) in r.rgba.as_chunks::<4>().0.iter().enumerate() {
+        if *px == background {
             continue;
         }
         let x = i % r.width;

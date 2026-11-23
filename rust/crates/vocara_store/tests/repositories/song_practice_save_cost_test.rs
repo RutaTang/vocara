@@ -220,8 +220,10 @@ fn the_waveform_cache_ends_as_the_per_clip_writes_left_it() {
             .map(|r| {
                 let floats = r
                     .peaks
-                    .chunks_exact(4)
-                    .map(|b| f64::from(f32::from_le_bytes([b[0], b[1], b[2], b[3]])))
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|b| f64::from(f32::from_le_bytes(*b)))
                     .collect();
                 (r.peaks.len(), floats)
             })

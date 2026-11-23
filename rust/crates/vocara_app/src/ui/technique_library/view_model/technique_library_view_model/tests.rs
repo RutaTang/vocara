@@ -83,10 +83,24 @@ fn unsupported<T>() -> vocara_store::Result<T> {
 impl TechniqueRepository for FakeRepo {
     fn list_techniques(&self) -> vocara_store::Result<Vec<Technique>> {
         self.reads.fetch_add(1, Ordering::SeqCst);
-        let failing = self
-            .fail_reads
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-            .is_ok();
+        // Take one pending failure, if any (a CAS loop: `fetch_update` is
+        // deprecated from Rust 1.99, and its replacement is newer than the
+        // toolchains this must build on).
+        let mut left = self.fail_reads.load(Ordering::SeqCst);
+        let failing = loop {
+            if left == 0 {
+                break false;
+            }
+            match self.fail_reads.compare_exchange_weak(
+                left,
+                left - 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break true,
+                Err(now) => left = now,
+            }
+        };
         if failing || self.unreadable.load(Ordering::SeqCst) {
             return Err(vocara_store::Error::State("simulated read failure".into()));
         }

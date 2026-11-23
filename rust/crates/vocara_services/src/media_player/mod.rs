@@ -288,8 +288,8 @@ pub fn bgra_to_rgba(
     let mut out = Vec::with_capacity(row.checked_mul(height)?);
     for y in 0..height {
         let start = y * bytes_per_row;
-        for px in src[start..start + row].chunks_exact(4) {
-            out.extend_from_slice(&[px[2], px[1], px[0], 0xFF]);
+        for [b, g, r, _] in src[start..start + row].as_chunks::<4>().0 {
+            out.extend_from_slice(&[*r, *g, *b, 0xFF]);
         }
     }
     Some(out)

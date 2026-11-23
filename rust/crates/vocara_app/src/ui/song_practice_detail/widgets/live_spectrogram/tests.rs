@@ -24,7 +24,7 @@ pub(crate) struct Raster {
 impl Raster {
     /// The pixels as `[r, g, b, a]`.
     pub fn pixels(&self) -> impl Iterator<Item = [u8; 4]> + '_ {
-        self.rgba.chunks_exact(4).map(|p| [p[0], p[1], p[2], p[3]])
+        self.rgba.as_chunks::<4>().0.iter().copied()
     }
 
     /// Pixel (`x`, `y`) in physical pixels.

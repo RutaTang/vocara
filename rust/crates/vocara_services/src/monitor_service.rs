@@ -527,8 +527,10 @@ fn finite_only(samples: &[f32]) -> Cow<'_, [f32]> {
 /// not a frame and is dropped.
 pub fn downmix_interleaved_stereo(frames: &[f32]) -> Vec<f32> {
     frames
-        .chunks_exact(2)
-        .map(|lr| ((f64::from(lr[0]) + f64::from(lr[1])) * 0.5) as f32)
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|[l, r]| ((f64::from(*l) + f64::from(*r)) * 0.5) as f32)
         .collect()
 }
 
