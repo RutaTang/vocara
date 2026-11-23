@@ -140,10 +140,11 @@ pub(crate) fn doubles(j: &JsonMap, key: &str) -> Result<Vec<f64>> {
     })
 }
 
-/// A double as `toJson` writes it (`Value::Null` for NaN/±infinity, which
-/// Dart's `jsonEncode` would refuse; clamped model fields never hold one).
+/// A double as `toJson` writes it. NaN and ±infinity become a value
+/// `dart_json::encode` refuses, as Dart's `jsonEncode` threw on them, so a
+/// model holding one fails its save instead of storing `null`.
 pub(crate) fn double(v: f64) -> Value {
-    Value::from(v)
+    crate::util::dart_json::double(v)
 }
 
 /// An optional value as `toJson` writes it (`null` when absent).

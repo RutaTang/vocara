@@ -1213,3 +1213,34 @@ mod json_read_differently {
         assert_eq!(f.ops_for("fx_buses", &bus.id), bus_ops);
     }
 }
+
+/// Dart's `jsonEncode` threw on a NaN or infinite double anywhere in a JSON
+/// column, so a practice holding one failed its save and nothing was written.
+/// (`serde_json` alone would have stored the value as `null`.)
+#[test]
+fn a_non_finite_fx_value_fails_the_save_and_writes_nothing() {
+    let f = Fixture::new();
+    let base = f.create("S");
+    let ops_before = f.oplog().len();
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let mut fx = TrackFx::flat();
+        fx.comp = CompSettings {
+            threshold_db: bad,
+            ..CompSettings::DEFAULT
+        };
+        let lane = AudioTrack {
+            fx: Some(fx),
+            ..take("Take 1", Some(&base.versions[0].id))
+        };
+        let result = f.songs.save_practice(&SongPractice {
+            vocal_tracks: arcs(vec![lane]),
+            ..base.clone()
+        });
+        assert!(result.is_err(), "{bad} saved");
+        assert_eq!(f.oplog().len(), ops_before, "{bad} journaled");
+        assert!(
+            f.load(&base.id).aggregate.vocal_tracks.is_empty(),
+            "{bad} wrote a row"
+        );
+    }
+}

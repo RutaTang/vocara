@@ -21,6 +21,24 @@ pub enum EncodeError {
     NonFinite,
 }
 
+/// What [`double`] puts in a JSON tree for NaN or ±infinity. A
+/// `serde_json::Value` cannot hold a non-finite number (`Value::from` turns
+/// one into `null`), but Dart's `toJson` kept the double and its `jsonEncode`
+/// then threw, so a model holding one could not be saved. [`encode`] refuses
+/// this marker the same way; nothing else turns a model's JSON into text.
+const NON_FINITE_MARKER: &str = "\u{0}vocara:non-finite-double\u{0}";
+
+/// A double as a Dart `toJson` writes it: a JSON number, or, for NaN and
+/// ±infinity, a value [`encode`] refuses with [`EncodeError::NonFinite`]
+/// (where Dart's `jsonEncode` threw).
+pub fn double(v: f64) -> Value {
+    if v.is_finite() {
+        Value::from(v)
+    } else {
+        Value::String(NON_FINITE_MARKER.to_string())
+    }
+}
+
 /// Encodes [value] as Dart's `jsonEncode` would.
 pub fn encode(value: &Value) -> Result<String, EncodeError> {
     let mut out = String::new();
@@ -33,6 +51,7 @@ fn write_value(out: &mut String, value: &Value) -> Result<(), EncodeError> {
         Value::Null => out.push_str("null"),
         Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
         Value::Number(n) => write_number(out, n)?,
+        Value::String(s) if s == NON_FINITE_MARKER => return Err(EncodeError::NonFinite),
         Value::String(s) => write_string(out, s),
         Value::Array(items) => {
             out.push('[');
@@ -168,6 +187,15 @@ mod tests {
         assert_eq!(dart_double(f64::INFINITY), None);
         let v = Value::Number(Number::from_f64(1.0).unwrap());
         assert!(encode(&v).is_ok());
+    }
+
+    #[test]
+    fn a_non_finite_double_in_a_model_tree_fails_the_encode() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let v = json!({"a": [1, {"b": double(bad)}]});
+            assert!(matches!(encode(&v), Err(EncodeError::NonFinite)));
+        }
+        assert_eq!(encode(&json!([double(-0.5)])).unwrap(), "[-0.5]");
     }
 
     #[test]
