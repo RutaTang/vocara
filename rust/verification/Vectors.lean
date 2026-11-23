@@ -220,6 +220,76 @@ def lruJson : String :=
     let (_, steps) := ops.foldl step ([], [])
     jobj [("max", toString max), ("steps", jarr steps)])
 
+/-! ## Oplog asset gate -/
+
+/-- One ledger entry of a multi-row ledger: its sequence, its row, and the
+row's entry. -/
+structure LEntry where
+  seq : Nat
+  key : Nat
+  e : OpEntry
+
+/-- The carry over a whole ledger: each row's entries through [carry]'s step
+(rows never interact). [st] is each row's resolved dependency so far. -/
+def carryLedger (st : List (Nat × Option Nat)) : List LEntry → List LEntry
+  | [] => []
+  | x :: xs =>
+    let d := (st.lookup x.key).getD none
+    let d' := opStep d x.e
+    { x with e := { x.e with dep := if x.e.tomb then x.e.dep else d' } } ::
+      carryLedger ((x.key, d') :: st.filter (fun p => p.1 != x.key)) xs
+
+/-- The entries no later entry of the same row follows, each with what its
+row resolves to through it (`read_pending`'s collapse: seq-ascending). -/
+def collapseLedger (w : List LEntry) : List (LEntry × Option Nat) :=
+  (List.range w.length).filterMap fun i =>
+    match w[i]? with
+    | none => none
+    | some x =>
+      if (w.drop (i + 1)).any (fun y => y.key == x.key) then none
+      else some (x, resolve none (((w.take (i + 1)).filter (fun y => y.key == x.key)).map (·.e)))
+
+def ackLedger (l : List LEntry) (w : Nat) : List LEntry :=
+  (carryLedger [] l).filter (fun x => x.seq > w)
+
+def compactLedger (l : List LEntry) : List LEntry :=
+  (collapseLedger (carryLedger [] l)).map (·.1)
+
+def lentryJson (x : LEntry) (dep : Option Nat) : String :=
+  jobj [("seq", toString x.seq), ("row", toString x.key),
+    ("tomb", if x.e.tomb then "true" else "false"), ("dep", optJson dep)]
+
+def ledgerJson (l : List LEntry) : String := jarr (l.map fun x => lentryJson x x.e.dep)
+
+def oplogJson : String :=
+  jarr ((nums 17 60).map fun x =>
+    let ops := nums x 40
+    let step := fun (acc : List LEntry × Nat × List String) (y : Nat) =>
+      let (l, next, out) := acc
+      let h := y / 2 ^ 33
+      let kind := h % 20
+      if kind < 11 then
+        let ent : OpEntry := ⟨h / 20 % 4 == 0, if h / 80 % 3 == 0 then some (h / 240 % 4 + 1) else none⟩
+        let x : LEntry := ⟨next, h / 960 % 3, ent⟩
+        (l ++ [x], next + 1, out ++ [jobj [("append", lentryJson x ent.dep)]])
+      else if kind < 15 then
+        let m := h / 20 % 8 + 1
+        let read := collapseLedger (l.take m)
+        (l, next, out ++ [jobj [("read", toString m),
+          ("expect", jarr (read.map fun p => lentryJson p.1 p.2))]])
+      else if kind < 19 then
+        let w := match l with
+          | [] => next - 1
+          | f :: _ => if h / 20 % 5 == 0 then f.seq - 1 else
+              (l[h / 100 % l.length]?.map (·.seq)).getD (next - 1)
+        let l' := ackLedger l w
+        (l', next, out ++ [jobj [("ack", toString w), ("ledger", ledgerJson l')]])
+      else
+        let l' := compactLedger l
+        (l', next, out ++ [jobj [("compact", "true"), ("ledger", ledgerJson l')]])
+    let (_, _, steps) := ops.foldl step ([], 1, [])
+    jarr steps)
+
 def main (args : List String) : IO Unit := do
   let dir := args.headD "vectors"
   IO.FS.createDirAll dir
@@ -228,7 +298,7 @@ def main (args : List String) : IO Unit := do
     ("hlc_advance.json", hlcAdvanceJson), ("lww.json", lwwJson),
     ("version.json", versionJson), ("ring.json", ringJson),
     ("canonical.json", canonicalJson), ("reconcile.json", reconcileJson),
-    ("lru.json", lruJson)]
+    ("lru.json", lruJson), ("oplog.json", oplogJson)]
   for (name, body) in files do
     IO.FS.writeFile (dir ++ "/" ++ name) (body ++ "\n")
     IO.println s!"wrote {dir}/{name}"

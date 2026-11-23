@@ -409,11 +409,22 @@ impl Persistence {
     /// written (see [`OplogDrain::ACK_CARRY_SQL`]: an UPDATE rewrites every
     /// row it matches, and this one used to match the whole surviving ledger
     /// on every boot).
+    ///
+    /// Like the ack's carry, it looks back no further than the row's latest
+    /// tombstone (see [`OplogDrain::ACK_CARRY_SQL`]: the drain's collapse
+    /// inherits nothing through a delete, and the Dart app's compaction,
+    /// which did, could hold a revived row on its deleted predecessor's
+    /// asset forever). `verification/VocaraVerify/Oplog.lean` proves the
+    /// compaction keeps what a read resolves each row to.
     pub const COMPACT_CARRY_SQL: &'static str = "UPDATE oplog SET depends_on_asset_id = (\
          SELECT o.depends_on_asset_id FROM oplog o \
          WHERE o.entity_table = oplog.entity_table \
          AND o.entity_id = oplog.entity_id \
          AND o.depends_on_asset_id IS NOT NULL \
+         AND o.seq >= (SELECT COALESCE(MAX(t.seq), 0) FROM oplog t \
+         WHERE t.entity_table = oplog.entity_table \
+         AND t.entity_id = oplog.entity_id \
+         AND t.op = 'tombstone') \
          ORDER BY o.seq DESC LIMIT 1\
          ) WHERE depends_on_asset_id IS NULL AND op <> 'tombstone' \
          AND seq IN (\
@@ -421,7 +432,11 @@ impl Persistence {
          AND EXISTS (SELECT 1 FROM oplog o \
          WHERE o.entity_table = oplog.entity_table \
          AND o.entity_id = oplog.entity_id \
-         AND o.depends_on_asset_id IS NOT NULL)";
+         AND o.depends_on_asset_id IS NOT NULL \
+         AND o.seq >= (SELECT COALESCE(MAX(t.seq), 0) FROM oplog t \
+         WHERE t.entity_table = oplog.entity_table \
+         AND t.entity_id = oplog.entity_id \
+         AND t.op = 'tombstone'))";
 
     // --- Accessors ----------------------------------------------------------
 
