@@ -330,6 +330,8 @@ impl MediaSectionState {
             Message::Player(m) => players
                 .update(m, factory, section.mic_live, section.analyzed_id)
                 .map(Event::Position),
+            // An audio card's name or chevron (neither toggles without an
+            // analysis to show, which only the view knows of).
             Message::ToggleExpand(id) => {
                 let expandable =
                     section.expandable && section.media_of(&id).is_some_and(|m| !m.is_video());
