@@ -3,6 +3,7 @@
 
 pub mod fx_panel;
 pub mod live_spectrogram;
+pub mod mixer_strip;
 pub mod pitch_lane;
 pub mod voiceprint_view;
 
