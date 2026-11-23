@@ -121,7 +121,7 @@ behavior and its tests are ported and the gates pass.
 | `data/services/audio_edit_service.dart` | 863 | `vocara_services::audio_edit_service` | todo |
 | `data/services/audio_exporter.dart` | 173 | `vocara_services::audio_exporter` | todo |
 | `data/services/audio_file_service.dart` | 362 | `vocara_services::audio_file_service` | todo |
-| `data/services/diagnostics_log.dart` | 440 | `vocara_model::diagnostics` (used by the store too) | API stub |
+| `data/services/diagnostics_log.dart` | 440 | `vocara_model::diagnostics` (used by the store too) | done |
 | `data/services/graph_audio_playback_service.dart` | 1533 | `vocara_services::graph_audio_playback_service` | todo |
 | `data/services/local_storage_service.dart` | 110 | `vocara_services::local_storage_service` | todo |
 | `data/services/media_analysis_service.dart` | 112 | `vocara_services::media_analysis_service` | todo |
