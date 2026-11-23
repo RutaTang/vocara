@@ -173,6 +173,21 @@ fixes it rather than port the bug, and says so where the fix lives:
   (`verification/VocaraVerify/Oplog.lean`, `carryOld_breaks_the_gate`). Only
   the local ledger is affected; the data stays compatible both ways.
 
+Where iced or the platform layer has no counterpart, the difference is kept
+small and written down in the module that has it:
+
+- Text has no letter spacing and no ellipsis (long names clip), and nothing
+  animates (fades, the separation bar's fill, the analyzer's settling jump
+  to their end state). Touch-only gestures (pointer cancel, a second finger)
+  do not exist on iced's desktop pointer.
+- The app needs macOS 11.0 (`packaging/macos/Info.plist.in`); the Flutter
+  app ran on 10.15. Nothing here can check that iced, wgpu and the native
+  code run on 10.15, so the minimum stays where the toolchain's Apple
+  Silicon floor puts it.
+- `applicationSupportsSecureRestorableState` is not declared (winit's
+  delegate has no hook for it); its only effect is a console warning on
+  macOS 14 and later.
+
 ## Tracking
 
 Every Dart source and where it lives in Rust. A row is `done` only when its
