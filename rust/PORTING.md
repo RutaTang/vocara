@@ -256,15 +256,15 @@ behavior and its tests are ported and the gates pass.
 | `ui/song_practice_detail/view_model/song_practice_detail_view_model.dart` | 3337 | `vocara_app::ui::song_practice_detail::view_model::song_practice_detail_view_model` | todo |
 | `ui/song_practice_detail/widgets/analysis_lanes.dart` | 988 | `vocara_app::ui::song_practice_detail::widgets::analysis_lanes` | todo |
 | `ui/song_practice_detail/widgets/bottom_dock.dart` | 312 | `vocara_app::ui::song_practice_detail::widgets::bottom_dock` | todo |
-| `ui/song_practice_detail/widgets/detail_transport_bar.dart` | 456 | `vocara_app::ui::song_practice_detail::widgets::detail_transport_bar` | todo |
+| `ui/song_practice_detail/widgets/detail_transport_bar.dart` | 456 | `vocara_app::ui::song_practice_detail::widgets::detail_transport_bar` (plain data in — `TransportBar` — and `Message`s out named after the calls the bar made; the gating is `controls`; the counter lays out its own tabular figures and letter spacing) | done |
 | `ui/song_practice_detail/widgets/fx_panel.dart` | 1723 | `vocara_app::ui::song_practice_detail::widgets::fx_panel` | todo |
-| `ui/song_practice_detail/widgets/left_panel.dart` | 1545 | `vocara_app::ui::song_practice_detail::widgets::left_panel` | todo |
+| `ui/song_practice_detail/widgets/left_panel.dart` | 1545 | `vocara_app::ui::song_practice_detail::widgets::left_panel` (plain data in — `Inspector`, `VoiceSummary` — and `Message`s out named after the view-model and mixer methods; the FX panel is a slot the screen fills with `fx_panel`'s view; the screen holds which chip menu is open, popped by `track_context_menu`'s host; the body is keyed by its channel; the post-frame heal is `Inspector::analysis_heal`) | done |
 | `ui/song_practice_detail/widgets/live_spectrogram.dart` | 150 | `vocara_app::ui::song_practice_detail::widgets::live_spectrogram` (the raster and its image live in the canvas's tree state, remade when it draws and the monitor's revision has moved) | done |
 | `ui/song_practice_detail/widgets/lyrics_panel.dart` | 1396 | `vocara_app::ui::song_practice_detail::widgets::lyrics_panel` | todo |
 | `ui/song_practice_detail/widgets/mixer_strip.dart` | 1185 | `vocara_app::ui::song_practice_detail::widgets::mixer_strip` | todo |
-| `ui/song_practice_detail/widgets/note_editor.dart` | 195 | `vocara_app::ui::song_practice_detail::widgets::note_editor` | todo |
+| `ui/song_practice_detail/widgets/note_editor.dart` | 195 | `vocara_app::ui::song_practice_detail::widgets::note_editor` (the screen holds the open `NoteEditor` and passes in the view model's `normalizeMarkerRange`; `update` returns Dart's result) | done |
 | `ui/song_practice_detail/widgets/pitch_lane.dart` | 648 | `vocara_app::ui::song_practice_detail::widgets::pitch_lane` | done (tests on hand-built metrics until `computeVoiceMetrics` lands) |
-| `ui/song_practice_detail/widgets/ruler_bar.dart` | 254 | `vocara_app::ui::song_practice_detail::widgets::ruler_bar` | todo |
+| `ui/song_practice_detail/widgets/ruler_bar.dart` | 254 | `vocara_app::ui::song_practice_detail::widgets::ruler_bar` (plain data in — `RulerBar` — and `Seek` / `SetLoopStart` / `SetLoopEnd` out; the body and both handles are one canvas recognizing taps and horizontal drags; its header-column and margin constants mirror `track_row`'s) | done |
 | `ui/song_practice_detail/widgets/song_practice_detail_screen.dart` | 2172 | `vocara_app::ui::song_practice_detail::widgets::song_practice_detail_screen` | todo |
 | `ui/song_practice_detail/widgets/technique_picker.dart` | 309 | `vocara_app::ui::song_practice_detail::widgets::technique_picker` | todo |
 | `ui/song_practice_detail/widgets/track_context_menu.dart` | 640 | `vocara_app::ui::song_practice_detail::widgets::track_context_menu` | todo |
