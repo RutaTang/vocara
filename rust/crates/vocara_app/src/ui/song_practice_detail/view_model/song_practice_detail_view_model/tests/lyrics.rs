@@ -227,6 +227,21 @@ fn a_dropped_file_of_another_kind_is_refused_with_a_word() {
 }
 
 #[test]
+fn a_fixed_typo_in_the_first_chorus_leaves_the_second_its_own_time() {
+    // Times were matched to the edited text by line text alone, first come
+    // first served.
+    let (_f, mut s) = Fixture::open(Setup::default());
+    let call = s.call(|vm| vm.import_lyrics("[00:30.00]chorus\n[00:40.00]verse\n[01:30.00]chorus"));
+    assert!(s.landed(call));
+    let times =
+        |s: &Screen| -> Vec<Option<i64>> { s.vm.lyrics().iter().map(|l| l.time_ms).collect() };
+    set_text(&mut s, "chorus!\nverse\nchorus");
+    assert_eq!(times(&s), [None, Some(40000), Some(90000)]);
+    set_text(&mut s, "verse\nchorus"); // the first chorus deleted
+    assert_eq!(times(&s), [Some(40000), Some(90000)]);
+}
+
+#[test]
 fn an_edit_keeps_the_times_of_the_lines_it_continues() {
     let (_f, mut s) = Fixture::open(Setup::default());
     let call = s.call(|vm| vm.import_lyrics("[00:01.00]one\n[00:02.00]two\n[00:03.00]three"));
