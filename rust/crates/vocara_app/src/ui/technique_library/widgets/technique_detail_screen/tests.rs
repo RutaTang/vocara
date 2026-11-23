@@ -1039,7 +1039,9 @@ fn the_dimension_bar_picks_the_view() {
     h.click("LTAS");
     assert_eq!(h.vm().analysis_dim(), 5);
     h.click("Range");
-    assert!(h.shows("The Range view is not available yet."));
+    assert_eq!(h.vm().analysis_dim(), 8);
+    h.click("Dynamics");
+    assert_eq!(h.vm().analysis_dim(), 9);
 }
 
 // A recording notice (an input lost, a degraded device) is toasted once.

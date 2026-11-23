@@ -26,9 +26,7 @@
 //!
 //! # Differences from Flutter
 //!
-//! The Range and Dynamics tabs are Dart's `RangeView` / `DynamicsView`
-//! (`voice_profile_view.dart`), not ported yet: they show a placeholder
-//! hint until they land. iced has no letter spacing (the gap table's
+//! iced has no letter spacing (the gap table's
 //! captions are set solid). The Dart level meter's fill had no height (a
 //! childless `ColoredBox` under `Align` takes the smallest size), so it never
 //! showed; here it fills the meter's 8 px, as intended — as in the examples
@@ -50,6 +48,7 @@ use crate::ui::core::theme::{alpha, bare_button, boxed, font, Studio};
 use crate::ui::core::widgets::studio_button::studio_button;
 use crate::ui::core::widgets::studio_hint::studio_hint;
 use crate::ui::song_practice_detail::view_model::analysis_source::AnalysisSource;
+use crate::ui::song_practice_detail::widgets::voice_profile_view;
 use crate::ui::song_practice_detail::widgets::voiceprint_view::{
     self as voiceprint, VoiceprintState,
 };
@@ -289,13 +288,8 @@ fn dimension<'a>(
         5 => voiceprint::ltas_tab(src),
         6 => voiceprint::vibrato_tab(src),
         7 => voiceprint::register_tab(src),
-        // PLACEHOLDER until `voice_profile_view` (RangeView, DynamicsView)
-        // is ported: then these are its two views.
-        _ => studio_hint(format!(
-            "The {} view is not available yet.",
-            DIMENSIONS[dim]
-        ))
-        .into(),
+        8 => voice_profile_view::range_view(src),
+        _ => voice_profile_view::dynamics_view(src),
     };
     view.map(Message::Voiceprint)
 }
