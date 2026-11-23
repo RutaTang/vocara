@@ -3,6 +3,7 @@
 
 pub mod analysis_lanes;
 pub mod live_spectrogram;
+pub mod lyrics_panel;
 pub mod pitch_lane;
 pub mod technique_picker;
 pub mod track_context_menu;
