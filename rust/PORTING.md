@@ -143,7 +143,7 @@ behavior and its tests are ported and the gates pass.
 
 | Dart source (client/lib/) | Lines | Rust home | Status |
 |---|---:|---|---|
-| `app.dart` | 85 | `vocara_app::app` | todo |
+| `app.dart` | 85 | `vocara_app::app` | done |
 | `config/app_config.dart` | 16 | `vocara_model::config::app_config` | done |
 | `config/dependencies.dart` | 109 | `vocara_app::dependencies` | todo |
 | `config/environment.dart` | 59 | `vocara_model::config::environment` | done |
@@ -208,25 +208,25 @@ behavior and its tests are ported and the gates pass.
 | `domain/models/technique_marker.dart` | 115 | `vocara_model::models::technique_marker` | done |
 | `domain/models/technique_media.dart` | 156 | `vocara_model::models::technique_media` | done |
 | `domain/models/voice_metrics.dart` | 975 | `vocara_model::models::voice_metrics` | done |
-| `main.dart` | 206 | `vocara_app::main` | todo |
-| `routing/navigation.dart` | 22 | `vocara_app::router` | todo |
-| `routing/router.dart` | 123 | `vocara_app::router` | todo |
-| `routing/routes.dart` | 23 | `vocara_app::router` | todo |
-| `ui/core/themes/studio.dart` | 45 | `vocara_app::ui::core::themes::studio` | todo |
-| `ui/core/themes/theme.dart` | 6 | `vocara_app::ui::core::themes::theme` | todo |
-| `ui/core/widgets/cap_label.dart` | 21 | `vocara_app::ui::core::widgets::cap_label` | todo |
-| `ui/core/widgets/confirm_dialog.dart` | 284 | `vocara_app::ui::core::widgets::confirm_dialog` | todo |
-| `ui/core/widgets/fatal_open_screen.dart` | 276 | `vocara_app::ui::core::widgets::fatal_open_screen` | todo |
-| `ui/core/widgets/holds_keyboard.dart` | 43 | `vocara_app::ui::core::widgets::holds_keyboard` | todo |
-| `ui/core/widgets/spectrogram_painter.dart` | 946 | `vocara_app::ui::core::widgets::spectrogram_painter` | todo |
-| `ui/core/widgets/stable_subtree.dart` | 66 | `vocara_app::ui::core::widgets::stable_subtree` | todo |
-| `ui/core/widgets/studio_button.dart` | 118 | `vocara_app::ui::core::widgets::studio_button` | todo |
-| `ui/core/widgets/studio_controls.dart` | 500 | `vocara_app::ui::core::widgets::studio_controls` | todo |
-| `ui/core/widgets/studio_hint.dart` | 74 | `vocara_app::ui::core::widgets::studio_hint` | todo |
-| `ui/core/widgets/tick_boundary.dart` | 25 | `vocara_app::ui::core::widgets::tick_boundary` | todo |
-| `ui/core/widgets/visible_drop_target.dart` | 80 | `vocara_app::ui::core::widgets::visible_drop_target` | todo |
-| `ui/core/widgets/waveform_painter.dart` | 457 | `vocara_app::ui::core::widgets::waveform_painter` | todo |
-| `ui/core/widgets/window_drag_bar.dart` | 60 | `vocara_app::ui::core::widgets::window_drag_bar` | todo |
+| `main.dart` | 206 | `src/main.rs`, `vocara_app::app` (library-open and quit-hook seams until the store and services land) | done |
+| `routing/navigation.dart` | 22 | `vocara_app::router` | done |
+| `routing/router.dart` | 123 | `vocara_app::router`, `vocara_app::app` | done |
+| `routing/routes.dart` | 23 | `vocara_app::router` | done |
+| `ui/core/themes/studio.dart` | 45 | `vocara_app::ui::core::theme` (`Studio`) | done |
+| `ui/core/themes/theme.dart` | 6 | `vocara_app::ui::core::theme` (`Zinc`, `app_theme`, styles) | done |
+| `ui/core/widgets/cap_label.dart` | 21 | `vocara_app::ui::core::widgets::cap_label` | done |
+| `ui/core/widgets/confirm_dialog.dart` | 284 | `vocara_app::ui::core::widgets::confirm_dialog` | done |
+| `ui/core/widgets/fatal_open_screen.dart` | 276 | `vocara_app::ui::core::widgets::fatal_open_screen` | done |
+| `ui/core/widgets/holds_keyboard.dart` | 43 | `vocara_app::ui::core::widgets::holds_keyboard` | done |
+| `ui/core/widgets/spectrogram_painter.dart` | 946 | `vocara_app::ui::core::widgets::spectrogram_painter` (reads the models through local traits until they land) | done |
+| `ui/core/widgets/stable_subtree.dart` | 66 | `vocara_app::ui::core::widgets::stable_subtree` | done |
+| `ui/core/widgets/studio_button.dart` | 118 | `vocara_app::ui::core::widgets::studio_button` | done |
+| `ui/core/widgets/studio_controls.dart` | 500 | `vocara_app::ui::core::widgets::studio_controls` | done |
+| `ui/core/widgets/studio_hint.dart` | 74 | `vocara_app::ui::core::widgets::studio_hint` | done |
+| `ui/core/widgets/tick_boundary.dart` | 25 | `vocara_app::ui::core::widgets::tick_boundary` | done |
+| `ui/core/widgets/visible_drop_target.dart` | 80 | `vocara_app::ui::core::widgets::visible_drop_target` | done |
+| `ui/core/widgets/waveform_painter.dart` | 457 | `vocara_app::ui::core::widgets::waveform_painter` | done |
+| `ui/core/widgets/window_drag_bar.dart` | 60 | `vocara_app::ui::core::widgets::window_drag_bar` | done |
 | `ui/home/view_model/home_view_model.dart` | 144 | `vocara_app::ui::home::view_model::home_view_model` | todo |
 | `ui/home/widgets/home_screen.dart` | 491 | `vocara_app::ui::home::widgets::home_screen` | todo |
 | `ui/home/widgets/new_practice_dialog.dart` | 16 | `vocara_app::ui::home::widgets::new_practice_dialog` | todo |
@@ -269,8 +269,8 @@ behavior and its tests are ported and the gates pass.
 | `ui/technique_library/widgets/technique_detail_screen.dart` | 825 | `vocara_app::ui::technique_library::widgets::technique_detail_screen` | todo |
 | `ui/technique_library/widgets/technique_dialogs.dart` | 117 | `vocara_app::ui::technique_library::widgets::technique_dialogs` | todo |
 | `utils/analysis_gate.dart` | 54 | `vocara_model::util::analysis_gate` | done |
-| `utils/busy_gate.dart` | 83 | `vocara_app::util::busy_gate` | todo |
-| `utils/command.dart` | 71 | `vocara_app::util::command` | todo |
+| `utils/busy_gate.dart` | 83 | `vocara_app::util::busy_gate` | done |
+| `utils/command.dart` | 71 | `vocara_app::util::command` | done |
 | `utils/export_copy.dart` | 153 | `vocara_model::util::export_copy` | done |
 | `utils/format.dart` | 13 | `vocara_model::util::format` | done |
 | `utils/id.dart` | 87 | `vocara_model::util::id` | done |
