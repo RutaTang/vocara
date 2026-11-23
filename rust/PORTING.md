@@ -176,7 +176,7 @@ behavior and its tests are ported and the gates pass.
 | `data/services/local_storage_service.dart` | 110 | `vocara_services::local_storage_service` | done |
 | `data/services/media_analysis_service.dart` | 112 | `vocara_services::media_analysis_service` | done (the default decoder is the engine bridge's; its tests run on injected decoders) |
 | `data/services/mic_permission.dart` | 36 | `vocara_services::mic_permission` | done (macOS half type-checked; runs on CI) |
-| `data/services/mic_recording_controller.dart` | 681 | `vocara_services::mic_recording_controller` | todo |
+| `data/services/mic_recording_controller.dart` | 681 | `vocara_services::mic_recording_controller` (the start is `begin_start` on the UI thread + `PendingStart::run` on a worker; the owner drives the two timers with `tick`; the `MicRecorder` trait is the view models' fake seam) | done |
 | `data/services/monitor_service.dart` | 262 | `vocara_services::monitor_service` | done |
 | `data/services/playback_engine.dart` | 147 | `vocara_services::playback_engine` | done |
 | `data/services/playback_engine_factory.dart` | 8 | `vocara_services::playback_engine_factory` | done |
