@@ -240,9 +240,9 @@ behavior and its tests are ported and the gates pass.
 | `ui/home/widgets/update_notice.dart` | 219 | `vocara_app::ui::home::widgets::update_notice` | done (the 5 s auto-check timer is the home screen's) |
 | `ui/settings/licenses.dart` | 213 | `vocara_app::ui::settings::licenses` (the page too; the crate list is the generated `assets/licenses/crates.json`: after a dependency change, run `VOCARA_UPDATE_LICENSES=1 cargo test -p vocara_app the_crate_license_list_is_current` and commit it) | done |
 | `ui/settings/settings_screen.dart` | 1135 | `vocara_app::ui::settings::settings_screen` | todo |
-| `ui/song_practice_detail/view_model/analysis_cache.dart` | 1717 | `vocara_app::ui::song_practice_detail::view_model::analysis_cache` | todo |
-| `ui/song_practice_detail/view_model/analysis_source.dart` | 64 | `vocara_app::ui::song_practice_detail::view_model::analysis_source` | todo |
-| `ui/song_practice_detail/view_model/interpretations_controller.dart` | 296 | `vocara_app::ui::song_practice_detail::view_model::interpretations_controller` | todo |
+| `ui/song_practice_detail/view_model/analysis_cache.dart` | 1717 | `vocara_app::ui::song_practice_detail::view_model::analysis_cache` (the Dart awaits are a state machine: worker jobs come back through `job_done`, the joins and `Future.wait`s are continuations drained as microtasks; selection and transport come from an `AnalysisHost`; the capture pump is the screen's 30 ms tick) | done |
+| `ui/song_practice_detail/view_model/analysis_source.dart` | 64 | `vocara_app::ui::song_practice_detail::view_model::analysis_source` (the listener is a `revision`; a seek is the view's message) | done |
+| `ui/song_practice_detail/view_model/interpretations_controller.dart` | 296 | `vocara_app::ui::song_practice_detail::view_model::interpretations_controller` (resync, save and the guarded file clean-up are effects; the delete holds the busy gate throughout) | done |
 | `ui/song_practice_detail/view_model/mixer_controller.dart` | 1271 | `vocara_app::ui::song_practice_detail::view_model::mixer_controller` | todo |
 | `ui/song_practice_detail/view_model/playback_controller.dart` | 439 | `vocara_app::ui::song_practice_detail::view_model::playback_controller` | todo |
 | `ui/song_practice_detail/view_model/recording_controller.dart` | 1169 | `vocara_app::ui::song_practice_detail::view_model::recording_controller` | todo |
