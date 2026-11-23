@@ -112,7 +112,7 @@ fn native_flush(file: &File, full_fsync: bool) -> bool {
 
 /// A plain `fsync(2)` (Dart's `RandomAccessFile.flush`), which on macOS,
 /// unlike Rust's `File::sync_all`, is NOT an F_FULLFSYNC.
-fn plain_fsync(file: &File) -> io::Result<()> {
+pub(crate) fn plain_fsync(file: &File) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::fd::AsRawFd;
