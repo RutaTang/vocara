@@ -19,6 +19,7 @@ mod pure;
 mod reopen;
 mod save_base;
 mod selection;
+mod separation;
 mod structural;
 mod take_flow;
 
@@ -222,6 +223,8 @@ pub(super) struct RepoState {
     pub saves_started: usize,
     /// When set, loads park on it.
     pub load_gate: Option<Arc<Gate>>,
+    /// Loads parked on `load_gate` right now.
+    pub loads_parked: usize,
     /// When set, the next save comes back merged with these words from a
     /// peer.
     pub peer_words_on_next_save: Option<Vec<LyricLine>>,
@@ -284,7 +287,9 @@ impl SongPracticeRepository for FakeRepo {
         }
         let gate = self.s().load_gate.clone();
         if let Some(gate) = gate {
+            self.s().loads_parked += 1;
             gate.wait();
+            self.s().loads_parked -= 1;
         }
         let mut s = self.s();
         s.loads += 1;

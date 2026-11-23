@@ -1,6 +1,7 @@
 //! The sync-cursor cases of `song_practice_structural_edit_test.dart` that
-//! the `lyrics` module leaves: the "lyrics sync cursor" group's lyrics
-//! dropped in Sync mode and new words from another device, and the groups
+//! the `lyrics` module leaves: the "lyrics sync cursor" group's failed
+//! click, lyrics dropped in Sync mode and new words from another device, and
+//! the groups
 //! "the sync cursor follows the words under it" and "the sync cursor through
 //! failed and queued writes".
 //!
@@ -87,6 +88,18 @@ fn release(f: &Fixture, gate: &Gate) {
 }
 
 // --- Lyrics sync cursor --------------------------------------------------------------------
+
+#[test]
+fn a_click_whose_write_fails_leaves_the_cursor_on_that_line() {
+    let (f, mut s) = Fixture::open(Setup::default());
+    assert!(set_text(&mut s, "one\ntwo\nthree"));
+    sync_mode(&mut s);
+    f.repo.s().fail_saves = true;
+    s.act(|vm| vm.stamp_lyric_at(1));
+    s.settle();
+    assert_eq!(time(&s, 1), None);
+    assert_eq!(s.vm.sync_index(), 1);
+}
 
 #[test]
 fn lyrics_dropped_in_sync_mode_restart_the_cursor() {

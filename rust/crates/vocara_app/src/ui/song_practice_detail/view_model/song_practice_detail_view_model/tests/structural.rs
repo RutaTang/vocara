@@ -1,7 +1,8 @@
 //! Port of `song_practice_structural_edit_test.dart` (the view model on the
 //! in-memory store): imports, the structural-edit mutex, persist before
 //! delete, split and merge, duplicates, separation, the remote-applied
-//! reload, take numbering, the save chain and its failures.
+//! reload, take numbering, the save chain and its failures. (The
+//! separation cases it leaves are `separation`'s.)
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -11,6 +12,7 @@ use vocara_model::models::audio_track::{AudioTrack, AudioTrackKind};
 use vocara_model::models::practice_note::PracticeNote;
 use vocara_model::models::song_practice::SongPractice;
 use vocara_model::models::technique_marker::TechniqueMarker;
+use vocara_services::audio_dsp::write_wav_mono;
 use vocara_services::engine::media::MAX_PLAYBACK_DURATION;
 use vocara_store::sync::sync_engine::RemoteApplied;
 
@@ -605,25 +607,32 @@ fn merge_saves_first_then_deletes_only_the_two_source_files() {
 
 #[test]
 fn a_selected_bottom_take_follows_its_audio_into_the_merged_lane() {
-    let (f, mut s) = Fixture::open(Setup {
-        practice: seed_practice(Some(mergeable_takes())),
-        ..Setup::default()
-    });
-    s.act(|vm| vm.select_track("bottom"));
-    s.act(|vm| vm.merge_track_down("top"));
-    s.settle();
-    assert_eq!(s.vm.selected_track_id(), Some("top"));
-    // ... and back with the takes when the save fails.
-    let (f2, mut s2) = Fixture::open(Setup {
-        practice: seed_practice(Some(mergeable_takes())),
-        ..Setup::default()
-    });
-    s2.act(|vm| vm.select_track("bottom"));
-    f2.repo.s().fail_saves = true;
-    s2.act(|vm| vm.merge_track_down("top"));
-    s2.settle();
-    assert_eq!(s2.vm.selected_track_id(), Some("bottom"));
-    let _ = f;
+    // ... and back out of it when the save fails.
+    for fail in [false, true] {
+        let (f, mut s) = Fixture::open(Setup {
+            practice: seed_practice(Some(mergeable_takes())),
+            ..Setup::default()
+        });
+        let bottom_clip = s.practice().vocal_tracks[1].clips[0].id.clone();
+        s.act(|vm| vm.select_clip("bottom", &bottom_clip));
+        assert_eq!(s.vm.record_target_id().as_deref(), Some("bottom"));
+        f.repo.s().fail_saves = fail;
+        s.act(|vm| vm.merge_track_down("top"));
+        s.settle();
+        if fail {
+            assert_eq!(s.vm.selected_track_id(), Some("bottom"));
+            assert_eq!(s.vm.selected_clip_id(), Some(bottom_clip.as_str()));
+        } else {
+            assert_eq!(s.vm.selected_track_id(), Some("top"), "not the backing");
+            let tracks = &s.practice().vocal_tracks;
+            assert_eq!(tracks.len(), 1);
+            assert_eq!(tracks[0].clips.len(), 1);
+            let merged = tracks[0].clips[0].id.clone();
+            assert_eq!(s.vm.selected_clip_id(), Some(merged.as_str()));
+            assert_eq!(s.vm.record_target_id().as_deref(), Some("top"));
+        }
+        f.repo.s().fail_saves = false;
+    }
 }
 
 #[test]
@@ -680,6 +689,30 @@ fn split_puts_the_surviving_half_in_a_new_clip_row_selection_following() {
 }
 
 #[test]
+fn the_bottom_takes_notes_follow_its_audio_in_the_joined_file() {
+    // The shift was the top clip's stored length, which a clip measured by an
+    // earlier build holds up to 10 ms short of its audio.
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let top_wav = dir.path().join("top.wav");
+    let silence = vec![0.0f64; 59232]; // 1234 ms at 48 kHz
+    std::fs::write(&top_wav, write_wav_mono(&silence, 48000)).expect("the top take");
+    let mut takes = mergeable_takes();
+    takes[0].clips[0].audio_file_path = top_wav.to_string_lossy().into_owned();
+    takes[0].clips[0].duration_ms = 1230;
+    takes[1].notes = vec![note("n", 100, None)];
+    let (_f, mut s) = Fixture::open(Setup {
+        practice: seed_practice(Some(takes)),
+        ..Setup::default()
+    });
+    s.act(|vm| vm.merge_track_down("top"));
+    s.settle();
+    let merged = &s.practice().vocal_tracks;
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0].notes.len(), 1);
+    assert_eq!(merged[0].notes[0].position_ms, 1334);
+}
+
+#[test]
 fn merge_puts_the_merged_audio_in_a_new_clip_row_selection_following() {
     let (_f, mut s) = Fixture::open(Setup {
         practice: seed_practice(Some(mergeable_takes())),
@@ -713,6 +746,29 @@ fn a_rename_and_a_note_landing_during_a_split_survive_it() {
     assert_eq!(first.display_name, "Renamed");
     assert_eq!(first.notes.len(), 1);
     assert_eq!(first.notes[0].content, "mid-split");
+}
+
+#[test]
+fn a_notes_text_saved_from_the_copy_its_editor_opened_with_keeps_the_clamp_a_split_gave_it() {
+    let (_f, mut s) = Fixture::open(Setup::default());
+    s.act(|vm| vm.add_note("single", 100, Some(900), "range"));
+    s.settle();
+    let opened = s.track("single").notes[0].clone(); // what the editor holds
+    set_position(&mut s, 500);
+    s.act(|vm| vm.split_track_at_playhead("single"));
+    s.settle();
+    let notes = s.track("single").notes.clone();
+    assert_eq!(notes.len(), 1);
+    let clamped = notes[0].clone();
+    assert_ne!(clamped.end_ms, Some(900), "precondition: split clamped");
+
+    s.act(|vm| vm.update_note_content("single", &opened.id, "edited"));
+    s.settle();
+    let notes = s.track("single").notes.clone();
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].content, "edited");
+    assert_eq!(notes[0].end_ms, clamped.end_ms);
+    assert_eq!(notes[0].position_ms, clamped.position_ms);
 }
 
 #[test]
@@ -826,16 +882,16 @@ fn add_accompaniment_deletes_the_replaced_backing_only_after_the_save() {
 fn duplicate_track_on_a_failed_save_deletes_the_copied_files() {
     let (f, mut s) = Fixture::open(Setup::default());
     f.repo.s().fail_saves = true;
-    s.act(|vm| vm.duplicate_track("multi"));
+    s.act(|vm| vm.duplicate_track("single"));
     s.settle();
-    assert_eq!(
-        f.events(),
-        [
-            "save-failed",
-            "delete:/edit/dup0.wav",
-            "delete:/edit/dup1.wav"
-        ]
-    );
+    assert!(f.events().contains(&"delete:/edit/dup0.wav".to_string()));
+    let ids: Vec<&str> = s
+        .practice()
+        .vocal_tracks
+        .iter()
+        .map(|t| t.id.as_str())
+        .collect();
+    assert_eq!(ids, ["single", "multi"]);
 }
 
 #[test]
@@ -858,6 +914,27 @@ fn duplicate_track_gives_the_copy_fresh_clip_note_and_marker_ids() {
     assert_eq!(copy.clips[0].audio_file_path, "/edit/dup0.wav");
     assert_ne!(copy.notes[0].id, "n1");
     assert_ne!(copy.technique_markers[0].id, "m1");
+}
+
+#[test]
+fn a_duplicate_is_of_the_take_as_it_is_once_the_files_are_copied() {
+    // Built from the snapshot taken before the copies, it missed a rename and
+    // a clip drag made while they ran.
+    let (f, mut s) = Fixture::open(Setup::default());
+    let gate = Gate::new();
+    *guard(&f.edits.duplicate_gate) = Some(Arc::clone(&gate));
+    s.act(|vm| vm.duplicate_track("multi"));
+    s.act(|vm| vm.rename_track("multi", "Verse"));
+    s.vm.move_clip_start_live("multi", "clip-b", 700);
+    s.act(|vm| vm.commit_track_move());
+    // Dart awaited both saves before the copies ran.
+    s.pump_until(|_| f.repo.s().save_no >= 2);
+    gate.open();
+    s.settle();
+    let copy = s.practice().vocal_tracks.last().cloned().expect("the copy");
+    assert_eq!(copy.display_name, "Verse copy");
+    let starts: Vec<i64> = copy.clips.iter().map(|c| c.start_ms).collect();
+    assert_eq!(starts, [0, 700]);
 }
 
 #[test]
@@ -1046,6 +1123,30 @@ fn a_take_that_arrived_from_another_device_is_inside_the_timeline() {
 }
 
 #[test]
+fn a_failed_save_keeps_the_timeline_over_every_lane() {
+    // A failed save reverts to the stored aggregate, whose timeline need not
+    // cover its takes (one recovered or synced past it): grown on load, it
+    // shrank back on the revert and cut the take off at the right edge.
+    let (f, mut s) = Fixture::open(Setup::default());
+    let mut stored = f.repo.stored();
+    let mut late = take("late", "Take 3 (recovered)", "/pool/late.wav");
+    late.clips[0].start_ms = 60_000;
+    late.clips[0].duration_ms = 5000;
+    stored.timeline_duration_ms = 1500;
+    stored.vocal_tracks.push(Arc::new(late));
+    {
+        let mut r = f.repo.s();
+        r.stored = Some(stored);
+        r.fail_saves = true;
+    }
+    s.act(|vm| vm.rename_track("single", "renamed"));
+    s.settle();
+    let p = s.practice();
+    assert!(p.vocal_tracks.iter().any(|t| t.id == "late"));
+    assert!(p.timeline_duration_ms >= p.content_end_ms());
+}
+
+#[test]
 fn a_reload_for_another_practice_reads_nothing() {
     let (f, mut s) = Fixture::open(Setup::default());
     let loads = f.repo.s().loads;
@@ -1097,6 +1198,20 @@ fn a_reload_after_a_failed_saves_revert_shows_the_store() {
     assert_eq!(s.practice().title, "Retitled elsewhere");
 }
 
+#[test]
+fn and_a_reload_after_the_release_shows_the_store() {
+    let (f, mut s) = Fixture::open(Setup::default());
+    s.act(|vm| vm.mixer_do(|m, h| m.set_track_volume_live(h, "single", 0.3)));
+    s.act(|vm| vm.mixer_do(|m, _| m.commit_track_volume()));
+    s.settle();
+    let mut stored = f.repo.stored();
+    stored.title = "Renamed elsewhere".into();
+    f.repo.s().stored = Some(stored);
+    s.act(|vm| vm.on_remote_applied(&remote("p1")));
+    s.settle();
+    assert_eq!(s.practice().title, "Renamed elsewhere");
+}
+
 // --- Take numbering ------------------------------------------------------------------
 
 #[test]
@@ -1133,8 +1248,13 @@ fn two_rapid_ungated_saves_never_overlap() {
 
 #[test]
 fn an_edit_made_while_a_save_is_failing_in_flight_survives() {
-    // The failed save does not revert over the newer model: the queued save
-    // retries the combined state.
+    // Edit A's save is in flight (its model already sent) when edit B
+    // changes the live model and queues save B. Save A then fails; its
+    // revert reloads the disk's model, and over B's model it would have
+    // saved the PRE-EDIT state: edit B lost on disk with only A's failure
+    // said. (When both edits land before the save sends its model, the
+    // failed write held both, and the revert with its toast is the designed
+    // failure: not what this pins.)
     let (f, mut s) = Fixture::open(Setup::default());
     let gate = Gate::new();
     {
@@ -1142,16 +1262,35 @@ fn an_edit_made_while_a_save_is_failing_in_flight_survives() {
         r.save_gate = Some(Arc::clone(&gate));
         r.fail_next_save = true;
     }
-    s.act(|vm| vm.rename_track("single", "A"));
+    s.act(|vm| vm.rename_track("single", "A")); // this save fails
+                                                // Save A has sent its model and is inside the store's write: THEN edit B
+                                                // arrives, the window the guard protects.
     s.pump_until(|_| f.repo.s().in_flight > 0);
-    s.act(|vm| vm.rename_track("multi", "B"));
+    s.act(|vm| vm.rename_track("single", "B")); // queued behind, must survive
     f.repo.s().save_gate = None;
     gate.open();
     s.settle();
-    let stored = f.repo.stored();
-    assert_eq!(stored.vocal_tracks[0].display_name, "A");
-    assert_eq!(stored.vocal_tracks[1].display_name, "B");
-    assert_eq!(s.toasts, ["Couldn't save your changes."]);
+
+    assert_eq!(f.events(), ["save-failed", "save"]);
+    let name = |p: &SongPractice| {
+        p.vocal_tracks
+            .iter()
+            .find(|t| t.id == "single")
+            .map(|t| t.display_name.clone())
+    };
+    assert_eq!(
+        name(&f.repo.stored()).as_deref(),
+        Some("B"),
+        "edit B must reach the store despite edit A's failed save"
+    );
+    assert_eq!(
+        name(s.practice()).as_deref(),
+        Some("B"),
+        "the screen must keep showing the surviving edit"
+    );
+    assert!(s
+        .toasts
+        .contains(&"Couldn't save your changes.".to_string()));
 }
 
 // --- A failed save that could not revert ---------------------------------------------
@@ -1177,6 +1316,32 @@ fn a_failed_save_that_could_not_revert_is_kept_and_retried_by_the_next_save() {
 }
 
 #[test]
+fn a_lyric_stamp_a_failed_save_could_not_revert_is_kept_for_the_next_tap() {
+    // Replaced by a later reload, the failed stamp went without the sync
+    // cursor moving back, and the next tap stamped the line after it.
+    fn tap_at(s: &mut Screen, ms: u64) {
+        set_position(s, ms);
+        s.act(|vm| vm.stamp_next_lyric());
+        s.settle();
+    }
+    let (f, mut s) = Fixture::open(Setup::default());
+    let call = s.call(|vm| vm.set_lyrics_text("a\nb\nc\nd"));
+    s.await_reply(call);
+    tap_at(&mut s, 1000);
+    {
+        let mut r = f.repo.s();
+        r.fail_at = vec![r.save_no + 1];
+        r.fail_next_load = true;
+    }
+    tap_at(&mut s, 2000);
+    s.act(|vm| vm.on_remote_applied(&remote("p1")));
+    s.settle();
+    tap_at(&mut s, 3000);
+    let times: Vec<Option<i64>> = f.repo.stored().lyrics.iter().map(|l| l.time_ms).collect();
+    assert_eq!(times, [Some(1000), Some(2000), Some(3000), None]);
+}
+
+#[test]
 fn an_import_a_failed_save_could_not_revert_keeps_its_file() {
     let (f, mut s) = Fixture::open(Setup::default());
     {
@@ -1189,4 +1354,18 @@ fn an_import_a_failed_save_could_not_revert_keeps_its_file() {
     s.settle();
     assert!(paths(s.practice()).contains(&"/import/0.wav".to_string()));
     assert!(!f.events().contains(&"delete:/import/0.wav".to_string()));
+}
+
+#[test]
+fn while_an_import_a_revert_took_back_still_drops_its_file() {
+    let (f, mut s) = Fixture::open(Setup::default());
+    {
+        let mut r = f.repo.s();
+        r.fail_at = vec![r.save_no + 1];
+    }
+    let call = s.call(|vm| vm.add_accompaniment("/src/backing.wav"));
+    s.await_reply(call);
+    s.settle();
+    assert!(s.practice().accompaniment.is_none());
+    assert!(f.events().contains(&"delete:/import/0.wav".to_string()));
 }
