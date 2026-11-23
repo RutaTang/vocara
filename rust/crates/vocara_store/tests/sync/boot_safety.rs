@@ -3,12 +3,15 @@
 //! instead of judging its half-delivered aggregate, and a repair queued
 //! behind a pull run does not hold up local saves.
 //!
-//! `Persistence.repairLibrary` is not ported yet; what it does with the
-//! engine is `engine.run_exclusive(|| db.transaction(|| checker.repair()))`
-//! (its write-gate and asset sweeps are Persistence's), which is what these
-//! tests run. Not ported here: the boot clock seed tests (Persistence's boot
-//! path; the durable mark itself is covered by `sync_state_store`), and
-//! everything about recovery, migration and the single-instance lock.
+//! `Persistence::repair_library` lives above the store (in
+//! `vocara_services::persistence`, whose tests run these two cases through
+//! it); what it does with the engine is
+//! `engine.run_exclusive(|| db.transaction(|| checker.repair()))` (its
+//! write-gate and asset sweeps are Persistence's), which is what these tests
+//! run. Not ported here: the boot clock seed tests (Persistence's boot path;
+//! the durable mark itself is covered by `sync_state_store`), and everything
+//! about recovery, migration and the single-instance lock — all in
+//! `vocara_services/tests/persistence`.
 
 use std::path::Path;
 use std::sync::mpsc;

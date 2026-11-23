@@ -157,7 +157,7 @@ behavior and its tests are ported and the gates pass.
 | `data/db/asset_store.dart` | 1322 | `vocara_store::db::asset_store` | done |
 | `data/db/durable_fs.dart` | 119 | `vocara_store::db::durable_fs` | done |
 | `data/db/library_lock.dart` | 318 | `vocara_store::db::library_lock` | done |
-| `data/db/persistence.dart` | 1286 | `vocara_services::persistence` (it opens the store and drives services: audio edit, waveform, audio files) | todo |
+| `data/db/persistence.dart` | 1286 | `vocara_services::persistence` (it opens the store and drives services: audio edit, waveform, audio files) | done |
 | `data/db/safe_migrator.dart` | 379 | `vocara_store::db::safe_migrator` | done |
 | `data/db/tables.dart` | 347 | `vocara_store::db::{schema, rows}` | done |
 | `data/db/write_gate.dart` | 92 | `vocara_store::db::write_gate` | done |
@@ -168,7 +168,7 @@ behavior and its tests are ported and the gates pass.
 | `data/repositories/technique_repository_drift.dart` | 607 | `vocara_store::repositories::technique_repository_drift` | done |
 | `data/services/app_settings_service.dart` | 1031 | `vocara_services::app_settings_service` | todo |
 | `data/services/audio_dsp.dart` | 2663 | `vocara_services::audio_dsp` | done |
-| `data/services/audio_edit_service.dart` | 863 | `vocara_services::audio_edit_service` | todo |
+| `data/services/audio_edit_service.dart` | 863 | `vocara_services::audio_edit_service` (the `AudioEdits` trait is the view models' seam) | done |
 | `data/services/audio_exporter.dart` | 173 | `vocara_services::audio_exporter` | done (the save panel is passed in by the app) |
 | `data/services/audio_file_service.dart` | 362 | `vocara_services::audio_file_service` | done |
 | `data/services/diagnostics_log.dart` | 440 | `vocara_model::diagnostics` (used by the store too) | done |
