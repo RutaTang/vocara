@@ -178,7 +178,7 @@ behavior and its tests are ported and the gates pass.
 | `data/services/source_separation_service.dart` | 745 | `vocara_services::source_separation_service` | todo |
 | `data/services/spectrogram_service.dart` | 463 | `vocara_services::spectrogram_service` | todo |
 | `data/services/technique_media_service.dart` | 103 | `vocara_services::technique_media_service` | todo |
-| `data/services/update_check_service.dart` | 285 | `vocara_services::update_check_service` | todo |
+| `data/services/update_check_service.dart` | 285 | `vocara_services::update_check_service` | done |
 | `data/services/waveform_service.dart` | 169 | `vocara_services::waveform_service` | todo |
 | `data/sync/hlc.dart` | 381 | `vocara_store::sync::hlc` | todo |
 | `data/sync/integrity_checker.dart` | 434 | `vocara_store::sync::integrity_checker` | todo |

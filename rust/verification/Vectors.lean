@@ -101,20 +101,16 @@ def versionJson : String :=
     [false, true].map fun pre =>
       let cur := verStr b ++ (if pre then "-rc.1" else "")
       jobj [("candidate", jstr (verStr a)), ("current", jstr cur),
-        ("newer", if isNewer (some a) (some (b, pre)) then "true" else "false")]
-  -- Spellings that parse to the same version, and candidates that never parse.
+        ("newer", if isNewerStr (verStr a).toList cur.toList then "true" else "false")]
+  -- Other spellings, run through the modelled string parser.
   let extra := [("v1.2.0", "1.1"), ("V2", "1.9.9"), ("1.2.0+42", "1.1.9"), ("1.3", "1.2.0+7"),
-    ("1.2.0-rc.1", "1.0"), ("1.x", "1.0"), ("", "1.0"), ("1..2", "1.0"), (" 2", "1.0"), ("0x2", "1.0")]
+    ("1.2.0-rc.1", "1.0"), ("1.x", "1.0"), ("", "1.0"), ("1..2", "1.0"), (" 2", "1.0"),
+    ("0x2", "1.0"), ("2 ", "1.0"), ("v", "1.0"), ("1.0.1", "v1.0.0-rc.1+3"), ("1.0.0", "1.0.0+build-7"),
+    ("1.0.0", "1.0.0-rc.1"), ("0.9.9", "1.0.0-rc.1"), ("1.0.0-rc.2", "1.0.0-rc.1"), ("1.0.1", "garbage"),
+    ("1. 2", "1.0"), ("+5", "1.0"), ("1.0.10", "1.0.9")]
   let extraJson := extra.map fun (c, cur) =>
-    let parsed : Option (List Nat) :=
-      match c with
-      | "v1.2.0" => some [1, 2, 0] | "V2" => some [2] | "1.2.0+42" => some [1, 2, 0]
-      | "1.3" => some [1, 3] | _ => none
-    let curParsed : List Nat :=
-      match cur with
-      | "1.1" => [1, 1] | "1.9.9" => [1, 9, 9] | "1.1.9" => [1, 1, 9] | "1.2.0+7" => [1, 2, 0] | _ => [1, 0]
     jobj [("candidate", jstr c), ("current", jstr cur),
-      ("newer", if isNewer parsed (some (curParsed, false)) then "true" else "false")]
+      ("newer", if isNewerStr c.toList cur.toList then "true" else "false")]
   jarr (cases ++ extraJson)
 
 /-! ## Ring -/

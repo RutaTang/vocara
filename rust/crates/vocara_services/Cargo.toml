@@ -27,6 +27,7 @@ rand.workspace = true
 dirs.workspace = true
 rustfft.workspace = true
 tokio.workspace = true
+ureq.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

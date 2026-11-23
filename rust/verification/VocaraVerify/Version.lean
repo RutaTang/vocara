@@ -211,4 +211,119 @@ theorem prerelease_candidate_never_newer (cur : Option (List Nat × Bool)) :
     isNewer none cur = false := by
   cases cur <;> rfl
 
+/-! ## The string layer (`_parseVersion` and `isNewer`'s handling of `current`) -/
+
+/-- Dart's `String.trim` for the whitespace a version string can carry. -/
+def isSpace (c : Char) : Bool := c = ' ' || c = '\t' || c = '\n' || c = '\r'
+
+def trimChars (s : List Char) : List Char :=
+  ((s.dropWhile isSpace).reverse.dropWhile isSpace).reverse
+
+/-- `s.split(sep)`, Dart's semantics (empty parts kept). -/
+def splitOn (sep : Char) : List Char → List (List Char)
+  | [] => [[]]
+  | c :: cs =>
+    if c = sep then [] :: splitOn sep cs
+    else match splitOn sep cs with
+      | [] => [[c]]
+      | p :: ps => (c :: p) :: ps
+
+/-- One dotted part: digits only, at least one. -/
+def parsePart (p : List Char) : Option Nat :=
+  if p ≠ [] ∧ p.all Char.isDigit then
+    some (p.foldl (fun n c => n * 10 + (c.toNat - 48)) 0)
+  else none
+
+/-- Drop one leading `v`/`V`. -/
+def stripV : List Char → List Char
+  | 'v' :: r => r
+  | 'V' :: r => r
+  | s => s
+
+/-- Cut a `+build` suffix. -/
+def cutBuild (s : List Char) : List Char := s.takeWhile (· ≠ '+')
+
+/-- Dart's `_parseVersion`: trim, drop one leading `v`/`V`, cut at `+`, then
+digits-only dotted parts. -/
+def parseVersion (raw : List Char) : Option (List Nat) :=
+  let s := cutBuild (stripV (trimChars raw))
+  if s = [] then none else (splitOn '.' s).mapM parsePart
+
+/-- `UpdateCheckService.isNewer(candidate, current)` on strings. -/
+def isNewerStr (cand cur : List Char) : Bool :=
+  let core := cur.takeWhile (· ≠ '+')
+  let pre := core.contains '-'
+  isNewer (parseVersion cand) ((parseVersion (core.takeWhile (· ≠ '-'))).map (·, pre))
+
+theorem mem_splitOn (sep c : Char) (hc : c ≠ sep) :
+    ∀ s : List Char, c ∈ s → ∃ p ∈ splitOn sep s, c ∈ p := by
+  intro s
+  induction s with
+  | nil => simp
+  | cons d ds ih =>
+    intro h
+    simp only [splitOn]
+    by_cases hd : d = sep
+    · simp only [hd, if_true]
+      have : c ∈ ds := by
+        simp only [List.mem_cons] at h
+        rcases h with h | h
+        · exact absurd (h.trans hd) hc
+        · exact h
+      obtain ⟨p, hp, hcp⟩ := ih this
+      exact ⟨p, by simp [hp], hcp⟩
+    · simp only [hd, if_false]
+      cases hs : splitOn sep ds with
+      | nil =>
+        refine ⟨[d], by simp, ?_⟩
+        simp only [List.mem_cons] at h
+        rcases h with h | h
+        · simp [h]
+        · obtain ⟨p, hp, _⟩ := ih h; rw [hs] at hp; simp at hp
+      | cons q qs =>
+        simp only [List.mem_cons] at h
+        rcases h with h | h
+        · exact ⟨d :: q, by simp, by simp [h]⟩
+        · obtain ⟨p, hp, hcp⟩ := ih h
+          rw [hs] at hp
+          simp only [List.mem_cons] at hp
+          rcases hp with rfl | hp
+          · exact ⟨d :: p, by simp, by simp [hcp]⟩
+          · exact ⟨p, by simp [hp], hcp⟩
+
+theorem parsePart_none_of_dash (p : List Char) (h : '-' ∈ p) : parsePart p = none := by
+  unfold parsePart
+  have : ¬ p.all Char.isDigit := by
+    intro hall
+    have := List.all_eq_true.mp hall '-' h
+    exact absurd this (by decide)
+  simp [this]
+
+theorem mapM_none_of_mem {ps : List (List Char)} {p : List Char} (hp : p ∈ ps)
+    (h : parsePart p = none) : ps.mapM parsePart = none := by
+  induction ps with
+  | nil => simp at hp
+  | cons q qs ih =>
+    simp only [List.mem_cons] at hp
+    rcases hp with rfl | hp
+    · simp [List.mapM_cons, h]
+    · cases hq : parsePart q <;> simp [List.mapM_cons, hq, ih hp]
+
+/-- **A prerelease candidate is never offered**: once trimmed, `v`-stripped and
+cut at `+`, a candidate holding a `-` does not parse, so `isNewer` is false
+whatever the running build. -/
+theorem prerelease_string_never_newer (cand cur : List Char)
+    (h : '-' ∈ cutBuild (stripV (trimChars cand))) :
+    isNewerStr cand cur = false := by
+  have hnone : parseVersion cand = none := by
+    unfold parseVersion
+    dsimp only
+    generalize cutBuild (stripV (trimChars cand)) = t at h ⊢
+    by_cases ht : t = []
+    · simp [ht]
+    · rw [if_neg ht]
+      obtain ⟨p, hp, hdp⟩ := mem_splitOn '.' '-' (by decide) _ h
+      exact mapM_none_of_mem hp (parsePart_none_of_dash p hdp)
+  simp [isNewerStr, hnone, prerelease_candidate_never_newer]
+
 end Vocara
