@@ -169,7 +169,7 @@ behavior and its tests are ported and the gates pass.
 | `data/services/app_settings_service.dart` | 1031 | `vocara_services::app_settings_service` | todo |
 | `data/services/audio_dsp.dart` | 2663 | `vocara_services::audio_dsp` | todo |
 | `data/services/audio_edit_service.dart` | 863 | `vocara_services::audio_edit_service` | todo |
-| `data/services/audio_exporter.dart` | 173 | `vocara_services::audio_exporter` | todo |
+| `data/services/audio_exporter.dart` | 173 | `vocara_services::audio_exporter` | done (the save panel is passed in by the app) |
 | `data/services/audio_file_service.dart` | 362 | `vocara_services::audio_file_service` | done |
 | `data/services/diagnostics_log.dart` | 440 | `vocara_model::diagnostics` (used by the store too) | done |
 | `data/services/graph_audio_playback_service.dart` | 1533 | `vocara_services::graph_audio_playback_service` | todo |
