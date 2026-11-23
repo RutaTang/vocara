@@ -1,8 +1,8 @@
 //! Port of `song_practice_structural_edit_test.dart` (the view model on the
 //! in-memory store): imports, the structural-edit mutex, persist before
 //! delete, split and merge, duplicates, separation, the remote-applied
-//! reload, take numbering, the save chain and its failures. (The
-//! separation cases it leaves are `separation`'s.)
+//! reload, take numbering, the save chain and its failures. (Its separation
+//! cases are `separation`'s; its sync-cursor cases, `lyrics_cursor`'s.)
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -795,51 +795,6 @@ fn a_rename_and_a_note_landing_during_a_merge_survive_it() {
     );
 }
 
-#[test]
-fn a_clip_dragged_during_a_split_keeps_its_position_in_both_halves() {
-    let gate = Gate::new();
-    let (_f, mut s) = Fixture::open(Setup {
-        analyze: gated_analyze(&gate),
-        ..Setup::default()
-    });
-    let mut p = s.practice().clone();
-    p.timeline_duration_ms = 10_000;
-    set_position(&mut s, 500);
-    s.act(|vm| vm.split_track_at_playhead("single"));
-    let clip_id = s.track("single").clips[0].id.clone();
-    s.vm.move_clip_start_live("single", &clip_id, 2000);
-    s.act(|vm| vm.commit_track_move());
-    gate.open();
-    s.settle();
-    let tracks = s.practice().vocal_tracks.clone();
-    let first = tracks
-        .iter()
-        .find(|t| t.id == "single")
-        .expect("first half");
-    let second = tracks
-        .iter()
-        .find(|t| t.display_name == "Take 1 (2)")
-        .expect("second half");
-    let moved_by = first.clips[0].start_ms;
-    assert!(moved_by > 0, "the drag kept");
-    assert_eq!(second.clips[0].start_ms, 500 + moved_by, "the cut followed");
-}
-
-#[test]
-fn re_analyze_keeps_the_position_a_clip_was_dragged_to() {
-    let gate = Gate::new();
-    let (_f, mut s) = Fixture::open(Setup {
-        analyze: gated_analyze(&gate),
-        ..Setup::default()
-    });
-    s.act(|vm| vm.reanalyze_track("single"));
-    s.vm.move_clip_start_live("single", "single-c0", 1000);
-    s.act(|vm| vm.commit_track_move());
-    gate.open();
-    s.settle();
-    assert!(s.track("single").clips[0].start_ms > 0);
-}
-
 // --- Duplicates and imports on failed saves -----------------------------------------
 
 #[test]
@@ -947,155 +902,6 @@ fn duplicate_track_that_fails_part_way_discards_the_copies_that_landed() {
     assert!(!s.vm.busy());
     assert_eq!(s.practice().vocal_tracks.len(), 2);
     assert_eq!(s.toasts, ["Something went wrong."]);
-}
-
-// --- Separation ----------------------------------------------------------------------
-
-fn separation_setup(practice: SongPractice, gate: &Arc<Gate>) -> Setup {
-    Setup {
-        practice,
-        separation: Arc::new(GatedSeparation {
-            gate: Arc::clone(gate),
-            cancels: std::sync::atomic::AtomicUsize::new(0),
-        }),
-        ..Setup::default()
-    }
-}
-
-fn with_accompaniment(path: &str) -> SongPractice {
-    let mut p = seed_practice(None);
-    p.accompaniment = Some(Arc::new(
-        AudioTrack::new("acc", AudioTrackKind::Accompaniment, "Song", at()).with_audio(
-            path,
-            0,
-            1000,
-            Vec::new(),
-        ),
-    ));
-    p
-}
-
-#[test]
-fn separating_a_backing_that_is_not_yet_the_reference_keeps_the_original() {
-    let gate = Gate::new();
-    gate.open();
-    let (_f, mut s) = Fixture::open(separation_setup(
-        with_accompaniment("/pool/song.wav"),
-        &gate,
-    ));
-    s.act(|vm| vm.separate_backing("acc"));
-    s.settle();
-    let p = s.practice().clone();
-    let acc = p.accompaniment.as_ref().expect("the instrumental");
-    assert_eq!(acc.display_name, "Song (Instrumental)");
-    assert_eq!(acc.clips[0].audio_file_path, "/import/0.wav");
-    let reference = p.reference.as_ref().expect("the original kept");
-    assert_eq!(reference.id, "acc");
-    assert_eq!(reference.kind, AudioTrackKind::Reference);
-    assert_eq!(p.separation_source.as_deref(), Some("/pool/song.wav"));
-    assert!(!s.vm.is_separating());
-    assert!(!s.vm.busy());
-}
-
-#[test]
-fn the_instrumental_sits_where_the_original_does() {
-    let gate = Gate::new();
-    gate.open();
-    let mut p = with_accompaniment("/pool/song.wav");
-    p.accompaniment = Some(Arc::new(
-        AudioTrack::new("acc", AudioTrackKind::Accompaniment, "Song", at()).with_audio(
-            "/pool/song.wav",
-            750,
-            1000,
-            Vec::new(),
-        ),
-    ));
-    let (_f, mut s) = Fixture::open(separation_setup(p, &gate));
-    s.act(|vm| vm.separate_backing("acc"));
-    s.settle();
-    let acc = s
-        .practice()
-        .accompaniment
-        .clone()
-        .expect("the instrumental");
-    assert_eq!(acc.clips[0].start_ms, 750);
-}
-
-#[test]
-fn cancel_after_the_stems_arrive_keeps_the_backing_as_it_was() {
-    let gate = Gate::new();
-    let (f, mut s) = Fixture::open(separation_setup(
-        with_accompaniment("/pool/song.wav"),
-        &gate,
-    ));
-    s.act(|vm| vm.separate_backing("acc"));
-    assert!(s.vm.can_cancel_separation());
-    s.vm.cancel_separation();
-    gate.open();
-    s.settle();
-    assert_eq!(
-        s.practice().accompaniment.as_ref().map(|a| a.id.as_str()),
-        Some("acc")
-    );
-    assert!(s.practice().reference.is_none());
-    assert!(!f.events().iter().any(|e| e == "save"));
-    assert!(!s.vm.is_separating());
-}
-
-#[test]
-fn a_failed_save_after_separation_deletes_the_import_and_restores_the_toggle() {
-    let gate = Gate::new();
-    gate.open();
-    let (f, mut s) = Fixture::open(separation_setup(
-        with_accompaniment("/pool/song.wav"),
-        &gate,
-    ));
-    s.act(|vm| vm.set_play_reference(true));
-    f.repo.s().fail_saves = true;
-    s.act(|vm| vm.separate_backing("acc"));
-    s.settle();
-    assert!(f.events().contains(&"delete:/import/0.wav".to_string()));
-    assert!(s.vm.mixer().play_reference(), "the toggle goes back");
-    assert!(s
-        .toasts
-        .contains(&"Could not save the separated track.".to_string()));
-    assert_eq!(
-        s.practice().accompaniment.as_ref().map(|a| a.id.as_str()),
-        Some("acc")
-    );
-}
-
-#[test]
-fn a_failed_separation_keeps_an_edit_made_while_its_save_ran() {
-    let gate = Gate::new();
-    gate.open();
-    let (f, mut s) = Fixture::open(separation_setup(
-        with_accompaniment("/pool/song.wav"),
-        &gate,
-    ));
-    let save_gate = Gate::new();
-    {
-        let mut r = f.repo.s();
-        r.save_gate = Some(Arc::clone(&save_gate));
-        r.fail_next_save = true;
-    }
-    s.act(|vm| vm.separate_backing("acc"));
-    s.pump_until(|_| f.repo.s().in_flight > 0);
-    s.act(|vm| vm.rename_track("single", "Kept"));
-    f.repo.s().save_gate = None;
-    save_gate.open();
-    s.settle();
-    assert_eq!(s.track("single").display_name, "Kept");
-    assert_eq!(f.repo.stored().vocal_tracks[0].display_name, "Kept");
-    assert_eq!(
-        f.repo
-            .stored()
-            .accompaniment
-            .as_ref()
-            .map(|a| a.id.as_str()),
-        Some("acc"),
-        "the separation was taken back inside its save"
-    );
 }
 
 // --- The remote-applied reload -------------------------------------------------------

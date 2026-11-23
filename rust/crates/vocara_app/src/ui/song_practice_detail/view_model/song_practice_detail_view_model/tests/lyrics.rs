@@ -279,22 +279,6 @@ fn an_edit_keeps_the_end_marker_of_a_line_that_is_still_last() {
 }
 
 #[test]
-fn a_merged_save_takes_in_the_peer_words_and_re_seeds_the_cursor() {
-    let (f, mut s) = Fixture::open(Setup::default());
-    assert!(set_text(&mut s, "one\ntwo\nthree"));
-    s.vm.set_lyrics_mode(LyricsMode::Sync);
-    f.repo.s().peer_words_on_next_save = Some(vec![
-        LyricLine::new("peer a", None),
-        LyricLine::new("peer b", None),
-    ]);
-    at_ms(&mut s, 700);
-    s.act(|vm| vm.stamp_next_lyric());
-    s.settle();
-    assert_eq!(words(&s), ["peer a", "peer b"]);
-    assert!(s.vm.sync_index() < 2, "never past the end");
-}
-
-#[test]
 fn lyrics_mode_edit_bumps_the_session_and_closing_drops_the_draft() {
     let (_f, mut s) = Fixture::open(Setup::default());
     let session = s.vm.lyrics_edit_session();

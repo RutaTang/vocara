@@ -383,6 +383,10 @@ fn peer_words_merged_into_an_ordinary_save_re_seed_the_cursor() {
     s.act(|vm| vm.commit_track_move()); // any non-lyrics save (a drag released)
     s.settle();
     assert_eq!(words(&s), ["x", "y"]);
+    assert!(
+        s.vm.sync_index() < s.vm.lyrics().len(),
+        "never past the end"
+    );
     s.at_ms(2000);
     stamp(&mut s);
     assert_eq!(
