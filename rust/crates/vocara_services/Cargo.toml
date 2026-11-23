@@ -27,10 +27,21 @@ rand.workspace = true
 dirs.workspace = true
 rustfft.workspace = true
 tokio.workspace = true
-ureq.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
 
 [lints]
 workspace = true
+
+# HTTPS for the update check: the system trust store on macOS (as Dart's
+# HttpClient used), rustls elsewhere.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+ureq = { workspace = true, features = ["rustls", "gzip"] }
+
+# The microphone permission prompt (AVFoundation), see mic_permission.rs.
+[target.'cfg(target_os = "macos")'.dependencies]
+ureq = { workspace = true, features = ["native-tls", "gzip"] }
+objc2 = "0.6"
+block2 = "0.6"
+objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "AVCaptureDevice", "AVMediaFormat"] }

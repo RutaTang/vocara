@@ -1,3 +1,5 @@
 //! Vocara services: the audio engine bridge and everything above it that is not UI.
 
+pub mod local_storage_service;
+pub mod mic_permission;
 pub mod update_check_service;

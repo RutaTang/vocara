@@ -167,9 +167,9 @@ behavior and its tests are ported and the gates pass.
 | `data/services/audio_file_service.dart` | 362 | `vocara_services::audio_file_service` | todo |
 | `data/services/diagnostics_log.dart` | 440 | `vocara_model::diagnostics` (used by the store too) | API stub |
 | `data/services/graph_audio_playback_service.dart` | 1533 | `vocara_services::graph_audio_playback_service` | todo |
-| `data/services/local_storage_service.dart` | 110 | `vocara_services::local_storage_service` | todo |
+| `data/services/local_storage_service.dart` | 110 | `vocara_services::local_storage_service` | done |
 | `data/services/media_analysis_service.dart` | 112 | `vocara_services::media_analysis_service` | todo |
-| `data/services/mic_permission.dart` | 36 | `vocara_services::mic_permission` | todo |
+| `data/services/mic_permission.dart` | 36 | `vocara_services::mic_permission` | done (macOS half type-checked; runs on CI) |
 | `data/services/mic_recording_controller.dart` | 681 | `vocara_services::mic_recording_controller` | todo |
 | `data/services/monitor_service.dart` | 262 | `vocara_services::monitor_service` | todo |
 | `data/services/playback_engine.dart` | 147 | `vocara_services::playback_engine` | todo |
