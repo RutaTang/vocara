@@ -548,7 +548,13 @@ fn repair_library_started_between_two_pages_of_a_pull_run_waits_for_the_run() {
         assert!(!pull.join().unwrap().failed());
         repair.join().unwrap().unwrap();
     });
-    assert_eq!(*events.lock().unwrap(), vec!["pull-done", "repair-done"]);
+    // No order check between "pull-done" and "repair-done": once the run
+    // releases its exclusive hold, the repair may finish before the pull
+    // thread gets to record anything (Dart's single isolate made that order
+    // fixed). What matters is that the repair did not run between the pages:
+    // it had not finished while the run was paused (above), and it did not
+    // judge the half-delivered aggregate (below).
+    assert_eq!(events.lock().unwrap().len(), 2);
     assert_eq!(
         interp_deleted_at(),
         None,
