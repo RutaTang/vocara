@@ -51,6 +51,8 @@ pub(crate) fn yin_difference(frame: &[f32], tau_max: usize, w: usize) -> Vec<f64
     let mut tau = 1;
     while tau + 7 <= tau_max {
         let mut s = [0.0f64; 8];
+        // The lagged samples this sweep reads, x[tau + j + l] for j < w and
+        // l < 8, as one slice: the reads below are provably in range.
         let lagged = &x[tau..tau + w + 7];
         for (j, &xj) in x[..w].iter().enumerate() {
             let seg = &lagged[j..j + 8];

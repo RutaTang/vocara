@@ -161,7 +161,7 @@ behavior and its tests are ported and the gates pass.
 | `data/repositories/technique_repository.dart` | 52 | `vocara_store::repositories::technique_repository` | todo |
 | `data/repositories/technique_repository_drift.dart` | 607 | `vocara_store::repositories::technique_repository_drift` | todo |
 | `data/services/app_settings_service.dart` | 1031 | `vocara_services::app_settings_service` | todo |
-| `data/services/audio_dsp.dart` | 2663 | `vocara_services::audio_dsp` | todo |
+| `data/services/audio_dsp.dart` | 2663 | `vocara_services::audio_dsp` | done |
 | `data/services/audio_edit_service.dart` | 863 | `vocara_services::audio_edit_service` | todo |
 | `data/services/audio_exporter.dart` | 173 | `vocara_services::audio_exporter` | todo |
 | `data/services/audio_file_service.dart` | 362 | `vocara_services::audio_file_service` | todo |

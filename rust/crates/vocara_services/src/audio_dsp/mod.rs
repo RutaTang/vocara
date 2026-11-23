@@ -30,9 +30,13 @@
 //! where Dart read it back, so the curves match the Flutter app's bit for
 //! bit. Power-of-two FFTs ≥ 16 (every production size) run Dart's own
 //! radix-2 transform, which is fftea's arithmetic operation for operation
-//! (see [`fft`]); any other size goes to `rustfft`, as Dart sent it to
-//! fftea's general FFT. Both are the unnormalized forward DFT
+//! (the private `fft` module); any other size goes to `rustfft`, as Dart
+//! sent it to fftea's general FFT. Both are the unnormalized forward DFT
 //! (`X[k] = Σ x[n]·e^{−2πikn/N}`), so magnitudes agree.
+//!
+//! Dart's named parameters with defaults are option structs with `Default`
+//! ([`AnalysisParams`], [`YinParams`], [`TunerOptions`]); Dart's callbacks
+//! are `FnMut` closures; a builder's `finish` consumes it.
 
 mod fft;
 mod filter;
@@ -161,7 +165,7 @@ fn db20(mag: f64) -> f64 {
 /// frame after frame): values from [src] starting at absolute index [start];
 /// indices outside `[0, src_len)` read as 0 (the exact edge semantics the
 /// batch metrics loop always had).
-fn pad_slice_into<'a>(out: &'a mut [f32], src: &[f32], start: i64, src_len: usize) -> &'a [f32] {
+fn pad_slice_into(out: &mut [f32], src: &[f32], start: i64, src_len: usize) {
     let count = out.len() as i64;
     let src_len = src_len as i64;
     let from = start.clamp(0, src_len);
@@ -175,7 +179,6 @@ fn pad_slice_into<'a>(out: &'a mut [f32], src: &[f32], start: i64, src_len: usiz
     } else {
         out.fill(0.0);
     }
-    out
 }
 
 /// [`pad_slice_into`] into a fresh window of [count] samples.
