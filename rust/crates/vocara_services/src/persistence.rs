@@ -600,11 +600,15 @@ impl Persistence {
             ),
         };
         let owns_library = guard.try_exclusive();
-        let opened = Self::open_owned(&dir, analyze, guard.clone(), owns_library);
-        if owns_library {
-            guard.release_exclusive();
+        /// Hands the boot's exclusive hold back however the boot ends.
+        struct Release(Arc<dyn LibraryGuard>);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                self.0.release_exclusive();
+            }
         }
-        opened
+        let _release = owns_library.then(|| Release(guard.clone()));
+        Self::open_owned(&dir, analyze, guard, owns_library)
     }
 
     fn open_owned(
@@ -1839,6 +1843,12 @@ impl Drop for Fill<'_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persistence_is_shared_across_threads() {
+        fn shared<T: Send + Sync>() {}
+        shared::<Persistence>();
+    }
 
     #[test]
     fn the_clock_seeds_from_every_synced_table_and_the_oplog_only() {
