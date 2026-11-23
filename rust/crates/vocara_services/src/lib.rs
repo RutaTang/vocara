@@ -6,6 +6,7 @@ pub mod audio_file_service;
 pub mod engine;
 pub mod local_storage_service;
 pub mod media_analysis_service;
+pub mod media_player;
 pub mod mic_permission;
 pub mod monitor_service;
 pub mod playback_engine;
