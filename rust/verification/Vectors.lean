@@ -192,6 +192,34 @@ def reconcileJson : String :=
       jobj [("id", jstr ("R" ++ toString i)), ("mine", optJson r.mine), ("db", optJson r.db),
         ("base", optJson r.base), ("op", opName (classify r)), ("after", optJson (after r))]))
 
+/-! ## LRU trim -/
+
+/-- `cache[k] = bytes`: replace any entry under k, append it as the newest,
+then trim keeping k. -/
+def lruPut (max k b : Nat) (l : List CacheEntry) : List CacheEntry :=
+  trim (fun e => e.1 == k) max (l.filter (fun e => e.1 != k) ++ [(k, b)])
+
+/-- `cache[k]`: a read refreshes the entry's recency. -/
+def lruGet (k : Nat) (l : List CacheEntry) : List CacheEntry :=
+  match l.find? (fun e => e.1 == k) with
+  | some e => l.filter (fun e => e.1 != k) ++ [e]
+  | none => l
+
+def lruJson : String :=
+  jarr ((nums 13 40).map fun x =>
+    let max := x / 2 ^ 40 % 60 + 1
+    let ops := (nums x 30).map fun y =>
+      let h := y / 2 ^ 33
+      (h % 3 == 0, h / 3 % 6, h / 18 % 26)
+    let step := fun (acc : List CacheEntry × List String) (op : Bool × Nat × Nat) =>
+      let (isGet, k, b) := op
+      let l := if isGet then lruGet k acc.1 else lruPut max k b acc.1
+      let opJson := if isGet then jobj [("get", toString k)]
+        else jobj [("put", toString k), ("bytes", toString b)]
+      (l, acc.2 ++ [jobj [("op", opJson), ("keys", jarr (l.map fun e => toString e.1))]])
+    let (_, steps) := ops.foldl step ([], [])
+    jobj [("max", toString max), ("steps", jarr steps)])
+
 def main (args : List String) : IO Unit := do
   let dir := args.headD "vectors"
   IO.FS.createDirAll dir
@@ -199,7 +227,8 @@ def main (args : List String) : IO Unit := do
     ("hlc_order.json", hlcOrderJson), ("hlc_tick.json", hlcTickJson),
     ("hlc_advance.json", hlcAdvanceJson), ("lww.json", lwwJson),
     ("version.json", versionJson), ("ring.json", ringJson),
-    ("canonical.json", canonicalJson), ("reconcile.json", reconcileJson)]
+    ("canonical.json", canonicalJson), ("reconcile.json", reconcileJson),
+    ("lru.json", lruJson)]
   for (name, body) in files do
     IO.FS.writeFile (dir ++ "/" ++ name) (body ++ "\n")
     IO.println s!"wrote {dir}/{name}"
