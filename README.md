@@ -48,9 +48,9 @@ suffix the window title (`Vocara — DEV`); prod shows neither.
 
 ## Development
 
-Prerequisites: a Rust toolchain ([rustup](https://rustup.rs)) and
-[just](https://github.com/casey/just); Lean 4 (the version in
-`rust/verification/lean-toolchain`) for the proofs.
+Prerequisites: [rustup](https://rustup.rs) (`rust/rust-toolchain.toml` pins
+the Rust release, which CI uses too) and [just](https://github.com/casey/just);
+Lean 4 (the version in `rust/verification/lean-toolchain`) for the proofs.
 
 ```sh
 just check     # format check, clippy (both feature modes), tests

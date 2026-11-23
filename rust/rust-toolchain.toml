@@ -1,0 +1,6 @@
+# The Rust release the gates run on, locally and in CI (the workflows install
+# the same one). Pinned so a new stable's lints cannot turn CI red overnight:
+# move it deliberately, after `just check` passes on the new release.
+[toolchain]
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]
