@@ -135,13 +135,41 @@ def ringJson : String :=
     let ops := (nums cap 200).map fun x => if x % 5 < 3 then some (x % 1000) else none
     jobj [("capacity", toString cap), ("ops", jarr (ringRun cap ops))])
 
+/-! ## Canonical JSON -/
+
+/-- Key atoms as UTF-16 code units (what Dart's `String.compareTo` orders by):
+ASCII, Latin-1, a BMP character above the surrogates (U+FF61) and two astral
+characters as surrogate pairs (U+1F600, U+10000), where code-unit order and
+Unicode scalar order disagree. -/
+def keyAtoms : List (List Nat) :=
+  [[0x61], [0x62], [0x41], [0x7A], [0x30], [0x5F], [0x20], [0xE9], [0xFF61],
+   [0xD83D, 0xDE00], [0xD800, 0xDC00]]
+
+def keyOf (x : Nat) : List Nat :=
+  (nums x (x % 3 + 1)).flatMap fun y => keyAtoms.getD (y % keyAtoms.length) []
+
+/-- Distinct keys, as a Dart map has (the last of equal keys kept). -/
+def dedupKeys : List (List Nat) → List (List Nat)
+  | [] => []
+  | k :: ks => if ks.contains k then dedupKeys ks else k :: dedupKeys ks
+
+def entriesJson (es : List (Entry Nat)) : String :=
+  jarr (es.map fun (k, v) => jarr [jarr (k.map toString), toString v])
+
+def canonicalJson : String :=
+  jarr ((nums 9 60).map fun x =>
+    let keys := dedupKeys ((nums x (x % 12 + 1)).map keyOf)
+    let es : List (Entry Nat) := (List.range keys.length).zip keys |>.map fun (i, k) => (k, i)
+    jobj [("input", entriesJson es), ("canon", entriesJson (canon es))])
+
 def main (args : List String) : IO Unit := do
   let dir := args.headD "vectors"
   IO.FS.createDirAll dir
   let files := [("ulid.json", ulidJson), ("hlc_packed.json", hlcPackedJson),
     ("hlc_order.json", hlcOrderJson), ("hlc_tick.json", hlcTickJson),
     ("hlc_advance.json", hlcAdvanceJson), ("lww.json", lwwJson),
-    ("version.json", versionJson), ("ring.json", ringJson)]
+    ("version.json", versionJson), ("ring.json", ringJson),
+    ("canonical.json", canonicalJson)]
   for (name, body) in files do
     IO.FS.writeFile (dir ++ "/" ++ name) (body ++ "\n")
     IO.println s!"wrote {dir}/{name}"
