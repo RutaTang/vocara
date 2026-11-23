@@ -221,30 +221,38 @@ impl SongPracticeDetailScreen {
             detail_transport_bar(self.transport_bar(practice)).map(Message::Transport),
             catch_up_guard(workspace.into(), vm.catching_up()),
         ];
-        let mut layers = stack![container(content)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(fill(Studio::BACKGROUND))];
-        if vm.lyrics_focus() {
+        // Every overlay keeps its slot, empty while it is not shown: iced
+        // matches a stack's layers by position, so a layer coming or going
+        // moved the ones above it and made them anew — a snack bar's did the
+        // note editor's and the picker's, whose field dropped the keyboard
+        // mid-word. (Dart's editors were dialogs of their own.)
+        let focus = vm.lyrics_focus().then(|| {
             let data = panel_data(vm, &self.shown, &NO_TEXT, self.under_dialog());
-            layers = layers.push(lyrics_focus_overlay(&self.lyrics, data).map(Message::Lyrics));
-        }
-        if vm.is_separating() {
-            layers = layers.push(separation_overlay(
-                vm.separation_progress(),
-                vm.can_cancel_separation(),
-            ));
-        }
-        if let Some(snack) = self.snack() {
-            layers = layers.push(snack_bar(snack));
-        }
-        if let Some((editor, _)) = &self.note_editor {
-            layers = layers.push(editor.view().map(Message::NoteEditor));
-        }
-        if let Some(open) = &self.picker {
-            layers = layers.push(open.picker.view().map(Message::TechniquePicker));
-        }
-        layers.into()
+            lyrics_focus_overlay(&self.lyrics, data).map(Message::Lyrics)
+        });
+        let separation = vm
+            .is_separating()
+            .then(|| separation_overlay(vm.separation_progress(), vm.can_cancel_separation()));
+        let editor = self
+            .note_editor
+            .as_ref()
+            .map(|(editor, _)| editor.view().map(Message::NoteEditor));
+        let picker = self
+            .picker
+            .as_ref()
+            .map(|open| open.picker.view().map(Message::TechniquePicker));
+        stack![
+            container(content)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(fill(Studio::BACKGROUND)),
+            slot(focus),
+            slot(separation),
+            slot(self.snack().map(snack_bar)),
+            slot(editor),
+            slot(picker),
+        ]
+        .into()
     }
 
     fn transport_bar<'a>(&'a self, practice: &'a SongPractice) -> TransportBar<'a> {
@@ -992,6 +1000,11 @@ impl SongPracticeDetailScreen {
 }
 
 // ------------------------------------------------------------ the pieces
+
+/// An overlay's slot in the page's stack: the layer, or nothing in its place.
+fn slot(layer: Option<Element<'_, Message>>) -> Element<'_, Message> {
+    layer.unwrap_or_else(|| Space::new().into())
+}
 
 /// `_NoWorkspace`: `child` centred under a bar with the transport's back
 /// control. Without it there was no way back at all while loading or when
