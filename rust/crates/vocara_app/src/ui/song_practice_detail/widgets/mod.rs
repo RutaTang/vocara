@@ -7,6 +7,7 @@ pub mod pitch_lane;
 pub mod technique_picker;
 pub mod track_context_menu;
 pub mod track_row;
+pub mod voice_profile_view;
 pub mod voiceprint_view;
 
 #[cfg(test)]
