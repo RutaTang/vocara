@@ -31,16 +31,11 @@ pub mod settings;
 pub mod song_practice_detail;
 pub mod technique_library;
 
-use iced::alignment::Vertical;
-use iced::widget::{column, container, row, text, Space};
-use iced::{Element, Length, Subscription, Task};
+use iced::{Element, Subscription, Task};
 
 use crate::router::{Navigation, Route};
 use crate::services::Services;
-use crate::ui::core::icons::Icon;
-use crate::ui::core::theme::{font, Studio};
 use crate::ui::core::widgets::confirm_dialog::{Dialog, DialogResult};
-use crate::ui::core::widgets::studio_button::studio_button;
 
 /// A screen the app can host (see the module docs).
 pub trait Screen {
@@ -154,38 +149,4 @@ impl<M> From<Task<M>> for Update<M> {
     fn from(task: Task<M>) -> Self {
         Update::task(task)
     }
-}
-
-/// The page every not-yet-ported screen shows: its title, what it would
-/// show, a back button when it has one, and its actions. PLACEHOLDER for the
-/// screen ports.
-pub(crate) fn placeholder<'a, M: Clone + 'a>(
-    title: &str,
-    detail: Option<String>,
-    back: Option<M>,
-    actions: Vec<Element<'a, M>>,
-) -> Element<'a, M> {
-    let mut header = row![].spacing(12).align_y(Vertical::Center);
-    if let Some(back) = back {
-        header = header.push(studio_button("Back", back).icon(Icon::ChevronLeft));
-    }
-    header = header.push(
-        text(title.to_string())
-            .size(22)
-            .font(font::BOLD)
-            .color(Studio::TEXT_PRIMARY),
-    );
-    let mut content = column![header].spacing(16);
-    if let Some(detail) = detail {
-        content = content.push(text(detail).size(13).color(Studio::TEXT_SECONDARY));
-    }
-    if !actions.is_empty() {
-        content = content.push(row(actions).spacing(10));
-    }
-    content = content.push(Space::new().height(Length::Fill));
-    container(content)
-        .padding(24)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
 }
