@@ -136,7 +136,7 @@ behavior and its tests are ported and the gates pass.
 | `data/services/technique_media_service.dart` | 103 | `vocara_services::technique_media_service` | todo |
 | `data/services/update_check_service.dart` | 285 | `vocara_services::update_check_service` | todo |
 | `data/services/waveform_service.dart` | 169 | `vocara_services::waveform_service` | todo |
-| `data/sync/hlc.dart` | 381 | `vocara_store::sync::hlc` | todo |
+| `data/sync/hlc.dart` | 381 | `vocara_store::sync::hlc` | done |
 | `data/sync/integrity_checker.dart` | 434 | `vocara_store::sync::integrity_checker` | todo |
 | `data/sync/oplog_drain.dart` | 191 | `vocara_store::sync::oplog_drain` | todo |
 | `data/sync/quarantine_store.dart` | 290 | `vocara_store::sync::quarantine_store` | todo |
