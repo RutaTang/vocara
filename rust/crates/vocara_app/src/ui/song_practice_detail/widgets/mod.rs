@@ -2,6 +2,7 @@
 //! `ui/song_practice_detail/widgets`).
 
 pub mod pitch_lane;
+pub mod technique_picker;
 pub mod track_context_menu;
 
 #[cfg(test)]
