@@ -6,19 +6,20 @@ use std::sync::OnceLock;
 /// (`appFlavor`); the Rust app reads it from the [`FLAVOR_VAR`] environment
 /// variable once, at startup, with the same rules ([`AppEnvironment::resolve`]).
 ///
-/// Each environment is a distinct macOS bundle id (see the flavor schemes and
-/// `macos/Runner/Configs/{Dev,Test,Prod}.xcconfig`):
+/// Each environment is a distinct macOS bundle id (`packaging/macos/bundle.sh`
+/// picks it from the flavor):
 ///   dev  -> com.rutatang.vocara.dev
 ///   test -> com.rutatang.vocara.test
 ///   prod -> com.rutatang.vocara
 /// The store location (the drift db + asset pool, and with it the HLC device
 /// node) is keyed by bundle id AND build config. Each bundle id gets its own
 /// macOS sandbox container, so dev/test/prod coexist on one machine without
-/// clobbering each other. But Debug/Profile builds disable the sandbox (see
-/// `macos/Runner/DebugProfile.entitlements`; deliberate dev-only choice so the
-/// prototype Python separation sidecar can be spawned), so the SAME bundle id
-/// resolves to the plain `~/Library/Application Support` path in Debug and to
-/// the sandbox container in Release: two disjoint stores with two HLC node ids.
+/// clobbering each other. But debug bundles disable the sandbox (see
+/// `packaging/macos/Debug.entitlements`; deliberate dev-only choice so the
+/// prototype Python separation sidecar can be spawned), as does `cargo run`
+/// (no bundle at all), so the SAME bundle id resolves to the plain
+/// `~/Library/Application Support` path in debug and to the sandbox container
+/// in release: two disjoint stores with two HLC node ids.
 ///
 /// Builds are flavor-only; an unflavored build (no flavor) is not a normal
 /// path but falls back to [`AppEnvironment::Dev`] for safety.

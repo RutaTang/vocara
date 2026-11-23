@@ -15,6 +15,7 @@ pub mod pitch_lane;
 pub mod ruler_bar;
 pub mod song_practice_detail_screen;
 pub mod technique_picker;
+pub mod timeline;
 pub mod track_context_menu;
 pub mod track_row;
 pub mod voice_profile_view;

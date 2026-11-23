@@ -95,12 +95,31 @@ impl OplogDrain {
     /// written: SQLite rewrites every row an UPDATE matches, even to the
     /// value it held, and with no dependency anywhere (production today)
     /// each ack rewrote the whole ledger above its watermark.
+    ///
+    /// An entry inherits what [`OplogDrain::read_pending`]'s collapse
+    /// resolves at it: the latest non-null dependency AT OR AFTER the row's
+    /// latest tombstone before it (sequence 0 when it has none; the tombstone
+    /// itself counts, its explicit dependency being what the collapse
+    /// resolves it to). The collapse inherits nothing through a tombstone, so
+    /// neither may the carry. The Dart app's carry
+    /// looked back past tombstones: an insert gated on an asset, its delete,
+    /// and a revive with no dependency resolve to NO dependency, yet an ack of
+    /// the insert handed the revive the insert's asset. Once that asset was
+    /// collected (its row was deleted) the revive was held forever, and with
+    /// it the ack watermark and the rest of the ledger.
+    /// `verification/VocaraVerify/Oplog.lean` proves the carry with the floor
+    /// keeps every read's resolution, and its vectors replay through this SQL
+    /// (`vocara_services/tests/lean_vectors_oplog.rs`).
     pub const ACK_CARRY_SQL: &'static str = "UPDATE oplog SET depends_on_asset_id = (\
          SELECT o.depends_on_asset_id FROM oplog o \
          WHERE o.entity_table = oplog.entity_table \
          AND o.entity_id = oplog.entity_id \
          AND o.depends_on_asset_id IS NOT NULL \
          AND o.seq <= oplog.seq \
+         AND o.seq >= (SELECT COALESCE(MAX(t.seq), 0) FROM oplog t \
+         WHERE t.entity_table = oplog.entity_table \
+         AND t.entity_id = oplog.entity_id \
+         AND t.op = 'tombstone' AND t.seq < oplog.seq) \
          ORDER BY o.seq DESC LIMIT 1\
          ) WHERE depends_on_asset_id IS NULL AND op <> 'tombstone' \
          AND seq > ? \
@@ -108,7 +127,11 @@ impl OplogDrain {
          WHERE o.entity_table = oplog.entity_table \
          AND o.entity_id = oplog.entity_id \
          AND o.depends_on_asset_id IS NOT NULL \
-         AND o.seq <= oplog.seq)";
+         AND o.seq <= oplog.seq \
+         AND o.seq >= (SELECT COALESCE(MAX(t.seq), 0) FROM oplog t \
+         WHERE t.entity_table = oplog.entity_table \
+         AND t.entity_id = oplog.entity_id \
+         AND t.op = 'tombstone' AND t.seq < oplog.seq))";
 
     /// A drain over [db].
     pub fn new(db: Arc<AppDatabase>) -> Self {
@@ -431,6 +454,44 @@ mod tests {
     }
 
     #[test]
+    fn an_ack_carries_no_dependency_across_a_tombstone() {
+        // An insert gated on an asset, its delete, then a revive with no
+        // dependency of its own: the collapse resolves the revive to NO
+        // dependency (a delete passes nothing on). The Dart carry looked back
+        // past the tombstone, so an ack of the insert handed the revive the
+        // insert's asset: once that asset was collected, the revive (and,
+        // through the ack watermark, the whole ledger) was held forever.
+        let f = fixture();
+        f.journal("clips", "C1", "insert", "h", Some("ASSET"));
+        f.journal("clips", "C1", "tombstone", "", None);
+        let batch = f.read();
+        assert_eq!(f.entry(&batch, "C1").depends_on_asset_id, None);
+        // Revived while the tombstone was being pushed.
+        f.journal("clips", "C1", "update", "back", None);
+        f.drain.ack(batch.max_seq).unwrap();
+
+        let next = f.read();
+        assert_eq!(f.entry(&next, "C1").op, "update");
+        assert_eq!(f.entry(&next, "C1").depends_on_asset_id, None);
+    }
+
+    #[test]
+    fn an_ack_carries_a_tombstones_explicit_dependency_to_its_revive() {
+        // The collapse resolves a tombstone to its own, explicitly journaled,
+        // dependency, and a revive after it inherits that: so does the carry.
+        let f = fixture();
+        f.journal("clips", "C1", "insert", "h", Some("OLD"));
+        f.journal("clips", "C1", "tombstone", "", Some("KEPT"));
+        f.journal("clips", "C1", "update", "back", None);
+        let before = f.read();
+        assert_eq!(f.entry(&before, "C1").depends_on_asset_id, Some(id("KEPT")));
+        f.drain.ack(before.max_seq - 2).unwrap();
+
+        let after = f.read();
+        assert_eq!(f.entry(&after, "C1").depends_on_asset_id, Some(id("KEPT")));
+    }
+
+    #[test]
     fn a_tombstone_inherits_no_asset_dependency() {
         let f = fixture();
         f.journal("clips", "C1", "insert", "h", Some("ASSET"));
@@ -526,5 +587,14 @@ mod tests {
             steps.join("\n")
         );
         assert!(!steps.iter().any(|s| s == "SCAN o"), "{}", steps.join("\n"));
+        // The tombstone floor's lookup too.
+        assert!(
+            steps
+                .iter()
+                .any(|s| s.starts_with("SEARCH t USING INDEX ix_oplog_entity")),
+            "{}",
+            steps.join("\n")
+        );
+        assert!(!steps.iter().any(|s| s == "SCAN t"), "{}", steps.join("\n"));
     }
 }

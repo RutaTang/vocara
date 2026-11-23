@@ -787,6 +787,28 @@ fn compaction_carries_the_latest_dependency_onto_the_surviving_entry() {
 }
 
 #[test]
+fn compaction_carries_no_dependency_across_a_tombstone() {
+    // A revive after a delete inherits nothing from before the delete, in
+    // the drain's collapse and so in the compaction (the Dart compaction
+    // carried the deleted insert's asset onto the revive; see the drain's
+    // `an_ack_carries_no_dependency_across_a_tombstone`).
+    let m = Memory::new();
+    let id = pad("C1");
+    journal(&m, "clips", &id, "insert", Some(&pad("AX")));
+    journal(&m, "clips", &id, "tombstone", None);
+    journal(&m, "clips", &id, "update", None);
+
+    let drain = OplogDrain::new(m.db().clone());
+    let before = drain.read_pending(OplogDrain::DEFAULT_LIMIT).unwrap();
+    assert_eq!(before.entries[0].depends_on_asset_id, None);
+    assert_eq!(m.compact_oplog().unwrap(), 2);
+    let after = drain.read_pending(OplogDrain::DEFAULT_LIMIT).unwrap();
+    assert_eq!(after.entries.len(), 1);
+    assert_eq!(after.entries[0].op, "update");
+    assert_eq!(after.entries[0].depends_on_asset_id, None);
+}
+
+#[test]
 fn with_no_dependency_anywhere_compaction_deletes_history_and_rewrites_no_survivor() {
     // The carry has nothing to carry when no entry names an asset — yet it
     // used to rewrite every surviving entry, on every boot.
@@ -891,6 +913,15 @@ fn the_compaction_carry_forward_probes_each_entity_through_ix_oplog_entity() {
         steps.join("\n")
     );
     assert!(!steps.iter().any(|s| s == "SCAN o"), "{}", steps.join("\n"));
+    // The tombstone floor's lookup too.
+    assert!(
+        steps
+            .iter()
+            .any(|s| s.starts_with("SEARCH t USING INDEX ix_oplog_entity")),
+        "{}",
+        steps.join("\n")
+    );
+    assert!(!steps.iter().any(|s| s == "SCAN t"), "{}", steps.join("\n"));
 }
 
 // --- Durability ----------------------------------------------------------------

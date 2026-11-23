@@ -7,17 +7,20 @@
 //! channel) and pumps the answers — Dart's event loop. Dart's completers
 //! are [`Gate`]s the fakes park on; a test opens them. Each test passes a
 //! private [`RecordingFinalizer`] where Dart used the app-wide instance: the
-//! Rust tests run in parallel.
+//! Rust tests run in parallel. A quit's requests to the recording wake the
+//! screen, which serves them as its answers come in.
 
 mod export;
 mod interpretations;
 mod lyrics;
+mod lyrics_cursor;
 mod placement;
 mod pure;
 mod reopen;
 mod save_base;
 mod selection;
 mod structural;
+mod take_flow;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -761,6 +764,8 @@ enum Msg {
     RecordingJob(recording_controller::JobDone),
     Finalized(RecordingOp, BusyOutcome<String>),
     FinalizeRetry(RecordingOp),
+    /// A quit asks something of the recording (the quit waker fired).
+    QuitAsked,
 }
 
 /// The screen around the view model (see the module doc).
@@ -776,8 +781,12 @@ pub(super) struct Screen {
 
 impl Screen {
     pub(super) fn open(deps: Deps, practice_id: &str, options: Options) -> Screen {
-        let (vm, effects) = SongPracticeDetailViewModel::new(deps, practice_id, options);
+        let (mut vm, effects) = SongPracticeDetailViewModel::new(deps, practice_id, options);
         let (tx, rx) = mpsc::channel();
+        let wake = tx.clone();
+        vm.set_quit_waker(move || {
+            let _ = wake.send(Msg::QuitAsked);
+        });
         let mut s = Screen {
             vm,
             tx,
@@ -841,7 +850,9 @@ impl Screen {
     }
 
     fn handle(&mut self, msg: Msg) {
-        if !matches!(msg, Msg::Setup(_)) {
+        // Neither is counted: a setup request comes while its start is in
+        // flight, and a quit's request from the quit's own thread.
+        if !matches!(msg, Msg::Setup(_) | Msg::QuitAsked) {
             self.in_flight -= 1;
         }
         let fx = match msg {
@@ -853,6 +864,7 @@ impl Screen {
             Msg::RecordingJob(done) => self.vm.recording_job_done(done),
             Msg::Finalized(op, outcome) => self.vm.finalize_ran(op, outcome),
             Msg::FinalizeRetry(op) => self.vm.finalize_retry_due(op),
+            Msg::QuitAsked => self.vm.serve_quit_requests(),
         };
         self.run(fx);
     }

@@ -148,6 +148,27 @@ the proofs are about the code that ships, not a lookalike. Targets:
 - Version comparison (`isNewer`): a strict order; a prerelease never wins.
 - Content hash canonicalization: invariant under map key order.
 - The SPSC ring's index arithmetic: FIFO, never over capacity.
+- Reconcile's three-way rules: an untouched row is never reverted, a row the
+  editor never held is never deleted.
+- The byte-budgeted LRU trim: fits or keeps only the inserted key, evicts the
+  least recently used first.
+- The oplog's asset gate: an ack or a boot compaction never changes what a
+  read resolves a surviving row's dependency to.
+
+`verification/README.md` lists each module, its theorems and its replay.
+
+## Deliberate deviations from the Dart
+
+Where a proof or a ported test showed the Dart behaviour to be wrong, the Rust
+fixes it rather than port the bug, and says so where the fix lives:
+
+- The oplog carry (`OplogDrain::ACK_CARRY_SQL`,
+  `Persistence::COMPACT_CARRY_SQL`) looks back no further than a row's latest
+  tombstone, as the drain's collapse does. The Dart carry inherited a deleted
+  insert's asset dependency across the tombstone onto a revive, which could
+  hold the revive, and through the ack watermark the whole ledger, forever
+  (`verification/VocaraVerify/Oplog.lean`, `carryOld_breaks_the_gate`). Only
+  the local ledger is affected; the data stays compatible both ways.
 
 ## Tracking
 
