@@ -148,7 +148,7 @@ behavior and its tests are ported and the gates pass.
 | `config/dependencies.dart` | 109 | `vocara_app::dependencies` | todo |
 | `config/environment.dart` | 59 | `vocara_model::config::environment` | todo |
 | `data/db/app_database.dart` | 180 | `vocara_store::db::schema` | done |
-| `data/db/asset_store.dart` | 1322 | `vocara_store::db::asset_store` | todo |
+| `data/db/asset_store.dart` | 1322 | `vocara_store::db::asset_store` | done |
 | `data/db/durable_fs.dart` | 119 | `vocara_store::db::durable_fs` | done |
 | `data/db/library_lock.dart` | 318 | `vocara_store::db::library_lock` | done |
 | `data/db/persistence.dart` | 1286 | `vocara_store::db::persistence` | todo |
