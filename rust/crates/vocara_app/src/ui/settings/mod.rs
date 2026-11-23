@@ -4,6 +4,8 @@
 //! affordance, which pops, or goes Home when it is the root of the stack
 //! (`popOrGo(context, Routes.home)`).
 
+pub mod licenses;
+
 use iced::{Element, Task};
 
 use super::{placeholder, Screen, Update};
