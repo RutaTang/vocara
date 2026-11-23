@@ -10,22 +10,16 @@ fn repo_file(rel: &str) -> String {
 
 /// Port of `update_check_version_sync_test.dart`: a release with a stale
 /// constant would ship an app that mis-identifies its own version and shows a
-/// permanent "update available" banner for its own release.
+/// permanent "update available" banner for its own release. The workspace
+/// version is what the release tag is checked against (release.yml) and what
+/// the bundle's Info.plist carries (packaging/macos/bundle.sh).
 #[test]
-fn app_version_and_build_number_match_the_package_versions() {
+fn app_version_matches_the_workspace_version() {
     assert_eq!(UpdateCheckService::APP_VERSION, env!("CARGO_PKG_VERSION"));
-    // While the Flutter client still ships, its pubspec must agree too.
-    let pubspec = repo_file("client/pubspec.yaml");
-    let line = pubspec
-        .lines()
-        .find(|l| l.starts_with("version:"))
-        .expect("pubspec.yaml must declare version: X+B");
-    let (version, build) = line["version:".len()..]
-        .trim()
-        .split_once('+')
-        .expect("version: X+B");
-    assert_eq!(UpdateCheckService::APP_VERSION, version);
-    assert_eq!(UpdateCheckService::APP_BUILD_NUMBER, build);
+    assert!(
+        UpdateCheckService::APP_BUILD_NUMBER.parse::<u32>().is_ok(),
+        "the build number is CFBundleVersion: a plain integer"
+    );
 }
 
 /// Port of `update_check_manifest_sync_test.dart`: a repo renamed in one place

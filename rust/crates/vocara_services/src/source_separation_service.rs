@@ -25,7 +25,7 @@ use sha2::Sha256;
 use crate::local_storage_service::LocalStorageService;
 
 /// The bundled sidecar, copied out to app support on first use.
-const SEPARATE_PY: &str = include_str!("../../../../client/assets/separation/separate.py");
+const SEPARATE_PY: &str = include_str!("../assets/separation/separate.py");
 
 /// The default separation model. MUST mirror `separate.py`'s DEFAULT_MODEL —
 /// it only feeds the cache key (so a model change invalidates stems), since

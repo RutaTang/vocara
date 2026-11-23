@@ -70,8 +70,8 @@ sed -e "s/@BUNDLE_ID@/$BUNDLE_ID/" -e "s/@DISPLAY_NAME@/$DISPLAY_NAME/" \
   "$HERE/Info.plist.in" > "$APP/Contents/Info.plist"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
-# The icon, from the same PNGs the Flutter app's asset catalog used.
-ICONS="$WORKSPACE/../client/macos/Runner/Assets.xcassets/AppIcon.appiconset"
+# The icon, from the PNGs the Flutter app's asset catalog shipped.
+ICONS="$HERE/AppIcon.appiconset"
 SET="$(mktemp -d)/AppIcon.iconset"
 mkdir -p "$SET"
 for size in 16 32 128 256 512; do
