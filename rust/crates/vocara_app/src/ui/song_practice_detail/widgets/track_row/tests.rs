@@ -582,6 +582,38 @@ fn the_live_forming_clip_keeps_its_absolute_sample_to_column_mapping() {
     assert!((apex - expected).abs() <= 3.0, "{apex} vs {expected}");
 }
 
+#[test]
+fn the_forming_take_grows_rightward_without_its_drawn_part_moving() {
+    // `kept_subtree_recording_test`'s recording ticks, at the row's level:
+    // each tick adds peaks; the box keeps its left edge and widens by the
+    // timeline's px per record interval, and the columns already drawn
+    // stay as they were.
+    let lane = f64::from(LANE_W);
+    let pps = recording_pixels_per_sample(VIEWPORT_MS, lane);
+    let peaks: Vec<f64> = (0..60).map(|i| (i % 5) as f64 / 5.0).collect();
+    let early = recording_span(VIEWPORT_MS, 0, lane, 2000, 20).expect("in view");
+    let later = recording_span(VIEWPORT_MS, 0, lane, 2000, 60).expect("in view");
+    assert_eq!(early.left, later.left);
+    assert!((later.width - early.width - 40.0 * pps).abs() < 1e-9);
+    let draw = |v: &VisibleSpan, n: usize| {
+        live_waveform_outline(
+            &peaks[..n][v.slice.range.clone()],
+            v.width,
+            40.0,
+            pps,
+            v.slice.index_offset,
+        )
+        .expect("painted")
+        .0
+    };
+    let (a, b) = (draw(&early, 20), draw(&later, 60));
+    // The top edge's first columns (the outline starts at (0, mid)).
+    let columns = (early.width.floor() as usize).saturating_sub(1);
+    assert_eq!(a[..columns], b[..columns]);
+    // No timeline: one pixel per sample, as Dart fell back to.
+    assert_eq!(recording_pixels_per_sample(0, lane), 1.0);
+}
+
 // ---------------------------------------------------------- geometry
 
 #[test]
