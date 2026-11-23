@@ -1,1 +1,5 @@
-//! Vocara domain model: practices, takes, FX, techniques, analysis results, and the pure utilities they need.
+//! Vocara domain model: practices, takes, FX, techniques, analysis results,
+//! and the pure utilities and infrastructure every layer above needs.
+
+pub mod diagnostics;
+pub mod util;
