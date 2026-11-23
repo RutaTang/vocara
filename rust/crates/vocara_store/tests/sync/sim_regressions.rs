@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use vocara_model::models::audio_track::{AudioTrack, AudioTrackKind};
 use vocara_model::models::song_practice::SongPractice;
+use vocara_model::models::take_version::TakeVersion;
 use vocara_model::util::dart_date_time::DateTime;
 use vocara_model::util::id::new_id;
 use vocara_store::db::AppDatabase;
@@ -216,6 +217,122 @@ fn a_practice_whose_interpretation_arrives_on_the_next_page_is_not_healed_mid_pu
     assert_eq!(b.oplog_count(), 0);
     // And B holds A's row verbatim (no repair-minted HLC).
     assert_eq!(b.row_states("practices"), a.row_states("practices"));
+}
+
+#[test]
+fn a_practice_pointing_at_an_interpretation_revived_on_the_next_page_is_not_healed_mid_pull() {
+    // The case above no longer reaches the heal on its own: a pointer to an
+    // ABSENT interpretation is now pending, never healed (see the
+    // IntegrityChecker's scalar heals). The heal still fires on a pointer to
+    // a TOMBSTONED one — and the pusher's parent-first order delivers
+    // exactly that mid-run whenever a save revives an interpretation and
+    // makes it active: the practice row lands a page before the revive. A
+    // repair between those pages nulls the pointer under a derived stamp
+    // above A's own row, journals it, and the null wins on every device.
+    let cloud = FakeCloud::new();
+    let a = Device::new(&cloud, "DEVA", T0);
+    let b = Device::new(&cloud, "DEVB", T0);
+
+    // A: a practice with a second interpretation, synced to B.
+    let created = a.repo().create_practice("Revived").unwrap();
+    let first = created.active_version_id.clone().unwrap();
+    let powerful = TakeVersion::new(new_id(), "Powerful", DateTime::now());
+    let l = a.load(&created.id);
+    let mut versions = l.aggregate.versions.clone();
+    versions.push(Arc::new(powerful.clone()));
+    a.save_with_base(
+        &SongPractice {
+            versions,
+            ..l.aggregate.clone()
+        },
+        &l,
+    );
+    assert!(!a.engine.pump_push().failed());
+    assert!(!b.engine.pump_pull().failed());
+
+    // An editor on A opens it, holding both interpretations.
+    let stale = a.load(&created.id);
+
+    // A deletes 'Powerful' (another editor's save without it), and B pulls
+    // the tombstone.
+    let l = a.load(&created.id);
+    let kept = l
+        .aggregate
+        .versions
+        .iter()
+        .filter(|v| v.id == first)
+        .cloned()
+        .collect();
+    a.save_with_base(
+        &SongPractice {
+            versions: kept,
+            ..l.aggregate.clone()
+        },
+        &l,
+    );
+    assert!(!a.engine.pump_push().failed());
+    assert!(!b.engine.pump_pull().failed());
+    assert!(
+        col::<Option<i64>>(&b.db, "interpretations", &powerful.id, "deleted_at")
+            .flatten()
+            .is_some(),
+        "B holds 'Powerful' tombstoned"
+    );
+
+    // The stale editor renames 'Powerful' and makes it active: its edit
+    // revives the row (the active editor wins), in the same save as the
+    // practice's new pointer.
+    let renamed: Vec<Arc<TakeVersion>> = stale
+        .aggregate
+        .versions
+        .iter()
+        .map(|v| {
+            if v.id == powerful.id {
+                Arc::new(TakeVersion {
+                    name: "Powerful (kept)".to_string(),
+                    ..(**v).clone()
+                })
+            } else {
+                v.clone()
+            }
+        })
+        .collect();
+    a.save_with_base(
+        &SongPractice {
+            versions: renamed,
+            active_version_id: Some(powerful.id.clone()),
+            ..stale.aggregate.clone()
+        },
+        &stale,
+    );
+    assert_eq!(
+        col::<Option<i64>>(&a.db, "interpretations", &powerful.id, "deleted_at"),
+        Some(None),
+        "the edit revived 'Powerful' on A"
+    );
+    assert!(!a.engine.pump_push().failed());
+
+    // One row per page: the practice (its pointer at the still-tombstoned
+    // 'Powerful') lands one page before the revive.
+    b.transport.set_page_size(1);
+    let pull = b.engine.pump_pull();
+    assert!(!pull.failed());
+    assert_eq!(
+        pull.applied, 2,
+        "the practice, then the revived interpretation"
+    );
+
+    assert_eq!(
+        col::<Option<String>>(&b.db, "practices", &created.id, "active_interpretation_id"),
+        Some(Some(powerful.id.clone())),
+        "the pointer must survive the page boundary un-healed"
+    );
+    assert_eq!(b.oplog_count(), 0, "no repair was journaled");
+    assert_eq!(b.row_states("practices"), a.row_states("practices"));
+    assert_eq!(
+        b.row_states("interpretations"),
+        a.row_states("interpretations")
+    );
 }
 
 // --- seed 0xab1a57: repairs are derived state, never fresh intent ----------
