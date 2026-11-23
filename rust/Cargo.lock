@@ -4543,6 +4543,9 @@ version = "0.1.0"
 dependencies = [
  "dirs",
  "hex",
+ "indexmap",
+ "libc",
+ "parking_lot",
  "rand",
  "rusqlite",
  "serde",
