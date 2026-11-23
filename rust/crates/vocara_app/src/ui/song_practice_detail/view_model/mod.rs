@@ -10,3 +10,4 @@ pub mod interpretations_controller;
 pub mod mixer_controller;
 pub mod playback_controller;
 pub mod recording_controller;
+pub mod song_practice_detail_view_model;

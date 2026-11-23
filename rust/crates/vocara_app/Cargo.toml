@@ -29,10 +29,10 @@ dirs.workspace = true
 lucide-icons.workspace = true
 png.workspace = true
 bytes.workspace = true
+indexmap.workspace = true
 
 [dev-dependencies]
 iced_test.workspace = true
-indexmap.workspace = true
 tempfile.workspace = true
 
 [lints]
