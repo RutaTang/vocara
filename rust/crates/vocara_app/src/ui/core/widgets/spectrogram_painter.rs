@@ -28,6 +28,7 @@ use crate::ui::core::theme::{alpha, font, Studio};
 pub use vocara_model::models::spectrogram::AnalysisFraming;
 use vocara_model::models::spectrogram::Spectrogram;
 use vocara_model::models::voice_metrics::VoiceMetrics;
+use vocara_model::util::dart_num::clamp_f64;
 
 /// What the spectrogram painters read of a [`Spectrogram`]: a
 /// [`frames`](AnalysisFraming::frames) × [`bins`](Self::bins) grid of dB
@@ -901,8 +902,11 @@ impl PowerSpectrumPainter {
         } else {
             ceil - floor
         };
-        let x = |bin: f64| (bin * self.bin_hz / self.max_hz).clamp(0.0, 1.0) * width;
-        let y = |db: f64| height * (1.0 - ((db - floor) / range).clamp(0.0, 1.0));
+        // Dart's clamp: a NaN bin (a take whose audio carried a non-finite
+        // sample) reads as the top of the scale, where Rust's would stay NaN
+        // and reach the path builder.
+        let x = |bin: f64| clamp_f64(bin * self.bin_hz / self.max_hz, 0.0, 1.0) * width;
+        let y = |db: f64| height * (1.0 - clamp_f64((db - floor) / range, 0.0, 1.0));
 
         let band = (
             x((2600.0 / self.bin_hz).round()),
