@@ -1,4 +1,4 @@
-//! Port of the repository case of
+//! Port of the repository and model cases of
 //! `client/test/technique_example_identity_test.dart`.
 //!
 //! Identity: two examples with identical bytes resolve to the SAME pooled
@@ -8,8 +8,7 @@
 //! pool dedups them to one file while both examples load, in order, under
 //! their own ids; the selection itself (keyed by id) and the naming of
 //! dropped and recorded examples belong to the technique detail view
-//! model's port, and the display-label rule is the model's
-//! (`TechniqueMedia::display_label`).
+//! model's port.
 
 use std::collections::HashSet;
 
@@ -64,5 +63,38 @@ fn two_byte_identical_examples_share_one_pooled_file_and_keep_their_own_ids() {
             .map(|m| m.label.as_str())
             .collect::<Vec<_>>(),
         vec!["Take 0", "Take 1"]
+    );
+}
+
+#[test]
+fn an_uncaptioned_example_named_by_the_app_reads_by_its_kind_never_a_hash() {
+    // The caption is the only name the user gave; with it cleared (or never
+    // set, as on examples saved before captions were staged) the fallback
+    // was the stored file's name — a generated id, or the pool's 64-hex
+    // hash. (A model rule, ported here with the rest of its Dart file.)
+    let media = |path: &str, label: &str| TechniqueMedia {
+        id: "m".into(),
+        path: path.into(),
+        kind: TechniqueMedia::kind_for_path(path),
+        label: label.into(),
+        added_at: DateTime::local_ymd(2026, 1, 1),
+    };
+    let hash = format!("9f64a747{}806a", "0".repeat(52));
+    assert_eq!(
+        media(&format!("/pool/{hash}.wav"), "").display_label(),
+        "Audio example"
+    );
+    assert_eq!(
+        media(&format!("/pool/{hash}.mp4"), "").display_label(),
+        "Video example"
+    );
+    assert_eq!(
+        media("/t/01M5Q7CW5YY1DCXTX5ZY7TPT68.wav", "").display_label(),
+        "Audio example"
+    );
+    assert_eq!(media("/t/My Demo.wav", "").display_label(), "My Demo.wav");
+    assert_eq!(
+        media(&format!("/pool/{hash}.wav"), "  Twang  ").display_label(),
+        "Twang"
     );
 }
