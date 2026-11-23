@@ -105,7 +105,7 @@
 mod jobs;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;

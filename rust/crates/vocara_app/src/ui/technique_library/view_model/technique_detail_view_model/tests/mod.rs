@@ -8,7 +8,7 @@
 //! enabled state, a label, a dialog) belongs to the detail screen's port,
 //! and each module lists those parts.
 
-mod support;
+pub(crate) mod support;
 
 mod detail_layout;
 mod dropped_frames;
