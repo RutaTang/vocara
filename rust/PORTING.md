@@ -151,7 +151,7 @@ behavior and its tests are ported and the gates pass.
 |---|---:|---|---|
 | `app.dart` | 85 | `vocara_app::app` | done |
 | `config/app_config.dart` | 16 | `vocara_model::config::app_config` | done |
-| `config/dependencies.dart` | 109 | `vocara_app::dependencies` | todo |
+| `config/dependencies.dart` | 109 | `vocara_app::services` (`Services`, `create_source_separation_service`) | done |
 | `config/environment.dart` | 59 | `vocara_model::config::environment` | done |
 | `data/db/app_database.dart` | 180 | `vocara_store::db::schema` | done |
 | `data/db/asset_store.dart` | 1322 | `vocara_store::db::asset_store` | done |
