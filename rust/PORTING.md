@@ -103,13 +103,13 @@ behavior and its tests are ported and the gates pass.
 | `config/app_config.dart` | 16 | `vocara_model::config::app_config` | todo |
 | `config/dependencies.dart` | 109 | `vocara_app::dependencies` | todo |
 | `config/environment.dart` | 59 | `vocara_model::config::environment` | todo |
-| `data/db/app_database.dart` | 180 | `vocara_store::db::app_database` | todo |
+| `data/db/app_database.dart` | 180 | `vocara_store::db::schema` | done |
 | `data/db/asset_store.dart` | 1322 | `vocara_store::db::asset_store` | todo |
 | `data/db/durable_fs.dart` | 119 | `vocara_store::db::durable_fs` | todo |
 | `data/db/library_lock.dart` | 318 | `vocara_store::db::library_lock` | todo |
 | `data/db/persistence.dart` | 1286 | `vocara_store::db::persistence` | todo |
 | `data/db/safe_migrator.dart` | 379 | `vocara_store::db::safe_migrator` | todo |
-| `data/db/tables.dart` | 347 | `vocara_store::db::tables` | todo |
+| `data/db/tables.dart` | 347 | `vocara_store::db::{schema, rows}` | done |
 | `data/db/write_gate.dart` | 92 | `vocara_store::db::write_gate` | todo |
 | `data/ffi/vocara_engine_bindings.dart` | 2051 | `vocara_services::engine` | todo |
 | `data/repositories/song_practice_repository.dart` | 64 | `vocara_store::repositories::song_practice_repository` | todo |
