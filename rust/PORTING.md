@@ -73,6 +73,12 @@ wrong. Port the behavior, not the shape:
   `// SAFETY:` comment.
 - **Gates** (run from `rust/`): `cargo fmt --all --check`, `cargo clippy
   --workspace --all-targets -- -D warnings`, `cargo test --workspace`.
+- **macOS check from Linux**: the shipped build is macOS, with the `device`
+  feature. `cargo check`/`clippy` never link, so a no-op C toolchain lets the
+  C dependencies' build scripts pass and type-checks every macOS-only path:
+  `CC_aarch64_apple_darwin=true AR_aarch64_apple_darwin=true
+  CXX_aarch64_apple_darwin=true cargo clippy --workspace --all-targets
+  --features vocara_app/device --target aarch64-apple-darwin -- -D warnings`.
 - **Commits**: small and frequent, on the working branch, with the session's
   trailer lines. CI is not run until the whole port is done.
 

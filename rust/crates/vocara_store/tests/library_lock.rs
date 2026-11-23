@@ -34,10 +34,10 @@ fn say(word: &str) {
 
 /// One `fcntl` record lock on [byte], as Python's `fcntl.lockf(fd, mode, 1,
 /// byte)` issues it (`F_SETLK`, or `F_SETLKW` when [blocking]).
-fn helper_lock(fd: i32, kind: i32, byte: i64, blocking: bool) -> Result<(), i32> {
+fn helper_lock(fd: i32, kind: impl Into<i64>, byte: i64, blocking: bool) -> Result<(), i32> {
     // SAFETY: a zeroed flock is valid; the fields the call reads are set.
     let mut fl: libc::flock = unsafe { std::mem::zeroed() };
-    fl.l_type = kind as _;
+    fl.l_type = kind.into() as _; // `c_short` on macOS, `c_int` on Linux
     fl.l_whence = libc::SEEK_SET as _;
     fl.l_start = byte as libc::off_t;
     fl.l_len = 1;
