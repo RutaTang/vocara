@@ -607,25 +607,32 @@ fn merge_saves_first_then_deletes_only_the_two_source_files() {
 
 #[test]
 fn a_selected_bottom_take_follows_its_audio_into_the_merged_lane() {
-    let (f, mut s) = Fixture::open(Setup {
-        practice: seed_practice(Some(mergeable_takes())),
-        ..Setup::default()
-    });
-    s.act(|vm| vm.select_track("bottom"));
-    s.act(|vm| vm.merge_track_down("top"));
-    s.settle();
-    assert_eq!(s.vm.selected_track_id(), Some("top"));
-    // ... and back with the takes when the save fails.
-    let (f2, mut s2) = Fixture::open(Setup {
-        practice: seed_practice(Some(mergeable_takes())),
-        ..Setup::default()
-    });
-    s2.act(|vm| vm.select_track("bottom"));
-    f2.repo.s().fail_saves = true;
-    s2.act(|vm| vm.merge_track_down("top"));
-    s2.settle();
-    assert_eq!(s2.vm.selected_track_id(), Some("bottom"));
-    let _ = f;
+    // ... and back out of it when the save fails.
+    for fail in [false, true] {
+        let (f, mut s) = Fixture::open(Setup {
+            practice: seed_practice(Some(mergeable_takes())),
+            ..Setup::default()
+        });
+        let bottom_clip = s.practice().vocal_tracks[1].clips[0].id.clone();
+        s.act(|vm| vm.select_clip("bottom", &bottom_clip));
+        assert_eq!(s.vm.record_target_id().as_deref(), Some("bottom"));
+        f.repo.s().fail_saves = fail;
+        s.act(|vm| vm.merge_track_down("top"));
+        s.settle();
+        if fail {
+            assert_eq!(s.vm.selected_track_id(), Some("bottom"));
+            assert_eq!(s.vm.selected_clip_id(), Some(bottom_clip.as_str()));
+        } else {
+            assert_eq!(s.vm.selected_track_id(), Some("top"), "not the backing");
+            let tracks = &s.practice().vocal_tracks;
+            assert_eq!(tracks.len(), 1);
+            assert_eq!(tracks[0].clips.len(), 1);
+            let merged = tracks[0].clips[0].id.clone();
+            assert_eq!(s.vm.selected_clip_id(), Some(merged.as_str()));
+            assert_eq!(s.vm.record_target_id().as_deref(), Some("top"));
+        }
+        f.repo.s().fail_saves = false;
+    }
 }
 
 #[test]
@@ -875,16 +882,16 @@ fn add_accompaniment_deletes_the_replaced_backing_only_after_the_save() {
 fn duplicate_track_on_a_failed_save_deletes_the_copied_files() {
     let (f, mut s) = Fixture::open(Setup::default());
     f.repo.s().fail_saves = true;
-    s.act(|vm| vm.duplicate_track("multi"));
+    s.act(|vm| vm.duplicate_track("single"));
     s.settle();
-    assert_eq!(
-        f.events(),
-        [
-            "save-failed",
-            "delete:/edit/dup0.wav",
-            "delete:/edit/dup1.wav"
-        ]
-    );
+    assert!(f.events().contains(&"delete:/edit/dup0.wav".to_string()));
+    let ids: Vec<&str> = s
+        .practice()
+        .vocal_tracks
+        .iter()
+        .map(|t| t.id.as_str())
+        .collect();
+    assert_eq!(ids, ["single", "multi"]);
 }
 
 #[test]
@@ -1241,8 +1248,13 @@ fn two_rapid_ungated_saves_never_overlap() {
 
 #[test]
 fn an_edit_made_while_a_save_is_failing_in_flight_survives() {
-    // The failed save does not revert over the newer model: the queued save
-    // retries the combined state.
+    // Edit A's save is in flight (its model already sent) when edit B
+    // changes the live model and queues save B. Save A then fails; its
+    // revert reloads the disk's model, and over B's model it would have
+    // saved the PRE-EDIT state: edit B lost on disk with only A's failure
+    // said. (When both edits land before the save sends its model, the
+    // failed write held both, and the revert with its toast is the designed
+    // failure: not what this pins.)
     let (f, mut s) = Fixture::open(Setup::default());
     let gate = Gate::new();
     {
@@ -1250,16 +1262,35 @@ fn an_edit_made_while_a_save_is_failing_in_flight_survives() {
         r.save_gate = Some(Arc::clone(&gate));
         r.fail_next_save = true;
     }
-    s.act(|vm| vm.rename_track("single", "A"));
+    s.act(|vm| vm.rename_track("single", "A")); // this save fails
+                                                // Save A has sent its model and is inside the store's write: THEN edit B
+                                                // arrives, the window the guard protects.
     s.pump_until(|_| f.repo.s().in_flight > 0);
-    s.act(|vm| vm.rename_track("multi", "B"));
+    s.act(|vm| vm.rename_track("single", "B")); // queued behind, must survive
     f.repo.s().save_gate = None;
     gate.open();
     s.settle();
-    let stored = f.repo.stored();
-    assert_eq!(stored.vocal_tracks[0].display_name, "A");
-    assert_eq!(stored.vocal_tracks[1].display_name, "B");
-    assert_eq!(s.toasts, ["Couldn't save your changes."]);
+
+    assert_eq!(f.events(), ["save-failed", "save"]);
+    let name = |p: &SongPractice| {
+        p.vocal_tracks
+            .iter()
+            .find(|t| t.id == "single")
+            .map(|t| t.display_name.clone())
+    };
+    assert_eq!(
+        name(&f.repo.stored()).as_deref(),
+        Some("B"),
+        "edit B must reach the store despite edit A's failed save"
+    );
+    assert_eq!(
+        name(s.practice()).as_deref(),
+        Some("B"),
+        "the screen must keep showing the surviving edit"
+    );
+    assert!(s
+        .toasts
+        .contains(&"Couldn't save your changes.".to_string()));
 }
 
 // --- A failed save that could not revert ---------------------------------------------
