@@ -148,6 +148,7 @@ fn cancel_after_the_stems_arrive_keeps_the_backing_as_it_was() {
     gate.open(); // the stems are in
     s.pump_until(|_| reached.load(Ordering::SeqCst)); // the instrumental is being analyzed
     assert!(s.vm.is_separating(), "Cancel is still on screen");
+    assert!(s.vm.can_cancel_separation());
     s.vm.cancel_separation();
     analysis.open();
     s.settle();
@@ -241,12 +242,8 @@ fn separating_a_backing_that_is_not_yet_the_reference_keeps_the_lanes_mixer_stat
     let call = s.call(|vm| vm.add_accompaniment("/src/full-mix.wav"));
     s.await_reply(call);
     s.settle();
-    let backing = s
-        .practice()
-        .accompaniment
-        .as_ref()
-        .map(|a| a.id.clone())
-        .expect("the full mix");
+    let full_mix = s.practice().accompaniment.clone().expect("the full mix");
+    let backing = full_mix.id.clone();
 
     s.act(|vm| vm.mixer_do(|m, h| m.set_track_volume_live(h, &backing, 0.42)));
     s.act(|vm| vm.mixer_do(|m, h| m.set_track_pan_live(h, &backing, -0.6)));
@@ -273,11 +270,27 @@ fn separating_a_backing_that_is_not_yet_the_reference_keeps_the_lanes_mixer_stat
 
     let reference = s.practice().reference.clone().expect("the Original");
     assert_eq!(reference.id, backing, "the same lane, re-kinded");
+    assert_eq!(reference.kind, AudioTrackKind::Reference);
     assert!((reference.volume - 0.42).abs() < 1e-9);
     assert!((reference.pan - -0.6).abs() < 1e-9);
     assert!(reference.muted);
     assert_eq!(reference.fx.as_ref().map(|fx| fx.eq_on), Some(true));
     assert_eq!(reference.color_value, Some(0xFF00_FF00));
+    // The instrumental is the lane's stem, named after it, and the full mix
+    // is kept for a re-separation.
+    let p = s.practice().clone();
+    let instrumental = p.accompaniment.as_ref().expect("the instrumental");
+    assert_eq!(
+        instrumental.display_name,
+        format!("{} (Instrumental)", full_mix.display_name)
+    );
+    assert_eq!(instrumental.clips[0].audio_file_path, "/import/1.wav");
+    assert_eq!(
+        p.separation_source.as_deref(),
+        Some(full_mix.clips[0].audio_file_path.as_str())
+    );
+    assert!(!s.vm.is_separating());
+    assert!(!s.vm.busy());
 }
 
 // --- The separated backing's import discipline -----------------------------------------------
@@ -288,7 +301,7 @@ fn separating_a_backing_that_is_not_yet_the_reference_keeps_the_lanes_mixer_stat
 // re-decoded into RAM at every project open, exactly the failure mode the
 // import discipline exists to prevent.
 #[test]
-fn the_separated_instrumental_goes_through_the_same_import_discipline_as_every_import() {
+fn the_separated_instrumental_goes_through_the_same_import_discipline_as_every_other_import() {
     let gate = Gate::new();
     gate.open();
     let (f, mut s) = open(seeded_with(Some(original())), &gate);
@@ -314,7 +327,8 @@ fn the_separated_instrumental_goes_through_the_same_import_discipline_as_every_i
 }
 
 #[test]
-fn a_failed_save_after_separation_deletes_the_transcoded_wav_and_the_import_copy() {
+fn a_failed_save_after_separation_deletes_the_transcoded_wav_and_the_import_copy_and_keeps_nothing_live(
+) {
     let gate = Gate::new();
     gate.open();
     let (f, mut s) = open(seeded_with(Some(original())), &gate);
@@ -328,6 +342,9 @@ fn a_failed_save_after_separation_deletes_the_transcoded_wav_and_the_import_copy
     assert!(events.contains(&"delete:/edit/inst48k.wav".to_string()));
     assert!(events.contains(&"delete:/import/0.wav".to_string()));
     assert!(s.practice().accompaniment.is_none(), "nothing kept live");
+    assert!(s
+        .toasts
+        .contains(&"Could not save the separated track.".to_string()));
 }
 
 #[test]

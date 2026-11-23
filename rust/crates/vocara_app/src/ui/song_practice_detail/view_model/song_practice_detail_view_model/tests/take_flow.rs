@@ -6,8 +6,7 @@
 //! the arm window and the take to Stop, the stop window and the take's save.
 //! (The recording controller's own halves of these cases are its tests'; a
 //! few of the file's cases are ported in `interpretations`, `reopen` and
-//! `placement`, and two of its dragged-clip cases have looser kin in
-//! `structural`.)
+//! `placement`.)
 //!
 //! The screen is the module above's, opened over the take-flow test's own
 //! fakes: [`FlowRepo`] (Dart's `_FakeRepo`: a save gate, failing saves, a
@@ -2004,6 +2003,7 @@ fn split_both_halves_follow_the_dragged_clip() {
     assert_eq!(first.id, "take1");
     assert_eq!(first.clips.len(), 1);
     assert_eq!(first.clips[0].start_ms, 300, "the drag snapped back");
+    assert_eq!(second.display_name, "Take 1 (2)");
     assert_eq!(second.clips.len(), 1);
     assert_eq!(second.clips[0].start_ms, 800);
 }

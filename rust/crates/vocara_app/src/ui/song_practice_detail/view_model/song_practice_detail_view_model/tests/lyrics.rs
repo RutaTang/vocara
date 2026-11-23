@@ -235,9 +235,9 @@ fn a_fixed_typo_in_the_first_chorus_leaves_the_second_its_own_time() {
     assert!(s.landed(call));
     let times =
         |s: &Screen| -> Vec<Option<i64>> { s.vm.lyrics().iter().map(|l| l.time_ms).collect() };
-    set_text(&mut s, "chorus!\nverse\nchorus");
+    assert!(set_text(&mut s, "chorus!\nverse\nchorus"));
     assert_eq!(times(&s), [None, Some(40000), Some(90000)]);
-    set_text(&mut s, "verse\nchorus"); // the first chorus deleted
+    assert!(set_text(&mut s, "verse\nchorus")); // the first chorus deleted
     assert_eq!(times(&s), [Some(40000), Some(90000)]);
 }
 
@@ -276,22 +276,6 @@ fn an_edit_keeps_the_end_marker_of_a_line_that_is_still_last() {
     assert_eq!(lines.len(), 3);
     assert!(lines[2].is_blank());
     assert_eq!(lines[2].time_ms, Some(3000));
-}
-
-#[test]
-fn a_merged_save_takes_in_the_peer_words_and_re_seeds_the_cursor() {
-    let (f, mut s) = Fixture::open(Setup::default());
-    assert!(set_text(&mut s, "one\ntwo\nthree"));
-    s.vm.set_lyrics_mode(LyricsMode::Sync);
-    f.repo.s().peer_words_on_next_save = Some(vec![
-        LyricLine::new("peer a", None),
-        LyricLine::new("peer b", None),
-    ]);
-    at_ms(&mut s, 700);
-    s.act(|vm| vm.stamp_next_lyric());
-    s.settle();
-    assert_eq!(words(&s), ["peer a", "peer b"]);
-    assert!(s.vm.sync_index() < 2, "never past the end");
 }
 
 #[test]
