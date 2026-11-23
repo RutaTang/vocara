@@ -195,13 +195,13 @@ fn a_save_with_nothing_to_save_closes_with_nothing() {
 #[test]
 fn the_card_is_at_most_460_wide_and_centred() {
     let editor = NoteEditor::new(None, ms(12_000), None, normalize);
-    // The default 1024 px window: the card's 20 px padding, the icon and its
+    // The default 1024 px window: the card's 20 px padding and 1 px border, the icon and its
     // 8 px gap before the title.
     let mut ui = iced_test::simulator(editor.view());
     let title = ui.find("Note at 00:12").expect("the title").bounds();
     let card_left = (1024.0 - CARD_MAX_WIDTH) / 2.0;
     assert!(
-        (title.x - (card_left + 20.0 + 16.0 + 8.0)).abs() < 0.5,
+        (title.x - (card_left + 21.0 + 16.0 + 8.0)).abs() < 0.5,
         "{title:?}"
     );
 }

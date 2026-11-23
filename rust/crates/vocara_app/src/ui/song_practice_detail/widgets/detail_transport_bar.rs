@@ -263,7 +263,7 @@ pub fn detail_transport_bar<'a>(bar: TransportBar<'a>) -> Element<'a, Message> {
     let takes = practice.active_vocal_tracks().len();
 
     // Left: back + title + counts. The title gives way first.
-    let left = Arranged::new(
+    let left = flexible_row(
         vec![
             back_button(),
             Space::new().width(6).into(),
@@ -283,8 +283,7 @@ pub fn detail_transport_bar<'a>(bar: TransportBar<'a>) -> Element<'a, Message> {
                 .wrapping(Wrapping::None)
                 .into(),
         ],
-        Size::new(Length::Shrink, Length::Shrink),
-        |children, trees, renderer, limits| loose_flex_row(children, trees, renderer, limits, 2),
+        2,
     );
 
     // Right: timeline zoom — a horizontal slider flanked by zoom icons, like
@@ -354,9 +353,9 @@ pub fn detail_transport_bar<'a>(bar: TransportBar<'a>) -> Element<'a, Message> {
     }
 
     let slots = Arranged::new(
-        vec![left.into(), right.into(), center.into()],
+        vec![left, right.into(), center.into()],
         Size::new(Length::Fill, Length::Fill),
-        arrange_bar,
+        Box::new(arrange_bar),
     );
     container(column![
         container(slots)
@@ -415,7 +414,8 @@ fn rec_pill<'a>(is_recording: bool, on_tap: Message) -> Element<'a, Message> {
         .align_y(Vertical::Center),
     )
     .height(32)
-    .padding([0, 12])
+    // A decoration's border pads its child too: 12 + 1.
+    .padding([0, 13])
     .align_y(Vertical::Center)
     .style(move |_| {
         boxed(
@@ -443,7 +443,9 @@ fn rec_pill<'a>(is_recording: bool, on_tap: Message) -> Element<'a, Message> {
 /// w600 `Studio.lcd`, tabular figures, 1 px letter spacing.
 fn lcd<'a>(content: String) -> Element<'a, Message> {
     container(lcd_counter(content))
-        .padding([6, 12])
+        // A decoration's border pads its child too (Flutter's `Container`
+        // adds `decoration.padding`): 1 px more each side.
+        .padding([7, 13])
         .style(|_| boxed(Some(Studio::INSET), 6.0, Some(Studio::BORDER)))
         .into()
 }
@@ -551,8 +553,9 @@ impl canvas::Program<Message> for ZoomSlider {
 // ------------------------------------------------------------------ layouts
 
 /// How an [`Arranged`] lays its children out.
-type Arrange<'a, M> =
-    fn(&mut [Element<'a, M>], &mut [Tree], &Renderer, &layout::Limits) -> layout::Node;
+type Arrange<'a, M> = Box<
+    dyn Fn(&mut [Element<'a, M>], &mut [Tree], &Renderer, &layout::Limits) -> layout::Node + 'a,
+>;
 
 /// Children laid out by a function: the counterpart of the Dart bar's
 /// `CustomMultiChildLayout` and its `Row(mainAxisSize: min)` with a
@@ -571,6 +574,26 @@ impl<'a, M> Arranged<'a, M> {
             arrange,
         }
     }
+}
+
+/// `Row(mainAxisSize: MainAxisSize.min, children: ...)` in which the child
+/// at `flex` is wrapped in a (loose) `Flexible`: it takes what the others
+/// leave, never more than its own width; the row shrinks to its children.
+/// (iced's `Row` lays its children out in order, so a long first child
+/// would leave nothing for the ones after it.) The inspector's chips use it
+/// too.
+pub(crate) fn flexible_row<'a, M: 'a>(
+    children: Vec<Element<'a, M>>,
+    flex: usize,
+) -> Element<'a, M> {
+    Arranged::new(
+        children,
+        Size::new(Length::Shrink, Length::Shrink),
+        Box::new(move |children, trees, renderer, limits| {
+            loose_flex_row(children, trees, renderer, limits, flex)
+        }),
+    )
+    .into()
 }
 
 /// `_BarLayout`, over `[left, right, center]` (Dart's paint order).

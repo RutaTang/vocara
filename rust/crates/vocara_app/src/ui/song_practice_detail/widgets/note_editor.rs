@@ -266,9 +266,11 @@ impl NoteEditor {
             column![
                 heading,
                 Space::new().height(14),
+                // 10 / 12, and the well's 1 px border: a decoration's border
+                // pads its child too (as on the card).
                 container(field)
                     .width(Length::Fill)
-                    .padding([10, 12])
+                    .padding([11, 13])
                     .style(theme::inset(8.0)),
                 Space::new().height(18),
                 actions,
@@ -277,7 +279,8 @@ impl NoteEditor {
         )
         .width(Length::Fill)
         .max_width(CARD_MAX_WIDTH)
-        .padding(20)
+        // 20, and the card's 1 px border.
+        .padding(21)
         .style(card_style);
         modal(
             container(card)
