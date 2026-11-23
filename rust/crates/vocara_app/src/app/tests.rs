@@ -52,7 +52,10 @@ fn the_app_boots_to_the_home_screen() {
 #[test]
 fn navigates_home_to_settings_and_back() {
     let mut app = boot(None);
-    click(&mut app, "Settings");
+    let (home, _) = app.top().expect("running");
+    // The header's settings button (an icon with a "Settings" tooltip).
+    let settings = char::from(crate::ui::core::icons::Icon::Settings).to_string();
+    click(&mut app, &settings);
     assert_eq!(app.routes(), vec![Some(Route::Home), Some(Route::Settings)]);
     assert!(shows(&app, "Settings"));
     assert!(!shows(&app, "Vocara"), "Home is covered");
@@ -60,17 +63,14 @@ fn navigates_home_to_settings_and_back() {
     click(&mut app, "Back");
     assert_eq!(app.routes(), vec![Some(Route::Home)]);
     assert!(shows(&app, "Vocara"));
-    // Popped, not replaced: the same Home page, whose push completed.
-    let Some((_, Page::Home(home))) = app.top() else {
-        panic!("home on top")
-    };
-    assert_eq!(home.returns, 1);
+    // Popped, not replaced: the same Home page.
+    assert_eq!(app.top().map(|(id, _)| id), Some(home));
 }
 
 #[test]
 fn a_late_message_for_a_page_that_is_gone_is_dropped() {
     let mut app = boot(None);
-    click(&mut app, "Technique library");
+    click(&mut app, "Techniques");
     let (gone, _) = app.top().unwrap();
     click(&mut app, "Back");
     assert_eq!(app.routes(), vec![Some(Route::Home)]);

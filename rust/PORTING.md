@@ -233,8 +233,8 @@ behavior and its tests are ported and the gates pass.
 | `ui/core/widgets/visible_drop_target.dart` | 80 | `vocara_app::ui::core::widgets::visible_drop_target` | done |
 | `ui/core/widgets/waveform_painter.dart` | 457 | `vocara_app::ui::core::widgets::waveform_painter` | done |
 | `ui/core/widgets/window_drag_bar.dart` | 60 | `vocara_app::ui::core::widgets::window_drag_bar` | done |
-| `ui/home/view_model/home_view_model.dart` | 144 | `vocara_app::ui::home::view_model::home_view_model` | todo |
-| `ui/home/widgets/home_screen.dart` | 491 | `vocara_app::ui::home::widgets::home_screen` | todo |
+| `ui/home/view_model/home_view_model.dart` | 144 | `vocara_app::ui::home::view_model` | done |
+| `ui/home/widgets/home_screen.dart` | 491 | `vocara_app::ui::home::home_screen` (its timers run as subscriptions while the page holds them; the "Loading practice" dialog and the toast draw inside the page, under the drag bar; remote-applied events come from `Library::remote_applied`) | done |
 | `ui/home/widgets/new_practice_dialog.dart` | 16 | `vocara_app::ui::home::widgets::new_practice_dialog` | done |
 | `ui/home/widgets/practice_project_card.dart` | 126 | `vocara_app::ui::home::widgets::practice_project_card` | done |
 | `ui/home/widgets/update_notice.dart` | 219 | `vocara_app::ui::home::widgets::update_notice` | done (the 5 s auto-check timer is the home screen's) |
