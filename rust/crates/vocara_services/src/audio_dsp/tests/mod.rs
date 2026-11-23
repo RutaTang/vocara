@@ -8,7 +8,7 @@ mod framing;
 mod live;
 mod metrics;
 mod spectrogram;
-mod support;
+pub(crate) mod support;
 mod wav;
 mod yin;
 
