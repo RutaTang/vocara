@@ -48,7 +48,52 @@
 //! (`_enqueueSave`) is a queue: one save runs at a time, the next starts
 //! (its synchronous start, as Dart's `then` ran it) before the finished
 //! one's caller resumes, and each holds the quit and is listed as landing on
-//! the practice from the moment it is queued.
+//! the practice from the moment it is queued. A save queued with none
+//! running starts as the call that queued it ends (Dart chained it on a
+//! completed tail: a microtask), so it sends the model that call left.
+//!
+//! # The API
+//!
+//! Construction: [`SongPracticeDetailViewModel::new`]`(`[`Deps`]`,
+//! practice_id, `[`Options`]`) -> (Self, Vec<Effect>)` — the load and the
+//! separation probe start at once.
+//!
+//! State (Dart's getters, snake_cased): `revision`, `practice_id`,
+//! `practice`, `app_settings`, `monitor`, `load_running`, `load_error`,
+//! `busy`, `error_message`, `catching_up`, `separation_progress`,
+//! `is_separating`, `separation_available`, `can_cancel_separation`,
+//! `can_reseparate`, `selected_track_id`, `selected_clip_id`,
+//! `selected_bus_id`, `selected_bus`, `selected_track`, `track_by_id`,
+//! `selected_track_notes`, `selected_track_techniques`, `all_notes`,
+//! `active_backing`, `lyrics_open`, `inspector_open`, `right_tab`, `lyrics`,
+//! `has_lyrics`, `lyrics_mode`, `lyrics_edit_session`, `lyrics_draft`,
+//! `lyrics_focus`, `sync_index`, `current_lyric_index(position_ms)`,
+//! `lyrics_as_text`, `position`, `is_recording`, `take_in_flight`,
+//! `take_holds_screen`, `is_moving_live(track_id)`, `record_target_id`,
+//! `has_work_in_flight`, `is_disposed`; the controllers (`playback`,
+//! `mixer`, `analysis`, `recording`, `versions`) and their host-bound reads
+//! (`with_playback`, `with_mixer`, `with_analysis`); and the view model is
+//! the dock's [`AnalysisSource`].
+//!
+//! Actions returning `Vec<Effect>`: `select_track`, `select_clip`,
+//! `set_play_reference`, `toggle_inspector_panel`, `stamp_next_lyric`,
+//! `stamp_lyric_at`, `clear_lyric_times`, `separate_backing`,
+//! `export_track_audio`, `export_clip_audio`, `new_take`, `delete_track`,
+//! `delete_clip`, `commit_track_move`, `move_vocal_track_to_lane_of`,
+//! `rename_track`, `set_track_color`, `duplicate_track`,
+//! `split_track_at_playhead`, `merge_track_down`, `reanalyze_track`,
+//! `add_note`, `add_note_at_playhead`, `update_note_content`, `delete_note`,
+//! `add_technique`, `delete_technique_marker`, `stop_recording`,
+//! `stop_before_leaving`, `commit_fx`, `on_remote_applied`,
+//! `refuse_structural_edit` (`(refused, effects)`), and the controller
+//! actions `playback_do`, `mixer_do`, `analysis_do`, `recording_do`,
+//! `versions_do`. Returning a [`Started`]: `add_accompaniment`,
+//! `add_reference`, `add_vocal_take`, `add_clip_to_take`,
+//! `import_lyrics_from_file`, `set_lyrics_text`, `import_lyrics`,
+//! `apply_edited_lyrics`, `available_techniques`. Plain: `select_bus`,
+//! `toggle_lyrics_panel`, `set_right_tab`, `set_lyrics_mode`,
+//! `set_lyrics_draft`, `set_lyrics_focus`, `seek`, `seek_to_lyric`,
+//! `move_clip_start_live`, `cancel_separation`, `dispose`.
 //!
 //! A call whose Dart future the screen awaits for its value returns a
 //! [`Started`]: its [`Call`] comes back in a [`Reply`] when it is done (the
