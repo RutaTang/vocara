@@ -257,7 +257,7 @@ behavior and its tests are ported and the gates pass.
 | `ui/song_practice_detail/widgets/detail_transport_bar.dart` | 456 | `vocara_app::ui::song_practice_detail::widgets::detail_transport_bar` | todo |
 | `ui/song_practice_detail/widgets/fx_panel.dart` | 1723 | `vocara_app::ui::song_practice_detail::widgets::fx_panel` | todo |
 | `ui/song_practice_detail/widgets/left_panel.dart` | 1545 | `vocara_app::ui::song_practice_detail::widgets::left_panel` | todo |
-| `ui/song_practice_detail/widgets/live_spectrogram.dart` | 150 | `vocara_app::ui::song_practice_detail::widgets::live_spectrogram` | todo |
+| `ui/song_practice_detail/widgets/live_spectrogram.dart` | 150 | `vocara_app::ui::song_practice_detail::widgets::live_spectrogram` (the raster and its image live in the canvas's tree state, remade when it draws and the monitor's revision has moved) | done |
 | `ui/song_practice_detail/widgets/lyrics_panel.dart` | 1396 | `vocara_app::ui::song_practice_detail::widgets::lyrics_panel` | todo |
 | `ui/song_practice_detail/widgets/mixer_strip.dart` | 1185 | `vocara_app::ui::song_practice_detail::widgets::mixer_strip` | todo |
 | `ui/song_practice_detail/widgets/note_editor.dart` | 195 | `vocara_app::ui::song_practice_detail::widgets::note_editor` | todo |
@@ -268,7 +268,7 @@ behavior and its tests are ported and the gates pass.
 | `ui/song_practice_detail/widgets/track_context_menu.dart` | 640 | `vocara_app::ui::song_practice_detail::widgets::track_context_menu` | todo |
 | `ui/song_practice_detail/widgets/track_row.dart` | 1158 | `vocara_app::ui::song_practice_detail::widgets::track_row` | todo |
 | `ui/song_practice_detail/widgets/voice_profile_view.dart` | 567 | `vocara_app::ui::song_practice_detail::widgets::voice_profile_view` | todo |
-| `ui/song_practice_detail/widgets/voiceprint_view.dart` | 2015 | `vocara_app::ui::song_practice_detail::widgets::voiceprint_view` | todo |
+| `ui/song_practice_detail/widgets/voiceprint_view.dart` | 2015 | `vocara_app::ui::song_practice_detail::widgets::voiceprint_view` (each tab is a function of the `AnalysisSource`; the Spectrogram tab's take image is a `VoiceprintState` the host keeps and `sync`s; a seek and the Take/Live toggle are `Message`s; the live panel's rounded clip is square) | done |
 | `ui/technique_library/technique_library_screen.dart` | 914 | `vocara_app::ui::technique_library::technique_library_screen` | done |
 | `ui/technique_library/view_model/technique_detail_view_model.dart` | 2013 | `vocara_app::ui::technique_library::view_model::technique_detail_view_model` | todo |
 | `ui/technique_library/view_model/technique_library_view_model.dart` | 280 | `vocara_app::ui::technique_library::view_model::technique_library_view_model` | done |
