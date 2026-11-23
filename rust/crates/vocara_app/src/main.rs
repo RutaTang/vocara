@@ -30,8 +30,7 @@ fn main() -> iced::Result {
         default_hook(info);
     }));
 
-    // SEAMS: the store and services ports replace the stand-in library open
-    // and the empty quit hooks.
-    let boot = Boot::from_env(library::open_library_stub, Arc::new(quit::NoQuitHooks));
+    // SEAM: the Persistence port replaces the stand-in library open.
+    let boot = Boot::from_env(library::open_library_stub, Arc::new(quit::ServiceQuitHooks));
     app::run(boot)
 }

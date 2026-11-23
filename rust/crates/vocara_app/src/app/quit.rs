@@ -10,9 +10,11 @@
 //! 2. finalize (save) every in-flight recording (`RecordingFinalizer.instance
 //!    .finalizeAll()`), instead of losing it as a 0-length take.
 //!
-//! Both live in the services, which are not ported yet: they implement
-//! [`QuitHooks`] (and the app is built with that implementation). Until then
-//! the app runs with [`NoQuitHooks`].
+//! The app runs with [`ServiceQuitHooks`], which calls the two services;
+//! tests use [`NoQuitHooks`] or their own counting hooks.
+
+use vocara_services::recording_finalizer::RecordingFinalizer;
+use vocara_services::source_separation_service::SeparationQuitGuard;
 
 /// What the quit guard calls before the app exits. Called from the UI thread
 /// (`kill_separation_sidecars`) and then a blocking worker thread
@@ -32,4 +34,18 @@ pub struct NoQuitHooks;
 impl QuitHooks for NoQuitHooks {
     fn kill_separation_sidecars(&self) {}
     fn finalize_recordings(&self) {}
+}
+
+/// The real hooks: the process-wide separation guard and recording finalizer.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ServiceQuitHooks;
+
+impl QuitHooks for ServiceQuitHooks {
+    fn kill_separation_sidecars(&self) {
+        SeparationQuitGuard::instance().kill_all();
+    }
+
+    fn finalize_recordings(&self) {
+        RecordingFinalizer::instance().finalize_all();
+    }
 }
