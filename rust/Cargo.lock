@@ -4483,6 +4483,7 @@ dependencies = [
  "dirs",
  "iced",
  "iced_test",
+ "indexmap",
  "lucide-icons",
  "png",
  "rfd",

@@ -31,6 +31,7 @@ png.workspace = true
 
 [dev-dependencies]
 iced_test.workspace = true
+indexmap.workspace = true
 tempfile.workspace = true
 
 [lints]

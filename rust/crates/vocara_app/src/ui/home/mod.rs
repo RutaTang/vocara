@@ -4,7 +4,11 @@
 //! off it the Dart header offered (the technique library and settings), so
 //! the app runs and routing works end to end.
 
+pub mod view_model;
 pub mod widgets;
+
+#[cfg(test)]
+pub(crate) mod testing;
 
 use iced::{Element, Task};
 
