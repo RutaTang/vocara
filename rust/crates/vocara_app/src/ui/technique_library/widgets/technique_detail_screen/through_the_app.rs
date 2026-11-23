@@ -1,0 +1,363 @@
+//! The technique page through the whole app — the router, the page stack
+//! and the dialog stack, over an in-memory library: the library → technique
+//! → back journey, a deep link to `/techniques/<id>`,
+//! `deep_link_back_test.dart`'s technique cases, the technique part of
+//! `technique_library_journey_test.dart` (a created technique opens, then
+//! waits in the grid), and `technique_detail_journey_test.dart` (edit, save
+//! and cancel round-trips through the repository, and a dropped example).
+
+use std::borrow::Cow;
+use std::collections::VecDeque;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use iced::{window, Event as IcedEvent, Size};
+use iced_test::selector::{Candidate, Target};
+use iced_test::Simulator;
+use vocara_model::config::environment::AppEnvironment;
+use vocara_model::util::dart_date_time::DateTime;
+use vocara_model::util::id::new_id;
+use vocara_services::audio_dsp::write_wav_mono;
+
+use super::*;
+use crate::app::library::{Library, LibraryOpen};
+use crate::app::{self, App, Boot, LibraryEvent, Page};
+use crate::router::PageId;
+use crate::ui::core::widgets::confirm_dialog;
+use crate::ui::home::testing::run_task;
+use crate::ui::technique_library::widgets::media::technique_media_section::{
+    ADD_ANOTHER, ADD_FIRST,
+};
+
+const SIZE: Size = Size::new(1440.0, 2400.0);
+
+fn settings() -> iced::Settings {
+    let mut settings = crate::app::settings();
+    settings.fonts = font::FACES
+        .iter()
+        .copied()
+        .chain([icons::FONT_BYTES])
+        .map(Cow::Borrowed)
+        .collect();
+    settings
+}
+
+/// The `n`-th text reading `label` (0 first), in tree order: the page, then
+/// the dialogs over it.
+fn nth(label: &str, n: usize) -> impl FnMut(Candidate<'_>) -> Option<Target> + Send {
+    let label = label.to_string();
+    let mut seen = 0;
+    move |candidate: Candidate<'_>| {
+        let Candidate::Text { content, .. } = &candidate else {
+            return None;
+        };
+        if *content != label {
+            return None;
+        }
+        seen += 1;
+        (seen == n + 1).then(|| Target::from(candidate))
+    }
+}
+
+fn chevron() -> String {
+    char::from(Icon::ChevronLeft).to_string()
+}
+
+/// A library holding "Twang" (and its id).
+fn seeded() -> (Arc<Library>, String) {
+    let library = Arc::new(Library::in_memory());
+    let id = new_id();
+    let now = DateTime::local_ymd(2026, 6, 20);
+    library
+        .technique_repo
+        .save_technique(&Technique::new(id.clone(), "Twang", now, now))
+        .expect("seeded");
+    (library, id)
+}
+
+/// The app at `start`, over `library`, every task run.
+fn boot(library: Arc<Library>, start: &str) -> App {
+    let mut boot = Boot::new(AppEnvironment::Dev);
+    boot.start = Some(start.to_string());
+    boot.services = Services::detached;
+    let (mut app, _open) = App::new(boot);
+    let task = app.update(app::Message::Library(LibraryEvent::Finished(
+        LibraryOpen::Opened(library),
+    )));
+    settle(&mut app, task);
+    app
+}
+
+/// Runs `task` and everything it leads to.
+fn settle(app: &mut App, task: Task<app::Message>) {
+    let mut queue: VecDeque<app::Message> = run_task(task).into();
+    while let Some(message) = queue.pop_front() {
+        let task = app.update(message);
+        queue.extend(run_task(task));
+    }
+}
+
+fn ui(app: &App) -> Simulator<'_, app::Message> {
+    Simulator::with_size(settings(), SIZE, app.view())
+}
+
+fn feed(app: &mut App, messages: Vec<app::Message>) {
+    for message in messages {
+        let task = app.update(message);
+        settle(app, task);
+    }
+}
+
+fn click_nth(app: &mut App, label: &str, n: usize) {
+    let messages: Vec<app::Message> = {
+        let mut ui = ui(app);
+        ui.click(nth(label, n))
+            .unwrap_or_else(|e| panic!("{label} #{n}: {e:?}"));
+        ui.into_messages().collect()
+    };
+    feed(app, messages);
+}
+
+fn click(app: &mut App, label: &str) {
+    click_nth(app, label, 0);
+}
+
+fn shows(app: &App, label: &str) -> bool {
+    ui(app).find(nth(label, 0)).is_ok()
+}
+
+/// The technique page on top.
+fn technique(app: &App) -> (PageId, &TechniqueDetailScreen) {
+    match app.top() {
+        Some((id, Page::Technique(screen))) => (id, screen),
+        other => panic!("a technique on top, not {other:?}"),
+    }
+}
+
+/// Sends the technique page on top `message` (a field's text, as typing
+/// leaves it).
+fn send(app: &mut App, message: Message) {
+    let (id, _) = technique(app);
+    let task = app.update(app::Message::Technique(id, message));
+    settle(app, task);
+}
+
+// The journey through the app: library → a technique → back. The page
+// pushed over the library pops back to that same library, whose open guard
+// is released for the next open (deep_link_back_test: 'a pushed technique
+// still pops back to the library it came from').
+#[test]
+fn the_library_opens_a_technique_and_back_returns_to_it() {
+    let (library, id) = seeded();
+    let mut app = boot(library, "/techniques");
+    let (grid, _) = app.top().expect("running");
+    assert!(shows(&app, "Twang"));
+
+    click(&mut app, "Twang");
+    assert_eq!(
+        app.routes(),
+        [
+            Some(Route::Techniques),
+            Some(Route::Technique { id: id.clone() })
+        ]
+    );
+    // Its page loaded: the name in the header, the read view's actions.
+    assert!(shows(&app, "Twang"));
+    assert!(shows(&app, "Edit") && shows(&app, "Delete"));
+    assert!(shows(&app, "EXAMPLES"));
+    assert!(!shows(&app, "New technique"), "the library is covered");
+
+    click(&mut app, &chevron());
+    assert_eq!(app.routes(), [Some(Route::Techniques)]);
+    // Popped, not replaced: the library underneath is the same page, so a
+    // second open is not swallowed by its open guard.
+    assert_eq!(app.top().map(|(id, _)| id), Some(grid));
+    click(&mut app, "Twang");
+    assert_eq!(technique(&app).1.technique_id, id);
+}
+
+// A deep link (`VOCARA_START=/techniques/<id>`) opens the technique as the
+// root of the stack; its back chevron lands on the library
+// (deep_link_back_test: 'a deep-linked technique: the back chevron lands on
+// the library').
+#[test]
+fn a_deep_linked_technique_opens_and_its_back_chevron_lands_on_the_library() {
+    let (library, id) = seeded();
+    let mut app = boot(library, &crate::router::technique_detail(&id));
+    assert_eq!(app.routes(), [Some(Route::Technique { id: id.clone() })]);
+    assert!(shows(&app, "Twang"));
+    assert!(shows(&app, "Edit"));
+
+    click(&mut app, &chevron());
+    assert_eq!(app.routes(), [Some(Route::Techniques)]);
+    assert!(shows(&app, "Twang"), "the library lists it");
+}
+
+// deep_link_back_test: 'a deep-linked technique: Delete lands on the
+// library'. Delete used to leave the user on the technique it had just
+// deleted (go_router had nothing to pop).
+#[test]
+fn a_deep_linked_technique_deleted_lands_on_the_library() {
+    let (library, id) = seeded();
+    let repo = library.technique_repo.clone();
+    let mut app = boot(library, &crate::router::technique_detail(&id));
+
+    click(&mut app, "Delete");
+    assert_eq!(app.dialogs(), 1);
+    assert!(shows(&app, "Delete \"Twang\"?"));
+    // The dialog's own Delete (the header's is the first).
+    click_nth(&mut app, "Delete", 1);
+    assert_eq!(app.dialogs(), 0);
+
+    assert!(
+        repo.list_techniques().expect("listed").is_empty(),
+        "deleted"
+    );
+    assert_eq!(app.routes(), [Some(Route::Techniques)]);
+    assert!(shows(&app, "Build your technique library"));
+}
+
+// technique_library_journey_test: 'creating a technique navigates to its
+// detail, then it shows in the grid on return'.
+#[test]
+fn a_created_technique_opens_then_waits_in_the_grid() {
+    let library = Arc::new(Library::in_memory());
+    let repo = library.technique_repo.clone();
+    let mut app = boot(library, "/techniques");
+    assert!(shows(&app, "Build your technique library"));
+
+    click(&mut app, "New technique");
+    assert_eq!(app.dialogs(), 1);
+    let task = app.update(app::Message::Dialog(confirm_dialog::Message::Input(
+        "Twang".into(),
+    )));
+    settle(&mut app, task);
+    click(&mut app, "Create");
+
+    // Creating navigates straight into the new technique's page, which
+    // loads with its name.
+    let (_, page) = technique(&app);
+    assert!(page.view_model().technique().is_some());
+    assert!(shows(&app, "Twang"));
+
+    // Back to the library — the new technique now shows as a card.
+    click(&mut app, &chevron());
+    assert_eq!(app.routes(), [Some(Route::Techniques)]);
+    assert!(shows(&app, "Twang"));
+    let all = repo.list_techniques().expect("listed");
+    assert_eq!(
+        all.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+        ["Twang"]
+    );
+}
+
+// technique_detail_journey_test: 'Edit → change fields → Save persists
+// through the repo'.
+#[test]
+fn edit_then_save_persists_through_the_repository() {
+    let (library, id) = seeded();
+    let repo = library.technique_repo.clone();
+    let mut app = boot(library, &crate::router::technique_detail(&id));
+
+    click(&mut app, "Edit");
+    assert!(
+        shows(&app, EDIT_TITLE),
+        "tapping Edit opens the editor form"
+    );
+    assert!(shows(&app, "NAME") && shows(&app, "SUMMARY"));
+    send(
+        &mut app,
+        Message::Field(LineField::Name, "Belted Twang".into()),
+    );
+    send(
+        &mut app,
+        Message::Prose(
+            ProseField::Summary,
+            text_editor::Action::Edit(text_editor::Edit::Paste(Arc::new(
+                "bright, ringing edge".into(),
+            ))),
+        ),
+    );
+
+    click(&mut app, "Save");
+    assert!(
+        shows(&app, "Edit") && !shows(&app, EDIT_TITLE),
+        "a successful save returns to view mode"
+    );
+    let reloaded = repo.get_technique(&id).expect("stored");
+    assert_eq!(reloaded.name, "Belted Twang");
+    assert_eq!(reloaded.summary, "bright, ringing edge");
+    assert!(shows(&app, "Belted Twang"), "the header shows the new name");
+}
+
+// technique_detail_journey_test: 'Edit → change a field → Cancel discards
+// via the confirm dialog'.
+#[test]
+fn cancel_discards_via_the_confirm_dialog() {
+    let (library, id) = seeded();
+    let repo = library.technique_repo.clone();
+    let mut app = boot(library, &crate::router::technique_detail(&id));
+
+    click(&mut app, "Edit");
+    send(
+        &mut app,
+        Message::Field(LineField::Name, "Should Not Persist".into()),
+    );
+    click(&mut app, "Cancel");
+    assert_eq!(app.dialogs(), 1, "cancelling a dirty editor asks first");
+    assert!(shows(&app, DISCARD_TITLE));
+    click(&mut app, "Discard");
+    assert_eq!(app.dialogs(), 0);
+    assert!(shows(&app, "Edit") && !shows(&app, EDIT_TITLE));
+    assert_eq!(
+        repo.get_technique(&id).expect("stored").name,
+        "Twang",
+        "a discarded edit never reaches the store"
+    );
+}
+
+// technique_detail_journey_test: 'Edit → drop a WAV example → Save persists
+// the media'.
+#[test]
+fn a_dropped_wav_example_is_saved_with_the_technique() {
+    let (library, id) = seeded();
+    let repo = library.technique_repo.clone();
+    let mut app = boot(library, &crate::router::technique_detail(&id));
+    click(&mut app, "Edit");
+    // With no media yet, the add zone shows its full prompt.
+    let zone = ui(&app)
+        .find(nth(ADD_FIRST, 0))
+        .expect("edit mode exposes the media add/drop zone")
+        .bounds()
+        .center();
+
+    let dir = tempfile::tempdir().unwrap();
+    let wav = dir.path().join("example.wav");
+    let samples: Vec<f64> = (0..4410)
+        .map(|i| 0.5 * (2.0 * std::f64::consts::PI * 330.0 * i as f64 / 44100.0).sin())
+        .collect();
+    std::fs::write(&wav, write_wav_mono(&samples, 44100)).unwrap();
+    let dropped: Vec<app::Message> = {
+        let mut ui = ui(&app);
+        ui.point_at(zone);
+        let _ = ui.simulate([
+            IcedEvent::Window(window::Event::FileHovered(PathBuf::from(&wav))),
+            IcedEvent::Window(window::Event::FileDropped(PathBuf::from(&wav))),
+            IcedEvent::Window(window::Event::RedrawRequested(iced::time::Instant::now())),
+        ]);
+        ui.into_messages().collect()
+    };
+    feed(&mut app, dropped);
+    // Once imported, the add zone goes dense — the clip is staged.
+    assert!(shows(&app, ADD_ANOTHER), "the dropped clip is staged");
+    assert!(shows(&app, "example"), "named after its file");
+
+    click(&mut app, "Save");
+    assert!(shows(&app, "Edit"), "save returns to view mode");
+    let reloaded = repo.get_technique(&id).expect("stored");
+    assert_eq!(reloaded.media.len(), 1, "the staged example persisted");
+    assert!(
+        std::path::Path::new(&reloaded.media[0].path).is_file(),
+        "the pooled example file resolves on disk"
+    );
+}
