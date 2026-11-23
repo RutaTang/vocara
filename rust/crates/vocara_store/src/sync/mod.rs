@@ -3,5 +3,7 @@
 //! `lib/data/sync`).
 
 pub mod hlc;
+pub mod quarantine_store;
+pub mod sync_hashes;
 pub mod sync_state_store;
 pub mod sync_writer;

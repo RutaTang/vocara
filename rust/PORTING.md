@@ -139,11 +139,11 @@ behavior and its tests are ported and the gates pass.
 | `data/sync/hlc.dart` | 381 | `vocara_store::sync::hlc` | done |
 | `data/sync/integrity_checker.dart` | 434 | `vocara_store::sync::integrity_checker` | todo |
 | `data/sync/oplog_drain.dart` | 191 | `vocara_store::sync::oplog_drain` | todo |
-| `data/sync/quarantine_store.dart` | 290 | `vocara_store::sync::quarantine_store` | todo |
+| `data/sync/quarantine_store.dart` | 290 | `vocara_store::sync::quarantine_store` | done |
 | `data/sync/reconcile.dart` | 227 | `vocara_store::sync::reconcile` | todo |
 | `data/sync/sync_applier.dart` | 1585 | `vocara_store::sync::sync_applier` | todo |
 | `data/sync/sync_engine.dart` | 1092 | `vocara_store::sync::sync_engine` | todo |
-| `data/sync/sync_hashes.dart` | 299 | `vocara_store::sync::sync_hashes` | todo |
+| `data/sync/sync_hashes.dart` | 299 | `vocara_store::sync::sync_hashes` | done |
 | `data/sync/sync_row.dart` | 618 | `vocara_store::sync::sync_row` | todo |
 | `data/sync/sync_state_store.dart` | 97 | `vocara_store::sync::sync_state_store` | done |
 | `data/sync/sync_transport.dart` | 182 | `vocara_store::sync::sync_transport` | todo |
