@@ -1,13 +1,19 @@
 //! Port of `client/test/sync_sim_regressions_test.dart`: targeted
 //! regressions for the REAL sync bugs found by the convergence simulation,
-//! one per fix, each named after the seed that first exposed it.
+//! one per fix, each named after the seed that first exposed it. The full
+//! episodes stay in the simulation battery (`tests/sync_simulation`); these
+//! pin the exact mechanism at the unit level.
 //!
-//! The multi-device cases drove full Persistence stacks through the
-//! repository in Dart; here the devices make the repository's row-level
-//! writes themselves (see `device.rs`).
+//! The multi-device cases drive each device's song repository, as Dart's
+//! drove full Persistence stacks (see `device.rs`); the 0xab1a57 cases
+//! write rows directly, as Dart's did.
 
 use std::sync::Arc;
 
+use vocara_model::models::audio_track::{AudioTrack, AudioTrackKind};
+use vocara_model::models::song_practice::SongPractice;
+use vocara_model::util::dart_date_time::DateTime;
+use vocara_model::util::id::new_id;
 use vocara_store::db::AppDatabase;
 use vocara_store::sync::hlc::{Hlc, HlcClock};
 use vocara_store::sync::integrity_checker::IntegrityChecker;
@@ -35,11 +41,24 @@ fn a_practice_deleted_before_it_ever_synced_arrives_whole_on_a_page_size_1_pulle
     let cloud = FakeCloud::new();
     let a = Device::new(&cloud, "DEVA", T0);
     let b = Device::new(&cloud, "DEVB", T0);
-    let (practice, interp) = a.create_practice("Doomed");
-    a.add_track(&practice, Some(&interp), "vocal", "Take 1");
+    let created = a.repo().create_practice("Doomed").unwrap();
+    let f = a.source_file("take", &[1, 2, 3, 4, 5, 6, 7, 8]);
+    let take =
+        AudioTrack {
+            version_id: created.active_version_id.clone(),
+            ..AudioTrack::new(new_id(), AudioTrackKind::Vocal, "Take 1", DateTime::now())
+                .with_audio(f, 0, 800, Vec::new())
+        };
+    let saved = a
+        .repo()
+        .save_practice(&SongPractice {
+            vocal_tracks: vec![Arc::new(take)],
+            ..created
+        })
+        .unwrap();
     // Delete BEFORE anything was pushed: every row ships as a tombstoned
     // fresh insert for B.
-    a.delete_practice(&practice);
+    a.repo().delete_practice(&saved.id).unwrap();
     let push = a.engine.pump_push();
     assert!(!push.failed());
 
@@ -73,6 +92,18 @@ fn a_practice_deleted_before_it_ever_synced_arrives_whole_on_a_page_size_1_pulle
 
 // --- seeds 0x5eed0009 / 0xabd782: single-slot resolution must replicate ----
 
+/// An accompaniment imported from [path] (Dart's `accompaniment(path,
+/// name:)`).
+fn accompaniment(path: &str, name: &str) -> AudioTrack {
+    AudioTrack::new(
+        new_id(),
+        AudioTrackKind::Accompaniment,
+        name,
+        DateTime::now(),
+    )
+    .with_audio(path, 0, 1000, Vec::new())
+}
+
 #[test]
 fn concurrent_accompaniments_end_with_the_loser_tombstoned_everywhere_with_one_row_state() {
     // Both devices add an accompaniment while unaware of each other. The
@@ -87,18 +118,36 @@ fn concurrent_accompaniments_end_with_the_loser_tombstoned_everywhere_with_one_r
     let a = Device::new(&cloud, "DEVA", T0);
     let b = Device::new(&cloud, "DEVB", T0);
     let c = Device::new(&cloud, "DEVC", T0);
+    let f = a.source_file("acc", &[9, 9, 9, 9, 1, 2, 3, 4]);
 
-    let (practice, _) = a.create_practice("Slot race");
+    let seeded = a.repo().create_practice("Slot race").unwrap();
     assert!(!a.engine.pump_push().failed());
     assert!(!b.engine.pump_pull().failed());
 
     // A adds accA and pushes it (accA is now LIVE in the cloud).
-    let (acc_a, _, _) = a.add_track(&practice, None, "accompaniment", "accA");
+    let la = a.load(&seeded.id);
+    let acc_a = accompaniment(&f, "accA");
+    a.save_with_base(
+        &SongPractice {
+            accompaniment: Some(Arc::new(acc_a.clone())),
+            ..la.aggregate.clone()
+        },
+        &la,
+    );
     assert!(!a.engine.pump_push().failed());
 
-    // B, not having pulled accA, adds accB with a strictly later HLC.
+    // B, not having pulled accA, adds accB with a strictly later HLC (the
+    // same bytes: both devices pool them under one content hash).
     b.now.set(a.now.get() + 5);
-    let (acc_b, _, _) = b.add_track(&practice, None, "accompaniment", "accB");
+    let lb = b.load(&seeded.id);
+    let acc_b = accompaniment(&f, "accB");
+    b.save_with_base(
+        &SongPractice {
+            accompaniment: Some(Arc::new(acc_b.clone())),
+            ..lb.aggregate.clone()
+        },
+        &lb,
+    );
     assert!(!b.engine.pump_push().failed());
 
     // Everyone settles (C pulls the whole log from scratch).
@@ -110,7 +159,7 @@ fn concurrent_accompaniments_end_with_the_loser_tombstoned_everywhere_with_one_r
     }
 
     // The resolution replicated: the cloud's current accA is TOMBSTONED.
-    let cloud_acc_a = cloud.server_row_for("tracks", &acc_a).unwrap();
+    let cloud_acc_a = cloud.server_row_for("tracks", &acc_a.id).unwrap();
     assert!(
         !cloud_acc_a.field("deleted_at").unwrap().is_null(),
         "the slot resolution must be pushed, not stay device-local"
@@ -129,7 +178,7 @@ fn concurrent_accompaniments_end_with_the_loser_tombstoned_everywhere_with_one_r
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(live, std::slice::from_ref(&acc_b));
+        assert_eq!(live, std::slice::from_ref(&acc_b.id));
         // No device is left with a pending resolution un-pushed.
         assert_eq!(dev.oplog_count(), 0);
     }
@@ -149,7 +198,7 @@ fn a_practice_whose_interpretation_arrives_on_the_next_page_is_not_healed_mid_pu
     let cloud = FakeCloud::new();
     let a = Device::new(&cloud, "DEVA", T0);
     let b = Device::new(&cloud, "DEVB", T0);
-    let (practice, interp) = a.create_practice("Paged");
+    let created = a.repo().create_practice("Paged").unwrap();
     assert!(!a.engine.pump_push().failed());
 
     b.transport.set_page_size(1);
@@ -158,8 +207,8 @@ fn a_practice_whose_interpretation_arrives_on_the_next_page_is_not_healed_mid_pu
     assert_eq!(pull.applied, 2, "practice + interpretation");
 
     assert_eq!(
-        col::<Option<String>>(&b.db, "practices", &practice, "active_interpretation_id"),
-        Some(Some(interp)),
+        col::<Option<String>>(&b.db, "practices", &created.id, "active_interpretation_id"),
+        Some(created.active_version_id.clone()),
         "the pointer must survive the page boundary un-healed"
     );
     // No repair ran, so nothing was journaled: applying remote changes still
@@ -221,9 +270,10 @@ fn a_scalar_heal_stamps_from_the_row_not_a_clock_tick_so_a_later_real_delete_sti
     let h = healer();
     // The row was written long "ago" by a remote device...
     let row_hlc = Hlc::new(1_000_000, 0, id("REMOTE"));
-    insert_practice(&h.db, &id("P"), &row_hlc, Some(&id("GONE"))); // dangling: a deleted interp
-                                                                   // Tombstoned, not absent: an absent target is still in flight and is
-                                                                   // never healed (see the IntegrityChecker's scalar heals).
+    // Dangling: a deleted interp.
+    insert_practice(&h.db, &id("P"), &row_hlc, Some(&id("GONE")));
+    // Tombstoned, not absent: an absent target is still in flight and is
+    // never healed (see the IntegrityChecker's scalar heals).
     h.db.execute(
         "INSERT INTO interpretations (id, practice_id, name, order_index, created_at, \
          updated_at, deleted_at, hlc_wall, hlc_ctr, hlc_node, hlc_packed, schema_v) \
