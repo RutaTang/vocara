@@ -32,7 +32,7 @@ fn click(app: &mut App, label: &str) {
     }
 }
 
-/// Clicks the page's back chevron (the technique library's header has no
+/// Clicks the page's back chevron (the technique pages' headers have no
 /// "Back" label; the placeholders' Back buttons carry the same glyph).
 fn back(app: &mut App) {
     let chevron = char::from(crate::ui::core::icons::Icon::ChevronLeft).to_string();
@@ -97,7 +97,7 @@ fn a_deep_linked_technique_goes_back_to_the_library() {
             id: "T1000000000000000000000000".into()
         })]
     );
-    click(&mut app, "Back");
+    back(&mut app);
     assert_eq!(app.routes(), vec![Some(Route::Techniques)]);
 }
 
