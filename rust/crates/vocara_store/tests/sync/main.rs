@@ -8,5 +8,9 @@
 mod support;
 
 mod applier;
+mod boot_safety;
+mod device;
 mod engine;
+mod round_trip;
 mod row;
+mod sim_regressions;
