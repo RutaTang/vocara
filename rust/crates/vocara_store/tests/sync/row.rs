@@ -291,7 +291,7 @@ fn decode_rejects_a_mistyped_or_missing_hlc_quad() {
         ("hlc_node", Some(FieldValue::from(""))),
         ("hlc_wall", None),
     ] {
-        let err = SyncRow::from_json(&json_with(&[patch.clone()])).unwrap_err();
+        let err = SyncRow::from_json(&json_with(std::slice::from_ref(&patch))).unwrap_err();
         assert!(is_format(&err), "{patch:?}");
     }
 }

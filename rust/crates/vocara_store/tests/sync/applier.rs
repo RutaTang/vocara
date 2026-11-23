@@ -1199,7 +1199,7 @@ fn a_re_delivered_identical_update_is_strictly_newer_than_the_restored_row() {
     applier.apply(&[practice("P", "v1", &hlc(900))]);
     let update = practice_full("P", "v2", &hlc(950), None, Some("A"));
 
-    let first = applier.apply(&[update.clone()]);
+    let first = applier.apply(std::slice::from_ref(&update));
     assert_eq!(first.applied, 0);
     assert_eq!(first.failed, 1);
     assert_eq!(practice_state(&db, "P").2, hlc(900).packed());
@@ -1451,7 +1451,7 @@ fn an_hlc_drift_record_is_parked_with_its_full_wire_payload() {
     let (applier, store) = parking(&db);
     let future = hlc(1000 + 5 * 60 * 1000 + 1);
     let rec = practice("FUT", "from the future", &future);
-    let res = applier.apply(&[rec.clone()]);
+    let res = applier.apply(std::slice::from_ref(&rec));
     assert_eq!(res.quarantined, 1);
     assert!(!practice_exists(&db, "FUT")); // still NOT applied
 
