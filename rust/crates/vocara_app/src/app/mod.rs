@@ -160,6 +160,10 @@ struct Running {
     services: Services,
     router: Router<Page>,
     dialogs: Vec<OpenDialog>,
+    /// Pages gone from the stack whose work is still landing (see
+    /// [`Page::lingers`]): they get their messages, and nothing else, until
+    /// it has.
+    lingering: Vec<(PageId, Page)>,
 }
 
 enum State {
@@ -327,7 +331,9 @@ impl App {
     }
 
     /// Delivers a screen message to page `id` — dropped when the page has
-    /// left the stack (a late result for a screen that is gone).
+    /// left the stack (a late result for a screen that is gone), unless the
+    /// page lingers for work still landing: then it gets the message, and
+    /// what it asks besides its tasks (a navigation, a dialog) is dropped.
     fn page(
         &mut self,
         id: PageId,
@@ -337,14 +343,30 @@ impl App {
             return Task::none();
         };
         let Running {
-            services, router, ..
+            services,
+            router,
+            lingering,
+            ..
         } = running.as_mut();
-        let Some(page) = router.get_mut(id) else {
+        if let Some(page) = router.get_mut(id) {
+            return match update(page, services) {
+                Some(u) => apply(running, u),
+                None => Task::none(),
+            };
+        }
+        let Some((_, page)) = lingering.iter_mut().find(|(p, _)| *p == id) else {
             return Task::none();
         };
-        match update(page, services) {
-            Some(u) => apply(running, u),
-            None => Task::none(),
+        let task = update(page, services).map_or_else(Task::none, |u| u.task);
+        lingering.retain(|(_, p)| p.lingers());
+        task
+    }
+
+    /// How many pages gone from the stack still linger.
+    pub fn lingering(&self) -> usize {
+        match &self.state {
+            State::Running(r) => r.lingering.len(),
+            _ => 0,
         }
     }
 
@@ -373,6 +395,7 @@ impl App {
                             services,
                             router,
                             dialogs: Vec::new(),
+                            lingering: Vec::new(),
                         }));
                         task
                     }
@@ -540,18 +563,18 @@ fn navigate(running: &mut Running, navigation: Navigation) -> Task<Message> {
     match change {
         Change::Pushed(id) => opening.map_or_else(Task::none, |o| o(id)),
         Change::Replaced { page, dropped } => {
-            for (gone, mut p) in dropped {
-                running.dialogs.retain(|d| d.page != gone);
-                p.dispose(&running.services);
+            let mut tasks = Vec::new();
+            for (gone, p) in dropped {
+                tasks.push(retire(running, gone, p));
             }
-            opening.map_or_else(Task::none, |o| o(page))
+            tasks.push(opening.map_or_else(Task::none, |o| o(page)));
+            Task::batch(tasks)
         }
         Change::Popped {
-            popped: (gone, mut p),
+            popped: (gone, p),
             revealed,
         } => {
-            running.dialogs.retain(|d| d.page != gone);
-            p.dispose(&running.services);
+            let teardown = retire(running, gone, p);
             // The push the revealed page made has completed.
             let Running {
                 services, router, ..
@@ -564,7 +587,8 @@ fn navigate(running: &mut Running, navigation: Navigation) -> Task<Message> {
                     None
                 )
             });
-            update.map_or_else(Task::none, |u| apply(running, u))
+            let returned = update.map_or_else(Task::none, |u| apply(running, u));
+            Task::batch([teardown, returned])
         }
         Change::Nothing => {
             // go_router threw "There is nothing to pop".
@@ -572,6 +596,18 @@ fn navigate(running: &mut Running, navigation: Navigation) -> Task<Message> {
             Task::none()
         }
     }
+}
+
+/// A page left the stack: its dialogs go, it is disposed, and it lingers
+/// while the work it started is still landing. The work its teardown
+/// started, to run.
+fn retire(running: &mut Running, gone: PageId, mut page: Page) -> Task<Message> {
+    running.dialogs.retain(|d| d.page != gone);
+    let teardown = page.dispose(gone, &running.services);
+    if page.lingers() {
+        running.lingering.push((gone, page));
+    }
+    teardown
 }
 
 /// Writes a window screenshot as a PNG.

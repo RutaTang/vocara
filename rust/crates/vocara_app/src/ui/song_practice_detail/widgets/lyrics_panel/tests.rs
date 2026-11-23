@@ -1226,9 +1226,9 @@ fn with_nothing_selected_the_tabs_say_what_to_do() {
 fn every_note_of_the_song_selects_its_take_then_seeks() {
     let take = annotated_take(AudioTrackKind::Vocal);
     let refs = [NoteRef {
-        track_id: "t1",
-        track_name: "Take 1",
-        note: &take.notes[0],
+        track_id: "t1".into(),
+        track_name: "Take 1".into(),
+        note: take.notes[0].clone(),
     }];
     let mut vm = Vm::reading(Vec::new());
     vm.tab = RightTab::Notes;

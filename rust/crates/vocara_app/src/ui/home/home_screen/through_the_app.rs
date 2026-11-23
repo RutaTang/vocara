@@ -1,7 +1,7 @@
 //! Home through the whole app — the router, the page stack and the dialog
 //! stack: the integration journeys (`home_settings_journey_test.dart`,
-//! `ui_journey_test.dart`) and `home_reopen_test.dart`. The practice page is
-//! still a placeholder; its Back pops as the transport bar's chevron did.
+//! `ui_journey_test.dart`) and `home_reopen_test.dart`. The practice page's
+//! way back is its transport bar's chevron.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -49,6 +49,11 @@ fn click(app: &mut App, label: &str) {
         let task = app.update(message);
         settle(app, task);
     }
+}
+
+/// The practice page's back chevron (its transport bar's).
+fn back(app: &mut App) {
+    click(app, &char::from(Icon::ChevronLeft).to_string());
 }
 
 fn shows(app: &App, label: &str) -> bool {
@@ -102,13 +107,13 @@ fn a_card_opens_its_practice_and_back_returns_home_ready_for_the_next() {
     assert_eq!(app.routes(), [Some(Route::Home)]);
     fire(&mut app, opening);
     assert_eq!(song_route(&app), first.id);
-    assert!(!shows(&app, "First"), "Home is covered");
+    assert!(!shows(&app, "Second"), "Home is covered");
 
     // Renamed while the practice is open; the way back reloads the list.
     let mut renamed = second.clone();
     renamed.title = "Second, renamed".into();
     repo.save_practice(&renamed).expect("save");
-    click(&mut app, "Back");
+    back(&mut app);
     assert_eq!(app.routes(), [Some(Route::Home)]);
     assert!(shows(&app, "Second, renamed"));
 
@@ -116,7 +121,7 @@ fn a_card_opens_its_practice_and_back_returns_home_ready_for_the_next() {
     click(&mut app, "Second, renamed");
     fire(&mut app, opening);
     assert_eq!(song_route(&app), second.id);
-    click(&mut app, "Back");
+    back(&mut app);
     click(&mut app, "First");
     fire(&mut app, opening);
     assert_eq!(song_route(&app), first.id);
@@ -146,7 +151,7 @@ fn a_new_practice_opens_and_its_card_waits_at_home() {
     let created = library.song_repo.get_practice(&id).expect("created");
     assert_eq!(created.title, "Bohemian Rhapsody");
 
-    click(&mut app, "Back");
+    back(&mut app);
     assert_eq!(app.routes(), [Some(Route::Home)]);
     assert!(shows(&app, "Bohemian Rhapsody"));
     assert!(!shows(&app, "No practices yet"));

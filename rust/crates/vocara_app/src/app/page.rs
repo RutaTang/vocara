@@ -13,7 +13,7 @@ use crate::ui::core::theme::{font, Studio};
 use crate::ui::core::widgets::studio_button::studio_button;
 use crate::ui::home::HomeScreen;
 use crate::ui::settings::SettingsScreen;
-use crate::ui::song_practice_detail::SongScreen;
+use crate::ui::song_practice_detail::SongPracticeDetailScreen;
 use crate::ui::technique_library::detail::TechniqueDetailScreen;
 use crate::ui::technique_library::TechniqueLibraryScreen;
 use crate::ui::{Screen, Update};
@@ -23,7 +23,8 @@ use crate::ui::{Screen, Update};
 pub enum Page {
     /// Boxed: the home screen holds its list and its commands' outcomes.
     Home(Box<HomeScreen>),
-    Song(SongScreen),
+    /// Boxed: the song page holds its view model and its panels' state.
+    Song(Box<SongPracticeDetailScreen>),
     Settings(SettingsScreen),
     Techniques(TechniqueLibraryScreen),
     Technique(TechniqueDetailScreen),
@@ -82,8 +83,8 @@ impl Page {
                 (Page::Home(Box::new(s)), tagged(t, Message::Home))
             }
             Ok(Route::Song { id }) => {
-                let (s, t) = SongScreen::new(id, services);
-                (Page::Song(s), tagged(t, Message::Song))
+                let (s, t) = SongPracticeDetailScreen::new(id, services);
+                (Page::Song(Box::new(s)), tagged(t, Message::Song))
             }
             Ok(Route::Settings) => {
                 let (s, t) = SettingsScreen::new(services);
@@ -106,7 +107,7 @@ impl Page {
         Some(match self {
             Page::Home(_) => Route::Home,
             Page::Song(s) => Route::Song {
-                id: s.practice_id.clone(),
+                id: s.practice_id().to_string(),
             },
             Page::Settings(_) => Route::Settings,
             Page::Techniques(_) => Route::Techniques,
@@ -143,9 +144,21 @@ impl Page {
         )
     }
 
-    /// Tells the page it left the stack.
-    pub fn dispose(&mut self, services: &Services) {
-        with_screen!(self, screen, _wrap => screen.dispose(services), ())
+    /// Tells the page it left the stack; the work its teardown started
+    /// (its messages tagged with its id, for the page lingering on).
+    pub fn dispose(&mut self, id: PageId, services: &Services) -> Task<Message> {
+        with_screen!(self, screen, _wrap => screen.dispose(services), ());
+        match self {
+            Page::Song(s) => s.take_teardown().map(move |m| Message::Song(id, m)),
+            _ => Task::none(),
+        }
+    }
+
+    /// Whether the page, gone from the stack, is kept until the work it
+    /// started lands (the song page's view model outlives it while a take,
+    /// a save or a guarded edit is in flight, as Dart's futures did).
+    pub fn lingers(&self) -> bool {
+        matches!(self, Page::Song(s) if s.lingers())
     }
 }
 

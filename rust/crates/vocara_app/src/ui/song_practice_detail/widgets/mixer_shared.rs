@@ -134,6 +134,7 @@ pub fn diff_keyed<'a, K: PartialEq, M>(
 pub struct Keyed<'a, K: Copy + PartialEq + 'static, M> {
     keys: Vec<K>,
     children: Vec<Element<'a, M>>,
+    vertical: bool,
     width: Length,
     height: Length,
     padding: Padding,
@@ -145,10 +146,20 @@ pub fn keyed_row<'a, K: Copy + PartialEq + 'static, M>() -> Keyed<'a, K, M> {
     Keyed {
         keys: Vec::new(),
         children: Vec::new(),
+        vertical: false,
         width: Length::Shrink,
         height: Length::Shrink,
         padding: Padding::ZERO,
         align: Alignment::Start,
+    }
+}
+
+/// A keyed column (the song page's lane list, whose rows Dart keyed by
+/// take, bus and section).
+pub fn keyed_column<'a, K: Copy + PartialEq + 'static, M>() -> Keyed<'a, K, M> {
+    Keyed {
+        vertical: true,
+        ..keyed_row()
     }
 }
 
@@ -170,6 +181,11 @@ impl<'a, K: Copy + PartialEq + 'static, M> Keyed<'a, K, M> {
 
     pub fn height(mut self, height: impl Into<Length>) -> Self {
         self.height = height.into();
+        self
+    }
+
+    pub fn width(mut self, width: impl Into<Length>) -> Self {
+        self.width = width.into();
         self
     }
 }
@@ -212,8 +228,13 @@ impl<K: Copy + PartialEq + 'static, M> Widget<M, Theme, Renderer> for Keyed<'_, 
         renderer: &Renderer,
         limits: &layout::Limits,
     ) -> layout::Node {
+        let axis = if self.vertical {
+            flex::Axis::Vertical
+        } else {
+            flex::Axis::Horizontal
+        };
         flex::resolve(
-            flex::Axis::Horizontal,
+            axis,
             renderer,
             limits,
             self.width,
