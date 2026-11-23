@@ -1,26 +1,30 @@
-//! The view-model cases of `song_practice_take_flow_test.dart` that record
-//! through the view model: a take driven by the real view model and the real
-//! recording controller, from REC through the arm window and the take to
-//! Stop, the stop window and the take's save — with the user acting in the
-//! windows between. (The recording controller's own halves of these cases
-//! are its tests'; the cases that need no recording are `interpretations`,
-//! `reopen` and `placement`.)
+//! The view-model cases of `song_practice_take_flow_test.dart`: flows that
+//! cross the detail screen's components — a take travelling from REC or an
+//! import through the model, the save and the analysis caches, with the user
+//! acting in the windows between their awaits. Most record: a take driven by
+//! the real view model and the real recording controller, from REC through
+//! the arm window and the take to Stop, the stop window and the take's save.
+//! (The recording controller's own halves of these cases are its tests'; a
+//! few of the file's cases are ported in `interpretations`, `reopen` and
+//! `placement`, and two of its dragged-clip cases have looser kin in
+//! `structural`.)
 //!
 //! The screen is the module above's, opened over the take-flow test's own
 //! fakes: [`FlowRepo`] (Dart's `_FakeRepo`: a save gate, failing saves, a
 //! commit that reports failure, the asset pool's re-read), [`FlowFiles`]
-//! (`_FakeFiles`: recordings and imports numbered) and [`Waveforms`]
-//! (`_FakeWaveforms`: an analysis that parks while its gate is shut). The
-//! engine is the real [`GraphAudioPlaybackService`] over [`Graph`] (Dart's
-//! `_FakeGraphEngine`), so the recording controller has its native engine:
-//! bindings that commit every sync, take the transport and the settings'
-//! pushes, and report a take's record counters. The recorder is [`FakeMic`]
-//! (Dart's `_FakeMic`): its start runs the take setup, parked on its
-//! permission prompt and its ready handshake while their gates are shut. It
-//! has no level ticks, so no tick is driven; where Dart waited a few
-//! milliseconds for its event loop to reach a point, the tests pump the
-//! screen until that point is reached (or, where the point is that nothing
-//! happens, for the same few milliseconds).
+//! (`_FakeFiles`: recordings and imports numbered), [`Waveforms`]
+//! (`_FakeWaveforms`: an analysis that parks while its gate is shut) and
+//! [`FlowSpectrograms`] (`_FakeSpectrograms`: every path asked for, the paired
+//! compute parked while its gate is shut). The engine is the real
+//! [`GraphAudioPlaybackService`] over [`Graph`] (Dart's `_FakeGraphEngine`),
+//! so the recording controller has its native engine: bindings that commit
+//! every sync, take the transport and the settings' pushes, and report a
+//! take's record counters. The recorder is [`FakeMic`] (Dart's `_FakeMic`):
+//! its start runs the take setup, parked on its permission prompt and its
+//! ready handshake while their gates are shut. It has no level ticks, so no
+//! tick is driven; where Dart waited a few milliseconds for its event loop to
+//! reach a point, the tests pump the screen until that point is reached (or,
+//! where the point is that nothing happens, for the same few milliseconds).
 
 use std::sync::atomic::AtomicBool;
 
@@ -762,6 +766,73 @@ impl Waveforms {
     }
 }
 
+/// Records every path an analysis was asked for and analyzes nothing (Dart's
+/// `_FakeSpectrograms`); while its gate is shut, the paired compute (the one
+/// the inspector and the dock ask for) parks.
+#[derive(Default)]
+struct FlowSpectrograms {
+    requested: Mutex<Vec<String>>,
+    gate: Mutex<Option<Arc<Gate>>>,
+    /// Paired computes parked on the gate right now.
+    parked: AtomicUsize,
+}
+
+impl FlowSpectrograms {
+    fn requested(&self) -> Vec<String> {
+        guard(&self.requested).clone()
+    }
+
+    fn parked(&self) -> usize {
+        self.parked.load(Ordering::SeqCst)
+    }
+
+    /// Parks the paired computes from now on until the returned gate opens
+    /// (Dart's `spectrograms.gate = Completer()`).
+    fn hold(&self) -> Arc<Gate> {
+        let gate = Gate::new();
+        *guard(&self.gate) = Some(Arc::clone(&gate));
+        gate
+    }
+}
+
+impl SpectrogramAnalyses for FlowSpectrograms {
+    fn compute_from_file(
+        &self,
+        path: &str,
+        _params: AnalysisParams,
+        _wanted: Option<&dyn Fn() -> bool>,
+    ) -> std::io::Result<Option<Arc<Spectrogram>>> {
+        guard(&self.requested).push(path.to_string());
+        Ok(None)
+    }
+
+    fn compute_metrics_from_file(
+        &self,
+        path: &str,
+        _params: AnalysisParams,
+        _wanted: Option<&dyn Fn() -> bool>,
+    ) -> std::io::Result<Option<Arc<VoiceMetrics>>> {
+        guard(&self.requested).push(path.to_string());
+        Ok(None)
+    }
+
+    fn compute_both_from_file(
+        &self,
+        path: &str,
+        _params: AnalysisParams,
+        _wanted: Option<&dyn Fn() -> bool>,
+    ) -> std::io::Result<Option<TakeAnalysisBundle>> {
+        guard(&self.requested).push(path.to_string());
+        let gate = guard(&self.gate).clone();
+        if let Some(gate) = gate {
+            self.parked.fetch_add(1, Ordering::SeqCst);
+            gate.wait();
+            self.parked.fetch_sub(1, Ordering::SeqCst);
+        }
+        Ok(None)
+    }
+}
+
 // --- The world and its screens -----------------------------------------------------------
 
 /// What each test's screens share (Dart's `repo`, `waveforms`,
@@ -770,7 +841,7 @@ struct World {
     repo: Arc<FlowRepo>,
     files: Arc<FlowFiles>,
     waveforms: Arc<Waveforms>,
-    spectro: Arc<CountingSpectro>,
+    spectro: Arc<FlowSpectrograms>,
     finalizer: Arc<RecordingFinalizer>,
 }
 
@@ -803,7 +874,7 @@ impl World {
             repo: FlowRepo::new(seed),
             files: Arc::new(FlowFiles::default()),
             waveforms: Arc::new(Waveforms::default()),
-            spectro: Arc::new(CountingSpectro::default()),
+            spectro: Arc::new(FlowSpectrograms::default()),
             finalizer: Arc::clone(finalizer),
         }
     }
@@ -1288,7 +1359,7 @@ fn a_take_whose_clip_moves_to_the_pool_on_a_later_save_is_analyzed_there() {
     assert_eq!(lane.clips.len(), 1);
     let path = &lane.clips[0].audio_file_path;
     assert!(path.starts_with("/pool/"), "{path}");
-    assert!(guard(&w.spectro.asked).contains(path));
+    assert!(w.spectro.requested().contains(path));
 }
 
 #[test]
@@ -1639,7 +1710,10 @@ fn the_dock_follows_a_recording_punched_into_a_take() {
     let clip_id = s.vm.selected_clip_id().expect("a clip");
     let clip = lane.clip_by_id(clip_id).expect("the clip");
     assert_eq!(clip.audio_file_path, "/pool/rec0.wav");
-    assert!(guard(&w.spectro.asked).contains(&"/pool/rec0.wav".to_string()));
+    assert!(w
+        .spectro
+        .requested()
+        .contains(&"/pool/rec0.wav".to_string()));
 }
 
 // --- Reopening while a take lands -----------------------------------------------------------
@@ -1727,4 +1801,346 @@ fn a_take_records_on_the_channel_choice_of_the_device_capturing_now() {
     );
     s.stop();
     s.settle();
+}
+
+// --- Cases with no take ----------------------------------------------------------------------
+
+/// A take of the interpretation on screen (the dragged-clip and removed-take
+/// groups' `take`).
+fn v1_take(id: &str, name: &str, path: &str) -> AudioTrack {
+    AudioTrack {
+        version_id: Some("v1".into()),
+        ..take(id, name, path)
+    }
+}
+
+fn with_takes(accompaniment: bool, takes: Vec<AudioTrack>) -> SongPractice {
+    SongPractice {
+        vocal_tracks: takes.into_iter().map(Arc::new).collect(),
+        ..seed(accompaniment)
+    }
+}
+
+// An active interpretation id that does not resolve: what the sync
+// integrity repair leaves when the active interpretation was deleted on
+// another device. The column is nulled, and the lanes fall back to showing
+// the first interpretation.
+
+fn unresolved() -> SongPractice {
+    SongPractice {
+        active_version_id: None,
+        ..seed(false)
+    }
+}
+
+#[test]
+fn an_unresolved_interpretation_still_shows_the_first_interpretation_and_its_takes() {
+    let w = World::new(unresolved());
+    let s = w.pump_vm(Open::default());
+    assert_eq!(
+        InterpretationsController::active(s.vm.practice()).map(|v| v.id.clone()),
+        Some("v1".to_string())
+    );
+    let takes: Vec<String> = InterpretationsController::vocal_takes(s.vm.practice())
+        .iter()
+        .map(|t| t.id.clone())
+        .collect();
+    assert_eq!(takes, ["take1"]);
+}
+
+#[test]
+fn under_an_unresolved_interpretation_a_selected_visible_take_can_be_armed() {
+    let w = World::new(unresolved());
+    let mut s = w.pump_vm(Open::default());
+    s.select("take1");
+    assert_eq!(s.vm.record_target_id().as_deref(), Some("take1"));
+}
+
+#[test]
+fn a_new_interpretation_made_while_a_take_imports_does_not_take_it_along() {
+    let w = World::new(seed(false));
+    let mut s = w.pump_vm(Open::default());
+    let gate = w.waveforms.hold();
+    let import = s.call(|vm| vm.add_vocal_take("/src/guide.wav"));
+    s.pump_for(ms(10));
+    s.act(|vm| vm.versions_do(|v, h| v.create("Fresh", h)));
+    // Dart's `await`: what the create started has landed; only the import's
+    // analysis is left in flight.
+    s.pump_until(|s| s.in_flight == 1);
+    gate.open();
+    s.await_reply(import);
+    s.settle();
+    let last = s.practice().vocal_tracks.last().cloned().expect("a take");
+    assert_eq!(last.version_id.as_deref(), Some("v1"));
+}
+
+#[test]
+fn take_and_clip_menu_actions_refused_while_an_import_runs_say_why() {
+    // Duplicate, Split, Merge, Re-analyze and Delete clip did nothing at all.
+    let w = World::new(seed(false));
+    let mut s = w.pump_vm(Open::default());
+    let gate = w.waveforms.hold();
+    let import = s.call(|vm| vm.add_vocal_take("/src/guide.wav"));
+    s.pump_for(ms(10));
+
+    let clip_id = s.practice().vocal_tracks[0].clips[0].id.clone();
+    s.act(|vm| vm.duplicate_track("take1"));
+    s.act(|vm| vm.split_track_at_playhead("take1"));
+    s.act(|vm| vm.merge_track_down("take1"));
+    s.act(|vm| vm.reanalyze_track("take1"));
+    s.act(|vm| vm.delete_clip("take1", &clip_id));
+    assert_eq!(s.toasts, ["Wait for the current edit to finish."; 5]);
+    gate.open();
+    s.await_reply(import);
+    s.settle();
+}
+
+#[test]
+fn a_folded_out_lane_re_reads_a_clip_whose_path_a_save_moved() {
+    // A synced clip opens at its `asset://` ref; once its bytes land, a save
+    // re-reads it at the pool path, which re-keys the lane's analysis. The
+    // folded-out lane computes only when pushed, so it sat blank with no
+    // spinner until it was folded again.
+    let take1 = AudioTrack {
+        clips: vec![
+            clip("c1", "/pool/a.wav", 0, 1000),
+            clip("c2", "asset://b.wav", 2000, 1000),
+        ],
+        version_id: Some("v1".into()),
+        ..AudioTrack::new("take1", AudioTrackKind::Vocal, "Take 1", at())
+    };
+    let w = World::new(with_takes(false, vec![take1]));
+    let mut s = w.pump_vm(Open::default());
+    s.act(|vm| vm.analysis_do(|a, h| a.toggle_track_expanded("take1", h)));
+    s.settle();
+    w.repo.s().pooling = true;
+    guard(&w.spectro.requested).clear();
+
+    s.act(|vm| vm.rename_track("take1", "Lead")); // any save re-reads the practice
+    s.settle();
+    assert!(
+        w.spectro.requested().contains(&"/pool/b.wav".to_string()),
+        "{:?}",
+        w.spectro.requested()
+    );
+}
+
+#[test]
+fn a_clip_dropped_onto_a_take_with_a_bus_selected_takes_the_selection() {
+    let w = World::new(seed(false));
+    let mut s = w.pump_vm(Open::default());
+    s.create_bus();
+    let call = s.call(|vm| vm.add_clip_to_take("take1", "/src/drop.wav", None));
+    s.await_reply(call);
+    s.settle();
+    assert_eq!(s.vm.selected_track_id(), Some("take1"));
+    assert_eq!(s.vm.selected_bus_id(), None);
+}
+
+#[test]
+fn the_dock_follows_a_clip_dropped_onto_a_take() {
+    // Inspector collapsed, dock open on an analysis tab: the dock computes
+    // only when pushed, so the push must name the clip as the model shows it.
+    let w = World::new(seed(false));
+    let mic = FakeMic::new(&w.finalizer);
+    let mut s = w.pump_vm(Open::graph(&Graph::new(), &mic));
+    w.repo.s().pooling = true;
+    s.act(|vm| vm.toggle_inspector_panel());
+    assert!(!s.vm.inspector_open());
+    s.act(|vm| vm.analysis_do(|a, h| a.show_dock_tab(DockTab::Spectrogram, h)));
+
+    let call = s.call(|vm| vm.add_clip_to_take("take1", "/src/drop.wav", None));
+    s.await_reply(call);
+    s.settle();
+    let lane = s.vm.selected_track().expect("a lane");
+    let clip_id = s.vm.selected_clip_id().expect("a clip");
+    let clip = lane.clip_by_id(clip_id).expect("the clip");
+    assert_eq!(clip.audio_file_path, "/pool/import0.wav");
+    assert!(w
+        .spectro
+        .requested()
+        .contains(&"/pool/import0.wav".to_string()));
+}
+
+// --- A clip dragged while a long edit runs keeps its new position ----------------------------
+
+/// Drags `clip_id` of `track_id` to `to_ms` while the edit `start` runs,
+/// parked on its analysis, then lets the edit land.
+fn drag_during(
+    s: &mut Screen,
+    w: &World,
+    start: impl FnOnce(&mut SongPracticeDetailViewModel) -> Vec<Effect>,
+    track_id: &str,
+    clip_id: &str,
+    to_ms: i64,
+) {
+    let gate = w.waveforms.hold(); // the edit's new audio is being analyzed
+    s.act(start);
+    s.pump_for(ms(5));
+    s.vm.move_clip_start_live(track_id, clip_id, to_ms);
+    s.act(|vm| vm.commit_track_move());
+    // Dart's `await vm.commitTrackMove()`: only the edit's analysis is left.
+    s.pump_until(|s| s.in_flight == 1);
+    gate.open();
+    s.settle();
+}
+
+#[test]
+fn split_both_halves_follow_the_dragged_clip() {
+    let w = World::new(seed(false));
+    let mut s = w.pump_vm(Open::default());
+    s.at_ms(500);
+    drag_during(
+        &mut s,
+        &w,
+        |vm| vm.split_track_at_playhead("take1"),
+        "take1",
+        "take1-c0",
+        300,
+    );
+    let stored = w.repo.stored();
+    let first = &stored.vocal_tracks[0];
+    let second = &stored.vocal_tracks[1];
+    assert_eq!(first.id, "take1");
+    assert_eq!(first.clips.len(), 1);
+    assert_eq!(first.clips[0].start_ms, 300, "the drag snapped back");
+    assert_eq!(second.clips.len(), 1);
+    assert_eq!(second.clips[0].start_ms, 800);
+}
+
+#[test]
+fn merge_the_merged_clip_sits_where_the_top_clip_was_dragged() {
+    let w = World::new(with_takes(
+        false,
+        vec![
+            v1_take("top", "Top", "/pool/top.wav"),
+            v1_take("bottom", "Bottom", "/pool/bottom.wav"),
+        ],
+    ));
+    let mut s = w.pump_vm(Open::default());
+    drag_during(
+        &mut s,
+        &w,
+        |vm| vm.merge_track_down("top"),
+        "top",
+        "top-c0",
+        300,
+    );
+    let stored = w.repo.stored();
+    assert_eq!(ids(&stored), ["top"]);
+    assert_eq!(stored.vocal_tracks[0].clips.len(), 1);
+    assert_eq!(stored.vocal_tracks[0].clips[0].start_ms, 300);
+}
+
+#[test]
+fn re_analyze_the_analyzed_clip_keeps_the_dragged_position() {
+    let w = World::new(seed(false));
+    let mut s = w.pump_vm(Open::default());
+    drag_during(
+        &mut s,
+        &w,
+        |vm| vm.reanalyze_track("take1"),
+        "take1",
+        "take1-c0",
+        300,
+    );
+    let stored = w.repo.stored();
+    assert_eq!(stored.vocal_tracks.len(), 1);
+    assert_eq!(stored.vocal_tracks[0].clips.len(), 1);
+    assert_eq!(stored.vocal_tracks[0].clips[0].start_ms, 300);
+}
+
+// --- An analysis in flight for a take that is removed ------------------------------------------
+
+#[test]
+fn an_analysis_in_flight_for_a_removed_take_is_discarded_not_run_again_on_the_dead_file() {
+    // The load selects the backing lane, which carries no analysis.
+    let w = World::new(seed(true));
+    let mut s = w.pump_vm(Open::default());
+    assert!(w.spectro.requested().is_empty());
+    let gate = w.spectro.hold();
+    s.select("take1"); // the inspector starts analyzing it
+    s.pump_until(|_| !w.spectro.requested().is_empty());
+    assert_eq!(w.spectro.requested(), ["/pool/take1.wav"]);
+    s.act(|vm| vm.delete_track("take1"));
+    // Dart's `await`: the delete landed; the analysis is still in flight.
+    s.pump_until(|s| s.in_flight == 1);
+    assert!(s.practice().vocal_tracks.is_empty());
+    assert_eq!(w.spectro.parked(), 1, "in flight");
+    gate.open();
+    s.settle();
+    assert_eq!(w.spectro.requested(), ["/pool/take1.wav"]);
+}
+
+#[test]
+fn an_analysis_in_flight_for_a_path_another_lane_still_plays_is_kept() {
+    // Identical bytes resolve to ONE pool path, so a duplicated take (or a
+    // file imported twice) has both lanes at the same path. Deleting one
+    // evicted the other's analysis and disowned its compute in flight,
+    // leaving the dock with no result and no loading state until the lane
+    // was selected again.
+    let w = World::new(with_takes(
+        true,
+        vec![
+            v1_take("a", "a", "/pool/shared.wav"),
+            v1_take("b", "b", "/pool/shared.wav"),
+        ],
+    ));
+    let mut s = w.pump_vm(Open::default());
+    // The dock alone (inspector collapsed) computes only on pushes.
+    s.act(|vm| vm.toggle_inspector_panel());
+    s.act(|vm| vm.analysis_do(|a, h| a.show_dock_tab(DockTab::Spectrogram, h)));
+    let gate = w.spectro.hold();
+    s.select("a");
+    s.pump_until(|_| !w.spectro.requested().is_empty());
+    assert_eq!(w.spectro.requested(), ["/pool/shared.wav"]);
+
+    s.act(|vm| vm.delete_track("b"));
+    s.pump_until(|s| s.in_flight == 1);
+    assert_eq!(s.vm.selected_track_id(), Some("a"));
+    assert_eq!(w.spectro.parked(), 1, "in flight");
+    gate.open();
+    s.settle();
+    // The compute landed for the lane still on screen (this fake answers
+    // nothing, which latches "unavailable").
+    let shows = s.vm.with_analysis(|a, h| {
+        a.spectrogram_loading(h)
+            || a.selected_metrics_unavailable(h)
+            || a.selected_spectrogram(h).is_some()
+    });
+    assert!(shows, "the dock was left with nothing to show");
+}
+
+// --- A reopen during an import ----------------------------------------------------------------
+
+#[test]
+fn a_reopen_during_an_import_on_the_old_screen_catches_up_on_it() {
+    // Back is allowed while an import analyzes, and the import writes when it
+    // ends. Listed as landing only at that closing save, the reopen neither
+    // waited nor re-read: it showed the practice without the take, and its
+    // next save fought the import's.
+    let w = World::new(seed(false));
+    let mut first = w.pump_vm(Open::default());
+    let takes_before = first.practice().vocal_tracks.len();
+    let gate = w.waveforms.hold(); // the import is being analyzed
+    let import = first.call(|vm| vm.add_vocal_take("/src/song.wav"));
+    first.pump_for(ms(20));
+    assert!(first.vm.busy(), "still importing");
+    first.vm.dispose();
+
+    let mut reopened = w.open_vm(Open::default());
+    reopened.pump_until(|s| s.vm.practice().is_some());
+    assert!(reopened.vm.catching_up(), "takes no edits yet");
+
+    gate.open();
+    first.await_reply(import);
+    first.settle();
+    reopened.pump_until(|s| !s.vm.catching_up());
+    reopened.settle();
+    assert!(!reopened.vm.catching_up());
+    assert_eq!(
+        reopened.practice().vocal_tracks.len(),
+        takes_before + 1,
+        "the imported take shows"
+    );
 }
