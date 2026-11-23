@@ -43,6 +43,7 @@ md-5 = "0.10"
 parking_lot = "0.12"
 indexmap = "2"
 png = "0.18"
+bytes = "1.9"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

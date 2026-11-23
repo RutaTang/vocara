@@ -1900,6 +1900,20 @@
       "texts": []
     },
     {
+      "name": "objc2-core-media",
+      "version": "0.3.2",
+      "license": "Zlib OR Apache-2.0 OR MIT",
+      "repository": "https://github.com/madsmtm/objc2",
+      "texts": []
+    },
+    {
+      "name": "objc2-core-video",
+      "version": "0.3.2",
+      "license": "Zlib OR Apache-2.0 OR MIT",
+      "repository": "https://github.com/madsmtm/objc2",
+      "texts": []
+    },
+    {
       "name": "objc2-encode",
       "version": "4.1.0",
       "license": "MIT",

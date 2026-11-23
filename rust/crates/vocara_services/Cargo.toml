@@ -12,7 +12,21 @@ default = []
 # The live audio engine (CoreAudio output, VoiceProcessingIO mic, symphonia
 # decode). macOS only: the engine's device path is Apple-specific. Without it
 # the services run on the null engine, as the Dart unit tests run on fakes.
-device = ["vocara_engine/device"]
+# It also turns on the technique example players' AVFoundation backend
+# (media_player.rs); without it they are the null player.
+device = [
+    "vocara_engine/device",
+    "objc2-av-foundation/AVPlayer",
+    "objc2-av-foundation/AVPlayerItem",
+    "objc2-av-foundation/AVPlayerItemOutput",
+    "objc2-av-foundation/objc2-core-foundation",
+    "objc2-av-foundation/objc2-core-media",
+    "objc2-av-foundation/objc2-core-video",
+    "dep:objc2-foundation",
+    "dep:objc2-core-foundation",
+    "dep:objc2-core-media",
+    "dep:objc2-core-video",
+]
 
 [dependencies]
 vocara_model.workspace = true
@@ -45,9 +59,47 @@ workspace = true
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 ureq = { workspace = true, features = ["rustls", "gzip"] }
 
-# The microphone permission prompt (AVFoundation), see mic_permission.rs.
+# The microphone permission prompt (AVFoundation), see mic_permission.rs,
+# and the example players' AVPlayer backend (with `device`), see
+# media_player.rs.
 [target.'cfg(target_os = "macos")'.dependencies]
 ureq = { workspace = true, features = ["native-tls", "gzip"] }
 objc2 = "0.6"
 block2 = "0.6"
-objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "AVCaptureDevice", "AVMediaFormat"] }
+objc2-av-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "AVCaptureDevice",
+    "AVMediaFormat",
+] }
+objc2-foundation = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "NSDictionary",
+    "NSError",
+    "NSObject",
+    "NSString",
+    "NSURL",
+    "NSValue",
+    "objc2-core-foundation",
+] }
+objc2-core-foundation = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "CFBase",
+    "CFString",
+    "CFDate",
+] }
+objc2-core-media = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "CMBase",
+    "CMTime",
+] }
+objc2-core-video = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "objc2",
+    "CVBase",
+    "CVBuffer",
+    "CVHostTime",
+    "CVImageBuffer",
+    "CVPixelBuffer",
+    "CVReturn",
+] }
