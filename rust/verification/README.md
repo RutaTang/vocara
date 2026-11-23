@@ -13,6 +13,7 @@ are about, and a Rust test fails the moment the Rust code disagrees with it.
 | `Hlc` | `vocara_store::sync::hlc` | `tick` and merge are strictly after the last stamp (and the remote one); the counter keeps six digits; the packed TEXT form orders exactly as the clock | store tests (once the HLC port lands) |
 | `Lww` | the sync applier's entity-level last-writer-wins | replicas that saw the same writes, in any order and with any re-delivery, hold the same row (`convergence`) | store tests (once the applier port lands) |
 | `Version` | `UpdateCheckService.isNewer` | a strict order (irreflexive, asymmetric, transitive): the update banner cannot flip-flop; a GA beats its own prerelease; a prerelease candidate is never offered | services tests (once the update check port lands) |
+| `Canonical` | `SyncWriter._canonical` (content hashes) | canonicalization keeps exactly the entries, sorts keys strictly, and gives the same result for two maps with the same entries whatever their key order, so devices agree on a row's hash | store tests (once the writer port lands) |
 | `Ring` | `vocara_engine::ring` (SPSC) | a bounded FIFO: pushes succeed exactly below capacity, pops return the oldest item; the wrapping word counters and the mask index give the same slots and occupancy | `vocara_services/tests/lean_vectors_ring.rs` |
 
 ## Building

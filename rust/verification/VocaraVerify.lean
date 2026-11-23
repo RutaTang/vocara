@@ -4,3 +4,4 @@ import VocaraVerify.Hlc
 import VocaraVerify.Lww
 import VocaraVerify.Version
 import VocaraVerify.Ring
+import VocaraVerify.Canonical
