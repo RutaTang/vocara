@@ -1,0 +1,50 @@
+# The Rust port of Vocara (see PORTING.md): the domain model, the store
+# (SQLite library + sync), the services (audio, analysis, settings), and the
+# iced application. The real-time audio engine stays where it is
+# (client/rust/vocara_engine) and is used through a path dependency, so the
+# Flutter app and its CI keep building it unchanged until the port replaces
+# them.
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+vocara_model = { path = "crates/vocara_model" }
+vocara_store = { path = "crates/vocara_store" }
+vocara_services = { path = "crates/vocara_services" }
+vocara_engine = { path = "../client/rust/vocara_engine" }
+
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+hex = "0.4"
+rand = "0.9"
+rusqlite = { version = "0.43", features = ["bundled"] }
+dirs = "6"
+rustfft = "6"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "process", "fs", "macros", "io-util"] }
+iced = { version = "0.14", default-features = false, features = ["wgpu", "tiny-skia", "canvas", "image", "tokio", "advanced", "x11", "wayland", "web-colors"] }
+iced_test = "0.14"
+rfd = "0.18"
+tempfile = "3"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+
+[profile.release]
+# Unwinding, not abort: the engine's FFI boundary catches panics (see the
+# engine crate's own profile notes).
+lto = "fat"
+codegen-units = 1

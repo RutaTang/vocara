@@ -1,0 +1,19 @@
+[package]
+name = "vocara_model"
+description = "Vocara's domain model and pure utilities (ported from client/lib/domain, client/lib/utils, client/lib/config)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+rand.workspace = true
+sha2.workspace = true
+hex.workspace = true
+
+[lints]
+workspace = true

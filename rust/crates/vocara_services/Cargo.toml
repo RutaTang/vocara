@@ -1,0 +1,35 @@
+[package]
+name = "vocara_services"
+description = "Vocara's services: the audio engine bridge, playback, recording, analysis, separation, settings, diagnostics and update check (ported from client/lib/data/services and client/lib/data/ffi)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+# The live audio engine (CoreAudio output, VoiceProcessingIO mic, symphonia
+# decode). macOS only: the engine's device path is Apple-specific. Without it
+# the services run on the null engine, as the Dart unit tests run on fakes.
+device = ["vocara_engine/device"]
+
+[dependencies]
+vocara_model.workspace = true
+vocara_store.workspace = true
+vocara_engine.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+sha2.workspace = true
+hex.workspace = true
+rand.workspace = true
+dirs.workspace = true
+rustfft.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
