@@ -30,7 +30,7 @@ use self::library::{LibraryOpen, OpenLibrary};
 use self::page::{erase, with_screen, PageUpdate};
 use self::quit::QuitHooks;
 use crate::router::{self, Change, Navigation, PageId, Route, Router};
-use crate::services::Services;
+use crate::services::{Services, ServicesFactory};
 use crate::ui::core::theme::{self, font};
 use crate::ui::core::widgets::confirm_dialog::{self, Dialog, DialogResult, DialogState};
 use crate::ui::core::widgets::fatal_open_screen::{self, FatalOpenScreen};
@@ -64,11 +64,13 @@ pub struct Boot {
     pub open_library: OpenLibrary,
     /// What runs before the app quits.
     pub quit_hooks: Arc<dyn QuitHooks>,
+    /// Builds the services once the library is open.
+    pub services: ServicesFactory,
 }
 
 impl Boot {
-    /// A boot in `environment` at Home, with the stand-in library open and
-    /// no quit hooks.
+    /// A boot in `environment` at Home, with the stand-in library open, no
+    /// quit hooks, and [`Services::detached`] (what the app's tests boot).
     pub fn new(environment: AppEnvironment) -> Self {
         Self {
             environment,
@@ -76,6 +78,7 @@ impl Boot {
             screenshot: None,
             open_library: library::open_library_stub,
             quit_hooks: Arc::new(quit::NoQuitHooks),
+            services: Services::detached,
         }
     }
 
@@ -90,6 +93,7 @@ impl Boot {
             screenshot: var(SCREENSHOT_VAR).map(PathBuf::from),
             open_library,
             quit_hooks,
+            services: Services::new,
         }
     }
 }
@@ -356,7 +360,7 @@ impl App {
                 }
                 match outcome {
                     LibraryOpen::Opened(library) => {
-                        let services = Services::new(library, self.boot.environment);
+                        let services = (self.boot.services)(library, self.boot.environment);
                         // Dev-only deep link: VOCARA_START=/song/<id>.
                         let start = self.boot.start.as_deref().unwrap_or(router::HOME);
                         let (page, opening) = Page::open(Route::parse(start), &services);

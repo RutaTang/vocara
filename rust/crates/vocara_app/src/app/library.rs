@@ -10,24 +10,66 @@
 //! provides the real open.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use vocara_model::config::environment::AppEnvironment;
+use vocara_model::util::id::new_id;
+use vocara_store::db::asset_store::AssetStore;
+use vocara_store::db::schema::AppDatabase;
+use vocara_store::repositories::{
+    SongPracticeRepository, SongPracticeRepositoryDrift, TechniqueRepository,
+    TechniqueRepositoryDrift,
+};
+use vocara_store::sync::hlc::HlcClock;
+use vocara_store::sync::sync_writer::SyncWriter;
 
 /// The opened library (Dart's `Persistence`: the database, the asset pool,
 /// both repositories and the remote-applied stream).
 ///
-/// PLACEHOLDER: an empty token until `vocara_store::db::persistence` lands;
-/// it then becomes (or wraps) the opened `Persistence`.
-#[derive(Debug)]
+/// INTERIM: until `vocara_services::persistence` is wired in, this is an
+/// in-memory store (nothing reaches the disk) with the real repositories
+/// over it, so every screen runs against the real data layer.
 pub struct Library {
-    _private: (),
+    /// `persistence.songRepo`.
+    pub song_repo: Arc<dyn SongPracticeRepository>,
+    /// `persistence.techRepo`.
+    pub technique_repo: Arc<dyn TechniqueRepository>,
+}
+
+impl std::fmt::Debug for Library {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Library").finish_non_exhaustive()
+    }
 }
 
 impl Library {
-    /// The placeholder library [`open_library_stub`] opens.
+    /// A library over an in-memory database, its asset pool in a fresh
+    /// temporary folder.
+    pub fn in_memory() -> Self {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let db = Arc::new(AppDatabase::open_in_memory().expect("in-memory database"));
+        let clock = Arc::new(HlcClock::new(new_id()));
+        let writer = Arc::new(SyncWriter::new(db.clone(), clock));
+        let root = std::env::temp_dir().join(format!(
+            "vocara-memory-library-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let assets = Arc::new(AssetStore::new(db.clone(), root, writer.clone()));
+        Library {
+            song_repo: Arc::new(SongPracticeRepositoryDrift::new(
+                db.clone(),
+                writer.clone(),
+                assets.clone(),
+            )),
+            technique_repo: Arc::new(TechniqueRepositoryDrift::new(db, writer, assets)),
+        }
+    }
+
+    /// The library [`open_library_stub`] opens.
     pub fn stub() -> Self {
-        Library { _private: () }
+        Self::in_memory()
     }
 }
 
