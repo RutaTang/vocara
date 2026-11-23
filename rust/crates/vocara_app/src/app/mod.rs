@@ -32,9 +32,12 @@ use self::quit::QuitHooks;
 use crate::router::{self, Change, Navigation, PageId, Route, Router};
 use crate::services::{Services, ServicesFactory};
 use crate::ui::core::theme::{self, font};
-use crate::ui::core::widgets::confirm_dialog::{self, Dialog, DialogResult, DialogState};
+use crate::ui::core::widgets::confirm_dialog::{
+    self, Dialog, DialogResult, DialogState, DialogStep,
+};
 use crate::ui::core::widgets::fatal_open_screen::{self, FatalOpenScreen};
 use crate::ui::core::widgets::window_drag_bar::window_drag_bar;
+use crate::ui::home::widgets::update_notice::open_url_task;
 use crate::ui::Screen;
 use crate::ui::{home, settings, song_practice_detail, technique_library};
 pub use vocara_model::config::environment::AppEnvironment;
@@ -438,13 +441,15 @@ impl App {
         let Some(open) = running.dialogs.last_mut() else {
             return Task::none();
         };
-        match open.state.update(message) {
-            Some(result) => {
+        match open.state.step(message) {
+            DialogStep::Closed(result) => {
                 let open = running.dialogs.pop().expect("checked above");
                 let message = (open.on_result)(result);
                 self.update(message)
             }
-            None => Task::none(),
+            // The update dialog stays open: its URL is the fallback.
+            DialogStep::OpenUrl(url) => open_url_task(url),
+            DialogStep::Stay => Task::none(),
         }
     }
 

@@ -15,6 +15,14 @@
 //! submits, as its `onSubmitted` did; Enter in the confirm dialog does
 //! nothing (no button there takes focus). While a dialog is up it holds the
 //! keyboard: nothing beneath sees a key.
+//!
+//! The app's two custom modals go through the same stack, so they too cover
+//! the drag bar as a Flutter dialog route did: the update download dialog
+//! ([`Dialog::UpdateDownload`], Home's banner and Settings) and the new
+//! technique dialog ([`Dialog::NewTechnique`], the technique library). They
+//! speak the same [`Message`]s; [`DialogState::step`] says what a message did
+//! — the update dialog's "Open Download Page" keeps it open and asks the app
+//! to open the browser ([`DialogStep::OpenUrl`]).
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::{
@@ -26,6 +34,8 @@ use super::studio_button::{studio_button, StudioButtonVariant};
 use super::wrap::Wrap;
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{self, alpha, font, Studio};
+use crate::ui::home::widgets::update_notice::{DialogOutcome, UpdateDownloadDialog};
+use crate::ui::technique_library::widgets::technique_dialogs::NewTechniqueDialog;
 
 /// `showConfirmDialog(title: ..., body: ..., ...)`. Defaults as in Dart:
 /// "Delete" / "Cancel", destructive (red confirm button), no icon. The title
@@ -134,6 +144,11 @@ impl StudioPrompt {
 pub enum Dialog {
     Confirm(ConfirmDialog),
     Prompt(StudioPrompt),
+    /// `showUpdateDownloadDialog`: closes with [`DialogResult::Closed`].
+    UpdateDownload(UpdateDownloadDialog),
+    /// `showNewTechniqueDialog`: closes with [`DialogResult::Text`] (the
+    /// trimmed name, or `None` cancelled).
+    NewTechnique(NewTechniqueDialog),
 }
 
 impl From<ConfirmDialog> for Dialog {
@@ -148,13 +163,30 @@ impl From<StudioPrompt> for Dialog {
     }
 }
 
+impl From<UpdateDownloadDialog> for Dialog {
+    fn from(d: UpdateDownloadDialog) -> Self {
+        Dialog::UpdateDownload(d)
+    }
+}
+
+impl From<NewTechniqueDialog> for Dialog {
+    fn from(d: NewTechniqueDialog) -> Self {
+        Dialog::NewTechnique(d)
+    }
+}
+
 /// How a dialog closed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DialogResult {
     /// A [`ConfirmDialog`]: whether the user confirmed.
     Confirmed(bool),
     /// A [`StudioPrompt`]: the trimmed text, or `None` on cancel / empty.
+    /// (A [`NewTechniqueDialog`] too: the trimmed name, or `None`
+    /// cancelled.)
     Text(Option<String>),
+    /// A dialog that answers nothing closed ([`UpdateDownloadDialog`]'s
+    /// "Later", a barrier tap or Escape).
+    Closed,
 }
 
 impl DialogResult {
@@ -167,7 +199,7 @@ impl DialogResult {
     pub fn text(self) -> Option<String> {
         match self {
             DialogResult::Text(t) => t,
-            DialogResult::Confirmed(_) => None,
+            DialogResult::Confirmed(_) | DialogResult::Closed => None,
         }
     }
 }
@@ -183,6 +215,19 @@ pub enum Message {
     Input(String),
 }
 
+/// What a [`Message`] did to an open dialog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DialogStep {
+    /// It stays open, as it is (or with its text edited).
+    Stay,
+    /// It stays open and asks for `url` to be opened in the browser (the
+    /// update dialog's "Open Download Page": it stays open on purpose, so
+    /// the URL it shows is the fallback if the launch fails).
+    OpenUrl(String),
+    /// It closed with this result.
+    Closed(DialogResult),
+}
+
 /// An open dialog: what it shows, and the prompt's text as typed.
 #[derive(Debug, Clone)]
 pub struct DialogState {
@@ -196,7 +241,7 @@ impl DialogState {
         let dialog = dialog.into();
         let text = match &dialog {
             Dialog::Prompt(p) => p.initial.clone().unwrap_or_default(),
-            Dialog::Confirm(_) => String::new(),
+            _ => String::new(),
         };
         Self {
             dialog,
@@ -209,28 +254,51 @@ impl DialogState {
         &self.dialog
     }
 
-    /// The task that puts the keyboard in the prompt's field when the dialog
-    /// opens (`autofocus: true`); nothing for a confirm dialog.
+    /// The task that puts the keyboard in the dialog's field when it opens
+    /// (`autofocus: true`: the prompt's, the new technique's name); nothing
+    /// for a dialog without one.
     pub fn focus<T: Send + 'static>(&self) -> iced::Task<T> {
-        match self.dialog {
+        match &self.dialog {
             Dialog::Prompt(_) => iced::widget::operation::focus(self.input.clone()),
-            Dialog::Confirm(_) => iced::Task::none(),
+            Dialog::NewTechnique(d) => d.focus(),
+            Dialog::Confirm(_) | Dialog::UpdateDownload(_) => iced::Task::none(),
         }
     }
 
     /// Handles `message`; `Some` when the dialog closes, with its result.
     pub fn update(&mut self, message: Message) -> Option<DialogResult> {
-        match (message, &self.dialog) {
+        match self.step(message) {
+            DialogStep::Closed(result) => Some(result),
+            DialogStep::Stay | DialogStep::OpenUrl(_) => None,
+        }
+    }
+
+    /// Handles `message`: whether the dialog stays, asks for the browser, or
+    /// closes (with its result).
+    pub fn step(&mut self, message: Message) -> DialogStep {
+        let closed =
+            |result: Option<DialogResult>| result.map_or(DialogStep::Stay, DialogStep::Closed);
+        match (message, &mut self.dialog) {
+            (message, Dialog::UpdateDownload(d)) => match d.update(message) {
+                Some(DialogOutcome::Close) => DialogStep::Closed(DialogResult::Closed),
+                Some(DialogOutcome::OpenUrl(url)) => DialogStep::OpenUrl(url),
+                None => DialogStep::Stay,
+            },
+            (message, Dialog::NewTechnique(d)) => closed(d.update(message)),
             (Message::Input(text), _) => {
                 self.text = text;
-                None
+                DialogStep::Stay
             }
-            (Message::Cancel, Dialog::Confirm(_)) => Some(DialogResult::Confirmed(false)),
-            (Message::Confirm, Dialog::Confirm(_)) => Some(DialogResult::Confirmed(true)),
-            (Message::Cancel, Dialog::Prompt(_)) => Some(DialogResult::Text(None)),
+            (Message::Cancel, Dialog::Confirm(_)) => {
+                DialogStep::Closed(DialogResult::Confirmed(false))
+            }
+            (Message::Confirm, Dialog::Confirm(_)) => {
+                DialogStep::Closed(DialogResult::Confirmed(true))
+            }
+            (Message::Cancel, Dialog::Prompt(_)) => DialogStep::Closed(DialogResult::Text(None)),
             (Message::Confirm, Dialog::Prompt(_)) => {
                 let t = self.text.trim();
-                Some(DialogResult::Text(if t.is_empty() {
+                DialogStep::Closed(DialogResult::Text(if t.is_empty() {
                     None
                 } else {
                     Some(t.to_string())
@@ -244,6 +312,9 @@ impl DialogState {
         let card = match &self.dialog {
             Dialog::Confirm(d) => confirm_card(d),
             Dialog::Prompt(p) => prompt_card(p, &self.text, self.input.clone()),
+            // The custom modals draw their own barrier and card.
+            Dialog::UpdateDownload(d) => return d.view(),
+            Dialog::NewTechnique(d) => return d.view(),
         };
         modal(card)
     }
@@ -516,6 +587,55 @@ mod tests {
                 Message::Confirm,
                 Message::Cancel
             ]
+        );
+    }
+
+    #[test]
+    fn the_update_dialog_opens_the_browser_and_stays_and_closes_with_nothing() {
+        use vocara_services::update_check_service::UpdateInfo;
+        let mut state = DialogState::new(UpdateDownloadDialog::new(UpdateInfo {
+            version: "9.9.9".into(),
+            url: "https://example.com/download".into(),
+            notes: "Notes.".into(),
+        }));
+        let messages = run(&mut state, |ui| {
+            assert!(ui.find("Vocara 9.9.9 is available").is_ok());
+            ui.click("Open Download Page").expect("the open button");
+            ui.click("Later").expect("the later button");
+        });
+        assert_eq!(messages, vec![Message::Confirm, Message::Cancel]);
+        assert_eq!(
+            state.step(Message::Confirm),
+            DialogStep::OpenUrl("https://example.com/download".into())
+        );
+        // The URL is read-only.
+        assert_eq!(state.step(Message::Input("x".into())), DialogStep::Stay);
+        assert_eq!(
+            state.step(Message::Cancel),
+            DialogStep::Closed(DialogResult::Closed)
+        );
+        assert!(!DialogResult::Closed.confirmed());
+        assert_eq!(DialogResult::Closed.text(), None);
+    }
+
+    #[test]
+    fn the_new_technique_dialog_waits_for_a_name() {
+        let mut state = DialogState::new(NewTechniqueDialog::new());
+        let messages = run(&mut state, |ui| {
+            assert!(ui.find("New technique").is_ok());
+            ui.click("Cancel").expect("the cancel button");
+        });
+        assert_eq!(messages, vec![Message::Cancel]);
+        assert_eq!(state.step(Message::Input("   ".into())), DialogStep::Stay);
+        assert_eq!(state.step(Message::Confirm), DialogStep::Stay, "blank");
+        state.step(Message::Input(" Twang ".into()));
+        assert_eq!(
+            state.update(Message::Confirm),
+            Some(DialogResult::Text(Some("Twang".into())))
+        );
+        assert_eq!(
+            DialogState::new(NewTechniqueDialog::new()).update(Message::Cancel),
+            Some(DialogResult::Text(None))
         );
     }
 }

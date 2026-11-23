@@ -10,11 +10,14 @@
 //!
 //! The dialog is a modal like the studio dialogs and speaks their
 //! [`Message`](DialogMessage)s: Cancel is "Later" (and a barrier tap or
-//! Escape), Confirm is "Open Download Page". Opening the browser is an
-//! effect the dialog returns ([`DialogOutcome::OpenUrl`]) for the screen to
-//! run ([`open_url_task`]) — the counterpart of Dart's `openUrl` test seam.
-//! The dialog stays open on purpose: if the browser launch fails, the
-//! release URL it shows is the fallback, selectable for copying by hand.
+//! Escape), Confirm is "Open Download Page". A screen shows it through the
+//! app's dialog stack (`Update::dialog`, `Dialog::UpdateDownload`), so it
+//! covers the whole window as Flutter's dialog route did. Opening the
+//! browser is an effect the dialog returns ([`DialogOutcome::OpenUrl`]),
+//! which the app runs ([`open_url_task`]) — the counterpart of Dart's
+//! `openUrl` test seam. The dialog stays open on purpose: if the browser
+//! launch fails, the release URL it shows is the fallback, selectable for
+//! copying by hand.
 //! Flutter's `SelectableText` is a read-only text field here: it selects and
 //! copies, and its edits are dropped (the dialog keeps the URL).
 
