@@ -24,15 +24,6 @@ fn dock<'a>(open: bool, tab: DockTab, supports_live: bool) -> BottomDock<'a> {
     }
 }
 
-/// The text `label`, anywhere.
-fn label(label: &str) -> impl FnMut(Candidate<'_>) -> Option<Target> + Send {
-    let label = label.to_string();
-    move |candidate: Candidate<'_>| match &candidate {
-        Candidate::Text { content, .. } if *content == label => Some(Target::from(candidate)),
-        _ => None,
-    }
-}
-
 #[test]
 fn every_tab_is_labelled_as_dart_labelled_it() {
     let labels: Vec<&str> = DockTab::ALL.iter().map(|t| tab_label(*t)).collect();
@@ -59,7 +50,10 @@ fn every_tab_is_labelled_as_dart_labelled_it() {
 fn the_closed_dock_shows_its_tabs_and_the_open_toggle() {
     let mut ui = iced_test::simulator(bottom_dock(dock(false, DockTab::Spectrogram, true)));
     for t in DockTab::ALL {
-        assert!(ui.find(tab_label(t).to_uppercase().as_str()).is_ok(), "{t:?}");
+        assert!(
+            ui.find(tab_label(t).to_uppercase().as_str()).is_ok(),
+            "{t:?}"
+        );
     }
     assert!(ui
         .find(char::from(Icon::PanelBottomOpen).to_string().as_str())
@@ -145,7 +139,10 @@ fn a_drag_on_the_grabber_reports_each_move_past_the_slop() {
             _ => None,
         })
         .collect();
-    assert_eq!(moves, [(-10.0, 600.0 - CHROME_HEIGHT), (5.0, 600.0 - CHROME_HEIGHT)]);
+    assert_eq!(
+        moves,
+        [(-10.0, 600.0 - CHROME_HEIGHT), (5.0, 600.0 - CHROME_HEIGHT)]
+    );
 }
 
 // playhead_repaint_test: 'opening the dock keeps the tab strip where it was
@@ -155,27 +152,28 @@ fn a_drag_on_the_grabber_reports_each_move_past_the_slop() {
 fn opening_the_dock_keeps_the_tab_strip_where_it_was_scrolled() {
     let mut ui = LiveUi::new(Size::new(520.0, 400.0));
     let closed = || bottom_dock(dock(false, DockTab::Spectrogram, false));
-    let before = ui
-        .find(closed(), label("DYNAMICS"))
-        .expect("the tab")
-        .bounds();
-    // Scroll the strip towards its end.
+    assert_eq!(strip_scroll(&mut ui, closed()), 0.0);
+    // Scroll the strip towards its end (a tab past the window's edge).
     let _ = ui.run(
         closed(),
-        [
-            live_ui::move_to(200.0, 18.0),
-            live_ui::scroll(-400.0, 0.0),
-        ],
+        [live_ui::move_to(200.0, 18.0), live_ui::scroll(-400.0, 0.0)],
     );
-    let scrolled = ui
-        .find(closed(), label("DYNAMICS"))
-        .expect("the tab")
-        .bounds();
-    assert!(scrolled.x < before.x, "the strip scrolled: {before:?} {scrolled:?}");
-    // A tab past the edge opens the dock: the strip stays where it was
-    // (below the grabber now).
+    let scrolled = strip_scroll(&mut ui, closed());
+    assert!(scrolled > 0.0, "the strip scrolled");
+    // That tab opens the dock: the strip stays where it was (below the
+    // grabber now).
     let open = bottom_dock(dock(true, DockTab::Dynamics, false));
-    let after = ui.find(open, label("DYNAMICS")).expect("the tab").bounds();
-    assert_eq!(after.x, scrolled.x);
-    assert_eq!(after.y, scrolled.y + HANDLE_HEIGHT);
+    assert_eq!(strip_scroll(&mut ui, open), scrolled);
+}
+
+/// How far the tab strip (the dock's only scrollable here) is scrolled.
+fn strip_scroll(ui: &mut LiveUi, view: Element<'_, Message>) -> f32 {
+    let strip = ui.find(view, |c: Candidate<'_>| match &c {
+        Candidate::Scrollable { .. } => Some(Target::from(c)),
+        _ => None,
+    });
+    match strip {
+        Some(Target::Scrollable { translation, .. }) => translation.x,
+        other => panic!("the tab strip: {other:?}"),
+    }
 }

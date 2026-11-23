@@ -2,15 +2,14 @@
 //! (each listed in its module's test doc) —
 //!
 //! - `takes_header_test.dart`: the VOCAL TAKES header at the smallest window;
-//! - `timeline_scrollbar_test.dart` and `timeline_envelope_test.dart`: the
-//!   scrollbar's thumb and the master / bus envelope, through their pure
-//!   functions;
 //! - `playhead_repaint_test.dart`'s screen cases that still apply (iced has
 //!   no repaint boundaries to pin; what those tests checked beside them is
 //!   ported): the dock's and a folded-out lane's heals, the clip and backing
 //!   deletes asking first, a lane's menu acting on the take as it is now, a
-//!   dock taller than the window, a resize counting every move, and a
-//!   reopen behind a landing save;
+//!   clip dragged on a folded-out take analyzed where it lands, a dock
+//!   taller than the window, a resize counting every move, and a reopen
+//!   behind a landing save (the dock's tab strip keeping its scroll is
+//!   `bottom_dock`'s);
 //! - `song_practice_placement_test.dart`'s screen cases: a drop laid out end
 //!   to end from the drop's playhead, a drop on a set backing said once its
 //!   takes landed, a clip picked from the take menu at the tap's playhead;
@@ -21,9 +20,33 @@
 //!   keeps its own drag when a lane above it goes;
 //! - `detail_arrange_journey_test.dart`'s transport, dock, interpretation,
 //!   New take and note cases on the page;
+//! - `fx_panel_test.dart`'s and `mixer_strip_test.dart`'s unmounted
+//!   mid-gesture cases, which those panels leave to the screen (a slider or
+//!   EQ band left mid-drag, a wheel Q edit inside its debounce, a mixer
+//!   fader left mid-drag: each still commits);
 //! - the drop handlers (a drop with no audio, a drop on the catch-up guard)
 //!   and the leave guards (a page left mid-save lingers, a drag left
 //!   mid-gesture is committed, a quit's request is served).
+//!
+//! Not ported, with why:
+//!
+//! - `playhead_repaint_test.dart`'s repaint and rebuild cases (a playhead,
+//!   fader, pan, recording or clock tick repaints only its own layer; every
+//!   playhead on its own layer; a view change or a save's re-read rebuilds
+//!   only what changed; the inspector keeps its FX panel through another
+//!   lane's edit): iced rebuilds the view and caches each canvas by its
+//!   inputs, which the painters' and widgets' own tests pin; the FX panel
+//!   keys its state by its target (`fx_panel`'s tests).
+//! - `kept_subtree_fresh_build_test.dart`'s 'kept subtrees equal a fresh
+//!   build' and 'callbacks of kept rows and strips act on the current
+//!   objects', and `kept_subtree_recording_test.dart`: nothing is kept
+//!   (`stable_subtree` is a no-op), so every view is a fresh build; the
+//!   callbacks' half is `track_row`'s, and the lane menu's is here.
+//! - The take flow's system-Back variants: the app has no system Back.
+//!   Its 'on the real stack' variants (the opener's push completing once)
+//!   need a recorder fake inside an app page, which pages build from the
+//!   app's services; the page-level cases pin the single leave, and the
+//!   app's tests the pop.
 //!
 //! The page runs over fakes (an in-memory repository, file and edit fakes, a
 //! fake engine and recorder, a gated analysis). Its work runs here, each job
@@ -37,7 +60,7 @@ use std::sync::{mpsc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::Instant;
 
-use iced::{window, Color, Event as IcedEvent, Point, Size};
+use iced::{window, Event as IcedEvent, Point, Size};
 use iced_test::selector::{Candidate, Target};
 use iced_test::Simulator;
 use indexmap::IndexMap;
@@ -54,6 +77,8 @@ use vocara_model::util::dart_date_time::DateTime;
 use vocara_services::audio_dsp::AnalysisParams;
 use vocara_services::audio_edit_service::{AudioEditError, AudioEdits, SplitPaths};
 use vocara_services::audio_file_service::{AudioFileError, AudioFiles};
+use vocara_services::engine::{EngineBindings, EngineError};
+use vocara_services::graph_audio_playback_service::{GraphAudioPlaybackService, StagingDecode};
 use vocara_services::mic_recording_controller::{
     DestinationError, MicEvent, MicRecorder, MicRecordingStart, MicRecordingStop, PendingStart,
     RecordingPathStrategy, StopFinalizeGate, StopFinalizeHold,
@@ -74,10 +99,12 @@ use crate::router::{Navigation, Route};
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::font;
 use crate::ui::core::widgets::confirm_dialog::{Dialog, DialogResult};
+use crate::ui::song_practice_detail::view_model::analysis_source::AnalysisSource;
 use crate::ui::song_practice_detail::view_model::mixer_controller::EngineHandle;
 use crate::ui::song_practice_detail::view_model::recording_controller::TakeAnalyzer;
 use crate::ui::song_practice_detail::view_model::song_practice_detail_view_model::DockTab;
 use crate::ui::song_practice_detail::widgets::live_ui::{self, LiveUi};
+use crate::ui::song_practice_detail::widgets::mixer_strip;
 use crate::ui::song_practice_detail::widgets::track_row::TRACK_ROW_HEIGHT;
 use crate::ui::DialogRequest;
 
@@ -297,7 +324,13 @@ impl AudioEdits for FakeEdits {
         Ok(path.to_string())
     }
 
-    fn punch_in(&self, _: &str, _: &str, _: &str, _: i64) -> Result<Option<String>, AudioEditError> {
+    fn punch_in(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: i64,
+    ) -> Result<Option<String>, AudioEditError> {
         Ok(None)
     }
 
@@ -335,6 +368,86 @@ impl SpectrogramAnalyses for NoSpectrograms {
         _: Option<&dyn Fn() -> bool>,
     ) -> std::io::Result<Option<TakeAnalysisBundle>> {
         Ok(None)
+    }
+}
+
+/// Analyses every file as a short voiced take: a small spectrogram and
+/// metrics, so the cache holds something it can let go.
+struct SmallAnalyses;
+
+fn small_metrics() -> Arc<VoiceMetrics> {
+    let frames = 8;
+    let flat = |v: f32| vec![v; frames];
+    Arc::new(VoiceMetrics {
+        frames,
+        hop: 512,
+        fft_size: 2048,
+        sample_rate: 44100,
+        ring: flat(0.0),
+        tilt: flat(0.0),
+        cpp: flat(0.0),
+        loudness: flat(-20.0),
+        f0: flat(220.0),
+        f1: flat(f32::NAN),
+        f2: flat(f32::NAN),
+        f3: flat(f32::NAN),
+        h1h2: flat(f32::NAN),
+        active: vec![1; frames],
+        ring_avg: 0.0,
+        tilt_avg: 0.0,
+        cpp_avg: 0.0,
+        peak_dbfs: f64::NAN,
+        clipped_fraction: 0.0,
+        snr_db: f64::NAN,
+    })
+}
+
+fn small_spectrogram() -> Arc<Spectrogram> {
+    let (frames, bins) = (8, 16);
+    Arc::new(Spectrogram {
+        frames,
+        bins,
+        max_hz: 5000.0,
+        sample_rate: 44100,
+        fft_size: 2048,
+        hop: 512,
+        db: vec![-30.0; frames * bins],
+        min_db: -60.0,
+        max_db: 0.0,
+    })
+}
+
+impl SpectrogramAnalyses for SmallAnalyses {
+    fn compute_from_file(
+        &self,
+        _: &str,
+        _: AnalysisParams,
+        _: Option<&dyn Fn() -> bool>,
+    ) -> std::io::Result<Option<Arc<Spectrogram>>> {
+        Ok(Some(small_spectrogram()))
+    }
+
+    fn compute_metrics_from_file(
+        &self,
+        _: &str,
+        _: AnalysisParams,
+        _: Option<&dyn Fn() -> bool>,
+    ) -> std::io::Result<Option<Arc<VoiceMetrics>>> {
+        Ok(Some(small_metrics()))
+    }
+
+    fn compute_both_from_file(
+        &self,
+        _: &str,
+        _: AnalysisParams,
+        _: Option<&dyn Fn() -> bool>,
+    ) -> std::io::Result<Option<TakeAnalysisBundle>> {
+        Ok(Some(TakeAnalysisBundle {
+            spectrogram: Some(small_spectrogram()),
+            metrics: Some(small_metrics()),
+            ltas: None,
+            profile: None,
+        }))
     }
 }
 
@@ -415,6 +528,188 @@ impl PlaybackEngine for FakeEngine {
     }
 
     fn dispose(&self) {}
+}
+
+/// The native engine as far as the page touches it around a take (the
+/// take-flow test's `_FakeGraphEngine`): the settings' attach and pushes,
+/// the transport, the mixer's syncs (every one commits, each track staged
+/// from the engine's cache) and a take's record counters. Anything else is
+/// the trait's default: a loud failure.
+#[derive(Default)]
+struct GraphBindings {
+    s: Mutex<GraphState>,
+}
+
+#[derive(Default)]
+struct GraphState {
+    buses: i32,
+    staging: usize,
+}
+
+impl GraphBindings {
+    /// A page's engine over these bindings.
+    fn service() -> Arc<GraphAudioPlaybackService> {
+        let decode: StagingDecode =
+            Arc::new(|path: &str, _: u32| panic!("{path} is staged from the cache, never decoded"));
+        Arc::new(GraphAudioPlaybackService::with_bindings(
+            Arc::new(GraphBindings::default()) as Arc<dyn EngineBindings>,
+            Some(decode),
+        ))
+    }
+}
+
+impl EngineBindings for GraphBindings {
+    fn sample_rate(&self) -> f64 {
+        48_000.0
+    }
+
+    fn destroy(&self) {}
+
+    fn actual_output_device(&self) -> String {
+        String::new()
+    }
+
+    fn set_monitor_gain(&self, _gain: f32) -> Result<(), EngineError> {
+        Ok(())
+    }
+
+    fn set_input_gain(&self, _gain: f32) -> Result<(), EngineError> {
+        Ok(())
+    }
+
+    fn set_echo_free(&self, _uid: &str) -> Result<(), EngineError> {
+        Ok(())
+    }
+
+    fn set_input_channel(&self, _mode: u32) -> Result<(), EngineError> {
+        Ok(())
+    }
+
+    fn set_monitor_reverb(&self, _room: f32, _damping: f32, _wet: f32) -> Result<(), EngineError> {
+        Ok(())
+    }
+
+    fn input_stream_state(&self) -> u64 {
+        0
+    }
+
+    fn record_latency_frames(&self) -> u32 {
+        0
+    }
+
+    fn record_written_frames(&self) -> u64 {
+        0
+    }
+
+    fn record_dropped_frames(&self) -> u64 {
+        0
+    }
+
+    fn play(&self) -> Result<(), EngineError> {
+        Ok(())
+    }
+
+    fn pause(&self) -> Result<(), EngineError> {
+        Ok(())
+    }
+
+    fn seek(&self, _frame: i64) -> Result<(), EngineError> {
+        Ok(())
+    }
+
+    fn set_loop(&self, _enabled: bool, _start: i64, _end: i64) -> Result<(), EngineError> {
+        Ok(())
+    }
+
+    fn frame_pos(&self) -> i64 {
+        0
+    }
+
+    fn buses_begin(&self) -> Result<(), EngineError> {
+        guard(&self.s).buses = 0;
+        Ok(())
+    }
+
+    fn buses_add(&self, _gain: f32, _muted: bool, _output: i32) -> Result<i32, EngineError> {
+        let mut s = guard(&self.s);
+        s.buses += 1;
+        Ok(s.buses - 1)
+    }
+
+    fn bus_chain(&self, _bus: i32, _tags: &[u8]) -> Result<(), EngineError> {
+        Ok(())
+    }
+
+    fn tracks_begin(&self) -> Result<(), EngineError> {
+        guard(&self.s).staging = 0;
+        Ok(())
+    }
+
+    /// Always a cache hit.
+    fn tracks_add(
+        &self,
+        _path: &str,
+        _start_ms: i64,
+        _gain: f32,
+        _muted: bool,
+        _is_vocal: bool,
+        _bus: i32,
+    ) -> Result<i32, EngineError> {
+        let mut s = guard(&self.s);
+        s.staging += 1;
+        Ok(s.staging as i32 - 1)
+    }
+
+    fn tracks_commit_staged(&self) -> Result<(), EngineError> {
+        Ok(())
+    }
+
+    fn tracks_publish(&self) -> Result<(), EngineError> {
+        Ok(())
+    }
+
+    fn commit_degraded_mask(&self) -> u64 {
+        0
+    }
+
+    fn set_track_volume(&self, _index: i32, _gain: f32, _muted: bool) -> Result<(), EngineError> {
+        Ok(())
+    }
+
+    fn set_pan(&self, _index: i32, _pan: f32) -> Result<(), EngineError> {
+        Ok(())
+    }
+
+    fn set_master(&self, _gain: f32) -> Result<(), EngineError> {
+        Ok(())
+    }
+
+    fn set_reverb(
+        &self,
+        _room: f32,
+        _damping: f32,
+        _wet: f32,
+        _dry: f32,
+        _width: f32,
+    ) -> Result<(), EngineError> {
+        Ok(())
+    }
+
+    fn set_bus_volume(&self, _bus: i32, _gain: f32, _muted: bool) -> Result<(), EngineError> {
+        Ok(())
+    }
+
+    fn set_bus_pan(&self, _bus: i32, _pan: f32) -> Result<(), EngineError> {
+        Ok(())
+    }
+
+    fn track_gr(&self, _track: i32) -> f32 {
+        0.0
+    }
+
+    fn bus_gr(&self, _bus: i32) -> f32 {
+        0.0
+    }
 }
 
 /// The take-flow test's recorder (`_FakeMic`, and with a `ready` gate
@@ -575,7 +870,10 @@ impl GatedAnalyze {
     }
 
     fn release_last(&self) {
-        guard(&self.gates).last().expect("an analysis parked").open();
+        guard(&self.gates)
+            .last()
+            .expect("an analysis parked")
+            .open();
     }
 }
 
@@ -621,6 +919,11 @@ struct Setup {
     mic: Option<Arc<dyn MicRecorder>>,
     finalizer: Option<Arc<RecordingFinalizer>>,
     techniques: Vec<Technique>,
+    /// The native engine (over [`GraphBindings`]) instead of the transport
+    /// fake: what recording needs.
+    graph: bool,
+    /// Analyses with something in them (else nothing analyses).
+    analyses: bool,
     /// Whether the first load runs before the page is handed over.
     settle: bool,
 }
@@ -634,6 +937,8 @@ impl Default for Setup {
             mic: None,
             finalizer: None,
             techniques: Vec::new(),
+            graph: false,
+            analyses: false,
             settle: true,
         }
     }
@@ -714,14 +1019,20 @@ impl Harness {
             repository: Arc::clone(&repo) as Arc<dyn SongPracticeRepository>,
             technique_repository: Arc::new(MemTechniques(Mutex::new(setup.techniques))),
             audio_files: Arc::clone(&files) as Arc<dyn AudioFiles>,
-            spectrograms: Arc::new(NoSpectrograms),
+            spectrograms: if setup.analyses {
+                Arc::new(SmallAnalyses) as Arc<dyn SpectrogramAnalyses>
+            } else {
+                Arc::new(NoSpectrograms)
+            },
             separation: Arc::new(FakeSourceSeparationService { available: false }),
             app_settings: Arc::clone(&services.app_settings),
         };
         let options = Options {
-            engine: Some(EngineHandle::Other(
-                Arc::clone(&engine) as Arc<dyn PlaybackEngine>
-            )),
+            engine: Some(if setup.graph {
+                EngineHandle::Graph(GraphBindings::service())
+            } else {
+                EngineHandle::Other(Arc::clone(&engine) as Arc<dyn PlaybackEngine>)
+            }),
             edits: Some(Arc::new(FakeEdits)),
             finalizer: Some(Arc::clone(&finalizer)),
             probe_duration: Some(Arc::new(|_: &str| Ok(None))),
@@ -974,94 +1285,6 @@ impl Drop for Harness {
 
 // ------------------------------------------------------- the pure parts
 
-// timeline_scrollbar_test: a 10-minute song in a 600 px groove viewed
-// through a 1-second window: the view's true share is 1 px, so the thumb
-// sits on its 28 px floor.
-const EXT: i64 = 600_000;
-const SPAN: i64 = 1000;
-const GROOVE: f64 = 600.0;
-
-#[test]
-fn at_the_last_page_the_thumb_ends_at_the_groove_end_not_past_it() {
-    let t = timeline_scroll_thumb(EXT - SPAN, SPAN, EXT, GROOVE);
-    assert_eq!(t.width, 28.0);
-    assert!((t.left + t.width - GROOVE).abs() < 1e-9);
-}
-
-#[test]
-fn at_the_first_page_the_thumb_starts_at_the_groove_start() {
-    assert_eq!(timeline_scroll_thumb(0, SPAN, EXT, GROOVE).left, 0.0);
-}
-
-#[test]
-fn dragging_the_thumb_across_its_whole_travel_pans_the_whole_song() {
-    let t = timeline_scroll_thumb(0, SPAN, EXT, GROOVE);
-    assert!((t.ms_per_px * (GROOVE - t.width) - (EXT - SPAN) as f64).abs() < 1e-6);
-}
-
-#[test]
-fn at_fit_all_the_thumb_fills_the_groove_and_does_not_drag() {
-    let t = timeline_scroll_thumb(0, EXT, EXT, GROOVE);
-    assert_eq!(t, ScrollThumb {
-        left: 0.0,
-        width: GROOVE,
-        ms_per_px: 0.0
-    });
-}
-
-#[test]
-fn a_song_shorter_than_the_minimum_view_span_does_not_divide_by_the_negative_range() {
-    // The view never narrows below 1 s, so a 400 ms song has span > extent.
-    let t = timeline_scroll_thumb(0, 1000, 400, GROOVE);
-    assert_eq!(t, ScrollThumb {
-        left: 0.0,
-        width: GROOVE,
-        ms_per_px: 0.0
-    });
-}
-
-/// timeline_envelope_test's `_spikeX`: the x of the drawn spike (with a
-/// single full-amplitude peak among zeros, the outline's highest point).
-fn spike_x(p: &WaveformPainter, size: Size) -> f64 {
-    let shape = p.shape(size).expect("something painted");
-    let (x, _) = shape
-        .outline
-        .iter()
-        .copied()
-        .min_by(|a, b| a.1.total_cmp(&b.1))
-        .expect("an outline");
-    x
-}
-
-fn spiked(at: usize) -> Arc<[f64]> {
-    (0..1000).map(|i| if i == at { 1.0 } else { 0.0 }).collect()
-}
-
-// A 20 s timeline in 1000 buckets (20 ms each), loud only at 10 s.
-#[test]
-fn the_fit_all_view_spreads_the_envelope_over_the_lane() {
-    let p = timeline_envelope_painter(spiked(500), 20000, 0, 20000, Color::WHITE);
-    assert!((spike_x(&p, Size::new(600.0, 40.0)) - 300.0).abs() < 3.0);
-}
-
-// The master and bus lanes draw one envelope bucketed over the whole
-// timeline, sliced to the view. While a take runs on past the timeline's end
-// the view reaches past it too: an envelope still spread over the whole lane
-// put every peak at the wrong time.
-#[test]
-fn a_view_reaching_past_the_timeline_end_keeps_peaks_on_time() {
-    let p = timeline_envelope_painter(spiked(500), 20000, 0, 30000, Color::WHITE);
-    let expected = 10000.0 / 30000.0 * 600.0;
-    assert!((spike_x(&p, Size::new(600.0, 40.0)) - expected).abs() < 3.0);
-}
-
-#[test]
-fn a_zoomed_view_paged_past_the_end_keeps_peaks_on_time() {
-    let p = timeline_envelope_painter(spiked(850), 20000, 15000, 10000, Color::WHITE);
-    // Bucket 850 starts at 17 000 ms: 2 s into the 10 s window.
-    assert!((spike_x(&p, Size::new(600.0, 40.0)) - 2000.0 / 10000.0 * 600.0).abs() < 3.0);
-}
-
 #[test]
 fn only_what_the_engine_decodes_counts_as_audio() {
     for ok in ["a.wav", "/x/B.MP3", "c.m4a", "d.aiff", "e.caf", "f.oga"] {
@@ -1077,8 +1300,14 @@ fn only_what_the_engine_decodes_counts_as_audio() {
 fn a_horizontal_swipe_or_shift_wheel_pans_the_view() {
     // iced's positive x scrolls the content right: Flutter's delta is its
     // negation.
-    assert_eq!(view::wheel_pan_ms(-60.0, 0.0, false, 600.0, 60000), Some(6000));
-    assert_eq!(view::wheel_pan_ms(0.0, 30.0, true, 600.0, 60000), Some(-3000));
+    assert_eq!(
+        view::wheel_pan_ms(-60.0, 0.0, false, 600.0, 60000),
+        Some(6000)
+    );
+    assert_eq!(
+        view::wheel_pan_ms(0.0, 30.0, true, 600.0, 60000),
+        Some(-3000)
+    );
     // Plain vertical scroll falls through to the list.
     assert_eq!(view::wheel_pan_ms(0.0, 30.0, false, 600.0, 60000), None);
     assert_eq!(view::wheel_pan_ms(-60.0, 0.0, false, 0.0, 60000), None);
@@ -1096,7 +1325,7 @@ fn a_practice_that_cannot_be_loaded_says_so_and_has_a_way_back() {
     let mut h = Harness::open(Setup {
         repo: Some(repo),
         settle: false,
-    ..Setup::default()
+        ..Setup::default()
     });
     // Loading: a spinner under the bar with the back chevron.
     assert!(h.vm().load_running());
@@ -1125,6 +1354,17 @@ fn narrow(name: &str) -> Harness {
 /// The centre pane's right edge in a narrow page.
 const CENTRE_RIGHT: f32 = 960.0 - 300.0;
 
+/// The interpretation dropdown's chevron: the one on the VOCAL TAKES row.
+fn dropdown_chevron(h: &Harness) -> iced::Rectangle {
+    let row = h.find("VOCAL TAKES").expect("the takes header").bounds();
+    let chevron = glyph(Icon::ChevronDown);
+    (0..)
+        .map_while(|n| h.ui().find(nth(&chevron, n)).ok())
+        .map(|t| t.bounds())
+        .find(|b| (b.center_y() - row.center_y()).abs() < 12.0)
+        .expect("the dropdown's chevron")
+}
+
 // takes_header_test: at the smallest window a user-named interpretation of a
 // little over a dozen characters overflowed the row and clipped the
 // dropdown's chevron off its right edge.
@@ -1132,10 +1372,7 @@ const CENTRE_RIGHT: f32 = 960.0 - 300.0;
 fn a_long_interpretation_name_gives_way_instead_of_overflowing() {
     let h = narrow("Powerful belt, second verse");
     assert!(h.shows("Powerful belt, second verse"));
-    let chevron = h
-        .find(&glyph(Icon::ChevronDown))
-        .expect("the dropdown's chevron")
-        .bounds();
+    let chevron = dropdown_chevron(&h);
     assert!(
         chevron.x + chevron.width <= CENTRE_RIGHT - 14.0 + 0.5,
         "the chevron stays inside the row: {chevron:?}"
@@ -1145,11 +1382,11 @@ fn a_long_interpretation_name_gives_way_instead_of_overflowing() {
 #[test]
 fn the_dropdown_stays_flush_right() {
     let h = narrow("Tender");
-    let chevron = h
-        .find(&glyph(Icon::ChevronDown))
-        .expect("the dropdown's chevron")
-        .bounds();
-    assert!(CENTRE_RIGHT - (chevron.x + chevron.width) < 40.0, "{chevron:?}");
+    let chevron = dropdown_chevron(&h);
+    assert!(
+        CENTRE_RIGHT - (chevron.x + chevron.width) < 40.0,
+        "{chevron:?}"
+    );
 }
 
 // -------------------------------------------------------- the transport
@@ -1199,7 +1436,9 @@ fn the_bottom_dock_opens_and_closes() {
 #[test]
 fn a_dock_taller_than_the_window_leaves_the_timeline_whole() {
     let mut h = Harness::open(Setup::default());
-    h.send(Message::Dock(bottom_dock::Message::ShowDockTab(DockTab::Mixer)));
+    h.send(Message::Dock(bottom_dock::Message::ShowDockTab(
+        DockTab::Mixer,
+    )));
     // As tall as a drag lets it get.
     for _ in 0..20 {
         h.send(Message::Dock(bottom_dock::Message::Resize {
@@ -1208,12 +1447,22 @@ fn a_dock_taller_than_the_window_leaves_the_timeline_whole() {
         }));
     }
     h.size = Size::new(1440.0, 560.0);
-    let ruler = h.find("0:00").expect("the ruler's first label").bounds();
-    let master = h.find("MASTER").expect("the master strip").bounds();
-    // The ruler stays at the top, and the dock begins no higher than the
-    // timeline's minimum below it.
-    assert!(master.y >= ruler.y + MIN_TIMELINE_HEIGHT - 40.0, "{ruler:?} {master:?}");
-    assert!(master.y + master.height <= h.size.height, "the dock's bottom shows");
+    let transport = h
+        .find(&glyph(Icon::ChevronLeft))
+        .expect("the transport's back chevron")
+        .bounds();
+    let tabs = h.find("MIXER").expect("the dock's tab strip").bounds();
+    // The timeline keeps its least height between the transport and the
+    // dock's tab strip (under the grabber), and the dock's bottom shows.
+    let transport_bottom = transport.y + transport.height;
+    assert!(
+        tabs.y - transport_bottom >= MIN_TIMELINE_HEIGHT,
+        "{transport:?} {tabs:?}"
+    );
+    assert!(
+        tabs.y + bottom_dock::TAB_BAR_HEIGHT <= h.size.height,
+        "the dock's bottom shows: {tabs:?}"
+    );
 }
 
 // playhead_repaint_test: 'a dock resize counts every move, even several in
@@ -1222,7 +1471,9 @@ fn a_dock_taller_than_the_window_leaves_the_timeline_whole() {
 #[test]
 fn a_dock_resize_counts_every_move_even_several_in_one_frame() {
     let mut h = Harness::open(Setup::default());
-    h.send(Message::Dock(bottom_dock::Message::ShowDockTab(DockTab::Mixer)));
+    h.send(Message::Dock(bottom_dock::Message::ShowDockTab(
+        DockTab::Mixer,
+    )));
     let before = h.vm().analysis().dock_height();
     // Two moves of one batch, built from the same view.
     for _ in 0..2 {
@@ -1232,9 +1483,13 @@ fn a_dock_resize_counts_every_move_even_several_in_one_frame() {
         }));
     }
     assert_eq!(h.vm().analysis().dock_height(), before + 20.0);
-    // From a capped dock, a drag down moves it at once.
-    h.send(Message::Dock(bottom_dock::Message::Resize { dy: 5.0, cap: 100.0 }));
-    assert_eq!(h.vm().analysis().dock_height(), 100.0_f64.max(before.min(100.0)) - 5.0);
+    // From a capped dock, a drag down moves it at once: from the height on
+    // screen, not the stored one.
+    h.send(Message::Dock(bottom_dock::Message::Resize {
+        dy: 5.0,
+        cap: 250.0,
+    }));
+    assert_eq!(h.vm().analysis().dock_height(), 245.0);
 }
 
 #[test]
@@ -1253,7 +1508,10 @@ fn the_dock_content_keeps_to_the_room_the_workspace_has() {
 // let go' — the dock's post-frame heal.
 #[test]
 fn the_dock_asks_again_for_analysis_the_cache_let_go() {
-    let mut h = Harness::open(Setup::default());
+    let mut h = Harness::open(Setup {
+        analyses: true,
+        ..Setup::default()
+    });
     h.send(Message::Row {
         track_id: "t1".into(),
         message: track_row::Message::Select,
@@ -1262,8 +1520,7 @@ fn the_dock_asks_again_for_analysis_the_cache_let_go() {
         DockTab::Spectrogram,
     )));
     h.settle();
-    // NoSpectrograms settles every compute as unavailable; dropping the
-    // settled half makes it lack again.
+    // The cache's budget drops the spectrogram.
     let _ = h
         .screen
         .vm
@@ -1287,7 +1544,10 @@ fn the_dock_asks_again_for_analysis_the_cache_let_go() {
 // let go' — after the frame that shows the lanes lacking data.
 #[test]
 fn a_folded_out_lane_asks_again_for_metrics_the_cache_let_go() {
-    let mut h = Harness::open(Setup::default());
+    let mut h = Harness::open(Setup {
+        analyses: true,
+        ..Setup::default()
+    });
     h.send(Message::Row {
         track_id: "t1".into(),
         message: track_row::Message::ToggleExpand,
@@ -1297,7 +1557,9 @@ fn a_folded_out_lane_asks_again_for_metrics_the_cache_let_go() {
         .screen
         .vm
         .analysis_do(|a, _| a.debug_drop_half("/pool/t1.wav", true));
-    assert!(h.vm().with_analysis(|a, host| a.lane_lacks_data("t1", host)));
+    assert!(h
+        .vm()
+        .with_analysis(|a, host| a.lane_lacks_data("t1", host)));
     let messages = {
         let mut ui = LiveUi::new(h.size);
         ui.run(h.screen.view(), [live_ui::redraw()])
@@ -1314,7 +1576,89 @@ fn a_folded_out_lane_asks_again_for_metrics_the_cache_let_go() {
     );
     h.feed(messages);
     h.settle();
-    assert!(!h.vm().with_analysis(|a, host| a.lane_lacks_data("t1", host)));
+    assert!(!h
+        .vm()
+        .with_analysis(|a, host| a.lane_lacks_data("t1", host)));
+}
+
+// playhead_repaint_test: 'a clip dragged on a folded-out multi-clip take is
+// analyzed where it lands, not at every position it passes' — each tick
+// re-keys the lane's merge, so a lane asking for what it lacks merged (and
+// cached) every in-between position; and read as settled meanwhile, the dock
+// and the lanes said the take could not be analyzed for the whole drag.
+#[test]
+fn a_clip_dragged_on_a_folded_out_take_is_analyzed_where_it_lands() {
+    let mut t0 = take("t0", "Take 1");
+    t0.clips = vec![
+        AudioClip {
+            id: "c0".into(),
+            audio_file_path: "/pool/t0.wav".into(),
+            duration_ms: 10000,
+            start_ms: 0,
+            waveform_peaks: Vec::new(),
+        },
+        AudioClip {
+            id: "c1".into(),
+            audio_file_path: "/pool/t0b.wav".into(),
+            duration_ms: 10000,
+            start_ms: 20000,
+            waveform_peaks: Vec::new(),
+        },
+    ];
+    let mut h = Harness::open(Setup {
+        practice: practice(vec![t0]),
+        analyses: true,
+        ..Setup::default()
+    });
+    let row = |message| Message::Row {
+        track_id: "t0".into(),
+        message,
+    };
+    h.send(row(track_row::Message::ToggleExpand)); // the pitch lane
+                                                   // Selected with no clip: the inspector and the dock show the lane's
+                                                   // merge too, and ask for it on their own.
+    h.send(row(track_row::Message::Select));
+    h.send(Message::Dock(bottom_dock::Message::ShowDockTab(
+        DockTab::Spectrogram,
+    )));
+    h.settle();
+    assert!(h
+        .vm()
+        .with_analysis(|a, host| a.metrics_for("t0", host))
+        .is_some());
+
+    for at in (20100..=20500).step_by(100) {
+        h.send(row(track_row::Message::ClipMoveLive {
+            clip_id: "c1".into(),
+            start_ms: at,
+        }));
+        h.settle();
+    }
+    let vm = h.vm();
+    assert!(
+        vm.with_analysis(|a, host| a.metrics_for("t0", host))
+            .is_none(),
+        "nothing merged"
+    );
+    // The lanes, the dock and the inspector wait for the merge where it
+    // lands rather than say the take cannot be analyzed.
+    assert!(vm.with_analysis(|a, host| a.metrics_loading_for("t0", host)));
+    assert!(vm.with_analysis(|a, host| a.spectrogram_loading_for("t0", host)));
+    assert!(vm.spectrogram_loading() && vm.metrics_loading());
+    assert!(!h.shows(analysis_lanes::NO_LOUDNESS_HINT));
+    assert!(
+        !h.shows(crate::ui::song_practice_detail::widgets::voiceprint_view::NO_SPECTROGRAM_HINT)
+    );
+
+    h.send(row(track_row::Message::MoveCommit));
+    h.settle();
+    let vm = h.vm();
+    assert!(
+        vm.with_analysis(|a, host| a.metrics_for("t0", host))
+            .is_some(),
+        "where it landed"
+    );
+    assert!(!vm.spectrogram_loading());
 }
 
 // detail_arrange_journey: 'expanding a take flips its disclosure chevron and
@@ -1410,7 +1754,10 @@ fn a_clip_picked_from_the_take_menu_lands_where_the_playhead_was_at_the_tap() {
         track_id: "t1".into(),
         message: track_row::Message::ContextMenu,
     });
-    assert!(h.shows("Add audio clip at playhead…"), "the lane menu is open");
+    assert!(
+        h.shows("Add audio clip at playhead…"),
+        "the lane menu is open"
+    );
     h.click("Add audio clip at playhead…");
     let (zone, at_ms) = h.picks.pop().expect("the open panel");
     assert_eq!(zone, DropZone::Take("t1".into()));
@@ -1465,9 +1812,9 @@ fn adding_a_note_via_the_take_header_saves_it_on_the_take() {
     let editor = h.screen.note_editor().expect("the note editor opened");
     assert_eq!(editor.title(), "Note at 00:00");
     h.send(Message::NoteEditor(note_editor::Message::Edit(
-        iced::widget::text_editor::Action::Edit(iced::widget::text_editor::Edit::Paste(
-            Arc::new("breath runs out here".into()),
-        )),
+        iced::widget::text_editor::Action::Edit(iced::widget::text_editor::Edit::Paste(Arc::new(
+            "breath runs out here".into(),
+        ))),
     )));
     h.click("Add");
     assert!(h.screen.note_editor().is_none(), "confirming closes it");
@@ -1556,7 +1903,11 @@ fn deleting_a_clip_asks_first_as_deleting_a_take_does() {
         panic!("a confirmation");
     };
     assert_eq!(confirm.title, "Delete this clip?");
-    assert_eq!(h.track("t1").clips.len(), 2, "nothing deleted before the answer");
+    assert_eq!(
+        h.track("t1").clips.len(),
+        2,
+        "nothing deleted before the answer"
+    );
     h.answer(DialogResult::Confirmed(false));
     assert_eq!(h.track("t1").clips.len(), 2, "cancelled");
 
@@ -1638,7 +1989,12 @@ fn the_interpretation_switcher_opens_its_menu_and_creates_one() {
     assert_eq!(prompt.initial.as_deref(), Some("Interpretation 2"));
     h.answer(DialogResult::Text(Some("Tender".into())));
     h.settle();
-    let names: Vec<String> = h.practice().versions.iter().map(|v| v.name.clone()).collect();
+    let names: Vec<String> = h
+        .practice()
+        .versions
+        .iter()
+        .map(|v| v.name.clone())
+        .collect();
     assert_eq!(names, ["Interpretation 1", "Tender"]);
     assert!(h.shows("Tender"), "the chip shows the new interpretation");
 }
@@ -1757,9 +2113,9 @@ fn a_fader_held_on_a_lane_that_goes_commits_its_level() {
         message: track_row::Message::Volume(0.4),
     });
     h.send(Message::OpenInterpretations);
-    h.send(Message::InterpretationMenu(InterpretationAction::SetActive(
-        "v2".into(),
-    )));
+    h.send(Message::InterpretationMenu(
+        InterpretationAction::SetActive("v2".into()),
+    ));
     h.settle();
     let t1 = h
         .repo
@@ -1784,6 +2140,7 @@ fn take_flow(ready: Option<&Arc<Gate>>, analyze: TakeAnalyzer) -> (Harness, Arc<
         mic: Some(Arc::clone(&mic) as Arc<dyn MicRecorder>),
         finalizer: Some(finalizer),
         analyze,
+        graph: true,
         ..Setup::default()
     });
     (h, mic)
@@ -1802,7 +2159,9 @@ fn take_ids(p: &SongPractice) -> Vec<String> {
 fn back_while_rec_is_still_arming_cancels_the_take_before_the_page_leaves() {
     let ready = Gate::new();
     let (mut h, _mic) = take_flow(Some(&ready), ok_analyze());
-    h.send(Message::Transport(detail_transport_bar::Message::StartRecording));
+    h.send(Message::Transport(
+        detail_transport_bar::Message::StartRecording,
+    ));
     h.pump_until(|h| h.repo.stored().vocal_tracks.len() == 2);
     assert!(h.vm().recording().is_starting_take(), "REC made a take");
 
@@ -1822,7 +2181,9 @@ fn back_while_rec_is_still_arming_cancels_the_take_before_the_page_leaves() {
 fn two_back_taps_in_recs_arm_window_leave_the_page_once() {
     let ready = Gate::new();
     let (mut h, _mic) = take_flow(Some(&ready), ok_analyze());
-    h.send(Message::Transport(detail_transport_bar::Message::StartRecording));
+    h.send(Message::Transport(
+        detail_transport_bar::Message::StartRecording,
+    ));
     h.pump_until(|h| h.repo.stored().vocal_tracks.len() == 2);
     h.click(&glyph(Icon::ChevronLeft));
     // The page is still there (nothing visibly happened): tap Back again.
@@ -1839,7 +2200,9 @@ fn a_second_back_while_the_take_lands_leaves_the_page_once() {
     let analyze = GatedAnalyze::new();
     analyze.gated.store(false, Ordering::SeqCst);
     let (mut h, _mic) = take_flow(None, analyze.analyzer());
-    h.send(Message::Transport(detail_transport_bar::Message::StartRecording));
+    h.send(Message::Transport(
+        detail_transport_bar::Message::StartRecording,
+    ));
     h.pump_until(|h| h.vm().is_recording());
     // The finalize's waveform analysis takes a while (a long take).
     analyze.gated.store(true, Ordering::SeqCst);
@@ -1859,7 +2222,9 @@ fn a_second_back_while_the_take_lands_leaves_the_page_once() {
 fn a_quit_while_recording_stops_the_take_and_waits_for_it_to_land() {
     let (mut h, _mic) = take_flow(None, ok_analyze());
     let wakes = h.screen.quit_feed.subscribe();
-    h.send(Message::Transport(detail_transport_bar::Message::StartRecording));
+    h.send(Message::Transport(
+        detail_transport_bar::Message::StartRecording,
+    ));
     h.pump_until(|h| h.vm().is_recording());
     let finalizer = Arc::clone(&h.finalizer);
     let quit = thread::spawn(move || finalizer.finalize_all());
@@ -1875,9 +2240,136 @@ fn a_quit_while_recording_stops_the_take_and_waits_for_it_to_land() {
     assert_eq!(h.repo.stored().vocal_tracks.len(), 2, "the take was saved");
 }
 
+// ------------------------- controls that leave the screen mid-gesture
+
+/// Two takes, `t1` selected in the inspector with `fx` on its chain.
+fn inspecting(fx: TrackFx) -> Harness {
+    let mut t1 = take("t1", "Take 1");
+    t1.fx = Some(fx);
+    let mut h = Harness::open(Setup {
+        practice: practice(vec![t1, take("t2", "Take 2")]),
+        ..Setup::default()
+    });
+    h.send(Message::Row {
+        track_id: "t1".into(),
+        message: track_row::Message::Select,
+    });
+    h.settle();
+    h.repo.s().saves = 0;
+    h
+}
+
+/// A live FX edit on `t1`, as a slider, an EQ band or a wheel's Q makes it
+/// (the panel commits on the release, or 400 ms after the wheel).
+fn live_fx_edit(h: &mut Harness, fx: &TrackFx) -> TrackFx {
+    let mut edited = fx.clone();
+    edited.send_db = -12.0;
+    h.send(Message::Fx(fx_panel::Message::SetTrackFxLive {
+        id: "t1".into(),
+        fx: edited.clone(),
+    }));
+    assert_eq!(h.repo.s().saves, 0, "a live edit writes nothing");
+    edited
+}
+
+// fx_panel_test: 'a slider unmounted mid-pan still commits'. Unmounted
+// mid-gesture (the selection changed), the slider's release never comes:
+// the value already live in the model was never written.
+#[test]
+fn an_fx_slider_left_mid_drag_still_commits() {
+    let fx = TrackFx {
+        comp_on: true,
+        ..TrackFx::flat()
+    };
+    let mut h = inspecting(fx.clone());
+    let edited = live_fx_edit(&mut h, &fx);
+    // The selection moves on: the inspector shows another take.
+    h.send(Message::Row {
+        track_id: "t2".into(),
+        message: track_row::Message::Select,
+    });
+    h.settle();
+    assert_eq!(h.repo.s().saves, 1);
+    let stored = h.repo.stored();
+    let t1 = stored
+        .vocal_tracks
+        .iter()
+        .find(|t| t.id == "t1")
+        .expect("t1");
+    assert_eq!(t1.fx.as_ref(), Some(&edited));
+}
+
+// fx_panel_test: 'an EQ band unmounted mid-drag still commits' (the
+// inspector collapsed under the drag).
+#[test]
+fn an_eq_band_left_mid_drag_still_commits() {
+    let fx = TrackFx {
+        eq_on: true,
+        ..TrackFx::flat()
+    };
+    let mut h = inspecting(fx.clone());
+    let edited = live_fx_edit(&mut h, &fx);
+    h.send(Message::Inspector(
+        left_panel::Message::ToggleInspectorPanel,
+    ));
+    h.settle();
+    assert_eq!(h.repo.s().saves, 1);
+    assert_eq!(h.repo.stored().vocal_tracks[0].fx.as_ref(), Some(&edited));
+    // Committed once: nothing is owed any more.
+    h.send(Message::Inspector(
+        left_panel::Message::ToggleInspectorPanel,
+    ));
+    h.settle();
+    assert_eq!(h.repo.s().saves, 1);
+}
+
+// fx_panel_test: 'a wheel Q edit still commits when the EQ goes away inside
+// the debounce' — leaving within 400 ms of the last wheel tick kept the Q
+// live in memory and never wrote it.
+#[test]
+fn a_wheel_q_edit_still_commits_when_the_page_goes_inside_the_debounce() {
+    let fx = TrackFx {
+        eq_on: true,
+        ..TrackFx::flat()
+    };
+    let mut h = inspecting(fx.clone());
+    let edited = live_fx_edit(&mut h, &fx);
+    h.screen.dispose(&h.services);
+    for effect in std::mem::take(&mut h.screen.teardown) {
+        h.run(effect);
+    }
+    h.settle();
+    assert_eq!(h.repo.s().saves, 1, "flushed, not dropped");
+    assert_eq!(h.repo.stored().vocal_tracks[0].fx.as_ref(), Some(&edited));
+}
+
+// mixer_strip_test: 'a strip fader scrolled away mid-drag still saves its
+// level' — iced's desk is not lazy, so a strip leaves only with the dock or
+// its tab: its level is saved then.
+#[test]
+fn a_mixer_fader_left_mid_drag_still_saves_its_level() {
+    let mut h = Harness::open(Setup::default());
+    h.send(Message::Dock(bottom_dock::Message::ShowDockTab(
+        DockTab::Mixer,
+    )));
+    h.settle();
+    h.repo.s().saves = 0;
+    h.send(Message::Dock(bottom_dock::Message::Mixer(
+        mixer_strip::Message::SetTrackVolumeLive {
+            id: "t1".into(),
+            volume: 0.3,
+        },
+    )));
+    assert_eq!(h.repo.s().saves, 0);
+    h.send(Message::Dock(bottom_dock::Message::ToggleDock));
+    h.settle();
+    assert_eq!(h.repo.s().saves, 1);
+    assert_eq!(h.repo.stored().vocal_tracks[0].volume, 0.3);
+}
+
 // ---------------------------------------- a fader's drag as lanes change
 
-/// The page with buses `ids` (their names `BUS <id>`).
+/// The page with buses `ids` (their names `Bus <id>`).
 fn with_buses(ids: &[&str]) -> Harness {
     let mut p = practice(vec![take("t1", "Take 1")]);
     p.fx_buses = ids
@@ -1904,7 +2396,7 @@ fn fader_at(h: &Harness, name: &str) -> Point {
 fn a_bus_fader_keeps_its_drag_when_a_bus_above_it_is_deleted() {
     let mut h = with_buses(&["a", "b"]);
     let mut ui = LiveUi::new(h.size);
-    let at = fader_at(&h, "BUS B");
+    let at = fader_at(&h, "Bus b");
     let mut messages = ui.run(
         h.screen.view(),
         [
