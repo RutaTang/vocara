@@ -9,9 +9,11 @@
 //! screens: every page under the window drag bar, a studio dialog over the
 //! whole window when a screen asks for one.
 //!
-//! The window is closed through the quit guard: a close request kills the
-//! separation sidecars, finalizes the recordings ([`quit::QuitHooks`]), then
-//! exits — once, however many close requests arrive meanwhile.
+//! The window is closed through the quit guard: a close request, or a quit
+//! macOS sends through `terminate:` (Cmd+Q, the app-menu Quit, a Dock quit,
+//! logout; [`vocara_services::quit_request`]), kills the separation
+//! sidecars, finalizes the recordings ([`quit::QuitHooks`]), then exits —
+//! once, however many requests arrive meanwhile.
 
 pub mod library;
 mod page;
@@ -25,6 +27,7 @@ use iced::futures::SinkExt;
 use iced::widget::{column, container, stack, Space};
 use iced::{window, Element, Length, Size, Subscription, Task, Theme};
 use vocara_model::diagnostics::DiagnosticsLog;
+use vocara_services::quit_request::QuitRequests;
 
 use self::library::{LibraryOpen, OpenLibrary};
 use self::page::{erase, with_screen, PageUpdate};
@@ -54,6 +57,16 @@ pub const SCREENSHOT_VAR: &str = "VOCARA_SCREENSHOT";
 
 /// How long after the first frame the screenshot is taken.
 const SCREENSHOT_DELAY: Duration = Duration::from_secs(4);
+
+/// `DiagnosticsLog.attachGlobalHooks()`, the first thing `main` does: binds
+/// the diagnostics log to the application support directory (the library
+/// folder, where the export and the release's launch check read it), so
+/// every entry from here on is appended to the rotating on-disk log, and
+/// logs every uncaught panic before handing it to the default hook. Without
+/// the bind the log only ever buffers in memory.
+pub fn attach_diagnostics() {
+    DiagnosticsLog::instance().attach_global_hooks(None);
+}
 
 /// How the app starts.
 #[derive(Clone)]
@@ -131,6 +144,10 @@ pub enum Message {
     WindowOpened(window::Id),
     /// The user asked to close the window.
     CloseRequested(window::Id),
+    /// macOS asked the app to quit (Cmd+Q, the app-menu Quit, a Dock quit,
+    /// logout: `NSApplication.terminate:`, see
+    /// [`vocara_services::quit_request`]).
+    QuitRequested,
     /// The quit guard finished its work: exit.
     QuitGuardDone,
     /// The drag bar: start a window drag / toggle maximize.
@@ -195,17 +212,7 @@ impl App {
             iced::stream::channel(
                 4,
                 async move |mut output: iced::futures::channel::mpsc::Sender<LibraryEvent>| {
-                    let mut waiting = output.clone();
-                    let outcome = crate::util::blocking(move || {
-                        open(&mut || {
-                            let _ = waiting.try_send(LibraryEvent::Waiting);
-                        })
-                    })
-                    .await
-                    .unwrap_or_else(|panic| LibraryOpen::Failed {
-                        detail: panic.clone(),
-                        log: panic,
-                    });
+                    let outcome = open_on_own_thread(open, output.clone()).await;
                     let _ = output.send(LibraryEvent::Finished(outcome)).await;
                 },
             ),
@@ -284,6 +291,7 @@ impl App {
                 self.window.get_or_insert(id);
                 self.quit()
             }
+            Message::QuitRequested => self.quit(),
             Message::QuitGuardDone => iced::exit(),
             Message::DragWindow => self.window.map_or_else(Task::none, window::drag),
             Message::ToggleMaximize => self.window.map_or_else(Task::none, window::toggle_maximize),
@@ -511,6 +519,7 @@ impl App {
     pub fn subscription(&self) -> Subscription<Message> {
         let mut subscriptions = vec![
             window::close_requests().map(Message::CloseRequested),
+            Subscription::run(quit_requests).map(|()| Message::QuitRequested),
             window::open_events().map(Message::WindowOpened),
         ];
         if let State::Running(running) = &self.state {
@@ -523,6 +532,15 @@ impl App {
         }
         Subscription::batch(subscriptions)
     }
+}
+
+/// The quits macOS routes through `terminate:` (Cmd+Q, the app-menu Quit, a
+/// Dock quit, logout), which `main` hands to [`QuitRequests::global`] instead
+/// of letting AppKit end the process before the quit guard ran.
+fn quit_requests() -> impl iced::futures::Stream<Item = ()> {
+    iced::futures::stream::unfold(QuitRequests::global().subscribe(), |mut requests| async {
+        requests.recv().await.map(|()| ((), requests))
+    })
 }
 
 /// Applies what a page's update asked for.
@@ -608,6 +626,51 @@ fn retire(running: &mut Running, gone: PageId, mut page: Page) -> Task<Message> 
         running.lingering.push((gone, page));
     }
     teardown
+}
+
+/// Runs the library open (`Persistence.open`) on a thread of its own and
+/// waits for its outcome; `waiting` gets [`LibraryEvent::Waiting`] when the
+/// open starts waiting on another Vocara's boot. A panic in the open comes
+/// back as a failure.
+///
+/// Not on the runtime's blocking pool: that wait lasts as long as the other
+/// boot does, and the runtime's teardown at exit waits for every blocking
+/// task, so the waiting window's Quit would hang until the other Vocara
+/// finished starting up. Dart's quit ended the process with the open still
+/// pending; a plain thread ends with the process the same way.
+async fn open_on_own_thread(
+    open: OpenLibrary,
+    mut waiting: iced::futures::channel::mpsc::Sender<LibraryEvent>,
+) -> LibraryOpen {
+    let (done, outcome) = iced::futures::channel::oneshot::channel();
+    let spawned = std::thread::Builder::new()
+        .name("library-open".into())
+        .spawn(move || {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                open(&mut || {
+                    let _ = waiting.try_send(LibraryEvent::Waiting);
+                })
+            }));
+            let _ = done.send(outcome.map_err(|p| crate::util::panic_message(p.as_ref())));
+        });
+    if let Err(e) = spawned {
+        return LibraryOpen::Failed {
+            detail: e.to_string(),
+            log: format!("{e:?}"),
+        };
+    }
+    match outcome.await {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(panic)) => LibraryOpen::Failed {
+            detail: panic.clone(),
+            log: panic,
+        },
+        // The thread always answers; this is the channel dropping unsent.
+        Err(gone) => LibraryOpen::Failed {
+            detail: gone.to_string(),
+            log: format!("{gone:?}"),
+        },
+    }
 }
 
 /// Writes a window screenshot as a PNG.
