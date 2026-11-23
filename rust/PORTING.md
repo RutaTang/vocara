@@ -164,7 +164,7 @@ behavior and its tests are ported and the gates pass.
 | `data/services/audio_dsp.dart` | 2663 | `vocara_services::audio_dsp` | todo |
 | `data/services/audio_edit_service.dart` | 863 | `vocara_services::audio_edit_service` | todo |
 | `data/services/audio_exporter.dart` | 173 | `vocara_services::audio_exporter` | todo |
-| `data/services/audio_file_service.dart` | 362 | `vocara_services::audio_file_service` | todo |
+| `data/services/audio_file_service.dart` | 362 | `vocara_services::audio_file_service` | done |
 | `data/services/diagnostics_log.dart` | 440 | `vocara_model::diagnostics` (used by the store too) | done |
 | `data/services/graph_audio_playback_service.dart` | 1533 | `vocara_services::graph_audio_playback_service` | todo |
 | `data/services/local_storage_service.dart` | 110 | `vocara_services::local_storage_service` | done |
@@ -179,7 +179,7 @@ behavior and its tests are ported and the gates pass.
 | `data/services/spectrogram_service.dart` | 463 | `vocara_services::spectrogram_service` | todo |
 | `data/services/technique_media_service.dart` | 103 | `vocara_services::technique_media_service` | todo |
 | `data/services/update_check_service.dart` | 285 | `vocara_services::update_check_service` | done |
-| `data/services/waveform_service.dart` | 169 | `vocara_services::waveform_service` | todo |
+| `data/services/waveform_service.dart` | 169 | `vocara_services::waveform_service` | done (decode supplied by the engine bridge) |
 | `data/sync/hlc.dart` | 381 | `vocara_store::sync::hlc` | done |
 | `data/sync/integrity_checker.dart` | 434 | `vocara_store::sync::integrity_checker` | done |
 | `data/sync/oplog_drain.dart` | 191 | `vocara_store::sync::oplog_drain` | done |
