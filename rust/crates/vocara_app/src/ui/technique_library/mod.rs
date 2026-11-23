@@ -6,6 +6,7 @@
 //! library, each popping when a page lies beneath).
 
 pub mod detail;
+pub mod view_model;
 pub mod widgets;
 
 use iced::{Element, Task};
