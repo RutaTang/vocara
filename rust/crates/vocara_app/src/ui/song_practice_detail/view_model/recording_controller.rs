@@ -333,7 +333,8 @@ type SetupReply = Result<TakeSetup, DestinationError>;
 /// A start that reached its take setup (Dart's destination `create`, after
 /// the permission gate): hand it to [`RecordingController::take_setup`] on
 /// the UI thread. The start waits for the answer; a request dropped
-/// unanswered fails the start silently.
+/// unanswered fails the start silently. (Clone, for a message type that
+/// must be: the controller answers the copy it is given, so keep no other.)
 #[derive(Clone)]
 pub struct TakeSetupRequest {
     op: RecordingOp,

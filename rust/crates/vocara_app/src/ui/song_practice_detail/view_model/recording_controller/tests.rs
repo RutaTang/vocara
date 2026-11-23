@@ -2659,6 +2659,29 @@ fn flow_a_second_back_while_the_take_lands_leaves_the_page_once() {
 }
 
 #[test]
+fn flow_a_stopped_take_is_listed_as_landing_until_its_save_lands() {
+    // Stop, then Back: the take's finalize (its analysis, then the save)
+    // outlives the screen, and a screen reopened on the practice inside
+    // those seconds waits for it (the view model's load reads the listing).
+    let f = finalizer();
+    let mic = FakeMic::flow(&f, None, None);
+    let mut s = Screen::flow(Opts::new(&f).mic(&mic), false);
+    s.record_auto();
+    s.save = Box::new(|_: &mut Host| None);
+    assert!(!f.is_landing("p1"));
+    s.stop();
+    s.c.dispose();
+    assert!(f.is_landing("p1"), "listed from the stop");
+    assert!(s.pump_until(|s| s.saves == 1));
+    assert!(f.is_landing("p1"), "still landing while it saves");
+    let ok = s.host.repo_save(false);
+    s.answer_save(0, ok);
+    assert!(s.pump_until(|s| !s.c.is_stopping()));
+    assert!(!f.is_landing("p1"));
+    assert_eq!(Host::clips_of(&s.host.stored, "take1"), 2);
+}
+
+#[test]
 fn flow_a_take_records_on_the_channel_choice_of_the_device_capturing_now() {
     // The devices are polled only while Settings is open: the take reads
     // the input channel of the device capturing now as it arms.
