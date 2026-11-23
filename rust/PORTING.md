@@ -157,7 +157,7 @@ behavior and its tests are ported and the gates pass.
 | `data/db/asset_store.dart` | 1322 | `vocara_store::db::asset_store` | done |
 | `data/db/durable_fs.dart` | 119 | `vocara_store::db::durable_fs` | done |
 | `data/db/library_lock.dart` | 318 | `vocara_store::db::library_lock` | done |
-| `data/db/persistence.dart` | 1286 | `vocara_store::db::persistence` | todo |
+| `data/db/persistence.dart` | 1286 | `vocara_services::persistence` (it opens the store and drives services: audio edit, waveform, audio files) | todo |
 | `data/db/safe_migrator.dart` | 379 | `vocara_store::db::safe_migrator` | done |
 | `data/db/tables.dart` | 347 | `vocara_store::db::{schema, rows}` | done |
 | `data/db/write_gate.dart` | 92 | `vocara_store::db::write_gate` | done |
