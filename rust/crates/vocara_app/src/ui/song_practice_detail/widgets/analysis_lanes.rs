@@ -542,7 +542,8 @@ fn lane_chip<'a>(label: &str, on: bool, on_tap: Message) -> Element<'a, Message>
             })
             .wrapping(Wrapping::None),
     )
-    .padding([4, 10])
+    // 4 × 10, inside the 1 px border (a decoration's border pads its child).
+    .padding([5, 11])
     .style(move |_| {
         boxed(
             Some(if on {
@@ -1236,7 +1237,8 @@ fn marker_chip<'a>(
     ]
     .align_y(Vertical::Center);
     let face = container(content)
-        .padding([4.0, if fill { 7.0 } else { 8.0 }])
+        // 4 × 7 (a bar) or 8 (a pill), inside the 1 px border.
+        .padding([5.0, if fill { 8.0 } else { 9.0 }])
         .height(Length::Fill)
         .width(if fill { Length::Fill } else { Length::Shrink })
         .align_y(Vertical::Center)
