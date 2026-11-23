@@ -132,3 +132,24 @@ fn song_practice_fx_buses_round_trip_legacy_json_has_no_buses() {
         .fx_buses
         .is_empty());
 }
+
+// From `client/test/solo_resolution_test.dart` ('FxBus.soloed'): the bus's
+// solo is persisted, and legacy JSON reads as not soloed.
+#[test]
+fn soloed_round_trips_through_json_and_copy_with_toggles_it() {
+    let bus = FxBus {
+        soloed: true,
+        ..FxBus::new("b1", "Reverb", TrackFx::flat())
+    };
+    assert!(FxBus::from_json(&bus.to_json()).unwrap().soloed);
+    // Legacy JSON without the field defaults to not-soloed.
+    let legacy = without(bus.to_json(), "soloed");
+    assert!(!FxBus::from_json(&legacy).unwrap().soloed);
+    // Dart's `copyWith(soloed: false)`.
+    let unsoloed = FxBus {
+        soloed: false,
+        ..bus.clone()
+    };
+    assert!(!unsoloed.soloed);
+    assert!(bus.soloed, "the copy leaves the original alone");
+}
