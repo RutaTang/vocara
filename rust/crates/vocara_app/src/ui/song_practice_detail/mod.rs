@@ -5,6 +5,7 @@
 //! awaits that push to reload its list and release its open guard), go Home
 //! when it is the root of the stack (a deep link).
 
+pub mod view_model;
 pub mod widgets;
 
 use iced::{Element, Task};
