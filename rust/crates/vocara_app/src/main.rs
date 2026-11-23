@@ -6,8 +6,10 @@
 //!   (`app::quit`), on the window's close request;
 //! - `DiagnosticsLog.attachGlobalHooks` → the panic hook below (every
 //!   uncaught panic is logged, then the default hook runs);
-//! - `MediaKit.ensureInitialized` → nothing yet: the media players come with
-//!   the technique screens;
+//! - `MediaKit.ensureInitialized` → nothing: the technique screens' players
+//!   are AVFoundation's, which need no global setup;
+//! - the Runner's launch-time microphone request (`AppDelegate.swift`) → the
+//!   request below;
 //! - the frameless window, its title and the prevented close →
 //!   `app::window_settings` and `App::title`;
 //! - `Persistence.open` with its refusals and failures → the app's boot
@@ -29,6 +31,15 @@ fn main() -> iced::Result {
         DiagnosticsLog::instance().log("panic", &info.to_string());
         default_hook(info);
     }));
+
+    // Ask for the microphone at launch, as the Runner did: raw CoreAudio
+    // capture never prompts and is fed silence without the grant, so the
+    // prompt (or an existing grant) is settled before any capture starts.
+    // The request blocks on the user's answer, so it runs off the UI thread;
+    // the mic actions ask again (and report a refusal) when they start.
+    std::thread::spawn(|| {
+        let _ = vocara_services::mic_permission::request();
+    });
 
     let boot = Boot::from_env(library::open_library, Arc::new(quit::ServiceQuitHooks));
     app::run(boot)

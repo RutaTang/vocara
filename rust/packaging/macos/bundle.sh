@@ -84,7 +84,12 @@ iconutil -c icns "$SET" -o "$APP/Contents/Resources/AppIcon.icns"
 rm -rf "${SET:?}"
 
 # Ad-hoc signed for local runs; the release workflow re-signs with the
-# Developer ID, the hardened runtime and Release.entitlements.
-codesign --force --sign - --entitlements "$HERE/Release.entitlements" "$APP" >&2
+# Developer ID, the hardened runtime and Release.entitlements. A --debug
+# bundle gets Debug.entitlements, sandbox off, as the Flutter app's Debug
+# configuration did: the prototype separation engine spawns a Python sidecar,
+# which a sandboxed app cannot exec. Release bundles stay sandboxed.
+ENTITLEMENTS="$HERE/Release.entitlements"
+[[ "$PROFILE" == debug ]] && ENTITLEMENTS="$HERE/Debug.entitlements"
+codesign --force --sign - --entitlements "$ENTITLEMENTS" "$APP" >&2
 
 echo "$APP"
