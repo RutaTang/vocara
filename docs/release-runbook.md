@@ -42,9 +42,12 @@ and deletes it at once.
 
 ## Cutting a release
 
-1. Bump the workspace `version` in `rust/Cargo.toml` (and
-   `UpdateCheckService::APP_BUILD_NUMBER` in
-   `rust/crates/vocara_services/src/update_check_service.rs`); commit to master.
+1. Bump the workspace `version` in `rust/Cargo.toml`, and with it
+   `UpdateCheckService::APP_VERSION` (the same version: a test pins the two
+   together, so a stale one fails the release's Validate phase after the tag
+   is pushed) and `UpdateCheckService::APP_BUILD_NUMBER` (the bundle's
+   `CFBundleVersion`), both in
+   `rust/crates/vocara_services/src/update_check_service.rs`; commit to master.
 2. `git tag -a v<version> -m "Vocara <version>" -m "<what changed>" && git push origin v<version>`
    — the tag's message becomes the public release notes and the notes the
    app's update dialog shows (a lightweight `git tag` publishes none). The
