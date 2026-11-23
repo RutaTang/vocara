@@ -76,6 +76,50 @@ wrong. Port the behavior, not the shape:
 - **Commits**: small and frequent, on the working branch, with the session's
   trailer lines. CI is not run until the whole port is done.
 
+## The iced application
+
+The app is one iced `application` (iced 0.14, the Elm architecture). The
+structure every screen follows, so screens ported by different hands fit:
+
+- **Root** (`vocara_app::app`): `App` holds the `Services` (the port of
+  `config/dependencies.dart`'s providers: `Arc`s of the store, repositories,
+  settings, update check, media and analysis services), the router and the
+  active screen's state. `Message` is one enum with a variant per screen
+  (`Message::Home(home::Message)`, ...) plus app-wide ones (window events,
+  toasts, ticks). `update` returns `Task<Message>`; `subscription` carries the
+  window close request, keyboard, ticks and file drops.
+- **Routing** (`vocara_app::router`): `Route` mirrors `routing/routes.dart`
+  (`Home`, `Song { id }`, `Settings`, `Techniques`, `Technique { id }`); the
+  router keeps go_router's push/pop/go semantics (the back button, deep links
+  via `VOCARA_START`, the `START` dart-define's replacement). Every page sits
+  under the window drag bar (`_chrome`).
+- **Screens**: `vocara_app::ui::<screen>` with `view_model.rs` (or a
+  `view_model/` folder) holding the Dart view model's state and logic as
+  plain Rust with no iced types, and the widgets/views next to it. A view
+  model method that did async work in Dart returns an `Effect` (or takes a
+  closure) that the screen's `update` turns into a `Task` running the
+  service call on a blocking thread; the result comes back as a `Message`.
+  Every Dart `notifyListeners` becomes "state changed; iced redraws".
+  Generation counters, `_disposed` guards and save chains keep their exact
+  semantics: a late result for a screen that is gone, or a superseded load,
+  is dropped exactly where Dart dropped it.
+- **Widgets**: `vocara_app::ui::core` holds the theme (`studio.dart` colors,
+  `theme.dart`) and the shared widgets (`studio_button`, `studio_controls`,
+  `confirm_dialog`, `fatal_open_screen`, `waveform_painter`,
+  `spectrogram_painter`, `window_drag_bar`, ...). Painters are
+  `canvas::Program`s; controls that need custom input (faders, knobs, drag
+  handles) are custom widgets or canvases with the same hit areas, drag
+  rules, wheel/trackpad handling and double-click resets as the Dart ones.
+  Icons are Lucide (forui's `FIcons`) from the `lucide-icons` crate.
+- **Window** (macOS): hidden title bar with a transparent, full-size content
+  view; the drag bar starts a window drag; the close request runs the quit
+  guard (kill separation sidecars, finalize recordings) before closing, as
+  `main.dart`'s `_QuitGuard` and exit listener did.
+- **Tests**: view models are unit-tested directly (the Dart widget tests
+  mostly assert view-model behavior; port those assertions); screens get
+  `iced_test` simulator tests where a Dart widget test checked what is on
+  screen or what a click does.
+
 ## Verification (Lean 4)
 
 `verification/` is a Lake project. Each core algorithm gets a Lean model that
