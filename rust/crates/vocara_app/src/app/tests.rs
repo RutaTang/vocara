@@ -65,11 +65,11 @@ fn navigates_home_to_settings_and_back() {
     click(&mut app, &settings);
     assert_eq!(app.routes(), vec![Some(Route::Home), Some(Route::Settings)]);
     assert!(shows(&app, "Settings"));
-    assert!(!shows(&app, "Vocara"), "Home is covered");
+    assert!(!shows(&app, "New practice"), "Home is covered");
 
-    click(&mut app, "Back");
+    back(&mut app);
     assert_eq!(app.routes(), vec![Some(Route::Home)]);
-    assert!(shows(&app, "Vocara"));
+    assert!(shows(&app, "New practice"));
     // Popped, not replaced: the same Home page.
     assert_eq!(app.top().map(|(id, _)| id), Some(home));
 }
