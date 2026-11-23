@@ -143,9 +143,9 @@ behavior and its tests are ported and the gates pass.
 
 | Dart source (client/lib/) | Lines | Rust home | Status |
 |---|---:|---|---|
-| `app.dart` | 85 | `vocara_app::app` | todo |
+| `app.dart` | 85 | `vocara_app::app` | done |
 | `config/app_config.dart` | 16 | `vocara_model::config::app_config` | todo |
-| `config/dependencies.dart` | 109 | `vocara_app::dependencies` | todo |
+| `config/dependencies.dart` | 109 | `vocara_app::services` (`Services`; a field per service as each lands) | partial |
 | `config/environment.dart` | 59 | `vocara_model::config::environment` | todo |
 | `data/db/app_database.dart` | 180 | `vocara_store::db::app_database` | todo |
 | `data/db/asset_store.dart` | 1322 | `vocara_store::db::asset_store` | todo |
@@ -208,10 +208,10 @@ behavior and its tests are ported and the gates pass.
 | `domain/models/technique_marker.dart` | 115 | `vocara_model::models::technique_marker` | todo |
 | `domain/models/technique_media.dart` | 156 | `vocara_model::models::technique_media` | todo |
 | `domain/models/voice_metrics.dart` | 975 | `vocara_model::models::voice_metrics` | todo |
-| `main.dart` | 206 | `vocara_app::main` | todo |
-| `routing/navigation.dart` | 22 | `vocara_app::router` | todo |
-| `routing/router.dart` | 123 | `vocara_app::router` | todo |
-| `routing/routes.dart` | 23 | `vocara_app::router` | todo |
+| `main.dart` | 206 | `src/main.rs`, `vocara_app::app` (library-open and quit-hook seams until the store and services land) | done |
+| `routing/navigation.dart` | 22 | `vocara_app::router` | done |
+| `routing/router.dart` | 123 | `vocara_app::router`, `vocara_app::app` | done |
+| `routing/routes.dart` | 23 | `vocara_app::router` | done |
 | `ui/core/themes/studio.dart` | 45 | `vocara_app::ui::core::theme` (`Studio`) | done |
 | `ui/core/themes/theme.dart` | 6 | `vocara_app::ui::core::theme` (`Zinc`, `app_theme`, styles) | done |
 | `ui/core/widgets/cap_label.dart` | 21 | `vocara_app::ui::core::widgets::cap_label` | done |
