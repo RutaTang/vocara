@@ -3,4 +3,5 @@
 
 pub mod media;
 pub mod studio_field;
+pub mod technique_analysis_section;
 pub mod technique_dialogs;
