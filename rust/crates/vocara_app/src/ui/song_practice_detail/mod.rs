@@ -5,6 +5,8 @@
 //! awaits that push to reload its list and release its open guard), go Home
 //! when it is the root of the stack (a deep link).
 
+pub mod widgets;
+
 use iced::{Element, Task};
 
 use super::{placeholder, Screen, Update};
