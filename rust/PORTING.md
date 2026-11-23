@@ -169,7 +169,7 @@ behavior and its tests are ported and the gates pass.
 | `data/services/app_settings_service.dart` | 1031 | `vocara_services::app_settings_service` | todo |
 | `data/services/audio_dsp.dart` | 2663 | `vocara_services::audio_dsp` | done |
 | `data/services/audio_edit_service.dart` | 863 | `vocara_services::audio_edit_service` | todo |
-| `data/services/audio_exporter.dart` | 173 | `vocara_services::audio_exporter` | todo |
+| `data/services/audio_exporter.dart` | 173 | `vocara_services::audio_exporter` | done (the save panel is passed in by the app) |
 | `data/services/audio_file_service.dart` | 362 | `vocara_services::audio_file_service` | done |
 | `data/services/diagnostics_log.dart` | 440 | `vocara_model::diagnostics` (used by the store too) | done |
 | `data/services/graph_audio_playback_service.dart` | 1533 | `vocara_services::graph_audio_playback_service` | todo |
@@ -180,10 +180,10 @@ behavior and its tests are ported and the gates pass.
 | `data/services/monitor_service.dart` | 262 | `vocara_services::monitor_service` | todo |
 | `data/services/playback_engine.dart` | 147 | `vocara_services::playback_engine` | todo |
 | `data/services/playback_engine_factory.dart` | 8 | `vocara_services::playback_engine_factory` | todo |
-| `data/services/recording_finalizer.dart` | 331 | `vocara_services::recording_finalizer` | todo |
+| `data/services/recording_finalizer.dart` | 331 | `vocara_services::recording_finalizer` | done |
 | `data/services/source_separation_service.dart` | 745 | `vocara_services::source_separation_service` | done |
 | `data/services/spectrogram_service.dart` | 463 | `vocara_services::spectrogram_service` | todo |
-| `data/services/technique_media_service.dart` | 103 | `vocara_services::technique_media_service` | todo |
+| `data/services/technique_media_service.dart` | 103 | `vocara_services::technique_media_service` | done |
 | `data/services/update_check_service.dart` | 285 | `vocara_services::update_check_service` | done |
 | `data/services/waveform_service.dart` | 169 | `vocara_services::waveform_service` | done (decode supplied by the engine bridge) |
 | `data/sync/hlc.dart` | 381 | `vocara_store::sync::hlc` | done |
