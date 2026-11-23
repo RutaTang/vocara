@@ -6,7 +6,7 @@
 //! `master_volume` 1.0, `kind` 'audio', ...), so a write that names only some
 //! columns reads like drift's `XCompanion.insert(...)`:
 //!
-//! ```ignore
+//! ```text
 //! db.insert(&InterpretationRow { id, practice_id, created_at: at, ..Default::default() })?;
 //! ```
 //!

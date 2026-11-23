@@ -254,6 +254,8 @@ impl AppDatabase {
 
     /// Runs [f] with the connection, holding the database for its duration.
     /// Inside a transaction on this thread, [f] runs in that transaction.
+    /// [f] must not issue BEGIN / COMMIT / SAVEPOINT itself: transactions go
+    /// through [`AppDatabase::transaction`], which keeps their nesting.
     pub fn with_conn<T>(&self, f: impl FnOnce(&Connection) -> T) -> T {
         let guard = self.inner.lock();
         f(&guard.conn)
