@@ -64,6 +64,28 @@ fn the_null_engine_is_unavailable_and_refuses() {
 
 /// A test root, its stub interpreter, and a service with a quit guard of its
 /// own.
+/// Waits until the freshly written stub at [path] can be executed. A test
+/// thread that forks while another one writes a stub hands the child a copy
+/// of the write descriptor until the child execs, and Linux refuses to run
+/// a file open for writing (ETXTBSY), which the service's engine probe would
+/// read as "no engine". Once one run succeeds, no such copy is left.
+fn wait_until_executable(path: &Path) {
+    const ETXTBSY: i32 = 26;
+    for _ in 0..500 {
+        match std::process::Command::new(path)
+            .arg("-c")
+            .stdin(std::process::Stdio::null())
+            .status()
+        {
+            Err(e) if e.raw_os_error() == Some(ETXTBSY) => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            _ => return,
+        }
+    }
+    panic!("{} stayed busy", path.display());
+}
+
 struct Rig {
     root: tempfile::TempDir,
     guard: Arc<SeparationQuitGuard>,
@@ -116,6 +138,7 @@ impl Rig {
         )
         .unwrap();
         fs::set_permissions(&f, fs::Permissions::from_mode(0o755)).unwrap();
+        wait_until_executable(&f);
         f.to_string_lossy().into_owned()
     }
 
