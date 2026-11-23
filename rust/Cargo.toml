@@ -35,6 +35,7 @@ iced = { version = "0.14", default-features = false, features = ["wgpu", "tiny-s
 iced_test = "0.14"
 rfd = "0.18"
 tempfile = "3"
+libc = "0.2"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
