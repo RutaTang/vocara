@@ -3,7 +3,10 @@
 //!
 //! What `main.dart` did and where it went:
 //! - the exit guard and the window-close guard → the app's quit guard
-//!   (`app::quit`), on the window's close request;
+//!   (`app::quit`), on the window's close request and on the quits macOS
+//!   sends through `NSApplication.terminate:` (Cmd+Q, the app-menu Quit, a
+//!   Dock quit, logout), which the Runner's `AppDelegate` held for it →
+//!   `vocara_services::quit_request`, installed below;
 //! - `DiagnosticsLog.attachGlobalHooks` → [`app::attach_diagnostics`] (the
 //!   log bound to the library folder on disk; every uncaught panic is
 //!   logged, then the default hook runs);
@@ -37,6 +40,12 @@ fn main() -> iced::Result {
     std::thread::spawn(|| {
         let _ = vocara_services::mic_permission::request();
     });
+
+    // Cmd+Q, the app-menu Quit, a Dock quit and logout go through
+    // NSApplication.terminate:, which never reaches the window's close
+    // request: route them to the quit guard too, before AppKit could end the
+    // process with a recording or a save still in flight.
+    vocara_services::quit_request::intercept();
 
     let boot = Boot::from_env(library::open_library, Arc::new(quit::ServiceQuitHooks));
     app::run(boot)

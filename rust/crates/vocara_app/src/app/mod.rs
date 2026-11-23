@@ -9,9 +9,11 @@
 //! screens: every page under the window drag bar, a studio dialog over the
 //! whole window when a screen asks for one.
 //!
-//! The window is closed through the quit guard: a close request kills the
-//! separation sidecars, finalizes the recordings ([`quit::QuitHooks`]), then
-//! exits — once, however many close requests arrive meanwhile.
+//! The window is closed through the quit guard: a close request, or a quit
+//! macOS sends through `terminate:` (Cmd+Q, the app-menu Quit, a Dock quit,
+//! logout; [`vocara_services::quit_request`]), kills the separation
+//! sidecars, finalizes the recordings ([`quit::QuitHooks`]), then exits —
+//! once, however many requests arrive meanwhile.
 
 pub mod library;
 mod page;
@@ -25,6 +27,7 @@ use iced::futures::SinkExt;
 use iced::widget::{column, container, stack, Space};
 use iced::{window, Element, Length, Size, Subscription, Task, Theme};
 use vocara_model::diagnostics::DiagnosticsLog;
+use vocara_services::quit_request::QuitRequests;
 
 use self::library::{LibraryOpen, OpenLibrary};
 use self::page::{erase, with_screen, PageUpdate};
@@ -141,6 +144,10 @@ pub enum Message {
     WindowOpened(window::Id),
     /// The user asked to close the window.
     CloseRequested(window::Id),
+    /// macOS asked the app to quit (Cmd+Q, the app-menu Quit, a Dock quit,
+    /// logout: `NSApplication.terminate:`, see
+    /// [`vocara_services::quit_request`]).
+    QuitRequested,
     /// The quit guard finished its work: exit.
     QuitGuardDone,
     /// The drag bar: start a window drag / toggle maximize.
@@ -284,6 +291,7 @@ impl App {
                 self.window.get_or_insert(id);
                 self.quit()
             }
+            Message::QuitRequested => self.quit(),
             Message::QuitGuardDone => iced::exit(),
             Message::DragWindow => self.window.map_or_else(Task::none, window::drag),
             Message::ToggleMaximize => self.window.map_or_else(Task::none, window::toggle_maximize),
@@ -511,6 +519,7 @@ impl App {
     pub fn subscription(&self) -> Subscription<Message> {
         let mut subscriptions = vec![
             window::close_requests().map(Message::CloseRequested),
+            Subscription::run(quit_requests).map(|()| Message::QuitRequested),
             window::open_events().map(Message::WindowOpened),
         ];
         if let State::Running(running) = &self.state {
@@ -523,6 +532,15 @@ impl App {
         }
         Subscription::batch(subscriptions)
     }
+}
+
+/// The quits macOS routes through `terminate:` (Cmd+Q, the app-menu Quit, a
+/// Dock quit, logout), which `main` hands to [`QuitRequests::global`] instead
+/// of letting AppKit end the process before the quit guard ran.
+fn quit_requests() -> impl iced::futures::Stream<Item = ()> {
+    iced::futures::stream::unfold(QuitRequests::global().subscribe(), |mut requests| async {
+        requests.recv().await.map(|()| ((), requests))
+    })
 }
 
 /// Applies what a page's update asked for.

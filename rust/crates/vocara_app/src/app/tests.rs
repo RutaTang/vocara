@@ -252,6 +252,41 @@ fn a_page_that_leaves_takes_its_dialog_with_it() {
     assert_eq!(app.dialogs(), 0);
 }
 
+#[test]
+fn a_quit_from_the_menu_or_the_dock_runs_the_same_guard_once() {
+    let hooks = Arc::new(CountingHooks::default());
+    let mut b = Boot::new(AppEnvironment::Dev);
+    b.quit_hooks = hooks.clone();
+    let (mut app, _) = App::new(b);
+    let _ = app.update(Message::Library(LibraryEvent::Finished(
+        LibraryOpen::Opened(Arc::new(Library::stub())),
+    )));
+    let _ = app.update(Message::QuitRequested);
+    // The red close button meanwhile, and a second Cmd+Q.
+    let _ = app.update(Message::CloseRequested(window::Id::unique()));
+    let _ = app.update(Message::QuitRequested);
+    assert_eq!(hooks.kills.load(Ordering::SeqCst), 1);
+    assert!(app.closing);
+}
+
+// The app's half of `vocara_services::quit_request`: what the intercepted
+// `terminate:` asks arrives as the app's quit requests.
+#[test]
+fn a_terminate_from_macos_reaches_the_app_as_a_quit_request() {
+    use iced::futures::StreamExt;
+    use vocara_services::quit_request::{QuitRequests, Verdict};
+
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let mut requests = Box::pin(quit_requests());
+    assert_eq!(
+        QuitRequests::global().terminate(std::time::Instant::now()),
+        Verdict::Asked
+    );
+    let asked = runtime
+        .block_on(async { tokio::time::timeout(Duration::from_secs(5), requests.next()).await });
+    assert_eq!(asked, Ok(Some(())));
+}
+
 /// What [`waiting_open`] waits for: another Vocara's boot to finish.
 static OPEN_RELEASED: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
 static OPEN_RELEASE: std::sync::Condvar = std::sync::Condvar::new();

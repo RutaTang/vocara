@@ -16,6 +16,7 @@ pub mod monitor_service;
 pub mod persistence;
 pub mod playback_engine;
 pub mod playback_engine_factory;
+pub mod quit_request;
 pub mod recording_finalizer;
 pub mod source_separation_service;
 pub mod spectrogram_service;
