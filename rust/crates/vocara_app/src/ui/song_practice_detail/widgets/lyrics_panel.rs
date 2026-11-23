@@ -141,12 +141,14 @@ pub enum LyricsMode {
     Sync,
 }
 
-/// One of `vm.allNotes`: a note and the take it is on.
-#[derive(Debug, Clone, Copy)]
-pub struct NoteRef<'a> {
-    pub track_id: &'a str,
-    pub track_name: &'a str,
-    pub note: &'a PracticeNote,
+/// One of `vm.allNotes`: a note and the take it is on. Owned: the view
+/// model hands the list out by value, and the screen keeps it for the
+/// panel to borrow.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NoteRef {
+    pub track_id: String,
+    pub track_name: String,
+    pub note: PracticeNote,
 }
 
 /// What the panel reads of the detail view model, as it is now.
@@ -184,7 +186,7 @@ pub struct RightPanelData<'a> {
     /// `vm.selectedTrackTechniques`.
     pub selected_track_techniques: &'a [TechniqueMarker],
     /// `vm.allNotes`.
-    pub all_notes: &'a [NoteRef<'a>],
+    pub all_notes: &'a [NoteRef],
     /// A dialog is over the page (Dart's `!ModalRoute.isCurrentOf(context)`):
     /// an editor made now does not take the keyboard from it.
     pub under_dialog: bool,
@@ -1404,10 +1406,10 @@ fn notes_view<'a>(data: RightPanelData<'a>) -> Element<'a, Message> {
     } else {
         for r in data.all_notes {
             items = items.push(note_tile(
-                r.note,
-                Some(r.track_name),
+                &r.note,
+                Some(&r.track_name),
                 vec![
-                    Message::SelectTrack(r.track_id.to_string()),
+                    Message::SelectTrack(r.track_id.clone()),
                     seek(r.note.position_ms),
                 ],
             ));
