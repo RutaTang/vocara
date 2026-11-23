@@ -1,0 +1,71 @@
+{"input":"","looksLikeLrc":false,"isLrcDocument":false,"plain":[],"plainText":"","lrc":[],"toLrc":""}
+{"input":"\n","looksLikeLrc":false,"isLrcDocument":false,"plain":[],"plainText":"","lrc":[],"toLrc":""}
+{"input":"\r\n\r\n","looksLikeLrc":false,"isLrcDocument":false,"plain":[],"plainText":"","lrc":[],"toLrc":""}
+{"input":"plain","looksLikeLrc":false,"isLrcDocument":false,"plain":[["plain",null]],"plainText":"plain","lrc":[],"toLrc":""}
+{"input":"﻿bom line\n  indented  \n\t\n","looksLikeLrc":false,"isLrcDocument":false,"plain":[["﻿bom line",null],["  indented",null]],"plainText":"﻿bom line\n  indented","lrc":[],"toLrc":""}
+{"input":"[00:01.00]one\r[00:02.00]two\r\n[00:03.00]three","looksLikeLrc":true,"isLrcDocument":true,"plain":[["[00:01.00]one",null],["[00:02.00]two",null],["[00:03.00]three",null]],"plainText":"[00:01.00]one\n[00:02.00]two\n[00:03.00]three","lrc":[["one",1000],["two",2000],["three",3000]],"toLrc":"[00:01.00]one\n[00:02.00]two\n[00:03.00]three\n"}
+{"input":"[ti:Song]\n[ar:Artist]\n[00:12.50]hello\n[01:03.250]world\nuntimed","looksLikeLrc":true,"isLrcDocument":false,"plain":[["[ti:Song]",null],["[ar:Artist]",null],["[00:12.50]hello",null],["[01:03.250]world",null],["untimed",null]],"plainText":"[ti:Song]\n[ar:Artist]\n[00:12.50]hello\n[01:03.250]world\nuntimed","lrc":[["hello",12500],["world",63250]],"toLrc":"[00:12.50]hello\n[01:03.25]world\n"}
+{"input":"[00:30.00]chorus\n[00:05.00]intro\n[00:10.00][00:20.00]ah","looksLikeLrc":true,"isLrcDocument":true,"plain":[["[00:30.00]chorus",null],["[00:05.00]intro",null],["[00:10.00][00:20.00]ah",null]],"plainText":"[00:30.00]chorus\n[00:05.00]intro\n[00:10.00][00:20.00]ah","lrc":[["intro",5000],["ah",10000],["ah",20000],["chorus",30000]],"toLrc":"[00:05.00]intro\n[00:10.00]ah\n[00:20.00]ah\n[00:30.00]chorus\n"}
+{"input":"[00:01.5]a\n[00:01.05]b\n[00:01.005]c\n[00:01:50]d\n[00:01.]e\n[00:01.1234]f","looksLikeLrc":true,"isLrcDocument":false,"plain":[["[00:01.5]a",null],["[00:01.05]b",null],["[00:01.005]c",null],["[00:01:50]d",null],["[00:01.]e",null],["[00:01.1234]f",null]],"plainText":"[00:01.5]a\n[00:01.05]b\n[00:01.005]c\n[00:01:50]d\n[00:01.]e\n[00:01.1234]f","lrc":[["c",1005],["b",1050],["a",1500],["d",1500]],"toLrc":"[00:01.00]c\n[00:01.05]b\n[00:01.50]a\n[00:01.50]d\n"}
+{"input":"[0:00]a\n[000:00]b\n[1000:00]c\n[00:000]d\n[00:5]e\n[100:59.999]f","looksLikeLrc":true,"isLrcDocument":false,"plain":[["[0:00]a",null],["[000:00]b",null],["[1000:00]c",null],["[00:000]d",null],["[00:5]e",null],["[100:59.999]f",null]],"plainText":"[0:00]a\n[000:00]b\n[1000:00]c\n[00:000]d\n[00:5]e\n[100:59.999]f","lrc":[["a",0],["b",0],["f",6059999]],"toLrc":"[00:00.00]a\n[00:00.00]b\n[100:59.99]f\n"}
+{"input":"[offset:+500]\n[00:10.00]a\n[00:00.20]b","looksLikeLrc":true,"isLrcDocument":true,"plain":[["[offset:+500]",null],["[00:10.00]a",null],["[00:00.20]b",null]],"plainText":"[offset:+500]\n[00:10.00]a\n[00:00.20]b","lrc":[["b",0],["a",9500]],"toLrc":"[00:00.00]b\n[00:09.50]a\n"}
+{"input":"[OFFSET: -250 ]\n[00:10.00]a","looksLikeLrc":true,"isLrcDocument":true,"plain":[["[OFFSET: -250 ]",null],["[00:10.00]a",null]],"plainText":"[OFFSET: -250 ]\n[00:10.00]a","lrc":[["a",10250]],"toLrc":"[00:10.25]a\n"}
+{"input":"[offset:+99999999999999999999999]\n[00:10.00]a","looksLikeLrc":true,"isLrcDocument":true,"plain":[["[offset:+99999999999999999999999]",null],["[00:10.00]a",null]],"plainText":"[offset:+99999999999999999999999]\n[00:10.00]a","lrc":[["a",10000]],"toLrc":"[00:10.00]a\n"}
+{"input":"[offset:-9223372036854775807]\n[00:01.00]a","looksLikeLrc":true,"isLrcDocument":true,"plain":[["[offset:-9223372036854775807]",null],["[00:01.00]a",null]],"plainText":"[offset:-9223372036854775807]\n[00:01.00]a","lrc":[["a",86401000]],"toLrc":"[1440:01.00]a\n"}
+{"input":"[offset:500]\n[offset:100]\n[00:01.00]a","looksLikeLrc":true,"isLrcDocument":true,"plain":[["[offset:500]",null],["[offset:100]",null],["[00:01.00]a",null]],"plainText":"[offset:500]\n[offset:100]\n[00:01.00]a","lrc":[["a",900]],"toLrc":"[00:00.90]a\n"}
+{"input":"[offset:1.5]\n[00:01.00]a","looksLikeLrc":true,"isLrcDocument":true,"plain":[["[offset:1.5]",null],["[00:01.00]a",null]],"plainText":"[offset:1.5]\n[00:01.00]a","lrc":[["a",1000]],"toLrc":"[00:01.00]a\n"}
+{"input":"I waited [04:33] for you\nand you came","looksLikeLrc":true,"isLrcDocument":false,"plain":[["I waited [04:33] for you",null],["and you came",null]],"plainText":"I waited [04:33] for you\nand you came","lrc":[["I waited  for you",273000]],"toLrc":"[04:33.00]I waited  for you\n"}
+{"input":"[00:12.50]hello\nlyrics by someone","looksLikeLrc":true,"isLrcDocument":false,"plain":[["[00:12.50]hello",null],["lyrics by someone",null]],"plainText":"[00:12.50]hello\nlyrics by someone","lrc":[["hello",12500]],"toLrc":"[00:12.50]hello\n"}
+{"input":"[ti:Song]\n[ar:Artist]","looksLikeLrc":false,"isLrcDocument":false,"plain":[["[ti:Song]",null],["[ar:Artist]",null]],"plainText":"[ti:Song]\n[ar:Artist]","lrc":[],"toLrc":""}
+{"input":"[#:comment]\n[00:01.00]x","looksLikeLrc":true,"isLrcDocument":true,"plain":[["[#:comment]",null],["[00:01.00]x",null]],"plainText":"[#:comment]\n[00:01.00]x","lrc":[["x",1000]],"toLrc":"[00:01.00]x\n"}
+{"input":"[1x:y]\n[00:01.00]x","looksLikeLrc":true,"isLrcDocument":false,"plain":[["[1x:y]",null],["[00:01.00]x",null]],"plainText":"[1x:y]\n[00:01.00]x","lrc":[["x",1000]],"toLrc":"[00:01.00]x\n"}
+{"input":"[ti:a]b]\n[00:01.00]x","looksLikeLrc":true,"isLrcDocument":false,"plain":[["[ti:a]b]",null],["[00:01.00]x",null]],"plainText":"[ti:a]b]\n[00:01.00]x","lrc":[["x",1000]],"toLrc":"[00:01.00]x\n"}
+{"input":"[ti:]\n[00:01.00]x","looksLikeLrc":true,"isLrcDocument":true,"plain":[["[ti:]",null],["[00:01.00]x",null]],"plainText":"[ti:]\n[00:01.00]x","lrc":[["x",1000]],"toLrc":"[00:01.00]x\n"}
+{"input":"[ti]\n[00:01.00]x","looksLikeLrc":true,"isLrcDocument":false,"plain":[["[ti]",null],["[00:01.00]x",null]],"plainText":"[ti]\n[00:01.00]x","lrc":[["x",1000]],"toLrc":"[00:01.00]x\n"}
+{"input":"[t:i:t]\n[00:01.00]x","looksLikeLrc":true,"isLrcDocument":true,"plain":[["[t:i:t]",null],["[00:01.00]x",null]],"plainText":"[t:i:t]\n[00:01.00]x","lrc":[["x",1000]],"toLrc":"[00:01.00]x\n"}
+{"input":"  [00:01.00]  spaced text  [00:02.00] tail  ","looksLikeLrc":true,"isLrcDocument":true,"plain":[["  [00:01.00]  spaced text  [00:02.00] tail",null]],"plainText":"  [00:01.00]  spaced text  [00:02.00] tail","lrc":[["spaced text   tail",1000],["spaced text   tail",2000]],"toLrc":"[00:01.00]spaced text   tail\n[00:02.00]spaced text   tail\n"}
+{"input":"[00:01.00]","looksLikeLrc":true,"isLrcDocument":true,"plain":[["[00:01.00]",null]],"plainText":"[00:01.00]","lrc":[["",1000]],"toLrc":"[00:01.00]\n"}
+{"input":"[00:01.00][00:01.00]same\n[00:01.00]other","looksLikeLrc":true,"isLrcDocument":true,"plain":[["[00:01.00][00:01.00]same",null],["[00:01.00]other",null]],"plainText":"[00:01.00][00:01.00]same\n[00:01.00]other","lrc":[["same",1000],["same",1000],["other",1000]],"toLrc":"[00:01.00]same\n[00:01.00]same\n[00:01.00]other\n"}
+{"input":"[00:01.00]café 中文 😀","looksLikeLrc":true,"isLrcDocument":true,"plain":[["[00:01.00]café 中文 😀",null]],"plainText":"[00:01.00]café 中文 😀","lrc":[["café 中文 😀",1000]],"toLrc":"[00:01.00]café 中文 😀\n"}
+{"input":"[[00:01.00]]bracketed","looksLikeLrc":true,"isLrcDocument":true,"plain":[["[[00:01.00]]bracketed",null]],"plainText":"[[00:01.00]]bracketed","lrc":[["[]bracketed",1000]],"toLrc":"[00:01.00][]bracketed\n"}
+{"input":"text [00:05.00] inside","looksLikeLrc":true,"isLrcDocument":true,"plain":[["text [00:05.00] inside",null]],"plainText":"text [00:05.00] inside","lrc":[["text  inside",5000]],"toLrc":"[00:05.00]text  inside\n"}
+{"input":"[00:01.00]a b","looksLikeLrc":true,"isLrcDocument":true,"plain":[["[00:01.00]a b",null]],"plainText":"[00:01.00]a b","lrc":[["a b",1000]],"toLrc":"[00:01.00]a b\n"}
+{"input":"[00:01.00]ab\n","looksLikeLrc":true,"isLrcDocument":true,"plain":[["[00:01.00]ab",null]],"plainText":"[00:01.00]ab","lrc":[["ab",1000]],"toLrc":"[00:01.00]ab\n"}
+{"input":"[١٢:00]arabic digits","looksLikeLrc":false,"isLrcDocument":false,"plain":[["[١٢:00]arabic digits",null]],"plainText":"[١٢:00]arabic digits","lrc":[],"toLrc":""}
+{"crafted":"THROWS"}
+{"prev":["a","b","c","b","a"],"next":["a","b","c","b","a"],"align":[0,1,2,3,4]}
+{"prev":["a","b","c","b","a"],"next":["a","c","b","a"],"align":[0,2,3,4]}
+{"prev":["a","b","c","b","a"],"next":["x","a","b","c","b","a","y"],"align":[null,0,1,2,3,4,null]}
+{"prev":["a","b","c","b","a"],"next":["","a","","a",""],"align":[null,0,null,4,null]}
+{"prev":["a","b","c","b","a"],"next":["b","a"],"align":[3,4]}
+{"prev":["a","b","c","b","a"],"next":[],"align":[]}
+{"prev":["a","c","b","a"],"next":["a","b","c","b","a"],"align":[0,null,1,2,3]}
+{"prev":["a","c","b","a"],"next":["a","c","b","a"],"align":[0,1,2,3]}
+{"prev":["a","c","b","a"],"next":["x","a","b","c","b","a","y"],"align":[null,0,null,1,2,3,null]}
+{"prev":["a","c","b","a"],"next":["","a","","a",""],"align":[null,0,null,3,null]}
+{"prev":["a","c","b","a"],"next":["b","a"],"align":[2,3]}
+{"prev":["a","c","b","a"],"next":[],"align":[]}
+{"prev":["x","a","b","c","b","a","y"],"next":["a","b","c","b","a"],"align":[1,2,3,4,5]}
+{"prev":["x","a","b","c","b","a","y"],"next":["a","c","b","a"],"align":[1,3,4,5]}
+{"prev":["x","a","b","c","b","a","y"],"next":["x","a","b","c","b","a","y"],"align":[0,1,2,3,4,5,6]}
+{"prev":["x","a","b","c","b","a","y"],"next":["","a","","a",""],"align":[null,1,null,5,null]}
+{"prev":["x","a","b","c","b","a","y"],"next":["b","a"],"align":[2,5]}
+{"prev":["x","a","b","c","b","a","y"],"next":[],"align":[]}
+{"prev":["","a","","a",""],"next":["a","b","c","b","a"],"align":[1,null,null,null,3]}
+{"prev":["","a","","a",""],"next":["a","c","b","a"],"align":[1,null,null,3]}
+{"prev":["","a","","a",""],"next":["x","a","b","c","b","a","y"],"align":[null,1,null,null,null,3,null]}
+{"prev":["","a","","a",""],"next":["","a","","a",""],"align":[0,1,2,3,4]}
+{"prev":["","a","","a",""],"next":["b","a"],"align":[null,3]}
+{"prev":["","a","","a",""],"next":[],"align":[]}
+{"prev":["b","a"],"next":["a","b","c","b","a"],"align":[null,null,null,0,1]}
+{"prev":["b","a"],"next":["a","c","b","a"],"align":[null,null,0,1]}
+{"prev":["b","a"],"next":["x","a","b","c","b","a","y"],"align":[null,null,0,null,null,1,null]}
+{"prev":["b","a"],"next":["","a","","a",""],"align":[null,1,null,null,null]}
+{"prev":["b","a"],"next":["b","a"],"align":[0,1]}
+{"prev":["b","a"],"next":[],"align":[]}
+{"prev":[],"next":["a","b","c","b","a"],"align":[null,null,null,null,null]}
+{"prev":[],"next":["a","c","b","a"],"align":[null,null,null,null]}
+{"prev":[],"next":["x","a","b","c","b","a","y"],"align":[null,null,null,null,null,null,null]}
+{"prev":[],"next":["","a","","a",""],"align":[null,null,null,null,null]}
+{"prev":[],"next":["b","a"],"align":[null,null]}
+{"prev":[],"next":[],"align":[]}

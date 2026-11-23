@@ -1,0 +1,59 @@
+{"in":"FileSystemException: Cannot open file, path = '/Users/ruta/Music/My Song Title.wav' (OS Error: No such file)","out":"FileSystemException: Cannot open file, path = '<path>.wav' (OS Error: No such file)"}
+{"in":"copy failed: /private/var/folders/ab/T/vocara/audio/01ABC/take.wav","out":"copy failed: <path>.wav"}
+{"in":"/Volumes/USB/session (final)/mix.aiff gone","out":"<path>.aiff gone"}
+{"in":"cp /Users/a/x.wav /Users/b/y.wav failed","out":"cp <path>.wav <path>.wav failed"}
+{"in":"path = '/Users/alice/Music/Vol.2 Live/My Secret Song.wav'","out":"path = '<path>.wav'"}
+{"in":"/Users/alice/feat.Ed Sheeran/Perfect Duet.wav (OS Error)","out":"<path>.wav (OS Error)"}
+{"in":"at /Users/alice/Adele 2016.12 Remix/Hello","out":"at <path>"}
+{"in":"/Users/a/My.Song.wav gone","out":"<path>.wav gone"}
+{"in":"'/Users/a/Ms.Lauryn Hill.wav' gone","out":"'<path>.wav' gone"}
+{"in":"cp /Users/a/dir /Users/b/y.wav failed","out":"cp <path> <path>.wav failed"}
+{"in":"FileSystemException: Cannot open file, path = '/Users/a/Music/Don't Stop Believin.m4a' (OS Error: x, errno = 2)","out":"FileSystemException: Cannot open file, path = '<path>.m4a' (OS Error: x, errno = 2)"}
+{"in":"path = '/Users/a/Guns N' Roses/Sweet Child O' Mine.mp3' (OS Error)","out":"path = '<path>.mp3' (OS Error)"}
+{"in":"path = '/Users/a/Rock 'n' Roll/Take 2.wav'","out":"path = '<path>.wav'"}
+{"in":"copy '/Users/a/x.wav' to '/Users/a/O' Mine.wav', failed","out":"copy '<path>.wav' to '<path>.wav', failed"}
+{"in":"path = '/Users/a/The Players' (Club Mix) - Mine.wav' (OS Error: x)","out":"path = '<path>.wav' (OS Error: x)"}
+{"in":"open '/Users/a/Don't.wav', retrying","out":"open '<path>.wav', retrying"}
+{"in":"copy '/Users/a/x.wav' to '/Users/b/y.aiff'","out":"copy '<path>.wav' to '<path>.aiff'"}
+{"in":"path = '/Users/a/Music/Blue Monday (12\" Version).mp3' (OS Error: x, errno = 2)","out":"path = '<path>.mp3' (OS Error: x, errno = 2)"}
+{"in":"path = '/Users/a/Song \"Live at Wembley\".m4a'","out":"path = '<path>.m4a'"}
+{"in":"path = '/Users/a/Song \"Live\".m4a' (OS Error: x)","out":"path = '<path>.m4a' (OS Error: x)"}
+{"in":"open \"/Users/a/x.wav\" failed","out":"open \"<path>.wav\" failed"}
+{"in":"copy \"/Users/a/x.wav\" to \"/Users/b/y.aiff\"","out":"copy \"<path>.wav\" to \"<path>.aiff\""}
+{"in":"decode failed for /Users/alice/Music/take.wav after 12.3s","out":"decode failed for <path>.wav after 12.3s"}
+{"in":"stage /Users/alice/Music/My Song.m4a: rate 22.05 kHz unsupported","out":"stage <path>.m4a: rate 22.05 kHz unsupported"}
+{"in":"import failed: /Users/alice/Music/Sonata Op.27.Part II (Jane Doe).wma","out":"import failed: <path>.wma"}
+{"in":"decode failed: /Users/alice/Movies/Lesson.mov with Jane Doe.avi","out":"decode failed: <path>.avi"}
+{"in":"#0  AssetStore._importFile (package:vocara/data/db/asset_store.dart:61:5)","out":"#0  AssetStore._importFile (package:vocara/data/db/asset_store.dart:61:5)"}
+{"in":"ratio 44100/48000","out":"ratio 44100/48000"}
+{"in":"dart:async boom","out":"dart:async boom"}
+{"in":"discard failed: FileSystemException: Deletion failed, path = '/Users/ruta/Library/Containers/app/take.wav'","out":"discard failed: FileSystemException: Deletion failed, path = '<path>.wav'"}
+{"in":"/Users","out":"/Users"}
+{"in":"/Users/","out":"/Users/"}
+{"in":"/Users/x","out":"<path>"}
+{"in":"/Usersx/y","out":"/Usersx/y"}
+{"in":"x/Users/y.wav","out":"x<path>.wav"}
+{"in":"/variable/x.wav /var/log/system.log","out":"/variable/x.wav <path>.log"}
+{"in":"/home/me/.config/vocara/settings.json\nnext line /tmp/a.b.c.d","out":"<path>.json\nnext line <path>.d"}
+{"in":"/opt/homebrew/lib/python3.12/site-packages/demucs/model.ckpt loaded","out":"<path>.ckpt loaded"}
+{"in":"/etc/hosts;/etc/passwd","out":"<path>"}
+{"in":"/tmp/'quoted'/file.txt","out":"<path>.txt"}
+{"in":"/tmp/a' (OS Error: denied)","out":"<path>' (OS Error: denied)"}
+{"in":"/tmp/a'  ","out":"<path>'  "}
+{"in":"/tmp/a'.","out":"<path>'."}
+{"in":"/tmp/a'.x","out":"<path>.x"}
+{"in":"/tmp/a',b","out":"<path>',b"}
+{"in":"/Library/Application Support/com.rutatang.vocara/vocara.db-wal is locked","out":"<path>"}
+{"in":"/Applications/Vocara.app/Contents/MacOS/Vocara crashed at 0x1f","out":"<path>"}
+{"in":"/Users/a/b.c.d.e.f.g.h.i.j.k","out":"<path>.k"}
+{"in":"/Users/a/song.WAV and /Users/b/other.Flac","out":"<path>.WAV and <path>.Flac"}
+{"in":"/Users/a/x.wav /Users/b/y.wav","out":"<path>.wav <path>.wav"}
+{"in":"/Users/a/x.wav \"/Users/b/y.wav\"","out":"<path>.wav \"<path>.wav\""}
+{"in":"/Users/a/été 中文 😀.mp3 gone","out":"<path>.mp3 gone"}
+{"in":"/Users/a/archive.tar.gz copied 1.5 MB in 0.25s","out":"<path>.25s"}
+{"in":"/Users/a/take.wav after 12.3s then.mp3","out":"<path>.mp3"}
+{"in":"/Users/a/take.wav x.1 y.2 z.wav","out":"<path>.wav"}
+{"in":"/Users/a/file.toolongextension done","out":"<path>"}
+{"in":"/Users/a/v1.2.3/ok","out":"<path>"}
+{"in":"no paths here at all","out":"no paths here at all"}
+{"in":"","out":""}
