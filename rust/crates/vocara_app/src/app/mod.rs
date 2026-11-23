@@ -55,6 +55,16 @@ pub const SCREENSHOT_VAR: &str = "VOCARA_SCREENSHOT";
 /// How long after the first frame the screenshot is taken.
 const SCREENSHOT_DELAY: Duration = Duration::from_secs(4);
 
+/// `DiagnosticsLog.attachGlobalHooks()`, the first thing `main` does: binds
+/// the diagnostics log to the application support directory (the library
+/// folder, where the export and the release's launch check read it), so
+/// every entry from here on is appended to the rotating on-disk log, and
+/// logs every uncaught panic before handing it to the default hook. Without
+/// the bind the log only ever buffers in memory.
+pub fn attach_diagnostics() {
+    DiagnosticsLog::instance().attach_global_hooks(None);
+}
+
 /// How the app starts.
 #[derive(Clone)]
 pub struct Boot {
