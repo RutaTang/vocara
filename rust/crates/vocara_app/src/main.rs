@@ -19,7 +19,9 @@
 //! - `Persistence.open` with its refusals and failures → the app's boot
 //!   (`app::library`), with the fatal windows;
 //! - the reveal-after-first-frame channel → iced shows the window once its
-//!   first UI is built.
+//!   first UI is built;
+//! - the Runner's menu bar (`MainMenu.xib`) → `vocara_services::app_menu`,
+//!   installed when the window opens.
 
 use std::sync::Arc;
 
