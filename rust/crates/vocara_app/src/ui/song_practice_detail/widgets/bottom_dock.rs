@@ -90,12 +90,14 @@ pub fn tab_label(t: DockTab) -> &'static str {
 /// (`max_height`, the whole dock's share, chrome included) — and never
 /// negative.
 pub fn content_height(dock_height: f64, max_height: f32) -> f32 {
-    (dock_height as f32).min(max_height - CHROME_HEIGHT).max(0.0)
+    (dock_height as f32)
+        .min(max_height - CHROME_HEIGHT)
+        .max(0.0)
 }
 
-/// The height a resize move sets (`vm.analysis.setDockHeight(_contentHeight
-/// - dy)`): from the height on screen — the stored height, capped at `cap`
-/// (the content's room) — less the move.
+/// The height a resize move sets (`setDockHeight(_contentHeight - dy)`):
+/// from the height on screen — the stored height, capped at `cap` (the
+/// content's room) — less the move.
 pub fn resized_height(dock_height: f64, cap: f32, dy: f32) -> f64 {
     dock_height.min(f64::from(cap)).max(0.0) - f64::from(dy)
 }
@@ -183,12 +185,7 @@ pub fn bottom_dock(dock: BottomDock<'_>) -> Element<'_, Message> {
         .into(),
         _ => Space::new().into(),
     };
-    let tabs = tab_bar(
-        open,
-        dock.tab,
-        open && dock.supports_live,
-        dock.live,
-    );
+    let tabs = tab_bar(open, dock.tab, open && dock.supports_live, dock.live);
     column![
         container(Space::new())
             .width(Length::Fill)
@@ -269,7 +266,11 @@ fn tab_bar<'a>(open: bool, tab: DockTab, shows_live: bool, live: bool) -> Elemen
             continue;
         }
         tabs = tabs
-            .push(dock_tab(tab_label(t), open && tab == t, Message::ShowDockTab(t)))
+            .push(dock_tab(
+                tab_label(t),
+                open && tab == t,
+                Message::ShowDockTab(t),
+            ))
             .push(Space::new().width(6));
     }
     let mut bar = row![

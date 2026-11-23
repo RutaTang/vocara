@@ -21,7 +21,9 @@ pub struct WakeFeed {
 
 impl WakeFeed {
     fn listeners(&self) -> MutexGuard<'_, Vec<UnboundedSender<()>>> {
-        self.listeners.lock().unwrap_or_else(PoisonError::into_inner)
+        self.listeners
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Rings every listener, forgetting the ones that are gone.

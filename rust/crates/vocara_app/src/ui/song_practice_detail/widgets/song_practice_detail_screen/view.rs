@@ -26,9 +26,9 @@ use vocara_model::models::song_practice::SongPractice;
 use vocara_model::util::dart_num::round_to_i64;
 
 use super::{
-    ms, selected_track_ref, timeline_envelope_painter, timeline_scroll_thumb, DropZone,
-    InterpretationAction, Message, OpenMenu, SongPracticeDetailScreen, Shown, FINISHING_SAVE,
-    MIN_TIMELINE_HEIGHT, NOT_LOADED, WAIT_FOR_SAVE, WAIT_FOR_SEPARATION,
+    ms, selected_track_ref, DropZone, InterpretationAction, Message, OpenMenu, Shown,
+    SongPracticeDetailScreen, FINISHING_SAVE, MIN_TIMELINE_HEIGHT, NOT_LOADED, WAIT_FOR_SAVE,
+    WAIT_FOR_SEPARATION,
 };
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{self, alpha, bare_button, boxed, fill, font, Studio};
@@ -40,6 +40,7 @@ use crate::ui::core::widgets::visible_drop_target::visible_drop_target;
 use crate::ui::core::widgets::waveform_painter::{PlayheadPainter, TimelineGridPainter};
 use crate::ui::core::widgets::wrap::Wrap;
 use crate::ui::song_practice_detail::view_model::analysis_source::AnalysisSource;
+use crate::ui::song_practice_detail::view_model::interpretations_controller::InterpretationsController;
 use crate::ui::song_practice_detail::view_model::song_practice_detail_view_model::{
     LyricsMode, RightTab, SongPracticeDetailViewModel,
 };
@@ -56,14 +57,16 @@ use crate::ui::song_practice_detail::widgets::lyrics_panel::{
 use crate::ui::song_practice_detail::widgets::mixer_shared::keyed_column;
 use crate::ui::song_practice_detail::widgets::mixer_strip::{MicInput, MixerStrip};
 use crate::ui::song_practice_detail::widgets::ruler_bar::{ruler_bar, RulerBar, RULER_HEIGHT};
+use crate::ui::song_practice_detail::widgets::timeline::{
+    timeline_envelope_painter, timeline_scroll_thumb,
+};
 use crate::ui::song_practice_detail::widgets::track_context_menu::{
-    argb, bus_context_menu, clip_context_menu, menu_host, studio_menu, track_context_menu,
-    BusMenu, StudioMenuItem, TrackMenu,
+    argb, bus_context_menu, clip_context_menu, menu_host, studio_menu, track_context_menu, BusMenu,
+    StudioMenuItem, TrackMenu,
 };
 use crate::ui::song_practice_detail::widgets::track_row::{
     ms_toggle, track_menu_button, track_row, TIMELINE_H_MARGIN, TRACK_HEADER_W, TRACK_ROW_HEIGHT,
 };
-use crate::ui::song_practice_detail::view_model::interpretations_controller::InterpretationsController;
 
 /// What `vm.lyricsAsText()` gives a view (only the update side reads it).
 static NO_TEXT: fn() -> String = String::new;
@@ -120,9 +123,7 @@ pub(super) fn panel_data<'a>(
         lyrics_draft: vm.lyrics_draft(),
         lyrics_edit_session: vm.lyrics_edit_session(),
         sync_index: vm.sync_index() as i64,
-        current_lyric_index: vm
-            .current_lyric_index(position_ms)
-            .map_or(-1, |i| i as i64),
+        current_lyric_index: vm.current_lyric_index(position_ms).map_or(-1, |i| i as i64),
         selected_track: vm
             .practice()
             .and_then(|p| selected_track_ref(vm, p))
@@ -146,7 +147,11 @@ impl Shown {
         self.mixer_tracks = vm
             .active_backing()
             .into_iter()
-            .chain(practice.map(SongPractice::active_vocal_tracks).unwrap_or_default())
+            .chain(
+                practice
+                    .map(SongPractice::active_vocal_tracks)
+                    .unwrap_or_default(),
+            )
             .collect();
         self.notes = vm.selected_track_notes();
         self.techniques = vm.selected_track_techniques();
@@ -188,7 +193,12 @@ impl SongPracticeDetailScreen {
             return no_workspace(spinner(36.0, 4.0, Studio::TEXT_SECONDARY));
         }
         let Some(practice) = vm.practice() else {
-            return no_workspace(text(NOT_LOADED).size(14).color(Studio::TEXT_SECONDARY).into());
+            return no_workspace(
+                text(NOT_LOADED)
+                    .size(14)
+                    .color(Studio::TEXT_SECONDARY)
+                    .into(),
+            );
         };
         let workspace = responsive(move |size| {
             // However tall the dock is dragged, the timeline keeps its
@@ -308,7 +318,11 @@ impl SongPracticeDetailScreen {
     }
 
     /// `BottomDock`, at most `max_height` tall.
-    fn dock_view<'a>(&'a self, practice: &'a SongPractice, max_height: f32) -> Element<'a, Message> {
+    fn dock_view<'a>(
+        &'a self,
+        practice: &'a SongPractice,
+        max_height: f32,
+    ) -> Element<'a, Message> {
         let vm = &*self.vm;
         let a = vm.analysis();
         let open = a.dock_open();
@@ -384,11 +398,7 @@ impl SongPracticeDetailScreen {
             .width(Length::Fill)
             .height(Length::Fill)
             .style(fill(Studio::BACKGROUND));
-        let column = column![
-            ruler,
-            lanes,
-            self.scrollbar(practice, dur, view_start)
-        ];
+        let column = column![ruler, lanes, self.scrollbar(practice, dur, view_start)];
         let mut layers = stack![column];
         // Loop region band across the timeline area (only while looping).
         if playback.loop_enabled() && dur > 0 {
@@ -550,7 +560,11 @@ impl SongPracticeDetailScreen {
         .view_start_ms(view_start)
         .selected(selected)
         .armed(!track.is_backing() && is_target)
-        .selected_clip_id(if selected { vm.selected_clip_id() } else { None })
+        .selected_clip_id(if selected {
+            vm.selected_clip_id()
+        } else {
+            None
+        })
         .reorderable(!track.is_backing())
         .expand(!track.is_backing(), expanded, true)
         .lane_drag(self.lane_drag.as_deref())
@@ -713,9 +727,11 @@ impl SongPracticeDetailScreen {
                     .font(font::BOLD)
                     .color(Studio::TEXT_FAINT),
                 Space::new().width(10),
-                container(row![new_take, Space::new().width(10), dropdown].align_y(Vertical::Center))
-                    .width(Length::Fill)
-                    .align_x(Horizontal::Right),
+                container(
+                    row![new_take, Space::new().width(10), dropdown].align_y(Vertical::Center)
+                )
+                .width(Length::Fill)
+                .align_x(Horizontal::Right),
             ]
             .align_y(Vertical::Center),
         )
@@ -737,8 +753,11 @@ impl SongPracticeDetailScreen {
             .versions
             .iter()
             .map(|v| {
-                StudioMenuItem::new(v.name.clone(), InterpretationAction::SetActive(v.id.clone()))
-                    .selected(Some(v.id.as_str()) == active)
+                StudioMenuItem::new(
+                    v.name.clone(),
+                    InterpretationAction::SetActive(v.id.clone()),
+                )
+                .selected(Some(v.id.as_str()) == active)
             })
             .collect();
         items.push(
@@ -1021,16 +1040,17 @@ fn catch_up_guard(workspace: Element<'_, Message>, catching_up: bool) -> Element
     if catching_up {
         // A file dropped on the guard: nothing beneath takes it through the
         // guard, so it is said instead.
-        let dim = container(
-            text(FINISHING_SAVE)
-                .size(13)
-                .color(Studio::TEXT_SECONDARY),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
-        .style(fill(Color::from_rgba8(0x0A, 0x0A, 0x0E, 0x80 as f32 / 255.0)));
+        let dim = container(text(FINISHING_SAVE).size(13).color(Studio::TEXT_SECONDARY))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .style(fill(Color::from_rgba8(
+                0x0A,
+                0x0A,
+                0x0E,
+                0x80 as f32 / 255.0,
+            )));
         layers = layers.push(opaque(visible_drop_target(dim, |_| {
             Message::RefusedDrop(WAIT_FOR_SAVE)
         })));
@@ -1103,7 +1123,12 @@ fn separation_overlay<'a>(progress: Option<f64>, can_cancel: bool) -> Element<'a
         .height(Length::Fill)
         .center_x(Length::Fill)
         .center_y(Length::Fill)
-        .style(fill(Color::from_rgba8(0x0A, 0x0A, 0x0E, 0xC4 as f32 / 255.0)));
+        .style(fill(Color::from_rgba8(
+            0x0A,
+            0x0A,
+            0x0E,
+            0xC4 as f32 / 255.0,
+        )));
     holds_keyboard(opaque(visible_drop_target(barrier, |_| {
         Message::RefusedDrop(WAIT_FOR_SEPARATION)
     })))
@@ -1156,16 +1181,11 @@ fn section_label<'a>(label: &'static str, top: f32) -> Element<'a, Message> {
 fn backing_header<'a>(reference: bool) -> Element<'a, Message> {
     let seg = |label: &'static str, active: bool, value: bool| {
         button(
-            container(
-                text(label)
-                    .size(11)
-                    .font(font::BOLD)
-                    .color(if active {
-                        Studio::ACCENT_BRIGHT
-                    } else {
-                        Studio::TEXT_SECONDARY
-                    }),
-            )
+            container(text(label).size(11).font(font::BOLD).color(if active {
+                Studio::ACCENT_BRIGHT
+            } else {
+                Studio::TEXT_SECONDARY
+            }))
             .padding(Padding::from([4, 12]))
             .style(move |_| {
                 boxed(
@@ -1318,7 +1338,10 @@ fn drop_zone(content: Element<'_, Message>, zone: DropZone) -> Element<'_, Messa
 
 /// A 74 px timeline row inset to the lanes: `header` over the header
 /// column, `lane` across the timeline, a 1 px line under both.
-fn timeline_row<'a>(header: Element<'a, Message>, lane: Element<'a, Message>) -> Element<'a, Message> {
+fn timeline_row<'a>(
+    header: Element<'a, Message>,
+    lane: Element<'a, Message>,
+) -> Element<'a, Message> {
     container(column![
         row![header, lane].height(Length::Fill),
         container(Space::new())
@@ -1398,7 +1421,9 @@ pub(super) fn wheel_pan_ms(x: f32, y: f32, shift: bool, width: f32, span: i64) -
     if delta == 0.0 {
         return None;
     }
-    Some(round_to_i64(f64::from(delta) / f64::from(width) * span as f64))
+    Some(round_to_i64(
+        f64::from(delta) / f64::from(width) * span as f64,
+    ))
 }
 
 /// The `Listener` over the lane list: pans the viewport on a two-finger
@@ -1610,7 +1635,11 @@ impl canvas::Program<Message> for Scrollbar {
         cursor: mouse::Cursor,
     ) -> mouse::Interaction {
         let (thumb, _) = self.thumb(bounds);
-        if state.press.is_some() || cursor.position_in(bounds).is_some_and(|p| thumb.contains(p)) {
+        if state.press.is_some()
+            || cursor
+                .position_in(bounds)
+                .is_some_and(|p| thumb.contains(p))
+        {
             mouse::Interaction::Grab
         } else {
             mouse::Interaction::None
@@ -1714,9 +1743,7 @@ impl Widget<Message, Theme, Renderer> for Reserve<'_> {
             limits.min(),
             Size::new((max.width - self.reserve).max(0.0), max.height),
         );
-        self.content
-            .as_widget_mut()
-            .layout(tree, renderer, &limits)
+        self.content.as_widget_mut().layout(tree, renderer, &limits)
     }
 
     fn draw(

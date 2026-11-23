@@ -12,9 +12,8 @@ use vocara_model::util::format::format_clock_ms;
 
 use super::{
     backing_set_toast, is_audio_path, ms, panel_data, Asked, Awaited, DropRun, DropZone,
-    InterpretationAction, Message, NoteTarget, OpenMenu, OpenPicker, Owed, Render,
-    RunKind, SongPracticeDetailScreen, Source, Step, NO_AUDIO_IN_DROP,
-    SNACK_DURATION,
+    InterpretationAction, Message, NoteTarget, OpenMenu, OpenPicker, Owed, Render, RunKind,
+    SongPracticeDetailScreen, Source, Step, NO_AUDIO_IN_DROP, SNACK_DURATION,
 };
 use crate::router::{Navigation, Route};
 use crate::ui::core::widgets::confirm_dialog::{ConfirmDialog, Dialog, DialogResult};
@@ -96,7 +95,8 @@ impl SongPracticeDetailScreen {
                 self.absorb(fx, &mut step);
             }
             Message::CommitFx => {
-                self.owed.retain(|o| !matches!(o, Owed::Fx(Source::Lane(_))));
+                self.owed
+                    .retain(|o| !matches!(o, Owed::Fx(Source::Lane(_))));
                 let fx = self.vm.commit_fx();
                 self.absorb(fx, &mut step);
             }
@@ -133,11 +133,7 @@ impl SongPracticeDetailScreen {
                     step.picks.push((zone, None));
                 }
             }
-            Message::Picked {
-                zone,
-                paths,
-                at_ms,
-            } => {
+            Message::Picked { zone, paths, at_ms } => {
                 if !paths.is_empty() {
                     self.drop_files(zone, paths, at_ms, &mut step);
                 }
@@ -354,15 +350,13 @@ impl SongPracticeDetailScreen {
             transport::Message::ToggleInputMonitor => {
                 self.vm.recording_do(|r, h| r.toggle_input_monitor(h))
             }
-            transport::Message::StartRecording => {
-                self.vm.recording_do(|r, h| r.start_recording(h))
-            }
+            transport::Message::StartRecording => self.vm.recording_do(|r, h| r.start_recording(h)),
             transport::Message::ZoomTimeline(factor) => {
                 self.vm.playback_do(|p, h| p.zoom_timeline(h, factor))
             }
-            transport::Message::SetTimelineZoomLive(value) => {
-                self.vm.playback_do(|p, h| p.set_timeline_zoom_live(h, value))
-            }
+            transport::Message::SetTimelineZoomLive(value) => self
+                .vm
+                .playback_do(|p, h| p.set_timeline_zoom_live(h, value)),
             transport::Message::CommitTimelineZoom => {
                 self.vm.playback_do(|p, _| p.commit_timeline_zoom())
             }
@@ -409,7 +403,9 @@ impl SongPracticeDetailScreen {
                 self.menu = Some(OpenMenu::Track(track_id));
                 return;
             }
-            track_row::Message::EditNote(note_id) => return self.edit_note(track_id, &note_id, step),
+            track_row::Message::EditNote(note_id) => {
+                return self.edit_note(track_id, &note_id, step)
+            }
             track_row::Message::AddNote => {
                 let at = ms(self.vm.position());
                 return self.add_note_at(track_id, at, None, step);
@@ -574,9 +570,9 @@ impl SongPracticeDetailScreen {
             } => self
                 .vm
                 .mixer_do(|m, h| m.add_bus_send(h, &bus_id, &target_bus_id)),
-            L::RemoveBusSend { bus_id, slot } => self
-                .vm
-                .mixer_do(|m, h| m.remove_bus_send(h, &bus_id, slot)),
+            L::RemoveBusSend { bus_id, slot } => {
+                self.vm.mixer_do(|m, h| m.remove_bus_send(h, &bus_id, slot))
+            }
             L::SetBusSendTarget {
                 bus_id,
                 slot,
@@ -906,7 +902,10 @@ impl SongPracticeDetailScreen {
             // before, and read per file, playback running on meanwhile spread
             // the files across the song. (Stacked at one spot instead, they
             // hid each other, and the lane's analysis kept only the last.)
-            DropZone::Take(track_id) => RunKind::Clip { track_id, at_ms: at },
+            DropZone::Take(track_id) => RunKind::Clip {
+                track_id,
+                at_ms: at,
+            },
         };
         let mut run = DropRun {
             id,
@@ -1125,9 +1124,9 @@ impl SongPracticeDetailScreen {
             return;
         };
         if let Some(t) = picked {
-            let fx = self
-                .vm
-                .add_technique(&open.track_id, &t.id, &t.name, open.start_ms, open.end_ms);
+            let fx =
+                self.vm
+                    .add_technique(&open.track_id, &t.id, &t.name, open.start_ms, open.end_ms);
             self.absorb(fx, step);
         }
     }
@@ -1203,8 +1202,11 @@ impl SongPracticeDetailScreen {
         let reseparate = self.vm.can_reseparate();
         // A backing the user imported is replaced too (with its notes and
         // mix), and the first-extraction copy did not say so.
-        let replaces_import =
-            !reseparate && self.vm.practice().is_some_and(|p| p.accompaniment.is_some());
+        let replaces_import = !reseparate
+            && self
+                .vm
+                .practice()
+                .is_some_and(|p| p.accompaniment.is_some());
         let dialog = ConfirmDialog::new(if reseparate {
             "Re-extract the backing?"
         } else {
@@ -1313,7 +1315,8 @@ impl SongPracticeDetailScreen {
                 // "At playhead" means where it was at the tap: the open
                 // panel can stay up for seconds while playback runs on.
                 let at = ms(self.vm.position());
-                step.picks.push((DropZone::Take(track.id.clone()), Some(at)));
+                step.picks
+                    .push((DropZone::Take(track.id.clone()), Some(at)));
                 return;
             }
             TrackAction::Duplicate => self.vm.duplicate_track(&id),
@@ -1522,7 +1525,10 @@ impl SongPracticeDetailScreen {
     /// The dock's Spectrogram image and each folded-out take's spectrogram
     /// lane image.
     fn sync_images(&mut self, step: &mut Step) {
-        let (dock_open, dock_tab) = (self.vm.analysis().dock_open(), self.vm.analysis().dock_tab());
+        let (dock_open, dock_tab) = (
+            self.vm.analysis().dock_open(),
+            self.vm.analysis().dock_tab(),
+        );
         if dock_open && dock_tab == DockTab::Spectrogram {
             if let Some(render) = self.voiceprint.sync_request(&*self.vm) {
                 step.renders.push((Render::Dock, render));
@@ -1650,4 +1656,3 @@ impl SongPracticeDetailScreen {
 fn millis(ms: i64) -> Duration {
     Duration::from_millis(u64::try_from(ms).unwrap_or(0))
 }
-

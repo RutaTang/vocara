@@ -112,7 +112,6 @@ use crate::app::library::RemoteAppliedBroadcast;
 use crate::services::Services;
 use crate::ui::core::widgets::confirm_dialog::DialogResult;
 use crate::ui::core::widgets::spectrogram_painter::{release_spectrogram_images, RenderRequest};
-use crate::ui::core::widgets::waveform_painter::{visible_peak_slice, WaveformPainter};
 use crate::ui::song_practice_detail::view_model::analysis_cache::{self, EqInputColumn};
 use crate::ui::song_practice_detail::view_model::interpretations_controller::VersionsOp;
 use crate::ui::song_practice_detail::view_model::recording_controller::{
@@ -176,86 +175,6 @@ pub fn is_audio_path(path: &str) -> bool {
 /// The toast after a drop on a set backing slot became vocal takes.
 pub fn backing_set_toast(slot: &str) -> String {
     format!("The {slot} is already set, so the drop was added as vocal takes.")
-}
-
-// ------------------------------------------------------- the pure geometry
-
-/// The timeline scrollbar's thumb in a groove `groove_w` px wide.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ScrollThumb {
-    /// Its left edge.
-    pub left: f64,
-    pub width: f64,
-    /// How many ms one px of thumb drag pans (0 when there is nothing to
-    /// scroll).
-    pub ms_per_px: f64,
-}
-
-/// `timelineScrollThumb`: the thumb for the view `start_ms` + `span_ms` of
-/// a timeline `extent_ms` long.
-///
-/// The thumb has a 28 px floor so it stays grabbable at deep zoom, so it is
-/// wider than its share of the timeline and its left edge can only travel
-/// `groove_w - width`: the start maps over THAT range ([0, extent − span]
-/// onto [0, travel]), and a drag maps back the same way. Mapping the start
-/// onto the whole groove instead ran the floored thumb off the groove's end
-/// near the last page, clipped to a ~2 px sliver at deep zoom.
-pub fn timeline_scroll_thumb(
-    start_ms: i64,
-    span_ms: i64,
-    extent_ms: i64,
-    groove_w: f64,
-) -> ScrollThumb {
-    let floor = if groove_w < 28.0 { groove_w } else { 28.0 };
-    let width = (span_ms as f64 / extent_ms as f64 * groove_w).clamp(floor, groove_w.max(floor));
-    let travel = groove_w - width;
-    // A song shorter than the minimum view span has span > extent.
-    let scroll_ms = extent_ms - span_ms;
-    if travel <= 0.0 || scroll_ms <= 0 {
-        return ScrollThumb {
-            left: 0.0,
-            width,
-            ms_per_px: 0.0,
-        };
-    }
-    ScrollThumb {
-        left: (start_ms as f64 / scroll_ms as f64 * travel).clamp(0.0, travel),
-        width,
-        ms_per_px: scroll_ms as f64 / travel,
-    }
-}
-
-/// `timelineEnvelopePainter`: the painter for a whole-timeline envelope —
-/// the master or a bus lane's, `peaks` bucketed over `extent_ms` from 0 — in
-/// the view `view_start_ms` + `view_span_ms`: only the visible slice,
-/// anchored through the shared helper so it lines up with the zoomed lanes,
-/// ruler and playhead above.
-///
-/// The view can reach past `extent_ms` (a take recording on past the
-/// timeline's end stretches the view until it is saved; a song shorter than
-/// the minimum view span): the slice then fills only the lane's share up to
-/// the timeline's end. Spread over the whole lane, every peak drew late.
-pub fn timeline_envelope_painter(
-    peaks: Arc<[f64]>,
-    extent_ms: i64,
-    view_start_ms: i64,
-    view_span_ms: i64,
-    color: iced::Color,
-) -> WaveformPainter {
-    if extent_ms <= 0 || peaks.is_empty() || (view_start_ms <= 0 && view_span_ms == extent_ms) {
-        return WaveformPainter::new(peaks, color);
-    }
-    let end = if view_start_ms + view_span_ms > extent_ms {
-        extent_ms
-    } else {
-        view_start_ms + view_span_ms
-    };
-    if end <= view_start_ms {
-        return WaveformPainter::new(Arc::from(Vec::new()), color);
-    }
-    let slice = visible_peak_slice(peaks.len(), 0, extent_ms, view_start_ms, end);
-    WaveformPainter::sliced(peaks, slice, color)
-        .width_fraction((end - view_start_ms) as f64 / view_span_ms as f64)
 }
 
 // ------------------------------------------------------------------ messages
@@ -381,7 +300,10 @@ pub enum Message {
     /// A bus lane's S (`vm.mixer.toggleBusSolo`).
     ToggleBusSolo(String),
     /// A bus lane's fader (`vm.mixer.setBusVolumeLive`).
-    SetBusVolumeLive { bus_id: String, volume: f64 },
+    SetBusVolumeLive {
+        bus_id: String,
+        volume: f64,
+    },
     /// A bus lane's fader released (`vm.commitFx`).
     CommitFx,
     /// The master lane's fader (`vm.mixer.setMasterVolumeLive`).
@@ -392,9 +314,15 @@ pub enum Message {
     /// pan the view by this many ms (`vm.playback.panView`).
     PanView(i64),
     /// Files dropped on a drop zone.
-    Drop { zone: DropZone, paths: Vec<PathBuf> },
+    Drop {
+        zone: DropZone,
+        paths: Vec<PathBuf>,
+    },
     /// A dragged file entered (or left) a drop zone.
-    DropHover { zone: DropZone, hover: bool },
+    DropHover {
+        zone: DropZone,
+        hover: bool,
+    },
     /// A drop hint was clicked: browse for audio for its zone.
     Browse(DropZone),
     /// The open panel answered (`at_ms`: where a take menu's "Add audio
@@ -673,7 +601,9 @@ fn work_task(effect: Effect) -> Task<Message> {
         }),
         Effect::FinalizeTake(op, run) => run.into_task(move |o| Message::Finalized(op, o)),
         Effect::FinalizeRetry { op, after } => {
-            Task::perform(tokio::time::sleep(after), move |_| Message::FinalizeRetry(op))
+            Task::perform(tokio::time::sleep(after), move |_| {
+                Message::FinalizeRetry(op)
+            })
         }
         Effect::MonitorMicPermission => Task::perform(blocking(mic_permission::request), |r| {
             Message::MonitorPermission(r.unwrap_or(false))
@@ -826,8 +756,14 @@ impl SongPracticeDetailScreen {
         (screen, step.into_update().task)
     }
 
-    fn open(practice_id: String, services: &Services, deps: Deps, options: Options) -> (Self, Step) {
-        let (mut vm, effects) = SongPracticeDetailViewModel::new(deps, practice_id.clone(), options);
+    fn open(
+        practice_id: String,
+        services: &Services,
+        deps: Deps,
+        options: Options,
+    ) -> (Self, Step) {
+        let (mut vm, effects) =
+            SongPracticeDetailViewModel::new(deps, practice_id.clone(), options);
         let quit_feed = Arc::new(WakeFeed::default());
         let waker = Arc::clone(&quit_feed);
         vm.set_quit_waker(move || waker.wake());
@@ -947,7 +883,8 @@ impl Screen for SongPracticeDetailScreen {
             );
         }
         if vm.analysis().capture_pump_active() {
-            subscriptions.push(iced::time::every(CAPTURE_PUMP_PERIOD).map(|_| Message::PumpCapture));
+            subscriptions
+                .push(iced::time::every(CAPTURE_PUMP_PERIOD).map(|_| Message::PumpCapture));
         }
         if recording.next_mic_tick_due().is_some() {
             subscriptions.push(

@@ -134,7 +134,7 @@ pub fn diff_keyed<'a, K: PartialEq, M>(
 pub struct Keyed<'a, K: Copy + PartialEq + 'static, M> {
     keys: Vec<K>,
     children: Vec<Element<'a, M>>,
-    axis: flex::Axis,
+    vertical: bool,
     width: Length,
     height: Length,
     padding: Padding,
@@ -146,7 +146,7 @@ pub fn keyed_row<'a, K: Copy + PartialEq + 'static, M>() -> Keyed<'a, K, M> {
     Keyed {
         keys: Vec::new(),
         children: Vec::new(),
-        axis: flex::Axis::Horizontal,
+        vertical: false,
         width: Length::Shrink,
         height: Length::Shrink,
         padding: Padding::ZERO,
@@ -158,7 +158,7 @@ pub fn keyed_row<'a, K: Copy + PartialEq + 'static, M>() -> Keyed<'a, K, M> {
 /// take, bus and section).
 pub fn keyed_column<'a, K: Copy + PartialEq + 'static, M>() -> Keyed<'a, K, M> {
     Keyed {
-        axis: flex::Axis::Vertical,
+        vertical: true,
         ..keyed_row()
     }
 }
@@ -228,9 +228,10 @@ impl<K: Copy + PartialEq + 'static, M> Widget<M, Theme, Renderer> for Keyed<'_, 
         renderer: &Renderer,
         limits: &layout::Limits,
     ) -> layout::Node {
-        let axis = match self.axis {
-            flex::Axis::Horizontal => flex::Axis::Horizontal,
-            flex::Axis::Vertical => flex::Axis::Vertical,
+        let axis = if self.vertical {
+            flex::Axis::Vertical
+        } else {
+            flex::Axis::Horizontal
         };
         flex::resolve(
             axis,
