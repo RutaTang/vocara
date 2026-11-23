@@ -112,9 +112,10 @@ fn a_quit_waits_for_a_save_still_landing_a_large_file_past_its_budget() {
     // step stalled for a whole window (not scheduling jitter on a loaded
     // machine) could read as a wedge.
     //
-    // RecordingFinalizer is not ported yet: its progress rule is played here
-    // as the quit runs it — wait one budget window; past it, keep waiting
-    // only while the reading moved since the last look, up to the ceiling.
+    // The quit's progress rule is played here as RecordingFinalizer runs it —
+    // wait one budget window; past it, keep waiting only while the reading
+    // moved since the last look, up to the ceiling. The same case against the
+    // real finalizer is vocara_services' tests/recording_finalizer_progress.rs.
     let f = fixture();
     let (fs, first_flush) = SlowFs::new(Duration::from_millis(300));
     let store = Arc::new(f.store_with(fs));
