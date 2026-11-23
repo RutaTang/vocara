@@ -539,7 +539,9 @@ pub struct MonitorService {
 }
 
 /// A read-only lock on a [`MonitorService`]'s [`MonitorState`]. Hold it only
-/// while reading: the feeder waits for it.
+/// while reading: the feeder waits for it. The lock is not reentrant, so
+/// read what the service's own methods report (`revision`, `active`) off
+/// this instead while holding it.
 pub struct MonitorRead<'a>(MutexGuard<'a, MonitorState>);
 
 impl Deref for MonitorRead<'_> {

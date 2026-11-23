@@ -174,15 +174,15 @@ behavior and its tests are ported and the gates pass.
 | `data/services/diagnostics_log.dart` | 440 | `vocara_model::diagnostics` (used by the store too) | done |
 | `data/services/graph_audio_playback_service.dart` | 1533 | `vocara_services::graph_audio_playback_service` | todo |
 | `data/services/local_storage_service.dart` | 110 | `vocara_services::local_storage_service` | done |
-| `data/services/media_analysis_service.dart` | 112 | `vocara_services::media_analysis_service` | todo |
+| `data/services/media_analysis_service.dart` | 112 | `vocara_services::media_analysis_service` | done (the default decoder is the engine bridge's; its tests run on injected decoders) |
 | `data/services/mic_permission.dart` | 36 | `vocara_services::mic_permission` | done (macOS half type-checked; runs on CI) |
 | `data/services/mic_recording_controller.dart` | 681 | `vocara_services::mic_recording_controller` | todo |
-| `data/services/monitor_service.dart` | 262 | `vocara_services::monitor_service` | todo |
+| `data/services/monitor_service.dart` | 262 | `vocara_services::monitor_service` | done |
 | `data/services/playback_engine.dart` | 147 | `vocara_services::playback_engine` | done |
 | `data/services/playback_engine_factory.dart` | 8 | `vocara_services::playback_engine_factory` | todo |
 | `data/services/recording_finalizer.dart` | 331 | `vocara_services::recording_finalizer` | done |
 | `data/services/source_separation_service.dart` | 745 | `vocara_services::source_separation_service` | done |
-| `data/services/spectrogram_service.dart` | 463 | `vocara_services::spectrogram_service` | todo |
+| `data/services/spectrogram_service.dart` | 463 | `vocara_services::spectrogram_service` | done (the RSS measurements are ignored tests, run alone on Linux) |
 | `data/services/technique_media_service.dart` | 103 | `vocara_services::technique_media_service` | done |
 | `data/services/update_check_service.dart` | 285 | `vocara_services::update_check_service` | done |
 | `data/services/waveform_service.dart` | 169 | `vocara_services::waveform_service` | done (decode supplied by the engine bridge) |
