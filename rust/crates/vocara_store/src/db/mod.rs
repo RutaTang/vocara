@@ -4,6 +4,7 @@
 pub mod durable_fs;
 pub mod library_lock;
 pub mod rows;
+pub mod safe_migrator;
 pub mod schema;
 pub mod write_gate;
 
