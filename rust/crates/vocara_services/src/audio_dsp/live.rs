@@ -1,6 +1,7 @@
 //! Live analysis: the mic-rate framer, the live spectrogram STFT, the live
 //! voice analyzer and the tuner's smoother.
 
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::f64::consts::{LN_10, LN_2};
 
@@ -436,18 +437,18 @@ impl LiveCore {
         // when the frame is audible, so a silent room skips the decimate +
         // YIN cost every hop (voiced requires audible anyway, so the result
         // is unchanged).
-        let mut ds: Option<Vec<f32>> = None;
+        let mut ds: Option<Cow<'_, [f32]>> = None;
         let (mut yin_f0, mut periodicity) = (f64::NAN, 0.0);
         if audible {
             let sr = self.sample_rate as f64;
             // YIN on the lighter ~22 kHz decimation; formants stay on the
             // 11 kHz ds.
             let yin = if self.yin_factor == 1 {
-                ds = Some(decimate(raw, self.ds_factor, sr).into_owned());
+                ds = Some(decimate(raw, self.ds_factor, sr));
                 yin_pitch(raw, self.yin_rate)
             } else {
                 let (d, yin_sig) = decimate_pair(raw, self.ds_factor, self.yin_factor, sr);
-                ds = Some(d);
+                ds = Some(Cow::Owned(d));
                 yin_pitch(&yin_sig, self.yin_rate)
             };
             yin_f0 = yin.f0;
