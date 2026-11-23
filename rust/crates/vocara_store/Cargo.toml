@@ -9,7 +9,9 @@ publish.workspace = true
 
 [dependencies]
 vocara_model.workspace = true
-rusqlite.workspace = true
+# hooks: the oplog-insert notifier behind SyncEngine::start (the Rust form
+# of drift's tableUpdates stream).
+rusqlite = { workspace = true, features = ["hooks"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -23,6 +25,9 @@ indexmap.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# trace: the sync tests count the statements a pull runs (drift's
+# QueryInterceptor in the Dart tests).
+rusqlite = { workspace = true, features = ["trace"] }
 
 [lints]
 workspace = true
