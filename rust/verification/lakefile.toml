@@ -1,0 +1,11 @@
+name = "VocaraVerify"
+version = "0.1.0"
+defaultTargets = ["VocaraVerify"]
+
+[[lean_lib]]
+name = "VocaraVerify"
+
+# Prints the test vectors the Rust tests replay (see vectors/).
+[[lean_exe]]
+name = "vectors"
+root = "Vectors"
