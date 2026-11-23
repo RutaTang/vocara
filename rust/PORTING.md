@@ -3,12 +3,13 @@
 This directory is the Rust port of the Vocara app: the Flutter/Dart client
 (`client/lib`, ~66k lines) rewritten in Rust with [iced](https://iced.rs) as
 the GUI, plus formal verification in Lean 4 of the core algorithms
-(`verification/`). The real-time audio engine is already Rust
-(`client/rust/vocara_engine`) and is used as it is, through a path dependency.
+(`verification/`). The real-time audio engine was already Rust; it now lives
+in this workspace (`crates/vocara_engine`, moved from `client/rust`
+unchanged).
 
 The Flutter app keeps building and shipping until this port reaches parity;
-then the engine moves into this workspace, `client/` is retired, and the CI
-and release workflows build this app instead.
+then `client/` is retired and the CI and release workflows build this app
+instead.
 
 ## The rule: a faithful port
 
@@ -41,6 +42,7 @@ wrong. Port the behavior, not the shape:
 
 | Crate | Ported from | Depends on |
 |---|---|---|
+| `crates/vocara_engine` | the engine itself (`client/rust/vocara_engine`, moved as is) | — |
 | `crates/vocara_model` | `lib/domain/models`, `lib/utils` (pure parts), `lib/config` (environment, app config) | — |
 | `crates/vocara_store` | `lib/data/db`, `lib/data/sync`, `lib/data/repositories` | model |
 | `crates/vocara_services` | `lib/data/services`, `lib/data/ffi` | model, store, engine |

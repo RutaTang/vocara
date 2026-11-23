@@ -9,7 +9,7 @@ use crate::waveform_service;
 
 fn fixture(name: &str) -> String {
     format!(
-        "{}/../../../client/rust/vocara_engine/tests/fixtures/{name}",
+        "{}/../vocara_engine/tests/fixtures/{name}",
         env!("CARGO_MANIFEST_DIR")
     )
 }

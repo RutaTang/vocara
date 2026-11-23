@@ -1,9 +1,6 @@
-# The Rust port of Vocara (see PORTING.md): the domain model, the store
-# (SQLite library + sync), the services (audio, analysis, settings), and the
-# iced application. The real-time audio engine stays where it is
-# (client/rust/vocara_engine) and is used through a path dependency, so the
-# Flutter app and its CI keep building it unchanged until the port replaces
-# them.
+# Vocara in Rust (see PORTING.md): the real-time audio engine, the domain
+# model, the store (SQLite library + sync), the services (audio, analysis,
+# settings), and the iced application.
 [workspace]
 resolver = "2"
 members = ["crates/*"]
@@ -19,7 +16,7 @@ publish = false
 vocara_model = { path = "crates/vocara_model" }
 vocara_store = { path = "crates/vocara_store" }
 vocara_services = { path = "crates/vocara_services" }
-vocara_engine = { path = "../client/rust/vocara_engine" }
+vocara_engine = { path = "crates/vocara_engine" }
 
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
@@ -53,7 +50,10 @@ dbg_macro = "deny"
 todo = "deny"
 
 [profile.release]
-# Unwinding, not abort: the engine's FFI boundary catches panics (see the
-# engine crate's own profile notes).
+# Default panic = "unwind", NOT abort: every engine C ABI entry point is
+# wrapped in catch_unwind, and that guard only works when panics unwind. An
+# abort profile made those guards dead code — a panic anywhere below (e.g.
+# symphonia's TimeBase asserting on a zero-sample-rate file) aborted the
+# whole app instead of returning a decode error.
 lto = "fat"
 codegen-units = 1

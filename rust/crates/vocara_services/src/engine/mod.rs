@@ -3,7 +3,7 @@
 //! Dart services wrapped around them (the device lists, the uid readers, the
 //! decode and probe helpers of `graph_audio_playback_service.dart`'s top level).
 //!
-//! The engine is the Rust crate `client/rust/vocara_engine`. Its C ABI
+//! The engine is the workspace crate `vocara_engine`. Its C ABI
 //! (`vocara_engine::ffi`, 92 `extern "C"` functions) and its `device` module
 //! exist only with the `device` feature, which forwards to the engine's. The
 //! Dart side loaded the engine as a framework and looked every symbol up by
