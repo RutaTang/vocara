@@ -1,6 +1,0 @@
-// Production environment — the shipping app. Stated explicitly (it matches the
-// AppInfo.xcconfig default) so the prod identity is self-documenting alongside
-// Dev.xcconfig / Test.xcconfig.
-#include "AppInfo.xcconfig"
-
-PRODUCT_BUNDLE_IDENTIFIER = com.rutatang.vocara

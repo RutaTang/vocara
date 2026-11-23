@@ -1,15 +1,18 @@
 # Porting Vocara to Rust
 
-This directory is the Rust port of the Vocara app: the Flutter/Dart client
-(`client/lib`, ~66k lines) rewritten in Rust with [iced](https://iced.rs) as
-the GUI, plus formal verification in Lean 4 of the core algorithms
-(`verification/`). The real-time audio engine was already Rust; it now lives
-in this workspace (`crates/vocara_engine`, moved from `client/rust`
-unchanged).
+This directory is the Vocara app, ported from its Flutter/Dart client
+(`client/lib`, ~66k lines) to Rust with [iced](https://iced.rs) as the GUI,
+plus formal verification in Lean 4 of the core algorithms (`verification/`).
+The real-time audio engine was already Rust; it lives in this workspace
+(`crates/vocara_engine`, moved from `client/rust` unchanged).
 
-The Flutter app keeps building and shipping until this port reaches parity;
-then `client/` is retired and the CI and release workflows build this app
-instead.
+The port is complete: every Dart source in the table below is `done`, the
+Dart unit and integration tests are ported with the code they test, and the
+CI and release workflows build this app. The Flutter client has been removed
+from the tree. It stays in the git history: its last commit is the parent of
+`git log -1 --diff-filter=D --format=%h -- client/pubspec.yaml`. The `client/`
+paths in this document, and the "port of `…dart`" notes throughout the code,
+name files of that client.
 
 ## The rule: a faithful port
 

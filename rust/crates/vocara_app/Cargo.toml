@@ -1,6 +1,6 @@
 [package]
 name = "vocara_app"
-description = "Vocara's desktop application, built with iced (ported from client/lib/ui, client/lib/main.dart, client/lib/routing)"
+description = "Vocara's desktop application, built with iced (ported from the Flutter client's lib/ui, main.dart and routing)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

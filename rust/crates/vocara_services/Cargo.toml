@@ -1,6 +1,6 @@
 [package]
 name = "vocara_services"
-description = "Vocara's services: the audio engine bridge, playback, recording, analysis, separation, settings, diagnostics and update check (ported from client/lib/data/services and client/lib/data/ffi)"
+description = "Vocara's services: the audio engine bridge, playback, recording, analysis, separation, settings, diagnostics and update check (ported from the Flutter client's lib/data/services and data/ffi)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

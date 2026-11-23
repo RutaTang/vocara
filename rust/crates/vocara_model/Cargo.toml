@@ -1,6 +1,6 @@
 [package]
 name = "vocara_model"
-description = "Vocara's domain model and pure utilities (ported from client/lib/domain, client/lib/utils, client/lib/config)"
+description = "Vocara's domain model and pure utilities (ported from the Flutter client's lib/domain, utils and config)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

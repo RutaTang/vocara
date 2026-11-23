@@ -1,2 +1,12 @@
 # Tool caches
 .clew/
+
+# Editors and the OS
+.DS_Store
+.idea/
+*.iml
+*.swp
+
+# Python (the stem separation sidecar)
+__pycache__/
+*.pyc

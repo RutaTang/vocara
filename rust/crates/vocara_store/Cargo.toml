@@ -1,6 +1,6 @@
 [package]
 name = "vocara_store"
-description = "Vocara's library store: the SQLite database, the asset pool, sync, and the repositories (ported from client/lib/data/db, sync, repositories)"
+description = "Vocara's library store: the SQLite database, the asset pool, sync, and the repositories (ported from the Flutter client's lib/data/db, sync and repositories)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

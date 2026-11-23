@@ -1,10 +1,10 @@
 # Vocara Sync Protocol — server wire contract
 
-The client's sync engine (`client/lib/data/sync/`) is transport-agnostic: it
+The client's sync engine (`rust/crates/vocara_store/src/sync/`) is transport-agnostic: it
 talks to `SyncTransport`, and this document is the contract any real backend
 must satisfy. The reference test implementation is
-`client/test/support/fake_sync_transport.dart`; the randomized convergence
-simulation (`client/test/sync_simulation_test.dart`) is the executable
+`FakeSyncTransport` / `FakeCloud` in `sync_transport.rs`; the randomized
+convergence simulation (`rust/crates/vocara_store/tests/sync_simulation/`) is the executable
 definition of correct end-to-end behavior.
 
 The server is a **dumb, durable relay**. All conflict resolution (HLC
@@ -78,7 +78,7 @@ transport failure as retry-later (at-least-once; see Idempotency).
 
 Request: `{ "rows": [ SyncRow, ... ] }` — at most 400 rows. `SyncRow` is
 `{ table, id, schemaV, hlcPacked, fields, fieldClocks? }` exactly as encoded
-by `client/lib/data/sync/sync_row.dart` (`fieldClocks` is reserved, null in
+by `rust/crates/vocara_store/src/sync/sync_row.rs` (`fieldClocks` is reserved, null in
 v1; the server stores it verbatim if present).
 
 Per row, in input order, the server MUST:
@@ -123,10 +123,10 @@ existence (the client's lazy-download probe).
 **Delivery order must preserve acceptance order** (ascending `serverSeq`,
 never reordered across pages), and `serverSeq` must be assigned in request
 order within a push batch. The client pushes parents before children
-(`SyncRowBuilder.tableRanks`) and relies on this: a puller that receives a
+(`SyncRowBuilder::table_ranks`) and relies on this: a puller that receives a
 child insert before its parent in a paged fetch can drop the child via the
 FK-orphan sweep — found as BUG 1 by simulation seed `0x5eed0001`, see
-`client/test/sync_sim_regressions_test.dart`.
+`rust/crates/vocara_store/tests/sync/sim_regressions.rs`.
 
 If the server ever compacts the change log to latest-per-row, compaction must
 preserve relative `serverSeq` order of the surviving rows (it does naturally —
@@ -181,8 +181,9 @@ their string order diverged from the tuple order.
 Do NOT replace the derivation with a fresh clock tick — a fresh-tick stamp
 was the original resurrection bug (seed `0xab1a57`): user-grade intent
 minted for bookkeeping let a scalar heal out-rank a genuinely later delete.
-Regressions for all three failure shapes live in `sync_applier_test.dart`
-(derived-node group, NODE-ONLY winner) and `sync_sim_regressions_test.dart`.
+Regressions for all three failure shapes live in
+`rust/crates/vocara_store/tests/sync/applier.rs` (derived-node group,
+NODE-ONLY winner) and `rust/crates/vocara_store/tests/sync/sim_regressions.rs`.
 
 **Pre-release note**: this protocol has never shipped; there are no old
 clients minting counter+1 derived stamps, so no mixed-version migration is
