@@ -37,6 +37,9 @@ lucide-icons = { version = "1.77", features = ["iced"] }
 rfd = "0.18"
 tempfile = "3"
 ureq = { version = "3", default-features = false }
+libc = "0.2"
+fancy-regex = "0.20"
+md-5 = "0.10"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

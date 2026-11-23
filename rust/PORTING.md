@@ -175,7 +175,7 @@ behavior and its tests are ported and the gates pass.
 | `data/services/playback_engine.dart` | 147 | `vocara_services::playback_engine` | todo |
 | `data/services/playback_engine_factory.dart` | 8 | `vocara_services::playback_engine_factory` | todo |
 | `data/services/recording_finalizer.dart` | 331 | `vocara_services::recording_finalizer` | todo |
-| `data/services/source_separation_service.dart` | 745 | `vocara_services::source_separation_service` | todo |
+| `data/services/source_separation_service.dart` | 745 | `vocara_services::source_separation_service` | done |
 | `data/services/spectrogram_service.dart` | 463 | `vocara_services::spectrogram_service` | todo |
 | `data/services/technique_media_service.dart` | 103 | `vocara_services::technique_media_service` | todo |
 | `data/services/update_check_service.dart` | 285 | `vocara_services::update_check_service` | done |

@@ -27,6 +27,9 @@ rand.workspace = true
 dirs.workspace = true
 rustfft.workspace = true
 tokio.workspace = true
+libc.workspace = true
+fancy-regex.workspace = true
+md-5.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
