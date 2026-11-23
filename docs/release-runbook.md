@@ -42,16 +42,18 @@ and deletes it at once.
 
 ## Cutting a release
 
-1. Bump `version:` in `client/pubspec.yaml`; commit to master.
+1. Bump the workspace `version` in `rust/Cargo.toml` (and
+   `UpdateCheckService::APP_BUILD_NUMBER` in
+   `rust/crates/vocara_services/src/update_check_service.rs`); commit to master.
 2. `git tag -a v<version> -m "Vocara <version>" -m "<what changed>" && git push origin v<version>`
    — the tag's message becomes the public release notes and the notes the
    app's update dialog shows (a lightweight `git tag` publishes none). The
    `Release` workflow runs the full pipeline:
-   - **Guard**: the tag must sit on master HEAD and match the pubspec version.
-   - **Validate**: format, analyze, unit tests, Rust engine tests (both
-     feature modes) + clippy, and all twelve integration suites (the five
-     UI journeys plus the seven service-level pipelines; the same list as
-     `just e2e`).
+   - **Guard**: the tag must sit on master HEAD and match the workspace version.
+   - **Validate**: fmt, clippy and the tests of the whole Rust workspace in
+     both feature modes (the app's journeys run as headless iced tests), and
+     the Lean proofs with their vectors (the same as `just check` and
+     `just proofs`).
    - **Build**: universal prod build → deep re-sign → DMG → notarize →
      staple → Gatekeeper assessment → launch the app from the DMG and check
      it boots inside its sandbox (`.github/scripts/launch-check.sh`).
@@ -79,18 +81,16 @@ and deletes it at once.
 All of these live as steps of the `build-macos` job in
 `.github/workflows/release.yml`:
 
-- **Signing config** — Release/Release-{Dev,Test,Prod} configs of the Runner
-  target use manual signing with `Developer ID Application`, team
-  `TP7LCYW3NY`, and hardened runtime. Debug/Profile stay ad-hoc for dev speed.
-- **Universal build** — the Rust engine builds arm64-only unless
-  `VOCARA_UNIVERSAL=1` (see `client/macos/build_rust.sh`); the workflow sets
-  it and hard-fails if either the app binary or the embedded `vocara_engine`
-  is not fat.
-- **Deep re-sign** — Xcode does not re-sign third-party frameworks (the
-  mpv/ffmpeg stack in `media_kit`) with hardened runtime + timestamp, which
-  notarization requires; the workflow re-signs every Mach-O inside-out before
-  building the DMG.
-- **Release entitlements** (`client/macos/Runner/Release.entitlements`):
+- **Bundle** — `rust/packaging/macos/bundle.sh --flavor prod --universal`
+  builds the app for arm64 and x86_64, joins them with `lipo`, and lays out
+  `vocara.app` (Info.plist with the flavor's bundle id and the workspace
+  version, the icon, an ad-hoc signature). The flavor is baked into the
+  binary at compile time. The workflow hard-fails if the executable is not
+  fat.
+- **Signing** — the workflow re-signs with `Developer ID Application`, team
+  `TP7LCYW3NY`, hardened runtime and a secure timestamp, which notarization
+  requires; any framework or dylib bundled later is signed inside-out first.
+- **Release entitlements** (`rust/packaging/macos/Release.entitlements`):
   - `app-sandbox` — the shipping app is fully sandboxed.
   - `device.audio-input` — microphone (recording, live monitoring, analysis).
   - `network.client` — outbound HTTP for the update check.
@@ -109,7 +109,7 @@ repo that is not a prerelease; the release workflow writes the file:
 {"latest": "1.2.0", "url": "https://github.com/RutaTang/vocara-releases/releases/tag/v1.2.0", "notes": "..."}
 ```
 
-`update_check_manifest_sync_test.dart` fails if `manifestUrl` and the
+`rust/crates/vocara_services/tests/update_check_pins.rs` fails if `MANIFEST_URL` and the
 workflow's `RELEASES_REPO` stop naming the same repo. v0.1.0 read this
 private repo's releases API instead, which answers 404 without a login, so
 v0.1.0 installs never see an update: their users need the next DMG by hand.
@@ -122,7 +122,7 @@ Auto-update via Sparkle was considered and deliberately deferred.
   new unsigned dylib — the deep re-sign step should catch it; check its find
   patterns still match the bundle layout).
 - Testing the release build locally without notarizing:
-  `cd client && VOCARA_UNIVERSAL=1 flutter build macos --release --flavor prod`
-  builds the same app bundle the workflow signs. An unsigned/un-notarized
+  `rust/packaging/macos/bundle.sh --flavor prod --universal` builds the
+  same app bundle the workflow signs. An unsigned/un-notarized
   local build is rejected by `spctl` — expected; Gatekeeper only accepts
   after notarize + staple.
