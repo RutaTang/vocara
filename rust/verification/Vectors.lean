@@ -162,6 +162,36 @@ def canonicalJson : String :=
     let es : List (Entry Nat) := (List.range keys.length).zip keys |>.map fun (i, k) => (k, i)
     jobj [("input", entriesJson es), ("canon", entriesJson (canon es))])
 
+/-! ## Reconcile -/
+
+def optJson : Option Nat → String
+  | none => "null"
+  | some n => toString n
+
+def opName : Option Op → String
+  | some .insert => jstr "insert"
+  | some .update => jstr "update"
+  | some .skip => jstr "skip"
+  | some .unchanged => jstr "unchanged"
+  | some .tombstone => jstr "tombstone"
+  | some .keep => jstr "keep"
+  | none => "null"
+
+/-- A side drawn from a small hash domain so equal hashes are common (from
+the generator's high bits: an LCG's low bits cycle with a short period). -/
+def sideOf (x : Nat) : Option Nat :=
+  let h := x / 2 ^ 40
+  if h % 4 = 0 then none else some (h / 4 % 3)
+
+def reconcileJson : String :=
+  jarr ((nums 11 80).map fun x =>
+    let rows := (nums x (x % 9 + 1)).map fun y =>
+      let v := nums y 3
+      ({ mine := sideOf (v.getD 0 0), db := sideOf (v.getD 1 0), base := sideOf (v.getD 2 0) } : Row)
+    jarr ((List.range rows.length).zip rows |>.map fun (i, r) =>
+      jobj [("id", jstr ("R" ++ toString i)), ("mine", optJson r.mine), ("db", optJson r.db),
+        ("base", optJson r.base), ("op", opName (classify r)), ("after", optJson (after r))]))
+
 def main (args : List String) : IO Unit := do
   let dir := args.headD "vectors"
   IO.FS.createDirAll dir
@@ -169,7 +199,7 @@ def main (args : List String) : IO Unit := do
     ("hlc_order.json", hlcOrderJson), ("hlc_tick.json", hlcTickJson),
     ("hlc_advance.json", hlcAdvanceJson), ("lww.json", lwwJson),
     ("version.json", versionJson), ("ring.json", ringJson),
-    ("canonical.json", canonicalJson)]
+    ("canonical.json", canonicalJson), ("reconcile.json", reconcileJson)]
   for (name, body) in files do
     IO.FS.writeFile (dir ++ "/" ++ name) (body ++ "\n")
     IO.println s!"wrote {dir}/{name}"
