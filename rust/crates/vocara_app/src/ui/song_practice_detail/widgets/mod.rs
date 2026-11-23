@@ -3,6 +3,7 @@
 
 pub mod live_spectrogram;
 pub mod pitch_lane;
+pub mod ruler_bar;
 pub mod track_context_menu;
 pub mod voiceprint_view;
 
