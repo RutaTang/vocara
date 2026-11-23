@@ -614,6 +614,54 @@ fn a_second_sync_engine_is_refused() {
 }
 
 #[test]
+fn attached_sync_announces_each_applied_page_to_every_subscriber() {
+    // Persistence's remote-applied broadcast: one event per committed pull
+    // page that changed rows, after it committed, to every subscriber of
+    // the moment.
+    let m = Memory::new();
+    let inner = Arc::new(FakeSyncTransport::new(FakeCloud::new(), "device"));
+    let engine = m
+        .attach_sync(inner.clone(), AttachSyncOptions::default())
+        .unwrap();
+    let early = m.subscribe_remote_applied();
+    let dropped = m.subscribe_remote_applied();
+    drop(dropped);
+    let peer = format!("{:0<26}", "PEER");
+    let wall = now_ms() - 1000;
+    let practice_id = new_id();
+    inner.cloud().accept(SyncRow::new(
+        "practices",
+        fields(vec![
+            ("id", practice_id.clone().into()),
+            ("title", "song".into()),
+            ("timeline_duration_ms", 0i64.into()),
+            ("master_volume", 1.0.into()),
+            ("active_interpretation_id", FieldValue::Null),
+            ("separation_asset_id", FieldValue::Null),
+            ("reverb_json", FieldValue::Null),
+            ("lyrics_json", FieldValue::Null),
+            ("created_at", wall.into()),
+            ("updated_at", wall.into()),
+            ("deleted_at", FieldValue::Null),
+            ("hlc_wall", wall.into()),
+            ("hlc_ctr", 0i64.into()),
+            ("hlc_node", peer.clone().into()),
+            ("hlc_packed", Hlc::new(wall, 0, peer).packed().into()),
+            ("schema_v", 1i64.into()),
+        ]),
+    ));
+    assert!(!engine.pump_pull().failed());
+    let event = early.try_recv().expect("the page was announced");
+    assert!(event.practice_ids.contains(&practice_id));
+    assert!(event.touches_table("practices"));
+    assert!(early.try_recv().is_err(), "one event per page");
+    // A later subscriber hears only what comes after it.
+    let late = m.subscribe_remote_applied();
+    assert!(late.try_recv().is_err());
+    assert_eq!(reload(&m, &practice_id).title, "song");
+}
+
+#[test]
 fn the_device_node_id_survives_restarts() {
     let root = tempfile::tempdir().unwrap();
     boot(root.path()).close().unwrap();
