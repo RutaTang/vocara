@@ -161,7 +161,7 @@ behavior and its tests are ported and the gates pass.
 | `data/db/safe_migrator.dart` | 379 | `vocara_store::db::safe_migrator` | done |
 | `data/db/tables.dart` | 347 | `vocara_store::db::{schema, rows}` | done |
 | `data/db/write_gate.dart` | 92 | `vocara_store::db::write_gate` | done |
-| `data/ffi/vocara_engine_bindings.dart` | 2051 | `vocara_services::engine` | todo |
+| `data/ffi/vocara_engine_bindings.dart` | 2051 | `vocara_services::engine` (with the decode policy, probe and device lists from the top of `graph_audio_playback_service.dart`: `engine::media`, `engine::enumerate_*`) | done (native calls type-checked for macOS; their tests run with `device`) |
 | `data/repositories/song_practice_repository.dart` | 64 | `vocara_store::repositories::song_practice_repository` | todo |
 | `data/repositories/song_practice_repository_drift.dart` | 1678 | `vocara_store::repositories::song_practice_repository_drift` | todo |
 | `data/repositories/technique_repository.dart` | 52 | `vocara_store::repositories::technique_repository` | todo |
@@ -178,7 +178,7 @@ behavior and its tests are ported and the gates pass.
 | `data/services/mic_permission.dart` | 36 | `vocara_services::mic_permission` | done (macOS half type-checked; runs on CI) |
 | `data/services/mic_recording_controller.dart` | 681 | `vocara_services::mic_recording_controller` | todo |
 | `data/services/monitor_service.dart` | 262 | `vocara_services::monitor_service` | todo |
-| `data/services/playback_engine.dart` | 147 | `vocara_services::playback_engine` | todo |
+| `data/services/playback_engine.dart` | 147 | `vocara_services::playback_engine` | done |
 | `data/services/playback_engine_factory.dart` | 8 | `vocara_services::playback_engine_factory` | todo |
 | `data/services/recording_finalizer.dart` | 331 | `vocara_services::recording_finalizer` | todo |
 | `data/services/source_separation_service.dart` | 745 | `vocara_services::source_separation_service` | done |
