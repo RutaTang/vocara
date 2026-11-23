@@ -1867,6 +1867,104 @@ fn the_technique_picker_lists_the_library_and_adds_the_pick() {
     assert!(h.track("t1").technique_markers.is_empty());
 }
 
+/// The characters the open note editor's field took.
+fn typed_in_note(messages: &[Message]) -> String {
+    use iced::widget::text_editor::{Action, Edit};
+    messages
+        .iter()
+        .filter_map(|m| match m {
+            Message::NoteEditor(note_editor::Message::Edit(Action::Edit(Edit::Insert(c)))) => {
+                Some(*c)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+// The editors are dialogs of their own in Dart, untouched by the page's snack
+// bars. iced matches a stack's layers by position: a snack bar that came or
+// went under the note editor moved it, its field was made anew, and what the
+// user typed next went nowhere.
+#[test]
+fn the_note_editor_keeps_the_keyboard_as_a_snack_bar_comes_and_goes() {
+    use iced_test::simulator::typewrite;
+    let mut h = Harness::open(Setup::default());
+    h.send(Message::Row {
+        track_id: "t1".into(),
+        message: track_row::Message::AddNote,
+    });
+    let title = h.find("Note at 00:00").expect("the editor").bounds();
+    let mut ui = LiveUi::new(h.size);
+    // Into the field, under the title, and typing.
+    let mut events = vec![
+        live_ui::move_to(title.x + 60.0, title.y + 50.0),
+        live_ui::press(),
+        live_ui::release(),
+    ];
+    events.extend(typewrite("a"));
+    let messages = ui.run(h.screen.view(), events);
+    assert_eq!(typed_in_note(&messages), "a");
+    h.feed(messages);
+    // A toast arrives meanwhile (an edit's, say).
+    h.send(Message::RefusedDrop(WAIT_FOR_SAVE));
+    assert!(h.screen.snack().is_some());
+    let messages = ui.run(h.screen.view(), typewrite("b"));
+    assert_eq!(typed_in_note(&messages), "b", "a snack bar came");
+    h.feed(messages);
+    // And its time runs out.
+    let seq = h.screen.snack_seq;
+    h.send(Message::SnackExpired(seq));
+    assert!(h.screen.snack().is_none());
+    let messages = ui.run(h.screen.view(), typewrite("c"));
+    assert_eq!(typed_in_note(&messages), "c", "the snack bar went");
+}
+
+// The picker's search, likewise.
+#[test]
+fn the_technique_picker_keeps_the_keyboard_as_a_snack_bar_goes() {
+    use iced_test::selector::Candidate;
+    use iced_test::simulator::typewrite;
+    let mut h = Harness::open(Setup::default());
+    // A toast showing as the picker opens.
+    h.send(Message::RefusedDrop(WAIT_FOR_SAVE));
+    h.send(Message::Row {
+        track_id: "t1".into(),
+        message: track_row::Message::AddTechnique,
+    });
+    h.settle();
+    let mut ui = LiveUi::new(h.size);
+    let search = ui
+        .find(h.screen.view(), |c: Candidate<'_>| match &c {
+            Candidate::TextInput { .. } => Some(Target::from(c)),
+            _ => None,
+        })
+        .expect("the search field")
+        .bounds();
+    let query = |messages: &[Message]| {
+        messages.iter().rev().find_map(|m| match m {
+            Message::TechniquePicker(technique_picker::Message::Query(q)) => Some(q.clone()),
+            _ => None,
+        })
+    };
+    let mut events = vec![
+        live_ui::move_to(search.center_x(), search.center_y()),
+        live_ui::press(),
+        live_ui::release(),
+    ];
+    events.extend(typewrite("t"));
+    let messages = ui.run(h.screen.view(), events);
+    assert_eq!(query(&messages).as_deref(), Some("t"));
+    h.feed(messages);
+    let seq = h.screen.snack_seq;
+    h.send(Message::SnackExpired(seq));
+    let messages = ui.run(h.screen.view(), typewrite("w"));
+    assert_eq!(
+        query(&messages).as_deref(),
+        Some("tw"),
+        "the snack bar went"
+    );
+}
+
 // --------------------------------------------------------------- the menus
 
 // playhead_repaint_test: 'deleting a clip asks first, as deleting a take
