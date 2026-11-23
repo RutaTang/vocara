@@ -185,12 +185,12 @@ behavior and its tests are ported and the gates pass.
 | `data/sync/oplog_drain.dart` | 191 | `vocara_store::sync::oplog_drain` | done |
 | `data/sync/quarantine_store.dart` | 290 | `vocara_store::sync::quarantine_store` | done |
 | `data/sync/reconcile.dart` | 227 | `vocara_store::sync::reconcile` | done |
-| `data/sync/sync_applier.dart` | 1585 | `vocara_store::sync::sync_applier` | todo |
-| `data/sync/sync_engine.dart` | 1092 | `vocara_store::sync::sync_engine` | todo |
+| `data/sync/sync_applier.dart` | 1585 | `vocara_store::sync::sync_applier` | done |
+| `data/sync/sync_engine.dart` | 1092 | `vocara_store::sync::sync_engine` | done |
 | `data/sync/sync_hashes.dart` | 299 | `vocara_store::sync::sync_hashes` | done |
-| `data/sync/sync_row.dart` | 618 | `vocara_store::sync::sync_row` | todo |
+| `data/sync/sync_row.dart` | 618 | `vocara_store::sync::sync_row` | done |
 | `data/sync/sync_state_store.dart` | 97 | `vocara_store::sync::sync_state_store` | done |
-| `data/sync/sync_transport.dart` | 182 | `vocara_store::sync::sync_transport` | todo |
+| `data/sync/sync_transport.dart` | 182 | `vocara_store::sync::sync_transport` (+ the test fake cloud) | done |
 | `data/sync/sync_writer.dart` | 142 | `vocara_store::sync::sync_writer` | done |
 | `domain/models/audio_device.dart` | 79 | `vocara_model::models::audio_device` | done |
 | `domain/models/audio_fx.dart` | 874 | `vocara_model::models::audio_fx` | done |
