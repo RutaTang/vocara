@@ -13,8 +13,8 @@
 
 use std::sync::Arc;
 
-use crate::app::environment::AppEnvironment;
 use crate::app::library::Library;
+use vocara_model::config::environment::AppEnvironment;
 
 /// Everything a screen reads from the app (`context.read<...>()`).
 #[derive(Debug, Clone)]

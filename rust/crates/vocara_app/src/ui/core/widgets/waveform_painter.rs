@@ -20,6 +20,7 @@ use iced::{mouse, Color, Length, Pixels, Point, Rectangle, Renderer, Size, Theme
 
 use super::painter::{color_key, KeyedCache, Same};
 use crate::ui::core::theme::{alpha, font};
+pub use vocara_model::util::format::format_clock_ms;
 
 /// Picks a readable time-grid interval (in ms) so labels/lines land roughly
 /// every `min_px` pixels (72 by default).
@@ -334,17 +335,6 @@ pub fn ruler_ticks(timeline_duration_ms: i64, start_ms: i64, width: f64) -> Vec<
         }
     }
     ticks
-}
-
-/// `formatClockMs`: a millisecond offset as `mm:ss` (negative reads 00:00;
-/// minutes past 99 keep all their digits).
-///
-/// A local copy of `utils/format.dart`'s `formatClock`, which belongs to
-/// `vocara_model::util::format` once that is ported.
-pub fn format_clock_ms(milliseconds: i64) -> String {
-    let ms = milliseconds.max(0);
-    let total_seconds = ms / 1000;
-    format!("{:02}:{:02}", total_seconds / 60, total_seconds % 60)
 }
 
 /// Where `PlayheadPainter` draws the playhead in a `width`-wide view, or

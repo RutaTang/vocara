@@ -4,13 +4,10 @@
 //! and the analysis overlays — frequency grid, power spectrum, formant and F0
 //! tracks (take and live) and the vowel chart.
 //!
-//! MODEL SEAM: the painters read the analysis models (`Spectrogram`,
-//! `VoiceMetrics`, `domain/models/spectrogram.dart` and `voice_metrics.dart`),
-//! which are being ported into `vocara_model::models` in parallel. Until they
-//! land, this module reads them through the local traits [`AnalysisFraming`],
-//! [`SpectrogramData`] and [`FormantTracks`], holding exactly the fields the
-//! painters read; wiring the models in is an `impl` of each trait (the
-//! framing maths here is `AnalysisFraming`'s, line for line).
+//! The painters read the analysis models (`vocara_model::models::spectrogram`
+//! and `voice_metrics`) through two narrow traits, [`SpectrogramData`] and
+//! [`FormantTracks`], holding exactly the fields they draw; frame times come
+//! from the models' own [`AnalysisFraming`].
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -28,37 +25,11 @@ use crate::ui::core::theme::{alpha, font, Studio};
 
 // ------------------------------------------------------------- model seam
 
-/// The STFT framing every per-frame analysis is laid out on, and the ONE
-/// frame↔time mapping all of them share (Dart's `AnalysisFraming` mixin).
-/// Frame f analyses the `fft_size`-sample window that STARTS at sample
-/// f·`hop`, and describes the audio around the window's CENTRE, so a frame is
-/// placed at its centre, never at its start.
-pub trait AnalysisFraming {
-    fn frames(&self) -> usize;
-    fn hop(&self) -> u32;
-    fn fft_size(&self) -> u32;
-    fn sample_rate(&self) -> u32;
+pub use vocara_model::models::spectrogram::AnalysisFraming;
+use vocara_model::models::spectrogram::Spectrogram;
+use vocara_model::models::voice_metrics::VoiceMetrics;
 
-    /// Seconds from the analysed audio's start to the centre of `frame`'s
-    /// analysis window — the moment that frame describes.
-    fn time_of_frame(&self, frame: usize) -> f64 {
-        (frame as f64 * f64::from(self.hop()) + f64::from(self.fft_size()) / 2.0)
-            / f64::from(self.sample_rate())
-    }
-
-    /// Where `frame`'s cell begins (seconds) when frames are drawn as
-    /// contiguous hop-wide columns centred on [`time_of_frame`](Self::time_of_frame).
-    fn cell_start(&self, frame: usize) -> f64 {
-        self.time_of_frame(frame) - f64::from(self.hop()) / 2.0 / f64::from(self.sample_rate())
-    }
-
-    /// Where `frame`'s cell ends (seconds).
-    fn cell_end(&self, frame: usize) -> f64 {
-        self.time_of_frame(frame) + f64::from(self.hop()) / 2.0 / f64::from(self.sample_rate())
-    }
-}
-
-/// What the spectrogram painters read of a `Spectrogram`: a
+/// What the spectrogram painters read of a [`Spectrogram`]: a
 /// [`frames`](AnalysisFraming::frames) × [`bins`](Self::bins) grid of dB
 /// values, row-major (`db[frame * bins + bin]`), and its peak.
 pub trait SpectrogramData: AnalysisFraming + Send + Sync {
@@ -67,44 +38,7 @@ pub trait SpectrogramData: AnalysisFraming + Send + Sync {
     fn max_db(&self) -> f64;
 }
 
-/// What the formant overlay reads of a `VoiceMetrics`: the F0 and F1–F3
-/// curves, one value per frame (Hz; NaN or ≤ 0 where unvoiced).
-pub trait FormantTracks: AnalysisFraming + Send + Sync {
-    fn f0(&self) -> &[f32];
-    fn f1(&self) -> &[f32];
-    fn f2(&self) -> &[f32];
-    fn f3(&self) -> &[f32];
-}
-
-/// A plain spectrogram (the fields [`SpectrogramData`] reads), standing in
-/// for `vocara_model::models::spectrogram::Spectrogram` until it lands.
-#[derive(Debug, Clone, PartialEq)]
-pub struct PlainSpectrogram {
-    pub frames: usize,
-    pub bins: usize,
-    pub sample_rate: u32,
-    pub fft_size: u32,
-    pub hop: u32,
-    pub db: Vec<f32>,
-    pub max_db: f64,
-}
-
-impl AnalysisFraming for PlainSpectrogram {
-    fn frames(&self) -> usize {
-        self.frames
-    }
-    fn hop(&self) -> u32 {
-        self.hop
-    }
-    fn fft_size(&self) -> u32 {
-        self.fft_size
-    }
-    fn sample_rate(&self) -> u32 {
-        self.sample_rate
-    }
-}
-
-impl SpectrogramData for PlainSpectrogram {
+impl SpectrogramData for Spectrogram {
     fn bins(&self) -> usize {
         self.bins
     }
@@ -116,36 +50,16 @@ impl SpectrogramData for PlainSpectrogram {
     }
 }
 
-/// Plain formant curves (the fields [`FormantTracks`] reads), standing in
-/// for `vocara_model::models::voice_metrics::VoiceMetrics` until it lands.
-#[derive(Debug, Clone, PartialEq)]
-pub struct PlainFormantTracks {
-    pub frames: usize,
-    pub sample_rate: u32,
-    pub fft_size: u32,
-    pub hop: u32,
-    pub f0: Vec<f32>,
-    pub f1: Vec<f32>,
-    pub f2: Vec<f32>,
-    pub f3: Vec<f32>,
+/// What the formant overlay reads of a [`VoiceMetrics`]: the F0 and F1–F3
+/// curves, one value per frame (Hz; NaN or ≤ 0 where unvoiced).
+pub trait FormantTracks: AnalysisFraming + Send + Sync {
+    fn f0(&self) -> &[f32];
+    fn f1(&self) -> &[f32];
+    fn f2(&self) -> &[f32];
+    fn f3(&self) -> &[f32];
 }
 
-impl AnalysisFraming for PlainFormantTracks {
-    fn frames(&self) -> usize {
-        self.frames
-    }
-    fn hop(&self) -> u32 {
-        self.hop
-    }
-    fn fft_size(&self) -> u32 {
-        self.fft_size
-    }
-    fn sample_rate(&self) -> u32 {
-        self.sample_rate
-    }
-}
-
-impl FormantTracks for PlainFormantTracks {
+impl FormantTracks for VoiceMetrics {
     fn f0(&self) -> &[f32] {
         &self.f0
     }
@@ -430,7 +344,7 @@ pub fn spectrogram_image_rect(
     }
     let dur = timeline_duration_ms as f64;
     let start = s.cell_start(0) * 1000.0 / dur;
-    let end = s.cell_end(frames - 1) * 1000.0 / dur;
+    let end = s.cell_end(frames as i64 - 1) * 1000.0 / dur;
     let w = f64::from(size.width);
     Some(Rectangle::new(
         Point::new((start * w) as f32, 0.0),
@@ -1126,7 +1040,7 @@ pub fn formant_dots(
             if hz.is_nan() || hz <= 0.0 || hz > max_hz {
                 continue;
             }
-            let x = metrics.time_of_frame(fr) * 1000.0 / dur as f64 * w;
+            let x = metrics.time_of_frame(fr as i64) * 1000.0 / dur as f64 * w;
             let y = (1.0 - hz / max_hz) * h;
             dots.push((Point::new(x as f32, y as f32), radius, alpha(color, 0.9)));
         }

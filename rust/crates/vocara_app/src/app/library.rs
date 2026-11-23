@@ -12,7 +12,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use super::environment::AppEnvironment;
+use vocara_model::config::environment::AppEnvironment;
 
 /// The opened library (Dart's `Persistence`: the database, the asset pool,
 /// both repositories and the remote-applied stream).

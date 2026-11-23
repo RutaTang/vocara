@@ -13,7 +13,6 @@
 //! separation sidecars, finalizes the recordings ([`quit::QuitHooks`]), then
 //! exits — once, however many close requests arrive meanwhile.
 
-pub mod environment;
 pub mod library;
 mod page;
 pub mod quit;
@@ -27,7 +26,6 @@ use iced::widget::{column, container, stack, Space};
 use iced::{window, Element, Length, Size, Subscription, Task, Theme};
 use vocara_model::diagnostics::DiagnosticsLog;
 
-use self::environment::AppEnvironment;
 use self::library::{LibraryOpen, OpenLibrary};
 use self::page::{erase, with_screen, PageUpdate};
 use self::quit::QuitHooks;
@@ -39,6 +37,7 @@ use crate::ui::core::widgets::fatal_open_screen::{self, FatalOpenScreen};
 use crate::ui::core::widgets::window_drag_bar::window_drag_bar;
 use crate::ui::Screen;
 use crate::ui::{home, settings, song_practice_detail, technique_library};
+pub use vocara_model::config::environment::AppEnvironment;
 
 pub use self::page::Page;
 

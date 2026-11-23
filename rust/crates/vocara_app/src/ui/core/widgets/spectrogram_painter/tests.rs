@@ -28,7 +28,7 @@ impl Lcg {
     }
 }
 
-fn spec(frames: usize, bins: usize, db: impl Fn(usize, usize) -> f64) -> PlainSpectrogram {
+fn spec(frames: usize, bins: usize, db: impl Fn(usize, usize) -> f64) -> Spectrogram {
     let mut values = vec![0f32; frames * bins];
     let mut max_db = f64::NEG_INFINITY;
     for f in 0..frames {
@@ -40,13 +40,15 @@ fn spec(frames: usize, bins: usize, db: impl Fn(usize, usize) -> f64) -> PlainSp
             }
         }
     }
-    PlainSpectrogram {
+    Spectrogram {
         frames,
         bins,
+        max_hz: 24000.0,
         sample_rate: 48000,
         fft_size: 2048,
         hop: 512,
         db: values,
+        min_db: -120.0,
         max_db,
     }
 }
@@ -359,13 +361,15 @@ fn the_live_colouring_is_the_take_colouring_of_the_same_bins() {
             peak = peak.max(f64::from(v));
         }
     }
-    let s = PlainSpectrogram {
+    let s = Spectrogram {
         frames: cols.len(),
         bins: BINS,
+        max_hz: 24000.0,
         sample_rate: 48000,
         fft_size: 2048,
         hop: 512,
         db,
+        min_db: -120.0,
         max_db: peak,
     };
     assert!(
@@ -376,9 +380,9 @@ fn the_live_colouring_is_the_take_colouring_of_the_same_bins() {
 
 // -------------------------------------------- analysis_frame_timing_test
 
-const SR: u32 = 48000;
-const HOP: u32 = 512;
-const FFT: u32 = 2048;
+const SR: i64 = 48000;
+const HOP: i64 = 512;
+const FFT: i64 = 2048;
 const HOP_MS: f64 = HOP as f64 / SR as f64 * 1000.0;
 
 #[test]
@@ -395,7 +399,7 @@ fn image_columns_sit_on_their_frames_window_centres() {
     for c in [0, 45, frames - 1] {
         let mid = ms_of_x(f64::from(dst.x) + (c as f64 + 0.5) * col_w);
         assert!(
-            (mid - s.time_of_frame(c) * 1000.0).abs() < 0.01,
+            (mid - s.time_of_frame(c as i64) * 1000.0).abs() < 0.01,
             "column {c}"
         );
     }
@@ -425,7 +429,7 @@ fn a_max_pooled_column_sits_over_the_frames_it_pools() {
     let c = c[0];
     let ms_of = |x: f64| x / f64::from(size.width) * take_ms as f64;
     let col_w = f64::from(dst.width) / w as f64;
-    let centre_ms = s.time_of_frame(HOT) * 1000.0;
+    let centre_ms = s.time_of_frame(HOT as i64) * 1000.0;
     // The pooled column spans its frames' cells, give or take the half frame
     // its integer frame bounds round off: the hot frame's window centre falls
     // inside it.
@@ -433,7 +437,7 @@ fn a_max_pooled_column_sits_over_the_frames_it_pools() {
     assert!(centre_ms <= ms_of(f64::from(dst.x) + (c + 1) as f64 * col_w));
 }
 
-fn tracks(frames: usize) -> PlainFormantTracks {
+fn tracks(frames: usize) -> VoiceMetrics {
     let curve = |base: f32| -> Vec<f32> {
         (0..frames)
             .map(|f| {
@@ -445,15 +449,28 @@ fn tracks(frames: usize) -> PlainFormantTracks {
             })
             .collect()
     };
-    PlainFormantTracks {
+    let nan = vec![f32::NAN; frames];
+    VoiceMetrics {
         frames,
-        sample_rate: SR,
-        fft_size: FFT,
         hop: HOP,
+        fft_size: FFT,
+        sample_rate: SR,
+        ring: nan.clone(),
+        tilt: nan.clone(),
+        cpp: nan.clone(),
+        loudness: nan.clone(),
         f0: curve(220.0),
         f1: curve(500.0),
         f2: curve(1500.0),
         f3: curve(2600.0),
+        h1h2: nan,
+        active: vec![0; frames],
+        ring_avg: f64::NAN,
+        tilt_avg: f64::NAN,
+        cpp_avg: f64::NAN,
+        peak_dbfs: f64::NAN,
+        clipped_fraction: 0.0,
+        snr_db: f64::NAN,
     }
 }
 
@@ -471,7 +488,7 @@ fn every_f0_dot_sits_at_its_frames_window_centre() {
     assert_eq!(f0.len(), voiced.len());
     for (dot, &f) in f0.iter().zip(&voiced) {
         let ms = f64::from(dot.0.x) / f64::from(size.width) * take_ms as f64;
-        assert!((ms - m.time_of_frame(f) * 1000.0).abs() < 0.01);
+        assert!((ms - m.time_of_frame(f as i64) * 1000.0).abs() < 0.01);
     }
     assert!(dots.len() > 4 * voiced.len() - 4, "all four tracks draw");
 }
