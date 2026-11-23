@@ -4,6 +4,8 @@
 //! off it the Dart header offered (the technique library and settings), so
 //! the app runs and routing works end to end.
 
+pub mod widgets;
+
 use iced::{Element, Task};
 
 use super::core::widgets::studio_button::studio_button;
