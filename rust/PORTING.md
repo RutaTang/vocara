@@ -243,8 +243,8 @@ behavior and its tests are ported and the gates pass.
 | `ui/song_practice_detail/view_model/analysis_cache.dart` | 1717 | `vocara_app::ui::song_practice_detail::view_model::analysis_cache` | todo |
 | `ui/song_practice_detail/view_model/analysis_source.dart` | 64 | `vocara_app::ui::song_practice_detail::view_model::analysis_source` | todo |
 | `ui/song_practice_detail/view_model/interpretations_controller.dart` | 296 | `vocara_app::ui::song_practice_detail::view_model::interpretations_controller` | todo |
-| `ui/song_practice_detail/view_model/mixer_controller.dart` | 1271 | `vocara_app::ui::song_practice_detail::view_model::mixer_controller` | todo |
-| `ui/song_practice_detail/view_model/playback_controller.dart` | 439 | `vocara_app::ui::song_practice_detail::view_model::playback_controller` | todo |
+| `ui/song_practice_detail/view_model/mixer_controller.dart` | 1271 | `vocara_app::ui::song_practice_detail::view_model::mixer_controller` (the view model's closures are a `MixerHost`; a saving edit returns a `SaveRequest`; the resync queues on the graph engine within the call and returns a `PendingSync`) | done |
+| `ui/song_practice_detail/view_model/playback_controller.dart` | 439 | `vocara_app::ui::song_practice_detail::view_model::playback_controller` (the closures are a `PlaybackHost`; the engine's streams are delivered by `drain_engine_events`) | done |
 | `ui/song_practice_detail/view_model/recording_controller.dart` | 1169 | `vocara_app::ui::song_practice_detail::view_model::recording_controller` | todo |
 | `ui/song_practice_detail/view_model/song_practice_detail_view_model.dart` | 3337 | `vocara_app::ui::song_practice_detail::view_model::song_practice_detail_view_model` | todo |
 | `ui/song_practice_detail/widgets/analysis_lanes.dart` | 988 | `vocara_app::ui::song_practice_detail::widgets::analysis_lanes` | todo |
