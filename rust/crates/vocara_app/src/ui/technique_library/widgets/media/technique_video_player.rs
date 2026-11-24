@@ -52,6 +52,22 @@
 //! Frames: each poll asks the player for the frame due now; a frame with a
 //! new revision becomes a new image handle (its pixels shared, not copied),
 //! so the renderer uploads a frame only when it changed.
+//!
+//! # Not as Flutter had it
+//!
+//! - iced clips to rectangles: the frame is not cut to the box's rounded
+//!   corners (`ClipRRect`); the controls' gradient rounds its bottom
+//!   corners to the border's inner radius.
+//! - The poster starts the player on its press (Dart's `onTap`, on the
+//!   release): the controls, made then, time their first double press
+//!   from the press.
+//! - iced has no focus scope. In Flutter a text field that took the focus
+//!   kept it from the controls for good; here a focused field takes the
+//!   keys it gets, and once none does the controls that hold the keyboard
+//!   hear them again.
+//! - A page that leaves while its video is fullscreen takes the
+//!   fullscreen view with it, and the window stays natively fullscreen;
+//!   media_kit's route on the root navigator would have outlived the page.
 
 use std::sync::Arc;
 use std::time::Duration;

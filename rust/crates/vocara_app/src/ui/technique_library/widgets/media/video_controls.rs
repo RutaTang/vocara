@@ -89,7 +89,38 @@
 //! # Keyboard (`:526-575`)
 //!
 //! The default shortcuts are [`shortcut`]'s; the host routes them (the
-//! controls' `Focus` held the keyboard).
+//! controls' `Focus` held the keyboard). A shortcut's seek goes where
+//! mpv took media_kit's absolute seek ([`seek_target`]): J two seconds in
+//! lands 8 s before the end. The media keys are bound, but macOS hands
+//! them to its Now Playing service, not to the window (neither Flutter's
+//! nor winit's), so they never fire, here as in the Dart app.
+//!
+//! # Not as Flutter had it
+//!
+//! - iced has no group opacity: the fade multiplies each part's own alpha.
+//!   Where parts overlap (a lit button under its icon) a half-faded frame
+//!   blends a little differently from Flutter's `AnimatedOpacity`, which
+//!   faded the composited bars as one.
+//! - Times come from the frames: a hover restarts the 3 s timer, and a tap
+//!   is timed for the double press, at the frame that follows it (iced
+//!   draws one at once), not at the event.
+//! - The wheel: only a line-based scroll (a mouse wheel) steps the volume.
+//!   Flutter took a trackpad's scroll (and a Magic Mouse's) as a pan
+//!   gesture, which the volume button's `onPointerSignal` never saw; winit
+//!   gives those as pixel deltas. A mouse with precise deltas and no
+//!   gesture phases, which Flutter would have taken as a scroll signal, is
+//!   a pixel delta here too, and is ignored.
+//! - The volume strip was a horizontal `SingleChildScrollView`; a sideways
+//!   scroll over the 12 px closed strip could scroll it. Not ported.
+//! - A completed clip's played span resets to the start (`:931-935`) and
+//!   stays there until the position moves; the same reset on every seek,
+//!   which mpv's next position event undid within a frame, is not drawn.
+//! - The position text is Inter 12 at line height 1, its glyphs placed in
+//!   the line as cosmic-text centres them, under a pixel below Flutter's
+//!   proportional leading.
+//! - Nothing here can take Tab's focus (iced has no focus traversal), so
+//!   the buttons' focus highlight and the slider's own arrow keys (when
+//!   Tab had focused it) do not exist.
 
 use std::time::Duration;
 
@@ -1185,7 +1216,10 @@ impl<M> Widget<M, Theme, Renderer> for VideoControls<'_, M> {
         };
         match mouse_event {
             mouse::Event::CursorMoved { position } => {
-                let p = *position;
+                // Where the pointer is in the layout's coordinates (a
+                // scrollable around translates the cursor, not the event),
+                // even over a layer above (a drag goes on there).
+                let p = cursor.land().position().unwrap_or(*position);
                 // A pointer event only when it moved (a hover or a move
                 // event: Flutter sent none for a pointer standing still).
                 if state.cursor == Some(p) {

@@ -23,9 +23,13 @@
 //!   cargo's own locks) and makes every license change reviewable.
 //! - **Bundled components** that no crate's license covers: the Inter
 //!   typeface the app embeds (its OFL text ships with the font), SQLite,
-//!   which rusqlite compiles in, and Material Icons, whose
-//!   `arrow_back_ios_new` outline this page's back button draws (its Apache
-//!   License text is `assets/licenses/material-icons/LICENSE`). Keep this
+//!   which rusqlite compiles in, Material Icons, whose
+//!   `arrow_back_ios_new` outline this page's back button draws and whose
+//!   `volume_*` and `fullscreen*` outlines the technique video's controls
+//!   draw (its Apache License text is
+//!   `assets/licenses/material-icons/LICENSE`), and Flutter, whose
+//!   `AnimatedIcons.play_pause` keyframes those controls animate (its BSD
+//!   license text is `assets/licenses/flutter/LICENSE`). Keep this
 //!   list in sync when the app starts shipping another non-crate component
 //!   (a media framework for the technique videos, say). The engine's own
 //!   code is first-party, covered by the app's copyright; its crates are in
@@ -403,17 +407,36 @@ fn bundled_components() -> Vec<LicenseEntry> {
             text: format!(
                 "{}\n\n{}",
                 entry(
-                    "Material Icons — the license page's back arrow \
-                     (google/material-design-icons)",
+                    "Material Icons — the license page's back arrow and the \
+                     technique video controls' icons (google/material-design-icons)",
                     "Apache License 2.0 (Apache-2.0)",
                     "below",
                     Some(
-                        "drawn by the Vocara app (the outline of \
-                         arrow_back_ios_new, rounded)"
+                        "drawn by the Vocara app (the outlines of \
+                         arrow_back_ios_new, rounded; volume_up, volume_down, \
+                         volume_off, fullscreen and fullscreen_exit)"
                     ),
                     None,
                 ),
                 include_str!("../../../assets/licenses/material-icons/LICENSE").trim()
+            ),
+        },
+        LicenseEntry {
+            packages: vec!["Flutter".to_string()],
+            text: format!(
+                "{}\n\n{}",
+                entry(
+                    "Flutter — the technique video controls' play/pause \
+                     animation (AnimatedIcons.play_pause, flutter/flutter)",
+                    "BSD 3-Clause (BSD-3-Clause)",
+                    "below",
+                    Some(
+                        "drawn by the Vocara app (the icon's keyframes, from \
+                         Flutter 3.38's play_pause.g.dart)"
+                    ),
+                    None,
+                ),
+                include_str!("../../../assets/licenses/flutter/LICENSE").trim()
             ),
         },
     ]
@@ -1192,6 +1215,7 @@ mod tests {
             "Inter (font)",
             "SQLite",
             "Material Icons",
+            "Flutter",
             "iced",
             "rusqlite",
             "serde",
@@ -1224,9 +1248,18 @@ mod tests {
         assert_eq!(icons.len(), 1);
         assert!(icons[0].text.contains("License: Apache License 2.0"));
         assert!(icons[0].text.contains("arrow_back_ios_new"));
+        assert!(icons[0].text.contains("fullscreen_exit"));
         assert!(icons[0]
             .text
             .contains("TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION"));
+        // The video controls' play/pause keyframes are Flutter's, under its
+        // BSD license, in full.
+        let flutter = data.licenses_of("Flutter");
+        assert_eq!(flutter.len(), 1);
+        assert!(flutter[0].text.contains("AnimatedIcons.play_pause"));
+        assert!(flutter[0]
+            .text
+            .contains("Copyright 2014 The Flutter Authors. All rights reserved."));
     }
 
     #[test]

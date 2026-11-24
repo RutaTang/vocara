@@ -691,6 +691,43 @@ fn two_taps_within_400_ms_toggle_fullscreen() {
 }
 
 #[test]
+fn a_scrolled_page_moves_the_controls_and_their_taps_with_it() {
+    // The page's scrollable translates the cursor, not the event.
+    let p = halfway();
+    let view = || -> Element<'static, Command> {
+        iced::widget::scrollable(column![
+            Space::new().height(200),
+            container(video_controls(p, |c| c)).width(W).height(H),
+            Space::new().height(400),
+        ])
+        .height(Length::Fill)
+        .into()
+    };
+    let mut window = Frames::new(WINDOW);
+    let t0 = Instant::now();
+    window.point_at(Point::new(240.0, 10.0));
+    window.frame(view(), &[], t0);
+    let down = wheel(mouse::ScrollDelta::Pixels { x: 0.0, y: -150.0 });
+    window.frame(view(), &[down], t0 + 10 * MS);
+    // The video's middle, 150 px up the window now.
+    window.point_at(Point::new(240.0, 185.0));
+    window.frame(view(), &[], t0 + 600 * MS);
+    let tap = [press(), release()];
+    window.frame(view(), &tap, t0 + 700 * MS);
+    let (_, sent) = window.frame_messages(view(), &tap, t0 + 900 * MS);
+    assert_eq!(sent, vec![Command::ToggleFullscreen]);
+    // A press on the play button that moves a little is still its tap.
+    let play = Point::new(PLAY.x, PLAY.y + 200.0 - 150.0);
+    window.point_at(play);
+    window.frame(view(), &[], t0 + 1_500 * MS);
+    window.frame(view(), &[press()], t0 + 1_510 * MS);
+    window.point_at(Point::new(play.x + 3.0, play.y));
+    window.frame(view(), &[], t0 + 1_520 * MS);
+    let (_, sent) = window.frame_messages(view(), &[release()], t0 + 1_530 * MS);
+    assert_eq!(sent, vec![Command::PlayOrPause]);
+}
+
+#[test]
 fn a_tap_within_400_ms_of_their_creation_toggles_fullscreen() {
     // `last` starts as the controls are made: a double click whose first
     // click started the video lands its second on them.
