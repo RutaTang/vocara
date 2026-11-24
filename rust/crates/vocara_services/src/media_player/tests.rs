@@ -160,6 +160,9 @@ fn native() -> NativeState {
         rate: 0.0,
         current_time: Some(Duration::ZERO),
         duration: Some(Duration::from_secs(10)),
+        loaded: Vec::new(),
+        volume: FULL_VOLUME,
+        muted: false,
     }
 }
 
@@ -291,6 +294,71 @@ fn a_failed_item_reports_its_error_and_never_plays() {
     );
 }
 
+#[test]
+fn waiting_to_play_is_buffering_and_a_pause_never_is() {
+    // Right after play(), or a seek while playing: waiting for data.
+    let waiting = NativeState {
+        time_control: NativeTimeControl::Waiting,
+        rate: 1.0,
+        ..native()
+    };
+    assert!(map_state(&waiting).buffering);
+    let playing = NativeState {
+        time_control: NativeTimeControl::Playing,
+        rate: 1.0,
+        ..native()
+    };
+    assert!(!map_state(&playing).buffering);
+    // mpv's `core-idle` while paused did not count (media_kit masked it).
+    assert!(!map_state(&native()).buffering);
+    let failed = NativeState {
+        item_status: NativeItemStatus::Failed,
+        ..waiting
+    };
+    assert!(!map_state(&failed).buffering);
+}
+
+#[test]
+fn the_buffer_ends_where_the_loaded_range_under_the_playhead_ends() {
+    let s = |ms: u64| Duration::from_millis(ms);
+    let ranges = [(s(0), s(4000)), (s(6000), s(9000))];
+    assert_eq!(buffered_until(&ranges, s(1000)), s(4000));
+    assert_eq!(buffered_until(&ranges, s(4000)), s(4000), "its end too");
+    assert_eq!(buffered_until(&ranges, s(7000)), s(9000));
+    assert_eq!(buffered_until(&ranges, s(5000)), Duration::ZERO, "a gap");
+    assert_eq!(buffered_until(&[], s(1000)), Duration::ZERO, "nothing yet");
+    // Through the mapping: never past the clip.
+    let loaded = NativeState {
+        current_time: Some(s(2000)),
+        loaded: vec![(s(0), s(12_000))],
+        ..native()
+    };
+    assert_eq!(map_state(&loaded).buffer, Duration::from_secs(10));
+}
+
+#[test]
+fn the_volume_plays_along_mpvs_cubic_curve() {
+    assert_eq!(volume_gain(100.0), 1.0);
+    assert_eq!(volume_gain(0.0), 0.0);
+    assert_eq!(volume_gain(50.0), 0.125, "half the volume, an eighth");
+    assert!((volume_gain(80.0) - 0.512).abs() < 1e-12);
+    // Out of range: as far as the player goes.
+    assert_eq!(volume_gain(130.0), 1.0);
+    assert_eq!(volume_gain(-5.0), 0.0);
+    assert_eq!(volume_gain(f64::NAN), 0.0);
+    assert_eq!(clamp_volume(105.0), FULL_VOLUME);
+    assert_eq!(clamp_volume(-1.0), 0.0);
+    // A poll reports the volume as set, and the mute.
+    let set = NativeState {
+        volume: 35.0,
+        muted: true,
+        ..native()
+    };
+    let state = map_state(&set);
+    assert_eq!((state.volume, state.muted), (35.0, true));
+    assert_eq!(PlayerState::default().volume, FULL_VOLUME, "a new player");
+}
+
 // ---------------------------------------------------------- null and fake
 
 #[test]
@@ -301,8 +369,11 @@ fn the_null_player_reports_every_clip_unavailable() {
         Err(MediaPlayerError::Unavailable)
     );
     player.play();
+    player.set_volume(20.0);
+    player.set_muted(true);
     let s = player.state();
     assert!(!s.playing && s.error.is_some());
+    assert_eq!((s.volume, s.muted), (FULL_VOLUME, false), "nothing to set");
     assert_eq!(player.frame(), None);
 }
 
@@ -334,6 +405,13 @@ fn the_fake_records_what_it_is_asked_and_its_disposal() {
     );
     assert_eq!((handle.plays(), handle.pauses()), (1, 1));
     assert_eq!(handle.seeks(), vec![Duration::from_millis(1500)]);
+    assert_eq!(handle.state().volume, FULL_VOLUME);
+    player.set_volume(40.0);
+    player.set_volume(120.0);
+    player.set_muted(true);
+    assert_eq!(handle.volumes(), vec![40.0, 120.0]);
+    let s = handle.state();
+    assert_eq!((s.volume, s.muted), (FULL_VOLUME, true), "clamped");
     assert!(!handle.disposed());
     drop(player);
     assert!(handle.disposed());

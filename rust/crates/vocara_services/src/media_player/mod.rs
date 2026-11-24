@@ -10,10 +10,13 @@
 //!   `VideoController` attached to the player did);
 //! - `player.open(Media(path), play: ...)` → [`MediaPlayer::open`];
 //! - `play` / `pause` / `playOrPause` / `seek` → the methods of the same
-//!   names;
+//!   names; `setVolume` (the video controls') → [`MediaPlayer::set_volume`],
+//!   and mpv's `mute` property, which media_kit's controls never set (their
+//!   mute button sets the volume to 0), → [`MediaPlayer::set_muted`];
 //! - `stream.playing` / `stream.position` / `stream.duration` (and
-//!   `completed`, `error`) → [`MediaPlayer::state`], a snapshot the UI POLLS
-//!   on an iced subscription tick while a clip plays, instead of streams it
+//!   `completed`, `error`, and the video controls' `buffering`, `buffer`
+//!   and `volume`) → [`MediaPlayer::state`], a snapshot the UI POLLS on an
+//!   iced subscription tick while a clip plays, instead of streams it
 //!   listens to;
 //! - the `Video` widget's texture → [`MediaPlayer::frame`], the latest frame
 //!   as RGBA with a revision, so the UI uploads a frame only when it changed;
@@ -24,7 +27,11 @@
 //! - **AVFoundation** (`avfoundation.rs`, macOS with the `device` feature):
 //!   an `AVPlayer` over an `AVPlayerItem` for the file, plus an
 //!   `AVPlayerItemVideoOutput` for video. AVFoundation ships with macOS, so
-//!   the app bundles no media framework (no libmpv, no GStreamer).
+//!   the app bundles no media framework (no libmpv, no GStreamer). The
+//!   volume keeps media_kit's 0–100 scale, which was mpv's: mpv plays a
+//!   volume at the cube of its share of 100 ([`volume_gain`]: 50 is an
+//!   eighth of the amplitude), and the backend gives `AVPlayer.volume` that
+//!   gain.
 //! - [`NullMediaPlayer`] (every other build): opening fails with
 //!   [`MediaPlayerError::Unavailable`], which the example players show as the
 //!   unavailable clip, exactly as Dart showed a clip whose file is not on this
@@ -78,8 +85,9 @@ pub enum MediaPlayerError {
 pub type Result<T> = std::result::Result<T, MediaPlayerError>;
 
 /// A player's state when polled: what media_kit's `stream.playing`,
-/// `position`, `duration`, `completed` and `error` last reported.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// `position`, `duration`, `completed`, `error`, `buffering`, `buffer` and
+/// `volume` last reported.
+#[derive(Debug, Clone, PartialEq)]
 pub struct PlayerState {
     /// Playing, or asked to play and waiting for data (media_kit reported
     /// `playing: true` from the moment `play` was called).
@@ -96,6 +104,55 @@ pub struct PlayerState {
     pub loading: bool,
     /// The clip could not be played; the reason.
     pub error: Option<String>,
+    /// Asked to play and waiting for data (media_kit's `buffering`: mpv's
+    /// `core-idle` outside a pause, or `paused-for-cache`).
+    pub buffering: bool,
+    /// Where the media data loaded ahead of the playhead ends (media_kit's
+    /// `buffer`, mpv's `demuxer-cache-time`); zero while unknown.
+    pub buffer: Duration,
+    /// The volume, from 0 (silent) to 100 (as recorded): media_kit's
+    /// `volume`, [`FULL_VOLUME`] for a new player.
+    pub volume: f64,
+    /// Muted ([`MediaPlayer::set_muted`]), whatever the volume.
+    pub muted: bool,
+}
+
+impl Default for PlayerState {
+    /// A player with nothing open: stopped at 0:00, at full volume.
+    fn default() -> Self {
+        PlayerState {
+            playing: false,
+            position: Duration::ZERO,
+            duration: Duration::ZERO,
+            completed: false,
+            loading: false,
+            error: None,
+            buffering: false,
+            buffer: Duration::ZERO,
+            volume: FULL_VOLUME,
+            muted: false,
+        }
+    }
+}
+
+/// media_kit's volume scale: 100 plays the clip as recorded (a new
+/// player's volume).
+pub const FULL_VOLUME: f64 = 100.0;
+
+/// `volume` as media_kit's controls set it: 0 to 100 (a non-number is 0).
+pub fn clamp_volume(volume: f64) -> f64 {
+    if volume.is_nan() {
+        return 0.0;
+    }
+    volume.clamp(0.0, FULL_VOLUME)
+}
+
+/// The amplitude mpv plays `volume` (media_kit's 0–100) at: the cube of its
+/// share of 100 (`audio_get_gain`, mpv's software volume), so 50 plays at an
+/// eighth. mpv would amplify past 100 (up to its `volume-max`); nothing
+/// here asks for more, and the gain stops at 1.
+pub fn volume_gain(volume: f64) -> f64 {
+    (clamp_volume(volume) / FULL_VOLUME).powi(3)
 }
 
 /// One decoded video frame.
@@ -146,6 +203,15 @@ pub trait MediaPlayer {
 
     /// Moves playback to `to` (clamped to the clip by the player).
     fn seek(&mut self, to: Duration);
+
+    /// Sets the volume, 0 (silent) to 100 (as recorded), as media_kit's
+    /// `setVolume` did, clamped to that range ([`clamp_volume`]). The player
+    /// plays it at [`volume_gain`]; [`PlayerState::volume`] reports what was
+    /// set.
+    fn set_volume(&mut self, volume: f64);
+
+    /// Mutes (or unmutes) the player, keeping its volume.
+    fn set_muted(&mut self, muted: bool);
 
     /// The player's state now.
     fn state(&self) -> PlayerState;
@@ -202,6 +268,10 @@ impl MediaPlayer for NullMediaPlayer {
     fn pause(&mut self) {}
 
     fn seek(&mut self, _to: Duration) {}
+
+    fn set_volume(&mut self, _volume: f64) {}
+
+    fn set_muted(&mut self, _muted: bool) {}
 
     fn state(&self) -> PlayerState {
         PlayerState {
@@ -328,6 +398,27 @@ pub struct NativeState {
     pub current_time: Option<Duration>,
     /// `AVPlayerItem.duration`: `None` while indefinite.
     pub duration: Option<Duration>,
+    /// `AVPlayerItem.loadedTimeRanges`, each as `(start, end)` (see
+    /// [`buffered_until`]).
+    pub loaded: Vec<(Duration, Duration)>,
+    /// The volume last set, on media_kit's scale (the `AVPlayer` was given
+    /// its [`volume_gain`]).
+    pub volume: f64,
+    /// `AVPlayer.isMuted`.
+    pub muted: bool,
+}
+
+/// media_kit's `buffer` (mpv's `demuxer-cache-time`: where the data read
+/// ahead of the playhead ends) from an item's loaded time ranges: the end
+/// of the range that holds `position`; zero when none does (nothing is
+/// loaded where it plays).
+pub fn buffered_until(ranges: &[(Duration, Duration)], position: Duration) -> Duration {
+    ranges
+        .iter()
+        .filter(|(start, end)| *start <= position && position <= *end)
+        .map(|(_, end)| *end)
+        .max()
+        .unwrap_or(Duration::ZERO)
 }
 
 /// How close to its end a stopped clip counts as completed: a scrub to the
@@ -345,6 +436,11 @@ pub const END_TOLERANCE: Duration = Duration::from_millis(1);
 ///   rate back at zero).
 /// - `loading`: the item has neither loaded nor failed yet.
 /// - `error`: the item or the player failed.
+/// - `buffering`: asked to play and waiting for data (the time control
+///   waiting to play at its rate), as mpv's `core-idle` was outside a
+///   pause.
+/// - `buffer`: [`buffered_until`] the position, never past the duration.
+/// - `volume`, `muted`: as set.
 pub fn map_state(native: &NativeState) -> PlayerState {
     let failed = native.item_status == NativeItemStatus::Failed || native.player_failed;
     let error = failed.then(|| {
@@ -362,6 +458,10 @@ pub fn map_state(native: &NativeState) -> PlayerState {
     }
     let completed =
         !failed && !playing && !duration.is_zero() && position + END_TOLERANCE >= duration;
+    let mut buffer = buffered_until(&native.loaded, position);
+    if !duration.is_zero() && buffer > duration {
+        buffer = duration;
+    }
     PlayerState {
         playing,
         position,
@@ -369,6 +469,10 @@ pub fn map_state(native: &NativeState) -> PlayerState {
         completed,
         loading: !failed && native.item_status == NativeItemStatus::Unknown,
         error,
+        buffering: !failed && native.time_control == NativeTimeControl::Waiting,
+        buffer,
+        volume: native.volume,
+        muted: native.muted,
     }
 }
 

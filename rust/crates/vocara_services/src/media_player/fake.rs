@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use super::{
-    MediaKind, MediaPlayer, MediaPlayerError, MediaPlayerFactory, PlayerState, Result, VideoFrame,
+    clamp_volume, MediaKind, MediaPlayer, MediaPlayerError, MediaPlayerFactory, PlayerState,
+    Result, VideoFrame,
 };
 
 #[derive(Debug)]
@@ -18,6 +19,7 @@ struct Shared {
     plays: usize,
     pauses: usize,
     seeks: Vec<Duration>,
+    volumes: Vec<f64>,
     disposed: bool,
     state: PlayerState,
     frame: Option<VideoFrame>,
@@ -28,8 +30,9 @@ fn lock(shared: &Mutex<Shared>) -> MutexGuard<'_, Shared> {
 }
 
 /// A fake player. `play` and `pause` flip its `playing` (as media_kit's did
-/// at once), `seek` moves its position; everything else it reports is what
-/// the test sets through its [`FakePlayerHandle`].
+/// at once), `seek` moves its position, `set_volume` and `set_muted` set
+/// what it reports; everything else it reports is what the test sets
+/// through its [`FakePlayerHandle`].
 #[derive(Debug)]
 pub struct FakeMediaPlayer {
     shared: Arc<Mutex<Shared>>,
@@ -52,6 +55,7 @@ impl FakeMediaPlayer {
             plays: 0,
             pauses: 0,
             seeks: Vec::new(),
+            volumes: Vec::new(),
             disposed: false,
             state: PlayerState::default(),
             frame: None,
@@ -98,6 +102,16 @@ impl MediaPlayer for FakeMediaPlayer {
         s.state.position = to;
     }
 
+    fn set_volume(&mut self, volume: f64) {
+        let mut s = lock(&self.shared);
+        s.volumes.push(volume);
+        s.state.volume = clamp_volume(volume);
+    }
+
+    fn set_muted(&mut self, muted: bool) {
+        lock(&self.shared).state.muted = muted;
+    }
+
     fn state(&self) -> PlayerState {
         lock(&self.shared).state.clone()
     }
@@ -136,6 +150,11 @@ impl FakePlayerHandle {
     /// Every seek target, in order.
     pub fn seeks(&self) -> Vec<Duration> {
         lock(&self.shared).seeks.clone()
+    }
+
+    /// Every volume it was asked for, in order (before clamping).
+    pub fn volumes(&self) -> Vec<f64> {
+        lock(&self.shared).volumes.clone()
     }
 
     /// Whether the player was dropped (media_kit's `dispose`).

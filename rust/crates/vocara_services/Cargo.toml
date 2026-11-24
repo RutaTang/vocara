@@ -19,11 +19,14 @@ device = [
     "objc2-av-foundation/AVPlayer",
     "objc2-av-foundation/AVPlayerItem",
     "objc2-av-foundation/AVPlayerItemOutput",
+    # NSValue's CMTimeRangeValue: the item's loaded time ranges.
+    "objc2-av-foundation/AVTime",
     "objc2-av-foundation/objc2-core-foundation",
     "objc2-av-foundation/objc2-core-media",
     "objc2-av-foundation/objc2-core-video",
     "dep:objc2-core-foundation",
     "dep:objc2-core-media",
+    "objc2-core-media/CMTimeRange",
     "dep:objc2-core-video",
 ]
 
