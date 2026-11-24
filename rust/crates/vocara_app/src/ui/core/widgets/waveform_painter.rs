@@ -19,6 +19,7 @@ use iced::widget::{canvas as canvas_widget, Canvas};
 use iced::{mouse, Color, Length, Pixels, Point, Rectangle, Renderer, Size, Theme};
 
 use super::painter::{color_key, KeyedCache, Same};
+use super::studio_text::fill_tabular_text;
 use crate::ui::core::theme::{alpha, font};
 pub use vocara_model::util::format::format_clock_ms;
 
@@ -597,7 +598,8 @@ impl<M> canvas::Program<M> for TimelineGridPainter {
 const RULER_LABEL_LINE: f32 = 1.21;
 
 /// `TimeRulerPainter`: the time ruler above the tracks — 7 px ticks plus
-/// `m:ss` labels, 10 px, 3 px right of each tick, 5 px off the bottom.
+/// `m:ss` labels, 10 px tabular figures, 3 px right of each tick, 5 px off
+/// the bottom.
 #[derive(Debug, Clone)]
 pub struct TimeRulerPainter {
     pub timeline_duration_ms: i64,
@@ -638,16 +640,19 @@ impl<M> canvas::Program<M> for TimeRulerPainter {
                         .with_color(self.tick_color)
                         .with_width(1.0),
                 );
-                frame.fill_text(canvas::Text {
-                    content: format_clock_ms(t),
-                    position: Point::new(x + 3.0, h - label_height - 5.0),
-                    color: self.text_color,
-                    size: Pixels(10.0),
-                    line_height: iced::widget::text::LineHeight::Relative(RULER_LABEL_LINE),
-                    font: font::REGULAR,
-                    align_y: Vertical::Top,
-                    ..canvas::Text::default()
-                });
+                fill_tabular_text(
+                    frame,
+                    canvas::Text {
+                        content: format_clock_ms(t),
+                        position: Point::new(x + 3.0, h - label_height - 5.0),
+                        color: self.text_color,
+                        size: Pixels(10.0),
+                        line_height: iced::widget::text::LineHeight::Relative(RULER_LABEL_LINE),
+                        font: font::REGULAR,
+                        align_y: Vertical::Top,
+                        ..canvas::Text::default()
+                    },
+                );
             }
         })]
     }

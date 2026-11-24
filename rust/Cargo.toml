@@ -28,7 +28,9 @@ rusqlite = { version = "0.43", features = ["bundled"] }
 dirs = "6"
 rustfft = "6"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "process", "fs", "macros", "io-util"] }
-iced = { version = "0.14", default-features = false, features = ["wgpu", "tiny-skia", "canvas", "image", "tokio", "advanced", "x11", "wayland", "web-colors"] }
+# `advanced-shaping`: every text is shaped fully (kerned, as Flutter set
+# it); iced's default shapes ASCII text glyph by glyph, with no kerning.
+iced = { version = "0.14", default-features = false, features = ["wgpu", "tiny-skia", "canvas", "image", "tokio", "advanced", "advanced-shaping", "x11", "wayland", "web-colors"] }
 iced_test = "0.14"
 lucide-icons = { version = "1.77", features = ["iced"] }
 # The open and save panels off macOS only (vocara_services::file_panels).

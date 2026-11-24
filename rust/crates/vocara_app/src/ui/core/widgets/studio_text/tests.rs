@@ -6,13 +6,9 @@ fn width_of(spec: &Spec<'_>) -> f32 {
     laid(spec, f32::INFINITY).min_bounds.width
 }
 
-/// `content` as an ellipsized text measures it once cut: shaped fully (the
-/// "…" is not ASCII), unspaced.
+/// `content` unspaced, as the ellipsis tests set their text.
 fn solid_width(content: &str, size: f32) -> f32 {
-    width_of(&Spec {
-        shaping: Shaping::Advanced,
-        ..spec(content, size, font::SEMIBOLD)
-    })
+    width_of(&spec(content, size, font::SEMIBOLD))
 }
 
 fn ellipsized<'s>(content: &'s str, size: f32, max_lines: usize) -> Spec<'s> {
@@ -46,8 +42,7 @@ fn spacing_follows_every_glyph_the_last_one_too() {
 
 #[test]
 fn spacing_keeps_the_shaping_of_non_latin_text() {
-    // Cyrillic (Inter has it) is shaped fully under `Auto`, and spaced per
-    // glyph as Latin is.
+    // Cyrillic (Inter has it) is shaped as Latin is, and spaced per glyph.
     let solid = spec("Привет", 12.0, font::REGULAR);
     let spaced = Spec {
         letter_spacing: 1.0,
@@ -75,7 +70,7 @@ fn spacing_keeps_the_line_height() {
 
 #[test]
 fn a_text_that_fits_has_no_ellipsis() {
-    // A text that fits is laid out exactly as iced's text would be.
+    // A text that fits is laid out whole, as wide as it is.
     let title = "Moon River";
     let natural = width_of(&spec(title, 16.0, font::SEMIBOLD));
     let fitted = laid(&ellipsized(title, 16.0, 1), natural + 0.5);
@@ -129,13 +124,9 @@ fn the_ellipsis_is_set_without_the_spacing() {
     let prefix = shown.strip_suffix(ELLIPSIS).expect("ends in …");
     let prefix_width = width_of(&Spec {
         letter_spacing: 0.8,
-        shaping: Shaping::Advanced,
         ..spec(prefix, 10.0, font::SEMIBOLD)
     });
-    let ellipsis_width = width_of(&Spec {
-        shaping: Shaping::Advanced,
-        ..spec(ELLIPSIS, 10.0, font::SEMIBOLD)
-    });
+    let ellipsis_width = width_of(&spec(ELLIPSIS, 10.0, font::SEMIBOLD));
     assert!(
         (cut.min_bounds.width - (prefix_width + ellipsis_width)).abs() < 0.5,
         "{} vs {} + {}",
@@ -190,16 +181,74 @@ fn a_canvas_label_puts_each_cluster_where_the_spaced_line_has_it() {
         ..solid.clone()
     };
     let mut font_system = font_system().write().expect("Write font system");
-    let (plain, plain_width) = spaced_clusters(font_system.raw(), &solid);
-    let (clusters, width) = spaced_clusters(font_system.raw(), &spaced);
+    let (plain, plain_width) = line_clusters(font_system.raw(), &solid);
+    let (clusters, width) = line_clusters(font_system.raw(), &spaced);
     drop(font_system);
     assert_eq!(clusters.len(), 9);
     assert!(close(width - plain_width, 9.0 * 1.5));
-    for (i, ((range, x), (plain_range, plain_x))) in clusters.iter().zip(&plain).enumerate() {
+    for (i, ((range, x, _), (plain_range, plain_x, _))) in clusters.iter().zip(&plain).enumerate() {
         assert_eq!(range, plain_range);
         assert_eq!(range.len(), 1);
         assert!(close(x - plain_x, i as f32 * 1.5), "{i}: {x} vs {plain_x}");
     }
+}
+
+#[test]
+fn tabular_figures_give_every_digit_one_advance() {
+    // Inter's `tnum`: two numbers with as many digits are as wide, which
+    // proportional figures are not ("1" is narrow, "0" wide).
+    let tabular = |content: &str| {
+        width_of(&Spec {
+            tabular: true,
+            ..spec(content, 11.0, font::SEMIBOLD)
+        })
+    };
+    let proportional = |content: &str| width_of(&spec(content, 11.0, font::SEMIBOLD));
+    assert!(
+        (proportional("11:11") - proportional("00:00")).abs() > 0.5,
+        "{} vs {}",
+        proportional("11:11"),
+        proportional("00:00")
+    );
+    assert!(
+        close(tabular("11:11"), tabular("00:00")),
+        "{} vs {}",
+        tabular("11:11"),
+        tabular("00:00")
+    );
+    assert!(close(tabular("-14.0 dB"), tabular("-87.3 dB")));
+    let digits: Vec<f32> = ('0'..='9').map(|d| tabular(&d.to_string())).collect();
+    assert!(digits.iter().all(|w| close(*w, digits[0])), "{digits:?}");
+    // Letters keep their own advances.
+    assert!(close(tabular("dB"), proportional("dB")));
+}
+
+#[test]
+fn a_canvas_label_centres_each_figure_in_its_tabular_advance() {
+    super::testing::load_fonts();
+    let plain = spec("11", 10.0, font::REGULAR);
+    let tabular = Spec {
+        tabular: true,
+        ..plain.clone()
+    };
+    let mut font_system = font_system().write().expect("Write font system");
+    let (own, _) = line_clusters(font_system.raw(), &plain);
+    let (cells, _) = line_clusters(font_system.raw(), &tabular);
+    drop(font_system);
+    // A tabular "1" is wider than Inter's own "1": the canvas, which draws
+    // the "1" it has, centres it in the cell.
+    assert!(cells[0].2 > own[0].2 + 0.5, "{cells:?} vs {own:?}");
+    assert!(close(cells[1].1, cells[0].2));
+}
+
+#[test]
+fn text_is_kerned_as_flutter_kerns_it() {
+    // "AV" in Inter has a kerning pair: set together, the two letters are
+    // narrower than their two advances.
+    let pair = width_of(&spec("AV", 40.0, font::REGULAR));
+    let apart =
+        width_of(&spec("A", 40.0, font::REGULAR)) + width_of(&spec("V", 40.0, font::REGULAR));
+    assert!(pair < apart - 1.0, "{pair} vs {apart}");
 }
 
 #[test]

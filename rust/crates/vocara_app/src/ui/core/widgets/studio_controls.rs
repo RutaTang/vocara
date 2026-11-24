@@ -16,21 +16,24 @@
 //! ends the drag reaches it wherever the pointer is. A control the screen
 //! stops showing mid-drag owes its commit to the screen.
 
+use std::sync::Arc;
 use std::time::Instant;
 
+use iced::advanced::graphics::text::cosmic_text::Buffer;
 use iced::advanced::layout::{self, Layout};
-use iced::advanced::text::{self as core_text, Paragraph as _, Renderer as _};
+use iced::advanced::text::LineHeight;
 use iced::advanced::widget::{tree, Operation, Tree};
 use iced::advanced::{renderer, Widget};
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::canvas::{self, Frame, Geometry, LineCap, Path, Stroke};
-use iced::widget::{button, canvas as canvas_widget, column, container, text};
+use iced::widget::{button, canvas as canvas_widget, column, container};
 use iced::{
-    mouse, Background, Border, Color, Element, Event, Font, Length, Pixels, Point, Rectangle,
-    Renderer, Shadow, Size, Theme, Vector,
+    mouse, Background, Border, Color, Element, Event, Font, Length, Point, Rectangle, Renderer,
+    Shadow, Size, Theme, Vector,
 };
 
 use super::gesture::{Gesture, PanDoubleTap};
+use super::studio_text::{self, studio_text};
 use super::wrap::Wrap;
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{alpha, bare_button, font, Studio};
@@ -129,9 +132,10 @@ impl<'a, M: Clone + 'a> From<StudioPanKnob<'a, M>> for Element<'a, M> {
         .align_x(Horizontal::Center);
         if knob.show_label {
             content = content.push(iced::widget::Space::new().height(2)).push(
-                text(pan_label(knob.value))
+                studio_text(pan_label(knob.value))
                     .size(9)
                     .font(font::SEMIBOLD)
+                    .tabular()
                     .color(Studio::TEXT_SECONDARY)
                     .width(size + 8.0)
                     .align_x(Horizontal::Center),
@@ -384,10 +388,11 @@ pub struct FixedWidthReadout {
     size: f32,
     font: Font,
     color: Color,
+    tabular: bool,
 }
 
 /// A readout of `text` `width` px wide, in a `size` px regular face of
-/// `Studio.textSecondary` until restyled.
+/// `Studio.textSecondary` with proportional figures until restyled.
 pub fn fixed_width_readout(text: impl Into<String>, width: f32, size: f32) -> FixedWidthReadout {
     FixedWidthReadout {
         text: text.into(),
@@ -395,6 +400,7 @@ pub fn fixed_width_readout(text: impl Into<String>, width: f32, size: f32) -> Fi
         size,
         font: font::REGULAR,
         color: Studio::TEXT_SECONDARY,
+        tabular: false,
     }
 }
 
@@ -409,25 +415,28 @@ impl FixedWidthReadout {
         self
     }
 
-    fn text_at(&self, size: f32) -> core_text::Text<&str, Font> {
-        core_text::Text {
-            content: self.text.as_str(),
-            bounds: Size::INFINITE,
-            size: Pixels(size),
-            line_height: core_text::LineHeight::default(),
-            font: self.font,
-            align_x: core_text::Alignment::Left,
-            align_y: Vertical::Top,
-            shaping: core_text::Shaping::Advanced,
-            wrapping: core_text::Wrapping::None,
-        }
+    /// `fontFeatures: [FontFeature.tabularFigures()]`.
+    pub fn tabular(mut self) -> Self {
+        self.tabular = true;
+        self
+    }
+
+    /// The reading laid out at `size` px, as `studio_text` sets it.
+    fn line_at(&self, size: f32) -> (Arc<Buffer>, Size) {
+        studio_text::line(
+            &self.text,
+            size,
+            LineHeight::default(),
+            self.font,
+            self.tabular,
+        )
     }
 }
 
-/// The laid-out reading: the font size it is set at, and its extent.
-#[derive(Debug, Default, Clone, Copy)]
+/// The laid-out reading: its buffer, and its extent.
+#[derive(Debug, Default, Clone)]
 pub struct ReadoutState {
-    size: f32,
+    buffer: Option<Arc<Buffer>>,
     extent: Size,
 }
 
@@ -445,18 +454,14 @@ impl<M> Widget<M, Theme, Renderer> for FixedWidthReadout {
     }
 
     fn layout(&mut self, tree: &mut Tree, _: &Renderer, limits: &layout::Limits) -> layout::Node {
-        let measured =
-            <Renderer as core_text::Renderer>::Paragraph::with_text(self.text_at(self.size))
-                .min_bounds();
-        let scale = if measured.width > self.width && measured.width > 0.0 {
-            self.width / measured.width
-        } else {
-            1.0
+        let (mut buffer, mut extent) = self.line_at(self.size);
+        if extent.width > self.width && extent.width > 0.0 {
+            (buffer, extent) = self.line_at(self.size * self.width / extent.width);
+        }
+        *tree.state.downcast_mut::<ReadoutState>() = ReadoutState {
+            buffer: Some(buffer),
+            extent,
         };
-        let size = self.size * scale;
-        let extent = <Renderer as core_text::Renderer>::Paragraph::with_text(self.text_at(size))
-            .min_bounds();
-        *tree.state.downcast_mut::<ReadoutState>() = ReadoutState { size, extent };
         layout::Node::new(limits.resolve(
             Length::Fixed(self.width),
             Length::Shrink,
@@ -475,20 +480,13 @@ impl<M> Widget<M, Theme, Renderer> for FixedWidthReadout {
         viewport: &Rectangle,
     ) {
         let state = tree.state.downcast_ref::<ReadoutState>();
+        let Some(buffer) = &state.buffer else {
+            return;
+        };
         let bounds = layout.bounds();
-        let text = self.text_at(state.size);
-        renderer.fill_text(
-            core_text::Text {
-                content: self.text.clone(),
-                bounds: state.extent,
-                size: text.size,
-                line_height: text.line_height,
-                font: text.font,
-                align_x: text.align_x,
-                align_y: text.align_y,
-                shaping: text.shaping,
-                wrapping: text.wrapping,
-            },
+        studio_text::draw_line(
+            renderer,
+            buffer,
             Point::new(bounds.x + bounds.width - state.extent.width, bounds.y),
             self.color,
             *viewport,
@@ -537,7 +535,7 @@ pub fn fader_db(volume: f64) -> String {
 pub const FADER_DB_READOUT_WIDTH: f32 = 46.0;
 
 /// `FaderDbReadout(volume)`: "-14.0 dB" in a 46 px box, 10 px w600
-/// `Studio.textSecondary`.
+/// `Studio.textSecondary`, tabular figures.
 pub fn fader_db_readout<'a, M: 'a>(volume: f64) -> Element<'a, M> {
     fixed_width_readout(
         format!("{} dB", fader_db(volume)),
@@ -546,6 +544,7 @@ pub fn fader_db_readout<'a, M: 'a>(volume: f64) -> Element<'a, M> {
     )
     .font(font::SEMIBOLD)
     .color(Studio::TEXT_SECONDARY)
+    .tabular()
     .into()
 }
 

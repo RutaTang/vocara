@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::canvas::{self, Frame, Geometry, Path};
 use iced::widget::text::Wrapping;
-use iced::widget::{button, canvas as canvas_widget, container, row, text, Space};
+use iced::widget::{button, canvas as canvas_widget, container, row, Space};
 use iced::{mouse, Element, Event, Length, Point, Rectangle, Renderer, Size, Subscription, Theme};
 use vocara_services::media_player::{
     MediaKind, MediaPlayer, MediaPlayerError, MediaPlayerFactory, PlayerState, VideoFrame,
@@ -301,8 +301,9 @@ impl Transport {
             Space::new().width(12),
             scrubber(fraction as f32),
             Space::new().width(12),
-            text(readout)
+            studio_text(readout)
                 .size(11.5)
+                .tabular()
                 .color(Studio::TEXT_SECONDARY)
                 .wrapping(Wrapping::None)
                 .width(82)

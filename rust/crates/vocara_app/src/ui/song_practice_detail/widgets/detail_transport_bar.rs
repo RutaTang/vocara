@@ -21,10 +21,9 @@
 //! - The counter's `ValueListenableBuilder` and `RepaintBoundary`s: an iced
 //!   view is rebuilt from state on every message, and only what changed is
 //!   redrawn; the counter reads [`TransportBar::position`] when built.
-//! - The counter's tabular figures (iced text has none) and 1 px letter
-//!   spacing: the counter lays its characters out itself, each digit in a
-//!   cell as wide as the widest digit and every character followed by 1 px,
-//!   so the transport does not shift as the seconds tick.
+//! - The counter's tabular figures and 1 px letter spacing: `studio_text`
+//!   with Inter's `tnum`, so the transport does not shift as the seconds
+//!   tick.
 //! - `ListenableBuilder(playback.viewport)` around the zoom slider and the
 //!   loop and follow buttons: the inputs are read when the bar is built.
 //! - The zoom slider's `onTapDown` / `onHorizontalDragUpdate` set the zoom
@@ -36,17 +35,13 @@
 use std::time::Duration;
 
 use iced::advanced::layout::{self, Layout};
-use iced::advanced::text::{self as core_text, Paragraph as _, Renderer as _};
-use iced::advanced::widget::{tree, Operation, Tree};
+use iced::advanced::widget::{Operation, Tree};
 use iced::advanced::{overlay, renderer, Clipboard, Shell, Widget};
 use iced::alignment::Vertical;
 use iced::widget::canvas::{self, Frame, Geometry, LineCap, Path, Stroke};
 use iced::widget::text::Wrapping;
 use iced::widget::{button, canvas as canvas_widget, column, container, row, text, Space};
-use iced::{
-    mouse, Color, Element, Event, Font, Length, Pixels, Point, Rectangle, Renderer, Size, Theme,
-    Vector,
-};
+use iced::{mouse, Element, Event, Length, Point, Rectangle, Renderer, Size, Theme, Vector};
 use vocara_model::models::song_practice::SongPractice;
 use vocara_model::util::format::{format_clock, format_clock_ms};
 
@@ -54,7 +49,7 @@ use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{alpha, bare_button, boxed, fill, font, Studio};
 use crate::ui::core::widgets::studio_controls::studio_round_button;
 use crate::ui::core::widgets::studio_hint::spinner;
-use crate::ui::core::widgets::studio_text::studio_text;
+use crate::ui::core::widgets::studio_text::{studio_text, StudioText};
 
 #[cfg(test)]
 mod tests;
@@ -809,155 +804,29 @@ impl<'a, M: 'a> From<Arranged<'a, M>> for Element<'a, M> {
 
 // ------------------------------------------------------------ the counter
 
-/// One line of text with tabular figures and letter spacing (see the module
-/// docs): every digit takes the widest digit's advance, centred in it, and
-/// every character is followed by `letter_spacing`.
-struct TabularText {
-    content: String,
-    size: f32,
-    font: Font,
-    color: Color,
-    letter_spacing: f32,
-}
-
-/// The laid-out characters (each one's x and own advance) and the line's
-/// size.
-#[derive(Debug, Default, Clone)]
-struct TabularLayout {
-    glyphs: Vec<(char, f32, f32)>,
-    width: f32,
-    height: f32,
-}
-
-impl TabularText {
-    fn text_at<'s>(&self, content: &'s str) -> core_text::Text<&'s str, Font> {
-        core_text::Text {
-            content,
-            bounds: Size::INFINITE,
-            size: Pixels(self.size),
-            line_height: core_text::LineHeight::Relative(LCD_LINE_HEIGHT),
-            font: self.font,
-            align_x: core_text::Alignment::Left,
-            align_y: Vertical::Top,
-            shaping: core_text::Shaping::Advanced,
-            wrapping: core_text::Wrapping::None,
-        }
-    }
-
-    fn width_of(&self, content: &str) -> f32 {
-        <Renderer as core_text::Renderer>::Paragraph::with_text(self.text_at(content))
-            .min_bounds()
-            .width
-    }
-
-    /// A character's advance: measured between two digits, so a space is
-    /// not dropped as trailing whitespace.
-    fn advance(&self, c: char) -> f32 {
-        self.width_of(&format!("0{c}0")) - self.width_of("00")
-    }
-
-    fn arrange(&self) -> TabularLayout {
-        let cell = ('0'..='9').map(|d| self.advance(d)).fold(0.0, f32::max);
-        let mut x = 0.0;
-        let mut glyphs = Vec::new();
-        for c in self.content.chars() {
-            let own = self.advance(c);
-            let slot = if c.is_ascii_digit() { cell } else { own };
-            glyphs.push((c, x + (slot - own) / 2.0, own));
-            x += slot + self.letter_spacing;
-        }
-        TabularLayout {
-            glyphs,
-            width: x,
-            height: self.size * LCD_LINE_HEIGHT,
-        }
-    }
+/// The counter's text: 14 px w600 `Studio.lcd`, 1 px letter spacing,
+/// tabular figures (Inter's `tnum`: every digit takes one advance, so the
+/// transport does not shift as the seconds tick).
+fn lcd_counter<'a>(content: String) -> StudioText<'a> {
+    studio_text(content)
+        .size(14)
+        .font(font::SEMIBOLD)
+        .line_height(LCD_LINE_HEIGHT)
+        .letter_spacing(1.0)
+        .tabular()
+        .color(Studio::LCD)
 }
 
 /// The counter's width for `content` (the tests'): every digit as wide as
-/// the widest, so the readout never changes width as the clock runs.
+/// the others, so the readout never changes width as the clock runs.
 #[cfg(test)]
 pub(crate) fn counter_width(content: &str) -> f32 {
-    lcd_counter(content.to_string()).arrange().width
-}
-
-/// The counter's text: 14 px w600 `Studio.lcd`, 1 px letter spacing.
-fn lcd_counter(content: String) -> TabularText {
-    TabularText {
-        content,
-        size: 14.0,
-        font: font::SEMIBOLD,
-        color: Studio::LCD,
+    use crate::ui::core::widgets::studio_text::{testing, Spec};
+    let spec = Spec {
+        line_height: 14.0 * LCD_LINE_HEIGHT,
         letter_spacing: 1.0,
-    }
-}
-
-impl<M> Widget<M, Theme, Renderer> for TabularText {
-    fn size(&self) -> Size<Length> {
-        Size::new(Length::Shrink, Length::Shrink)
-    }
-
-    fn tag(&self) -> tree::Tag {
-        tree::Tag::of::<TabularLayout>()
-    }
-
-    fn state(&self) -> tree::State {
-        tree::State::new(TabularLayout::default())
-    }
-
-    fn layout(&mut self, tree: &mut Tree, _: &Renderer, limits: &layout::Limits) -> layout::Node {
-        let arranged = self.arrange();
-        let size = Size::new(arranged.width, arranged.height);
-        *tree.state.downcast_mut::<TabularLayout>() = arranged;
-        layout::Node::new(limits.resolve(Length::Shrink, Length::Shrink, size))
-    }
-
-    fn draw(
-        &self,
-        tree: &Tree,
-        renderer: &mut Renderer,
-        _: &Theme,
-        _: &renderer::Style,
-        layout: Layout<'_>,
-        _: mouse::Cursor,
-        viewport: &Rectangle,
-    ) {
-        let arranged = tree.state.downcast_ref::<TabularLayout>();
-        let bounds = layout.bounds();
-        for &(c, x, own) in &arranged.glyphs {
-            let t = self.text_at("");
-            renderer.fill_text(
-                core_text::Text {
-                    content: c.to_string(),
-                    bounds: Size::new(own + 1.0, arranged.height),
-                    size: t.size,
-                    line_height: t.line_height,
-                    font: t.font,
-                    align_x: t.align_x,
-                    align_y: t.align_y,
-                    shaping: t.shaping,
-                    wrapping: t.wrapping,
-                },
-                Point::new(bounds.x + x, bounds.y),
-                self.color,
-                *viewport,
-            );
-        }
-    }
-
-    fn operate(
-        &mut self,
-        _: &mut Tree,
-        layout: Layout<'_>,
-        _: &Renderer,
-        operation: &mut dyn Operation,
-    ) {
-        operation.text(None, layout.bounds(), &self.content);
-    }
-}
-
-impl<'a, M: 'a> From<TabularText> for Element<'a, M> {
-    fn from(t: TabularText) -> Self {
-        Element::new(t)
-    }
+        tabular: true,
+        ..testing::spec(content, 14.0, font::SEMIBOLD)
+    };
+    testing::laid(&spec, f32::INFINITY).min_bounds.width
 }

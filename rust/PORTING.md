@@ -171,11 +171,19 @@ structure every screen follows, so screens ported by different hands fit:
   `canvas::Program`s; controls that need custom input (faders, knobs, drag
   handles) are custom widgets or canvases with the same hit areas, drag
   rules, wheel/trackpad handling and double-click resets as the Dart ones.
-  Icons are Lucide (forui's `FIcons`) from the `lucide-icons` crate. Text
-  with a `letterSpacing` or an `overflow: TextOverflow.ellipsis` is
-  `studio_text` (`.letter_spacing(px)`, `.ellipsis(max_lines)`), which lays
-  its own cosmic-text buffer out as SkParagraph did; a canvas label with a
-  `letterSpacing` is drawn with `studio_text::fill_spaced_text`.
+  Icons are Lucide (forui's `FIcons`) from the `lucide-icons` crate.
+- **Text**: every text is shaped fully and kerned, as Flutter set it: the
+  workspace enables iced's `advanced-shaping` feature, which makes
+  `Shaping::Advanced` every text's default (iced's own default shapes ASCII
+  glyph by glyph, unkerned). A paragraph is shaped when its text changes,
+  not per frame; laying a label out takes about 20 µs shaped fully against
+  10 µs glyph by glyph in a release build (`ui::core::theme`'s ignored
+  `shaping_cost` measures it). Text with a `letterSpacing`, `fontFeatures:
+  [FontFeature.tabularFigures()]` or an `overflow: TextOverflow.ellipsis` is
+  `studio_text` (`.letter_spacing(px)`, `.tabular()`,
+  `.ellipsis(max_lines)`), which lays its own cosmic-text buffer out as
+  SkParagraph did; a canvas label with spacing or tabular figures is drawn
+  with `studio_text::fill_spaced_text` / `fill_tabular_text`.
 - **Window** (macOS): hidden title bar with a transparent, full-size content
   view; the drag bar starts a window drag; the close request runs the quit
   guard (kill separation sidecars, finalize recordings) before closing, as
@@ -341,7 +349,7 @@ behavior and its tests are ported and the gates pass.
 | `ui/song_practice_detail/view_model/song_practice_detail_view_model.dart` | 3337 | `vocara_app::ui::song_practice_detail::view_model::song_practice_detail_view_model` (each await on a repository, file, edit or engine call is a `Job` the screen runs and answers through `job_done`; the save chain is a queue whose first save starts as the call that queued it ends (Dart's microtask); the guarded edits take the busy gate and list it as landing from their start; awaited calls answer with a `Reply`; the controllers are reached through `*_do` / `with_*`, their effects run in place or passed on as the view model's; the screen keeps a disposed view model until `has_work_in_flight` is false) | done |
 | `ui/song_practice_detail/widgets/analysis_lanes.dart` | 988 | `vocara_app::ui::song_practice_detail::widgets::analysis_lanes` (plain data in, `Message`s out named after the cache's `toggleLane` / `healLane` and the screen's add / edit callbacks; the heal-on-build is a `HealLane` after the frame, once per revision the screen passes; the spectrogram lane's image is a `LaneImage` the screen keeps per take and `sync`s; the marker lanes' range drag lives in the lane's canvas state, in times; `Placed` lays the take box and the markers out past the lane's edges, as `Positioned` did) | done |
 | `ui/song_practice_detail/widgets/bottom_dock.dart` | 312 | `vocara_app::ui::song_practice_detail::widgets::bottom_dock` (plain data in — `BottomDock`, the open tab's content from `dock_content` — and `Message`s out; the post-frame heal is `heals`, asked by the screen after each update; the grabber reports each move with the content's room, and the screen sets the height from the height on screen, read per move; the handle and the content keep their slots while closed, so the tab strip keeps its scroll) | done |
-| `ui/song_practice_detail/widgets/detail_transport_bar.dart` | 456 | `vocara_app::ui::song_practice_detail::widgets::detail_transport_bar` (plain data in — `TransportBar` — and `Message`s out named after the calls the bar made; the gating is `controls`; the counter lays out its own tabular figures and letter spacing) | done |
+| `ui/song_practice_detail/widgets/detail_transport_bar.dart` | 456 | `vocara_app::ui::song_practice_detail::widgets::detail_transport_bar` (plain data in — `TransportBar` — and `Message`s out named after the calls the bar made; the gating is `controls`; the counter is `studio_text` with tabular figures and letter spacing) | done |
 | `ui/song_practice_detail/widgets/fx_panel.dart` | 1723 | `vocara_app::ui::song_practice_detail::widgets::fx_panel` (plain data in — `FxPanel`: the target's id and chain, the EQ's input column under the playhead, the compressor's gain reduction — and `Message`s out, one per view-model call; the panel keys its state by its target; the analyzer ticks on redraws and stops once settled, any redraw waking it; the GR meter keeps its 50 ms poll over the reading the host passed in; a drag or Q debounce in flight when the screen stops showing the panel owes its `CommitFx` to the screen; the studio menus are `widgets::mixer_shared::PopupMenu`) | done |
 | `ui/song_practice_detail/widgets/left_panel.dart` | 1545 | `vocara_app::ui::song_practice_detail::widgets::left_panel` (plain data in — `Inspector`, `VoiceSummary` — and `Message`s out named after the view-model and mixer methods; the FX panel is a slot the screen fills with `fx_panel`'s view; the screen holds which chip menu is open, popped by `track_context_menu`'s host; the body is keyed by its channel; the post-frame heal is `Inspector::analysis_heal`) | done |
 | `ui/song_practice_detail/widgets/live_spectrogram.dart` | 150 | `vocara_app::ui::song_practice_detail::widgets::live_spectrogram` (the raster and its image live in the canvas's tree state, remade when it draws and the monitor's revision has moved) | done |
