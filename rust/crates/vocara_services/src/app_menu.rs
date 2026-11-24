@@ -32,10 +32,11 @@
 //!   `AppDelegate` answered YES, stays undeclared (winit's application
 //!   delegate has no such method). Its only effect is a console warning on
 //!   macOS 14 and later.
-//! - The minimum macOS version stays 11.0 (`LSMinimumSystemVersion` in
+//! - The minimum macOS version is 11.0 (`LSMinimumSystemVersion` in
 //!   `packaging/macos/Info.plist.in`), where the Flutter app's was 10.15:
-//!   whether this app and its dependencies run on 10.15 cannot be verified
-//!   here.
+//!   the native file panels (rfd) are built on UniformTypeIdentifiers,
+//!   whose framework the binary links and which exists only from macOS 11,
+//!   so the app cannot even load on 10.15.
 
 use std::ffi::CStr;
 

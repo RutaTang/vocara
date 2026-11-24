@@ -25,9 +25,9 @@
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.music</string>
 	<!-- 11.0, where the Flutter app said 10.15 (its deployment target): the
-	     arm64 slice cannot run below 11.0, and whether the Rust app and its
-	     dependencies (wgpu, the engine, the AVFoundation players) run on
-	     10.15 has not been verified, so 10.15 is not claimed. -->
+	     native file panels (rfd) are built on UniformTypeIdentifiers, whose
+	     framework the binary links and which exists only from macOS 11, so
+	     the app cannot even load on 10.15. -->
 	<key>LSMinimumSystemVersion</key>
 	<string>11.0</string>
 	<key>NSHighResolutionCapable</key>
