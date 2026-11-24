@@ -138,7 +138,23 @@ pub fn practice_project_card<'a, M: Clone + 'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iced::{Point, Settings, Size};
+    use iced::{Point, Size};
+    use std::borrow::Cow;
+
+    /// The app's fonts (Inter, and the Lucide icons). A simulator loads its
+    /// fonts into the font system every test shares, so a test drawing with
+    /// none of its own drew with whatever other tests had loaded by then: the
+    /// same card drew differently before and after another test loaded Inter.
+    fn settings() -> iced::Settings {
+        let mut settings = crate::app::settings();
+        settings.fonts = crate::ui::core::theme::font::FACES
+            .iter()
+            .copied()
+            .chain([icons::FONT_BYTES])
+            .map(Cow::Borrowed)
+            .collect();
+        settings
+    }
 
     #[derive(Debug, Clone, PartialEq)]
     enum Msg {
@@ -214,11 +230,8 @@ mod tests {
         assert!((card_border(true).a - 0.6).abs() < 1e-6);
         let p = summary(2, 1, true);
         let snapshot = |cursor: Option<Point>| {
-            let mut ui = iced_test::Simulator::with_size(
-                Settings::default(),
-                Size::new(280.0, 150.0),
-                card(&p),
-            );
+            let mut ui =
+                iced_test::Simulator::with_size(settings(), Size::new(280.0, 150.0), card(&p));
             if let Some(at) = cursor {
                 ui.point_at(at);
             }

@@ -517,15 +517,40 @@ fn several_wedged_finalizers_cost_the_quit_one_budget_not_one_each() {
 }
 
 /// A finalizer for testing whose progress reads [copied].
+/// The windows the copy tests run under. A save is read as stalled when its
+/// reading has not moved for a whole [`WINDOW`], so the copier moves far more
+/// often than that ([`STEP`]) and copies for longer than the [`TOTAL`] budget
+/// ([`COPY`]), which is what the tests are about. The margins are wide on
+/// purpose: on a loaded runner a 20 ms sleep overslept a 40 ms window, and a
+/// copy still under way read as a stall.
+const WINDOW: Duration = Duration::from_millis(150);
+const TOTAL: Duration = Duration::from_millis(200);
+const COPY: Duration = Duration::from_millis(400);
+const STEP: Duration = Duration::from_millis(5);
+
 fn copying(copied: &Arc<AtomicI64>) -> Arc<RecordingFinalizer> {
     let copied = Arc::clone(copied);
     shared(
         RecordingFinalizer::for_testing()
-            .with_per_finalizer_budget(ms(40))
-            .with_total_budget(ms(60))
+            .with_per_finalizer_budget(WINDOW)
+            .with_total_budget(TOTAL)
             .with_progress_ceiling(Duration::from_secs(5))
             .with_progress(move || copied.load(Ordering::SeqCst)),
     )
+}
+
+/// Copies for [`COPY`] of wall-clock time, a megabyte more on disk every
+/// [`STEP`] (a late wake-up costs steps, never the copy's length), calling
+/// [at_step] with each step's index.
+fn copy_for(copied: &AtomicI64, mut at_step: impl FnMut(usize)) {
+    let until = Instant::now() + COPY;
+    let mut i = 0;
+    while Instant::now() < until {
+        thread::sleep(STEP);
+        copied.fetch_add(1 << 20, Ordering::SeqCst);
+        at_step(i);
+        i += 1;
+    }
 }
 
 #[test]
@@ -539,10 +564,7 @@ fn a_save_queued_behind_a_long_copy_lands_before_the_quit_exits() {
     let copy = {
         let (copied, done) = (Arc::clone(&copied), copy_done.clone());
         spawn_hold(&f, move || {
-            for _ in 0..10 {
-                thread::sleep(ms(20));
-                copied.fetch_add(1 << 20, Ordering::SeqCst);
-            }
+            copy_for(&copied, |_| {});
             done.open();
         })
     };
@@ -578,10 +600,7 @@ fn a_copy_keeps_the_quit_waiting_for_the_save_it_belongs_to_then_a_wedged_one_is
     let copy = {
         let (copied, landed) = (Arc::clone(&copied), Arc::clone(&landed));
         spawn_hold(&f, move || {
-            for _ in 0..10 {
-                thread::sleep(ms(20));
-                copied.fetch_add(1 << 20, Ordering::SeqCst);
-            }
+            copy_for(&copied, |_| {});
             landed.store(true, Ordering::SeqCst);
         })
     };
@@ -591,7 +610,13 @@ fn a_copy_keeps_the_quit_waiting_for_the_save_it_belongs_to_then_a_wedged_one_is
         landed.load(Ordering::SeqCst),
         "the copying save was not waited on"
     );
-    assert!(sw.elapsed() < ms(1000), "the wedge is cut");
+    // The copy, then one window more for the wedge: well under the join's
+    // two seconds, which only a quit that never cut the wedge would reach.
+    assert!(
+        sw.elapsed() < ms(1500),
+        "the wedge is cut: {:?}",
+        sw.elapsed()
+    );
     copy.join().unwrap();
 }
 
@@ -624,10 +649,7 @@ fn a_held_save_still_copying_past_its_budget_keeps_the_quit_waiting() {
     let save = {
         let (copied, landed) = (Arc::clone(&copied), Arc::clone(&landed));
         spawn_hold(&f, move || {
-            for _ in 0..15 {
-                thread::sleep(ms(20));
-                copied.fetch_add(1 << 20, Ordering::SeqCst); // a megabyte more on disk
-            }
+            copy_for(&copied, |_| {});
             landed.store(true, Ordering::SeqCst);
         })
     };
@@ -649,13 +671,12 @@ fn a_save_still_copying_is_not_cut_off_when_another_copy_lands() {
     let save = {
         let (copied, landed) = (Arc::clone(&copied), Arc::clone(&landed));
         spawn_hold(&f, move || {
-            for i in 0..15 {
-                thread::sleep(ms(20));
-                copied.fetch_add(1 << 20, Ordering::SeqCst);
+            let other = Arc::clone(&copied);
+            copy_for(&copied, |i| {
                 if i == 3 {
-                    copied.fetch_sub(100 << 20, Ordering::SeqCst); // the other import landed
+                    other.fetch_sub(100 << 20, Ordering::SeqCst); // the other import landed
                 }
-            }
+            });
             landed.store(true, Ordering::SeqCst);
         })
     };
