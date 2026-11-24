@@ -1032,3 +1032,58 @@ fn a_nan_bin_in_the_power_spectrum_reads_as_the_top_of_the_scale() {
         .all(|&(x, y)| x.is_finite() && y.is_finite()));
     assert_eq!(shape.area[2].1, 0.0);
 }
+
+// ------------------------------------------------- the live panel's clip
+
+#[test]
+fn rounded_corners_cover_what_a_six_pixel_rounded_clip_left_out() {
+    use crate::ui::core::widgets::animated::testing::{near, Frames};
+    let red = Color::from_rgb(1.0, 0.0, 0.0);
+    let view = || -> Element<'static, ()> {
+        stack![
+            container(Space::new())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(fill(red)),
+            canvas_widget(RoundedCorners {
+                radius: 6.0,
+                backdrop: Studio::SURFACE,
+            })
+            .width(Length::Fill)
+            .height(Length::Fill),
+        ]
+        .into()
+    };
+    let mut window = Frames::new(Size::new(40.0, 30.0));
+    window.frame(view(), &[], iced::time::Instant::now());
+    let at = |x: f32, y: f32| window.pixel(Point::new(x, y));
+    // Each corner pixel is the backdrop; a pixel well inside each arc
+    // (3.5 px from the corner, 3.5 from the arc's centre) shows the clip's
+    // content, as do the edges past the corners and the middle.
+    for (corner, inside) in [
+        ((0.0, 0.0), (3.0, 3.0)),
+        ((39.0, 0.0), (36.0, 3.0)),
+        ((39.0, 29.0), (36.0, 26.0)),
+        ((0.0, 29.0), (3.0, 26.0)),
+    ] {
+        assert!(near(at(corner.0, corner.1), Studio::SURFACE), "{corner:?}");
+        assert!(near(at(inside.0, inside.1), red), "{inside:?}");
+    }
+    assert!(near(at(20.0, 0.0), red) && near(at(0.0, 15.0), red));
+    assert!(near(at(20.0, 15.0), red));
+}
+
+#[test]
+fn the_live_spectrogram_panel_is_clipped_round() {
+    use crate::ui::core::widgets::animated::testing::{near, Frames};
+    let src = live(&[]);
+    let state = VoiceprintState::new();
+    let mut window = Frames::new(DOCK);
+    window.frame(spectrogram(&src, &state), &[], iced::time::Instant::now());
+    // The panel ends 20 in from the right and 16 up from the bottom: its
+    // corner pixel is the hosts' surface, a pixel in from it the well.
+    let corner = Point::new(DOCK.width - 21.0, DOCK.height - 17.0);
+    assert!(near(window.pixel(corner), Studio::SURFACE));
+    let inside = Point::new(DOCK.width - 26.0, DOCK.height - 22.0);
+    assert!(near(window.pixel(inside), Studio::INSET));
+}
