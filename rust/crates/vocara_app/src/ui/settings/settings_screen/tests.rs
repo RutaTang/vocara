@@ -1372,11 +1372,12 @@ fn a_cards_rows_show_no_ink_but_take_taps_under_the_click_cursor() {
 
     let press = Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
     let release = Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left));
-    let (_, messages) = window.frame_messages(view(), &[press.clone()], t0 + 300 * MS);
+    let (_, messages) = window.frame_messages(view(), std::slice::from_ref(&press), t0 + 300 * MS);
     assert!(messages.is_empty());
     window.frame(view(), &[], t0 + 600 * MS);
     assert_eq!(window.pixel(spot).into_rgba8(), card_color, "pressed");
-    let (_, messages) = window.frame_messages(view(), &[release.clone()], t0 + 700 * MS);
+    let (_, messages) =
+        window.frame_messages(view(), std::slice::from_ref(&release), t0 + 700 * MS);
     assert!(matches!(messages.as_slice(), [Message::RepairLibrary]));
 
     // A disabled row: no tap, and no click cursor.
