@@ -168,6 +168,11 @@ the proofs are about the code that ships, not a lookalike. Targets:
   least recently used first.
 - The oplog's asset gate: an ack or a boot compaction never changes what a
   read resolves a surviving row's dependency to.
+- The lyrics core: `parse_lrc` of `to_lrc` gives back the timed lines,
+  trimmed and rounded down to the centisecond, in stable time order, and a
+  second save changes nothing; `align_lines` matches only equal lines, in
+  order, and within its cell limit as many as their longest common
+  subsequence.
 
 `verification/README.md` lists each module, its theorems and its replay.
 
