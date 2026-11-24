@@ -34,12 +34,13 @@
 //!
 //! # Differences from Flutter
 //!
-//! Flutter animated the hover icons' fade (120 ms), the zone's drag
-//! highlight (120 ms) and the chevron's turn (150 ms); iced switches at once,
-//! and the turned chevron is the up chevron (the same glyph turned half a
-//! turn). iced has no ellipsis (one-line labels clip), no letter spacing
-//! (the caption's 0.6) and no subtree opacity: the faded zone fades each of
-//! its colors instead. No italic Inter face is bundled, so "Empty content"
+//! The hover icons fade (120 ms), the zone's padding and drag highlight
+//! move (120 ms) and the chevron turns (150 ms), all linear, as the Dart
+//! implicit animations did; the turned chevron at rest is the up chevron
+//! (the same glyph turned half a turn). iced has no ellipsis (one-line
+//! labels clip), no letter spacing (the caption's 0.6) and no subtree
+//! opacity: the faded zone fades each of its colors instead, and the hover
+//! icons their glyphs'. No italic Inter face is bundled, so "Empty content"
 //! asks for italic and draws upright. The Dart level meter's fill had no
 //! height (a childless `ColoredBox` under `Align` takes the smallest size),
 //! so it never showed; here it fills the meter's 8 px, as intended.
@@ -67,10 +68,19 @@ use vocara_services::media_player::MediaPlayerFactory;
 use super::example_players::{self, ExampleClip, ExamplePlayers};
 use super::technique_audio_player as audio;
 use crate::ui::core::icons::{self, Icon};
+use crate::ui::core::motion::Curve;
 use crate::ui::core::theme::{self, alpha, bare_button, boxed, font, Studio};
+use crate::ui::core::widgets::animated::{animated, animated_container, Decoration};
 use crate::ui::core::widgets::confirm_dialog::{self, modal, DialogResult};
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::core::widgets::visible_drop_target::visible_drop_target;
+
+/// How long the hover icons take to fade in or out (`AnimatedOpacity`).
+pub const HOVER_ANIMATION: Duration = Duration::from_millis(120);
+/// How long the chevron takes to turn (`AnimatedRotation`).
+pub const CHEVRON_ANIMATION: Duration = Duration::from_millis(150);
+/// How long the drop zone takes to change (`AnimatedContainer`).
+pub const ZONE_ANIMATION: Duration = Duration::from_millis(120);
 
 /// What the zone says while the technique has no example.
 pub const ADD_FIRST: &str = "Drag an audio or video clip here, or click to browse";
@@ -604,41 +614,13 @@ impl<'a> TechniqueMediaSection<'a> {
         ]
         .align_y(Vertical::Center);
         if editable || self.exportable {
-            // Shown while the card is hovered; there, and tappable, either
-            // way (Flutter faded them, which keeps their place and their
-            // taps).
-            let mut actions = row![].align_y(Vertical::Center);
-            if self.exportable {
-                actions = actions.push(hover_icon(
-                    Icon::Download,
-                    "Export",
-                    Message::Export(m.id.clone()),
-                    hovered,
-                ));
-                if editable {
-                    actions = actions.push(Space::new().width(4));
-                }
-            }
-            if editable {
-                actions = actions
-                    .push(hover_icon(
-                        Icon::Pencil,
-                        "Rename",
-                        Message::Rename {
-                            id: m.id.clone(),
-                            current: label,
-                        },
-                        hovered,
-                    ))
-                    .push(Space::new().width(4))
-                    .push(hover_icon(
-                        Icon::Trash2,
-                        "Remove",
-                        Message::Remove(m.id.clone()),
-                        hovered,
-                    ));
-            }
-            header = header.push(Space::new().width(8)).push(actions);
+            header = header.push(Space::new().width(8)).push(hover_actions(
+                hovered,
+                self.exportable,
+                editable,
+                m.id.clone(),
+                label,
+            ));
         }
         if can_expand {
             header = header.push(Space::new().width(8)).push(expand_chevron(
@@ -708,7 +690,6 @@ impl<'a> TechniqueMediaSection<'a> {
         } else {
             (Studio::PANEL, Studio::BORDER)
         };
-        let (fill, border) = (fade(fill, opacity), fade(border, opacity));
         let content = row![
             icons::icon(Icon::Plus, 15.0, fg),
             Space::new().width(8),
@@ -722,12 +703,15 @@ impl<'a> TechniqueMediaSection<'a> {
             .clip(true),
         ]
         .align_y(Vertical::Center);
-        // 16 across and 12 (dense) or 22 down, inside the 1 px border.
-        let zone = container(content)
+        // 16 across and 12 (dense) or 22 down, inside the 1 px border. The
+        // padding and the drag's tint move over 120 ms, linear (the Dart
+        // `AnimatedContainer`); the faded zone's opacity applies at once.
+        let zone = animated_container(content, ZONE_ANIMATION)
             .width(Length::Fill)
-            .align_x(Horizontal::Center)
+            .align((0.0, -1.0))
             .padding([if dense { 13.0 } else { 23.0 }, 17.0])
-            .style(move |_| boxed(Some(fill), 10.0, Some(border)));
+            .decoration(Decoration::boxed(fill, 10.0, border, 1.0))
+            .opacity(opacity);
         let tap = button(zone)
             .width(Length::Fill)
             .padding(0)
@@ -803,15 +787,59 @@ fn divider<'a, M: 'a>() -> Element<'a, M> {
         .into()
 }
 
-/// `_HoverIcon`: a 14 px faint glyph with a click cursor and a tooltip,
-/// drawn while `visible`.
-fn hover_icon<'a>(
-    icon: Icon,
-    tip: &'a str,
-    on_tap: Message,
-    visible: bool,
+/// A card's hover icons — Export (when `exportable`), then Rename and
+/// Remove (when `editable`) — faded in while the card is `hovered` and out
+/// when it is not, over 120 ms (`AnimatedOpacity`); there, and tappable,
+/// either way (a faded widget keeps its place and its taps).
+fn hover_actions<'a>(
+    hovered: bool,
+    exportable: bool,
+    editable: bool,
+    id: String,
+    label: String,
 ) -> Element<'a, Message> {
-    let color = alpha(Studio::TEXT_FAINT, if visible { 1.0 } else { 0.0 });
+    let actions = move |opacity: f32| -> Element<'a, Message> {
+        let mut actions = row![].align_y(Vertical::Center);
+        if exportable {
+            actions = actions.push(hover_icon(
+                Icon::Download,
+                "Export",
+                Message::Export(id.clone()),
+                opacity,
+            ));
+            if editable {
+                actions = actions.push(Space::new().width(4));
+            }
+        }
+        if editable {
+            actions = actions
+                .push(hover_icon(
+                    Icon::Pencil,
+                    "Rename",
+                    Message::Rename {
+                        id: id.clone(),
+                        current: label.clone(),
+                    },
+                    opacity,
+                ))
+                .push(Space::new().width(4))
+                .push(hover_icon(
+                    Icon::Trash2,
+                    "Remove",
+                    Message::Remove(id.clone()),
+                    opacity,
+                ));
+        }
+        actions.into()
+    };
+    let target = if hovered { 1.0 } else { 0.0 };
+    animated(target, HOVER_ANIMATION, Curve::Linear, actions).into()
+}
+
+/// `_HoverIcon`: a 14 px faint glyph with a click cursor and a tooltip,
+/// drawn at `opacity`.
+fn hover_icon<'a>(icon: Icon, tip: &'a str, on_tap: Message, opacity: f32) -> Element<'a, Message> {
+    let color = alpha(Studio::TEXT_FAINT, opacity);
     let target = button(icons::icon(icon, 14.0, color))
         .padding(0)
         .style(bare_button)
@@ -828,19 +856,75 @@ fn hover_icon<'a>(
     .into()
 }
 
-/// `_ExpandChevron`: the expand/collapse affordance, a chevron that flips
-/// when open (the up chevron is the down one turned half a turn).
+/// `_ExpandChevron`: the expand/collapse affordance, a chevron that turns
+/// half a turn when open, over 150 ms (`AnimatedRotation`); its color
+/// changes at once. At rest it is the down or the up chevron (the down one
+/// turned half a turn); while it turns, the chevron's path, turned.
 fn expand_chevron<'a>(expanded: bool, on_tap: Message) -> Element<'a, Message> {
-    let (glyph, color) = if expanded {
-        (Icon::ChevronUp, Studio::ACCENT_BRIGHT)
+    let color = if expanded {
+        Studio::ACCENT_BRIGHT
     } else {
-        (Icon::ChevronDown, Studio::TEXT_FAINT)
+        Studio::TEXT_FAINT
     };
-    button(container(icons::icon(glyph, 16.0, color)).padding(4))
-        .padding(0)
-        .style(bare_button)
-        .on_press(on_tap)
-        .into()
+    let face = move |turns: f32| -> Element<'a, Message> {
+        let glyph: Element<'a, Message> = if turns == 0.0 {
+            icons::icon(Icon::ChevronDown, 16.0, color).into()
+        } else if turns == 0.5 {
+            icons::icon(Icon::ChevronUp, 16.0, color).into()
+        } else {
+            canvas_widget(TurnedChevron { turns, color })
+                .width(16)
+                .height(16)
+                .into()
+        };
+        button(container(glyph).padding(4))
+            .padding(0)
+            .style(bare_button)
+            .on_press(on_tap.clone())
+            .into()
+    };
+    let turns = if expanded { 0.5 } else { 0.0 };
+    animated(turns, CHEVRON_ANIMATION, Curve::Linear, face).into()
+}
+
+/// Lucide's `chevron-down` (`m6 9 6 6 6-6` on its 24 grid, a 2-unit round
+/// stroke), `turns` of a turn about its centre.
+struct TurnedChevron {
+    turns: f32,
+    color: Color,
+}
+
+impl canvas::Program<Message> for TurnedChevron {
+    type State = ();
+
+    fn draw(
+        &self,
+        _: &(),
+        renderer: &Renderer,
+        _: &Theme,
+        bounds: Rectangle,
+        _: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let mut frame = Frame::new(renderer, bounds.size());
+        let scale = bounds.width / 24.0;
+        frame.translate(iced::Vector::new(bounds.width / 2.0, bounds.height / 2.0));
+        frame.rotate(self.turns * std::f32::consts::TAU);
+        let at = |x: f32, y: f32| Point::new((x - 12.0) * scale, (y - 12.0) * scale);
+        let chevron = Path::new(|p| {
+            p.move_to(at(6.0, 9.0));
+            p.line_to(at(12.0, 15.0));
+            p.line_to(at(18.0, 9.0));
+        });
+        frame.stroke(
+            &chevron,
+            canvas::Stroke::default()
+                .with_color(self.color)
+                .with_width(2.0 * scale)
+                .with_line_cap(canvas::LineCap::Round)
+                .with_line_join(canvas::LineJoin::Round),
+        );
+        vec![frame.into_geometry()]
+    }
 }
 
 /// `_RecBtn`: a filled pill (coral, or red for `danger`), dark label; grey

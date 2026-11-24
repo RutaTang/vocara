@@ -4,15 +4,19 @@
 //!
 //! Same geometry (34 px tall, 14 px side padding, radius 7, 1 px border, a
 //! 15 px icon 7 px before a 13 px w600 label), colors per variant and hover,
-//! and a click cursor only when enabled. Flutter animated the color change
-//! over 120 ms (`AnimatedContainer`); iced switches at once.
+//! and a click cursor only when enabled. The fill and border move to a new
+//! look over 120 ms, linear, as the Dart `AnimatedContainer` did — on hover
+//! and on an enable or disable alike; the label and icon change at once.
+
+use std::time::Duration;
 
 use iced::alignment::Vertical;
 use iced::widget::{button, container, row, text};
-use iced::{Background, Border, Color, Element, Length, Shadow, Theme};
+use iced::{Color, Element, Length};
 
 use crate::ui::core::icons::{self, Icon};
-use crate::ui::core::theme::{alpha, font, Studio};
+use crate::ui::core::theme::{alpha, bare_button, font, Studio};
+use crate::ui::core::widgets::animated::{animated_container, Decoration};
 
 /// The look of a [`StudioButton`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -28,6 +32,9 @@ pub enum StudioButtonVariant {
 
 /// The button's height.
 pub const HEIGHT: f32 = 34.0;
+
+/// How long its fill and border take to change (`AnimatedContainer`).
+pub const ANIMATION: Duration = Duration::from_millis(120);
 
 /// `StudioButton(label: ..., onTap: ...)`; configure with the builder
 /// methods, then convert into an [`Element`].
@@ -141,25 +148,18 @@ impl<'a, M: Clone + 'a> From<StudioButton<M>> for Element<'a, M> {
             .align_y(Vertical::Center);
         let variant = b.variant;
         let enabled = b.enabled;
-        button(inner)
+        let tap = button(inner)
             .height(HEIGHT)
             .width(width)
             .padding([0, 14])
             .on_press_maybe(enabled.then_some(b.on_tap))
-            .style(move |_: &Theme, status| {
-                let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
-                let (bg, border, fg, _) = colors(variant, enabled, hovered);
-                button::Style {
-                    background: Some(Background::Color(bg)),
-                    text_color: fg,
-                    border: Border {
-                        color: border,
-                        width: 1.0,
-                        radius: 7.0.into(),
-                    },
-                    shadow: Shadow::default(),
-                    snap: false,
-                }
+            .style(bare_button);
+        // The decoration animates behind the button (the pointer over it is
+        // the `MouseRegion`'s hover).
+        animated_container(tap, ANIMATION)
+            .style(move |hovered| {
+                let (bg, border, _, _) = colors(variant, enabled, hovered);
+                Decoration::boxed(bg, 7.0, border, 1.0)
             })
             .into()
     }
@@ -188,6 +188,46 @@ mod tests {
         ));
         ui.click("Save").expect("label shown");
         assert!(ui.into_messages().next().is_none());
+    }
+
+    #[test]
+    fn its_fill_moves_to_the_hover_look_and_back_over_120_ms() {
+        use crate::ui::core::motion::Lerp;
+        use crate::ui::core::widgets::animated::testing::{near, over, Frames, BACKGROUND, MS};
+        use iced::time::Instant;
+        use iced::{Point, Size};
+
+        let view = |enabled| {
+            Element::from(
+                studio_button("Go", Msg::Tapped)
+                    .variant(StudioButtonVariant::Accent)
+                    .enabled(enabled),
+            )
+        };
+        let mut window = Frames::new(Size::new(120.0, 40.0));
+        // Inside the border, left of the label.
+        let fill = Point::new(4.0, 17.0);
+        let shows = |w: &Frames, c: Color| near(w.pixel(fill), over(c, BACKGROUND));
+        let (rest, ..) = colors(StudioButtonVariant::Accent, true, false);
+        let (hover, ..) = colors(StudioButtonVariant::Accent, true, true);
+        let t0 = Instant::now();
+        window.frame(view(true), &[], t0);
+        assert!(shows(&window, rest));
+        window.point_at(Point::new(20.0, 17.0));
+        assert!(window.frame(view(true), &[], t0));
+        assert!(shows(&window, rest), "start");
+        window.frame(view(true), &[], t0 + 60 * MS);
+        assert!(shows(&window, rest.lerp(hover, 0.5)), "middle");
+        assert!(!window.frame(view(true), &[], t0 + 120 * MS));
+        assert!(shows(&window, hover), "end");
+        // Disabled under the pointer: its look moves there too.
+        let (disabled, ..) = colors(StudioButtonVariant::Accent, false, true);
+        let t1 = t0 + 500 * MS;
+        assert!(window.frame(view(false), &[], t1));
+        window.frame(view(false), &[], t1 + 60 * MS);
+        assert!(shows(&window, hover.lerp(disabled, 0.5)));
+        window.frame(view(false), &[], t1 + 120 * MS);
+        assert!(shows(&window, disabled));
     }
 
     #[test]

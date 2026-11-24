@@ -31,7 +31,9 @@ use super::{
     WAIT_FOR_SEPARATION,
 };
 use crate::ui::core::icons::{self, Icon};
+use crate::ui::core::motion::Curve;
 use crate::ui::core::theme::{self, alpha, bare_button, boxed, fill, font, Studio};
+use crate::ui::core::widgets::animated::{animated, animated_container, Decoration};
 use crate::ui::core::widgets::holds_keyboard::holds_keyboard;
 use crate::ui::core::widgets::studio_button::studio_button;
 use crate::ui::core::widgets::studio_controls::{fader_db_readout, studio_fader};
@@ -1074,6 +1076,26 @@ fn catch_up_guard(workspace: Element<'_, Message>, catching_up: bool) -> Element
         .into()
 }
 
+/// How long the separation bar's fill takes to reach a new value.
+pub const SEPARATION_FILL_ANIMATION: std::time::Duration = std::time::Duration::from_millis(280);
+
+/// The separation bar, 8 tall: its fill moves to each new `progress` over
+/// 280 ms, easing out (its `AnimatedContainer`).
+fn separation_fill<'a>(progress: f64) -> Element<'a, Message> {
+    animated(
+        progress as f32,
+        SEPARATION_FILL_ANIMATION,
+        Curve::EaseOut,
+        |value| {
+            canvas_widget(ProgressBar { value })
+                .width(Length::Fill)
+                .height(8)
+                .into()
+        },
+    )
+    .into()
+}
+
 /// `_SeparationOverlay`: a blocking overlay while stems are separated (a
 /// multi-minute background job). Nothing beneath takes a drop through it
 /// (said instead), nor a key, nor a tap.
@@ -1102,9 +1124,8 @@ fn separation_overlay<'a>(progress: Option<f64>, can_cancel: bool) -> Element<'a
         ]
         .align_y(Vertical::Center),
         Space::new().height(18),
-        canvas_widget(ProgressBar { value: p as f32 })
-            .width(Length::Fill)
-            .height(8),
+        // The fill animates; the percentage changes at once.
+        separation_fill(p),
         Space::new().height(16),
         text("Pulling the instrumental out of the song to sing over.\nThis can take a minute or two.")
             .size(12)
@@ -1287,16 +1308,20 @@ fn buses_header<'a>() -> Element<'a, Message> {
     .into()
 }
 
+/// How long a drop hint's box takes to light up or go back.
+pub const DROP_HINT_ANIMATION: std::time::Duration = std::time::Duration::from_millis(120);
+
 /// `_DropHint`: an icon and a line, lit up (accent border + tint) while a
 /// file is dragged over the area, so the drop target is the box itself —
-/// not the whole background.
+/// not the whole background. The box's tint and border change over 120 ms,
+/// linear (its `AnimatedContainer`); the icon and line at once.
 fn drop_hint<'a>(icon: Icon, hint: &'static str, highlighted: bool) -> Element<'a, Message> {
     let color = if highlighted {
         Studio::ACCENT
     } else {
         Studio::TEXT_FAINT
     };
-    container(
+    animated_container(
         row![
             icons::icon(icon, 16.0, color),
             Space::new().width(8),
@@ -1305,30 +1330,15 @@ fn drop_hint<'a>(icon: Icon, hint: &'static str, highlighted: bool) -> Element<'
             container(text(hint).size(13).color(color).wrapping(Wrapping::None)).clip(true),
         ]
         .align_y(Vertical::Center),
+        DROP_HINT_ANIMATION,
     )
     .width(Length::Fill)
     .height(64)
-    .center_x(Length::Fill)
-    .center_y(64)
-    .style(move |_| container::Style {
-        border: iced::Border {
-            color: if highlighted {
-                Studio::ACCENT
-            } else {
-                Studio::BORDER
-            },
-            width: if highlighted { 1.5 } else { 1.0 },
-            radius: 8.0.into(),
-        },
-        ..boxed(
-            Some(if highlighted {
-                alpha(Studio::ACCENT, 0.08)
-            } else {
-                Studio::PANEL
-            }),
-            8.0,
-            None,
-        )
+    .align((0.0, 0.0))
+    .decoration(if highlighted {
+        Decoration::boxed(alpha(Studio::ACCENT, 0.08), 8.0, Studio::ACCENT, 1.5)
+    } else {
+        Decoration::boxed(Studio::PANEL, 8.0, Studio::BORDER, 1.0)
     })
     .into()
 }
@@ -1833,5 +1843,49 @@ impl Widget<Message, Theme, Renderer> for Reserve<'_> {
 impl<'a> From<Reserve<'a>> for Element<'a, Message> {
     fn from(r: Reserve<'a>) -> Self {
         Element::new(r)
+    }
+}
+
+#[cfg(test)]
+mod animations {
+    use iced::time::Instant;
+
+    use super::*;
+    use crate::ui::core::motion::Lerp;
+    use crate::ui::core::widgets::animated::testing::{near, over, Frames, BACKGROUND, MS};
+
+    #[test]
+    fn a_drop_hint_lights_up_over_120_ms() {
+        let view = |lit| drop_hint(Icon::Music, "Drop a song", lit);
+        let mut window = Frames::new(Size::new(300.0, 64.0));
+        // Inside the border, clear of the icon and the line.
+        let fill = Point::new(5.0, 32.0);
+        let (rest, glow) = (Studio::PANEL, alpha(Studio::ACCENT, 0.08));
+        let shows = |w: &Frames, c: Color| near(w.pixel(fill), over(c, BACKGROUND));
+        let t0 = Instant::now();
+        window.frame(view(false), &[], t0);
+        assert!(shows(&window, rest));
+        assert!(window.frame(view(true), &[], t0));
+        assert!(shows(&window, rest), "start");
+        window.frame(view(true), &[], t0 + 60 * MS);
+        assert!(shows(&window, rest.lerp(glow, 0.5)), "middle");
+        assert!(!window.frame(view(true), &[], t0 + 120 * MS));
+        assert!(shows(&window, glow), "end");
+    }
+
+    #[test]
+    fn the_separation_bar_eases_its_fill_out_over_280_ms() {
+        let mut window = Frames::new(Size::new(200.0, 8.0));
+        let filled = |w: &Frames, x: f32| !near(w.pixel(Point::new(x, 4.0)), Studio::INSET);
+        let t0 = Instant::now();
+        window.frame(separation_fill(0.0), &[], t0);
+        assert!(!filled(&window, 4.0), "empty");
+        assert!(window.frame(separation_fill(1.0), &[], t0));
+        assert!(!filled(&window, 100.0), "start");
+        window.frame(separation_fill(1.0), &[], t0 + 140 * MS);
+        // Eased out, the fill is past halfway (68 %; linear would be 50 %).
+        assert!(filled(&window, 130.0) && !filled(&window, 145.0), "middle");
+        assert!(!window.frame(separation_fill(1.0), &[], t0 + 280 * MS));
+        assert!(filled(&window, 195.0), "end");
     }
 }

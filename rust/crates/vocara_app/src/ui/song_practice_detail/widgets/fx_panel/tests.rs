@@ -977,3 +977,31 @@ fn a_held_slider_keeps_its_drag_through_another_cards_edit() {
     assert!(edits[0].gate.attack_ms > 0.0);
     assert_eq!(frame.messages.last(), Some(&Message::CommitFx));
 }
+
+#[test]
+fn a_toggle_changes_color_linearly_and_eases_its_thumb_over_130_ms() {
+    use crate::ui::core::motion::Lerp;
+    use crate::ui::core::widgets::animated::testing as anim;
+
+    let view = |on| fx_toggle(on, vec![Message::CommitFx]);
+    let mut window = anim::Frames::new(Size::new(40.0, 20.0));
+    let at = |w: &anim::Frames, x: f32, c: Color| anim::near(w.pixel(Point::new(x, 9.0)), c);
+    let t0 = Instant::now();
+    window.frame(view(false), &[], t0);
+    assert!(at(&window, 9.0, Studio::TEXT_SECONDARY) && at(&window, 28.0, Studio::BORDER));
+    assert!(window.frame(view(true), &[], t0));
+    // The thumb turns white at once, and starts where it was.
+    assert!(at(&window, 9.0, Color::WHITE), "start");
+    assert!(at(&window, 28.0, Studio::BORDER), "start");
+    window.frame(view(true), &[], t0 + 65 * anim::MS);
+    // Eased out, the thumb is past halfway (its middle at 9 + 16 × 0.68,
+    // where a linear one would be at 17): its right edge covers 25.
+    assert!(at(&window, 25.0, Color::WHITE), "the thumb eases out");
+    let track = Studio::BORDER.lerp(Studio::ACCENT, 0.5);
+    assert!(at(&window, 4.0, track), "the color is linear");
+    assert!(!window.frame(view(true), &[], t0 + 130 * anim::MS));
+    assert!(
+        at(&window, 25.0, Color::WHITE) && at(&window, 4.0, Studio::ACCENT),
+        "end"
+    );
+}

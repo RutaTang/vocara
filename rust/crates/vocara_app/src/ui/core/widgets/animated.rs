@@ -162,6 +162,11 @@ pub type StyleFn<'a> = Box<dyn Fn(bool) -> Option<Decoration> + 'a>;
 pub struct AnimatedContainer<'a, M> {
     content: Element<'a, M>,
     style: StyleFn<'a>,
+    /// Whether the border is drawn over the child (see
+    /// [`AnimatedContainer::border_above`]).
+    border_above: bool,
+    /// Scales the decoration's alpha, not animated (an `Opacity` around it).
+    opacity: f32,
     padding: Padding,
     align: (f32, f32),
     width: Length,
@@ -181,6 +186,8 @@ pub fn animated_container<'a, M>(
     AnimatedContainer {
         content,
         style: Box::new(|_| None),
+        border_above: false,
+        opacity: 1.0,
         padding: Padding::ZERO,
         align: (-1.0, -1.0),
         width: size.width.fluid(),
@@ -213,6 +220,21 @@ impl<'a, M> AnimatedContainer<'a, M> {
     /// The decoration, given whether the pointer is over the box.
     pub fn style(mut self, style: impl Fn(bool) -> Decoration + 'a) -> Self {
         self.style = Box::new(move |hovered| Some(style(hovered)));
+        self
+    }
+
+    /// Draws the border over the child rather than beneath it: for a child
+    /// that fills the box with an opaque face of its own (a `BoxDecoration`'s
+    /// border lies over its fill, and the child inside it).
+    pub fn border_above(mut self) -> Self {
+        self.border_above = true;
+        self
+    }
+
+    /// Draws the decoration at `opacity` (an `Opacity` widget around the
+    /// Dart `AnimatedContainer`): it applies at once, whatever animates.
+    pub fn opacity(mut self, opacity: f32) -> Self {
+        self.opacity = opacity;
         self
     }
 
@@ -268,7 +290,11 @@ fn positioned<M>(
         width,
         height,
         padding,
-        |limits| content.as_widget_mut().layout(tree, renderer, limits),
+        |limits| {
+            content
+                .as_widget_mut()
+                .layout(tree, renderer, &limits.loose())
+        },
         |node, space| {
             let size = node.size();
             node.translate(Vector::new(
@@ -369,22 +395,47 @@ impl<M> Widget<M, Theme, Renderer> for AnimatedContainer<'_, M> {
         viewport: &Rectangle,
     ) {
         let state = tree.state.downcast_ref::<State<Look>>();
-        if let Some(d) = state.shown().decoration {
-            if d.background.a > 0.0 || (d.border_width > 0.0 && d.border.a > 0.0) {
+        let opacity = self.opacity;
+        let decoration = state.shown().decoration.map(|d| Decoration {
+            background: Color {
+                a: d.background.a * opacity,
+                ..d.background
+            },
+            border: Color {
+                a: d.border.a * opacity,
+                ..d.border
+            },
+            ..d
+        });
+        let bounds = layout.bounds();
+        let quad = |renderer: &mut Renderer, background: Color, border: Border| {
+            if background.a > 0.0 || (border.width > 0.0 && border.color.a > 0.0) {
                 renderer.fill_quad(
                     renderer::Quad {
-                        bounds: layout.bounds(),
-                        border: Border {
-                            color: d.border,
-                            width: d.border_width,
-                            radius: d.radius.into(),
-                        },
+                        bounds,
+                        border,
                         shadow: Shadow::default(),
                         snap: false,
                     },
-                    Background::Color(d.background),
+                    Background::Color(background),
                 );
             }
+        };
+        let border = |d: Decoration| Border {
+            color: d.border,
+            width: d.border_width,
+            radius: d.radius.into(),
+        };
+        if let Some(d) = decoration {
+            let under = if self.border_above {
+                Border {
+                    width: 0.0,
+                    ..border(d)
+                }
+            } else {
+                border(d)
+            };
+            quad(renderer, d.background, under);
         }
         self.content.as_widget().draw(
             &tree.children[0],
@@ -395,6 +446,13 @@ impl<M> Widget<M, Theme, Renderer> for AnimatedContainer<'_, M> {
             cursor,
             viewport,
         );
+        if let Some(d) = decoration.filter(|_| self.border_above) {
+            // A layer of its own: the child may have drawn in layers above
+            // this one (a `hover`'s top face does).
+            renderer.with_layer(bounds, |renderer| {
+                quad(renderer, Color::TRANSPARENT, border(d));
+            });
+        }
     }
 
     fn operate(
@@ -642,5 +700,7 @@ impl<'a, T: Lerp + 'static, M: 'a> From<Animated<'a, T, M>> for Element<'a, M> {
     }
 }
 
+#[cfg(test)]
+pub(crate) mod testing;
 #[cfg(test)]
 mod tests;

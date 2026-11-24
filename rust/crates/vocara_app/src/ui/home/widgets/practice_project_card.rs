@@ -6,20 +6,26 @@
 //! The card fills the grid cell it is given (Dart's grid made each 150 tall,
 //! at most 280 wide). Hover is iced's `hover`: the trash layer draws and
 //! takes input only while the pointer is over the card, as Dart's
-//! `MouseRegion` built it only then, and the card's own border turns coral
-//! from its button status. Flutter animated the border over 120 ms
-//! (`AnimatedContainer`); iced switches at once. The title is held to one
-//! line (Dart ellipsized it; iced clips it).
+//! `MouseRegion` built it only then, and the card's border turns coral
+//! while the pointer is over it, over 120 ms, linear (the Dart
+//! `AnimatedContainer`). The title is held to one line (Dart ellipsized it;
+//! iced clips it).
+
+use std::time::Duration;
 
 use iced::alignment::Vertical;
 use iced::widget::text::Wrapping;
 use iced::widget::{button, column, container, hover, row, text, Space};
-use iced::{Background, Border, Color, Element, Length, Shadow, Theme};
+use iced::{Color, Element, Length};
 use vocara_model::models::practice_summary::PracticeSummary;
 use vocara_model::util::dart_date_time::DateTime;
 
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{alpha, bare_button, boxed, font, Studio};
+use crate::ui::core::widgets::animated::{animated_container, Decoration};
+
+/// How long the border takes to change (`AnimatedContainer`).
+pub const ANIMATION: Duration = Duration::from_millis(120);
 
 /// The card's border: coral at 60 % while hovered, `Studio.border` at rest.
 pub fn card_border(hovered: bool) -> Color {
@@ -99,25 +105,14 @@ pub fn practice_project_card<'a, M: Clone + 'a>(
     .height(Length::Fill);
     // 16 of padding inside the 1 px border (a decoration's border pads its
     // child; an iced border does not).
-    let card = button(container(content).padding(17))
+    let tap = button(container(content).padding(17))
         .padding(0)
         .width(Length::Fill)
         .height(Length::Fill)
         .on_press(on_open)
-        .style(|_: &Theme, status| {
-            let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
-            button::Style {
-                background: Some(Background::Color(Studio::PANEL)),
-                text_color: Studio::TEXT_PRIMARY,
-                border: Border {
-                    color: card_border(hovered),
-                    width: 1.0,
-                    radius: 10.0.into(),
-                },
-                shadow: Shadow::default(),
-                snap: false,
-            }
-        });
+        .style(bare_button);
+    let card = animated_container(tap, ANIMATION)
+        .style(|hovered| Decoration::boxed(Studio::PANEL, 10.0, card_border(hovered), 1.0));
     // The trash sits at the end of the badge's row, centred on the 34 px
     // badge; its own 16 px glyph is the hit area.
     let trash = button(icons::icon(Icon::Trash2, 16.0, Studio::TEXT_FAINT))
@@ -222,6 +217,30 @@ mod tests {
             ui.into_messages().collect::<Vec<_>>(),
             vec![Msg::Open, Msg::Delete]
         );
+    }
+
+    #[test]
+    fn the_border_turns_coral_over_120_ms_under_the_pointer() {
+        use crate::ui::core::motion::Lerp;
+        use crate::ui::core::widgets::animated::testing::{near, over, Frames, MS};
+        use iced::time::Instant;
+
+        let p = summary(2, 1, true);
+        let mut window = Frames::new(Size::new(280.0, 150.0));
+        // The left border, halfway down.
+        let edge = Point::new(0.0, 75.0);
+        let shows = |w: &Frames, border: Color| near(w.pixel(edge), over(border, Studio::PANEL));
+        let t0 = Instant::now();
+        window.frame(card(&p), &[], t0);
+        assert!(shows(&window, card_border(false)));
+        window.point_at(Point::new(140.0, 75.0));
+        assert!(window.frame(card(&p), &[], t0));
+        assert!(shows(&window, card_border(false)), "start");
+        window.frame(card(&p), &[], t0 + 60 * MS);
+        let middle = card_border(false).lerp(card_border(true), 0.5);
+        assert!(shows(&window, middle), "middle: {:?}", window.pixel(edge));
+        assert!(!window.frame(card(&p), &[], t0 + 120 * MS));
+        assert!(shows(&window, card_border(true)), "end");
     }
 
     #[test]

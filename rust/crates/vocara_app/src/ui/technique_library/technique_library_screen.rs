@@ -18,10 +18,10 @@
 //! next confirmed one run, and the return from a technique's page reloads
 //! the list and opens card taps again.
 //!
-//! Flutter animated the card border (120 ms) and the snack bar's entrance;
-//! iced switches at once. iced has no ellipsis: one-line labels clip, and
-//! the summary is held to its three lines; nor letter spacing (the title's
-//! 0.3). The page draws its snack bars itself, over its bottom edge, while
+//! A card's border turns coral while the pointer is over it, over 120 ms,
+//! linear (the Dart `AnimatedContainer`). iced has no ellipsis: one-line
+//! labels clip, and the summary is held to its three lines; nor letter
+//! spacing (the title's 0.3). The page draws its snack bars itself, over its bottom edge, while
 //! it is on top; once it leaves (or is covered) the app keeps them up over
 //! the page on top (`app::messenger`), as Dart's `ScaffoldMessenger`, above
 //! every page, did. A new one waits behind the ones up, as `showSnackBar`
@@ -58,6 +58,7 @@ use crate::router::{Navigation, Route};
 use crate::services::Services;
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{self, alpha, bare_button, font, Studio};
+use crate::ui::core::widgets::animated::{animated_container, Decoration};
 use crate::ui::core::widgets::confirm_dialog::ConfirmDialog;
 use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
 use crate::ui::core::widgets::studio_hint::spinner;
@@ -73,6 +74,9 @@ pub const SNACK_DURATION: Duration = Duration::from_millis(4000);
 
 /// The grid's padding (all round).
 pub const GRID_PADDING: f32 = 24.0;
+/// How long a card's border takes to change (`AnimatedContainer`).
+pub const CARD_ANIMATION: Duration = Duration::from_millis(120);
+
 /// The widest a card gets (`maxCrossAxisExtent`).
 pub const CARD_MAX_WIDTH: f32 = 300.0;
 /// Every card's height (`mainAxisExtent`).
@@ -799,9 +803,22 @@ fn grid(vm: &TechniqueLibraryViewModel) -> Element<'_, Message> {
 }
 
 /// A technique's card: at rest, and — while the pointer is over it — with
-/// its coral border and its trash.
+/// its trash and its coral border, which comes in over 120 ms.
 fn card<'a>(t: &'a Technique, vm: &TechniqueLibraryViewModel) -> Element<'a, Message> {
-    hover(card_face(t, vm, false), card_face(t, vm, true))
+    animated_container(
+        hover(card_face(t, vm, false), card_face(t, vm, true)),
+        CARD_ANIMATION,
+    )
+    .border_above()
+    .style(|hovered| {
+        let border = if hovered {
+            alpha(Studio::ACCENT, 0.6)
+        } else {
+            Studio::BORDER
+        };
+        Decoration::boxed(Studio::PANEL, 10.0, border, 1.0)
+    })
+    .into()
 }
 
 fn card_face<'a>(
@@ -879,12 +896,8 @@ fn card_face<'a>(
             .push(Space::new().height(8))
             .push(tag_chips(&t.tags, vm));
     }
-    let border = if hovered {
-        alpha(Studio::ACCENT, 0.6)
-    } else {
-        Studio::BORDER
-    };
-    // 16 of padding inside the 1 px border.
+    // 16 of padding inside the 1 px border (the card's, drawn over the
+    // face).
     button(
         container(content)
             .width(Length::Fill)
@@ -899,9 +912,8 @@ fn card_face<'a>(
         background: Some(Background::Color(Studio::PANEL)),
         text_color: Studio::TEXT_PRIMARY,
         border: Border {
-            color: border,
-            width: 1.0,
             radius: 10.0.into(),
+            ..Border::default()
         },
         shadow: Shadow::default(),
         snap: false,

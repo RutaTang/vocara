@@ -70,8 +70,7 @@
 //! - A multi-file drop still importing when the page leaves stops with the
 //!   file in flight (Dart's loop went on calling the disposed view model).
 //! - iced text has no letter spacing (the section labels' 0.8, set solid)
-//!   and no ellipsis (one-line labels clip); the separation bar's fill
-//!   jumps where Flutter animated it over 280 ms.
+//!   and no ellipsis (one-line labels clip).
 
 mod feeds;
 mod update;
