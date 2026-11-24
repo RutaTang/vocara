@@ -354,10 +354,20 @@ def parsedJson : Option (List LyricLine) → String
   | some ls => linesJson ls
   | none => "null"
 
+/-- Many lines at a few times, each its own text: the order of equal times
+after rounding is the stable sort's (an unstable one keeps short lists in
+order, so these are long). -/
+def tieLines (x : Nat) : List LyricLine :=
+  (nums x (30 + x / 2 ^ 40 % 30)).zipIdx.map fun (y, k) =>
+    let h := y / 2 ^ 33
+    { text := ("line " ++ toString k).toList, time := some (h % 3 * 1000 + h / 3 % 10 : Nat) }
+
 def lrcRoundtripJson : String :=
-  jarr ((nums 19 150).map fun x =>
-    let ls := (nums x (x / 2 ^ 37 % 13)).map fun y =>
-      ({ text := textOf y, time := timeOf (lcg y) } : LyricLine)
+  let cases := ((nums 19 150).map fun x =>
+    (nums x (x / 2 ^ 37 % 13)).map fun y =>
+      ({ text := textOf y, time := timeOf (lcg y) } : LyricLine)) ++
+    (nums 31 10).map tieLines
+  jarr (cases.map fun ls =>
     let doc := toLrc ls
     jobj [("lines", linesJson ls), ("doc", jtext doc), ("parsed", parsedJson (parseLrc doc)),
       ("writable", if ls.all writableB then "true" else "false")])
@@ -451,7 +461,14 @@ def alignJson : String :=
     let n := if h % 10 = 0 then 40 + h / 10 % 80 else h / 10 % 25
     let prev := (nums x n).map fun y => lineOf (y / 2 ^ 31)
     let next := (nums (lcg x) (h / 7 % 7)).foldl editLines prev
-    let limit := if h % 6 = 0 then h / 6 % 40 else 25000000
+    -- Small limits, and the limit exactly at the middle's cells and one
+    -- below.
+    let cells := (middle prev next).a.length * (middle prev next).b.length
+    let limit := match h % 6 with
+      | 0 => h / 6 % 40
+      | 1 => cells
+      | 2 => cells - 1
+      | _ => 25000000
     let out := alignLines prev next limit
     jobj [("prev", strsJson prev), ("next", strsJson next), ("cell_limit", toString limit),
       ("out", jarr (out.map optJson))])
