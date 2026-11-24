@@ -41,31 +41,50 @@
 //!
 //! **How it looks**, dark (the zinc theme's brightness): 222 wide, radius
 //! 8, 6 padding, `0xB2303030` with a 1 px `0xFF5B5B5B` border, under a
-//! shadow of `0x3C000000` blurred 10 at (0, 4). Each item is a label 14 px,
-//! w400, letter spacing -0.15, white, 8 in from the sides, 2 below the
-//! top and 5 above the bottom; under the pointer it fills with the theme's
-//! primary color (`CupertinoTheme.primaryColor`, zinc's primary under a
-//! Material theme), radius 4, and its label takes `primaryContrastingColor`
-//! (zinc's primary foreground). The labels are Cupertino's English ones
-//! (`DefaultCupertinoLocalizations`).
+//! shadow of `0x3C000000` blurred 10 at (0, 4), spread 0.5. Each item is a
+//! label 14 px, w400, letter spacing -0.15, white, 8 in from the sides, 2
+//! below the top and 5 above the bottom; under the pointer it fills with
+//! the theme's primary color (`CupertinoTheme.primaryColor`, zinc's primary
+//! under a Material theme), radius 4, and its label takes
+//! `primaryContrastingColor` (zinc's primary foreground). The labels are
+//! Cupertino's English ones (`DefaultCupertinoLocalizations`).
+//!
+//! Its corners and the items' are rounded superellipses
+//! (`RoundedSuperellipseBorder`, Apple's continuous corners, drawn from the
+//! engine's own construction: [`rsuperellipse`](super::super::rsuperellipse)),
+//! filled and stroked as canvas paths: the fill over the whole box, the
+//! 1 px border centred half a pixel in on a radius of 7.5 (the side's
+//! inside stroke, `RSuperellipse.inflate(-0.5)`). The shadow's shape is the
+//! box grown by its 0.5 spread on every side (`ShapeDecoration` shadows
+//! `rect.shift(offset).inflate(spreadRadius)`).
 //!
 //! What iced cannot draw as Flutter did, kept as close as it can be:
 //! - the toolbar blurred (sigma 20) and saturated (×3) what lay behind it
 //!   (`BackdropFilter`); iced has no backdrop filter, so what lies behind
 //!   shows through the 70 % fill unblurred;
-//! - its shadow spread 0.5 px; an iced shadow has no spread;
-//! - its corners and the items' were superellipses
-//!   (`RoundedSuperellipseBorder`); iced rounds them as circular arcs;
+//! - its shadow was its shape blurred by a Gaussian (`MaskFilter.blur`,
+//!   sigma 6.27 for the blur radius 10); iced's shadow is a quad's (a
+//!   circular-cornered box, radius 8, faded out over the blur radius on
+//!   its own curve), so only its place and spread are Flutter's;
+//! - its outer edge was cut by a hard-edged clip of the same shape
+//!   (`Clip.hardEdge` around the backdrop filter); iced fills it
+//!   antialiased;
 //! - the labels' style set `inherit: false` and no family, so Flutter set
-//!   them in the system UI font (SF Pro); the app bundles only Inter and
-//!   iced cannot name the system UI font (a hidden family), so they are set
-//!   in Inter, at Inter's natural line height (1.21 em), the box Flutter's
-//!   line took from its font's metrics.
+//!   them in the macOS system UI font (SF Pro, CoreText's `.AppleSystemUIFont`).
+//!   The font system does load it on macOS, under its hidden family (see
+//!   the macOS test `the_system_ui_font_is_reachable_by_its_family_name`),
+//!   but setting the labels in it would not be Flutter's: the face is a
+//!   variable font whose optical size CoreText set from the text's size,
+//!   and cosmic-text (iced's text engine) varies a face along its weight
+//!   axis alone, so it would draw the face's default instance, not the 14
+//!   px one. They stay in the bundled Inter, at Inter's natural line height
+//!   (1.21 em), the box Flutter's line took from its font's metrics.
 
 use std::cell::RefCell;
 use std::sync::Arc;
 use std::time::Duration;
 
+use iced::advanced::graphics::geometry::Renderer as _;
 use iced::advanced::graphics::text::cosmic_text::Buffer;
 use iced::advanced::graphics::text::{font_system, Version};
 use iced::advanced::layout::{self, Layout};
@@ -73,6 +92,7 @@ use iced::advanced::renderer::{self, Renderer as _};
 use iced::advanced::text::{Alignment, Wrapping};
 use iced::advanced::{clipboard, overlay, Clipboard, Shell};
 use iced::time::Instant;
+use iced::widget::canvas::{Frame, Stroke};
 use iced::{
     keyboard, mouse, window, Border, Color, Event, Padding, Point, Rectangle, Renderer, Shadow,
     Size, Theme, Vector,
@@ -80,6 +100,7 @@ use iced::{
 
 use crate::ui::core::motion::{cubic_curve, Lerp};
 use crate::ui::core::theme::{font, Zinc};
+use crate::ui::core::widgets::rsuperellipse;
 use crate::ui::core::widgets::studio_text::{draw_line, lay_out, Spec};
 
 /// `_kToolbarScreenPadding`: the room kept between the toolbar and the
@@ -95,12 +116,17 @@ pub const PADDING: f32 = 6.0;
 pub const BACKGROUND: Color = Color::from_rgba8(0x30, 0x30, 0x30, 0xB2 as f32 / 255.0);
 /// `_kToolbarBorderColor`, dark.
 pub const BORDER: Color = Color::from_rgb8(0x5B, 0x5B, 0x5B);
-/// `_kToolbarShadow` (less its 0.5 spread).
+/// `_kToolbarShadow`, but for its spread.
 pub const SHADOW: Shadow = Shadow {
     color: Color::from_rgba8(0, 0, 0, 60.0 / 255.0),
     offset: Vector::new(0.0, 4.0),
     blur_radius: 10.0,
 };
+/// `_kToolbarShadow`'s `spreadRadius`: how far its shape grows past the
+/// toolbar's on every side.
+pub const SHADOW_SPREAD: f32 = 0.5;
+/// The toolbar's border's width (`BorderSide`'s default).
+pub const BORDER_WIDTH: f32 = 1.0;
 /// `_kToolbarButtonPadding`.
 pub const BUTTON_PADDING: Padding = Padding {
     top: 2.0,
@@ -363,45 +389,64 @@ impl<Message> overlay::Overlay<Message, Theme, Renderer> for Toolbar<'_, Message
             return;
         }
         let bounds = layout.bounds();
+        // The shadow alone, its shape the box grown by its spread.
         renderer.fill_quad(
             renderer::Quad {
-                bounds,
+                bounds: bounds.expand(SHADOW_SPREAD),
                 border: Border {
-                    color: BORDER,
-                    width: 1.0,
                     radius: RADIUS.into(),
+                    ..Border::default()
                 },
                 shadow: SHADOW,
                 snap: false,
             },
-            BACKGROUND,
+            Color::TRANSPARENT,
         );
         let hovered = item_at(bounds, &items, cursor);
         let now = menu.now.unwrap_or_else(Instant::now);
-        for (i, item) in items.iter().enumerate() {
-            let opacity = menu.fades[item.index()].opacity(now);
-            let row = Rectangle {
-                x: bounds.x + PADDING,
-                y: bounds.y + PADDING + i as f32 * item_height(),
-                width: bounds.width - 2.0 * PADDING,
-                height: item_height(),
-            };
-            let is_hovered = hovered == Some(*item);
-            if is_hovered {
-                renderer.fill_quad(
-                    renderer::Quad {
-                        bounds: row,
-                        border: Border {
-                            radius: BUTTON_RADIUS.into(),
-                            ..Border::default()
-                        },
-                        shadow: Shadow::default(),
-                        snap: false,
-                    },
-                    faded(HOVER, opacity),
+        // The box and the hovered item's fill, superellipses, over the
+        // shadow (a layer's quads are drawn before its geometry) and under
+        // the labels.
+        let mut frame = Frame::new(renderer, bounds.size());
+        let local = Rectangle::with_size(bounds.size());
+        frame.fill(&rsuperellipse::path(local, RADIUS), BACKGROUND);
+        frame.stroke(
+            &rsuperellipse::path(
+                local.shrink(BORDER_WIDTH / 2.0),
+                RADIUS - BORDER_WIDTH / 2.0,
+            ),
+            Stroke::default()
+                .with_width(BORDER_WIDTH)
+                .with_color(BORDER),
+        );
+        let rows: Vec<(Item, Rectangle, f32)> = items
+            .iter()
+            .enumerate()
+            .map(|(i, item)| {
+                let row = Rectangle {
+                    x: bounds.x + PADDING,
+                    y: bounds.y + PADDING + i as f32 * item_height(),
+                    width: bounds.width - 2.0 * PADDING,
+                    height: item_height(),
+                };
+                (*item, row, menu.fades[item.index()].opacity(now))
+            })
+            .collect();
+        for (item, row, opacity) in &rows {
+            if hovered == Some(*item) {
+                let row = *row - Vector::new(bounds.x, bounds.y);
+                frame.fill(
+                    &rsuperellipse::path(row, BUTTON_RADIUS),
+                    faded(HOVER, *opacity),
                 );
             }
-            let (buffer, _) = label(*item);
+        }
+        renderer.with_translation(Vector::new(bounds.x, bounds.y), |renderer| {
+            renderer.draw_geometry(frame.into_geometry());
+        });
+        for (item, row, opacity) in rows {
+            let is_hovered = hovered == Some(item);
+            let (buffer, _) = label(item);
             draw_line(
                 renderer,
                 &buffer,

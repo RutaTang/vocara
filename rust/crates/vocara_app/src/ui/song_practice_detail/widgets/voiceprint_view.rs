@@ -31,11 +31,18 @@
 //!   over the take spectrogram that seeks on the press and on every
 //!   horizontal move of a drag.
 //!
-//! Where iced differs: the live spectrogram's 6 px rounded clip
-//! (`ClipRRect`) is square, as iced clips to rectangles; the `Tooltip`s
-//! (`material_tooltip`, fading as Material's did) stay below their chip,
-//! kept inside the window, where Flutter's flipped above when there was no
-//! room below.
+//! Where iced has no widget of Flutter's:
+//!
+//! - The live spectrogram's `ClipRRect(borderRadius: 6)`: iced clips to
+//!   rectangles, so the panel draws its four corners outside the rounded
+//!   rectangle over everything in it, in the color both its hosts lay
+//!   behind it (the dock's and the technique page's analysis box,
+//!   `Studio.surface`, opaque): what the clip let show of the backdrop
+//!   there ([`RoundedCorners`]), the corners' antialiasing the clip's
+//!   complement.
+//! - The `Tooltip`s are `material_tooltip`'s, fading as Material's did,
+//!   below their chip or above it when only there they fit
+//!   (`positionDependentBox`), kept 10 px inside the window.
 
 use std::f32::consts::FRAC_PI_2;
 use std::f64::consts::LN_2;
@@ -1026,6 +1033,13 @@ fn live_spectrogram_panel<'a>(monitor: &'a MonitorService) -> Element<'a, Messag
         canvas_widget(overlay)
             .width(Length::Fill)
             .height(Length::Fill),
+        // `ClipRRect(borderRadius: BorderRadius.circular(6))` over both.
+        canvas_widget(RoundedCorners {
+            radius: LIVE_CLIP_RADIUS,
+            backdrop: Studio::SURFACE,
+        })
+        .width(Length::Fill)
+        .height(Length::Fill),
     ];
     column![
         container(header).padding(ltrb(AXIS_WIDTH, 0.0, 0.0, 6.0)),
@@ -1035,6 +1049,60 @@ fn live_spectrogram_panel<'a>(monitor: &'a MonitorService) -> Element<'a, Messag
     .width(Length::Fill)
     .height(Length::Fill)
     .into()
+}
+
+/// The live panel's `ClipRRect` radius.
+const LIVE_CLIP_RADIUS: f32 = 6.0;
+
+/// A rounded clip over what lies under it in a stack, drawn as its
+/// complement: the four corners outside a rectangle rounded by `radius`
+/// (circular arcs, an `RRect`), filled with the opaque `backdrop` that
+/// shows there around the clipped box. Takes no input.
+pub(crate) struct RoundedCorners {
+    pub radius: f32,
+    pub backdrop: Color,
+}
+
+impl RoundedCorners {
+    /// The corners of a `size` box, as one path.
+    fn path(&self, size: Size) -> Path {
+        let r = self.radius.min(size.width / 2.0).min(size.height / 2.0);
+        let (w, h) = (size.width, size.height);
+        Path::new(|p| {
+            // Each corner: along one edge, round the arc's tangent from
+            // the corner, back to it.
+            for (corner, along, to) in [
+                (Point::ORIGIN, Point::new(r, 0.0), Point::new(0.0, r)),
+                (Point::new(w, 0.0), Point::new(w, r), Point::new(w - r, 0.0)),
+                (Point::new(w, h), Point::new(w - r, h), Point::new(w, h - r)),
+                (Point::new(0.0, h), Point::new(0.0, h - r), Point::new(r, h)),
+            ] {
+                p.move_to(corner);
+                p.line_to(along);
+                p.arc_to(corner, to, r);
+                p.close();
+            }
+        })
+    }
+}
+
+impl<M> canvas::Program<M> for RoundedCorners {
+    type State = ();
+
+    fn draw(
+        &self,
+        _: &(),
+        renderer: &Renderer,
+        _: &Theme,
+        bounds: Rectangle,
+        _: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let mut frame = Frame::new(renderer, bounds.size());
+        if self.radius > 0.0 {
+            frame.fill(&self.path(bounds.size()), self.backdrop);
+        }
+        vec![frame.into_geometry()]
+    }
 }
 
 /// `_LiveRegisterPanel`: the running chest/mix/head split plus a real-time

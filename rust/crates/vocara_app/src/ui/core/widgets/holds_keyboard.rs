@@ -14,16 +14,20 @@
 //! back). Mount the overlay as a later layer of the `stack` it covers, as the
 //! Dart overlay lay over the panel. Screens' keyboard subscriptions must skip
 //! captured events (`event::Status::Captured`), which is how a shortcut
-//! "beneath" the overlay stays quiet.
+//! "beneath" the overlay stays quiet. It is a focus scope of its own, as
+//! Dart's `FocusScope` was: Tab goes round the fields inside it.
 
 use iced::{Element, Event};
 
+use super::focus_traversal::focus_scope;
 use super::wrap::Wrap;
 
 /// `HoldsKeyboard(child: child)`.
 pub fn holds_keyboard<'a, M: 'a>(child: impl Into<Element<'a, M>>) -> Element<'a, M> {
     Wrap::<M, ()>::new(
-        child,
+        // A focus scope of its own: Tab goes round the fields inside it and
+        // cannot walk back to those beneath (`focus_traversal`).
+        focus_scope(child),
         Box::new(|_, event, _, _, shell| {
             if matches!(event, Event::Keyboard(_)) {
                 shell.capture_event();

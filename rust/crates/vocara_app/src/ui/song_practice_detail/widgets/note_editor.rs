@@ -43,6 +43,7 @@ use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::faded;
 use crate::ui::core::theme::{self, alpha, font, Studio, Zinc};
 use crate::ui::core::widgets::confirm_dialog::{barrier, Fade};
+use crate::ui::core::widgets::focus_traversal::focus_scope;
 use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
 use crate::ui::core::widgets::text_field::editor::{self as text_editor, text_editor};
 use crate::ui::core::widgets::wrap::Wrap;
@@ -358,7 +359,8 @@ fn modal(content: Element<'_, Message>, fade: Fade) -> Element<'_, Message> {
     let barrier = barrier(BARRIER, fade.barrier, Some(Message::Cancel));
     let layers = stack![barrier, center(opaque(content)).align_x(Horizontal::Center)];
     Wrap::<Message, ()>::new(
-        layers,
+        // A dialog route's scope: Tab goes round its fields.
+        focus_scope(layers),
         Box::new(|_, event, _, _, shell| {
             if let Event::Keyboard(event) = event {
                 if let keyboard::Event::KeyPressed {

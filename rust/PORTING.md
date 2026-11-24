@@ -216,8 +216,8 @@ structure every screen follows, so screens ported by different hands fit:
 - **Text fields** (`widgets::text_field`): iced's `text_input` and
   `text_editor` keep their caret, focus and blink in private state and draw
   a 1 px square caret in the text's color, under the text, so the app forks
-  them (iced_widget 0.14.2, MIT; their keys, mouse, clipboard, input method
-  and scrolling unchanged) for what Flutter's macOS `TextField` did: its
+  them (iced_widget 0.14.2, MIT; their keys, mouse, clipboard and input
+  method unchanged but where noted) for what Flutter's macOS `TextField` did: its
   caret (2 px, round ends, `cursorColor`, a pixel above and below the line,
   2 device pixels left of the glyph edge, never left of the text, on a
   device pixel, over the text, 500 ms on and off, clipped to the field only
@@ -226,14 +226,32 @@ structure every screen follows, so screens ported by different hands fit:
   toolbar there with what macOS offered: Cut, Copy, Paste, no Select All).
   A multi-line field wraps 3 px short of its width (the caret's room); one
   read-only is `SelectableText` (it selects and copies, shows no caret,
-  and keeps its own selection). A press of any button outside a field
-  unfocuses it, as `TextFieldTapRegion` did. The fields sit forui's
+  and keeps its own selection). A single-line field's text, when wider
+  than the field, scrolls as `EditableText` scrolled it
+  (`text_field::input::scroll`): only as far as shows the caret, over
+  100 ms (`Curves.fastOutSlowIn`) after an edit, a click or the focus
+  coming, at once for a keyboard move or a drag of the selection; it stays
+  where it is while the field is unfocused, Home and End only scroll on
+  macOS (`scrollToBeginningOfDocument:`), and a wheel's or trackpad's
+  horizontal delta scrolls it. As a field reveals its caret, the scroll
+  view around it (a `.fading()` one) shows the caret too
+  (`text_field::show_on_screen`, `RenderObject.showOnScreen`): with the
+  field's 20 px `scrollPadding` (24 below) over the same 100 ms after an
+  edit or the focus coming, bare and at once for a keyboard move. A press
+  of any button outside a field
+  unfocuses it, as `TextFieldTapRegion` did. Tab and Shift+Tab move the
+  focus to the next and the previous field (`widgets::focus_traversal`):
+  within the top page, a dialog or an overlay holding the keyboard (each a
+  focus scope, going round at its ends), in reading order, a single-line
+  field they land on selecting all its text (`selectAllOnFocus` on
+  macOS) and the scroll view around it showing it. The fields sit forui's
   `contentPadding` less compact density's inside their wells
   (`theme::FIELD_PADDING`: 10 across, 6 down), and a bordered container's
   padding counts its 1 px border, as a Flutter `Container`'s did. The
   caret's device pixels are the window's scale factor
-  (`text_field::set_scale_factor`), which the app asks for when its window
-  opens.
+  (`ui::core::scale_factor`, which the scrollbar's tolerance reads too),
+  which the app asks for when its window opens and the widgets that read
+  it follow when the window is rescaled.
 - **Window** (macOS): hidden title bar with a transparent, full-size content
   view; the drag bar starts a window drag; the close request runs the quit
   guard (kill separation sidecars, finalize recordings) before closing, as
@@ -270,7 +288,11 @@ structure every screen follows, so screens ported by different hands fit:
   (`theme::scrollbar`); a drag of it scrolls in proportion, a press on its
   track pages 0.8 of the view in 100 ms; it fades in on a scroll or under
   the pointer and out 600 ms after, and while it shows its 12 px track is
-  its own, not the content's. A horizontal scrollable (Material gave none)
+  its own, not the content's: a mouse wheel there scrolls the view and
+  never the content under it, a trackpad's swipe there scrolls nothing
+  (Flutter's pan-zoom never reached the view's drag), and the bar notices
+  after each frame, not only on a move, that the view left a still
+  pointer. A horizontal scrollable (Material gave none)
   and a `ScrollConfiguration(scrollbars: false)` one have no scrollbar
   (`Scrollbar::hidden()`, `fading_scrollbar::no_scrollbar`): nothing is
   drawn and nothing takes the pointer at their edge.
@@ -326,20 +348,25 @@ small and written down in the module that has it:
 
 - Touch-only gestures (pointer cancel, a second finger) do not exist on
   iced's desktop pointer.
-- The wheel over a shown scrollbar's track scrolls its view as Flutter's
-  did, but the iced scrollable offers it to the content under the track
-  first; a page of under half a pixel jumps as on a Retina display, iced
-  not telling a widget the scale (`fading_scrollbar`).
-- A text field's right-click toolbar (`text_field::toolbar`) shows what
-  lies behind it unblurred and unsaturated (Flutter's `BackdropFilter`;
-  iced has no backdrop filter), its shadow without its 0.5 px spread, its
-  corners as circular arcs, not superellipses, and its labels in Inter at
-  Inter's natural line height, where Flutter set them in the system UI
-  font (iced cannot name that hidden family).
-- A single-line field's text, when wider than the field, scrolls as iced's
-  did (the caret kept 5 px in from the right edge as it moves), not as
-  Flutter's `EditableText` did (only as far as reveals the caret, over
-  100 ms).
+- Tab stops on text fields alone (`focus_traversal`). Flutter's also
+  stopped on Material's focusable widgets, all on screens without a text
+  field (the settings rows, slider and switch, the license page's back
+  button and list tiles, the tag and track menus' items), drawing a focus
+  highlight that Space or Enter activated; iced's buttons, sliders and
+  switches take no keyboard focus, so Tab does nothing there.
+- A press on a shown scrollbar's track pages at once, where Flutter's tap
+  waited out the gesture arena (to the release, or 100 ms) when a
+  recognizer above the view wanted the press too: iced has no arena
+  (`fading_scrollbar`).
+- A text field's right-click toolbar (`text_field::toolbar`, its
+  superellipse corners and its shadow's spread Flutter's) shows what lies
+  behind it unblurred and unsaturated (Flutter's `BackdropFilter`; iced
+  has no backdrop filter), its shadow faded on iced's curve, not a
+  Gaussian, and its labels in Inter at Inter's natural line height, where
+  Flutter set them in the macOS system UI font: the font system reaches
+  that face by its hidden family name, but cosmic-text varies a face
+  along its weight axis alone, so it would draw the variable system font
+  at its default optical size, not the 14 px one CoreText set.
 
 ## Tracking
 
@@ -462,7 +489,7 @@ behavior and its tests are ported and the gates pass.
 | `ui/song_practice_detail/widgets/track_context_menu.dart` | 640 | `vocara_app::ui::song_practice_detail::widgets::track_context_menu` (the menus are elements reporting actions; the screen holds which is open and wraps what was clicked in `menu_host`, which pops it at the press that opened it, or under its trigger; the rename and delete-bus prompts are `StudioPrompt` / `ConfirmDialog` values) | done |
 | `ui/song_practice_detail/widgets/track_row.dart` | 1158 | `vocara_app::ui::song_practice_detail::widgets::track_row` (plain data in, `Message`s out; the screen wraps each row in `menu_host`, mounts the rows keyed by take id, and holds the reorder drag's lane and drop target; a clip's move-drag lives in the lane, keyed by clip id; the widget tests run on `widgets::live_ui`, which rebuilds the view between events) | done |
 | `ui/song_practice_detail/widgets/voice_profile_view.dart` | 567 | `vocara_app::ui::song_practice_detail::widgets::voice_profile_view` (each tab a function of the `AnalysisSource`, an `Element` of the host's message: neither reports anything) | done |
-| `ui/song_practice_detail/widgets/voiceprint_view.dart` | 2015 | `vocara_app::ui::song_practice_detail::widgets::voiceprint_view` (each tab is a function of the `AnalysisSource`; the Spectrogram tab's take image is a `VoiceprintState` the host keeps and `sync`s; a seek and the Take/Live toggle are `Message`s; the live panel's rounded clip is square) | done |
+| `ui/song_practice_detail/widgets/voiceprint_view.dart` | 2015 | `vocara_app::ui::song_practice_detail::widgets::voiceprint_view` (each tab is a function of the `AnalysisSource`; the Spectrogram tab's take image is a `VoiceprintState` the host keeps and `sync`s; a seek and the Take/Live toggle are `Message`s; the live panel's rounded clip draws its corners in the hosts' surface) | done |
 | `ui/technique_library/technique_library_screen.dart` | 914 | `vocara_app::ui::technique_library::technique_library_screen` (the snack bars queue, timed by a subscription, and go to the app's `messenger` when a page covers the library or it leaves) | done |
 | `ui/technique_library/view_model/technique_detail_view_model.dart` | 2013 | `vocara_app::ui::technique_library::view_model::technique_detail_view_model` (each awaited I/O is a `Job` the screen runs on a worker and lands, the code after the `await` a continuation; Dart's return values are `Answer`s; `micArmed` / `analysisScrub` are effects; the recorder's timers are the screen's ticks, which also carry a quit's `quitFinalize` from the finalizer thread; the screen API is in the module doc) | done |
 | `ui/technique_library/view_model/technique_library_view_model.dart` | 280 | `vocara_app::ui::technique_library::view_model::technique_library_view_model` | done |

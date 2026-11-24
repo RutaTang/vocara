@@ -54,6 +54,7 @@ pub use iced::widget::text_editor::{
     Action, Cursor, Edit, Line, LineEnding, Motion, Position, Selection,
 };
 
+use super::show_on_screen::{self, Request};
 use super::toolbar::{self, Item};
 use super::{caret, DEFAULT_CARET};
 
@@ -208,6 +209,28 @@ impl<'a, Message> TextEditor<'a, Message> {
     /// Whether it takes no input: not editable, not selectable.
     fn is_disabled(&self) -> bool {
         self.on_edit.is_none() && !self.read_only
+    }
+
+    /// The caret's rectangle down the text (a pixel above and below its
+    /// line), or the selection's last line box; across, the text box: in
+    /// layout coordinates, what the view around is asked to show.
+    fn caret_line(&self, layout: Layout<'_>, renderer: &Renderer) -> Rectangle {
+        let text_bounds = layout.bounds().shrink(self.padding);
+        let line = self.line_height_px(renderer);
+        let internal = self.content.0.borrow();
+        let (top, height) = match internal.editor.selection() {
+            Selection::Caret(position) => {
+                (position.y - caret::OVERHANG, line + 2.0 * caret::OVERHANG)
+            }
+            Selection::Range(ranges) => ranges
+                .last()
+                .map_or((0.0, line), |range| (range.y, range.height)),
+        };
+        Rectangle {
+            y: text_bounds.y + top,
+            height,
+            ..text_bounds
+        }
     }
 
     fn line_height_px(&self, renderer: &Renderer) -> f32 {
@@ -508,6 +531,16 @@ pub struct State {
     secondary_press: Option<Point>,
     /// The open context menu.
     toolbar: Option<toolbar::State>,
+    /// It can be neither edited nor selected from: it takes no focus from
+    /// the keyboard's traversal.
+    disabled: bool,
+    /// The keyboard's traversal focused it: after the frame that shows it,
+    /// the view around it is asked to show its caret (`true` once that
+    /// frame has been drawn).
+    reveal: Option<bool>,
+    /// What it asks the scroll view around it to show
+    /// (`show_on_screen`).
+    pub(super) requests: Vec<Request>,
 }
 
 #[derive(Debug, Clone)]
@@ -546,6 +579,29 @@ impl State {
     /// Whether its context menu is open.
     pub fn has_menu(&self) -> bool {
         self.toolbar.is_some()
+    }
+}
+
+impl crate::ui::core::widgets::focus_traversal::Traversable for State {
+    fn can_focus(&self) -> bool {
+        !self.disabled
+    }
+
+    fn is_focused(&self) -> bool {
+        self.focus.is_some()
+    }
+
+    /// Focused from elsewhere: a multi-line field keeps its selection,
+    /// and the view around it shows its caret after the frame
+    /// (`_handleFocusChanged`'s `_scheduleShowCaretOnScreen`).
+    fn focus_by_traversal(&mut self) {
+        self.focus = Some(Focus::now());
+        self.reveal = Some(false);
+    }
+
+    fn unfocus_by_traversal(&mut self) {
+        self.focus = None;
+        self.toolbar = None;
     }
 }
 
@@ -660,10 +716,14 @@ impl<Message> Widget<Message, Theme, Renderer> for TextEditor<'_, Message> {
     }
 
     fn state(&self) -> widget::tree::State {
-        widget::tree::State::new(State::default())
+        widget::tree::State::new(State {
+            disabled: self.is_disabled(),
+            ..State::default()
+        })
     }
 
     fn diff(&self, tree: &mut widget::Tree) {
+        tree.state.downcast_mut::<State>().disabled = self.is_disabled();
         if self.is_disabled() {
             // A disabled field takes no pointer: its menu goes.
             tree.state.downcast_mut::<State>().toolbar = None;
@@ -739,6 +799,26 @@ impl<Message> Widget<Message, Theme, Renderer> for TextEditor<'_, Message> {
 
         let state = tree.state.downcast_mut::<State>();
         let is_redraw = matches!(event, Event::Window(window::Event::RedrawRequested(_now)),);
+        // What the views around took is gone; what they did not, stale.
+        state.requests.clear();
+        if is_redraw {
+            match state.reveal {
+                Some(false) => {
+                    state.reveal = Some(true);
+                    shell.request_redraw();
+                }
+                Some(true) => {
+                    state.reveal = None;
+                    let rect = self.caret_line(layout, renderer);
+                    state.requests.push(Request {
+                        rect: rect.expand(show_on_screen::CARET_PADDING),
+                        animate: true,
+                    });
+                    show_on_screen::ask();
+                }
+                None => {}
+            }
+        }
 
         match event {
             Event::Window(window::Event::Unfocused) => {
@@ -1156,6 +1236,13 @@ impl<Message> Widget<Message, Theme, Renderer> for TextEditor<'_, Message> {
         let state = tree.state.downcast_mut::<State>();
 
         operation.focusable(self.id.as_ref(), layout.bounds(), state);
+        // Its own state and its text box, for the keyboard's traversal
+        // (`focus_traversal`).
+        operation.custom(
+            self.id.as_ref(),
+            layout.bounds().shrink(self.padding),
+            state,
+        );
         // `SelectableText` is text: a finder reads it as Flutter's
         // `find.text` did.
         if self.read_only {

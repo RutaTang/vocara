@@ -10,8 +10,8 @@
 //! in private state, so nothing outside them can draw one in its place or
 //! select the word under a right-click. So both are forked here from
 //! iced_widget 0.14.2 (MIT, the version the workspace pins), with their
-//! keyboard, mouse, clipboard, input method, scrolling and selection
-//! handling kept as they are:
+//! keyboard, mouse, clipboard, input method and selection handling kept as
+//! they are, but where they differed from Flutter's as listed below:
 //!
 //! - [`input`]: the single-line field (`text_input`), over a `&str`, Return
 //!   submitting;
@@ -45,6 +45,20 @@
 //! - **The caret margin**: a multi-line field wraps its text 3 px short of
 //!   its width (`_kCaretGap + cursorWidth`), as `RenderEditable` laid it
 //!   out, leaving the caret room at the end of a full line.
+//! - **The single-line scroll** ([`input::scroll`]): text wider than the
+//!   field scrolls only as far as shows the caret (`_showCaretOnScreen`),
+//!   over 100 ms on `Curves.fastOutSlowIn` after an edit, a click or the
+//!   focus coming, at once for a keyboard move or a drag of the selection;
+//!   it stays put while the field is unfocused, Home and End only scroll
+//!   on macOS, and a wheel or trackpad scrolls it. iced kept the caret
+//!   5 px in from the right edge as it moved, and an unfocused field at
+//!   its start.
+//! - **Cut** (Cmd+X) cuts nothing without a selection, where iced's
+//!   deleted the character after the caret.
+//! - **Tab** moves the focus to the next field of its focus scope
+//!   ([`focus_traversal`](super::focus_traversal)), which a single-line
+//!   field takes by selecting all its text; a disabled field takes none.
+//!   Both report their state to it (`Operation::custom`).
 //!
 //! The device pixel ratio the caret needs is the window's scale factor,
 //! which the app hands over when its window opens and the fields take
@@ -53,6 +67,7 @@
 pub mod caret;
 pub mod editor;
 pub mod input;
+pub mod show_on_screen;
 pub mod toolbar;
 
 pub use caret::set_scale_factor;
