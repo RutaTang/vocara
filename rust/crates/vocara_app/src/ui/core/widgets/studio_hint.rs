@@ -5,7 +5,11 @@
 //!
 //! [`spinner`] is Material's indeterminate `CircularProgressIndicator` (the
 //! same head/tail/offset/rotation curves), drawn on a canvas that asks for
-//! the next frame while it is shown.
+//! the next frame while it is shown. As Material 3's 2023 indicator (the
+//! default in Flutter 3.38; forui sets no progress indicator theme) it
+//! strokes the circle inscribed in its box with the stroke centred on it
+//! (`strokeAlignCenter`): the arc's radius is half the box, and half the
+//! stroke falls outside the box, which still lays out at its size.
 
 use std::f32::consts::PI;
 use std::time::Instant;
@@ -86,7 +90,9 @@ pub fn lane_hint<'a, M: 'a>(label: impl Into<String>) -> Element<'a, M> {
 }
 
 /// An indeterminate circular progress indicator `size` px square, stroke
-/// `stroke_width`, in `color`.
+/// `stroke_width`, in `color`: it lays out `size` square and its stroke,
+/// centred on the box's inscribed circle, overflows the box by half its
+/// width (see the module docs).
 pub fn spinner<'a, M: 'a>(size: f32, stroke_width: f32, color: Color) -> Element<'a, M> {
     canvas_widget(Spinner {
         color,
@@ -182,14 +188,25 @@ impl<M> canvas::Program<M> for Spinner {
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
-        let mut frame = Frame::new(renderer, bounds.size());
+        // `strokeAlignCenter`: no stroke offset (`strokeWidth / 2 *
+        // -strokeAlign`), so the arc's box is the indicator's own and half
+        // the stroke lies outside it. The frame reaches that far so the
+        // overflow is drawn, not clipped.
+        let half = self.stroke_width / 2.0;
+        let mut frame = Frame::with_bounds(
+            renderer,
+            Rectangle::new(
+                Point::new(-half, -half),
+                iced::Size::new(bounds.width + 2.0 * half, bounds.height + 2.0 * half),
+            ),
+        );
         let elapsed = state
             .now
             .saturating_duration_since(state.start)
             .as_secs_f32()
             * 1000.0;
         let (start, sweep) = arc_at(elapsed);
-        let radius = (bounds.width.min(bounds.height) - self.stroke_width) / 2.0;
+        let radius = bounds.width.min(bounds.height) / 2.0;
         let center = Point::new(bounds.width / 2.0, bounds.height / 2.0);
         let arc = Path::new(|b| {
             b.arc(Arc {
@@ -228,6 +245,45 @@ mod tests {
         assert!((fast_out_slow_in(1.0) - 1.0).abs() < 0.002);
         // Curves.fastOutSlowIn.transform(0.5) ≈ 0.7748.
         assert!((fast_out_slow_in(0.5) - 0.7748).abs() < 0.01);
+    }
+
+    #[test]
+    fn the_stroke_is_centred_on_the_boxs_circle_and_overflows_it() {
+        use crate::ui::core::widgets::animated::testing::{Frames, MS};
+        use iced::widget::container;
+        use iced::Size;
+
+        // A 36 px box (stroke 4) at (32, 32) of a 100 px window, white.
+        let view = || -> Element<'static, ()> {
+            container(spinner(36.0, 4.0, Color::WHITE))
+                .padding(32)
+                .into()
+        };
+        let mut window = Frames::new(Size::new(100.0, 100.0));
+        // Half a cycle in, the head is all the way round and the tail has
+        // not moved: the arc covers the box's left edge (angle π).
+        let t0 = iced::time::Instant::now();
+        let more = window.frame(view(), &[], t0 + 1333 * MS / 2);
+        assert!(more, "it asks for the next frame");
+        let ink = |x: f32| window.ink(Point::new(x, 49.0), Point::new(x + 1.0, 51.0));
+        // The arc's radius is 18 (half the box) and the stroke spans 16 to
+        // 20 from the centre at 50: from x = 30 to 34, the first 2 px of it
+        // outside the box (which starts at 32).
+        assert!(ink(30.5) > 200, "outside the box: {}", ink(30.5));
+        assert!(ink(32.5) > 200, "inside: {}", ink(32.5));
+        assert!(ink(35.5) < 40, "within the ring: {}", ink(35.5));
+        assert!(ink(28.5) < 40, "beyond the stroke: {}", ink(28.5));
+    }
+
+    #[test]
+    fn the_spinner_lays_out_at_its_size() {
+        let mut ui = iced_test::simulator::<(), _, _>(Element::from(iced::widget::row![
+            spinner(14.0, 2.0, Color::WHITE),
+            text("after")
+        ]));
+        // The text starts right after the 14 px box, the overflow aside.
+        let after = ui.find("after").expect("the text");
+        assert_eq!(after.bounds().x, 14.0);
     }
 
     #[test]
