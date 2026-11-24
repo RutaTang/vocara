@@ -70,6 +70,7 @@ use std::rc::Rc;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::ui::core::text;
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::widget::{tree, Operation, Tree};
 use iced::advanced::{overlay, renderer, Clipboard, Shell, Widget};
@@ -77,7 +78,7 @@ use iced::alignment::Vertical;
 use iced::widget::text::Wrapping;
 use iced::widget::{
     button, canvas as canvas_widget, center, column, container, mouse_area, pin, responsive, row,
-    stack, text, Space,
+    stack, Space,
 };
 use iced::{
     mouse, touch, widget, Border, Color, Element, Event, Length, Padding, Point, Rectangle,

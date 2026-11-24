@@ -2,8 +2,9 @@
 //! values Flutter's own `HSLColor` produced), and the host's placement and
 //! dismissal.
 
+use crate::ui::core::text;
 use iced::keyboard::key::Named;
-use iced::widget::{column, container, text};
+use iced::widget::{column, container};
 use iced::{keyboard, Settings};
 use iced_test::simulator;
 

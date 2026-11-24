@@ -52,13 +52,12 @@ use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use crate::ui::core::text;
 use iced::alignment::{Horizontal, Vertical};
 use iced::border::Radius;
 use iced::futures::channel::mpsc;
 use iced::futures::{Stream, StreamExt};
-use iced::widget::{
-    button, column, container, row, scrollable, slider, stack, text, Column, Space,
-};
+use iced::widget::{button, column, container, row, scrollable, slider, stack, Column, Space};
 use iced::{Color, Element, Length, Padding, Shadow, Subscription, Task, Theme, Vector};
 use vocara_model::diagnostics::DiagnosticsLog;
 use vocara_model::models::audio_device::AudioDevice;

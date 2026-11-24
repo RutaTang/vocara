@@ -38,10 +38,11 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::ui::core::text;
 use iced::alignment::{Horizontal, Vertical};
 use iced::futures::{stream, Stream, StreamExt};
 use iced::widget::{
-    button, center, column, container, opaque, responsive, row, scrollable, stack, text, Space,
+    button, center, column, container, opaque, responsive, row, scrollable, stack, Space,
 };
 use iced::{Color, Element, Length, Padding, Shadow, Subscription, Task, Theme, Vector};
 use vocara_model::models::practice_summary::PracticeSummary;

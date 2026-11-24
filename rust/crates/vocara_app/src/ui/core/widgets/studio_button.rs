@@ -10,8 +10,9 @@
 
 use std::time::Duration;
 
+use crate::ui::core::text;
 use iced::alignment::Vertical;
-use iced::widget::{button, container, row, text};
+use iced::widget::{button, container, row};
 use iced::{Color, Element, Length};
 
 use crate::ui::core::icons::{self, Icon};

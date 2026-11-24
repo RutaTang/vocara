@@ -63,10 +63,10 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::ui::core::text;
 use iced::alignment::Vertical;
 use iced::widget::{
-    button, center, column, container, opaque, scrollable, stack, text, text_editor, Column, Row,
-    Space,
+    button, center, column, container, opaque, scrollable, stack, text_editor, Column, Row, Space,
 };
 use iced::{widget, Color, Element, Font, Length, Padding, Shadow, Subscription, Task, Vector};
 use vocara_model::models::technique::Technique;
@@ -1407,7 +1407,7 @@ fn snack_bar(message: &str, _opacity: f32) -> Element<'_, Infallible> {
     let bar = container(
         text(message)
             .size(14)
-            .line_height(20.0 / 14.0)
+            .line_height(1.0)
             .color(theme::SNACK_BAR_DEFAULT_TEXT),
     )
     .width(Length::Fill)

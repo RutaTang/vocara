@@ -12,8 +12,9 @@
 
 use std::time::Duration;
 
+use crate::ui::core::text;
 use iced::alignment::Vertical;
-use iced::widget::{button, column, container, hover, row, text, Space};
+use iced::widget::{button, column, container, hover, row, Space};
 use iced::{Color, Element, Length};
 use vocara_model::models::practice_summary::PracticeSummary;
 use vocara_model::util::dart_date_time::DateTime;

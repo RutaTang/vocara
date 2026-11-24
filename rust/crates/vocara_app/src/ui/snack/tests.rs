@@ -7,7 +7,7 @@ use crate::ui::core::widgets::animated::testing::{near, Frames, MS};
 const DURATION: Duration = Duration::from_millis(4000);
 
 fn look(text: &str, _: f32) -> Element<'_, Infallible> {
-    iced::widget::text(text).into()
+    crate::ui::core::text(text).into()
 }
 
 fn bar(text: &str, clears: bool, style: SnackStyle) -> SnackBar {

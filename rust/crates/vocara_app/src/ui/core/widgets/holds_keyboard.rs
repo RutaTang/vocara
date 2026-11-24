@@ -36,9 +36,10 @@ pub fn holds_keyboard<'a, M: 'a>(child: impl Into<Element<'a, M>>) -> Element<'a
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::core::text;
     use crate::ui::core::widgets::wrap::Wrap;
     use iced::keyboard;
-    use iced::widget::{stack, text};
+    use iced::widget::stack;
 
     #[derive(Debug, Clone, PartialEq)]
     enum Msg {

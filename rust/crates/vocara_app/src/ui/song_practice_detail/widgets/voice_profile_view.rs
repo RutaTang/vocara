@@ -15,10 +15,11 @@
 
 use std::sync::Arc;
 
+use crate::ui::core::text;
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::canvas::{self, gradient, Frame, Geometry, LineCap, Path, Stroke, Style};
 use iced::widget::text::{Alignment, LineHeight};
-use iced::widget::{canvas as canvas_widget, column, container, row, stack, text, Space};
+use iced::widget::{canvas as canvas_widget, column, container, row, stack, Space};
 use iced::{mouse, Color, Element, Length, Padding, Pixels, Point, Rectangle, Renderer, Theme};
 use vocara_model::models::audio_track::AudioTrack;
 use vocara_model::models::voice_metrics::{note_name_for_midi, VoiceMetrics, VoiceProfile};

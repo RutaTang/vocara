@@ -4,8 +4,9 @@
 //! `Icon::ChevronLeft`, ...). The shared widgets take an [`Icon`] wherever the
 //! Dart ones took an `IconData`.
 
+use crate::ui::core::text;
 use iced::alignment::{Horizontal, Vertical};
-use iced::widget::{text, Text};
+use iced::widget::Text;
 use iced::{Color, Font};
 
 pub use lucide_icons::Icon;

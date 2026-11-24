@@ -42,13 +42,13 @@ use std::f64::consts::LN_2;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::ui::core::text;
 use iced::alignment::{Horizontal, Vertical};
 use iced::border::Radius;
 use iced::widget::canvas::{self, gradient, Frame, Geometry, LineCap, Path, Stroke};
 use iced::widget::text::Alignment;
 use iced::widget::{
-    button, canvas as canvas_widget, center, column, container, responsive, row, stack, text, Row,
-    Space,
+    button, canvas as canvas_widget, center, column, container, responsive, row, stack, Row, Space,
 };
 use iced::{
     mouse, Background, Border, Color, Element, Length, Padding, Pixels, Point, Rectangle, Renderer,

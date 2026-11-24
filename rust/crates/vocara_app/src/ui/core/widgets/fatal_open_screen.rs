@@ -7,8 +7,9 @@
 //! window is visible from the start, so a fatal open never looks like the app
 //! simply never launched.
 
+use crate::ui::core::text;
 use iced::alignment::Horizontal;
-use iced::widget::{button, center, column, container, row, scrollable, text, Space};
+use iced::widget::{button, center, column, container, row, scrollable, Space};
 use iced::{Background, Border, Element, Length, Shadow, Theme};
 
 use crate::ui::core::theme::{self, alpha, font, Studio};

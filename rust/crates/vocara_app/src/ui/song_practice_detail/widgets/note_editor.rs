@@ -30,8 +30,9 @@
 use std::fmt;
 use std::time::Duration;
 
+use crate::ui::core::text;
 use iced::alignment::{Horizontal, Vertical};
-use iced::widget::{center, column, container, opaque, row, stack, text, text_editor, Space};
+use iced::widget::{center, column, container, opaque, row, stack, text_editor, Space};
 use iced::{keyboard, widget, Background, Border, Color, Element, Event, Length, Shadow, Task};
 use vocara_model::models::practice_note::PracticeNote;
 use vocara_model::util::dart_string;

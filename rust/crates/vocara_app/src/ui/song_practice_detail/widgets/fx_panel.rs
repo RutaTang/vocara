@@ -60,10 +60,11 @@ mod tests;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use crate::ui::core::text;
 use iced::alignment::{Horizontal, Vertical};
 use iced::border::Radius;
 use iced::widget::canvas::{self, Frame, Geometry, Path, Stroke};
-use iced::widget::{canvas as canvas_widget, column, container, row, scrollable, text, Space};
+use iced::widget::{canvas as canvas_widget, column, container, row, scrollable, Space};
 use iced::{
     mouse, window, Color, Element, Length, Padding, Point, Rectangle, Renderer, Size, Theme,
 };

@@ -49,11 +49,12 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path as FilePath, PathBuf};
 use std::time::Duration;
 
+use crate::ui::core::text;
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::canvas::{self, Frame, Geometry, Path};
 use iced::widget::{
-    button, canvas as canvas_widget, column, container, keyed_column, mouse_area, row, text,
-    text_input, Column, Space,
+    button, canvas as canvas_widget, column, container, keyed_column, mouse_area, row, text_input,
+    Column, Space,
 };
 use iced::{
     mouse, widget, Color, Element, Font, Length, Padding, Point, Rectangle, Renderer, Size,
@@ -1071,6 +1072,7 @@ impl RenameExampleDialog {
             .on_input(Message::Input)
             .on_submit(Message::Confirm)
             .size(14)
+            .line_height(1.0)
             .padding(0)
             .style(fade.input(theme::studio_input));
         let card = container(

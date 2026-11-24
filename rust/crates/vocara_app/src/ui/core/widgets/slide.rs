@@ -297,8 +297,9 @@ impl<'a, M: 'a> From<Slide<'a, M>> for Element<'a, M> {
 
 #[cfg(test)]
 mod tests {
+    use crate::ui::core::text;
     use iced::time::Instant;
-    use iced::widget::{button, container, text, Space};
+    use iced::widget::{button, container, Space};
     use iced::{Point, Size};
 
     use super::*;

@@ -41,6 +41,7 @@
 
 use std::sync::Arc;
 
+use crate::ui::core::text;
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::widget::{tree, Operation, Tree};
 use iced::advanced::{overlay, renderer, Clipboard, Shell, Widget};
@@ -49,7 +50,7 @@ use iced::border::Radius;
 use iced::widget::canvas::{self, Frame, Geometry, Path};
 use iced::widget::text::{Alignment, Wrapping};
 use iced::widget::{
-    button, canvas as canvas_widget, center, column, container, responsive, row, scrollable, text,
+    button, canvas as canvas_widget, center, column, container, responsive, row, scrollable,
     Column, Space,
 };
 use iced::{

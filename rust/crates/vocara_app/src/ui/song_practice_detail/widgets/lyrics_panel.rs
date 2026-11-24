@@ -63,6 +63,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::ui::core::text;
 use iced::advanced::widget::operation::scrollable::AbsoluteOffset;
 use iced::advanced::widget::operation::{Operation, Outcome, Scrollable};
 use iced::alignment::{Horizontal, Vertical};
@@ -70,7 +71,7 @@ use iced::widget::canvas::{self, Frame, Geometry};
 use iced::widget::text::{Alignment, Wrapping};
 use iced::widget::{
     button, canvas as canvas_widget, center, column, container, responsive, row, scrollable, stack,
-    text, text_editor, Column, Space,
+    text_editor, Column, Space,
 };
 use iced::{
     keyboard, mouse, widget, Border, Color, Element, Event, Length, Padding, Pixels, Point,

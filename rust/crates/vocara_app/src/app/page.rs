@@ -2,8 +2,9 @@
 //! `routing/router.dart`), plus go_router's error page for a location that
 //! matches no route.
 
+use crate::ui::core::text;
 use iced::alignment::Horizontal;
-use iced::widget::{center, column, text};
+use iced::widget::{center, column};
 use iced::{Element, Subscription, Task};
 
 use super::Message;

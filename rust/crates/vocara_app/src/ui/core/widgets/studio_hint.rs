@@ -10,9 +10,10 @@
 use std::f32::consts::PI;
 use std::time::Instant;
 
+use crate::ui::core::text;
 use iced::alignment::Horizontal;
 use iced::widget::canvas::{self, path::Arc, Frame, Geometry, Path, Stroke};
-use iced::widget::{canvas as canvas_widget, center, column, container, text, Space};
+use iced::widget::{canvas as canvas_widget, center, column, container, Space};
 use iced::{
     mouse, window, Color, Element, Length, Padding, Point, Radians, Rectangle, Renderer, Theme,
 };

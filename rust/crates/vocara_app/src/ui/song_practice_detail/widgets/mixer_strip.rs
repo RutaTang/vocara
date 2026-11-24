@@ -47,12 +47,13 @@ mod tests;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
+use crate::ui::core::text;
 use iced::alignment::{Horizontal, Vertical};
 use iced::border::Radius;
 use iced::widget::canvas::{self, Frame, Geometry, LineCap, Path, Stroke};
 use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::{
-    button, canvas as canvas_widget, center, column, container, responsive, row, scrollable, text,
+    button, canvas as canvas_widget, center, column, container, responsive, row, scrollable,
     Column, Space,
 };
 use iced::{mouse, Color, Element, Length, Padding, Point, Rectangle, Renderer, Size, Theme};

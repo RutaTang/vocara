@@ -107,7 +107,7 @@ mod tests {
     use crate::ui::snack::{SnackStyle, TRANSITION};
 
     fn look(text: &str, _: f32) -> Element<'_, Infallible> {
-        iced::widget::text(text).into()
+        crate::ui::core::text(text).into()
     }
 
     fn bar(text: &str, left_ms: u64, clears: bool) -> SnackBar {

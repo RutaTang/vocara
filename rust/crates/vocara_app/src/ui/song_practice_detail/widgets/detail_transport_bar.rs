@@ -34,13 +34,14 @@
 
 use std::time::Duration;
 
+use crate::ui::core::text;
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::widget::{Operation, Tree};
 use iced::advanced::{overlay, renderer, Clipboard, Shell, Widget};
 use iced::alignment::Vertical;
 use iced::widget::canvas::{self, Frame, Geometry, LineCap, Path, Stroke};
 use iced::widget::text::Wrapping;
-use iced::widget::{button, canvas as canvas_widget, column, container, row, text, Space};
+use iced::widget::{button, canvas as canvas_widget, column, container, row, Space};
 use iced::{mouse, Element, Event, Length, Point, Rectangle, Renderer, Size, Theme, Vector};
 use vocara_model::models::song_practice::SongPractice;
 use vocara_model::util::format::{format_clock, format_clock_ms};

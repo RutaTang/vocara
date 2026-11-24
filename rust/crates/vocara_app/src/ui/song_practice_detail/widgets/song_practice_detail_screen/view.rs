@@ -7,6 +7,7 @@
 use std::convert::Infallible;
 use std::sync::Arc;
 
+use crate::ui::core::text;
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::widget::{tree, Operation, Tree};
 use iced::advanced::{overlay, renderer, Clipboard, Shell, Widget};
@@ -14,7 +15,7 @@ use iced::alignment::{Horizontal, Vertical};
 use iced::widget::canvas::{self, gradient, Frame, Geometry, Path};
 use iced::widget::{
     button, canvas as canvas_widget, column, container, mouse_area, opaque, responsive, row,
-    scrollable, stack, text, Space,
+    scrollable, stack, Space,
 };
 use iced::{
     keyboard, mouse, Color, Element, Event, Length, Padding, Point, Rectangle, Renderer, Shadow,

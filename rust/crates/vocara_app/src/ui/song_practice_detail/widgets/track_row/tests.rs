@@ -816,12 +816,12 @@ fn an_expanded_take_shows_its_sub_lanes() {
     let track = take("t1", 5000, Vec::new());
     let mut ui = sim(row_of(&track)
         .expand(true, true, true)
-        .sub_lanes(iced::widget::text("the pitch lane")));
+        .sub_lanes(crate::ui::core::text("the pitch lane")));
     let lanes = ui.find("the pitch lane").expect("folded out").bounds();
     assert!(lanes.y >= TRACK_ROW_HEIGHT, "{lanes:?}");
     let mut ui = sim(row_of(&track)
         .expand(true, false, true)
-        .sub_lanes(iced::widget::text("the pitch lane")));
+        .sub_lanes(crate::ui::core::text("the pitch lane")));
     assert!(ui.find("the pitch lane").is_err());
 }
 

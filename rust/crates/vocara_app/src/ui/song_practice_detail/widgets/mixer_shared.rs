@@ -22,12 +22,13 @@ pub mod testing;
 use std::cell::Cell;
 use std::rc::Rc;
 
+use crate::ui::core::text;
 use iced::advanced::layout::{self, flex, Layout};
 use iced::advanced::widget::{tree, Operation, Tree};
 use iced::advanced::{overlay, renderer, Clipboard, Shell, Widget};
 use iced::alignment::Vertical;
 use iced::widget::text::Wrapping;
-use iced::widget::{column, container, row, scrollable, text, Column, Space};
+use iced::widget::{column, container, row, scrollable, Column, Space};
 use iced::{
     keyboard, mouse, touch, Alignment, Background, Border, Element, Event, Length, Padding, Point,
     Rectangle, Renderer, Shadow, Size, Theme, Vector,

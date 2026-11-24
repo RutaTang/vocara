@@ -6,7 +6,7 @@
 //! a tick repaints — has no iced counterpart: the canvases cache by their
 //! inputs, which the tabs' own tests pin.)
 
-use iced::widget::text;
+use crate::ui::core::text;
 use iced::Size;
 use iced_test::selector::{Candidate, Target};
 

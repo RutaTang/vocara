@@ -24,9 +24,10 @@
 
 use std::cell::RefCell;
 
+use crate::ui::core::text;
 use iced::widget::canvas::{self, Geometry};
 use iced::widget::image::{FilterMethod, Handle};
-use iced::widget::{canvas as canvas_widget, center, container, stack, text, Space};
+use iced::widget::{canvas as canvas_widget, center, container, stack, Space};
 use iced::{mouse, Element, Length, Rectangle, Renderer, Theme};
 use vocara_services::monitor_service::{LiveColumn, MonitorService};
 

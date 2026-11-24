@@ -15,7 +15,8 @@
 //! the dialog's state so it was disposed only after the exit transition; the
 //! state here is plain data and goes with the dialog.)
 
-use iced::widget::{column, container, row, text, Space};
+use crate::ui::core::text;
+use iced::widget::{column, container, row, Space};
 use iced::{widget, Element, Length, Task};
 use vocara_model::util::dart_string;
 

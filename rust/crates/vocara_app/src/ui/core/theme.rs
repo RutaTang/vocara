@@ -11,9 +11,10 @@
 //! Flutter's `color.withValues(alpha: a)` *replaces* the alpha; [`alpha`] is
 //! its counterpart (not iced's `scale_alpha`, which multiplies).
 
+use crate::ui::core::text;
 use iced::border::Radius;
 use iced::font::{Family, Weight};
-use iced::widget::{button, container, scrollable, text, text_input};
+use iced::widget::{button, container, scrollable, text_input};
 use iced::{Background, Border, Color, Font, Shadow, Theme, Vector};
 
 /// Dark "studio" palette — charcoal panels with a warm coral accent, modeled
@@ -557,7 +558,8 @@ mod tests {
         // `advanced-shaping` feature), so Inter's "AV" kerning pair sets the
         // two letters closer than their two advances. Shaped glyph by glyph
         // (iced's default for ASCII), they sat exactly their advances apart.
-        use iced::widget::{row, text};
+        use crate::ui::core::text;
+        use iced::widget::row;
         use std::borrow::Cow;
 
         assert_eq!(

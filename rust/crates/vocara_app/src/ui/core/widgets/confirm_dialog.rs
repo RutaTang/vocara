@@ -36,9 +36,10 @@
 
 use std::time::Duration;
 
+use crate::ui::core::text;
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::{
-    center, column, container, mouse_area, opaque, row, scrollable, stack, text, text_input, Space,
+    center, column, container, mouse_area, opaque, row, scrollable, stack, text_input, Space,
 };
 use iced::{keyboard, widget, Background, Color, Element, Event, Length, Padding};
 
@@ -462,6 +463,7 @@ fn prompt_card<'a>(
         .on_input(Message::Input)
         .on_submit(Message::Confirm)
         .size(14)
+        .line_height(1.0)
         .padding(0)
         .style(fade.input(theme::studio_input));
     content = content

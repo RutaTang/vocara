@@ -30,11 +30,12 @@
 //! `Align` takes the smallest size), so it never showed; here it fills the
 //! meter's 8 px, as intended — as in the examples section's record row.
 
+use crate::ui::core::text;
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::canvas::{self, Frame, Geometry, Path};
 use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::{
-    button, canvas as canvas_widget, column, container, row, scrollable, text, Row, Space,
+    button, canvas as canvas_widget, column, container, row, scrollable, Row, Space,
 };
 use iced::{mouse, Element, Length, Padding, Point, Rectangle, Renderer, Size, Theme};
 use vocara_model::models::technique_analysis::TechniqueAnalysis;

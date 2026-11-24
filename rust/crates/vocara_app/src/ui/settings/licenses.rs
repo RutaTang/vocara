@@ -55,11 +55,12 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use crate::ui::core::text;
 use iced::alignment::{Horizontal, Vertical};
 use iced::border::Radius;
 use iced::widget::text::{LineHeight, Wrapping};
 use iced::widget::{
-    button, column, container, keyed_column, row, scrollable, stack, text, Column, Space,
+    button, column, container, keyed_column, row, scrollable, stack, Column, Space,
 };
 use iced::{Background, Border, Color, Element, Length, Padding, Shadow, Theme, Vector};
 use serde::Deserialize;

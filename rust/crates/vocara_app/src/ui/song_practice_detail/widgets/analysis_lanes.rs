@@ -42,6 +42,7 @@
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, Weak};
 
+use crate::ui::core::text;
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::widget::{tree, Operation, Tree};
 use iced::advanced::{overlay, renderer, Clipboard, Shell, Widget};
@@ -49,8 +50,7 @@ use iced::alignment::Vertical;
 use iced::widget::canvas::{self, Frame, Geometry, Path, Stroke};
 use iced::widget::text::Wrapping;
 use iced::widget::{
-    button, canvas as canvas_widget, column, container, responsive, row, scrollable, stack, text,
-    Space,
+    button, canvas as canvas_widget, column, container, responsive, row, scrollable, stack, Space,
 };
 use iced::{
     mouse, window, Border, Color, Element, Event, Length, Padding, Point, Rectangle, Renderer,

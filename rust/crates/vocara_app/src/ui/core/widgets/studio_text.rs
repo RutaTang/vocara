@@ -88,14 +88,15 @@ pub struct StudioText<'a> {
     max_lines: Option<usize>,
 }
 
-/// Text with iced's `text` defaults: the renderer's font and size, no
-/// letter spacing, proportional figures, and no ellipsis (it wraps at
-/// words, as iced's does).
+/// Text with the app's defaults: the renderer's font and size, Flutter's
+/// line height under the app's Material theme (1.0, see
+/// [`crate::ui::core::text`]), no letter spacing, proportional figures, and
+/// no ellipsis (it wraps at words, as iced's does).
 pub fn studio_text<'a>(content: impl Into<Cow<'a, str>>) -> StudioText<'a> {
     StudioText {
         content: content.into(),
         size: None,
-        line_height: LineHeight::default(),
+        line_height: LineHeight::Relative(1.0),
         font: None,
         width: Length::Shrink,
         height: Length::Shrink,

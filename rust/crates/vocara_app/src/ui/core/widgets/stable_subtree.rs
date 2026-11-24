@@ -25,7 +25,7 @@ pub fn stable_subtree<'a, M>(child: impl Into<Element<'a, M>>) -> Element<'a, M>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iced::widget::text;
+    use crate::ui::core::text;
 
     // Dart's `debugNeverKeep builds every child afresh`: what a kept subtree
     // shows must be what a fresh build shows. (The other two Dart tests

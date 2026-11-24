@@ -22,10 +22,10 @@
 //! they do, drawn at a fade ([`TechniquePicker::view_at`]) by the screen,
 //! which keeps its `DialogMotion`.
 
+use crate::ui::core::text;
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::{
-    button, center, column, container, opaque, row, scrollable, stack, text, text_input, Column,
-    Space,
+    button, center, column, container, opaque, row, scrollable, stack, text_input, Column, Space,
 };
 use iced::{keyboard, widget, Element, Event, Length, Padding, Task};
 use vocara_model::models::technique::Technique;
@@ -235,6 +235,7 @@ fn search_field(query: &str, id: widget::Id, fade: Fade) -> Element<'_, Message>
                 .id(id)
                 .on_input(Message::Query)
                 .size(13)
+                .line_height(1.0)
                 .padding(0)
                 .style(fade.input(theme::studio_input)),
         ]

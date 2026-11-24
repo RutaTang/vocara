@@ -27,10 +27,11 @@ use std::collections::{BTreeSet, HashMap};
 use std::f64::consts::LN_2;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
+use crate::ui::core::text;
 use iced::alignment::Vertical;
 use iced::widget::canvas::{self, Frame, Geometry, LineCap, Path, Stroke};
 use iced::widget::text::LineHeight;
-use iced::widget::{canvas as canvas_widget, column, container, rich_text, row, span, stack, text};
+use iced::widget::{canvas as canvas_widget, column, container, rich_text, row, span, stack};
 use iced::{
     mouse, Color, Element, Length, Padding, Pixels, Point, Rectangle, Renderer, Size, Theme,
 };
@@ -1012,13 +1013,17 @@ fn header<'a, M: 'a>(lane: &PitchLane, notes: &[PitchNote], in_tune: f64) -> Ele
         };
         content = content
             .push(iced::widget::Space::new().height(7))
-            .push(rich_text::<(), M, Theme, Renderer>([
-                span(score)
-                    .size(14)
-                    .font(font::BOLD)
-                    .color(Studio::TEXT_PRIMARY),
-                span("  in tune").size(9).color(Studio::TEXT_FAINT),
-            ]))
+            .push(
+                rich_text::<(), M, Theme, Renderer>([
+                    span(score)
+                        .size(14)
+                        .font(font::BOLD)
+                        .color(Studio::TEXT_PRIMARY),
+                    span("  in tune").size(9).color(Studio::TEXT_FAINT),
+                ])
+                // `Text.rich` under the Material default: height 1.
+                .line_height(1.0),
+            )
             .push(iced::widget::Space::new().height(3))
             // Live readout of the note under the playhead.
             .push(

@@ -21,8 +21,9 @@
 //! Flutter's `SelectableText` is a read-only text field here: it selects and
 //! copies, and its edits are dropped (the dialog keeps the URL).
 
+use crate::ui::core::text;
 use iced::alignment::Vertical;
-use iced::widget::{button, column, container, row, scrollable, text, text_input, Space};
+use iced::widget::{button, column, container, row, scrollable, text_input, Space};
 use iced::{Background, Border, Color, Element, Length, Padding, Task, Theme};
 use vocara_services::update_check_service::{UpdateCheckService, UpdateInfo};
 
@@ -217,6 +218,7 @@ impl UpdateDownloadDialog {
         let url = text_input("", &info.url)
             .on_input(DialogMessage::Input)
             .size(12)
+            .line_height(1.0)
             .padding(0)
             .style(fade.input(url_style));
         content = content

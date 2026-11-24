@@ -18,11 +18,12 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
 
+use crate::ui::core::text;
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::widget::{tree, Operation, Tree};
 use iced::advanced::{overlay, renderer, Clipboard, Shell, Widget};
 use iced::time::Instant;
-use iced::widget::{container, text};
+use iced::widget::container;
 use iced::{
     mouse, window, Element, Event, Length, Point, Rectangle, Renderer, Size, Theme, Vector,
 };

@@ -26,12 +26,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::ui::core::text;
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::widget::{tree, Operation, Tree};
 use iced::advanced::{overlay, renderer, Clipboard, Shell, Widget};
 use iced::alignment::Vertical;
 use iced::widget::image::{self, FilterMethod};
-use iced::widget::{column, container, mouse_area, stack, text, Space};
+use iced::widget::{column, container, mouse_area, stack, Space};
 use iced::{
     mouse, Color, ContentFit, Element, Event, Length, Rectangle, Renderer, Size, Subscription,
     Theme, Vector,

@@ -38,9 +38,10 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::ui::core::text;
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::{
-    button, center, column, container, hover, opaque, responsive, row, scrollable, stack, text,
+    button, center, column, container, hover, opaque, responsive, row, scrollable, stack,
     text_input, Column, Row, Space,
 };
 use iced::{Background, Border, Color, Element, Length, Padding, Shadow, Task, Theme, Vector};
@@ -683,6 +684,7 @@ fn search_box(query: &str) -> Element<'_, Message> {
                 .id(SEARCH)
                 .on_input(Message::Query)
                 .size(13)
+                .line_height(1.0)
                 .padding(0)
                 .style(theme::studio_input),
         ]
@@ -1013,7 +1015,7 @@ fn snack_bar(message: &str, _opacity: f32) -> Element<'_, Infallible> {
     let bar = container(
         text(message)
             .size(14)
-            .line_height(20.0 / 14.0)
+            .line_height(1.0)
             .color(theme::SNACK_BAR_DEFAULT_TEXT),
     )
     .width(Length::Fill)
