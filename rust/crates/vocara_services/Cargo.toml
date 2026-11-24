@@ -53,6 +53,30 @@ tempfile.workspace = true
 [lints]
 workspace = true
 
+# The AppKit hooks (menu bar, delegate, terminate:) on a real Mac: AppKit
+# wants the main thread, so `main` is the test's own (see the file).
+[[test]]
+name = "macos_gui"
+harness = false
+
+# What tests/macos_gui.rs builds its windows, fields and events with.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSControl",
+    "NSGraphics",
+    "NSPasteboard",
+    "NSRunningApplication",
+    "NSText",
+    "NSTextField",
+    "NSView",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSDate",
+    "NSRunLoop",
+] }
+
 # HTTPS for the update check: the system trust store on macOS (as Dart's
 # HttpClient used), rustls elsewhere.
 [target.'cfg(not(target_os = "macos"))'.dependencies]
@@ -78,9 +102,12 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
     "NSApplication",
     "NSEvent",
+    # NSEvent's key-event constructor (the menu's edit target).
+    "NSGraphicsContext",
     "NSMenu",
     "NSMenuItem",
     "NSResponder",
+    "NSWindow",
 ] }
 # Not only with `device`: the menu bar needs it too.
 objc2-foundation = { version = "0.3", default-features = false, features = [

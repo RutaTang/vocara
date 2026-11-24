@@ -89,6 +89,13 @@ wrong. Port the behavior, not the shape:
   `CC_aarch64_apple_darwin=true AR_aarch64_apple_darwin=true
   CXX_aarch64_apple_darwin=true cargo clippy --workspace --all-targets
   --features vocara_app/device --target aarch64-apple-darwin -- -D warnings`.
+- **macOS GUI test**: `crates/vocara_services/tests/macos_gui.rs` (no
+  harness: AppKit wants the main thread) drives AppKit for real: the menu
+  bar's edit target, the delegate's secure restorable state and the
+  intercepted `terminate:`. `cargo test` runs it on macOS, in both feature
+  modes on CI, whose runner has a GUI session; on a Mac it opens two small
+  windows for a few seconds, takes the keyboard and overwrites the
+  clipboard. Elsewhere it prints a skip line.
 - **Commits**: small and frequent, on the working branch, with the session's
   trailer lines. CI is not run until the whole port is done.
 
@@ -185,12 +192,11 @@ small and written down in the module that has it:
   to their end state). Touch-only gestures (pointer cancel, a second finger)
   do not exist on iced's desktop pointer.
 - The app needs macOS 11.0 (`packaging/macos/Info.plist.in`); the Flutter
-  app ran on 10.15. Nothing here can check that iced, wgpu and the native
-  code run on 10.15, so the minimum stays where the toolchain's Apple
-  Silicon floor puts it.
-- `applicationSupportsSecureRestorableState` is not declared (winit's
-  delegate has no hook for it); its only effect is a console warning on
-  macOS 14 and later.
+  app ran on 10.15. Its native file panels are built on
+  UniformTypeIdentifiers: `rfd` links `UniformTypeIdentifiers.framework`
+  (through `objc2-uniform-type-identifiers`) and calls `UTType` and
+  `setAllowedContentTypes:` with no availability check, and that framework
+  exists only from macOS 11, so the binary cannot even load on 10.15.
 
 ## Tracking
 
