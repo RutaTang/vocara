@@ -1,19 +1,25 @@
 //! Text as Flutter's `Text` set it where iced's `text` widget cannot: with
-//! letter spacing (`TextStyle.letterSpacing`) and with the ellipsis overflow
+//! letter spacing (`TextStyle.letterSpacing`), tabular figures
+//! (`FontFeature.tabularFigures()`) and the ellipsis overflow
 //! (`overflow: TextOverflow.ellipsis`, with or without `maxLines`).
 //!
-//! iced lays its text out with cosmic-text but exposes neither. This widget
-//! builds the cosmic-text buffer itself, with what iced's paragraph sets
-//! (metrics, the font's attributes, shaping, wrapping, alignment), plus
-//! cosmic-text's own letter spacing, and draws it as a raw buffer
-//! (`iced::advanced::graphics::text::Raw`). The text keeps its shaping:
-//! kerning, ligatures, font fallback and non-Latin scripts.
+//! iced lays its text out with cosmic-text but exposes none of them. This
+//! widget builds the cosmic-text buffer itself, with what iced's paragraph
+//! sets (metrics, the font's attributes, wrapping, alignment), plus
+//! cosmic-text's own letter spacing and OpenType features, and draws it as a
+//! raw buffer (`iced::advanced::graphics::text::Raw`). It always shapes
+//! fully (`Shaping::Advanced`), as the whole app does (iced's
+//! `advanced-shaping` feature): kerning, ligatures, font fallback and
+//! non-Latin scripts, as Flutter shaped every text.
 //!
 //! - **Letter spacing**: Flutter's paragraph (SkParagraph) adds the spacing
 //!   after every glyph, the last one included, so a spaced line is
 //!   `spacing × glyphs` wider than a solid one (and a centred one sits half
 //!   a spacing left of the solid line's centre). cosmic-text adds it to each
 //!   glyph's advance: the same.
+//! - **Tabular figures** ([`StudioText::tabular`]): the font's `tnum`
+//!   feature, which the bundled Inter faces carry: every digit takes the
+//!   same advance, so a number keeps its width as it changes.
 //! - **Ellipsis** ([`StudioText::ellipsis`]): SkParagraph's. The text wraps
 //!   into at most `max_lines` lines at the width it is given (one line never
 //!   wraps). When text is left over, the last line keeps the longest run of
@@ -29,21 +35,27 @@
 //! as wide as what it shows (at most the width it was given), a spaced one
 //! with its trailing spacing. Widget operations see the full text (as a
 //! Flutter finder reads `Text.data`), then, when it was cut, the text shown.
+//!
+//! A canvas label with letter spacing or tabular figures is drawn with
+//! [`fill_spaced_text`] / [`fill_tabular_text`].
 
 use std::borrow::Cow;
+use std::ops::Range;
 use std::sync::Arc;
 
-use iced::advanced::graphics::text::cosmic_text::{self, Attrs, Buffer, FontSystem, Metrics, Wrap};
+use iced::advanced::graphics::text::cosmic_text::{
+    self, Attrs, Buffer, FeatureTag, FontFeatures, FontSystem, Metrics, Wrap,
+};
 use iced::advanced::graphics::text::{
     self as graphics_text, font_system, Raw, Renderer as _, Version,
 };
 use iced::advanced::layout::{self, Layout};
-use iced::advanced::text::{Alignment, LineHeight, Renderer as _, Shaping, Wrapping};
+use iced::advanced::text::{Alignment, LineHeight, Renderer as _, Wrapping};
 use iced::advanced::widget::{tree, Operation, Tree};
 use iced::advanced::{renderer, Widget};
 use iced::alignment::Vertical;
 use iced::widget::canvas::Text;
-use iced::{mouse, Color, Element, Font, Length, Pixels, Rectangle, Renderer, Size, Theme};
+use iced::{mouse, Color, Element, Font, Length, Pixels, Point, Rectangle, Renderer, Size, Theme};
 
 /// The ellipsis SkParagraph appends (`ParagraphStyle`'s default, U+2026).
 pub const ELLIPSIS: &str = "\u{2026}";
@@ -51,6 +63,12 @@ pub const ELLIPSIS: &str = "\u{2026}";
 /// How far past its width a laid-out line may reach before it overflows:
 /// cosmic-text sums advances in `f32`.
 const EPSILON: f32 = 0.01;
+
+/// Every text is shaped fully: kerned, as Flutter set it.
+const SHAPING: cosmic_text::Shaping = cosmic_text::Shaping::Advanced;
+
+/// `FontFeature.tabularFigures()`.
+const TABULAR_FIGURES: FeatureTag = FeatureTag::new(b"tnum");
 
 /// A run of text, styled and laid out as Flutter's `Text` (see the module
 /// docs). Build it with [`studio_text`].
@@ -63,15 +81,16 @@ pub struct StudioText<'a> {
     height: Length,
     align_x: Alignment,
     align_y: Vertical,
-    shaping: Shaping,
     wrapping: Wrapping,
     color: Option<Color>,
     letter_spacing: f32,
+    tabular: bool,
     max_lines: Option<usize>,
 }
 
 /// Text with iced's `text` defaults: the renderer's font and size, no
-/// letter spacing, and no ellipsis (it wraps at words, as iced's does).
+/// letter spacing, proportional figures, and no ellipsis (it wraps at
+/// words, as iced's does).
 pub fn studio_text<'a>(content: impl Into<Cow<'a, str>>) -> StudioText<'a> {
     StudioText {
         content: content.into(),
@@ -82,10 +101,10 @@ pub fn studio_text<'a>(content: impl Into<Cow<'a, str>>) -> StudioText<'a> {
         height: Length::Shrink,
         align_x: Alignment::Default,
         align_y: Vertical::Top,
-        shaping: Shaping::default(),
         wrapping: Wrapping::default(),
         color: None,
         letter_spacing: 0.0,
+        tabular: false,
         max_lines: None,
     }
 }
@@ -133,11 +152,6 @@ impl<'a> StudioText<'a> {
         self
     }
 
-    pub fn shaping(mut self, shaping: Shaping) -> Self {
-        self.shaping = shaping;
-        self
-    }
-
     /// How the text wraps when it has no ellipsis (an ellipsized text wraps
     /// at words, breaking a word too long for a line, as Flutter did).
     pub fn wrapping(mut self, wrapping: Wrapping) -> Self {
@@ -154,6 +168,12 @@ impl<'a> StudioText<'a> {
     /// `TextStyle.letterSpacing`: logical pixels after every glyph.
     pub fn letter_spacing(mut self, spacing: f32) -> Self {
         self.letter_spacing = spacing;
+        self
+    }
+
+    /// `fontFeatures: [FontFeature.tabularFigures()]`: the font's `tnum`.
+    pub fn tabular(mut self) -> Self {
+        self.tabular = true;
         self
     }
 
@@ -175,9 +195,9 @@ pub(crate) struct Spec<'s> {
     pub line_height: f32,
     pub font: Font,
     pub align_x: Alignment,
-    pub shaping: Shaping,
     pub wrapping: Wrapping,
     pub letter_spacing: f32,
+    pub tabular: bool,
     pub max_lines: Option<usize>,
 }
 
@@ -191,14 +211,19 @@ pub(crate) struct Laid {
 }
 
 /// The font attributes of `font` at `size`, with `spacing` px after every
-/// glyph (cosmic-text takes it in ems).
-fn attributes(font: Font, size: f32, spacing: f32) -> Attrs<'static> {
-    let attrs = graphics_text::to_attributes(font);
+/// glyph (cosmic-text takes it in ems) and, when `tabular`, the `tnum`
+/// feature.
+fn attributes(font: Font, size: f32, spacing: f32, tabular: bool) -> Attrs<'static> {
+    let mut attrs = graphics_text::to_attributes(font);
     if spacing != 0.0 && size > 0.0 {
-        attrs.letter_spacing(spacing / size)
-    } else {
-        attrs
+        attrs = attrs.letter_spacing(spacing / size);
     }
+    if tabular {
+        let mut features = FontFeatures::new();
+        let _ = features.enable(TABULAR_FIGURES);
+        attrs = attrs.font_features(features);
+    }
+    attrs
 }
 
 /// A buffer of `spans` with the spec's metrics, in `bounds` (as iced's
@@ -208,18 +233,17 @@ fn buffer(
     spec: &Spec<'_>,
     bounds: Size,
     wrap: Wrap,
-    shaping: cosmic_text::Shaping,
     spans: &[(&str, Attrs<'static>)],
 ) -> Buffer {
     let mut buffer = Buffer::new(font_system, Metrics::new(spec.size, spec.line_height));
     buffer.set_size(font_system, Some(bounds.width), Some(bounds.height));
     buffer.set_wrap(font_system, wrap);
-    let default_attrs = attributes(spec.font, spec.size, spec.letter_spacing);
+    let default_attrs = attributes(spec.font, spec.size, spec.letter_spacing, spec.tabular);
     buffer.set_rich_text(
         font_system,
         spans.iter().map(|(text, attrs)| (*text, attrs.clone())),
         &default_attrs,
-        shaping,
+        SHAPING,
         None,
     );
     buffer
@@ -251,16 +275,17 @@ fn lines(buffer: &Buffer) -> Vec<Line> {
         .collect()
 }
 
-/// The shaping clusters of a buffer's glyphs, in logical order: each one's
-/// byte range, the x of its leftmost glyph and its advance (its glyphs'
-/// advances, spacing included). A cluster's glyphs share their `start`.
-fn glyph_clusters(buffer: &Buffer) -> Vec<(std::ops::Range<usize>, f32, f32)> {
+/// The shaping clusters of a one-paragraph buffer's glyphs, in logical
+/// order: each one's byte range, the x of its leftmost glyph and its
+/// advance (its glyphs' advances, spacing included). A cluster's glyphs
+/// share their `start`.
+fn glyph_clusters(buffer: &Buffer) -> Vec<(Range<usize>, f32, f32)> {
     let mut glyphs: Vec<(usize, usize, f32, f32)> = buffer
         .layout_runs()
         .flat_map(|run| run.glyphs.iter().map(|g| (g.start, g.end, g.x, g.w)))
         .collect();
     glyphs.sort_by_key(|g| g.0);
-    let mut clusters: Vec<(std::ops::Range<usize>, f32, f32)> = Vec::new();
+    let mut clusters: Vec<(Range<usize>, f32, f32)> = Vec::new();
     for (start, end, x, w) in glyphs {
         match clusters.last_mut() {
             Some(cluster) if cluster.0.start == start => {
@@ -300,7 +325,7 @@ pub(crate) fn fitting_prefix(clusters: &[(usize, usize, f32)], room: f32) -> usi
 
 /// Lays `spec` out in `bounds` (see the module docs).
 pub(crate) fn lay_out(font_system: &mut FontSystem, spec: &Spec<'_>, bounds: Size) -> Laid {
-    let spaced = attributes(spec.font, spec.size, spec.letter_spacing);
+    let styled = attributes(spec.font, spec.size, spec.letter_spacing, spec.tabular);
     let finish = |font_system: &mut FontSystem, mut buffer: Buffer, shown: Option<String>| {
         let min_bounds = graphics_text::align(&mut buffer, font_system, spec.align_x);
         Laid {
@@ -310,16 +335,8 @@ pub(crate) fn lay_out(font_system: &mut FontSystem, spec: &Spec<'_>, bounds: Siz
         }
     };
     let Some(max_lines) = spec.max_lines.filter(|_| bounds.width.is_finite()) else {
-        let shaping = graphics_text::to_shaping(spec.shaping, spec.content);
         let wrap = graphics_text::to_wrap(spec.wrapping);
-        let plain = buffer(
-            font_system,
-            spec,
-            bounds,
-            wrap,
-            shaping,
-            &[(spec.content, spaced)],
-        );
+        let plain = buffer(font_system, spec, bounds, wrap, &[(spec.content, styled)]);
         return finish(font_system, plain, None);
     };
     let wrap = if max_lines == 1 {
@@ -328,14 +345,13 @@ pub(crate) fn lay_out(font_system: &mut FontSystem, spec: &Spec<'_>, bounds: Siz
         Wrap::WordOrGlyph
     };
     // Every line, however tall the room: whether text is left over does
-    // not depend on the height. Shaped as iced's text shapes it.
+    // not depend on the height.
     let whole = buffer(
         font_system,
         spec,
         Size::new(bounds.width, f32::INFINITY),
         wrap,
-        graphics_text::to_shaping(spec.shaping, spec.content),
-        &[(spec.content, spaced.clone())],
+        &[(spec.content, styled.clone())],
     );
     let laid_lines = lines(&whole);
     // Text is left over past the last line, or the one line is too long. (A
@@ -375,16 +391,12 @@ pub(crate) fn lay_out(font_system: &mut FontSystem, spec: &Spec<'_>, bounds: Siz
         .get(last.start..)
         .unwrap_or_default()
         .to_string();
-    // The cut text is shaped as iced shapes a text with a "…" in it (`Auto`
-    // shapes it fully: "…" is not ASCII), and measured so.
-    let shaping = graphics_text::to_shaping(spec.shaping, ELLIPSIS);
-    let solid = attributes(spec.font, spec.size, 0.0);
+    let solid = attributes(spec.font, spec.size, 0.0, false);
     let ellipsis = buffer(
         font_system,
         spec,
         Size::INFINITE,
         Wrap::None,
-        shaping,
         &[(ELLIPSIS, solid.clone())],
     );
     let ellipsis_width = lines(&ellipsis).first().map_or(0.0, |line| line.width);
@@ -393,18 +405,10 @@ pub(crate) fn lay_out(font_system: &mut FontSystem, spec: &Spec<'_>, bounds: Siz
         spec,
         Size::INFINITE,
         Wrap::None,
-        shaping,
-        &[(&rest, spaced.clone())],
+        &[(&rest, styled.clone())],
     );
     let rest_clusters = clusters(&unwrapped);
     let mut cut = fitting_prefix(&rest_clusters, bounds.width - ellipsis_width);
-    if cut >= rest.len() && laid_lines.len() == max_lines {
-        // Shaped fully, the one long line fits after all: no text is left
-        // over to mark.
-        let mut fitted = whole;
-        fitted.set_size(font_system, Some(bounds.width), Some(bounds.height));
-        return finish(font_system, fitted, None);
-    }
     loop {
         let head = format!("{kept}{}", &rest[..cut]);
         let shown = buffer(
@@ -412,8 +416,7 @@ pub(crate) fn lay_out(font_system: &mut FontSystem, spec: &Spec<'_>, bounds: Siz
             spec,
             bounds,
             Wrap::None,
-            shaping,
-            &[(&head, spaced.clone()), (ELLIPSIS, solid.clone())],
+            &[(&head, styled.clone()), (ELLIPSIS, solid.clone())],
         );
         // Shaped together, the cut line can kern a hair wider than its
         // clusters summed: give back a cluster until it fits.
@@ -428,39 +431,96 @@ pub(crate) fn lay_out(font_system: &mut FontSystem, spec: &Spec<'_>, bounds: Siz
     }
 }
 
+/// One unwrapped line of `content` laid out as [`StudioText`] lays it out,
+/// for a widget that places its own text: the buffer to draw with
+/// [`draw_line`], and its size.
+pub(crate) fn line(
+    content: &str,
+    size: f32,
+    line_height: LineHeight,
+    font: Font,
+    tabular: bool,
+) -> (Arc<Buffer>, Size) {
+    let spec = Spec {
+        content,
+        size,
+        line_height: line_height.to_absolute(Pixels(size)).0,
+        font,
+        align_x: Alignment::Default,
+        wrapping: Wrapping::None,
+        letter_spacing: 0.0,
+        tabular,
+        max_lines: None,
+    };
+    let mut font_system = font_system().write().expect("Write font system");
+    let laid = lay_out(font_system.raw(), &spec, Size::INFINITE);
+    (Arc::new(laid.buffer), laid.min_bounds)
+}
+
+/// Draws a [`line`] with its top-left at `position`.
+pub(crate) fn draw_line(
+    renderer: &mut Renderer,
+    buffer: &Arc<Buffer>,
+    position: Point,
+    color: Color,
+    viewport: Rectangle,
+) {
+    renderer.fill_raw(Raw {
+        buffer: Arc::downgrade(buffer),
+        position,
+        color,
+        clip_bounds: viewport,
+    });
+}
+
 // ---------------------------------------------------------------- canvas
 
-/// `content` set on one line with `spacing` px after every glyph, as
-/// [`StudioText`] sets it: each shaping cluster's byte range and x, and the
-/// line's width.
-pub(crate) fn spaced_clusters(
+/// `content` set on one line as [`StudioText`] sets it: each shaping
+/// cluster's byte range, x and advance, and the line's width.
+pub(crate) fn line_clusters(
     font_system: &mut FontSystem,
     spec: &Spec<'_>,
-) -> (Vec<(std::ops::Range<usize>, f32)>, f32) {
+) -> (Vec<(Range<usize>, f32, f32)>, f32) {
     let one_line = Spec {
         wrapping: Wrapping::None,
         max_lines: None,
         ..spec.clone()
     };
     let laid = lay_out(font_system, &one_line, Size::INFINITE);
-    let clusters = glyph_clusters(&laid.buffer)
-        .into_iter()
-        .map(|(range, x, _)| (range, x))
-        .collect();
-    (clusters, laid.min_bounds.width)
+    (glyph_clusters(&laid.buffer), laid.min_bounds.width)
 }
 
 /// `frame.fill_text(text)` with `spacing` px after every glyph
-/// (`TextStyle.letterSpacing` on a `TextPainter`): the line is laid out as
-/// [`StudioText`] lays it out, then each cluster is drawn where it landed
-/// (a canvas draws its own text, not a raw buffer). The alignment is the
-/// spaced line's.
+/// (`TextStyle.letterSpacing` on a `TextPainter`): see [`fill_canvas_text`].
 pub fn fill_spaced_text(frame: &mut iced::widget::canvas::Frame, text: Text, spacing: f32) {
-    if spacing == 0.0 || text.content.is_empty() {
+    fill_canvas_text(frame, text, spacing, false);
+}
+
+/// `frame.fill_text(text)` with tabular figures (`fontFeatures:
+/// [FontFeature.tabularFigures()]` on a `TextPainter`): see
+/// [`fill_canvas_text`].
+pub fn fill_tabular_text(frame: &mut iced::widget::canvas::Frame, text: Text) {
+    fill_canvas_text(frame, text, 0.0, true);
+}
+
+/// `frame.fill_text(text)` set as [`StudioText`] sets it, with `spacing` px
+/// after every glyph and, when `tabular`, tabular figures. A canvas draws
+/// its own text, which takes no letter spacing and no OpenType features, so
+/// the line is laid out here and each cluster drawn where it landed; a
+/// figure whose tabular advance differs from its own is centred in it (as
+/// the font's `tnum` figures sit in theirs). The alignment is the laid-out
+/// line's.
+pub fn fill_canvas_text(
+    frame: &mut iced::widget::canvas::Frame,
+    text: Text,
+    spacing: f32,
+    tabular: bool,
+) {
+    if (spacing == 0.0 && !tabular) || text.content.is_empty() {
         frame.fill_text(text);
         return;
     }
-    let (clusters, width) = {
+    let (clusters, width, own_advances) = {
         let mut font_system = font_system().write().expect("Write font system");
         let spec = Spec {
             content: &text.content,
@@ -468,22 +528,41 @@ pub fn fill_spaced_text(frame: &mut iced::widget::canvas::Frame, text: Text, spa
             line_height: text.line_height.to_absolute(text.size).0,
             font: text.font,
             align_x: Alignment::Default,
-            shaping: text.shaping,
             wrapping: Wrapping::None,
             letter_spacing: spacing,
+            tabular,
             max_lines: None,
         };
-        spaced_clusters(font_system.raw(), &spec)
+        let (clusters, width) = line_clusters(font_system.raw(), &spec);
+        // What each cluster advances as the canvas draws it: without the
+        // features.
+        let own_advances = if tabular {
+            let (own, _) = line_clusters(
+                font_system.raw(),
+                &Spec {
+                    tabular: false,
+                    ..spec.clone()
+                },
+            );
+            Some(own)
+        } else {
+            None
+        };
+        (clusters, width, own_advances)
     };
     let left = match text.align_x {
         Alignment::Center => text.position.x - width / 2.0,
         Alignment::Right => text.position.x - width,
         Alignment::Default | Alignment::Left | Alignment::Justified => text.position.x,
     };
-    for (range, x) in clusters {
+    for (range, x, advance) in clusters {
+        let own = own_advances
+            .as_ref()
+            .and_then(|own| own.iter().find(|c| c.0 == range))
+            .map_or(advance, |c| c.2);
         frame.fill_text(Text {
             content: text.content[range].to_string(),
-            position: iced::Point::new(left + x, text.position.y),
+            position: Point::new(left + x + (advance - own) / 2.0, text.position.y),
             align_x: Alignment::Left,
             ..text.clone()
         });
@@ -501,9 +580,9 @@ struct Key {
     line_height: f32,
     font: Font,
     align_x: Alignment,
-    shaping: Shaping,
     wrapping: Wrapping,
     letter_spacing: f32,
+    tabular: bool,
     max_lines: Option<usize>,
     version: Version,
 }
@@ -526,9 +605,9 @@ impl StudioText<'_> {
             line_height: self.line_height.to_absolute(Pixels(size)).0,
             font: self.font.unwrap_or_else(|| renderer.default_font()),
             align_x: self.align_x,
-            shaping: self.shaping,
             wrapping: self.wrapping,
             letter_spacing: self.letter_spacing,
+            tabular: self.tabular,
             max_lines: self.max_lines,
         }
     }
@@ -565,9 +644,9 @@ impl<M> Widget<M, Theme, Renderer> for StudioText<'_> {
                 line_height: spec.line_height,
                 font: spec.font,
                 align_x: spec.align_x,
-                shaping: spec.shaping,
                 wrapping: spec.wrapping,
                 letter_spacing: spec.letter_spacing,
+                tabular: spec.tabular,
                 max_lines: spec.max_lines,
                 version: font_system.version(),
             };
@@ -599,12 +678,13 @@ impl<M> Widget<M, Theme, Renderer> for StudioText<'_> {
         let position = layout
             .bounds()
             .anchor(state.min_bounds, self.align_x, self.align_y);
-        renderer.fill_raw(Raw {
-            buffer: Arc::downgrade(buffer),
+        draw_line(
+            renderer,
+            buffer,
             position,
-            color: self.color.unwrap_or(style.text_color),
-            clip_bounds: *viewport,
-        });
+            self.color.unwrap_or(style.text_color),
+            *viewport,
+        );
     }
 
     fn operate(
@@ -653,9 +733,9 @@ pub(crate) mod testing {
             line_height: LineHeight::default().to_absolute(Pixels(size)).0,
             font,
             align_x: Alignment::Default,
-            shaping: Shaping::default(),
             wrapping: Wrapping::None,
             letter_spacing: 0.0,
+            tabular: false,
             max_lines: None,
         }
     }
