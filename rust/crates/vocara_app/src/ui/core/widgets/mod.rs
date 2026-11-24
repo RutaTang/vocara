@@ -11,6 +11,7 @@ pub mod holds_keyboard;
 pub mod material_slider;
 pub mod material_switch;
 pub mod material_tooltip;
+pub mod opacity_layer;
 pub mod rsuperellipse;
 pub mod slide;
 pub mod spectrogram_painter;

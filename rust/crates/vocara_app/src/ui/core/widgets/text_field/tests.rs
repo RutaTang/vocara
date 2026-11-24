@@ -11,7 +11,9 @@ use iced::event;
 use iced::keyboard::{self, key::Named};
 use iced::time::Instant;
 use iced::widget::{button, column, container, text_input::Value, Space};
-use iced::{mouse, window, Color, Element, Event, Length, Padding, Point, Renderer, Size};
+use iced::{
+    mouse, window, Color, Element, Event, Length, Padding, Point, Rectangle, Renderer, Size,
+};
 use iced_test::runtime::user_interface::{self, UserInterface};
 
 use super::caret;
@@ -941,6 +943,190 @@ fn the_toolbar_fills_its_superellipse_seventy_percent_over_what_lies_behind() {
     // The corner itself is outside the shape: the window's.
     let corner = window.pixel(menu.x as u32, menu.y as u32);
     assert!(!near(corner, toolbar::BORDER), "{corner:?}");
+}
+
+/// The backdrop's colors either side of its edge (8-bit exact, muted
+/// enough that the saturation boost clamps nothing).
+const LEFT: Color = Color::from_rgb8(153, 128, 102);
+const RIGHT: Color = Color::from_rgb8(77, 102, 128);
+
+/// `LEFT` up to column `edge`, `RIGHT` from it on, filling the window.
+fn backdrop<'a, M: 'a>(edge: f32) -> Element<'a, M> {
+    iced::widget::row![
+        container(Space::new().width(edge).height(Length::Fill)).style(theme::fill(LEFT)),
+        container(Space::new().width(Length::Fill).height(Length::Fill)).style(theme::fill(RIGHT)),
+    ]
+    .into()
+}
+
+#[test]
+fn the_toolbar_blurs_what_lies_behind_it() {
+    let mut window = window();
+    window.board = Board(Some("Z".into()));
+    let value = "alpha beta gamma";
+    let anchor = Point::new(TEXT_X + width("alpha be"), MIDDLE);
+    let menu = toolbar::place(anchor, toolbar::size(3), window.size);
+    // A sharp edge behind the menu, well right of its labels.
+    let edge = (menu.x + 150.0).round();
+    let view = || iced::widget::stack![backdrop::<Msg>(edge), field(value)];
+    window.run(view(), anchor, &right_click(), Instant::now());
+    window.run(view(), Point::new(390.0, 190.0), &[], Instant::now());
+    // In the box's bottom padding, where the blur reaches no higher than
+    // the backdrop below the field (and the box's shadow is the same all
+    // along the row): the edge comes out as a ramp over many pixels.
+    let y = menu.y + toolbar::size(3).height - 3.0;
+    assert!(
+        y - 3.0 * toolbar::BLUR_SIGMA > 46.0,
+        "the field is out of reach"
+    );
+    let at = |dx: f32| window.pixel((edge + dx) as u32, y as u32);
+    let ramp: Vec<Color> = [-40.0, -20.0, 0.0, 20.0, 40.0]
+        .into_iter()
+        .map(at)
+        .collect();
+    for pair in ramp.windows(2) {
+        // Blue rises and red falls across it, step by step.
+        assert!(pair[0].b < pair[1].b && pair[0].r > pair[1].r, "{ramp:?}");
+    }
+    // Either side of the edge itself, the two columns barely differ, where
+    // unblurred they would show the two colors under the fill.
+    let step = (at(-1.0).r - at(0.0).r).abs();
+    let sharp = over(toolbar::BACKGROUND, LEFT).r - over(toolbar::BACKGROUND, RIGHT).r;
+    assert!(step < 4.0 / 255.0 && sharp > 20.0 / 255.0, "{step} {sharp}");
+}
+
+/// A window filled by [`backdrop`] at `edge`, filtered as the toolbar
+/// filters (`BackdropFilter`) inside `clip`.
+struct Probe {
+    edge: f32,
+    clip: Rectangle,
+}
+
+impl iced::advanced::Widget<(), iced::Theme, Renderer> for Probe {
+    fn size(&self) -> Size<Length> {
+        Size::new(Length::Fill, Length::Fill)
+    }
+
+    fn layout(
+        &mut self,
+        _tree: &mut iced::advanced::widget::Tree,
+        _renderer: &Renderer,
+        limits: &iced::advanced::layout::Limits,
+    ) -> iced::advanced::layout::Node {
+        iced::advanced::layout::Node::new(limits.max())
+    }
+
+    fn draw(
+        &self,
+        _tree: &iced::advanced::widget::Tree,
+        renderer: &mut Renderer,
+        _theme: &iced::Theme,
+        _style: &core_renderer::Style,
+        layout: iced::advanced::Layout<'_>,
+        _cursor: mouse::Cursor,
+        _viewport: &iced::Rectangle,
+    ) {
+        use crate::ui::core::widgets::opacity_layer::{BackdropFilter, Effects as _};
+        use iced::advanced::Renderer as _;
+        let bounds = layout.bounds();
+        let (left, right) = (
+            Rectangle {
+                width: self.edge,
+                ..bounds
+            },
+            Rectangle {
+                x: self.edge,
+                width: bounds.width - self.edge,
+                ..bounds
+            },
+        );
+        for (bounds, color) in [(left, LEFT), (right, RIGHT)] {
+            renderer.fill_quad(
+                core_renderer::Quad {
+                    bounds,
+                    ..core_renderer::Quad::default()
+                },
+                color,
+            );
+        }
+        renderer.draw_backdrop_filter(
+            &iced::widget::canvas::Path::rectangle(self.clip.position(), self.clip.size()),
+            BackdropFilter {
+                blur_sigma: toolbar::BLUR_SIGMA,
+                color_matrix: BackdropFilter::saturation_matrix(toolbar::SATURATION),
+            },
+        );
+    }
+}
+
+/// What the filter makes of column `x` of [`backdrop`] at `edge` in a
+/// window `width` wide, computed afresh: a Gaussian blur of standard
+/// deviation 20 cut off at 3 of them (each column beyond the window's
+/// edge the nearest one inside), then Cupertino's saturation matrix at 3.
+fn filtered(x: i32, edge: i32, width: i32) -> Color {
+    let sigma = f64::from(toolbar::BLUR_SIGMA);
+    let reach = (3.0 * sigma).ceil() as i32;
+    let weight = |k: i32| (-f64::from(k * k) / (2.0 * sigma * sigma)).exp();
+    let total: f64 = (-reach..=reach).map(weight).sum();
+    let mut sum = [0.0_f64; 3];
+    for k in -reach..=reach {
+        let column = (x + k).clamp(0, width - 1);
+        let c = if column < edge { LEFT } else { RIGHT };
+        for (s, v) in sum.iter_mut().zip([c.r, c.g, c.b]) {
+            *s += weight(k) / total * f64::from(v);
+        }
+    }
+    let s = f64::from(toolbar::SATURATION);
+    let (r, g, b) = (0.213 * (1.0 - s), 0.715 * (1.0 - s), 0.072 * (1.0 - s));
+    let row = |m: [f64; 3]| (m[0] * sum[0] + m[1] * sum[1] + m[2] * sum[2]).clamp(0.0, 1.0) as f32;
+    Color::from_rgb(row([r + s, g, b]), row([r, g + s, b]), row([r, g, b + s]))
+}
+
+#[test]
+fn the_backdrop_filter_is_a_gaussian_blur_then_the_saturation_matrix() {
+    let size = Size::new(200.0, 100.0);
+    let (edge, clip) = (
+        60.0,
+        Rectangle::new(Point::new(0.0, 30.0), Size::new(150.0, 40.0)),
+    );
+    let mut frames = crate::ui::core::widgets::animated::testing::Frames::new(size);
+    frames.frame(
+        Element::<()>::new(Probe { edge, clip }),
+        &[],
+        Instant::now(),
+    );
+    // Inside the clip: the filtered backdrop, near the window's edge (where
+    // the blur takes the edge column) as well as across the colors' edge.
+    for x in [0, 2, 20, 45, 59, 60, 61, 80, 120, 149] {
+        let drawn = frames.pixel(Point::new(x as f32, 50.0));
+        let expected = filtered(x, edge as i32, size.width as i32);
+        assert!(
+            near(drawn, expected),
+            "column {x}: {drawn:?}, not {expected:?}"
+        );
+    }
+    // A column well away from the edge is its color saturated threefold.
+    assert!(!near(frames.pixel(Point::new(2.0, 50.0)), LEFT));
+    // Outside it, the backdrop as it was.
+    assert_eq!(frames.pixel(Point::new(170.0, 50.0)), RIGHT);
+    assert_eq!(frames.pixel(Point::new(20.0, 10.0)), LEFT);
+    assert_eq!(frames.pixel(Point::new(100.0, 90.0)), RIGHT);
+}
+
+#[test]
+fn the_saturation_matrix_is_cupertinos() {
+    use crate::ui::core::widgets::opacity_layer::BackdropFilter;
+    // `_matrixWithSaturation(3)`.
+    let m = BackdropFilter::saturation_matrix(3.0);
+    let expected = [
+        2.574, -1.43, -0.144, 0.0, 0.0, //
+        -0.426, 1.57, -0.144, 0.0, 0.0, //
+        -0.426, -1.43, 2.856, 0.0, 0.0, //
+        0.0, 0.0, 0.0, 1.0, 0.0,
+    ];
+    for (a, b) in m.iter().zip(expected) {
+        assert!((a - b).abs() < 1e-5, "{m:?}");
+    }
 }
 
 /// The macOS system UI font Flutter set the labels in, on macOS, where the

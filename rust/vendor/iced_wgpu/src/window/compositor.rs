@@ -323,10 +323,17 @@ impl graphics::Compositor for Compositor {
         width: u32,
         height: u32,
     ) {
+        // vocara: a backdrop filter copies what the frame holds under it
+        // (`effect::Pipeline::backdrop`), where the surface allows it.
+        let copy = surface
+            .get_capabilities(&self.adapter)
+            .usages
+            .intersection(wgpu::TextureUsages::COPY_SRC);
+
         surface.configure(
             &self.engine.device,
             &wgpu::SurfaceConfiguration {
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | copy,
                 format: self.format,
                 present_mode: self.settings.present_mode,
                 width,
