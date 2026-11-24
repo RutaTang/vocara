@@ -1268,41 +1268,6 @@ fn licenses_opens_the_license_page_and_its_back_returns_to_settings() {
 }
 
 #[test]
-fn the_switch_slides_and_grows_its_thumb_over_200_ms_easing_in() {
-    use crate::ui::core::motion::{Curve, Lerp};
-    use crate::ui::core::widgets::animated::testing::{near, Frames, MS};
-    use std::time::Instant;
-
-    let view = |on| material_switch(on, Message::Poll);
-    let mut window = Frames::new(Size::new(60.0, 40.0));
-    let row = |x: f32| iced::Point::new(x, 16.0);
-    let t0 = Instant::now();
-    window.frame(view(false), &[], t0);
-    // Off: the 16 px thumb centred at 16, on the inset track.
-    assert!(near(window.pixel(row(16.0)), Zinc::FOREGROUND), "the thumb");
-    assert!(near(window.pixel(row(36.0)), Studio::INSET), "the track");
-    assert!(window.frame(view(true), &[], t0));
-    assert!(near(window.pixel(row(16.0)), Zinc::FOREGROUND), "start");
-    window.frame(view(true), &[], t0 + 100 * MS);
-    // Halfway in time, eased in: the thumb's centre at 16 + 20 × eased.
-    let eased = Curve::EaseIn.transform(0.5);
-    let centre = 16.0 + 20.0 * eased;
-    let thumb = Zinc::FOREGROUND.lerp(Zinc::PRIMARY_FOREGROUND, eased);
-    assert!(near(window.pixel(row(centre)), thumb), "middle: the thumb");
-    let track = Studio::INSET.lerp(Studio::ACCENT, eased);
-    assert!(near(window.pixel(row(48.0)), track), "middle: the track");
-    assert!(!window.frame(view(true), &[], t0 + 200 * MS));
-    assert!(
-        near(window.pixel(row(36.0)), Zinc::PRIMARY_FOREGROUND),
-        "end"
-    );
-    assert!(
-        near(window.pixel(row(10.0)), Studio::ACCENT),
-        "end: the track"
-    );
-}
-
-#[test]
 fn the_license_page_slides_in_over_settings_and_back_out() {
     use crate::ui::core::motion::Curve;
     use crate::ui::core::widgets::slide::{cupertino, PAGE_TRANSITION};

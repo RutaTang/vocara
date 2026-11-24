@@ -55,6 +55,11 @@ pub enum Curve {
     SnackBarM3FadeIn,
     /// `Threshold(0.0)`: 0 at 0, 1 past it.
     Threshold0,
+    /// `Curves.easeOutBack`: `Cubic(0.175, 0.885, 0.32, 1.275)`, which
+    /// overshoots 1 before it settles.
+    EaseOutBack,
+    /// `Curves.easeOutBack.flipped`.
+    EaseOutBackFlipped,
 }
 
 impl Curve {
@@ -89,6 +94,8 @@ impl Curve {
                 }
             }
             Curve::Threshold0 => 1.0,
+            Curve::EaseOutBack => cubic(0.175, 0.885, 0.32, 1.275, t),
+            Curve::EaseOutBackFlipped => 1.0 - cubic(0.175, 0.885, 0.32, 1.275, 1.0 - t),
         };
         y as f32
     }
@@ -111,8 +118,16 @@ impl Curve {
             }
             Curve::SnackBarM3FadeIn => |t| Curve::SnackBarM3FadeIn.transform(t),
             Curve::Threshold0 => |t| Curve::Threshold0.transform(t),
+            Curve::EaseOutBack => |t| Curve::EaseOutBack.transform(t),
+            Curve::EaseOutBackFlipped => |t| Curve::EaseOutBackFlipped.transform(t),
         })
     }
+}
+
+/// `Cubic(a, b, c, d).transform(t)` for a curve the [`Curve`] set does not
+/// name: 0 and 1 map to themselves.
+pub fn cubic_curve(a: f64, b: f64, c: f64, d: f64, t: f32) -> f32 {
+    cubic_transform(a, b, c, d, f64::from(t.clamp(0.0, 1.0))) as f32
 }
 
 /// Flutter's `Cubic(a, b, c, d).transformInternal(t)`: bisects the curve's
@@ -514,6 +529,15 @@ mod tests {
             Curve::FastEaseInToSlowEaseOutFlipped.transform(0.802),
             0.459
         ));
+        // easeOutBack overshoots 1 on its way and settles back; flipped, it
+        // undershoots 0 first.
+        assert!(close(Curve::EaseOutBack.transform(0.5), 1.0674));
+        assert!(Curve::EaseOutBack.transform(0.7) > 1.0);
+        assert!(close(
+            Curve::EaseOutBackFlipped.transform(0.5),
+            1.0 - Curve::EaseOutBack.transform(0.5)
+        ));
+        assert!(close(cubic_curve(0.2, 0.0, 0.0, 1.0, 0.5), 0.8774));
         // The snack bar's fade happens between 40 % and 60 % of the run.
         assert_eq!(Curve::SnackBarM3FadeIn.transform(0.39), 0.0);
         assert!(Curve::SnackBarM3FadeIn.transform(0.5) > 0.0);
@@ -531,6 +555,8 @@ mod tests {
             Curve::FastEaseInToSlowEaseOutFlipped,
             Curve::SnackBarM3FadeIn,
             Curve::Threshold0,
+            Curve::EaseOutBack,
+            Curve::EaseOutBackFlipped,
         ] {
             assert_eq!(curve.transform(0.0), 0.0, "{curve:?}");
             assert_eq!(curve.transform(1.0), 1.0, "{curve:?}");

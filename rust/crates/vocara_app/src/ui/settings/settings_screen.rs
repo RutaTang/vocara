@@ -38,9 +38,10 @@
 //!
 //! Flutter's Material slider and switch are drawn here with iced's slider,
 //! under Material's overlay (`slider_overlay`: it grows over 100 ms under
-//! the pointer on the thumb or a drag), and a switch built to Material 3's
-//! geometry and toggle motion (200 ms), without its hover/press overlay; the
-//! switch's semantics label has no counterpart.
+//! the pointer on the thumb or a drag), and Material 3's switch as forui
+//! themed it (`material_switch`: its 300 ms toggle, stretching thumb, hover
+//! and press rings, and drag); the switch's semantics label has no
+//! counterpart.
 
 use std::collections::VecDeque;
 use std::convert::Infallible;
@@ -74,11 +75,12 @@ use crate::app::library::Library;
 use crate::router::Route;
 use crate::services::Services;
 use crate::ui::core::icons::{self, Icon};
-use crate::ui::core::motion::{self, Controller, Curve, Lerp};
-use crate::ui::core::theme::{self, alpha, bare_button, boxed, font, Studio, Zinc};
-use crate::ui::core::widgets::animated::{animated, ink_hover};
+use crate::ui::core::motion::{self, Controller};
+use crate::ui::core::theme::{self, alpha, bare_button, boxed, font, Studio};
+use crate::ui::core::widgets::animated::ink_hover;
 use crate::ui::core::widgets::confirm_dialog::ConfirmDialog;
 use crate::ui::core::widgets::fading_scrollbar::Fading;
+use crate::ui::core::widgets::material_switch::material_switch;
 use crate::ui::core::widgets::slide::{cupertino, slide, PAGE_TRANSITION};
 use crate::ui::core::widgets::slider_overlay::slider_overlay;
 use crate::ui::core::widgets::studio_hint::spinner;
@@ -1556,7 +1558,13 @@ fn headphones_card<'a>(device: AudioDevice, marked: bool) -> Element<'a, Message
             Space::new().width(12),
             label,
             Space::new().width(12),
-            container(material_switch(marked, toggle)).id(HEADPHONES_SWITCH),
+            container(material_switch(
+                marked,
+                toggle,
+                Studio::ACCENT,
+                Studio::INSET
+            ))
+            .id(HEADPHONES_SWITCH),
         ]
         .align_y(Vertical::Center),
     )
@@ -1570,59 +1578,6 @@ fn headphones_card<'a>(device: AudioDevice, marked: bool) -> Element<'a, Message
     })
     .style(theme::card(CARD_RADIUS))
     .into()
-}
-
-/// How long Material's switch takes to toggle (`_kToggleDuration`).
-pub const SWITCH_TOGGLE: Duration = Duration::from_millis(200);
-
-/// Material 3's switch: a 52 × 32 track — coral when on, the inset colour
-/// with an outline when off — and its thumb, 24 px on the right when on,
-/// 16 px on the left when off. Tapping it toggles. A toggle moves it over
-/// 200 ms (`ToggleableStateMixin`'s position: `Curves.easeIn` turning on,
-/// `Curves.easeOut` turning off), the thumb sliding and growing or
-/// shrinking and the colors following, as `_SwitchPainter` drew it.
-fn material_switch<'a>(on: bool, toggle: Message) -> Element<'a, Message> {
-    let target = if on { 1.0 } else { 0.0 };
-    let curve = if on { Curve::EaseIn } else { Curve::EaseOut };
-    animated(target, SWITCH_TOGGLE, curve, move |position| {
-        material_switch_at(position, toggle.clone())
-    })
-    .into()
-}
-
-/// [`material_switch`] at `position` (0 off, 1 on).
-fn material_switch_at<'a>(position: f32, toggle: Message) -> Element<'a, Message> {
-    const WIDTH: f32 = 52.0;
-    const HEIGHT: f32 = 32.0;
-    let thumb_size = 16.0.lerp(24.0, position);
-    // The thumb's centre runs between the track's rounded ends.
-    let centre = (HEIGHT / 2.0).lerp(WIDTH - HEIGHT / 2.0, position);
-    // The scheme's `onPrimary` thumb when on; the `outline` (its
-    // `onSurface`) thumb and track outline when off.
-    let track = Studio::INSET.lerp(Studio::ACCENT, position);
-    let outline = Zinc::FOREGROUND.lerp(Color::TRANSPARENT, position);
-    let thumb = Zinc::FOREGROUND.lerp(Zinc::PRIMARY_FOREGROUND, position);
-    let knob = container(Space::new())
-        .width(thumb_size)
-        .height(thumb_size)
-        .style(move |_: &Theme| boxed(Some(thumb), thumb_size / 2.0, None));
-    let face = container(row![Space::new().width(centre - thumb_size / 2.0), knob])
-        .width(WIDTH)
-        .height(HEIGHT)
-        .align_y(Vertical::Center)
-        .style(move |_: &Theme| container::Style {
-            border: Border {
-                color: outline,
-                width: if outline.a > 0.0 { 2.0 } else { 0.0 },
-                radius: (HEIGHT / 2.0).into(),
-            },
-            ..boxed(Some(track), HEIGHT / 2.0, None)
-        });
-    button(face)
-        .padding(0)
-        .style(bare_button)
-        .on_press(toggle)
-        .into()
 }
 
 /// Which input(s) of a multi-input device (an audio interface) are the

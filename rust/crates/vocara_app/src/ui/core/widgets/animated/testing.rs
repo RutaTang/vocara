@@ -80,6 +80,16 @@ impl Frames {
         events: &[Event],
         at: Instant,
     ) -> bool {
+        self.frame_messages(view, events, at).0
+    }
+
+    /// [`Frames::frame`], with the messages the view published.
+    pub fn frame_messages<'a, M>(
+        &mut self,
+        view: impl Into<Element<'a, M>>,
+        events: &[Event],
+        at: Instant,
+    ) -> (bool, Vec<M>) {
         let cursor = mouse::Cursor::Available(self.cursor);
         let mut ui = UserInterface::build(
             view,
@@ -118,13 +128,14 @@ impl Frames {
             BACKGROUND,
         );
         self.cache = ui.into_cache();
-        matches!(
+        let more = matches!(
             state,
             user_interface::State::Updated {
                 redraw_request: window::RedrawRequest::NextFrame,
                 ..
             }
-        )
+        );
+        (more, messages)
     }
 
     /// The color drawn at `at` in the last frame.
