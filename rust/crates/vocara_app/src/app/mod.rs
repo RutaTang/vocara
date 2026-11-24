@@ -799,4 +799,32 @@ pub fn run(boot: Boot) -> iced::Result {
 }
 
 #[cfg(test)]
+impl App {
+    /// The services the pages open over, once running.
+    pub(crate) fn services(&self) -> &Services {
+        match &self.state {
+            State::Running(r) => &r.services,
+            _ => panic!("the app is not running"),
+        }
+    }
+
+    /// Pushes `page` as a push navigation would (a test's page, over its
+    /// fakes); `opening` makes its first task once it has its id.
+    pub(crate) fn push_page(
+        &mut self,
+        page: Page,
+        opening: impl FnOnce(PageId) -> Task<Message>,
+    ) -> Task<Message> {
+        let State::Running(running) = &mut self.state else {
+            panic!("the app is not running");
+        };
+        let Change::Pushed(id) = running.router.push(page) else {
+            unreachable!("a push pushes");
+        };
+        running.messenger.gather(&mut running.router);
+        opening(id)
+    }
+}
+
+#[cfg(test)]
 mod tests;
