@@ -37,6 +37,10 @@
 //!    [`EditKey`]). The keyUp made carries the modifiers held at that moment,
 //!    so winit does not keep ⌘ as held after a click.
 //!
+//! `tests/macos_gui.rs` checks this on a Mac (CI's macOS runner): the four
+//! keys and clicks on the four items reach a winit-like view once each, and
+//! in an `NSTextField` ⌘A with ⌘C, ⌘V and ⌘X select, copy, paste and cut.
+//!
 //! One of the Runner's settings stays different: the minimum macOS version
 //! is 11.0 (`LSMinimumSystemVersion` in `packaging/macos/Info.plist.in`),
 //! where the Flutter app's was 10.15. The native file panels (rfd) are built

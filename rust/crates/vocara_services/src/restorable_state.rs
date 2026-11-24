@@ -16,6 +16,10 @@
 //! The method goes on the delegate's class, so every instance of that class
 //! answers YES; the classes the app sets as delegate (winit's, the GUI
 //! test's) are its own.
+//!
+//! `tests/macos_gui.rs` checks this on a Mac (CI's macOS runner): a delegate
+//! without the method answers YES once set, through AppKit's `setDelegate:`,
+//! and one that answers keeps its answer.
 
 /// Makes every application delegate set from now on answer YES to
 /// `applicationSupportsSecureRestorableState:` (see the module doc). Once
