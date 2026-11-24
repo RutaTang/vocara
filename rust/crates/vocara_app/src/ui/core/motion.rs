@@ -51,6 +51,8 @@ pub enum Curve {
     /// Material 3's floating snack bar fade:
     /// `Interval(0.4, 0.6, curve: Curves.easeInCirc)`.
     SnackBarM3FadeIn,
+    /// `Threshold(0.0)`: 0 at 0, 1 past it.
+    Threshold0,
 }
 
 impl Curve {
@@ -83,6 +85,7 @@ impl Curve {
                     cubic(0.6, 0.04, 0.98, 0.335, t)
                 }
             }
+            Curve::Threshold0 => 1.0,
         };
         y as f32
     }
@@ -103,6 +106,7 @@ impl Curve {
                 |t| Curve::FastEaseInToSlowEaseOutFlipped.transform(t)
             }
             Curve::SnackBarM3FadeIn => |t| Curve::SnackBarM3FadeIn.transform(t),
+            Curve::Threshold0 => |t| Curve::Threshold0.transform(t),
         })
     }
 }
@@ -511,6 +515,7 @@ mod tests {
             Curve::FastEaseInToSlowEaseOut,
             Curve::FastEaseInToSlowEaseOutFlipped,
             Curve::SnackBarM3FadeIn,
+            Curve::Threshold0,
         ] {
             assert_eq!(curve.transform(0.0), 0.0, "{curve:?}");
             assert_eq!(curve.transform(1.0), 1.0, "{curve:?}");

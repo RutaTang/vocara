@@ -1946,9 +1946,12 @@ fn the_note_editor_keeps_the_keyboard_as_a_snack_bar_comes_and_goes() {
     let messages = ui.run(h.screen.view(), typewrite("b"));
     assert_eq!(typed_in_note(&messages), "b", "a snack bar came");
     h.feed(messages);
-    // And its time runs out.
-    let seq = h.screen.snack_seq;
+    // And its time runs out, and it leaves.
+    let seq = h.screen.snack_seq().expect("a snack bar");
     h.send(Message::SnackExpired(seq));
+    h.send(Message::SnackFrame(
+        std::time::Instant::now() + crate::ui::snack::TRANSITION,
+    ));
     assert!(h.screen.snack().is_none());
     let messages = ui.run(h.screen.view(), typewrite("c"));
     assert_eq!(typed_in_note(&messages), "c", "the snack bar went");
@@ -1990,8 +1993,11 @@ fn the_technique_picker_keeps_the_keyboard_as_a_snack_bar_goes() {
     let messages = ui.run(h.screen.view(), events);
     assert_eq!(query(&messages).as_deref(), Some("t"));
     h.feed(messages);
-    let seq = h.screen.snack_seq;
+    let seq = h.screen.snack_seq().expect("a snack bar");
     h.send(Message::SnackExpired(seq));
+    h.send(Message::SnackFrame(
+        std::time::Instant::now() + crate::ui::snack::TRANSITION,
+    ));
     let messages = ui.run(h.screen.view(), typewrite("w"));
     assert_eq!(
         query(&messages).as_deref(),

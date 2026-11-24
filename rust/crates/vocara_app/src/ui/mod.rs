@@ -32,11 +32,11 @@
 pub mod core;
 pub mod home;
 pub mod settings;
+pub mod snack;
 pub mod song_practice_detail;
 pub mod technique_library;
 
-use std::convert::Infallible;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use iced::futures::{stream, Stream, StreamExt};
 use iced::{Element, Subscription, Task};
@@ -44,6 +44,7 @@ use iced::{Element, Subscription, Task};
 use crate::router::{Navigation, Route};
 use crate::services::Services;
 use crate::ui::core::widgets::confirm_dialog::{Dialog, DialogResult};
+pub use crate::ui::snack::{SnackBar, SnackLook};
 
 /// A screen the app can host (see the module docs).
 pub trait Screen {
@@ -77,56 +78,6 @@ pub trait Screen {
     /// whichever page came next until its time ran out.
     fn take_snack_bars(&mut self) -> Vec<SnackBar> {
         Vec::new()
-    }
-}
-
-/// Draws a snack bar's text as its page does (`SnackBar` reports nothing:
-/// no Dart snack bar had an action).
-pub type SnackLook = for<'a> fn(&'a str) -> Element<'a, Infallible>;
-
-/// A snack bar a page hands to the app ([`Screen::take_snack_bars`]).
-#[derive(Debug, Clone)]
-pub struct SnackBar {
-    /// What it says.
-    pub text: String,
-    /// How long it still shows: the rest of its time for the one showing,
-    /// all of it for one still waiting.
-    pub left: Duration,
-    /// Whether its page cleared the snack bars up before showing it
-    /// (`clearSnackBars()`, then `showSnackBar`), or queued it behind them
-    /// (`showSnackBar` alone).
-    pub clears: bool,
-    /// Its page's widget for it.
-    pub look: SnackLook,
-}
-
-impl SnackBar {
-    /// The one showing since `since`, for `duration` in all; `None` once its
-    /// time is up.
-    pub fn showing(
-        text: String,
-        duration: Duration,
-        since: Instant,
-        clears: bool,
-        look: SnackLook,
-    ) -> Option<Self> {
-        let left = duration.saturating_sub(since.elapsed());
-        (!left.is_zero()).then_some(Self {
-            text,
-            left,
-            clears,
-            look,
-        })
-    }
-
-    /// One waiting its turn: all of `duration` still ahead of it.
-    pub fn waiting(text: String, duration: Duration, clears: bool, look: SnackLook) -> Self {
-        Self {
-            text,
-            left: duration,
-            clears,
-            look,
-        }
     }
 }
 

@@ -1231,24 +1231,23 @@ fn a_toast_stays_its_time_and_a_new_one_replaces_it() {
     let second = page.screen.toast_seq().expect("a toast");
     page.send(Message::ToastExpired(second));
     assert!(page.screen.toast().is_none());
-    assert!(!page.shows_containing("Diagnostics saved"));
+    // (Drawn while it leaves.)
+    let left = std::time::Instant::now() + crate::ui::snack::TRANSITION;
+    page.send(Message::ToastFrame(left));
+    assert!(!page.shows_containing("Diagnostics saved"), "gone");
 }
 
 #[test]
-fn the_toast_timer_waits_3_5_s_then_reports_once() {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_time()
-        .build()
-        .expect("a runtime");
-    rt.block_on(async {
-        let started = std::time::Instant::now();
-        let mut stream = std::pin::pin!(toast_timer(&7));
-        assert_eq!(stream.next().await, Some(Message::ToastExpired(7)));
-        assert!(started.elapsed() >= TOAST_DURATION);
-        assert_eq!(TOAST_DURATION, Duration::from_millis(3500));
-        let more = tokio::time::timeout(Duration::from_millis(100), stream.next()).await;
-        assert!(more.is_err(), "then nothing more");
-    });
+fn the_toast_stays_3_5_s_from_the_end_of_its_entrance() {
+    use crate::ui::snack::TRANSITION;
+    let mut page = Setup::new().mount();
+    let before = std::time::Instant::now();
+    page.send(Message::Exported(Exported::Saved));
+    let after = std::time::Instant::now();
+    let timer = page.screen.toast_timer().expect("its timer");
+    assert_eq!(TOAST_DURATION, Duration::from_millis(3500));
+    assert!(timer.deadline >= before + TRANSITION + TOAST_DURATION);
+    assert!(timer.deadline <= after + TRANSITION + TOAST_DURATION);
 }
 
 // Dart: "Licenses opens the license page with the hand-maintained

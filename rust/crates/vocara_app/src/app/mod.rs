@@ -27,7 +27,7 @@ pub mod quit;
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use iced::futures::SinkExt;
 use iced::widget::{column, container, stack, Space};
@@ -48,12 +48,13 @@ use crate::ui::core::widgets::confirm_dialog::{
 use crate::ui::core::widgets::fatal_open_screen::{self, FatalOpenScreen};
 use crate::ui::core::widgets::window_drag_bar::window_drag_bar;
 use crate::ui::home::widgets::update_notice::open_url_task;
+use crate::ui::snack::SnackEvent;
 use crate::ui::{home, settings, song_practice_detail, technique_library};
 use crate::ui::{Screen, SnackBar};
 pub use vocara_model::config::environment::AppEnvironment;
 
-pub use self::messenger::SnackTimer;
 pub use self::page::Page;
+pub use crate::ui::snack::SnackTimer;
 
 /// The deep link the app opens at instead of Home (Dart's `START`
 /// dart-define, `--dart-define=START=/song/<id>`).
@@ -146,6 +147,8 @@ pub enum Message {
     Dialog(confirm_dialog::Message),
     /// The time of the snack bar the app shows (snack bar `n`) is up.
     SnackBarExpired(u64),
+    /// A frame while one of the app's snack bars enters or leaves.
+    SnackBarFrame(Instant),
     /// Boot: the library open.
     Library(LibraryEvent),
     /// The fatal window's actions.
@@ -361,7 +364,13 @@ impl App {
             Message::Dialog(message) => self.dialog(message),
             Message::SnackBarExpired(seq) => {
                 if let State::Running(running) = &mut self.state {
-                    running.messenger.expired(seq);
+                    running.messenger.event(SnackEvent::Expired(seq));
+                }
+                Task::none()
+            }
+            Message::SnackBarFrame(at) => {
+                if let State::Running(running) = &mut self.state {
+                    running.messenger.event(SnackEvent::Frame(at));
                 }
                 Task::none()
             }
@@ -682,7 +691,9 @@ fn navigate(running: &mut Running, navigation: Navigation) -> Task<Message> {
 /// is still landing. The work its teardown started, to run.
 fn retire(running: &mut Running, gone: PageId, mut page: Page) -> Task<Message> {
     running.dialogs.retain(|d| d.page != gone);
-    running.messenger.adopt(page.take_snack_bars());
+    running
+        .messenger
+        .adopt(page.take_snack_bars(), Instant::now());
     let teardown = page.dispose(gone, &running.services);
     if page.lingers() {
         running.lingering.push((gone, page));

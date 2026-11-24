@@ -7,6 +7,7 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::time::Instant;
 
 use vocara_model::config::environment::AppEnvironment;
 use vocara_services::update_check_service::UpdateCheckService;
@@ -251,11 +252,17 @@ fn a_toast_up_as_home_opens_a_page_stays_up_over_it_until_its_time_is_up() {
     assert_eq!(app.routes(), [Some(Route::Home), Some(Route::Techniques)]);
     assert!(shows(&app, CREATE_FAILED), "over the page Home opened");
     let timer = app.snack_timer().expect("its timer runs");
-    assert!(timer.left <= SNACK_DURATION, "for the time it had left");
+    let latest = Instant::now() + crate::ui::snack::TRANSITION + SNACK_DURATION;
+    assert!(timer.deadline <= latest, "for the time it had left");
 
-    let task = app.update(timer.message());
+    let task = app.update(app::Message::SnackBarExpired(timer.seq));
     settle(&mut app, task);
-    assert!(!shows(&app, CREATE_FAILED), "gone once its time is up");
+    assert!(app.snack_bar().is_none(), "its time is up");
+    assert!(shows(&app, CREATE_FAILED), "leaving");
+    let left = Instant::now() + crate::ui::snack::TRANSITION;
+    let task = app.update(app::Message::SnackBarFrame(left));
+    settle(&mut app, task);
+    assert!(!shows(&app, CREATE_FAILED), "gone once it has left");
     back(&mut app);
     assert_eq!(app.routes(), [Some(Route::Home)]);
     assert!(!shows(&app, CREATE_FAILED), "Home does not show it again");

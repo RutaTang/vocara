@@ -661,14 +661,19 @@ fn a_create_that_fails_says_so_for_four_seconds() {
     h.send(Message::NewTechniqueNamed(Some("Belt".into())));
     h.settle();
     assert_eq!(h.screen.snacks.len(), 2);
-    let seq = h.screen.snack_seq;
-    h.send(Message::SnackExpired(seq - 1));
+    let seq = h.screen.snacks.current_seq().expect("one showing");
+    h.send(Message::SnackExpired(seq + 1));
     assert_eq!(h.screen.snacks.len(), 2, "a stale timer hides nothing");
     h.send(Message::SnackExpired(seq));
     assert_eq!(h.screen.snacks.len(), 1);
-    h.send(Message::SnackExpired(h.screen.snack_seq));
+    let seq = h.screen.snacks.current_seq().expect("the next");
+    h.send(Message::SnackExpired(seq));
     assert_eq!(h.screen.snack(), None);
-    assert!(!h.shows(CREATE_FAILED));
+    assert!(h.shows(CREATE_FAILED), "leaving");
+    h.send(Message::SnackFrame(
+        std::time::Instant::now() + crate::ui::snack::TRANSITION,
+    ));
+    assert!(!h.shows(CREATE_FAILED), "gone");
 }
 
 #[test]

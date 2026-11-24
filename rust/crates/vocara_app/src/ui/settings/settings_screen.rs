@@ -31,7 +31,9 @@
 //! the update download dialog) go through the app's dialog stack. A toast
 //! still up when Settings leaves stays up over Home for the time it has left
 //! (the app's, `app::messenger`), as under Dart's app-wide
-//! `ScaffoldMessenger`.
+//! `ScaffoldMessenger`. A toast fades in and out as Material's floating
+//! snack bar did, its 3.5 s counted from the end of its entrance
+//! (`ui::snack`).
 //!
 //! Flutter's Material slider and switch are drawn here with iced's slider and
 //! a switch built to Material 3's geometry, without their hover/press
@@ -49,7 +51,7 @@ use std::time::{Duration, Instant};
 use iced::alignment::{Horizontal, Vertical};
 use iced::border::Radius;
 use iced::futures::channel::mpsc;
-use iced::futures::{stream, Stream, StreamExt};
+use iced::futures::{Stream, StreamExt};
 use iced::widget::text::Wrapping;
 use iced::widget::{
     button, column, container, row, scrollable, slider, stack, text, Column, Space,
@@ -75,6 +77,7 @@ use crate::ui::core::theme::{self, alpha, bare_button, boxed, font, Studio, Zinc
 use crate::ui::core::widgets::confirm_dialog::ConfirmDialog;
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::home::widgets::update_notice::UpdateDownloadDialog;
+use crate::ui::snack::{SnackEvent, SnackQueue, SnackStyle, SnackTimer};
 use crate::ui::{Screen, SnackBar, Update};
 use crate::util::to_string_as_fixed;
 
@@ -366,15 +369,8 @@ pub enum Message {
     Licenses(licenses::Message),
     /// Toast `n` has been up long enough.
     ToastExpired(u64),
-}
-
-/// A result toast.
-#[derive(Debug, Clone)]
-struct Toast {
-    seq: u64,
-    text: String,
-    /// Since when it has shown.
-    since: Instant,
+    /// A frame while a toast enters or leaves.
+    ToastFrame(Instant),
 }
 
 // ------------------------------------------------------------------ screen
@@ -413,8 +409,8 @@ pub struct SettingsScreen {
     /// The license page, while it is open over Settings.
     licenses: Option<LicensesPage>,
 
-    toast: Option<Toast>,
-    toasts: u64,
+    /// The result toasts (one at a time: each replaces the one up).
+    toasts: SnackQueue,
 }
 
 impl std::fmt::Debug for SettingsScreen {
@@ -425,7 +421,7 @@ impl std::fmt::Debug for SettingsScreen {
             .field("repairing", &self.repairing)
             .field("exporting", &self.exporting)
             .field("licenses", &self.licenses.is_some())
-            .field("toast", &self.toast)
+            .field("toasts", &self.toasts)
             .finish_non_exhaustive()
     }
 }
@@ -458,8 +454,7 @@ impl SettingsScreen {
             picking: false,
             exporting: false,
             licenses: None,
-            toast: None,
-            toasts: 0,
+            toasts: SnackQueue::new(),
         };
         // Refresh once on open (the poll then keeps the lists live).
         let first = screen.refresh();
@@ -468,13 +463,18 @@ impl SettingsScreen {
 
     /// The toast on screen, if any.
     pub fn toast(&self) -> Option<&str> {
-        self.toast.as_ref().map(|t| t.text.as_str())
+        self.toasts.current().map(|t| t.text.as_str())
     }
 
     /// The number of the toast on screen ([`Message::ToastExpired`] takes
     /// it down).
     pub fn toast_seq(&self) -> Option<u64> {
-        self.toast.as_ref().map(|t| t.seq)
+        self.toasts.current_seq()
+    }
+
+    /// The toast's timer, while one is up.
+    pub fn toast_timer(&self) -> Option<SnackTimer> {
+        self.toasts.timer()
     }
 
     /// Whether the repair is running.
@@ -575,12 +575,8 @@ impl SettingsScreen {
     /// Replaces any toast on screen with `text` (`clearSnackBars`, then
     /// `showSnackBar`).
     fn show_toast(&mut self, text: impl Into<String>) {
-        self.toasts += 1;
-        self.toast = Some(Toast {
-            seq: self.toasts,
-            text: text.into(),
-            since: Instant::now(),
-        });
+        let bar = SnackBar::new(text, TOAST_DURATION, true, SnackStyle::Floating, toast_bar);
+        self.toasts.show(bar, Instant::now());
     }
 
     fn check_for_updates(&mut self) -> Update<Message> {
@@ -807,9 +803,11 @@ impl Screen for SettingsScreen {
                 Update::none()
             }
             Message::ToastExpired(seq) => {
-                if self.toast.as_ref().is_some_and(|t| t.seq == seq) {
-                    self.toast = None;
-                }
+                self.toasts.expired(seq, Instant::now());
+                Update::none()
+            }
+            Message::ToastFrame(at) => {
+                self.toasts.frame(at);
                 Update::none()
             }
         }
@@ -842,13 +840,7 @@ impl Screen for SettingsScreen {
 
     /// The toast, for the time it has left; it replaced the ones before it.
     fn take_snack_bars(&mut self) -> Vec<SnackBar> {
-        let Some(toast) = self.toast.take() else {
-            return Vec::new();
-        };
-        let look = toast_bar::<Infallible>;
-        SnackBar::showing(toast.text, TOAST_DURATION, toast.since, true, look)
-            .into_iter()
-            .collect()
+        self.toasts.take(Instant::now())
     }
 
     fn view(&self) -> Element<'_, Message> {
@@ -867,8 +859,8 @@ impl Screen for SettingsScreen {
             .width(Length::Fill)
             .height(Length::Fill)
             .style(theme::page)];
-        if let Some(toast) = &self.toast {
-            layers = layers.push(toast_bar(&toast.text));
+        if let Some(toasts) = self.toasts.view() {
+            layers = layers.push(toasts.map(|never| match never {}));
         }
         layers.into()
     }
@@ -882,24 +874,15 @@ impl Screen for SettingsScreen {
             Subscription::run_with(SettingsFeed(Arc::clone(&self.settings)), settings_changes)
                 .map(|()| Message::SettingsChanged),
         ];
-        if let Some(seq) = self.toast_seq() {
-            subscriptions.push(Subscription::run_with(seq, toast_timer));
-        }
+        subscriptions.push(self.toasts.subscription().map(|event| match event {
+            SnackEvent::Expired(seq) => Message::ToastExpired(seq),
+            SnackEvent::Frame(at) => Message::ToastFrame(at),
+        }));
         if self.watches_update_check() {
             subscriptions.push(iced::time::every(UPDATE_WATCH).map(|_| Message::UpdateWatch));
         }
         Subscription::batch(subscriptions)
     }
-}
-
-/// Toast `seq`'s one-shot timer.
-fn toast_timer(seq: &u64) -> impl Stream<Item = Message> {
-    let seq = *seq;
-    stream::once(async move {
-        tokio::time::sleep(TOAST_DURATION).await;
-        Message::ToastExpired(seq)
-    })
-    .chain(stream::pending())
 }
 
 /// The settings service as a subscription's identity (the service itself, by
@@ -1707,26 +1690,26 @@ fn info_row<'a>(icon: Icon, title: &'a str, subtitle: String) -> Element<'a, Mes
 
 /// The result toast (home's SnackBar pattern): floating 16 in from the
 /// page's edges at its bottom, `Studio.surfaceRaised`, radius 8,
-/// `Studio.border`, 13 px text. (Of any message type: the app draws it too,
-/// once the page has handed it over.)
-fn toast_bar<M: 'static>(message: &str) -> Element<'_, M> {
-    let bar = container(text(message).size(13).color(Studio::TEXT_PRIMARY))
+/// `Studio.border`, 13 px text, at `opacity`. (The app draws it too, once
+/// the page has handed it over.)
+fn toast_bar(message: &str, opacity: f32) -> Element<'_, Infallible> {
+    let fade = move |c: Color| alpha(c, c.a * opacity);
+    let bar = container(text(message).size(13).color(fade(Studio::TEXT_PRIMARY)))
         .width(Length::Fill)
         .padding(Padding::from([14, 16]))
-        .style(|_: &Theme| container::Style {
+        .style(move |_: &Theme| container::Style {
             shadow: Shadow {
-                color: alpha(Color::BLACK, 0.4),
+                color: alpha(Color::BLACK, 0.4 * opacity),
                 offset: Vector::new(0.0, 3.0),
                 blur_radius: 8.0,
             },
-            ..boxed(Some(Studio::SURFACE_RAISED), 8.0, Some(Studio::BORDER))
+            ..boxed(
+                Some(fade(Studio::SURFACE_RAISED)),
+                8.0,
+                Some(fade(Studio::BORDER)),
+            )
         });
-    container(bar)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .padding(16)
-        .align_y(Vertical::Bottom)
-        .into()
+    container(bar).width(Length::Fill).padding(16).into()
 }
 
 #[cfg(test)]

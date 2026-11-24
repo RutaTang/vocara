@@ -142,12 +142,8 @@ impl Home {
             .expect("an open in flight")
     }
 
-    fn snack_timer(&self) -> Timer {
-        self.screen
-            .timers()
-            .into_iter()
-            .find(|t| matches!(t, Timer::Snack(_)))
-            .expect("a toast up")
+    fn snack_timer(&self) -> crate::ui::snack::SnackTimer {
+        self.screen.snack_timer().expect("a toast up")
     }
 }
 
@@ -298,11 +294,18 @@ fn a_failed_create_says_so_and_opens_nothing() {
     assert_eq!(home.titles(), ["Kept"]);
     // The result is cleared once shown.
     assert!(home.screen.vm().create_project().result().is_none());
+    // Up 2.8 s from the end of its entrance.
     let timer = home.snack_timer();
-    assert_eq!(timer.delay(), Duration::from_millis(2800));
-    home.fire(timer);
+    let latest = std::time::Instant::now() + crate::ui::snack::TRANSITION;
+    assert!(timer.deadline <= latest + Duration::from_millis(2800));
+    assert!(timer.deadline > latest + Duration::from_millis(2500));
+    home.send(Message::SnackExpired(timer.seq));
     assert!(home.screen.snack().is_none());
-    assert!(!home.shows(CREATE_FAILED));
+    assert!(home.shows(CREATE_FAILED), "leaving");
+    home.send(Message::SnackFrame(
+        std::time::Instant::now() + crate::ui::snack::TRANSITION,
+    ));
+    assert!(!home.shows(CREATE_FAILED), "gone");
 }
 
 // -------------------------------------------------------------- open

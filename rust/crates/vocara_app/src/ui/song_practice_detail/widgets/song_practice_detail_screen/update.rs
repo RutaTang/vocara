@@ -17,6 +17,7 @@ use super::{
 };
 use crate::router::{Navigation, Route};
 use crate::ui::core::widgets::confirm_dialog::{ConfirmDialog, Dialog, DialogResult};
+use crate::ui::snack::{SnackBar, SnackStyle};
 use crate::ui::song_practice_detail::view_model::song_practice_detail_view_model::{
     normalize_marker_range, DockTab, Effect, LyricsMode, Reply, RightTab, Started,
 };
@@ -41,6 +42,11 @@ impl SongPracticeDetailScreen {
     /// Handles one message; what it asked of the runtime.
     pub(super) fn handle(&mut self, message: Message) -> Step {
         let mut step = Step::new();
+        if let Message::SnackFrame(at) = message {
+            // Only the snack bar's drawing moves.
+            self.snacks.frame(at);
+            return step;
+        }
         if self.disposed {
             // Gone from the stack: only the answers to work the view model
             // still has in flight, so it lands.
@@ -172,11 +178,7 @@ impl SongPracticeDetailScreen {
                 let fx = self.vm.on_remote_applied(&event);
                 self.absorb(fx, &mut step);
             }
-            Message::SnackExpired(seq) => {
-                if self.snack.as_ref().is_some_and(|(s, ..)| *s == seq) {
-                    self.snack = None;
-                }
-            }
+            Message::SnackExpired(seq) => self.snacks.expired(seq, Instant::now()),
             Message::Done => {}
             answer => self.answer(answer, &mut step),
         }
@@ -305,8 +307,14 @@ impl SongPracticeDetailScreen {
         if self.disposed {
             return;
         }
-        self.snack_seq += 1;
-        self.snack = Some((self.snack_seq, text, Instant::now()));
+        let bar = SnackBar::new(
+            text,
+            super::SNACK_DURATION,
+            true,
+            SnackStyle::Floating,
+            super::view::snack_bar,
+        );
+        self.snacks.show(bar, Instant::now());
     }
 
     /// `vm.refuseStructuralEdit()`: whether an import or a structural edit

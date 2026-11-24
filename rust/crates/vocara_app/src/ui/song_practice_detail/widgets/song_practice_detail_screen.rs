@@ -61,7 +61,9 @@
 //!   page on top for the time it has left (`app::messenger`), as Dart's
 //!   `ScaffoldMessenger`, above the pages, did — the case that matters is a
 //!   take's finalize toasting as Back leaves. A new one replaces the one
-//!   showing, as `clearSnackBars` did. Its timer is a subscription.
+//!   showing, as `clearSnackBars` did, once that one has left; each fades
+//!   in and out as Material's floating snack bar did, its time counted from
+//!   the end of its entrance (`ui::snack`). Its timer is a subscription.
 //! - The note editor and the technique picker are drawn over the page, under
 //!   the window drag bar (Dart's dialog routes covered it); the app's studio
 //!   dialogs cover the whole window as before.
@@ -82,7 +84,6 @@ mod tests;
 mod through_the_app;
 
 use std::collections::HashMap;
-use std::convert::Infallible;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -116,6 +117,7 @@ use crate::app::library::RemoteAppliedBroadcast;
 use crate::services::Services;
 use crate::ui::core::widgets::confirm_dialog::DialogResult;
 use crate::ui::core::widgets::spectrogram_painter::{release_spectrogram_images, RenderRequest};
+use crate::ui::snack::{SnackEvent, SnackQueue};
 use crate::ui::song_practice_detail::view_model::analysis_cache::{self, EqInputColumn};
 use crate::ui::song_practice_detail::view_model::interpretations_controller::VersionsOp;
 use crate::ui::song_practice_detail::view_model::recording_controller::{
@@ -394,6 +396,8 @@ pub enum Message {
     RemoteApplied(RemoteApplied),
     /// The showing snack bar's time is up.
     SnackExpired(u64),
+    /// A frame while the snack bar enters or leaves.
+    SnackFrame(Instant),
     /// A finished side effect.
     Done,
 }
@@ -713,9 +717,8 @@ pub struct SongPracticeDetailScreen {
     /// The take whose clip a move-drag is moving.
     moving: Option<String>,
     owed: Vec<Owed>,
-    /// The snack bar showing: its number, its text, and since when.
-    snack: Option<(u64, String, Instant)>,
-    snack_seq: u64,
+    /// The snack bars (one at a time: each replaces the one up).
+    snacks: SnackQueue,
 }
 
 impl fmt::Debug for SongPracticeDetailScreen {
@@ -799,8 +802,7 @@ impl SongPracticeDetailScreen {
             drop_target: None,
             moving: None,
             owed: Vec::new(),
-            snack: None,
-            snack_seq: 0,
+            snacks: SnackQueue::new(),
         };
         let mut step = Step::new();
         screen.absorb(effects, &mut step);
@@ -820,7 +822,12 @@ impl SongPracticeDetailScreen {
 
     /// The snack bar showing, if any.
     pub fn snack(&self) -> Option<&str> {
-        self.snack.as_ref().map(|(_, s, _)| s.as_str())
+        self.snacks.current().map(|s| s.text.as_str())
+    }
+
+    /// The showing snack bar's number ([`Message::SnackExpired`] takes it).
+    pub fn snack_seq(&self) -> Option<u64> {
+        self.snacks.current_seq()
     }
 
     /// The menu the page holds open, if any.
@@ -914,9 +921,10 @@ impl Screen for SongPracticeDetailScreen {
                     .map(|_| Message::SeparationProgressTick),
             );
         }
-        if let Some((seq, ..)) = &self.snack {
-            subscriptions.push(Subscription::run_with(*seq, snack_timer));
-        }
+        subscriptions.push(self.snacks.subscription().map(|event| match event {
+            SnackEvent::Expired(seq) => Message::SnackExpired(seq),
+            SnackEvent::Frame(at) => Message::SnackFrame(at),
+        }));
         Subscription::batch(subscriptions)
     }
 
@@ -938,7 +946,7 @@ impl Screen for SongPracticeDetailScreen {
         self.picker = None;
         self.runs.clear();
         self.awaiting.clear();
-        self.snack = None;
+        self.snacks = SnackQueue::new();
         self.voiceprint.clear();
         self.lane_images.clear();
         release_spectrogram_images();
@@ -949,19 +957,8 @@ impl Screen for SongPracticeDetailScreen {
     /// The snack bar showing, for the time it has left; it replaced the
     /// ones before it.
     fn take_snack_bars(&mut self) -> Vec<SnackBar> {
-        let Some((_, text, since)) = self.snack.take() else {
-            return Vec::new();
-        };
-        let look = view::snack_bar::<Infallible>;
-        SnackBar::showing(text, SNACK_DURATION, since, true, look)
-            .into_iter()
-            .collect()
+        self.snacks.take(Instant::now())
     }
-}
-
-/// Snack bar `seq`'s timer.
-fn snack_timer(seq: &u64) -> impl iced::futures::Stream<Item = Message> {
-    crate::ui::one_shot(SNACK_DURATION, Message::SnackExpired(*seq))
 }
 
 /// The selected track as the practice holds it (borrowed for the views).

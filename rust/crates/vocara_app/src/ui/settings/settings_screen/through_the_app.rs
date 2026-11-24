@@ -189,11 +189,18 @@ fn a_toast_up_as_settings_leaves_stays_up_on_home_until_its_time_is_up() {
     assert_eq!(app.routes(), [Some(crate::router::Route::Home)]);
     assert!(shows(&app, REPORT), "Home shows it");
     let timer = app.snack_timer().expect("its timer runs");
-    assert!(timer.left <= TOAST_DURATION, "for the time it had left");
+    let latest = Instant::now() + crate::ui::snack::TRANSITION + TOAST_DURATION;
+    assert!(timer.deadline <= latest, "for the time it had left");
 
-    let task = app.update(timer.message());
+    let task = app.update(app::Message::SnackBarExpired(timer.seq));
     settle(&mut app, task);
-    assert!(!shows(&app, REPORT), "gone once its time is up");
+    let left = Instant::now() + crate::ui::snack::TRANSITION;
+    let task = app.update(app::Message::SnackBarFrame(left));
+    settle(&mut app, task);
+    assert!(
+        !shows(&app, REPORT),
+        "gone once its time is up and it has left"
+    );
 }
 
 fn newer_release(library: Arc<Library>, environment: AppEnvironment) -> Services {
