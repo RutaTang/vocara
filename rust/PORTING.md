@@ -195,12 +195,18 @@ structure every screen follows, so screens ported by different hands fit:
   `widgets::animated` (`AnimatedContainer`, and `Animated`, which builds
   its content from an animating value): they keep their animation in the
   widget tree, take their time from `RedrawRequested` and ask for the next
-  frame only while they move. A model that animates (the snack bars,
-  `ui::snack`; a page transition and a closed dialog's barrier, the app's;
-  the license page; a lyrics list's scroll) subscribes to
-  `motion::frames(animating)`, the window's frames only while something
-  moves: an idle app does not redraw. The state never waits for an
-  animation; only its drawing does.
+  frame only while they move; so do the widgets that port Material's own
+  motion (`material_tooltip`, `fading_scrollbar`, `slider_overlay`, the
+  `InkWell` highlights of `animated::ink_hover`, the FX chain's
+  reordering cards). A model that animates (the snack bars, `ui::snack`;
+  a page transition and a dialog coming in or going, the app's and the
+  pages' that draw their own; the license page; a lyrics list's scroll)
+  subscribes to `motion::frames(animating)`, the window's frames only
+  while something moves: an idle app does not redraw. The state never
+  waits for an animation; only its drawing does. iced has no subtree
+  opacity: what fades (a dialog card, a snack bar, a tooltip) takes every
+  color it draws at the fade's opacity. A sliding page moves its layout
+  with its drawing (`widgets::slide`), so a tap lands where it is drawn.
 - **Tests**: view models are unit-tested directly (the Dart widget tests
   mostly assert view-model behavior; port those assertions); screens get
   `iced_test` simulator tests where a Dart widget test checked what is on
