@@ -21,7 +21,10 @@
 //! - the reveal-after-first-frame channel → iced shows the window once its
 //!   first UI is built;
 //! - the Runner's menu bar (`MainMenu.xib`) → `vocara_services::app_menu`,
-//!   installed when the window opens.
+//!   installed when the window opens;
+//! - the Runner's `AppDelegate.applicationSupportsSecureRestorableState` →
+//!   `vocara_services::restorable_state`, declared below on whatever
+//!   delegate winit sets.
 
 use std::sync::Arc;
 
@@ -48,6 +51,12 @@ fn main() -> iced::Result {
     // request: route them to the quit guard too, before AppKit could end the
     // process with a recording or a save still in flight.
     vocara_services::quit_request::intercept();
+
+    // Answer AppKit's launch-time question about secure restorable state,
+    // as the Runner's AppDelegate did (macOS 14+ warns otherwise). The
+    // delegate is winit's, set as the event loop is created inside
+    // `app::run`: hook `setDelegate:` before that.
+    vocara_services::restorable_state::declare_secure();
 
     let boot = Boot::from_env(library::open_library, Arc::new(quit::ServiceQuitHooks));
     app::run(boot)

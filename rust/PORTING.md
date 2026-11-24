@@ -190,9 +190,6 @@ small and written down in the module that has it:
   (through `objc2-uniform-type-identifiers`) and calls `UTType` and
   `setAllowedContentTypes:` with no availability check, and that framework
   exists only from macOS 11, so the binary cannot even load on 10.15.
-- `applicationSupportsSecureRestorableState` is not declared (winit's
-  delegate has no hook for it); its only effect is a console warning on
-  macOS 14 and later.
 
 ## Tracking
 
