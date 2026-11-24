@@ -137,7 +137,11 @@ structure every screen follows, so screens ported by different hands fit:
   `canvas::Program`s; controls that need custom input (faders, knobs, drag
   handles) are custom widgets or canvases with the same hit areas, drag
   rules, wheel/trackpad handling and double-click resets as the Dart ones.
-  Icons are Lucide (forui's `FIcons`) from the `lucide-icons` crate.
+  Icons are Lucide (forui's `FIcons`) from the `lucide-icons` crate. Text
+  with a `letterSpacing` or an `overflow: TextOverflow.ellipsis` is
+  `studio_text` (`.letter_spacing(px)`, `.ellipsis(max_lines)`), which lays
+  its own cosmic-text buffer out as SkParagraph did; a canvas label with a
+  `letterSpacing` is drawn with `studio_text::fill_spaced_text`.
 - **Window** (macOS): hidden title bar with a transparent, full-size content
   view; the drag bar starts a window drag; the close request runs the quit
   guard (kill separation sidecars, finalize recordings) before closing, as
@@ -187,10 +191,9 @@ fixes it rather than port the bug, and says so where the fix lives:
 Where iced or the platform layer has no counterpart, the difference is kept
 small and written down in the module that has it:
 
-- Text has no letter spacing and no ellipsis (long names clip), and nothing
-  animates (fades, the separation bar's fill, the analyzer's settling jump
-  to their end state). Touch-only gestures (pointer cancel, a second finger)
-  do not exist on iced's desktop pointer.
+- Nothing animates (fades, the separation bar's fill, the analyzer's settling
+  jump to their end state). Touch-only gestures (pointer cancel, a second
+  finger) do not exist on iced's desktop pointer.
 - The app needs macOS 11.0 (`packaging/macos/Info.plist.in`); the Flutter
   app ran on 10.15. Its native file panels are built on
   UniformTypeIdentifiers: `rfd` links `UniformTypeIdentifiers.framework`
