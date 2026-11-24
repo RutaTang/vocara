@@ -2,10 +2,13 @@
 //! inside `CupertinoPageTransition`), with the faint edge shadow the
 //! incoming page casts on the one it covers (`_CupertinoEdgeShadowDecoration`).
 //!
-//! The slide is drawn, not laid out: the page keeps its place for its input,
-//! its widgets' state and a test's lookups, and only its drawing moves (and
-//! is clipped to the box). A page sliding away takes no input at all and is
-//! out of reach of operations (`IgnorePointer` on a route going away).
+//! The slide moves the page's layout, not only its drawing: a tap lands where
+//! the page is drawn, as Flutter's `SlideTransition` hit-tested its child
+//! where it painted it, and the page is clipped to its box. Each frame of a
+//! slide rebuilds the view, and iced lays a rebuilt view out anew, so the
+//! layout follows the slide frame by frame. A page sliding away takes no
+//! input at all and is out of reach of operations (`IgnorePointer` on a
+//! route going away); [`inert`] makes anything so.
 
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::widget::{Operation, Tree};
@@ -59,7 +62,13 @@ pub struct Slide<'a, M> {
     interactive: bool,
 }
 
-/// `content`, drawn `dx` of its width to the right.
+/// `content`, taking no input and out of reach of operations (a dialog
+/// going away), where it is.
+pub fn inert<'a, M: 'a>(content: impl Into<Element<'a, M>>) -> Element<'a, M> {
+    slide(content, 0.0).inert().into()
+}
+
+/// `content`, laid out and drawn `dx` of its width to the right.
 pub fn slide<'a, M>(content: impl Into<Element<'a, M>>, dx: f32) -> Slide<'a, M> {
     Slide {
         content: content.into(),
@@ -71,7 +80,7 @@ pub fn slide<'a, M>(content: impl Into<Element<'a, M>>, dx: f32) -> Slide<'a, M>
 }
 
 impl<M> Slide<'_, M> {
-    /// Also drawn `dy` of its height down.
+    /// Also `dy` of its height down.
     pub fn down(mut self, dy: f32) -> Self {
         self.dy = dy;
         self
@@ -113,9 +122,13 @@ impl<M> Widget<M, Theme, Renderer> for Slide<'_, M> {
         renderer: &Renderer,
         limits: &layout::Limits,
     ) -> layout::Node {
-        self.content
+        let page = self
+            .content
             .as_widget_mut()
-            .layout(&mut tree.children[0], renderer, limits)
+            .layout(&mut tree.children[0], renderer, limits);
+        let size = page.size();
+        let moved = Vector::new(self.dx * size.width, self.dy * size.height);
+        layout::Node::with_children(size, vec![page.translate(moved)])
     }
 
     fn update(
@@ -133,7 +146,7 @@ impl<M> Widget<M, Theme, Renderer> for Slide<'_, M> {
             self.content.as_widget_mut().update(
                 &mut tree.children[0],
                 event,
-                layout,
+                page(layout),
                 cursor,
                 renderer,
                 clipboard,
@@ -154,40 +167,32 @@ impl<M> Widget<M, Theme, Renderer> for Slide<'_, M> {
         viewport: &Rectangle,
     ) {
         let bounds = layout.bounds();
+        let page = page(layout);
         let cursor = if self.interactive {
             cursor
         } else {
             mouse::Cursor::Unavailable
         };
-        if self.dx == 0.0 && self.dy == 0.0 && self.shadow <= 0.0 {
+        let draw = |renderer: &mut Renderer| {
             self.content.as_widget().draw(
                 &tree.children[0],
                 renderer,
                 theme,
                 style,
-                layout,
+                page,
                 cursor,
                 viewport,
             );
+        };
+        if self.dx == 0.0 && self.dy == 0.0 && self.shadow <= 0.0 {
+            draw(renderer);
             return;
         }
-        let dx = self.dx * bounds.width;
-        let moved = Vector::new(dx, self.dy * bounds.height);
         renderer.with_layer(bounds, |renderer| {
             if self.shadow > 0.0 {
-                draw_shadow(renderer, bounds, dx, self.shadow);
+                draw_shadow(renderer, bounds, page.bounds().x, self.shadow);
             }
-            renderer.with_translation(moved, |renderer| {
-                self.content.as_widget().draw(
-                    &tree.children[0],
-                    renderer,
-                    theme,
-                    style,
-                    layout,
-                    cursor,
-                    &(*viewport - moved),
-                );
-            });
+            draw(renderer);
         });
     }
 
@@ -201,7 +206,7 @@ impl<M> Widget<M, Theme, Renderer> for Slide<'_, M> {
         if self.interactive {
             self.content.as_widget_mut().operate(
                 &mut tree.children[0],
-                layout,
+                page(layout),
                 renderer,
                 operation,
             );
@@ -221,7 +226,7 @@ impl<M> Widget<M, Theme, Renderer> for Slide<'_, M> {
         }
         self.content.as_widget().mouse_interaction(
             &tree.children[0],
-            layout,
+            page(layout),
             cursor,
             viewport,
             renderer,
@@ -239,24 +244,26 @@ impl<M> Widget<M, Theme, Renderer> for Slide<'_, M> {
         if !self.interactive {
             return None;
         }
-        let bounds = layout.bounds();
-        let moved = Vector::new(self.dx * bounds.width, self.dy * bounds.height);
         self.content.as_widget_mut().overlay(
             &mut tree.children[0],
-            layout,
+            page(layout),
             renderer,
             viewport,
-            translation + moved,
+            translation,
         )
     }
 }
 
+/// The page's layout, moved, inside the slide's.
+fn page(layout: Layout<'_>) -> Layout<'_> {
+    layout.children().next().expect("a slide lays out its page")
+}
+
 /// `_CupertinoEdgeShadowPainter`: a band 5 % of the page wide, left of its
-/// edge at `bounds.x + dx`, drawn as Flutter drew it, in 1 px columns, each
-/// the colors lerped across the band, at `strength`.
-fn draw_shadow(renderer: &mut Renderer, bounds: Rectangle, dx: f32, strength: f32) {
+/// edge at `edge`, drawn as Flutter drew it, in 1 px columns, each the
+/// colors lerped across the band, at `strength`.
+fn draw_shadow(renderer: &mut Renderer, bounds: Rectangle, edge: f32, strength: f32) {
     let width = 0.05 * bounds.width;
-    let edge = bounds.x + dx;
     let mut x = 0.0_f32;
     while x < width {
         let color = SHADOW[0].lerp(SHADOW[1], x / width);
@@ -319,6 +326,33 @@ mod tests {
             drawn(&window, 60.0) && !drawn(&window, 70.0),
             "a third out left"
         );
+    }
+
+    #[test]
+    fn a_tap_lands_where_the_page_is_drawn() {
+        // A 100 wide button at the left of a 200 wide page, the page half
+        // way in: the button is drawn at 100..200.
+        let view = || {
+            let target = button(Space::new().width(100).height(40))
+                .padding(0)
+                .on_press(());
+            Element::from(slide(
+                container(target).width(Length::Fill).height(Length::Fill),
+                0.5,
+            ))
+        };
+        let tap = |x: f32| {
+            let mut ui = iced_test::Simulator::with_size(
+                iced::Settings::default(),
+                Size::new(200.0, 40.0),
+                view(),
+            );
+            ui.point_at(Point::new(x, 20.0));
+            let _ = ui.simulate(iced_test::simulator::click());
+            ui.into_messages().count()
+        };
+        assert_eq!(tap(50.0), 0, "where it would rest: nothing there");
+        assert_eq!(tap(150.0), 1, "where it is drawn");
     }
 
     #[test]
