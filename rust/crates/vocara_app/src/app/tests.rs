@@ -246,8 +246,8 @@ fn a_dialog_covers_the_window_and_its_result_reaches_its_page() {
 
 #[test]
 fn a_closed_dialogs_barrier_fades_out_over_150_ms_on_frames_while_it_does() {
-    use iced::advanced::subscription::into_recipes;
     use crate::ui::core::motion::Status;
+    use iced::advanced::subscription::into_recipes;
     let mut app = boot(None);
     let frames = |app: &App| {
         let State::Running(running) = &app.state else {
@@ -368,6 +368,107 @@ fn a_library_open_still_waiting_does_not_hold_the_exit() {
     // Let the open finish either way, so a failure here cannot hang the run.
     release_waiting_open();
     assert!(done.is_ok(), "the runtime's teardown waited on the open");
+}
+
+// ------------------------------------------------------- page transitions
+
+/// The page transition running: its progress at `at` (the moving page's
+/// offset, the covered page's, the shadow), or `None`.
+fn route_at(app: &App, at: Instant) -> Option<(f32, f32, f32)> {
+    let State::Running(running) = &app.state else {
+        panic!("running")
+    };
+    running.route.as_ref().map(|r| r.progress(at))
+}
+
+fn frames_running(app: &App) -> bool {
+    use iced::advanced::subscription::into_recipes;
+    let State::Running(running) = &app.state else {
+        panic!("running")
+    };
+    !into_recipes(motion::frames(running.is_animating(Instant::now()))).is_empty()
+}
+
+fn close(a: f32, b: f32) -> bool {
+    (a - b).abs() < 1e-3
+}
+
+#[test]
+fn a_pushed_page_slides_in_over_500_ms_and_the_one_beneath_a_third_out() {
+    let mut app = boot(None);
+    assert!(!frames_running(&app), "an idle app asks for no frames");
+    let t0 = Instant::now();
+    let _ = app.update(Message::Navigate(Navigation::Push(Route::Settings)));
+    assert_eq!(
+        app.routes(),
+        vec![Some(Route::Home), Some(Route::Settings)],
+        "at once"
+    );
+    assert!(frames_running(&app), "frames while it slides");
+    // At its start: all the way right, Home where it was.
+    let (primary, secondary, shadow) = route_at(&app, t0).expect("a transition");
+    assert!(close(primary, 1.0) && close(secondary, 0.0) && close(shadow, 0.0));
+    // Halfway in time (give or take the instant the push took).
+    let half = t0 + ROUTE_TRANSITION / 2;
+    let (primary, secondary, _) = route_at(&app, half).expect("a transition");
+    let along = |curve: Curve| curve.transform(0.5);
+    assert!((primary - (1.0 - along(Curve::FastEaseInToSlowEaseOut))).abs() < 0.01);
+    assert!((secondary + along(Curve::LinearToEaseOut) / 3.0).abs() < 0.01);
+    // At its end: in, and Home a third of the way out.
+    let (primary, secondary, shadow) =
+        route_at(&app, t0 + 2 * ROUTE_TRANSITION).expect("a transition");
+    assert!(close(primary, 0.0) && close(secondary, -1.0 / 3.0) && close(shadow, 1.0));
+    // A frame past its end lets it go, and the frames stop.
+    let _ = app.update(Message::Frame(Instant::now() + ROUTE_TRANSITION));
+    assert!(route_at(&app, Instant::now()).is_none());
+    assert!(!frames_running(&app));
+}
+
+#[test]
+fn a_popped_page_slides_back_out_and_the_one_beneath_back_in() {
+    let mut app = boot(None);
+    let _ = app.update(Message::Navigate(Navigation::Push(Route::Settings)));
+    let _ = app.update(Message::Frame(Instant::now() + ROUTE_TRANSITION));
+    let t0 = Instant::now();
+    let _ = app.update(Message::Navigate(Navigation::Pop));
+    assert_eq!(app.routes(), vec![Some(Route::Home)], "at once");
+    assert!(!shows(&app, "Settings"), "the page going takes no part");
+    assert!(shows(&app, "New practice"), "Home is on top again");
+    let (primary, secondary, _) = route_at(&app, t0).expect("a transition");
+    assert!(close(primary, 0.0) && close(secondary, -1.0 / 3.0), "start");
+    // Back along the flipped curve, Home on `Curves.easeInToLinear`.
+    let half = t0 + ROUTE_TRANSITION / 2;
+    let (primary, secondary, _) = route_at(&app, half).expect("a transition");
+    let flipped = Curve::FastEaseInToSlowEaseOutFlipped.transform(0.5);
+    assert!((primary - (1.0 - flipped)).abs() < 0.01, "{primary}");
+    let eased = Curve::EaseInToLinear.transform(0.5);
+    assert!((secondary + eased / 3.0).abs() < 0.01, "{secondary}");
+    let (primary, secondary, _) = route_at(&app, t0 + 2 * ROUTE_TRANSITION).expect("a transition");
+    assert!(close(primary, 1.0) && close(secondary, 0.0), "end");
+}
+
+#[test]
+fn a_page_popped_as_it_comes_in_goes_back_from_where_it_got() {
+    let mut app = boot(None);
+    let t0 = Instant::now();
+    let _ = app.update(Message::Navigate(Navigation::Push(Route::Settings)));
+    let _ = app.update(Message::Navigate(Navigation::Pop));
+    let State::Running(running) = &app.state else {
+        panic!("running")
+    };
+    let route = running.route.as_ref().expect("a transition");
+    // It had barely started: it is back out within the time it took in.
+    assert!(route.controller.ends_at(Instant::now()) < t0 + ROUTE_TRANSITION / 10);
+}
+
+#[test]
+fn a_go_slides_the_new_page_over_the_ones_it_replaced() {
+    let mut app = boot(Some("/settings"));
+    let t0 = Instant::now();
+    let _ = app.update(Message::Navigate(Navigation::Go(Route::Home)));
+    assert_eq!(app.routes(), vec![Some(Route::Home)]);
+    let (primary, secondary, _) = route_at(&app, t0).expect("a transition");
+    assert!(close(primary, 1.0) && close(secondary, 0.0));
 }
 
 #[test]

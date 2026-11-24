@@ -14,6 +14,15 @@
 //! takes them over when it stops being on top and draws them over the page
 //! on top until their time runs out (the `messenger` module).
 //!
+//! A navigation slides the pages as the `MaterialPage`s go_router built did
+//! on macOS (`CupertinoPageTransition`, 500 ms; [`RouteTransition`]). The
+//! stack changes at once — a popped page is disposed at once, as before —
+//! and only the drawing follows: the page going is drawn as it goes (from
+//! the app, or from its lingering), taking no input. The slide is drawn,
+//! not laid out, so a tap during it lands where the page will rest (Flutter
+//! hit-tested the moving page where it was drawn). The window drag bar,
+//! the same on every page, stays put.
+//!
 //! The window is closed through the quit guard: a close request, or a quit
 //! macOS sends through `terminate:` (Cmd+Q, the app-menu Quit, a Dock quit,
 //! logout; [`vocara_services::quit_request`]), kills the separation
@@ -47,6 +56,7 @@ use crate::ui::core::widgets::confirm_dialog::{
     self, Dialog, DialogResult, DialogState, DialogStep,
 };
 use crate::ui::core::widgets::fatal_open_screen::{self, FatalOpenScreen};
+use crate::ui::core::widgets::slide::slide;
 use crate::ui::core::widgets::window_drag_bar::window_drag_bar;
 use crate::ui::home::widgets::update_notice::open_url_task;
 use crate::ui::snack::SnackEvent;
@@ -202,15 +212,121 @@ struct Running {
     /// The barriers of dialogs that closed, fading out (each dialog's
     /// route animation running back).
     closing: Vec<Controller>,
+    /// The page transition running, if any.
+    route: Option<RouteTransition>,
     /// The last frame's time, what the drawing reads.
     now: Instant,
 }
 
 impl Running {
-    /// Whether something the app draws itself moves at `now` (a closed
-    /// dialog's barrier fading out).
+    /// Whether something the app draws itself moves at `now` (a page
+    /// transition, a closed dialog's barrier fading out).
     fn is_animating(&self, now: Instant) -> bool {
         self.closing.iter().any(|c| c.is_animating(now))
+            || self
+                .route
+                .as_ref()
+                .is_some_and(|r| r.controller.is_animating(now))
+    }
+
+    /// The pages as drawn at the last frame: under the page on top, the
+    /// page on top, and over it (see [`RouteTransition`]). The page on top
+    /// always takes the middle slot, so its widgets keep their state.
+    fn pages_view<'a>(&'a self) -> [Element<'a, Message>; 3] {
+        let (top, page) = self.router.top();
+        let empty = || Element::from(Space::new().width(Length::Fill).height(Length::Fill));
+        let Some(route) = &self.route else {
+            return [empty(), slide(page.view(top), 0.0).into(), empty()];
+        };
+        let (primary, secondary, shadow) = route.progress(self.now);
+        let gone_view = |id: PageId, held: &'a Option<Box<Page>>| -> Option<Element<'a, Message>> {
+            let page = held.as_deref().or_else(|| {
+                self.lingering
+                    .iter()
+                    .find(|(p, _)| *p == id)
+                    .map(|(_, page)| page)
+            })?;
+            Some(page.view(id))
+        };
+        match &route.kind {
+            RouteKind::Push { below } => {
+                let under = self
+                    .router
+                    .pages()
+                    .find(|(id, _)| id == below)
+                    .map_or_else(empty, |(id, page)| {
+                        slide(page.view(id), secondary).inert().into()
+                    });
+                let over = slide(page.view(top), primary).shadow(shadow);
+                [under, over.into(), empty()]
+            }
+            RouteKind::Pop { gone, held } => {
+                let revealed = slide(page.view(top), secondary);
+                let over = gone_view(*gone, held).map_or_else(empty, |view| {
+                    slide(view, primary).shadow(shadow).inert().into()
+                });
+                [empty(), revealed.into(), over]
+            }
+            RouteKind::Go { gone } => {
+                let under = gone
+                    .iter()
+                    .filter_map(|(id, held)| gone_view(*id, held))
+                    .fold(stack![], |layers, view| {
+                        layers.push(slide(view, 0.0).inert())
+                    });
+                let over = slide(page.view(top), primary).shadow(shadow);
+                [under.into(), over.into(), empty()]
+            }
+        }
+    }
+}
+
+/// How long a page takes to come in or go (`CupertinoRouteTransitionMixin`'s
+/// `kTransitionDuration`: a `MaterialPage` on macOS slides as on iOS).
+pub const ROUTE_TRANSITION: Duration = Duration::from_millis(500);
+
+/// A page transition: Flutter's `CupertinoPageTransition`, which the
+/// `MaterialPage`s go_router built used on macOS. The page coming in (a push
+/// or a go) slides in from the right edge over 500 ms
+/// (`Curves.fastEaseInToSlowEaseOut`), casting a faint shadow to its left,
+/// while the page it covers slides a third of the way out to the left
+/// (`Curves.linearToEaseOut`); a pop runs the same back (the flipped curve,
+/// and `Curves.easeInToLinear` for the page revealed). A go's replaced pages
+/// stay still under the page coming in, as routes being removed did.
+struct RouteTransition {
+    kind: RouteKind,
+    /// The moving page's route animation: 1 when it is all in.
+    controller: Controller,
+}
+
+enum RouteKind {
+    /// The page on top was pushed over `below`.
+    Push { below: PageId },
+    /// Page `gone` was popped off the one on top now; the page itself is
+    /// `held` here, or lingers.
+    Pop {
+        gone: PageId,
+        held: Option<Box<Page>>,
+    },
+    /// The page on top replaced these (each held here, or lingering).
+    Go {
+        gone: Vec<(PageId, Option<Box<Page>>)>,
+    },
+}
+
+impl RouteTransition {
+    /// The moving page's offset (in its widths, rightward), the covered
+    /// page's, and the edge shadow's strength, at `now`.
+    fn progress(&self, now: Instant) -> (f32, f32, f32) {
+        let c = &self.controller;
+        let primary = c.curved(
+            Curve::FastEaseInToSlowEaseOut,
+            Some(Curve::FastEaseInToSlowEaseOutFlipped),
+            now,
+        );
+        let secondary = c.curved(Curve::LinearToEaseOut, Some(Curve::EaseInToLinear), now);
+        let shadow = c.curved(Curve::LinearToEaseOut, None, now);
+        (1.0 - primary, -secondary / 3.0, shadow)
     }
 }
 
@@ -395,6 +511,13 @@ impl App {
                     running.now = running.now.max(at);
                     let now = running.now;
                     running.closing.retain(|c| c.is_animating(now));
+                    if running
+                        .route
+                        .as_ref()
+                        .is_some_and(|r| !r.controller.is_animating(now))
+                    {
+                        running.route = None;
+                    }
                 }
                 Task::none()
             }
@@ -489,6 +612,7 @@ impl App {
                             lingering: Vec::new(),
                             messenger: Messenger::default(),
                             closing: Vec::new(),
+                            route: None,
                             now: Instant::now(),
                         }));
                         task
@@ -584,11 +708,11 @@ impl App {
                 .into(),
             State::Waiting(screen) | State::Fatal(screen) => screen.view().map(Message::Fatal),
             State::Running(running) => {
-                let (id, page) = running.router.top();
                 // The snack bar the app shows sits over the page, where the
                 // page draws its own. The page keeps its place in the stack
-                // whether one shows or not, so its widgets keep their state.
-                let mut content = stack![page.view(id)]
+                // whether one shows or not, or whether it slides, so its
+                // widgets keep their state.
+                let mut content = stack(running.pages_view())
                     .width(Length::Fill)
                     .height(Length::Fill);
                 if let Some(snack_bar) = running.messenger.view() {
@@ -685,6 +809,7 @@ fn navigate(running: &mut Running, navigation: Navigation) -> Task<Message> {
         *opening = Some(task);
         page
     };
+    let now = Instant::now();
     let change = match navigation {
         Navigation::Push(route) => running.router.push(open(route, &mut opening)),
         Navigation::Go(route) => running.router.go(open(route, &mut opening)),
@@ -694,12 +819,25 @@ fn navigate(running: &mut Running, navigation: Navigation) -> Task<Message> {
         }
     };
     match change {
-        Change::Pushed(id) => opening.map_or_else(Task::none, |o| o(id)),
+        Change::Pushed(id) => {
+            running.route = covered(&running.router, id).map(|below| RouteTransition {
+                kind: RouteKind::Push { below },
+                controller: forward(now),
+            });
+            opening.map_or_else(Task::none, |o| o(id))
+        }
         Change::Replaced { page, dropped } => {
             let mut tasks = Vec::new();
-            for (gone, p) in dropped {
-                tasks.push(retire(running, gone, p));
+            let mut gone = Vec::new();
+            for (id, p) in dropped {
+                let (task, held) = retire(running, id, p);
+                tasks.push(task);
+                gone.push((id, held));
             }
+            running.route = Some(RouteTransition {
+                kind: RouteKind::Go { gone },
+                controller: forward(now),
+            });
             tasks.push(opening.map_or_else(Task::none, |o| o(page)));
             Task::batch(tasks)
         }
@@ -707,7 +845,21 @@ fn navigate(running: &mut Running, navigation: Navigation) -> Task<Message> {
             popped: (gone, p),
             revealed,
         } => {
-            let teardown = retire(running, gone, p);
+            let (teardown, held) = retire(running, gone, p);
+            // A page popped while it was still coming in goes back from
+            // where it got (its route animation reversed).
+            let mut controller = match running.route.take() {
+                Some(RouteTransition {
+                    kind: RouteKind::Push { .. },
+                    controller,
+                }) if controller.is_animating(now) => controller,
+                _ => Controller::completed(ROUTE_TRANSITION, ROUTE_TRANSITION),
+            };
+            controller.reverse(now);
+            running.route = Some(RouteTransition {
+                kind: RouteKind::Pop { gone, held },
+                controller,
+            });
             // The push the revealed page made has completed.
             let Running {
                 services, router, ..
@@ -733,8 +885,13 @@ fn navigate(running: &mut Running, navigation: Navigation) -> Task<Message> {
 
 /// A page left the stack: its dialogs go, the snack bars it shows stay up
 /// (the app's now), it is disposed, and it lingers while the work it started
-/// is still landing. The work its teardown started, to run.
-fn retire(running: &mut Running, gone: PageId, mut page: Page) -> Task<Message> {
+/// is still landing. The work its teardown started, to run, and the page
+/// unless it lingers (its transition draws it as it goes).
+fn retire(
+    running: &mut Running,
+    gone: PageId,
+    mut page: Page,
+) -> (Task<Message>, Option<Box<Page>>) {
     running.dialogs.retain(|d| d.page != gone);
     running
         .messenger
@@ -742,8 +899,26 @@ fn retire(running: &mut Running, gone: PageId, mut page: Page) -> Task<Message> 
     let teardown = page.dispose(gone, &running.services);
     if page.lingers() {
         running.lingering.push((gone, page));
+        (teardown, None)
+    } else {
+        (teardown, Some(Box::new(page)))
     }
-    teardown
+}
+
+/// The page right under page `id` on the stack, if any.
+fn covered(router: &Router<Page>, id: PageId) -> Option<PageId> {
+    router
+        .pages()
+        .map(|(p, _)| p)
+        .take_while(|p| *p != id)
+        .last()
+}
+
+/// A route animation running forward from `now`, as a page comes in.
+fn forward(now: Instant) -> Controller {
+    let mut controller = Controller::new(ROUTE_TRANSITION, ROUTE_TRANSITION);
+    controller.forward(now);
+    controller
 }
 
 /// Runs the library open (`Persistence.open`) on a thread of its own and
