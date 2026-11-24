@@ -18,12 +18,17 @@
 //! `openUrl` test seam. The dialog stays open on purpose: if the browser
 //! launch fails, the release URL it shows is the fallback, selectable for
 //! copying by hand.
-//! Flutter's `SelectableText` is a read-only text field here: it selects and
-//! copies, and its edits are dropped (the dialog keeps the URL).
+//! Flutter's `SelectableText` is the read-only multi-line field here
+//! (`text_field::TextEditor::read_only`): the address wraps as the text did
+//! (no line limit, at words, a word longer than the line broken between
+//! its letters), selects and copies (the right-click menu offering Copy),
+//! and shows no caret; its selection is its own, so it sends the dialog
+//! nothing.
 
 use crate::ui::core::text;
 use iced::alignment::Vertical;
-use iced::widget::{button, column, container, row, scrollable, text_input, Space};
+use iced::widget::text::Wrapping;
+use iced::widget::{button, column, container, row, scrollable, Space};
 use iced::{Background, Border, Color, Element, Length, Padding, Task, Theme};
 use vocara_services::update_check_service::{UpdateCheckService, UpdateInfo};
 
@@ -34,6 +39,7 @@ use crate::ui::core::widgets::fading_scrollbar::Fading;
 use crate::ui::core::widgets::material_tooltip::material_tooltip;
 use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
 use crate::ui::core::widgets::studio_text::studio_text;
+use crate::ui::core::widgets::text_field::editor::{self as text_editor, text_editor};
 
 pub use crate::ui::core::widgets::confirm_dialog::Message as DialogMessage;
 
@@ -158,14 +164,27 @@ pub enum DialogOutcome {
 /// version, release notes, and the release page URL as selectable text (so
 /// it stays reachable even when opening the browser fails), plus an "Open
 /// Download Page" button.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct UpdateDownloadDialog {
     info: UpdateInfo,
+    /// The URL as the selectable text holds it, with its selection.
+    url: text_editor::Content,
 }
+
+/// Two dialogs are the same when they offer the same release (the URL's
+/// selection is the text's own state).
+impl PartialEq for UpdateDownloadDialog {
+    fn eq(&self, other: &Self) -> bool {
+        self.info == other.info && self.url.text() == other.url.text()
+    }
+}
+
+impl Eq for UpdateDownloadDialog {}
 
 impl UpdateDownloadDialog {
     pub fn new(info: UpdateInfo) -> Self {
-        Self { info }
+        let url = text_editor::Content::with_text(&info.url);
+        Self { info, url }
     }
 
     /// The release it offers.
@@ -180,7 +199,8 @@ impl UpdateDownloadDialog {
             // The dialog stays open on purpose: if the browser launch fails
             // the selectable URL is the fallback.
             DialogMessage::Confirm => Some(DialogOutcome::OpenUrl(self.info.url.clone())),
-            // The URL is read-only: an edit to it is dropped.
+            // The URL is read-only: it sends nothing, and an edit to it
+            // would be dropped.
             DialogMessage::Input(_) => None,
         }
     }
@@ -214,19 +234,22 @@ impl UpdateDownloadDialog {
             );
         }
         // Selectable so the user can copy the address by hand if the browser
-        // cannot be opened.
-        let url = text_input("", &info.url)
-            .on_input(DialogMessage::Input)
+        // cannot be opened (`SelectableText`: no line limit, no caret).
+        let url = text_editor(&self.url)
+            .read_only(true)
             .size(12)
             .line_height(1.0)
             .padding(0)
-            .style(fade.input(url_style));
+            .wrapping(Wrapping::WordOrGlyph)
+            .style(move |t, s| faded_url(url_style(t, s), fade.card));
         content = content
             .push(Space::new().height(14))
             .push(
+                // 10 by 12 inside the well's 1 px border (a Flutter
+                // `Container`'s padding includes its decoration's border).
                 container(url)
                     .width(Length::Fill)
-                    .padding(Padding::from([10, 12]))
+                    .padding(Padding::from([11, 13]))
                     .style(fade.style(theme::inset(8.0))),
             )
             .push(Space::new().height(22))
@@ -241,21 +264,32 @@ impl UpdateDownloadDialog {
             ]);
         let card = container(content.width(Length::Fill))
             .width(480)
-            .padding(22)
+            // 22 inside the card's 1 px border.
+            .padding(23)
             .style(fade.style(theme::dialog_card));
         modal(container(card).padding(24).into(), fade)
     }
 }
 
-/// The URL: `Studio.textSecondary`, 12 px, on the inset well.
-fn url_style(_: &Theme, _: text_input::Status) -> text_input::Style {
-    text_input::Style {
+/// The URL: `Studio.textSecondary`, 12 px, on the inset well, with
+/// `SelectableText`'s selection color (the theme's primary at 40 %).
+fn url_style(_: &Theme, _: text_editor::Status) -> text_editor::Style {
+    text_editor::Style {
         background: Background::Color(Color::TRANSPARENT),
         border: Border::default(),
-        icon: Studio::TEXT_FAINT,
         placeholder: Studio::TEXT_FAINT,
         value: Studio::TEXT_SECONDARY,
         selection: alpha(Zinc::PRIMARY, 0.40),
+    }
+}
+
+/// The URL's look at `opacity` (the dialog's fade).
+fn faded_url(style: text_editor::Style, opacity: f32) -> text_editor::Style {
+    text_editor::Style {
+        placeholder: theme::faded(style.placeholder, opacity),
+        value: theme::faded(style.value, opacity),
+        selection: theme::faded(style.selection, opacity),
+        ..style
     }
 }
 
@@ -347,16 +381,13 @@ mod tests {
         let messages = dialog_messages(&dialog, |ui| {
             assert!(ui.find("Vocara 9.9.9 is available").is_ok());
             assert!(ui.find("New voiceprint views.").is_ok());
-            // The URL is in a (read-only) text field, not plain text.
-            let url_field = ui.find(|candidate: Candidate<'_>| match candidate {
-                Candidate::TextInput { state, .. }
-                    if state.text() == "https://example.com/download" =>
-                {
-                    Some(())
-                }
+            // The URL is selectable text: text, not an editable field.
+            assert!(ui.find("https://example.com/download").is_ok());
+            let field = ui.find(|candidate: Candidate<'_>| match candidate {
+                Candidate::TextInput { .. } => Some(()),
                 _ => None,
             });
-            assert!(url_field.is_ok(), "the URL is selectable");
+            assert!(field.is_err(), "no editable field");
             ui.click("Later").expect("the later button");
         });
         assert_eq!(messages, vec![DialogMessage::Cancel]);
@@ -364,6 +395,40 @@ mod tests {
             dialog.update(DialogMessage::Cancel),
             Some(DialogOutcome::Close)
         );
+    }
+
+    #[test]
+    fn the_url_wraps_in_its_well_inside_the_card() {
+        // The 480-wide card centred in the 1024-wide window, 22 inside its
+        // 1 px border; the well 12 by 10 inside its own; the text at its
+        // 12 px lines, as many as it takes.
+        crate::ui::core::widgets::studio_text::testing::load_fonts();
+        let card_left = (1024.0 - 480.0) / 2.0;
+        let width = 480.0 - 2.0 * 23.0 - 2.0 * 13.0;
+        let dialog = |url: &str| {
+            UpdateDownloadDialog::new(UpdateInfo {
+                version: "2.0.0".into(),
+                url: url.into(),
+                notes: String::new(),
+            })
+        };
+        let short = dialog("https://example.com/2");
+        let mut ui = iced_test::simulator(short.view());
+        let title = ui.find("Vocara 2.0.0 is available").expect("the title");
+        let url = ui.find("https://example.com/2").expect("the URL").bounds();
+        assert_eq!(title.bounds().x, card_left + 23.0);
+        assert_eq!(
+            (url.x, url.width, url.height),
+            (card_left + 36.0, width, 12.0)
+        );
+        // The title (15 px), 14, the well's border and padding.
+        assert_eq!(url.y, title.bounds().y + 15.0 + 14.0 + 11.0);
+
+        let long = format!("https://example.com/releases/{}", "a".repeat(120));
+        let long_dialog = dialog(&long);
+        let mut ui = iced_test::simulator(long_dialog.view());
+        let url = ui.find(long.as_str()).expect("the URL").bounds();
+        assert!(url.height >= 24.0 && url.height % 12.0 == 0.0, "{url:?}");
     }
 
     #[test]

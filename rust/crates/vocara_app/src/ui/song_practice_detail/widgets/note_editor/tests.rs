@@ -205,3 +205,24 @@ fn the_card_is_at_most_460_wide_and_centred() {
         "{title:?}"
     );
 }
+
+#[test]
+fn the_field_holds_three_to_six_lines_and_its_inset() {
+    // `minLines: 3, maxLines: 6` of 14 × 1.4, and forui's content padding
+    // less compact density's: 6 above and below, 10 at the sides.
+    let line = FIELD_SIZE * FIELD_LINE_HEIGHT;
+    let mut editor = NoteEditor::new(None, Duration::ZERO, None, normalize);
+    let long = "line\n".repeat(12);
+    for (text, lines) in [("short", MIN_LINES), (long.as_str(), MAX_LINES)] {
+        enter_text(&mut editor, text);
+        let mut ui = iced_test::simulator(editor.view());
+        let field = ui.find(editor.input_id()).expect("the field").bounds();
+        assert!(
+            (field.height - (lines * line + 12.0)).abs() < 1e-3,
+            "{lines} lines: {field:?}"
+        );
+        // The card's 20 and border, the well's 12 and border.
+        let card_left = (1024.0 - CARD_MAX_WIDTH) / 2.0;
+        assert_eq!(field.x, card_left + 21.0 + 13.0, "{field:?}");
+    }
+}

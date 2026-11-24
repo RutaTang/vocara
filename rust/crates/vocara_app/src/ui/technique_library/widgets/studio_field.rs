@@ -4,21 +4,25 @@
 //! field — and [`parse_comma_list`], how the aliases and tags fields read.
 //!
 //! Flutter's one `TextField` was single-line by default and multi-line with
-//! `minLines`/`maxLines`; iced has a single-line `text_input` and a
-//! multi-line `text_editor`, so the field is [`studio_field`] over a `&str`
-//! (single line, Return submits) or [`studio_prose_field`] over a
-//! `text_editor::Content` (prose: it grows from `min_lines` to `max_lines`,
-//! then scrolls). `autofocus` is the owner's `iced::widget::operation::focus`
-//! task on the field's [`id`](StudioField::id) when it appears. iced draws
-//! the caret in the text colour (the coral `cursorColor` has no
-//! counterpart).
+//! `minLines`/`maxLines`; the app's text fields (`widgets::text_field`) are
+//! a single-line one and a multi-line one, so the field is
+//! [`studio_field`] over a `&str` (single line, Return submits) or
+//! [`studio_prose_field`] over a `text_field::Content` (prose: it grows
+//! from `min_lines` to `max_lines`, then scrolls). Both draw Flutter's
+//! macOS caret in the coral `cursorColor` and open its right-click menu;
+//! their text sits forui's content padding less compact density's inside
+//! the well (`theme::FIELD_PADDING`). `autofocus` is the owner's
+//! `iced::widget::operation::focus` task on the field's
+//! [`id`](StudioField::id) when it appears.
 
-use iced::widget::{column, container, text_editor, text_input, Space};
+use iced::widget::{column, container, Space};
 use iced::{widget, Background, Border, Color, Element, Length, Padding, Theme};
 use vocara_model::util::dart_string;
 
 use crate::ui::core::theme::{self, alpha, font, Studio, Zinc};
 use crate::ui::core::widgets::studio_text::studio_text;
+use crate::ui::core::widgets::text_field::editor::{self as text_editor, text_editor};
+use crate::ui::core::widgets::text_field::text_input;
 
 /// The field's text size and line height (`fontSize: 14, height: 1.45`).
 const TEXT_SIZE: f32 = 14.0;
@@ -198,7 +202,8 @@ impl<'a, M: Clone + 'a> From<StudioField<'a, M>> for Element<'a, M> {
                 let mut input = text_input(&f.hint, value)
                     .size(TEXT_SIZE)
                     .line_height(LINE_HEIGHT)
-                    .padding(0)
+                    .padding(theme::FIELD_PADDING)
+                    .caret_color(theme::faded(Studio::ACCENT, opacity))
                     .style(move |t, s| theme::faded_input(theme::studio_input(t, s), opacity));
                 if let Some(id) = f.id {
                     input = input.id(id);
@@ -220,13 +225,21 @@ impl<'a, M: Clone + 'a> From<StudioField<'a, M>> for Element<'a, M> {
                 max_lines,
             } => {
                 let line = TEXT_SIZE * LINE_HEIGHT;
+                // iced's editor holds its text's height (not its own) to
+                // `min_height`..`max_height` but lays its text out in
+                // `max_height` less its padding: the padding goes on the
+                // maximum so the text may fill `max_lines`.
                 let mut editor = text_editor(content)
                     .placeholder(f.hint)
                     .size(TEXT_SIZE)
                     .line_height(LINE_HEIGHT)
-                    .padding(0)
+                    .padding(theme::FIELD_PADDING)
                     .min_height(line * f32::from(min_lines.max(1)))
-                    .max_height(line * f32::from(max_lines.max(min_lines).max(1)))
+                    .max_height(
+                        line * f32::from(max_lines.max(min_lines).max(1))
+                            + theme::FIELD_PADDING.y(),
+                    )
+                    .caret_color(theme::faded(Studio::ACCENT, opacity))
                     .style(move |t, s| faded_editor(studio_editor(t, s), opacity));
                 if let Some(id) = f.id {
                     editor = editor.id(id);
@@ -246,9 +259,11 @@ impl<'a, M: Clone + 'a> From<StudioField<'a, M>> for Element<'a, M> {
                 .letter_spacing(0.6)
                 .color(theme::faded(Studio::TEXT_FAINT, opacity)),
             Space::new().height(6),
+            // 10 by 12 inside the well's 1 px border (a Flutter
+            // `Container`'s padding includes its decoration's border).
             container(field)
                 .width(Length::Fill)
-                .padding(Padding::from([10, 12]))
+                .padding(Padding::from([11, 13]))
                 .style(move |t| theme::faded_container(theme::inset(8.0)(t), opacity)),
         ]
         .into()
@@ -311,6 +326,49 @@ mod tests {
         ));
         assert!(ui.find("ALIASES (COMMA SEPARATED)").is_ok());
         assert!(ui.find("Edge").is_ok(), "the field shows its value");
+    }
+
+    #[test]
+    fn the_field_sits_in_its_well_as_the_collapsed_decoration_put_it() {
+        // The caption (10.5 px) and 6 above the well; the well's 10 by 12
+        // inside its 1 px border; then the field, forui's content padding
+        // less compact density's: 10 across and 6 down, so a line of
+        // 14 × 1.45 and 12.
+        let id = widget::Id::unique();
+        let mut ui = iced_test::simulator(Element::from(
+            container(
+                studio_field("Name", "Twang")
+                    .id(id.clone())
+                    .on_input(Msg::Input),
+            )
+            .width(300),
+        ));
+        let field = ui.find(id).expect("the field").bounds();
+        let line = TEXT_SIZE * LINE_HEIGHT;
+        assert_eq!(field.x, 13.0, "{field:?}");
+        assert_eq!(field.y, 10.5 + 6.0 + 11.0, "{field:?}");
+        assert_eq!(field.width, 300.0 - 2.0 * 13.0, "{field:?}");
+        assert!((field.height - (line + 12.0)).abs() < 1e-3, "{field:?}");
+
+        // A prose field: three lines and 12 at least, eight and 12 at most.
+        let short = text_editor::Content::with_text("One line");
+        let long = text_editor::Content::with_text(&"A line\n".repeat(20));
+        for (content, lines) in [(&short, 3.0), (&long, 8.0)] {
+            let id = widget::Id::unique();
+            let mut ui = iced_test::simulator(Element::from(
+                container(
+                    studio_prose_field("Description", content, 3, 8)
+                        .id(id.clone())
+                        .on_action(edit_or_move),
+                )
+                .width(300),
+            ));
+            let field = ui.find(id).expect("the field").bounds();
+            assert!(
+                (field.height - (lines * line + 12.0)).abs() < 1e-3,
+                "{lines} lines: {field:?}"
+            );
+        }
     }
 
     #[test]

@@ -49,8 +49,8 @@ use std::time::{Duration, Instant};
 use crate::ui::core::text;
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::{
-    button, center, column, container, hover, responsive, row, scrollable, stack, text_input,
-    Column, Row, Space,
+    button, center, column, container, hover, responsive, row, scrollable, stack, Column, Row,
+    Space,
 };
 use iced::{Background, Border, Element, Length, Padding, Shadow, Task, Theme};
 use vocara_model::models::technique::Technique;
@@ -74,6 +74,7 @@ use crate::ui::core::widgets::fading_scrollbar::{no_scrollbar, Fading};
 use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::core::widgets::studio_text::studio_text;
+use crate::ui::core::widgets::text_field::text_input;
 use crate::ui::snack::{fixed_bar, SnackEvent, SnackQueue, SnackStyle};
 use crate::ui::{Screen, SnackBar, Update};
 
@@ -685,7 +686,9 @@ fn rule<'a>() -> Element<'a, Message> {
         .into()
 }
 
-/// The search box: 240 × 34, a search glyph before the field.
+/// The search box: 240 × 34, a search glyph before the field. The box's
+/// height is fixed, so the field's own inset ([`theme::FIELD_PADDING`])
+/// moves its text in from the sides only: the field stays centred.
 fn search_box(query: &str) -> Element<'_, Message> {
     container(
         row![
@@ -696,7 +699,8 @@ fn search_box(query: &str) -> Element<'_, Message> {
                 .on_input(Message::Query)
                 .size(13)
                 .line_height(1.0)
-                .padding(0)
+                .padding(theme::FIELD_PADDING)
+                .caret_color(Studio::ACCENT)
                 .style(theme::studio_input),
         ]
         .align_y(Vertical::Center),

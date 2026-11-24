@@ -272,6 +272,20 @@ fn a_created_practice_opens_after_the_loading_dialog() {
 }
 
 #[test]
+fn the_loading_card_pads_its_content_inside_its_border() {
+    // 26 by 24 inside the card's 1 px border: the 52 disc, 16, then the
+    // label (13.5 px), the card centred in the 1024 × 768 window.
+    let mut ui = iced_test::simulator(opening_dialog(Fade::SHOWN));
+    let label = ui.find("Loading practice").expect("the label").bounds();
+    let height = 2.0 * 27.0 + 52.0 + 16.0 + 13.5;
+    let card_top = (768.0 - height) / 2.0;
+    assert!(
+        (label.y - (card_top + 27.0 + 52.0 + 16.0)).abs() < 1e-3,
+        "{label:?}"
+    );
+}
+
+#[test]
 fn the_loading_dialog_comes_in_and_goes_over_150_ms_with_frames_only_meanwhile() {
     use crate::ui::core::motion;
     use crate::ui::core::widgets::confirm_dialog::testing::{assert_comes_in, assert_goes};

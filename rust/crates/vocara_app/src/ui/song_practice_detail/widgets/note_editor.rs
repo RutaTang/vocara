@@ -24,15 +24,16 @@
 //! opacity (iced has no subtree opacity), and keeps a closed one drawn,
 //! taking no input, until it has faded out.
 //!
-//! Where iced differs: the caret is drawn in the text color (Flutter's was
-//! coral).
+//! The field is the app's multi-line text field (`widgets::text_field`):
+//! Flutter's macOS caret in the coral `cursorColor`, the right-click menu,
+//! and the field's inset inside its well (`theme::FIELD_PADDING`).
 
 use std::fmt;
 use std::time::Duration;
 
 use crate::ui::core::text;
 use iced::alignment::{Horizontal, Vertical};
-use iced::widget::{center, column, container, opaque, row, stack, text_editor, Space};
+use iced::widget::{center, column, container, opaque, row, stack, Space};
 use iced::{keyboard, widget, Background, Border, Color, Element, Event, Length, Shadow, Task};
 use vocara_model::models::practice_note::PracticeNote;
 use vocara_model::util::dart_string;
@@ -43,6 +44,7 @@ use crate::ui::core::theme::faded;
 use crate::ui::core::theme::{self, alpha, font, Studio, Zinc};
 use crate::ui::core::widgets::confirm_dialog::{barrier, Fade};
 use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
+use crate::ui::core::widgets::text_field::editor::{self as text_editor, text_editor};
 use crate::ui::core::widgets::wrap::Wrap;
 
 #[cfg(test)]
@@ -251,10 +253,14 @@ impl NoteEditor {
             .on_action(Message::Edit)
             .size(FIELD_SIZE)
             .line_height(FIELD_LINE_HEIGHT)
-            .padding(0)
+            .padding(theme::FIELD_PADDING)
             .height(Length::Shrink)
+            // iced's editor holds its text's height (not its own) to these
+            // but lays its text out in `max_height` less its padding: the
+            // padding goes on the maximum so the text may fill six lines.
             .min_height(FIELD_SIZE * FIELD_LINE_HEIGHT * MIN_LINES)
-            .max_height(FIELD_SIZE * FIELD_LINE_HEIGHT * MAX_LINES)
+            .max_height(FIELD_SIZE * FIELD_LINE_HEIGHT * MAX_LINES + theme::FIELD_PADDING.y())
+            .caret_color(fade.color(Studio::ACCENT))
             .style(move |t, s| faded_field(field_style(t, s), fade.card));
 
         let mut actions = row![].align_y(Vertical::Center);

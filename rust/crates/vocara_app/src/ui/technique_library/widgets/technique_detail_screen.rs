@@ -73,9 +73,7 @@ use std::time::{Duration, Instant};
 
 use crate::ui::core::text;
 use iced::alignment::Vertical;
-use iced::widget::{
-    button, center, column, container, scrollable, stack, text_editor, Column, Row, Space,
-};
+use iced::widget::{button, center, column, container, scrollable, stack, Column, Row, Space};
 use iced::{widget, Element, Font, Length, Padding, Subscription, Task};
 use vocara_model::models::technique::Technique;
 use vocara_model::models::technique_media::TechniqueMedia;
@@ -103,6 +101,7 @@ use crate::ui::core::widgets::spectrogram_painter::{release_spectrogram_images, 
 use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::core::widgets::studio_text::studio_text;
+use crate::ui::core::widgets::text_field::editor as text_editor;
 use crate::ui::snack::{fixed_bar, SnackEvent, SnackQueue, SnackStyle};
 use crate::ui::song_practice_detail::widgets::voiceprint_view::{
     self as voiceprint, VoiceprintState,

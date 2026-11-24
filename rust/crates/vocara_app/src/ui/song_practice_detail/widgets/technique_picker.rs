@@ -25,7 +25,7 @@
 use crate::ui::core::text;
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::{
-    button, center, column, container, opaque, row, scrollable, stack, text_input, Column, Space,
+    button, center, column, container, opaque, row, scrollable, stack, Column, Space,
 };
 use iced::{keyboard, widget, Element, Event, Length, Padding, Task};
 use vocara_model::models::technique::Technique;
@@ -37,6 +37,7 @@ use crate::ui::core::widgets::confirm_dialog::{barrier, Fade};
 use crate::ui::core::widgets::fading_scrollbar::Fading;
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::core::widgets::studio_text::studio_text;
+use crate::ui::core::widgets::text_field::text_input;
 use crate::ui::core::widgets::wrap::Wrap;
 
 /// `showTechniquePicker`'s default title.
@@ -225,7 +226,9 @@ impl TechniquePicker {
 }
 
 /// `_SearchField`: 34 tall, the inset well (radius 8), a search glyph before
-/// the field. (Its coral `cursorColor` has no iced counterpart.)
+/// the field. The well's height is fixed, so the field's own inset
+/// ([`theme::FIELD_PADDING`]) moves its text in from the sides only: the
+/// field stays centred in the well.
 fn search_field(query: &str, id: widget::Id, fade: Fade) -> Element<'_, Message> {
     container(
         row![
@@ -236,7 +239,8 @@ fn search_field(query: &str, id: widget::Id, fade: Fade) -> Element<'_, Message>
                 .on_input(Message::Query)
                 .size(13)
                 .line_height(1.0)
-                .padding(0)
+                .padding(theme::FIELD_PADDING)
+                .caret_color(fade.color(Studio::ACCENT))
                 .style(fade.input(theme::studio_input)),
         ]
         .align_y(Vertical::Center),

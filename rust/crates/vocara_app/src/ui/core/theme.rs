@@ -15,7 +15,7 @@ use crate::ui::core::text;
 use iced::border::Radius;
 use iced::font::{Family, Weight};
 use iced::widget::{button, container, scrollable, text_input};
-use iced::{Background, Border, Color, Font, Shadow, Theme, Vector};
+use iced::{Background, Border, Color, Font, Padding, Shadow, Theme, Vector};
 
 /// Dark "studio" palette — charcoal panels with a warm coral accent, modeled
 /// on a modern DAW. Tracks are neutral gray by default; the selected track and
@@ -400,13 +400,30 @@ pub fn text_faint(_: &Theme) -> text::Style {
 
 // --------------------------------------------------------------------- input
 
+/// Where a studio text field's text, hint and caret sit inside the field.
+/// Every Dart field is a `TextField` with `InputDecoration(isCollapsed:
+/// true, border: InputBorder.none)` and no `contentPadding` of its own, so
+/// `applyDefaults` gives it forui's `inputDecorationTheme.contentPadding`
+/// (`FTextFieldStyle.contentPadding`, 10 all round), which a collapsed
+/// decoration keeps; macOS's compact `VisualDensity` takes its
+/// `baseSizeAdjustment.dy` (-8) off the field's height and half of it off
+/// the text's top (`_RenderDecoration._layout`). So the text is 10 in from
+/// the left and right and 6 from the top and bottom, and the field is its
+/// lines plus 12 tall.
+pub const FIELD_PADDING: Padding = Padding {
+    top: 6.0,
+    right: 10.0,
+    bottom: 6.0,
+    left: 10.0,
+};
+
 /// The studio text field (`TextField` with `InputDecoration(isCollapsed,
 /// border: none)` inside an inset well, as `confirm_dialog.dart` and
 /// `studio_field.dart` build it): no fill or border of its own (the well
 /// draws them), `Studio.textPrimary` text, `Studio.textFaint` hint, faint
-/// text when disabled, and Material 3's selection color (primary at 40 %).
-/// iced draws the caret in the value color: the coral `cursorColor` has no
-/// counterpart.
+/// text when disabled, and the selection color a macOS field took
+/// (`CupertinoTheme.primaryColor`, the Material primary, at 40 %). The
+/// coral `cursorColor` is the field's own (`text_field`'s `caret_color`).
 pub fn studio_input(_: &Theme, status: text_input::Status) -> text_input::Style {
     let disabled = matches!(status, text_input::Status::Disabled);
     text_input::Style {
