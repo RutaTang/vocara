@@ -171,7 +171,10 @@ structure every screen follows, so screens ported by different hands fit:
   `canvas::Program`s; controls that need custom input (faders, knobs, drag
   handles) are custom widgets or canvases with the same hit areas, drag
   rules, wheel/trackpad handling and double-click resets as the Dart ones.
-  Icons are Lucide (forui's `FIcons`) from the `lucide-icons` crate.
+  Icons are Lucide (forui's `FIcons`) from the `lucide-icons` crate. The
+  one Material icon a Flutter widget drew on its own, the license page's
+  `BackButton` arrow (`Icons.arrow_back_ios_new_rounded`), is drawn from
+  its Material Icons outline (Apache 2.0, listed on the license page).
 - **Text**: every text is shaped fully and kerned, as Flutter set it: the
   workspace enables iced's `advanced-shaping` feature, which makes
   `Shaping::Advanced` every text's default (iced's own default shapes ASCII
@@ -199,7 +202,8 @@ structure every screen follows, so screens ported by different hands fit:
   motion (`material_tooltip`, `fading_scrollbar`, `material_slider`,
   `material_switch` (Material 3's switch as forui themed it, read off
   Flutter 3.38's `switch.dart`), the `InkWell` highlights of
-  `animated::ink_hover`, the FX chain's reordering cards). A model that animates (the snack bars, `ui::snack`;
+  `animated::ink_hover` (`ink_well` for a button's own overlay colors),
+  the FX chain's reordering cards, the license page's draggable sheet). A model that animates (the snack bars, `ui::snack`;
   a page transition and a dialog coming in or going, the app's and the
   pages' that draw their own; the license page; a lyrics list's scroll)
   subscribes to `motion::frames(animating)`, the window's frames only
@@ -357,7 +361,7 @@ behavior and its tests are ported and the gates pass.
 | `ui/home/widgets/new_practice_dialog.dart` | 16 | `vocara_app::ui::home::widgets::new_practice_dialog` | done |
 | `ui/home/widgets/practice_project_card.dart` | 126 | `vocara_app::ui::home::widgets::practice_project_card` | done |
 | `ui/home/widgets/update_notice.dart` | 219 | `vocara_app::ui::home::widgets::update_notice` | done (the 5 s auto-check timer is the home screen's) |
-| `ui/settings/licenses.dart` | 213 | `vocara_app::ui::settings::licenses` (the page too; the crate list is the generated `assets/licenses/crates.json`: after a dependency change, run `VOCARA_UPDATE_LICENSES=1 cargo test -p vocara_app the_crate_license_list_is_current` and commit it) | done |
+| `ui/settings/licenses.dart` | 213 | `vocara_app::ui::settings::licenses` (the page too, as `LicensePage` laid it out on macOS under forui's Material theme, its registry gathered off the UI thread under a spinner and its detail on a `DraggableScrollableSheet` a trackpad grows; what still differs is in the module docs; the crate list is the generated `assets/licenses/crates.json`: after a dependency change, run `VOCARA_UPDATE_LICENSES=1 cargo test -p vocara_app the_crate_license_list_is_current` and commit it) | done |
 | `ui/settings/settings_screen.dart` | 1135 | `vocara_app::ui::settings::settings_screen` (no view model: the screen holds `_SettingsScreenState`'s state; the settings choices block on their persist, so they run off the UI thread one at a time, in order, and those still waiting when the page leaves are applied after it; the save panel, the bundle and the storage root are `SettingsHooks`; the license page and the toasts draw inside the page, a toast up as the page leaves going to the app's `messenger`) | done |
 | `ui/song_practice_detail/view_model/analysis_cache.dart` | 1717 | `vocara_app::ui::song_practice_detail::view_model::analysis_cache` (the Dart awaits are a state machine: worker jobs come back through `job_done`, the joins and `Future.wait`s are continuations drained as microtasks; selection and transport come from an `AnalysisHost`; the capture pump is the screen's 30 ms tick) | done |
 | `ui/song_practice_detail/view_model/analysis_source.dart` | 64 | `vocara_app::ui::song_practice_detail::view_model::analysis_source` (the listener is a `revision`; a seek is the view's message) | done |

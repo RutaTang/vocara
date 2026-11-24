@@ -824,7 +824,9 @@ impl Screen for SettingsScreen {
                 route.forward(Instant::now());
                 self.licenses_route = Some(Box::new(route));
                 self.closed_licenses = None;
-                Update::none()
+                // The page gathers its registry off the UI thread, under a
+                // spinner, as its `FutureBuilder` did.
+                Update::task(LicensesPage::load().map(Message::Licenses))
             }
             Message::Licenses(message) => {
                 if let Some(page) = &mut self.licenses {

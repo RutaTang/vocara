@@ -1261,7 +1261,7 @@ fn licenses_opens_the_license_page_and_its_back_returns_to_settings() {
     assert!(page.shows("Powered by iced"));
     assert!(page.shows("Inter (font)"));
     assert!(!page.shows("Check for updates"), "the page covers Settings");
-    page.click(&glyph(Icon::ChevronLeft));
+    page.click_id(licenses::BACK);
     assert!(!page.screen.licenses_open());
     assert!(page.shows("Check for updates"));
     assert!(page.navigations.is_empty(), "Settings stays");
