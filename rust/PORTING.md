@@ -184,6 +184,27 @@ structure every screen follows, so screens ported by different hands fit:
   `.ellipsis(max_lines)`), which lays its own cosmic-text buffer out as
   SkParagraph did; a canvas label with spacing or tabular figures is drawn
   with `studio_text::fill_spaced_text` / `fill_tabular_text`.
+- **Text fields** (`widgets::text_field`): iced's `text_input` and
+  `text_editor` keep their caret, focus and blink in private state and draw
+  a 1 px square caret in the text's color, under the text, so the app forks
+  them (iced_widget 0.14.2, MIT; their keys, mouse, clipboard, input method
+  and scrolling unchanged) for what Flutter's macOS `TextField` did: its
+  caret (2 px, round ends, `cursorColor`, a pixel above and below the line,
+  2 device pixels left of the glyph edge, never left of the text, on a
+  device pixel, over the text, 500 ms on and off, clipped to the field only
+  while its text overflows) and its right-click menu (the word under the
+  click selected unless it was on the selection, and the desktop Cupertino
+  toolbar there with what macOS offered: Cut, Copy, Paste, no Select All).
+  A multi-line field wraps 3 px short of its width (the caret's room); one
+  read-only is `SelectableText` (it selects and copies, shows no caret,
+  and keeps its own selection). A press of any button outside a field
+  unfocuses it, as `TextFieldTapRegion` did. The fields sit forui's
+  `contentPadding` less compact density's inside their wells
+  (`theme::FIELD_PADDING`: 10 across, 6 down), and a bordered container's
+  padding counts its 1 px border, as a Flutter `Container`'s did. The
+  caret's device pixels are the window's scale factor
+  (`text_field::set_scale_factor`), which the app asks for when its window
+  opens.
 - **Window** (macOS): hidden title bar with a transparent, full-size content
   view; the drag bar starts a window drag; the close request runs the quit
   guard (kill separation sidecars, finalize recordings) before closing, as
@@ -260,6 +281,16 @@ small and written down in the module that has it:
 
 - Touch-only gestures (pointer cancel, a second finger) do not exist on
   iced's desktop pointer.
+- A text field's right-click toolbar (`text_field::toolbar`) shows what
+  lies behind it unblurred and unsaturated (Flutter's `BackdropFilter`;
+  iced has no backdrop filter), its shadow without its 0.5 px spread, its
+  corners as circular arcs, not superellipses, and its labels in Inter at
+  Inter's natural line height, where Flutter set them in the system UI
+  font (iced cannot name that hidden family).
+- A single-line field's text, when wider than the field, scrolls as iced's
+  did (the caret kept 5 px in from the right edge as it moves), not as
+  Flutter's `EditableText` did (only as far as reveals the caret, over
+  100 ms).
 
 ## Tracking
 
