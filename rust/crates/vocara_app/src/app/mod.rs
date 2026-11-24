@@ -210,8 +210,9 @@ struct Running {
     /// The snack bars pages handed over, shown over the page on top.
     messenger: Messenger,
     /// The barriers of dialogs that closed, fading out (each dialog's
-    /// route animation running back).
-    closing: Vec<Controller>,
+    /// route animation running back), each over the dialogs that were under
+    /// it (how many).
+    closing: Vec<(usize, Controller)>,
     /// The page transition running, if any.
     route: Option<RouteTransition>,
     /// The last frame's time, what the drawing reads.
@@ -222,7 +223,7 @@ impl Running {
     /// Whether something the app draws itself moves at `now` (a page
     /// transition, a closed dialog's barrier fading out).
     fn is_animating(&self, now: Instant) -> bool {
-        self.closing.iter().any(|c| c.is_animating(now))
+        self.closing.iter().any(|(_, c)| c.is_animating(now))
             || self
                 .route
                 .as_ref()
@@ -501,7 +502,7 @@ impl App {
                 if let State::Running(running) = &mut self.state {
                     running.now = running.now.max(at);
                     let now = running.now;
-                    running.closing.retain(|c| c.is_animating(now));
+                    running.closing.retain(|(_, c)| c.is_animating(now));
                     if running
                         .route
                         .as_ref()
@@ -680,7 +681,7 @@ impl App {
                 let mut barrier =
                     Controller::completed(confirm_dialog::TRANSITION, confirm_dialog::TRANSITION);
                 barrier.reverse(Instant::now());
-                running.closing.push(barrier);
+                running.closing.push((running.dialogs.len(), barrier));
                 let message = (open.on_result)(result);
                 self.update(message)
             }
@@ -723,21 +724,31 @@ impl App {
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .style(theme::page)];
-                // A closed dialog's barrier, fading out; it takes no input
-                // (Flutter's barrier ignores the pointer as its route goes).
-                for barrier in &running.closing {
-                    let t = barrier.curved(Curve::Ease, None, running.now);
-                    let color = theme::DIALOG_BARRIER;
-                    layers = layers.push(
-                        container(Space::new())
-                            .width(Length::Fill)
-                            .height(Length::Fill)
-                            .style(theme::fill(alpha(color, color.a * t))),
-                    );
-                }
-                for open in &running.dialogs {
+                // A closed dialog's barrier, fading out where its dialog was
+                // (over the dialogs under it, under any opened since); it
+                // takes no input (Flutter's barrier ignores the pointer as
+                // its route goes).
+                let fading = |depth: usize| {
+                    running
+                        .closing
+                        .iter()
+                        .filter(move |(d, _)| *d == depth)
+                        .map(|(_, barrier)| {
+                            let t = barrier.curved(Curve::Ease, None, running.now);
+                            let color = theme::DIALOG_BARRIER;
+                            Element::from(
+                                container(Space::new())
+                                    .width(Length::Fill)
+                                    .height(Length::Fill)
+                                    .style(theme::fill(alpha(color, color.a * t))),
+                            )
+                        })
+                };
+                for (depth, open) in running.dialogs.iter().enumerate() {
+                    layers = layers.extend(fading(depth));
                     layers = layers.push(open.state.view().map(Message::Dialog));
                 }
+                layers = layers.extend(fading(running.dialogs.len()));
                 layers.into()
             }
         }

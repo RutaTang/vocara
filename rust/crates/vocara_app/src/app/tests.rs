@@ -264,7 +264,7 @@ fn a_closed_dialogs_barrier_fades_out_over_150_ms_on_frames_while_it_does() {
         let State::Running(running) = &app.state else {
             panic!("running")
         };
-        running.closing.first().cloned()
+        running.closing.first().map(|(_, c)| c.clone())
     };
     let fading = barrier(&app).expect("its barrier fades out");
     assert_eq!(frames(&app), 1, "frames while it does");
