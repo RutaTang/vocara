@@ -43,6 +43,7 @@ use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{self, bare_button, font, Studio};
 use crate::ui::core::widgets::animated::ink_hover;
 use crate::ui::core::widgets::confirm_dialog::{ConfirmDialog, StudioPrompt};
+use crate::ui::core::widgets::gesture::{any_tap_event, AnyTap};
 use crate::ui::core::widgets::studio_text::studio_text;
 
 // ------------------------------------------------------------------- tints
@@ -191,9 +192,6 @@ pub const MENU_MAX_HEIGHT: f32 = 440.0;
 
 /// How close a menu may come to the window's edges.
 pub const MENU_MARGIN: f32 = 8.0;
-
-/// `kTouchSlop`: how far a tap on the barrier may travel and still dismiss.
-const TAP_SLOP: f32 = 18.0;
 
 /// The track menu's flags (the non-callback half of `TrackMenuActions`).
 /// Vocal-only actions are hidden for the accompaniment; `can_merge_down`
@@ -743,10 +741,10 @@ pub fn menu_position(at: Point, menu: Size, window: Size) -> Point {
 struct HostState {
     /// The last press inside the host, from its top-left.
     press: Option<Vector>,
-    /// A press on the barrier (outside the open menu), where it landed: its
-    /// release within the tap slop dismisses (Flutter's barrier dismisses on
+    /// A tap on the barrier (outside the open menu) in flight: its release
+    /// within the tap slop dismisses (Flutter's barrier dismisses on
     /// a tap's up, of any button).
-    barrier: Option<Point>,
+    barrier: AnyTap,
 }
 
 impl<'a, M: Clone + 'a> Widget<M, Theme, Renderer> for MenuHost<'a, M> {
@@ -849,7 +847,7 @@ impl<'a, M: Clone + 'a> Widget<M, Theme, Renderer> for MenuHost<'a, M> {
         );
         let state = tree.state.downcast_mut::<HostState>();
         if self.menu.is_none() {
-            state.barrier = None;
+            state.barrier = AnyTap::default();
         }
         // Every press inside counts, the ones a child took too (the ⋯
         // button's tap-down): the last one opened the menu.
@@ -937,7 +935,7 @@ struct OpenMenu<'a, 'b, M> {
     menu: &'b mut Element<'a, M>,
     tree: &'b mut Tree,
     at: Point,
-    barrier: &'b mut Option<Point>,
+    barrier: &'b mut AnyTap,
     on_dismiss: M,
 }
 
@@ -1013,38 +1011,19 @@ impl<M: Clone> overlay::Overlay<M, Theme, Renderer> for OpenMenu<'_, '_, M> {
                 shell.capture_event();
                 return;
             }
-            Event::Mouse(mouse::Event::ButtonPressed(_)) => {
-                if let Some(p) = cursor.position().filter(|p| outside(*p)) {
-                    *self.barrier = Some(p);
+            _ => {
+                // The barrier: a tap outside the menu, of any button, on its
+                // release within the tap slop.
+                let (tapped, taken) =
+                    any_tap_event(self.barrier, event, outside, cursor.position());
+                if tapped {
+                    shell.publish(self.on_dismiss.clone());
+                }
+                if taken {
                     shell.capture_event();
                     return;
                 }
             }
-            Event::Touch(touch::Event::FingerPressed { position, .. }) if outside(*position) => {
-                *self.barrier = Some(*position);
-                shell.capture_event();
-                return;
-            }
-            Event::Mouse(mouse::Event::CursorMoved { position })
-            | Event::Touch(touch::Event::FingerMoved { position, .. }) => {
-                // Dragged past the tap slop: not a tap, so no dismissal.
-                if self
-                    .barrier
-                    .is_some_and(|at| at.distance(*position) > TAP_SLOP)
-                {
-                    *self.barrier = None;
-                }
-            }
-            Event::Mouse(mouse::Event::ButtonReleased(_))
-            | Event::Touch(touch::Event::FingerLifted { .. })
-                if self.barrier.is_some() =>
-            {
-                *self.barrier = None;
-                shell.publish(self.on_dismiss.clone());
-                shell.capture_event();
-                return;
-            }
-            _ => {}
         }
         self.menu.as_widget_mut().update(
             self.tree,

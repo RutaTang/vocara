@@ -30,12 +30,13 @@ use iced::alignment::Vertical;
 use iced::widget::text::Wrapping;
 use iced::widget::{column, container, row, scrollable, Column, Space};
 use iced::{
-    keyboard, mouse, touch, Alignment, Background, Border, Element, Event, Length, Padding, Point,
+    keyboard, mouse, Alignment, Background, Border, Element, Event, Length, Padding, Point,
     Rectangle, Renderer, Shadow, Size, Theme, Vector,
 };
 
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{self, Studio};
+use crate::ui::core::widgets::gesture::{any_tap_event, AnyTap};
 use crate::ui::core::widgets::wrap::Wrap;
 
 /// A model color (`colorValue`, ARGB) as Flutter's `Color(value)`.
@@ -515,6 +516,8 @@ struct PopupState {
     open: Option<Vector>,
     /// A primary press on the trigger that may become the opening tap.
     down: Option<Point>,
+    /// A tap on the open menu's barrier in flight.
+    barrier: AnyTap,
 }
 
 impl<'a, M: Clone + 'a> Widget<M, Theme, Renderer> for PopupMenu<'a, M> {
@@ -613,6 +616,7 @@ impl<'a, M: Clone + 'a> Widget<M, Theme, Renderer> for PopupMenu<'a, M> {
         let state = tree.state.downcast_mut::<PopupState>();
         let open = |state: &mut PopupState, at: Vector, shell: &mut Shell<'_, M>| {
             state.open = Some(at);
+            state.barrier = AnyTap::default();
             shell.capture_event();
             shell.invalidate_layout();
             shell.request_redraw();
@@ -723,8 +727,9 @@ impl<'a, M: Clone + 'a> From<PopupMenu<'a, M>> for Element<'a, M> {
 }
 
 /// The open menu over the whole window: a barrier with no color
-/// (`barrierDismissible`), so a press outside the menu or Escape closes it
-/// and nothing beneath sees the pointer or the keyboard meanwhile.
+/// (`barrierDismissible`), so a tap outside the menu (any button, landing
+/// on its release within the tap slop: `gesture::AnyTap`) or Escape closes
+/// it, and nothing beneath sees the pointer or the keyboard meanwhile.
 struct MenuOverlay<'a, 'b, M> {
     menu: &'b mut Element<'a, M>,
     tree: &'b mut Tree,
@@ -801,18 +806,26 @@ impl<M> overlay::Overlay<M, Theme, Renderer> for MenuOverlay<'_, '_, M> {
         let Some(menu) = layout.children().next() else {
             return;
         };
-        let outside = !cursor.is_over(menu.bounds());
-        let dismiss = match event {
-            Event::Mouse(mouse::Event::ButtonPressed(_))
-            | Event::Touch(touch::Event::FingerPressed { .. }) => outside,
-            Event::Keyboard(keyboard::Event::KeyPressed {
-                key: keyboard::Key::Named(keyboard::key::Named::Escape),
-                ..
-            }) => true,
-            _ => false,
-        };
-        if dismiss {
+        if let Event::Keyboard(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Named(keyboard::key::Named::Escape),
+            ..
+        }) = event
+        {
             self.close(shell);
+            shell.capture_event();
+            return;
+        }
+        let bounds = menu.bounds();
+        let (tapped, taken) = any_tap_event(
+            &mut self.state.barrier,
+            event,
+            |at| !bounds.contains(at),
+            cursor.position(),
+        );
+        if tapped {
+            self.close(shell);
+        }
+        if taken {
             shell.capture_event();
             return;
         }

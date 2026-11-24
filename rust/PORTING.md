@@ -171,6 +171,10 @@ structure every screen follows, so screens ported by different hands fit:
   `canvas::Program`s; controls that need custom input (faders, knobs, drag
   handles) are custom widgets or canvases with the same hit areas, drag
   rules, wheel/trackpad handling and double-click resets as the Dart ones.
+  Every dismissible modal barrier (the dialogs', the note editor's and
+  technique picker's, the popup menus') dismisses as `ModalBarrier` did:
+  on a tap's release, of any button, within `kTouchSlop` of its press
+  (`widgets::gesture::AnyTap`), not on the press.
   Icons are Lucide (forui's `FIcons`) from the `lucide-icons` crate.
 - **Text**: every text is shaped fully and kerned, as Flutter set it: the
   workspace enables iced's `advanced-shaping` feature, which makes

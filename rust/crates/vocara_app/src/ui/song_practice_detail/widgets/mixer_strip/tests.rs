@@ -639,18 +639,28 @@ mod deleting_a_bus_asks_first {
     }
 
     #[test]
-    fn a_press_outside_closes_the_menu_and_nothing_beneath_sees_it() {
+    fn a_tap_outside_closes_the_menu_on_its_release_and_nothing_beneath_sees_it() {
         let buses = lead_vox();
         let mut ui = simulator(SIZE, desk(&[], &buses, true).view());
         let title = text_at(&mut ui, "Lead Vox", 0).expect("the bus strip");
         ui.point_at(title.center());
         let _ = ui.simulate([right_press(), right_release()]);
         assert!(text_at(&mut ui, "Rename", 0).is_some());
-        // The "+ Bus" button sits under the barrier.
+        // The "+ Bus" button sits under the barrier, which dismisses on a
+        // tap's release (`ModalBarrier`), not its press.
         let add = text_at(&mut ui, "BUS", 0).expect("+ Bus");
         ui.point_at(add.center());
-        let _ = ui.simulate([press(), release()]);
+        let _ = ui.simulate([press()]);
+        assert!(text_at(&mut ui, "Rename", 0).is_some(), "still open");
+        let _ = ui.simulate([release()]);
         assert!(text_at(&mut ui, "Rename", 0).is_none(), "closed");
+        // A secondary click outside dismisses as well.
+        ui.point_at(title.center());
+        let _ = ui.simulate([right_press(), right_release()]);
+        assert!(text_at(&mut ui, "Rename", 0).is_some());
+        ui.point_at(add.center());
+        let _ = ui.simulate([right_press(), right_release()]);
+        assert!(text_at(&mut ui, "Rename", 0).is_none(), "closed again");
         assert!(ui.into_messages().next().is_none());
     }
 }

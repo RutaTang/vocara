@@ -11,7 +11,9 @@
 //! public too, for a screen that draws a modal of its own.
 //!
 //! Dismissal is Flutter `showDialog`'s: a tap on the barrier or Escape
-//! cancels (the barrier is dismissible); Enter in the prompt's field
+//! cancels (the barrier is dismissible; its tap is `ModalBarrier`'s — any
+//! button, landing on the release within `kTouchSlop` of the press, see
+//! [`barrier`]); Enter in the prompt's field
 //! submits, as its `onSubmitted` did; Enter in the confirm dialog does
 //! nothing (no button there takes focus). While a dialog is up it holds the
 //! keyboard: nothing beneath sees a key.
@@ -38,11 +40,10 @@ use std::time::Duration;
 
 use crate::ui::core::text;
 use iced::alignment::{Horizontal, Vertical};
-use iced::widget::{
-    center, column, container, mouse_area, opaque, row, scrollable, stack, text_input, Space,
-};
+use iced::widget::{center, column, container, opaque, row, scrollable, stack, text_input, Space};
 use iced::{keyboard, widget, Background, Color, Element, Event, Length, Padding};
 
+use super::gesture::{any_tap_event, AnyTap};
 use super::studio_button::{studio_button, StudioButtonVariant};
 use super::studio_text::studio_text;
 use super::wrap::Wrap;
@@ -574,12 +575,19 @@ impl DialogMotion {
     }
 }
 
-/// A barrier of `color` over everything at `strength` (0 to 1); a press on
-/// it reports `on_press`, when given. It takes every press either way.
+/// A barrier of `color` over everything at `strength` (0 to 1); a tap on it
+/// reports `on_tap`, when given (`ModalBarrier(dismissible: true)`). It
+/// takes every press either way.
+///
+/// The tap is the modal barrier's (`gesture::AnyTap`): any button, and it
+/// lands on the release, within `kTouchSlop` of the press. A press dragged
+/// further, or joined by a second button, dismisses nothing; nor does a
+/// release whose press went down on the card (or before the barrier was
+/// there).
 pub fn barrier<'a, M: Clone + 'a>(
     color: Color,
     strength: f32,
-    on_press: Option<M>,
+    on_tap: Option<M>,
 ) -> Element<'a, M> {
     let fill = container(Space::new())
         .width(Length::Fill)
@@ -588,8 +596,20 @@ pub fn barrier<'a, M: Clone + 'a>(
             background: Some(Background::Color(faded(color, strength))),
             ..container::Style::default()
         });
-    match on_press {
-        Some(on_press) => opaque(mouse_area(fill).on_press(on_press)),
+    match on_tap {
+        Some(on_tap) => opaque(Wrap::<M, AnyTap>::new(
+            fill,
+            Box::new(move |tap, event, bounds, cursor, shell| {
+                let (tapped, taken) =
+                    any_tap_event(tap, event, |at| bounds.contains(at), cursor.position());
+                if tapped {
+                    shell.publish(on_tap.clone());
+                }
+                if taken {
+                    shell.capture_event();
+                }
+            }),
+        )),
         None => opaque(fill),
     }
 }
@@ -838,6 +858,90 @@ mod tests {
             let _ = ui.simulate(iced_test::simulator::click());
         });
         assert_eq!(messages, vec![Message::Cancel, Message::Cancel]);
+    }
+
+    fn mouse(event: iced::mouse::Event) -> Event {
+        Event::Mouse(event)
+    }
+
+    fn press(button: iced::mouse::Button) -> Event {
+        mouse(iced::mouse::Event::ButtonPressed(button))
+    }
+
+    fn release(button: iced::mouse::Button) -> Event {
+        mouse(iced::mouse::Event::ButtonReleased(button))
+    }
+
+    #[test]
+    fn the_barrier_cancels_on_a_taps_release_of_any_button() {
+        use iced::mouse::Button;
+        let corner = Point::new(5.0, 5.0);
+        // `ModalBarrier`'s tap: the press alone dismisses nothing; its release
+        // does.
+        let mut state = DialogState::new(ConfirmDialog::new("Delete?"));
+        let mut ui = iced_test::simulator(state.view());
+        ui.point_at(corner);
+        let _ = ui.simulate([press(Button::Left)]);
+        assert_eq!(ui.into_messages().count(), 0, "not on the press");
+        for button in [Button::Left, Button::Right, Button::Middle] {
+            let messages = run(&mut state, |ui| {
+                ui.point_at(corner);
+                let _ = ui.simulate([press(button), release(button)]);
+            });
+            assert_eq!(messages, vec![Message::Cancel], "{button:?}");
+        }
+    }
+
+    #[test]
+    fn a_barrier_press_dragged_past_the_slop_or_joined_by_a_button_is_no_tap() {
+        use iced::mouse::Button;
+        let moved = |x: f32| {
+            mouse(iced::mouse::Event::CursorMoved {
+                position: Point::new(x, 5.0),
+            })
+        };
+        let mut state = DialogState::new(ConfirmDialog::new("Delete?"));
+        // Within `kTouchSlop` (18 px) of the press: still a tap.
+        let messages = run(&mut state, |ui| {
+            ui.point_at(Point::new(5.0, 5.0));
+            let _ = ui.simulate([press(Button::Left), moved(23.0), release(Button::Left)]);
+        });
+        assert_eq!(messages, vec![Message::Cancel]);
+        // Past it, even if it comes back: no tap.
+        let messages = run(&mut state, |ui| {
+            ui.point_at(Point::new(5.0, 5.0));
+            let _ = ui.simulate([
+                press(Button::Left),
+                moved(24.0),
+                moved(5.0),
+                release(Button::Left),
+            ]);
+        });
+        assert!(messages.is_empty(), "{messages:?}");
+        // A second button while the first is down rejects it.
+        let messages = run(&mut state, |ui| {
+            ui.point_at(Point::new(5.0, 5.0));
+            let _ = ui.simulate([
+                press(Button::Left),
+                press(Button::Right),
+                release(Button::Right),
+                release(Button::Left),
+            ]);
+        });
+        assert!(messages.is_empty(), "{messages:?}");
+    }
+
+    #[test]
+    fn a_press_on_the_card_released_on_the_barrier_is_no_tap() {
+        let mut state = DialogState::new(ConfirmDialog::new("Delete?").body("Body"));
+        let messages = run(&mut state, |ui| {
+            let body = ui.find("Body").expect("body shown").bounds();
+            ui.point_at(body.center());
+            let _ = ui.simulate([press(iced::mouse::Button::Left)]);
+            ui.point_at(Point::new(5.0, 5.0));
+            let _ = ui.simulate([release(iced::mouse::Button::Left)]);
+        });
+        assert!(messages.is_empty(), "{messages:?}");
     }
 
     #[test]
