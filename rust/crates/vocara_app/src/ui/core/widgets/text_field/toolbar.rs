@@ -67,7 +67,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use iced::advanced::graphics::text::cosmic_text::Buffer;
-use iced::advanced::graphics::text::font_system;
+use iced::advanced::graphics::text::{font_system, Version};
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::renderer::{self, Renderer as _};
 use iced::advanced::text::{Alignment, Wrapping};
@@ -290,12 +290,21 @@ struct Toolbar<'b, Message> {
 
 /// An item's label laid out (once per label and thread), and its size.
 fn label(item: Item) -> (Arc<Buffer>, Size) {
+    /// A label laid out, with the font system's version it was laid out
+    /// at (a font loaded since lays it out afresh).
+    type Laid = (Item, Version, Arc<Buffer>, Size);
     thread_local! {
-        static LABELS: RefCell<Vec<(Item, Arc<Buffer>, Size)>> = const { RefCell::new(Vec::new()) };
+        static LABELS: RefCell<Vec<Laid>> = const { RefCell::new(Vec::new()) };
     }
+    let version = font_system().read().expect("Read font system").version();
     LABELS.with(|labels| {
-        if let Some((_, buffer, size)) = labels.borrow().iter().find(|(i, ..)| *i == item) {
-            return (buffer.clone(), *size);
+        let found = labels
+            .borrow()
+            .iter()
+            .find(|(i, v, ..)| *i == item && *v == version)
+            .map(|(_, _, buffer, size)| (buffer.clone(), *size));
+        if let Some(found) = found {
+            return found;
         }
         let spec = Spec {
             content: item.label(),
@@ -313,9 +322,9 @@ fn label(item: Item) -> (Arc<Buffer>, Size) {
             lay_out(font_system.raw(), &spec, Size::INFINITE)
         };
         let buffer = Arc::new(laid.buffer);
-        labels
-            .borrow_mut()
-            .push((item, buffer.clone(), laid.min_bounds));
+        let mut labels = labels.borrow_mut();
+        labels.retain(|(i, ..)| *i != item);
+        labels.push((item, version, buffer.clone(), laid.min_bounds));
         (buffer, laid.min_bounds)
     })
 }
