@@ -307,8 +307,11 @@ fn the_counter_keeps_its_width_as_the_clock_runs() {
         .map(|s| counter_width(s))
         .collect();
     assert!(widths[0] > 0.0);
+    // Inter kerns its tabular 4 by about a hundredth of a pixel (HarfBuzz
+    // did in Flutter too): the counter moves by less than a twentieth of a
+    // pixel, never the pixel a second proportional figures would.
     assert!(
-        widths.iter().all(|w| (w - widths[0]).abs() < 0.01),
+        widths.iter().all(|w| (w - widths[0]).abs() < 0.05),
         "{widths:?}"
     );
     // Each character is followed by its 1 px of letter spacing.

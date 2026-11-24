@@ -1046,8 +1046,10 @@ pub fn window_settings() -> window::Settings {
 }
 
 /// The app-wide iced settings: Inter as the default face, Material's 14 px
-/// body text as the default size, antialiased geometry.
+/// body text as the default size, antialiased geometry. The bundled Inter
+/// is installed first, over any copy the machine has ([`font::install`]).
 pub fn settings() -> iced::Settings {
+    font::install();
     iced::Settings {
         default_font: font::REGULAR,
         default_text_size: theme::DEFAULT_TEXT_SIZE.into(),

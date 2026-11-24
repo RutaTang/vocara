@@ -132,8 +132,37 @@ pub mod font {
         }
     }
 
+    /// Loads the bundled faces into the font system every renderer shares,
+    /// and takes every other face of their family off it: a copy of Inter
+    /// installed on the machine (another version, with other metrics and
+    /// kerning) would otherwise be matched first, where Flutter set every
+    /// text in the faces forui bundled whatever the system had. Idempotent.
+    pub fn install() {
+        use iced::advanced::graphics::text::cosmic_text::fontdb::Source;
+        use std::borrow::Cow;
+
+        let mut fonts = iced::advanced::graphics::text::font_system()
+            .write()
+            .expect("the font system");
+        for face in FACES {
+            fonts.load_font(Cow::Borrowed(face));
+        }
+        let db = fonts.raw().db_mut();
+        let others: Vec<_> = db
+            .faces()
+            .filter(|face| {
+                !matches!(face.source, Source::Binary(_))
+                    && face.families.iter().any(|(name, _)| name == FAMILY)
+            })
+            .map(|face| face.id)
+            .collect();
+        for id in others {
+            db.remove_face(id);
+        }
+    }
+
     /// The bundled faces (the weights the Dart UI uses: w400..w800), to load
-    /// at startup (`iced::application(..).font(..)`, `Settings::fonts`).
+    /// at startup ([`install`]).
     pub const FACES: [&[u8]; 5] = [
         include_bytes!("../../../assets/fonts/inter/Inter-Regular.ttf"),
         include_bytes!("../../../assets/fonts/inter/Inter-Medium.ttf"),

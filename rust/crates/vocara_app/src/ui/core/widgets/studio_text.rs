@@ -713,17 +713,12 @@ pub(crate) mod testing {
     //! Loading the app's faces into the font system every test shares, and
     //! laying text out with them, for tests that measure text.
 
-    use std::borrow::Cow;
-
     use super::*;
     use crate::ui::core::theme::font;
 
     /// Loads Inter (every weight the app bundles); loading twice is a no-op.
     pub(crate) fn load_fonts() {
-        let mut font_system = font_system().write().expect("Write font system");
-        for face in font::FACES {
-            font_system.load_font(Cow::Borrowed(face));
-        }
+        font::install();
     }
 
     /// A one-line spec of `content` in Inter at `size` and `weight`.

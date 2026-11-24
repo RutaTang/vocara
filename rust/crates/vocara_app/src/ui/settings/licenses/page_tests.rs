@@ -121,12 +121,11 @@ impl Window {
     fn new() -> Self {
         static FONTS: Once = Once::new();
         FONTS.call_once(|| {
-            let mut system = iced_test::renderer::graphics::text::font_system()
+            font::install();
+            iced_test::renderer::graphics::text::font_system()
                 .write()
-                .expect("the font system");
-            for face in font::FACES.iter().copied().chain([icons::FONT_BYTES]) {
-                system.load_font(Cow::Borrowed(face));
-            }
+                .expect("the font system")
+                .load_font(Cow::Borrowed(icons::FONT_BYTES));
         });
         let renderer = iced_test::futures::futures::executor::block_on(
             <Renderer as Headless>::new(font::REGULAR, DEFAULT_TEXT_SIZE.into(), None),
