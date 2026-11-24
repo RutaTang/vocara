@@ -35,6 +35,7 @@ use iced::{
 
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{self, Studio};
+use crate::ui::core::widgets::fading_scrollbar::no_scrollbar;
 use crate::ui::core::widgets::wrap::Wrap;
 
 /// A model color (`colorValue`, ARGB) as Flutter's `Color(value)`.
@@ -485,7 +486,7 @@ fn menu_card<'a, M: Clone + 'a>(
         }
         rows = rows.push(MenuRow::new(item, Rc::clone(picked)));
     }
-    container(scrollable(rows).style(theme::no_scrollbar))
+    container(no_scrollbar(scrollable(rows)))
         .width(width)
         .max_height(MENU_MAX_HEIGHT)
         // Inside the 1 px border (the decoration's padding).

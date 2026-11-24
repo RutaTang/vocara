@@ -208,6 +208,19 @@ structure every screen follows, so screens ported by different hands fit:
   opacity: what fades (a dialog card, a snack bar, a tooltip) takes every
   color it draws at the fade's opacity. A sliding page moves its layout
   with its drawing (`widgets::slide`), so a tap lands where it is drawn.
+- **Scrollbars**: a vertical scrollable that Material's desktop scroll
+  behavior gave a scrollbar takes `.fading()` (`widgets::fading_scrollbar`),
+  which hides iced's own scrollbar and draws and drives Material's itself,
+  as Flutter 3.38's `ScrollbarPainter` and `RawScrollbarState` did: an
+  8 px thumb 2 px in from the edge, its share of the view's height but at
+  least 48, in `onSurface` at 30 %, 65 % hovered, 75 % dragged
+  (`theme::scrollbar`); a drag of it scrolls in proportion, a press on its
+  track pages 0.8 of the view in 100 ms; it fades in on a scroll or under
+  the pointer and out 600 ms after, and while it shows its 12 px track is
+  its own, not the content's. A horizontal scrollable (Material gave none)
+  and a `ScrollConfiguration(scrollbars: false)` one have no scrollbar
+  (`Scrollbar::hidden()`, `fading_scrollbar::no_scrollbar`): nothing is
+  drawn and nothing takes the pointer at their edge.
 - **Tests**: view models are unit-tested directly (the Dart widget tests
   mostly assert view-model behavior; port those assertions); screens get
   `iced_test` simulator tests where a Dart widget test checked what is on
@@ -260,6 +273,10 @@ small and written down in the module that has it:
 
 - Touch-only gestures (pointer cancel, a second finger) do not exist on
   iced's desktop pointer.
+- The wheel over a shown scrollbar's track scrolls its view as Flutter's
+  did, but the iced scrollable offers it to the content under the track
+  first; a page of under half a pixel jumps as on a Retina display, iced
+  not telling a widget the scale (`fading_scrollbar`).
 
 ## Tracking
 

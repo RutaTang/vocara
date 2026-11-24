@@ -61,7 +61,7 @@ use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{self, alpha, bare_button, font, Studio};
 use crate::ui::core::widgets::animated::{animated_container, ink_hover, Decoration};
 use crate::ui::core::widgets::confirm_dialog::ConfirmDialog;
-use crate::ui::core::widgets::fading_scrollbar::Fading;
+use crate::ui::core::widgets::fading_scrollbar::{no_scrollbar, Fading};
 use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::core::widgets::studio_text::studio_text;
@@ -568,7 +568,7 @@ impl TechniqueLibraryScreen {
                 Message::PickTag(Some(facet.tag)),
             ));
         }
-        container(scrollable(items).style(theme::no_scrollbar))
+        container(no_scrollbar(scrollable(items)))
             .width(240)
             .max_height(440)
             .padding(1)
