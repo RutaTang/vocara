@@ -38,8 +38,8 @@
 //!   [`Message::RenameBus`] / [`Message::DeleteBus`] where the Dart desk
 //!   opened `showRenameDialog` / `confirmDeleteBus` and then called the
 //!   mixer.
-//! - iced text has no tabular figures; the disabled MON fader fades its
-//!   colors (iced has no subtree opacity).
+//! - The disabled MON fader fades its colors (iced has no subtree
+//!   opacity).
 
 #[cfg(test)]
 mod tests;
@@ -426,11 +426,12 @@ fn caption<'a>(label: &'static str, color: Color) -> Element<'a, Message> {
         .into()
 }
 
-/// A strip's "-6.0 dB" readout.
+/// A strip's "-6.0 dB" readout, in tabular figures.
 fn db_readout<'a>(volume: f64) -> Element<'a, Message> {
-    text(format!("{} dB", fader_db(volume)))
+    studio_text(format!("{} dB", fader_db(volume)))
         .size(10)
         .font(font::SEMIBOLD)
+        .tabular()
         .color(Studio::TEXT_SECONDARY)
         .into()
 }
@@ -938,9 +939,10 @@ fn fader_column<'a>(
             .height(Length::Fill)
             .align_x(Horizontal::Center),
         gap(6.0),
-        text(readout)
+        studio_text(readout)
             .size(9)
             .font(font::SEMIBOLD)
+            .tabular()
             .color(if enabled {
                 Studio::TEXT_SECONDARY
             } else {

@@ -1334,8 +1334,9 @@ fn sends_section<'a, M: Clone + 'a>(
                 .width(Length::Fill),
                 Space::new().width(6),
                 container(
-                    text(fmt_send_db(send.level_db))
+                    studio_text(fmt_send_db(send.level_db))
                         .size(9)
+                        .tabular()
                         .color(Studio::TEXT_SECONDARY)
                         .wrapping(Wrapping::None),
                 )

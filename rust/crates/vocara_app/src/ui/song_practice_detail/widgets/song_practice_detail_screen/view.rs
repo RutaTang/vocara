@@ -1094,9 +1094,10 @@ fn separation_overlay<'a>(progress: Option<f64>, can_cancel: bool) -> Element<'a
                     .color(Studio::TEXT_PRIMARY)
             )
             .width(Length::Fill),
-            text(format!("{pct}%"))
+            studio_text(format!("{pct}%"))
                 .size(14)
                 .font(font::BOLD)
+                .tabular()
                 .color(Studio::ACCENT),
         ]
         .align_y(Vertical::Center),

@@ -48,8 +48,7 @@
 //!   height (the toolbar, the pinned hint) keeps a slot, so the editor and
 //!   the sync list keep their widget state (Dart keyed the tab body).
 //!
-//! Where iced differs: text has no tabular figures; tooltips show below
-//! their button on hover.
+//! Where iced differs: tooltips show below their button on hover.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1301,9 +1300,10 @@ fn sync_line<'a>(
             .into();
     }
     let target = i as i64 == data.sync_index;
-    let time = text(l.time_ms.map_or_else(|| "—".to_string(), sync_time))
+    let time = studio_text(l.time_ms.map_or_else(|| "—".to_string(), sync_time))
         .size(11)
         .font(font::SEMIBOLD)
+        .tabular()
         .color(if l.is_synced() {
             Studio::ACCENT
         } else {
