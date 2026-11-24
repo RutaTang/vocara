@@ -137,12 +137,12 @@ impl<T: Lerp> State<T> {
             .map_or_else(|| self.motion.target(), |now| self.motion.value(now))
     }
 
-    /// A frame at `at`: moves to `target`, and asks for the next frame
-    /// while it moves. Returns what it shows now.
-    fn frame<M>(&mut self, target: T, at: Instant, shell: &mut Shell<'_, M>) -> T {
+    /// A frame at `at`: moves to `target` along `curve`, and asks for the
+    /// next frame while it moves. Returns what it shows now.
+    fn frame<M>(&mut self, target: T, curve: Curve, at: Instant, shell: &mut Shell<'_, M>) -> T {
         let now = self.now.map_or(at, |was| was.max(at));
         self.now = Some(now);
-        self.motion.retarget(target, now);
+        self.motion.retarget_along(target, curve, now);
         if self.motion.is_animating(now) {
             shell.request_redraw();
         }
@@ -374,7 +374,7 @@ impl<M> Widget<M, Theme, Renderer> for AnimatedContainer<'_, M> {
             shell.request_redraw();
         }
         if let Event::Window(window::Event::RedrawRequested(at)) = event {
-            let look = state.frame(self.look(state.hovered), *at, shell);
+            let look = state.frame(self.look(state.hovered), self.curve, *at, shell);
             let moved = state
                 .laid_out
                 .is_some_and(|was| (was.padding, was.align) != (look.padding, look.align));
@@ -636,7 +636,7 @@ impl<T: Lerp + 'static, M> Widget<M, Theme, Renderer> for Animated<'_, T, M> {
         );
         if let Event::Window(window::Event::RedrawRequested(at)) = event {
             let state = tree.state.downcast_mut::<State<T>>();
-            let value = state.frame(self.target, *at, shell);
+            let value = state.frame(self.target, self.curve, *at, shell);
             if state.laid_out.is_some_and(|was| was != value) {
                 shell.invalidate_layout();
             }

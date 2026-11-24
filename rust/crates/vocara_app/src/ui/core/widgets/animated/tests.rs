@@ -157,7 +157,7 @@ fn a_container_decoration_moves_by_its_curve() {
     let mut state = State::new(look(rest), 120 * MS, Curve::EaseOut);
     let mut messages: Vec<()> = Vec::new();
     let mut shell = Shell::new(&mut messages);
-    state.frame(look(hover), t0, &mut shell);
+    state.frame(look(hover), Curve::EaseOut, t0, &mut shell);
     let at = |t: Duration| state.motion.value(t0 + t).decoration.expect("a decoration");
     assert_eq!(at(Duration::ZERO), rest, "start");
     let k = Curve::EaseOut.transform(0.5);

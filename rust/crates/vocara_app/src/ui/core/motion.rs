@@ -287,6 +287,15 @@ impl<T: Lerp> Implicit<T> {
         self.run = Some(run(self.duration, self.curve, now));
     }
 
+    /// [`Self::retarget`], the run following `curve` (a toggle that eases
+    /// in one way and out the other).
+    pub fn retarget_along(&mut self, target: T, curve: Curve, now: Instant) {
+        if target != self.to {
+            self.curve = curve;
+        }
+        self.retarget(target, now);
+    }
+
     /// Shows `value` at once, stopping any run.
     pub fn jump(&mut self, value: T) {
         self.from = value;

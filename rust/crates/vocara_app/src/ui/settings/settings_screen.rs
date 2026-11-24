@@ -37,9 +37,10 @@
 //! (`ui::snack`).
 //!
 //! Flutter's Material slider and switch are drawn here with iced's slider and
-//! a switch built to Material 3's geometry, without their hover/press
-//! overlays; iced has no letter spacing or ellipsis (one-line labels clip),
-//! and the switch's semantics label has no counterpart.
+//! a switch built to Material 3's geometry and toggle motion (200 ms),
+//! without their hover/press overlays; iced has no letter spacing or
+//! ellipsis (one-line labels clip), and the switch's semantics label has no
+//! counterpart.
 
 use std::collections::VecDeque;
 use std::convert::Infallible;
@@ -74,8 +75,9 @@ use crate::app::library::Library;
 use crate::router::Route;
 use crate::services::Services;
 use crate::ui::core::icons::{self, Icon};
-use crate::ui::core::motion::{self, Controller};
+use crate::ui::core::motion::{self, Controller, Curve, Lerp};
 use crate::ui::core::theme::{self, alpha, bare_button, boxed, font, Studio, Zinc};
+use crate::ui::core::widgets::animated::animated;
 use crate::ui::core::widgets::confirm_dialog::ConfirmDialog;
 use crate::ui::core::widgets::slide::{cupertino, slide, PAGE_TRANSITION};
 use crate::ui::core::widgets::studio_hint::spinner;
@@ -1576,38 +1578,48 @@ fn headphones_card<'a>(device: AudioDevice, marked: bool) -> Element<'a, Message
     .into()
 }
 
+/// How long Material's switch takes to toggle (`_kToggleDuration`).
+pub const SWITCH_TOGGLE: Duration = Duration::from_millis(200);
+
 /// Material 3's switch: a 52 × 32 track — coral when on, the inset colour
 /// with an outline when off — and its thumb, 24 px on the right when on,
-/// 16 px on the left when off. Tapping it toggles.
+/// 16 px on the left when off. Tapping it toggles. A toggle moves it over
+/// 200 ms (`ToggleableStateMixin`'s position: `Curves.easeIn` turning on,
+/// `Curves.easeOut` turning off), the thumb sliding and growing or
+/// shrinking and the colors following, as `_SwitchPainter` drew it.
 fn material_switch<'a>(on: bool, toggle: Message) -> Element<'a, Message> {
+    let target = if on { 1.0 } else { 0.0 };
+    let curve = if on { Curve::EaseIn } else { Curve::EaseOut };
+    animated(target, SWITCH_TOGGLE, curve, move |position| {
+        material_switch_at(position, toggle.clone())
+    })
+    .into()
+}
+
+/// [`material_switch`] at `position` (0 off, 1 on).
+fn material_switch_at<'a>(position: f32, toggle: Message) -> Element<'a, Message> {
     const WIDTH: f32 = 52.0;
     const HEIGHT: f32 = 32.0;
-    let thumb_size = if on { 24.0 } else { 16.0 };
+    let thumb_size = 16.0.lerp(24.0, position);
+    // The thumb's centre runs between the track's rounded ends.
+    let centre = (HEIGHT / 2.0).lerp(WIDTH - HEIGHT / 2.0, position);
     // The scheme's `onPrimary` thumb when on; the `outline` (its
     // `onSurface`) thumb and track outline when off.
-    let (track, outline, thumb) = if on {
-        (Studio::ACCENT, None, Zinc::PRIMARY_FOREGROUND)
-    } else {
-        (Studio::INSET, Some(Zinc::FOREGROUND), Zinc::FOREGROUND)
-    };
+    let track = Studio::INSET.lerp(Studio::ACCENT, position);
+    let outline = Zinc::FOREGROUND.lerp(Color::TRANSPARENT, position);
+    let thumb = Zinc::FOREGROUND.lerp(Zinc::PRIMARY_FOREGROUND, position);
     let knob = container(Space::new())
         .width(thumb_size)
         .height(thumb_size)
         .style(move |_: &Theme| boxed(Some(thumb), thumb_size / 2.0, None));
-    let face = container(knob)
+    let face = container(row![Space::new().width(centre - thumb_size / 2.0), knob])
         .width(WIDTH)
         .height(HEIGHT)
-        .padding((HEIGHT - thumb_size) / 2.0)
-        .align_x(if on {
-            Horizontal::Right
-        } else {
-            Horizontal::Left
-        })
         .align_y(Vertical::Center)
         .style(move |_: &Theme| container::Style {
             border: Border {
-                color: outline.unwrap_or(Color::TRANSPARENT),
-                width: if outline.is_some() { 2.0 } else { 0.0 },
+                color: outline,
+                width: if outline.a > 0.0 { 2.0 } else { 0.0 },
                 radius: (HEIGHT / 2.0).into(),
             },
             ..boxed(Some(track), HEIGHT / 2.0, None)
