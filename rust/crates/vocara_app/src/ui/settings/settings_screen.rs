@@ -42,7 +42,9 @@
 //! under the pointer on the thumb or a drag), and the switch as forui
 //! themed it (`material_switch`: its 300 ms toggle, stretching thumb, hover
 //! and press rings, and drag); the switch's semantics label has no
-//! counterpart.
+//! counterpart. The cards' tappable rows (Dart's `InkWell`s) show no hover
+//! or press highlight, as in Dart: their ink went on the `Scaffold`'s
+//! `Material`, under the opaque card (`tappable`).
 
 use std::collections::VecDeque;
 use std::convert::Infallible;
@@ -54,7 +56,6 @@ use std::time::{Duration, Instant};
 
 use crate::ui::core::text;
 use iced::alignment::{Horizontal, Vertical};
-use iced::border::Radius;
 use iced::futures::channel::mpsc;
 use iced::futures::{Stream, StreamExt};
 use iced::widget::{button, column, container, row, scrollable, slider, stack, Column, Space};
@@ -75,7 +76,6 @@ use crate::services::Services;
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::motion::{self, Controller};
 use crate::ui::core::theme::{self, alpha, bare_button, boxed, font, Studio};
-use crate::ui::core::widgets::animated::ink_hover;
 use crate::ui::core::widgets::confirm_dialog::ConfirmDialog;
 use crate::ui::core::widgets::fading_scrollbar::Fading;
 use crate::ui::core::widgets::material_slider::{clear_style, material_slider, SliderLook};
@@ -123,10 +123,8 @@ const BLUETOOTH_CONFLICT: &str = "The microphone is a Bluetooth headset. Bluetoo
      high-quality sound and a microphone at once, so recording drops the headset to call \
      quality. Pick a different microphone (e.g. the built-in mic).";
 
-/// The radius of the raised cards, and of a row's hover inside one (inside
-/// its 1 px border).
+/// The radius of the raised cards.
 const CARD_RADIUS: f32 = 10.0;
-const ROW_RADIUS: f32 = CARD_RADIUS - 1.0;
 
 /// The repair result as one plain sentence with the report's numbers.
 ///
@@ -1099,7 +1097,6 @@ impl SettingsScreen {
                     },
                     (!self.repairing).then_some(Message::RepairLibrary),
                     self.repairing,
-                    Corners::TOP,
                 ),
                 divider(),
                 action_row(
@@ -1113,7 +1110,6 @@ impl SettingsScreen {
                     },
                     (!self.exporting).then_some(Message::ExportDiagnostics),
                     self.exporting,
-                    Corners::BOTTOM,
                 ),
             ]));
 
@@ -1132,7 +1128,6 @@ impl SettingsScreen {
                     update_subtitle(&self.updates, checking),
                     (!checking).then_some(Message::CheckForUpdates),
                     checking,
-                    Corners::NONE,
                 ),
                 divider(),
                 action_row(
@@ -1141,7 +1136,6 @@ impl SettingsScreen {
                     "Open-source components that ship with Vocara.",
                     Some(Message::OpenLicenses),
                     false,
-                    Corners::BOTTOM,
                 ),
             ]));
 
@@ -1217,59 +1211,26 @@ fn section_label<'a>(label: &str) -> Element<'a, Message> {
         .into()
 }
 
-/// Which of a card's corners a row's hover fills (the card clips its rows to
-/// its rounded shape).
-#[derive(Debug, Clone, Copy)]
-struct Corners {
-    top: bool,
-    bottom: bool,
-}
-
-impl Corners {
-    const NONE: Corners = Corners {
-        top: false,
-        bottom: false,
-    };
-    const TOP: Corners = Corners {
-        top: true,
-        bottom: false,
-    };
-    const BOTTOM: Corners = Corners {
-        top: false,
-        bottom: true,
-    };
-
-    fn radius(self) -> Radius {
-        let top = if self.top { ROW_RADIUS } else { 0.0 };
-        let bottom = if self.bottom { ROW_RADIUS } else { 0.0 };
-        Radius {
-            top_left: top,
-            top_right: top,
-            bottom_right: bottom,
-            bottom_left: bottom,
-        }
-    }
-}
-
-/// A tappable row of a card: `on_tap` `None` disables it. Its hover
-/// highlight fades in and out (the `InkWell`'s, `ink_hover`); none on a
-/// disabled row.
+/// A tappable row of a card (`InkWell(onTap: ..., hoverColor:
+/// Studio.hover)`): `on_tap` `None` disables it. A tap on an enabled row
+/// reports `on_tap`, and the pointer over it is the click cursor
+/// (`WidgetStateMouseCursor.clickable`; the basic one on a disabled row).
+///
+/// It shows no hover or press highlight. Dart's rows were `InkWell`s inside
+/// the cards' opaque `Studio.surfaceRaised` `Container`s with no `Material`
+/// between: an `InkWell` paints its ink on the nearest `Material` beneath
+/// it (here the `Scaffold`'s), which paints its ink features before its
+/// children, so the card covered every highlight.
 fn tappable<'a>(
     content: impl Into<Element<'a, Message>>,
     on_tap: Option<Message>,
-    corners: Corners,
 ) -> Element<'a, Message> {
-    let enabled = on_tap.is_some();
-    let row = button(content)
+    button(content)
         .padding(0)
         .width(Length::Fill)
         .style(bare_button)
-        .on_press_maybe(on_tap);
-    if enabled {
-        ink_hover(row, Studio::HOVER, corners.radius())
-    } else {
-        row.into()
-    }
+        .on_press_maybe(on_tap)
+        .into()
 }
 
 /// `_Card`: the raised card the rows sit in — `Studio.surfaceRaised`, radius
@@ -1308,7 +1269,6 @@ fn device_card<'a>(
         },
         explicit.is_none(),
         Some(Message::Choose(choose(None))),
-        Corners::TOP,
     ));
     for d in devices {
         rows.push(divider());
@@ -1317,7 +1277,6 @@ fn device_card<'a>(
             device_subtitle(d),
             explicit == Some(d.uid.as_str()),
             Some(Message::Choose(choose(Some(d.uid.clone())))),
-            Corners::NONE,
         ));
     }
     if let Some(uid) = missing {
@@ -1333,7 +1292,6 @@ fn device_card<'a>(
             "Unavailable · using system default".to_string(),
             true,
             None,
-            Corners::NONE,
         ));
     }
     rows.push(divider());
@@ -1349,7 +1307,6 @@ fn device_row<'a>(
     subtitle: String,
     selected: bool,
     on_tap: Option<Message>,
-    corners: Corners,
 ) -> Element<'a, Message> {
     let enabled = on_tap.is_some();
     let accent = if enabled {
@@ -1391,11 +1348,7 @@ fn device_row<'a>(
     if selected {
         content = content.push(icons::icon(Icon::Check, 16.0, accent));
     }
-    tappable(
-        container(content).padding(Padding::from([12, 14])),
-        on_tap,
-        corners,
-    )
+    tappable(container(content).padding(Padding::from([12, 14])), on_tap)
 }
 
 /// `_RefreshRow`: "Refresh devices".
@@ -1413,7 +1366,6 @@ fn refresh_row<'a>() -> Element<'a, Message> {
         )
         .padding(Padding::from([11, 14])),
         Some(Message::RefreshDevices),
-        Corners::BOTTOM,
     )
 }
 
@@ -1641,7 +1593,6 @@ fn action_row<'a>(
     subtitle: impl Into<String>,
     on_tap: Option<Message>,
     busy: bool,
-    corners: Corners,
 ) -> Element<'a, Message> {
     let enabled = on_tap.is_some();
     let trailing: Element<'a, Message> = if busy {
@@ -1679,11 +1630,7 @@ fn action_row<'a>(
         trailing,
     ]
     .align_y(Vertical::Center);
-    tappable(
-        container(content).padding(Padding::from([12, 14])),
-        on_tap,
-        corners,
-    )
+    tappable(container(content).padding(Padding::from([12, 14])), on_tap)
 }
 
 /// `_InfoRow`: a row that takes no taps (the About block's version line).

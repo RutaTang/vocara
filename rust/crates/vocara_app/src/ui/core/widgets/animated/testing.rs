@@ -39,6 +39,8 @@ pub struct Frames {
     cursor: Point,
     /// The last frame, drawn, as RGBA rows.
     pixels: Vec<u8>,
+    /// The cursor the last frame asked for.
+    interaction: mouse::Interaction,
 }
 
 impl Frames {
@@ -63,6 +65,7 @@ impl Frames {
             size,
             cursor: Point::new(-100.0, -100.0),
             pixels: Vec::new(),
+            interaction: mouse::Interaction::None,
         }
     }
 
@@ -128,6 +131,12 @@ impl Frames {
             BACKGROUND,
         );
         self.cache = ui.into_cache();
+        if let user_interface::State::Updated {
+            mouse_interaction, ..
+        } = state
+        {
+            self.interaction = mouse_interaction;
+        }
         let more = matches!(
             state,
             user_interface::State::Updated {
@@ -136,6 +145,11 @@ impl Frames {
             }
         );
         (more, messages)
+    }
+
+    /// The cursor the last frame asked for under the pointer.
+    pub fn interaction(&self) -> mouse::Interaction {
+        self.interaction
     }
 
     /// The color drawn at `at` in the last frame.
