@@ -31,7 +31,11 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "process
 iced = { version = "0.14", default-features = false, features = ["wgpu", "tiny-skia", "canvas", "image", "tokio", "advanced", "x11", "wayland", "web-colors"] }
 iced_test = "0.14"
 lucide-icons = { version = "1.77", features = ["iced"] }
-rfd = "0.18"
+# The open and save panels off macOS only (vocara_services::file_panels).
+# The portal backend alone: rfd's `wayland` feature only names a parent
+# window, which no panel of the app's sets, and it would make the services'
+# own build link the system's libwayland-client.
+rfd = { version = "0.18", default-features = false, features = ["xdg-portal"] }
 tempfile = "3"
 ureq = { version = "3", default-features = false }
 libc = "0.2"

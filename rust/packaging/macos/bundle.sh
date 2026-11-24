@@ -43,11 +43,26 @@ BUILD="$(sed -n 's/.*APP_BUILD_NUMBER: &.static str = "\(.*\)";/\1/p' \
   "$WORKSPACE/crates/vocara_services/src/update_check_service.rs")"
 [[ -n "$VERSION" && -n "$BUILD" ]] || { echo "could not read version/build" >&2; exit 1; }
 
+# The oldest macOS each slice runs on (LSMinimumSystemVersion in
+# Info.plist.in): 10.15 for Intel, the Flutter app's deployment target;
+# 11.0 for Apple silicon, the first macOS it ran (and rustc's floor there).
+# The C dependencies (cc) build for the same version.
+deployment_target() {
+  case "$1" in
+    x86_64-apple-darwin) echo 10.15 ;;
+    aarch64-apple-darwin) echo 11.0 ;;
+    *) echo "no deployment target for $1" >&2; return 2 ;;
+  esac
+}
+
 build_one() {
   local target="$1"
+  local minimum
+  minimum="$(deployment_target "$target")"
   local flags=(--locked -p vocara_app --features device --target "$target")
   [[ "$PROFILE" == release ]] && flags+=(--release)
-  (cd "$WORKSPACE" && VOCARA_FLAVOR="$FLAVOR" cargo build "${flags[@]}" >&2)
+  (cd "$WORKSPACE" && MACOSX_DEPLOYMENT_TARGET="$minimum" VOCARA_FLAVOR="$FLAVOR" \
+    cargo build "${flags[@]}" >&2)
   echo "$WORKSPACE/target/$target/$PROFILE/vocara"
 }
 

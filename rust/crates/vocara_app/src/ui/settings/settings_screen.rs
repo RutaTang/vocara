@@ -261,10 +261,11 @@ impl SettingsHooks {
     }
 }
 
-/// The platform save panel (rfd; on macOS it runs on the main thread for the
-/// calling worker): the destination path, or `None` on cancel. Blocking.
+/// The platform save panel (`file_panels`; on macOS it runs on the main
+/// thread for the calling worker): the destination path, or `None` on
+/// cancel. Blocking.
 fn save_panel(suggested_name: &str) -> Result<Option<String>, String> {
-    Ok(rfd::FileDialog::new()
+    Ok(vocara_services::file_panels::FileDialog::new()
         .set_file_name(suggested_name)
         .save_file()
         .map(|path| path.to_string_lossy().into_owned()))

@@ -417,7 +417,7 @@ pub fn subscription(players: &ExamplePlayers) -> Subscription<Message> {
 pub fn browse() -> Task<Message> {
     // Derive the picker filter from the same source as drag-drop's
     // isSupportedMedia so the two entry paths accept identical formats.
-    let picking = rfd::AsyncFileDialog::new()
+    let picking = vocara_services::file_panels::AsyncFileDialog::new()
         .add_filter(PICKER_LABEL, &TechniqueMedia::picker_extensions())
         .pick_files();
     Task::future(picking).map(|files| {

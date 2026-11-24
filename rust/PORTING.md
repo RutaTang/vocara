@@ -88,7 +88,41 @@ wrong. Port the behavior, not the shape:
   C dependencies' build scripts pass and type-checks every macOS-only path:
   `CC_aarch64_apple_darwin=true AR_aarch64_apple_darwin=true
   CXX_aarch64_apple_darwin=true cargo clippy --workspace --all-targets
-  --features vocara_app/device --target aarch64-apple-darwin -- -D warnings`.
+  --features vocara_app/device --target aarch64-apple-darwin -- -D warnings`,
+  and the same for `x86_64-apple-darwin` (the slice macOS 10.15 runs).
+- **macOS 10.15**, the Flutter app's minimum, is the app's too
+  (`LSMinimumSystemVersion` in `packaging/macos/Info.plist.in`). No runner
+  has it, so what keeps it is checked by reading the binary:
+  - `packaging/macos/bundle.sh` builds the x86_64 slice with
+    `MACOSX_DEPLOYMENT_TARGET=10.15` (arm64 at 11.0, the first macOS on
+    Apple silicon);
+  - nothing may link a framework 10.15 lacks. The file panels are
+    `vocara_services::file_panels` on `NSOpenPanel` / `NSSavePanel` (rfd
+    only off macOS), since rfd's macOS backend links
+    UniformTypeIdentifiers (macOS 11). What the macOS build links (the
+    link line of the `device` build), with the first macOS that had each:
+    AppKit, ApplicationServices, AudioToolbox, Carbon, CoreAudio,
+    CoreFoundation, Foundation, `libSystem`, `libobjc` (10.0); Security,
+    `libiconv` (by 10.3); CoreVideo, QuartzCore (10.4); AVFoundation,
+    CoreMedia (10.7); CoreGraphics (10.8 as a framework of its own, inside
+    ApplicationServices before); Metal (10.11). The crates that link them
+    are the `objc2-*` bindings, `winit`, `wgpu-hal` and `metal`,
+    `core-graphics`, `core-foundation-sys`, `security-framework-sys`
+    (native-tls), `sys-locale`, `block2`, `dispatch2` and `libc`;
+  - every symbol it imports must be in 10.15. Checked against the macOS
+    10.15 SDK's stubs (x86_64) and 11.0's (arm64), all are but
+    `AudioHardwareCreateProcessTap` / `AudioHardwareDestroyProcessTap`
+    (macOS 14.2), which cpal's loopback capture uses: the binary links
+    CoreAudio weakly for them (`crates/vocara_app/build.rs`), and nothing
+    calls them on macOS;
+  - an API newer than 10.15 is called only behind `objc2::available!` or a
+    `respondsToSelector:` check. Ours are all 10.14 or older; winit and
+    wgpu-hal check the OS version themselves;
+  - CI's `macos-build` job builds the bundle universal and runs
+    `.github/scripts/macos-minimum-check.sh` on it: each slice's minimum,
+    the frameworks and libraries against an allow-list of what 10.15
+    ships, the two process-tap imports weak. The release workflow runs it
+    on the release binary.
 - **macOS GUI test**: `crates/vocara_services/tests/macos_gui.rs` (no
   harness: AppKit wants the main thread) drives AppKit for real: the menu
   bar's edit target, the delegate's secure restorable state and the
@@ -199,12 +233,6 @@ small and written down in the module that has it:
 - Nothing animates (fades, the separation bar's fill, the analyzer's settling
   jump to their end state). Touch-only gestures (pointer cancel, a second
   finger) do not exist on iced's desktop pointer.
-- The app needs macOS 11.0 (`packaging/macos/Info.plist.in`); the Flutter
-  app ran on 10.15. Its native file panels are built on
-  UniformTypeIdentifiers: `rfd` links `UniformTypeIdentifiers.framework`
-  (through `objc2-uniform-type-identifiers`) and calls `UTType` and
-  `setAllowedContentTypes:` with no availability check, and that framework
-  exists only from macOS 11, so the binary cannot even load on 10.15.
 
 ## Tracking
 
@@ -332,11 +360,11 @@ behavior and its tests are ported and the gates pass.
 | `ui/technique_library/view_model/technique_detail_view_model.dart` | 2013 | `vocara_app::ui::technique_library::view_model::technique_detail_view_model` (each awaited I/O is a `Job` the screen runs on a worker and lands, the code after the `await` a continuation; Dart's return values are `Answer`s; `micArmed` / `analysisScrub` are effects; the recorder's timers are the screen's ticks, which also carry a quit's `quitFinalize` from the finalizer thread; the screen API is in the module doc) | done |
 | `ui/technique_library/view_model/technique_library_view_model.dart` | 280 | `vocara_app::ui::technique_library::view_model::technique_library_view_model` | done |
 | `ui/technique_library/widgets/media/technique_audio_player.dart` | 417 | `vocara_app::ui::technique_library::widgets::media::technique_audio_player` (media_kit's `Player` → `vocara_services::media_player`, polled: AVFoundation on macOS with `device`, the null player elsewhere, a fake in tests; the keyed players a technique page keeps → `media::example_players`) | done (the AVFoundation backend type-checked for macOS; its pure parts tested everywhere) |
-| `ui/technique_library/widgets/media/technique_media_section.dart` | 898 | `vocara_app::ui::technique_library::widgets::media::technique_media_section` (plain data in — `TechniqueMediaSection`, the constructor's parameters — and `Message`s out, which `MediaSectionState::update` turns into the callbacks' `Event`s; the page keeps that state (hover, drag) and the `ExamplePlayers`; the picker is rfd's (`browse`), the rename dialog goes through the app's dialog stack (`Dialog::RenameExample`)) | done |
+| `ui/technique_library/widgets/media/technique_media_section.dart` | 898 | `vocara_app::ui::technique_library::widgets::media::technique_media_section` (plain data in — `TechniqueMediaSection`, the constructor's parameters — and `Message`s out, which `MediaSectionState::update` turns into the callbacks' `Event`s; the page keeps that state (hover, drag) and the `ExamplePlayers`; the picker is `vocara_services::file_panels`' (`browse`), the rename dialog goes through the app's dialog stack (`Dialog::RenameExample`)) | done |
 | `ui/technique_library/widgets/media/technique_video_player.dart` | 190 | `vocara_app::ui::technique_library::widgets::media::technique_video_player` | done (media_kit's desktop controls → the audio player's bar while hovered; no volume, fullscreen or keyboard shortcuts) |
 | `ui/technique_library/widgets/studio_field.dart` | 96 | `vocara_app::ui::technique_library::widgets::studio_field` | done |
 | `ui/technique_library/widgets/technique_analysis_section.dart` | 690 | `vocara_app::ui::technique_library::widgets::technique_analysis_section` (`view` reads the view model, `update` makes the call the Dart tap made where the control was live; the page keeps the Spectrogram tab's `VoiceprintState` and asks `ensureReferenceAnalysis` while the panel is built; the Dart level meter's fill had no height, here it shows) | done (the Range and Dynamics tabs are placeholders until `voice_profile_view` lands) |
-| `ui/technique_library/widgets/technique_detail_screen.dart` | 825 | `vocara_app::ui::technique_library::widgets::technique_detail_screen` (the router's `technique_library::detail`; the screen owns the view model, the `ExamplePlayers`, the `MediaSectionState` and the analysis card's `VoiceprintState`; each `Job` runs off the UI thread and lands as `Message::Landed`, each `Answer` is a Dart `await` resuming; the recorder's ticks — and a quit's `quitFinalize` — and the players' poll are subscriptions; the dialogs go through `Update::dialog`; the header's double-tap settle drops its buttons' messages; the snack bars are the page's while it is on top (queued, timed by a subscription), the app's `messenger`'s once it leaves; exports use rfd's save panel, the players `SystemMediaPlayers` — `with_deps` takes a test's) | done |
+| `ui/technique_library/widgets/technique_detail_screen.dart` | 825 | `vocara_app::ui::technique_library::widgets::technique_detail_screen` (the router's `technique_library::detail`; the screen owns the view model, the `ExamplePlayers`, the `MediaSectionState` and the analysis card's `VoiceprintState`; each `Job` runs off the UI thread and lands as `Message::Landed`, each `Answer` is a Dart `await` resuming; the recorder's ticks — and a quit's `quitFinalize` — and the players' poll are subscriptions; the dialogs go through `Update::dialog`; the header's double-tap settle drops its buttons' messages; the snack bars are the page's while it is on top (queued, timed by a subscription), the app's `messenger`'s once it leaves; exports use `file_panels`' save panel, the players `SystemMediaPlayers` — `with_deps` takes a test's) | done |
 | `ui/technique_library/widgets/technique_dialogs.dart` | 117 | `vocara_app::ui::technique_library::widgets::technique_dialogs` | done |
 | `utils/analysis_gate.dart` | 54 | `vocara_model::util::analysis_gate` | done |
 | `utils/busy_gate.dart` | 83 | `vocara_app::util::busy_gate` | done |

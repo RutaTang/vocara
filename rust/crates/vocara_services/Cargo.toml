@@ -78,46 +78,62 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
 ] }
 
 # HTTPS for the update check: the system trust store on macOS (as Dart's
-# HttpClient used), rustls elsewhere.
+# HttpClient used), rustls elsewhere. And the open and save panels off
+# macOS: rfd's (file_panels.rs). On macOS they are AppKit's, through
+# objc2-app-kit below: rfd's macOS backend links UniformTypeIdentifiers,
+# which exists only from macOS 11.
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 ureq = { workspace = true, features = ["rustls", "gzip"] }
+rfd.workspace = true
 
 # The microphone permission prompt (AVFoundation), see mic_permission.rs,
-# the quit requests and the menu bar (AppKit), see quit_request.rs and
-# app_menu.rs, and the example players' AVPlayer backend (with `device`),
-# see media_player.rs.
+# the quit requests, the menu bar and the open and save panels (AppKit), see
+# quit_request.rs, app_menu.rs and file_panels.rs, and the example players'
+# AVPlayer backend (with `device`), see media_player.rs.
 [target.'cfg(target_os = "macos")'.dependencies]
 ureq = { workspace = true, features = ["native-tls", "gzip"] }
 objc2 = "0.6"
 block2 = "0.6"
+# `run_on_main`: the panels run on the main thread, as rfd's did.
+dispatch2 = { version = "0.3", default-features = false, features = ["std", "objc2"] }
 objc2-av-foundation = { version = "0.3", default-features = false, features = [
     "std",
     "block2",
     "AVCaptureDevice",
     "AVMediaFormat",
 ] }
-# The version rfd already brings in, for objc2 0.6 (winit's 0.2 pairs with
-# objc2 0.5).
+# The version for objc2 0.6 (winit's 0.2 pairs with objc2 0.5). No default
+# features, and never `objc2-uniform-type-identifiers`: it links
+# UniformTypeIdentifiers.framework, which macOS 10.15 does not have.
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
+    # The sheets' completion handlers (file_panels.rs).
+    "block2",
     "NSApplication",
     "NSEvent",
     # NSEvent's key-event constructor (the menu's edit target).
     "NSGraphicsContext",
     "NSMenu",
     "NSMenuItem",
+    "NSOpenPanel",
+    "NSPanel",
     "NSResponder",
+    # NSApplicationActivationPolicy (file_panels.rs).
+    "NSRunningApplication",
+    "NSSavePanel",
     "NSWindow",
 ] }
 # Not only with `device`: the menu bar needs it too.
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
+    "NSArray",
     "NSBundle",
     "NSProcessInfo",
     "NSDictionary",
     "NSError",
     "NSObject",
     "NSString",
+    "NSThread",
     "NSURL",
     "NSValue",
     "objc2-core-foundation",
