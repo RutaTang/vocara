@@ -17,10 +17,29 @@
 //! the dragged card will land moves, each card it passes slides to its new
 //! place over 250 ms (`Curves.easeInOut`, from wherever it was); on the
 //! drop the card glides from where it was let go into its slot over 250 ms
-//! (`Curves.easeOut`). The order changes at the drop, at once (Flutter
-//! reported it once the glide ended); only the drawing follows. The time
-//! comes from the window's frames, and the chain asks for them only while a
-//! card moves.
+//! (`Curves.easeOut`). The time comes from the window's frames, and the
+//! chain asks for them only while a card moves.
+//!
+//! The new order is reported at the drop, where Flutter's list reported it
+//! 250 ms later, at the glide's end (`_DragInfo.end` ran the proxy's
+//! animation back; its dismissal called `_dropCompleted`, which called
+//! `onReorder`). That wait was not safe to port: until then the drag stayed
+//! in flight (`_dragInfo` set), and in Flutter
+//!
+//! - a press on any card's handle during the glide started a new drag,
+//!   whose `startItemDragReorder` found `_dragInfo` set and called
+//!   `cancelReorder`: `_dragReset` threw the dropped order away, unreported;
+//! - the panel going away during it (another take or bus selected: the
+//!   panel is keyed by its target; the inspector collapsed) disposed the
+//!   list, whose `dispose` ran `_dragReset`: the same;
+//! - an order the model changed meanwhile was adopted by `_InsertChain`'s
+//!   `didUpdateWidget`, and the glide's end then applied the old drag's
+//!   indices to it.
+//!
+//! Reported at the drop, the model takes the order at once (the engine's
+//! chain 250 ms sooner than Flutter's did), and nothing that happens during
+//! the glide can lose or misplace it: a new drag starts from the order
+//! already applied. Only the drawing follows.
 //!
 //! There is no auto-scroll to port: the Dart list was shrink-wrapped with
 //! `NeverScrollableScrollPhysics`, so the edge auto-scroller it drove
@@ -721,5 +740,33 @@ mod tests {
         assert!(!window.frame(view(BAC), &[], t2 + 250 * MS), "rests");
         assert!(near(at(&window, 45.0), A), "end: in its place");
         assert!(near(at(&window, 85.0), C), "C never moved");
+    }
+
+    #[test]
+    fn the_drop_reports_the_order_at_once_and_a_drag_during_the_glide_loses_nothing() {
+        let mut window = Frames::new(Size::new(100.0, 200.0));
+        let t0 = Instant::now();
+        window.point_at(Point::new(5.0, 5.0));
+        window.frame(view(ABC), &[press()], t0);
+        window.point_at(Point::new(5.0, 75.0));
+        window.frame(view(ABC), &[], t0 + 16 * MS);
+        let (_, dropped) = window.frame_messages(view(ABC), &[release()], t0 + 300 * MS);
+        let order = |messages: &[Message]| -> Vec<Vec<FxKind>> {
+            messages
+                .iter()
+                .filter_map(|m| match m {
+                    Message::ReorderTrackInserts { order, .. } => Some(order.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(order(&dropped), vec![BAC.to_vec()], "at the drop");
+        // A handle pressed while A glides in (Flutter's list cancelled the
+        // reorder it had yet to report): the new order stands, and the new
+        // drag, let go where it started, reports nothing more.
+        window.point_at(Point::new(5.0, 5.0));
+        let (_, more) = window.frame_messages(view(BAC), &[press()], t0 + 350 * MS);
+        let (_, after) = window.frame_messages(view(BAC), &[release()], t0 + 366 * MS);
+        assert!(order(&more).is_empty() && order(&after).is_empty());
     }
 }
