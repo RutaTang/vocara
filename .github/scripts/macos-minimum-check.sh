@@ -7,7 +7,10 @@
 #    the Apple silicon (arm64) slice, if any, for 11.0;
 #  - every framework and library each slice links is one macOS 10.15 ships
 #    (the allow-list below), so dyld finds them all; in particular not
-#    UniformTypeIdentifiers.framework, which is macOS 11+.
+#    UniformTypeIdentifiers.framework, which is macOS 11+;
+#  - the symbols known to be newer than 10.15 that it imports all the same
+#    are imported weakly (WEAK_ONLY below), so dyld binds them to null
+#    rather than refuse to load the app.
 # Used by CI (a debug universal bundle) and by the release workflow (the
 # universal release binary, before it is signed).
 set -euo pipefail
@@ -43,6 +46,14 @@ LIBRARIES=(
   /usr/lib/libobjc.A.dylib
   /usr/lib/libiconv.2.dylib
   /usr/lib/libc++.1.dylib
+)
+# Imports newer than macOS 10.15 that nothing calls there: cpal's loopback
+# capture (macOS 14.2+). Weak because the binary links CoreAudio weakly
+# (rust/crates/vocara_app/build.rs). Every other symbol the app imports is
+# in the macOS 10.15 SDK.
+WEAK_ONLY=(
+  _AudioHardwareCreateProcessTap
+  _AudioHardwareDestroyProcessTap
 )
 
 FAILED=0
@@ -112,6 +123,20 @@ for arch in x86_64 arm64; do
   done < <(otool -arch "$arch" -L "$BIN" | tail -n +2)
   # libSystem at least: none read means otool failed.
   [[ "$linked" -gt 0 ]] || fail "otool listed nothing $arch links"
+
+  # nm -m marks an import "external", or "weak external" when weak.
+  imports="$(nm -arch "$arch" -m -u "$BIN")"
+  [[ -n "$imports" ]] || fail "nm listed nothing $arch imports"
+  for symbol in "${WEAK_ONLY[@]}"; do
+    line="$(grep -E "[[:space:]]${symbol}([[:space:]]|$)" <<<"$imports" || true)"
+    if [[ -z "$line" ]]; then
+      echo "$arch: does not import $symbol"
+    elif [[ "$line" == *"weak external"* ]]; then
+      echo "$arch: imports $symbol weakly"
+    else
+      fail "$arch slice imports $symbol strongly: no macOS before 14.2 would load it ($line)"
+    fi
+  done
 done
 
 [[ "$FAILED" == 0 ]] || exit 1
