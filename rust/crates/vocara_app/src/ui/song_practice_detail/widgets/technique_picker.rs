@@ -225,7 +225,9 @@ impl TechniquePicker {
 }
 
 /// `_SearchField`: 34 tall, the inset well (radius 8), a search glyph before
-/// the field. (Its coral `cursorColor` has no iced counterpart.)
+/// the field. The well's height is fixed, so the field's own inset
+/// ([`theme::FIELD_PADDING`]) moves its text in from the sides only: the
+/// field stays centred in the well.
 fn search_field(query: &str, id: widget::Id, fade: Fade) -> Element<'_, Message> {
     container(
         row![
@@ -236,7 +238,7 @@ fn search_field(query: &str, id: widget::Id, fade: Fade) -> Element<'_, Message>
                 .on_input(Message::Query)
                 .size(13)
                 .line_height(1.0)
-                .padding(0)
+                .padding(theme::FIELD_PADDING)
                 .style(fade.input(theme::studio_input)),
         ]
         .align_y(Vertical::Center),

@@ -617,7 +617,15 @@ fn the_rename_dialog_shows_the_caption_and_saves_or_cancels() {
     };
     let mut dialog = RenameExampleDialog::new("Example 0");
     let messages = drive(&dialog, &|ui| {
-        assert!(ui.find("Rename example").is_ok());
+        // The field: the well's 12 by 10 inside its 1 px border, then
+        // forui's content padding less compact density's (10 across, 6
+        // down) around the 14 px line.
+        let title = ui.find("Rename example").expect("the title").bounds();
+        let field = ui.find("Example 0").expect("the field").bounds();
+        assert_eq!(field.x, title.x + 13.0, "{field:?}");
+        assert_eq!(field.y, title.y + 15.0 + 14.0 + 11.0, "{field:?}");
+        assert_eq!(field.width, 380.0 - 2.0 * 21.0 - 2.0 * 13.0, "{field:?}");
+        assert_eq!(field.height, 14.0 + 12.0, "{field:?}");
         ui.click("Example 0").expect("the field holds the caption");
         let _ = ui.tap_key(iced::keyboard::Key::Named(iced::keyboard::key::Named::End));
         let _ = ui.typewrite("!");

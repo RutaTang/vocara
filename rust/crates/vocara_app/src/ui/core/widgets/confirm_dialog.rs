@@ -355,12 +355,14 @@ impl DialogState {
     }
 }
 
-/// The card's outer geometry: 400 wide, 22 padding, inside a 24 margin.
+/// The card's outer geometry: 400 wide, 22 padding inside its 1 px border
+/// (a Flutter `Container`'s padding includes its decoration's border; an
+/// iced border takes no room), inside a 24 margin.
 fn card<'a>(content: Element<'a, Message>, fade: Fade) -> Element<'a, Message> {
     container(
         container(content)
             .width(400)
-            .padding(22)
+            .padding(23)
             .style(fade.style(theme::dialog_card)),
     )
     .padding(24)
@@ -464,12 +466,13 @@ fn prompt_card<'a>(
         .on_submit(Message::Confirm)
         .size(14)
         .line_height(1.0)
-        .padding(0)
+        .padding(theme::FIELD_PADDING)
         .style(fade.input(theme::studio_input));
     content = content
         .push(
             container(field)
-                .padding(Padding::from([10, 12]))
+                // 10 by 12 inside the well's 1 px border.
+                .padding(Padding::from([11, 13]))
                 .style(fade.style(theme::inset(8.0))),
         )
         .push(Space::new().height(22))
@@ -918,6 +921,25 @@ mod tests {
             ui.click("Create").expect("confirm button");
         });
         assert_eq!(messages, vec![Message::Confirm]);
+    }
+
+    #[test]
+    fn the_prompt_card_and_its_field_sit_inside_their_borders() {
+        // A 400-wide card centred in the 1024-wide window, 22 inside its
+        // 1 px border; the well 10 by 12 inside its own; the field
+        // forui's content padding less compact density's (10 across, 6
+        // down): a 14 px line and 12.
+        let state = DialogState::new(StudioPrompt::new("Rename").hint("Song title"));
+        let mut ui = iced_test::simulator(state.view());
+        let title = ui.find("Rename").expect("the title").bounds();
+        let field = ui.find("Song title").expect("the field").bounds();
+        let card_left = (1024.0 - 400.0) / 2.0;
+        assert_eq!(title.x, card_left + 23.0, "{title:?}");
+        assert_eq!(field.x, card_left + 23.0 + 13.0, "{field:?}");
+        assert_eq!(field.width, 400.0 - 2.0 * 23.0 - 2.0 * 13.0, "{field:?}");
+        assert_eq!(field.height, 14.0 + 12.0, "{field:?}");
+        // The title (15 px), 16, then the well's top border and padding.
+        assert_eq!(field.y - title.y, 15.0 + 16.0 + 11.0, "{field:?}");
     }
 
     #[test]

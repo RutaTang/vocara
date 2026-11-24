@@ -224,9 +224,11 @@ impl UpdateDownloadDialog {
         content = content
             .push(Space::new().height(14))
             .push(
+                // 10 by 12 inside the well's 1 px border (a Flutter
+                // `Container`'s padding includes its decoration's border).
                 container(url)
                     .width(Length::Fill)
-                    .padding(Padding::from([10, 12]))
+                    .padding(Padding::from([11, 13]))
                     .style(fade.style(theme::inset(8.0))),
             )
             .push(Space::new().height(22))
@@ -241,7 +243,8 @@ impl UpdateDownloadDialog {
             ]);
         let card = container(content.width(Length::Fill))
             .width(480)
-            .padding(22)
+            // 22 inside the card's 1 px border.
+            .padding(23)
             .style(fade.style(theme::dialog_card));
         modal(container(card).padding(24).into(), fade)
     }

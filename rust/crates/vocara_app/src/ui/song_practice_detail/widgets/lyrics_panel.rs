@@ -1230,7 +1230,7 @@ fn lyrics_editor<'a>(state: &'a LyricsPanelState, editor: &'a Editor) -> Element
             .on_action(Message::EditorAction)
             .size(14)
             .line_height(1.4)
-            .padding(0)
+            .padding(theme::FIELD_PADDING)
             .height(Length::Fill)
             .style(editor_style);
         let well = container(field)

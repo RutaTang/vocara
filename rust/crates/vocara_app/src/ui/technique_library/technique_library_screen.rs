@@ -674,7 +674,9 @@ fn rule<'a>() -> Element<'a, Message> {
         .into()
 }
 
-/// The search box: 240 × 34, a search glyph before the field.
+/// The search box: 240 × 34, a search glyph before the field. The box's
+/// height is fixed, so the field's own inset ([`theme::FIELD_PADDING`])
+/// moves its text in from the sides only: the field stays centred.
 fn search_box(query: &str) -> Element<'_, Message> {
     container(
         row![
@@ -685,7 +687,7 @@ fn search_box(query: &str) -> Element<'_, Message> {
                 .on_input(Message::Query)
                 .size(13)
                 .line_height(1.0)
-                .padding(0)
+                .padding(theme::FIELD_PADDING)
                 .style(theme::studio_input),
         ]
         .align_y(Vertical::Center),

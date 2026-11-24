@@ -1073,7 +1073,7 @@ impl RenameExampleDialog {
             .on_submit(Message::Confirm)
             .size(14)
             .line_height(1.0)
-            .padding(0)
+            .padding(theme::FIELD_PADDING)
             .style(fade.input(theme::studio_input));
         let card = container(
             column![

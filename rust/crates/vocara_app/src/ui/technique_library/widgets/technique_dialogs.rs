@@ -123,7 +123,8 @@ impl NewTechniqueDialog {
             .width(Length::Fill),
         )
         .width(440)
-        .padding(22)
+        // 22 inside the card's 1 px border.
+        .padding(23)
         .style(fade.style(theme::dialog_card));
         modal(container(card).padding(24).into(), fade)
     }
@@ -146,6 +147,21 @@ mod tests {
             ui.into_messages().collect()
         };
         messages.into_iter().map(|m| dialog.update(m)).collect()
+    }
+
+    #[test]
+    fn the_card_pads_its_content_inside_its_border() {
+        // 440 wide, centred in the 1024-wide window, 22 inside its 1 px
+        // border: the title and the name field's caption start there, and
+        // the well spans the rest.
+        let dialog = NewTechniqueDialog::new();
+        let mut ui = iced_test::simulator(dialog.view());
+        let title = ui.find("New technique").expect("the title").bounds();
+        let card_left = (1024.0 - 440.0) / 2.0;
+        assert_eq!(title.x, card_left + 23.0, "{title:?}");
+        let field = ui.find(dialog.input_id()).expect("the field").bounds();
+        assert_eq!(field.x, card_left + 23.0 + 13.0, "{field:?}");
+        assert_eq!(field.width, 440.0 - 2.0 * 23.0 - 2.0 * 13.0, "{field:?}");
     }
 
     #[test]

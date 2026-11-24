@@ -775,7 +775,9 @@ fn opening_dialog<'a>(fade: Fade) -> Element<'a, Message> {
         .align_x(Horizontal::Center),
     )
     .width(168)
-    .padding(Padding::from([26, 24]))
+    // 26 by 24 inside the card's 1 px border (a Flutter `Container`'s
+    // padding includes its decoration's border).
+    .padding(Padding::from([27, 25]))
     .style(fade.style(|_: &Theme| container::Style {
         shadow: Shadow {
             color: alpha(Color::BLACK, 0.4),

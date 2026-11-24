@@ -251,10 +251,13 @@ impl NoteEditor {
             .on_action(Message::Edit)
             .size(FIELD_SIZE)
             .line_height(FIELD_LINE_HEIGHT)
-            .padding(0)
+            .padding(theme::FIELD_PADDING)
             .height(Length::Shrink)
+            // iced's editor holds its text's height (not its own) to these
+            // but lays its text out in `max_height` less its padding: the
+            // padding goes on the maximum so the text may fill six lines.
             .min_height(FIELD_SIZE * FIELD_LINE_HEIGHT * MIN_LINES)
-            .max_height(FIELD_SIZE * FIELD_LINE_HEIGHT * MAX_LINES)
+            .max_height(FIELD_SIZE * FIELD_LINE_HEIGHT * MAX_LINES + theme::FIELD_PADDING.y())
             .style(move |t, s| faded_field(field_style(t, s), fade.card));
 
         let mut actions = row![].align_y(Vertical::Center);
