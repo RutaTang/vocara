@@ -115,6 +115,7 @@ use super::track_row;
 use super::voiceprint_view::VoiceprintState;
 use crate::app::library::RemoteAppliedBroadcast;
 use crate::services::Services;
+use crate::ui::core::motion;
 use crate::ui::core::widgets::confirm_dialog::DialogResult;
 use crate::ui::core::widgets::spectrogram_painter::{release_spectrogram_images, RenderRequest};
 use crate::ui::snack::{SnackEvent, SnackQueue};
@@ -925,6 +926,11 @@ impl Screen for SongPracticeDetailScreen {
             SnackEvent::Expired(seq) => Message::SnackExpired(seq),
             SnackEvent::Frame(at) => Message::SnackFrame(at),
         }));
+        // A lyrics list scrolling to a revealed line.
+        subscriptions.push(
+            motion::frames(self.lyrics.is_scrolling(Instant::now()))
+                .map(|at| Message::Lyrics(lyrics_panel::Message::ScrollFrame(at))),
+        );
         Subscription::batch(subscriptions)
     }
 

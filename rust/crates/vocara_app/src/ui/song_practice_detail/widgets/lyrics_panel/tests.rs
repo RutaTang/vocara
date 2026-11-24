@@ -99,8 +99,8 @@ impl PanelUi {
         messages
     }
 
-    /// Runs the panel's requests on `view`, as the runtime runs their tasks
-    /// (a chained operation runs after the one before).
+    /// Runs the panel's requests on `view`, as the runtime runs their tasks;
+    /// a reveal's scroll lands where its animation ends.
     fn apply<'a>(&mut self, view: Element<'a, Message>, requests: Vec<PanelRequest>) {
         let mut ui = self.build(view);
         for request in requests {
@@ -110,15 +110,23 @@ impl PanelUi {
                     list,
                     line,
                     alignment,
-                } => Box::new(Reveal::new(list, line, alignment)),
-            };
-            loop {
-                ui.operate(&self.renderer, op.as_mut());
-                match op.finish() {
-                    Outcome::Chain(next) => op = next,
-                    _ => break,
+                    ..
+                } => {
+                    let mut reveal = Reveal::new(list, line, alignment);
+                    ui.operate(&self.renderer, &mut operation::black_box(&mut reveal));
+                    let Outcome::Some(scroll) = reveal.finish() else {
+                        continue;
+                    };
+                    Box::new(operation::scrollable::scroll_to(
+                        scroll.list,
+                        operation::scrollable::AbsoluteOffset {
+                            x: None,
+                            y: Some(scroll.to),
+                        },
+                    ))
                 }
-            }
+            };
+            ui.operate(&self.renderer, op.as_mut());
         }
         self.cache = Some(ui.into_cache());
     }
@@ -1082,7 +1090,8 @@ fn the_sync_list_recentres_its_target_on_each_notification_not_when_built() {
         vec![PanelRequest::Reveal {
             list: state.list_id(List::Sync),
             line: state.line_id(List::Sync, 7),
-            alignment: 0.5
+            alignment: 0.5,
+            motion: ScrollMotion::SYNC,
         }]
     );
     // Past the last line: nothing to reveal.
@@ -1341,4 +1350,67 @@ fn the_sync_list_stamps_the_line_tapped_and_shows_its_times() {
         tap_label(&mut ui, &state, &vm, "line 3"),
         vec![Message::StampLyricAt(3)]
     );
+}
+
+// ------------------------------------------------- the reveal's animation
+
+fn scroll_of(state: &LyricsPanelState, at: std::time::Instant) -> Option<f32> {
+    state.scrolls.first().map(|(_, along)| along.value(at))
+}
+
+#[test]
+fn a_reveal_scrolls_its_list_there_over_its_time_from_where_it_was() {
+    use std::time::Instant;
+    let mut state = LyricsPanelState::new();
+    let list = state.list_id(List::Reader);
+    let t0 = Instant::now();
+    assert!(!state.is_scrolling(t0), "nothing scrolls: no frames");
+    let start = |from, to| ScrollStart {
+        scroll: RevealScroll {
+            list: list.clone(),
+            from,
+            to,
+        },
+        motion: ScrollMotion::READER,
+    };
+    let _: Task<Message> = state.start_scroll(start(100.0, 420.0), t0);
+    assert!(state.is_scrolling(t0 + Duration::from_millis(1)));
+    assert_eq!(scroll_of(&state, t0), Some(100.0), "start");
+    let half = t0 + Duration::from_millis(160);
+    let expected = 100.0 + 320.0 * Curve::EaseOut.transform(0.5);
+    let middle = scroll_of(&state, half).expect("scrolling");
+    assert!((middle - expected).abs() < 0.5, "middle: {middle}");
+    assert_eq!(
+        scroll_of(&state, t0 + Duration::from_millis(320)),
+        Some(420.0),
+        "end"
+    );
+    // The next line's reveal takes over from where this one got.
+    let _: Task<Message> = state.start_scroll(start(0.0, 600.0), half);
+    assert!((scroll_of(&state, half).expect("scrolling") - middle).abs() < 0.5);
+    // Its last frame lets it go, and the frames stop.
+    let _: Task<Message> = state.scroll_frame(half + Duration::from_millis(320));
+    assert!(state.scrolls.is_empty());
+    assert!(!state.is_scrolling(half + Duration::from_millis(320)));
+    // Already there: nothing animates.
+    let _: Task<Message> = state.start_scroll(start(50.0, 50.0), t0);
+    assert!(state.scrolls.is_empty());
+}
+
+#[test]
+fn the_readers_ease_out_over_320_ms_and_the_sync_list_eases_over_200() {
+    assert_eq!(
+        (ScrollMotion::READER.duration, ScrollMotion::READER.curve),
+        (Duration::from_millis(320), Curve::EaseOut)
+    );
+    assert_eq!(
+        (ScrollMotion::SYNC.duration, ScrollMotion::SYNC.curve),
+        (Duration::from_millis(200), Curve::Ease)
+    );
+    let state = LyricsPanelState::new();
+    let reader = state.reveal(List::Reader, 2, 5, 0.4);
+    assert!(matches!(
+        reader,
+        Some(PanelRequest::Reveal { motion, .. }) if motion == ScrollMotion::READER
+    ));
 }

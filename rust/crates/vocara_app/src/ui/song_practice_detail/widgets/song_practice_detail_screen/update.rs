@@ -47,6 +47,11 @@ impl SongPracticeDetailScreen {
             self.snacks.frame(at);
             return step;
         }
+        if let Message::Lyrics(lyrics_panel::Message::ScrollFrame(at)) = message {
+            // Only a lyrics list's scroll moves.
+            step.task(self.lyrics.scroll_frame(at));
+            return step;
+        }
         if self.disposed {
             // Gone from the stack: only the answers to work the view model
             // still has in flight, so it lands.
@@ -832,6 +837,15 @@ impl SongPracticeDetailScreen {
             } => return self.edit_technique(track_id, &marker_id, step),
             P::Toast(text) => {
                 self.toast(text);
+                return;
+            }
+            P::Scroll(start) => {
+                let scroll = self.lyrics.start_scroll(start, Instant::now());
+                step.task(scroll);
+                return;
+            }
+            P::ScrollFrame(at) => {
+                step.task(self.lyrics.scroll_frame(at));
                 return;
             }
         };
