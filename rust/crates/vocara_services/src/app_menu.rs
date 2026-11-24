@@ -41,13 +41,12 @@
 //! keys and clicks on the four items reach a winit-like view once each, and
 //! in an `NSTextField` ⌘A with ⌘C, ⌘V and ⌘X select, copy, paste and cut.
 //!
-//! One of the Runner's settings stays different: the minimum macOS version
-//! is 11.0 (`LSMinimumSystemVersion` in `packaging/macos/Info.plist.in`),
-//! where the Flutter app's was 10.15. The native file panels (rfd) are built
-//! on UniformTypeIdentifiers, whose framework the binary links and which
-//! exists only from macOS 11, so the app cannot even load on 10.15. (The
-//! Runner's `applicationSupportsSecureRestorableState` is
-//! [`crate::restorable_state`].)
+//! The Runner's other settings: its deployment target, macOS 10.15, is the
+//! app's minimum too (`LSMinimumSystemVersion` in
+//! `packaging/macos/Info.plist.in`), and every AppKit call here is in 10.15
+//! (the newest, `NSApp.helpMenu` and `NSEvent.modifierFlags`, are 10.6).
+//! Its `applicationSupportsSecureRestorableState` is
+//! [`crate::restorable_state`].
 
 use std::ffi::CStr;
 

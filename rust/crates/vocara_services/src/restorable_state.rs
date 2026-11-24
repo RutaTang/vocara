@@ -4,7 +4,11 @@
 //!
 //! AppKit asks the application delegate at launch whether the app's
 //! restorable state is to be decoded with secure coding, and macOS 14 and
-//! later log a warning when the delegate does not say. The delegate is
+//! later log a warning when the delegate does not say. It asks from macOS
+//! 12, where the method appeared; on 10.15 and 11 (the app's minimum is
+//! 10.15) the method added here is never called, and adding it uses only
+//! the Objective-C runtime (`class_addMethod`, `method_setImplementation`),
+//! which those have. The delegate is
 //! winit's, which has no such method, and winit sets it while it creates its
 //! event loop, before the app gets control. So [`declare_secure`] puts a
 //! `setDelegate:` in front of AppKit's: it gives the new delegate's class an

@@ -89,7 +89,9 @@ All of these live as steps of the `build-macos` job in
   `vocara.app` (Info.plist with the flavor's bundle id and the workspace
   version, the icon, an ad-hoc signature). The flavor is baked into the
   binary at compile time. The workflow hard-fails if the executable is not
-  fat.
+  fat, or if it could not load on macOS 10.15, the app's minimum
+  (`.github/scripts/macos-minimum-check.sh`: the x86_64 slice is built for
+  10.15, arm64 for 11.0, and they link only what 10.15 ships).
 - **Signing** — the workflow re-signs with `Developer ID Application`, team
   `TP7LCYW3NY`, hardened runtime and a secure timestamp, which notarization
   requires; any framework or dylib bundled later is signed inside-out first.
