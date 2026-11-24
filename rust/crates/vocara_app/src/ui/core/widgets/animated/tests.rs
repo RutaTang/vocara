@@ -120,6 +120,78 @@ fn an_ink_hover_fades_its_highlight_in_over_50_ms() {
 }
 
 #[test]
+fn an_ink_press_fades_its_highlight_in_over_200_ms_and_out_from_where_it_got() {
+    let mut window = window();
+    let t0 = Instant::now();
+    let inside = Point::new(50.0, 20.0);
+    let row = || ink_hover::<()>(Space::new().width(100).height(40), HOVER, 0.0);
+    // Hovered all the way first, so only the pressed highlight moves.
+    window.point_at(inside);
+    window.frame(row(), &[], t0);
+    window.frame(row(), &[], t0 + 50 * MS);
+    let hovered = HOVER;
+    let pressed = |a: f32| {
+        over(
+            Color {
+                a: INK_HIGHLIGHT.a * a,
+                ..INK_HIGHLIGHT
+            },
+            hovered,
+        )
+    };
+    assert!(
+        near(window.pixel(inside), hovered),
+        "no press: the hover alone"
+    );
+
+    let press = Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
+    let release = Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left));
+    let t1 = t0 + 100 * MS;
+    assert!(
+        window.frame(row(), std::slice::from_ref(&press), t1),
+        "asks for frames"
+    );
+    assert!(near(window.pixel(inside), pressed(0.0)), "start");
+    window.frame(row(), &[], t1 + 100 * MS);
+    assert!(near(window.pixel(inside), pressed(0.5)), "middle");
+    window.frame(row(), &[], t1 + 200 * MS);
+    assert!(near(window.pixel(inside), pressed(1.0)), "end");
+    // Released: back over 200 ms; released halfway in, over half that.
+    let t2 = t1 + 300 * MS;
+    window.frame(row(), std::slice::from_ref(&release), t2);
+    window.frame(row(), &[], t2 + 100 * MS);
+    assert!(near(window.pixel(inside), pressed(0.5)), "going");
+    assert!(!window.frame(row(), &[], t2 + 200 * MS), "rests");
+    assert!(near(window.pixel(inside), hovered), "gone");
+    let t3 = t2 + 300 * MS;
+    window.frame(row(), std::slice::from_ref(&press), t3);
+    window.frame(row(), std::slice::from_ref(&release), t3 + 100 * MS);
+    window.frame(row(), &[], t3 + 150 * MS);
+    assert!(near(window.pixel(inside), pressed(0.25)), "a quick tap");
+    assert!(!window.frame(row(), &[], t3 + 200 * MS));
+    assert!(near(window.pixel(inside), hovered));
+}
+
+#[test]
+fn an_ink_press_that_wanders_off_lets_its_highlight_go() {
+    let mut window = window();
+    let t0 = Instant::now();
+    let inside = Point::new(50.0, 20.0);
+    let row = || ink_hover::<()>(Space::new().width(100).height(40), HOVER, 0.0);
+    window.point_at(inside);
+    window.frame(row(), &[], t0);
+    let press = Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
+    window.frame(row(), std::slice::from_ref(&press), t0 + 50 * MS);
+    window.frame(row(), &[], t0 + 150 * MS);
+    assert!(!near(window.pixel(inside), HOVER), "pressed");
+    // 20 px away, past the slop: cancelled, as a tap recognizer did.
+    window.point_at(Point::new(70.0, 20.0));
+    window.frame(row(), &[], t0 + 150 * MS);
+    assert!(!window.frame(row(), &[], t0 + 250 * MS));
+    assert!(near(window.pixel(Point::new(70.0, 20.0)), HOVER));
+}
+
+#[test]
 fn an_animated_container_draws_its_opacity_at_once() {
     let mut window = window();
     let t0 = Instant::now();

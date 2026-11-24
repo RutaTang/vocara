@@ -26,7 +26,7 @@ use iced::{
     Shadow, Size, Theme, Vector,
 };
 
-use crate::ui::core::motion::{Curve, Implicit, Lerp};
+use crate::ui::core::motion::{Controller, Curve, Implicit, Lerp};
 
 /// What an [`AnimatedContainer`] paints behind its child: a
 /// `BoxDecoration`'s color, its uniform border and its corner radius.
@@ -207,22 +207,254 @@ pub fn animated_container<'a, M>(
 /// `hoverDuration`'s default).
 pub const INK_HOVER: Duration = Duration::from_millis(50);
 
-/// An `InkWell(hoverColor: color)` around `content` (a transparent button):
-/// the highlight, `radius` round, fades in under the pointer and out after
-/// it over [`INK_HOVER`], linear (`InkHighlight`'s alpha); splashes are off
-/// app-wide.
+/// How long an `InkWell`'s pressed highlight takes to fade in or out
+/// (`InkResponse.getFadeDurationForType`, pressed).
+pub const INK_PRESS: Duration = Duration::from_millis(200);
+
+/// The pressed highlight's color: the theme's `highlightColor`, a dark
+/// `ThemeData`'s default (`Color(0x40CCCCCC)`; forui's approximate Material
+/// theme sets none).
+pub const INK_HIGHLIGHT: Color = Color::from_rgba8(0xCC, 0xCC, 0xCC, 0x40 as f32 / 255.0);
+
+/// How far a press may wander before it is no longer a tap (`kTouchSlop`,
+/// a tap recognizer's slop).
+const TOUCH_SLOP: f32 = 18.0;
+
+/// An `InkWell(hoverColor: color)` around `content` (a transparent button),
+/// its highlights `radius` round: the hover one fades in under the pointer
+/// and out after it over [`INK_HOVER`], and the pressed one
+/// ([`INK_HIGHLIGHT`], over it) fades in while a press is down and out
+/// after it over [`INK_PRESS`], each linear (`InkHighlight`'s alpha).
+/// Splashes are off app-wide (forui's theme sets `NoSplash`).
 pub fn ink_hover<'a, M: 'a>(
     content: impl Into<Element<'a, M>>,
     color: Color,
     radius: impl Into<Radius>,
 ) -> Element<'a, M> {
     let radius = radius.into();
-    animated_container(content, INK_HOVER)
+    let pressed = InkPress {
+        content: content.into(),
+        radius,
+    };
+    animated_container(Element::new(pressed), INK_HOVER)
         .style(move |hovered| {
             let a = if hovered { color.a } else { 0.0 };
             Decoration::fill(Color { a, ..color }, radius)
         })
         .into()
+}
+
+/// An `InkWell`'s pressed highlight under `content` (see [`ink_hover`]).
+struct InkPress<'a, M> {
+    content: Element<'a, M>,
+    radius: Radius,
+}
+
+/// The pressed highlight's state: its `AnimationController` (forward as a
+/// press comes down, back as it goes, from wherever it got) and the press.
+struct PressState {
+    highlight: Controller,
+    /// Whether the highlight is on (the controller's last direction).
+    active: bool,
+    /// Where the press that holds the highlight came down.
+    down: Option<iced::Point>,
+    /// The last frame's time.
+    now: Option<Instant>,
+}
+
+impl PressState {
+    fn shown(&self) -> f32 {
+        self.now.map_or(0.0, |now| self.highlight.value(now))
+    }
+}
+
+impl<M> Widget<M, Theme, Renderer> for InkPress<'_, M> {
+    fn size(&self) -> Size<Length> {
+        self.content.as_widget().size()
+    }
+
+    fn size_hint(&self) -> Size<Length> {
+        self.content.as_widget().size_hint()
+    }
+
+    fn tag(&self) -> tree::Tag {
+        tree::Tag::of::<PressState>()
+    }
+
+    fn state(&self) -> tree::State {
+        tree::State::new(PressState {
+            highlight: Controller::new(INK_PRESS, INK_PRESS),
+            active: false,
+            down: None,
+            now: None,
+        })
+    }
+
+    fn children(&self) -> Vec<Tree> {
+        vec![Tree::new(&self.content)]
+    }
+
+    fn diff(&self, tree: &mut Tree) {
+        tree.diff_children(std::slice::from_ref(&self.content));
+    }
+
+    fn layout(
+        &mut self,
+        tree: &mut Tree,
+        renderer: &Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node {
+        self.content
+            .as_widget_mut()
+            .layout(&mut tree.children[0], renderer, limits)
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut Tree,
+        event: &Event,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        renderer: &Renderer,
+        clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, M>,
+        viewport: &Rectangle,
+    ) {
+        let state = tree.state.downcast_mut::<PressState>();
+        let was = state.down;
+        match event {
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                state.down = cursor.position_over(layout.bounds());
+            }
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                state.down = None;
+            }
+            Event::Mouse(mouse::Event::CursorMoved { position }) => {
+                // Wandered off: the tap is cancelled.
+                if state
+                    .down
+                    .is_some_and(|at| at.distance(*position) > TOUCH_SLOP)
+                {
+                    state.down = None;
+                }
+            }
+            Event::Window(window::Event::RedrawRequested(at)) => {
+                let now = state.now.map_or(*at, |was| was.max(*at));
+                state.now = Some(now);
+                let on = state.down.is_some();
+                if on != state.active {
+                    state.active = on;
+                    if on {
+                        state.highlight.forward(now);
+                    } else {
+                        state.highlight.reverse(now);
+                    }
+                }
+                if state.highlight.is_animating(now) {
+                    shell.request_redraw();
+                }
+            }
+            _ => {}
+        }
+        if state.down != was {
+            shell.request_redraw();
+        }
+        self.content.as_widget_mut().update(
+            &mut tree.children[0],
+            event,
+            layout,
+            cursor,
+            renderer,
+            clipboard,
+            shell,
+            viewport,
+        );
+    }
+
+    fn draw(
+        &self,
+        tree: &Tree,
+        renderer: &mut Renderer,
+        theme: &Theme,
+        style: &renderer::Style,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+    ) {
+        let shown = tree.state.downcast_ref::<PressState>().shown();
+        if shown > 0.0 {
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds: layout.bounds(),
+                    border: Border {
+                        radius: self.radius,
+                        ..Border::default()
+                    },
+                    shadow: Shadow::default(),
+                    snap: false,
+                },
+                Background::Color(Color {
+                    a: INK_HIGHLIGHT.a * shown,
+                    ..INK_HIGHLIGHT
+                }),
+            );
+        }
+        self.content.as_widget().draw(
+            &tree.children[0],
+            renderer,
+            theme,
+            style,
+            layout,
+            cursor,
+            viewport,
+        );
+    }
+
+    fn operate(
+        &mut self,
+        tree: &mut Tree,
+        layout: Layout<'_>,
+        renderer: &Renderer,
+        operation: &mut dyn Operation,
+    ) {
+        self.content
+            .as_widget_mut()
+            .operate(&mut tree.children[0], layout, renderer, operation);
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &Tree,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+        renderer: &Renderer,
+    ) -> mouse::Interaction {
+        self.content.as_widget().mouse_interaction(
+            &tree.children[0],
+            layout,
+            cursor,
+            viewport,
+            renderer,
+        )
+    }
+
+    fn overlay<'b>(
+        &'b mut self,
+        tree: &'b mut Tree,
+        layout: Layout<'b>,
+        renderer: &Renderer,
+        viewport: &Rectangle,
+        translation: Vector,
+    ) -> Option<overlay::Element<'b, M, Theme, Renderer>> {
+        self.content.as_widget_mut().overlay(
+            &mut tree.children[0],
+            layout,
+            renderer,
+            viewport,
+            translation,
+        )
+    }
 }
 
 /// `AnimatedAlign(alignment: align, duration: duration, curve: curve)`.
