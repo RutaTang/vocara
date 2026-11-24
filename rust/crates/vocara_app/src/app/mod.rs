@@ -61,6 +61,7 @@ use crate::ui::core::widgets::confirm_dialog::{
     self, Dialog, DialogMotion, DialogResult, DialogState, DialogStep,
 };
 use crate::ui::core::widgets::fatal_open_screen::{self, FatalOpenScreen};
+use crate::ui::core::widgets::focus_traversal::focus_scope;
 use crate::ui::core::widgets::slide::{cupertino, inert, slide};
 use crate::ui::core::widgets::text_field;
 use crate::ui::core::widgets::window_drag_bar::window_drag_bar;
@@ -252,12 +253,17 @@ impl Running {
 
     /// The pages as drawn at the last frame: under the page on top, the
     /// page on top, and over it (see [`RouteTransition`]). The page on top
-    /// always takes the middle slot, so its widgets keep their state.
+    /// always takes the middle slot, so its widgets keep their state, and
+    /// is a focus scope (`focus_traversal`: Tab moves among its fields).
     fn pages_view<'a>(&'a self) -> [Element<'a, Message>; 3] {
         let (top, page) = self.router.top();
         let empty = || Element::from(Space::new().width(Length::Fill).height(Length::Fill));
         let Some(route) = &self.route else {
-            return [empty(), slide(page.view(top), 0.0).into(), empty()];
+            return [
+                empty(),
+                slide(focus_scope(page.view(top)), 0.0).into(),
+                empty(),
+            ];
         };
         let (primary, secondary, shadow) = route.progress(self.now);
         let gone_view = |id: PageId, held: &'a Option<Box<Page>>| -> Option<Element<'a, Message>> {
@@ -278,11 +284,11 @@ impl Running {
                     .map_or_else(empty, |(id, page)| {
                         slide(page.view(id), secondary).inert().into()
                     });
-                let over = slide(page.view(top), primary).shadow(shadow);
+                let over = slide(focus_scope(page.view(top)), primary).shadow(shadow);
                 [under, over.into(), empty()]
             }
             RouteKind::Pop { gone, held } => {
-                let revealed = slide(page.view(top), secondary);
+                let revealed = slide(focus_scope(page.view(top)), secondary);
                 let over = gone_view(*gone, held).map_or_else(empty, |view| {
                     slide(view, primary).shadow(shadow).inert().into()
                 });
@@ -295,7 +301,7 @@ impl Running {
                     .fold(stack![], |layers, view| {
                         layers.push(slide(view, 0.0).inert())
                     });
-                let over = slide(page.view(top), primary).shadow(shadow);
+                let over = slide(focus_scope(page.view(top)), primary).shadow(shadow);
                 [under.into(), over.into(), empty()]
             }
         }

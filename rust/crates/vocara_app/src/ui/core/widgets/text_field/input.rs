@@ -511,11 +511,15 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
     }
 
     fn state(&self) -> tree::State {
-        tree::State::new(State::default())
+        tree::State::new(State {
+            disabled: self.on_input.is_none(),
+            ..State::default()
+        })
     }
 
     fn diff(&self, tree: &mut Tree) {
         let state = tree.state.downcast_mut::<State>();
+        state.disabled = self.on_input.is_none();
 
         // Stop pasting if input becomes disabled
         if self.on_input.is_none() {
@@ -584,8 +588,9 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
 
         operation.text_input(self.id.as_ref(), layout.bounds(), state);
         operation.focusable(self.id.as_ref(), layout.bounds(), state);
-        // Its own state ([`State`]), for an operation that reads it.
-        operation.custom(self.id.as_ref(), layout.bounds(), state);
+        // Its own state ([`State`]) and its text box, for the keyboard's
+        // traversal (`focus_traversal`).
+        operation.custom(self.id.as_ref(), text_bounds(layout), state);
     }
 
     fn update(
@@ -1397,6 +1402,9 @@ pub struct State {
     toolbar: Option<toolbar::State>,
     /// The text's horizontal scroll.
     scroll: Scroll,
+    /// It cannot be edited (`enabled: false`): it takes no focus from the
+    /// keyboard's traversal.
+    disabled: bool,
 }
 
 fn state(tree: &mut Tree) -> &mut State {
@@ -1469,6 +1477,28 @@ impl State {
 
     fn select_range(&mut self, start: usize, end: usize) {
         self.cursor.select_range(start, end);
+    }
+}
+
+impl crate::ui::core::widgets::focus_traversal::Traversable for State {
+    fn can_focus(&self) -> bool {
+        !self.disabled
+    }
+
+    fn is_focused(&self) -> bool {
+        State::is_focused(self)
+    }
+
+    /// Focused from elsewhere: a single-line field selects all its text on
+    /// macOS (`selectAllOnFocus`), and its end is revealed.
+    fn focus_by_traversal(&mut self) {
+        focus(self);
+        self.select_all();
+        self.scroll.schedule(Reveal::Animate);
+    }
+
+    fn unfocus_by_traversal(&mut self) {
+        State::unfocus(self);
     }
 }
 

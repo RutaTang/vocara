@@ -227,7 +227,12 @@ structure every screen follows, so screens ported by different hands fit:
   where it is while the field is unfocused, Home and End only scroll on
   macOS (`scrollToBeginningOfDocument:`), and a wheel's or trackpad's
   horizontal delta scrolls it. A press of any button outside a field
-  unfocuses it, as `TextFieldTapRegion` did. The fields sit forui's
+  unfocuses it, as `TextFieldTapRegion` did. Tab and Shift+Tab move the
+  focus to the next and the previous field (`widgets::focus_traversal`):
+  within the top page, a dialog or an overlay holding the keyboard (each a
+  focus scope, going round at its ends), in reading order, a single-line
+  field they land on selecting all its text (`selectAllOnFocus` on
+  macOS) and the scroll view around it showing it. The fields sit forui's
   `contentPadding` less compact density's inside their wells
   (`theme::FIELD_PADDING`: 10 across, 6 down), and a bordered container's
   padding counts its 1 px border, as a Flutter `Container`'s did. The
@@ -326,6 +331,12 @@ small and written down in the module that has it:
 
 - Touch-only gestures (pointer cancel, a second finger) do not exist on
   iced's desktop pointer.
+- Tab stops on text fields alone (`focus_traversal`). Flutter's also
+  stopped on Material's focusable widgets, all on screens without a text
+  field (the settings rows, slider and switch, the license page's back
+  button and list tiles, the tag and track menus' items), drawing a focus
+  highlight that Space or Enter activated; iced's buttons, sliders and
+  switches take no keyboard focus, so Tab does nothing there.
 - The wheel over a shown scrollbar's track scrolls its view as Flutter's
   did, but the iced scrollable offers it to the content under the track
   first; a page of under half a pixel jumps as on a Retina display, iced

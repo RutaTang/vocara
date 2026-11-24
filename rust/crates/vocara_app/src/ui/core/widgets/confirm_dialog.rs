@@ -43,6 +43,7 @@ use iced::alignment::{Horizontal, Vertical};
 use iced::widget::{center, column, container, opaque, row, scrollable, stack, text_input, Space};
 use iced::{keyboard, widget, Background, Color, Element, Event, Length, Padding};
 
+use super::focus_traversal::focus_scope;
 use super::gesture::{any_tap_event, AnyTap};
 use super::studio_button::{studio_button, StudioButtonVariant};
 use super::studio_text::studio_text;
@@ -628,7 +629,8 @@ pub fn modal<'a>(content: Element<'a, Message>, fade: Fade) -> Element<'a, Messa
     let barrier = barrier(theme::DIALOG_BARRIER, fade.barrier, Some(Message::Cancel));
     let layers = stack![barrier, center(opaque(content)).align_x(Horizontal::Center)];
     Wrap::<Message, ()>::new(
-        layers,
+        // A dialog route's scope: Tab goes round its fields.
+        focus_scope(layers),
         Box::new(|_, event, _, _, shell| {
             if let Event::Keyboard(event) = event {
                 if let keyboard::Event::KeyPressed {

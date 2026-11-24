@@ -55,6 +55,10 @@
 //!   its start.
 //! - **Cut** (Cmd+X) cuts nothing without a selection, where iced's
 //!   deleted the character after the caret.
+//! - **Tab** moves the focus to the next field of its focus scope
+//!   ([`focus_traversal`](super::focus_traversal)), which a single-line
+//!   field takes by selecting all its text; a disabled field takes none.
+//!   Both report their state to it (`Operation::custom`).
 //!
 //! The device pixel ratio the caret needs is the window's scale factor,
 //! which the app hands over when its window opens and the fields take
