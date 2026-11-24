@@ -102,10 +102,15 @@ wrong. Port the behavior, not the shape:
     UniformTypeIdentifiers (macOS 11). What the macOS build links (the
     link line of the `device` build), with the first macOS that had each:
     AppKit, ApplicationServices, AudioToolbox, Carbon, CoreAudio,
-    CoreFoundation, Foundation, `libSystem`, `libobjc` (10.0); Security,
-    `libiconv` (by 10.3); CoreVideo, QuartzCore (10.4); AVFoundation,
-    CoreMedia (10.7); CoreGraphics (10.8 as a framework of its own, inside
-    ApplicationServices before); Metal (10.11). The crates that link them
+    CoreFoundation, CoreServices, Foundation, `libSystem`, `libobjc`
+    (10.0); Security, `libiconv` (by 10.3); CoreVideo, QuartzCore (10.4);
+    AVFoundation, CoreMedia (10.7); CoreGraphics (10.8 as a framework of
+    its own, inside ApplicationServices before); Metal (10.11); ColorSync
+    (10.13 as a public framework, inside ApplicationServices before: the
+    current SDK's linker records it for winit's
+    `CGDisplayCreateUUIDFromDisplayID`, which winit links through
+    ApplicationServices, and CoreServices likewise for what it
+    re-exports). The crates that link them
     are the `objc2-*` bindings, `winit`, `wgpu-hal` and `metal`,
     `core-graphics`, `core-foundation-sys`, `security-framework-sys`
     (native-tls), `sys-locale`, `block2`, `dispatch2` and `libc`;
@@ -182,6 +187,13 @@ structure every screen follows, so screens ported by different hands fit:
   one Material icon a Flutter widget drew on its own, the license page's
   `BackButton` arrow (`Icons.arrow_back_ios_new_rounded`), is drawn from
   its Material Icons outline (Apache 2.0, listed on the license page).
+- **Renderer**: the macOS app draws with iced's wgpu renderer, patched in
+  `rust/vendor/iced_wgpu` (see `rust/vendor/README.md`) to draw a quad's
+  border over its fill, as Flutter's `BoxDecoration` (and iced's
+  tiny-skia renderer, which the Linux tests draw with) do: upstream drew it
+  in place of the fill, so a translucent border (a hovered card's coral at
+  60 %) showed the page behind the card. Text always uses the bundled
+  Inter (`theme::font::install`), never a copy installed on the machine.
 - **Text**: every text is shaped fully and kerned, as Flutter set it: the
   workspace enables iced's `advanced-shaping` feature, which makes
   `Shaping::Advanced` every text's default (iced's own default shapes ASCII

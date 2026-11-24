@@ -101,8 +101,14 @@ fn shipped_packages(meta: &Value) -> Vec<&Value> {
     let mut shipped: Vec<&Value> = seen
         .into_iter()
         .filter_map(|id| packages.get(id).copied())
-        // Path crates (the workspace's own, the engine) are first-party.
-        .filter(|p| !p["source"].is_null())
+        // The workspace's own crates (the engine among them) are
+        // first-party; a vendored, patched crate (`rust/vendor`) is still
+        // third-party.
+        .filter(|p| {
+            !meta["workspace_members"]
+                .as_array()
+                .is_some_and(|members| members.contains(&p["id"]))
+        })
         .collect();
     shipped.sort_by(|a, b| {
         (a["name"].as_str(), a["version"].as_str())

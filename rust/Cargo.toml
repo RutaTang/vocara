@@ -4,6 +4,8 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
+# Patched third-party crates (vendor/README.md), not members.
+exclude = ["vendor"]
 
 [workspace.package]
 version = "0.1.0"
@@ -66,3 +68,7 @@ todo = "deny"
 # whole app instead of returning a decode error.
 lto = "fat"
 codegen-units = 1
+
+# See vendor/README.md: iced_wgpu's quads draw their border over their fill.
+[patch.crates-io]
+iced_wgpu = { path = "vendor/iced_wgpu" }
