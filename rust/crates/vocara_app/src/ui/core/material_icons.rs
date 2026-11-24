@@ -303,15 +303,26 @@ mod tests {
 
     #[test]
     fn play_pause_runs_from_the_triangle_to_the_bars() {
-        // Every path is opaque throughout; the first one's start moves from
-        // the triangle's top-left corner to the right bar's.
-        for frames in &PLAY_PAUSE {
-            assert!(frames.opacities.iter().all(|o| *o == 1.0));
-        }
+        // The first path's start moves from the triangle's top-left corner
+        // to the right bar's.
         assert_eq!(PLAY_PAUSE[0].move_to[0], [16.046875, 10.039062500000002]);
         assert_eq!(PLAY_PAUSE[0].move_to[15], [36.0, 10.0]);
-        let paths = play_pause(0.0, Point::ORIGIN, 48.0);
-        assert_eq!(paths.len(), 3);
-        assert!(paths.iter().all(|(_, opacity)| *opacity == 1.0));
+        // Two paths stay opaque; the third fades out a quarter of the way.
+        let opacities = |progress: f32| -> Vec<f32> {
+            play_pause(progress, Point::ORIGIN, 48.0)
+                .into_iter()
+                .map(|(_, o)| o)
+                .collect()
+        };
+        assert_eq!(opacities(0.0), vec![1.0, 1.0, 1.0]);
+        let at_keyframe_4 = opacities(4.0 / 15.0);
+        assert!(
+            (at_keyframe_4[2] - 0.733_333).abs() < 1e-4,
+            "{at_keyframe_4:?}"
+        );
+        assert_eq!(opacities(1.0), vec![1.0, 1.0, 0.0]);
+        // Halfway between keyframes 3 (opaque) and 4.
+        let between = opacities(3.5 / 15.0);
+        assert!((between[2] - (1.0 + 0.733_333) / 2.0).abs() < 1e-4);
     }
 }
