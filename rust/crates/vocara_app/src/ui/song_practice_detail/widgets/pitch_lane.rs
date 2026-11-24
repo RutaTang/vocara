@@ -43,6 +43,7 @@ use vocara_model::util::dart_num::{ceil_to_i64, compare_f64, floor_to_i64, round
 use crate::ui::core::theme::{alpha, fill, font, Studio};
 use crate::ui::core::widgets::painter::{KeyedCache, Same};
 use crate::ui::core::widgets::studio_hint::lane_hint;
+use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::core::widgets::waveform_painter::PlayheadPainter;
 
 #[cfg(test)]
@@ -998,10 +999,10 @@ impl<'a, M: 'a> From<PitchLane> for Element<'a, M> {
 }
 
 fn header<'a, M: 'a>(lane: &PitchLane, notes: &[PitchNote], in_tune: f64) -> Element<'a, M> {
-    // The 0.8 letter spacing has no iced counterpart.
-    let mut content = column![text("PITCH")
+    let mut content = column![studio_text("PITCH")
         .size(10)
         .font(font::BOLD)
+        .letter_spacing(0.8)
         .color(Studio::TEXT_FAINT)];
     if let (Some(m), false) = (&lane.metrics, lane.loading) {
         let score = if in_tune.is_nan() {

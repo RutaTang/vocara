@@ -10,8 +10,8 @@
 //! [`AudioExporter::export`] blocks its (worker) thread for the save panel
 //! and the copy. The save panel itself is the app's: Dart's default picker
 //! (`systemSaveLocation`, file_selector's save panel) is a GUI call, so
-//! `vocara_app` passes its own (rfd's dialog, run on the main thread for the
-//! worker) to [`AudioExporter::new`].
+//! `vocara_app` passes its own (the save panel of [`crate::file_panels`],
+//! run on the main thread for the worker) to [`AudioExporter::new`].
 
 use std::error::Error;
 use std::fs;

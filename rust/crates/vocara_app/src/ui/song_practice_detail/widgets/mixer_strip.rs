@@ -38,9 +38,8 @@
 //!   [`Message::RenameBus`] / [`Message::DeleteBus`] where the Dart desk
 //!   opened `showRenameDialog` / `confirmDeleteBus` and then called the
 //!   mixer.
-//! - iced text has no ellipsis (one-line labels clip), no letter spacing and
-//!   no tabular figures; the disabled MON fader fades its colors (iced has
-//!   no subtree opacity).
+//! - The disabled MON fader fades its colors (iced has no subtree
+//!   opacity).
 
 #[cfg(test)]
 mod tests;
@@ -52,7 +51,6 @@ use iced::alignment::{Horizontal, Vertical};
 use iced::border::Radius;
 use iced::widget::canvas::{self, Frame, Geometry, LineCap, Path, Stroke};
 use iced::widget::scrollable::{Direction, Scrollbar};
-use iced::widget::text::Wrapping;
 use iced::widget::{
     button, canvas as canvas_widget, center, column, container, responsive, row, scrollable, text,
     tooltip, Column, Space,
@@ -67,6 +65,7 @@ use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{self, alpha, bare_button, boxed, font, Studio};
 use crate::ui::core::widgets::painter::{color_key, KeyedCache};
 use crate::ui::core::widgets::studio_controls::{fader_db, studio_pan_knob};
+use crate::ui::core::widgets::studio_text::studio_text;
 
 /// The desk's data: the Dart widget's `tracks`, and what it read from the
 /// view model.
@@ -404,27 +403,35 @@ fn gap<'a>(height: f32) -> Element<'a, Message> {
     Space::new().height(height).into()
 }
 
-/// A strip's one-line title.
+/// A strip's one-line title, centred, ellipsized.
 fn title<'a>(label: &str, color: Color) -> Element<'a, Message> {
-    container(
-        text(label.to_string())
-            .size(11)
-            .font(font::BOLD)
-            .color(color)
-            .wrapping(Wrapping::None)
-            .align_x(Horizontal::Center)
-            .width(Length::Fill),
-    )
-    .width(Length::Fill)
-    .clip(true)
-    .into()
+    studio_text(label.to_string())
+        .size(11)
+        .font(font::BOLD)
+        .color(color)
+        .align_x(Horizontal::Center)
+        .width(Length::Fill)
+        .ellipsis(1)
+        .into()
 }
 
-/// A strip's "-6.0 dB" readout.
+/// A fixed strip's caption ("MASTER", "MIC"): 11 px w700, 0.5 letter
+/// spacing, centred.
+fn caption<'a>(label: &'static str, color: Color) -> Element<'a, Message> {
+    studio_text(label)
+        .size(11)
+        .font(font::BOLD)
+        .letter_spacing(0.5)
+        .color(color)
+        .into()
+}
+
+/// A strip's "-6.0 dB" readout, in tabular figures.
 fn db_readout<'a>(volume: f64) -> Element<'a, Message> {
-    text(format!("{} dB", fader_db(volume)))
+    studio_text(format!("{} dB", fader_db(volume)))
         .size(10)
         .font(font::SEMIBOLD)
+        .tabular()
         .color(Studio::TEXT_SECONDARY)
         .into()
 }
@@ -492,16 +499,16 @@ fn route_chip<'a>(
     options: Vec<MenuItem<Message>>,
 ) -> Element<'a, Message> {
     let face = container(
-        text(format!("→ {label}"))
+        studio_text(format!("→ {label}"))
             .size(9)
             .font(font::SEMIBOLD)
             .color(alpha(accent, 0.9))
-            .wrapping(Wrapping::None),
+            .align_x(Horizontal::Center)
+            .ellipsis(1),
     )
     .width(Length::Fill)
     .padding([3, 6])
     .align_x(Horizontal::Center)
-    .clip(true)
     .style(|_| boxed(Some(Studio::SURFACE_RAISED), 4.0, Some(Studio::BORDER)));
     PopupMenu::new(face, options, ROUTE_MENU_WIDTH, Opens::BelowOnTap).into()
 }
@@ -725,9 +732,10 @@ fn add_bus_button<'a>() -> Element<'a, Message> {
         column![
             icons::icon(Icon::Plus, 16.0, Studio::TEXT_SECONDARY),
             Space::new().height(6),
-            text("BUS")
+            studio_text("BUS")
                 .size(9)
                 .font(font::BOLD)
+                .letter_spacing(0.5)
                 .color(Studio::TEXT_FAINT),
         ]
         .align_x(Horizontal::Center),
@@ -750,7 +758,7 @@ fn add_bus_button<'a>() -> Element<'a, Message> {
 fn master_channel<'a>(value: f64) -> Element<'a, Message> {
     let body = strip_body(move |squeezed| {
         vec![
-            title("MASTER", Studio::ACCENT),
+            caption("MASTER", Studio::ACCENT),
             // Pad where the M/S row + pan knob sit on a track strip, so the
             // fader lines up with the channel faders.
             gap(92.0),
@@ -865,11 +873,7 @@ fn mic_input_channel<'a>(mic: MicInput) -> Element<'a, Message> {
             None => mon,
         };
         vec![
-            text("MIC")
-                .size(11)
-                .font(font::BOLD)
-                .color(Studio::RECORD)
-                .into(),
+            caption("MIC", Studio::RECORD),
             gap(8.0),
             // Shared input level meter (monitor + record are the same mic).
             canvas_widget(InputMeter {
@@ -924,9 +928,10 @@ fn fader_column<'a>(
         .into()
     };
     column![
-        text(label)
+        studio_text(label)
             .size(9)
             .font(font::BOLD)
+            .letter_spacing(0.5)
             .color(alpha(accent, if enabled { 0.9 } else { 0.35 })),
         gap(6.0),
         container(fader)
@@ -934,9 +939,10 @@ fn fader_column<'a>(
             .height(Length::Fill)
             .align_x(Horizontal::Center),
         gap(6.0),
-        text(readout)
+        studio_text(readout)
             .size(9)
             .font(font::SEMIBOLD)
+            .tabular()
             .color(if enabled {
                 Studio::TEXT_SECONDARY
             } else {

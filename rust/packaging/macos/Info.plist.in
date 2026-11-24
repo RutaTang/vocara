@@ -24,12 +24,14 @@
 	<string>@BUILD@</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.music</string>
-	<!-- 11.0, where the Flutter app said 10.15 (its deployment target): the
-	     native file panels (rfd) are built on UniformTypeIdentifiers, whose
-	     framework the binary links and which exists only from macOS 11, so
-	     the app cannot even load on 10.15. -->
+	<!-- 10.15, as the Flutter app (its deployment target). bundle.sh builds
+	     the Intel slice for 10.15 (MACOSX_DEPLOYMENT_TARGET), and CI checks
+	     that slice's minimum and that every framework it links is one 10.15
+	     has. The Apple silicon slice is built for 11.0, the first macOS that
+	     runs on Apple silicon, so no Mac it can run on is older: no
+	     LSMinimumSystemVersionByArchitecture is needed to say so. -->
 	<key>LSMinimumSystemVersion</key>
-	<string>11.0</string>
+	<string>10.15</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSHumanReadableCopyright</key>

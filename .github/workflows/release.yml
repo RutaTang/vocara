@@ -256,6 +256,12 @@ jobs:
           lipo "$APP_PATH/Contents/MacOS/vocara" -verify_arch x86_64 arm64 \
             || { echo "::error::not universal: $APP_PATH/Contents/MacOS/vocara"; exit 1; }
 
+      # LSMinimumSystemVersion is 10.15: the Intel slice must be built for
+      # it and link only what 10.15 ships (CI checks a debug build the same
+      # way; this is the binary that ships).
+      - name: Check it can load on macOS 10.15
+        run: .github/scripts/macos-minimum-check.sh "$APP_PATH"
+
       # Hardened runtime + secure timestamp on every Mach-O, innermost first,
       # so the outer seals stay valid. Required for notarization. The Rust
       # app ships one statically linked executable today; the loops keep any

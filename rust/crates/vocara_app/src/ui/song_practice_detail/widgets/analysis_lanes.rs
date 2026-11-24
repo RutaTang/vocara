@@ -38,9 +38,6 @@
 //!   its own size wherever it lands, as Flutter did, and clip to the lane.
 //! - The marker lanes' range drag lives in the lane's canvas state, in
 //!   TIMES, as Dart held it in its `State`.
-//!
-//! Where iced differs: text has no letter spacing (set solid) and no
-//! ellipsis (a marker's label is clipped at its box).
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, Weak};
@@ -73,6 +70,7 @@ use crate::ui::core::widgets::spectrogram_painter::{
     FrequencyGridPainter, PowerSpectrumPainter, RenderRequest, Rendered, SpectrogramImage,
 };
 use crate::ui::core::widgets::studio_hint::lane_hint;
+use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::core::widgets::waveform_painter::PlayheadPainter;
 use crate::ui::core::widgets::wrap::Wrap;
 pub use crate::ui::song_practice_detail::view_model::analysis_cache::AnalysisLane;
@@ -493,9 +491,10 @@ pub fn lane_toolbar<'a>(active: &BTreeSet<AnalysisLane>, track_id: &str) -> Elem
         );
     }
     let label = container(
-        text("LANES")
+        studio_text("LANES")
             .size(9)
             .font(font::BOLD)
+            .letter_spacing(0.8)
             .color(Studio::TEXT_FAINT),
     )
     .padding(Padding {
@@ -584,9 +583,10 @@ fn rule<'a>(horizontal: bool) -> Element<'a, Message> {
 fn lane_shell<'a>(label: &str, height: f32, body: Element<'a, Message>) -> Element<'a, Message> {
     let header = container(row![
         container(
-            text(label.to_string())
+            studio_text(label.to_string())
                 .size(10)
                 .font(font::BOLD)
+                .letter_spacing(0.8)
                 .color(Studio::TEXT_FAINT)
                 .wrapping(Wrapping::None),
         )
@@ -1218,17 +1218,18 @@ fn marker_chip<'a>(
     on_tap: Message,
     fill: bool,
 ) -> Element<'a, Message> {
-    let label_text = text(label.to_string())
+    let label_text = studio_text(label.to_string())
         .size(11)
         .font(style.label_font)
         .color(style.label_color)
-        .wrapping(Wrapping::None);
-    // A point pill is bounded so a long label is cut; a range bar gives the
-    // label whatever width the span leaves it.
+        .ellipsis(1);
+    // A point pill is bounded so a long label ellipsizes; a range bar flexes
+    // to whatever width the span gives it (the label takes the rest of the
+    // row, as `Flexible` did).
     let label_box: Element<'a, Message> = if fill {
-        container(label_text).width(Length::Fill).clip(true).into()
+        label_text.into()
     } else {
-        container(label_text).max_width(150).clip(true).into()
+        container(label_text).max_width(150).into()
     };
     let content = row![
         icons::icon(style.icon, 11.0, style.icon_color),

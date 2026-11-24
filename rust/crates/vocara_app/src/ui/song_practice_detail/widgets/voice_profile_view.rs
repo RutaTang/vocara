@@ -12,8 +12,6 @@
 //! as it is then. The loudness curve is the timeline's
 //! [`LoudnessLanePainter`], its drawing cached until the take changes; the
 //! playhead is its own canvas on top.
-//!
-//! Where iced differs: text has no letter spacing (set solid).
 
 use std::sync::Arc;
 
@@ -30,6 +28,7 @@ use vocara_services::monitor_service::MonitorService;
 use super::analysis_lanes::LoudnessLanePainter;
 use crate::ui::core::theme::{alpha, boxed, font, Studio};
 use crate::ui::core::widgets::studio_hint::studio_hint;
+use crate::ui::core::widgets::studio_text::{studio_text, StudioText};
 use crate::ui::core::widgets::waveform_painter::PlayheadPainter;
 use crate::ui::song_practice_detail::view_model::analysis_source::AnalysisSource;
 
@@ -313,11 +312,13 @@ fn ltrb(left: f32, top: f32, right: f32, bottom: f32) -> Padding {
     }
 }
 
-/// `_CapLabel`: a 9 px w700 faint caption, as written (not upper-cased).
-fn cap_label<'a>(label: &str) -> iced::widget::Text<'a> {
-    text(label.to_string())
+/// `_CapLabel`: a 9 px w700 faint caption with 0.6 letter spacing, as
+/// written (not upper-cased).
+fn cap_label<'a>(label: &str) -> StudioText<'a> {
+    studio_text(label.to_string())
         .size(9)
         .font(font::BOLD)
+        .letter_spacing(0.6)
         .color(Studio::TEXT_FAINT)
 }
 

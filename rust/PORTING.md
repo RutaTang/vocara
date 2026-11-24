@@ -88,7 +88,41 @@ wrong. Port the behavior, not the shape:
   C dependencies' build scripts pass and type-checks every macOS-only path:
   `CC_aarch64_apple_darwin=true AR_aarch64_apple_darwin=true
   CXX_aarch64_apple_darwin=true cargo clippy --workspace --all-targets
-  --features vocara_app/device --target aarch64-apple-darwin -- -D warnings`.
+  --features vocara_app/device --target aarch64-apple-darwin -- -D warnings`,
+  and the same for `x86_64-apple-darwin` (the slice macOS 10.15 runs).
+- **macOS 10.15**, the Flutter app's minimum, is the app's too
+  (`LSMinimumSystemVersion` in `packaging/macos/Info.plist.in`). No runner
+  has it, so what keeps it is checked by reading the binary:
+  - `packaging/macos/bundle.sh` builds the x86_64 slice with
+    `MACOSX_DEPLOYMENT_TARGET=10.15` (arm64 at 11.0, the first macOS on
+    Apple silicon);
+  - nothing may link a framework 10.15 lacks. The file panels are
+    `vocara_services::file_panels` on `NSOpenPanel` / `NSSavePanel` (rfd
+    only off macOS), since rfd's macOS backend links
+    UniformTypeIdentifiers (macOS 11). What the macOS build links (the
+    link line of the `device` build), with the first macOS that had each:
+    AppKit, ApplicationServices, AudioToolbox, Carbon, CoreAudio,
+    CoreFoundation, Foundation, `libSystem`, `libobjc` (10.0); Security,
+    `libiconv` (by 10.3); CoreVideo, QuartzCore (10.4); AVFoundation,
+    CoreMedia (10.7); CoreGraphics (10.8 as a framework of its own, inside
+    ApplicationServices before); Metal (10.11). The crates that link them
+    are the `objc2-*` bindings, `winit`, `wgpu-hal` and `metal`,
+    `core-graphics`, `core-foundation-sys`, `security-framework-sys`
+    (native-tls), `sys-locale`, `block2`, `dispatch2` and `libc`;
+  - every symbol it imports must be in 10.15. Checked against the macOS
+    10.15 SDK's stubs (x86_64) and 11.0's (arm64), all are but
+    `AudioHardwareCreateProcessTap` / `AudioHardwareDestroyProcessTap`
+    (macOS 14.2), which cpal's loopback capture uses: the binary links
+    CoreAudio weakly for them (`crates/vocara_app/build.rs`), and nothing
+    calls them on macOS;
+  - an API newer than 10.15 is called only behind `objc2::available!` or a
+    `respondsToSelector:` check. Ours are all 10.14 or older; winit and
+    wgpu-hal check the OS version themselves;
+  - CI's `macos-build` job builds the bundle universal and runs
+    `.github/scripts/macos-minimum-check.sh` on it: each slice's minimum,
+    the frameworks and libraries against an allow-list of what 10.15
+    ships, the two process-tap imports weak. The release workflow runs it
+    on the release binary.
 - **macOS GUI test**: `crates/vocara_services/tests/macos_gui.rs` (no
   harness: AppKit wants the main thread) drives AppKit for real: the menu
   bar's edit target, the delegate's secure restorable state and the
@@ -138,6 +172,18 @@ structure every screen follows, so screens ported by different hands fit:
   handles) are custom widgets or canvases with the same hit areas, drag
   rules, wheel/trackpad handling and double-click resets as the Dart ones.
   Icons are Lucide (forui's `FIcons`) from the `lucide-icons` crate.
+- **Text**: every text is shaped fully and kerned, as Flutter set it: the
+  workspace enables iced's `advanced-shaping` feature, which makes
+  `Shaping::Advanced` every text's default (iced's own default shapes ASCII
+  glyph by glyph, unkerned). A paragraph is shaped when its text changes,
+  not per frame; laying a label out takes about 20 µs shaped fully against
+  10 µs glyph by glyph in a release build (`ui::core::theme`'s ignored
+  `shaping_cost` measures it). Text with a `letterSpacing`, `fontFeatures:
+  [FontFeature.tabularFigures()]` or an `overflow: TextOverflow.ellipsis` is
+  `studio_text` (`.letter_spacing(px)`, `.tabular()`,
+  `.ellipsis(max_lines)`), which lays its own cosmic-text buffer out as
+  SkParagraph did; a canvas label with spacing or tabular figures is drawn
+  with `studio_text::fill_spaced_text` / `fill_tabular_text`.
 - **Window** (macOS): hidden title bar with a transparent, full-size content
   view; the drag bar starts a window drag; the close request runs the quit
   guard (kill separation sidecars, finalize recordings) before closing, as
@@ -181,6 +227,11 @@ the proofs are about the code that ships, not a lookalike. Targets:
   least recently used first.
 - The oplog's asset gate: an ack or a boot compaction never changes what a
   read resolves a surviving row's dependency to.
+- The lyrics core: `parse_lrc` of `to_lrc` gives back the timed lines,
+  trimmed and rounded down to the centisecond, in stable time order, and a
+  second save changes nothing; `align_lines` matches only equal lines, in
+  order, and within its cell limit as many as their longest common
+  subsequence.
 
 `verification/README.md` lists each module, its theorems and its replay.
 
@@ -200,15 +251,8 @@ fixes it rather than port the bug, and says so where the fix lives:
 Where iced or the platform layer has no counterpart, the difference is kept
 small and written down in the module that has it:
 
-- Text has no letter spacing and no ellipsis (long names clip). Touch-only
-  gestures (pointer cancel, a second finger) do not exist on iced's desktop
-  pointer.
-- The app needs macOS 11.0 (`packaging/macos/Info.plist.in`); the Flutter
-  app ran on 10.15. Its native file panels are built on
-  UniformTypeIdentifiers: `rfd` links `UniformTypeIdentifiers.framework`
-  (through `objc2-uniform-type-identifiers`) and calls `UTType` and
-  `setAllowedContentTypes:` with no availability check, and that framework
-  exists only from macOS 11, so the binary cannot even load on 10.15.
+- Touch-only gestures (pointer cancel, a second finger) do not exist on
+  iced's desktop pointer.
 
 ## Tracking
 
@@ -317,7 +361,7 @@ behavior and its tests are ported and the gates pass.
 | `ui/song_practice_detail/view_model/song_practice_detail_view_model.dart` | 3337 | `vocara_app::ui::song_practice_detail::view_model::song_practice_detail_view_model` (each await on a repository, file, edit or engine call is a `Job` the screen runs and answers through `job_done`; the save chain is a queue whose first save starts as the call that queued it ends (Dart's microtask); the guarded edits take the busy gate and list it as landing from their start; awaited calls answer with a `Reply`; the controllers are reached through `*_do` / `with_*`, their effects run in place or passed on as the view model's; the screen keeps a disposed view model until `has_work_in_flight` is false) | done |
 | `ui/song_practice_detail/widgets/analysis_lanes.dart` | 988 | `vocara_app::ui::song_practice_detail::widgets::analysis_lanes` (plain data in, `Message`s out named after the cache's `toggleLane` / `healLane` and the screen's add / edit callbacks; the heal-on-build is a `HealLane` after the frame, once per revision the screen passes; the spectrogram lane's image is a `LaneImage` the screen keeps per take and `sync`s; the marker lanes' range drag lives in the lane's canvas state, in times; `Placed` lays the take box and the markers out past the lane's edges, as `Positioned` did) | done |
 | `ui/song_practice_detail/widgets/bottom_dock.dart` | 312 | `vocara_app::ui::song_practice_detail::widgets::bottom_dock` (plain data in — `BottomDock`, the open tab's content from `dock_content` — and `Message`s out; the post-frame heal is `heals`, asked by the screen after each update; the grabber reports each move with the content's room, and the screen sets the height from the height on screen, read per move; the handle and the content keep their slots while closed, so the tab strip keeps its scroll) | done |
-| `ui/song_practice_detail/widgets/detail_transport_bar.dart` | 456 | `vocara_app::ui::song_practice_detail::widgets::detail_transport_bar` (plain data in — `TransportBar` — and `Message`s out named after the calls the bar made; the gating is `controls`; the counter lays out its own tabular figures and letter spacing) | done |
+| `ui/song_practice_detail/widgets/detail_transport_bar.dart` | 456 | `vocara_app::ui::song_practice_detail::widgets::detail_transport_bar` (plain data in — `TransportBar` — and `Message`s out named after the calls the bar made; the gating is `controls`; the counter is `studio_text` with tabular figures and letter spacing) | done |
 | `ui/song_practice_detail/widgets/fx_panel.dart` | 1723 | `vocara_app::ui::song_practice_detail::widgets::fx_panel` (plain data in — `FxPanel`: the target's id and chain, the EQ's input column under the playhead, the compressor's gain reduction — and `Message`s out, one per view-model call; the panel keys its state by its target; the analyzer ticks on redraws and stops once settled, any redraw waking it; the GR meter keeps its 50 ms poll over the reading the host passed in; a drag or Q debounce in flight when the screen stops showing the panel owes its `CommitFx` to the screen; the studio menus are `widgets::mixer_shared::PopupMenu`) | done |
 | `ui/song_practice_detail/widgets/left_panel.dart` | 1545 | `vocara_app::ui::song_practice_detail::widgets::left_panel` (plain data in — `Inspector`, `VoiceSummary` — and `Message`s out named after the view-model and mixer methods; the FX panel is a slot the screen fills with `fx_panel`'s view; the screen holds which chip menu is open, popped by `track_context_menu`'s host; the body is keyed by its channel; the post-frame heal is `Inspector::analysis_heal`) | done |
 | `ui/song_practice_detail/widgets/live_spectrogram.dart` | 150 | `vocara_app::ui::song_practice_detail::widgets::live_spectrogram` (the raster and its image live in the canvas's tree state, remade when it draws and the monitor's revision has moved) | done |
@@ -336,11 +380,11 @@ behavior and its tests are ported and the gates pass.
 | `ui/technique_library/view_model/technique_detail_view_model.dart` | 2013 | `vocara_app::ui::technique_library::view_model::technique_detail_view_model` (each awaited I/O is a `Job` the screen runs on a worker and lands, the code after the `await` a continuation; Dart's return values are `Answer`s; `micArmed` / `analysisScrub` are effects; the recorder's timers are the screen's ticks, which also carry a quit's `quitFinalize` from the finalizer thread; the screen API is in the module doc) | done |
 | `ui/technique_library/view_model/technique_library_view_model.dart` | 280 | `vocara_app::ui::technique_library::view_model::technique_library_view_model` | done |
 | `ui/technique_library/widgets/media/technique_audio_player.dart` | 417 | `vocara_app::ui::technique_library::widgets::media::technique_audio_player` (media_kit's `Player` → `vocara_services::media_player`, polled: AVFoundation on macOS with `device`, the null player elsewhere, a fake in tests; the keyed players a technique page keeps → `media::example_players`) | done (the AVFoundation backend type-checked for macOS; its pure parts tested everywhere) |
-| `ui/technique_library/widgets/media/technique_media_section.dart` | 898 | `vocara_app::ui::technique_library::widgets::media::technique_media_section` (plain data in — `TechniqueMediaSection`, the constructor's parameters — and `Message`s out, which `MediaSectionState::update` turns into the callbacks' `Event`s; the page keeps that state (hover, drag) and the `ExamplePlayers`; the picker is rfd's (`browse`), the rename dialog goes through the app's dialog stack (`Dialog::RenameExample`)) | done |
+| `ui/technique_library/widgets/media/technique_media_section.dart` | 898 | `vocara_app::ui::technique_library::widgets::media::technique_media_section` (plain data in — `TechniqueMediaSection`, the constructor's parameters — and `Message`s out, which `MediaSectionState::update` turns into the callbacks' `Event`s; the page keeps that state (hover, drag) and the `ExamplePlayers`; the picker is `vocara_services::file_panels`' (`browse`), the rename dialog goes through the app's dialog stack (`Dialog::RenameExample`)) | done |
 | `ui/technique_library/widgets/media/technique_video_player.dart` | 190 | `vocara_app::ui::technique_library::widgets::media::technique_video_player` | done (media_kit's desktop controls → the audio player's bar while hovered; no volume, fullscreen or keyboard shortcuts) |
 | `ui/technique_library/widgets/studio_field.dart` | 96 | `vocara_app::ui::technique_library::widgets::studio_field` | done |
 | `ui/technique_library/widgets/technique_analysis_section.dart` | 690 | `vocara_app::ui::technique_library::widgets::technique_analysis_section` (`view` reads the view model, `update` makes the call the Dart tap made where the control was live; the page keeps the Spectrogram tab's `VoiceprintState` and asks `ensureReferenceAnalysis` while the panel is built; the Dart level meter's fill had no height, here it shows) | done (the Range and Dynamics tabs are placeholders until `voice_profile_view` lands) |
-| `ui/technique_library/widgets/technique_detail_screen.dart` | 825 | `vocara_app::ui::technique_library::widgets::technique_detail_screen` (the router's `technique_library::detail`; the screen owns the view model, the `ExamplePlayers`, the `MediaSectionState` and the analysis card's `VoiceprintState`; each `Job` runs off the UI thread and lands as `Message::Landed`, each `Answer` is a Dart `await` resuming; the recorder's ticks — and a quit's `quitFinalize` — and the players' poll are subscriptions; the dialogs go through `Update::dialog`; the header's double-tap settle drops its buttons' messages; the snack bars are the page's while it is on top (queued, timed by a subscription), the app's `messenger`'s once it leaves; exports use rfd's save panel, the players `SystemMediaPlayers` — `with_deps` takes a test's) | done |
+| `ui/technique_library/widgets/technique_detail_screen.dart` | 825 | `vocara_app::ui::technique_library::widgets::technique_detail_screen` (the router's `technique_library::detail`; the screen owns the view model, the `ExamplePlayers`, the `MediaSectionState` and the analysis card's `VoiceprintState`; each `Job` runs off the UI thread and lands as `Message::Landed`, each `Answer` is a Dart `await` resuming; the recorder's ticks — and a quit's `quitFinalize` — and the players' poll are subscriptions; the dialogs go through `Update::dialog`; the header's double-tap settle drops its buttons' messages; the snack bars are the page's while it is on top (queued, timed by a subscription), the app's `messenger`'s once it leaves; exports use `file_panels`' save panel, the players `SystemMediaPlayers` — `with_deps` takes a test's) | done |
 | `ui/technique_library/widgets/technique_dialogs.dart` | 117 | `vocara_app::ui::technique_library::widgets::technique_dialogs` | done |
 | `utils/analysis_gate.dart` | 54 | `vocara_model::util::analysis_gate` | done |
 | `utils/busy_gate.dart` | 83 | `vocara_app::util::busy_gate` | done |

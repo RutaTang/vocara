@@ -60,6 +60,7 @@ use crate::ui::core::theme::{self, alpha, bare_button, boxed, font, Studio};
 use crate::ui::core::widgets::confirm_dialog::{fading_barrier, ConfirmDialog};
 use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
 use crate::ui::core::widgets::studio_hint::spinner;
+use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::snack::{SnackEvent, SnackQueue, SnackStyle, SnackTimer};
 use crate::ui::{Screen, SnackBar, Update};
 
@@ -345,9 +346,10 @@ impl HomeScreen {
 
     fn header(&self) -> Element<'_, Message> {
         let bar = row![
-            text("Vocara")
+            studio_text("Vocara")
                 .size(18)
                 .font(font::BOLD)
+                .letter_spacing(0.3)
                 .color(Studio::TEXT_PRIMARY),
             Space::new().width(Length::Fill),
             studio_button("New practice", Message::NewPractice)
@@ -730,9 +732,10 @@ fn opening_dialog<'a>() -> Element<'a, Message> {
         column![
             disc,
             Space::new().height(16),
-            text("Loading practice")
+            studio_text("Loading practice")
                 .size(13.5)
                 .font(font::SEMIBOLD)
+                .letter_spacing(0.2)
                 .color(Studio::TEXT_PRIMARY),
         ]
         .align_x(Horizontal::Center),

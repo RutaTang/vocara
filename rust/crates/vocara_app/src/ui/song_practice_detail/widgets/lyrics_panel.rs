@@ -55,9 +55,7 @@
 //!   height (the toolbar, the pinned hint) keeps a slot, so the editor and
 //!   the sync list keep their widget state (Dart keyed the tab body).
 //!
-//! Where iced differs: text has no letter spacing (set solid), no ellipsis
-//! (clipped) and no tabular figures; tooltips show below their button on
-//! hover.
+//! Where iced differs: tooltips show below their button on hover.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -87,6 +85,7 @@ use crate::ui::core::motion::{Curve, Implicit};
 use crate::ui::core::theme::{self, alpha, boxed, fill, font, Studio};
 use crate::ui::core::widgets::holds_keyboard::holds_keyboard;
 use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
+use crate::ui::core::widgets::studio_text::{fill_spaced_text, studio_text};
 use crate::ui::core::widgets::visible_drop_target::visible_drop_target;
 use crate::ui::core::widgets::wrap::Wrap;
 
@@ -302,7 +301,7 @@ pub struct ScrollStart {
 /// [`Message::ImportLyricsFromFile`], a cancel as nothing. Call it from
 /// `update` (the panel is set up on the UI thread).
 pub fn browse_lyrics_file() -> Task<Message> {
-    let picking = rfd::AsyncFileDialog::new()
+    let picking = vocara_services::file_panels::AsyncFileDialog::new()
         .add_filter("Lyrics", &LYRICS_FILE_EXTENSIONS)
         .pick_file();
     Task::future(picking).then(|file| match file {
@@ -941,9 +940,10 @@ fn tab_bar<'a>(active: RightTab) -> Element<'a, Message> {
 /// `_Tab`: an upper-cased label, raised and outlined when active.
 fn tab<'a>(label: &str, active: bool, to: RightTab) -> Element<'a, Message> {
     let face = container(
-        text(label.to_uppercase())
+        studio_text(label.to_uppercase())
             .size(11)
             .font(font::BOLD)
+            .letter_spacing(0.6)
             .color(if active {
                 Studio::TEXT_PRIMARY
             } else {
@@ -995,8 +995,9 @@ fn rail<'a>() -> Element<'a, Message> {
     .into()
 }
 
-/// `RotatedBox(quarterTurns: 1, child: Text(label))`: the label reading
-/// top to bottom from the top of its box, clipped at its bottom.
+/// `RotatedBox(quarterTurns: 1, child: Text(label))`: the label (11 px
+/// w700, 1.5 letter spacing) reading top to bottom from the top of its box,
+/// clipped at its bottom.
 struct RotatedLabel {
     label: &'static str,
 }
@@ -1015,16 +1016,20 @@ impl canvas::Program<Message> for RotatedLabel {
         let mut frame = Frame::new(renderer, bounds.size());
         frame.translate(Vector::new(bounds.width / 2.0, 0.0));
         frame.rotate(std::f32::consts::FRAC_PI_2);
-        frame.fill_text(canvas::Text {
-            content: self.label.to_string(),
-            position: Point::ORIGIN,
-            color: Studio::TEXT_SECONDARY,
-            size: Pixels(11.0),
-            font: font::BOLD,
-            align_x: Alignment::Left,
-            align_y: Vertical::Center,
-            ..canvas::Text::default()
-        });
+        fill_spaced_text(
+            &mut frame,
+            canvas::Text {
+                content: self.label.to_string(),
+                position: Point::ORIGIN,
+                color: Studio::TEXT_SECONDARY,
+                size: Pixels(11.0),
+                font: font::BOLD,
+                align_x: Alignment::Left,
+                align_y: Vertical::Center,
+                ..canvas::Text::default()
+            },
+            1.5,
+        );
         vec![frame.into_geometry()]
     }
 }
@@ -1402,24 +1407,26 @@ fn sync_line<'a>(
             .into();
     }
     let target = i as i64 == data.sync_index;
-    let time = text(l.time_ms.map_or_else(|| "—".to_string(), sync_time))
+    let time = studio_text(l.time_ms.map_or_else(|| "—".to_string(), sync_time))
         .size(11)
         .font(font::SEMIBOLD)
+        .tabular()
         .color(if l.is_synced() {
             Studio::ACCENT
         } else {
             Studio::TEXT_FAINT
         })
         .wrapping(Wrapping::None);
-    // At most two lines of 13 px text; the rest is cut.
-    let words = container(text(l.text.as_str()).size(13).color(if target {
-        Studio::TEXT_PRIMARY
-    } else {
-        Studio::TEXT_SECONDARY
-    }))
-    .width(Length::Fill)
-    .max_height(13.0 * 1.3 * 2.0)
-    .clip(true);
+    // At most two lines of 13 px text, the second ellipsized.
+    let words = studio_text(l.text.as_str())
+        .size(13)
+        .color(if target {
+            Studio::TEXT_PRIMARY
+        } else {
+            Studio::TEXT_SECONDARY
+        })
+        .width(Length::Fill)
+        .ellipsis(2);
     let face = container(row![container(time).width(52), words].align_y(Vertical::Center))
         // 6 × 8, inside a 1 px border (transparent off target).
         .padding([7, 9])
@@ -1528,15 +1535,13 @@ fn notes_view<'a>(data: RightPanelData<'a>) -> Element<'a, Message> {
 /// `_NotesHeader`: the take's name, upper-cased, and the + (with
 /// `add_tip`) when it can be annotated.
 fn notes_header<'a>(title: &str, on_add: Option<Message>, add_tip: &str) -> Element<'a, Message> {
-    let mut header = row![container(
-        text(title.to_uppercase())
-            .size(11)
-            .font(font::BOLD)
-            .color(Studio::TEXT_FAINT)
-            .wrapping(Wrapping::None),
-    )
-    .width(Length::Fill)
-    .clip(true)]
+    let mut header = row![studio_text(title.to_uppercase())
+        .size(11)
+        .font(font::BOLD)
+        .letter_spacing(0.8)
+        .color(Studio::TEXT_FAINT)
+        .width(Length::Fill)
+        .ellipsis(1)]
     .align_y(Vertical::Center);
     if let Some(on_add) = on_add {
         let plus = container(icons::icon(Icon::Plus, 15.0, Studio::ACCENT))
@@ -1603,14 +1608,10 @@ fn note_tile<'a>(
     .width(Length::Fill);
     if let Some(sub) = subtitle {
         words = words.push(Space::new().height(3)).push(
-            container(
-                text(sub)
-                    .size(10)
-                    .color(Studio::TEXT_FAINT)
-                    .wrapping(Wrapping::None),
-            )
-            .width(Length::Fill)
-            .clip(true),
+            studio_text(sub)
+                .size(10)
+                .color(Studio::TEXT_FAINT)
+                .ellipsis(1),
         );
     }
     let content = row![
@@ -1680,14 +1681,11 @@ fn technique_tile<'a>(
         Space::new().width(8),
         icons::icon(Icon::Waypoints, 13.0, Studio::ACCENT),
         Space::new().width(6),
-        container(
-            text(marker.technique_name.as_str())
-                .size(12.5)
-                .color(Studio::TEXT_PRIMARY)
-                .wrapping(Wrapping::None),
-        )
-        .width(Length::Fill)
-        .clip(true),
+        studio_text(marker.technique_name.as_str())
+            .size(12.5)
+            .color(Studio::TEXT_PRIMARY)
+            .width(Length::Fill)
+            .ellipsis(1),
         remove,
     ]
     .align_y(Vertical::Center);

@@ -48,10 +48,9 @@
 //! time counted from the end of its entrance (`ui::snack`); the timer is a
 //! subscription. The
 //! header ignores its buttons for a double-tap's span after it switches
-//! modes, as Dart's `IgnorePointer` did, by dropping their messages. iced has
-//! no ellipsis (the title clips) and no letter spacing (the title's 0.3, the
-//! captions' 0.6); no italic Inter face is bundled, so "Empty content" asks
-//! for italic and draws upright. The prose fields are iced text editors that
+//! modes, as Dart's `IgnorePointer` did, by dropping their messages. No
+//! italic Inter face is bundled, so "Empty content" asks for italic and
+//! draws upright. The prose fields are iced text editors that
 //! grow from their minimum to their maximum lines, then scroll, as Flutter's
 //! did.
 
@@ -65,7 +64,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use iced::alignment::Vertical;
-use iced::widget::text::Wrapping;
 use iced::widget::{
     button, center, column, container, opaque, scrollable, stack, text, text_editor, Column, Row,
     Space,
@@ -95,6 +93,7 @@ use crate::ui::core::widgets::confirm_dialog::ConfirmDialog;
 use crate::ui::core::widgets::spectrogram_painter::{release_spectrogram_images, RenderRequest};
 use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
 use crate::ui::core::widgets::studio_hint::spinner;
+use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::snack::{SnackEvent, SnackQueue, SnackStyle};
 use crate::ui::song_practice_detail::widgets::voiceprint_view::{
     self as voiceprint, VoiceprintState,
@@ -417,11 +416,11 @@ pub fn job_task(job: Job) -> Task<Message> {
     })
 }
 
-/// The platform save panel an example's export asks (rfd, on the export's
-/// worker; on macOS it runs on the main thread for it): the destination, or
-/// `None` on cancel. Blocking.
+/// The platform save panel an example's export asks (`file_panels`, on the
+/// export's worker; on macOS it runs on the main thread for it): the
+/// destination, or `None` on cancel. Blocking.
 fn save_panel(suggested_name: &str) -> Result<Option<String>, PickError> {
-    Ok(rfd::FileDialog::new()
+    Ok(vocara_services::file_panels::FileDialog::new()
         .set_file_name(suggested_name)
         .save_file()
         .map(|path| path.to_string_lossy().into_owned()))
@@ -1008,15 +1007,13 @@ impl TechniqueDetailScreen {
         // middle and the action buttons sit flush against the right edge.
         bar = bar
             .push(
-                container(
-                    text(title)
-                        .size(18)
-                        .font(font::BOLD)
-                        .color(Studio::TEXT_PRIMARY)
-                        .wrapping(Wrapping::None),
-                )
-                .width(Length::Fill)
-                .clip(true),
+                studio_text(title)
+                    .size(18)
+                    .font(font::BOLD)
+                    .letter_spacing(0.3)
+                    .color(Studio::TEXT_PRIMARY)
+                    .width(Length::Fill)
+                    .ellipsis(1),
             )
             .push(Space::new().width(12));
         if self.editing {
@@ -1350,9 +1347,10 @@ fn view_field<'a>(
             .into(),
     };
     column![
-        text(label.to_uppercase())
+        studio_text(label.to_uppercase())
             .size(10.5)
             .font(font::BOLD)
+            .letter_spacing(0.6)
             .color(if accent {
                 Studio::ACCENT_BRIGHT
             } else {

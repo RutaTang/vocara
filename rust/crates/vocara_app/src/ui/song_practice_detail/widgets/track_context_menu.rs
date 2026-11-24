@@ -33,8 +33,7 @@ use iced::advanced::layout::{self, Layout};
 use iced::advanced::widget::{tree, Operation, Tree};
 use iced::advanced::{overlay, renderer, Clipboard, Shell, Widget};
 use iced::alignment::Vertical;
-use iced::widget::text::Wrapping;
-use iced::widget::{button, column, container, row, scrollable, text, Column, Row, Space};
+use iced::widget::{button, column, container, row, scrollable, Column, Row, Space};
 use iced::{
     keyboard, mouse, touch, Border, Color, Element, Event, Length, Padding, Point, Rectangle,
     Renderer, Size, Theme, Vector,
@@ -44,6 +43,7 @@ use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{self, bare_button, font, Studio};
 use crate::ui::core::widgets::animated::ink_hover;
 use crate::ui::core::widgets::confirm_dialog::{ConfirmDialog, StudioPrompt};
+use crate::ui::core::widgets::studio_text::studio_text;
 
 // ------------------------------------------------------------------- tints
 
@@ -581,26 +581,17 @@ impl<'a, M: Clone + 'a> From<MenuRow<M>> for Element<'a, M> {
                 .push(icons::icon(icon, 15.0, color))
                 .push(Space::new().width(12));
         }
-        // One line, clipped (Dart ellipsized it; iced has no ellipsis).
+        // One line, ellipsized.
         let mut labels =
-            column![
-                container(text(r.label).size(13).color(color).wrapping(Wrapping::None))
-                    .width(Length::Fill)
-                    .clip(true)
-            ]
-            .width(Length::Fill);
+            column![studio_text(r.label).size(13).color(color).ellipsis(1)].width(Length::Fill);
         if let Some(subtitle) = r.subtitle {
             labels = labels.push(Space::new().height(2)).push(
-                // Two lines at most.
-                container(
-                    text(subtitle)
-                        .size(10.5)
-                        .line_height(1.3)
-                        .color(Studio::TEXT_FAINT),
-                )
-                .width(Length::Fill)
-                .max_height(10.5 * 1.3 * 2.0)
-                .clip(true),
+                // Two lines at most, the second ellipsized.
+                studio_text(subtitle)
+                    .size(10.5)
+                    .line_height(1.3)
+                    .color(Studio::TEXT_FAINT)
+                    .ellipsis(2),
             );
         }
         content = content.push(labels);
@@ -618,8 +609,8 @@ impl<'a, M: Clone + 'a> From<MenuRow<M>> for Element<'a, M> {
 }
 
 /// `_ColorGrid`: the inline lane-color picker — a faint "COLOR" caption over
-/// the preset swatches, eight to a row at the menu's width. (The caption's
-/// 0.6 letter spacing has no iced counterpart.)
+/// the preset swatches, eight to a row at the menu's width. The caption is
+/// 9 px w700 with 0.6 letter spacing.
 fn color_grid<'a, M: Clone + 'a>(
     current: Option<i64>,
     on_pick: impl Fn(i64) -> M,
@@ -629,9 +620,10 @@ fn color_grid<'a, M: Clone + 'a>(
         .map(|&value| color_swatch(argb(value), current == Some(value), on_pick(value)));
     container(column![
         container(
-            text("COLOR")
+            studio_text("COLOR")
                 .size(9)
                 .font(font::BOLD)
+                .letter_spacing(0.6)
                 .color(Studio::TEXT_FAINT)
         )
         .padding(Padding {

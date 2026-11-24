@@ -37,10 +37,9 @@
 //! The hover icons fade (120 ms), the zone's padding and drag highlight
 //! move (120 ms) and the chevron turns (150 ms), all linear, as the Dart
 //! implicit animations did; the turned chevron at rest is the up chevron
-//! (the same glyph turned half a turn). iced has no ellipsis (one-line
-//! labels clip), no letter spacing (the caption's 0.6) and no subtree
-//! opacity: the faded zone fades each of its colors instead, and the hover
-//! icons their glyphs'. No italic Inter face is bundled, so "Empty content"
+//! (the same glyph turned half a turn). iced has no subtree opacity: the
+//! faded zone fades each of its colors instead, and the hover icons their
+//! glyphs'. No italic Inter face is bundled, so "Empty content"
 //! asks for italic and draws upright. The Dart level meter's fill had no
 //! height (a childless `ColoredBox` under `Align` takes the smallest size),
 //! so it never showed; here it fills the meter's 8 px, as intended.
@@ -52,7 +51,6 @@ use std::time::Duration;
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::canvas::{self, Frame, Geometry, Path};
-use iced::widget::text::Wrapping;
 use iced::widget::{
     button, canvas as canvas_widget, column, container, keyed_column, mouse_area, row, text,
     text_input, tooltip, Column, Space,
@@ -73,6 +71,7 @@ use crate::ui::core::theme::{self, alpha, bare_button, boxed, font, Studio};
 use crate::ui::core::widgets::animated::{animated, animated_container, Decoration};
 use crate::ui::core::widgets::confirm_dialog::{self, modal, DialogResult};
 use crate::ui::core::widgets::studio_hint::spinner;
+use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::core::widgets::visible_drop_target::visible_drop_target;
 
 /// How long the hover icons take to fade in or out (`AnimatedOpacity`).
@@ -428,7 +427,7 @@ pub fn subscription(players: &ExamplePlayers) -> Subscription<Message> {
 pub fn browse() -> Task<Message> {
     // Derive the picker filter from the same source as drag-drop's
     // isSupportedMedia so the two entry paths accept identical formats.
-    let picking = rfd::AsyncFileDialog::new()
+    let picking = vocara_services::file_panels::AsyncFileDialog::new()
         .add_filter(PICKER_LABEL, &TechniqueMedia::picker_extensions())
         .pick_files();
     Task::future(picking).map(|files| {
@@ -493,9 +492,10 @@ impl<'a> TechniqueMediaSection<'a> {
         let has_analysis = analysis.is_some();
         let mut analysis = analysis;
         let mut header = row![
-            text("EXAMPLES")
+            studio_text("EXAMPLES")
                 .size(10.5)
                 .font(font::BOLD)
+                .letter_spacing(0.6)
                 .color(Studio::ACCENT_BRIGHT),
             Space::new().width(8),
         ]
@@ -597,15 +597,12 @@ impl<'a> TechniqueMediaSection<'a> {
             Space::new().width(6),
             // The name area toggles the analysis (when expandable).
             button(
-                container(
-                    text(label.clone())
-                        .size(12)
-                        .font(font::MEDIUM)
-                        .color(Studio::TEXT_SECONDARY)
-                        .wrapping(Wrapping::None),
-                )
-                .width(Length::Fill)
-                .clip(true),
+                studio_text(label.clone())
+                    .size(12)
+                    .font(font::MEDIUM)
+                    .color(Studio::TEXT_SECONDARY)
+                    .width(Length::Fill)
+                    .ellipsis(1),
             )
             .width(Length::Fill)
             .padding(0)
@@ -693,14 +690,11 @@ impl<'a> TechniqueMediaSection<'a> {
         let content = row![
             icons::icon(Icon::Plus, 15.0, fg),
             Space::new().width(8),
-            container(
-                text(if dense { ADD_ANOTHER } else { ADD_FIRST })
-                    .size(12.5)
-                    .font(font::MEDIUM)
-                    .color(fg)
-                    .wrapping(Wrapping::None),
-            )
-            .clip(true),
+            studio_text(if dense { ADD_ANOTHER } else { ADD_FIRST })
+                .size(12.5)
+                .font(font::MEDIUM)
+                .color(fg)
+                .ellipsis(1),
         ]
         .align_y(Vertical::Center);
         // 16 across and 12 (dense) or 22 down, inside the 1 px border. The

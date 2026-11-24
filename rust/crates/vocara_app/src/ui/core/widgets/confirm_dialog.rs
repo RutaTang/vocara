@@ -41,6 +41,7 @@ use iced::{keyboard, widget, Background, Color, Element, Event, Length, Padding}
 
 use super::animated::animated;
 use super::studio_button::{studio_button, StudioButtonVariant};
+use super::studio_text::studio_text;
 use super::wrap::Wrap;
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::motion::Curve;
@@ -383,17 +384,14 @@ fn confirm_card(d: &ConfirmDialog) -> Element<'_, Message> {
         heading = heading.push(Space::new().width(12));
     }
     heading = heading.push(
-        // Two lines at most (Dart ellipsized past them; iced clips them).
-        container(
-            text(d.title.as_str())
-                .size(15)
-                .font(font::BOLD)
-                .line_height(1.3)
-                .color(Studio::TEXT_PRIMARY),
-        )
-        .width(Length::Fill)
-        .max_height(15.0 * 1.3 * 2.0)
-        .clip(true),
+        // Two lines at most, the second ellipsized past them.
+        studio_text(d.title.as_str())
+            .size(15)
+            .font(font::BOLD)
+            .line_height(1.3)
+            .color(Studio::TEXT_PRIMARY)
+            .width(Length::Fill)
+            .ellipsis(2),
     );
     let mut content = column![heading];
     if let Some(body) = &d.body {
@@ -428,9 +426,10 @@ fn prompt_card<'a>(p: &'a StudioPrompt, value: &str, input: widget::Id) -> Eleme
     if !p.label.is_empty() {
         content = content
             .push(
-                text(p.label.to_uppercase())
+                studio_text(p.label.to_uppercase())
                     .size(10.5)
                     .font(font::BOLD)
+                    .letter_spacing(0.6)
                     .color(Studio::TEXT_FAINT),
             )
             .push(Space::new().height(6));
@@ -627,6 +626,37 @@ mod tests {
             state.update(Message::Cancel),
             Some(DialogResult::Text(None))
         );
+    }
+
+    #[test]
+    fn a_long_title_wraps_to_two_lines_the_second_ellipsized() {
+        use iced_test::selector::Candidate;
+
+        crate::ui::core::widgets::studio_text::testing::load_fonts();
+        let title = "Delete the take “Verse two, third pass, with the harmony \
+                     line and the ad-libs” and every clip recorded into it?";
+        let state = DialogState::new(ConfirmDialog::new(title).body("This cannot be undone."));
+        let mut ui = iced_test::simulator(state.view());
+        // Found by its full text, as a Flutter finder reads `Text.data`...
+        let full = ui.find(title).expect("the title").bounds();
+        // ...it shows two lines (15 px at 1.3), the second ending in "…".
+        assert!((full.height - 2.0 * 15.0 * 1.3).abs() < 0.01, "{full:?}");
+        let shown = ui
+            .find(|candidate: Candidate<'_>| match candidate {
+                Candidate::Text { content, .. } if content.ends_with('\u{2026}') => {
+                    Some(content.to_string())
+                }
+                _ => None,
+            })
+            .expect("the cut title");
+        let lines: Vec<&str> = shown.lines().collect();
+        assert_eq!(lines.len(), 2, "{shown:?}");
+        assert!(title.starts_with(lines[0]));
+        // The short title of the other tests shows whole, on one line.
+        let state = DialogState::new(ConfirmDialog::new("Delete?"));
+        let mut ui = iced_test::simulator(state.view());
+        let short = ui.find("Delete?").expect("the title").bounds();
+        assert!((short.height - 15.0 * 1.3).abs() < 0.01, "{short:?}");
     }
 
     #[test]

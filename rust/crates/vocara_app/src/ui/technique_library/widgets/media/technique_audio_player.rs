@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::canvas::{self, Frame, Geometry, Path};
 use iced::widget::text::Wrapping;
-use iced::widget::{button, canvas as canvas_widget, container, row, text, Space};
+use iced::widget::{button, canvas as canvas_widget, container, row, Space};
 use iced::{mouse, Element, Event, Length, Point, Rectangle, Renderer, Size, Subscription, Theme};
 use vocara_services::media_player::{
     MediaKind, MediaPlayer, MediaPlayerError, MediaPlayerFactory, PlayerState, VideoFrame,
@@ -43,6 +43,7 @@ use vocara_store::db::asset_store::AssetStore;
 
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{alpha, bare_button, boxed, Studio};
+use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::core::widgets::wrap::Wrap;
 
 /// What an example whose file is missing on this device says instead of
@@ -300,8 +301,9 @@ impl Transport {
             Space::new().width(12),
             scrubber(fraction as f32),
             Space::new().width(12),
-            text(readout)
+            studio_text(readout)
                 .size(11.5)
+                .tabular()
                 .color(Studio::TEXT_SECONDARY)
                 .wrapping(Wrapping::None)
                 .width(82)
@@ -446,14 +448,11 @@ pub fn unavailable_clip<'a, M: 'a>() -> Element<'a, M> {
         row![
             icons::icon(Icon::FileX, 15.0, Studio::TEXT_FAINT),
             Space::new().width(10),
-            container(
-                text(UNAVAILABLE_CLIP_MESSAGE)
-                    .size(12)
-                    .color(Studio::TEXT_FAINT)
-                    .wrapping(Wrapping::None),
-            )
-            .width(Length::Fill)
-            .clip(true),
+            studio_text(UNAVAILABLE_CLIP_MESSAGE)
+                .size(12)
+                .color(Studio::TEXT_FAINT)
+                .width(Length::Fill)
+                .ellipsis(1),
         ]
         .align_y(Vertical::Center),
     )

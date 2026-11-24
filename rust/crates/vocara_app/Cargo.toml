@@ -20,7 +20,6 @@ vocara_model.workspace = true
 vocara_store.workspace = true
 vocara_services.workspace = true
 iced.workspace = true
-rfd.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

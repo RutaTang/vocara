@@ -100,7 +100,10 @@ pub const fn alpha(color: Color, a: f32) -> Color {
 
 /// The app font: forui's Inter, which `toApproximateMaterialTheme` set as the
 /// Material theme's font family, so every `Text` in the app (Studio styles
-/// set no family of their own) rendered in it.
+/// set no family of their own) rendered in it. Every text is shaped fully,
+/// kerned as Flutter set it: the workspace enables iced's `advanced-shaping`
+/// feature, which makes `Shaping::Advanced` the default of every text
+/// (iced's own default shapes ASCII text glyph by glyph, without kerning).
 pub mod font {
     use super::{Family, Font, Weight};
 
@@ -451,5 +454,88 @@ mod tests {
     fn the_theme_uses_the_scaffold_background() {
         assert_eq!(app_theme().palette().background, Studio::BACKGROUND);
         assert_eq!(app_theme().palette().text, Zinc::FOREGROUND);
+    }
+
+    #[test]
+    fn text_is_kerned_as_flutter_kerns_it() {
+        // iced's `text`, as the app builds it: shaped fully (the
+        // `advanced-shaping` feature), so Inter's "AV" kerning pair sets the
+        // two letters closer than their two advances. Shaped glyph by glyph
+        // (iced's default for ASCII), they sat exactly their advances apart.
+        use iced::widget::{row, text};
+        use std::borrow::Cow;
+
+        assert_eq!(
+            iced::widget::text::Shaping::default(),
+            iced::widget::text::Shaping::Advanced
+        );
+        let mut settings = crate::app::settings();
+        settings.fonts = font::FACES.iter().copied().map(Cow::Borrowed).collect();
+        let glyphs = row![text("AV").size(40), text("A").size(40), text("V").size(40),];
+        let mut ui: iced_test::Simulator<'_, ()> =
+            iced_test::Simulator::with_settings(settings, glyphs);
+        let width = |ui: &mut iced_test::Simulator<'_, ()>, label: &str| {
+            ui.find(label).expect("the text").bounds().width
+        };
+        let pair = width(&mut ui, "AV");
+        let apart = width(&mut ui, "A") + width(&mut ui, "V");
+        assert!(pair < apart - 1.0, "{pair} vs {apart}");
+    }
+
+    /// What full shaping costs over glyph-by-glyph shaping, per text laid
+    /// out (iced keeps a text's paragraph until the text changes, so this is
+    /// paid per change, not per frame). A measurement, not a check: run it
+    /// alone, in release, with `--ignored --nocapture`.
+    #[test]
+    #[ignore = "a timing measurement"]
+    fn shaping_cost() {
+        use iced::advanced::text::{self as core_text, Paragraph as _};
+        use iced::alignment::Vertical;
+        use iced::{Pixels, Renderer, Size};
+        use std::time::Instant;
+
+        crate::ui::core::widgets::studio_text::testing::load_fonts();
+        let labels = [
+            "VOCAL TAKES",
+            "Bohemian Rhapsody",
+            "-14.0 dB",
+            "00:59 / 03:00",
+            "Extracting the backing",
+            "backing · 2 takes · 1 note",
+            "Updated 2026-03-04 05:06",
+            "New practice",
+            "And I will always love you, I will always love you",
+            "Drag an audio or video clip here, or click to browse",
+            "Twang",
+            "L12",
+        ];
+        let shape = |content: &str, shaping| {
+            <Renderer as core_text::Renderer>::Paragraph::with_text(core_text::Text {
+                content,
+                bounds: Size::new(240.0, f32::INFINITY),
+                size: Pixels(13.0),
+                line_height: core_text::LineHeight::default(),
+                font: font::REGULAR,
+                align_x: core_text::Alignment::Default,
+                align_y: Vertical::Top,
+                shaping,
+                wrapping: core_text::Wrapping::Word,
+            })
+        };
+        let rounds = 400;
+        for shaping in [core_text::Shaping::Basic, core_text::Shaping::Advanced] {
+            for label in labels {
+                let _ = shape(label, shaping);
+            }
+            let start = Instant::now();
+            for _ in 0..rounds {
+                for label in labels {
+                    let _ = shape(label, shaping);
+                }
+            }
+            let each =
+                start.elapsed().as_secs_f64() * 1e6 / f64::from(rounds) / labels.len() as f64;
+            println!("{shaping:?}: {each:.1} µs per text");
+        }
     }
 }

@@ -7,6 +7,7 @@ pub mod audio_edit_service;
 pub mod audio_exporter;
 pub mod audio_file_service;
 pub mod engine;
+pub mod file_panels;
 pub mod graph_audio_playback_service;
 pub mod local_storage_service;
 pub mod media_analysis_service;
