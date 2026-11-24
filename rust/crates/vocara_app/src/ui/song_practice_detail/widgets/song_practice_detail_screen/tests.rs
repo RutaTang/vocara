@@ -81,12 +81,12 @@ use vocara_services::engine::{EngineBindings, EngineError};
 use vocara_services::graph_audio_playback_service::{GraphAudioPlaybackService, StagingDecode};
 use vocara_services::mic_recording_controller::{
     DestinationError, MicEvent, MicRecorder, MicRecordingStart, MicRecordingStop, PendingStart,
-    RecordingPathStrategy, StopFinalizeGate, StopFinalizeHold,
+    QuitFinalize, RecordingPathStrategy, StopFinalizeGate, StopFinalizeHold,
 };
 use vocara_services::playback_engine::{
     Broadcast, BusPlayback, Subscription as EngineSubscription, TrackPlayback,
 };
-use vocara_services::recording_finalizer::RecordingFinalizer;
+use vocara_services::recording_finalizer::{Finalizer, RecordingFinalizer};
 use vocara_services::source_separation_service::FakeSourceSeparationService;
 use vocara_services::spectrogram_service::{SpectrogramAnalyses, TakeAnalysisBundle};
 use vocara_services::waveform_service::WaveformResult;
@@ -715,11 +715,15 @@ impl EngineBindings for GraphBindings {
 /// The take-flow test's recorder (`_FakeMic`, and with a `ready` gate
 /// `_ArmingMic`): its start runs the destination's create (the take setup),
 /// then parks on `ready` while it is shut; starting until its start returns,
-/// arming nothing once `invalidate_pending_start` landed meanwhile.
+/// arming nothing once `invalidate_pending_start` landed meanwhile. Wired to
+/// its controller's quit hook (`wire_quit`), it lists the take's quit work
+/// for exactly its armed window, as the app's `MicRecordingController` does:
+/// registered as it arms, under the same lock that flips `recording`.
 struct FakeMic {
     s: Arc<Mutex<MicState>>,
     ready: Option<Arc<Gate>>,
     stop_gate: StopFinalizeGate,
+    finalizer: Arc<RecordingFinalizer>,
 }
 
 #[derive(Default)]
@@ -730,6 +734,8 @@ struct MicState {
     last_path: Option<String>,
     /// The frames the take's ring dropped (a busy disk), said at its stop.
     dropped_frames: u64,
+    /// The armed take's quit work (`finalize_on_quit`), once wired.
+    on_quit: Option<Finalizer>,
 }
 
 impl FakeMic {
@@ -738,7 +744,13 @@ impl FakeMic {
             s: Arc::new(Mutex::new(MicState::default())),
             ready: ready.cloned(),
             stop_gate: StopFinalizeGate::new(Arc::clone(finalizer)),
+            finalizer: Arc::clone(finalizer),
         })
+    }
+
+    /// Hands the recorder its controller's `on_quit_finalize`.
+    fn wire_quit(&self, hook: QuitFinalize) {
+        guard(&self.s).on_quit = Some(Finalizer::new(move || hook()));
     }
 }
 
@@ -777,6 +789,7 @@ impl MicRecorder for FakeMic {
         };
         let s = Arc::clone(&self.s);
         let ready = self.ready.clone();
+        let finalizer = Arc::clone(&self.finalizer);
         PendingStart::from_fn(move || {
             let outcome = (|| {
                 let path = destination.create()?;
@@ -790,6 +803,9 @@ impl MicRecorder for FakeMic {
                 st.starting = false;
                 st.last_path = Some(path.clone());
                 st.recording = true;
+                if let Some(on_quit) = &st.on_quit {
+                    finalizer.register(on_quit, true);
+                }
                 Ok(MicRecordingStart::Started(path))
             })();
             guard(&s).starting = false;
@@ -809,6 +825,9 @@ impl MicRecorder for FakeMic {
             return None;
         }
         s.recording = false;
+        if let Some(on_quit) = &s.on_quit {
+            self.finalizer.unregister(on_quit);
+        }
         Some(MicRecordingStop {
             path: s.last_path.clone().unwrap_or_default(),
             clean: true,
@@ -2333,7 +2352,9 @@ fn a_fader_held_on_a_lane_that_goes_commits_its_level() {
 /// The take-flow screen: a backing and `take1`, the mic armed by REC.
 fn take_flow(ready: Option<&Arc<Gate>>, analyze: TakeAnalyzer) -> (Harness, Arc<FakeMic>) {
     let (setup, mic) = take_flow_setup(ready, analyze);
-    (Harness::open(setup), mic)
+    let h = Harness::open(setup);
+    mic.wire_quit(h.vm().recording().quit_hook());
+    (h, mic)
 }
 
 fn take_flow_setup(ready: Option<&Arc<Gate>>, analyze: TakeAnalyzer) -> (Setup, Arc<FakeMic>) {
@@ -2362,7 +2383,10 @@ pub(super) fn take_flow_page(
     let (setup, mic) = take_flow_setup(None, ok_analyze());
     guard(&mic.s).dropped_frames = dropped_frames;
     let fakes = Fakes::new(setup, services);
-    SongPracticeDetailScreen::with_options("p1".into(), services, fakes.deps, fakes.options)
+    let page =
+        SongPracticeDetailScreen::with_options("p1".into(), services, fakes.deps, fakes.options);
+    mic.wire_quit(page.0.vm.recording().quit_hook());
+    page
 }
 
 fn take_ids(p: &SongPractice) -> Vec<String> {
@@ -2453,7 +2477,16 @@ fn a_quit_while_recording_stops_the_take_and_waits_for_it_to_land() {
     h.pump_until(|h| h.vm().recording().has_quit_requests());
     assert_eq!(wakes.next(), Some(()), "the quit rang");
     h.send(Message::QuitRequests);
-    h.pump_until(|_| quit.is_finished());
+    // The page serves every ring, as its subscription does: a quit that
+    // caught the start before it landed asks twice (the start's cancel and
+    // the armed take's stop), on two threads.
+    loop {
+        h.pump_until(|h| quit.is_finished() || h.vm().recording().has_quit_requests());
+        if quit.is_finished() {
+            break;
+        }
+        h.send(Message::QuitRequests);
+    }
     h.settle();
     assert!(!h.vm().is_recording());
     assert_eq!(h.repo.stored().vocal_tracks.len(), 2, "the take was saved");

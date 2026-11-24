@@ -2400,6 +2400,15 @@ impl RecordingController {
         !self.quit.queue().asked.is_empty()
     }
 
+    /// What the app's recorder is handed as its `on_quit_finalize`: asks
+    /// this controller to stop the armed take. A test's injected recorder
+    /// takes it to register for its armed window, as the real one does.
+    #[cfg(test)]
+    pub(crate) fn quit_hook(&self) -> vocara_services::mic_recording_controller::QuitFinalize {
+        let quit = Arc::clone(&self.quit);
+        Arc::new(move || quit.ask(QuitKind::StopTake))
+    }
+
     /// Serves the quit's requests: what the quit's finalizers awaited in
     /// Dart. A take armed stops and lands; one in REC's arm window is
     /// cancelled, and a start that reached its take setup is waited for
