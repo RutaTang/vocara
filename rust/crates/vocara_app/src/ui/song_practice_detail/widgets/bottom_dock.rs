@@ -31,15 +31,14 @@
 //!   before a rebuild both count, and a drag down from a capped dock moves it
 //!   at once.
 //!
-//! Where iced differs: text has no letter spacing (the tabs' 0.8, set
-//! solid); the tab strip scrolls without a visible scrollbar.
+//! Where iced differs: the tab strip scrolls without a visible scrollbar.
 
 #[cfg(test)]
 mod tests;
 
 use iced::alignment::Vertical;
 use iced::widget::scrollable::{Direction, Scrollbar};
-use iced::widget::{button, column, container, row, scrollable, stack, text, Row, Space};
+use iced::widget::{button, column, container, row, scrollable, stack, Row, Space};
 use iced::{mouse, Color, Element, Event, Length, Padding};
 use vocara_model::models::voice_metrics::{Ltas, RegisterMap, VoiceMetrics, VoiceProfile};
 
@@ -49,6 +48,7 @@ use super::voice_profile_view::{dynamics_view, range_view};
 use super::voiceprint_view::{self as voiceprint, VoiceprintState};
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{bare_button, boxed, fill, font, Studio};
+use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::core::widgets::wrap::Wrap;
 use crate::ui::song_practice_detail::view_model::analysis_source::AnalysisSource;
 use crate::ui::song_practice_detail::view_model::song_practice_detail_view_model::DockTab;
@@ -331,9 +331,10 @@ fn tab_bar<'a>(open: bool, tab: DockTab, shows_live: bool, live: bool) -> Elemen
 /// `_Tab`: an upper-cased 11 px label, raised with a border when active.
 fn dock_tab<'a>(label: &'static str, active: bool, on_tap: Message) -> Element<'a, Message> {
     let face = container(
-        text(label.to_uppercase())
+        studio_text(label.to_uppercase())
             .size(11)
             .font(font::BOLD)
+            .letter_spacing(0.8)
             .color(if active {
                 Studio::TEXT_PRIMARY
             } else {

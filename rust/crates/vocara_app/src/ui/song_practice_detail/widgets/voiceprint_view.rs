@@ -31,8 +31,7 @@
 //!   over the take spectrogram that seeks on the press and on every
 //!   horizontal move of a drag.
 //!
-//! Where iced differs: text has no letter spacing (set solid) and no
-//! ellipsis (the tab header clips); the live spectrogram's 6 px rounded clip
+//! Where iced differs: the live spectrogram's 6 px rounded clip
 //! (`ClipRRect`) is square, as iced clips to rectangles; the `Tooltip`s are
 //! iced tooltips below their chip, shown on hover.
 
@@ -44,7 +43,7 @@ use std::time::Duration;
 use iced::alignment::{Horizontal, Vertical};
 use iced::border::Radius;
 use iced::widget::canvas::{self, gradient, Frame, Geometry, LineCap, Path, Stroke};
-use iced::widget::text::{Alignment, Wrapping};
+use iced::widget::text::Alignment;
 use iced::widget::{
     button, canvas as canvas_widget, center, column, container, responsive, row, stack, text,
     tooltip, Row, Space,
@@ -62,6 +61,7 @@ use vocara_model::models::voice_metrics::{
 use vocara_model::util::dart_num::{clamp_f64, floor_to_i64, round_to_i64};
 use vocara_services::monitor_service::{MonitorService, MonitorState};
 
+use super::detail_transport_bar::flexible_row;
 use super::live_spectrogram::live_spectrogram;
 use super::pitch_lane::{note_vibrato_of, pitch_lane, pitch_notes_of, pitch_range_of};
 use crate::ui::core::theme::{self, boxed, fill, font, inset, Studio};
@@ -71,6 +71,7 @@ use crate::ui::core::widgets::spectrogram_painter::{
     RenderRequest, Rendered, SpectrogramImage, VowelSpacePainter, F0_COLOR, FORMANT_COLORS,
 };
 use crate::ui::core::widgets::studio_hint::studio_hint;
+use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::core::widgets::waveform_painter::PlayheadPainter;
 use crate::ui::song_practice_detail::view_model::analysis_source::AnalysisSource;
 use crate::util::to_string_as_fixed;
@@ -1081,9 +1082,10 @@ fn live_register_panel<'a>(m: &MonitorState) -> Element<'a, Message> {
         Studio::TEXT_FAINT
     };
     let readout = column![
-        text(label)
+        studio_text(label)
             .size(24)
             .font(font::EXTRA_BOLD)
+            .letter_spacing(1.5)
             .color(label_color),
         Space::new().height(4),
         text(if has_now {
@@ -1282,9 +1284,10 @@ fn f0_chip<'a>(hz: f64) -> Element<'a, Message> {
     let mut content = row![
         dot(F0_COLOR, 8.0),
         Space::new().width(6),
-        text("F0")
+        studio_text("F0")
             .size(9)
             .font(font::BOLD)
+            .letter_spacing(0.6)
             .color(Studio::TEXT_FAINT),
         Space::new().width(6),
         text(if has {
@@ -1327,9 +1330,10 @@ fn metric_chip<'a>(
         }
     };
     let content = row![
-        text(label)
+        studio_text(label)
             .size(9)
             .font(font::BOLD)
+            .letter_spacing(0.6)
             .color(Studio::TEXT_FAINT),
         Space::new().width(6),
         text(format!("{} dB", fmt(value)))
@@ -1351,9 +1355,10 @@ fn metric_chip<'a>(
 /// `_StatInline`: a small inline "LABEL value" stat used in tab headers.
 fn stat_inline<'a>(label: &str, value: String, accent: Color) -> Element<'a, Message> {
     row![
-        text(format!("{}  ", label.to_uppercase()))
+        studio_text(format!("{}  ", label.to_uppercase()))
             .size(9)
             .font(font::BOLD)
+            .letter_spacing(0.5)
             .color(Studio::TEXT_FAINT),
         text(value).size(12).font(font::BOLD).color(accent),
     ]
@@ -1407,7 +1412,11 @@ fn live_dot<'a>() -> Element<'a, Message> {
     row![
         dot(Studio::RECORD, 8.0),
         Space::new().width(6),
-        text("LIVE").size(10).font(font::BOLD).color(Studio::RECORD),
+        studio_text("LIVE")
+            .size(10)
+            .font(font::BOLD)
+            .letter_spacing(0.5)
+            .color(Studio::RECORD),
     ]
     .align_y(Vertical::Center)
     .into()
@@ -1427,19 +1436,19 @@ fn reg_swatch<'a>(color: Color, label: String) -> Element<'a, Message> {
 /// `_TabHeader`: a small uppercase header row for a tab, indented past the
 /// frequency axis, with an optional `trailing` widget after it.
 fn tab_header<'a>(label: &str, trailing: Option<Element<'a, Message>>) -> Element<'a, Message> {
-    let mut header = row![container(
-        text(label.to_uppercase())
-            .size(10)
-            .font(font::BOLD)
-            .color(Studio::TEXT_FAINT)
-            .wrapping(Wrapping::None),
-    )
-    .clip(true)]
-    .align_y(Vertical::Center);
+    // The label is `Flexible`: it ellipsizes in what `trailing` leaves it.
+    let mut header: Vec<Element<'a, Message>> = vec![studio_text(label.to_uppercase())
+        .size(10)
+        .font(font::BOLD)
+        .letter_spacing(0.8)
+        .color(Studio::TEXT_FAINT)
+        .ellipsis(1)
+        .into()];
     if let Some(trailing) = trailing {
-        header = header.push(Space::new().width(10)).push(trailing);
+        header.push(Space::new().width(10).into());
+        header.push(trailing);
     }
-    container(header)
+    container(flexible_row(header, 0))
         .padding(ltrb(AXIS_WIDTH, 0.0, 0.0, 6.0))
         .into()
 }
@@ -1448,9 +1457,10 @@ fn tab_header<'a>(label: &str, trailing: Option<Element<'a, Message>>) -> Elemen
 /// indented past the frequency axis so the panels read consistently.
 fn panel_label<'a>(label: &str) -> Element<'a, Message> {
     container(
-        text(label.to_uppercase())
+        studio_text(label.to_uppercase())
             .size(10)
             .font(font::BOLD)
+            .letter_spacing(0.8)
             .color(Studio::TEXT_FAINT),
     )
     .padding(ltrb(AXIS_WIDTH, 0.0, 0.0, 4.0))
@@ -1541,9 +1551,10 @@ fn vowel_panel<'a>(f1: f64, f2: f64) -> Element<'a, Message> {
         .into()
     });
     column![
-        text("VOWEL  F1×F2")
+        studio_text("VOWEL  F1×F2")
             .size(10)
             .font(font::BOLD)
+            .letter_spacing(0.8)
             .color(Studio::TEXT_FAINT),
         Space::new().height(8),
         chart,

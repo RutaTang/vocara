@@ -11,10 +11,11 @@
 use std::time::Instant;
 
 use iced::alignment::{Horizontal, Vertical};
-use iced::widget::{container, text};
+use iced::widget::container;
 use iced::{mouse, Element, Event, Length};
 
 use super::gesture::{Gesture, PanDoubleTap};
+use super::studio_text::studio_text;
 use super::wrap::Wrap;
 use crate::ui::core::theme::{boxed, fill, font, Studio};
 
@@ -69,13 +70,13 @@ pub fn window_drag_bar<'a, M: Clone + 'a>(
 }
 
 /// Small uppercase pill marking the non-production environment: 9 px w800
-/// `Studio.background` on `Studio.accent`, radius 4. (Its 0.8 letter spacing
-/// has no iced counterpart.)
+/// `Studio.background` on `Studio.accent`, 0.8 letter spacing, radius 4.
 fn env_badge<'a, M: 'a>(label: &str) -> Element<'a, M> {
     container(
-        text(label.to_string())
+        studio_text(label.to_string())
             .size(9)
             .font(font::EXTRA_BOLD)
+            .letter_spacing(0.8)
             .line_height(1.0)
             .color(Studio::BACKGROUND),
     )

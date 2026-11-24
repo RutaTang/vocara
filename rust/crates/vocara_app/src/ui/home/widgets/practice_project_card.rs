@@ -9,10 +9,9 @@
 //! `MouseRegion` built it only then, and the card's own border turns coral
 //! from its button status. Flutter animated the border over 120 ms
 //! (`AnimatedContainer`); iced switches at once. The title is held to one
-//! line (Dart ellipsized it; iced clips it).
+//! line, ellipsized.
 
 use iced::alignment::Vertical;
-use iced::widget::text::Wrapping;
 use iced::widget::{button, column, container, hover, row, text, Space};
 use iced::{Background, Border, Color, Element, Length, Shadow, Theme};
 use vocara_model::models::practice_summary::PracticeSummary;
@@ -20,6 +19,7 @@ use vocara_model::util::dart_date_time::DateTime;
 
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{alpha, bare_button, boxed, font, Studio};
+use crate::ui::core::widgets::studio_text::studio_text;
 
 /// The card's border: coral at 60 % while hovered, `Studio.border` at rest.
 pub fn card_border(hovered: bool) -> Color {
@@ -77,15 +77,11 @@ pub fn practice_project_card<'a, M: Clone + 'a>(
     let content = column![
         row![badge, Space::new().width(Length::Fill)],
         Space::new().height(Length::Fill),
-        container(
-            text(practice.title.clone())
-                .size(16)
-                .font(font::SEMIBOLD)
-                .color(Studio::TEXT_PRIMARY)
-                .wrapping(Wrapping::None),
-        )
-        .width(Length::Fill)
-        .clip(true),
+        studio_text(practice.title.clone())
+            .size(16)
+            .font(font::SEMIBOLD)
+            .color(Studio::TEXT_PRIMARY)
+            .ellipsis(1),
         Space::new().height(4),
         text(subtitle(practice))
             .size(12)
@@ -209,6 +205,41 @@ mod tests {
         assert!(ui.find("Bohemian Rhapsody").is_ok());
         assert!(ui.find("backing · 2 takes · 1 note").is_ok());
         assert!(ui.find("Updated 2026-03-04 05:06").is_ok());
+    }
+
+    #[test]
+    fn a_long_title_ends_in_an_ellipsis_within_the_card() {
+        use iced_test::selector::{Candidate, Target};
+
+        let long = "A practice whose title runs on far past the width of its card";
+        let p = PracticeSummary {
+            title: long.into(),
+            ..summary(2, 1, true)
+        };
+        let mut ui = iced_test::Simulator::with_settings(settings(), card(&p));
+        // The title is still found by its full text...
+        let title = ui.find(long).expect("the title");
+        // ...and what shows is its longest prefix that fits, then "…",
+        // inside the card's 17 px of padding and border.
+        let shown = ui
+            .find(|candidate: Candidate<'_>| match candidate {
+                Candidate::Text { content, .. } if content.ends_with('\u{2026}') => {
+                    Some((content.to_string(), Target::from(candidate)))
+                }
+                _ => None,
+            })
+            .expect("the cut title");
+        let prefix = shown.0.trim_end_matches('\u{2026}');
+        assert!(long.starts_with(prefix) && prefix.len() > 10, "{}", shown.0);
+        assert!(title.bounds().width <= 280.0 - 2.0 * 17.0);
+        // A title that fits shows whole.
+        let mut ui = iced_test::Simulator::with_settings(settings(), card(&summary(2, 1, true)));
+        assert!(ui
+            .find(|candidate: Candidate<'_>| match candidate {
+                Candidate::Text { content, .. } if content.ends_with('\u{2026}') => Some(()),
+                _ => None,
+            })
+            .is_err());
     }
 
     #[test]

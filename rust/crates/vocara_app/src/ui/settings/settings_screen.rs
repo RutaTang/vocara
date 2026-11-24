@@ -35,8 +35,7 @@
 //!
 //! Flutter's Material slider and switch are drawn here with iced's slider and
 //! a switch built to Material 3's geometry, without their hover/press
-//! overlays; iced has no letter spacing or ellipsis (one-line labels clip),
-//! and the switch's semantics label has no counterpart.
+//! overlays; the switch's semantics label has no counterpart.
 
 use std::collections::VecDeque;
 use std::convert::Infallible;
@@ -50,7 +49,6 @@ use iced::alignment::{Horizontal, Vertical};
 use iced::border::Radius;
 use iced::futures::channel::mpsc;
 use iced::futures::{stream, Stream, StreamExt};
-use iced::widget::text::Wrapping;
 use iced::widget::{
     button, column, container, row, scrollable, slider, stack, text, Column, Space,
 };
@@ -74,6 +72,7 @@ use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{self, alpha, bare_button, boxed, font, Studio, Zinc};
 use crate::ui::core::widgets::confirm_dialog::ConfirmDialog;
 use crate::ui::core::widgets::studio_hint::spinner;
+use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::home::widgets::update_notice::UpdateDownloadDialog;
 use crate::ui::{Screen, SnackBar, Update};
 use crate::util::to_string_as_fixed;
@@ -1110,9 +1109,10 @@ fn header<'a>() -> Element<'a, Message> {
     let bar = row![
         back,
         Space::new().width(6),
-        text("Settings")
+        studio_text("Settings")
             .size(18)
             .font(font::BOLD)
+            .letter_spacing(0.3)
             .color(Studio::TEXT_PRIMARY),
     ]
     .align_y(Vertical::Center);
@@ -1143,11 +1143,13 @@ fn divider<'a>() -> Element<'a, Message> {
     rule()
 }
 
-/// `_SectionLabel`: the text in capitals, 11 px bold, `Studio.textSecondary`.
+/// `_SectionLabel`: the text in capitals, 11 px bold, 1.2 letter spacing,
+/// `Studio.textSecondary`.
 fn section_label<'a>(label: &str) -> Element<'a, Message> {
-    text(label.to_uppercase())
+    studio_text(label.to_uppercase())
         .size(11)
         .font(font::BOLD)
+        .letter_spacing(1.2)
         .color(Studio::TEXT_SECONDARY)
         .into()
 }
@@ -1311,19 +1313,15 @@ fn device_row<'a>(
     } else {
         Studio::TEXT_SECONDARY
     };
-    let mut label = column![container(
-        text(title)
-            .size(13.5)
-            .font(if selected {
-                font::SEMIBOLD
-            } else {
-                font::MEDIUM
-            })
-            .color(title_color)
-            .wrapping(Wrapping::None),
-    )
-    .width(Length::Fill)
-    .clip(true)];
+    let mut label = column![studio_text(title)
+        .size(13.5)
+        .font(if selected {
+            font::SEMIBOLD
+        } else {
+            font::MEDIUM
+        })
+        .color(title_color)
+        .ellipsis(1)];
     if !subtitle.is_empty() {
         label = label
             .push(Space::new().height(2))
@@ -1614,11 +1612,17 @@ fn input_channel_card<'a>(device: &str, mode: u32) -> Element<'a, Message> {
 /// One segment of the input-channel control.
 fn segment<'a>(label: &'a str, value: u32, mode: u32) -> Element<'a, Message> {
     let active = mode == value;
-    let face = container(text(label).size(11).font(font::BOLD).color(if active {
-        Studio::ACCENT_BRIGHT
-    } else {
-        Studio::TEXT_SECONDARY
-    }))
+    let face = container(
+        studio_text(label)
+            .size(11)
+            .font(font::BOLD)
+            .letter_spacing(0.3)
+            .color(if active {
+                Studio::ACCENT_BRIGHT
+            } else {
+                Studio::TEXT_SECONDARY
+            }),
+    )
     .padding(Padding::from([4, 12]))
     .style(move |_: &Theme| boxed(active.then(|| alpha(Studio::ACCENT, 0.18)), 5.0, None));
     button(face)

@@ -9,15 +9,16 @@
 //! (single line, Return submits) or [`studio_prose_field`] over a
 //! `text_editor::Content` (prose: it grows from `min_lines` to `max_lines`,
 //! then scrolls). `autofocus` is the owner's `iced::widget::operation::focus`
-//! task on the field's [`id`](StudioField::id) when it appears. The caption's
-//! 0.6 letter spacing has no iced counterpart, and iced draws the caret in
-//! the text colour (the coral `cursorColor` has none either).
+//! task on the field's [`id`](StudioField::id) when it appears. iced draws
+//! the caret in the text colour (the coral `cursorColor` has no
+//! counterpart).
 
-use iced::widget::{column, container, text, text_editor, text_input, Space};
+use iced::widget::{column, container, text_editor, text_input, Space};
 use iced::{widget, Background, Border, Color, Element, Length, Padding, Theme};
 use vocara_model::util::dart_string;
 
 use crate::ui::core::theme::{self, alpha, font, Studio, Zinc};
+use crate::ui::core::widgets::studio_text::studio_text;
 
 /// The field's text size and line height (`fontSize: 14, height: 1.45`).
 const TEXT_SIZE: f32 = 14.0;
@@ -210,9 +211,10 @@ impl<'a, M: Clone + 'a> From<StudioField<'a, M>> for Element<'a, M> {
             }
         };
         column![
-            text(f.label.to_uppercase())
+            studio_text(f.label.to_uppercase())
                 .size(10.5)
                 .font(font::BOLD)
+                .letter_spacing(0.6)
                 .color(Studio::TEXT_FAINT),
             Space::new().height(6),
             container(field)

@@ -11,7 +11,6 @@ use iced::advanced::widget::{tree, Operation, Tree};
 use iced::advanced::{overlay, renderer, Clipboard, Shell, Widget};
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::canvas::{self, gradient, Frame, Geometry, Path};
-use iced::widget::text::Wrapping;
 use iced::widget::{
     button, canvas as canvas_widget, column, container, mouse_area, opaque, responsive, row,
     scrollable, stack, text, Space,
@@ -36,6 +35,7 @@ use crate::ui::core::widgets::holds_keyboard::holds_keyboard;
 use crate::ui::core::widgets::studio_button::studio_button;
 use crate::ui::core::widgets::studio_controls::{fader_db_readout, studio_fader};
 use crate::ui::core::widgets::studio_hint::spinner;
+use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::core::widgets::visible_drop_target::visible_drop_target;
 use crate::ui::core::widgets::waveform_painter::{PlayheadPainter, TimelineGridPainter};
 use crate::ui::core::widgets::wrap::Wrap;
@@ -680,18 +680,17 @@ impl SongPracticeDetailScreen {
             row![
                 icons::icon(Icon::Drama, 13.0, Studio::ACCENT_BRIGHT),
                 Space::new().width(7),
-                // On a narrow centre pane the name gives way (clipped) rather
-                // than pushing the chevron off the row.
+                // On a narrow centre pane the name gives way (ellipsized)
+                // rather than pushing the chevron off the row.
                 Reserve::new(
                     container(
-                        text(name)
+                        studio_text(name)
                             .size(12)
                             .font(font::BOLD)
                             .color(Studio::TEXT_PRIMARY)
-                            .wrapping(Wrapping::None),
+                            .ellipsis(1),
                     )
-                    .max_width(170)
-                    .clip(true),
+                    .max_width(170),
                     4.0 + 14.0,
                 ),
                 Space::new().width(4),
@@ -730,9 +729,10 @@ impl SongPracticeDetailScreen {
         .on_press(Message::NewTake);
         container(
             row![
-                text("VOCAL TAKES")
+                studio_text("VOCAL TAKES")
                     .size(11)
                     .font(font::BOLD)
+                    .letter_spacing(0.8)
                     .color(Studio::TEXT_FAINT),
                 Space::new().width(10),
                 container(
@@ -802,15 +802,13 @@ impl SongPracticeDetailScreen {
         let fader_id = bus.id.clone();
         let content = container(column![
             row![
-                container(
-                    text(bus.name.as_str())
-                        .size(11.5)
-                        .font(font::BOLD)
-                        .color(accent)
-                        .wrapping(Wrapping::None)
-                )
-                .width(Length::Fill)
-                .clip(true),
+                studio_text(bus.name.as_str())
+                    .size(11.5)
+                    .font(font::BOLD)
+                    .letter_spacing(0.2)
+                    .color(accent)
+                    .width(Length::Fill)
+                    .ellipsis(1),
                 track_menu_button(Message::OpenBusMenu(id.clone())),
             ]
             .align_y(Vertical::Center),
@@ -910,9 +908,10 @@ impl SongPracticeDetailScreen {
         let vm = &*self.vm;
         let volume = practice.master_volume;
         let content = container(column![
-            text("MASTER")
+            studio_text("MASTER")
                 .size(11.5)
                 .font(font::BOLD)
+                .letter_spacing(0.4)
                 .color(Studio::ACCENT),
             Space::new().height(Length::Fill),
             row![
@@ -1171,12 +1170,14 @@ pub(super) fn snack_bar<M: 'static>(message: &str) -> Element<'_, M> {
         .into()
 }
 
-/// A section label of the lane list ("MASTER TRACK", "FX BUSES"' text).
+/// A section label of the lane list ("MASTER TRACK", "FX BUSES"' text): 11
+/// px w700, 0.8 letter spacing.
 fn section_label<'a>(label: &'static str, top: f32) -> Element<'a, Message> {
     container(
-        text(label)
+        studio_text(label)
             .size(11)
             .font(font::BOLD)
+            .letter_spacing(0.8)
             .color(Studio::TEXT_FAINT),
     )
     .padding(Padding {
@@ -1195,11 +1196,17 @@ fn section_label<'a>(label: &'static str, top: f32) -> Element<'a, Message> {
 fn backing_header<'a>(reference: bool) -> Element<'a, Message> {
     let seg = |label: &'static str, active: bool, value: bool| {
         button(
-            container(text(label).size(11).font(font::BOLD).color(if active {
-                Studio::ACCENT_BRIGHT
-            } else {
-                Studio::TEXT_SECONDARY
-            }))
+            container(
+                studio_text(label)
+                    .size(11)
+                    .font(font::BOLD)
+                    .letter_spacing(0.3)
+                    .color(if active {
+                        Studio::ACCENT_BRIGHT
+                    } else {
+                        Studio::TEXT_SECONDARY
+                    }),
+            )
             .padding(Padding::from([4, 12]))
             .style(move |_| {
                 boxed(
@@ -1226,13 +1233,14 @@ fn backing_header<'a>(reference: bool) -> Element<'a, Message> {
     .style(theme::inset(7.0));
     container(
         row![
-            text(if reference {
+            studio_text(if reference {
                 "REFERENCE · ORIGINAL"
             } else {
                 "ACCOMPANIMENT"
             })
             .size(11)
             .font(font::BOLD)
+            .letter_spacing(0.8)
             .color(Studio::TEXT_FAINT),
             Space::new().width(Length::Fill),
             toggle,
@@ -1268,9 +1276,10 @@ fn buses_header<'a>() -> Element<'a, Message> {
     .on_press(Message::NewBus);
     container(
         row![
-            text("FX BUSES")
+            studio_text("FX BUSES")
                 .size(11)
                 .font(font::BOLD)
+                .letter_spacing(0.8)
                 .color(Studio::TEXT_FAINT),
             Space::new().width(Length::Fill),
             new_bus,
@@ -1302,7 +1311,7 @@ fn drop_hint<'a>(icon: Icon, hint: &'static str, highlighted: bool) -> Element<'
             Space::new().width(8),
             // Cut short rather than overflowing: at the smallest window with
             // both side panels open the centre pane is under 400 px wide.
-            container(text(hint).size(13).color(color).wrapping(Wrapping::None)).clip(true),
+            studio_text(hint).size(13).color(color).ellipsis(1),
         ]
         .align_y(Vertical::Center),
     )

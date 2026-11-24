@@ -22,7 +22,6 @@
 //! copies, and its edits are dropped (the dialog keeps the URL).
 
 use iced::alignment::Vertical;
-use iced::widget::text::Wrapping;
 use iced::widget::{button, column, container, row, scrollable, text, text_input, tooltip, Space};
 use iced::{Background, Border, Color, Element, Length, Padding, Task, Theme};
 use vocara_services::update_check_service::{UpdateCheckService, UpdateInfo};
@@ -31,6 +30,7 @@ use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{self, alpha, bare_button, font, Studio, Zinc};
 use crate::ui::core::widgets::confirm_dialog::modal;
 use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
+use crate::ui::core::widgets::studio_text::studio_text;
 
 pub use crate::ui::core::widgets::confirm_dialog::Message as DialogMessage;
 
@@ -95,16 +95,13 @@ fn banner<'a>(info: UpdateInfo) -> Element<'a, Message> {
     let content = row![
         icons::icon(Icon::CircleArrowUp, 16.0, Studio::ACCENT),
         Space::new().width(10),
-        // One line (Dart ellipsized it; iced clips it).
-        container(
-            text(format!("Vocara {} is available.", info.version))
-                .size(13)
-                .font(font::SEMIBOLD)
-                .color(Studio::TEXT_PRIMARY)
-                .wrapping(Wrapping::None),
-        )
-        .width(Length::Fill)
-        .clip(true),
+        // One line, ellipsized.
+        studio_text(format!("Vocara {} is available.", info.version))
+            .size(13)
+            .font(font::SEMIBOLD)
+            .color(Studio::TEXT_PRIMARY)
+            .width(Length::Fill)
+            .ellipsis(1),
         Space::new().width(10),
         studio_button("Download", Message::Download(info))
             .icon(Icon::Download)

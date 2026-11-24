@@ -21,7 +21,6 @@
 //! Escape cancels, and nothing beneath sees a key.
 
 use iced::alignment::{Horizontal, Vertical};
-use iced::widget::text::Wrapping;
 use iced::widget::{
     button, center, column, container, mouse_area, opaque, row, scrollable, stack, text,
     text_input, Column, Space,
@@ -33,6 +32,7 @@ use vocara_model::util::dart_string;
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{self, font, Studio};
 use crate::ui::core::widgets::studio_hint::spinner;
+use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::core::widgets::wrap::Wrap;
 
 /// `showTechniquePicker`'s default title.
@@ -237,17 +237,19 @@ fn search_field(query: &str, id: widget::Id) -> Element<'_, Message> {
 /// coral waypoints glyph, the name (13.5 px w600) and, when it has tags,
 /// them joined by " · " under it — one line each.
 fn technique_row(t: &Technique) -> Element<'_, Message> {
-    let mut labels = column![one_line(
-        text(t.name.as_str())
-            .size(13.5)
-            .font(font::SEMIBOLD)
-            .color(Studio::TEXT_PRIMARY)
-    )]
+    let mut labels = column![studio_text(t.name.as_str())
+        .size(13.5)
+        .font(font::SEMIBOLD)
+        .color(Studio::TEXT_PRIMARY)
+        .ellipsis(1)]
     .width(Length::Fill);
     if !t.tags.is_empty() {
-        labels = labels.push(Space::new().height(2)).push(one_line(
-            text(t.tags.join(" · ")).size(11).color(Studio::TEXT_FAINT),
-        ));
+        labels = labels.push(Space::new().height(2)).push(
+            studio_text(t.tags.join(" · "))
+                .size(11)
+                .color(Studio::TEXT_FAINT)
+                .ellipsis(1),
+        );
     }
     button(
         row![
@@ -262,14 +264,6 @@ fn technique_row(t: &Technique) -> Element<'_, Message> {
     .style(theme::menu_item)
     .on_press(Message::Pick(t.id.clone()))
     .into()
-}
-
-/// One line, clipped (Dart ellipsized it; iced has no ellipsis).
-fn one_line<'a>(label: iced::widget::Text<'a>) -> Element<'a, Message> {
-    container(label.wrapping(Wrapping::None))
-        .width(Length::Fill)
-        .clip(true)
-        .into()
 }
 
 /// `_Hint`: a faint centred message, 20 / 28 padding.
