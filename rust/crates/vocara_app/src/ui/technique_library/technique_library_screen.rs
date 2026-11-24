@@ -19,9 +19,9 @@
 //! the list and opens card taps again.
 //!
 //! Flutter animated the card border (120 ms) and the snack bar's entrance;
-//! iced switches at once. iced has no ellipsis: one-line labels clip, and
-//! the summary is held to its three lines; nor letter spacing (the title's
-//! 0.3). The page draws its snack bars itself, over its bottom edge, while
+//! iced switches at once.
+//!
+//! The page draws its snack bars itself, over its bottom edge, while
 //! it is on top; once it leaves (or is covered) the app keeps them up over
 //! the page on top (`app::messenger`), as Dart's `ScaffoldMessenger`, above
 //! every page, did. A new one waits behind the ones up, as `showSnackBar`
@@ -37,7 +37,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use iced::alignment::{Horizontal, Vertical};
-use iced::widget::text::Wrapping;
 use iced::widget::{
     button, center, column, container, hover, opaque, responsive, row, scrollable, stack, text,
     text_input, Column, Row, Space,
@@ -61,6 +60,7 @@ use crate::ui::core::theme::{self, alpha, bare_button, font, Studio};
 use crate::ui::core::widgets::confirm_dialog::ConfirmDialog;
 use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
 use crate::ui::core::widgets::studio_hint::spinner;
+use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::{Screen, SnackBar, Update};
 
 /// The snack bar after a create that did not happen.
@@ -431,9 +431,10 @@ impl TechniqueLibraryScreen {
         let mut bar = row![
             back,
             Space::new().width(6),
-            text("Technique library")
+            studio_text("Technique library")
                 .size(18)
                 .font(font::BOLD)
+                .letter_spacing(0.3)
                 .color(Studio::TEXT_PRIMARY),
             // The space absorbs the slack so the search + tag filter + New
             // technique cluster sits flush right. The tag filter is a
@@ -500,14 +501,13 @@ impl TechniqueLibraryScreen {
             icons::icon(Icon::Tag, 13.0, icon),
             Space::new().width(7),
             container(
-                text(label)
+                studio_text(label)
                     .size(13)
                     .font(font::SEMIBOLD)
                     .color(fg)
-                    .wrapping(Wrapping::None),
+                    .ellipsis(1),
             )
-            .max_width(150)
-            .clip(true),
+            .max_width(150),
             Space::new().width(6),
             icons::icon(Icon::ChevronDown, 14.0, Studio::TEXT_SECONDARY),
         ]
@@ -733,19 +733,16 @@ fn menu_item<'a>(
     };
     button(
         row![
-            container(
-                text(label)
-                    .size(13)
-                    .font(if active {
-                        font::SEMIBOLD
-                    } else {
-                        font::REGULAR
-                    })
-                    .color(color)
-                    .wrapping(Wrapping::None),
-            )
-            .width(Length::Fill)
-            .clip(true),
+            studio_text(label)
+                .size(13)
+                .font(if active {
+                    font::SEMIBOLD
+                } else {
+                    font::REGULAR
+                })
+                .color(color)
+                .width(Length::Fill)
+                .ellipsis(1),
             Space::new().width(10),
             text(count.to_string()).size(12).color(if active {
                 Studio::ACCENT
@@ -809,15 +806,12 @@ fn card_face<'a>(
     vm: &TechniqueLibraryViewModel,
     hovered: bool,
 ) -> Element<'a, Message> {
-    let mut title = row![container(
-        text(t.name.as_str())
-            .size(16)
-            .font(font::SEMIBOLD)
-            .color(Studio::TEXT_PRIMARY)
-            .wrapping(Wrapping::None),
-    )
-    .width(Length::Fill)
-    .clip(true)]
+    let mut title = row![studio_text(t.name.as_str())
+        .size(16)
+        .font(font::SEMIBOLD)
+        .color(Studio::TEXT_PRIMARY)
+        .width(Length::Fill)
+        .ellipsis(1)]
     .align_y(Vertical::Center);
     if !t.media.is_empty() {
         let kind = if t.media.iter().any(|m| m.is_video()) {
@@ -852,16 +846,14 @@ fn card_face<'a>(
     let summary: Element<'a, Message> = if subtitle.is_empty() {
         Space::new().into()
     } else {
-        container(
-            text(subtitle)
-                .size(12.5)
-                .line_height(1.35)
-                .color(Studio::TEXT_SECONDARY),
-        )
-        // Three lines at most.
-        .max_height(12.5 * 1.35 * 3.0)
-        .clip(true)
-        .into()
+        // Three lines at most, the third ellipsized.
+        studio_text(subtitle)
+            .size(12.5)
+            .line_height(1.35)
+            .color(Studio::TEXT_SECONDARY)
+            .width(Length::Fill)
+            .ellipsis(3)
+            .into()
     };
     let mut content = column![
         title,
@@ -945,11 +937,11 @@ fn mini_tag(label: &str, active: bool) -> Element<'_, Message> {
     // One line: the wrap bounds a chip to the card's width, and a long tag
     // wrapped inside its chip grew the card past its fixed height.
     button(
-        text(label)
+        studio_text(label)
             .size(10.5)
             .font(font::SEMIBOLD)
             .color(fg)
-            .wrapping(Wrapping::None),
+            .ellipsis(1),
     )
     // 7 / 2 inside the 1 px border.
     .padding([3, 8])

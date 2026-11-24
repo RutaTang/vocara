@@ -46,10 +46,9 @@
 //! page, did. A new one waits behind the ones up, as `showSnackBar` queued
 //! it; the timer is a subscription. The
 //! header ignores its buttons for a double-tap's span after it switches
-//! modes, as Dart's `IgnorePointer` did, by dropping their messages. iced has
-//! no ellipsis (the title clips) and no letter spacing (the title's 0.3, the
-//! captions' 0.6); no italic Inter face is bundled, so "Empty content" asks
-//! for italic and draws upright. The prose fields are iced text editors that
+//! modes, as Dart's `IgnorePointer` did, by dropping their messages. No
+//! italic Inter face is bundled, so "Empty content" asks for italic and
+//! draws upright. The prose fields are iced text editors that
 //! grow from their minimum to their maximum lines, then scroll, as Flutter's
 //! did.
 
@@ -64,7 +63,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use iced::alignment::Vertical;
-use iced::widget::text::Wrapping;
 use iced::widget::{
     button, center, column, container, opaque, scrollable, stack, text, text_editor, Column, Row,
     Space,
@@ -94,6 +92,7 @@ use crate::ui::core::widgets::confirm_dialog::ConfirmDialog;
 use crate::ui::core::widgets::spectrogram_painter::{release_spectrogram_images, RenderRequest};
 use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
 use crate::ui::core::widgets::studio_hint::spinner;
+use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::song_practice_detail::widgets::voiceprint_view::{
     self as voiceprint, VoiceprintState,
 };
@@ -1020,15 +1019,13 @@ impl TechniqueDetailScreen {
         // middle and the action buttons sit flush against the right edge.
         bar = bar
             .push(
-                container(
-                    text(title)
-                        .size(18)
-                        .font(font::BOLD)
-                        .color(Studio::TEXT_PRIMARY)
-                        .wrapping(Wrapping::None),
-                )
-                .width(Length::Fill)
-                .clip(true),
+                studio_text(title)
+                    .size(18)
+                    .font(font::BOLD)
+                    .letter_spacing(0.3)
+                    .color(Studio::TEXT_PRIMARY)
+                    .width(Length::Fill)
+                    .ellipsis(1),
             )
             .push(Space::new().width(12));
         if self.editing {
@@ -1374,9 +1371,10 @@ fn view_field<'a>(
             .into(),
     };
     column![
-        text(label.to_uppercase())
+        studio_text(label.to_uppercase())
             .size(10.5)
             .font(font::BOLD)
+            .letter_spacing(0.6)
             .color(if accent {
                 Studio::ACCENT_BRIGHT
             } else {

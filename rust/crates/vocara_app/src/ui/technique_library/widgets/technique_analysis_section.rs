@@ -26,11 +26,9 @@
 //!
 //! # Differences from Flutter
 //!
-//! iced has no letter spacing (the gap table's
-//! captions are set solid). The Dart level meter's fill had no height (a
-//! childless `ColoredBox` under `Align` takes the smallest size), so it never
-//! showed; here it fills the meter's 8 px, as intended — as in the examples
-//! section's record row.
+//! The Dart level meter's fill had no height (a childless `ColoredBox` under
+//! `Align` takes the smallest size), so it never showed; here it fills the
+//! meter's 8 px, as intended — as in the examples section's record row.
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::canvas::{self, Frame, Geometry, Path};
@@ -47,6 +45,7 @@ use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{alpha, bare_button, boxed, font, Studio};
 use crate::ui::core::widgets::studio_button::studio_button;
 use crate::ui::core::widgets::studio_hint::studio_hint;
+use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::song_practice_detail::view_model::analysis_source::AnalysisSource;
 use crate::ui::song_practice_detail::widgets::voice_profile_view;
 use crate::ui::song_practice_detail::widgets::voiceprint_view::{
@@ -741,11 +740,12 @@ fn cell<'a>(content: Element<'a, Message>, flex: u16) -> Element<'a, Message> {
         .into()
 }
 
-/// A gap table caption (`_capStyle`).
+/// A gap table caption (`_capStyle`: 9 px w700, 0.5 letter spacing).
 fn caption<'a>(label: &'a str) -> Element<'a, Message> {
-    text(label)
+    studio_text(label)
         .size(9)
         .font(font::BOLD)
+        .letter_spacing(0.5)
         .color(Studio::TEXT_FAINT)
         .into()
 }

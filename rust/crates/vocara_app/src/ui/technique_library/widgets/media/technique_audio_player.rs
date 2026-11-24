@@ -43,6 +43,7 @@ use vocara_store::db::asset_store::AssetStore;
 
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{alpha, bare_button, boxed, Studio};
+use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::core::widgets::wrap::Wrap;
 
 /// What an example whose file is missing on this device says instead of
@@ -446,14 +447,11 @@ pub fn unavailable_clip<'a, M: 'a>() -> Element<'a, M> {
         row![
             icons::icon(Icon::FileX, 15.0, Studio::TEXT_FAINT),
             Space::new().width(10),
-            container(
-                text(UNAVAILABLE_CLIP_MESSAGE)
-                    .size(12)
-                    .color(Studio::TEXT_FAINT)
-                    .wrapping(Wrapping::None),
-            )
-            .width(Length::Fill)
-            .clip(true),
+            studio_text(UNAVAILABLE_CLIP_MESSAGE)
+                .size(12)
+                .color(Studio::TEXT_FAINT)
+                .width(Length::Fill)
+                .ellipsis(1),
         ]
         .align_y(Vertical::Center),
     )
