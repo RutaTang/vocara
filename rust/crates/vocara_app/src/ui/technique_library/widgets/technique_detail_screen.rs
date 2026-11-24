@@ -413,11 +413,11 @@ pub fn job_task(job: Job) -> Task<Message> {
     })
 }
 
-/// The platform save panel an example's export asks (rfd, on the export's
-/// worker; on macOS it runs on the main thread for it): the destination, or
-/// `None` on cancel. Blocking.
+/// The platform save panel an example's export asks (`file_panels`, on the
+/// export's worker; on macOS it runs on the main thread for it): the
+/// destination, or `None` on cancel. Blocking.
 fn save_panel(suggested_name: &str) -> Result<Option<String>, PickError> {
-    Ok(rfd::FileDialog::new()
+    Ok(vocara_services::file_panels::FileDialog::new()
         .set_file_name(suggested_name)
         .save_file()
         .map(|path| path.to_string_lossy().into_owned()))

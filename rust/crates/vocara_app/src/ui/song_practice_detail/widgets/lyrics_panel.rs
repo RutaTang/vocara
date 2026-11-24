@@ -253,7 +253,7 @@ pub enum Message {
 /// [`Message::ImportLyricsFromFile`], a cancel as nothing. Call it from
 /// `update` (the panel is set up on the UI thread).
 pub fn browse_lyrics_file() -> Task<Message> {
-    let picking = rfd::AsyncFileDialog::new()
+    let picking = vocara_services::file_panels::AsyncFileDialog::new()
         .add_filter("Lyrics", &LYRICS_FILE_EXTENSIONS)
         .pick_file();
     Task::future(picking).then(|file| match file {

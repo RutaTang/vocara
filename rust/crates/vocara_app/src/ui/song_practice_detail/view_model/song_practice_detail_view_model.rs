@@ -414,7 +414,7 @@ pub struct Options {
     pub edits: Option<Arc<dyn AudioEdits>>,
     /// The quit's registry (default: the app-wide instance).
     pub finalizer: Option<Arc<RecordingFinalizer>>,
-    /// The export's save panel (default: rfd's).
+    /// The export's save panel (default: `file_panels`' save panel).
     pub save_location_picker: Option<SaveLocationPicker>,
     /// The import admission gate's probe. Injectable because the real probe
     /// is a direct call into the engine, which plain unit tests cannot make.
@@ -1032,7 +1032,7 @@ impl SongPracticeDetailViewModel {
         });
         let picker: SaveLocationPicker = save_location_picker.unwrap_or_else(|| {
             Arc::new(|suggested: &str| {
-                Ok(rfd::FileDialog::new()
+                Ok(vocara_services::file_panels::FileDialog::new()
                     .set_file_name(suggested)
                     .save_file()
                     .map(|path| path.to_string_lossy().into_owned()))

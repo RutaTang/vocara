@@ -628,7 +628,7 @@ fn work_task(effect: Effect) -> Task<Message> {
 /// [`Message::Picked`].
 fn pick_audio(zone: DropZone, at_ms: Option<i64>) -> Task<Message> {
     let extensions: Vec<&str> = AUDIO_EXTENSIONS.iter().map(|e| &e[1..]).collect();
-    let picking = rfd::AsyncFileDialog::new()
+    let picking = vocara_services::file_panels::AsyncFileDialog::new()
         .add_filter("Audio", &extensions)
         .pick_files();
     Task::future(picking).map(move |files| Message::Picked {
