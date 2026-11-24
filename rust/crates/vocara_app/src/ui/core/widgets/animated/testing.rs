@@ -92,6 +92,27 @@ impl Frames {
         events: &[Event],
         at: Instant,
     ) -> (bool, Vec<M>) {
+        self.run(view, events, at, true)
+    }
+
+    /// [`Frames::frame`] with the pointer held still: no move is sent,
+    /// though the frame's events see it where it is.
+    pub fn frame_still<'a, M>(
+        &mut self,
+        view: impl Into<Element<'a, M>>,
+        events: &[Event],
+        at: Instant,
+    ) -> bool {
+        self.run(view, events, at, false).0
+    }
+
+    fn run<'a, M>(
+        &mut self,
+        view: impl Into<Element<'a, M>>,
+        events: &[Event],
+        at: Instant,
+        moved: bool,
+    ) -> (bool, Vec<M>) {
         let cursor = mouse::Cursor::Available(self.cursor);
         let mut ui = UserInterface::build(
             view,
@@ -101,7 +122,9 @@ impl Frames {
         );
         let mut messages = Vec::new();
         let mut events = events.to_vec();
-        events.insert(0, move_to(self.cursor));
+        if moved {
+            events.insert(0, move_to(self.cursor));
+        }
         let _ = ui.update(
             &events,
             cursor,

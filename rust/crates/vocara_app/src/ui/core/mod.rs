@@ -3,6 +3,7 @@
 
 pub mod icons;
 pub mod motion;
+pub mod scale_factor;
 pub mod text;
 pub mod theme;
 pub mod widgets;

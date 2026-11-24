@@ -237,8 +237,9 @@ structure every screen follows, so screens ported by different hands fit:
   (`theme::FIELD_PADDING`: 10 across, 6 down), and a bordered container's
   padding counts its 1 px border, as a Flutter `Container`'s did. The
   caret's device pixels are the window's scale factor
-  (`text_field::set_scale_factor`), which the app asks for when its window
-  opens.
+  (`ui::core::scale_factor`, which the scrollbar's tolerance reads too),
+  which the app asks for when its window opens and the widgets that read
+  it follow when the window is rescaled.
 - **Window** (macOS): hidden title bar with a transparent, full-size content
   view; the drag bar starts a window drag; the close request runs the quit
   guard (kill separation sidecars, finalize recordings) before closing, as
@@ -275,7 +276,11 @@ structure every screen follows, so screens ported by different hands fit:
   (`theme::scrollbar`); a drag of it scrolls in proportion, a press on its
   track pages 0.8 of the view in 100 ms; it fades in on a scroll or under
   the pointer and out 600 ms after, and while it shows its 12 px track is
-  its own, not the content's. A horizontal scrollable (Material gave none)
+  its own, not the content's: a mouse wheel there scrolls the view and
+  never the content under it, a trackpad's swipe there scrolls nothing
+  (Flutter's pan-zoom never reached the view's drag), and the bar notices
+  after each frame, not only on a move, that the view left a still
+  pointer. A horizontal scrollable (Material gave none)
   and a `ScrollConfiguration(scrollbars: false)` one have no scrollbar
   (`Scrollbar::hidden()`, `fading_scrollbar::no_scrollbar`): nothing is
   drawn and nothing takes the pointer at their edge.
@@ -337,10 +342,10 @@ small and written down in the module that has it:
   button and list tiles, the tag and track menus' items), drawing a focus
   highlight that Space or Enter activated; iced's buttons, sliders and
   switches take no keyboard focus, so Tab does nothing there.
-- The wheel over a shown scrollbar's track scrolls its view as Flutter's
-  did, but the iced scrollable offers it to the content under the track
-  first; a page of under half a pixel jumps as on a Retina display, iced
-  not telling a widget the scale (`fading_scrollbar`).
+- A press on a shown scrollbar's track pages at once, where Flutter's tap
+  waited out the gesture arena (to the release, or 100 ms) when a
+  recognizer above the view wanted the press too: iced has no arena
+  (`fading_scrollbar`).
 - A text field's right-click toolbar (`text_field::toolbar`) shows what
   lies behind it unblurred and unsaturated (Flutter's `BackdropFilter`;
   iced has no backdrop filter), its shadow without its 0.5 px spread, its

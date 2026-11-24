@@ -63,7 +63,6 @@ use crate::ui::core::widgets::confirm_dialog::{
 use crate::ui::core::widgets::fatal_open_screen::{self, FatalOpenScreen};
 use crate::ui::core::widgets::focus_traversal::focus_scope;
 use crate::ui::core::widgets::slide::{cupertino, inert, slide};
-use crate::ui::core::widgets::text_field;
 use crate::ui::core::widgets::window_drag_bar::window_drag_bar;
 use crate::ui::home::widgets::update_notice::open_url_task;
 use crate::ui::snack::SnackEvent;
@@ -492,7 +491,7 @@ impl App {
                 scale_factor
             }
             Message::ScaleFactor(scale_factor) => {
-                text_field::set_scale_factor(scale_factor);
+                crate::ui::core::scale_factor::set_scale_factor(scale_factor);
                 Task::none()
             }
             Message::CloseRequested(id) => {

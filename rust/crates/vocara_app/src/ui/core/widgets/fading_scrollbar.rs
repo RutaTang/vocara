@@ -51,16 +51,31 @@
 //! `ScrollConfiguration(scrollbars: false)` took it off a vertical one:
 //! those take `Scrollbar::hidden()` without this widget.
 //!
-//! Left as it is, iced having no counterpart: the wheel over the shown
-//! track scrolls the view, as Flutter's bar passed it to its scrollable,
-//! but the iced scrollable offers it to the content under the track first;
-//! a press on the track pages at once, where Flutter's tap waited out the
-//! gesture arena (to the release, or 100 ms) when a recognizer above the
-//! view wanted the press too; the bar learns that the pointer left only
-//! when the pointer moves, where Flutter also looked after each frame; and
-//! a page that would move the view less than half a pixel jumps instead
-//! (`nearEqual` against `1 / devicePixelRatio`, taken as a Retina
-//! display's 2: iced does not tell a widget the scale).
+//! - The wheel over the shown track is the bar's (`_receivedPointerSignal`,
+//!   the content under the track out of the hit test): a mouse wheel's
+//!   lines scroll the view by its vertical delta (`pointerScroll`, the
+//!   app's 60 px a line; Shift's axis swap macOS makes undone, as
+//!   Flutter's embedder undid it), within its range, and the content under
+//!   the track never sees it; during a drag of the thumb nothing scrolls.
+//!   A trackpad's (or a Magic Mouse's) pixels over the shown track scroll
+//!   nothing: Flutter took them as pan-zoom gestures, which only the
+//!   recognizers in the hit test saw, the view's own drag not among them.
+//! - The pointer leaving the view is noticed after each frame too, not
+//!   only when it moves (Flutter's mouse tracker re-tested a still pointer
+//!   after each frame and sent the bar's region its exit when the view no
+//!   longer lay under it, as when the layout moved it away or something
+//!   came over it). Content scrolling under a still pointer changes
+//!   nothing for the bar: its hover was only ever re-tested on motion.
+//! - A page that would move the view less than a device pixel jumps
+//!   instead (`nearEqual` against `1 / devicePixelRatio`, the window's
+//!   scale factor, `ui::core::scale_factor`).
+//!
+//! Left as it is, iced having no counterpart: a press on the track pages
+//! at once, where Flutter's tap waited out the gesture arena (to the
+//! release, or 100 ms) when a recognizer above the view wanted the press
+//! too. iced hands a widget each press once, in the order of its tree,
+//! with no arena: no widget above the view can claim the press back, so
+//! there is no later moment for the bar to learn it won.
 
 use std::rc::Rc;
 use std::time::Duration;
@@ -74,11 +89,12 @@ use iced::widget::scrollable::{
     self, AbsoluteOffset, Direction, Scrollable, Scrollbar, Status, Style,
 };
 use iced::{
-    mouse, window, Background, Border, Color, Element, Event, Length, Point, Rectangle, Renderer,
-    Size, Theme, Vector,
+    keyboard, mouse, window, Background, Border, Color, Element, Event, Length, Point, Rectangle,
+    Renderer, Size, Theme, Vector,
 };
 
 use crate::ui::core::motion::{self, Controller, Curve, Lerp};
+use crate::ui::core::scale_factor::{scale_factor, set_scale_factor};
 use crate::ui::core::theme;
 
 /// How long the thumb takes to fade in or out (`_kScrollbarFadeDuration`).
@@ -126,9 +142,31 @@ const MIN_INTERACTIVE_SIZE: f32 = 48.0;
 /// widened to absorb f32 layout noise).
 const PRECISION: f32 = 1e-3;
 
-/// A page shorter than this jumps (`toleranceFor(...).distance`,
-/// `1 / devicePixelRatio`, see the module docs).
-const NEAR: f32 = 0.5;
+/// A page shorter than this jumps (`toleranceFor(...).distance`, a
+/// device pixel, see the module docs).
+fn near() -> f32 {
+    1.0 / scale_factor()
+}
+
+/// How far a mouse wheel's `delta` over the shown track scrolls the view
+/// down (`_pointerSignalEventDelta`, the vertical delta: Flutter's bar
+/// flipped no axis for Shift), none for a trackpad's pixels (see the
+/// module docs).
+fn wheel_on_track(delta: mouse::ScrollDelta, modifiers: keyboard::Modifiers) -> Option<f32> {
+    match delta {
+        mouse::ScrollDelta::Lines { x, y } => {
+            // macOS hands Shift's lines over across; Flutter's embedder
+            // put them back down.
+            let down = if cfg!(target_os = "macos") && modifiers.shift() {
+                x
+            } else {
+                y
+            };
+            Some(-down * 60.0)
+        }
+        mouse::ScrollDelta::Pixels { .. } => None,
+    }
+}
 
 /// The style's statuses the thumb's colors are read at.
 const IDLE: Status = Status::Active {
@@ -441,6 +479,8 @@ struct State {
     /// to the fraction, or what the scrollable shows.
     pixels: Option<f32>,
     now: Option<Instant>,
+    /// The keyboard's modifiers (Shift, for the wheel).
+    modifiers: keyboard::Modifiers,
 }
 
 /// `controller` is heading in or in (`isForwardOrCompleted`).
@@ -480,6 +520,7 @@ impl State {
             dirty: false,
             pixels: None,
             now: None,
+            modifiers: keyboard::Modifiers::default(),
         }
     }
 
@@ -825,6 +866,12 @@ impl<M> Widget<M, Theme, Renderer> for FadingScrollbar<'_, M> {
             }
             let scrolls = state.bar(bounds, content).is_some();
             state.settle(now, scrolls, shell);
+            // A still pointer the view no longer lies under has left it
+            // (the mouse tracker's re-test after the frame).
+            if state.buttons == 0 && state.inside && cursor.position_over(bounds).is_none() {
+                let bar = state.bar(bounds, content);
+                state.hover(None, bar);
+            }
         }
 
         let pixels = state.pixels.unwrap_or(0.0);
@@ -866,7 +913,7 @@ impl<M> Widget<M, Theme, Renderer> for FadingScrollbar<'_, M> {
                         let step = PAGE_SHARE * bounds.height;
                         let step = if at.y > bar.thumb.y { step } else { -step };
                         let to = (pixels + step).clamp(0.0, bar.range);
-                        if (to - pixels).abs() < NEAR {
+                        if (to - pixels).abs() < near() {
                             let paging = state.page.take().is_some();
                             if to != pixels {
                                 scroll(scrollable, child, to);
@@ -937,18 +984,38 @@ impl<M> Widget<M, Theme, Renderer> for FadingScrollbar<'_, M> {
             Event::Mouse(mouse::Event::CursorLeft) if state.buttons == 0 => {
                 state.hover(None, bar);
             }
-            Event::Mouse(mouse::Event::WheelScrolled { .. }) => {
-                let on_track = cursor
+            Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
+                let track = cursor
                     .position()
                     .zip(bar)
-                    .is_some_and(|(at, bar)| bar.takes(at, shown));
-                if state.drag.is_some() && on_track {
-                    // Held by the drag: the bar's own wheel waits.
+                    .filter(|(at, bar)| bar.takes(*at, shown))
+                    .map(|(_, bar)| bar);
+                if let Some(bar) = track {
+                    // The shown track's: the content under it never sees
+                    // the wheel. Held by a drag, the bar's own wheel waits.
                     pass = false;
+                    let to = wheel_on_track(*delta, state.modifiers)
+                        .filter(|_| state.drag.is_none())
+                        .map(|dy| (dy, (pixels + dy).clamp(0.0, bar.range)))
+                        .filter(|(dy, to)| *dy != 0.0 && *to != pixels);
+                    if let Some((_, to)) = to {
+                        // `pointerScroll`: a scroll that ends at once, any
+                        // page stopped.
+                        state.page = None;
+                        scroll(scrollable, child, to);
+                        state.moved(to, true);
+                        shell.capture_event();
+                    }
                 } else {
-                    // The bar hands the wheel to its scrollable.
+                    // Elsewhere the scrollable has it.
                     content_cursor = cursor;
                 }
+            }
+            Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
+                state.modifiers = *modifiers;
+            }
+            Event::Window(window::Event::Rescaled(scale_factor)) => {
+                set_scale_factor(*scale_factor);
             }
             _ => {}
         }
@@ -1114,6 +1181,13 @@ mod tests {
         })
     }
 
+    /// A mouse wheel turned `down` lines (60 px each).
+    fn lines(down: f32) -> Event {
+        Event::Mouse(mouse::Event::WheelScrolled {
+            delta: mouse::ScrollDelta::Lines { x: 0.0, y: -down },
+        })
+    }
+
     fn press() -> Event {
         Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
     }
@@ -1191,8 +1265,9 @@ mod tests {
             near(window.pixel(Point::new(94.0, 48.0)), BACKGROUND),
             "no more"
         );
-        // Half way down the content, half way down its 52 px travel.
-        window.frame(view(1000.0), &[wheel(450.0)], t0 + 400 * MS);
+        // Half way down the content (the wheel on the track is the
+        // bar's), half way down its 52 px travel.
+        window.frame(view(1000.0), &[lines(7.5)], t0 + 400 * MS);
         assert!(near(window.pixel(Point::new(94.0, 25.0)), BACKGROUND));
         assert!(near(window.pixel(Point::new(94.0, 27.0)), on));
         assert!(near(window.pixel(Point::new(94.0, 72.0)), on));
@@ -1421,5 +1496,123 @@ mod tests {
         window.point_at(on_track);
         let (_, moves) = window.frame_messages(view(), &[], t0 + 348 * MS);
         assert_eq!(moves, [on_track], "the content's drag");
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum Scrolled {
+        Outer(f32),
+        Inner(f32),
+    }
+
+    #[test]
+    fn the_wheel_on_the_shown_track_is_the_bars_not_the_contents() {
+        // A view whose content is, at the top, a scroll view of its own
+        // across its whole width, under the track too.
+        let view = || -> Element<'_, Scrolled> {
+            fading_scrollbar(
+                scrollable(column![
+                    scrollable(column![Space::new().width(100).height(400)])
+                        .width(Length::Fill)
+                        .height(150)
+                        .on_scroll(|v| Scrolled::Inner(v.absolute_offset().y)),
+                    Space::new().height(300),
+                ])
+                .width(100)
+                .height(100)
+                .on_scroll(|v| Scrolled::Outer(v.absolute_offset().y)),
+            )
+        };
+        let mut window = window();
+        let t0 = Instant::now();
+        window.point_at(Point::new(95.0, 70.0));
+        window.frame(view(), &[], t0);
+        window.frame(view(), &[], t0 + 300 * MS);
+        // A wheel's line on the shown track: the view scrolls, the content
+        // under the track does not.
+        let (_, scrolled) = window.frame_messages(view(), &[lines(1.0)], t0 + 316 * MS);
+        assert_eq!(scrolled, [Scrolled::Outer(60.0)]);
+        // A trackpad's pixels there: nothing.
+        let (_, scrolled) = window.frame_messages(view(), &[wheel(30.0)], t0 + 332 * MS);
+        assert_eq!(scrolled, []);
+        // Off the track the content has the wheel first.
+        window.point_at(Point::new(50.0, 70.0));
+        let (_, scrolled) = window.frame_messages(view(), &[lines(1.0)], t0 + 348 * MS);
+        assert_eq!(scrolled, [Scrolled::Inner(60.0)]);
+    }
+
+    #[test]
+    fn a_held_thumb_keeps_the_wheel_on_the_track_from_scrolling() {
+        let mut window = window();
+        let t0 = Instant::now();
+        window.point_at(Point::new(94.0, 10.0));
+        window.frame(view(1000.0), &[], t0);
+        window.frame(view(1000.0), &[], t0 + 300 * MS);
+        window.frame(view(1000.0), &[press()], t0 + 316 * MS);
+        let (_, scrolled) = window.frame_messages(view(1000.0), &[lines(1.0)], t0 + 332 * MS);
+        assert_eq!(offset(&scrolled), None);
+    }
+
+    #[test]
+    fn a_page_under_a_device_pixel_jumps() {
+        // 0.8 px to scroll: a press below the thumb pages 0.8.
+        let mut window = window();
+        let t0 = Instant::now();
+        window.point_at(Point::new(94.0, 99.8));
+        set_scale_factor(1.0);
+        window.frame(view(100.8), &[], t0);
+        window.frame(view(100.8), &[], t0 + 300 * MS);
+        let (_, scrolled) =
+            window.frame_messages(view(100.8), &[press(), release()], t0 + 316 * MS);
+        assert!(
+            offset(&scrolled).is_some_and(|y| (y - 0.8).abs() < 1e-4),
+            "a pixel's tolerance: at once"
+        );
+
+        // On a Retina display half a pixel is the tolerance: it runs.
+        let mut window = Frames::new(Size::new(120.0, 120.0));
+        set_scale_factor(2.0);
+        window.point_at(Point::new(94.0, 99.8));
+        window.frame(view(100.8), &[], t0);
+        window.frame(view(100.8), &[], t0 + 300 * MS);
+        let (more, scrolled) =
+            window.frame_messages(view(100.8), &[press(), release()], t0 + 316 * MS);
+        set_scale_factor(1.0);
+        assert_eq!(offset(&scrolled), None, "it starts at the next frame");
+        assert!(more);
+    }
+
+    #[test]
+    fn a_view_that_leaves_a_still_pointer_lets_its_bar_fade() {
+        // The view `top` down a taller window (a column leaves out a
+        // child of no size: the view is never its first).
+        let view = |top: f32| -> Element<'_, f32> {
+            column![
+                Space::new().height(top),
+                fading_scrollbar(
+                    scrollable(column![Space::new().width(100).height(1000.0)])
+                        .width(100)
+                        .height(100)
+                ),
+            ]
+            .into()
+        };
+        let mut window = Frames::new(Size::new(120.0, 400.0));
+        let t0 = Instant::now();
+        // The pointer on the track holds the bar in.
+        window.point_at(Point::new(94.0, 30.0));
+        window.frame(view(1.0), &[], t0);
+        window.frame(view(1.0), &[], t0 + 300 * MS);
+        window.frame(view(1.0), &[], t0 + 2000 * MS);
+        let thumb_at = |top: f32| Point::new(94.0, top + 24.0);
+        assert!(near(window.pixel(thumb_at(1.0)), thumb(0.65)), "held");
+        // The view moves down from under the pointer, which stays still:
+        // after the frame the bar learns it left, and fades 600 ms on.
+        let t1 = t0 + 2100 * MS;
+        assert!(window.frame_still(view(201.0), &[], t1), "a frame to come");
+        window.frame_still(view(201.0), &[], t1 + 16 * MS);
+        assert!(!near(window.pixel(thumb_at(201.0)), BACKGROUND), "still in");
+        window.frame_still(view(201.0), &[], t1 + 616 * MS);
+        window.frame_still(view(201.0), &[], t1 + 1000 * MS);
+        assert!(near(window.pixel(thumb_at(201.0)), BACKGROUND), "faded");
     }
 }

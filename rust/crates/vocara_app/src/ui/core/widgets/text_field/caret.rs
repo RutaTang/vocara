@@ -19,8 +19,6 @@
 //! whenever the text or the selection changes) is the one iced's fields
 //! already had, kept in the forks.
 
-use std::cell::Cell;
-
 use iced::advanced::renderer::{self, Renderer as _};
 use iced::{Border, Color, Rectangle, Renderer, Shadow};
 
@@ -41,26 +39,7 @@ pub const OFFSET_DEVICE_PIXELS: f32 = -2.0;
 /// (`_caretMargin`: `_kCaretGap` 1 + `cursorWidth`).
 pub const MARGIN: f32 = 1.0 + WIDTH;
 
-thread_local! {
-    /// The window's scale factor: Flutter's `devicePixelRatio`. Fields are
-    /// laid out and drawn on the thread that runs the app's `update`, which
-    /// sets it.
-    static SCALE_FACTOR: Cell<f32> = const { Cell::new(1.0) };
-}
-
-/// Hands the fields the window's scale factor (`devicePixelRatio`), which
-/// places their caret: the app does when its window opens, and the fields
-/// themselves when the window moves to a screen of another scale.
-pub fn set_scale_factor(scale_factor: f32) {
-    if scale_factor.is_finite() && scale_factor > 0.0 {
-        SCALE_FACTOR.with(|s| s.set(scale_factor));
-    }
-}
-
-/// The scale factor [`set_scale_factor`] last set (1 before it was).
-pub fn scale_factor() -> f32 {
-    SCALE_FACTOR.with(Cell::get)
-}
+pub use crate::ui::core::scale_factor::{scale_factor, set_scale_factor};
 
 /// The caret's rectangle, in the text's own coordinates, for a caret at the
 /// glyph edge `x` on the line from `line_top`, `line_height` tall, whose
