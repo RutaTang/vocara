@@ -36,10 +36,11 @@
 //! snack bar did, its 3.5 s counted from the end of its entrance
 //! (`ui::snack`).
 //!
-//! Flutter's Material slider and switch are drawn here with iced's slider and
-//! a switch built to Material 3's geometry and toggle motion (200 ms),
-//! without their hover/press overlays; the switch's semantics label has no
-//! counterpart.
+//! Flutter's Material slider and switch are drawn here with iced's slider,
+//! under Material's overlay (`slider_overlay`: it grows over 100 ms under
+//! the pointer on the thumb or a drag), and a switch built to Material 3's
+//! geometry and toggle motion (200 ms), without its hover/press overlay; the
+//! switch's semantics label has no counterpart.
 
 use std::collections::VecDeque;
 use std::convert::Infallible;
@@ -78,6 +79,7 @@ use crate::ui::core::theme::{self, alpha, bare_button, boxed, font, Studio, Zinc
 use crate::ui::core::widgets::animated::{animated, ink_hover};
 use crate::ui::core::widgets::confirm_dialog::ConfirmDialog;
 use crate::ui::core::widgets::slide::{cupertino, slide, PAGE_TRANSITION};
+use crate::ui::core::widgets::slider_overlay::slider_overlay;
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::home::widgets::update_notice::UpdateDownloadDialog;
@@ -1449,14 +1451,18 @@ fn reverb_card<'a>(wet: f64) -> Element<'a, Message> {
     let value = wet.clamp(0.0, 1.0);
     // Flutter's track sits the overlay radius (12) in from each end; iced's
     // runs edge to edge with the thumb's centre a radius (6) in.
-    let reverb = container(
+    let reverb = container(slider_overlay(
         slider(0.0..=1.0, value, |wet| {
             Message::Choose(Choice::MonitorReverb(wet))
         })
         .step(0.01)
         .height(24)
         .style(reverb_slider_style),
-    )
+        value as f32,
+        6.0,
+        // `RoundSliderOverlayShape(overlayRadius: 12)`.
+        12.0,
+    ))
     .id(REVERB_SLIDER)
     .padding(Padding::from([0, 6]))
     .width(Length::Fill);
