@@ -1238,6 +1238,26 @@ fn a_toast_stays_its_time_and_a_new_one_replaces_it() {
 }
 
 #[test]
+fn a_toast_swiped_away_goes_at_once_with_its_time() {
+    let mut page = Setup::new().mount();
+    page.send(Message::Exported(Exported::Saved));
+    let seq = page.screen.toast_seq().expect("a toast");
+    // Its `Dismissible` reports it once it has slid out: it goes with no
+    // exit of its own (`removeCurrentSnackBar(reason: swipe)`).
+    page.send(Message::ToastSwiped(seq));
+    assert!(page.screen.toast().is_none());
+    assert!(page.screen.toast_timer().is_none(), "its timer with it");
+    assert!(
+        !page.shows_containing("Diagnostics saved"),
+        "not drawn leaving"
+    );
+    // A stale report takes down nothing.
+    page.send(Message::Exported(Exported::Saved));
+    page.send(Message::ToastSwiped(seq));
+    assert_eq!(page.screen.toast(), Some(DIAGNOSTICS_SAVED));
+}
+
+#[test]
 fn the_toast_stays_3_5_s_from_the_end_of_its_entrance() {
     use crate::ui::snack::TRANSITION;
     let mut page = Setup::new().mount();

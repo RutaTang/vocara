@@ -189,6 +189,7 @@ impl SongPracticeDetailScreen {
                 self.absorb(fx, &mut step);
             }
             Message::SnackExpired(seq) => self.snacks.expired(seq, Instant::now()),
+            Message::SnackSwiped(seq) => self.snacks.swiped(seq, Instant::now()),
             Message::Done => {}
             answer => self.answer(answer, &mut step),
         }

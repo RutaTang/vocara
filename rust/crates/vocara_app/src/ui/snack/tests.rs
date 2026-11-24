@@ -1,5 +1,5 @@
 use iced::advanced::subscription::into_recipes;
-use iced::{Point, Size};
+use iced::{mouse, Point, Size};
 
 use super::*;
 use crate::ui::core::widgets::animated::testing::{near, Frames, MS};
@@ -271,4 +271,214 @@ fn a_fixed_snack_bar_has_forui_s_rounded_corners() {
     assert!(near(at(0.0, 20.0), bar), "{:?}", at(0.0, 20.0));
     assert!(near(at(100.0, 0.0), bar), "{:?}", at(100.0, 0.0));
     assert!(near(at(8.0, 8.0), bar), "{:?}", at(8.0, 8.0));
+}
+
+// ------------------------------------------------------------- swiping
+
+#[test]
+fn a_snack_bar_swiped_away_goes_at_once_and_the_next_enters() {
+    let mut q = SnackQueue::new();
+    let t0 = Instant::now();
+    q.show(bar("a", false, SnackStyle::Fixed), t0);
+    q.show(bar("b", false, SnackStyle::Fixed), t0);
+    let a = q.current_seq().expect("a's seq");
+    let t1 = t0 + TRANSITION + 1000 * MS;
+    q.swiped(a, t1);
+    assert_eq!(q.current().map(|b| b.text.as_str()), Some("b"));
+    assert!(q.leaving.is_none(), "no exit of its own: it has slid out");
+    // "b" enters now, and has its time after its entrance.
+    assert_eq!(showing(&q).value(t1), 0.0);
+    assert!(showing(&q).value(t1 + 125 * MS) > 0.0);
+    let timer = q.timer().expect("b's timer");
+    assert!(about(timer.deadline, t1 + TRANSITION + DURATION));
+    // A stale report takes down nothing.
+    q.swiped(a, t1);
+    assert_eq!(q.current().map(|b| b.text.as_str()), Some("b"));
+}
+
+#[test]
+fn one_swiped_while_it_leaves_lets_the_next_enter_now() {
+    let mut q = SnackQueue::new();
+    let t0 = Instant::now();
+    q.show(bar("a", false, SnackStyle::Floating), t0);
+    q.show(bar("b", false, SnackStyle::Floating), t0);
+    let a = q.timer().expect("a's timer");
+    let t1 = a.deadline;
+    q.expired(a.seq, t1);
+    // "a" leaves; "b" waits for it until t1 + TRANSITION.
+    assert!(q.leaving.is_some());
+    let t2 = t1 + 100 * MS;
+    q.swiped(a.seq, t2);
+    assert!(q.leaving.is_none());
+    assert_eq!(showing(&q).value(t2), 0.0);
+    assert!(showing(&q).value(t2 + 125 * MS) > 0.0, "entering from t2");
+    let timer = q.timer().expect("b's timer");
+    assert!(about(timer.deadline, t2 + TRANSITION + DURATION));
+}
+
+/// What the test window draws as a snack bar's `Material`: a 40 tall white
+/// bar.
+fn white_material(_: &str, _: f32) -> Element<'_, Infallible> {
+    iced::widget::container(iced::widget::Space::new().width(Length::Fill).height(40))
+        .style(|_| crate::ui::core::theme::boxed(Some(iced::Color::WHITE), 0.0, None))
+        .into()
+}
+
+/// A queue showing one snack bar of `style`, all in by `t0`.
+fn shown(style: SnackStyle, t0: Instant) -> SnackQueue {
+    let mut q = SnackQueue::new();
+    q.show(
+        SnackBar::new("a", DURATION, false, style, white_material),
+        t0 - TRANSITION,
+    );
+    q.frame(t0);
+    q
+}
+
+fn left_press() -> Event {
+    Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
+}
+
+fn left_release() -> Event {
+    Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
+}
+
+/// Pointer events are handled at `at` from here on.
+fn events_at(at: Instant) {
+    crate::ui::core::widgets::dismissible::testing::set_event_time(Some(at));
+}
+
+#[test]
+fn a_floating_snack_bar_follows_a_drag_down_on_its_material_and_slides_back() {
+    // A 200 × 100 window: the bar's box is its 40 px Material in a 16 px
+    // margin, 72 tall at the bottom (y 28 to 100), the Material at y 44 to
+    // 84, x 16 to 184.
+    let mut window = Frames::new(Size::new(200.0, 100.0));
+    let t0 = Instant::now();
+    let mut q = shown(SnackStyle::Floating, t0);
+    let white = |w: &Frames, y: f32| near(w.pixel(Point::new(100.0, y)), iced::Color::WHITE);
+    events_at(t0);
+    window.frame(q.view().expect("drawn"), &[], t0);
+    assert!(white(&window, 46.0) && !white(&window, 42.0), "at rest");
+    // Over the Material, the bar takes the pointer (nothing beneath shows
+    // its cursor); over the margin, it does not.
+    window.point_at(Point::new(100.0, 60.0));
+    window.frame(q.view().expect("drawn"), &[], t0);
+    assert_eq!(window.interaction(), mouse::Interaction::Idle);
+
+    // Down 20 px, slowly: it follows, clipped at the page's bottom.
+    let t1 = t0 + 100 * MS;
+    events_at(t1);
+    window.frame(q.view().expect("drawn"), &[left_press()], t1);
+    for (i, y) in [65.0, 70.0, 75.0, 80.0].into_iter().enumerate() {
+        let t = t1 + 50 * MS * (i as u32 + 1);
+        events_at(t);
+        window.point_at(Point::new(100.0, y));
+        q.frame(t);
+        window.frame(q.view().expect("drawn"), &[], t);
+    }
+    assert!(!white(&window, 60.0) && white(&window, 66.0), "20 px down");
+    assert!(white(&window, 99.0), "its bottom under the page's edge");
+
+    // Let go 20 / 72 of the way down: it slides back over that share of
+    // 200 ms (56 ms), and nothing is reported.
+    let up = t1 + 300 * MS;
+    events_at(up);
+    let (more, messages) = window.frame_messages(q.view().expect("drawn"), &[left_release()], up);
+    assert!(more, "it asks for frames while it slides");
+    assert!(messages.is_empty());
+    let back = up + 60 * MS;
+    q.frame(back);
+    let (more, messages) = window.frame_messages(q.view().expect("drawn"), &[], back);
+    assert!(!more && messages.is_empty());
+    assert!(
+        white(&window, 46.0) && !white(&window, 42.0),
+        "back at rest"
+    );
+    assert_eq!(q.current().map(|b| b.text.as_str()), Some("a"));
+
+    // A drag on the margin is no drag.
+    window.point_at(Point::new(100.0, 36.0));
+    let t2 = back + 100 * MS;
+    events_at(t2);
+    window.frame(q.view().expect("drawn"), &[left_press()], t2);
+    assert_eq!(window.interaction(), mouse::Interaction::None);
+    window.point_at(Point::new(100.0, 90.0));
+    events_at(t2 + 50 * MS);
+    window.frame(q.view().expect("drawn"), &[], t2 + 50 * MS);
+    assert!(white(&window, 46.0), "it stays put");
+    events_at(t2 + 100 * MS);
+    window.frame(q.view().expect("drawn"), &[left_release()], t2 + 100 * MS);
+    crate::ui::core::widgets::dismissible::testing::set_event_time(None);
+}
+
+#[test]
+fn a_fixed_snack_bar_dragged_past_40_percent_slides_out_and_is_swiped_away() {
+    // The fixed 40 px bar at the window's bottom (y 60 to 100), taking the
+    // drag anywhere on it.
+    let mut window = Frames::new(Size::new(200.0, 100.0));
+    let t0 = Instant::now();
+    let mut q = shown(SnackStyle::Fixed, t0);
+    let seq = q.current_seq().expect("its seq");
+    let white = |w: &Frames, y: f32| near(w.pixel(Point::new(5.0, y)), iced::Color::WHITE);
+    window.point_at(Point::new(5.0, 62.0));
+    events_at(t0);
+    window.frame(q.view().expect("drawn"), &[left_press()], t0);
+    // 20 px of 40: past the threshold.
+    for (i, y) in [67.0, 72.0, 77.0, 82.0].into_iter().enumerate() {
+        let t = t0 + 50 * MS * (i as u32 + 1);
+        events_at(t);
+        window.point_at(Point::new(5.0, y));
+        window.frame(q.view().expect("drawn"), &[], t);
+    }
+    assert!(!white(&window, 78.0) && white(&window, 82.0), "half down");
+    let up = t0 + 250 * MS;
+    events_at(up);
+    let (_, messages) = window.frame_messages(q.view().expect("drawn"), &[left_release()], up);
+    assert!(messages.is_empty(), "not yet");
+    // Half of 200 ms to go.
+    let (more, messages) = window.frame_messages(q.view().expect("drawn"), &[], up + 99 * MS);
+    assert!(more && messages.is_empty());
+    let (more, messages) = window.frame_messages(q.view().expect("drawn"), &[], up + 101 * MS);
+    assert!(!more);
+    assert_eq!(messages, vec![SnackEvent::Swiped(seq)]);
+    assert!(!white(&window, 99.0), "out of sight");
+    q.swiped(seq, up + 101 * MS);
+    assert!(q.current().is_none() && q.view().is_none());
+    crate::ui::core::widgets::dismissible::testing::set_event_time(None);
+}
+
+#[test]
+fn a_new_snack_bar_in_a_swiped_ones_place_starts_at_rest() {
+    let mut window = Frames::new(Size::new(200.0, 100.0));
+    let t0 = Instant::now();
+    let mut q = shown(SnackStyle::Fixed, t0);
+    q.show(
+        SnackBar::new("b", DURATION, false, SnackStyle::Fixed, white_material),
+        t0,
+    );
+    let seq = q.current_seq().expect("a's seq");
+    // Dragged all the way out and let go: swiped at once.
+    window.point_at(Point::new(5.0, 62.0));
+    events_at(t0);
+    window.frame(q.view().expect("drawn"), &[left_press()], t0);
+    events_at(t0 + 50 * MS);
+    window.point_at(Point::new(5.0, 110.0));
+    window.frame(q.view().expect("drawn"), &[], t0 + 50 * MS);
+    events_at(t0 + 100 * MS);
+    let (_, messages) =
+        window.frame_messages(q.view().expect("drawn"), &[left_release()], t0 + 100 * MS);
+    assert_eq!(messages, vec![SnackEvent::Swiped(seq)]);
+    let t1 = t0 + 100 * MS;
+    q.swiped(seq, t1);
+    // "b" enters where "a" was drawn, from its own rest, not "a"'s slide.
+    let t2 = t1 + TRANSITION;
+    q.frame(t2);
+    window.point_at(Point::new(-10.0, -10.0));
+    window.frame(q.view().expect("drawn"), &[], t2);
+    assert!(near(
+        window.pixel(Point::new(5.0, 62.0)),
+        iced::Color::WHITE
+    ));
+    crate::ui::core::widgets::dismissible::testing::set_event_time(None);
 }

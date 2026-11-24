@@ -379,6 +379,8 @@ pub enum Message {
     Frame(Instant),
     /// A frame while a toast enters or leaves.
     ToastFrame(Instant),
+    /// Toast `n` was swiped away.
+    ToastSwiped(u64),
 }
 
 // ------------------------------------------------------------------ screen
@@ -868,6 +870,10 @@ impl Screen for SettingsScreen {
                 self.toasts.frame(at);
                 Update::none()
             }
+            Message::ToastSwiped(seq) => {
+                self.toasts.swiped(seq, Instant::now());
+                Update::none()
+            }
         }
     }
 
@@ -936,7 +942,7 @@ impl Screen for SettingsScreen {
             .height(Length::Fill)
             .style(theme::page)];
         if let Some(toasts) = self.toasts.view() {
-            layers = layers.push(toasts.map(|never| match never {}));
+            layers = layers.push(toasts.map(toast_message));
         }
         layers.into()
     }
@@ -950,10 +956,7 @@ impl Screen for SettingsScreen {
             Subscription::run_with(SettingsFeed(Arc::clone(&self.settings)), settings_changes)
                 .map(|()| Message::SettingsChanged),
         ];
-        subscriptions.push(self.toasts.subscription().map(|event| match event {
-            SnackEvent::Expired(seq) => Message::ToastExpired(seq),
-            SnackEvent::Frame(at) => Message::ToastFrame(at),
-        }));
+        subscriptions.push(self.toasts.subscription().map(toast_message));
         subscriptions.push(motion::frames(self.is_animating(Instant::now())).map(Message::Frame));
         if self.watches_update_check() {
             subscriptions.push(iced::time::every(UPDATE_WATCH).map(|_| Message::UpdateWatch));
@@ -1656,10 +1659,19 @@ fn info_row<'a>(icon: Icon, title: &'a str, subtitle: String) -> Element<'a, Mes
     .into()
 }
 
-/// The result toast (home's SnackBar pattern): floating 16 in from the
-/// page's edges at its bottom, `Studio.surfaceRaised`, radius 8,
-/// `Studio.border`, 13 px text, at `opacity`. (The app draws it too, once
-/// the page has handed it over.)
+/// The page's message for what its toasts report.
+fn toast_message(event: SnackEvent) -> Message {
+    match event {
+        SnackEvent::Expired(seq) => Message::ToastExpired(seq),
+        SnackEvent::Frame(at) => Message::ToastFrame(at),
+        SnackEvent::Swiped(seq) => Message::ToastSwiped(seq),
+    }
+}
+
+/// The result toast (home's SnackBar pattern): floating (set 16 in from the
+/// page's edges at its bottom by the queue, `snack::FLOATING_MARGIN`),
+/// `Studio.surfaceRaised`, radius 8, `Studio.border`, 13 px text, at
+/// `opacity`. (The app draws it too, once the page has handed it over.)
 fn toast_bar(message: &str, opacity: f32) -> Element<'_, Infallible> {
     let fade = move |c: Color| alpha(c, c.a * opacity);
     let bar = container(text(message).size(13).color(fade(Studio::TEXT_PRIMARY)))
@@ -1677,7 +1689,7 @@ fn toast_bar(message: &str, opacity: f32) -> Element<'_, Infallible> {
                 Some(fade(Studio::BORDER)),
             )
         });
-    container(bar).width(Length::Fill).padding(16).into()
+    bar.into()
 }
 
 #[cfg(test)]

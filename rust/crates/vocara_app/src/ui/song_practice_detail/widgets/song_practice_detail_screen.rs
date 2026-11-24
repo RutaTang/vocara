@@ -78,6 +78,15 @@ mod feeds;
 mod update;
 mod view;
 
+/// The page's message for what its snack bars report.
+fn snack_message(event: SnackEvent) -> Message {
+    match event {
+        SnackEvent::Expired(seq) => Message::SnackExpired(seq),
+        SnackEvent::Frame(at) => Message::SnackFrame(at),
+        SnackEvent::Swiped(seq) => Message::SnackSwiped(seq),
+    }
+}
+
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -399,6 +408,8 @@ pub enum Message {
     SnackExpired(u64),
     /// A frame while the snack bar enters or leaves.
     SnackFrame(Instant),
+    /// Snack bar `n` was swiped away.
+    SnackSwiped(u64),
     /// A frame while the note editor or the picker comes in or goes.
     DialogFrame(Instant),
     /// A finished side effect.
@@ -937,10 +948,7 @@ impl Screen for SongPracticeDetailScreen {
                     .map(|_| Message::SeparationProgressTick),
             );
         }
-        subscriptions.push(self.snacks.subscription().map(|event| match event {
-            SnackEvent::Expired(seq) => Message::SnackExpired(seq),
-            SnackEvent::Frame(at) => Message::SnackFrame(at),
-        }));
+        subscriptions.push(self.snacks.subscription().map(snack_message));
         subscriptions
             .push(motion::frames(self.dialogs_animating(Instant::now())).map(Message::DialogFrame));
         // A lyrics list scrolling to a revealed line.

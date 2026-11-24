@@ -165,6 +165,8 @@ pub enum Message {
     SnackBarExpired(u64),
     /// A frame while one of the app's snack bars enters or leaves.
     SnackBarFrame(Instant),
+    /// The app's snack bar `n` was swiped away.
+    SnackBarSwiped(u64),
     /// A frame while a page slides or a dialog comes in or goes.
     Frame(Instant),
     /// Boot: the library open.
@@ -510,6 +512,12 @@ impl App {
             Message::SnackBarFrame(at) => {
                 if let State::Running(running) = &mut self.state {
                     running.messenger.event(SnackEvent::Frame(at));
+                }
+                Task::none()
+            }
+            Message::SnackBarSwiped(seq) => {
+                if let State::Running(running) = &mut self.state {
+                    running.messenger.event(SnackEvent::Swiped(seq));
                 }
                 Task::none()
             }

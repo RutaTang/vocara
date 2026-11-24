@@ -30,6 +30,15 @@
 //! timer is a subscription.
 
 mod anchored;
+/// The page's message for what its snack bars report.
+fn snack_message(event: SnackEvent) -> Message {
+    match event {
+        SnackEvent::Expired(seq) => Message::SnackExpired(seq),
+        SnackEvent::Frame(at) => Message::SnackFrame(at),
+        SnackEvent::Swiped(seq) => Message::SnackSwiped(seq),
+    }
+}
+
 #[cfg(test)]
 mod tests;
 
@@ -162,6 +171,8 @@ pub enum Message {
     SnackExpired(u64),
     /// A frame while a snack bar enters or leaves.
     SnackFrame(Instant),
+    /// Snack bar `n` was swiped away.
+    SnackSwiped(u64),
 }
 
 /// What handling one message asked for: the view model's work, to run off
@@ -329,6 +340,10 @@ impl TechniqueLibraryScreen {
             }
             Message::SnackFrame(at) => {
                 self.snacks.frame(at);
+                Step::none()
+            }
+            Message::SnackSwiped(seq) => {
+                self.snacks.swiped(seq, Instant::now());
                 Step::none()
             }
         }
@@ -617,10 +632,7 @@ impl Screen for TechniqueLibraryScreen {
             .remote_applied
             .subscription()
             .map(Message::RemoteApplied);
-        let snacks = self.snacks.subscription().map(|event| match event {
-            SnackEvent::Expired(seq) => Message::SnackExpired(seq),
-            SnackEvent::Frame(at) => Message::SnackFrame(at),
-        });
+        let snacks = self.snacks.subscription().map(snack_message);
         iced::Subscription::batch([applied, snacks])
     }
 
@@ -640,7 +652,7 @@ impl Screen for TechniqueLibraryScreen {
             .height(Length::Fill)
             .style(theme::page)];
         if let Some(snacks) = self.snacks.view() {
-            layers = layers.push(snacks.map(|never| match never {}));
+            layers = layers.push(snacks.map(snack_message));
         }
         layers.into()
     }

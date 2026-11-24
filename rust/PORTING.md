@@ -163,7 +163,10 @@ structure every screen follows, so screens ported by different hands fit:
   while it is on top and hands them to the app when it stops being on top
   (`Screen::take_snack_bars`), which keeps them up over the page on top for
   the time they have left, as Dart's `ScaffoldMessenger` above the pages
-  did (`app::messenger`).
+  did (`app::messenger`). A snack bar can be dragged down and away with the
+  mouse, as `SnackBar`'s `Dismissible` let it be (`widgets::dismissible`):
+  once it has slid out it reports so, and its queue takes it down at once
+  and lets the next one enter (`SnackQueue::swiped`).
 - **Widgets**: `vocara_app::ui::core` holds the theme (`studio.dart` colors,
   `theme.dart`) and the shared widgets (`studio_button`, `studio_controls`,
   `confirm_dialog`, `fatal_open_screen`, `waveform_painter`,
@@ -203,7 +206,9 @@ structure every screen follows, so screens ported by different hands fit:
   motion (`material_tooltip`, `fading_scrollbar`, `material_slider`,
   `material_switch` (Material 3's switch as forui themed it, read off
   Flutter 3.38's `switch.dart`), the `InkWell` highlights of
-  `animated::ink_hover`, the FX chain's reordering cards). A model that animates (the snack bars, `ui::snack`;
+  `animated::ink_hover`, a snack bar's swipe (`dismissible`, with
+  Flutter's velocity tracker and fling spring), the FX chain's reordering
+  cards). A model that animates (the snack bars, `ui::snack`;
   a page transition and a dialog coming in or going, the app's and the
   pages' that draw their own; the license page; a lyrics list's scroll)
   subscribes to `motion::frames(animating)`, the window's frames only

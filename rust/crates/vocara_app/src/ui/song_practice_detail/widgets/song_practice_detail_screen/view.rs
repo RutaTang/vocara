@@ -276,7 +276,7 @@ impl SongPracticeDetailScreen {
             slot(
                 self.snacks
                     .view()
-                    .map(|snacks| snacks.map(|never| match never {})),
+                    .map(|snacks| snacks.map(super::snack_message))
             ),
             slot(editor),
             slot(picker),
@@ -1195,10 +1195,10 @@ fn separation_overlay<'a>(progress: Option<f64>, can_cancel: bool) -> Element<'a
     })))
 }
 
-/// The toast: a floating snack bar 16 in from the page's edges at its
-/// bottom, `Studio.surfaceRaised`, radius 8, `Studio.border`, 13 px text, at
-/// `opacity`. It takes its own taps. (The app draws it too, once the page
-/// has handed it over.)
+/// The toast: a floating snack bar (set 16 in from the page's edges at its
+/// bottom by the queue, `snack::FLOATING_MARGIN`), `Studio.surfaceRaised`,
+/// radius 8, `Studio.border`, 13 px text, at `opacity`. (The app draws it
+/// too, once the page has handed it over.)
 pub(super) fn snack_bar(message: &str, opacity: f32) -> Element<'_, Infallible> {
     let fade = move |c: Color| alpha(c, c.a * opacity);
     let bar = container(text(message).size(13).color(fade(Studio::TEXT_PRIMARY)))
@@ -1216,10 +1216,7 @@ pub(super) fn snack_bar(message: &str, opacity: f32) -> Element<'_, Infallible> 
                 Some(fade(Studio::BORDER)),
             )
         });
-    container(opaque(bar))
-        .width(Length::Fill)
-        .padding(16)
-        .into()
+    bar.into()
 }
 
 /// A section label of the lane list ("MASTER TRACK", "FX BUSES"' text): 11
