@@ -26,7 +26,8 @@
 //! The device lists refresh once on open, then every 1.5 s so plugging or
 //! unplugging a device updates them live (the refresh only notifies when a
 //! set actually changed). Toasts (Dart's floating SnackBars) and the license
-//! page (a `MaterialPageRoute` pushed over Settings) draw inside the page,
+//! page (a `MaterialPageRoute` pushed over Settings, sliding in and back out
+//! over it as the app's pages do, `slide::cupertino`) draw inside the page,
 //! under the window drag bar; the studio dialogs (the repair confirmation,
 //! the update download dialog) go through the app's dialog stack. A toast
 //! still up when Settings leaves stays up over Home for the time it has left
@@ -73,8 +74,10 @@ use crate::app::library::Library;
 use crate::router::Route;
 use crate::services::Services;
 use crate::ui::core::icons::{self, Icon};
+use crate::ui::core::motion::{self, Controller};
 use crate::ui::core::theme::{self, alpha, bare_button, boxed, font, Studio, Zinc};
 use crate::ui::core::widgets::confirm_dialog::ConfirmDialog;
+use crate::ui::core::widgets::slide::{cupertino, slide, PAGE_TRANSITION};
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::home::widgets::update_notice::UpdateDownloadDialog;
 use crate::ui::snack::{SnackEvent, SnackQueue, SnackStyle, SnackTimer};
@@ -369,6 +372,8 @@ pub enum Message {
     Licenses(licenses::Message),
     /// Toast `n` has been up long enough.
     ToastExpired(u64),
+    /// A frame while the license page slides, or its licenses come in.
+    Frame(Instant),
     /// A frame while a toast enters or leaves.
     ToastFrame(Instant),
 }
@@ -407,7 +412,13 @@ pub struct SettingsScreen {
     exporting: bool,
 
     /// The license page, while it is open over Settings.
-    licenses: Option<LicensesPage>,
+    licenses: Option<Box<LicensesPage>>,
+    /// The license page's route animation, while it slides in or out.
+    licenses_route: Option<Box<Controller>>,
+    /// The license page sliding out after its Back, drawn until it has.
+    closed_licenses: Option<Box<LicensesPage>>,
+    /// The last frame's time, what the drawing reads.
+    now: Instant,
 
     /// The result toasts (one at a time: each replaces the one up).
     toasts: SnackQueue,
@@ -454,11 +465,23 @@ impl SettingsScreen {
             picking: false,
             exporting: false,
             licenses: None,
+            licenses_route: None,
+            closed_licenses: None,
+            now: Instant::now(),
             toasts: SnackQueue::new(),
         };
         // Refresh once on open (the poll then keeps the lists live).
         let first = screen.refresh();
         (screen, first)
+    }
+
+    /// Whether the license page slides, or its licenses come in or go, at
+    /// `now`.
+    pub fn is_animating(&self, now: Instant) -> bool {
+        self.licenses_route
+            .as_ref()
+            .is_some_and(|r| r.is_animating(now))
+            || self.licenses.as_ref().is_some_and(|l| l.is_animating(now))
     }
 
     /// The toast on screen, if any.
@@ -791,14 +814,46 @@ impl Screen for SettingsScreen {
                 Update::none()
             }
             Message::OpenLicenses => {
-                self.licenses = Some(LicensesPage::new());
+                self.licenses = Some(Box::new(LicensesPage::new()));
+                let mut route = Controller::new(PAGE_TRANSITION, PAGE_TRANSITION);
+                route.forward(Instant::now());
+                self.licenses_route = Some(Box::new(route));
+                self.closed_licenses = None;
                 Update::none()
             }
             Message::Licenses(message) => {
                 if let Some(page) = &mut self.licenses {
                     if page.update(message) {
-                        self.licenses = None;
+                        // Back: the page slides back out from where it got.
+                        let now = Instant::now();
+                        let mut route = self
+                            .licenses_route
+                            .take()
+                            .filter(|r| r.is_animating(now))
+                            .map_or_else(
+                                || Controller::completed(PAGE_TRANSITION, PAGE_TRANSITION),
+                                |r| *r,
+                            );
+                        route.reverse(now);
+                        self.licenses_route = Some(Box::new(route));
+                        self.closed_licenses = self.licenses.take();
                     }
+                }
+                Update::none()
+            }
+            Message::Frame(at) => {
+                self.now = self.now.max(at);
+                let now = self.now;
+                if let Some(page) = &mut self.licenses {
+                    page.frame(at);
+                }
+                if self
+                    .licenses_route
+                    .as_ref()
+                    .is_some_and(|r| !r.is_animating(now))
+                {
+                    self.licenses_route = None;
+                    self.closed_licenses = None;
                 }
                 Update::none()
             }
@@ -844,16 +899,34 @@ impl Screen for SettingsScreen {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        let page: Element<'_, Message> = match &self.licenses {
-            Some(licenses) => licenses.view().map(Message::Licenses),
-            None => column![
+        let settings = || -> Element<'_, Message> {
+            column![
                 header(),
                 scrollable(self.body())
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .style(theme::scrollbar),
             ]
+            .into()
+        };
+        let route = self.licenses_route.as_ref().map(|r| cupertino(r, self.now));
+        let page: Element<'_, Message> = match (&self.licenses, &self.closed_licenses, route) {
+            // Sliding in over Settings, which slides a third of the way out.
+            (Some(licenses), _, Some((moving, covered, shadow))) => stack![
+                slide(settings(), covered).inert(),
+                slide(licenses.view().map(Message::Licenses), moving).shadow(shadow),
+            ]
             .into(),
+            (Some(licenses), ..) => licenses.view().map(Message::Licenses),
+            // Sliding back out after its Back, Settings sliding back in.
+            (None, Some(closed), Some((moving, covered, shadow))) => stack![
+                slide(settings(), covered),
+                slide(closed.view().map(Message::Licenses), moving)
+                    .shadow(shadow)
+                    .inert(),
+            ]
+            .into(),
+            (None, ..) => settings(),
         };
         let mut layers = stack![container(page)
             .width(Length::Fill)
@@ -878,6 +951,7 @@ impl Screen for SettingsScreen {
             SnackEvent::Expired(seq) => Message::ToastExpired(seq),
             SnackEvent::Frame(at) => Message::ToastFrame(at),
         }));
+        subscriptions.push(motion::frames(self.is_animating(Instant::now())).map(Message::Frame));
         if self.watches_update_check() {
             subscriptions.push(iced::time::every(UPDATE_WATCH).map(|_| Message::UpdateWatch));
         }

@@ -56,7 +56,7 @@ use crate::ui::core::widgets::confirm_dialog::{
     self, Dialog, DialogResult, DialogState, DialogStep,
 };
 use crate::ui::core::widgets::fatal_open_screen::{self, FatalOpenScreen};
-use crate::ui::core::widgets::slide::slide;
+use crate::ui::core::widgets::slide::{cupertino, slide};
 use crate::ui::core::widgets::window_drag_bar::window_drag_bar;
 use crate::ui::home::widgets::update_notice::open_url_task;
 use crate::ui::snack::SnackEvent;
@@ -281,9 +281,8 @@ impl Running {
     }
 }
 
-/// How long a page takes to come in or go (`CupertinoRouteTransitionMixin`'s
-/// `kTransitionDuration`: a `MaterialPage` on macOS slides as on iOS).
-pub const ROUTE_TRANSITION: Duration = Duration::from_millis(500);
+/// How long a page takes to come in or go.
+pub use crate::ui::core::widgets::slide::PAGE_TRANSITION as ROUTE_TRANSITION;
 
 /// A page transition: Flutter's `CupertinoPageTransition`, which the
 /// `MaterialPage`s go_router built used on macOS. The page coming in (a push
@@ -318,15 +317,7 @@ impl RouteTransition {
     /// The moving page's offset (in its widths, rightward), the covered
     /// page's, and the edge shadow's strength, at `now`.
     fn progress(&self, now: Instant) -> (f32, f32, f32) {
-        let c = &self.controller;
-        let primary = c.curved(
-            Curve::FastEaseInToSlowEaseOut,
-            Some(Curve::FastEaseInToSlowEaseOutFlipped),
-            now,
-        );
-        let secondary = c.curved(Curve::LinearToEaseOut, Some(Curve::EaseInToLinear), now);
-        let shadow = c.curved(Curve::LinearToEaseOut, None, now);
-        (1.0 - primary, -secondary / 3.0, shadow)
+        cupertino(&self.controller, now)
     }
 }
 

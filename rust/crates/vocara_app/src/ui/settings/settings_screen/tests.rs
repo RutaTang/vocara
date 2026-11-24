@@ -1268,6 +1268,56 @@ fn licenses_opens_the_license_page_and_its_back_returns_to_settings() {
 }
 
 #[test]
+fn the_license_page_slides_in_over_settings_and_back_out() {
+    use crate::ui::core::motion::Curve;
+    use crate::ui::core::widgets::slide::{cupertino, PAGE_TRANSITION};
+    use std::time::Instant;
+
+    let mut page = Setup::new().mount();
+    assert!(!page.screen.is_animating(Instant::now()), "idle: no frames");
+    let t0 = Instant::now();
+    page.send(Message::OpenLicenses);
+    assert!(page.screen.licenses_open(), "open at once");
+    assert!(
+        page.screen.is_animating(Instant::now()),
+        "frames while it slides"
+    );
+    let route = |page: &Page, t| {
+        let route = page.screen.licenses_route.as_ref().expect("sliding");
+        cupertino(route, t)
+    };
+    let (moving, covered, _) = route(&page, t0);
+    assert!((moving - 1.0).abs() < 1e-3 && covered.abs() < 1e-3, "start");
+    let (moving, _, _) = route(&page, t0 + PAGE_TRANSITION / 2);
+    let expected = 1.0 - Curve::FastEaseInToSlowEaseOut.transform(0.5);
+    assert!((moving - expected).abs() < 0.01, "middle: {moving}");
+    let (moving, covered, _) = route(&page, t0 + 2 * PAGE_TRANSITION);
+    assert!(
+        moving.abs() < 1e-3 && (covered + 1.0 / 3.0).abs() < 1e-3,
+        "end"
+    );
+    page.send(Message::Frame(Instant::now() + PAGE_TRANSITION));
+    assert!(page.screen.licenses_route.is_none());
+
+    // Back: it slides out, drawn (not reachable) until it has.
+    let t1 = Instant::now();
+    page.send(Message::Licenses(licenses::Message::Back));
+    assert!(!page.screen.licenses_open(), "closed at once");
+    assert!(page.screen.closed_licenses.is_some());
+    assert!(
+        !page.shows("Powered by iced"),
+        "the page going takes no part"
+    );
+    let (moving, _, _) = route(&page, t1);
+    assert!(moving.abs() < 1e-3, "it starts all in");
+    let (moving, _, _) = route(&page, t1 + 2 * PAGE_TRANSITION);
+    assert!((moving - 1.0).abs() < 1e-3, "and ends all out");
+    page.send(Message::Frame(Instant::now() + PAGE_TRANSITION));
+    assert!(page.screen.closed_licenses.is_none(), "let go");
+    assert!(!page.screen.is_animating(Instant::now()));
+}
+
+#[test]
 fn the_page_hears_the_settings_notify() {
     let page = Setup::new().mount();
     let feed = SettingsFeed(page.services.app_settings.clone());

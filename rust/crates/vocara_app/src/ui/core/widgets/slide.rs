@@ -14,7 +14,32 @@ use iced::{
     mouse, Background, Color, Element, Event, Length, Rectangle, Renderer, Size, Theme, Vector,
 };
 
-use crate::ui::core::motion::Lerp;
+use std::time::Duration;
+
+use iced::time::Instant;
+
+use crate::ui::core::motion::{Controller, Curve, Lerp};
+
+/// How long a page takes to come in or go (`CupertinoRouteTransitionMixin`'s
+/// `kTransitionDuration`: a `MaterialPageRoute` on macOS slides as on iOS).
+pub const PAGE_TRANSITION: Duration = Duration::from_millis(500);
+
+/// `CupertinoPageTransition` on a route animation at `now`: the moving
+/// page's offset (in its widths, rightward: in from the right edge on
+/// `Curves.fastEaseInToSlowEaseOut`, back on its flip), the covered page's
+/// (a third of the way out to the left on `Curves.linearToEaseOut`, back on
+/// `Curves.easeInToLinear`), and the moving page's edge shadow's strength
+/// (`Curves.linearToEaseOut`).
+pub fn cupertino(route: &Controller, now: Instant) -> (f32, f32, f32) {
+    let primary = route.curved(
+        Curve::FastEaseInToSlowEaseOut,
+        Some(Curve::FastEaseInToSlowEaseOutFlipped),
+        now,
+    );
+    let secondary = route.curved(Curve::LinearToEaseOut, Some(Curve::EaseInToLinear), now);
+    let shadow = route.curved(Curve::LinearToEaseOut, None, now);
+    (1.0 - primary, -secondary / 3.0, shadow)
+}
 
 /// The edge shadow's colors, at its full strength: from the page's edge
 /// outward (`<Color>[Color(0x04000000), CupertinoColors.transparent]`).
@@ -26,6 +51,8 @@ pub struct Slide<'a, M> {
     /// How far right its drawing moves, in its own widths (a
     /// `SlideTransition`'s fractional offset).
     dx: f32,
+    /// How far down, in its own heights.
+    dy: f32,
     /// The edge shadow's strength, 0 to 1 (none at 0).
     shadow: f32,
     /// Whether it takes input (a route coming in, or the one on top).
@@ -37,12 +64,19 @@ pub fn slide<'a, M>(content: impl Into<Element<'a, M>>, dx: f32) -> Slide<'a, M>
     Slide {
         content: content.into(),
         dx,
+        dy: 0.0,
         shadow: 0.0,
         interactive: true,
     }
 }
 
 impl<M> Slide<'_, M> {
+    /// Also drawn `dy` of its height down.
+    pub fn down(mut self, dy: f32) -> Self {
+        self.dy = dy;
+        self
+    }
+
     /// Casts the edge shadow at `strength` (0 to 1) left of the page.
     pub fn shadow(mut self, strength: f32) -> Self {
         self.shadow = strength;
@@ -125,7 +159,7 @@ impl<M> Widget<M, Theme, Renderer> for Slide<'_, M> {
         } else {
             mouse::Cursor::Unavailable
         };
-        if self.dx == 0.0 && self.shadow <= 0.0 {
+        if self.dx == 0.0 && self.dy == 0.0 && self.shadow <= 0.0 {
             self.content.as_widget().draw(
                 &tree.children[0],
                 renderer,
@@ -138,11 +172,11 @@ impl<M> Widget<M, Theme, Renderer> for Slide<'_, M> {
             return;
         }
         let dx = self.dx * bounds.width;
+        let moved = Vector::new(dx, self.dy * bounds.height);
         renderer.with_layer(bounds, |renderer| {
             if self.shadow > 0.0 {
                 draw_shadow(renderer, bounds, dx, self.shadow);
             }
-            let moved = Vector::new(dx, 0.0);
             renderer.with_translation(moved, |renderer| {
                 self.content.as_widget().draw(
                     &tree.children[0],
@@ -205,13 +239,14 @@ impl<M> Widget<M, Theme, Renderer> for Slide<'_, M> {
         if !self.interactive {
             return None;
         }
-        let dx = self.dx * layout.bounds().width;
+        let bounds = layout.bounds();
+        let moved = Vector::new(self.dx * bounds.width, self.dy * bounds.height);
         self.content.as_widget_mut().overlay(
             &mut tree.children[0],
             layout,
             renderer,
             viewport,
-            translation + Vector::new(dx, 0.0),
+            translation + moved,
         )
     }
 }

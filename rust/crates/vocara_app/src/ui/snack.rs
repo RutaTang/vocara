@@ -136,7 +136,7 @@ pub struct SnackQueue {
     /// turn.
     queue: VecDeque<Entry>,
     /// The one leaving, drawn until it has left.
-    leaving: Option<Entry>,
+    leaving: Option<Box<Entry>>,
     /// Numbers the snack bars, so a stale timer takes down nothing.
     made: u64,
     /// The last frame's time, what the drawing reads.
@@ -287,7 +287,12 @@ impl SnackQueue {
     pub fn view(&self) -> Option<Element<'_, Infallible>> {
         let mut layers = stack![].width(Length::Fill).height(Length::Fill);
         let mut any = false;
-        for entry in self.leaving.iter().chain(self.queue.front()) {
+        for entry in self
+            .leaving
+            .as_deref()
+            .into_iter()
+            .chain(self.queue.front())
+        {
             let Some(motion) = &entry.motion else {
                 continue;
             };
@@ -307,7 +312,7 @@ impl SnackQueue {
             return;
         }
         motion.controller.reverse(now);
-        self.leaving = Some(entry);
+        self.leaving = Some(Box::new(entry));
     }
 
     /// The first snack bar starts its entrance — once the one leaving has
