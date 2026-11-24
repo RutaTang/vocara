@@ -1,15 +1,19 @@
 // The page-level cases of Dart's technique_example_player_test.dart, on the
 // keyed player set the technique page keeps (the page itself is ported
 // elsewhere): players survive scrolling and earlier removals, a clip whose
-// file arrives gets a player, and a take pauses and blocks every example.
+// file arrives gets a player, and a take pauses and blocks every example;
+// and the video controls' keyboard and fullscreen.
 
 use super::*;
+use iced::keyboard::{key::Named, Key};
 use iced::widget::{column, container, scrollable, Space};
 use iced::{mouse, Event, Length, Point};
 use iced_test::simulator;
 use vocara_services::media_player::{FakeMediaPlayers, FakePlayerHandle};
 
+use crate::ui::core::widgets::wrap::Wrap;
 use crate::ui::technique_library::widgets::media::technique_audio_player::UNAVAILABLE_CLIP_MESSAGE;
+use crate::ui::technique_library::widgets::media::video_controls::{Command, Shortcut};
 
 const MISSING: &str = "asset://01J00000000000000000000000";
 
@@ -182,7 +186,7 @@ fn only_the_analyzed_clip_drives_and_follows_the_analysis() {
     built[1].set_state(|s| s.position = Duration::from_secs(2));
     assert_eq!(
         examples.update(Message::Tick, &players, false, Some("M1")),
-        Some(Duration::from_secs(2))
+        Some(Report::Position(Duration::from_secs(2)))
     );
     // A scrub of M0's bar is not M1's to report.
     assert_eq!(
@@ -269,4 +273,142 @@ fn an_idle_page_is_not_polled() {
         None,
     );
     assert!(examples.needs_tick());
+}
+
+// ------------------------------------------- the video controls' keyboard
+
+fn video_clip(id: &'static str) -> ExampleClip<'static> {
+    ExampleClip {
+        id,
+        path: "/tmp/example.mp4",
+        video: true,
+    }
+}
+
+fn video_key(id: &str) -> ExampleKey {
+    ExampleKey {
+        id: id.to_string(),
+        unavailable: false,
+        video: true,
+    }
+}
+
+/// Video `id`'s message `m`.
+fn to_video(
+    examples: &mut ExamplePlayers,
+    players: &FakeMediaPlayers,
+    id: &str,
+    m: video::Message,
+) -> Option<Report> {
+    examples.update(Message::Video(video_key(id), m), players, false, None)
+}
+
+/// What the page sends for a Space none of its widgets took, with
+/// `content` in it.
+fn space_through<'a>(
+    examples: &'a ExamplePlayers,
+    content: Element<'a, Message>,
+    play_blocked: bool,
+) -> Vec<Message> {
+    let page = examples.shortcuts(content, play_blocked, |m| m);
+    let mut ui = simulator(page);
+    let _ = ui.tap_key(Key::Named(Named::Space));
+    ui.into_messages().collect()
+}
+
+#[test]
+fn the_first_video_started_holds_the_keyboard_until_a_take_takes_it() {
+    let players = FakeMediaPlayers::new();
+    let mut examples = ExamplePlayers::new();
+    examples.sync([video_clip("V1"), video_clip("V2")], &players);
+    assert_eq!(examples.keyboard_holder(), None, "nothing started");
+    to_video(&mut examples, &players, "V1", video::Message::Play);
+    assert_eq!(examples.keyboard_holder(), Some(&video_key("V1")));
+    // V2's autofocus found V1's controls focused.
+    to_video(&mut examples, &players, "V2", video::Message::Play);
+    assert_eq!(examples.keyboard_holder(), Some(&video_key("V1")));
+    // A take: ExcludeFocus took the focus, and nothing gave it back.
+    examples.set_play_blocked(false);
+    assert_eq!(examples.keyboard_holder(), Some(&video_key("V1")));
+    examples.set_play_blocked(true);
+    examples.set_play_blocked(false);
+    assert_eq!(examples.keyboard_holder(), None);
+}
+
+#[test]
+fn the_keyboard_goes_with_its_video() {
+    let players = FakeMediaPlayers::new();
+    let mut examples = ExamplePlayers::new();
+    examples.sync([video_clip("V1"), video_clip("V2")], &players);
+    to_video(&mut examples, &players, "V1", video::Message::Play);
+    examples.sync([video_clip("V2")], &players);
+    assert_eq!(examples.keyboard_holder(), None);
+}
+
+#[test]
+fn the_page_hands_the_keys_nothing_took_to_the_video_holding_the_keyboard() {
+    let players = FakeMediaPlayers::new();
+    let mut examples = ExamplePlayers::new();
+    examples.sync([video_clip("V1"), video_clip("V2")], &players);
+    // No video started: no controls to hear it.
+    assert!(space_through(&examples, Space::new().into(), false).is_empty());
+    to_video(&mut examples, &players, "V1", video::Message::Play);
+    to_video(&mut examples, &players, "V2", video::Message::Play);
+    let space = vec![Message::Video(
+        video_key("V1"),
+        video::Message::Key(Shortcut::PlayOrPause),
+    )];
+    assert_eq!(space_through(&examples, Space::new().into(), false), space);
+    // Not while a take blocks them (ExcludeFocus).
+    assert!(space_through(&examples, Space::new().into(), true).is_empty());
+    // A key a widget of the page took (a focused field) is its own.
+    let field = Wrap::<Message, ()>::new(
+        Space::new(),
+        Box::new(|_, event, _, _, shell| {
+            if matches!(event, Event::Keyboard(_)) {
+                shell.capture_event();
+            }
+        }),
+    );
+    assert!(space_through(&examples, field.into(), false).is_empty());
+    // A video in fullscreen takes its keys in its own view.
+    to_video(
+        &mut examples,
+        &players,
+        "V1",
+        video::Message::Key(Shortcut::ToggleFullscreen),
+    );
+    assert!(space_through(&examples, Space::new().into(), false).is_empty());
+}
+
+#[test]
+fn a_video_in_fullscreen_is_shown_over_the_window() {
+    let players = FakeMediaPlayers::new();
+    let mut examples = ExamplePlayers::new();
+    examples.sync([video_clip("V1")], &players);
+    to_video(&mut examples, &players, "V1", video::Message::Play);
+    assert!(examples.overlay().is_none());
+    let toggle = video::Message::Controls(Command::ToggleFullscreen);
+    assert_eq!(
+        to_video(&mut examples, &players, "V1", toggle.clone()),
+        Some(Report::Window(WindowRequest::EnterFullscreen))
+    );
+    {
+        // Its keys come back addressed to it.
+        let mut ui = simulator(examples.overlay().expect("in fullscreen"));
+        let _ = ui.tap_key(Key::Named(Named::Escape));
+        let sent: Vec<Message> = ui.into_messages().collect();
+        assert_eq!(
+            sent,
+            vec![Message::Video(
+                video_key("V1"),
+                video::Message::Key(Shortcut::ExitFullscreen)
+            )]
+        );
+    }
+    assert_eq!(
+        to_video(&mut examples, &players, "V1", toggle),
+        Some(Report::Window(WindowRequest::ExitFullscreen))
+    );
+    assert!(examples.overlay().is_none());
 }

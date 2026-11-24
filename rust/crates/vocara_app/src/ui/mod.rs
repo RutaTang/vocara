@@ -12,7 +12,8 @@
 //! - [`Screen::update`], which handles a message and returns an [`Update`]:
 //!   the tasks to run (service calls on a blocking thread, see
 //!   `util::blocking`), where to navigate, and a dialog to show;
-//! - [`Screen::view`], [`Screen::subscription`] (keyboard, ticks: skip
+//! - [`Screen::view`], [`Screen::overlay`] (a full-window layer, as a route
+//!   on the root navigator), [`Screen::subscription`] (keyboard, ticks: skip
 //!   events a widget captured), [`Screen::returned`] (a page this one pushed
 //!   was popped: Dart's `await context.push(...)` completing) and
 //!   [`Screen::dispose`] (the page left the stack);
@@ -55,6 +56,15 @@ pub trait Screen {
 
     /// The page's content (the app puts the window drag bar above it).
     fn view(&self) -> Element<'_, Self::Message>;
+
+    /// What the page shows over the whole window — above the window drag
+    /// bar, every page and the app's snack bar, under the dialogs — while
+    /// it is on top, if anything: a route a widget of the page pushed on
+    /// the root navigator (the video controls' fullscreen). It takes the
+    /// input it covers.
+    fn overlay(&self) -> Option<Element<'_, Self::Message>> {
+        None
+    }
 
     /// What the screen listens to; `on_top` is false while another page
     /// covers it (its timers may run on; its keys should not).

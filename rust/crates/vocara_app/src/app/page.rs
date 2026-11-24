@@ -132,6 +132,17 @@ impl Page {
         )
     }
 
+    /// What the page shows over the whole window, its messages tagged with
+    /// its id (see [`Screen::overlay`]).
+    pub fn overlay(&self, id: PageId) -> Option<Element<'_, Message>> {
+        with_screen!(
+            self,
+            screen,
+            wrap => screen.overlay().map(move |e| e.map(move |m| wrap(id, m))),
+            None
+        )
+    }
+
     /// The page's subscription, its messages tagged with its id.
     pub fn subscription(&self, id: PageId, on_top: bool) -> Subscription<Message> {
         with_screen!(

@@ -154,7 +154,10 @@ structure every screen follows, so screens ported by different hands fit:
   (`Home`, `Song { id }`, `Settings`, `Techniques`, `Technique { id }`); the
   router keeps go_router's push/pop/go semantics (the back button, deep links
   via `VOCARA_START`, the `START` dart-define's replacement). Every page sits
-  under the window drag bar (`_chrome`).
+  under the window drag bar (`_chrome`). A route a widget pushed on the
+  root navigator over everything (media_kit's fullscreen video) is the top
+  page's `Screen::overlay`, which the app draws over the drag bar, the
+  pages and its snack bar, under the dialogs.
 - **Screens**: `vocara_app::ui::<screen>` with `view_model.rs` (or a
   `view_model/` folder) holding the Dart view model's state and logic as
   plain Rust with no iced types, and the widgets/views next to it. A view
@@ -184,9 +187,13 @@ structure every screen follows, so screens ported by different hands fit:
   on a tap's release, of any button, within `kTouchSlop` of its press
   (`widgets::gesture::AnyTap`), not on the press.
   Icons are Lucide (forui's `FIcons`) from the `lucide-icons` crate. The
-  one Material icon a Flutter widget drew on its own, the license page's
-  `BackButton` arrow (`Icons.arrow_back_ios_new_rounded`), is drawn from
-  its Material Icons outline (Apache 2.0, listed on the license page).
+  Material icons a Flutter widget drew on its own — the license page's
+  `BackButton` arrow (`Icons.arrow_back_ios_new_rounded`), and media_kit's
+  video controls' `volume_up` / `volume_down` / `volume_off` /
+  `fullscreen` / `fullscreen_exit` (`ui::core::material_icons`) — are
+  drawn from their Material Icons outlines (Apache 2.0), and the controls'
+  `AnimatedIcons.play_pause` from Flutter's keyframes (BSD-3-Clause), both
+  listed on the license page.
 - **Renderer**: the macOS app draws with iced's wgpu renderer, patched in
   `rust/vendor/iced_wgpu` (see `rust/vendor/README.md`) to draw a quad's
   border over its fill, as Flutter's `BoxDecoration` (and iced's
@@ -461,7 +468,7 @@ behavior and its tests are ported and the gates pass.
 | `ui/technique_library/view_model/technique_library_view_model.dart` | 280 | `vocara_app::ui::technique_library::view_model::technique_library_view_model` | done |
 | `ui/technique_library/widgets/media/technique_audio_player.dart` | 417 | `vocara_app::ui::technique_library::widgets::media::technique_audio_player` (media_kit's `Player` → `vocara_services::media_player`, polled: AVFoundation on macOS with `device`, the null player elsewhere, a fake in tests; the keyed players a technique page keeps → `media::example_players`) | done (the AVFoundation backend type-checked for macOS; its pure parts tested everywhere) |
 | `ui/technique_library/widgets/media/technique_media_section.dart` | 898 | `vocara_app::ui::technique_library::widgets::media::technique_media_section` (plain data in — `TechniqueMediaSection`, the constructor's parameters — and `Message`s out, which `MediaSectionState::update` turns into the callbacks' `Event`s; the page keeps that state (hover, drag) and the `ExamplePlayers`; the picker is `vocara_services::file_panels`' (`browse`), the rename dialog goes through the app's dialog stack (`Dialog::RenameExample`)) | done |
-| `ui/technique_library/widgets/media/technique_video_player.dart` | 190 | `vocara_app::ui::technique_library::widgets::media::technique_video_player` | done (media_kit's desktop controls → the audio player's bar while hovered; no volume, fullscreen or keyboard shortcuts) |
+| `ui/technique_library/widgets/media/technique_video_player.dart` | 190 | `vocara_app::ui::technique_library::widgets::media::technique_video_player` (the controls `AdaptiveVideoControls` gave it on macOS, media_kit_video 2.0.1's `MaterialDesktopVideoControls` with `modifyVolumeOnScroll: false` → `media::video_controls`, one widget drawing and handling them all; its fullscreen route → the page's `Screen::overlay` plus the window's native fullscreen; the controls' keyboard → the first video started, through `ExamplePlayers::shortcuts`) | done (what iced cannot do the same — group opacity, focus scopes, rounded clips, scroll phases — is listed in `video_controls`' and the player's module docs) |
 | `ui/technique_library/widgets/studio_field.dart` | 96 | `vocara_app::ui::technique_library::widgets::studio_field` | done |
 | `ui/technique_library/widgets/technique_analysis_section.dart` | 690 | `vocara_app::ui::technique_library::widgets::technique_analysis_section` (`view` reads the view model, `update` makes the call the Dart tap made where the control was live; the page keeps the Spectrogram tab's `VoiceprintState` and asks `ensureReferenceAnalysis` while the panel is built; the Dart level meter's fill had no height, here it shows) | done (the Range and Dynamics tabs are placeholders until `voice_profile_view` lands) |
 | `ui/technique_library/widgets/technique_detail_screen.dart` | 825 | `vocara_app::ui::technique_library::widgets::technique_detail_screen` (the router's `technique_library::detail`; the screen owns the view model, the `ExamplePlayers`, the `MediaSectionState` and the analysis card's `VoiceprintState`; each `Job` runs off the UI thread and lands as `Message::Landed`, each `Answer` is a Dart `await` resuming; the recorder's ticks — and a quit's `quitFinalize` — and the players' poll are subscriptions; the dialogs go through `Update::dialog`; the header's double-tap settle drops its buttons' messages; the snack bars are the page's while it is on top (queued, timed by a subscription), the app's `messenger`'s once it leaves; exports use `file_panels`' save panel, the players `SystemMediaPlayers` — `with_deps` takes a test's) | done |

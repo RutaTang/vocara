@@ -2,7 +2,15 @@
 //! one `AVPlayerItem` for the clip's file URL, and for video an
 //! `AVPlayerItemVideoOutput` that hands out 32BGRA pixel buffers, converted
 //! to RGBA for the UI. Everything is polled: no KVO, no notifications, no
-//! blocks, so nothing calls back into Rust behind the UI's back.
+//! blocks, so nothing calls back into Rust behind the UI's back. A poll
+//! reads the item's `loadedTimeRanges` for the buffered extent, and the
+//! player's `timeControlStatus` waiting to play for `buffering`.
+//!
+//! Volume: `AVPlayer.volume` gets mpv's gain for media_kit's 0–100 volume
+//! (`volume_gain`); the volume set is kept here and reported as set, as
+//! mpv's `volume` property was. `AVPlayer.muted` is the mute. Both are
+//! macOS 10.7 API, as is `loadedTimeRanges` and NSValue's
+//! `CMTimeRangeValue`.
 //!
 //! Main-thread-only: `AVPlayer` and `AVPlayerItem` are main-thread classes
 //! (objc2 makes them `!Send` and asks for a `MainThreadMarker` to create
@@ -27,9 +35,9 @@ use objc2::runtime::AnyObject;
 use objc2::{AllocAnyThread, MainThreadMarker};
 use objc2_av_foundation::{
     AVPlayer, AVPlayerItem, AVPlayerItemStatus, AVPlayerItemVideoOutput, AVPlayerStatus,
-    AVPlayerTimeControlStatus,
+    AVPlayerTimeControlStatus, NSValueAVFoundationExtensions,
 };
-use objc2_core_media::{CMTime, CMTimeFlags};
+use objc2_core_media::{CMTime, CMTimeFlags, CMTimeRange};
 use objc2_core_video::{
     kCVPixelBufferPixelFormatTypeKey, kCVPixelFormatType_32BGRA, kCVReturnSuccess,
     CVGetCurrentHostTime, CVGetHostClockFrequency, CVPixelBuffer, CVPixelBufferGetBaseAddress,
@@ -41,9 +49,9 @@ use objc2_core_video::{
 use objc2_foundation::{NSDictionary, NSNumber, NSString, NSURL};
 
 use super::{
-    bgra_to_rgba, cm_time_to_duration, duration_to_cm_time, map_state, MediaKind, MediaPlayer,
-    MediaPlayerError, NativeItemStatus, NativeState, NativeTimeControl, PlayerState, Result,
-    VideoFrame,
+    bgra_to_rgba, clamp_volume, cm_time_to_duration, duration_to_cm_time, map_state, volume_gain,
+    MediaKind, MediaPlayer, MediaPlayerError, NativeItemStatus, NativeState, NativeTimeControl,
+    PlayerState, Result, VideoFrame, FULL_VOLUME,
 };
 
 /// The clip that is open: its item, and the item's video output (video
@@ -60,10 +68,14 @@ pub(super) struct AvMediaPlayer {
     player: Retained<AVPlayer>,
     opened: Option<Opened>,
     frame: Option<VideoFrame>,
+    /// The volume last set, on media_kit's 0–100 scale (the player has its
+    /// [`volume_gain`]).
+    volume: f64,
 }
 
 impl AvMediaPlayer {
-    /// A player with nothing open. Fails off the main thread.
+    /// A player with nothing open, at full volume (an `AVPlayer` starts at
+    /// 1.0, media_kit's 100). Fails off the main thread.
     pub(super) fn new(kind: MediaKind) -> Result<AvMediaPlayer> {
         let mtm = MainThreadMarker::new().ok_or(MediaPlayerError::NotMainThread)?;
         // SAFETY: `+[AVPlayer new]` has no preconditions; the marker proves
@@ -75,6 +87,7 @@ impl AvMediaPlayer {
             player,
             opened: None,
             frame: None,
+            volume: FULL_VOLUME,
         })
     }
 
@@ -93,6 +106,9 @@ impl AvMediaPlayer {
     fn native(&self, item: &AVPlayerItem) -> NativeState {
         // SAFETY: plain property reads on live objects we hold a reference
         // to, on the main thread (the type is `!Send`, created there).
+        // `CMTimeRangeValue` is read only from the values of
+        // `loadedTimeRanges`, which AVFoundation documents as NSValues
+        // holding CMTimeRanges.
         unsafe {
             let item_status = match item.status() {
                 AVPlayerItemStatus::ReadyToPlay => NativeItemStatus::ReadyToPlay,
@@ -111,6 +127,12 @@ impl AvMediaPlayer {
                 }
                 _ => NativeTimeControl::Paused,
             };
+            let loaded = item
+                .loadedTimeRanges()
+                .to_vec()
+                .iter()
+                .filter_map(|value| range_of(value.CMTimeRangeValue()))
+                .collect();
             NativeState {
                 item_status,
                 player_failed,
@@ -119,6 +141,9 @@ impl AvMediaPlayer {
                 rate: self.player.rate(),
                 current_time: duration_of(self.player.currentTime()),
                 duration: duration_of(item.duration()),
+                loaded,
+                volume: self.volume,
+                muted: self.player.isMuted(),
             }
         }
     }
@@ -128,6 +153,13 @@ impl AvMediaPlayer {
 /// or with a timescale that is not positive).
 fn duration_of(t: CMTime) -> Option<Duration> {
     cm_time_to_duration(t.value, t.timescale, t.flags.0)
+}
+
+/// A `CMTimeRange` as `(start, end)`; `None` unless both are numbers.
+fn range_of(range: CMTimeRange) -> Option<(Duration, Duration)> {
+    let start = duration_of(range.start)?;
+    let length = duration_of(range.duration)?;
+    Some((start, start.saturating_add(length)))
 }
 
 /// A `CMTime` for a [`Duration`].
@@ -327,6 +359,18 @@ impl MediaPlayer for AvMediaPlayer {
                 CM_TIME_ZERO,
             )
         };
+    }
+
+    fn set_volume(&mut self, volume: f64) {
+        self.volume = clamp_volume(volume);
+        // mpv's curve: the player plays at the cube of the volume's share.
+        // SAFETY: on the main thread; any value in 0–1 is a valid volume.
+        unsafe { self.player.setVolume(volume_gain(self.volume) as f32) };
+    }
+
+    fn set_muted(&mut self, muted: bool) {
+        // SAFETY: on the main thread; a plain property write.
+        unsafe { self.player.setMuted(muted) };
     }
 
     fn state(&self) -> PlayerState {

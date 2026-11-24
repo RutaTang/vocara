@@ -30,7 +30,13 @@
 //! - `subscription`: [`subscription`] (the players' poll);
 //! - the view model's signals: `micArmed` (`pauseSignal`) →
 //!   [`ExamplePlayers::pause_all`]; `analysisScrub` →
-//!   [`ExamplePlayers::seek_analyzed`].
+//!   [`ExamplePlayers::seek_analyzed`];
+//! - the video controls' keyboard and fullscreen: the page wraps its
+//!   content in [`ExamplePlayers::shortcuts`], shows
+//!   [`ExamplePlayers::overlay`] over the whole window, tells the players
+//!   after every message whether a take blocks them
+//!   ([`ExamplePlayers::set_play_blocked`]), and carries an
+//!   [`Event::Window`] out on the window.
 //!
 //! # Differences from Flutter
 //!
@@ -64,8 +70,9 @@ use vocara_model::models::technique_media::TechniqueMedia;
 use vocara_model::util::dart_string;
 use vocara_services::media_player::MediaPlayerFactory;
 
-use super::example_players::{self, ExampleClip, ExamplePlayers};
+use super::example_players::{self, ExampleClip, ExamplePlayers, Report};
 use super::technique_audio_player as audio;
+use super::technique_video_player::WindowRequest;
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::motion::Curve;
 use crate::ui::core::theme::{self, alpha, bare_button, boxed, font, Studio};
@@ -285,6 +292,10 @@ pub enum Event {
     StopRecord,
     /// `onPlaybackPosition(at)`: the analyzed example's player moved.
     Position(Duration),
+    /// A video's controls entered or left fullscreen: the window's native
+    /// fullscreen to enter or leave (media_kit did it itself; run
+    /// [`window_task`](super::technique_video_player::window_task)).
+    Window(WindowRequest),
 }
 
 /// What Dart's `_MediaTile` and `_AddZone` states held, kept by the page.
@@ -341,7 +352,10 @@ impl MediaSectionState {
             // playhead (both directions).
             Message::Player(m) => players
                 .update(m, factory, section.mic_live, section.analyzed_id)
-                .map(Event::Position),
+                .map(|report| match report {
+                    Report::Position(at) => Event::Position(at),
+                    Report::Window(request) => Event::Window(request),
+                }),
             // An audio card's name or chevron (neither toggles without an
             // analysis to show, which only the view knows of).
             Message::ToggleExpand(id) => {
