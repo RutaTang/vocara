@@ -8,7 +8,9 @@
 //! link booting into the seeded takes, the dock, the interpretation
 //! switcher, New take and a note added from a take's header, each
 //! round-tripping through the store. (`ui_journey_test.dart` runs through
-//! this page from Home's own journeys.)
+//! this page from Home's own journeys.) And the toast a take's finalize
+//! shows as Back leaves, which stays up on Home (Dart's `ScaffoldMessenger`
+//! sat above the pages) until its time is up or Home toasts over it.
 
 use std::borrow::Cow;
 use std::collections::VecDeque;
@@ -26,9 +28,11 @@ use super::*;
 use crate::app::library::{Library, LibraryOpen};
 use crate::app::{self, App, Boot, LibraryEvent, Page};
 use crate::router::{Navigation, PageId, Route};
+use crate::services::ServicesFactory;
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::font;
-use crate::ui::home::testing::run_task;
+use crate::ui::core::widgets::confirm_dialog;
+use crate::ui::home::testing::{run_task, spawn_task, FakePractices};
 
 const SIZE: Size = Size::new(1440.0, 1000.0);
 
@@ -91,9 +95,14 @@ fn seeded(takes: usize) -> (Arc<Library>, String, tempfile::TempDir) {
 
 /// The app at `start` (Home when `None`), over `library`, every task run.
 fn boot(library: Arc<Library>, start: Option<&str>) -> App {
+    boot_over(library, start, Services::detached)
+}
+
+/// [`boot`], over the services `services` makes.
+fn boot_over(library: Arc<Library>, start: Option<&str>, services: ServicesFactory) -> App {
     let mut boot = Boot::new(AppEnvironment::Dev);
     boot.start = start.map(str::to_string);
-    boot.services = Services::detached;
+    boot.services = services;
     let (mut app, _open) = App::new(boot);
     let task = app.update(app::Message::Library(LibraryEvent::Finished(
         LibraryOpen::Opened(library),
@@ -108,6 +117,15 @@ fn settle(app: &mut App, task: Task<app::Message>) {
     while let Some(message) = queue.pop_front() {
         let task = app.update(message);
         queue.extend(run_task(task));
+    }
+}
+
+/// Runs `task`, handing the app each message as it comes (and settling
+/// what that leads to): for a task that waits on the app meanwhile.
+fn pump(app: &mut App, task: Task<app::Message>) {
+    for message in spawn_task(task) {
+        let task = app.update(message);
+        settle(app, task);
     }
 }
 
@@ -286,4 +304,100 @@ fn adding_a_note_via_the_take_header_persists_it_on_the_take() {
         .flat_map(|t| t.notes.iter().map(|n| n.content.clone()))
         .collect();
     assert_eq!(notes, ["breath runs out here"]);
+}
+
+// ------------------------------------------------- a toast as the page goes
+
+/// What a take whose recorder dropped a second of audio (48 000 frames)
+/// says as it lands.
+const DROPPED: &str = "Recording dropped about 1000 ms of audio while the disk was busy. \
+                       The take has small gaps.";
+
+/// Home's toast for a practice that could not be created.
+const CREATE_FAILED: &str = "Could not create the practice. Please try again.";
+
+/// The app at Home over `services`, with the take-flow page (a backing and
+/// a take, over the page tests' fakes) pushed over it as Home pushes a
+/// practice, recording a take its recorder will have dropped a second of.
+fn recording_over_home(services: ServicesFactory) -> App {
+    let mut app = boot_over(Arc::new(Library::in_memory()), None, services);
+    let (screen, opening) = super::tests::take_flow_page(app.services(), 48_000);
+    let task = app.push_page(Page::Song(Box::new(screen)), move |id| {
+        opening.map(move |m| app::Message::Song(id, m))
+    });
+    settle(&mut app, task);
+    assert!(song(&app).1.view_model().practice().is_some(), "loaded");
+    // REC. The start hands its take setup to the page and waits for the
+    // answer: its messages land as they come.
+    let (id, _) = song(&app);
+    let task = app.update(app::Message::Song(
+        id,
+        Message::Transport(detail_transport_bar::Message::StartRecording),
+    ));
+    pump(&mut app, task);
+    assert!(song(&app).1.view_model().is_recording());
+    app
+}
+
+/// Home's practices refuse to be created.
+fn refusing_creates(library: Arc<Library>, environment: AppEnvironment) -> Services {
+    let mut services = Services::detached(library, environment);
+    let practices = FakePractices::with(Vec::new());
+    practices.state().uncreatable = true;
+    services.song_repo = practices;
+    services
+}
+
+/// Takes down the snack bar the app shows, its time up.
+fn time_up(app: &mut App) {
+    let timer = app.snack_timer().expect("a snack bar's timer runs");
+    let task = app.update(timer.message());
+    settle(app, task);
+}
+
+// song_practice_detail_screen.dart: Back during a take awaits
+// `stopBeforeLeaving`, whose finalize toasts just before the page pops; the
+// app-wide `ScaffoldMessenger` kept that snack bar up on Home for the rest of
+// its 2.8 s. The page's own snack bar went with the page: the message was
+// never seen.
+#[test]
+fn a_takes_finalize_toast_at_back_stays_up_on_home_until_its_time_is_up() {
+    let mut app = recording_over_home(Services::detached);
+    back(&mut app);
+    assert_eq!(app.routes(), [Some(Route::Home)], "the page left");
+    assert_eq!(app.lingering(), 0, "its take landed");
+    assert!(shows(&app, DROPPED), "Home shows the take's toast");
+    assert!(shows(&app, "New practice"), "over Home");
+
+    let bar = app.snack_bar().expect("the app shows it");
+    assert_eq!(bar.text, DROPPED);
+    assert!(bar.left <= SNACK_DURATION, "for the time it had left");
+    let timer = app.snack_timer().expect("its timer runs");
+    assert_eq!(timer.left, bar.left);
+
+    time_up(&mut app);
+    assert!(!shows(&app, DROPPED), "gone once its time is up");
+    assert!(app.snack_timer().is_none(), "and no timer runs on");
+}
+
+// Home's toast cleared the snack bars up first (`clearSnackBars()`, then
+// `showSnackBar`): a failed create's says so in place of the take's.
+#[test]
+fn a_home_toast_replaces_the_takes_toast() {
+    let mut app = recording_over_home(refusing_creates);
+    back(&mut app);
+    assert!(shows(&app, DROPPED));
+
+    click(&mut app, "New practice");
+    let task = app.update(app::Message::Dialog(confirm_dialog::Message::Input(
+        "Encore".into(),
+    )));
+    settle(&mut app, task);
+    click(&mut app, "Create");
+    assert!(shows(&app, CREATE_FAILED), "Home's toast shows");
+    assert!(!shows(&app, DROPPED), "in place of the take's");
+
+    time_up(&mut app);
+    assert!(!shows(&app, CREATE_FAILED), "then goes in its own time");
+    assert!(!shows(&app, DROPPED), "with nothing left behind it");
 }

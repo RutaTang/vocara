@@ -1,7 +1,9 @@
 //! Home through the whole app — the router, the page stack and the dialog
 //! stack: the integration journeys (`home_settings_journey_test.dart`,
 //! `ui_journey_test.dart`) and `home_reopen_test.dart`. The practice page's
-//! way back is its transport bar's chevron.
+//! way back is its transport bar's chevron. And Home's toast, which stays up
+//! over the page Home opens (Dart's `ScaffoldMessenger` sat above the
+//! pages).
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -15,7 +17,7 @@ use crate::app::{self, App, Boot, LibraryEvent, Page};
 use crate::router::PageId;
 use crate::services::ServicesFactory;
 use crate::ui::core::widgets::confirm_dialog;
-use crate::ui::home::testing::run_task;
+use crate::ui::home::testing::{run_task, FakePractices};
 
 fn boot(library: Arc<Library>, services: ServicesFactory) -> App {
     let mut boot = Boot::new(AppEnvironment::Dev);
@@ -221,4 +223,40 @@ fn the_update_dialog_covers_the_window() {
     }
     assert_eq!(app.dialogs(), 0);
     assert_eq!(app.routes(), [Some(Route::Home)]);
+}
+
+/// Home's practices refuse to be created.
+fn refusing_creates(library: Arc<Library>, environment: AppEnvironment) -> Services {
+    let mut services = Services::detached(library, environment);
+    let practices = FakePractices::with(Vec::new());
+    practices.state().uncreatable = true;
+    services.song_repo = practices;
+    services
+}
+
+// Home's toast went through the app-wide `ScaffoldMessenger`: a page Home
+// opened while it was up showed it for the rest of its time.
+#[test]
+fn a_toast_up_as_home_opens_a_page_stays_up_over_it_until_its_time_is_up() {
+    let mut app = boot(Arc::new(Library::in_memory()), refusing_creates);
+    click(&mut app, "New practice");
+    let task = app.update(app::Message::Dialog(confirm_dialog::Message::Input(
+        "Encore".into(),
+    )));
+    settle(&mut app, task);
+    click(&mut app, "Create");
+    assert_eq!(home(&app).1.snack(), Some(CREATE_FAILED));
+
+    click(&mut app, "Techniques");
+    assert_eq!(app.routes(), [Some(Route::Home), Some(Route::Techniques)]);
+    assert!(shows(&app, CREATE_FAILED), "over the page Home opened");
+    let timer = app.snack_timer().expect("its timer runs");
+    assert!(timer.left <= SNACK_DURATION, "for the time it had left");
+
+    let task = app.update(timer.message());
+    settle(&mut app, task);
+    assert!(!shows(&app, CREATE_FAILED), "gone once its time is up");
+    back(&mut app);
+    assert_eq!(app.routes(), [Some(Route::Home)]);
+    assert!(!shows(&app, CREATE_FAILED), "Home does not show it again");
 }

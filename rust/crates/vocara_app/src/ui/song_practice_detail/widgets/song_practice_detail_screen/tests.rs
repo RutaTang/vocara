@@ -43,10 +43,10 @@
 //!   (`stable_subtree` is a no-op), so every view is a fresh build; the
 //!   callbacks' half is `track_row`'s, and the lane menu's is here.
 //! - The take flow's system-Back variants: the app has no system Back.
-//!   Its 'on the real stack' variants (the opener's push completing once)
-//!   need a recorder fake inside an app page, which pages build from the
-//!   app's services; the page-level cases pin the single leave, and the
-//!   app's tests the pop.
+//!   Its 'on the real stack' variants (the opener's push completing once):
+//!   the page-level cases pin the single leave, and the app's tests the pop.
+//!   (`through_the_app` hosts this take-flow page in the app, through
+//!   [`take_flow_page`], for the toast its finalize shows at Back.)
 //!
 //! The page runs over fakes (an in-memory repository, file and edit fakes, a
 //! fake engine and recorder, a gated analysis). Its work runs here, each job
@@ -728,6 +728,8 @@ struct MicState {
     starting: bool,
     generation: u64,
     last_path: Option<String>,
+    /// The frames the take's ring dropped (a busy disk), said at its stop.
+    dropped_frames: u64,
 }
 
 impl FakeMic {
@@ -810,7 +812,7 @@ impl MicRecorder for FakeMic {
         Some(MicRecordingStop {
             path: s.last_path.clone().unwrap_or_default(),
             clean: true,
-            dropped_frames: 0,
+            dropped_frames: s.dropped_frames,
         })
     }
 
@@ -946,6 +948,64 @@ impl Default for Setup {
 
 // ----------------------------------------------------------- the harness
 
+/// A page's fakes, and its view model's dependencies and options over them.
+struct Fakes {
+    repo: Arc<MemRepo>,
+    files: Arc<FakeFiles>,
+    engine: Arc<FakeEngine>,
+    finalizer: Arc<RecordingFinalizer>,
+    deps: Deps,
+    options: Options,
+}
+
+impl Fakes {
+    /// The fakes `setup` asks for, over the app's `services`.
+    fn new(setup: Setup, services: &Services) -> Self {
+        let repo = setup
+            .repo
+            .unwrap_or_else(|| MemRepo::with(setup.practice.clone()));
+        let files = Arc::new(FakeFiles::default());
+        let engine = Arc::new(FakeEngine::default());
+        let finalizer = setup
+            .finalizer
+            .unwrap_or_else(|| Arc::new(RecordingFinalizer::for_testing()));
+        let deps = Deps {
+            repository: Arc::clone(&repo) as Arc<dyn SongPracticeRepository>,
+            technique_repository: Arc::new(MemTechniques(Mutex::new(setup.techniques))),
+            audio_files: Arc::clone(&files) as Arc<dyn AudioFiles>,
+            spectrograms: if setup.analyses {
+                Arc::new(SmallAnalyses) as Arc<dyn SpectrogramAnalyses>
+            } else {
+                Arc::new(NoSpectrograms)
+            },
+            separation: Arc::new(FakeSourceSeparationService { available: false }),
+            app_settings: Arc::clone(&services.app_settings),
+        };
+        let options = Options {
+            engine: Some(if setup.graph {
+                EngineHandle::Graph(GraphBindings::service())
+            } else {
+                EngineHandle::Other(Arc::clone(&engine) as Arc<dyn PlaybackEngine>)
+            }),
+            edits: Some(Arc::new(FakeEdits)),
+            finalizer: Some(Arc::clone(&finalizer)),
+            probe_duration: Some(Arc::new(|_: &str| Ok(None))),
+            save_location_picker: Some(Arc::new(|_: &str| Ok(None))),
+            analyze: Some(setup.analyze),
+            mic: setup.mic,
+            ..Options::default()
+        };
+        Fakes {
+            repo,
+            files,
+            engine,
+            finalizer,
+            deps,
+            options,
+        }
+    }
+}
+
 /// A finished piece of work, coming back to the UI thread; `counted` when
 /// it ends work in flight (a take setup arrives while its start still runs).
 struct Landing {
@@ -1007,40 +1067,15 @@ fn nth(label: &str, n: usize) -> impl FnMut(Candidate<'_>) -> Option<Target> + S
 impl Harness {
     fn open(setup: Setup) -> Self {
         let services = Services::detached(Arc::new(Library::in_memory()), AppEnvironment::Dev);
-        let repo = setup
-            .repo
-            .unwrap_or_else(|| MemRepo::with(setup.practice.clone()));
-        let files = Arc::new(FakeFiles::default());
-        let engine = Arc::new(FakeEngine::default());
-        let finalizer = setup
-            .finalizer
-            .unwrap_or_else(|| Arc::new(RecordingFinalizer::for_testing()));
-        let deps = Deps {
-            repository: Arc::clone(&repo) as Arc<dyn SongPracticeRepository>,
-            technique_repository: Arc::new(MemTechniques(Mutex::new(setup.techniques))),
-            audio_files: Arc::clone(&files) as Arc<dyn AudioFiles>,
-            spectrograms: if setup.analyses {
-                Arc::new(SmallAnalyses) as Arc<dyn SpectrogramAnalyses>
-            } else {
-                Arc::new(NoSpectrograms)
-            },
-            separation: Arc::new(FakeSourceSeparationService { available: false }),
-            app_settings: Arc::clone(&services.app_settings),
-        };
-        let options = Options {
-            engine: Some(if setup.graph {
-                EngineHandle::Graph(GraphBindings::service())
-            } else {
-                EngineHandle::Other(Arc::clone(&engine) as Arc<dyn PlaybackEngine>)
-            }),
-            edits: Some(Arc::new(FakeEdits)),
-            finalizer: Some(Arc::clone(&finalizer)),
-            probe_duration: Some(Arc::new(|_: &str| Ok(None))),
-            save_location_picker: Some(Arc::new(|_: &str| Ok(None))),
-            analyze: Some(setup.analyze),
-            mic: setup.mic,
-            ..Options::default()
-        };
+        let settle = setup.settle;
+        let Fakes {
+            repo,
+            files,
+            engine,
+            finalizer,
+            deps,
+            options,
+        } = Fakes::new(setup, &services);
         let (screen, step) = SongPracticeDetailScreen::open("p1".into(), &services, deps, options);
         let (tx, rx) = mpsc::channel();
         let mut h = Harness {
@@ -1060,7 +1095,7 @@ impl Harness {
             size: Size::new(1440.0, 1000.0),
         };
         h.absorb(step);
-        if setup.settle {
+        if settle {
             h.settle();
             assert!(h.vm().practice().is_some(), "loaded");
         }
@@ -2229,19 +2264,37 @@ fn a_fader_held_on_a_lane_that_goes_commits_its_level() {
 
 /// The take-flow screen: a backing and `take1`, the mic armed by REC.
 fn take_flow(ready: Option<&Arc<Gate>>, analyze: TakeAnalyzer) -> (Harness, Arc<FakeMic>) {
+    let (setup, mic) = take_flow_setup(ready, analyze);
+    (Harness::open(setup), mic)
+}
+
+fn take_flow_setup(ready: Option<&Arc<Gate>>, analyze: TakeAnalyzer) -> (Setup, Arc<FakeMic>) {
     let finalizer = Arc::new(RecordingFinalizer::for_testing());
     let mic = FakeMic::new(&finalizer, ready);
     let mut p = practice(vec![take("take1", "Take 1")]);
     p.accompaniment = Some(Arc::new(backing()));
-    let h = Harness::open(Setup {
+    let setup = Setup {
         practice: p,
         mic: Some(Arc::clone(&mic) as Arc<dyn MicRecorder>),
         finalizer: Some(finalizer),
         analyze,
         graph: true,
         ..Setup::default()
-    });
-    (h, mic)
+    };
+    (setup, mic)
+}
+
+/// The take-flow page over the app's `services`, for the app to host
+/// (`through_the_app`), and its first task; its recorder drops
+/// `dropped_frames` frames over the take.
+pub(super) fn take_flow_page(
+    services: &Services,
+    dropped_frames: u64,
+) -> (SongPracticeDetailScreen, Task<Message>) {
+    let (setup, mic) = take_flow_setup(None, ok_analyze());
+    guard(&mic.s).dropped_frames = dropped_frames;
+    let fakes = Fakes::new(setup, services);
+    SongPracticeDetailScreen::with_options("p1".into(), services, fakes.deps, fakes.options)
 }
 
 fn take_ids(p: &SongPractice) -> Vec<String> {

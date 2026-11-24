@@ -1149,8 +1149,9 @@ fn separation_overlay<'a>(progress: Option<f64>, can_cancel: bool) -> Element<'a
 
 /// The toast: a floating snack bar 16 in from the page's edges at its
 /// bottom, `Studio.surfaceRaised`, radius 8, `Studio.border`, 13 px text. It
-/// takes its own taps.
-fn snack_bar(message: &str) -> Element<'_, Message> {
+/// takes its own taps. (Of any message type: the app draws it too, once the
+/// page has handed it over.)
+pub(super) fn snack_bar<M: 'static>(message: &str) -> Element<'_, M> {
     let bar = container(text(message).size(13).color(Studio::TEXT_PRIMARY))
         .width(Length::Fill)
         .padding(Padding::from([14, 16]))

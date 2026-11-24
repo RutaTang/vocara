@@ -9,6 +9,11 @@
 //! screens: every page under the window drag bar, a studio dialog over the
 //! whole window when a screen asks for one.
 //!
+//! A snack bar outlives the page that showed it, as under Dart's app-wide
+//! `ScaffoldMessenger`: a page draws its own while it is on top, and the app
+//! takes them over when it stops being on top and draws them over the page
+//! on top until their time runs out (the `messenger` module).
+//!
 //! The window is closed through the quit guard: a close request, or a quit
 //! macOS sends through `terminate:` (Cmd+Q, the app-menu Quit, a Dock quit,
 //! logout; [`vocara_services::quit_request`]), kills the separation
@@ -16,6 +21,7 @@
 //! once, however many requests arrive meanwhile.
 
 pub mod library;
+mod messenger;
 mod page;
 pub mod quit;
 
@@ -30,6 +36,7 @@ use vocara_model::diagnostics::DiagnosticsLog;
 use vocara_services::quit_request::QuitRequests;
 
 use self::library::{LibraryOpen, OpenLibrary};
+use self::messenger::Messenger;
 use self::page::{erase, with_screen, PageUpdate};
 use self::quit::QuitHooks;
 use crate::router::{self, Change, Navigation, PageId, Route, Router};
@@ -41,10 +48,11 @@ use crate::ui::core::widgets::confirm_dialog::{
 use crate::ui::core::widgets::fatal_open_screen::{self, FatalOpenScreen};
 use crate::ui::core::widgets::window_drag_bar::window_drag_bar;
 use crate::ui::home::widgets::update_notice::open_url_task;
-use crate::ui::Screen;
 use crate::ui::{home, settings, song_practice_detail, technique_library};
+use crate::ui::{Screen, SnackBar};
 pub use vocara_model::config::environment::AppEnvironment;
 
+pub use self::messenger::SnackTimer;
 pub use self::page::Page;
 
 /// The deep link the app opens at instead of Home (Dart's `START`
@@ -136,6 +144,8 @@ pub enum Message {
     Navigate(Navigation),
     /// The open dialog's buttons, barrier and keys.
     Dialog(confirm_dialog::Message),
+    /// The time of the snack bar the app shows (snack bar `n`) is up.
+    SnackBarExpired(u64),
     /// Boot: the library open.
     Library(LibraryEvent),
     /// The fatal window's actions.
@@ -181,6 +191,8 @@ struct Running {
     /// [`Page::lingers`]): they get their messages, and nothing else, until
     /// it has.
     lingering: Vec<(PageId, Page)>,
+    /// The snack bars pages handed over, shown over the page on top.
+    messenger: Messenger,
 }
 
 enum State {
@@ -268,7 +280,34 @@ impl App {
         }
     }
 
+    /// The snack bar the app shows over the page on top (one a page handed
+    /// over), if any.
+    pub fn snack_bar(&self) -> Option<&SnackBar> {
+        match &self.state {
+            State::Running(r) => r.messenger.showing(),
+            _ => None,
+        }
+    }
+
+    /// The timer of the snack bar the app shows, while it shows one.
+    pub fn snack_timer(&self) -> Option<SnackTimer> {
+        match &self.state {
+            State::Running(r) => r.messenger.timer(),
+            _ => None,
+        }
+    }
+
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let task = self.handle(message);
+        // Whatever the message changed, the snack bars of a page no longer
+        // on top, or one toasting over the app's, are the app's now.
+        if let State::Running(running) = &mut self.state {
+            running.messenger.gather(&mut running.router);
+        }
+        task
+    }
+
+    fn handle(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Library(event) => self.library(event),
             Message::Fatal(message) => self.fatal_action(message),
@@ -320,6 +359,12 @@ impl App {
                 _ => Task::none(),
             },
             Message::Dialog(message) => self.dialog(message),
+            Message::SnackBarExpired(seq) => {
+                if let State::Running(running) = &mut self.state {
+                    running.messenger.expired(seq);
+                }
+                Task::none()
+            }
             Message::Home(id, m) => self.page(id, |page, services| match page {
                 Page::Home(s) => Some(erase(s.update(m, services), id, Message::Home)),
                 _ => None,
@@ -409,6 +454,7 @@ impl App {
                             router,
                             dialogs: Vec::new(),
                             lingering: Vec::new(),
+                            messenger: Messenger::default(),
                         }));
                         task
                     }
@@ -499,6 +545,15 @@ impl App {
             State::Waiting(screen) | State::Fatal(screen) => screen.view().map(Message::Fatal),
             State::Running(running) => {
                 let (id, page) = running.router.top();
+                // The snack bar the app shows sits over the page, where the
+                // page draws its own. The page keeps its place in the stack
+                // whether one shows or not, so its widgets keep their state.
+                let mut content = stack![page.view(id)]
+                    .width(Length::Fill)
+                    .height(Length::Fill);
+                if let Some(snack_bar) = running.messenger.view() {
+                    content = content.push(snack_bar);
+                }
                 // The window drag bar sits at the top of every page; dialogs
                 // render above it, their barrier covering the whole window.
                 let chrome = column![
@@ -507,7 +562,7 @@ impl App {
                         Message::DragWindow,
                         Message::ToggleMaximize
                     ),
-                    container(page.view(id)).height(Length::Fill),
+                    container(content).height(Length::Fill),
                 ];
                 let mut layers = stack![container(chrome)
                     .width(Length::Fill)
@@ -534,6 +589,7 @@ impl App {
             for (id, page) in running.router.pages() {
                 subscriptions.push(page.subscription(id, id == top && !covered));
             }
+            subscriptions.push(running.messenger.subscription());
         }
         Subscription::batch(subscriptions)
     }
@@ -621,11 +677,12 @@ fn navigate(running: &mut Running, navigation: Navigation) -> Task<Message> {
     }
 }
 
-/// A page left the stack: its dialogs go, it is disposed, and it lingers
-/// while the work it started is still landing. The work its teardown
-/// started, to run.
+/// A page left the stack: its dialogs go, the snack bars it shows stay up
+/// (the app's now), it is disposed, and it lingers while the work it started
+/// is still landing. The work its teardown started, to run.
 fn retire(running: &mut Running, gone: PageId, mut page: Page) -> Task<Message> {
     running.dialogs.retain(|d| d.page != gone);
+    running.messenger.adopt(page.take_snack_bars());
     let teardown = page.dispose(gone, &running.services);
     if page.lingers() {
         running.lingering.push((gone, page));
@@ -739,6 +796,34 @@ pub fn run(boot: Boot) -> iced::Result {
         application = application.font(face);
     }
     application.font(crate::ui::core::icons::FONT_BYTES).run()
+}
+
+#[cfg(test)]
+impl App {
+    /// The services the pages open over, once running.
+    pub(crate) fn services(&self) -> &Services {
+        match &self.state {
+            State::Running(r) => &r.services,
+            _ => panic!("the app is not running"),
+        }
+    }
+
+    /// Pushes `page` as a push navigation would (a test's page, over its
+    /// fakes); `opening` makes its first task once it has its id.
+    pub(crate) fn push_page(
+        &mut self,
+        page: Page,
+        opening: impl FnOnce(PageId) -> Task<Message>,
+    ) -> Task<Message> {
+        let State::Running(running) = &mut self.state else {
+            panic!("the app is not running");
+        };
+        let Change::Pushed(id) = running.router.push(page) else {
+            unreachable!("a push pushes");
+        };
+        running.messenger.gather(&mut running.router);
+        opening(id)
+    }
 }
 
 #[cfg(test)]

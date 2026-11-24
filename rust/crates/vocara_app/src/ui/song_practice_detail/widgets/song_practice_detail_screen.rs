@@ -37,7 +37,8 @@
 //! capture pump, the mic's level tick, the monitor meter and the device
 //! watch while each is active, the separation's progress, a quit's requests
 //! (the waker set with `set_quit_waker` wakes it; the app's quit guard waits
-//! for them) and the library's remote-applied events. The dialogs — every
+//! for them), the library's remote-applied events and the snack bar's time.
+//! The dialogs — every
 //! confirmation and name prompt — go through the app's dialog stack
 //! ([`Update::dialog`]).
 //!
@@ -55,9 +56,12 @@
 //!
 //! # Differences from Flutter
 //!
-//! - The snack bars are the page's own, over its bottom edge (Dart's
-//!   `ScaffoldMessenger` sat above the page); a new one replaces the one
-//!   showing, as `clearSnackBars` did.
+//! - The page draws its snack bar itself, over its bottom edge, while it is
+//!   on top; once it leaves (or is covered) the app keeps it up over the
+//!   page on top for the time it has left (`app::messenger`), as Dart's
+//!   `ScaffoldMessenger`, above the pages, did — the case that matters is a
+//!   take's finalize toasting as Back leaves. A new one replaces the one
+//!   showing, as `clearSnackBars` did. Its timer is a subscription.
 //! - The note editor and the technique picker are drawn over the page, under
 //!   the window drag bar (Dart's dialog routes covered it); the app's studio
 //!   dialogs cover the whole window as before.
@@ -79,10 +83,11 @@ mod tests;
 mod through_the_app;
 
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use iced::{Element, Subscription, Task};
 use vocara_model::diagnostics::DiagnosticsLog;
@@ -120,7 +125,7 @@ use crate::ui::song_practice_detail::view_model::recording_controller::{
 use crate::ui::song_practice_detail::view_model::song_practice_detail_view_model::{
     Call, Deps, Effect, JobDone, Options, SongPracticeDetailViewModel,
 };
-use crate::ui::{Screen, Update};
+use crate::ui::{Screen, SnackBar, Update};
 use crate::util::busy_gate::BusyOutcome;
 
 // ------------------------------------------------------------------ constants
@@ -709,7 +714,8 @@ pub struct SongPracticeDetailScreen {
     /// The take whose clip a move-drag is moving.
     moving: Option<String>,
     owed: Vec<Owed>,
-    snack: Option<(u64, String)>,
+    /// The snack bar showing: its number, its text, and since when.
+    snack: Option<(u64, String, Instant)>,
     snack_seq: u64,
 }
 
@@ -815,7 +821,7 @@ impl SongPracticeDetailScreen {
 
     /// The snack bar showing, if any.
     pub fn snack(&self) -> Option<&str> {
-        self.snack.as_ref().map(|(_, s)| s.as_str())
+        self.snack.as_ref().map(|(_, s, _)| s.as_str())
     }
 
     /// The menu the page holds open, if any.
@@ -909,6 +915,9 @@ impl Screen for SongPracticeDetailScreen {
                     .map(|_| Message::SeparationProgressTick),
             );
         }
+        if let Some((seq, ..)) = &self.snack {
+            subscriptions.push(Subscription::run_with(*seq, snack_timer));
+        }
         Subscription::batch(subscriptions)
     }
 
@@ -937,6 +946,23 @@ impl Screen for SongPracticeDetailScreen {
         // The commits' saves land on the lingering page.
         self.teardown = step.work;
     }
+
+    /// The snack bar showing, for the time it has left; it replaced the
+    /// ones before it.
+    fn take_snack_bars(&mut self) -> Vec<SnackBar> {
+        let Some((_, text, since)) = self.snack.take() else {
+            return Vec::new();
+        };
+        let look = view::snack_bar::<Infallible>;
+        SnackBar::showing(text, SNACK_DURATION, since, true, look)
+            .into_iter()
+            .collect()
+    }
+}
+
+/// Snack bar `seq`'s timer.
+fn snack_timer(seq: &u64) -> impl iced::futures::Stream<Item = Message> {
+    crate::ui::one_shot(SNACK_DURATION, Message::SnackExpired(*seq))
 }
 
 /// The selected track as the practice holds it (borrowed for the views).

@@ -21,17 +21,20 @@
 //! Flutter animated the card border (120 ms) and the snack bar's entrance;
 //! iced switches at once. iced has no ellipsis: one-line labels clip, and
 //! the summary is held to its three lines; nor letter spacing (the title's
-//! 0.3). The snack bars are the page's own, over its bottom edge, until an
-//! app-wide one exists (Dart's `ScaffoldMessenger` sat above every page, so
-//! one outlived a navigation).
+//! 0.3). The page draws its snack bars itself, over its bottom edge, while
+//! it is on top; once it leaves (or is covered) the app keeps them up over
+//! the page on top (`app::messenger`), as Dart's `ScaffoldMessenger`, above
+//! every page, did. A new one waits behind the ones up, as `showSnackBar`
+//! queued it; the timer is a subscription.
 
 mod anchored;
 #[cfg(test)]
 mod tests;
 
 use std::collections::VecDeque;
+use std::convert::Infallible;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::text::Wrapping;
@@ -58,7 +61,7 @@ use crate::ui::core::theme::{self, alpha, bare_button, font, Studio};
 use crate::ui::core::widgets::confirm_dialog::ConfirmDialog;
 use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
 use crate::ui::core::widgets::studio_hint::spinner;
-use crate::ui::{Screen, Update};
+use crate::ui::{Screen, SnackBar, Update};
 
 /// The snack bar after a create that did not happen.
 pub const CREATE_FAILED: &str = "Couldn't create the technique.";
@@ -106,6 +109,8 @@ pub struct TechniqueLibraryScreen {
     snacks: VecDeque<String>,
     /// Tags the showing snack bar's timer, so a stale timer hides nothing.
     snack_seq: u64,
+    /// Since when the first has shown.
+    snack_since: Instant,
 }
 
 /// What the library reacts to.
@@ -237,6 +242,7 @@ impl TechniqueLibraryScreen {
             queued_deletes: VecDeque::new(),
             snacks: VecDeque::new(),
             snack_seq: 0,
+            snack_since: Instant::now(),
         };
         (screen, load)
     }
@@ -314,14 +320,13 @@ impl TechniqueLibraryScreen {
             Message::Landed(done) => self.landed(done),
             Message::RemoteApplied(event) => Step::effect(self.vm.on_remote_applied(&event)),
             Message::SnackExpired(seq) => {
-                if seq != self.snack_seq || self.snacks.pop_front().is_none() {
-                    return Step::none();
+                if seq == self.snack_seq
+                    && self.snacks.pop_front().is_some()
+                    && !self.snacks.is_empty()
+                {
+                    self.snack_shows();
                 }
-                if self.snacks.is_empty() {
-                    Step::none()
-                } else {
-                    self.snack_timer().into()
-                }
+                Step::none()
             }
         }
     }
@@ -344,7 +349,10 @@ impl TechniqueLibraryScreen {
             Some(effect) => Step::effect(Some(effect)),
             // Dropped as re-entry: the `await` returned at once, with no
             // created technique to open.
-            None => self.show_snack(CREATE_FAILED).into(),
+            None => {
+                self.show_snack(CREATE_FAILED);
+                Step::none()
+            }
         }
     }
 
@@ -378,16 +386,12 @@ impl TechniqueLibraryScreen {
                         step.update = step.update.and_navigate(navigation);
                     }
                 }
-                _ => {
-                    let snack = self.show_snack(CREATE_FAILED);
-                    step.update = step.update.and_task(snack);
-                }
+                _ => self.show_snack(CREATE_FAILED),
             }
         }
         if deleting && !self.vm.delete_technique().running() {
             if !self.vm.delete_technique().completed() {
-                let snack = self.show_snack(DELETE_FAILED);
-                step.update = step.update.and_task(snack);
+                self.show_snack(DELETE_FAILED);
             }
             // The next confirmed delete, which waited for this one.
             if let Some(id) = self.queued_deletes.pop_front() {
@@ -399,24 +403,18 @@ impl TechniqueLibraryScreen {
 
     /// `showSnackBar(SnackBar(content: Text(text)))`: shown now, or after
     /// the ones before it.
-    fn show_snack(&mut self, text: &str) -> Task<Message> {
+    fn show_snack(&mut self, text: &str) {
         self.snacks.push_back(text.to_string());
-        if self.snacks.len() > 1 {
-            return Task::none();
+        if self.snacks.len() == 1 {
+            self.snack_shows();
         }
-        self.snack_timer()
     }
 
-    /// Times the snack bar now showing.
-    fn snack_timer(&mut self) -> Task<Message> {
+    /// The first snack bar shows from now, for [`SNACK_DURATION`] (timed by
+    /// the subscription).
+    fn snack_shows(&mut self) {
         self.snack_seq += 1;
-        let seq = self.snack_seq;
-        // The timer starts when the task first runs (on the runtime), not
-        // here.
-        Task::perform(
-            async move { tokio::time::sleep(SNACK_DURATION).await },
-            move |_| Message::SnackExpired(seq),
-        )
+        self.snack_since = Instant::now();
     }
 
     // ---------------------------------------------------------------- view
@@ -617,12 +615,19 @@ impl TechniqueLibraryScreen {
 impl Screen for TechniqueLibraryScreen {
     type Message = Message;
 
-    /// Freshness reloads when sync applies remote rows; with no sync
-    /// configured the stream simply never fires.
+    /// Freshness reloads when sync applies remote rows (with no sync
+    /// configured the stream simply never fires), and the showing snack
+    /// bar's timer.
     fn subscription(&self, _on_top: bool) -> iced::Subscription<Message> {
-        self.remote_applied
+        let applied = self
+            .remote_applied
             .subscription()
-            .map(Message::RemoteApplied)
+            .map(Message::RemoteApplied);
+        if self.snacks.is_empty() {
+            return applied;
+        }
+        let timer = iced::Subscription::run_with(self.snack_seq, snack_timer);
+        iced::Subscription::batch([applied, timer])
     }
 
     fn update(&mut self, message: Message, _services: &Services) -> Update<Message> {
@@ -657,6 +662,25 @@ impl Screen for TechniqueLibraryScreen {
     fn dispose(&mut self, _services: &Services) {
         self.vm.dispose();
     }
+
+    /// The snack bar showing, for the time it has left, then the ones
+    /// waiting, for all of theirs; each queued behind the ones before it.
+    fn take_snack_bars(&mut self) -> Vec<SnackBar> {
+        let look = snack_bar::<Infallible>;
+        let mut snacks = std::mem::take(&mut self.snacks).into_iter();
+        let showing = snacks.next().and_then(|text| {
+            SnackBar::showing(text, SNACK_DURATION, self.snack_since, false, look)
+        });
+        showing
+            .into_iter()
+            .chain(snacks.map(|text| SnackBar::waiting(text, SNACK_DURATION, false, look)))
+            .collect()
+    }
+}
+
+/// Snack bar timer `seq`.
+fn snack_timer(seq: &u64) -> impl iced::futures::Stream<Item = Message> {
+    crate::ui::one_shot(SNACK_DURATION, Message::SnackExpired(*seq))
 }
 
 /// A full-width 1 px line in `Studio.border`.
@@ -1001,8 +1025,9 @@ fn empty_state<'a>() -> Element<'a, Message> {
 
 /// Material 3's fixed snack bar along the page's bottom: the inverse
 /// surface, 14 px text, 24 / 14 of padding, elevation 6. It takes its own
-/// taps.
-fn snack_bar(message: &str) -> Element<'_, Message> {
+/// taps. (Of any message type: the app draws it too, once the page has
+/// handed it over.)
+fn snack_bar<M: 'static>(message: &str) -> Element<'_, M> {
     let bar = container(
         text(message)
             .size(14)

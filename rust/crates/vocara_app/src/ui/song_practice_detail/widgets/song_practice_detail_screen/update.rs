@@ -5,7 +5,7 @@
 
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use iced::Task;
 use vocara_model::util::format::format_clock_ms;
@@ -13,7 +13,7 @@ use vocara_model::util::format::format_clock_ms;
 use super::{
     backing_set_toast, is_audio_path, ms, panel_data, Asked, Awaited, DropRun, DropZone,
     InterpretationAction, Message, NoteTarget, OpenMenu, OpenPicker, Owed, Render, RunKind,
-    SongPracticeDetailScreen, Source, Step, NO_AUDIO_IN_DROP, SNACK_DURATION,
+    SongPracticeDetailScreen, Source, Step, NO_AUDIO_IN_DROP,
 };
 use crate::router::{Navigation, Route};
 use crate::ui::core::widgets::confirm_dialog::{ConfirmDialog, Dialog, DialogResult};
@@ -138,7 +138,7 @@ impl SongPracticeDetailScreen {
                     self.drop_files(zone, paths, at_ms, &mut step);
                 }
             }
-            Message::RefusedDrop(text) => self.toast(text.to_string(), &mut step),
+            Message::RefusedDrop(text) => self.toast(text.to_string()),
             Message::TrackMenu(action) => self.track_action(action, &mut step),
             Message::ClipMenu(action) => self.clip_action(action, &mut step),
             Message::BusMenu(action) => self.bus_action(action, &mut step),
@@ -173,7 +173,7 @@ impl SongPracticeDetailScreen {
                 self.absorb(fx, &mut step);
             }
             Message::SnackExpired(seq) => {
-                if self.snack.as_ref().is_some_and(|(s, _)| *s == seq) {
+                if self.snack.as_ref().is_some_and(|(s, ..)| *s == seq) {
                     self.snack = None;
                 }
             }
@@ -216,7 +216,7 @@ impl SongPracticeDetailScreen {
     pub(super) fn absorb(&mut self, effects: Vec<Effect>, step: &mut Step) {
         for effect in effects {
             match effect {
-                Effect::Toast(text) => self.toast(text, step),
+                Effect::Toast(text) => self.toast(text),
                 Effect::Leave => {
                     if !self.disposed {
                         step.update.navigation = Some(Navigation::PopOrGo(Route::Home));
@@ -299,18 +299,14 @@ impl SongPracticeDetailScreen {
     }
 
     /// `_showToast`: the snack bar, replacing the one showing
-    /// (`clearSnackBars`). Not once the page is gone.
-    pub(super) fn toast(&mut self, text: String, step: &mut Step) {
+    /// (`clearSnackBars`), for [`SNACK_DURATION`](super::SNACK_DURATION)
+    /// (timed by the page's subscription). Not once the page is gone.
+    pub(super) fn toast(&mut self, text: String) {
         if self.disposed {
             return;
         }
         self.snack_seq += 1;
-        let seq = self.snack_seq;
-        self.snack = Some((seq, text));
-        step.task(Task::perform(
-            async move { tokio::time::sleep(SNACK_DURATION).await },
-            move |_| Message::SnackExpired(seq),
-        ));
+        self.snack = Some((self.snack_seq, text, Instant::now()));
     }
 
     /// `vm.refuseStructuralEdit()`: whether an import or a structural edit
@@ -827,7 +823,7 @@ impl SongPracticeDetailScreen {
                 marker_id,
             } => return self.edit_technique(track_id, &marker_id, step),
             P::Toast(text) => {
-                self.toast(text, step);
+                self.toast(text);
                 return;
             }
         };
@@ -864,7 +860,7 @@ impl SongPracticeDetailScreen {
         let audio: VecDeque<String> = paths.iter().filter(|p| is_audio_path(p)).cloned().collect();
         if audio.is_empty() {
             if !paths.is_empty() {
-                self.toast(NO_AUDIO_IN_DROP.to_string(), step);
+                self.toast(NO_AUDIO_IN_DROP.to_string());
             }
             return;
         }
@@ -974,7 +970,7 @@ impl SongPracticeDetailScreen {
             } = run.kind
             {
                 if vocal_count.saturating_sub(before) == files {
-                    self.toast(backing_set_toast(slot), step);
+                    self.toast(backing_set_toast(slot));
                 }
             }
             return;

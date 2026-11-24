@@ -238,6 +238,11 @@ impl<P> Router<P> {
         self.pages.iter().map(|(id, p)| (*id, p))
     }
 
+    /// The pages, bottom first, mutably.
+    pub fn pages_mut(&mut self) -> impl Iterator<Item = (PageId, &mut P)> {
+        self.pages.iter_mut().map(|(id, p)| (*id, p))
+    }
+
     /// How many pages are open.
     pub fn len(&self) -> usize {
         self.pages.len()

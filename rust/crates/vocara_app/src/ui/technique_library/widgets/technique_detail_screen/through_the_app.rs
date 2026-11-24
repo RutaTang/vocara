@@ -5,6 +5,9 @@
 //! `technique_library_journey_test.dart` (a created technique opens, then
 //! waits in the grid), and `technique_detail_journey_test.dart` (edit, save
 //! and cancel round-trips through the repository, and a dropped example).
+//! And a snack bar up as Back leaves, which stays up on the library (Dart's
+//! `ScaffoldMessenger` sat above the pages), the library's own waiting
+//! behind it.
 
 use std::borrow::Cow;
 use std::collections::VecDeque;
@@ -14,17 +17,22 @@ use std::sync::Arc;
 use iced::{window, Event as IcedEvent, Size};
 use iced_test::selector::{Candidate, Target};
 use iced_test::Simulator;
+use indexmap::IndexMap;
 use vocara_model::config::environment::AppEnvironment;
 use vocara_model::util::dart_date_time::DateTime;
 use vocara_model::util::id::new_id;
 use vocara_services::audio_dsp::write_wav_mono;
+use vocara_store::repositories::TechniqueRepository;
+use vocara_store::sync::sync_hashes::Loaded;
 
 use super::*;
 use crate::app::library::{Library, LibraryOpen};
 use crate::app::{self, App, Boot, LibraryEvent, Page};
 use crate::router::PageId;
+use crate::services::ServicesFactory;
 use crate::ui::core::widgets::confirm_dialog;
 use crate::ui::home::testing::run_task;
+use crate::ui::technique_library::technique_library_screen::CREATE_FAILED as LIBRARY_CREATE_FAILED;
 use crate::ui::technique_library::widgets::media::technique_media_section::{
     ADD_ANOTHER, ADD_FIRST,
 };
@@ -77,9 +85,14 @@ fn seeded() -> (Arc<Library>, String) {
 
 /// The app at `start`, over `library`, every task run.
 fn boot(library: Arc<Library>, start: &str) -> App {
+    boot_over(library, start, Services::detached)
+}
+
+/// [`boot`], over the services `services` makes.
+fn boot_over(library: Arc<Library>, start: &str, services: ServicesFactory) -> App {
     let mut boot = Boot::new(AppEnvironment::Dev);
     boot.start = Some(start.to_string());
-    boot.services = Services::detached;
+    boot.services = services;
     let (mut app, _open) = App::new(boot);
     let task = app.update(app::Message::Library(LibraryEvent::Finished(
         LibraryOpen::Opened(library),
@@ -360,4 +373,128 @@ fn a_dropped_wav_example_is_saved_with_the_technique() {
         std::path::Path::new(&reloaded.media[0].path).is_file(),
         "the pooled example file resolves on disk"
     );
+}
+
+// ------------------------------------------------- a snack bar as the page goes
+
+/// The library's techniques, refusing every write.
+struct Refusing(Arc<dyn TechniqueRepository>);
+
+fn refused() -> vocara_store::Error {
+    vocara_store::Error::State("refused".into())
+}
+
+impl TechniqueRepository for Refusing {
+    fn list_techniques(&self) -> vocara_store::Result<Vec<Technique>> {
+        self.0.list_techniques()
+    }
+
+    fn get_technique(&self, id: &str) -> vocara_store::Result<Technique> {
+        self.0.get_technique(id)
+    }
+
+    fn load_technique(&self, id: &str) -> vocara_store::Result<Loaded<Technique>> {
+        self.0.load_technique(id)
+    }
+
+    fn save_technique(&self, _technique: &Technique) -> vocara_store::Result<Technique> {
+        Err(refused())
+    }
+
+    fn save_technique_with_base(
+        &self,
+        _technique: &Technique,
+        _base_hashes: &IndexMap<String, String>,
+    ) -> vocara_store::Result<Loaded<Technique>> {
+        Err(refused())
+    }
+
+    fn delete_technique(&self, _id: &str) -> vocara_store::Result<()> {
+        Err(refused())
+    }
+}
+
+/// The app's services, its techniques refusing every write.
+fn refusing_writes(library: Arc<Library>, environment: AppEnvironment) -> Services {
+    let mut services = Services::detached(library, environment);
+    services.technique_repo = Arc::new(Refusing(services.technique_repo.clone()));
+    services
+}
+
+/// The library (the root, as a deep link opens it) with "Twang" open over
+/// it, whose delete was refused: its page says so.
+fn refused_delete() -> App {
+    let (library, _) = seeded();
+    let mut app = boot_over(library, "/techniques", refusing_writes);
+    click(&mut app, "Twang");
+    click(&mut app, "Delete");
+    // The dialog's own Delete (the header's is the first).
+    click_nth(&mut app, "Delete", 1);
+    assert_eq!(technique(&app).1.snack(), Some(DELETE_FAILED));
+    app
+}
+
+/// Takes down the snack bar the app shows, its time up.
+fn time_up(app: &mut App) {
+    let timer = app.snack_timer().expect("a snack bar's timer runs");
+    let task = app.update(timer.message());
+    settle(app, task);
+}
+
+// technique_detail_screen.dart's snack bars went through the app-wide
+// `ScaffoldMessenger`: one up as Back popped the page stayed up on the
+// library for the rest of its 4 s. The page's own went with the page.
+#[test]
+fn a_snack_bar_up_at_back_stays_up_on_the_library_until_its_time_is_up() {
+    let mut app = refused_delete();
+    click(&mut app, &chevron());
+    assert_eq!(app.routes(), [Some(Route::Techniques)], "the page left");
+    assert!(shows(&app, DELETE_FAILED), "the library shows it");
+    assert!(shows(&app, "New technique"), "over the library");
+
+    let bar = app.snack_bar().expect("the app shows it");
+    assert_eq!(bar.text, DELETE_FAILED);
+    assert!(bar.left <= SNACK_DURATION, "for the time it had left");
+
+    time_up(&mut app);
+    assert!(!shows(&app, DELETE_FAILED), "gone once its time is up");
+    assert!(app.snack_timer().is_none(), "and no timer runs on");
+}
+
+// The library's snack bars were plain `showSnackBar`s: one shown while the
+// technique's is still up waits its turn behind it, then shows for all of
+// its 4 s.
+#[test]
+fn a_library_snack_bar_waits_behind_it() {
+    let mut app = refused_delete();
+    click(&mut app, &chevron());
+    assert!(shows(&app, DELETE_FAILED));
+
+    click(&mut app, "New technique");
+    let task = app.update(app::Message::Dialog(confirm_dialog::Message::Input(
+        "Belt".into(),
+    )));
+    settle(&mut app, task);
+    click(&mut app, "Create");
+    assert_eq!(app.dialogs(), 0);
+    assert!(shows(&app, DELETE_FAILED), "the technique's stays up");
+    assert!(!shows(&app, LIBRARY_CREATE_FAILED), "the library's waits");
+
+    time_up(&mut app);
+    assert!(
+        shows(&app, LIBRARY_CREATE_FAILED),
+        "then the library's shows"
+    );
+    assert!(!shows(&app, DELETE_FAILED));
+    let timer = app.snack_timer().expect("its timer runs");
+    // It was handed over the moment it was shown, its time all but whole.
+    assert!(
+        SNACK_DURATION - timer.left < Duration::from_millis(500),
+        "for all of its time, not {:?}",
+        timer.left
+    );
+
+    time_up(&mut app);
+    assert!(!shows(&app, LIBRARY_CREATE_FAILED), "then goes");
+    assert!(app.snack_timer().is_none());
 }

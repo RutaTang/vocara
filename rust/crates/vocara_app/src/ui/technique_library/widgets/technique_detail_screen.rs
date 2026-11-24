@@ -33,14 +33,18 @@
 //! [`TechniqueDetailViewModel::next_tick_due`] asks for them (the capture
 //! pump, the level and device watch, and a quit's `quitFinalize` handed
 //! over from the finalizer thread — the app's quit guard waits on it), the
-//! players' poll, and the library's remote-applied events. The dialogs —
+//! players' poll, the library's remote-applied events, and the showing snack
+//! bar's time. The dialogs —
 //! delete, unsaved changes, an example's removal and rename — go through the
 //! app's dialog stack ([`Update::dialog`]).
 //!
 //! # Differences from Flutter
 //!
-//! The snack bars are the page's own, over its bottom edge, as on the
-//! library page (Dart's `ScaffoldMessenger` sat above every page). The
+//! The page draws its snack bars itself, over its bottom edge, while it is
+//! on top; once it leaves (or is covered) the app keeps them up over the page
+//! on top (`app::messenger`), as Dart's `ScaffoldMessenger`, above every
+//! page, did. A new one waits behind the ones up, as `showSnackBar` queued
+//! it; the timer is a subscription. The
 //! header ignores its buttons for a double-tap's span after it switches
 //! modes, as Dart's `IgnorePointer` did, by dropping their messages. iced has
 //! no ellipsis (the title clips) and no letter spacing (the title's 0.3, the
@@ -55,8 +59,9 @@ mod tests;
 mod through_the_app;
 
 use std::collections::VecDeque;
+use std::convert::Infallible;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use iced::alignment::Vertical;
 use iced::widget::text::Wrapping;
@@ -95,7 +100,7 @@ use crate::ui::song_practice_detail::widgets::voiceprint_view::{
 use crate::ui::technique_library::view_model::technique_detail_view_model::{
     Answer, Done, Effect, Job, Next, TechniqueDetailDeps, TechniqueDetailViewModel,
 };
-use crate::ui::{Screen, Update};
+use crate::ui::{Screen, SnackBar, Update};
 
 /// The header's title while editing.
 pub const EDIT_TITLE: &str = "Edit technique";
@@ -451,6 +456,8 @@ pub struct TechniqueDetailScreen {
     snacks: VecDeque<String>,
     /// Tags the showing snack bar's timer.
     snack_seq: u64,
+    /// Since when the first has shown.
+    snack_since: Instant,
 }
 
 impl std::fmt::Debug for TechniqueDetailScreen {
@@ -506,6 +513,7 @@ impl TechniqueDetailScreen {
             shown: Shown::default(),
             snacks: VecDeque::new(),
             snack_seq: 0,
+            snack_since: Instant::now(),
         };
         let mut step = Step::new();
         screen.absorb(next, &mut step);
@@ -671,8 +679,7 @@ impl TechniqueDetailScreen {
                     && self.snacks.pop_front().is_some()
                     && !self.snacks.is_empty()
                 {
-                    let timer = self.snack_timer();
-                    step.task(timer);
+                    self.snack_shows();
                 }
             }
         }
@@ -704,7 +711,7 @@ impl TechniqueDetailScreen {
             // `_record` / `_RecordRow._start`: an error from the start is
             // said.
             Answer::PracticeStart(Some(error)) | Answer::ExampleStart(Some(error)) => {
-                self.snack_into(&error, step);
+                self.snack_into(&error);
             }
             Answer::PracticeStart(None) | Answer::ExampleStart(None) | Answer::ExampleStop(_) => {}
             Answer::Saved(ok) => {
@@ -712,7 +719,7 @@ impl TechniqueDetailScreen {
                     // Stay in edit so the staged draft (and the files copied
                     // for it) isn't stranded; the user can retry. Leaving now
                     // would orphan those files.
-                    self.snack_into(SAVE_FAILED, step);
+                    self.snack_into(SAVE_FAILED);
                     return;
                 }
                 self.close_editor(step);
@@ -729,7 +736,7 @@ impl TechniqueDetailScreen {
                 if ok {
                     step.update.navigation = Some(Navigation::PopOrGo(Route::Techniques));
                 } else {
-                    self.snack_into(DELETE_FAILED, step);
+                    self.snack_into(DELETE_FAILED);
                 }
             }
         }
@@ -758,7 +765,7 @@ impl TechniqueDetailScreen {
         // was lost), then clear it so it shows exactly once.
         if let Some(notice) = self.vm.recording_notice().map(str::to_string) {
             self.vm.clear_recording_notice();
-            self.snack_into(&notice, step);
+            self.snack_into(&notice);
         }
     }
 
@@ -882,7 +889,7 @@ impl TechniqueDetailScreen {
         // Said, not quietly put back: Save kept the old name and closed the
         // editor as if the cleared one had been saved.
         if name.is_empty() {
-            self.snack_into(NAME_REQUIRED, step);
+            self.snack_into(NAME_REQUIRED);
             return;
         }
         // Built from the form BEFORE the save runs: an in-flight example
@@ -966,22 +973,18 @@ impl TechniqueDetailScreen {
     }
 
     /// Shows `text` in a snack bar (now, or after the ones before it).
-    fn snack_into(&mut self, text: &str, step: &mut Step) {
+    fn snack_into(&mut self, text: &str) {
         self.snacks.push_back(text.to_string());
         if self.snacks.len() == 1 {
-            let timer = self.snack_timer();
-            step.task(timer);
+            self.snack_shows();
         }
     }
 
-    /// Times the snack bar now showing.
-    fn snack_timer(&mut self) -> Task<Message> {
+    /// The first snack bar shows from now, for [`SNACK_DURATION`] (timed by
+    /// the subscription).
+    fn snack_shows(&mut self) {
         self.snack_seq += 1;
-        let seq = self.snack_seq;
-        Task::perform(
-            async move { tokio::time::sleep(SNACK_DURATION).await },
-            move |_| Message::SnackExpired(seq),
-        )
+        self.snack_since = Instant::now();
     }
 
     // -------------------------------------------------------------- view
@@ -1283,6 +1286,9 @@ impl Screen for TechniqueDetailScreen {
                 iced::time::every(MicRecordingController::TICK_PERIOD).map(|_| Message::Tick),
             );
         }
+        if !self.snacks.is_empty() {
+            subscriptions.push(Subscription::run_with(self.snack_seq, snack_timer));
+        }
         Subscription::batch(subscriptions)
     }
 
@@ -1300,6 +1306,25 @@ impl Screen for TechniqueDetailScreen {
         self.voiceprint.clear();
         release_spectrogram_images();
     }
+
+    /// The snack bar showing, for the time it has left, then the ones
+    /// waiting, for all of theirs; each queued behind the ones before it.
+    fn take_snack_bars(&mut self) -> Vec<SnackBar> {
+        let look = snack_bar::<Infallible>;
+        let mut snacks = std::mem::take(&mut self.snacks).into_iter();
+        let showing = snacks.next().and_then(|text| {
+            SnackBar::showing(text, SNACK_DURATION, self.snack_since, false, look)
+        });
+        showing
+            .into_iter()
+            .chain(snacks.map(|text| SnackBar::waiting(text, SNACK_DURATION, false, look)))
+            .collect()
+    }
+}
+
+/// Snack bar timer `seq`.
+fn snack_timer(seq: &u64) -> impl iced::futures::Stream<Item = Message> {
+    crate::ui::one_shot(SNACK_DURATION, Message::SnackExpired(*seq))
 }
 
 /// The unsaved-changes dialog (`_confirmDiscard`); `then` takes whether the
@@ -1401,8 +1426,9 @@ fn chip_row<'a>(labels: &'a [String], tint: bool) -> Element<'a, Message> {
 
 /// Material 3's fixed snack bar along the page's bottom: the inverse
 /// surface, 14 px text, 24 / 14 of padding, elevation 6. It takes its own
-/// taps.
-fn snack_bar(message: &str) -> Element<'_, Message> {
+/// taps. (Of any message type: the app draws it too, once the page has
+/// handed it over.)
+fn snack_bar<M: 'static>(message: &str) -> Element<'_, M> {
     let bar = container(
         text(message)
             .size(14)

@@ -174,6 +174,28 @@ fn the_repair_confirmation_covers_the_window_and_the_report_toasts() {
     assert!(!settings.repairing());
 }
 
+// Settings' toasts went through the app-wide `ScaffoldMessenger`: one up as
+// the page left stayed up on Home for the rest of its 3.5 s.
+#[test]
+fn a_toast_up_as_settings_leaves_stays_up_on_home_until_its_time_is_up() {
+    const REPORT: &str = "Repair finished. Everything looks consistent.";
+    let mut app = boot(Some("/settings"), Services::detached);
+    click(&mut app, "Repair library");
+    click(&mut app, "Repair");
+    assert_eq!(settings_page(&app).1.toast(), Some(REPORT));
+
+    // The root of the stack (a deep link): Back goes Home.
+    click(&mut app, &glyph(Icon::ChevronLeft));
+    assert_eq!(app.routes(), [Some(crate::router::Route::Home)]);
+    assert!(shows(&app, REPORT), "Home shows it");
+    let timer = app.snack_timer().expect("its timer runs");
+    assert!(timer.left <= TOAST_DURATION, "for the time it had left");
+
+    let task = app.update(timer.message());
+    settle(&mut app, task);
+    assert!(!shows(&app, REPORT), "gone once its time is up");
+}
+
 fn newer_release(library: Arc<Library>, environment: AppEnvironment) -> Services {
     let mut services = Services::detached(library, environment);
     services.update_check = Arc::new(UpdateCheckService::with_fetcher(
