@@ -501,3 +501,105 @@ fn a_library_snack_bar_waits_behind_it() {
     assert!(!shows(&app, LIBRARY_CREATE_FAILED), "then goes");
     assert!(app.snack_timer().is_none());
 }
+
+// ------------------------------------------------ a video in fullscreen
+
+/// What a drag on the window drag bar sends.
+fn drag_the_bar(app: &App) -> Vec<app::Message> {
+    use iced::mouse;
+    let mut ui = ui(app);
+    ui.point_at(iced::Point::new(600.0, 10.0));
+    let _ = ui.simulate([
+        IcedEvent::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+        IcedEvent::Mouse(mouse::Event::CursorMoved {
+            position: iced::Point::new(640.0, 12.0),
+        }),
+        IcedEvent::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+    ]);
+    ui.into_messages().collect()
+}
+
+// media_kit's fullscreen route sat on the root navigator: over every page
+// and the window drag bar, taking the clicks and keys it covered.
+#[test]
+fn a_fullscreen_video_covers_the_whole_window_and_takes_its_keys() {
+    use crate::ui::technique_library::view_model::technique_detail_view_model::tests::support::{
+        example, twang, Setup, ID,
+    };
+    use crate::ui::technique_library::widgets::media::example_players::{self, ExampleKey};
+    use crate::ui::technique_library::widgets::media::technique_video_player as video;
+    use crate::ui::technique_library::widgets::media::video_controls::Shortcut;
+    use iced::keyboard::{key::Named, Key};
+    use vocara_model::models::technique_media::{TechniqueMedia, TechniqueMediaKind};
+    use vocara_services::media_player::FakeMediaPlayers;
+
+    let mut app = boot(Arc::new(Library::in_memory()), "/techniques");
+    let clip = TechniqueMedia {
+        kind: TechniqueMediaKind::Video,
+        ..example("V", "/tmp/example.mp4")
+    };
+    let setup = Setup::new(twang(ID, vec![clip]));
+    let players = Arc::new(FakeMediaPlayers::new());
+    let (screen, step) = TechniqueDetailScreen::open(setup.deps(), app.services(), players);
+    let opening = step.into_update().task;
+    let task = app.push_page(Page::Technique(screen), move |id| {
+        opening.map(move |m| app::Message::Technique(id, m))
+    });
+    settle(&mut app, task);
+    let (page, _) = technique(&app);
+    let to_video = |m: video::Message| {
+        app::Message::Technique(
+            page,
+            Message::Media(media_section::Message::Player(
+                example_players::Message::Video(
+                    ExampleKey {
+                        id: "V".to_string(),
+                        unavailable: false,
+                        video: true,
+                    },
+                    m,
+                ),
+            )),
+        )
+    };
+    let drags = |messages: &[app::Message]| {
+        messages
+            .iter()
+            .any(|m| matches!(m, app::Message::DragWindow))
+    };
+    assert!(drags(&drag_the_bar(&app)), "the bar, uncovered");
+
+    feed(
+        &mut app,
+        vec![
+            to_video(video::Message::Play),
+            to_video(video::Message::Key(Shortcut::ToggleFullscreen)),
+        ],
+    );
+    assert!(technique(&app).1.overlay().is_some());
+    assert!(!drags(&drag_the_bar(&app)), "covered");
+    // Escape reaches the video, not the page under it.
+    let sent: Vec<app::Message> = {
+        let mut ui = ui(&app);
+        let _ = ui.tap_key(Key::Named(Named::Escape));
+        ui.into_messages().collect()
+    };
+    assert!(
+        sent.iter().any(|m| matches!(
+            m,
+            app::Message::Technique(
+                _,
+                Message::Media(media_section::Message::Player(
+                    example_players::Message::Video(
+                        _,
+                        video::Message::Key(Shortcut::ExitFullscreen)
+                    )
+                ))
+            )
+        )),
+        "{sent:?}"
+    );
+    feed(&mut app, sent);
+    assert!(technique(&app).1.overlay().is_none());
+    assert!(drags(&drag_the_bar(&app)), "uncovered again");
+}

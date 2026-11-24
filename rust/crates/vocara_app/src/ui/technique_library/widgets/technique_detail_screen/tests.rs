@@ -33,8 +33,11 @@ use crate::ui::technique_library::view_model::technique_detail_view_model::tests
     example, remote, twang, write_file, FakeMedia, Outcome, Setup, StartMode, ID,
 };
 use crate::ui::technique_library::view_model::technique_detail_view_model::JobKind;
+use crate::ui::technique_library::widgets::media::example_players;
 use crate::ui::technique_library::widgets::media::technique_audio_player::UNAVAILABLE_CLIP_MESSAGE;
 use crate::ui::technique_library::widgets::media::technique_media_section::{ADD_FIRST, STARTING};
+use crate::ui::technique_library::widgets::media::technique_video_player as video;
+use crate::ui::technique_library::widgets::media::video_controls::Shortcut;
 use crate::ui::DialogRequest;
 
 /// Tall enough for the whole edit form, the examples block included.
@@ -1078,4 +1081,97 @@ fn a_rename_stages_the_new_caption() {
     h.answer(DialogResult::Text(Some("Belted".into())));
     assert!(h.shows("Belted"));
     assert!(h.vm().has_media_draft());
+}
+
+// ------------------------------------------------- the video's controls
+
+/// An audio example (analyzed: a practice take can start) and a video.
+fn audio_and_video() -> Technique {
+    let mut technique = two_examples();
+    technique.media[1] = TechniqueMedia {
+        kind: vocara_model::models::technique_media::TechniqueMediaKind::Video,
+        ..example("V", "/tmp/example.mp4")
+    };
+    technique
+}
+
+/// The video's message `m`, as the page gets it.
+fn to_video(m: video::Message) -> Message {
+    Message::Media(media_section::Message::Player(
+        example_players::Message::Video(
+            example_players::ExampleKey {
+                id: "V".to_string(),
+                unavailable: false,
+                video: true,
+            },
+            m,
+        ),
+    ))
+}
+
+/// The video's messages among `sent` (every message must be one).
+fn of_video(sent: &[Message]) -> Vec<video::Message> {
+    sent.iter()
+        .map(|m| match m {
+            Message::Media(media_section::Message::Player(example_players::Message::Video(
+                key,
+                m,
+            ))) if key.id == "V" => m.clone(),
+            other => panic!("not the video's: {other:?}"),
+        })
+        .collect()
+}
+
+/// What a key none of the page's widgets takes sends.
+fn tap(h: &Harness, key: iced::keyboard::Key) -> Vec<Message> {
+    let mut ui = h.ui();
+    let _ = ui.tap_key(key);
+    ui.into_messages().collect()
+}
+
+#[test]
+fn the_started_video_takes_the_pages_keys_and_its_fullscreen_covers_the_window() {
+    use iced::keyboard::{key::Named, Key};
+    let mut h = Harness::loaded(Setup::new(audio_and_video()));
+    h.size = Size::new(1200.0, 1400.0);
+    assert!(
+        tap(&h, Key::Named(Named::Space)).is_empty(),
+        "no controls yet"
+    );
+    h.send(to_video(video::Message::Play));
+    let video = h.built().pop().expect("the video's player");
+    assert_eq!(
+        of_video(&tap(&h, Key::Named(Named::Space))),
+        vec![video::Message::Key(Shortcut::PlayOrPause)]
+    );
+    // F: fullscreen, shown over the whole window.
+    assert!(h.screen.overlay().is_none());
+    let f = tap(&h, Key::Character("f".into()));
+    assert_eq!(
+        of_video(&f),
+        vec![video::Message::Key(Shortcut::ToggleFullscreen)]
+    );
+    h.feed(f);
+    let keys: Vec<Message> = {
+        let overlay = h.screen.overlay().expect("in fullscreen");
+        let mut ui = Simulator::with_size(settings(), h.size, overlay);
+        let _ = ui.tap_key(Key::Named(Named::ArrowRight));
+        let _ = ui.tap_key(Key::Named(Named::Escape));
+        ui.into_messages().collect()
+    };
+    assert_eq!(
+        of_video(&keys),
+        vec![
+            video::Message::Key(Shortcut::SeekBy(2_000)),
+            video::Message::Key(Shortcut::ExitFullscreen),
+        ]
+    );
+    h.feed(keys);
+    assert_eq!(video.seeks(), vec![std::time::Duration::from_secs(2)]);
+    assert!(h.screen.overlay().is_none());
+    // A practice take takes the keyboard from the controls, for good.
+    h.click(analysis::RECORD_PRACTICE);
+    h.settle();
+    assert!(h.vm().is_recording_practice());
+    assert!(tap(&h, Key::Named(Named::Space)).is_empty());
 }
