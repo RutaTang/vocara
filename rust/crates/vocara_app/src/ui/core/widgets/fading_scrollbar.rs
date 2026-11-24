@@ -54,7 +54,11 @@
 //! Left as it is, iced having no counterpart: the wheel over the shown
 //! track scrolls the view, as Flutter's bar passed it to its scrollable,
 //! but the iced scrollable offers it to the content under the track first;
-//! and a page that would move the view less than half a pixel jumps instead
+//! a press on the track pages at once, where Flutter's tap waited out the
+//! gesture arena (to the release, or 100 ms) when a recognizer above the
+//! view wanted the press too; the bar learns that the pointer left only
+//! when the pointer moves, where Flutter also looked after each frame; and
+//! a page that would move the view less than half a pixel jumps instead
 //! (`nearEqual` against `1 / devicePixelRatio`, taken as a Retina
 //! display's 2: iced does not tell a widget the scale).
 
