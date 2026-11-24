@@ -6,8 +6,8 @@ fn width_of(spec: &Spec<'_>) -> f32 {
     laid(spec, f32::INFINITY).min_bounds.width
 }
 
-/// `content` as an ellipsized text measures it: shaped fully (the "…" is
-/// not ASCII), unspaced.
+/// `content` as an ellipsized text measures it once cut: shaped fully (the
+/// "…" is not ASCII), unspaced.
 fn solid_width(content: &str, size: f32) -> f32 {
     width_of(&Spec {
         shaping: Shaping::Advanced,
@@ -75,14 +75,23 @@ fn spacing_keeps_the_line_height() {
 
 #[test]
 fn a_text_that_fits_has_no_ellipsis() {
+    // A text that fits is laid out exactly as iced's text would be.
     let title = "Moon River";
-    let room = solid_width(title, 16.0) + 0.5;
-    let fitted = laid(&ellipsized(title, 16.0, 1), room);
+    let natural = width_of(&spec(title, 16.0, font::SEMIBOLD));
+    let fitted = laid(&ellipsized(title, 16.0, 1), natural + 0.5);
     assert_eq!(fitted.shown, None);
-    assert!(close(fitted.min_bounds.width, solid_width(title, 16.0)));
+    assert!(close(fitted.min_bounds.width, natural));
     // Exactly as wide as the room still fits.
-    let exact = laid(&ellipsized(title, 16.0, 1), solid_width(title, 16.0));
+    let exact = laid(&ellipsized(title, 16.0, 1), natural);
     assert_eq!(exact.shown, None);
+    // So does a non-Latin one.
+    let title = "Лунная река";
+    let natural = width_of(&spec(title, 16.0, font::SEMIBOLD));
+    assert_eq!(laid(&ellipsized(title, 16.0, 1), natural).shown, None);
+    let cut = laid(&ellipsized(title, 16.0, 1), natural - 1.0);
+    let shown = cut.shown.expect("cut");
+    assert!(title.starts_with(shown.trim_end_matches(ELLIPSIS)));
+    assert!(cut.min_bounds.width <= natural - 1.0 + 0.01);
 }
 
 #[test]
@@ -170,6 +179,27 @@ fn max_lines_wraps_then_ellipsizes_the_last_line() {
 fn an_unbounded_width_never_cuts() {
     let long = "x".repeat(400);
     assert_eq!(laid(&ellipsized(&long, 12.0, 1), f32::INFINITY).shown, None);
+}
+
+#[test]
+fn a_canvas_label_puts_each_cluster_where_the_spaced_line_has_it() {
+    super::testing::load_fonts();
+    let solid = spec("INSPECTOR", 11.0, font::BOLD);
+    let spaced = Spec {
+        letter_spacing: 1.5,
+        ..solid.clone()
+    };
+    let mut font_system = font_system().write().expect("Write font system");
+    let (plain, plain_width) = spaced_clusters(font_system.raw(), &solid);
+    let (clusters, width) = spaced_clusters(font_system.raw(), &spaced);
+    drop(font_system);
+    assert_eq!(clusters.len(), 9);
+    assert!(close(width - plain_width, 9.0 * 1.5));
+    for (i, ((range, x), (plain_range, plain_x))) in clusters.iter().zip(&plain).enumerate() {
+        assert_eq!(range, plain_range);
+        assert_eq!(range.len(), 1);
+        assert!(close(x - plain_x, i as f32 * 1.5), "{i}: {x} vs {plain_x}");
+    }
 }
 
 #[test]

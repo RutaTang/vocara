@@ -42,6 +42,7 @@ use iced::advanced::text::{Alignment, LineHeight, Renderer as _, Shaping, Wrappi
 use iced::advanced::widget::{tree, Operation, Tree};
 use iced::advanced::{renderer, Widget};
 use iced::alignment::Vertical;
+use iced::widget::canvas::Text;
 use iced::{mouse, Color, Element, Font, Length, Pixels, Rectangle, Renderer, Size, Theme};
 
 /// The ellipsis SkParagraph appends (`ParagraphStyle`'s default, U+2026).
@@ -250,23 +251,36 @@ fn lines(buffer: &Buffer) -> Vec<Line> {
         .collect()
 }
 
-/// The shaping clusters of one unwrapped line, in logical order: each
-/// one's byte range and advance (its glyphs' advances, spacing included).
-fn clusters(buffer: &Buffer) -> Vec<(usize, usize, f32)> {
-    let mut clusters: Vec<(usize, usize, f32)> = Vec::new();
-    for run in buffer.layout_runs() {
-        for glyph in run.glyphs {
-            match clusters.iter_mut().find(|c| c.0 == glyph.start) {
-                Some(cluster) => {
-                    cluster.1 = cluster.1.max(glyph.end);
-                    cluster.2 += glyph.w;
-                }
-                None => clusters.push((glyph.start, glyph.end, glyph.w)),
+/// The shaping clusters of a buffer's glyphs, in logical order: each one's
+/// byte range, the x of its leftmost glyph and its advance (its glyphs'
+/// advances, spacing included). A cluster's glyphs share their `start`.
+fn glyph_clusters(buffer: &Buffer) -> Vec<(std::ops::Range<usize>, f32, f32)> {
+    let mut glyphs: Vec<(usize, usize, f32, f32)> = buffer
+        .layout_runs()
+        .flat_map(|run| run.glyphs.iter().map(|g| (g.start, g.end, g.x, g.w)))
+        .collect();
+    glyphs.sort_by_key(|g| g.0);
+    let mut clusters: Vec<(std::ops::Range<usize>, f32, f32)> = Vec::new();
+    for (start, end, x, w) in glyphs {
+        match clusters.last_mut() {
+            Some(cluster) if cluster.0.start == start => {
+                cluster.0.end = cluster.0.end.max(end);
+                cluster.1 = cluster.1.min(x);
+                cluster.2 += w;
             }
+            _ => clusters.push((start..end, x, w)),
         }
     }
-    clusters.sort_by_key(|c| c.0);
     clusters
+}
+
+/// The shaping clusters of one unwrapped line, in logical order: each
+/// one's byte range and advance.
+fn clusters(buffer: &Buffer) -> Vec<(usize, usize, f32)> {
+    glyph_clusters(buffer)
+        .into_iter()
+        .map(|(range, _, advance)| (range.start, range.end, advance))
+        .collect()
 }
 
 /// The byte length of the longest run of `clusters` (from the first) whose
@@ -308,23 +322,19 @@ pub(crate) fn lay_out(font_system: &mut FontSystem, spec: &Spec<'_>, bounds: Siz
         );
         return finish(font_system, plain, None);
     };
-    // An ellipsized text is shaped as it is when cut ("…" is not ASCII, so
-    // `Auto` shapes it fully), so its width does not jump when the "…"
-    // comes and goes.
-    let shaping = graphics_text::to_shaping(spec.shaping, ELLIPSIS);
     let wrap = if max_lines == 1 {
         Wrap::None
     } else {
         Wrap::WordOrGlyph
     };
     // Every line, however tall the room: whether text is left over does
-    // not depend on the height.
+    // not depend on the height. Shaped as iced's text shapes it.
     let whole = buffer(
         font_system,
         spec,
         Size::new(bounds.width, f32::INFINITY),
         wrap,
-        shaping,
+        graphics_text::to_shaping(spec.shaping, spec.content),
         &[(spec.content, spaced.clone())],
     );
     let laid_lines = lines(&whole);
@@ -365,6 +375,9 @@ pub(crate) fn lay_out(font_system: &mut FontSystem, spec: &Spec<'_>, bounds: Siz
         .get(last.start..)
         .unwrap_or_default()
         .to_string();
+    // The cut text is shaped as iced shapes a text with a "…" in it (`Auto`
+    // shapes it fully: "…" is not ASCII), and measured so.
+    let shaping = graphics_text::to_shaping(spec.shaping, ELLIPSIS);
     let solid = attributes(spec.font, spec.size, 0.0);
     let ellipsis = buffer(
         font_system,
@@ -385,6 +398,13 @@ pub(crate) fn lay_out(font_system: &mut FontSystem, spec: &Spec<'_>, bounds: Siz
     );
     let rest_clusters = clusters(&unwrapped);
     let mut cut = fitting_prefix(&rest_clusters, bounds.width - ellipsis_width);
+    if cut >= rest.len() && laid_lines.len() == max_lines {
+        // Shaped fully, the one long line fits after all: no text is left
+        // over to mark.
+        let mut fitted = whole;
+        fitted.set_size(font_system, Some(bounds.width), Some(bounds.height));
+        return finish(font_system, fitted, None);
+    }
     loop {
         let head = format!("{kept}{}", &rest[..cut]);
         let shown = buffer(
@@ -405,6 +425,68 @@ pub(crate) fn lay_out(font_system: &mut FontSystem, spec: &Spec<'_>, bounds: Siz
             (true, Some(shorter)) => cut = shorter,
             _ => return finish(font_system, shown, Some(format!("{head}{ELLIPSIS}"))),
         }
+    }
+}
+
+// ---------------------------------------------------------------- canvas
+
+/// `content` set on one line with `spacing` px after every glyph, as
+/// [`StudioText`] sets it: each shaping cluster's byte range and x, and the
+/// line's width.
+pub(crate) fn spaced_clusters(
+    font_system: &mut FontSystem,
+    spec: &Spec<'_>,
+) -> (Vec<(std::ops::Range<usize>, f32)>, f32) {
+    let one_line = Spec {
+        wrapping: Wrapping::None,
+        max_lines: None,
+        ..spec.clone()
+    };
+    let laid = lay_out(font_system, &one_line, Size::INFINITE);
+    let clusters = glyph_clusters(&laid.buffer)
+        .into_iter()
+        .map(|(range, x, _)| (range, x))
+        .collect();
+    (clusters, laid.min_bounds.width)
+}
+
+/// `frame.fill_text(text)` with `spacing` px after every glyph
+/// (`TextStyle.letterSpacing` on a `TextPainter`): the line is laid out as
+/// [`StudioText`] lays it out, then each cluster is drawn where it landed
+/// (a canvas draws its own text, not a raw buffer). The alignment is the
+/// spaced line's.
+pub fn fill_spaced_text(frame: &mut iced::widget::canvas::Frame, text: Text, spacing: f32) {
+    if spacing == 0.0 || text.content.is_empty() {
+        frame.fill_text(text);
+        return;
+    }
+    let (clusters, width) = {
+        let mut font_system = font_system().write().expect("Write font system");
+        let spec = Spec {
+            content: &text.content,
+            size: text.size.0,
+            line_height: text.line_height.to_absolute(text.size).0,
+            font: text.font,
+            align_x: Alignment::Default,
+            shaping: text.shaping,
+            wrapping: Wrapping::None,
+            letter_spacing: spacing,
+            max_lines: None,
+        };
+        spaced_clusters(font_system.raw(), &spec)
+    };
+    let left = match text.align_x {
+        Alignment::Center => text.position.x - width / 2.0,
+        Alignment::Right => text.position.x - width,
+        Alignment::Default | Alignment::Left | Alignment::Justified => text.position.x,
+    };
+    for (range, x) in clusters {
+        frame.fill_text(Text {
+            content: text.content[range].to_string(),
+            position: iced::Point::new(left + x, text.position.y),
+            align_x: Alignment::Left,
+            ..text.clone()
+        });
     }
 }
 
