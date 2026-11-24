@@ -3376,9 +3376,6 @@ dependencies = [
  "raw-window-handle",
  "wasm-bindgen",
  "wasm-bindgen-futures",
- "wayland-backend",
- "wayland-client",
- "wayland-protocols",
  "web-sys",
  "windows-sys 0.61.2",
 ]
@@ -4563,6 +4560,7 @@ version = "0.1.0"
 dependencies = [
  "block2 0.6.2",
  "dirs",
+ "dispatch2",
  "fancy-regex",
  "hex",
  "libc",
@@ -4575,6 +4573,7 @@ dependencies = [
  "objc2-core-video",
  "objc2-foundation 0.3.2",
  "rand",
+ "rfd",
  "rusqlite",
  "rustfft",
  "serde",
