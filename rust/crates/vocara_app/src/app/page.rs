@@ -16,7 +16,7 @@ use crate::ui::settings::SettingsScreen;
 use crate::ui::song_practice_detail::SongPracticeDetailScreen;
 use crate::ui::technique_library::detail::TechniqueDetailScreen;
 use crate::ui::technique_library::TechniqueLibraryScreen;
-use crate::ui::{Screen, Update};
+use crate::ui::{Screen, SnackBar, Update};
 
 /// One open page.
 #[derive(Debug)]
@@ -159,6 +159,12 @@ impl Page {
     /// a save or a guarded edit is in flight, as Dart's futures did).
     pub fn lingers(&self) -> bool {
         matches!(self, Page::Song(s) if s.lingers())
+    }
+
+    /// The page's snack bars, handed over to the app (see
+    /// [`Screen::take_snack_bars`]).
+    pub fn take_snack_bars(&mut self) -> Vec<SnackBar> {
+        with_screen!(self, screen, _wrap => screen.take_snack_bars(), Vec::new())
     }
 }
 

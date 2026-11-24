@@ -15,7 +15,11 @@
 //! - [`Screen::view`], [`Screen::subscription`] (keyboard, ticks: skip
 //!   events a widget captured), [`Screen::returned`] (a page this one pushed
 //!   was popped: Dart's `await context.push(...)` completing) and
-//!   [`Screen::dispose`] (the page left the stack).
+//!   [`Screen::dispose`] (the page left the stack);
+//! - [`Screen::take_snack_bars`], for a page that shows snack bars: it draws
+//!   them itself while it is on top, and hands them to the app when it stops
+//!   being on top, as Dart's app-wide `ScaffoldMessenger` kept them up over
+//!   whatever page came next.
 //!
 //! The view model (`view_model.rs`) holds the Dart view model's state and
 //! logic with no iced types; its async work comes back as `Effect` values the
@@ -31,6 +35,10 @@ pub mod settings;
 pub mod song_practice_detail;
 pub mod technique_library;
 
+use std::convert::Infallible;
+use std::time::{Duration, Instant};
+
+use iced::futures::{stream, Stream, StreamExt};
 use iced::{Element, Subscription, Task};
 
 use crate::router::{Navigation, Route};
@@ -60,6 +68,76 @@ pub trait Screen {
 
     /// The page left the stack (popped, or dropped by a go).
     fn dispose(&mut self, _services: &Services) {}
+
+    /// Hands the app the page's snack bars — the one showing, with the time
+    /// it has left, then the ones waiting their turn — and stops showing
+    /// them. The app asks when the page stops being on top (covered, popped,
+    /// dropped), and when it toasts while the app shows one already: Dart's
+    /// `ScaffoldMessenger` sat above the pages, so a snack bar stayed up over
+    /// whichever page came next until its time ran out.
+    fn take_snack_bars(&mut self) -> Vec<SnackBar> {
+        Vec::new()
+    }
+}
+
+/// Draws a snack bar's text as its page does (`SnackBar` reports nothing:
+/// no Dart snack bar had an action).
+pub type SnackLook = for<'a> fn(&'a str) -> Element<'a, Infallible>;
+
+/// A snack bar a page hands to the app ([`Screen::take_snack_bars`]).
+#[derive(Debug, Clone)]
+pub struct SnackBar {
+    /// What it says.
+    pub text: String,
+    /// How long it still shows: the rest of its time for the one showing,
+    /// all of it for one still waiting.
+    pub left: Duration,
+    /// Whether its page cleared the snack bars up before showing it
+    /// (`clearSnackBars()`, then `showSnackBar`), or queued it behind them
+    /// (`showSnackBar` alone).
+    pub clears: bool,
+    /// Its page's widget for it.
+    pub look: SnackLook,
+}
+
+impl SnackBar {
+    /// The one showing since `since`, for `duration` in all; `None` once its
+    /// time is up.
+    pub fn showing(
+        text: String,
+        duration: Duration,
+        since: Instant,
+        clears: bool,
+        look: SnackLook,
+    ) -> Option<Self> {
+        let left = duration.saturating_sub(since.elapsed());
+        (!left.is_zero()).then_some(Self {
+            text,
+            left,
+            clears,
+            look,
+        })
+    }
+
+    /// One waiting its turn: all of `duration` still ahead of it.
+    pub fn waiting(text: String, duration: Duration, clears: bool, look: SnackLook) -> Self {
+        Self {
+            text,
+            left: duration,
+            clears,
+            look,
+        }
+    }
+}
+
+/// A one-shot timer as a subscription's stream: `message` once `delay` is
+/// up, then nothing (a snack bar's time).
+pub fn one_shot<M: Send + 'static>(delay: Duration, message: M) -> impl Stream<Item = M> {
+    stream::once(async move {
+        tokio::time::sleep(delay).await;
+        message
+    })
+    .chain(stream::pending())
 }
 
 /// A dialog a screen asks the app to show, and how its result comes back.
