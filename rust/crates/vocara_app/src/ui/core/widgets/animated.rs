@@ -231,9 +231,22 @@ pub fn ink_hover<'a, M: 'a>(
     color: Color,
     radius: impl Into<Radius>,
 ) -> Element<'a, M> {
+    ink_well(content, color, INK_HIGHLIGHT, radius)
+}
+
+/// [`ink_hover`] whose pressed highlight is `pressed` rather than
+/// [`INK_HIGHLIGHT`]: an `InkWell` whose `overlayColor` resolves the hovered
+/// and the pressed states to `color` and `pressed` (a Material 3 button's).
+pub fn ink_well<'a, M: 'a>(
+    content: impl Into<Element<'a, M>>,
+    color: Color,
+    pressed: Color,
+    radius: impl Into<Radius>,
+) -> Element<'a, M> {
     let radius = radius.into();
     let pressed = InkPress {
         content: content.into(),
+        color: pressed,
         radius,
     };
     animated_container(Element::new(pressed), INK_HOVER)
@@ -244,9 +257,11 @@ pub fn ink_hover<'a, M: 'a>(
         .into()
 }
 
-/// An `InkWell`'s pressed highlight under `content` (see [`ink_hover`]).
+/// An `InkWell`'s pressed highlight, in `color`, under `content` (see
+/// [`ink_hover`]).
 struct InkPress<'a, M> {
     content: Element<'a, M>,
+    color: Color,
     radius: Radius,
 }
 
@@ -394,8 +409,8 @@ impl<M> Widget<M, Theme, Renderer> for InkPress<'_, M> {
                     snap: false,
                 },
                 Background::Color(Color {
-                    a: INK_HIGHLIGHT.a * shown,
-                    ..INK_HIGHLIGHT
+                    a: self.color.a * shown,
+                    ..self.color
                 }),
             );
         }

@@ -22,11 +22,14 @@
 //!   `cargo metadata` call (a build script running cargo can deadlock on
 //!   cargo's own locks) and makes every license change reviewable.
 //! - **Bundled components** that no crate's license covers: the Inter
-//!   typeface the app embeds (its OFL text ships with the font) and SQLite,
-//!   which rusqlite compiles in. Keep this list in sync when the app starts
-//!   shipping another non-crate component (a media framework for the
-//!   technique videos, say). The engine's own code is first-party, covered
-//!   by the app's copyright; its crates are in the generated list.
+//!   typeface the app embeds (its OFL text ships with the font), SQLite,
+//!   which rusqlite compiles in, and Material Icons, whose
+//!   `arrow_back_ios_new` outline this page's back button draws (its Apache
+//!   License text is `assets/licenses/material-icons/LICENSE`). Keep this
+//!   list in sync when the app starts shipping another non-crate component
+//!   (a media framework for the technique videos, say). The engine's own
+//!   code is first-party, covered by the app's copyright; its crates are in
+//!   the generated list.
 //!
 //! [`licenses`] gathers both once (registration is idempotent, as
 //! `registerBundledComponentLicenses` was), as Flutter `LicenseEntry`s:
@@ -40,41 +43,106 @@
 //! 960 wide: an app bar, the about header and the package list on the left,
 //! and the selected package's licenses on a card to the right. Colours are
 //! the theme Settings gave it (`Studio.background` scaffold,
-//! `Studio.surface` cards and app bar) over forui's zinc text styles. A newly
-//! selected package's licenses come in as the detail's `AnimatedSwitcher`
-//! brought them, over 500 ms: up from a quarter of the card's height
-//! (`Curves.fastOutSlowIn`) as they fade in (`Curves.easeIn`), the last
-//! package's going the same way back over them (`FadeUpwardsPageTransition`);
-//! the one going takes no input. A package's licenses fill in as
-//! `_PackageLicensePage` filled them, a license at a time (Flutter parsed
-//! each in a task between frames, so a few could land per frame; here one
-//! lands per frame), under Material's spinner until the last has. "Powered
-//! by Flutter" reads "Powered by iced".
+//! `Studio.surface` cards and app bar) over forui's approximate Material
+//! theme (zinc dark), on macOS:
+//!
+//! - **Loading.** The registry is gathered off the UI thread
+//!   ([`LicensesPage::load`]), as the page's `FutureBuilder` waited on
+//!   `LicenseRegistry.licenses`: meanwhile the master pane is the about
+//!   block over Material's spinner on a card with no elevation (an error
+//!   shows centred instead). Once gathered, the list shows and the first
+//!   package's detail comes in like any other (the switcher started on an
+//!   empty child; `_initDefaultDetailPage`'s post-frame callback re-keys
+//!   it).
+//! - **The app bar**: the `BackButton` (`licenses/back_button.rs`:
+//!   Material 3's 40 px icon button under forui's icon-button theme, the
+//!   "Back" tooltip, `Icons.arrow_back_ios_new_rounded`) in the 56 px
+//!   leading slot and "Licenses" centred on the bar's width: macOS centres
+//!   an app bar's title under fewer than two actions, and the bar has none.
+//!   Once the package list scrolls under it (its
+//!   `ScrollNotificationObserver`), the bar takes the scheme's surface tint
+//!   (8 % of `primary`) at once.
+//! - **The package rows** are two-line `ListTile`s at the desktop's compact
+//!   density (`licenses/list_tile.rs`): 64 tall, the title's baseline 32
+//!   down, the subtitle's 48; the selected one on the theme's
+//!   `highlightColor`. Their `InkWell` lights them in forui's rounded
+//!   list-tile shape (radius 8), over the selection too: the theme's
+//!   `hoverColor` under the pointer (fading over 50 ms), its
+//!   `highlightColor` while pressed (over 200 ms).
+//! - **The detail** sits on a `DraggableScrollableSheet`
+//!   (`licenses/sheet.rs`): its card starts `56 · h / (h + 28)` down the
+//!   page (the sheet's size is a share of the window's height, the page the
+//!   window less the drag bar), and a trackpad's scroll grows it to the
+//!   page's full height before the list scrolls (shrinking it back after
+//!   the list is at its top), where a mouse wheel only scrolls the list.
+//!   The header (the pinned `SliverAppBar`) centres the package over its
+//!   license count, no gap between, and takes the surface tint once the
+//!   list scrolls under it; each license follows a `Divider` in forui's
+//!   `dividerTheme` color (`secondary`).
+//! - **The switch.** A newly selected package's licenses come in as the
+//!   detail's `AnimatedSwitcher` brought them, over 500 ms: up from a
+//!   quarter of the page's height (the transition slides the switcher's
+//!   whole child, `Curves.fastOutSlowIn`) as they fade in
+//!   (`Curves.easeIn`), the last package's going the same way back over
+//!   them (`FadeUpwardsPageTransition`), keeping its scroll and its sheet
+//!   (the switcher's children are keyed); the one going takes no input. A
+//!   package's licenses fill in as `_PackageLicensePage` filled them, a
+//!   license at a time (Flutter parsed each in a task between frames, so a
+//!   few could land per frame; here one lands per frame), under Material's
+//!   spinner until the last has. "Powered by Flutter" reads "Powered by
+//!   iced".
+//!
+//! Where it still differs:
+//!
+//! - A trackpad's flick: Flutter flung the sheet and the list with its own
+//!   ballistic simulation as the fingers lifted; iced gets the momentum
+//!   macOS sends after them as more scroll deltas, so those move the sheet
+//!   and the list as the fingers did (as in every scrollable of the app).
+//!   iced tells a trackpad (and a Magic Mouse) from a wheel by its pixel
+//!   deltas, where Flutter went by the scroll's gesture phases: a mouse
+//!   whose driver sends pixel deltas without phases grows the sheet here.
+//! - Flutter's scrollbar on the detail spanned the whole scroll view, the
+//!   pinned header's 56 px included; here the list under the header is
+//!   the scrollable, so the bar starts under the header.
+//! - The registry is gathered once per run, not on each opening: a later
+//!   opening shows the spinner only until the gathering task reports.
+//! - The outgoing detail takes no input at all; Flutter's could still be
+//!   reached where the incoming one did not cover it.
+//! - A title too wide to centre (unreachable on a 960 px window) would be
+//!   pushed to the start and ellipsized in Flutter; here it is not.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use crate::ui::core::text;
-use iced::alignment::{Horizontal, Vertical};
+use iced::alignment::Horizontal;
 use iced::border::Radius;
 use iced::widget::text::{LineHeight, Wrapping};
-use iced::widget::{
-    button, column, container, keyed_column, row, scrollable, stack, Column, Space,
-};
-use iced::{Background, Border, Color, Element, Length, Padding, Shadow, Theme, Vector};
+use iced::widget::{button, column, container, scrollable, stack, Column, Space};
+use iced::{Background, Border, Color, Element, Length, Padding, Shadow, Task, Theme, Vector};
 use serde::Deserialize;
 use vocara_services::update_check_service::UpdateCheckService;
 
-use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::motion::{Controller, Curve};
 use crate::ui::core::theme::{self, alpha, font, Studio, Zinc};
+use crate::ui::core::widgets::animated::{ink_hover, INK_HIGHLIGHT};
 use crate::ui::core::widgets::fading_scrollbar::Fading;
 use crate::ui::core::widgets::slide::slide;
 use crate::ui::core::widgets::studio_hint::spinner;
 
+pub mod back_button;
+pub mod list_tile;
+pub mod sheet;
+
+use back_button::back_button;
+use list_tile::two_line_tile;
+use sheet::{keyed_stack, scroll_watch, sheet, SCROLLED_UNDER_TINT};
+
 #[cfg(test)]
 mod generate;
+#[cfg(test)]
+mod page_tests;
 
 // ------------------------------------------------------------------ entries
 
@@ -330,6 +398,24 @@ fn bundled_components() -> Vec<LicenseEntry> {
                 None,
             ),
         },
+        LicenseEntry {
+            packages: vec!["Material Icons".to_string()],
+            text: format!(
+                "{}\n\n{}",
+                entry(
+                    "Material Icons — the license page's back arrow \
+                     (google/material-design-icons)",
+                    "Apache License 2.0 (Apache-2.0)",
+                    "below",
+                    Some(
+                        "drawn by the Vocara app (the outline of \
+                         arrow_back_ios_new, rounded)"
+                    ),
+                    None,
+                ),
+                include_str!("../../../assets/licenses/material-icons/LICENSE").trim()
+            ),
+        },
     ]
 }
 
@@ -456,6 +542,38 @@ const TEXT_SEPARATION: f32 = 18.0;
 /// go (the detail's `AnimatedSwitcher`).
 pub const DETAIL_TRANSITION: Duration = Duration::from_millis(500);
 
+/// The back button's container, for whoever has to click it.
+pub const BACK: iced::widget::Id = iced::widget::Id::new("licenses-back");
+
+/// A package's row under the pointer: the dark theme's `hoverColor`
+/// (white at 4 %), the `InkWell` of a `ListTile` that sets none.
+pub const TILE_HOVER: Color = Color {
+    a: 0.04,
+    ..Color::WHITE
+};
+
+/// The rows' highlights' corners: forui's `listTileTheme` shape (its
+/// `style.borderRadius`, 8).
+pub const TILE_RADIUS: f32 = 8.0;
+
+/// The gathered registry, as a message carries it (compared by address).
+#[derive(Clone, Copy)]
+pub struct Registry(pub &'static LicenseData);
+
+impl PartialEq for Registry {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self.0, other.0)
+    }
+}
+
+impl Eq for Registry {}
+
+impl std::fmt::Debug for Registry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Registry({} packages)", self.0.packages.len())
+    }
+}
+
 /// What the page reports.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
@@ -465,22 +583,36 @@ pub enum Message {
     Select(usize),
     /// A frame while a package's licenses come in or go.
     Frame(Instant),
+    /// The registry, gathered off the UI thread ([`LicensesPage::load`]),
+    /// or why it could not be.
+    Loaded(Result<Registry, String>),
+    /// The package list came off its top (true) or went back to it: the
+    /// app bar is scrolled under.
+    MasterScrolled(bool),
 }
 
-/// The license page: which package is shown (the first until one is
-/// picked, as `selectedId` was), and the details coming and going.
+/// The license page: what it lists once gathered, which package is shown
+/// (the first until one is picked, as `selectedId` was), and the details
+/// coming and going.
 #[derive(Debug, Clone)]
 pub struct LicensesPage {
-    /// What it lists.
-    data: &'static LicenseData,
+    /// The registry, once gathered (the `FutureBuilder`'s snapshot); none
+    /// while it is.
+    data: Option<Result<&'static LicenseData, String>>,
     selected: usize,
     /// How many of the shown package's licenses have filled in.
     loaded: usize,
-    /// The shown package's detail coming in; none for the first, which
-    /// shows at once (an `AnimatedSwitcher`'s first child does).
+    /// The shown package's detail coming in (from the moment the registry
+    /// is gathered, as the switcher brought the first one in over the empty
+    /// one it started with).
     entering: Option<Controller>,
+    /// The shown detail's key: a detail keeps its state (its scroll, its
+    /// sheet's size) while it goes, as a keyed child of the switcher did.
+    key: u64,
     /// The details going, each on its own controller running back.
     leaving: Vec<Going>,
+    /// The package list is scrolled under the app bar.
+    scrolled_under: bool,
     /// The last frame's time, what the drawing reads.
     now: Instant,
 }
@@ -489,45 +621,75 @@ pub struct LicensesPage {
 #[derive(Debug, Clone)]
 struct Going {
     index: usize,
+    key: u64,
     controller: Controller,
     loaded: usize,
 }
 
 impl Default for LicensesPage {
     fn default() -> Self {
-        Self::over(license_data())
+        Self::new()
     }
 }
 
 impl LicensesPage {
-    /// The page listing every license the app ships.
+    /// The page, the registry still to gather ([`LicensesPage::load`]).
     pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// The page listing `data`.
-    pub fn over(data: &'static LicenseData) -> Self {
         Self {
-            data,
+            data: None,
             selected: 0,
             loaded: 0,
             entering: None,
+            key: 0,
             leaving: Vec::new(),
+            scrolled_under: false,
             now: Instant::now(),
+        }
+    }
+
+    /// Gathers every license the app ships off the UI thread
+    /// (`LicenseRegistry.licenses` folded into `_LicenseData`), for the
+    /// page to get as [`Message::Loaded`].
+    pub fn load() -> Task<Message> {
+        Task::perform(crate::util::blocking(license_data), |gathered| {
+            Message::Loaded(gathered.map(Registry))
+        })
+    }
+
+    /// The page listing `data`, gathered now.
+    pub fn over(data: &'static LicenseData) -> Self {
+        let mut page = Self::new();
+        page.gathered(Ok(data), Instant::now());
+        page
+    }
+
+    /// What it lists, once gathered.
+    fn data(&self) -> Option<&'static LicenseData> {
+        match self.data {
+            Some(Ok(data)) => Some(data),
+            _ => None,
         }
     }
 
     /// How many licenses the shown package has.
     fn total(&self) -> usize {
-        self.data
-            .packages
-            .get(self.selected)
-            .map_or(0, |p| self.data.license_count(p))
+        self.data()
+            .and_then(|data| {
+                data.packages
+                    .get(self.selected)
+                    .map(|p| data.license_count(p))
+            })
+            .unwrap_or(0)
     }
 
     /// The package shown (an index into [`LicenseData::packages`]).
     pub fn selected(&self) -> usize {
         self.selected
+    }
+
+    /// Whether the registry has been gathered.
+    pub fn is_loaded(&self) -> bool {
+        self.data.is_some()
     }
 
     /// Handles `message`; true on Back, when the page's owner closes it.
@@ -542,6 +704,33 @@ impl LicensesPage {
                 self.frame(at);
                 false
             }
+            Message::Loaded(gathered) => {
+                self.gathered(gathered.map(|r| r.0), Instant::now());
+                false
+            }
+            Message::MasterScrolled(under) => {
+                self.scrolled_under = under;
+                false
+            }
+        }
+    }
+
+    /// The registry, gathered at `now`: the list shows, and the first
+    /// package's detail comes in (`_initDefaultDetailPage`'s post-frame
+    /// callback re-keys the switcher from its empty first child). A second
+    /// gathering changes nothing.
+    pub fn gathered(&mut self, gathered: Result<&'static LicenseData, String>, now: Instant) {
+        if self.data.is_some() {
+            return;
+        }
+        let shows = gathered
+            .as_ref()
+            .is_ok_and(|data| !data.packages.is_empty());
+        self.data = Some(gathered);
+        if shows {
+            let mut coming = Controller::new(DETAIL_TRANSITION, DETAIL_TRANSITION);
+            coming.forward(now);
+            self.entering = Some(coming);
         }
     }
 
@@ -559,12 +748,14 @@ impl LicensesPage {
         self.leaving.retain(|g| g.index != index);
         self.leaving.push(Going {
             index: self.selected,
+            key: self.key,
             controller: going,
             loaded: self.loaded,
         });
         let mut coming = Controller::new(DETAIL_TRANSITION, DETAIL_TRANSITION);
         coming.forward(now);
         self.entering = Some(coming);
+        self.key += 1;
         self.selected = index;
         // A new `_PackageLicensePage`: its licenses fill in anew.
         self.loaded = 0;
@@ -589,7 +780,8 @@ impl LicensesPage {
     }
 
     /// A detail on `controller` at the last frame: its opacity and how far
-    /// down it is, in its heights (`_FadeUpwardsPageTransition`).
+    /// down it is, in the page's heights (`_FadeUpwardsPageTransition`
+    /// slides the switcher's whole child, the page tall).
     fn upwards(&self, controller: Option<&Controller>) -> (f32, f32) {
         let t = controller.map_or(1.0, |c| c.value(self.now));
         (
@@ -600,43 +792,75 @@ impl LicensesPage {
 
     /// The page.
     pub fn view(&self) -> Element<'static, Message> {
-        let data = self.data;
-        let selected = self.selected.min(data.packages.len().saturating_sub(1));
-        let scaffold = column![
-            app_bar(),
-            container(master(data, selected))
+        let master: Element<'static, Message> = match &self.data {
+            // `ConnectionState.waiting`: the about block over Material's
+            // spinner, on a card with no elevation.
+            None => container(column![
+                about(),
+                container(spinner(36.0, 4.0, Zinc::PRIMARY)).center_x(Length::Fill),
+            ])
+            .width(MASTER_WIDTH)
+            .height(Length::Fill)
+            .style(theme::fill(Studio::SURFACE))
+            .into(),
+            // The error, centred.
+            Some(Err(error)) => container(
+                text(error.clone())
+                    .size(theme::DEFAULT_TEXT_SIZE)
+                    .color(Zinc::FOREGROUND),
+            )
+            .center_x(MASTER_WIDTH)
+            .center_y(Length::Fill)
+            .into(),
+            Some(Ok(data)) => {
+                let selected = self.selected.min(data.packages.len().saturating_sub(1));
+                container(scroll_watch(
+                    master(data, selected),
+                    Message::MasterScrolled,
+                ))
                 .width(MASTER_WIDTH)
                 .height(Length::Fill)
-                .style(material(Some(Radius::from(0.0)))),
-        ]
-        .width(Length::Fill)
-        .height(Length::Fill);
+                .style(material(Some(Radius::from(0.0))))
+                .into()
+            }
+        };
+        let scaffold = column![app_bar(self.scrolled_under), master]
+            .width(Length::Fill)
+            .height(Length::Fill);
         let mut layers = stack![container(scaffold)
             .width(Length::Fill)
             .height(Length::Fill)
             .style(theme::page)];
+        let Some(data) = self.data() else {
+            return layers.into();
+        };
+        let selected = self.selected.min(data.packages.len().saturating_sub(1));
         if let Some(package) = data.packages.get(selected) {
-            // The details going, under the one coming in.
-            let mut details = stack![].width(Length::Fill).height(Length::Fill);
+            // The details going, under the one coming in, each keeping its
+            // state by its key.
+            let mut details = keyed_stack();
             for going in &self.leaving {
                 if let Some(package) = data.packages.get(going.index) {
                     let (opacity, down) = self.upwards(Some(&going.controller));
                     let card = detail(package, &data.licenses_of(package), going.loaded, opacity);
-                    details = details.push(slide(card, 0.0).down(down).inert());
+                    details = details.push(
+                        going.key,
+                        slide(sheet(card, opacity), 0.0).down(down).inert(),
+                    );
                 }
             }
             let (opacity, down) = self.upwards(self.entering.as_ref());
             let card = detail(package, &data.licenses_of(package), self.loaded, opacity);
-            details = details.push(slide(keyed_column([(selected, card)]), 0.0).down(down));
-            // The detail card sits over the app bar's lower half, from the
-            // master's edge (less the card's elevation) to the gutter.
+            details = details.push(self.key, slide(sheet(card, opacity), 0.0).down(down));
+            // The sheet spans the page's height, over the app bar, from the
+            // master's edge less the card's elevation to the gutter.
             layers = layers.push(
                 container(details)
                     .padding(Padding {
-                        top: TOOLBAR_HEIGHT,
-                        right: GUTTER + CARD_ELEVATION,
+                        top: 0.0,
+                        right: GUTTER,
                         bottom: 0.0,
-                        left: MASTER_WIDTH,
+                        left: MASTER_WIDTH - CARD_ELEVATION,
                     })
                     .width(Length::Fill)
                     .height(Length::Fill),
@@ -670,37 +894,52 @@ fn faded_material(radius: Option<Radius>, opacity: f32) -> impl Fn(&Theme) -> co
     }
 }
 
-/// The app bar: a back button and "Licenses" on the toolbar, over an empty
-/// second toolbar row (the master/detail scaffold's action row).
-fn app_bar<'a>() -> Element<'a, Message> {
-    let back = button(icons::icon(Icon::ChevronLeft, 24.0, Studio::TEXT_PRIMARY))
-        .padding(12)
-        .style(|theme: &Theme, status| button::Style {
-            background: matches!(status, button::Status::Hovered | button::Status::Pressed)
-                .then_some(Background::Color(alpha(Studio::TEXT_PRIMARY, 0.08))),
-            border: Border {
-                radius: 24.0.into(),
-                ..Border::default()
-            },
-            ..theme::bare_button(theme, status)
-        })
-        .on_press(Message::Back);
+/// `color` under the scheme's surface tint at Material 3's scrolled-under
+/// elevation (`ElevationOverlay.applySurfaceTint`: `primary` at 8 %
+/// alpha-blended over it).
+pub fn scrolled_under(color: Color) -> Color {
+    let t = SCROLLED_UNDER_TINT;
+    let tint = Zinc::PRIMARY;
+    Color {
+        r: tint.r * t + color.r * (1.0 - t),
+        g: tint.g * t + color.g * (1.0 - t),
+        b: tint.b * t + color.b * (1.0 - t),
+        a: 1.0,
+    }
+}
+
+/// The app bar: the back button in the 56 px leading slot and "Licenses"
+/// centred on the bar's width (`NavigationToolbar(centerMiddle: true)`:
+/// macOS centres an app bar's title under fewer than two actions, and the
+/// page's has none), over an empty second toolbar row (the master/detail
+/// scaffold's action row). Once the package list is scrolled under it, its
+/// `Studio.surface` takes the surface tint, at once (the bar's `Material`
+/// does not animate its color).
+fn app_bar<'a>(scrolled: bool) -> Element<'a, Message> {
+    let background = if scrolled {
+        scrolled_under(Studio::SURFACE)
+    } else {
+        Studio::SURFACE
+    };
+    // The title stays clear of the leading slot (56 + 16) on any window
+    // the app allows (960 wide and up), so it is never pushed off centre.
+    let title = container(
+        text("Licenses")
+            .size(18)
+            .color(Studio::TEXT_PRIMARY)
+            .wrapping(Wrapping::None),
+    )
+    .center_x(Length::Fill)
+    .center_y(TOOLBAR_HEIGHT);
+    let leading = container(container(back_button(Message::Back)).id(BACK))
+        .center_x(TOOLBAR_HEIGHT)
+        .center_y(TOOLBAR_HEIGHT);
     container(column![
-        row![
-            container(back)
-                .center_x(TOOLBAR_HEIGHT)
-                .center_y(TOOLBAR_HEIGHT),
-            text("Licenses")
-                .size(18)
-                .line_height(1.0)
-                .color(Studio::TEXT_PRIMARY),
-        ]
-        .height(TOOLBAR_HEIGHT)
-        .align_y(Vertical::Center),
+        stack![title, leading].height(TOOLBAR_HEIGHT),
         Space::new().height(TOOLBAR_HEIGHT),
     ])
     .width(Length::Fill)
-    .style(theme::fill(Studio::SURFACE))
+    .style(theme::fill(background))
     .into()
 }
 
@@ -742,62 +981,40 @@ fn master(data: &LicenseData, selected: usize) -> Element<'_, Message> {
         .into()
 }
 
-/// The dark theme's `highlightColor`: a selected package's background.
-const HIGHLIGHT: Color = Color::from_rgba8(0xCC, 0xCC, 0xCC, 0x40 as f32 / 255.0);
-
-/// `_PackageListTile`: the package and its license count, 72 tall.
+/// `_PackageListTile`: the package and its license count in a two-line
+/// `ListTile` (64 tall at the desktop's compact density, its baselines 32
+/// and 48 down), on the theme's `highlightColor` when selected (an `Ink`
+/// under the tile's own). Its `InkWell` lights the row in forui's rounded
+/// list-tile shape over that: the theme's `hoverColor` under the pointer
+/// (fading over 50 ms) and its `highlightColor` while pressed (over
+/// 200 ms). The row is built alike either way, so its highlights carry
+/// over a change of selection.
 fn package_tile<'a>(
     package: &str,
     licenses: usize,
     index: usize,
     selected: bool,
 ) -> Element<'a, Message> {
-    let content = column![
+    let tile = two_line_tile(
         text(package.to_string())
-            .size(16)
-            .line_height(1.0)
-            .color(Zinc::FOREGROUND)
-            .wrapping(Wrapping::None),
-        Space::new().height(4),
-        text(licenses_detail_text(licenses))
-            .size(14)
-            .line_height(1.0)
+            .size(list_tile::TITLE_SIZE)
             .color(Zinc::FOREGROUND),
-    ];
-    button(
-        container(content)
-            .height(72)
-            .width(Length::Fill)
-            .padding(Padding {
-                top: 0.0,
-                right: 24.0,
-                bottom: 0.0,
-                left: 16.0,
-            })
-            .align_y(Vertical::Center)
-            .clip(true),
-    )
-    .padding(0)
-    .width(Length::Fill)
-    .style(move |_: &Theme, status| {
-        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
-        let background = if selected {
-            Some(HIGHLIGHT)
-        } else if hovered {
-            Some(alpha(Zinc::FOREGROUND, 0.04))
-        } else {
-            None
-        };
-        button::Style {
-            background: background.map(Background::Color),
-            text_color: Zinc::FOREGROUND,
-            border: Border::default(),
-            shadow: Shadow::default(),
-            snap: false,
-        }
-    })
-    .on_press(Message::Select(index))
-    .into()
+        text(licenses_detail_text(licenses))
+            .size(list_tile::SUBTITLE_SIZE)
+            .color(Zinc::FOREGROUND),
+    );
+    let row = button(tile)
+        .padding(0)
+        .width(Length::Fill)
+        .style(theme::bare_button)
+        .on_press(Message::Select(index));
+    container(ink_hover(row, TILE_HOVER, TILE_RADIUS))
+        .width(Length::Fill)
+        .style(move |_: &Theme| container::Style {
+            background: selected.then_some(Background::Color(INK_HIGHLIGHT)),
+            ..container::Style::default()
+        })
+        .into()
 }
 
 /// `_PackageLicensePage` on the detail card: the package and its license
@@ -811,30 +1028,33 @@ fn detail<'a>(
     opacity: f32,
 ) -> Element<'a, Message> {
     let fg = alpha(Zinc::FOREGROUND, Zinc::FOREGROUND.a * opacity);
+    // `_PackageLicensePageTitle` in the pinned `SliverAppBar`'s toolbar:
+    // the title (`titleLarge`) right over the subtitle (`titleSmall`), both
+    // at the column's start, the column centred on the card (macOS, no
+    // actions) and in the toolbar's height.
     let header = container(column![
         text(package.to_string())
             .size(18)
-            .line_height(1.0)
-            .color(fg),
-        Space::new().height(4),
+            .color(fg)
+            .wrapping(Wrapping::None),
         text(licenses_detail_text(licenses.len()))
             .size(14)
-            .line_height(1.0)
-            .color(fg),
+            .color(fg)
+            .wrapping(Wrapping::None),
     ])
-    .height(TOOLBAR_HEIGHT)
     .padding([0.0, 16.0])
-    .align_y(Vertical::Center);
+    .center_x(Length::Fill)
+    .center_y(TOOLBAR_HEIGHT);
     let mut body = Column::new();
     for license in licenses.iter().take(loaded) {
         // `Padding(all: 18, child: Divider())`: a 16 px divider, its 1 px
-        // line centred (in the scheme's outline colour, the foreground).
+        // line centred, in forui's `dividerTheme` color (`secondary`).
         body = body.push(
             container(
                 container(Space::new())
                     .width(Length::Fill)
                     .height(1)
-                    .style(theme::fill(fg)),
+                    .style(theme::fill(alpha(Zinc::SECONDARY, opacity))),
             )
             .padding([18.0 + 7.5, 18.0]),
         );
@@ -971,6 +1191,7 @@ mod tests {
         for package in [
             "Inter (font)",
             "SQLite",
+            "Material Icons",
             "iced",
             "rusqlite",
             "serde",
@@ -997,6 +1218,15 @@ mod tests {
         // The OFL ships with the font.
         let inter = data.licenses_of("Inter (font)");
         assert!(inter[0].text.contains("SIL OPEN FONT LICENSE Version 1.1"));
+        // The back button's arrow is Material Icons' outline, under its
+        // Apache License, in full.
+        let icons = data.licenses_of("Material Icons");
+        assert_eq!(icons.len(), 1);
+        assert!(icons[0].text.contains("License: Apache License 2.0"));
+        assert!(icons[0].text.contains("arrow_back_ios_new"));
+        assert!(icons[0]
+            .text
+            .contains("TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION"));
     }
 
     #[test]
@@ -1087,10 +1317,9 @@ mod tests {
         assert!(ui.find("Another").is_ok());
         assert!(ui.find("First license").is_err());
 
-        let back = char::from(Icon::ChevronLeft).to_string();
         let messages: Vec<Message> = {
             let mut ui = iced_test::simulator(page.view());
-            ui.click(back.as_str()).expect("the back button");
+            ui.click(BACK).expect("the back button");
             ui.into_messages().collect()
         };
         assert_eq!(messages, vec![Message::Back]);
@@ -1100,24 +1329,29 @@ mod tests {
     #[test]
     fn a_picked_packages_licenses_come_up_and_in_as_the_last_ones_go() {
         let mut page = LicensesPage::new();
+        let t = Instant::now();
+        page.gathered(Ok(license_data()), t);
         // Say its licenses have filled in (see the next test).
         page.loaded = page.total();
-        let t0 = Instant::now();
-        assert_eq!(
-            page.upwards(page.entering.as_ref()),
-            (1.0, 0.0),
-            "the first, at once"
-        );
-        assert!(!page.is_animating(t0));
-        page.select(1, t0);
-        assert_eq!(page.selected(), 1, "at once");
-        assert!(page.is_animating(t0 + DETAIL_TRANSITION / 2));
-        let at = |page: &mut LicensesPage, t: Duration| {
-            page.now = t0 + t;
+        let at = |page: &mut LicensesPage, now: Instant| {
+            page.now = now;
             let coming = page.upwards(page.entering.as_ref());
             let going = page.upwards(page.leaving.first().map(|g| &g.controller));
             (coming, going)
         };
+        // The first comes in the same way, from the empty detail the
+        // switcher started with.
+        let ((opacity, down), _) = at(&mut page, t);
+        assert_eq!((opacity, down), (0.0, 0.25), "the first: down, clear");
+        assert!(page.is_animating(t));
+        let t0 = t + DETAIL_TRANSITION;
+        let ((opacity, down), _) = at(&mut page, t0);
+        assert_eq!((opacity, down), (1.0, 0.0), "in");
+        assert!(!page.is_animating(t0));
+        page.select(1, t0);
+        assert_eq!(page.selected(), 1, "at once");
+        assert!(page.is_animating(t0 + DETAIL_TRANSITION / 2));
+        let at = |page: &mut LicensesPage, d: Duration| at(page, t0 + d);
         let ((opacity, down), (gone, sunk)) = at(&mut page, Duration::ZERO);
         assert_eq!((opacity, down), (0.0, 0.25), "start: down a quarter, clear");
         assert_eq!((gone, sunk), (1.0, 0.0), "the last one in full");
@@ -1164,19 +1398,28 @@ mod tests {
         page.frame(t0);
         page.frame(t0);
         assert_eq!(shown(&page), [true; 3], "all in");
-        assert!(!page.is_animating(t0), "and the frames stop");
+        assert!(
+            !page.is_animating(t0 + DETAIL_TRANSITION),
+            "and the frames stop once the detail is in"
+        );
         page.frame(t0);
         assert_eq!(page.loaded, 3);
     }
 
     #[test]
     fn the_real_page_renders() {
-        let page = LicensesPage::new();
-        let mut ui = iced_test::Simulator::with_size(
-            iced::Settings::default(),
-            iced::Size::new(1440.0, 872.0),
-            page.view(),
-        );
-        ui.snapshot(&theme::app_theme()).expect("the page renders");
+        let mut page = LicensesPage::new();
+        let render = |page: &LicensesPage| {
+            let mut ui = iced_test::Simulator::with_size(
+                iced::Settings::default(),
+                iced::Size::new(1440.0, 872.0),
+                page.view(),
+            );
+            ui.snapshot(&theme::app_theme()).expect("the page renders");
+        };
+        render(&page);
+        page.gathered(Ok(license_data()), Instant::now());
+        page.frame(Instant::now() + DETAIL_TRANSITION);
+        render(&page);
     }
 }
