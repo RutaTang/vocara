@@ -525,6 +525,8 @@ pub type ViewFn<'a, T, M> = Box<dyn Fn(T) -> Element<'a, M> + 'a>;
 /// `AnimatedRotation`'s turns, an `AnimatedContainer`'s width.
 pub struct Animated<'a, T, M> {
     target: T,
+    /// What it shows when it first appears (its target, unless set).
+    initial: T,
     duration: Duration,
     curve: Curve,
     view: ViewFn<'a, T, M>,
@@ -544,11 +546,26 @@ pub fn animated<'a, T: Lerp + 'static, M>(
     let content = view(target);
     Animated {
         target,
+        initial: target,
         duration,
         curve,
         view: Box::new(view),
         content,
         built: target,
+    }
+}
+
+impl<'a, T: Lerp + 'static, M> Animated<'a, T, M> {
+    /// Starts at `initial` when it first appears, and moves to its target
+    /// from there (a transition's entrance, as a route's animation running
+    /// forward from 0 when it is pushed).
+    pub fn from(mut self, initial: T) -> Self {
+        self.initial = initial;
+        if initial != self.built {
+            self.content = (self.view)(initial);
+            self.built = initial;
+        }
+        self
     }
 }
 
@@ -566,7 +583,7 @@ impl<T: Lerp + 'static, M> Widget<M, Theme, Renderer> for Animated<'_, T, M> {
     }
 
     fn state(&self) -> tree::State {
-        tree::State::new(State::new(self.target, self.duration, self.curve))
+        tree::State::new(State::new(self.initial, self.duration, self.curve))
     }
 
     fn children(&self) -> Vec<Tree> {

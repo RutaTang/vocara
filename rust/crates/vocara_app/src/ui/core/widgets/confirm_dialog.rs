@@ -24,16 +24,26 @@
 //! speak the same [`Message`]s; [`DialogState::step`] says what a message did
 //! — the update dialog's "Open Download Page" keeps it open and asks the app
 //! to open the browser ([`DialogStep::OpenUrl`]).
+//!
+//! A dialog's barrier fades in over 150 ms (`DialogRoute`'s transition,
+//! the barrier's color on `Curves.ease`, [`fading_barrier`]); the app fades
+//! it back out when the dialog closes. The card itself shows and goes at
+//! once: Material faded it with the barrier (`Curves.easeOut`), but iced
+//! has no subtree opacity, and the cards' text is drawn in fixed colors.
+
+use std::time::Duration;
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::{
     center, column, container, mouse_area, opaque, row, stack, text, text_input, Space,
 };
-use iced::{keyboard, widget, Background, Element, Event, Length, Padding};
+use iced::{keyboard, widget, Background, Color, Element, Event, Length, Padding};
 
+use super::animated::animated;
 use super::studio_button::{studio_button, StudioButtonVariant};
 use super::wrap::Wrap;
 use crate::ui::core::icons::{self, Icon};
+use crate::ui::core::motion::Curve;
 use crate::ui::core::theme::{self, alpha, font, Studio};
 use crate::ui::home::widgets::update_notice::{DialogOutcome, UpdateDownloadDialog};
 use crate::ui::technique_library::widgets::media::technique_media_section::RenameExampleDialog;
@@ -447,22 +457,38 @@ fn prompt_card<'a>(p: &'a StudioPrompt, value: &str, input: widget::Id) -> Eleme
     card(content.into())
 }
 
+/// How long a dialog takes to come in and to go (`DialogRoute`'s
+/// `transitionDuration`).
+pub const TRANSITION: Duration = Duration::from_millis(150);
+
+/// A barrier of `color` over everything, faded in from clear over
+/// [`TRANSITION`] on `Curves.ease` as it first shows (`ModalRoute`'s
+/// `barrierCurve`); a press on it reports `on_press`, when given. It takes
+/// every press either way.
+pub fn fading_barrier<'a, M: Clone + 'a>(color: Color, on_press: Option<M>) -> Element<'a, M> {
+    animated(1.0_f32, TRANSITION, Curve::Ease, move |t| {
+        let fill = container(Space::new())
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(move |_| container::Style {
+                background: Some(Background::Color(alpha(color, color.a * t))),
+                ..container::Style::default()
+            });
+        match on_press.clone() {
+            Some(on_press) => opaque(mouse_area(fill).on_press(on_press)),
+            None => opaque(fill),
+        }
+    })
+    .from(0.0)
+    .into()
+}
+
 /// `content` centred over a dismissible barrier (`Color(0xB0000000)`)
 /// covering everything: a tap on the barrier cancels, the card takes its own
-/// taps, Escape cancels and no key reaches what lies beneath.
+/// taps, Escape cancels and no key reaches what lies beneath. The barrier
+/// fades in ([`fading_barrier`]).
 pub fn modal<'a>(content: Element<'a, Message>) -> Element<'a, Message> {
-    let barrier = opaque(
-        mouse_area(
-            container(Space::new())
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .style(|_| container::Style {
-                    background: Some(Background::Color(theme::DIALOG_BARRIER)),
-                    ..container::Style::default()
-                }),
-        )
-        .on_press(Message::Cancel),
-    );
+    let barrier = fading_barrier(theme::DIALOG_BARRIER, Some(Message::Cancel));
     let layers = stack![barrier, center(opaque(content)).align_x(Horizontal::Center)];
     Wrap::<Message, ()>::new(
         layers,
@@ -497,6 +523,39 @@ mod tests {
         let mut ui = iced_test::simulator(state.view());
         drive(&mut ui);
         ui.into_messages().collect()
+    }
+
+    #[test]
+    fn a_barrier_fades_in_over_150_ms_on_curves_ease() {
+        use crate::ui::core::motion::Lerp;
+        use crate::ui::core::widgets::animated::testing::{near, Frames, MS};
+        use iced::time::Instant;
+        use iced::{Point, Size};
+
+        // Over white, so its darkening shows.
+        let view = || -> Element<'static, Message> {
+            stack![
+                container(Space::new())
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .style(theme::fill(Color::WHITE)),
+                fading_barrier(theme::DIALOG_BARRIER, Some(Message::Cancel)),
+            ]
+            .into()
+        };
+        let shade = |t: f32| {
+            let a = theme::DIALOG_BARRIER.a * Curve::Ease.transform(t);
+            Color::WHITE.lerp(Color::BLACK, a)
+        };
+        let mut window = Frames::new(Size::new(40.0, 40.0));
+        let at = Point::new(20.0, 20.0);
+        let t0 = Instant::now();
+        assert!(window.frame(view(), &[], t0));
+        assert!(near(window.pixel(at), Color::WHITE), "start: clear");
+        window.frame(view(), &[], t0 + 75 * MS);
+        assert!(near(window.pixel(at), shade(0.5)), "middle");
+        assert!(!window.frame(view(), &[], t0 + 150 * MS));
+        assert!(near(window.pixel(at), shade(1.0)), "end");
     }
 
     #[test]

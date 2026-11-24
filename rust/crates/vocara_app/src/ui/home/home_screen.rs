@@ -57,7 +57,7 @@ use crate::router::Route;
 use crate::services::Services;
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{self, alpha, bare_button, boxed, font, Studio};
-use crate::ui::core::widgets::confirm_dialog::ConfirmDialog;
+use crate::ui::core::widgets::confirm_dialog::{fading_barrier, ConfirmDialog};
 use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::snack::{SnackEvent, SnackQueue, SnackStyle, SnackTimer};
@@ -747,12 +747,7 @@ fn opening_dialog<'a>() -> Element<'a, Message> {
         },
         ..boxed(Some(Studio::SURFACE_RAISED), 16.0, Some(Studio::BORDER))
     });
-    let barrier = opaque(
-        container(Space::new())
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(theme::fill(alpha(Color::BLACK, 0.28))),
-    );
+    let barrier = fading_barrier::<Message>(alpha(Color::BLACK, 0.28), None);
     stack![barrier, center(opaque(card))].into()
 }
 

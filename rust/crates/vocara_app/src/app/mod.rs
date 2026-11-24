@@ -41,7 +41,8 @@ use self::page::{erase, with_screen, PageUpdate};
 use self::quit::QuitHooks;
 use crate::router::{self, Change, Navigation, PageId, Route, Router};
 use crate::services::{Services, ServicesFactory};
-use crate::ui::core::theme::{self, font};
+use crate::ui::core::motion::{self, Controller, Curve};
+use crate::ui::core::theme::{self, alpha, font};
 use crate::ui::core::widgets::confirm_dialog::{
     self, Dialog, DialogResult, DialogState, DialogStep,
 };
@@ -149,6 +150,8 @@ pub enum Message {
     SnackBarExpired(u64),
     /// A frame while one of the app's snack bars enters or leaves.
     SnackBarFrame(Instant),
+    /// A frame while a closed dialog's barrier fades out.
+    Frame(Instant),
     /// Boot: the library open.
     Library(LibraryEvent),
     /// The fatal window's actions.
@@ -196,6 +199,19 @@ struct Running {
     lingering: Vec<(PageId, Page)>,
     /// The snack bars pages handed over, shown over the page on top.
     messenger: Messenger,
+    /// The barriers of dialogs that closed, fading out (each dialog's
+    /// route animation running back).
+    closing: Vec<Controller>,
+    /// The last frame's time, what the drawing reads.
+    now: Instant,
+}
+
+impl Running {
+    /// Whether something the app draws itself moves at `now` (a closed
+    /// dialog's barrier fading out).
+    fn is_animating(&self, now: Instant) -> bool {
+        self.closing.iter().any(|c| c.is_animating(now))
+    }
 }
 
 enum State {
@@ -374,6 +390,14 @@ impl App {
                 }
                 Task::none()
             }
+            Message::Frame(at) => {
+                if let State::Running(running) = &mut self.state {
+                    running.now = running.now.max(at);
+                    let now = running.now;
+                    running.closing.retain(|c| c.is_animating(now));
+                }
+                Task::none()
+            }
             Message::Home(id, m) => self.page(id, |page, services| match page {
                 Page::Home(s) => Some(erase(s.update(m, services), id, Message::Home)),
                 _ => None,
@@ -464,6 +488,8 @@ impl App {
                             dialogs: Vec::new(),
                             lingering: Vec::new(),
                             messenger: Messenger::default(),
+                            closing: Vec::new(),
+                            now: Instant::now(),
                         }));
                         task
                     }
@@ -535,6 +561,11 @@ impl App {
         match open.state.step(message) {
             DialogStep::Closed(result) => {
                 let open = running.dialogs.pop().expect("checked above");
+                // Its card goes at once; its barrier fades out.
+                let mut barrier =
+                    Controller::completed(confirm_dialog::TRANSITION, confirm_dialog::TRANSITION);
+                barrier.reverse(Instant::now());
+                running.closing.push(barrier);
                 let message = (open.on_result)(result);
                 self.update(message)
             }
@@ -577,6 +608,18 @@ impl App {
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .style(theme::page)];
+                // A closed dialog's barrier, fading out; it takes no input
+                // (Flutter's barrier ignores the pointer as its route goes).
+                for barrier in &running.closing {
+                    let t = barrier.curved(Curve::Ease, None, running.now);
+                    let color = theme::DIALOG_BARRIER;
+                    layers = layers.push(
+                        container(Space::new())
+                            .width(Length::Fill)
+                            .height(Length::Fill)
+                            .style(theme::fill(alpha(color, color.a * t))),
+                    );
+                }
                 for open in &running.dialogs {
                     layers = layers.push(open.state.view().map(Message::Dialog));
                 }
@@ -599,6 +642,8 @@ impl App {
                 subscriptions.push(page.subscription(id, id == top && !covered));
             }
             subscriptions.push(running.messenger.subscription());
+            subscriptions
+                .push(motion::frames(running.is_animating(Instant::now())).map(Message::Frame));
         }
         Subscription::batch(subscriptions)
     }

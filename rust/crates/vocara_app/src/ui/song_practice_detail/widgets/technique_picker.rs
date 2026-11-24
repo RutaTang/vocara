@@ -23,8 +23,8 @@
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::text::Wrapping;
 use iced::widget::{
-    button, center, column, container, mouse_area, opaque, row, scrollable, stack, text,
-    text_input, Column, Space,
+    button, center, column, container, opaque, row, scrollable, stack, text, text_input, Column,
+    Space,
 };
 use iced::{keyboard, widget, Element, Event, Length, Padding, Task};
 use vocara_model::models::technique::Technique;
@@ -32,6 +32,7 @@ use vocara_model::util::dart_string;
 
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{self, font, Studio};
+use crate::ui::core::widgets::confirm_dialog::fading_barrier;
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::core::widgets::wrap::Wrap;
 
@@ -292,15 +293,7 @@ fn hint<'a>(label: &'a str) -> Element<'a, Message> {
 /// barrier cancels, the card takes its own taps, Escape cancels and no key
 /// reaches what lies beneath.
 fn modal(content: Element<'_, Message>) -> Element<'_, Message> {
-    let barrier = opaque(
-        mouse_area(
-            container(Space::new())
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .style(theme::dialog_barrier),
-        )
-        .on_press(Message::Cancel),
-    );
+    let barrier = fading_barrier(theme::DIALOG_BARRIER, Some(Message::Cancel));
     let layers = stack![barrier, center(opaque(content))];
     Wrap::<Message, ()>::new(
         layers,

@@ -19,15 +19,15 @@
 //! data and goes with the editor.)
 //!
 //! Where iced differs: the caret is drawn in the text color (Flutter's was
-//! coral), and the dialog appears without Flutter's fade.
+//! coral). The barrier fades in as a dialog route's did
+//! (`confirm_dialog::fading_barrier`), but the card shows at once and the
+//! editor goes at once (iced has no subtree opacity).
 
 use std::fmt;
 use std::time::Duration;
 
 use iced::alignment::{Horizontal, Vertical};
-use iced::widget::{
-    center, column, container, mouse_area, opaque, row, stack, text, text_editor, Space,
-};
+use iced::widget::{center, column, container, opaque, row, stack, text, text_editor, Space};
 use iced::{keyboard, widget, Background, Border, Color, Element, Event, Length, Shadow, Task};
 use vocara_model::models::practice_note::PracticeNote;
 use vocara_model::util::dart_string;
@@ -35,6 +35,7 @@ use vocara_model::util::format::format_clock_ms;
 
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{self, alpha, font, Studio, Zinc};
+use crate::ui::core::widgets::confirm_dialog::fading_barrier;
 use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
 use crate::ui::core::widgets::wrap::Wrap;
 
@@ -322,18 +323,7 @@ fn field_style(_: &iced::Theme, _: text_editor::Status) -> text_editor::Style {
 /// tap on the barrier cancels, the card takes its own taps, Escape cancels
 /// and no key reaches what lies beneath.
 fn modal(content: Element<'_, Message>) -> Element<'_, Message> {
-    let barrier = opaque(
-        mouse_area(
-            container(Space::new())
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .style(|_| container::Style {
-                    background: Some(Background::Color(BARRIER)),
-                    ..container::Style::default()
-                }),
-        )
-        .on_press(Message::Cancel),
-    );
+    let barrier = fading_barrier(BARRIER, Some(Message::Cancel));
     let layers = stack![barrier, center(opaque(content)).align_x(Horizontal::Center)];
     Wrap::<Message, ()>::new(
         layers,

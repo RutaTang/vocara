@@ -245,6 +245,44 @@ fn a_dialog_covers_the_window_and_its_result_reaches_its_page() {
 }
 
 #[test]
+fn a_closed_dialogs_barrier_fades_out_over_150_ms_on_frames_while_it_does() {
+    use iced::advanced::subscription::into_recipes;
+    use crate::ui::core::motion::Status;
+    let mut app = boot(None);
+    let frames = |app: &App| {
+        let State::Running(running) = &app.state else {
+            panic!("running")
+        };
+        into_recipes(motion::frames(running.is_animating(Instant::now()))).len()
+    };
+    assert_eq!(frames(&app), 0, "an idle app asks for no frames");
+    open_dialog(&mut app);
+    let closed = Instant::now();
+    let _ = app.update(Message::Dialog(confirm_dialog::Message::Cancel));
+    assert_eq!(app.dialogs(), 0, "closed at once");
+    let barrier = |app: &App| {
+        let State::Running(running) = &app.state else {
+            panic!("running")
+        };
+        running.closing.first().cloned()
+    };
+    let fading = barrier(&app).expect("its barrier fades out");
+    assert_eq!(frames(&app), 1, "frames while it does");
+    let t = confirm_dialog::TRANSITION;
+    assert_eq!(fading.status(closed), Status::Reverse);
+    // At its start it is all there; halfway, on `Curves.ease`; then gone.
+    assert!(fading.curved(Curve::Ease, None, closed) > 0.99);
+    let half = closed + t / 2;
+    let middle = fading.curved(Curve::Ease, None, half);
+    assert!((middle - Curve::Ease.transform(fading.value(half))).abs() < 1e-6);
+    assert!(middle > 0.4 && middle < 0.9, "{middle}");
+    assert_eq!(fading.curved(Curve::Ease, None, closed + t * 2), 0.0, "end");
+    let _ = app.update(Message::Frame(Instant::now() + t));
+    assert!(barrier(&app).is_none(), "dropped once faded");
+    assert_eq!(frames(&app), 0, "and the frames stop");
+}
+
+#[test]
 fn a_page_that_leaves_takes_its_dialog_with_it() {
     let mut app = boot(Some("/settings"));
     open_dialog(&mut app);
