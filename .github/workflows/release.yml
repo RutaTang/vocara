@@ -155,8 +155,8 @@ jobs:
       # these headless iced tests.
       - name: Tests
         run: |
-          cargo test --locked --workspace
-          cargo test --locked --workspace --features vocara_app/device
+          cargo test --locked --workspace --no-fail-fast
+          cargo test --locked --workspace --features vocara_app/device --no-fail-fast
 
   validate-lean:
     name: Validate Lean proofs

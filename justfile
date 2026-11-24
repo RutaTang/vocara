@@ -32,8 +32,8 @@ lint:
 
 # The tests in both feature modes (the app's journeys run headless).
 test:
-    cd rust && cargo test --workspace
-    cd rust && cargo test --workspace --features vocara_app/device
+    cd rust && cargo test --workspace --no-fail-fast
+    cd rust && cargo test --workspace --features vocara_app/device --no-fail-fast
 
 # Build the Lean proofs and regenerate the vectors the Rust tests replay.
 proofs:

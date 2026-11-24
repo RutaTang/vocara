@@ -45,8 +45,11 @@ jobs:
       # no-feature build, which only this shape catches.
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo clippy --locked --workspace --all-targets --features vocara_app/device -- -D warnings
-      - run: cargo test --locked --workspace
-      - run: cargo test --locked --workspace --features vocara_app/device
+      # --no-fail-fast, and the device run even after a failed plain run: one
+      # CI run reports every failing test in both modes, not just the first.
+      - run: cargo test --locked --workspace --no-fail-fast
+      - if: ${{ !cancelled() }}
+        run: cargo test --locked --workspace --features vocara_app/device --no-fail-fast
 
   # The Lean 4 proofs of the core algorithms (rust/verification), and the
   # vectors the Rust tests replay: committed vectors that differ from what
