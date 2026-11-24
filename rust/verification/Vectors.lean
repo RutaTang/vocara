@@ -290,6 +290,189 @@ def oplogJson : String :=
     let (_, _, steps) := ops.foldl step ([], 1, [])
     jarr steps)
 
+/-! ## Lyrics: LRC -/
+
+def hex4 (n : Nat) : String :=
+  let h := "0123456789abcdef".toList
+  String.mk [h.getD (n / 4096 % 16) '0', h.getD (n / 256 % 16) '0', h.getD (n / 16 % 16) '0',
+    h.getD (n % 16) '0']
+
+/-- A JSON string of any text (`\u` escapes outside printable ASCII, astral
+characters as surrogate pairs). -/
+def jtext (s : List Char) : String :=
+  let esc (c : Char) : String :=
+    let n := c.toNat
+    if c = '"' then "\\\"" else if c = '\\' then "\\\\"
+    else if 0x20 ≤ n ∧ n < 0x7F then c.toString
+    else if n < 0x10000 then "\\u" ++ hex4 n
+    else "\\u" ++ hex4 (0xD800 + (n - 0x10000) / 1024) ++ "\\u" ++ hex4 (0xDC00 + (n - 0x10000) % 1024)
+  "\"" ++ String.join (s.map esc) ++ "\""
+
+def lyricJson (l : LyricLine) : String :=
+  jobj [("text", jtext l.text), ("time", match l.time with | some t => toString t | none => "null")]
+
+def linesJson (ls : List LyricLine) : String := jarr (ls.map lyricJson)
+
+/-- Text pieces: plain words, Dart white space (U+3000, U+FEFF, U+0085, U+00A0,
+a tab), non-ASCII and astral characters, and bits of tag syntax. -/
+def safeAtoms : List String :=
+  ["la", "oh oh", "Hello world", " ", "  ", "\t", "é", "日本語", "😀", "　", "﻿",
+   "\u0085", " ", "[", "]", ":", ".", "7", "07", "-", "[ti:x]", "[1:2]", "[10:00", "a]b"]
+
+/-- Pieces that break the round trip: line breaks, time tags, an offset. -/
+def badAtoms : List String :=
+  ["\r", "\n", "\r\n", "[00:05]", "[01:02.345]", "x[00:01]y", "[offset:+500]", "[OFFSET: -20 ]"]
+
+def textOf (x : Nat) : List Char :=
+  (nums x (x / 2 ^ 40 % 4)).foldl (fun acc y =>
+    let h := y / 2 ^ 33
+    let atom := if h % 23 = 0 then badAtoms.getD (h / 23 % badAtoms.length) ""
+      else safeAtoms.getD (h / 23 % safeAtoms.length) ""
+    acc ++ atom.toList) []
+
+/-- Times: untimed, edges (minute and 100- and 1000-minute boundaries),
+negative, anywhere below 1000 minutes, and a few close ones (ties once
+rounded, for the stable sort). -/
+def timeOf (x : Nat) : Option Int :=
+  let h := x / 2 ^ 33
+  match h % 10 with
+  | 0 | 1 => none
+  | 2 => some ([0, 9, 10, 999, 1000, 59999, 60000, 5999999, 6000000, 59999990, 59999999, 60000000,
+      61234567, 123456789].getD (h / 10 % 14) 0 : Nat)
+  | 3 => some (-(([1, 9, 10, 1500, 59999, 60000, 61000, 123456].getD (h / 10 % 8) 1 : Nat) : Int))
+  | 4 => some (h / 10 % 60000000 : Nat)
+  | 5 | 6 => some ((h / 10 % 3) * 1000 + h / 30 % 12 : Nat)
+  | _ => some (h / 10 % 600000 : Nat)
+
+def writableB (l : LyricLine) : Bool :=
+  l.text.all (fun c => c != '\r' && c != '\n') && (scan (dartTrim l.text)).1.isEmpty &&
+    match l.time with
+    | some t => decide (0 ≤ t)
+    | none => (offsetOf (dartTrim l.text)).isNone
+
+def parsedJson : Option (List LyricLine) → String
+  | some ls => linesJson ls
+  | none => "null"
+
+/-- Many lines at a few times, each its own text: the order of equal times
+after rounding is the stable sort's (an unstable one keeps short lists in
+order, so these are long). -/
+def tieLines (x : Nat) : List LyricLine :=
+  (nums x (30 + x / 2 ^ 40 % 30)).zipIdx.map fun (y, k) =>
+    let h := y / 2 ^ 33
+    { text := ("line " ++ toString k).toList, time := some (h % 3 * 1000 + h / 3 % 10 : Nat) }
+
+def lrcRoundtripJson : String :=
+  let cases := ((nums 19 150).map fun x =>
+    (nums x (x / 2 ^ 37 % 13)).map fun y =>
+      ({ text := textOf y, time := timeOf (lcg y) } : LyricLine)) ++
+    (nums 31 10).map tieLines
+  jarr (cases.map fun ls =>
+    let doc := toLrc ls
+    jobj [("lines", linesJson ls), ("doc", jtext doc), ("parsed", parsedJson (parseLrc doc)),
+      ("writable", if ls.all writableB then "true" else "false")])
+
+/-- A digit from the generator's high bits. -/
+def dig (h k : Nat) : String := toString (h / k % 10)
+
+/-- Time tags in every syntax the parser takes, and some it does not. -/
+def tagOf (h : Nat) : String :=
+  let d := dig h
+  match h % 16 with
+  | 0 => "[" ++ d 7 ++ ":" ++ d 11 ++ d 13 ++ "]"
+  | 1 => "[" ++ d 7 ++ d 17 ++ ":" ++ d 11 ++ d 13 ++ "." ++ d 19 ++ "]"
+  | 2 => "[" ++ d 7 ++ d 17 ++ ":" ++ d 11 ++ d 13 ++ "." ++ d 19 ++ d 23 ++ "]"
+  | 3 => "[" ++ d 7 ++ d 17 ++ ":" ++ d 11 ++ d 13 ++ "." ++ d 19 ++ d 23 ++ d 29 ++ "]"
+  | 4 => "[" ++ d 31 ++ d 7 ++ d 17 ++ ":" ++ d 11 ++ d 13 ++ "." ++ d 19 ++ d 23 ++ "]"
+  | 5 => "[" ++ d 7 ++ d 17 ++ ":" ++ d 11 ++ d 13 ++ ":" ++ d 19 ++ d 23 ++ "]"
+  | 6 => "[" ++ d 31 ++ d 7 ++ d 17 ++ d 37 ++ ":" ++ d 11 ++ d 13 ++ "]"
+  | 7 => "[" ++ d 7 ++ ":" ++ d 11 ++ "]"
+  | 8 => "[" ++ d 7 ++ d 17 ++ ":" ++ d 11 ++ d 13 ++ "." ++ d 19 ++ d 23 ++ d 29 ++ d 41 ++ "]"
+  | 9 => "[" ++ d 7 ++ d 17 ++ ":" ++ d 11 ++ d 13 ++ ".]"
+  | 10 => "[" ++ d 7 ++ d 17 ++ ":" ++ d 11 ++ d 13
+  | 11 => "[:" ++ d 11 ++ d 13 ++ "]"
+  | 12 => "[" ++ d 7 ++ d 17 ++ ":" ++ d 11 ++ d 13 ++ d 19 ++ "]"
+  | _ => "[" ++ d 7 ++ d 17 ++ ":" ++ d 11 ++ d 13 ++ "]"
+
+def offsetLines : List String :=
+  ["[offset:+500]", "[OFFSET: -250 ]", "[Offset:\t1200　]", "[offset:abc]", "[offset:]",
+   "[offset:+99999999999]", "[offset:-9223372036854775808]", "[offset:9223372036854775808]",
+   "[offset: 5 ] x", "[offset:0]", "[offset:-86400001]", "[offsét:5]"]
+
+def ends : List String := ["\n", "\r\n", "\r"]
+def pads : List String := ["", "", "", " ", "\t", "　", "﻿", "  "]
+
+def docLine (y : Nat) : String :=
+  let h := y / 2 ^ 30
+  let text := String.mk (textOf (lcg y))
+  let body := match h % 12 with
+    | 0 => offsetLines.getD (h / 12 % offsetLines.length) ""
+    | 1 => "[ar:Someone]"
+    | 2 => ""
+    | 3 => "just words " ++ text
+    | 4 => text ++ " " ++ tagOf (h / 12) ++ " more"
+    | 5 | 6 => tagOf (h / 12) ++ tagOf (h / 7919) ++ text
+    | 7 => tagOf (h / 12) ++ tagOf (h / 7919) ++ tagOf (h / 104729) ++ text ++ tagOf (h / 13)
+    | _ => tagOf (h / 12) ++ text
+  pads.getD (h / 2 ^ 20 % pads.length) "" ++ body ++ pads.getD (h / 2 ^ 23 % pads.length) ""
+
+def lrcParseJson : String :=
+  jarr ((nums 23 150).map fun x =>
+    let ys := nums x (x / 2 ^ 37 % 12)
+    let doc := ys.foldl (fun acc y =>
+      acc ++ docLine y ++ ends.getD (y / 2 ^ 50 % ends.length) "\n") ""
+    let doc := if x / 2 ^ 45 % 3 = 0 then doc ++ String.mk (textOf (lcg x)) else doc
+    jobj [("doc", jtext doc.toList), ("parsed", parsedJson (parseLrc doc.toList))])
+
+/-- At the size limit (2^20 characters of text): `tags` tags `[00:00]` on
+one line of `text` times `char` (an astral one counts twice, as in UTF-16). -/
+def lrcBudgetJson : String :=
+  jarr ([(1024, 1023, 'x'), (1024, 1024, 'x'), (1024, 511, '😀'), (1024, 512, '😀'),
+      (3, 100, 'x')].map fun (k, t, c) =>
+    let doc := (List.replicate k "[00:00]".toList).flatten ++ List.replicate t c
+    let r := parseLrc doc
+    jobj [("tags", toString k), ("text", toString t), ("char", jtext [c]),
+      ("ok", if r.isSome then "true" else "false"),
+      ("count", toString ((r.getD []).length))])
+
+/-! ## Lyrics: line alignment -/
+
+def lineAtoms : List String :=
+  ["", "la", "la la", "oh", "chorus", "verse one", "verse two", "bridge", "na na", "hey"]
+
+def lineOf (h : Nat) : String :=
+  -- Skewed, so repeats (a chorus) are common.
+  lineAtoms.getD (if h % 3 = 0 then h / 3 % 3 else h / 3 % lineAtoms.length) ""
+
+/-- Edits a text: inserts, deletes and changes at random places. -/
+def editLines (l : List String) (y : Nat) : List String :=
+  let h := y / 2 ^ 30
+  let i := if l.length = 0 then 0 else h / 3 % (l.length + 1)
+  match h % 3 with
+  | 0 => l.take i ++ [lineOf (h / 97)] ++ l.drop i
+  | 1 => l.take i ++ l.drop (i + 1)
+  | _ => l.take i ++ (if i < l.length then [lineOf (h / 97)] else []) ++ l.drop (i + 1)
+
+def strsJson (l : List String) : String := jarr (l.map fun s => jtext s.toList)
+
+def alignJson : String :=
+  jarr ((nums 29 200).map fun x =>
+    let h := x / 2 ^ 30
+    let n := if h % 10 = 0 then 40 + h / 10 % 80 else h / 10 % 25
+    let prev := (nums x n).map fun y => lineOf (y / 2 ^ 31)
+    let next := (nums (lcg x) (h / 7 % 7)).foldl editLines prev
+    -- Small limits, and the limit exactly at the middle's cells and one
+    -- below.
+    let cells := (middle prev next).a.length * (middle prev next).b.length
+    let limit := match h % 6 with
+      | 0 => h / 6 % 40
+      | 1 => cells
+      | 2 => cells - 1
+      | _ => 25000000
+    let out := alignLines prev next limit
+    jobj [("prev", strsJson prev), ("next", strsJson next), ("cell_limit", toString limit),
+      ("out", jarr (out.map optJson))])
+
 def main (args : List String) : IO Unit := do
   let dir := args.headD "vectors"
   IO.FS.createDirAll dir
@@ -298,7 +481,9 @@ def main (args : List String) : IO Unit := do
     ("hlc_advance.json", hlcAdvanceJson), ("lww.json", lwwJson),
     ("version.json", versionJson), ("ring.json", ringJson),
     ("canonical.json", canonicalJson), ("reconcile.json", reconcileJson),
-    ("lru.json", lruJson), ("oplog.json", oplogJson)]
+    ("lru.json", lruJson), ("oplog.json", oplogJson),
+    ("lrc_roundtrip.json", lrcRoundtripJson), ("lrc_parse.json", lrcParseJson),
+    ("lrc_budget.json", lrcBudgetJson), ("align.json", alignJson)]
   for (name, body) in files do
     IO.FS.writeFile (dir ++ "/" ++ name) (body ++ "\n")
     IO.println s!"wrote {dir}/{name}"
