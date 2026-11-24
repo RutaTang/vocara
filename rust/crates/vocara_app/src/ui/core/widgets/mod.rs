@@ -5,6 +5,7 @@ pub mod cap_label;
 pub mod confirm_dialog;
 pub mod fatal_open_screen;
 pub mod holds_keyboard;
+pub mod material_tooltip;
 pub mod slide;
 pub mod spectrogram_painter;
 pub mod stable_subtree;

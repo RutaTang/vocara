@@ -32,8 +32,10 @@
 //!   horizontal move of a drag.
 //!
 //! Where iced differs: the live spectrogram's 6 px rounded clip
-//! (`ClipRRect`) is square, as iced clips to rectangles; the `Tooltip`s are
-//! iced tooltips below their chip, shown on hover.
+//! (`ClipRRect`) is square, as iced clips to rectangles; the `Tooltip`s
+//! (`material_tooltip`, fading as Material's did) stay below their chip,
+//! kept inside the window, where Flutter's flipped above when there was no
+//! room below.
 
 use std::f32::consts::FRAC_PI_2;
 use std::f64::consts::LN_2;
@@ -45,8 +47,8 @@ use iced::border::Radius;
 use iced::widget::canvas::{self, gradient, Frame, Geometry, LineCap, Path, Stroke};
 use iced::widget::text::Alignment;
 use iced::widget::{
-    button, canvas as canvas_widget, center, column, container, responsive, row, stack, text,
-    tooltip, Row, Space,
+    button, canvas as canvas_widget, center, column, container, responsive, row, stack, text, Row,
+    Space,
 };
 use iced::{
     mouse, Background, Border, Color, Element, Length, Padding, Pixels, Point, Rectangle, Renderer,
@@ -65,6 +67,7 @@ use super::detail_transport_bar::flexible_row;
 use super::live_spectrogram::live_spectrogram;
 use super::pitch_lane::{note_vibrato_of, pitch_lane, pitch_notes_of, pitch_range_of};
 use crate::ui::core::theme::{self, boxed, fill, font, inset, Studio};
+use crate::ui::core::widgets::material_tooltip::material_tooltip;
 use crate::ui::core::widgets::painter::{KeyedCache, Same};
 use crate::ui::core::widgets::spectrogram_painter::{
     FormantTrackPainter, FrequencyGridPainter, LiveFormantPainter, PowerSpectrumPainter,
@@ -1266,15 +1269,7 @@ const CHIP_HEIGHT: f32 = 26.0;
 /// A Material tooltip below `target`: its top 24 px below the target's
 /// centre.
 fn with_tip<'a>(target: Element<'a, Message>, tip: &'static str) -> Element<'a, Message> {
-    tooltip(
-        target,
-        container(text(tip).size(theme::TOOLTIP_TEXT_SIZE))
-            .padding(theme::TOOLTIP_PADDING)
-            .style(theme::tooltip),
-        tooltip::Position::Bottom,
-    )
-    .gap(24.0 - CHIP_HEIGHT / 2.0)
-    .into()
+    material_tooltip(target, tip, 24.0 - CHIP_HEIGHT / 2.0).into()
 }
 
 /// `_F0Chip`: the F0 (pitch) readout — frequency plus the equal-tempered

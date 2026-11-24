@@ -41,8 +41,7 @@ use std::time::{Duration, Instant};
 use iced::alignment::{Horizontal, Vertical};
 use iced::futures::{stream, Stream, StreamExt};
 use iced::widget::{
-    button, center, column, container, opaque, responsive, row, scrollable, stack, text, tooltip,
-    Space,
+    button, center, column, container, opaque, responsive, row, scrollable, stack, text, Space,
 };
 use iced::{Color, Element, Length, Padding, Shadow, Subscription, Task, Theme, Vector};
 use vocara_model::models::practice_summary::PracticeSummary;
@@ -61,6 +60,7 @@ use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::motion;
 use crate::ui::core::theme::{self, alpha, bare_button, boxed, font, Studio};
 use crate::ui::core::widgets::confirm_dialog::{barrier, ConfirmDialog, DialogMotion, Fade};
+use crate::ui::core::widgets::material_tooltip::material_tooltip;
 use crate::ui::core::widgets::slide::inert;
 use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
 use crate::ui::core::widgets::studio_hint::spinner;
@@ -642,16 +642,8 @@ fn header_icon_button<'a>(icon: Icon, tip: &'a str, on_tap: Message) -> Element<
     .padding(0)
     .style(bare_button)
     .on_press(on_tap);
-    tooltip(
-        target,
-        container(text(tip).size(theme::TOOLTIP_TEXT_SIZE))
-            .padding(theme::TOOLTIP_PADDING)
-            .style(theme::tooltip),
-        tooltip::Position::Bottom,
-    )
     // Material's tooltip sits 24 px below the target's centre.
-    .gap(24.0 - 34.0 / 2.0)
-    .into()
+    material_tooltip(target, tip, 24.0 - 34.0 / 2.0).into()
 }
 
 /// How many cards fit across `width` (`SliverGridDelegateWithMax

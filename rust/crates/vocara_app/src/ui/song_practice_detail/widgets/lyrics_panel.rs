@@ -55,7 +55,9 @@
 //!   height (the toolbar, the pinned hint) keeps a slot, so the editor and
 //!   the sync list keep their widget state (Dart keyed the tab body).
 //!
-//! Where iced differs: tooltips show below their button on hover.
+//! Where iced differs: a tooltip (`material_tooltip`, which fades as
+//! Material's did) stays below its button, kept inside the window, where
+//! Flutter's flipped above when there was no room below.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -68,7 +70,7 @@ use iced::widget::canvas::{self, Frame, Geometry};
 use iced::widget::text::{Alignment, Wrapping};
 use iced::widget::{
     button, canvas as canvas_widget, center, column, container, responsive, row, scrollable, stack,
-    text, text_editor, tooltip, Column, Space,
+    text, text_editor, Column, Space,
 };
 use iced::{
     keyboard, mouse, widget, Border, Color, Element, Event, Length, Padding, Pixels, Point,
@@ -84,6 +86,7 @@ use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::motion::{Curve, Implicit};
 use crate::ui::core::theme::{self, alpha, boxed, fill, font, Studio};
 use crate::ui::core::widgets::holds_keyboard::holds_keyboard;
+use crate::ui::core::widgets::material_tooltip::material_tooltip;
 use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
 use crate::ui::core::widgets::studio_text::{fill_spaced_text, studio_text};
 use crate::ui::core::widgets::visible_drop_target::visible_drop_target;
@@ -864,15 +867,7 @@ fn with_tip<'a>(
     tip: &str,
     target_height: f32,
 ) -> Element<'a, Message> {
-    tooltip(
-        target,
-        container(text(tip.to_string()).size(theme::TOOLTIP_TEXT_SIZE))
-            .padding(theme::TOOLTIP_PADDING)
-            .style(theme::tooltip),
-        tooltip::Position::Bottom,
-    )
-    .gap(24.0 - target_height / 2.0)
-    .into()
+    material_tooltip(target, tip, 24.0 - target_height / 2.0).into()
 }
 
 /// `_IconBtn`: a 15 px icon in a 6 px pad (coral-washed when `active`),

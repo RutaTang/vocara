@@ -22,13 +22,14 @@
 //! copies, and its edits are dropped (the dialog keeps the URL).
 
 use iced::alignment::Vertical;
-use iced::widget::{button, column, container, row, scrollable, text, text_input, tooltip, Space};
+use iced::widget::{button, column, container, row, scrollable, text, text_input, Space};
 use iced::{Background, Border, Color, Element, Length, Padding, Task, Theme};
 use vocara_services::update_check_service::{UpdateCheckService, UpdateInfo};
 
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{self, alpha, bare_button, font, Studio, Zinc};
 use crate::ui::core::widgets::confirm_dialog::{modal, Fade};
+use crate::ui::core::widgets::material_tooltip::material_tooltip;
 use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
 use crate::ui::core::widgets::studio_text::studio_text;
 
@@ -136,16 +137,8 @@ fn dismiss_button<'a>() -> Element<'a, Message> {
     .padding(0)
     .style(bare_button)
     .on_press(Message::Dismiss);
-    tooltip(
-        target,
-        container(text("Dismiss").size(theme::TOOLTIP_TEXT_SIZE))
-            .padding(theme::TOOLTIP_PADDING)
-            .style(theme::tooltip),
-        tooltip::Position::Bottom,
-    )
     // Material's tooltip sits 24 px below the target's centre.
-    .gap(10)
-    .into()
+    material_tooltip(target, "Dismiss", 10.0).into()
 }
 
 // -------------------------------------------------------------------- dialog

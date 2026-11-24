@@ -53,7 +53,7 @@ use iced::alignment::{Horizontal, Vertical};
 use iced::widget::canvas::{self, Frame, Geometry, Path};
 use iced::widget::{
     button, canvas as canvas_widget, column, container, keyed_column, mouse_area, row, text,
-    text_input, tooltip, Column, Space,
+    text_input, Column, Space,
 };
 use iced::{
     mouse, widget, Color, Element, Font, Length, Padding, Point, Rectangle, Renderer, Size,
@@ -70,6 +70,7 @@ use crate::ui::core::motion::Curve;
 use crate::ui::core::theme::{self, alpha, bare_button, boxed, font, Studio};
 use crate::ui::core::widgets::animated::{animated, animated_container, Decoration};
 use crate::ui::core::widgets::confirm_dialog::{self, modal, DialogResult, Fade};
+use crate::ui::core::widgets::material_tooltip::material_tooltip;
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::core::widgets::visible_drop_target::visible_drop_target;
@@ -838,16 +839,8 @@ fn hover_icon<'a>(icon: Icon, tip: &'a str, on_tap: Message, opacity: f32) -> El
         .padding(0)
         .style(bare_button)
         .on_press(on_tap);
-    tooltip(
-        target,
-        container(text(tip).size(theme::TOOLTIP_TEXT_SIZE))
-            .padding(theme::TOOLTIP_PADDING)
-            .style(theme::tooltip),
-        tooltip::Position::Bottom,
-    )
     // Material's tooltip sits 24 px below the target's centre.
-    .gap(24.0 - 14.0 / 2.0)
-    .into()
+    material_tooltip(target, tip, 24.0 - 14.0 / 2.0).into()
 }
 
 /// `_ExpandChevron`: the expand/collapse affordance, a chevron that turns
