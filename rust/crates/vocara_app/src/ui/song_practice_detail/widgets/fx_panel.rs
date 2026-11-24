@@ -49,8 +49,7 @@
 //!   last view (Dart polled the engine itself); the meter keeps Dart's 50 ms
 //!   poll cadence, peak falloff and idle stop over it.
 //! - Flutter animated the toggles (130 ms) and the reorder; iced switches at
-//!   once. iced text has no letter spacing (the titles' 0.8) and no
-//!   ellipsis.
+//!   once.
 
 mod chain;
 pub mod eq;
@@ -80,6 +79,7 @@ use crate::ui::core::theme::{self, boxed, font, Studio};
 use crate::ui::core::widgets::cap_label::cap_label;
 use crate::ui::core::widgets::painter::KeyedCache;
 use crate::ui::core::widgets::studio_controls::fixed_width_readout;
+use crate::ui::core::widgets::studio_text::studio_text;
 use crate::util::to_string_as_fixed;
 
 /// What the panel edits: exactly one of a vocal take's insert chain or an FX
@@ -673,9 +673,10 @@ fn insert_header<'a>(title: &str, on: bool, on_toggle: Vec<Message>) -> Element<
             right: 6.0,
             ..Padding::ZERO
         }),
-        text(title.to_uppercase())
+        studio_text(title.to_uppercase())
             .size(10.5)
             .font(font::BOLD)
+            .letter_spacing(0.8)
             .color(if on {
                 Studio::TEXT_PRIMARY
             } else {

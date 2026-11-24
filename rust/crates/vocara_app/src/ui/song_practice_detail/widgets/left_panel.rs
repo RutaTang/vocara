@@ -36,9 +36,8 @@
 //! - `RepaintBoundary` / `StableSubtree`: no counterpart needed (see
 //!   `stable_subtree`); the canvases cache their drawing.
 //!
-//! Where iced differs: no ellipsis (one-line labels clip), no letter
-//! spacing, the range line's baseline alignment is a bottom alignment, and
-//! the rail's rotated label is drawn on a canvas.
+//! Where iced differs: the range line's baseline alignment is a bottom
+//! alignment, and the rail's rotated label is drawn on a canvas.
 
 use std::sync::Arc;
 
@@ -77,6 +76,7 @@ use crate::ui::core::theme::{self, alpha, bare_button, boxed, fill, font, Studio
 use crate::ui::core::widgets::cap_label::cap_label;
 use crate::ui::core::widgets::studio_controls::{fader_db_readout, studio_fader, studio_pan_knob};
 use crate::ui::core::widgets::studio_hint::spinner;
+use crate::ui::core::widgets::studio_text::{fill_spaced_text, studio_text};
 use crate::ui::song_practice_detail::view_model::analysis_cache::DockTab;
 use crate::util::to_string_as_fixed;
 
@@ -781,7 +781,8 @@ fn rail<'a, M: Clone + 'a>(on: fn(Message) -> M) -> Element<'a, M> {
         .into()
 }
 
-/// The rail's "INSPECTOR", 11 px w700, turned a quarter clockwise
+/// The rail's "INSPECTOR", 11 px w700, 1.5 letter spacing, turned a quarter
+/// clockwise
 /// (`RotatedBox(quarterTurns: 1)`): it reads top to bottom from the top of
 /// its box, centred across the rail.
 struct RailLabel;
@@ -800,16 +801,20 @@ impl<M> canvas::Program<M> for RailLabel {
         let mut frame = Frame::new(renderer, bounds.size());
         frame.translate(Vector::new(bounds.width / 2.0, 0.0));
         frame.rotate(std::f32::consts::FRAC_PI_2);
-        frame.fill_text(canvas::Text {
-            content: "INSPECTOR".to_string(),
-            position: Point::ORIGIN,
-            color: Studio::TEXT_SECONDARY,
-            size: Pixels(11.0),
-            font: font::BOLD,
-            align_x: Alignment::Left,
-            align_y: Vertical::Center,
-            ..canvas::Text::default()
-        });
+        fill_spaced_text(
+            &mut frame,
+            canvas::Text {
+                content: "INSPECTOR".to_string(),
+                position: Point::ORIGIN,
+                color: Studio::TEXT_SECONDARY,
+                size: Pixels(11.0),
+                font: font::BOLD,
+                align_x: Alignment::Left,
+                align_y: Vertical::Center,
+                ..canvas::Text::default()
+            },
+            1.5,
+        );
         vec![frame.into_geometry()]
     }
 }
@@ -818,9 +823,10 @@ impl<M> canvas::Program<M> for RailLabel {
 fn header<'a, M: Clone + 'a>(on: fn(Message) -> M) -> Element<'a, M> {
     container(
         row![
-            text("INSPECTOR")
+            studio_text("INSPECTOR")
                 .size(11)
                 .font(font::BOLD)
+                .letter_spacing(0.6)
                 .color(Studio::TEXT_PRIMARY),
             Space::new().width(Length::Fill),
             button(
@@ -1009,18 +1015,16 @@ fn bus_header<'a, M: 'a>(bus: &'a FxBus) -> Element<'a, M> {
     row![
         dot(dot_color),
         Space::new().width(8),
-        container(
-            text(bus.name.as_str())
-                .size(15)
-                .font(font::BOLD)
-                .color(Studio::TEXT_PRIMARY)
-                .wrapping(Wrapping::None)
-        )
-        .width(Length::Fill)
-        .clip(true),
-        text("FX BUS")
+        studio_text(bus.name.as_str())
+            .size(15)
+            .font(font::BOLD)
+            .color(Studio::TEXT_PRIMARY)
+            .width(Length::Fill)
+            .ellipsis(1),
+        studio_text("FX BUS")
             .size(9)
             .font(font::BOLD)
+            .letter_spacing(0.8)
             .color(Studio::TEXT_FAINT),
     ]
     .align_y(Vertical::Center)
@@ -1034,16 +1038,13 @@ fn take_header<'a, M: 'a>(insp: Inspector<'a>, track: &'a AudioTrack) -> Element
         row![
             dot(take_dot_color(track)),
             Space::new().width(8),
-            container(
-                text(track.display_name.as_str())
-                    .size(13.5)
-                    .font(font::BOLD)
-                    .line_height(1.25)
-                    .color(Studio::TEXT_PRIMARY)
-            )
-            .width(Length::Fill)
-            .max_height(13.5 * 1.25 * 2.0)
-            .clip(true),
+            studio_text(track.display_name.as_str())
+                .size(13.5)
+                .font(font::BOLD)
+                .line_height(1.25)
+                .color(Studio::TEXT_PRIMARY)
+                .width(Length::Fill)
+                .ellipsis(2),
         ]
         .align_y(Vertical::Center),
         Space::new().height(8),
@@ -1167,11 +1168,13 @@ fn channel_footer<'a, M: Clone + 'a>(
     .into()
 }
 
-/// `_StripLabel`: a caption for the footer's rows (9 px w700, faint).
+/// `_StripLabel`: a caption for the footer's rows (9 px w700, 0.5 letter
+/// spacing, faint).
 fn strip_label<'a, M: 'a>(label: &'a str) -> Element<'a, M> {
-    text(label)
+    studio_text(label)
         .size(9)
         .font(font::BOLD)
+        .letter_spacing(0.5)
         .color(Studio::TEXT_FAINT)
         .into()
 }
@@ -1233,14 +1236,11 @@ fn output_chip<'a, M: Clone + 'a>(
     // child too.
     let chip = container(flexible_row(
         vec![
-            container(
-                text(name)
-                    .size(11)
-                    .color(Studio::TEXT_SECONDARY)
-                    .wrapping(Wrapping::None),
-            )
-            .clip(true)
-            .into(),
+            studio_text(name)
+                .size(11)
+                .color(Studio::TEXT_SECONDARY)
+                .ellipsis(1)
+                .into(),
             Space::new().width(4).into(),
             icons::icon(Icon::ChevronDown, 14.0, Studio::TEXT_FAINT).into(),
         ],
@@ -1311,13 +1311,12 @@ fn sends_section<'a, M: Clone + 'a>(
             SEND_MENU_WIDTH,
         );
         let chip = container(
-            text(send_name(&send.bus_id, &strip.targets))
+            studio_text(send_name(&send.bus_id, &strip.targets))
                 .size(10)
                 .color(Studio::TEXT_SECONDARY)
-                .wrapping(Wrapping::None),
+                .ellipsis(1),
         )
         .width(Length::Fill)
-        .clip(true)
         // 6 / 3, and the chip's 1 px border.
         .padding([4, 7])
         .style(|_| boxed(Some(Studio::INSET), 4.0, Some(Studio::BORDER)));
@@ -1496,9 +1495,10 @@ fn voice_summary<'a>(s: VoiceSummary<'a>) -> Element<'a, Message> {
     }
     col = col
         .push(
-            text("VOICE SUMMARY")
+            studio_text("VOICE SUMMARY")
                 .size(10)
                 .font(font::BOLD)
+                .letter_spacing(0.8)
                 .color(Studio::TEXT_SECONDARY),
         )
         .push(Space::new().height(10))
@@ -1697,18 +1697,19 @@ fn metric<'a>(cell: SummaryCell) -> Element<'a, Message> {
     if let Some(color) = cell.dot {
         top = top.push(disc(7.0, color));
     }
-    let one_line = |t: iced::widget::Text<'a>| container(t.wrapping(Wrapping::None)).clip(true);
     tappable(
         container(column![
             top,
             Space::new().height(4),
-            one_line(
-                text(cell.value)
-                    .size(16)
-                    .font(font::EXTRA_BOLD)
-                    .color(Studio::TEXT_PRIMARY)
-            ),
-            one_line(text(cell.sub).size(9.5).color(Studio::TEXT_FAINT)),
+            studio_text(cell.value)
+                .size(16)
+                .font(font::EXTRA_BOLD)
+                .color(Studio::TEXT_PRIMARY)
+                .ellipsis(1),
+            studio_text(cell.sub)
+                .size(9.5)
+                .color(Studio::TEXT_FAINT)
+                .ellipsis(1),
         ])
         .width(Length::Fill)
         // 10 / 9, and the cell's 1 px border.
