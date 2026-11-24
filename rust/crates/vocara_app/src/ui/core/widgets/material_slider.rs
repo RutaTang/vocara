@@ -1,13 +1,23 @@
-//! A Material `Slider`'s overlay around an iced slider: the round glow
-//! (`RoundSliderOverlayShape`) that grows from the thumb's centre when the
-//! pointer comes over the thumb or a drag starts, and shrinks when both
-//! are over, over 100 ms (`kRadialReactionDuration`) on
-//! `Curves.fastOutSlowIn`. Its color is Material 3's (the scheme's primary
-//! at 8 % while the pointer is over the slider, 10 % while dragging,
-//! nothing otherwise), taken as it is at each frame, as Flutter resolved it
-//! on each build. It is drawn under the whole slider, its track included
-//! (Flutter drew it over the track and under the thumb: the track is 3 px
-//! of an overlay 8 % strong).
+//! A Material 3 `Slider` (Flutter 3.38, the 2023 design) drawn over an
+//! iced slider, which takes the input and draws nothing itself. It paints
+//! what `_RenderSlider.paint` did, in its order:
+//!
+//! - the track (`RoundedRectSliderTrackShape`): the part after the thumb
+//!   `track_height` tall, the part before it 2 px taller
+//!   (`additionalActiveTrackHeight`), each a pill, the two meeting half a
+//!   track height past the thumb's centre;
+//! - the overlay (`RoundSliderOverlayShape`): the round glow that grows from
+//!   the thumb's centre when the pointer comes over the thumb or a drag
+//!   starts, and shrinks when both are over, over 100 ms
+//!   (`kRadialReactionDuration`) on `Curves.fastOutSlowIn`. Its color is
+//!   Material 3's (the scheme's primary at 8 % while the pointer is over the
+//!   slider, 10 % while dragging, nothing otherwise), taken as it is at each
+//!   frame, as Flutter resolved it on each build;
+//! - the thumb (`RoundSliderThumbShape`): a disc on a shadow whose
+//!   elevation rises from 1 to 6 with the overlay. The shadow is the
+//!   engine's spot shadow for a light 600 px up and 800 px wide (`drawShadow`:
+//!   offset down by about the elevation, blurred by 4/3 of it, black at
+//!   25 %), its faint ambient part left out.
 
 use std::time::Duration;
 
@@ -15,44 +25,166 @@ use iced::advanced::layout::{self, Layout};
 use iced::advanced::widget::{tree, Operation, Tree};
 use iced::advanced::{overlay, renderer, Clipboard, Renderer as _, Shell, Widget};
 use iced::time::Instant;
+use iced::widget::slider;
 use iced::{
     mouse, window, Background, Border, Color, Element, Event, Length, Point, Rectangle, Renderer,
     Shadow, Size, Theme, Vector,
 };
 
-use crate::ui::core::motion::{Controller, Curve};
+use crate::ui::core::motion::{Controller, Curve, Lerp};
 use crate::ui::core::theme::Zinc;
 
 /// How long the overlay takes to grow or shrink (`kRadialReactionDuration`).
 pub const REACTION: Duration = Duration::from_millis(100);
 
-/// The overlay at full size, around `slider`, whose thumb (`thumb_radius`
-/// round, its centre that far in from each end) shows `value` (0 to 1).
-pub fn slider_overlay<'a, M: 'a>(
+/// How much taller the track is before the thumb
+/// (`additionalActiveTrackHeight`).
+const ADDITIONAL_ACTIVE_TRACK_HEIGHT: f32 = 2.0;
+
+/// The thumb's elevation at rest and under the full overlay
+/// (`RoundSliderThumbShape`'s `elevation`, `pressedElevation`).
+const THUMB_ELEVATION: f32 = 1.0;
+const PRESSED_THUMB_ELEVATION: f32 = 6.0;
+
+/// The iced slider's style under [`material_slider`]: nothing drawn, its
+/// handle `thumb_radius` round (which sets where a click lands).
+pub fn clear_style(thumb_radius: f32) -> impl Fn(&Theme, slider::Status) -> slider::Style {
+    move |_, _| slider::Style {
+        rail: slider::Rail {
+            backgrounds: (
+                Background::Color(Color::TRANSPARENT),
+                Background::Color(Color::TRANSPARENT),
+            ),
+            width: 0.0,
+            border: Border::default(),
+        },
+        handle: slider::Handle {
+            shape: slider::HandleShape::Circle {
+                radius: thumb_radius,
+            },
+            background: Background::Color(Color::TRANSPARENT),
+            border_width: 0.0,
+            border_color: Color::TRANSPARENT,
+        },
+    }
+}
+
+/// What one frame draws.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Paint {
+    inactive_track: Option<Rectangle>,
+    active_track: Option<Rectangle>,
+    overlay: Option<(Rectangle, Color)>,
+    thumb: Rectangle,
+    thumb_shadow: Shadow,
+}
+
+/// The spot shadow `Canvas.drawShadow` casts at `elevation` under the
+/// engine's light (600 px up, 600 px above the shape, 800 px across):
+/// offset down by `600 e / (600 - e)`, blurred by `800 e / (600 - e)`,
+/// black at 25 %.
+fn spot_shadow(elevation: f32) -> Shadow {
+    const LIGHT_HEIGHT: f32 = 600.0;
+    const LIGHT_RADIUS: f32 = 800.0;
+    let share = elevation / (LIGHT_HEIGHT - elevation);
+    Shadow {
+        color: Color::from_rgba(0.0, 0.0, 0.0, 0.25),
+        offset: Vector::new(0.0, LIGHT_HEIGHT * share),
+        blur_radius: LIGHT_RADIUS * share,
+    }
+}
+
+/// How the slider is drawn (`SliderThemeData`, as the Dart call set it).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SliderLook {
+    pub track_height: f32,
+    pub active_track: Color,
+    pub inactive_track: Color,
+    pub thumb: Color,
+    pub thumb_radius: f32,
+    pub overlay_radius: f32,
+}
+
+/// `slider` (drawing nothing of its own) drawn as `look`, its thumb (its
+/// centre `look.thumb_radius` in from each end) showing `value` (0 to 1).
+pub fn material_slider<'a, M: 'a>(
     slider: impl Into<Element<'a, M>>,
     value: f32,
-    thumb_radius: f32,
-    overlay_radius: f32,
+    look: SliderLook,
 ) -> Element<'a, M> {
-    Element::new(SliderOverlay {
+    Element::new(MaterialSlider {
         slider: slider.into(),
         value: value.clamp(0.0, 1.0),
-        thumb_radius,
-        overlay_radius,
+        look,
     })
 }
 
-struct SliderOverlay<'a, M> {
+struct MaterialSlider<'a, M> {
     slider: Element<'a, M>,
     value: f32,
-    thumb_radius: f32,
-    overlay_radius: f32,
+    look: SliderLook,
 }
 
-impl<M> SliderOverlay<'_, M> {
+impl<M> MaterialSlider<'_, M> {
+    /// What it draws in `bounds` with the overlay `t` of the way grown in
+    /// `color`.
+    fn paint(&self, bounds: Rectangle, t: f32, color: Color) -> Paint {
+        let look = self.look;
+        let thumb = self.thumb(bounds);
+        // `getPreferredRect`: the track runs between the thumb's two ends.
+        let track = Rectangle::new(
+            Point::new(
+                bounds.x + look.thumb_radius,
+                bounds.center_y() - look.track_height / 2.0,
+            ),
+            Size::new(
+                (bounds.width - 2.0 * look.thumb_radius).max(0.0),
+                look.track_height,
+            ),
+        );
+        let half = look.track_height / 2.0;
+        let inactive_track = (thumb.x < track.x + track.width - half).then(|| {
+            Rectangle::new(
+                Point::new(thumb.x - half, track.y),
+                Size::new(track.x + track.width - (thumb.x - half), track.height),
+            )
+        });
+        let active_track = (thumb.x > track.x + half).then(|| {
+            Rectangle::new(
+                Point::new(track.x, track.y - ADDITIONAL_ACTIVE_TRACK_HEIGHT / 2.0),
+                Size::new(
+                    thumb.x + half - track.x,
+                    track.height + ADDITIONAL_ACTIVE_TRACK_HEIGHT,
+                ),
+            )
+        });
+        let radius = look.overlay_radius * t;
+        let overlay = (radius > 0.0 && color.a > 0.0).then(|| {
+            (
+                Rectangle::new(
+                    Point::new(thumb.x - radius, thumb.y - radius),
+                    Size::new(2.0 * radius, 2.0 * radius),
+                ),
+                color,
+            )
+        });
+        let elevation = THUMB_ELEVATION.lerp(PRESSED_THUMB_ELEVATION, t);
+        let r = look.thumb_radius;
+        Paint {
+            inactive_track,
+            active_track,
+            overlay,
+            thumb: Rectangle::new(
+                Point::new(thumb.x - r, thumb.y - r),
+                Size::new(2.0 * r, 2.0 * r),
+            ),
+            thumb_shadow: spot_shadow(elevation),
+        }
+    }
+
     /// Where the thumb's centre is in `bounds`.
     fn thumb(&self, bounds: Rectangle) -> Point {
-        let inset = self.thumb_radius;
+        let inset = self.look.thumb_radius;
         Point::new(
             bounds.x + inset + self.value * (bounds.width - 2.0 * inset).max(0.0),
             bounds.center_y(),
@@ -98,7 +230,7 @@ impl State {
     }
 }
 
-impl<M> Widget<M, Theme, Renderer> for SliderOverlay<'_, M> {
+impl<M> Widget<M, Theme, Renderer> for MaterialSlider<'_, M> {
     fn size(&self) -> Size<Length> {
         self.slider.as_widget().size()
     }
@@ -154,7 +286,7 @@ impl<M> Widget<M, Theme, Renderer> for SliderOverlay<'_, M> {
     ) {
         let bounds = layout.bounds();
         let thumb = self.thumb(bounds);
-        let reach = self.overlay_radius;
+        let reach = self.look.overlay_radius;
         let square = Rectangle::new(
             Point::new(thumb.x - reach, thumb.y - reach),
             Size::new(2.0 * reach, 2.0 * reach),
@@ -217,26 +349,7 @@ impl<M> Widget<M, Theme, Renderer> for SliderOverlay<'_, M> {
         cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
-        let (t, color) = tree.state.downcast_ref::<State>().shown();
-        let radius = self.overlay_radius * t;
-        if radius > 0.0 && color.a > 0.0 {
-            let centre = self.thumb(layout.bounds());
-            renderer.fill_quad(
-                renderer::Quad {
-                    bounds: Rectangle::new(
-                        Point::new(centre.x - radius, centre.y - radius),
-                        Size::new(2.0 * radius, 2.0 * radius),
-                    ),
-                    border: Border {
-                        radius: radius.into(),
-                        ..Border::default()
-                    },
-                    shadow: Shadow::default(),
-                    snap: false,
-                },
-                Background::Color(color),
-            );
-        }
+        // The iced slider underneath is clear; it draws for completeness.
         self.slider.as_widget().draw(
             &tree.children[0],
             renderer,
@@ -246,6 +359,33 @@ impl<M> Widget<M, Theme, Renderer> for SliderOverlay<'_, M> {
             cursor,
             viewport,
         );
+        let (t, color) = tree.state.downcast_ref::<State>().shown();
+        let bounds = layout.bounds();
+        let paint = self.paint(bounds, t, color);
+        let mut pill = |bounds: Rectangle, color: Color, shadow: Shadow| {
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds,
+                    border: Border {
+                        radius: (bounds.height.min(bounds.width) / 2.0).into(),
+                        ..Border::default()
+                    },
+                    shadow,
+                    snap: false,
+                },
+                Background::Color(color),
+            );
+        };
+        if let Some(inactive) = paint.inactive_track {
+            pill(inactive, self.look.inactive_track, Shadow::default());
+        }
+        if let Some(active) = paint.active_track {
+            pill(active, self.look.active_track, Shadow::default());
+        }
+        if let Some((ring, color)) = paint.overlay {
+            pill(ring, color, Shadow::default());
+        }
+        pill(paint.thumb, self.look.thumb, paint.thumb_shadow);
     }
 
     fn operate(
@@ -302,30 +442,43 @@ mod tests {
     use super::*;
     use crate::ui::core::widgets::animated::testing::{near, over, Frames, BACKGROUND, MS};
 
-    /// A 200 × 24 slider at the middle (its thumb, 6 round, at (100, 12)),
-    /// its handle and rail clear so only the overlay draws.
-    fn view<'a>() -> Element<'a, f32> {
-        let clear = |_: &Theme, _| slider::Style {
-            rail: slider::Rail {
-                backgrounds: (
-                    Background::Color(Color::TRANSPARENT),
-                    Background::Color(Color::TRANSPARENT),
-                ),
-                width: 3.0,
-                border: Border::default(),
-            },
-            handle: slider::Handle {
-                shape: slider::HandleShape::Circle { radius: 6.0 },
-                background: Background::Color(Color::TRANSPARENT),
-                border_width: 0.0,
-                border_color: Color::TRANSPARENT,
-            },
-        };
-        let s = slider(0.0..=1.0, 0.5, |v| v).height(24).style(clear);
-        container(slider_overlay(s, 0.5, 6.0, 12.0))
+    /// Nothing but the overlay (the shadow, black, does not show on the
+    /// black window).
+    const CLEAR: SliderLook = SliderLook {
+        track_height: 3.0,
+        active_track: Color::TRANSPARENT,
+        inactive_track: Color::TRANSPARENT,
+        thumb: Color::TRANSPARENT,
+        thumb_radius: 6.0,
+        overlay_radius: 12.0,
+    };
+
+    const ACTIVE: Color = Color::from_rgb8(200, 80, 60);
+    const INACTIVE: Color = Color::from_rgb8(40, 40, 90);
+    const THUMB: Color = Color::from_rgb8(220, 90, 70);
+
+    const LOOK: SliderLook = SliderLook {
+        track_height: 3.0,
+        active_track: ACTIVE,
+        inactive_track: INACTIVE,
+        thumb: THUMB,
+        thumb_radius: 6.0,
+        overlay_radius: 12.0,
+    };
+
+    /// A 200 × 24 slider at the middle (its thumb, 6 round, at (100, 12)).
+    fn view_as<'a>(look: SliderLook) -> Element<'a, f32> {
+        let s = slider(0.0..=1.0, 0.5, |v| v)
+            .height(24)
+            .style(clear_style(6.0));
+        container(material_slider(s, 0.5, look))
             .width(200)
             .height(24)
             .into()
+    }
+
+    fn view<'a>() -> Element<'a, f32> {
+        view_as(CLEAR)
     }
 
     fn glow(alpha: f32) -> Color {
@@ -393,20 +546,113 @@ mod tests {
         assert!(near(window.pixel(ring), BACKGROUND));
     }
 
+    fn paint_at(value: f32, t: f32) -> Paint {
+        let o = MaterialSlider::<()> {
+            slider: Space::new().into(),
+            value,
+            look: LOOK,
+        };
+        o.paint(
+            Rectangle::new(Point::ORIGIN, Size::new(200.0, 24.0)),
+            t,
+            Color::WHITE,
+        )
+    }
+
     #[test]
     fn its_thumb_follows_the_value_inside_the_thumbs_inset() {
         let bounds = Rectangle::new(Point::new(10.0, 0.0), Size::new(100.0, 24.0));
         let at = |value: f32| {
-            let o = SliderOverlay::<()> {
+            let o = MaterialSlider::<()> {
                 slider: Space::new().into(),
                 value,
-                thumb_radius: 6.0,
-                overlay_radius: 12.0,
+                look: LOOK,
             };
             o.thumb(bounds)
         };
         assert_eq!(at(0.0), Point::new(16.0, 12.0));
         assert_eq!(at(1.0), Point::new(104.0, 12.0));
         assert_eq!(at(0.5), Point::new(60.0, 12.0));
+    }
+
+    #[test]
+    fn the_track_is_2_px_taller_before_the_thumb_and_the_two_meet_past_its_centre() {
+        let paint = paint_at(0.5, 0.0);
+        // The thumb at (100, 12); the track from 6 to 194.
+        assert_eq!(
+            paint.active_track,
+            Some(Rectangle::new(Point::new(6.0, 9.5), Size::new(95.5, 5.0)))
+        );
+        assert_eq!(
+            paint.inactive_track,
+            Some(Rectangle::new(Point::new(98.5, 10.5), Size::new(95.5, 3.0)))
+        );
+        assert_eq!(
+            paint.thumb,
+            Rectangle::new(Point::new(94.0, 6.0), Size::new(12.0, 12.0))
+        );
+        assert_eq!(paint.overlay, None, "no overlay at rest");
+        // At the ends one part is not drawn.
+        assert_eq!(paint_at(0.0, 0.0).active_track, None);
+        assert_eq!(paint_at(1.0, 0.0).inactive_track, None);
+    }
+
+    #[test]
+    fn the_thumb_s_shadow_rises_from_elevation_1_to_6_with_the_overlay() {
+        let rest = paint_at(0.5, 0.0).thumb_shadow;
+        assert!((rest.offset.y - 600.0 / 599.0).abs() < 1e-4, "{rest:?}");
+        assert!((rest.blur_radius - 800.0 / 599.0).abs() < 1e-4);
+        assert_eq!(rest.color, Color::from_rgba(0.0, 0.0, 0.0, 0.25));
+        let up = paint_at(0.5, 1.0).thumb_shadow;
+        assert!((up.offset.y - 3600.0 / 594.0).abs() < 1e-4, "{up:?}");
+        assert!((up.blur_radius - 4800.0 / 594.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn it_draws_the_track_then_the_overlay_then_the_thumb() {
+        let mut window = Frames::new(Size::new(220.0, 40.0));
+        let t0 = Instant::now();
+        window.frame(view_as(LOOK), &[], t0);
+        assert!(near(window.pixel(Point::new(150.0, 12.0)), INACTIVE));
+        // Rows 10 to 13 lie wholly inside the 5 px part (9.5 to 14.5); the
+        // 3 px part (10.5 to 13.5) only half covers row 10.
+        assert!(
+            near(window.pixel(Point::new(50.0, 10.0)), ACTIVE),
+            "5 px tall"
+        );
+        assert!(
+            !near(window.pixel(Point::new(150.0, 10.0)), INACTIVE),
+            "3 px: half"
+        );
+        assert!(
+            near(window.pixel(Point::new(150.0, 9.0)), BACKGROUND),
+            "3 px: clear"
+        );
+        assert!(near(window.pixel(Point::new(100.0, 12.0)), THUMB));
+        // Under the pointer the overlay tints the track and not the thumb
+        // (a wide overlay here, to see it on the track clear of the thumb's
+        // shadow, which reaches 14 px out at elevation 6).
+        let wide = SliderLook {
+            overlay_radius: 40.0,
+            ..LOOK
+        };
+        window.point_at(Point::new(100.0, 12.0));
+        window.frame(view_as(wide), &[], t0);
+        window.frame(view_as(wide), &[], t0 + 100 * MS);
+        let tint = Color {
+            a: Zinc::PRIMARY.a * 0.08,
+            ..Zinc::PRIMARY
+        };
+        assert!(
+            near(window.pixel(Point::new(130.0, 12.0)), over(tint, INACTIVE)),
+            "over the track"
+        );
+        assert!(
+            near(window.pixel(Point::new(100.0, 12.0)), THUMB),
+            "under the thumb"
+        );
+        // The raised thumb's shadow darkens the track under it.
+        let shaded = window.pixel(Point::new(100.0, 20.0));
+        assert!(shaded.r < over(tint, BACKGROUND).r - 0.01, "{shaded:?}");
     }
 }

@@ -196,7 +196,7 @@ structure every screen follows, so screens ported by different hands fit:
   its content from an animating value): they keep their animation in the
   widget tree, take their time from `RedrawRequested` and ask for the next
   frame only while they move; so do the widgets that port Material's own
-  motion (`material_tooltip`, `fading_scrollbar`, `slider_overlay`,
+  motion (`material_tooltip`, `fading_scrollbar`, `material_slider`,
   `material_switch` (Material 3's switch as forui themed it, read off
   Flutter 3.38's `switch.dart`), the `InkWell` highlights of
   `animated::ink_hover`, the FX chain's reordering cards). A model that animates (the snack bars, `ui::snack`;

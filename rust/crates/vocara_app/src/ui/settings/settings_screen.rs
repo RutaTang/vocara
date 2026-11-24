@@ -36,9 +36,10 @@
 //! snack bar did, its 3.5 s counted from the end of its entrance
 //! (`ui::snack`).
 //!
-//! Flutter's Material slider and switch are drawn here with iced's slider,
-//! under Material's overlay (`slider_overlay`: it grows over 100 ms under
-//! the pointer on the thumb or a drag), and Material 3's switch as forui
+//! Flutter's Material slider and switch are drawn here as Material 3 drew
+//! them: the slider's track, overlay and shadowed thumb over iced's slider,
+//! which takes the input (`material_slider`: the overlay grows over 100 ms
+//! under the pointer on the thumb or a drag), and the switch as forui
 //! themed it (`material_switch`: its 300 ms toggle, stretching thumb, hover
 //! and press rings, and drag); the switch's semantics label has no
 //! counterpart.
@@ -58,9 +59,7 @@ use iced::futures::{Stream, StreamExt};
 use iced::widget::{
     button, column, container, row, scrollable, slider, stack, text, Column, Space,
 };
-use iced::{
-    Background, Border, Color, Element, Length, Padding, Shadow, Subscription, Task, Theme, Vector,
-};
+use iced::{Color, Element, Length, Padding, Shadow, Subscription, Task, Theme, Vector};
 use vocara_model::diagnostics::DiagnosticsLog;
 use vocara_model::models::audio_device::AudioDevice;
 use vocara_model::util::export_copy::{export_copy, exports_into};
@@ -80,9 +79,9 @@ use crate::ui::core::theme::{self, alpha, bare_button, boxed, font, Studio};
 use crate::ui::core::widgets::animated::ink_hover;
 use crate::ui::core::widgets::confirm_dialog::ConfirmDialog;
 use crate::ui::core::widgets::fading_scrollbar::Fading;
+use crate::ui::core::widgets::material_slider::{clear_style, material_slider, SliderLook};
 use crate::ui::core::widgets::material_switch::material_switch;
 use crate::ui::core::widgets::slide::{cupertino, slide, PAGE_TRANSITION};
-use crate::ui::core::widgets::slider_overlay::slider_overlay;
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::home::widgets::update_notice::UpdateDownloadDialog;
@@ -1454,17 +1453,23 @@ fn reverb_card<'a>(wet: f64) -> Element<'a, Message> {
     let value = wet.clamp(0.0, 1.0);
     // Flutter's track sits the overlay radius (12) in from each end; iced's
     // runs edge to edge with the thumb's centre a radius (6) in.
-    let reverb = container(slider_overlay(
+    let reverb = container(material_slider(
         slider(0.0..=1.0, value, |wet| {
             Message::Choose(Choice::MonitorReverb(wet))
         })
         .step(0.01)
         .height(24)
-        .style(reverb_slider_style),
+        .style(clear_style(6.0)),
         value as f32,
-        6.0,
-        // `RoundSliderOverlayShape(overlayRadius: 12)`.
-        12.0,
+        SliderLook {
+            track_height: 3.0,
+            active_track: Studio::ACCENT,
+            inactive_track: Studio::INSET,
+            thumb: Studio::ACCENT,
+            thumb_radius: 6.0,
+            // `RoundSliderOverlayShape(overlayRadius: 12)`.
+            overlay_radius: 12.0,
+        },
     ))
     .id(REVERB_SLIDER)
     .padding(Padding::from([0, 6]))
@@ -1491,30 +1496,6 @@ fn reverb_card<'a>(wet: f64) -> Element<'a, Message> {
     .padding(Padding::from([9, 15]))
     .style(theme::card(CARD_RADIUS))
     .into()
-}
-
-/// The reverb slider: a 3 px track, coral up to a 6 px coral thumb, the
-/// inset colour after it.
-fn reverb_slider_style(_: &Theme, _: slider::Status) -> slider::Style {
-    slider::Style {
-        rail: slider::Rail {
-            backgrounds: (
-                Background::Color(Studio::ACCENT),
-                Background::Color(Studio::INSET),
-            ),
-            width: 3.0,
-            border: Border {
-                radius: 1.5.into(),
-                ..Border::default()
-            },
-        },
-        handle: slider::Handle {
-            shape: slider::HandleShape::Circle { radius: 6.0 },
-            background: Background::Color(Studio::ACCENT),
-            border_width: 0.0,
-            border_color: Color::TRANSPARENT,
-        },
-    }
 }
 
 /// Whether only headphones play from the current output — wired ones on an
