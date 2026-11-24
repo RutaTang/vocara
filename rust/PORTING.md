@@ -209,8 +209,8 @@ structure every screen follows, so screens ported by different hands fit:
 - **Text fields** (`widgets::text_field`): iced's `text_input` and
   `text_editor` keep their caret, focus and blink in private state and draw
   a 1 px square caret in the text's color, under the text, so the app forks
-  them (iced_widget 0.14.2, MIT; their keys, mouse, clipboard, input method
-  and scrolling unchanged) for what Flutter's macOS `TextField` did: its
+  them (iced_widget 0.14.2, MIT; their keys, mouse, clipboard and input
+  method unchanged but where noted) for what Flutter's macOS `TextField` did: its
   caret (2 px, round ends, `cursorColor`, a pixel above and below the line,
   2 device pixels left of the glyph edge, never left of the text, on a
   device pixel, over the text, 500 ms on and off, clipped to the field only
@@ -219,7 +219,14 @@ structure every screen follows, so screens ported by different hands fit:
   toolbar there with what macOS offered: Cut, Copy, Paste, no Select All).
   A multi-line field wraps 3 px short of its width (the caret's room); one
   read-only is `SelectableText` (it selects and copies, shows no caret,
-  and keeps its own selection). A press of any button outside a field
+  and keeps its own selection). A single-line field's text, when wider
+  than the field, scrolls as `EditableText` scrolled it
+  (`text_field::input::scroll`): only as far as shows the caret, over
+  100 ms (`Curves.fastOutSlowIn`) after an edit, a click or the focus
+  coming, at once for a keyboard move or a drag of the selection; it stays
+  where it is while the field is unfocused, Home and End only scroll on
+  macOS (`scrollToBeginningOfDocument:`), and a wheel's or trackpad's
+  horizontal delta scrolls it. A press of any button outside a field
   unfocuses it, as `TextFieldTapRegion` did. The fields sit forui's
   `contentPadding` less compact density's inside their wells
   (`theme::FIELD_PADDING`: 10 across, 6 down), and a bordered container's
@@ -329,10 +336,6 @@ small and written down in the module that has it:
   corners as circular arcs, not superellipses, and its labels in Inter at
   Inter's natural line height, where Flutter set them in the system UI
   font (iced cannot name that hidden family).
-- A single-line field's text, when wider than the field, scrolls as iced's
-  did (the caret kept 5 px in from the right edge as it moves), not as
-  Flutter's `EditableText` did (only as far as reveals the caret, over
-  100 ms).
 
 ## Tracking
 

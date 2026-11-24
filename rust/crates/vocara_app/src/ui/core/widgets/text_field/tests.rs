@@ -19,6 +19,7 @@ use super::editor::{self, Action, Edit, Position};
 use super::input;
 use super::toolbar::{self, Item};
 use super::*;
+use crate::ui::core::motion::Curve;
 use crate::ui::core::theme::{self, app_theme, font, Studio, DEFAULT_TEXT_SIZE};
 use crate::ui::core::widgets::animated::testing::{near, over, BACKGROUND};
 use crate::ui::core::widgets::studio_text::testing::{laid, load_fonts, spec};
@@ -690,4 +691,230 @@ fn a_multi_line_field_draws_the_caret_on_its_line() {
     }
     // Not on the first line.
     assert!(!near(window.pixel(x, LINE_TOP as u32 + 7), Studio::ACCENT));
+}
+
+// ------------------------------------------------------------ the scroll
+
+/// Reads the first single-line field's scroll.
+struct ReadScroll(Option<f32>);
+
+impl iced::advanced::widget::Operation for ReadScroll {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn iced::advanced::widget::Operation)) {
+        operate(self);
+    }
+
+    fn custom(
+        &mut self,
+        _id: Option<&iced::widget::Id>,
+        _bounds: iced::Rectangle,
+        state: &mut dyn std::any::Any,
+    ) {
+        if let Some(state) = state.downcast_ref::<input::State>() {
+            self.0.get_or_insert(state.scroll_offset());
+        }
+    }
+}
+
+impl Window {
+    /// How far the single-line field in `view` has its text scrolled, as
+    /// last drawn.
+    fn scroll<'a, M>(&mut self, view: impl Into<Element<'a, M>>) -> f32 {
+        let mut ui = UserInterface::build(
+            view,
+            self.size,
+            std::mem::take(&mut self.cache),
+            &mut self.renderer,
+        );
+        let mut read = ReadScroll(None);
+        ui.operate(&self.renderer, &mut read);
+        self.cache = ui.into_cache();
+        read.0.expect("a single-line field")
+    }
+}
+
+/// The field's text box: 240 wide (the 260 field less its inset).
+const BOX: f32 = 240.0;
+
+fn typed(text: &str) -> Event {
+    iced_test::simulator::press_key(keyboard::Key::Character(text.into()), Some(text.into()))
+}
+
+fn key(named: Named) -> Event {
+    iced_test::simulator::press_key(keyboard::Key::Named(named), None)
+}
+
+fn command() -> Event {
+    Event::Keyboard(keyboard::Event::ModifiersChanged(
+        keyboard::Modifiers::COMMAND,
+    ))
+}
+
+/// The text the field published last among `messages`, if any.
+fn input_of(messages: Vec<Msg>) -> Option<String> {
+    messages.into_iter().rev().find_map(|m| match m {
+        Msg::Input(text) => Some(text),
+        _ => None,
+    })
+}
+
+/// The longest run of a's the box holds with the caret's room after it.
+fn filler() -> String {
+    let mut text = String::from("a");
+    while width(&format!("{text}a")) + caret::MARGIN < BOX {
+        text.push('a');
+    }
+    text
+}
+
+/// Where the caret at the end of `text` is revealed: its right edge (2 px
+/// wide, 2 device pixels left of the glyph edge, on a pixel) on the box's.
+fn revealed_end(text: &str) -> f32 {
+    let left = (TEXT_X + width(text) - 2.0).round() - TEXT_X;
+    left + caret::WIDTH - BOX
+}
+
+/// The field holding the filler, clicked at its end, then `more` typed
+/// there at `t0` (one frame): the text, after the frame that shows it.
+fn type_past_the_end(window: &mut Window, more: &str, t0: Instant) -> String {
+    let text = filler();
+    let at = Point::new(TEXT_X + width(&text) + 1.0, MIDDLE);
+    window.run(field(&text), at, &click(), t0 - 300 * MS);
+    window.run(field(&text), at, &[], t0 - 200 * MS);
+    let keys: Vec<Event> = more.chars().map(|c| typed(&c.to_string())).collect();
+    let (messages, _) = window.run(field(&text), at, &keys, t0);
+    input_of(messages).expect("typed")
+}
+
+#[test]
+fn typing_past_the_edge_scrolls_only_as_far_as_shows_the_caret_over_100_ms() {
+    caret::set_scale_factor(1.0);
+    let mut window = window();
+    let at = Point::new(150.0, MIDDLE);
+    let t0 = Instant::now() + 1000 * MS;
+    let text = type_past_the_end(&mut window, "WW", t0);
+    // The frame that showed it, still unscrolled; then the run's first
+    // frame...
+    assert_eq!(window.scroll(field(&text)), 0.0);
+    let t1 = t0 + 16 * MS;
+    window.run(field(&text), at, &[], t1);
+    assert_eq!(window.scroll(field(&text)), 0.0);
+    // ...half way on fastOutSlowIn...
+    let to = revealed_end(&text);
+    assert!(
+        to > 0.0 && to < width("WW"),
+        "only as far as the caret: {to}"
+    );
+    window.run(field(&text), at, &[], t1 + 50 * MS);
+    let half = to * Curve::FastOutSlowIn.transform(0.5);
+    assert!((window.scroll(field(&text)) - half).abs() < 0.01);
+    // ...and there after 100 ms.
+    window.run(field(&text), at, &[], t1 + 100 * MS);
+    assert!((window.scroll(field(&text)) - to).abs() < 0.01);
+    // The caret on the box's last two pixels, over the text.
+    let x = (TEXT_X + BOX) as u32;
+    assert!(near(
+        window.pixel(x - 1, LINE_TOP as u32 + 7),
+        Studio::ACCENT
+    ));
+    assert!(near(
+        window.pixel(x - 2, LINE_TOP as u32 + 7),
+        Studio::ACCENT
+    ));
+
+    // The focus going elsewhere leaves the text where it was (iced's
+    // field went back to its start).
+    let away = Point::new(10.0, 150.0);
+    window.run(field(&text), away, &click(), t1 + 300 * MS);
+    window.run(field(&text), away, &[], t1 + 400 * MS);
+    assert!((window.scroll(field(&text)) - to).abs() < 0.01);
+}
+
+#[test]
+fn deleting_at_the_end_slides_the_text_back_into_range() {
+    caret::set_scale_factor(1.0);
+    let mut window = window();
+    let at = Point::new(150.0, MIDDLE);
+    let t0 = Instant::now() + 1000 * MS;
+    let text = type_past_the_end(&mut window, "WWW", t0);
+    window.run(field(&text), at, &[], t0 + 16 * MS);
+    window.run(field(&text), at, &[], t0 + 200 * MS);
+    let before = window.scroll(field(&text));
+    assert!((before - revealed_end(&text)).abs() < 0.01);
+
+    let (messages, _) = window.run(field(&text), at, &[key(Named::Backspace)], t0 + 300 * MS);
+    let text = input_of(messages).expect("deleted");
+    let max = width(&text) + caret::MARGIN - BOX;
+    assert!(before > max, "out of range");
+    // Out of range for the frame that shows the edit, then back over
+    // 100 ms.
+    assert_eq!(window.scroll(field(&text)), before);
+    let t1 = t0 + 316 * MS;
+    window.run(field(&text), at, &[], t1);
+    assert_eq!(window.scroll(field(&text)), before);
+    window.run(field(&text), at, &[], t1 + 50 * MS);
+    let half = before + (max - before) * Curve::FastOutSlowIn.transform(0.5);
+    assert!((window.scroll(field(&text)) - half).abs() < 0.01);
+    window.run(field(&text), at, &[], t1 + 100 * MS);
+    assert!((window.scroll(field(&text)) - max).abs() < 0.01);
+}
+
+#[test]
+fn a_keyboard_move_reveals_the_caret_at_once() {
+    caret::set_scale_factor(1.0);
+    let mut window = window();
+    let at = Point::new(150.0, MIDDLE);
+    let t0 = Instant::now() + 1000 * MS;
+    let text = type_past_the_end(&mut window, "WWWW", t0);
+    window.run(field(&text), at, &[], t0 + 16 * MS);
+    window.run(field(&text), at, &[], t0 + 200 * MS);
+    let end = window.scroll(field(&text));
+    assert!(end > 0.0);
+    // Home (on macOS it scrolls alone; elsewhere it takes the caret
+    // along): at once, in the frame of the key.
+    window.run(field(&text), at, &[key(Named::Home)], t0 + 300 * MS);
+    assert_eq!(window.scroll(field(&text)), 0.0);
+    // End: back to the end, at once.
+    window.run(field(&text), at, &[key(Named::End)], t0 + 400 * MS);
+    let back = window.scroll(field(&text));
+    assert!((back - end).abs() < 0.01, "{back} {end}");
+    // Select All shows the selection's end, at once.
+    window.run(field(&text), at, &[key(Named::Home)], t0 + 500 * MS);
+    window.run(field(&text), at, &[command(), typed("a")], t0 + 600 * MS);
+    let back = window.scroll(field(&text));
+    assert!((back - end).abs() < 0.01, "{back} {end}");
+}
+
+#[test]
+fn a_trackpad_swipe_across_the_field_scrolls_it_within_its_range() {
+    caret::set_scale_factor(1.0);
+    let mut window = window();
+    let text = format!("{}WWWW", filler());
+    let at = Point::new(150.0, MIDDLE);
+    let swipe = |x: f32, y: f32| {
+        Event::Mouse(mouse::Event::WheelScrolled {
+            delta: mouse::ScrollDelta::Pixels { x, y },
+        })
+    };
+    let t0 = Instant::now();
+    let (_, statuses) = window.run(field(&text), at, &[swipe(-30.0, 2.0)], t0);
+    assert_eq!(statuses, vec![event::Status::Captured]);
+    assert_eq!(window.scroll(field(&text)), 30.0);
+    // Mostly down: the page's, not the field's.
+    let (_, statuses) = window.run(field(&text), at, &[swipe(-3.0, -20.0)], t0);
+    assert_eq!(statuses, vec![event::Status::Ignored]);
+    assert_eq!(window.scroll(field(&text)), 30.0);
+    // No further than the line and the caret's room.
+    window.run(field(&text), at, &[swipe(-500.0, 0.0)], t0);
+    let max = width(&text) + caret::MARGIN - BOX;
+    assert!((window.scroll(field(&text)) - max).abs() < 0.01);
+}
+
+#[test]
+fn cut_without_a_selection_cuts_nothing() {
+    let mut window = window();
+    let at = Point::new(TEXT_X + 1.0, MIDDLE);
+    let t0 = Instant::now();
+    window.run(field("abc"), at, &click(), t0);
+    let (messages, _) = window.run(field("abc"), at, &[command(), typed("x")], t0 + 16 * MS);
+    assert_eq!(messages, vec![]);
 }

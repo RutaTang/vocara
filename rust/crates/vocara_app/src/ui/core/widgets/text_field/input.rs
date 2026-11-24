@@ -10,13 +10,13 @@
 //! every pointer down outside it), and the window losing focus closes its
 //! menu as it hides its caret.
 //!
-//! The text scrolls as iced's does, not as Flutter's did: when it is wider
-//! than the field, iced keeps the caret 5 px in from the right edge as it
-//! moves, where Flutter's `EditableText` scrolled only as far as revealed
-//! the caret, over 100 ms (`_showCaretOnScreen`).
+//! Its text scrolls as Flutter's did, not as iced's (which kept the caret
+//! 5 px in from the right edge as it moved, and the text at its start while
+//! unfocused): see [`scroll`].
 
 mod cursor;
 mod editor;
+pub mod scroll;
 
 use iced::advanced::clipboard::{self, Clipboard};
 use iced::advanced::graphics::text::cosmic_text::Affinity;
@@ -44,6 +44,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 pub use cursor::Cursor;
 use editor::Editor;
+use scroll::{Geometry, Reveal, Scroll};
 
 use super::toolbar::{self, Item};
 use super::{caret, DEFAULT_CARET};
@@ -172,11 +173,9 @@ impl<'a, Message: Clone> TextInput<'a, Message> {
             cursor::State::Selection { start, end } => start.min(end),
         };
 
-        let text = state.value.raw();
-        let (cursor_x, scroll_offset) =
-            measure_cursor_and_scroll_offset(text, text_bounds, caret_index);
+        let cursor_x = glyph_x(state, caret_index);
 
-        let x = (text_bounds.x + cursor_x).floor() - scroll_offset;
+        let x = (text_bounds.x + cursor_x).floor() - state.scroll.pixels();
 
         InputMethod::Enabled {
             cursor: Rectangle::new(
@@ -216,17 +215,20 @@ impl<'a, Message: Clone> TextInput<'a, Message> {
 
         let text = value.to_string();
 
-        // The caret to draw over the text, the scroll offset, and whether
-        // a selection is drawn.
-        let (caret, offset, selection) = if let Some(focus) = state
+        // The text's scroll, which stays where it was put while the field
+        // is not focused (see `scroll`).
+        let offset = state.scroll.pixels();
+
+        // The caret to draw over the text, and whether a selection is
+        // drawn.
+        let (caret, selection) = if let Some(focus) = state
             .is_focused
             .as_ref()
             .filter(|focus| focus.is_window_focused)
         {
             match state.cursor.state(value) {
                 cursor::State::Index(position) => {
-                    let (x, offset) =
-                        measure_cursor_and_scroll_offset(state.value.raw(), text_bounds, position);
+                    let x = glyph_x(state, position);
 
                     let is_caret_visible = !is_disabled
                         && ((focus.now - focus.updated_at).as_millis()
@@ -242,38 +244,25 @@ impl<'a, Message: Clone> TextInput<'a, Message> {
                         caret::rect(x, 0.0, text_bounds.height, max_x)
                     });
 
-                    (caret, offset, None)
+                    (caret, None)
                 }
                 cursor::State::Selection { start, end } => {
-                    let left = start.min(end);
-                    let right = end.max(start);
-
-                    let (left_position, left_offset) =
-                        measure_cursor_and_scroll_offset(state.value.raw(), text_bounds, left);
-
-                    let (right_position, right_offset) =
-                        measure_cursor_and_scroll_offset(state.value.raw(), text_bounds, right);
-
-                    let width = right_position - left_position;
+                    let left_position = glyph_x(state, start.min(end));
+                    let right_position = glyph_x(state, end.max(start));
 
                     (
                         None,
-                        if end == right {
-                            right_offset
-                        } else {
-                            left_offset
-                        },
                         Some(Rectangle {
                             x: text_bounds.x + left_position,
                             y: text_bounds.y,
-                            width,
+                            width: right_position - left_position,
                             height: text_bounds.height,
                         }),
                     )
                 }
             }
         } else {
-            (None, 0.0, None)
+            (None, None)
         };
 
         let draw = |renderer: &mut Renderer, viewport| {
@@ -324,11 +313,12 @@ impl<'a, Message: Clone> TextInput<'a, Message> {
         }
 
         // Over the text (`paintCursorAboveText`). `RenderEditable` clips
-        // what it paints to its box only while the text overflows it
-        // (`_hasVisualOverflow`): otherwise the caret's pixel above and
-        // below the line shows.
+        // what it paints to its box only while the text overflows it or is
+        // scrolled (`_hasVisualOverflow`): otherwise the caret's pixel above
+        // and below the line shows.
         if let Some(rect) = caret {
-            let overflows = state.value.raw().min_width() + caret::MARGIN > text_bounds.width;
+            let overflows =
+                state.value.raw().min_width() + caret::MARGIN > text_bounds.width || offset != 0.0;
             caret::draw(
                 renderer,
                 rect + Vector::new(text_bounds.x - offset, text_bounds.y),
@@ -342,7 +332,7 @@ impl<'a, Message: Clone> TextInput<'a, Message> {
     /// whether it lies after the glyph left of it (Flutter's upstream
     /// affinity): `getPositionForOffset`.
     fn position_at(&self, state: &State, text_bounds: Rectangle, x: f32) -> (usize, bool) {
-        let offset = offset(text_bounds, &self.value, state);
+        let offset = state.scroll.pixels();
         let content = self.value.to_string();
         let Some(hit) = state
             .value
@@ -376,8 +366,12 @@ impl<'a, Message: Clone> TextInput<'a, Message> {
         };
         if !on_selection || !state.is_focused() {
             let (start, end) = word_at(&self.value, index, upstream);
+            let (before, was_focused) = (state.cursor, state.is_focused());
             state.cursor.select_range(start, end);
             focus(state);
+            if before != state.cursor || !was_focused {
+                state.scroll.schedule(Reveal::Animate);
+            }
         }
         state.toolbar = Some(toolbar::State::new(
             position,
@@ -425,6 +419,8 @@ struct Menu<'b, Message> {
     value: &'b mut Value,
     state: &'b mut State,
     on_input: Option<&'b dyn Fn(String) -> Message>,
+    /// The field's layout, for the scroll.
+    geometry: Geometry,
 }
 
 impl<Message> toolbar::Field<Message> for Menu<'_, Message> {
@@ -462,6 +458,9 @@ impl<Message> toolbar::Field<Message> for Menu<'_, Message> {
                         clipboard::Kind::Standard,
                         self.value.select(start, end).to_string(),
                     );
+                    // `copySelection(toolbar)`'s `bringIntoView`.
+                    let x = extent_x(state, self.value);
+                    state.scroll.bring_into_view(&self.geometry, x);
                 }
             }
             Item::Cut => {
@@ -476,6 +475,9 @@ impl<Message> toolbar::Field<Message> for Menu<'_, Message> {
                     let mut editor = Editor::new(self.value, &mut state.cursor);
                     editor.delete();
                     shell.publish(on_input(editor.contents()));
+                    // The edit's reveal, then a `bringIntoView` after the
+                    // frame, which stops it.
+                    state.scroll.schedule(Reveal::Jump);
                 }
             }
             Item::Paste => {
@@ -489,6 +491,7 @@ impl<Message> toolbar::Field<Message> for Menu<'_, Message> {
                 let mut editor = Editor::new(self.value, &mut state.cursor);
                 editor.paste(Value::new(&content));
                 shell.publish(on_input(editor.contents()));
+                state.scroll.schedule(Reveal::Jump);
             }
         }
         if let Some(focus) = &mut state.is_focused {
@@ -581,6 +584,8 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
 
         operation.text_input(self.id.as_ref(), layout.bounds(), state);
         operation.focusable(self.id.as_ref(), layout.bounds(), state);
+        // Its own state ([`State`]), for an operation that reads it.
+        operation.custom(self.id.as_ref(), layout.bounds(), state);
     }
 
     fn update(
@@ -606,11 +611,21 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
             );
         };
 
+        if !matches!(event, Event::Window(window::Event::RedrawRequested(_))) {
+            // A reveal whose frame has been drawn ran at that frame's end,
+            // before this.
+            let state = state(tree);
+            let geometry = geometry(state, layout);
+            let x = extent_x(state, &self.value);
+            state.scroll.flush(&geometry, x);
+        }
+
         match &event {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
             | Event::Touch(touch::Event::FingerPressed { .. }) => {
                 let state = state(tree);
                 let cursor_before = state.cursor;
+                let was_focused = state.is_focused();
 
                 let click_position = cursor.position_over(layout.bounds());
 
@@ -680,6 +695,13 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
 
                     state.last_click = Some(click);
 
+                    // A click that moved the selection or brought the focus
+                    // reveals the caret (`userUpdateTextEditingValue`,
+                    // `_handleFocusChanged`).
+                    if cursor_before != state.cursor || !was_focused {
+                        state.scroll.schedule(Reveal::Animate);
+                    }
+
                     if cursor_before != state.cursor {
                         shell.request_redraw();
                     }
@@ -736,6 +758,7 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
                             .unwrap_or(0);
 
                     let selection_before = state.cursor.selection(&value);
+                    let cursor_before = state.cursor;
 
                     match is_dragging {
                         Drag::Select => {
@@ -760,6 +783,14 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
 
                     if let Some(focus) = &mut state.is_focused {
                         focus.updated_at = Instant::now();
+                    }
+
+                    // A drag shows the selection's moving end at once.
+                    if cursor_before != state.cursor {
+                        let geometry = geometry(state, layout);
+                        let x = extent_x(state, &value);
+                        state.scroll.bring_into_view(&geometry, x);
+                        shell.request_redraw();
                     }
 
                     if selection_before != state.cursor.selection(&value) {
@@ -798,12 +829,17 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
                                 return;
                             };
 
-                            if let Some((start, end)) = state.cursor.selection(&self.value) {
-                                clipboard.write(
-                                    clipboard::Kind::Standard,
-                                    self.value.select(start, end).to_string(),
-                                );
-                            }
+                            // Nothing to cut without a selection
+                            // (`CopySelectionTextIntent.cut` does nothing
+                            // with a collapsed one).
+                            let Some((start, end)) = state.cursor.selection(&self.value) else {
+                                shell.capture_event();
+                                return;
+                            };
+                            clipboard.write(
+                                clipboard::Kind::Standard,
+                                self.value.select(start, end).to_string(),
+                            );
 
                             let mut editor = Editor::new(&mut self.value, &mut state.cursor);
                             editor.delete();
@@ -814,6 +850,7 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
 
                             focus.updated_at = Instant::now();
                             state.toolbar = None;
+                            state.scroll.schedule(Reveal::Animate);
                             update_cache(state, &self.value);
                             return;
                         }
@@ -839,6 +876,7 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
                                 }
                             };
 
+                            let before = (self.value.to_string(), state.cursor);
                             let mut editor = Editor::new(&mut self.value, &mut state.cursor);
                             editor.paste(content.clone());
 
@@ -848,6 +886,9 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
                             state.is_pasting = Some(content);
                             focus.updated_at = Instant::now();
                             state.toolbar = None;
+                            if before != (self.value.to_string(), state.cursor) {
+                                state.scroll.schedule(Reveal::Animate);
+                            }
                             update_cache(state, &self.value);
                             return;
                         }
@@ -861,6 +902,11 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
 
                                 shell.request_redraw();
                             }
+
+                            // `_updateSelection`'s `bringIntoView`.
+                            let geometry = geometry(state, layout);
+                            let x = extent_x(state, &self.value);
+                            state.scroll.bring_into_view(&geometry, x);
 
                             shell.capture_event();
                             return;
@@ -886,6 +932,7 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
 
                             focus.updated_at = Instant::now();
                             state.toolbar = None;
+                            state.scroll.schedule(Reveal::Animate);
                             update_cache(state, &self.value);
                             return;
                         }
@@ -919,6 +966,7 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
                                 }
                             }
 
+                            let before = (self.value.to_string(), state.cursor);
                             let mut editor = Editor::new(&mut self.value, &mut state.cursor);
                             editor.backspace();
 
@@ -928,6 +976,9 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
 
                             focus.updated_at = Instant::now();
                             state.toolbar = None;
+                            if before != (self.value.to_string(), state.cursor) {
+                                state.scroll.schedule(Reveal::Animate);
+                            }
                             update_cache(state, &self.value);
                         }
                         keyboard::Key::Named(key::Named::Delete) => {
@@ -946,6 +997,7 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
                                 }
                             }
 
+                            let before = (self.value.to_string(), state.cursor);
                             let mut editor = Editor::new(&mut self.value, &mut state.cursor);
                             editor.delete();
 
@@ -955,7 +1007,30 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
 
                             focus.updated_at = Instant::now();
                             state.toolbar = None;
+                            if before != (self.value.to_string(), state.cursor) {
+                                state.scroll.schedule(Reveal::Animate);
+                            }
                             update_cache(state, &self.value);
+                        }
+                        keyboard::Key::Named(key::Named::Home)
+                            if SCROLL_KEYS_ONLY_SCROLL && !modifiers.shift() =>
+                        {
+                            // `scrollToBeginningOfDocument:`: the text
+                            // scrolls to its start; the caret stays.
+                            let geometry = geometry(state, layout);
+                            state.scroll.bring_into_view(&geometry, glyph_x(state, 0));
+                            shell.request_redraw();
+                            shell.capture_event();
+                        }
+                        keyboard::Key::Named(key::Named::End)
+                            if SCROLL_KEYS_ONLY_SCROLL && !modifiers.shift() =>
+                        {
+                            // `scrollToEndOfDocument:`.
+                            let geometry = geometry(state, layout);
+                            let end = glyph_x(state, self.value.len());
+                            state.scroll.bring_into_view(&geometry, end);
+                            shell.request_redraw();
+                            shell.capture_event();
                         }
                         keyboard::Key::Named(key::Named::Home) => {
                             let cursor_before = state.cursor;
@@ -973,6 +1048,10 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
 
                                 shell.request_redraw();
                             }
+
+                            let geometry = geometry(state, layout);
+                            let x = extent_x(state, &self.value);
+                            state.scroll.bring_into_view(&geometry, x);
 
                             shell.capture_event();
                         }
@@ -993,6 +1072,10 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
 
                                 shell.request_redraw();
                             }
+
+                            let geometry = geometry(state, layout);
+                            let x = extent_x(state, &self.value);
+                            state.scroll.bring_into_view(&geometry, x);
 
                             shell.capture_event();
                         }
@@ -1025,6 +1108,10 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
                                 shell.request_redraw();
                             }
 
+                            let geometry = geometry(state, layout);
+                            let x = extent_x(state, &self.value);
+                            state.scroll.bring_into_view(&geometry, x);
+
                             shell.capture_event();
                         }
                         keyboard::Key::Named(key::Named::ArrowRight) => {
@@ -1056,6 +1143,10 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
 
                                 shell.request_redraw();
                             }
+
+                            let geometry = geometry(state, layout);
+                            let x = extent_x(state, &self.value);
+                            state.scroll.bring_into_view(&geometry, x);
 
                             shell.capture_event();
                         }
@@ -1127,6 +1218,7 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
                         focus.updated_at = Instant::now();
                         state.is_pasting = None;
                         state.toolbar = None;
+                        state.scroll.schedule(Reveal::Animate);
 
                         let message = (on_input)(editor.contents());
                         shell.publish(message);
@@ -1136,6 +1228,18 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
                     }
                 }
             },
+            Event::Mouse(mouse::Event::WheelScrolled { delta })
+                if cursor.is_over(layout.bounds()) =>
+            {
+                let state = state(tree);
+                let geometry = geometry(state, layout);
+                if let Some(dx) = horizontal_scroll(*delta, state.keyboard_modifiers) {
+                    if state.scroll.scroll_by(&geometry, dx) {
+                        shell.capture_event();
+                        shell.request_redraw();
+                    }
+                }
+            }
             Event::Window(window::Event::Unfocused) => {
                 let state = state(tree);
 
@@ -1150,6 +1254,7 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
                 if let Some(focus) = &mut state.is_focused {
                     focus.is_window_focused = true;
                     focus.updated_at = Instant::now();
+                    state.scroll.schedule(Reveal::Animate);
 
                     shell.request_redraw();
                 }
@@ -1159,6 +1264,12 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
             }
             Event::Window(window::Event::RedrawRequested(now)) => {
                 let state = state(tree);
+
+                let geometry = geometry(state, layout);
+                let x = extent_x(state, &self.value);
+                if state.scroll.frame(*now, &geometry, x) {
+                    shell.request_redraw();
+                }
 
                 if let Some(focus) = state
                     .is_focused
@@ -1242,18 +1353,20 @@ impl<'a, Message: Clone + 'a> Widget<Message, Theme, Renderer> for TextInput<'a,
     fn overlay<'b>(
         &'b mut self,
         tree: &'b mut Tree,
-        _layout: Layout<'b>,
+        layout: Layout<'b>,
         _renderer: &Renderer,
         _viewport: &Rectangle,
         translation: Vector,
     ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
         let state = tree.state.downcast_mut::<State>();
         let position = state.toolbar.as_mut()?.position(translation);
+        let geometry = geometry(state, layout);
         Some(toolbar::overlay(
             Box::new(Menu {
                 value: &mut self.value,
                 state,
                 on_input: self.on_input.as_deref(),
+                geometry,
             }),
             position,
         ))
@@ -1282,6 +1395,8 @@ pub struct State {
     secondary_press: Option<Point>,
     /// The open context menu.
     toolbar: Option<toolbar::State>,
+    /// The text's horizontal scroll.
+    scroll: Scroll,
 }
 
 fn state(tree: &mut Tree) -> &mut State {
@@ -1317,9 +1432,18 @@ impl State {
         self.toolbar.is_some()
     }
 
+    /// How far its text is scrolled left, as last drawn.
+    pub fn scroll_offset(&self) -> f32 {
+        self.scroll.pixels()
+    }
+
+    /// Focused by the app (`autofocus`, a focus request), which
+    /// `EditableText` took as its own (`_flagInternalFocus`): the caret at
+    /// the end, as a field with no selection yet got it, and revealed.
     fn focus(&mut self) {
         focus(self);
         self.move_cursor_to_end();
+        self.scroll.schedule(Reveal::Animate);
     }
 
     fn unfocus(&mut self) {
@@ -1392,36 +1516,35 @@ impl operation::TextInput for State {
     }
 }
 
-fn offset(text_bounds: Rectangle, value: &Value, state: &State) -> f32 {
-    if state.is_focused() {
-        let cursor = state.cursor();
+/// The glyph edge of the text position `index`, in the line's
+/// coordinates.
+fn glyph_x(state: &State, index: usize) -> f32 {
+    state
+        .value
+        .raw()
+        .grapheme_position(0, index)
+        .map_or(0.0, |position| position.x)
+}
 
-        let focus_position = match cursor.state(value) {
-            cursor::State::Index(i) => i,
-            cursor::State::Selection { end, .. } => end,
-        };
+/// The text's box.
+fn text_bounds(layout: Layout<'_>) -> Rectangle {
+    layout
+        .children()
+        .next()
+        .map_or_else(|| layout.bounds(), |text| text.bounds())
+}
 
-        let (_, offset) =
-            measure_cursor_and_scroll_offset(state.value.raw(), text_bounds, focus_position);
-
-        offset
-    } else {
-        0.0
+/// What the field's scroll needs of its layout.
+fn geometry(state: &State, layout: Layout<'_>) -> Geometry {
+    Geometry {
+        bounds: text_bounds(layout),
+        text_width: state.value.raw().min_width(),
     }
 }
 
-fn measure_cursor_and_scroll_offset(
-    paragraph: &Paragraph,
-    text_bounds: Rectangle,
-    cursor_index: usize,
-) -> (f32, f32) {
-    let grapheme_position = paragraph
-        .grapheme_position(0, cursor_index)
-        .unwrap_or(Point::ORIGIN);
-
-    let offset = ((grapheme_position.x + 5.0) - text_bounds.width).max(0.0);
-
-    (grapheme_position.x, offset)
+/// The glyph edge of the selection's moving end (`selection.extent`).
+fn extent_x(state: &State, value: &Value) -> f32 {
+    glyph_x(state, state.cursor.end(value))
 }
 
 fn find_cursor_position(
@@ -1430,7 +1553,7 @@ fn find_cursor_position(
     state: &State,
     x: f32,
 ) -> Option<usize> {
-    let offset = offset(text_bounds, value, state);
+    let offset = state.scroll.pixels();
     let value = value.to_string();
 
     let char_offset = state
@@ -1475,6 +1598,36 @@ fn replace_paragraph(
 
 /// `_kCursorBlinkHalfPeriod`, iced's `CURSOR_BLINK_INTERVAL_MILLIS`.
 const CURSOR_BLINK_INTERVAL_MILLIS: u128 = 500;
+
+/// Whether Home and End only scroll the text, the caret left where it is:
+/// macOS bound them to `scrollToBeginningOfDocument:` and
+/// `scrollToEndOfDocument:`, which `EditableText` took as
+/// `ScrollToDocumentBoundaryIntent` (`bringIntoView` of the text's start or
+/// end). Elsewhere Flutter moved the caret, as iced's field does.
+const SCROLL_KEYS_ONLY_SCROLL: bool = cfg!(target_os = "macos");
+
+/// What a wheel or trackpad `delta` scrolls the text by, if it is the
+/// field's: a mouse wheel's horizontal lines, the vertical ones with Shift
+/// (`pointerAxisModifiers`; macOS hands them over swapped already), 60 px a
+/// line as the app's scrollables take them; a trackpad's pixels when they
+/// run more across than down (its horizontal drag beating the page's
+/// vertical one to the gesture).
+fn horizontal_scroll(delta: mouse::ScrollDelta, modifiers: keyboard::Modifiers) -> Option<f32> {
+    match delta {
+        mouse::ScrollDelta::Lines { x, y } => {
+            let shift = modifiers.shift();
+            // iced's scrollable: macOS swaps the axes under Shift itself.
+            let (x, y) = if cfg!(target_os = "macos") && shift {
+                (y, x)
+            } else {
+                (x, y)
+            };
+            let across = if shift { y } else { x };
+            (across != 0.0).then_some(-across * 60.0)
+        }
+        mouse::ScrollDelta::Pixels { x, y } => (x.abs() > y.abs()).then_some(-x),
+    }
+}
 
 /// iced's `text_editor::convert_macos_shortcut` (crate-private there):
 /// macOS's Emacs keys.
