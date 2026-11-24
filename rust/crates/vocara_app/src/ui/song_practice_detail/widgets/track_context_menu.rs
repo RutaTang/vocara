@@ -43,6 +43,7 @@ use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{self, bare_button, font, Studio};
 use crate::ui::core::widgets::animated::ink_hover;
 use crate::ui::core::widgets::confirm_dialog::{ConfirmDialog, StudioPrompt};
+use crate::ui::core::widgets::fading_scrollbar::no_scrollbar;
 use crate::ui::core::widgets::studio_text::studio_text;
 
 // ------------------------------------------------------------------- tints
@@ -483,8 +484,7 @@ pub fn rename_dialog(current: &str) -> StudioPrompt {
 /// inside a [`MENU_MAX_HEIGHT`] cap.
 fn menu_card<'a, M: 'a>(rows: Column<'a, M>, width: f32) -> Element<'a, M> {
     container(
-        container(scrollable(rows.width(Length::Fill)).style(theme::no_scrollbar))
-            .max_height(MENU_MAX_HEIGHT),
+        container(no_scrollbar(scrollable(rows.width(Length::Fill)))).max_height(MENU_MAX_HEIGHT),
     )
     .width(width)
     // Inside the 1 px border (a decoration's border pads its child).

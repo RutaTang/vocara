@@ -81,6 +81,7 @@ use crate::ui::core::motion::Curve;
 use crate::ui::core::theme::{self, boxed, font, Studio};
 use crate::ui::core::widgets::animated::{animated_align, animated_container, Decoration};
 use crate::ui::core::widgets::cap_label::cap_label;
+use crate::ui::core::widgets::fading_scrollbar::no_scrollbar;
 use crate::ui::core::widgets::painter::KeyedCache;
 use crate::ui::core::widgets::studio_controls::fixed_width_readout;
 use crate::ui::core::widgets::studio_text::studio_text;
@@ -251,10 +252,9 @@ impl<'a> FxPanel<'a> {
             bottom: 16.0,
             left: 2.0,
         });
-        let panel = scrollable(body)
+        let panel = no_scrollbar(scrollable(body))
             .width(Length::Fill)
-            .height(Length::Fill)
-            .style(theme::no_scrollbar);
+            .height(Length::Fill);
         keyed_row()
             .push(target_key(&self.target), panel)
             .height(Length::Fill)

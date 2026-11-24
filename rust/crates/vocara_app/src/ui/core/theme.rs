@@ -430,55 +430,46 @@ pub fn studio_input(_: &Theme, status: text_input::Status) -> text_input::Style 
 
 // ---------------------------------------------------------------- scrollable
 
-/// The thickness of [`scrollbar`]'s thumb (Material's desktop scrollbar).
-pub const SCROLLBAR_WIDTH: f32 = 8.0;
+/// `color.withOpacity(opacity)`: the alpha replaced by `opacity`, rounded to
+/// 8 bits (`withAlpha((255 * opacity).round())`).
+pub fn with_opacity(color: Color, opacity: f32) -> Color {
+    alpha(color, (255.0 * opacity).round() / 255.0)
+}
 
-/// Material 3's desktop scrollbar under the zinc scheme: no track, a
-/// radius-8 thumb in `onSurface` at 30 %, 50 % hovered, 60 % dragged.
-/// Scrollables take it through `widgets::fading_scrollbar`, which fades the
-/// thumb in on a scroll and out after it, and eases its hover color, as
-/// Flutter did.
+/// The thumb of Material's desktop scrollbar under the zinc scheme, which
+/// is dark: `onSurface` at 30 %, 65 % under the pointer, 75 % dragged
+/// (`_MaterialScrollbarState._thumbColor`, `Brightness.dark`, each
+/// `withOpacity`), radius 8 (`_kScrollbarRadius`), no track. Scrollables
+/// take it through `widgets::fading_scrollbar`, which draws the thumb
+/// itself (iced's own scrollbar hidden) with these colors and this radius:
+/// 8 wide, 2 in from the edge, at least 48 long, fading in on a scroll and
+/// out after it and easing its hover color, as Flutter did.
 pub fn scrollbar(_: &Theme, status: scrollable::Status) -> scrollable::Style {
+    let (idle, hovered, dragged) = (0.30, 0.65, 0.75);
     let (h, v) = match status {
-        scrollable::Status::Active { .. } => (0.30, 0.30),
+        scrollable::Status::Active { .. } => (idle, idle),
         scrollable::Status::Hovered {
-            is_horizontal_scrollbar_hovered,
-            is_vertical_scrollbar_hovered,
+            is_horizontal_scrollbar_hovered: x,
+            is_vertical_scrollbar_hovered: y,
             ..
         } => (
-            if is_horizontal_scrollbar_hovered {
-                0.50
-            } else {
-                0.30
-            },
-            if is_vertical_scrollbar_hovered {
-                0.50
-            } else {
-                0.30
-            },
+            if x { hovered } else { idle },
+            if y { hovered } else { idle },
         ),
         scrollable::Status::Dragged {
-            is_horizontal_scrollbar_dragged,
-            is_vertical_scrollbar_dragged,
+            is_horizontal_scrollbar_dragged: x,
+            is_vertical_scrollbar_dragged: y,
             ..
         } => (
-            if is_horizontal_scrollbar_dragged {
-                0.60
-            } else {
-                0.30
-            },
-            if is_vertical_scrollbar_dragged {
-                0.60
-            } else {
-                0.30
-            },
+            if x { dragged } else { idle },
+            if y { dragged } else { idle },
         ),
     };
     let rail = |a: f32| scrollable::Rail {
         background: None,
         border: Border::default(),
         scroller: scrollable::Scroller {
-            background: Background::Color(alpha(Zinc::FOREGROUND, a)),
+            background: Background::Color(with_opacity(Zinc::FOREGROUND, a)),
             border: Border {
                 radius: Radius::from(8.0),
                 ..Border::default()
@@ -501,16 +492,6 @@ pub fn scrollbar(_: &Theme, status: scrollable::Status) -> scrollable::Style {
             icon: Studio::TEXT_PRIMARY,
         },
     }
-}
-
-/// A scrollable with no visible scrollbar (`ScrollConfiguration(scrollbars:
-/// false)`, as the context menus use).
-pub fn no_scrollbar(theme: &Theme, status: scrollable::Status) -> scrollable::Style {
-    let mut style = scrollbar(theme, status);
-    let hidden = Background::Color(Color::TRANSPARENT);
-    style.vertical_rail.scroller.background = hidden;
-    style.horizontal_rail.scroller.background = hidden;
-    style
 }
 
 /// A button that draws nothing of its own: the `GestureDetector` /
