@@ -102,6 +102,24 @@ fn an_animated_container_follows_the_pointer_over_its_duration() {
 }
 
 #[test]
+fn an_ink_hover_fades_its_highlight_in_over_50_ms() {
+    let mut window = window();
+    let t0 = Instant::now();
+    let inside = Point::new(50.0, 20.0);
+    let row = || ink_hover::<()>(Space::new().width(100).height(40), HOVER, 0.0);
+    window.frame(row(), &[], t0);
+    assert!(near(window.pixel(inside), BACKGROUND), "none at rest");
+    window.point_at(inside);
+    window.frame(row(), &[], t0);
+    assert!(near(window.pixel(inside), BACKGROUND), "start");
+    window.frame(row(), &[], t0 + 25 * MS);
+    let half = over(Color { a: 0.5, ..HOVER }, BACKGROUND);
+    assert!(near(window.pixel(inside), half), "middle: alpha only");
+    assert!(!window.frame(row(), &[], t0 + 50 * MS));
+    assert!(near(window.pixel(inside), HOVER), "end");
+}
+
+#[test]
 fn an_animated_container_draws_its_opacity_at_once() {
     let mut window = window();
     let t0 = Instant::now();

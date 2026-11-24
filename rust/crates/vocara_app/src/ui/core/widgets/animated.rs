@@ -19,6 +19,7 @@ use std::time::Duration;
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::widget::{tree, Operation, Tree};
 use iced::advanced::{overlay, renderer, Clipboard, Renderer as _, Shell, Widget};
+use iced::border::Radius;
 use iced::time::Instant;
 use iced::{
     mouse, window, Background, Border, Color, Element, Event, Length, Padding, Rectangle, Renderer,
@@ -34,27 +35,27 @@ pub struct Decoration {
     pub background: Color,
     pub border: Color,
     pub border_width: f32,
-    pub radius: f32,
+    pub radius: Radius,
 }
 
 impl Decoration {
     /// A fill with no border.
-    pub fn fill(background: Color, radius: f32) -> Self {
+    pub fn fill(background: Color, radius: impl Into<Radius>) -> Self {
         Self {
             background,
             border: Color::TRANSPARENT,
             border_width: 0.0,
-            radius,
+            radius: radius.into(),
         }
     }
 
     /// A fill inside a `width` border.
-    pub fn boxed(background: Color, radius: f32, border: Color, width: f32) -> Self {
+    pub fn boxed(background: Color, radius: impl Into<Radius>, border: Color, width: f32) -> Self {
         Self {
             background,
             border,
             border_width: width,
-            radius,
+            radius: radius.into(),
         }
     }
 }
@@ -67,7 +68,12 @@ impl Lerp for Decoration {
             background: self.background.lerp(to.background, t),
             border: self.border.lerp(to.border, t),
             border_width: self.border_width.lerp(to.border_width, t).max(0.0),
-            radius: self.radius.lerp(to.radius, t),
+            radius: Radius {
+                top_left: self.radius.top_left.lerp(to.radius.top_left, t),
+                top_right: self.radius.top_right.lerp(to.radius.top_right, t),
+                bottom_right: self.radius.bottom_right.lerp(to.radius.bottom_right, t),
+                bottom_left: self.radius.bottom_left.lerp(to.radius.bottom_left, t),
+            },
         }
     }
 }
@@ -195,6 +201,28 @@ pub fn animated_container<'a, M>(
         duration,
         curve: Curve::Linear,
     }
+}
+
+/// How long an `InkWell`'s hover highlight takes to fade in or out (its
+/// `hoverDuration`'s default).
+pub const INK_HOVER: Duration = Duration::from_millis(50);
+
+/// An `InkWell(hoverColor: color)` around `content` (a transparent button):
+/// the highlight, `radius` round, fades in under the pointer and out after
+/// it over [`INK_HOVER`], linear (`InkHighlight`'s alpha); splashes are off
+/// app-wide.
+pub fn ink_hover<'a, M: 'a>(
+    content: impl Into<Element<'a, M>>,
+    color: Color,
+    radius: impl Into<Radius>,
+) -> Element<'a, M> {
+    let radius = radius.into();
+    animated_container(content, INK_HOVER)
+        .style(move |hovered| {
+            let a = if hovered { color.a } else { 0.0 };
+            Decoration::fill(Color { a, ..color }, radius)
+        })
+        .into()
 }
 
 /// `AnimatedAlign(alignment: align, duration: duration, curve: curve)`.
@@ -424,7 +452,7 @@ impl<M> Widget<M, Theme, Renderer> for AnimatedContainer<'_, M> {
         let border = |d: Decoration| Border {
             color: d.border,
             width: d.border_width,
-            radius: d.radius.into(),
+            radius: d.radius,
         };
         if let Some(d) = decoration {
             let under = if self.border_above {

@@ -233,8 +233,9 @@ pub fn menu(_: &Theme) -> container::Style {
     }
 }
 
-/// A menu row: transparent, `Studio.hover` under the pointer (the
-/// `InkWell(hoverColor: Studio.hover)` rows; splashes are off app-wide).
+/// A menu row: transparent, `Studio.hover` under the pointer, at once (a
+/// `MouseRegion`'s hover; the `InkWell` rows fade theirs in, see
+/// `widgets::animated::ink_hover`).
 pub fn menu_item(_: &Theme, status: button::Status) -> button::Style {
     let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
     button::Style {

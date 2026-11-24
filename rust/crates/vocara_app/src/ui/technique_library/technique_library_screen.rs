@@ -60,7 +60,7 @@ use crate::router::{Navigation, Route};
 use crate::services::Services;
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{self, alpha, bare_button, font, Studio};
-use crate::ui::core::widgets::animated::{animated_container, Decoration};
+use crate::ui::core::widgets::animated::{animated_container, ink_hover, Decoration};
 use crate::ui::core::widgets::confirm_dialog::ConfirmDialog;
 use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
 use crate::ui::core::widgets::studio_hint::spinner;
@@ -711,7 +711,7 @@ fn menu_item<'a>(
     } else {
         Studio::TEXT_PRIMARY
     };
-    button(
+    let row = button(
         row![
             container(
                 text(label)
@@ -737,9 +737,10 @@ fn menu_item<'a>(
     )
     .width(Length::Fill)
     .padding([9, 14])
-    .style(theme::menu_item)
-    .on_press(on_tap)
-    .into()
+    .style(bare_button)
+    .on_press(on_tap);
+    // An `InkWell(hoverColor: Studio.hover)`.
+    ink_hover(row, Studio::HOVER, 0.0)
 }
 
 /// How the grid lays out at a content `width`: the column count and the

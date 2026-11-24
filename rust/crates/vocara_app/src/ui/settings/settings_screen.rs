@@ -77,7 +77,7 @@ use crate::services::Services;
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::motion::{self, Controller, Curve, Lerp};
 use crate::ui::core::theme::{self, alpha, bare_button, boxed, font, Studio, Zinc};
-use crate::ui::core::widgets::animated::animated;
+use crate::ui::core::widgets::animated::{animated, ink_hover};
 use crate::ui::core::widgets::confirm_dialog::ConfirmDialog;
 use crate::ui::core::widgets::slide::{cupertino, slide, PAGE_TRANSITION};
 use crate::ui::core::widgets::studio_hint::spinner;
@@ -1245,37 +1245,25 @@ impl Corners {
     }
 }
 
-/// A row that takes taps: `Studio.hover` under the pointer (the
-/// `InkWell(hoverColor: Studio.hover)` rows; splashes are off app-wide),
-/// nothing when disabled.
-fn row_style(corners: Corners) -> impl Fn(&Theme, button::Status) -> button::Style {
-    move |_, status| {
-        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
-        button::Style {
-            background: hovered.then_some(Background::Color(Studio::HOVER)),
-            text_color: Studio::TEXT_PRIMARY,
-            border: Border {
-                radius: corners.radius(),
-                ..Border::default()
-            },
-            shadow: Shadow::default(),
-            snap: false,
-        }
-    }
-}
-
-/// A tappable row of a card: `on_tap` `None` disables it.
+/// A tappable row of a card: `on_tap` `None` disables it. Its hover
+/// highlight fades in and out (the `InkWell`'s, `ink_hover`); none on a
+/// disabled row.
 fn tappable<'a>(
     content: impl Into<Element<'a, Message>>,
     on_tap: Option<Message>,
     corners: Corners,
 ) -> Element<'a, Message> {
-    button(content)
+    let enabled = on_tap.is_some();
+    let row = button(content)
         .padding(0)
         .width(Length::Fill)
-        .style(row_style(corners))
-        .on_press_maybe(on_tap)
-        .into()
+        .style(bare_button)
+        .on_press_maybe(on_tap);
+    if enabled {
+        ink_hover(row, Studio::HOVER, corners.radius())
+    } else {
+        row.into()
+    }
 }
 
 /// `_Card`: the raised card the rows sit in — `Studio.surfaceRaised`, radius

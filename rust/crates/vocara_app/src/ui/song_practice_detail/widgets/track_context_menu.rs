@@ -42,6 +42,7 @@ use iced::{
 
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{self, bare_button, font, Studio};
+use crate::ui::core::widgets::animated::ink_hover;
 use crate::ui::core::widgets::confirm_dialog::{ConfirmDialog, StudioPrompt};
 
 // ------------------------------------------------------------------- tints
@@ -606,12 +607,13 @@ impl<'a, M: Clone + 'a> From<MenuRow<M>> for Element<'a, M> {
         if r.selected {
             content = content.push(icons::icon(Icon::Check, 14.0, Studio::ACCENT));
         }
-        button(content)
+        // An `InkWell(hoverColor: Studio.hover)`.
+        let row = button(content)
             .width(Length::Fill)
             .padding([9, 14])
-            .style(theme::menu_item)
-            .on_press(r.on_tap)
-            .into()
+            .style(bare_button)
+            .on_press(r.on_tap);
+        ink_hover(row, Studio::HOVER, 0.0)
     }
 }
 
