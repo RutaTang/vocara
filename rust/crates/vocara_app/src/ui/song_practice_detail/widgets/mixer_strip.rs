@@ -276,11 +276,12 @@ impl<'a> MixerStrip<'a> {
             StripKey::Master,
             gap_after(master_channel(self.master_volume)),
         );
+        // The horizontal `ListView`: Material's scroll behavior gave a
+        // horizontal scrollable no scrollbar.
         scrollable(desk)
-            .direction(Direction::Horizontal(Scrollbar::default()))
+            .direction(Direction::Horizontal(Scrollbar::hidden()))
             .width(Length::Fill)
             .height(Length::Fill)
-            .fading()
             .into()
     }
 }
