@@ -88,6 +88,7 @@ use super::media::technique_media_section::{
     self as media_section, rename_dialog, sync_players, AnalysisBuilder, Event as MediaEvent,
     MediaSectionState, TechniqueMediaSection,
 };
+use super::media::technique_video_player::window_task;
 use super::studio_field::{parse_comma_list, studio_field, studio_prose_field};
 use super::technique_analysis_section as analysis;
 use crate::app::library::RemoteAppliedBroadcast;
@@ -755,6 +756,7 @@ impl TechniqueDetailScreen {
     fn refresh(&mut self, step: &mut Step) {
         self.shown = Shown::of(&self.vm, self.edit_view());
         sync_players(&mut self.players, &self.shown.media, &*self.player_factory);
+        self.players.set_play_blocked(self.vm.mic_live());
         if self.analysis_shown() {
             // Compute the reference analysis lazily once the example clip is
             // known.
@@ -973,6 +975,10 @@ impl TechniqueDetailScreen {
             MediaEvent::StopRecord => self.vm.stop_example_recording(),
             MediaEvent::Position(at) => {
                 self.vm.set_playhead_from_playback(at);
+                return;
+            }
+            MediaEvent::Window(request) => {
+                step.task(window_task(request));
                 return;
             }
         };
@@ -1258,6 +1264,11 @@ impl Screen for TechniqueDetailScreen {
                 .width(Length::Fill)
                 .height(Length::Fill)
         ];
+        // The video controls holding the keyboard get the keys nothing on
+        // the page took.
+        let page = self.players.shortcuts(page, self.vm.mic_live(), |m| {
+            Message::Media(media_section::Message::Player(m))
+        });
         let mut layers = stack![container(page)
             .width(Length::Fill)
             .height(Length::Fill)
@@ -1266,6 +1277,13 @@ impl Screen for TechniqueDetailScreen {
             layers = layers.push(snacks.map(snack_message));
         }
         layers.into()
+    }
+
+    /// A video's fullscreen route, over the whole window.
+    fn overlay(&self) -> Option<Element<'_, Message>> {
+        self.players
+            .overlay()
+            .map(|view| view.map(|m| Message::Media(media_section::Message::Player(m))))
     }
 
     /// The recorder's ticks while it asks for them, the players' poll, and

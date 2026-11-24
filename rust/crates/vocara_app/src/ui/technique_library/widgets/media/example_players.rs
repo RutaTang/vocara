@@ -30,16 +30,33 @@
 //! `analysisScrub` → [`ExamplePlayers::seek_analyzed`]. Everything runs on
 //! the UI thread in `update`, as the players require; the page drops them
 //! (and so stops them) when it is disposed.
+//!
+//! # The video controls' keyboard and fullscreen
+//!
+//! A video's controls took the keyboard as they appeared (their
+//! `Focus(autofocus: true)`), unless the page's focus scope had a focused
+//! node already — the controls of a video started earlier. So the set
+//! keeps which video holds the keyboard ([`ExamplePlayers::keyboard_holder`]):
+//! the first one started, until it goes, or until a take blocks the
+//! examples (`ExcludeFocus` took the focus away, and nothing gave it back:
+//! [`ExamplePlayers::set_play_blocked`]). The page wraps its content in
+//! [`ExamplePlayers::shortcuts`], which hands that video every key no
+//! widget of the page took (a focused text field takes its keys first, as
+//! it held the focus). A video in fullscreen is shown by the page over the
+//! whole window ([`ExamplePlayers::overlay`]) and takes its own keys.
 
 use std::time::Duration;
 
-use iced::{Element, Subscription};
+use iced::{Element, Event, Subscription};
 use vocara_services::media_player::MediaPlayerFactory;
 
 use super::technique_audio_player::{
     self as audio, is_unavailable_path, TechniqueAudioPlayer, AUDIO_POLL_INTERVAL,
 };
-use super::technique_video_player::{self as video, TechniqueVideoPlayer, VIDEO_POLL_INTERVAL};
+use super::technique_video_player::{
+    self as video, TechniqueVideoPlayer, WindowRequest, VIDEO_POLL_INTERVAL,
+};
+use crate::ui::core::widgets::wrap::Wrap;
 
 /// One example clip as the page shows it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,10 +118,21 @@ pub enum Message {
     Tick,
 }
 
+/// What a player's message asks of the page.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Report {
+    /// The analyzed example's audio moved here (`onPosition`).
+    Position(Duration),
+    /// A video entered or left fullscreen: the window's native fullscreen.
+    Window(WindowRequest),
+}
+
 /// The page's example players, in the order shown (see the module docs).
 #[derive(Debug, Default)]
 pub struct ExamplePlayers {
     entries: Vec<(ExampleKey, ExamplePlayer)>,
+    /// The video whose controls hold the keyboard.
+    keyboard: Option<ExampleKey>,
 }
 
 impl ExamplePlayers {
@@ -151,33 +179,64 @@ impl ExamplePlayers {
             };
             self.entries.push((key, player));
         }
-        // `old` now holds only the players no longer shown: dropped here.
+        // `old` now holds only the players no longer shown: dropped here
+        // (and the keyboard with a video that goes).
+        if let Some(holder) = &self.keyboard {
+            if !self.entries.iter().any(|(k, _)| k == holder) {
+                self.keyboard = None;
+            }
+        }
+    }
+
+    /// The video whose controls hold the keyboard, if any.
+    pub fn keyboard_holder(&self) -> Option<&ExampleKey> {
+        self.keyboard.as_ref()
+    }
+
+    /// Whether a take blocks the examples (`playBlocked`): when it does,
+    /// the controls lose the keyboard for good (`ExcludeFocus`).
+    pub fn set_play_blocked(&mut self, blocked: bool) {
+        if blocked {
+            self.keyboard = None;
+        }
     }
 
     /// Handles a player's message (or the tick). `play_blocked`: a take is
     /// arming or recording. `analyzed`: the example whose position drives
     /// the analysis (only its audio player reports). Returns the position to
-    /// move the analysis playhead to, if any.
+    /// move the analysis playhead to, or what the window must do, if
+    /// anything.
     pub fn update(
         &mut self,
         message: Message,
         players: &dyn MediaPlayerFactory,
         play_blocked: bool,
         analyzed: Option<&str>,
-    ) -> Option<Duration> {
+    ) -> Option<Report> {
         match message {
             Message::Audio(key, m) => {
                 let reports = analyzed == Some(key.id.as_str());
                 match self.entry_mut(&key)? {
-                    ExamplePlayer::Audio(p) => p.update(m, play_blocked).filter(|_| reports),
+                    ExamplePlayer::Audio(p) => p
+                        .update(m, play_blocked)
+                        .filter(|_| reports)
+                        .map(Report::Position),
                     ExamplePlayer::Video(_) => None,
                 }
             }
             Message::Video(key, m) => {
-                if let ExamplePlayer::Video(p) = self.entry_mut(&key)? {
-                    p.update(m, players, play_blocked);
+                let ExamplePlayer::Video(p) = self.entry_mut(&key)? else {
+                    return None;
+                };
+                let had_player = p.has_player();
+                let request = p.update(m, players, play_blocked);
+                let started = !had_player && p.has_player();
+                // The controls appeared: their autofocus takes the
+                // keyboard unless another video's controls hold it.
+                if started && self.keyboard.is_none() {
+                    self.keyboard = Some(key);
                 }
-                None
+                request.map(Report::Window)
             }
             Message::Tick => {
                 let mut report = None;
@@ -193,13 +252,64 @@ impl ExamplePlayers {
                             }
                         }
                         ExamplePlayer::Video(p) => {
-                            p.update(video::Message::Tick, players, play_blocked);
+                            let _ = p.update(video::Message::Tick, players, play_blocked);
                         }
                     }
                 }
-                report
+                report.map(Report::Position)
             }
         }
+    }
+
+    /// The video whose controls hold the keyboard, while they can take it:
+    /// started, inline (a fullscreen video takes its keys in its own view)
+    /// and not blocked.
+    fn keyboard_video(&self, play_blocked: bool) -> Option<&ExampleKey> {
+        let key = self.keyboard.as_ref().filter(|_| !play_blocked)?;
+        match self.entries.iter().find(|(k, _)| k == key)? {
+            (_, ExamplePlayer::Video(p)) if p.has_player() && !p.is_fullscreen() => Some(key),
+            _ => None,
+        }
+    }
+
+    /// `content` (the page) handing the keys none of its widgets took to
+    /// the controls that hold the keyboard (their `CallbackShortcuts`),
+    /// as `wrap`ped messages; a key a shortcut takes goes no further.
+    pub fn shortcuts<'a, M: 'a>(
+        &self,
+        content: impl Into<Element<'a, M>>,
+        play_blocked: bool,
+        wrap: impl Fn(Message) -> M + 'a,
+    ) -> Element<'a, M> {
+        let holder = self.keyboard_video(play_blocked).cloned();
+        Wrap::<M, ()>::new(
+            content,
+            Box::new(move |_, event, _, _, shell| {
+                let (Some(key), Event::Keyboard(event)) = (&holder, event) else {
+                    return;
+                };
+                if shell.is_event_captured() {
+                    return;
+                }
+                if let Some(m) = video::key_message(event) {
+                    shell.publish(wrap(Message::Video(key.clone(), m)));
+                    shell.capture_event();
+                }
+            }),
+        )
+        .into()
+    }
+
+    /// The fullscreen view of the video in fullscreen, if one is: shown
+    /// over the whole window.
+    pub fn overlay(&self) -> Option<Element<'_, Message>> {
+        self.entries.iter().find_map(|(key, player)| match player {
+            ExamplePlayer::Video(p) => p.fullscreen_view().map(|view| {
+                let key = key.clone();
+                view.map(move |m| Message::Video(key.clone(), m))
+            }),
+            ExamplePlayer::Audio(_) => None,
+        })
     }
 
     fn entry_mut(&mut self, key: &ExampleKey) -> Option<&mut ExamplePlayer> {

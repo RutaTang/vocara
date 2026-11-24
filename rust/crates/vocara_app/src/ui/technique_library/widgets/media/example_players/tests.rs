@@ -182,7 +182,7 @@ fn only_the_analyzed_clip_drives_and_follows_the_analysis() {
     built[1].set_state(|s| s.position = Duration::from_secs(2));
     assert_eq!(
         examples.update(Message::Tick, &players, false, Some("M1")),
-        Some(Duration::from_secs(2))
+        Some(Report::Position(Duration::from_secs(2)))
     );
     // A scrub of M0's bar is not M1's to report.
     assert_eq!(

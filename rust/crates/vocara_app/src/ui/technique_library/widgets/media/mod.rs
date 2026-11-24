@@ -7,3 +7,4 @@ pub mod example_players;
 pub mod technique_audio_player;
 pub mod technique_media_section;
 pub mod technique_video_player;
+pub mod video_controls;

@@ -4,20 +4,50 @@
 //! To avoid spinning up a native player (and a texture) for every clip just
 //! by showing the viewer, the player is created LAZILY on the first press of
 //! the poster's play button; a lightweight poster shows until then. Once
-//! started, the latest frame shows letterboxed in the 16:9 box, and the
-//! controls appear while the pointer is over it.
+//! started, the latest frame shows letterboxed in the 16:9 box (black
+//! behind it, `Video(fill: Colors.black)`), under media_kit's desktop
+//! controls (`video_controls`: the seek bar, play/pause, the volume button
+//! and slider, the position, the fullscreen button, the buffering spinner),
+//! which show while the pointer moves over the video and hide 3 s after.
 //!
-//! The controls: media_kit's desktop controls (play/pause, seek bar,
-//! position / duration, volume, fullscreen, keyboard shortcuts) become the
-//! audio player's bar — its disc, scrubber and readout — over the bottom of
-//! the picture. Volume, fullscreen and the shortcuts are not ported; the
-//! controls show while hovered (media_kit also hid them after a few idle
-//! seconds).
+//! The box is Dart's: at most 520 wide, its 1 px `Studio.border` rounded
+//! 10 (the border insets the video by its width, as a `Container`'s border
+//! did), black.
 //!
-//! While a take records (`play_blocked`), the poster and the controls take
-//! no input (Dart's `IgnorePointer` + `ExcludeFocus`), and anything that
-//! starts the player anyway is paused again on the next poll
+//! # Fullscreen
+//!
+//! media_kit's fullscreen pushed a route on the root navigator — the same
+//! video, with controls of its own (the fullscreen theme, the same values),
+//! filling the window over everything, the window drag bar included — and
+//! made the window natively fullscreen (`toggleFullScreen:` when it was
+//! not; leaving does the reverse when it is). Here the player keeps a
+//! `fullscreen` flag: the page shows [`TechniqueVideoPlayer::fullscreen_view`]
+//! over the whole window ([`Screen::overlay`](crate::ui::Screen::overlay)),
+//! taking every key and every click, and the change asks the window for
+//! its native fullscreen ([`WindowRequest`], [`window_task`]: iced's
+//! borderless fullscreen, which winit makes with `toggleFullScreen:`). The
+//! fullscreen button, F, a double press and (in fullscreen) Escape toggle
+//! it, as media_kit's did. A window left native fullscreen another way
+//! (the green button) keeps showing the video, as the route stayed.
+//!
+//! # The keyboard
+//!
+//! The controls' `Focus(autofocus: true)` took the keyboard when they
+//! appeared, unless something on the page held it already — another video
+//! started earlier did. The page keeps which video's controls hold it
+//! (`example_players`) and hands that video its shortcuts as
+//! [`Message::Key`]; the fullscreen view takes its own.
+//!
+//! # While a take records (`play_blocked`)
+//!
+//! Dart's `IgnorePointer` + `ExcludeFocus` around the inline video: the
+//! poster and the controls take no input (the controls go as if the
+//! pointer left), its shortcuts are off and the controls lose the keyboard
+//! for good, and anything that starts the player anyway is paused again on
+//! the next poll
 //! ([`pause_while_play_blocked`](super::technique_audio_player::pause_while_play_blocked)).
+//! The fullscreen route was not under that block: in fullscreen the
+//! controls still answer, and the poll's pause still holds.
 //!
 //! Frames: each poll asks the player for the frame due now; a frame with a
 //! new revision becomes a new image handle (its pixels shared, not copied),
@@ -30,20 +60,20 @@ use crate::ui::core::text;
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::widget::{tree, Operation, Tree};
 use iced::advanced::{overlay, renderer, Clipboard, Shell, Widget};
-use iced::alignment::Vertical;
 use iced::widget::image::{self, FilterMethod};
-use iced::widget::{column, container, mouse_area, stack, Space};
+use iced::widget::{container, mouse_area, opaque, stack, Space};
 use iced::{
-    mouse, Color, ContentFit, Element, Event, Length, Rectangle, Renderer, Size, Subscription,
-    Theme, Vector,
+    keyboard, mouse, window, Color, ContentFit, Element, Event, Length, Rectangle, Renderer, Size,
+    Subscription, Task, Theme, Vector,
 };
-use vocara_services::media_player::{MediaKind, MediaPlayerFactory, VideoFrame};
+use vocara_services::media_player::{clamp_volume, MediaKind, MediaPlayerFactory, VideoFrame};
 
-use super::technique_audio_player::{
-    self as audio, is_unavailable_path, Transport, UNAVAILABLE_CLIP_MESSAGE,
-};
+use super::technique_audio_player::{is_unavailable_path, Transport, UNAVAILABLE_CLIP_MESSAGE};
+use super::video_controls::{self as controls, seek_target, video_controls, Command, Shortcut};
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{alpha, boxed, Studio};
+use crate::ui::core::widgets::holds_keyboard::holds_keyboard;
+use crate::ui::core::widgets::wrap::Wrap;
 
 /// How often a playing video is polled: a new frame can be due at 60 Hz.
 pub const VIDEO_POLL_INTERVAL: Duration = Duration::from_micros(16_667);
@@ -54,17 +84,47 @@ pub const MAX_WIDTH: f32 = 520.0;
 /// The box's width : height.
 pub const ASPECT_RATIO: f32 = 16.0 / 9.0;
 
+/// The box's corner radius, and its border's width.
+pub const RADIUS: f32 = 10.0;
+pub const BORDER_WIDTH: f32 = 1.0;
+
 /// The video player's messages.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Message {
     /// The poster's play button: start the player.
     Play,
-    /// The pointer entered (`true`) or left the picture: the controls.
-    Hover(bool),
-    /// The controls (the audio player's bar).
-    Controls(audio::Message),
+    /// The controls (inline or fullscreen).
+    Controls(Command),
+    /// A shortcut, for the controls that hold the keyboard.
+    Key(Shortcut),
     /// The poll.
     Tick,
+}
+
+/// What the window must do when the video enters or leaves fullscreen
+/// (media_kit's `defaultEnterNativeFullscreen` / `defaultExitNativeFullscreen`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowRequest {
+    EnterFullscreen,
+    ExitFullscreen,
+}
+
+impl WindowRequest {
+    /// The window mode it asks for.
+    pub fn mode(self) -> window::Mode {
+        match self {
+            WindowRequest::EnterFullscreen => window::Mode::Fullscreen,
+            WindowRequest::ExitFullscreen => window::Mode::Windowed,
+        }
+    }
+}
+
+/// Carries `request` out on the app's window: its native fullscreen, or
+/// back. A window already in that mode stays as it is (media_kit checked
+/// the style mask first).
+pub fn window_task<M: Send + 'static>(request: WindowRequest) -> Task<M> {
+    let mode = request.mode();
+    window::latest().and_then(move |id| window::set_mode(id, mode))
 }
 
 /// The frame on screen: its revision and its image.
@@ -84,8 +144,9 @@ pub struct TechniqueVideoPlayer {
     /// device (the repository's `asset://` placeholder), or opening it
     /// failed.
     unavailable: bool,
-    hovered: bool,
     frame: Option<Shown>,
+    /// media_kit's fullscreen route is up.
+    fullscreen: bool,
 }
 
 impl TechniqueVideoPlayer {
@@ -95,8 +156,8 @@ impl TechniqueVideoPlayer {
             path: path.to_string(),
             transport: Transport::new(None),
             unavailable: is_unavailable_path(path),
-            hovered: false,
             frame: None,
+            fullscreen: false,
         }
     }
 
@@ -113,6 +174,16 @@ impl TechniqueVideoPlayer {
     /// Whether the player reports playing.
     pub fn is_playing(&self) -> bool {
         self.transport.playing()
+    }
+
+    /// Whether the video is in fullscreen.
+    pub fn is_fullscreen(&self) -> bool {
+        self.fullscreen
+    }
+
+    /// What the controls show.
+    pub fn playback(&self) -> controls::Playback {
+        self.transport.playback()
     }
 
     /// The revision of the frame on screen, if any.
@@ -141,24 +212,84 @@ impl TechniqueVideoPlayer {
     }
 
     /// Handles a message. `players` builds the player on the first play.
+    /// Returns what the window must do, when the video enters or leaves
+    /// fullscreen.
     pub fn update(
         &mut self,
         message: Message,
         players: &dyn MediaPlayerFactory,
         play_blocked: bool,
-    ) {
-        match message {
-            Message::Tick => self.tick(play_blocked),
-            Message::Hover(hovered) => self.hovered = hovered,
-            // Neither the pointer nor the keyboard while a take records: a
-            // press queued before the block lands after it.
-            _ if play_blocked => {}
-            Message::Play => self.start(players),
-            Message::Controls(m) => {
-                let _ = self.transport.update(m, play_blocked);
-                self.refresh_frame();
+    ) -> Option<WindowRequest> {
+        let request = match message {
+            Message::Tick => {
+                self.tick(play_blocked);
+                return None;
             }
+            // Neither the pointer nor the keyboard reach the inline video
+            // while a take records: a press queued before the block lands
+            // after it. The fullscreen route was not under the block.
+            _ if play_blocked && !self.fullscreen => None,
+            Message::Play => {
+                self.start(players);
+                None
+            }
+            Message::Controls(command) => self.command(command, play_blocked),
+            Message::Key(shortcut) => self.shortcut(shortcut, play_blocked),
+        };
+        self.refresh_frame();
+        request
+    }
+
+    /// What the controls asked.
+    fn command(&mut self, command: Command, play_blocked: bool) -> Option<WindowRequest> {
+        if !self.transport.has_player() {
+            return None;
         }
+        match command {
+            Command::PlayOrPause => self.transport.play_or_pause(play_blocked),
+            Command::Seek(to) => self.transport.seek(to),
+            Command::SetVolume(volume) => self.transport.set_volume(clamp_volume(volume)),
+            Command::ToggleFullscreen => return self.set_fullscreen(!self.fullscreen),
+        }
+        None
+    }
+
+    /// What a shortcut does (`keyboardShortcuts`, `material_desktop.dart:
+    /// 526-575`), against the player's state now.
+    fn shortcut(&mut self, shortcut: Shortcut, play_blocked: bool) -> Option<WindowRequest> {
+        let state = self.transport.current()?;
+        match shortcut {
+            Shortcut::Play if !play_blocked => self.transport.play(),
+            Shortcut::Play => {}
+            Shortcut::Pause => self.transport.pause(),
+            Shortcut::PlayOrPause => self.transport.play_or_pause(play_blocked),
+            // A one-clip playlist: `next()` and `previous()` do nothing.
+            Shortcut::Next | Shortcut::Previous => {}
+            Shortcut::SeekBy(ms) => {
+                if let Some(to) = seek_target(state.position, ms, state.duration) {
+                    self.transport.seek(to);
+                }
+            }
+            Shortcut::VolumeBy(step) => {
+                self.transport.set_volume(clamp_volume(state.volume + step))
+            }
+            Shortcut::ToggleFullscreen => return self.set_fullscreen(!self.fullscreen),
+            Shortcut::ExitFullscreen => return self.set_fullscreen(false),
+        }
+        None
+    }
+
+    /// `enterFullscreen` / `exitFullscreen`: nothing when already so.
+    fn set_fullscreen(&mut self, on: bool) -> Option<WindowRequest> {
+        if self.fullscreen == on {
+            return None;
+        }
+        self.fullscreen = on;
+        Some(if on {
+            WindowRequest::EnterFullscreen
+        } else {
+            WindowRequest::ExitFullscreen
+        })
     }
 
     /// `pauseSignal`: a take is arming; pause where it is.
@@ -200,50 +331,79 @@ impl TechniqueVideoPlayer {
         }
     }
 
+    /// The latest frame, letterboxed (`BoxFit.contain`, low filter
+    /// quality), over black.
+    fn picture(&self) -> Element<'_, Message> {
+        let picture: Element<'_, Message> = match &self.frame {
+            Some(shown) => image::Image::new(shown.handle.clone())
+                .content_fit(ContentFit::Contain)
+                .filter_method(FilterMethod::Linear)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into(),
+            None => Space::new().width(Length::Fill).height(Length::Fill).into(),
+        };
+        container(picture)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(|_| boxed(Some(Color::BLACK), 0.0, None))
+            .into()
+    }
+
     pub fn view(&self, play_blocked: bool) -> Element<'_, Message> {
         let content: Element<'_, Message> = if !self.transport.has_player() {
             poster(self.unavailable, play_blocked)
         } else {
-            let picture: Element<'_, Message> = match &self.frame {
-                Some(shown) => image::Image::new(shown.handle.clone())
-                    .content_fit(ContentFit::Contain)
-                    .filter_method(FilterMethod::Linear)
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .into(),
-                None => Space::new().width(Length::Fill).height(Length::Fill).into(),
-            };
-            let mut layers = stack![container(picture)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .style(|_| boxed(Some(Color::BLACK), 0.0, None))];
-            if self.hovered && !play_blocked {
-                layers = layers.push(column![
-                    Space::new().height(Length::Fill),
-                    container(self.transport.bar(play_blocked).map(Message::Controls))
-                        .width(Length::Fill)
-                        .height(audio::HEIGHT)
-                        .padding([0, 10])
-                        .align_y(Vertical::Center)
-                        .style(|_| boxed(Some(alpha(Color::BLACK, 0.55)), 0.0, None)),
-                ]);
-            }
-            let area = mouse_area(layers);
-            if play_blocked {
-                area.into()
-            } else {
-                area.on_enter(Message::Hover(true))
-                    .on_exit(Message::Hover(false))
-                    .into()
-            }
+            stack![
+                self.picture(),
+                video_controls(self.playback(), Message::Controls)
+                    .enabled(!play_blocked)
+                    .corner_radius(RADIUS - BORDER_WIDTH),
+            ]
+            .into()
         };
         container(AspectRatio::new(content, ASPECT_RATIO))
             .width(Length::Fill)
             .max_width(MAX_WIDTH)
+            .padding(BORDER_WIDTH)
             .clip(true)
-            .style(|_| boxed(Some(Color::BLACK), 10.0, Some(Studio::BORDER)))
+            .style(|_| boxed(Some(Color::BLACK), RADIUS, Some(Studio::BORDER)))
             .into()
     }
+
+    /// The fullscreen route's page while the video is fullscreen: the video
+    /// filling the window over black, its own controls over it; it takes
+    /// every click and every key (its shortcuts first).
+    pub fn fullscreen_view(&self) -> Option<Element<'_, Message>> {
+        if !self.fullscreen || !self.transport.has_player() {
+            return None;
+        }
+        let page = stack![
+            self.picture(),
+            video_controls(self.playback(), Message::Controls).fullscreen(true),
+        ];
+        let keys = Wrap::<Message, ()>::new(
+            container(page).width(Length::Fill).height(Length::Fill),
+            Box::new(|_, event, _, _, shell| {
+                if shell.is_event_captured() {
+                    return;
+                }
+                if let Event::Keyboard(key) = event {
+                    if let Some(shortcut) = controls::shortcut(key) {
+                        shell.publish(Message::Key(shortcut));
+                        shell.capture_event();
+                    }
+                }
+            }),
+        );
+        Some(holds_keyboard(opaque(keys)))
+    }
+}
+
+/// The shortcut message a key event triggers, if any (for the host that
+/// routes the keyboard to the inline controls).
+pub fn key_message(event: &keyboard::Event) -> Option<Message> {
+    controls::shortcut(event).map(Message::Key)
 }
 
 /// A frame as an image handle sharing its pixels.

@@ -6,8 +6,8 @@
 //!
 //! The Dart file also held what the video player shares: the player seam
 //! (`createExamplePlayer`, here a [`MediaPlayerFactory`] the host passes
-//! in), [`pause_while_play_blocked`], [`UNAVAILABLE_CLIP_MESSAGE`], and the
-//! bar's disc and scrubber.
+//! in), [`pause_while_play_blocked`] and [`UNAVAILABLE_CLIP_MESSAGE`]; the
+//! playback state both players poll (`Transport`) lives here too.
 //!
 //! # From streams to polling
 //!
@@ -38,9 +38,11 @@ use iced::widget::{button, canvas as canvas_widget, container, row, Space};
 use iced::{mouse, Element, Event, Length, Point, Rectangle, Renderer, Size, Subscription, Theme};
 use vocara_services::media_player::{
     MediaKind, MediaPlayer, MediaPlayerError, MediaPlayerFactory, PlayerState, VideoFrame,
+    FULL_VOLUME,
 };
 use vocara_store::db::asset_store::AssetStore;
 
+use super::video_controls::Playback;
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{alpha, bare_button, boxed, Studio};
 use crate::ui::core::widgets::studio_text::studio_text;
@@ -107,13 +109,18 @@ pub enum Message {
 }
 
 /// The playback state Dart's `_TechniqueAudioPlayerState` kept: the player
-/// and what its streams last said, plus the bar's drag. The video player's
-/// controls run on it too.
+/// and what its streams last said, plus the bar's drag. The video player
+/// runs on it too, and reads what its controls listened to besides
+/// (`completed`, `buffering`, `buffer`, `volume`).
 pub(super) struct Transport {
     player: Option<Box<dyn MediaPlayer>>,
     playing: bool,
     position: Duration,
     duration: Duration,
+    completed: bool,
+    buffering: bool,
+    buffer: Duration,
+    volume: f64,
     dragging: bool,
     drag_value: f64,
     /// The position the player last reported: a poll that reads another is
@@ -133,6 +140,10 @@ impl Transport {
             playing: false,
             position: Duration::ZERO,
             duration: Duration::ZERO,
+            completed: false,
+            buffering: false,
+            buffer: Duration::ZERO,
+            volume: FULL_VOLUME,
             dragging: false,
             drag_value: 0.0,
             reported: Duration::ZERO,
@@ -164,6 +175,10 @@ impl Transport {
         self.playing = state.playing;
         self.duration = state.duration;
         self.loading = state.loading;
+        self.completed = state.completed;
+        self.buffering = state.buffering;
+        self.buffer = state.buffer;
+        self.volume = state.volume;
         self.settle = self.settle.saturating_sub(1);
         if state.position == self.reported {
             return None;
@@ -185,11 +200,70 @@ impl Transport {
     }
 
     /// A command went to the player: poll until it shows, and take its
-    /// `playing` at once (media_kit reported it synchronously).
+    /// `playing` and `volume` at once (media_kit reported them
+    /// synchronously).
     fn commanded(&mut self) {
         self.settle = SETTLE_TICKS;
         if let Some(player) = &self.player {
-            self.playing = player.state().playing;
+            let state = player.state();
+            self.playing = state.playing;
+            self.volume = state.volume;
+        }
+    }
+
+    /// What the video controls show.
+    pub(super) fn playback(&self) -> Playback {
+        Playback {
+            playing: self.playing,
+            completed: self.completed,
+            position: self.position,
+            duration: self.duration,
+            buffer: self.buffer,
+            buffering: self.buffering,
+            volume: self.volume,
+        }
+    }
+
+    /// The player's state now (not the last poll's), if there is a player.
+    pub(super) fn current(&self) -> Option<PlayerState> {
+        self.player.as_ref().map(|p| p.state())
+    }
+
+    /// `play`.
+    pub(super) fn play(&mut self) {
+        if let Some(player) = &mut self.player {
+            player.play();
+            self.commanded();
+        }
+    }
+
+    /// `playOrPause`, with the take's block: Pause stays live; Play waits
+    /// for the take to end.
+    pub(super) fn play_or_pause(&mut self, play_blocked: bool) {
+        if play_blocked && !self.playing {
+            return;
+        }
+        if let Some(player) = &mut self.player {
+            player.play_or_pause();
+            self.commanded();
+        }
+    }
+
+    /// `seek(to)`, the position moved there at once (the seek bar set its
+    /// own on release).
+    pub(super) fn seek(&mut self, to: Duration) {
+        self.position = to;
+        if let Some(player) = &mut self.player {
+            player.seek(to);
+            self.commanded();
+        }
+    }
+
+    /// `setVolume(volume)`.
+    pub(super) fn set_volume(&mut self, volume: f64) {
+        if let Some(player) = &mut self.player {
+            player.set_volume(volume);
+            self.commanded();
         }
     }
 

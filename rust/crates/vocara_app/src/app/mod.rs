@@ -768,6 +768,14 @@ impl App {
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .style(theme::page)];
+                // What the page on top shows over the whole window (a route
+                // on the root navigator: a video's fullscreen), over the
+                // drag bar and the snack bars, under the dialogs. Its slot
+                // stays when empty, so the dialogs keep theirs.
+                let (top, page) = running.router.top();
+                layers = layers.push(page.overlay(top).unwrap_or_else(|| {
+                    Space::new().width(Length::Fill).height(Length::Fill).into()
+                }));
                 // A closed dialog fades out where it was (over the dialogs
                 // under it, under any opened since), taking no input (as its
                 // route went, Flutter's barrier ignored the pointer).
