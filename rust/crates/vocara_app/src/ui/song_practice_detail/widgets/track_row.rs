@@ -90,6 +90,7 @@ use super::track_context_menu::{argb, default_take_color, selected_lane_color};
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{alpha, bare_button, boxed, fill, font, Studio};
 use crate::ui::core::widgets::studio_controls::{studio_fader, studio_mini_button};
+use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::core::widgets::waveform_painter::{
     visible_peak_slice, LiveWaveformPainter, PeakSlice, PlayheadPainter, TimelineGridPainter,
     WaveformPainter,
@@ -589,8 +590,8 @@ fn main_row<'a, M>(r: &TrackRow<'a, M>) -> Element<'a, Message> {
 /// `_TrackHeader`: the fixed-width left control column for a track
 /// (Logic/Cubase mixer-strip style): a 3 px color bar, the name + ⋯ menu,
 /// and a row of mute/solo, volume and add-note controls. A tap on it
-/// selects the lane; a right-click opens the lane menu. (The label's 0.3
-/// letter spacing has no iced counterpart.)
+/// selects the lane; a right-click opens the lane menu. The label is 11.5
+/// px w700 with 0.3 letter spacing, ellipsized.
 fn header<'a, M>(r: &TrackRow<'a, M>, accent: Color) -> Element<'a, Message> {
     let track = r.track;
     let mut top = row![].align_y(Vertical::Center);
@@ -607,15 +608,13 @@ fn header<'a, M>(r: &TrackRow<'a, M>, accent: Color) -> Element<'a, Message> {
     }
     top = top
         .push(
-            container(
-                text(r.label.to_uppercase())
-                    .size(11.5)
-                    .font(font::BOLD)
-                    .color(Studio::TEXT_PRIMARY)
-                    .wrapping(Wrapping::None),
-            )
-            .width(Length::Fill)
-            .clip(true),
+            studio_text(r.label.to_uppercase())
+                .size(11.5)
+                .font(font::BOLD)
+                .letter_spacing(0.3)
+                .color(Studio::TEXT_PRIMARY)
+                .width(Length::Fill)
+                .ellipsis(1),
         )
         .push(track_menu_button(Message::ContextMenu));
     let mut controls = row![
@@ -1265,17 +1264,17 @@ fn note_marker<'a>(color: Color) -> Element<'a, Message> {
 // ------------------------------------------------------- the reorder drag
 
 /// `_DragGhost`: the floating label shown under the pointer while
-/// long-press dragging a lane — a grip glyph and the label (11 px w700) on a
-/// raised, coral-ringed chip with a soft shadow. (The 0.8 letter spacing
-/// has no iced counterpart.)
+/// long-press dragging a lane — a grip glyph and the label (11 px w700, 0.8
+/// letter spacing) on a raised, coral-ringed chip with a soft shadow.
 fn drag_ghost<'a>(label: &str) -> Element<'a, Message> {
     container(
         row![
             icons::icon(Icon::GripVertical, 14.0, Studio::TEXT_SECONDARY),
             Space::new().width(8),
-            text(label.to_uppercase())
+            studio_text(label.to_uppercase())
                 .size(11)
                 .font(font::BOLD)
+                .letter_spacing(0.8)
                 .color(Studio::TEXT_PRIMARY)
                 .wrapping(Wrapping::None),
         ]

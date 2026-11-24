@@ -17,13 +17,12 @@
 //! - `CustomMultiChildLayout(_BarLayout)`: [`bar_layout`] centres the
 //!   transport on the bar and gives the title group and the zoom control the
 //!   room either side of it, less a 12 px gap; the title group is a row in
-//!   which the title gives way first (`Flexible`), clipped where Flutter
-//!   ellipsized it (iced has no ellipsis).
+//!   which the title gives way first (`Flexible`), ellipsized.
 //! - The counter's `ValueListenableBuilder` and `RepaintBoundary`s: an iced
 //!   view is rebuilt from state on every message, and only what changed is
 //!   redrawn; the counter reads [`TransportBar::position`] when built.
-//! - The counter's tabular figures and 1 px letter spacing (iced text has
-//!   neither): the counter lays its characters out itself, each digit in a
+//! - The counter's tabular figures (iced text has none) and 1 px letter
+//!   spacing: the counter lays its characters out itself, each digit in a
 //!   cell as wide as the widest digit and every character followed by 1 px,
 //!   so the transport does not shift as the seconds tick.
 //! - `ListenableBuilder(playback.viewport)` around the zoom slider and the
@@ -55,6 +54,7 @@ use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{alpha, bare_button, boxed, fill, font, Studio};
 use crate::ui::core::widgets::studio_controls::studio_round_button;
 use crate::ui::core::widgets::studio_hint::spinner;
+use crate::ui::core::widgets::studio_text::studio_text;
 
 #[cfg(test)]
 mod tests;
@@ -267,15 +267,12 @@ pub fn detail_transport_bar<'a>(bar: TransportBar<'a>) -> Element<'a, Message> {
         vec![
             back_button(),
             Space::new().width(6).into(),
-            container(
-                text(practice.title.clone())
-                    .size(15)
-                    .font(font::BOLD)
-                    .color(Studio::TEXT_PRIMARY)
-                    .wrapping(Wrapping::None),
-            )
-            .clip(true)
-            .into(),
+            studio_text(practice.title.clone())
+                .size(15)
+                .font(font::BOLD)
+                .color(Studio::TEXT_PRIMARY)
+                .ellipsis(1)
+                .into(),
             Space::new().width(10).into(),
             text(counts_label(takes, bar.visible_note_count))
                 .size(12)
@@ -409,7 +406,11 @@ fn rec_pill<'a>(is_recording: bool, on_tap: Message) -> Element<'a, Message> {
         row![
             dot,
             Space::new().width(7),
-            text("REC").size(12).font(font::BOLD).color(Studio::RECORD),
+            studio_text("REC")
+                .size(12)
+                .font(font::BOLD)
+                .letter_spacing(0.5)
+                .color(Studio::RECORD),
         ]
         .align_y(Vertical::Center),
     )
