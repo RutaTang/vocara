@@ -18,6 +18,19 @@
 //! the same fade alone; a fixed one slides up from the page's bottom edge
 //! (`Curves.fastOutSlowIn`, clipped) and back down. Flutter's `Hero`
 //! between the pages' scaffolds has no counterpart.
+//!
+//! A snack bar can be swiped away: `SnackBar` wraps itself in a
+//! `Dismissible` that dismisses downward (`widgets::dismissible`), so
+//! dragged down with the mouse it follows the pointer, and let go far
+//! enough down (or flung) it slides out of its clip; once it is out, the
+//! queue takes it down at once, with no exit of its own
+//! (`removeCurrentSnackBar(reason: SnackBarClosedReason.swipe)`): its timer
+//! is gone, and the next one enters ([`SnackQueue::swiped`]). One that is
+//! leaving already can be swiped too. A floating snack bar takes the drag
+//! on its `Material` alone, not on its margin (the `Dismissible`'s
+//! `HitTestBehavior.deferToChild`, for a snack bar with a margin); a fixed
+//! one anywhere on it (`HitTestBehavior.opaque`). Either takes every press
+//! on it, so nothing beneath sees one.
 
 use std::collections::VecDeque;
 use std::convert::Infallible;
@@ -29,9 +42,14 @@ use iced::advanced::{renderer, Clipboard, Renderer as _, Shell, Widget};
 use iced::alignment::Vertical;
 use iced::time::Instant;
 use iced::widget::{container, stack};
-use iced::{mouse, Element, Event, Length, Rectangle, Renderer, Size, Subscription, Theme};
+use iced::{
+    mouse, Color, Element, Event, Length, Padding, Rectangle, Renderer, Shadow, Size, Subscription,
+    Theme, Vector,
+};
 
 use crate::ui::core::motion::{self, Controller, Curve};
+use crate::ui::core::theme;
+use crate::ui::core::widgets::dismissible::{Behavior, Dismissible};
 
 /// How long a snack bar takes to enter, and to leave
 /// (`_snackBarTransitionDuration`).
@@ -47,10 +65,20 @@ pub enum SnackStyle {
     Fixed,
 }
 
-/// Draws a snack bar's text, at an opacity, as its page does (`SnackBar`
-/// reports nothing: no Dart snack bar had an action). A floating snack bar
-/// includes its margin.
+/// Draws a snack bar's text, at an opacity, as its page does: the bar's
+/// `Material` alone (`SnackBar` reports nothing: no Dart snack bar had an
+/// action). The queue sets a floating one in its margin
+/// ([`FLOATING_MARGIN`]).
 pub type SnackLook = for<'a> fn(&'a str, f32) -> Element<'a, Infallible>;
+
+/// A floating snack bar's margin around its `Material`: every Dart
+/// floating snack bar's `margin: EdgeInsets.all(16)`.
+pub const FLOATING_MARGIN: f32 = 16.0;
+
+/// A floating snack bar's corner radius, where it takes hits: every Dart
+/// floating snack bar's `RoundedRectangleBorder(borderRadius:
+/// BorderRadius.circular(8))`.
+pub const FLOATING_RADIUS: f32 = 8.0;
 
 /// A snack bar: what it says, its time and look; a page hands its own to
 /// the app ([`Screen::take_snack_bars`](crate::ui::Screen::take_snack_bars)).
@@ -104,19 +132,24 @@ pub struct SnackTimer {
     pub deadline: Instant,
 }
 
-/// What a [`SnackQueue`]'s subscription reports.
+/// What a [`SnackQueue`]'s subscription and its snack bars report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SnackEvent {
     /// Snack bar `n`'s time is up.
     Expired(u64),
     /// A frame, while one enters or leaves.
     Frame(Instant),
+    /// Snack bar `n` was swiped away (its view reports it).
+    Swiped(u64),
 }
 
 /// A snack bar's entrance and exit.
 #[derive(Debug, Clone)]
 struct Motion {
     controller: Controller,
+    /// When its entrance starts (later than it was set up when it waits for
+    /// the one before it to leave).
+    start: Instant,
     /// When its entrance ends, and its time starts.
     entered: Instant,
 }
@@ -219,6 +252,26 @@ impl SnackQueue {
         }
     }
 
+    /// Snack bar `seq` was swiped away at `now`: it has slid out of sight
+    /// already, so it goes at once, with no exit, its timer with it, and the
+    /// next one enters now (`removeCurrentSnackBar(reason: swipe)`). One
+    /// leaving can be swiped too: the next one, which waited for it to
+    /// leave, enters now instead. A stale report takes down nothing.
+    pub fn swiped(&mut self, seq: u64, now: Instant) {
+        if self.leaving.as_ref().is_some_and(|e| e.seq == seq) {
+            self.leaving = None;
+            if let Some(first) = self.queue.front_mut() {
+                if first.motion.as_ref().is_some_and(|m| m.start > now) {
+                    first.motion = None;
+                }
+            }
+            self.start_first(now);
+        } else if self.queue.front().is_some_and(|e| e.seq == seq) {
+            self.queue.pop_front();
+            self.start_first(now);
+        }
+    }
+
     /// A frame at `now`: what is drawn moves on, and the one leaving goes
     /// once it has left.
     pub fn frame(&mut self, now: Instant) {
@@ -283,8 +336,9 @@ impl SnackQueue {
     }
 
     /// The snack bars as drawn at the last frame: the one leaving, and the
-    /// one showing, over the bottom of the page.
-    pub fn view(&self) -> Option<Element<'_, Infallible>> {
+    /// one showing, over the bottom of the page. A snack bar swiped away
+    /// reports [`SnackEvent::Swiped`].
+    pub fn view(&self) -> Option<Element<'_, SnackEvent>> {
         let mut layers = stack![].width(Length::Fill).height(Length::Fill);
         let mut any = false;
         for entry in self
@@ -296,7 +350,12 @@ impl SnackQueue {
             let Some(motion) = &entry.motion else {
                 continue;
             };
-            layers = layers.push(transition(&entry.bar, &motion.controller, self.now));
+            layers = layers.push(transition(
+                entry.seq,
+                &entry.bar,
+                &motion.controller,
+                self.now,
+            ));
             any = true;
         }
         any.then(|| layers.into())
@@ -339,6 +398,7 @@ impl SnackQueue {
         controller.forward(start);
         first.motion = Some(Motion {
             controller,
+            start,
             entered: start + ahead,
         });
     }
@@ -362,6 +422,35 @@ fn timer_stream(timer: &SnackTimer) -> impl iced::futures::Stream<Item = SnackEv
     .chain(iced::futures::stream::pending())
 }
 
+/// Material 3's fixed snack bar with the text `message`, as a `SnackBar`
+/// with no shape, color or padding of its own drew it under forui's theme:
+/// the inverse surface, forui's rounded shape ([`theme::SNACK_BAR_RADIUS`]),
+/// 14 px text, 24 / 14 of padding, elevation 6. It slides rather than
+/// fades, so it is always opaque.
+pub fn fixed_bar(message: &str, _opacity: f32) -> Element<'_, Infallible> {
+    container(
+        crate::ui::core::text(message)
+            .size(14)
+            .line_height(1.0)
+            .color(theme::SNACK_BAR_DEFAULT_TEXT),
+    )
+    .width(Length::Fill)
+    .padding([14, 24])
+    .style(|_| container::Style {
+        shadow: Shadow {
+            color: Color::from_rgba8(0, 0, 0, 0.3),
+            offset: Vector::new(0.0, 3.0),
+            blur_radius: 6.0,
+        },
+        ..theme::boxed(
+            Some(theme::SNACK_BAR_DEFAULT_BACKGROUND),
+            theme::SNACK_BAR_RADIUS,
+            None,
+        )
+    })
+    .into()
+}
+
 /// How far in `bar` is at `now` on `controller`: `(opacity, height factor)`
 /// (see the module docs).
 pub fn progress(style: SnackStyle, controller: &Controller, now: Instant) -> (f32, f32) {
@@ -375,19 +464,32 @@ pub fn progress(style: SnackStyle, controller: &Controller, now: Instant) -> (f3
     }
 }
 
-/// `bar` drawn at `now` on `controller`, at the bottom of the page.
+/// `bar` (number `seq`) drawn at `now` on `controller`, at the bottom of
+/// the page: its `Dismissible` inside its transition's clip.
 fn transition<'a>(
+    seq: u64,
     bar: &'a SnackBar,
     controller: &Controller,
     now: Instant,
-) -> Element<'a, Infallible> {
+) -> Element<'a, SnackEvent> {
     let (opacity, height) = progress(bar.style, controller, now);
-    let anchor = match bar.style {
-        SnackStyle::Floating => Anchor::Bottom,
-        SnackStyle::Fixed => Anchor::Top,
+    let look = (bar.look)(&bar.text, opacity).map(|never| match never {});
+    let (anchor, content, behavior) = match bar.style {
+        SnackStyle::Floating => (
+            Anchor::Bottom,
+            container(look)
+                .width(Length::Fill)
+                .padding(FLOATING_MARGIN)
+                .into(),
+            Behavior::DeferToChild {
+                inset: Padding::new(FLOATING_MARGIN),
+                radius: FLOATING_RADIUS,
+            },
+        ),
+        SnackStyle::Fixed => (Anchor::Top, look, Behavior::Opaque),
     };
     container(Reveal {
-        content: (bar.look)(&bar.text, opacity),
+        content: Dismissible::new(content, seq, behavior, SnackEvent::Swiped(seq)).into(),
         factor: height,
         anchor,
     })
@@ -407,14 +509,23 @@ enum Anchor {
 }
 
 /// `ClipRect(Align(heightFactor: factor))`: as tall as `factor` of its
-/// content, which it clips, anchored at one edge.
-struct Reveal<'a> {
-    content: Element<'a, Infallible>,
+/// content, which it clips, anchored at one edge. Its content takes hits
+/// only within the clip (as `RenderClipRect` hit-tests).
+struct Reveal<'a, M> {
+    content: Element<'a, M>,
     factor: f32,
     anchor: Anchor,
 }
 
-impl Widget<Infallible, Theme, Renderer> for Reveal<'_> {
+/// What of `viewport` a reveal in `bounds` shows: an empty rectangle when
+/// it shows nothing.
+fn clipped(bounds: Rectangle, viewport: &Rectangle) -> Rectangle {
+    bounds
+        .intersection(viewport)
+        .unwrap_or(Rectangle::new(bounds.position(), Size::ZERO))
+}
+
+impl<M> Widget<M, Theme, Renderer> for Reveal<'_, M> {
     fn size(&self) -> Size<Length> {
         Size::new(self.content.as_widget().size().width, Length::Shrink)
     }
@@ -457,7 +568,7 @@ impl Widget<Infallible, Theme, Renderer> for Reveal<'_> {
         cursor: mouse::Cursor,
         renderer: &Renderer,
         clipboard: &mut dyn Clipboard,
-        shell: &mut Shell<'_, Infallible>,
+        shell: &mut Shell<'_, M>,
         viewport: &Rectangle,
     ) {
         self.content.as_widget_mut().update(
@@ -468,7 +579,7 @@ impl Widget<Infallible, Theme, Renderer> for Reveal<'_> {
             renderer,
             clipboard,
             shell,
-            viewport,
+            &clipped(layout.bounds(), viewport),
         );
     }
 
@@ -526,14 +637,14 @@ impl Widget<Infallible, Theme, Renderer> for Reveal<'_> {
             &tree.children[0],
             layout.children().next().expect("the content's layout"),
             cursor,
-            viewport,
+            &clipped(layout.bounds(), viewport),
             renderer,
         )
     }
 }
 
-impl<'a> From<Reveal<'a>> for Element<'a, Infallible> {
-    fn from(reveal: Reveal<'a>) -> Self {
+impl<'a, M: 'a> From<Reveal<'a, M>> for Element<'a, M> {
+    fn from(reveal: Reveal<'a, M>) -> Self {
         Element::new(reveal)
     }
 }

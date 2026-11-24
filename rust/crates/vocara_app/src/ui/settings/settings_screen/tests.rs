@@ -1238,6 +1238,26 @@ fn a_toast_stays_its_time_and_a_new_one_replaces_it() {
 }
 
 #[test]
+fn a_toast_swiped_away_goes_at_once_with_its_time() {
+    let mut page = Setup::new().mount();
+    page.send(Message::Exported(Exported::Saved));
+    let seq = page.screen.toast_seq().expect("a toast");
+    // Its `Dismissible` reports it once it has slid out: it goes with no
+    // exit of its own (`removeCurrentSnackBar(reason: swipe)`).
+    page.send(Message::ToastSwiped(seq));
+    assert!(page.screen.toast().is_none());
+    assert!(page.screen.toast_timer().is_none(), "its timer with it");
+    assert!(
+        !page.shows_containing("Diagnostics saved"),
+        "not drawn leaving"
+    );
+    // A stale report takes down nothing.
+    page.send(Message::Exported(Exported::Saved));
+    page.send(Message::ToastSwiped(seq));
+    assert_eq!(page.screen.toast(), Some(DIAGNOSTICS_SAVED));
+}
+
+#[test]
 fn the_toast_stays_3_5_s_from_the_end_of_its_entrance() {
     use crate::ui::snack::TRANSITION;
     let mut page = Setup::new().mount();
@@ -1333,4 +1353,56 @@ fn the_page_hears_the_settings_notify() {
     drop(changes);
     page.settings().set_monitor_reverb(0.1);
     assert_eq!(page.settings().monitor_reverb_wet(), 0.1);
+}
+
+// --------------------------------------------------------------- rows
+
+#[test]
+fn a_cards_rows_show_no_ink_but_take_taps_under_the_click_cursor() {
+    use crate::ui::core::widgets::animated::testing::{Frames, MS};
+    use iced::{mouse, Event, Point};
+
+    // Dart's rows were InkWells inside the card's opaque Container, with no
+    // Material between: their ink went on the Scaffold's Material, under
+    // the card. So neither hovering nor pressing a row tints it.
+    let view = || {
+        card(vec![
+            action_row(
+                Icon::Wrench,
+                "Repair library",
+                "Checks.",
+                Some(Message::RepairLibrary),
+                false,
+            ),
+            divider(),
+            action_row(Icon::FileDown, "Export", "Saves.", None, false),
+        ])
+    };
+    let mut window = Frames::new(Size::new(400.0, 160.0));
+    let t0 = Instant::now();
+    // Over the first row, clear of its text and chevron.
+    let spot = Point::new(300.0, 10.0);
+    window.point_at(spot);
+    window.frame(view(), &[], t0);
+    window.frame(view(), &[], t0 + 200 * MS);
+    // Studio.hover is two steps off the card's color: compare exactly.
+    let card_color = Studio::SURFACE_RAISED.into_rgba8();
+    assert_eq!(window.pixel(spot).into_rgba8(), card_color, "hovered");
+    assert_eq!(window.interaction(), mouse::Interaction::Pointer);
+
+    let press = Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
+    let release = Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left));
+    let (_, messages) = window.frame_messages(view(), std::slice::from_ref(&press), t0 + 300 * MS);
+    assert!(messages.is_empty());
+    window.frame(view(), &[], t0 + 600 * MS);
+    assert_eq!(window.pixel(spot).into_rgba8(), card_color, "pressed");
+    let (_, messages) =
+        window.frame_messages(view(), std::slice::from_ref(&release), t0 + 700 * MS);
+    assert!(matches!(messages.as_slice(), [Message::RepairLibrary]));
+
+    // A disabled row: no tap, and no click cursor.
+    window.point_at(Point::new(300.0, 100.0));
+    let (_, messages) = window.frame_messages(view(), &[press, release], t0 + 800 * MS);
+    assert!(messages.is_empty());
+    assert_ne!(window.interaction(), mouse::Interaction::Pointer);
 }

@@ -54,21 +54,29 @@
 //! grow from their minimum to their maximum lines, then scroll, as Flutter's
 //! did.
 
+/// The page's message for what its snack bars report.
+fn snack_message(event: SnackEvent) -> Message {
+    match event {
+        SnackEvent::Expired(seq) => Message::SnackExpired(seq),
+        SnackEvent::Frame(at) => Message::SnackFrame(at),
+        SnackEvent::Swiped(seq) => Message::SnackSwiped(seq),
+    }
+}
+
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod through_the_app;
 
-use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::ui::core::text;
 use iced::alignment::Vertical;
 use iced::widget::{
-    button, center, column, container, opaque, scrollable, stack, text_editor, Column, Row, Space,
+    button, center, column, container, scrollable, stack, text_editor, Column, Row, Space,
 };
-use iced::{widget, Color, Element, Font, Length, Padding, Shadow, Subscription, Task, Vector};
+use iced::{widget, Element, Font, Length, Padding, Subscription, Task};
 use vocara_model::models::technique::Technique;
 use vocara_model::models::technique_media::TechniqueMedia;
 use vocara_model::util::dart_string;
@@ -95,7 +103,7 @@ use crate::ui::core::widgets::spectrogram_painter::{release_spectrogram_images, 
 use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::core::widgets::studio_text::studio_text;
-use crate::ui::snack::{SnackEvent, SnackQueue, SnackStyle};
+use crate::ui::snack::{fixed_bar, SnackEvent, SnackQueue, SnackStyle};
 use crate::ui::song_practice_detail::widgets::voiceprint_view::{
     self as voiceprint, VoiceprintState,
 };
@@ -214,6 +222,8 @@ pub enum Message {
     SnackExpired(u64),
     /// A frame while a snack bar enters or leaves.
     SnackFrame(Instant),
+    /// Snack bar `n` was swiped away.
+    SnackSwiped(u64),
 }
 
 /// The edit form: the text as typed, and the technique it was seeded from
@@ -679,6 +689,7 @@ impl TechniqueDetailScreen {
             }
             Message::SnackExpired(seq) => self.snacks.expired(seq, Instant::now()),
             Message::SnackFrame(at) => self.snacks.frame(at),
+            Message::SnackSwiped(seq) => self.snacks.swiped(seq, Instant::now()),
         }
         self.refresh(&mut step);
         step
@@ -971,7 +982,7 @@ impl TechniqueDetailScreen {
 
     /// Shows `text` in a snack bar (now, or after the ones before it).
     fn snack_into(&mut self, text: &str) {
-        let bar = SnackBar::new(text, SNACK_DURATION, false, SnackStyle::Fixed, snack_bar);
+        let bar = SnackBar::new(text, SNACK_DURATION, false, SnackStyle::Fixed, fixed_bar);
         self.snacks.show(bar, Instant::now());
     }
 
@@ -1253,7 +1264,7 @@ impl Screen for TechniqueDetailScreen {
             .height(Length::Fill)
             .style(theme::page)];
         if let Some(snacks) = self.snacks.view() {
-            layers = layers.push(snacks.map(|never| match never {}));
+            layers = layers.push(snacks.map(snack_message));
         }
         layers.into()
     }
@@ -1272,10 +1283,7 @@ impl Screen for TechniqueDetailScreen {
                 iced::time::every(MicRecordingController::TICK_PERIOD).map(|_| Message::Tick),
             );
         }
-        subscriptions.push(self.snacks.subscription().map(|event| match event {
-            SnackEvent::Expired(seq) => Message::SnackExpired(seq),
-            SnackEvent::Frame(at) => Message::SnackFrame(at),
-        }));
+        subscriptions.push(self.snacks.subscription().map(snack_message));
         Subscription::batch(subscriptions)
     }
 
@@ -1397,28 +1405,4 @@ fn chip_row<'a>(labels: &'a [String], tint: bool) -> Element<'a, Message> {
         .wrap()
         .vertical_spacing(6)
         .into()
-}
-
-/// Material 3's fixed snack bar along the page's bottom: the inverse
-/// surface, 14 px text, 24 / 14 of padding, elevation 6. It takes its own
-/// taps. (The app draws it too, once the page has handed it over; it slides
-/// rather than fades, so it is always opaque.)
-fn snack_bar(message: &str, _opacity: f32) -> Element<'_, Infallible> {
-    let bar = container(
-        text(message)
-            .size(14)
-            .line_height(1.0)
-            .color(theme::SNACK_BAR_DEFAULT_TEXT),
-    )
-    .width(Length::Fill)
-    .padding([14, 24])
-    .style(|_| container::Style {
-        shadow: Shadow {
-            color: Color::from_rgba8(0, 0, 0, 0.3),
-            offset: Vector::new(0.0, 3.0),
-            blur_radius: 6.0,
-        },
-        ..boxed(Some(theme::SNACK_BAR_DEFAULT_BACKGROUND), 0.0, None)
-    });
-    opaque(bar)
 }

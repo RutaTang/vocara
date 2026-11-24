@@ -4,18 +4,21 @@
 //!
 //! The menu right-aligns under the trigger, 6 px below it, kept 8 px inside
 //! the window; it is laid out within the window less those 8 px all round.
-//! Like the popup route, it is modal with no barrier color: a press outside
-//! the menu or Escape dismisses it (`barrierDismissible`), and while it is
-//! open nothing beneath sees the pointer or the keyboard. The menu is drawn
+//! Like the popup route, it is modal with no barrier color: a tap outside
+//! the menu (any button, landing on its release within the tap slop:
+//! `gesture::AnyTap`) or Escape dismisses it (`barrierDismissible`), and
+//! while it is open nothing beneath sees the pointer or the keyboard. The menu is drawn
 //! from the current state on every view, so a reload landing while it is
 //! open updates it (Dart rebuilt it with a `ListenableBuilder` for that).
 
 use iced::advanced::layout::{self, Layout};
-use iced::advanced::widget::{Operation, Tree};
+use iced::advanced::widget::{tree, Operation, Tree};
 use iced::advanced::{overlay, renderer, Clipboard, Shell, Widget};
 use iced::{
-    keyboard, mouse, touch, Element, Event, Length, Point, Rectangle, Renderer, Size, Theme, Vector,
+    keyboard, mouse, Element, Event, Length, Point, Rectangle, Renderer, Size, Theme, Vector,
 };
+
+use crate::ui::core::widgets::gesture::{any_tap_event, AnyTap};
 
 /// The gap between the trigger's bottom and the menu.
 pub const GAP: f32 = 6.0;
@@ -30,7 +33,7 @@ pub struct Anchored<'a, M> {
 }
 
 impl<'a, M> Anchored<'a, M> {
-    /// `trigger`, with `menu` open under it when `Some`; a press outside the
+    /// `trigger`, with `menu` open under it when `Some`; a tap outside the
     /// menu or Escape reports `on_dismiss`.
     pub fn new(
         trigger: impl Into<Element<'a, M, Theme, Renderer>>,
@@ -72,6 +75,14 @@ impl<'a, M: Clone + 'a> Widget<M, Theme, Renderer> for Anchored<'a, M> {
         self.trigger.as_widget().size_hint()
     }
 
+    fn tag(&self) -> tree::Tag {
+        tree::Tag::of::<AnyTap>()
+    }
+
+    fn state(&self) -> tree::State {
+        tree::State::new(AnyTap::default())
+    }
+
     fn children(&self) -> Vec<Tree> {
         vec![
             Tree::new(&self.trigger),
@@ -80,6 +91,10 @@ impl<'a, M: Clone + 'a> Widget<M, Theme, Renderer> for Anchored<'a, M> {
     }
 
     fn diff(&self, tree: &mut Tree) {
+        if self.menu.is_none() {
+            // The barrier's tap goes with the menu.
+            *tree.state.downcast_mut::<AnyTap>() = AnyTap::default();
+        }
         tree.children.resize_with(2, Tree::empty);
         tree.children[0].diff(&self.trigger);
         match &self.menu {
@@ -180,7 +195,10 @@ impl<'a, M: Clone + 'a> Widget<M, Theme, Renderer> for Anchored<'a, M> {
         viewport: &Rectangle,
         translation: Vector,
     ) -> Option<overlay::Element<'b, M, Theme, Renderer>> {
-        let [trigger_tree, menu_tree] = tree.children.as_mut_slice() else {
+        let Tree {
+            state, children, ..
+        } = tree;
+        let [trigger_tree, menu_tree] = children.as_mut_slice() else {
             return None;
         };
         match &mut self.menu {
@@ -188,6 +206,7 @@ impl<'a, M: Clone + 'a> Widget<M, Theme, Renderer> for Anchored<'a, M> {
                 menu,
                 tree: menu_tree,
                 anchor: layout.bounds() + translation,
+                barrier: state.downcast_mut::<AnyTap>(),
                 on_dismiss: self.on_dismiss.clone(),
             }))),
             None => self.trigger.as_widget_mut().overlay(
@@ -212,6 +231,8 @@ struct Menu<'a, 'b, M> {
     menu: &'b mut Element<'a, M, Theme, Renderer>,
     tree: &'b mut Tree,
     anchor: Rectangle,
+    /// A tap on the barrier in flight.
+    barrier: &'b mut AnyTap,
     on_dismiss: M,
 }
 
@@ -276,18 +297,26 @@ impl<M: Clone> overlay::Overlay<M, Theme, Renderer> for Menu<'_, '_, M> {
         let Some(menu) = layout.children().next() else {
             return;
         };
-        let outside = !cursor.is_over(menu.bounds());
-        let dismiss = match event {
-            Event::Mouse(mouse::Event::ButtonPressed(_))
-            | Event::Touch(touch::Event::FingerPressed { .. }) => outside,
-            Event::Keyboard(keyboard::Event::KeyPressed {
-                key: keyboard::Key::Named(keyboard::key::Named::Escape),
-                ..
-            }) => true,
-            _ => false,
-        };
-        if dismiss {
+        if let Event::Keyboard(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Named(keyboard::key::Named::Escape),
+            ..
+        }) = event
+        {
             shell.publish(self.on_dismiss.clone());
+            shell.capture_event();
+            return;
+        }
+        let bounds = menu.bounds();
+        let (tapped, taken) = any_tap_event(
+            self.barrier,
+            event,
+            |at| !bounds.contains(at),
+            cursor.position(),
+        );
+        if tapped {
+            shell.publish(self.on_dismiss.clone());
+        }
+        if taken {
             shell.capture_event();
             return;
         }

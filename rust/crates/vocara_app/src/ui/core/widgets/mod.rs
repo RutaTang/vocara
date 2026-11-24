@@ -3,6 +3,7 @@
 pub mod animated;
 pub mod cap_label;
 pub mod confirm_dialog;
+pub mod dismissible;
 pub mod fading_scrollbar;
 pub mod fatal_open_screen;
 pub mod holds_keyboard;

@@ -16,7 +16,8 @@
 //! app shows none: the order in which they were shown is the order in which
 //! they come and go, as in Dart's single queue. They enter and leave as
 //! Material's did, a handed-over one carrying on from where its entrance
-//! got ([`crate::ui::snack`]).
+//! got ([`crate::ui::snack`]); one swiped away goes at once, and the next
+//! enters (`removeCurrentSnackBar(reason: SnackBarClosedReason.swipe)`).
 //!
 //! # Differences from Flutter
 //!
@@ -25,9 +26,10 @@
 //! practice" dialog, the song page's note editor and technique picker),
 //! which covered a snack bar in Dart; the studio dialogs still cover it. No
 //! Dart snack bar had an action, so none is carried over. One leaving as its
-//! page stops being on top goes at once.
+//! page stops being on top goes at once. A snack bar being dragged (swiped)
+//! as its page stops being on top is let go: the app draws it at rest, its
+//! slide being the page's widget's.
 
-use std::convert::Infallible;
 use std::time::Instant;
 
 use iced::{Element, Subscription};
@@ -75,27 +77,32 @@ impl Messenger {
         }
     }
 
-    /// What the snack bars' subscription reported.
+    /// What the snack bars' subscription, or one of them, reported.
     pub fn event(&mut self, event: SnackEvent) {
         match event {
             SnackEvent::Expired(seq) => self.queue.expired(seq, Instant::now()),
             SnackEvent::Frame(at) => self.queue.frame(at),
+            SnackEvent::Swiped(seq) => self.queue.swiped(seq, Instant::now()),
         }
     }
 
     /// The snack bars as their pages drew them, entering or leaving.
     pub fn view(&self) -> Option<Element<'_, Message>> {
-        self.queue
-            .view()
-            .map(|e: Element<'_, Infallible>| e.map(|never| match never {}))
+        self.queue.view().map(|e| e.map(message))
     }
 
     /// Their timer, and the frames while one enters or leaves.
     pub fn subscription(&self) -> Subscription<Message> {
-        self.queue.subscription().map(|event| match event {
-            SnackEvent::Expired(seq) => Message::SnackBarExpired(seq),
-            SnackEvent::Frame(at) => Message::SnackBarFrame(at),
-        })
+        self.queue.subscription().map(message)
+    }
+}
+
+/// The app's message for what its snack bars report.
+fn message(event: SnackEvent) -> Message {
+    match event {
+        SnackEvent::Expired(seq) => Message::SnackBarExpired(seq),
+        SnackEvent::Frame(at) => Message::SnackBarFrame(at),
+        SnackEvent::Swiped(seq) => Message::SnackBarSwiped(seq),
     }
 }
 
@@ -106,7 +113,7 @@ mod tests {
     use super::*;
     use crate::ui::snack::{SnackStyle, TRANSITION};
 
-    fn look(text: &str, _: f32) -> Element<'_, Infallible> {
+    fn look(text: &str, _: f32) -> Element<'_, std::convert::Infallible> {
         crate::ui::core::text(text).into()
     }
 
@@ -176,5 +183,22 @@ mod tests {
         assert_eq!(into_recipes(m.subscription()).len(), 1, "frames, no timer");
         m.event(SnackEvent::Frame(Instant::now() + TRANSITION));
         assert!(into_recipes(m.subscription()).is_empty(), "idle again");
+    }
+
+    #[test]
+    fn a_snack_bar_swiped_away_goes_and_the_next_one_has_its_turn() {
+        let mut m = Messenger::default();
+        let long_ago = Instant::now() - Duration::from_secs(1);
+        m.adopt(
+            vec![bar("a", 60_000, false), bar("b", 4000, false)],
+            long_ago,
+        );
+        let a = m.timer().expect("a's timer").seq;
+        m.event(SnackEvent::Swiped(a));
+        assert_eq!(texts(&m), ["b"]);
+        assert_ne!(m.timer().map(|t| t.seq), Some(a), "b's timer now");
+        // Its view reports the swipe as the app's message.
+        let message = message(SnackEvent::Swiped(a));
+        assert!(matches!(message, Message::SnackBarSwiped(n) if n == a));
     }
 }

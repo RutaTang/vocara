@@ -13,7 +13,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use iced::keyboard::{self, key::Named};
-use iced::{mouse, Point, Rectangle, Size};
+use iced::{mouse, Color, Point, Rectangle, Size};
 use iced_test::selector::{Candidate, Target};
 use iced_test::Simulator;
 use vocara_model::config::environment::AppEnvironment;
@@ -562,7 +562,7 @@ fn the_open_tag_menu_follows_a_reload() {
 }
 
 #[test]
-fn escape_or_a_press_outside_closes_the_tag_menu_and_nothing_beneath_sees_it() {
+fn escape_or_a_tap_outside_closes_the_tag_menu_and_nothing_beneath_sees_it() {
     let mut h = Harness::library(vec![stored("Twang", &["EVT"])]);
     h.settle();
     h.click("All tags");
@@ -573,6 +573,16 @@ fn escape_or_a_press_outside_closes_the_tag_menu_and_nothing_beneath_sees_it() {
     assert!(!h.screen.tag_menu_open());
 
     h.click("All tags");
+    // The barrier dismisses on a tap's release (`ModalBarrier`), not its
+    // press: a press alone leaves the menu open.
+    let messages = h.drive(|ui| {
+        let card = ui.find("Twang").expect("the card").bounds();
+        ui.point_at(card.center());
+        let _ = ui.simulate([iced::Event::Mouse(mouse::Event::ButtonPressed(
+            mouse::Button::Left,
+        ))]);
+    });
+    assert!(messages.is_empty(), "{messages:?}");
     // A tap on a card beneath the open menu only closes the menu.
     assert_eq!(h.click("Twang"), vec![Message::DismissTagMenu]);
     assert!(h.navigations.is_empty());

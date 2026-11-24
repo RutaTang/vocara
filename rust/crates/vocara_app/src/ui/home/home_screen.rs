@@ -159,6 +159,8 @@ pub enum Message {
     SnackExpired(u64),
     /// A frame while a toast enters or leaves.
     SnackFrame(Instant),
+    /// Toast `n` was swiped away.
+    SnackSwiped(u64),
     /// A frame while the opening dialog comes in or goes.
     DialogFrame(Instant),
 }
@@ -509,6 +511,10 @@ impl Screen for HomeScreen {
                 self.snacks.frame(at);
                 Update::none()
             }
+            Message::SnackSwiped(seq) => {
+                self.snacks.swiped(seq, Instant::now());
+                Update::none()
+            }
             Message::DialogFrame(at) => {
                 self.now = self.now.max(at);
                 if self.loading.as_ref().is_some_and(|m| m.is_gone(self.now)) {
@@ -532,7 +538,7 @@ impl Screen for HomeScreen {
             .height(Length::Fill)
             .style(theme::page)];
         if let Some(snacks) = self.snacks.view() {
-            layers = layers.push(snacks.map(|never| match never {}));
+            layers = layers.push(snacks.map(snack_message));
         }
         if let Some(fade) = self.loading_fade(self.now) {
             let dialog = opening_dialog(fade);
@@ -549,10 +555,7 @@ impl Screen for HomeScreen {
             .into_iter()
             .map(|timer| Subscription::run_with(timer, timer_stream))
             .collect();
-        subscriptions.push(self.snacks.subscription().map(|event| match event {
-            SnackEvent::Expired(seq) => Message::SnackExpired(seq),
-            SnackEvent::Frame(at) => Message::SnackFrame(at),
-        }));
+        subscriptions.push(self.snacks.subscription().map(snack_message));
         subscriptions
             .push(motion::frames(self.is_animating(Instant::now())).map(Message::DialogFrame));
         // Freshness reloads when sync applies remote rows; with no sync
@@ -788,8 +791,18 @@ fn opening_dialog<'a>(fade: Fade) -> Element<'a, Message> {
     stack![barrier, center(opaque(card))].into()
 }
 
-/// The failure toast: a floating SnackBar 16 in from the page's edges at its
-/// bottom, `Studio.surfaceRaised`, radius 8, `Studio.border`, 13 px text, at
+/// The page's message for what its toasts report.
+fn snack_message(event: SnackEvent) -> Message {
+    match event {
+        SnackEvent::Expired(seq) => Message::SnackExpired(seq),
+        SnackEvent::Frame(at) => Message::SnackFrame(at),
+        SnackEvent::Swiped(seq) => Message::SnackSwiped(seq),
+    }
+}
+
+/// The failure toast: a floating SnackBar (set 16 in from the page's edges
+/// at its bottom by the queue, `snack::FLOATING_MARGIN`),
+/// `Studio.surfaceRaised`, radius 8, `Studio.border`, 13 px text, at
 /// `opacity`. (The app draws it too, once the page has handed it over.)
 fn snack_bar(message: &str, opacity: f32) -> Element<'_, Infallible> {
     let fade = move |c: Color| alpha(c, c.a * opacity);
@@ -808,7 +821,7 @@ fn snack_bar(message: &str, opacity: f32) -> Element<'_, Infallible> {
                 Some(fade(Studio::BORDER)),
             )
         });
-    container(bar).width(Length::Fill).padding(16).into()
+    bar.into()
 }
 
 #[cfg(test)]
