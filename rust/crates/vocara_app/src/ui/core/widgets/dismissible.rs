@@ -32,6 +32,18 @@
 //! completed, as Dart's `onDismissed` came: the model waits on nothing.
 //! iced's events carry no time stamps; the drag samples each at the time it
 //! is handled.
+//!
+//! Where it takes hits it takes the wheel too: the page beneath does not
+//! scroll under it (Flutter's hit test stopped at the snack bar, so no
+//! scrollable beneath saw the pointer signal).
+//!
+//! # Differences from Flutter
+//!
+//! On macOS Flutter delivered a two-finger trackpad swipe as a pan-zoom,
+//! which the drag recognizer took as well, so such a swipe dragged a snack
+//! bar too. iced reports a trackpad's scroll as wheel deltas with no phase,
+//! so it never says when the fingers lift and such a drag could never end:
+//! a trackpad swipe over it moves nothing.
 
 use std::time::Duration;
 
@@ -864,6 +876,13 @@ impl<M: Clone> Widget<M, Theme, Renderer> for Dismissible<'_, M> {
                 dismissed = dismiss.release(event_time());
                 shell.capture_event();
                 shell.request_redraw();
+            }
+            Event::Mouse(mouse::Event::WheelScrolled { .. })
+                if cursor
+                    .position()
+                    .is_some_and(|at| self.hits(bounds, shift, viewport, at)) =>
+            {
+                shell.capture_event();
             }
             _ => {}
         }

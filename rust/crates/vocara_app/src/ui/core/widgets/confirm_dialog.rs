@@ -581,9 +581,11 @@ impl DialogMotion {
 ///
 /// The tap is the modal barrier's (`gesture::AnyTap`): any button, and it
 /// lands on the release, within `kTouchSlop` of the press. A press dragged
-/// further, or joined by a second button, dismisses nothing; nor does a
-/// release whose press went down on the card (or before the barrier was
-/// there).
+/// further, or joined by a second button on the barrier, dismisses
+/// nothing; nor does a release whose press went down on the card (or
+/// before the barrier was there). (A second button pressed over the card
+/// is the card's, which the barrier never sees: in Flutter the pointer,
+/// down on the barrier, stayed the barrier's.)
 pub fn barrier<'a, M: Clone + 'a>(
     color: Color,
     strength: f32,

@@ -232,3 +232,70 @@ fn rounded_hits_leave_the_corners_out() {
     assert!(!in_rounded(rect, 8.0, Point::new(99.0, 39.0)));
     assert!(!in_rounded(rect, 8.0, Point::new(101.0, 20.0)));
 }
+
+// ------------------------------------------------------------- widget
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Heard {
+    /// The page beneath took a press.
+    Pressed,
+    /// The page beneath scrolled.
+    Scrolled,
+    Dismissed,
+}
+
+/// A page that hears presses and scrolls, and over its bottom a dismissible
+/// 40 px "Material" in a 16 px margin (box y 28 to 100 of a 200 × 100
+/// window; the Material at x 16 to 184, y 44 to 84).
+fn page_and_bar<'a>() -> Element<'a, Heard> {
+    use iced::widget::{container, mouse_area, stack, Space};
+    let page = mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
+        .on_press(Heard::Pressed)
+        .on_right_press(Heard::Pressed)
+        .on_scroll(|_| Heard::Scrolled);
+    let material = container(Space::new().width(Length::Fill).height(40))
+        .style(|_| crate::ui::core::theme::boxed(Some(iced::Color::WHITE), 8.0, None));
+    let bar = Dismissible::new(
+        container(material).width(Length::Fill).padding(16),
+        1,
+        Behavior::DeferToChild {
+            inset: Padding::new(16.0),
+            radius: 8.0,
+        },
+        Heard::Dismissed,
+    );
+    stack![
+        page,
+        container(bar)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_y(iced::alignment::Vertical::Bottom),
+    ]
+    .into()
+}
+
+#[test]
+fn it_takes_presses_and_the_wheel_on_its_material_and_lets_the_margin_through() {
+    use crate::ui::core::widgets::animated::testing::Frames;
+    let press = Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right));
+    let wheel = Event::Mouse(mouse::Event::WheelScrolled {
+        delta: mouse::ScrollDelta::Lines { x: 0.0, y: -1.0 },
+    });
+    let mut window = Frames::new(Size::new(200.0, 100.0));
+    let t0 = Instant::now();
+    let heard = |window: &mut Frames, at: Point, event: &Event| {
+        window.point_at(at);
+        let (_, messages) = window.frame_messages(page_and_bar(), std::slice::from_ref(event), t0);
+        messages
+    };
+    // On the Material: nothing beneath hears a press of any button, or the
+    // wheel.
+    let on = Point::new(100.0, 60.0);
+    assert!(heard(&mut window, on, &press).is_empty());
+    assert!(heard(&mut window, on, &wheel).is_empty());
+    // On the margin, or a rounded corner: the page does.
+    for off in [Point::new(100.0, 36.0), Point::new(17.0, 45.0)] {
+        assert_eq!(heard(&mut window, off, &press), [Heard::Pressed]);
+        assert_eq!(heard(&mut window, off, &wheel), [Heard::Scrolled]);
+    }
+}
