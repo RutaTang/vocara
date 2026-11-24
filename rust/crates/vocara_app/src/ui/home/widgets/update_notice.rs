@@ -28,7 +28,7 @@ use vocara_services::update_check_service::{UpdateCheckService, UpdateInfo};
 
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{self, alpha, bare_button, font, Studio, Zinc};
-use crate::ui::core::widgets::confirm_dialog::modal;
+use crate::ui::core::widgets::confirm_dialog::{modal, Fade};
 use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
 use crate::ui::core::widgets::studio_text::studio_text;
 
@@ -190,14 +190,19 @@ impl UpdateDownloadDialog {
         }
     }
 
-    /// The dialog over the whole window: the barrier and the centred card
-    /// (480 wide, the studio dialog card).
+    /// The dialog over the whole window, all in: the barrier and the
+    /// centred card (480 wide, the studio dialog card).
     pub fn view(&self) -> Element<'_, DialogMessage> {
+        self.view_at(Fade::SHOWN)
+    }
+
+    /// The dialog at `fade` (`confirm_dialog`'s module docs).
+    pub fn view_at(&self, fade: Fade) -> Element<'_, DialogMessage> {
         let info = &self.info;
         let mut content = column![text(format!("Vocara {} is available", info.version))
             .size(15)
             .font(font::BOLD)
-            .color(Studio::TEXT_PRIMARY)];
+            .color(fade.color(Studio::TEXT_PRIMARY))];
         if !info.notes.is_empty() {
             content = content.push(Space::new().height(12)).push(
                 container(
@@ -205,7 +210,7 @@ impl UpdateDownloadDialog {
                         text(info.notes.as_str())
                             .size(12.5)
                             .line_height(1.5)
-                            .color(Studio::TEXT_SECONDARY)
+                            .color(fade.color(Studio::TEXT_SECONDARY))
                             .width(Length::Fill),
                     )
                     .style(theme::scrollbar),
@@ -219,29 +224,30 @@ impl UpdateDownloadDialog {
             .on_input(DialogMessage::Input)
             .size(12)
             .padding(0)
-            .style(url_style);
+            .style(fade.input(url_style));
         content = content
             .push(Space::new().height(14))
             .push(
                 container(url)
                     .width(Length::Fill)
                     .padding(Padding::from([10, 12]))
-                    .style(theme::inset(8.0)),
+                    .style(fade.style(theme::inset(8.0))),
             )
             .push(Space::new().height(22))
             .push(row![
                 Space::new().width(Length::Fill),
-                studio_button("Later", DialogMessage::Cancel),
+                studio_button("Later", DialogMessage::Cancel).opacity(fade.card),
                 Space::new().width(10),
                 studio_button("Open Download Page", DialogMessage::Confirm)
                     .icon(Icon::Download)
-                    .variant(StudioButtonVariant::Accent),
+                    .variant(StudioButtonVariant::Accent)
+                    .opacity(fade.card),
             ]);
         let card = container(content.width(Length::Fill))
             .width(480)
             .padding(22)
-            .style(theme::dialog_card);
-        modal(container(card).padding(24).into())
+            .style(fade.style(theme::dialog_card));
+        modal(container(card).padding(24).into(), fade)
     }
 }
 

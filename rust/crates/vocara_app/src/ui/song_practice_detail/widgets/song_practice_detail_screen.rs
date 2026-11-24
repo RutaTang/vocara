@@ -66,7 +66,9 @@
 //!   the end of its entrance (`ui::snack`). Its timer is a subscription.
 //! - The note editor and the technique picker are drawn over the page, under
 //!   the window drag bar (Dart's dialog routes covered it); the app's studio
-//!   dialogs cover the whole window as before.
+//!   dialogs cover the whole window as before. They come in and go as their
+//!   `DialogRoute`s did (`confirm_dialog::DialogMotion`); a closed one stays
+//!   drawn, taking no input, until it has faded out.
 //! - There is no system Back (no `PopScope`): the transport's chevron is the
 //!   page's only way back, and it runs the leave guard.
 //! - A multi-file drop still importing when the page leaves stops with the
@@ -114,7 +116,7 @@ use super::voiceprint_view::VoiceprintState;
 use crate::app::library::RemoteAppliedBroadcast;
 use crate::services::Services;
 use crate::ui::core::motion;
-use crate::ui::core::widgets::confirm_dialog::DialogResult;
+use crate::ui::core::widgets::confirm_dialog::{DialogMotion, DialogResult};
 use crate::ui::core::widgets::spectrogram_painter::{release_spectrogram_images, RenderRequest};
 use crate::ui::snack::{SnackEvent, SnackQueue};
 use crate::ui::song_practice_detail::view_model::analysis_cache::{self, EqInputColumn};
@@ -397,6 +399,8 @@ pub enum Message {
     SnackExpired(u64),
     /// A frame while the snack bar enters or leaves.
     SnackFrame(Instant),
+    /// A frame while the note editor or the picker comes in or goes.
+    DialogFrame(Instant),
     /// A finished side effect.
     Done,
 }
@@ -701,6 +705,14 @@ pub struct SongPracticeDetailScreen {
     menu: Option<OpenMenu>,
     note_editor: Option<(NoteEditor, NoteTarget)>,
     picker: Option<OpenPicker>,
+    /// The open note editor's and picker's route animations.
+    editor_motion: DialogMotion,
+    picker_motion: DialogMotion,
+    /// A closed note editor or picker, drawn as it goes.
+    closing_editor: Option<Box<(NoteEditor, DialogMotion)>>,
+    closing_picker: Option<Box<(TechniquePicker, DialogMotion)>>,
+    /// The last frame's time, what their drawing reads.
+    dialog_now: Instant,
     picker_seq: u64,
     /// Studio dialogs this page asked that have not answered yet.
     dialogs_open: usize,
@@ -791,6 +803,11 @@ impl SongPracticeDetailScreen {
             menu: None,
             note_editor: None,
             picker: None,
+            editor_motion: DialogMotion::shown(),
+            picker_motion: DialogMotion::shown(),
+            closing_editor: None,
+            closing_picker: None,
+            dialog_now: Instant::now(),
             picker_seq: 0,
             dialogs_open: 0,
             awaiting: HashMap::new(),
@@ -924,6 +941,8 @@ impl Screen for SongPracticeDetailScreen {
             SnackEvent::Expired(seq) => Message::SnackExpired(seq),
             SnackEvent::Frame(at) => Message::SnackFrame(at),
         }));
+        subscriptions
+            .push(motion::frames(self.dialogs_animating(Instant::now())).map(Message::DialogFrame));
         // A lyrics list scrolling to a revealed line.
         subscriptions.push(
             motion::frames(self.lyrics.is_scrolling(Instant::now()))
@@ -948,6 +967,8 @@ impl Screen for SongPracticeDetailScreen {
         self.menu = None;
         self.note_editor = None;
         self.picker = None;
+        self.closing_editor = None;
+        self.closing_picker = None;
         self.runs.clear();
         self.awaiting.clear();
         self.snacks = SnackQueue::new();

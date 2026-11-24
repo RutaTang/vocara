@@ -18,10 +18,15 @@
 //! on macOS (`CupertinoPageTransition`, 500 ms; [`RouteTransition`]). The
 //! stack changes at once — a popped page is disposed at once, as before —
 //! and only the drawing follows: the page going is drawn as it goes (from
-//! the app, or from its lingering), taking no input. The slide is drawn,
-//! not laid out, so a tap during it lands where the page will rest (Flutter
-//! hit-tested the moving page where it was drawn). The window drag bar,
+//! the app, or from its lingering), taking no input. The slide moves the
+//! page's layout with its drawing, so a tap during it lands where the page
+//! is drawn, as Flutter hit-tested the moving page. The window drag bar,
 //! the same on every page, stays put.
+//!
+//! A studio dialog comes in and goes as Flutter's `DialogRoute` did (150
+//! ms, `confirm_dialog::DialogMotion`): its barrier and card fade in, and a
+//! closed one stays drawn where it was, taking no input, while it fades
+//! out.
 //!
 //! The window is closed through the quit guard: a close request, or a quit
 //! macOS sends through `terminate:` (Cmd+Q, the app-menu Quit, a Dock quit,
@@ -50,13 +55,13 @@ use self::page::{erase, with_screen, PageUpdate};
 use self::quit::QuitHooks;
 use crate::router::{self, Change, Navigation, PageId, Route, Router};
 use crate::services::{Services, ServicesFactory};
-use crate::ui::core::motion::{self, Controller, Curve};
-use crate::ui::core::theme::{self, alpha, font};
+use crate::ui::core::motion::{self, Controller};
+use crate::ui::core::theme::{self, font};
 use crate::ui::core::widgets::confirm_dialog::{
-    self, Dialog, DialogResult, DialogState, DialogStep,
+    self, Dialog, DialogMotion, DialogResult, DialogState, DialogStep,
 };
 use crate::ui::core::widgets::fatal_open_screen::{self, FatalOpenScreen};
-use crate::ui::core::widgets::slide::{cupertino, slide};
+use crate::ui::core::widgets::slide::{cupertino, inert, slide};
 use crate::ui::core::widgets::window_drag_bar::window_drag_bar;
 use crate::ui::home::widgets::update_notice::open_url_task;
 use crate::ui::snack::SnackEvent;
@@ -160,7 +165,7 @@ pub enum Message {
     SnackBarExpired(u64),
     /// A frame while one of the app's snack bars enters or leaves.
     SnackBarFrame(Instant),
-    /// A frame while a closed dialog's barrier fades out.
+    /// A frame while a page slides or a dialog comes in or goes.
     Frame(Instant),
     /// Boot: the library open.
     Library(LibraryEvent),
@@ -197,6 +202,16 @@ struct OpenDialog {
     page: PageId,
     state: DialogState,
     on_result: Box<dyn FnOnce(DialogResult) -> Message + Send>,
+    /// Its route animation, coming in.
+    motion: DialogMotion,
+}
+
+/// A dialog that closed, drawn as it goes.
+struct ClosingDialog {
+    /// How many dialogs were under it.
+    depth: usize,
+    state: DialogState,
+    motion: DialogMotion,
 }
 
 struct Running {
@@ -209,10 +224,9 @@ struct Running {
     lingering: Vec<(PageId, Page)>,
     /// The snack bars pages handed over, shown over the page on top.
     messenger: Messenger,
-    /// The barriers of dialogs that closed, fading out (each dialog's
-    /// route animation running back), each over the dialogs that were under
-    /// it (how many).
-    closing: Vec<(usize, Controller)>,
+    /// The dialogs that closed, fading out (each dialog's route animation
+    /// running back), each over the dialogs that were under it.
+    closing: Vec<ClosingDialog>,
     /// The page transition running, if any.
     route: Option<RouteTransition>,
     /// The last frame's time, what the drawing reads.
@@ -221,9 +235,10 @@ struct Running {
 
 impl Running {
     /// Whether something the app draws itself moves at `now` (a page
-    /// transition, a closed dialog's barrier fading out).
+    /// transition, a dialog coming in or going).
     fn is_animating(&self, now: Instant) -> bool {
-        self.closing.iter().any(|(_, c)| c.is_animating(now))
+        self.closing.iter().any(|c| c.motion.is_animating(now))
+            || self.dialogs.iter().any(|d| d.motion.is_animating(now))
             || self
                 .route
                 .as_ref()
@@ -502,7 +517,7 @@ impl App {
                 if let State::Running(running) = &mut self.state {
                     running.now = running.now.max(at);
                     let now = running.now;
-                    running.closing.retain(|(_, c)| c.is_animating(now));
+                    running.closing.retain(|c| c.motion.is_animating(now));
                     if running
                         .route
                         .as_ref()
@@ -676,13 +691,20 @@ impl App {
         };
         match open.state.step(message) {
             DialogStep::Closed(result) => {
-                let open = running.dialogs.pop().expect("checked above");
-                // Its card goes at once; its barrier fades out.
-                let mut barrier =
-                    Controller::completed(confirm_dialog::TRANSITION, confirm_dialog::TRANSITION);
-                barrier.reverse(Instant::now());
-                running.closing.push((running.dialogs.len(), barrier));
-                let message = (open.on_result)(result);
+                let OpenDialog {
+                    state,
+                    on_result,
+                    mut motion,
+                    ..
+                } = running.dialogs.pop().expect("checked above");
+                // It goes from wherever it got.
+                motion.close(Instant::now());
+                running.closing.push(ClosingDialog {
+                    depth: running.dialogs.len(),
+                    state,
+                    motion,
+                });
+                let message = on_result(result);
                 self.update(message)
             }
             // The update dialog stays open: its URL is the fallback.
@@ -724,29 +746,23 @@ impl App {
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .style(theme::page)];
-                // A closed dialog's barrier, fading out where its dialog was
-                // (over the dialogs under it, under any opened since); it
-                // takes no input (Flutter's barrier ignores the pointer as
-                // its route goes).
+                // A closed dialog fades out where it was (over the dialogs
+                // under it, under any opened since), taking no input (as its
+                // route went, Flutter's barrier ignored the pointer).
+                let now = running.now;
                 let fading = |depth: usize| {
                     running
                         .closing
                         .iter()
-                        .filter(move |(d, _)| *d == depth)
-                        .map(|(_, barrier)| {
-                            let t = barrier.curved(Curve::Ease, None, running.now);
-                            let color = theme::DIALOG_BARRIER;
-                            Element::from(
-                                container(Space::new())
-                                    .width(Length::Fill)
-                                    .height(Length::Fill)
-                                    .style(theme::fill(alpha(color, color.a * t))),
-                            )
+                        .filter(move |c| c.depth == depth)
+                        .map(move |c| {
+                            inert(c.state.view_at(c.motion.fade(now)).map(Message::Dialog))
                         })
                 };
                 for (depth, open) in running.dialogs.iter().enumerate() {
                     layers = layers.extend(fading(depth));
-                    layers = layers.push(open.state.view().map(Message::Dialog));
+                    let fade = open.motion.fade(now);
+                    layers = layers.push(open.state.view_at(fade).map(Message::Dialog));
                 }
                 layers = layers.extend(fading(running.dialogs.len()));
                 layers.into()
@@ -794,6 +810,7 @@ fn apply(running: &mut Running, update: PageUpdate) -> Task<Message> {
             page: pending.page,
             state,
             on_result: pending.on_result,
+            motion: DialogMotion::opening(Instant::now()),
         });
     }
     if let Some(navigation) = update.navigation {

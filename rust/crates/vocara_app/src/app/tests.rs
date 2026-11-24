@@ -8,6 +8,7 @@ use iced::keyboard;
 
 use super::*;
 use crate::app::library::Library;
+use crate::ui::core::motion::Curve;
 use crate::ui::core::widgets::confirm_dialog::ConfirmDialog;
 
 fn boot(start: Option<&str>) -> App {
@@ -245,41 +246,53 @@ fn a_dialog_covers_the_window_and_its_result_reaches_its_page() {
 }
 
 #[test]
-fn a_closed_dialogs_barrier_fades_out_over_150_ms_on_frames_while_it_does() {
-    use crate::ui::core::motion::Status;
+fn a_dialog_fades_in_and_out_over_150_ms_on_frames_while_it_does() {
+    use crate::ui::core::widgets::confirm_dialog::testing::{assert_comes_in, assert_goes};
     use iced::advanced::subscription::into_recipes;
-    let mut app = boot(None);
-    let frames = |app: &App| {
+    fn running(app: &App) -> &Running {
         let State::Running(running) = &app.state else {
             panic!("running")
         };
-        into_recipes(motion::frames(running.is_animating(Instant::now()))).len()
-    };
-    assert_eq!(frames(&app), 0, "an idle app asks for no frames");
-    open_dialog(&mut app);
-    let closed = Instant::now();
-    let _ = app.update(Message::Dialog(confirm_dialog::Message::Cancel));
-    assert_eq!(app.dialogs(), 0, "closed at once");
-    let barrier = |app: &App| {
-        let State::Running(running) = &app.state else {
-            panic!("running")
-        };
-        running.closing.first().map(|(_, c)| c.clone())
-    };
-    let fading = barrier(&app).expect("its barrier fades out");
-    assert_eq!(frames(&app), 1, "frames while it does");
+        running
+    }
+    let frames =
+        |app: &App, at: Instant| into_recipes(motion::frames(running(app).is_animating(at))).len();
     let t = confirm_dialog::TRANSITION;
-    assert_eq!(fading.status(closed), Status::Reverse);
-    // At its start it is all there; halfway, on `Curves.ease`; then gone.
-    assert!(fading.curved(Curve::Ease, None, closed) > 0.99);
-    let half = closed + t / 2;
-    let middle = fading.curved(Curve::Ease, None, half);
-    assert!((middle - Curve::Ease.transform(fading.value(half))).abs() < 1e-6);
-    assert!(middle > 0.4 && middle < 0.9, "{middle}");
-    assert_eq!(fading.curved(Curve::Ease, None, closed + t * 2), 0.0, "end");
-    let _ = app.update(Message::Frame(Instant::now() + t));
-    assert!(barrier(&app).is_none(), "dropped once faded");
-    assert_eq!(frames(&app), 0, "and the frames stop");
+    let mut app = boot(None);
+    assert_eq!(
+        frames(&app, Instant::now()),
+        0,
+        "an idle app asks for no frames"
+    );
+
+    let before = Instant::now();
+    open_dialog(&mut app);
+    let after = Instant::now();
+    assert_comes_in(&running(&app).dialogs[0].motion, before, after);
+    assert_eq!(frames(&app, after), 1, "frames while it comes in");
+    assert_eq!(frames(&app, after + t), 0, "none once it is in");
+
+    // Say it got all the way in.
+    let State::Running(r) = &mut app.state else {
+        panic!("running")
+    };
+    r.dialogs[0].motion = DialogMotion::shown();
+    let before = Instant::now();
+    let _ = app.update(Message::Dialog(confirm_dialog::Message::Cancel));
+    let after = Instant::now();
+    assert_eq!(app.dialogs(), 0, "closed at once");
+    let going = &running(&app)
+        .closing
+        .first()
+        .expect("drawn as it goes")
+        .motion;
+    assert_goes(going, before, after);
+    assert_eq!(frames(&app, after), 1, "frames while it goes");
+    // Drawn as it goes, it is out of reach.
+    assert!(!shows(&app, "Delete “Take 3”?"), "out of reach");
+    let _ = app.update(Message::Frame(after + t));
+    assert!(running(&app).closing.is_empty(), "dropped once gone");
+    assert_eq!(frames(&app, after + t), 0, "and the frames stop");
 }
 
 #[test]

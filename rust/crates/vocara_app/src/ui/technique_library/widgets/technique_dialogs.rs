@@ -21,7 +21,7 @@ use vocara_model::util::dart_string;
 
 use super::studio_field::studio_field;
 use crate::ui::core::theme::{self, font, Studio};
-use crate::ui::core::widgets::confirm_dialog::{modal, DialogResult};
+use crate::ui::core::widgets::confirm_dialog::{modal, DialogResult, Fade};
 use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
 
 pub use crate::ui::core::widgets::confirm_dialog::Message;
@@ -86,38 +86,45 @@ impl NewTechniqueDialog {
         }
     }
 
-    /// The dialog over the whole window: the barrier and the centred card
-    /// (440 wide, the studio dialog card).
+    /// The dialog over the whole window, all in: the barrier and the
+    /// centred card (440 wide, the studio dialog card).
     pub fn view(&self) -> Element<'_, Message> {
+        self.view_at(Fade::SHOWN)
+    }
+
+    /// The dialog at `fade` (`confirm_dialog`'s module docs).
+    pub fn view_at(&self, fade: Fade) -> Element<'_, Message> {
         let card = container(
             column![
                 text("New technique")
                     .size(16)
                     .font(font::BOLD)
-                    .color(Studio::TEXT_PRIMARY),
+                    .color(fade.color(Studio::TEXT_PRIMARY)),
                 Space::new().height(16),
                 studio_field("Name", &self.name)
                     .hint("e.g. Twang, Mixed voice, Curbing")
                     .id(self.input.clone())
                     .on_input(Message::Input)
                     // Return creates, as in the app's other name dialogs.
-                    .on_submit(Message::Confirm),
+                    .on_submit(Message::Confirm)
+                    .opacity(fade.card),
                 Space::new().height(20),
                 row![
                     Space::new().width(Length::Fill),
-                    studio_button("Cancel", Message::Cancel),
+                    studio_button("Cancel", Message::Cancel).opacity(fade.card),
                     Space::new().width(8),
                     studio_button("Create", Message::Confirm)
                         .variant(StudioButtonVariant::Accent)
-                        .enabled(self.trimmed().is_some()),
+                        .enabled(self.trimmed().is_some())
+                        .opacity(fade.card),
                 ],
             ]
             .width(Length::Fill),
         )
         .width(440)
         .padding(22)
-        .style(theme::dialog_card);
-        modal(container(card).padding(24).into())
+        .style(fade.style(theme::dialog_card));
+        modal(container(card).padding(24).into(), fade)
     }
 }
 

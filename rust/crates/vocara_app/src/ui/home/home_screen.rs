@@ -19,7 +19,9 @@
 //! Two Flutter overlays draw inside the page here, under the window drag
 //! bar: the "Loading practice" dialog (a non-dismissible `showDialog` with
 //! no result to give, which the app's dialog stack cannot close on a timer)
-//! and the SnackBar. The studio dialogs (new practice, delete confirmation,
+//! and the SnackBar. The dialog comes in and goes as its `DialogRoute` did
+//! (`confirm_dialog::DialogMotion`): it fades out over the library as the
+//! practice slides in, taking no input. The studio dialogs (new practice, delete confirmation,
 //! update download) go through the app's dialog stack and cover the whole
 //! window, as Flutter's dialog routes did.
 //!
@@ -56,8 +58,10 @@ use crate::app::library::RemoteAppliedBroadcast;
 use crate::router::Route;
 use crate::services::Services;
 use crate::ui::core::icons::{self, Icon};
+use crate::ui::core::motion;
 use crate::ui::core::theme::{self, alpha, bare_button, boxed, font, Studio};
-use crate::ui::core::widgets::confirm_dialog::{fading_barrier, ConfirmDialog};
+use crate::ui::core::widgets::confirm_dialog::{barrier, ConfirmDialog, DialogMotion, Fade};
+use crate::ui::core::widgets::slide::inert;
 use crate::ui::core::widgets::studio_button::{studio_button, StudioButtonVariant};
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::core::widgets::studio_text::studio_text;
@@ -153,6 +157,8 @@ pub enum Message {
     SnackExpired(u64),
     /// A frame while a toast enters or leaves.
     SnackFrame(Instant),
+    /// A frame while the opening dialog comes in or goes.
+    DialogFrame(Instant),
 }
 
 /// An open in flight: the opening dialog, then the pushed practice until it
@@ -189,6 +195,12 @@ pub struct HomeScreen {
 
     /// The failure toasts (one at a time: each replaces the one up).
     snacks: SnackQueue,
+
+    /// The opening dialog's route animation, from its open until it has
+    /// gone.
+    loading: Option<DialogMotion>,
+    /// The last frame's time, what the dialog's drawing reads.
+    now: Instant,
 
     /// Deletes confirmed while another one still ran, in the order they were
     /// confirmed: each runs once the one before it is done.
@@ -235,6 +247,8 @@ impl HomeScreen {
             opens: 0,
             update_check_pending: true,
             snacks: SnackQueue::new(),
+            loading: None,
+            now: Instant::now(),
             queued_deletes: VecDeque::new(),
         };
         (screen, run(first))
@@ -285,6 +299,17 @@ impl HomeScreen {
             id,
             dialog: true,
         });
+        self.loading = Some(DialogMotion::opening(Instant::now()));
+    }
+
+    /// The opening dialog's fade, while it is drawn.
+    pub fn loading_fade(&self, now: Instant) -> Option<Fade> {
+        self.loading.as_ref().map(|m| m.fade(now))
+    }
+
+    /// Whether the opening dialog comes in or goes at `now`.
+    pub fn is_animating(&self, now: Instant) -> bool {
+        self.loading.as_ref().is_some_and(|m| m.is_animating(now))
     }
 
     /// Surfaces create/delete failures as a transient toast the moment the
@@ -417,6 +442,9 @@ impl Screen for HomeScreen {
                 Some(o) if o.seq == seq && o.dialog => {
                     // Close the dialog, then enter.
                     o.dialog = false;
+                    if let Some(loading) = &mut self.loading {
+                        loading.close(Instant::now());
+                    }
                     Update::push(Route::Song { id: o.id.clone() })
                 }
                 _ => Update::none(),
@@ -479,6 +507,13 @@ impl Screen for HomeScreen {
                 self.snacks.frame(at);
                 Update::none()
             }
+            Message::DialogFrame(at) => {
+                self.now = self.now.max(at);
+                if self.loading.as_ref().is_some_and(|m| m.is_gone(self.now)) {
+                    self.loading = None;
+                }
+                Update::none()
+            }
         }
     }
 
@@ -497,8 +532,11 @@ impl Screen for HomeScreen {
         if let Some(snacks) = self.snacks.view() {
             layers = layers.push(snacks.map(|never| match never {}));
         }
-        if self.opening.as_ref().is_some_and(|o| o.dialog) {
-            layers = layers.push(opening_dialog());
+        if let Some(fade) = self.loading_fade(self.now) {
+            let dialog = opening_dialog(fade);
+            // Going, it takes no input.
+            let open = self.opening.as_ref().is_some_and(|o| o.dialog);
+            layers = layers.push(if open { dialog } else { inert(dialog) });
         }
         layers.into()
     }
@@ -513,6 +551,8 @@ impl Screen for HomeScreen {
             SnackEvent::Expired(seq) => Message::SnackExpired(seq),
             SnackEvent::Frame(at) => Message::SnackFrame(at),
         }));
+        subscriptions
+            .push(motion::frames(self.is_animating(Instant::now())).map(Message::DialogFrame));
         // Freshness reloads when sync applies remote rows; with no sync
         // configured the stream simply never fires.
         subscriptions.push(
@@ -718,16 +758,16 @@ fn error_state<'a>() -> Element<'a, Message> {
 
 /// A small "loading practice" dialog shown over the library while a project
 /// opens (it stays on the library, dimmed, so opening feels like a quick
-/// load rather than a jump to a blank screen). Its barrier is not
+/// load rather than a jump to a blank screen), at `fade`. Its barrier is not
 /// dismissible: it takes every tap.
-fn opening_dialog<'a>() -> Element<'a, Message> {
+fn opening_dialog<'a>(fade: Fade) -> Element<'a, Message> {
     // Accent disc behind the spinner — reads as a deliberate, branded
     // loader.
-    let disc = container(spinner(24.0, 2.6, Studio::ACCENT))
+    let disc = container(spinner(24.0, 2.6, fade.color(Studio::ACCENT)))
         .padding(14)
         .width(52)
         .height(52)
-        .style(|_: &Theme| boxed(Some(alpha(Studio::ACCENT, 0.1)), 26.0, None));
+        .style(fade.style(|_: &Theme| boxed(Some(alpha(Studio::ACCENT, 0.1)), 26.0, None)));
     let card = container(
         column![
             disc,
@@ -736,21 +776,21 @@ fn opening_dialog<'a>() -> Element<'a, Message> {
                 .size(13.5)
                 .font(font::SEMIBOLD)
                 .letter_spacing(0.2)
-                .color(Studio::TEXT_PRIMARY),
+                .color(fade.color(Studio::TEXT_PRIMARY)),
         ]
         .align_x(Horizontal::Center),
     )
     .width(168)
     .padding(Padding::from([26, 24]))
-    .style(|_: &Theme| container::Style {
+    .style(fade.style(|_: &Theme| container::Style {
         shadow: Shadow {
             color: alpha(Color::BLACK, 0.4),
             offset: Vector::new(0.0, 10.0),
             blur_radius: 28.0,
         },
         ..boxed(Some(Studio::SURFACE_RAISED), 16.0, Some(Studio::BORDER))
-    });
-    let barrier = fading_barrier::<Message>(alpha(Color::BLACK, 0.28), None);
+    }));
+    let barrier = barrier::<Message>(alpha(Color::BLACK, 0.28), fade.barrier, None);
     stack![barrier, center(opaque(card))].into()
 }
 

@@ -69,7 +69,7 @@ use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::motion::Curve;
 use crate::ui::core::theme::{self, alpha, bare_button, boxed, font, Studio};
 use crate::ui::core::widgets::animated::{animated, animated_container, Decoration};
-use crate::ui::core::widgets::confirm_dialog::{self, modal, DialogResult};
+use crate::ui::core::widgets::confirm_dialog::{self, modal, DialogResult, Fade};
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::core::widgets::visible_drop_target::visible_drop_target;
@@ -1064,9 +1064,14 @@ impl RenameExampleDialog {
         }
     }
 
-    /// The dialog over the whole window: the barrier (`Color(0xB0000000)`)
-    /// and the centred 380-wide card.
+    /// The dialog over the whole window, all in: the barrier
+    /// (`Color(0xB0000000)`) and the centred 380-wide card.
     pub fn view(&self) -> Element<'_, confirm_dialog::Message> {
+        self.view_at(Fade::SHOWN)
+    }
+
+    /// The dialog at `fade` (`confirm_dialog`'s module docs).
+    pub fn view_at(&self, fade: Fade) -> Element<'_, confirm_dialog::Message> {
         use confirm_dialog::Message;
         let field = text_input("Caption", &self.text)
             .id(self.input.clone())
@@ -1074,25 +1079,25 @@ impl RenameExampleDialog {
             .on_submit(Message::Confirm)
             .size(14)
             .padding(0)
-            .style(theme::studio_input);
+            .style(fade.input(theme::studio_input));
         let card = container(
             column![
                 text("Rename example")
                     .size(15)
                     .font(font::BOLD)
-                    .color(Studio::TEXT_PRIMARY),
+                    .color(fade.color(Studio::TEXT_PRIMARY)),
                 Space::new().height(14),
                 // 12 by 10 inside the well's 1 px border.
                 container(field)
                     .width(Length::Fill)
                     .padding([11, 13])
-                    .style(theme::inset(8.0)),
+                    .style(fade.style(theme::inset(8.0))),
                 Space::new().height(18),
                 row![
                     Space::new().width(Length::Fill),
-                    dialog_button("Cancel", Message::Cancel, false),
+                    dialog_button("Cancel", Message::Cancel, false, fade),
                     Space::new().width(8),
-                    dialog_button("Save", Message::Confirm, true),
+                    dialog_button("Save", Message::Confirm, true, fade),
                 ],
             ]
             .width(Length::Fill),
@@ -1100,16 +1105,18 @@ impl RenameExampleDialog {
         .width(380)
         // 20 inside the 1 px border.
         .padding(21)
-        .style(|_| boxed(Some(Studio::SURFACE_RAISED), 16.0, Some(Studio::BORDER)));
-        modal(container(card).padding(24).into())
+        .style(fade.style(|_| boxed(Some(Studio::SURFACE_RAISED), 16.0, Some(Studio::BORDER))));
+        modal(container(card).padding(24).into(), fade)
     }
 }
 
-/// `_DialogButton`: the rename dialog's flat buttons (no hover change).
+/// `_DialogButton`: the rename dialog's flat buttons (no hover change), at
+/// the dialog's `fade`.
 fn dialog_button<'a>(
     label: &'a str,
     on_tap: confirm_dialog::Message,
     accent: bool,
+    fade: Fade,
 ) -> Element<'a, confirm_dialog::Message> {
     let (fill, border, fg) = if accent {
         (
@@ -1120,6 +1127,7 @@ fn dialog_button<'a>(
     } else {
         (Studio::SURFACE_RAISED, Studio::BORDER, Studio::TEXT_PRIMARY)
     };
+    let (fill, border, fg) = (fade.color(fill), fade.color(border), fade.color(fg));
     // 14 by 8 inside the 1 px border.
     let face = container(text(label).size(13).font(font::SEMIBOLD).color(fg))
         .padding([9, 15])

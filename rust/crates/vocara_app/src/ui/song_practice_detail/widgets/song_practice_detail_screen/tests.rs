@@ -1865,6 +1865,68 @@ fn adding_a_note_via_the_take_header_saves_it_on_the_take() {
 }
 
 #[test]
+fn the_note_editor_and_the_picker_come_in_and_go_over_150_ms() {
+    use crate::ui::core::widgets::confirm_dialog::testing::{assert_comes_in, assert_goes};
+    use crate::ui::core::widgets::confirm_dialog::{DialogMotion, TRANSITION};
+    use iced::advanced::subscription::into_recipes;
+
+    let t = TRANSITION;
+    let frames = |h: &Harness, at: Instant| {
+        into_recipes(motion::frames(h.screen.dialogs_animating(at))).len()
+    };
+    let mut h = Harness::open(Setup::default());
+    assert_eq!(frames(&h, Instant::now()), 0, "idle");
+
+    // The note editor comes in.
+    let before = Instant::now();
+    h.click(&glyph(Icon::StickyNote));
+    let after = Instant::now();
+    assert_comes_in(&h.screen.editor_motion, before, after);
+    assert_eq!(frames(&h, after), 1, "frames while it comes in");
+    assert_eq!(frames(&h, after + t), 0, "none once it is in");
+
+    // Say it got all the way in. Cancelled, it closes at once and goes,
+    // drawn but out of reach.
+    h.screen.editor_motion = DialogMotion::shown();
+    let before = Instant::now();
+    h.click("Cancel");
+    let after = Instant::now();
+    assert!(h.screen.note_editor().is_none(), "closed at once");
+    let going = &h
+        .screen
+        .closing_editor
+        .as_ref()
+        .expect("drawn as it goes")
+        .1;
+    assert_goes(going, before, after);
+    assert!(!h.shows("Cancel"), "out of reach");
+    assert_eq!(frames(&h, after), 1, "frames while it goes");
+    h.send(Message::DialogFrame(after + t));
+    assert!(h.screen.closing_editor.is_none(), "dropped once gone");
+    assert_eq!(frames(&h, after + t), 0, "and the frames stop");
+
+    // The picker the same.
+    let before = Instant::now();
+    h.click(&glyph(Icon::Waypoints));
+    let after = Instant::now();
+    assert_comes_in(&h.screen.picker_motion, before, after);
+    h.screen.picker_motion = DialogMotion::shown();
+    let before = Instant::now();
+    h.send(Message::TechniquePicker(technique_picker::Message::Cancel));
+    let after = Instant::now();
+    assert!(h.screen.technique_picker().is_none(), "closed at once");
+    let going = &h
+        .screen
+        .closing_picker
+        .as_ref()
+        .expect("drawn as it goes")
+        .1;
+    assert_goes(going, before, after);
+    h.send(Message::DialogFrame(after + t));
+    assert!(h.screen.closing_picker.is_none(), "dropped once gone");
+}
+
+#[test]
 fn the_technique_picker_lists_the_library_and_adds_the_pick() {
     let twang = Technique::new("T1", "Twang", at(), at());
     let mut h = Harness::open(Setup {

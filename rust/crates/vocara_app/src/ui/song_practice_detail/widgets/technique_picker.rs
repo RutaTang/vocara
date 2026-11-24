@@ -18,7 +18,9 @@
 //! (`autofocus`), and feeds it its messages until
 //! [`TechniquePicker::update`] says it closed. It is modal like the studio
 //! dialogs (`confirm_dialog::modal`): the same barrier, a tap on it or
-//! Escape cancels, and nothing beneath sees a key.
+//! Escape cancels, and nothing beneath sees a key. It comes in and goes as
+//! they do, drawn at a fade ([`TechniquePicker::view_at`]) by the screen,
+//! which keeps its `DialogMotion`.
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::{
@@ -31,7 +33,7 @@ use vocara_model::util::dart_string;
 
 use crate::ui::core::icons::{self, Icon};
 use crate::ui::core::theme::{self, font, Studio};
-use crate::ui::core::widgets::confirm_dialog::fading_barrier;
+use crate::ui::core::widgets::confirm_dialog::{barrier, Fade};
 use crate::ui::core::widgets::studio_hint::spinner;
 use crate::ui::core::widgets::studio_text::studio_text;
 use crate::ui::core::widgets::wrap::Wrap;
@@ -146,15 +148,21 @@ impl TechniquePicker {
         }
     }
 
-    /// The picker over the page: the barrier and the centred card.
+    /// The picker over the page, all in: the barrier and the centred card.
     pub fn view(&self) -> Element<'_, Message> {
+        self.view_at(Fade::SHOWN)
+    }
+
+    /// The picker at `fade` (`confirm_dialog`'s module docs: its host keeps
+    /// its `DialogMotion`).
+    pub fn view_at(&self, fade: Fade) -> Element<'_, Message> {
         let header = container(column![
             text(self.title.as_str())
                 .size(16)
                 .font(font::BOLD)
-                .color(Studio::TEXT_PRIMARY),
+                .color(fade.color(Studio::TEXT_PRIMARY)),
             Space::new().height(12),
-            search_field(&self.query, self.search.clone()),
+            search_field(&self.query, self.search.clone(), fade),
         ])
         .padding(Padding {
             top: 18.0,
@@ -168,21 +176,21 @@ impl TechniquePicker {
                 container(Space::new())
                     .width(Length::Fill)
                     .height(1)
-                    .style(theme::fill(Studio::BORDER)),
-                self.body(),
+                    .style(theme::fill(fade.color(Studio::BORDER))),
+                self.body(fade),
             ]
             .width(Length::Fill),
         )
         .width(WIDTH)
         // Inside the 1 px border (a decoration's border pads its child).
         .padding(1)
-        .style(theme::dialog_card);
-        modal(container(card).padding(24).into())
+        .style(fade.style(theme::dialog_card));
+        modal(container(card).padding(24).into(), fade)
     }
 
-    fn body(&self) -> Element<'_, Message> {
+    fn body(&self, fade: Fade) -> Element<'_, Message> {
         let Some(all) = &self.all else {
-            return container(spinner(20.0, 2.0, Studio::TEXT_SECONDARY))
+            return container(spinner(20.0, 2.0, fade.color(Studio::TEXT_SECONDARY)))
                 .width(Length::Fill)
                 .height(120)
                 .align_x(Horizontal::Center)
@@ -190,19 +198,25 @@ impl TechniquePicker {
                 .into();
         };
         if self.failed {
-            return hint("Couldn't open the technique library. Try again in a moment.");
+            return hint(
+                "Couldn't open the technique library. Try again in a moment.",
+                fade,
+            );
         }
         if all.is_empty() {
-            return hint("No techniques yet. Add some in the technique library first.");
+            return hint(
+                "No techniques yet. Add some in the technique library first.",
+                fade,
+            );
         }
         let filtered = self.filtered();
         if filtered.is_empty() {
-            return hint("No techniques match.");
+            return hint("No techniques match.", fade);
         }
-        let rows = Column::with_children(filtered.into_iter().map(technique_row))
+        let rows = Column::with_children(filtered.into_iter().map(|t| technique_row(t, fade)))
             .width(Length::Fill)
             .padding([6, 0]);
-        container(scrollable(rows).style(theme::scrollbar))
+        container(scrollable(rows).style(fade.scrollbar(theme::scrollbar)))
             .width(Length::Fill)
             .max_height(LIST_MAX_HEIGHT)
             .into()
@@ -211,17 +225,17 @@ impl TechniquePicker {
 
 /// `_SearchField`: 34 tall, the inset well (radius 8), a search glyph before
 /// the field. (Its coral `cursorColor` has no iced counterpart.)
-fn search_field(query: &str, id: widget::Id) -> Element<'_, Message> {
+fn search_field(query: &str, id: widget::Id, fade: Fade) -> Element<'_, Message> {
     container(
         row![
-            icons::icon(Icon::Search, 14.0, Studio::TEXT_FAINT),
+            icons::icon(Icon::Search, 14.0, fade.color(Studio::TEXT_FAINT)),
             Space::new().width(8),
             text_input("Search techniques", query)
                 .id(id)
                 .on_input(Message::Query)
                 .size(13)
                 .padding(0)
-                .style(theme::studio_input),
+                .style(fade.input(theme::studio_input)),
         ]
         .align_y(Vertical::Center),
     )
@@ -230,31 +244,31 @@ fn search_field(query: &str, id: widget::Id) -> Element<'_, Message> {
     // 10 inside the 1 px border.
     .padding([0, 11])
     .align_y(Vertical::Center)
-    .style(theme::inset(8.0))
+    .style(fade.style(theme::inset(8.0)))
     .into()
 }
 
 /// `_TechniqueRow`: `Studio.hover` under the pointer, 20 / 9 padding; a
 /// coral waypoints glyph, the name (13.5 px w600) and, when it has tags,
 /// them joined by " · " under it — one line each.
-fn technique_row(t: &Technique) -> Element<'_, Message> {
+fn technique_row(t: &Technique, fade: Fade) -> Element<'_, Message> {
     let mut labels = column![studio_text(t.name.as_str())
         .size(13.5)
         .font(font::SEMIBOLD)
-        .color(Studio::TEXT_PRIMARY)
+        .color(fade.color(Studio::TEXT_PRIMARY))
         .ellipsis(1)]
     .width(Length::Fill);
     if !t.tags.is_empty() {
         labels = labels.push(Space::new().height(2)).push(
             studio_text(t.tags.join(" · "))
                 .size(11)
-                .color(Studio::TEXT_FAINT)
+                .color(fade.color(Studio::TEXT_FAINT))
                 .ellipsis(1),
         );
     }
     button(
         row![
-            icons::icon(Icon::Waypoints, 13.0, Studio::ACCENT),
+            icons::icon(Icon::Waypoints, 13.0, fade.color(Studio::ACCENT)),
             Space::new().width(10),
             labels,
         ]
@@ -262,20 +276,20 @@ fn technique_row(t: &Technique) -> Element<'_, Message> {
     )
     .width(Length::Fill)
     .padding([9, 20])
-    .style(theme::menu_item)
+    .style(move |t, s| theme::faded_button(theme::menu_item(t, s), fade.card))
     .on_press(Message::Pick(t.id.clone()))
     .into()
 }
 
 /// `_Hint`: a faint centred message, 20 / 28 padding.
-fn hint<'a>(label: &'a str) -> Element<'a, Message> {
+fn hint(label: &str, fade: Fade) -> Element<'_, Message> {
     container(
         text(label)
             .size(12.5)
             .line_height(1.4)
             .align_x(Horizontal::Center)
             .width(Length::Fill)
-            .color(Studio::TEXT_FAINT),
+            .color(fade.color(Studio::TEXT_FAINT)),
     )
     .width(Length::Fill)
     .padding([28, 20])
@@ -285,9 +299,9 @@ fn hint<'a>(label: &'a str) -> Element<'a, Message> {
 /// `content` centred over the studio dialogs' dismissible barrier
 /// (`Color(0xB0000000)`), as `confirm_dialog::modal` draws it: a tap on the
 /// barrier cancels, the card takes its own taps, Escape cancels and no key
-/// reaches what lies beneath.
-fn modal(content: Element<'_, Message>) -> Element<'_, Message> {
-    let barrier = fading_barrier(theme::DIALOG_BARRIER, Some(Message::Cancel));
+/// reaches what lies beneath. Both at `fade`.
+fn modal(content: Element<'_, Message>, fade: Fade) -> Element<'_, Message> {
+    let barrier = barrier(theme::DIALOG_BARRIER, fade.barrier, Some(Message::Cancel));
     let layers = stack![barrier, center(opaque(content))];
     Wrap::<Message, ()>::new(
         layers,

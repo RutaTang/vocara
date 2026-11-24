@@ -35,6 +35,7 @@ use crate::ui::core::motion::Curve;
 use crate::ui::core::theme::{self, alpha, bare_button, boxed, fill, font, Studio};
 use crate::ui::core::widgets::animated::{animated, animated_container, Decoration};
 use crate::ui::core::widgets::holds_keyboard::holds_keyboard;
+use crate::ui::core::widgets::slide::inert;
 use crate::ui::core::widgets::studio_button::studio_button;
 use crate::ui::core::widgets::studio_controls::{fader_db_readout, studio_fader};
 use crate::ui::core::widgets::studio_hint::spinner;
@@ -236,14 +237,33 @@ impl SongPracticeDetailScreen {
         let separation = vm
             .is_separating()
             .then(|| separation_overlay(vm.separation_progress(), vm.can_cancel_separation()));
-        let editor = self
-            .note_editor
-            .as_ref()
-            .map(|(editor, _)| editor.view().map(Message::NoteEditor));
-        let picker = self
-            .picker
-            .as_ref()
-            .map(|open| open.picker.view().map(Message::TechniquePicker));
+        // A closed one takes the open one's slot as it goes, taking no input.
+        let now = self.dialog_now;
+        let editor = match (&self.note_editor, &self.closing_editor) {
+            (Some((editor, _)), _) => Some(
+                editor
+                    .view_at(self.editor_motion.fade(now))
+                    .map(Message::NoteEditor),
+            ),
+            (None, Some(going)) => Some(inert(
+                going.0.view_at(going.1.fade(now)).map(Message::NoteEditor),
+            )),
+            (None, None) => None,
+        };
+        let picker = match (&self.picker, &self.closing_picker) {
+            (Some(open), _) => Some(
+                open.picker
+                    .view_at(self.picker_motion.fade(now))
+                    .map(Message::TechniquePicker),
+            ),
+            (None, Some(going)) => Some(inert(
+                going
+                    .0
+                    .view_at(going.1.fade(now))
+                    .map(Message::TechniquePicker),
+            )),
+            (None, None) => None,
+        };
         stack![
             container(content)
                 .width(Length::Fill)

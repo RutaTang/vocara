@@ -272,6 +272,43 @@ fn a_created_practice_opens_after_the_loading_dialog() {
 }
 
 #[test]
+fn the_loading_dialog_comes_in_and_goes_over_150_ms_with_frames_only_meanwhile() {
+    use crate::ui::core::motion;
+    use crate::ui::core::widgets::confirm_dialog::testing::{assert_comes_in, assert_goes};
+    use crate::ui::core::widgets::confirm_dialog::{DialogMotion, TRANSITION};
+    use iced::advanced::subscription::into_recipes;
+    use std::time::Instant;
+
+    let t = TRANSITION;
+    let frames =
+        |home: &Home, at: Instant| into_recipes(motion::frames(home.screen.is_animating(at))).len();
+    let mut home = Home::over(FakePractices::with(vec![summary("a", "Song")]));
+    assert_eq!(frames(&home, Instant::now()), 0, "idle");
+
+    let before = Instant::now();
+    home.send(Message::Open("a".into()));
+    let after = Instant::now();
+    assert_comes_in(home.screen.loading.as_ref().expect("drawn"), before, after);
+    assert_eq!(frames(&home, after), 1, "frames while it comes in");
+    assert_eq!(frames(&home, after + t), 0, "none once it is in");
+
+    // Say it got all the way in. The hold over, it goes as the practice is
+    // pushed, out of reach.
+    home.screen.loading = Some(DialogMotion::shown());
+    let timer = home.opening_timer();
+    let before = Instant::now();
+    home.fire(timer);
+    let after = Instant::now();
+    assert_eq!(home.navigations, [song("a")]);
+    assert_goes(home.screen.loading.as_ref().expect("drawn"), before, after);
+    assert!(!home.shows("Loading practice"), "out of reach");
+    assert_eq!(frames(&home, after), 1, "frames while it goes");
+    home.send(Message::DialogFrame(after + t));
+    assert!(home.screen.loading_fade(after + t).is_none(), "gone");
+    assert_eq!(frames(&home, after + t), 0, "and the frames stop");
+}
+
+#[test]
 fn a_cancelled_prompt_creates_nothing() {
     let repo = FakePractices::with(Vec::new());
     let mut home = Home::over(repo.clone());
