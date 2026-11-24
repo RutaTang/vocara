@@ -1,6 +1,7 @@
 //! Material's `Tooltip` as the app's mouse met it on the desktop: a plain
-//! text tip below its target (theme's colors, `bodySmall`), shown while the
-//! pointer is over the target.
+//! text tip below its target (above it when only there it fits), kept 10 px
+//! inside the window (theme's colors, `bodySmall`), shown while the pointer
+//! is over the target.
 //!
 //! It comes and goes as `TooltipState` drove it: the pointer entering the
 //! target fades it in over 150 ms; leaving, the tip stays for 100 ms (the
@@ -327,7 +328,35 @@ impl<M> Widget<M, Theme, Renderer> for Tooltip<'_, M> {
     }
 }
 
-/// The tip, laid out below its target, inside the window.
+/// Flutter's `positionDependentBox` as the tooltip calls it (preferring
+/// below, 10 px from the window's edges): below the target by
+/// `vertical_offset` from its centre if it fits there or fits neither way,
+/// else above; across, centred on the target and kept 10 px inside the
+/// window, or centred in it when it is too wide for that.
+fn position_dependent_box(window: Size, tip: Size, target: Point, vertical_offset: f32) -> Point {
+    const MARGIN: f32 = 10.0;
+    let fits_below = target.y + vertical_offset + tip.height <= window.height - MARGIN;
+    let fits_above = target.y - vertical_offset - tip.height >= MARGIN;
+    let below = if fits_above == fits_below {
+        true
+    } else {
+        fits_below
+    };
+    let y = if below {
+        (target.y + vertical_offset).min(window.height - MARGIN)
+    } else {
+        (target.y - vertical_offset - tip.height).max(MARGIN)
+    };
+    let flexible = window.width - tip.width;
+    let x = if flexible <= 2.0 * MARGIN {
+        flexible / 2.0
+    } else {
+        (target.x - tip.width / 2.0).clamp(MARGIN, flexible - MARGIN)
+    };
+    Point::new(x, y)
+}
+
+/// The tip, laid out by [`position_dependent_box`].
 struct Tip<'a, 'b, M> {
     tip: &'b mut Element<'a, M>,
     tree: &'b mut Tree,
@@ -342,12 +371,11 @@ impl<M> overlay::Overlay<M, Theme, Renderer> for Tip<'_, '_, M> {
             renderer,
             &layout::Limits::new(Size::ZERO, bounds),
         );
-        let size = node.size();
-        let x = self.target.x + (self.target.width - size.width) / 2.0;
-        let y = self.target.y + self.target.height + self.gap;
-        let at = Point::new(
-            x.clamp(0.0, (bounds.width - size.width).max(0.0)),
-            y.clamp(0.0, (bounds.height - size.height).max(0.0)),
+        let at = position_dependent_box(
+            bounds,
+            node.size(),
+            self.target.center(),
+            self.target.height / 2.0 + self.gap,
         );
         node.move_to(at)
     }
@@ -497,5 +525,58 @@ mod tests {
                 0.5
             )))
         );
+    }
+
+    #[test]
+    fn it_goes_above_its_target_when_only_there_it_fits() {
+        // A 40 × 20 target on the window's bottom edge: below, the tip
+        // would end past 10 px from it; above, it ends 10 px over the
+        // target's top (24 px from its centre).
+        let view = || -> Element<'_, ()> {
+            container(material_tooltip(
+                Space::new().width(40).height(20),
+                "Tip",
+                10.0,
+            ))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_y(iced::alignment::Vertical::Bottom)
+            .into()
+        };
+        let mut window = Frames::new(Size::new(200.0, 100.0));
+        let t0 = Instant::now();
+        window.point_at(Point::new(20.0, 90.0));
+        window.frame(view(), &[], t0);
+        window.frame(view(), &[], t0 + 150 * MS);
+        assert!(
+            near(window.pixel(Point::new(20.0, 68.0)), tip_at(1.0)),
+            "above: its bottom padding"
+        );
+        assert!(near(window.pixel(Point::new(20.0, 72.0)), BACKGROUND));
+    }
+
+    #[test]
+    fn it_is_placed_as_flutter_s_position_dependent_box_places_it() {
+        let window = Size::new(200.0, 100.0);
+        let tip = Size::new(30.0, 24.0);
+        // Below, centred on the target.
+        let below = position_dependent_box(window, tip, Point::new(100.0, 20.0), 20.0);
+        assert_eq!(below, Point::new(85.0, 40.0));
+        // Kept 10 px inside the window's sides.
+        let left = position_dependent_box(window, tip, Point::new(5.0, 20.0), 20.0);
+        assert_eq!(left.x, 10.0);
+        let right = position_dependent_box(window, tip, Point::new(198.0, 20.0), 20.0);
+        assert_eq!(right.x, 160.0);
+        // No room below: above.
+        let above = position_dependent_box(window, tip, Point::new(100.0, 80.0), 20.0);
+        assert_eq!(above, Point::new(85.0, 36.0));
+        // Room neither way: below, held 10 px above the bottom edge.
+        let tall = Size::new(30.0, 90.0);
+        let neither = position_dependent_box(window, tall, Point::new(100.0, 50.0), 20.0);
+        assert_eq!(neither.y, 70.0);
+        // Too wide for the margins: centred in the window.
+        let wide =
+            position_dependent_box(window, Size::new(185.0, 24.0), Point::new(5.0, 20.0), 20.0);
+        assert_eq!(wide.x, 7.5);
     }
 }
