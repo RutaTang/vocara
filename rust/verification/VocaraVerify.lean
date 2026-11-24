@@ -8,3 +8,5 @@ import VocaraVerify.Canonical
 import VocaraVerify.Reconcile
 import VocaraVerify.Lru
 import VocaraVerify.Oplog
+import VocaraVerify.Align
+import VocaraVerify.Lrc

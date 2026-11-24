@@ -1,0 +1,1 @@
+[{"tags": 1024, "text": 1023, "char": "x", "ok": true, "count": 1024}, {"tags": 1024, "text": 1024, "char": "x", "ok": false, "count": 0}, {"tags": 1024, "text": 511, "char": "\ud83d\ude00", "ok": true, "count": 1024}, {"tags": 1024, "text": 512, "char": "\ud83d\ude00", "ok": false, "count": 0}, {"tags": 3, "text": 100, "char": "x", "ok": true, "count": 3}]
